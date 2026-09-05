@@ -1,0 +1,7 @@
+/target
+**/*.rs.bk
+.env
+.env.local
+.DS_Store
+/.mira
+testing.txt

@@ -1,0 +1,17 @@
+[package]
+name         = "mira-policy"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+description  = "Permission modes + rule DSL for the Mira harness."
+
+[dependencies]
+mira-core   = { workspace = true }
+mira-tools  = { workspace = true }
+
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+thiserror   = { workspace = true }
+tracing     = { workspace = true }
+glob        = { workspace = true }

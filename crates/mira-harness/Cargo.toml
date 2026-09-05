@@ -1,0 +1,23 @@
+[package]
+name         = "mira-harness"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+description  = "Agent loop for the Mira harness."
+
+[dependencies]
+mira-core     = { workspace = true }
+mira-ai       = { workspace = true }
+mira-tools    = { workspace = true }
+mira-policy   = { workspace = true }
+mira-sandbox  = { workspace = true }
+
+async-trait   = { workspace = true }
+futures       = { workspace = true }
+tokio         = { workspace = true }
+tokio-stream  = { workspace = true }
+serde         = { workspace = true }
+serde_json    = { workspace = true }
+tracing       = { workspace = true }
+thiserror     = { workspace = true }

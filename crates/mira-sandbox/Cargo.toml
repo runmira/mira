@@ -1,0 +1,12 @@
+[package]
+name         = "mira-sandbox"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+description  = "Command execution wrapper for the Mira harness. Starts thin; landlock/seatbelt slot in later."
+
+[dependencies]
+tokio     = { workspace = true }
+thiserror = { workspace = true }
+tracing   = { workspace = true }

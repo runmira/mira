@@ -1,0 +1,30 @@
+[package]
+name         = "mira-cli"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+description  = "Terminal entrypoint for the Mira coding agent."
+default-run  = "mira"
+
+[[bin]]
+name = "mira"
+path = "src/main.rs"
+
+[dependencies]
+mira-core     = { workspace = true }
+mira-ai       = { workspace = true }
+mira-tools    = { workspace = true }
+mira-policy   = { workspace = true }
+mira-sandbox  = { workspace = true }
+mira-harness  = { workspace = true }
+
+async-trait        = { workspace = true }
+tokio              = { workspace = true }
+futures            = { workspace = true }
+clap               = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+anyhow             = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }

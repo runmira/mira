@@ -1,0 +1,60 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "Apache-2.0"
+repository = "https://github.com/runmira/mira"
+
+[workspace.dependencies]
+# Internal crates — path deps so cargo publish stays honest later.
+mira-core     = { path = "crates/mira-core",    version = "0.1.0" }
+mira-ai       = { path = "crates/mira-ai",      version = "0.1.0" }
+mira-tools    = { path = "crates/mira-tools",   version = "0.1.0" }
+mira-policy   = { path = "crates/mira-policy",  version = "0.1.0" }
+mira-sandbox  = { path = "crates/mira-sandbox", version = "0.1.0" }
+mira-harness  = { path = "crates/mira-harness", version = "0.1.0" }
+
+# Async runtime
+tokio           = { version = "1.40", features = ["macros", "rt-multi-thread", "process", "fs", "io-util", "io-std", "sync", "signal", "time"] }
+tokio-stream    = { version = "0.1", features = ["sync"] }
+futures         = "0.3"
+async-trait     = "0.1"
+
+# HTTP + streaming
+reqwest             = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+eventsource-stream  = "0.2"
+bytes               = "1"
+
+# Serialization
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+
+# Errors
+anyhow    = "1"
+thiserror = "2"
+
+# CLI + config
+clap    = { version = "4.5", features = ["derive", "env"] }
+
+# Observability
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# Utility
+glob        = "0.3"
+uuid        = { version = "1", features = ["v4", "serde"] }
+regex       = "1"
+shellexpand = "3"
+
+[profile.release]
+lto           = "thin"
+codegen-units = 1
+strip         = "symbols"
+
+[profile.dev]
+# Faster incremental builds for a workspace this size.
+debug = 1

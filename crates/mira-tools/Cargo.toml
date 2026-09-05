@@ -1,0 +1,20 @@
+[package]
+name         = "mira-tools"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+description  = "Tool trait, registry, and built-in tools for the Mira harness."
+
+[dependencies]
+mira-core     = { workspace = true }
+mira-ai       = { workspace = true }
+mira-sandbox  = { workspace = true }
+
+async-trait   = { workspace = true }
+tokio         = { workspace = true }
+serde         = { workspace = true }
+serde_json    = { workspace = true }
+thiserror     = { workspace = true }
+tracing       = { workspace = true }
+shellexpand   = { workspace = true }
