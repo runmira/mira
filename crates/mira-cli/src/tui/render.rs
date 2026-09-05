@@ -4,6 +4,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
+use crate::tui::diff::{DiffKind, DiffLine};
 use crate::tui::state::{LogEntry, TuiState};
 
 pub fn draw(f: &mut Frame, state: &TuiState) {
@@ -172,10 +173,15 @@ fn status(f: &mut Frame, area: Rect, state: &TuiState) {
 }
 
 fn approval_modal(f: &mut Frame, state: &TuiState) {
-    let Some(req) = state.pending_approval.as_ref() else {
+    let Some(pending) = state.pending_approval.as_ref() else {
         return;
     };
-    let area = centered(f.area(), 70, 40);
+    let (pct_w, pct_h) = if pending.preview.is_some() {
+        (80, 70)
+    } else {
+        (70, 40)
+    };
+    let area = centered(f.area(), pct_w, pct_h);
     f.render_widget(Clear, area);
 
     let block = Block::default()
@@ -186,20 +192,45 @@ fn approval_modal(f: &mut Frame, state: &TuiState) {
             Style::default().fg(Color::Yellow).bold(),
         ));
 
-    let args = pretty_args(&req.call.function.arguments);
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled("tool: ", Style::default().fg(Color::DarkGray)),
+    let mut lines = vec![Line::from(vec![
+        Span::styled("tool: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            pending.request.call.function.name.clone(),
+            Style::default().fg(Color::Yellow).bold(),
+        ),
+    ])];
+
+    if let Some(preview) = &pending.preview {
+        let kind_label = match preview.kind {
+            DiffKind::Edit => "edit",
+            DiffKind::Overwrite => "overwrite",
+            DiffKind::Create => "create",
+        };
+        lines.push(Line::from(vec![
+            Span::styled("file: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(preview.path.clone(), Style::default().fg(Color::Cyan)),
             Span::styled(
-                req.call.function.name.clone(),
-                Style::default().fg(Color::Yellow).bold(),
+                format!("  ({kind_label})"),
+                Style::default().fg(Color::DarkGray),
             ),
-        ]),
-        Line::from(Span::styled("args:", Style::default().fg(Color::DarkGray))),
-    ];
-    for l in args.lines().take(12) {
-        lines.push(Line::from(Span::raw(format!("  {l}"))));
+        ]));
+        lines.push(Line::from(""));
+        for dl in &preview.lines {
+            lines.push(diff_line(dl));
+        }
+    } else {
+        lines.push(Line::from(Span::styled(
+            "args:",
+            Style::default().fg(Color::DarkGray),
+        )));
+        for l in pretty_args(&pending.request.call.function.arguments)
+            .lines()
+            .take(12)
+        {
+            lines.push(Line::from(Span::raw(format!("  {l}"))));
+        }
     }
+
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
         Span::styled("y", Style::default().fg(Color::Green).bold()),
@@ -215,6 +246,27 @@ fn approval_modal(f: &mut Frame, state: &TuiState) {
         .wrap(Wrap { trim: false })
         .alignment(Alignment::Left);
     f.render_widget(para, area);
+}
+
+fn diff_line(d: &DiffLine) -> Line<'_> {
+    match d {
+        DiffLine::Ctx(s) => Line::from(vec![
+            Span::styled(" ", Style::default()),
+            Span::styled(s.clone(), Style::default().fg(Color::Gray)),
+        ]),
+        DiffLine::Add(s) => Line::from(vec![
+            Span::styled("+", Style::default().fg(Color::Green).bold()),
+            Span::styled(s.clone(), Style::default().fg(Color::Green)),
+        ]),
+        DiffLine::Del(s) => Line::from(vec![
+            Span::styled("-", Style::default().fg(Color::Red).bold()),
+            Span::styled(s.clone(), Style::default().fg(Color::Red)),
+        ]),
+        DiffLine::HunkGap => Line::from(Span::styled(
+            "  ⋯",
+            Style::default().fg(Color::DarkGray).italic(),
+        )),
+    }
 }
 
 fn mode_style(state: &TuiState) -> Style {

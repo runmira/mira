@@ -1,4 +1,5 @@
 mod approver;
+mod config;
 mod repl;
 mod tui;
 
@@ -16,35 +17,43 @@ use mira_tools::{builtin, Registry, ToolContext};
 use tokio::sync::Mutex;
 use tracing_subscriber::EnvFilter;
 
+use crate::config::{MiraConfig, ProviderConfig};
+
 /// Mira — an open-source coding agent.
+///
+/// Every flag can also be set in `~/.mira/mira.yaml` (global) or
+/// `<cwd>/.mira/config.yaml` (per-repo). CLI flags win over env vars,
+/// which win over per-repo config, which wins over global config.
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Cli {
-    /// Base URL of an OpenAI-compatible endpoint.
-    #[arg(
-        long,
-        env = "MIRA_BASE_URL",
-        default_value = "https://openrouter.ai/api/v1"
-    )]
-    base_url: String,
+    /// Provider name — a key in `providers` in your `mira.yaml`.
+    #[arg(long)]
+    provider: Option<String>,
 
-    /// API key for the endpoint.
-    #[arg(long, env = "MIRA_API_KEY")]
-    api_key: String,
+    /// Base URL of an OpenAI-compatible endpoint. Overrides the provider's
+    /// `base_url` from config.
+    #[arg(long)]
+    base_url: Option<String>,
+
+    /// API key for the endpoint. Overrides the provider's key from config
+    /// or its `api_key_env` env variable.
+    #[arg(long)]
+    api_key: Option<String>,
 
     /// Model ID.
-    #[arg(long, env = "MIRA_MODEL", default_value = "google/gemini-2.5-flash")]
-    model: String,
+    #[arg(long)]
+    model: Option<String>,
 
     /// Permission mode: plan|manual|auto|edit|yolo.
-    #[arg(long, default_value_t = String::from("manual"))]
-    mode: String,
+    #[arg(long)]
+    mode: Option<String>,
 
-    /// Cap on tokens the model may produce per turn. Skip to use the model default.
+    /// Cap on tokens the model may produce per turn.
     #[arg(long)]
     max_tokens: Option<u32>,
 
-    /// Sampling temperature. Skip to use the model default.
+    /// Sampling temperature.
     #[arg(long)]
     temperature: Option<f32>,
 
@@ -71,13 +80,17 @@ async fn main() -> Result<()> {
     init_tracing(use_tui);
 
     let cwd = std::env::current_dir().context("failed to read cwd")?;
+    let cfg = MiraConfig::load(&cwd).context("load config")?;
+
+    // --- resolve settings across CLI / env / config / defaults
+    let settings = resolve_settings(&cli, &cfg)?;
 
     // --- provider
     let provider = Arc::new(
         OpenAiCompatible::new(OpenAiConfig {
-            base_url: cli.base_url,
-            api_key: cli.api_key,
-            extra_headers: Vec::new(),
+            base_url: settings.base_url,
+            api_key: settings.api_key,
+            extra_headers: settings.extra_headers,
         })
         .context("build provider")?,
     );
@@ -89,11 +102,12 @@ async fn main() -> Result<()> {
     let registry = Arc::new(registry);
     let tool_ctx = ToolContext::new(cwd.clone(), sandbox);
 
-    // --- policy
-    let mode = parse_mode(&cli.mode)?;
+    // --- policy: rules from config, mode from CLI/config/default
     let policy = Policy::from_config(&PolicyConfig {
-        mode,
-        ..Default::default()
+        mode: settings.mode,
+        allow: cfg.permissions.allow.clone(),
+        ask: cfg.permissions.ask.clone(),
+        deny: cfg.permissions.deny.clone(),
     })
     .context("compile policy")?;
     let policy = Arc::new(Mutex::new(policy));
@@ -123,9 +137,9 @@ async fn main() -> Result<()> {
     };
 
     // --- session (fresh or resumed)
-    let mut sess_cfg = SessionConfig::new(cli.model.clone());
-    sess_cfg.max_tokens = cli.max_tokens;
-    sess_cfg.temperature = cli.temperature;
+    let mut sess_cfg = SessionConfig::new(settings.model.clone());
+    sess_cfg.max_tokens = settings.max_tokens;
+    sess_cfg.temperature = settings.temperature;
 
     let session = match resume_target(cli.resume.as_deref(), store.as_deref(), &cwd).await? {
         Some(record) => Session::resume_from(
@@ -156,16 +170,117 @@ async fn main() -> Result<()> {
         tui::run(
             session,
             tui::TuiConfig {
-                model: cli.model,
-                mode,
+                model: settings.model,
+                mode: settings.mode,
                 policy,
                 approval_rx: approval_rx.expect("tui branch created a receiver"),
+                cwd: cwd.clone(),
             },
         )
         .await
     } else {
         repl::run(session).await
     }
+}
+
+/// Values that survive the CLI/env/config/default cascade and get passed
+/// down to the provider, policy, and session.
+struct ResolvedSettings {
+    base_url: String,
+    api_key: String,
+    model: String,
+    mode: Mode,
+    max_tokens: Option<u32>,
+    temperature: Option<f32>,
+    extra_headers: Vec<(String, String)>,
+}
+
+fn resolve_settings(cli: &Cli, cfg: &MiraConfig) -> Result<ResolvedSettings> {
+    // Provider selection: --provider > MIRA_PROVIDER env > config default > "openrouter".
+    let provider_name = cli
+        .provider
+        .clone()
+        .or_else(|| std::env::var("MIRA_PROVIDER").ok())
+        .or_else(|| cfg.default_provider.clone())
+        .unwrap_or_else(|| "openrouter".to_owned());
+
+    // Provider entry: take from config, or synthesise a bare one so
+    // env-only setups (no config file at all) still work.
+    let provider = cfg
+        .providers
+        .get(&provider_name)
+        .cloned()
+        .unwrap_or_default();
+
+    let base_url = cli
+        .base_url
+        .clone()
+        .or_else(|| std::env::var("MIRA_BASE_URL").ok())
+        .or(provider.base_url.clone())
+        .or_else(|| default_base_url_for(&provider_name))
+        .with_context(|| {
+            format!("no base_url for provider `{provider_name}` — set --base-url, MIRA_BASE_URL, or providers.{provider_name}.base_url in config")
+        })?;
+
+    let api_key = cli
+        .api_key
+        .clone()
+        .or_else(|| std::env::var("MIRA_API_KEY").ok())
+        .or_else(|| ProviderConfig::resolved_api_key(&provider))
+        .with_context(|| {
+            format!("no api_key for provider `{provider_name}` — set --api-key, MIRA_API_KEY, or providers.{provider_name} in config")
+        })?;
+
+    let model = cli
+        .model
+        .clone()
+        .or_else(|| std::env::var("MIRA_MODEL").ok())
+        .or_else(|| cfg.default_model.clone())
+        .unwrap_or_else(|| "google/gemini-2.5-flash".to_owned());
+
+    let mode_str = cli
+        .mode
+        .clone()
+        .or_else(|| std::env::var("MIRA_MODE").ok())
+        .or_else(|| cfg.default_mode.clone())
+        .unwrap_or_else(|| "manual".to_owned());
+    let mode = parse_mode(&mode_str)?;
+
+    let max_tokens = cli.max_tokens.or(cfg.max_tokens);
+    let temperature = cli.temperature.or(cfg.temperature);
+
+    let extra_headers = provider
+        .extra_headers
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
+    Ok(ResolvedSettings {
+        base_url,
+        api_key,
+        model,
+        mode,
+        max_tokens,
+        temperature,
+        extra_headers,
+    })
+}
+
+/// Sensible base_url defaults for a handful of well-known provider
+/// names, so `--provider openrouter` alone (with only an env key set)
+/// works out of the box.
+fn default_base_url_for(name: &str) -> Option<String> {
+    Some(
+        match name {
+            "openrouter" => "https://openrouter.ai/api/v1",
+            "openai" => "https://api.openai.com/v1",
+            "anthropic" => "https://api.anthropic.com/v1",
+            "groq" => "https://api.groq.com/openai/v1",
+            "ollama" => "http://localhost:11434/v1",
+            _ => return None,
+        }
+        .to_owned(),
+    )
 }
 
 /// Resolve `--resume` into a concrete session record.

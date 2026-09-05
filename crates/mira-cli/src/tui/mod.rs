@@ -11,6 +11,7 @@
 //! spawned loop task exits when its send channel closes.
 
 pub mod approver;
+mod diff;
 mod render;
 mod state;
 
@@ -36,7 +37,7 @@ use tokio::sync::{mpsc, Mutex};
 
 use approver::ApprovalRequest;
 pub use approver::TuiApprover;
-use state::TuiState;
+use state::{PendingApproval, TuiState};
 
 /// Everything the TUI needs beyond what `Session` already owns.
 pub struct TuiConfig {
@@ -46,6 +47,8 @@ pub struct TuiConfig {
     pub policy: Arc<Mutex<Policy>>,
     /// Receiver paired with the [`TuiApprover`] handed to `Session`.
     pub approval_rx: mpsc::UnboundedReceiver<ApprovalRequest>,
+    /// Repo root — used to resolve relative paths in edit/write diff previews.
+    pub cwd: std::path::PathBuf,
 }
 
 pub async fn run(session: Session, cfg: TuiConfig) -> Result<()> {
@@ -108,7 +111,8 @@ async fn event_loop(
                 handle_harness_event(evt, &mut state, &mut agent_stream);
             }
             Some(req) = cfg.approval_rx.recv() => {
-                state.pending_approval = Some(req);
+                let preview = diff::compute_preview(&cfg.cwd, &req.call).await;
+                state.pending_approval = Some(PendingApproval { request: req, preview });
             }
         }
 
@@ -276,8 +280,8 @@ fn handle_approval_key(key: KeyEvent, state: &mut TuiState) {
         _ => None,
     };
     let Some(allow) = allow else { return };
-    if let Some(req) = state.pending_approval.take() {
-        let _ = req.reply.send(allow);
+    if let Some(pending) = state.pending_approval.take() {
+        let _ = pending.request.reply.send(allow);
     }
 }
 

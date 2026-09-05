@@ -2,6 +2,15 @@ use mira_core::{ToolCall, ToolResult};
 use mira_policy::Mode;
 
 use crate::tui::approver::ApprovalRequest;
+use crate::tui::diff::DiffPreview;
+
+/// An approval request enriched with an optional diff preview (present
+/// only for edit_file / write_file calls). The preview is computed
+/// asynchronously by the event loop after the request arrives.
+pub struct PendingApproval {
+    pub request: ApprovalRequest,
+    pub preview: Option<DiffPreview>,
+}
 
 /// One row in the visible transcript.
 ///
@@ -40,7 +49,7 @@ pub struct TuiState {
     pub mode: Mode,
     pub model: String,
     pub streaming: bool,
-    pub pending_approval: Option<ApprovalRequest>,
+    pub pending_approval: Option<PendingApproval>,
     pub esc_pending: bool,
     pub scroll: u16,
     /// When true, the UI auto-scrolls the transcript to the bottom on new
