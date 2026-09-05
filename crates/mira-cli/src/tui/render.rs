@@ -7,12 +7,17 @@ use ratatui::Frame;
 use crate::tui::state::{LogEntry, TuiState};
 
 pub fn draw(f: &mut Frame, state: &TuiState) {
+    // Input area grows with content up to 8 rows so a multi-line message
+    // is visible while composing, then shrinks back after submit.
+    let input_rows = input_display_rows(state.input()).min(6);
+    let input_height = input_rows + 2; // + top/bottom border
+
     let root = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
             Constraint::Min(1),
-            Constraint::Length(3),
+            Constraint::Length(input_height),
             Constraint::Length(1),
         ])
         .split(f.area());
@@ -25,6 +30,11 @@ pub fn draw(f: &mut Frame, state: &TuiState) {
     if state.pending_approval.is_some() {
         approval_modal(f, state);
     }
+}
+
+fn input_display_rows(input: &str) -> u16 {
+    let count = input.split('\n').count().max(1) as u16;
+    count.max(1)
 }
 
 fn header(f: &mut Frame, area: Rect, state: &TuiState) {
@@ -111,18 +121,31 @@ fn input(f: &mut Frame, area: Rect, state: &TuiState) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray));
-    let text = if state.input().is_empty() {
+
+    let body: Text = if state.input().is_empty() {
         Line::from(Span::styled(
-            "type a message · enter to send · esc esc to quit",
+            "message · enter send · ctrl+j newline · ↑↓ history · esc esc quit",
             Style::default().fg(Color::DarkGray),
         ))
+        .into()
     } else {
-        Line::from(vec![
-            Span::raw(state.input().to_owned()),
-            Span::styled("▎", Style::default().fg(Color::Cyan)),
-        ])
+        // Split on '\n' rather than .lines() so a trailing newline shows
+        // as an empty last row (that's where the cursor lives after Ctrl+J).
+        let mut segments: Vec<Line> = state
+            .input()
+            .split('\n')
+            .map(|l| Line::from(l.to_owned()))
+            .collect();
+        // Attach a cursor marker to the last visible row.
+        if let Some(last) = segments.last_mut() {
+            let existing = std::mem::take(last);
+            let mut spans: Vec<Span> = existing.spans;
+            spans.push(Span::styled("▎", Style::default().fg(Color::Cyan)));
+            *last = Line::from(spans);
+        }
+        Text::from(segments)
     };
-    f.render_widget(Paragraph::new(text).block(block), area);
+    f.render_widget(Paragraph::new(body).block(block), area);
 }
 
 fn status(f: &mut Frame, area: Rect, state: &TuiState) {

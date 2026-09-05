@@ -14,8 +14,10 @@
 
 pub mod approver;
 pub mod event;
+pub mod persist;
 pub mod session;
 
 pub use approver::{Approver, AutoApprover};
 pub use event::HarnessEvent;
+pub use persist::{FileStore, SessionRecord, SessionStore, StoreError};
 pub use session::{Session, SessionConfig};

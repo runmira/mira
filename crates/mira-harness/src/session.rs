@@ -12,6 +12,7 @@ use tracing::{error, info, warn};
 
 use crate::approver::Approver;
 use crate::event::HarnessEvent;
+use crate::persist::{now_secs, SessionRecord, SessionStore};
 
 /// Runtime configuration for a session. Everything the loop needs besides
 /// mutable state.
@@ -56,12 +57,14 @@ pub struct Session {
     pub id: SessionId,
     cfg: Arc<Mutex<SessionConfig>>,
     history: Arc<Mutex<Vec<Message>>>,
+    created_at: u64,
 
     provider: Arc<dyn ChatProvider>,
     registry: Arc<Registry>,
     policy: Arc<Mutex<Policy>>,
     approver: Arc<dyn Approver>,
     tool_ctx: ToolContext,
+    store: Option<Arc<dyn SessionStore>>,
 }
 
 impl Session {
@@ -78,12 +81,47 @@ impl Session {
             id: SessionId::new(),
             cfg: Arc::new(Mutex::new(cfg)),
             history: Arc::new(Mutex::new(vec![Message::system(system_prompt)])),
+            created_at: now_secs(),
             provider,
             registry,
             policy,
             approver,
             tool_ctx,
+            store: None,
         }
+    }
+
+    /// Rehydrate from a persisted record — same wiring as [`Session::new`]
+    /// but the id, history, config, and creation timestamp come from disk.
+    /// Attach a store afterwards with [`Session::with_store`] to keep
+    /// autosaving.
+    #[allow(clippy::too_many_arguments)]
+    pub fn resume_from(
+        record: SessionRecord,
+        provider: Arc<dyn ChatProvider>,
+        registry: Arc<Registry>,
+        policy: Arc<Mutex<Policy>>,
+        approver: Arc<dyn Approver>,
+        tool_ctx: ToolContext,
+    ) -> Self {
+        Self {
+            id: record.id,
+            cfg: Arc::new(Mutex::new(record.cfg)),
+            history: Arc::new(Mutex::new(record.messages)),
+            created_at: record.created_at,
+            provider,
+            registry,
+            policy,
+            approver,
+            tool_ctx,
+            store: None,
+        }
+    }
+
+    /// Attach a store so the session autosaves after each round.
+    pub fn with_store(mut self, store: Arc<dyn SessionStore>) -> Self {
+        self.store = Some(store);
+        self
     }
 
     /// Snapshot the current history.
@@ -93,6 +131,13 @@ impl Session {
 
     pub async fn config(&self) -> SessionConfig {
         self.cfg.lock().await.clone()
+    }
+
+    /// Hot-swap the model. Applies to the next `send()` — an in-flight turn
+    /// finishes on the model it started with, since `run_loop` snapshots the
+    /// config at spawn time.
+    pub async fn set_model(&self, model: impl Into<String>) {
+        self.cfg.lock().await.model = model.into();
     }
 
     /// Run one user turn to completion.
@@ -177,6 +222,7 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
             m
         };
         sess.history.lock().await.push(assistant_msg);
+        checkpoint(&sess).await;
         let _ = tx.send(HarnessEvent::TurnComplete).await;
 
         if pending_calls.is_empty() || finish == FinishReason::Stop {
@@ -238,6 +284,7 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
                 .push(Message::tool(result.call_id.clone(), &result.content));
             let _ = tx.send(HarnessEvent::ToolEnd(result)).await;
         }
+        checkpoint(&sess).await;
     }
 
     let _ = tx
@@ -247,6 +294,24 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
         )))
         .await;
     let _ = tx.send(HarnessEvent::Done).await;
+}
+
+/// Snapshot the session and save through the attached store, if any.
+/// Failures are logged and swallowed — losing a checkpoint shouldn't kill
+/// the running conversation.
+async fn checkpoint(sess: &Session) {
+    let Some(store) = &sess.store else { return };
+    let record = SessionRecord {
+        id: sess.id.clone(),
+        cwd: sess.tool_ctx.cwd.clone(),
+        cfg: sess.cfg.lock().await.clone(),
+        messages: sess.history.lock().await.clone(),
+        created_at: sess.created_at,
+        updated_at: now_secs(),
+    };
+    if let Err(e) = store.save(&record).await {
+        warn!(session = %sess.id, %e, "session checkpoint failed");
+    }
 }
 
 fn format_action(a: mira_tools::Action) -> &'static str {

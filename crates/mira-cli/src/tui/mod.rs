@@ -18,7 +18,8 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEvent, KeyModifiers,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
+    EventStream, KeyCode, KeyEvent, KeyModifiers,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -58,7 +59,12 @@ pub async fn run(session: Session, cfg: TuiConfig) -> Result<()> {
 fn enter() -> Result<Terminal<CrosstermBackend<std::io::Stdout>>> {
     enable_raw_mode()?;
     let mut out = std::io::stdout();
-    execute!(out, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(
+        out,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
     Ok(Terminal::new(CrosstermBackend::new(out))?)
 }
 
@@ -67,7 +73,8 @@ fn leave(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<(
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        DisableMouseCapture
+        DisableMouseCapture,
+        DisableBracketedPaste
     )?;
     terminal.show_cursor()?;
     Ok(())
@@ -130,11 +137,26 @@ async fn handle_terminal_event(
     agent_stream: &mut Option<BoxStream<'static, HarnessEvent>>,
     cfg: &mut TuiConfig,
 ) {
-    let Event::Key(key) = evt else { return };
-    if key.kind != crossterm::event::KeyEventKind::Press {
-        return;
+    match evt {
+        Event::Paste(s) => {
+            state.input_push_str(&s);
+            state.esc_pending = false;
+            state.flash = None;
+        }
+        Event::Key(k) if k.kind == crossterm::event::KeyEventKind::Press => {
+            handle_key(k, state, session, agent_stream, cfg).await;
+        }
+        _ => {}
     }
+}
 
+async fn handle_key(
+    key: KeyEvent,
+    state: &mut TuiState,
+    session: &Session,
+    agent_stream: &mut Option<BoxStream<'static, HarnessEvent>>,
+    cfg: &mut TuiConfig,
+) {
     // Approval modal steals the keys.
     if state.pending_approval.is_some() {
         handle_approval_key(key, state);
@@ -149,6 +171,12 @@ async fn handle_terminal_event(
                 state.push_warning("interrupted".into());
             }
         }
+        // Ctrl+J → newline in the composer. Terminals send LF (0x0A) for
+        // Ctrl+J and CR (0x0D) for Enter, which crossterm maps to
+        // KeyCode::Enter with the CONTROL modifier for the LF case.
+        (KeyCode::Char('j'), KeyModifiers::CONTROL)
+        | (KeyCode::Enter, KeyModifiers::CONTROL)
+        | (KeyCode::Enter, KeyModifiers::SHIFT) => state.input_newline(),
         (KeyCode::Esc, _) => {
             if state.esc_pending {
                 state.should_quit = true;
@@ -157,14 +185,15 @@ async fn handle_terminal_event(
             }
             return; // don't reset esc_pending below
         }
-        (KeyCode::Enter, m) if !m.contains(KeyModifiers::SHIFT) => {
+        (KeyCode::Enter, m) if !m.intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL) => {
             if state.is_input_empty() || state.streaming {
                 return;
             }
             let text = state.input_clear();
             if text.starts_with('/') {
-                run_slash(&text, state, cfg).await;
+                run_slash(&text, state, session, cfg).await;
             } else {
+                state.remember_submission(&text);
                 state.push_user(text.clone());
                 state.streaming = true;
                 state.follow_tail = true;
@@ -172,6 +201,8 @@ async fn handle_terminal_event(
             }
         }
         (KeyCode::Backspace, _) => state.input_backspace(),
+        (KeyCode::Up, _) => state.history_prev(),
+        (KeyCode::Down, _) => state.history_next(),
         (KeyCode::PageUp, _) => {
             state.follow_tail = false;
             state.scroll = state.scroll.saturating_sub(5);
@@ -218,7 +249,7 @@ fn handle_harness_event(
     }
 }
 
-async fn run_slash(cmd: &str, state: &mut TuiState, cfg: &mut TuiConfig) {
+async fn run_slash(cmd: &str, state: &mut TuiState, session: &Session, cfg: &mut TuiConfig) {
     let mut parts = cmd.trim().splitn(2, ' ');
     let head = parts.next().unwrap_or("");
     let rest = parts.next().unwrap_or("").trim();
@@ -251,10 +282,8 @@ async fn run_slash(cmd: &str, state: &mut TuiState, cfg: &mut TuiConfig) {
                 state.push_warning("usage: /model <id>".into());
             } else {
                 state.model = rest.to_owned();
-                state.flash = Some(format!("model → {rest} (applies to next turn)"));
-                // NOTE: SessionConfig.model isn't hot-swapped here yet — a
-                // follow-up will add a Session::set_model method. For now
-                // the label updates and takes effect on next `send`.
+                session.set_model(rest.to_owned()).await;
+                state.flash = Some(format!("model → {rest}"));
             }
         }
 

@@ -20,12 +20,23 @@ pub enum LogEntry {
 /// All state the render loop reads.
 ///
 /// Kept dumb on purpose — every field is public to the tui modules but
-/// mutation happens through the small `push_*` helpers so invariants (like
-/// "assistant tokens append onto a trailing Assistant entry") live in one
-/// place.
+/// mutation happens through the small `push_*` / `input_*` helpers so
+/// invariants (like "assistant tokens append onto a trailing Assistant
+/// entry") live in one place.
 pub struct TuiState {
     entries: Vec<LogEntry>,
+
+    /// Composer buffer. May contain '\n' for multi-line input (Ctrl+J).
     input: String,
+    /// Ring of submitted messages for up/down arrow recall.
+    history: Vec<String>,
+    /// Cursor into `history` when browsing; `None` means we're on a fresh
+    /// composer, not viewing a past message.
+    history_cursor: Option<usize>,
+    /// The composer's live contents at the moment the user first pressed
+    /// Up — restored when they browse back past the newest history entry.
+    history_stash: String,
+
     pub mode: Mode,
     pub model: String,
     pub streaming: bool,
@@ -36,8 +47,7 @@ pub struct TuiState {
     /// entries. Flipped off when the user PgUps, on when they PgDn back.
     pub follow_tail: bool,
     pub should_quit: bool,
-    /// Non-empty while the transcript is being cleared (`/clear`) or reset
-    /// to show a one-shot status line ("switched model to X").
+    /// Non-empty while showing a one-shot status blip (e.g. "model → X").
     pub flash: Option<String>,
 }
 
@@ -46,6 +56,9 @@ impl TuiState {
         Self {
             entries: Vec::new(),
             input: String::new(),
+            history: Vec::new(),
+            history_cursor: None,
+            history_stash: String::new(),
             mode,
             model,
             streaming: false,
@@ -113,19 +126,83 @@ impl TuiState {
     }
 
     pub fn input_push(&mut self, c: char) {
+        self.leave_history_browse();
         self.input.push(c);
     }
 
+    pub fn input_push_str(&mut self, s: &str) {
+        self.leave_history_browse();
+        self.input.push_str(s);
+    }
+
+    pub fn input_newline(&mut self) {
+        self.leave_history_browse();
+        self.input.push('\n');
+    }
+
     pub fn input_backspace(&mut self) {
+        self.leave_history_browse();
         self.input.pop();
     }
 
     pub fn input_clear(&mut self) -> String {
+        self.history_cursor = None;
+        self.history_stash.clear();
         std::mem::take(&mut self.input)
     }
 
     pub fn is_input_empty(&self) -> bool {
         self.input.trim().is_empty()
+    }
+
+    /// Record a submitted message so up-arrow can recall it later.
+    pub fn remember_submission(&mut self, s: &str) {
+        // Skip duplicate consecutive entries — mirrors bash/zsh behaviour.
+        if self.history.last().map(String::as_str) == Some(s) {
+            return;
+        }
+        self.history.push(s.to_owned());
+    }
+
+    /// Up-arrow: step backward through submitted messages. First press
+    /// stashes the live composer so we can restore it if the user cycles
+    /// back to the present.
+    pub fn history_prev(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+        let next = match self.history_cursor {
+            None => {
+                self.history_stash = std::mem::take(&mut self.input);
+                self.history.len() - 1
+            }
+            Some(0) => 0, // clamp at oldest
+            Some(i) => i - 1,
+        };
+        self.history_cursor = Some(next);
+        self.input = self.history[next].clone();
+    }
+
+    /// Down-arrow: step forward. Past the newest, restore the stash.
+    pub fn history_next(&mut self) {
+        let Some(i) = self.history_cursor else { return };
+        if i + 1 < self.history.len() {
+            self.history_cursor = Some(i + 1);
+            self.input = self.history[i + 1].clone();
+        } else {
+            self.history_cursor = None;
+            self.input = std::mem::take(&mut self.history_stash);
+        }
+    }
+
+    /// Any input mutation (typing, backspace, paste) drops us out of
+    /// history browse mode — otherwise the next up-arrow would clobber
+    /// their edit.
+    fn leave_history_browse(&mut self) {
+        if self.history_cursor.is_some() {
+            self.history_cursor = None;
+            self.history_stash.clear();
+        }
     }
 }
 

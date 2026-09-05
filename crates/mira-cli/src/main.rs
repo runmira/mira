@@ -8,7 +8,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::Parser;
 use mira_ai::openai::{OpenAiCompatible, OpenAiConfig};
-use mira_harness::{Approver, Session, SessionConfig};
+use mira_core::SessionId;
+use mira_harness::{Approver, FileStore, Session, SessionConfig, SessionStore};
 use mira_policy::{Mode, Policy, PolicyConfig};
 use mira_sandbox::Sandbox;
 use mira_tools::{builtin, Registry, ToolContext};
@@ -51,6 +52,15 @@ struct Cli {
     /// Piped input (e.g. `echo foo | mira`) always uses the REPL.
     #[arg(long)]
     simple: bool,
+
+    /// Resume a previous session. Without an ID, picks the most recent
+    /// session for the current directory.
+    #[arg(long, value_name = "ID", num_args = 0..=1, default_missing_value = "")]
+    resume: Option<String>,
+
+    /// Skip persistence entirely — sessions are not saved to disk.
+    #[arg(long)]
+    no_persist: bool,
 }
 
 #[tokio::main]
@@ -99,19 +109,48 @@ async fn main() -> Result<()> {
         )
     };
 
-    // --- session
+    // --- store (optional)
+    let store: Option<Arc<dyn SessionStore>> = if cli.no_persist {
+        None
+    } else {
+        match FileStore::open_default() {
+            Ok(s) => Some(Arc::new(s)),
+            Err(e) => {
+                eprintln!("warning: persistence disabled ({e})");
+                None
+            }
+        }
+    };
+
+    // --- session (fresh or resumed)
     let mut sess_cfg = SessionConfig::new(cli.model.clone());
     sess_cfg.max_tokens = cli.max_tokens;
     sess_cfg.temperature = cli.temperature;
-    let session = Session::new(
-        sess_cfg,
-        system_prompt(&cwd),
-        provider,
-        registry,
-        policy.clone(),
-        approver,
-        tool_ctx,
-    );
+
+    let session = match resume_target(cli.resume.as_deref(), store.as_deref(), &cwd).await? {
+        Some(record) => Session::resume_from(
+            record,
+            provider,
+            registry,
+            policy.clone(),
+            approver,
+            tool_ctx,
+        ),
+        None => Session::new(
+            sess_cfg,
+            system_prompt(&cwd),
+            provider,
+            registry,
+            policy.clone(),
+            approver,
+            tool_ctx,
+        ),
+    };
+    let session = if let Some(s) = store.clone() {
+        session.with_store(s)
+    } else {
+        session
+    };
 
     if use_tui {
         tui::run(
@@ -126,6 +165,33 @@ async fn main() -> Result<()> {
         .await
     } else {
         repl::run(session).await
+    }
+}
+
+/// Resolve `--resume` into a concrete session record.
+///
+/// - `None`: no resume requested → fresh session.
+/// - `Some("")`: resume most recent session in `cwd`.
+/// - `Some(id)`: resume by id.
+async fn resume_target(
+    flag: Option<&str>,
+    store: Option<&dyn SessionStore>,
+    cwd: &std::path::Path,
+) -> Result<Option<mira_harness::SessionRecord>> {
+    let Some(flag) = flag else {
+        return Ok(None);
+    };
+    let Some(store) = store else {
+        anyhow::bail!("--resume needs persistence, but --no-persist is set (or no home dir)");
+    };
+    if flag.is_empty() {
+        let recent = store.list_recent(cwd, 1).await?;
+        match recent.into_iter().next() {
+            Some(r) => Ok(Some(r)),
+            None => anyhow::bail!("no saved sessions for `{}`", cwd.display()),
+        }
+    } else {
+        Ok(Some(store.load(&SessionId::from(flag)).await?))
     }
 }
 
