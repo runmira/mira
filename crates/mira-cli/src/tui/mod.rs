@@ -27,6 +27,7 @@ use crossterm::terminal::{
 };
 use futures::stream::BoxStream;
 use futures::StreamExt;
+use mira_core::Role;
 use mira_harness::{HarnessEvent, Session};
 use mira_policy::{Mode, Policy};
 use ratatui::backend::CrosstermBackend;
@@ -88,7 +89,7 @@ async fn event_loop(
     mut cfg: TuiConfig,
 ) -> Result<()> {
     let mut state = TuiState::new(cfg.model.clone(), cfg.mode);
-    state.push_info("mira ready. type a message · ctrl-c interrupt · esc esc quit");
+    hydrate_from_history(&session, &mut state).await;
 
     let mut input_events = EventStream::new();
     let mut agent_stream: Option<BoxStream<'static, HarnessEvent>> = None;
@@ -117,6 +118,55 @@ async fn event_loop(
     }
 
     Ok(())
+}
+
+/// Rebuild the visible transcript from a session's history. On a fresh
+/// session (only a system message) we just show the welcome line; on
+/// resume we replay user/assistant/tool entries so it's obvious the
+/// conversation continued rather than starting empty.
+async fn hydrate_from_history(session: &Session, state: &mut TuiState) {
+    let history = session.history().await;
+    // Only count non-system messages when deciding whether to announce
+    // "resumed"; a fresh session has just the system prompt.
+    let visible_count = history.iter().filter(|m| m.role != Role::System).count();
+
+    if visible_count == 0 {
+        state.push_info("mira ready. type a message · ctrl-c interrupt · esc esc quit");
+        return;
+    }
+
+    state.push_info(format!(
+        "resumed session {} · {} message{}",
+        session.id,
+        visible_count,
+        if visible_count == 1 { "" } else { "s" }
+    ));
+
+    for msg in history {
+        match msg.role {
+            Role::System => {}
+            Role::User => {
+                if let Some(c) = msg.content {
+                    state.push_user(c);
+                }
+            }
+            Role::Assistant => {
+                if let Some(c) = msg.content.as_deref() {
+                    if !c.is_empty() {
+                        state.push_assistant(c.to_owned());
+                    }
+                }
+                for call in msg.tool_calls {
+                    state.push_tool_call_raw(call.function.name, call.function.arguments);
+                }
+            }
+            Role::Tool => {
+                if let Some(c) = msg.content {
+                    state.push_tool_result_replay(&c);
+                }
+            }
+        }
+    }
 }
 
 async fn next_agent_event(

@@ -119,6 +119,33 @@ impl TuiState {
         });
     }
 
+    /// Replay a tool result from history — we don't know its is_error
+    /// flag anymore (the wire message doesn't carry it), so callers pass
+    /// their best guess. `denied by policy` and `io error` snippets get
+    /// marked as errors so the visual state matches how they originally
+    /// rendered.
+    pub fn push_tool_result_replay(&mut self, content: &str) {
+        let is_error = content.starts_with("denied by policy")
+            || content.starts_with("io error")
+            || content.starts_with("no such tool")
+            || content.starts_with("tool failed")
+            || content.starts_with("invalid arguments");
+        self.entries.push(LogEntry::ToolResult {
+            ok: !is_error,
+            snippet: first_line(content, 200),
+        });
+    }
+
+    /// Push a raw tool call from history (name + args string).
+    pub fn push_tool_call_raw(&mut self, name: String, args: String) {
+        self.entries.push(LogEntry::ToolCall { name, args });
+    }
+
+    /// Push an already-complete assistant message from history.
+    pub fn push_assistant(&mut self, s: String) {
+        self.entries.push(LogEntry::Assistant(s));
+    }
+
     // ---- input ----
 
     pub fn input(&self) -> &str {
