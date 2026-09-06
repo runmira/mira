@@ -30,7 +30,19 @@ Three ideas shape it:
 
 ## Install
 
-Requires Rust 1.88+ (see [`rust-toolchain.toml`](./rust-toolchain.toml)).
+**Homebrew** (macOS and Linux):
+
+```bash
+brew install runmira/tap/mira
+```
+
+**Install script** (macOS and Linux, no Homebrew required):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/runmira/mira/main/install.sh | bash
+```
+
+**From source** — requires Rust 1.88+ (see [`rust-toolchain.toml`](./rust-toolchain.toml)):
 
 ```bash
 git clone https://github.com/runmira/mira && cd mira
