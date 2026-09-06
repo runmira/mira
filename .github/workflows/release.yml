@@ -21,10 +21,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Apple Silicon — the long-term primary macOS target.
           - os: macos-latest
             target: aarch64-apple-darwin
             asset: mira-darwin-arm64.tar.gz
-          - os: macos-13
+          # x86_64 Mac — `macos-13` was retired Dec 2025. `macos-15-intel`
+          # is the current Intel runner. GitHub plans to retire x86_64
+          # macOS entirely around Fall 2027; treat this as a transitional
+          # target and bias new work toward arm64.
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             asset: mira-darwin-x86_64.tar.gz
           - os: ubuntu-latest
