@@ -1,0 +1,12 @@
+[package]
+name         = "mira-config"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+description  = "On-disk YAML configuration shared by the Mira CLI and server."
+
+[dependencies]
+serde      = { workspace = true }
+serde_yaml = { workspace = true }
+anyhow     = { workspace = true }

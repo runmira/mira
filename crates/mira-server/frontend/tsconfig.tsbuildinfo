@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/api.ts","./src/main.tsx","./src/types.ts","./src/ws.ts","./src/components/assistantcontent.tsx","./src/components/composer.tsx","./src/components/folderpicker.tsx","./src/components/markdown.tsx","./src/components/settings.tsx","./src/components/sidebar.tsx","./src/components/thinking.tsx","./src/components/toolcard.tsx"],"version":"5.9.3"}

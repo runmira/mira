@@ -1,25 +1,30 @@
 //! Diff previews for `edit_file` / `write_file` approvals.
 //!
-//! When the model asks to change a file, we'd rather show the user a
-//! coloured unified diff than a raw JSON args blob. This module reads
-//! the target file, applies the proposed edit in memory, and produces a
-//! grouped diff (3 lines of context) that [`crate::tui::render`] paints
-//! red/green in the approval modal.
+//! When the model asks to change a file, both the TUI approval modal and
+//! the web UI approval modal render a coloured diff of the proposed
+//! change instead of a raw JSON args blob. This module reads the target
+//! file, applies the edit in memory, and produces a grouped diff (3
+//! lines of context) that any frontend can style.
+//!
+//! Types derive `Serialize`/`Deserialize` so the server can put a
+//! [`DiffPreview`] straight on the WebSocket.
 
 use std::path::Path;
 
 use mira_core::ToolCall;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use similar::{ChangeTag, TextDiff};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DiffPreview {
     pub path: String,
     pub kind: DiffKind,
     pub lines: Vec<DiffLine>,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum DiffKind {
     /// `edit_file` — modifying existing content.
     Edit,
@@ -29,7 +34,8 @@ pub enum DiffKind {
     Create,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "tag", content = "text", rename_all = "lowercase")]
 pub enum DiffLine {
     /// Unchanged context line.
     Ctx(String),

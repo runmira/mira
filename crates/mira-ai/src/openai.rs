@@ -18,7 +18,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, warn};
 
 use crate::event::{ChatEvent, FinishReason, ToolCallBuffer};
-use crate::provider::{ChatProvider, ChatRequest, ProviderError};
+use crate::provider::{ChatProvider, ChatRequest, ModelInfo, ProviderError};
 use crate::tool_spec::ToolSpec;
 
 /// Configuration for an OpenAI-compatible endpoint.
@@ -69,6 +69,21 @@ impl OpenAiCompatible {
 
 #[async_trait]
 impl ChatProvider for OpenAiCompatible {
+    async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+        let url = format!("{}/models", self.cfg.base_url.trim_end_matches('/'));
+        let resp = self.http.get(&url).headers(self.headers()?).send().await?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ProviderError::Status { status, body });
+        }
+        let raw: ModelListResponse = resp
+            .json()
+            .await
+            .map_err(|e| ProviderError::Decode(e.to_string()))?;
+        Ok(raw.data.into_iter().map(Into::into).collect())
+    }
+
     async fn stream(
         &self,
         request: ChatRequest,
@@ -321,4 +336,34 @@ struct WireToolFnDelta {
     name: Option<String>,
     #[serde(default)]
     arguments: Option<String>,
+}
+
+/// `GET /v1/models` response shape. The OpenAI standard is
+/// `{ data: [{ id, owned_by, ... }] }`. OpenRouter extends each entry with
+/// `name` (display) and `context_length` — we pick those up when present.
+#[derive(Deserialize)]
+struct ModelListResponse {
+    data: Vec<WireModel>,
+}
+
+#[derive(Deserialize)]
+struct WireModel {
+    id: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    owned_by: Option<String>,
+    #[serde(default)]
+    context_length: Option<u32>,
+}
+
+impl From<WireModel> for ModelInfo {
+    fn from(w: WireModel) -> Self {
+        ModelInfo {
+            id: w.id,
+            display_name: w.name,
+            owned_by: w.owned_by,
+            context_length: w.context_length,
+        }
+    }
 }

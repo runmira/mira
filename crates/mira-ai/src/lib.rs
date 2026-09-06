@@ -11,10 +11,12 @@
 //! implements [`ChatProvider`] — no changes needed in the harness.
 
 pub mod event;
+pub mod null;
 pub mod openai;
 pub mod provider;
 pub mod tool_spec;
 
 pub use event::{ChatEvent, FinishReason};
-pub use provider::{ChatProvider, ChatRequest, ProviderError};
+pub use null::NullProvider;
+pub use provider::{ChatProvider, ChatRequest, ModelInfo, ProviderError};
 pub use tool_spec::ToolSpec;

@@ -4,7 +4,8 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::tui::diff::{DiffKind, DiffLine};
+use mira_tools::{DiffKind, DiffLine};
+
 use crate::tui::state::{LogEntry, TuiState};
 
 pub fn draw(f: &mut Frame, state: &mut TuiState) {

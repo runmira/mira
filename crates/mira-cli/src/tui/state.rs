@@ -1,8 +1,8 @@
 use mira_core::{ToolCall, ToolResult};
 use mira_policy::Mode;
+use mira_tools::DiffPreview;
 
 use crate::tui::approver::ApprovalRequest;
-use crate::tui::diff::DiffPreview;
 
 /// An approval request enriched with an optional diff preview (present
 /// only for edit_file / write_file calls). The preview is computed

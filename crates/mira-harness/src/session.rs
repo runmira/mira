@@ -7,8 +7,15 @@ use mira_policy::{Decision, Policy, Request as PolicyRequest};
 use mira_tools::{Registry, ToolContext};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Mutex};
+use tokio::task::AbortHandle;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{error, info, warn};
+
+/// How much of a tool result actually goes back into the model's context.
+/// A single `ls -R` on a real repo can be 20k+ tokens which blows past
+/// every provider's per-request cap — cap in the harness so the frontend
+/// still sees the full result but the model only sees a preview.
+const TOOL_RESULT_HISTORY_CAP: usize = 4000;
 
 use crate::approver::Approver;
 use crate::event::HarnessEvent;
@@ -65,6 +72,10 @@ pub struct Session {
     approver: Arc<dyn Approver>,
     tool_ctx: ToolContext,
     store: Option<Arc<dyn SessionStore>>,
+    /// Handle to the currently-running turn task, if any. `cancel()` aborts
+    /// it; the loop's `tx.send` calls then fail as the channel closes and
+    /// the frontend stops seeing new events.
+    current_turn: Arc<Mutex<Option<AbortHandle>>>,
 }
 
 impl Session {
@@ -88,6 +99,7 @@ impl Session {
             approver,
             tool_ctx,
             store: None,
+            current_turn: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -115,6 +127,7 @@ impl Session {
             approver,
             tool_ctx,
             store: None,
+            current_turn: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -152,9 +165,31 @@ impl Session {
         let this = self.clone();
         let (tx, rx) = mpsc::channel::<HarnessEvent>(64);
 
-        tokio::spawn(async move { run_loop(this, cfg, tx).await });
+        // If a prior turn is still running (shouldn't happen with a
+        // well-behaved UI but easy to hit while debugging), abort it —
+        // otherwise two tasks race to mutate history.
+        let handle = tokio::spawn(async move { run_loop(this, cfg, tx).await });
+        let mut slot = self.current_turn.lock().await;
+        if let Some(prev) = slot.take() {
+            prev.abort();
+        }
+        *slot = Some(handle.abort_handle());
 
         ReceiverStream::new(rx).boxed()
+    }
+
+    /// Cancel the currently-running turn, if any. Any in-flight tool call
+    /// finishes on its own thread (we don't kill child processes), but the
+    /// model stream stops pumping events and the next round never starts.
+    pub async fn cancel(&self) -> bool {
+        let mut slot = self.current_turn.lock().await;
+        match slot.take() {
+            Some(h) => {
+                h.abort();
+                true
+            }
+            None => false,
+        }
     }
 }
 
@@ -237,10 +272,10 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
                 let msg = format!("no such tool: {}", call.function.name);
                 warn!(tool = %call.function.name, "unknown tool call");
                 let result = ToolResult::err(call.id.clone(), msg);
-                sess.history
-                    .lock()
-                    .await
-                    .push(Message::tool(result.call_id.clone(), &result.content));
+                sess.history.lock().await.push(Message::tool(
+                    result.call_id.clone(),
+                    truncate_for_history(&result.content),
+                ));
                 let _ = tx.send(HarnessEvent::ToolEnd(result)).await;
                 continue;
             };
@@ -278,10 +313,10 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
                 }
             };
 
-            sess.history
-                .lock()
-                .await
-                .push(Message::tool(result.call_id.clone(), &result.content));
+            sess.history.lock().await.push(Message::tool(
+                result.call_id.clone(),
+                truncate_for_history(&result.content),
+            ));
             let _ = tx.send(HarnessEvent::ToolEnd(result)).await;
         }
         checkpoint(&sess).await;
@@ -312,6 +347,27 @@ async fn checkpoint(sess: &Session) {
     if let Err(e) = store.save(&record).await {
         warn!(session = %sess.id, %e, "session checkpoint failed");
     }
+}
+
+/// Truncate a tool result to a size the model can safely re-ingest. We keep
+/// the head (usually the most relevant part — first lines of a diff, the
+/// start of a file listing) and add a marker line telling the model how
+/// much was elided.
+fn truncate_for_history(content: &str) -> String {
+    if content.len() <= TOOL_RESULT_HISTORY_CAP {
+        return content.to_owned();
+    }
+    let cut = content
+        .char_indices()
+        .take_while(|(i, _)| *i < TOOL_RESULT_HISTORY_CAP)
+        .map(|(i, _)| i)
+        .last()
+        .unwrap_or(0);
+    let head = &content[..cut];
+    let omitted = content.len() - cut;
+    format!(
+        "{head}\n\n… [{omitted} bytes truncated; ask again with a narrower query to see more]"
+    )
 }
 
 fn format_action(a: mira_tools::Action) -> &'static str {

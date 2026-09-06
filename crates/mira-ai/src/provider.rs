@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use mira_core::Message;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{event::ChatEvent, tool_spec::ToolSpec};
@@ -39,6 +40,20 @@ pub struct ChatRequest {
     pub max_tokens: Option<u32>,
 }
 
+/// One entry in a provider's model catalog. `id` is the value you pass as
+/// `ChatRequest::model`; the extras are metadata the UI can surface.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModelInfo {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// Provider-specific bucket (OpenRouter groups by "openai", "anthropic", …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owned_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_length: Option<u32>,
+}
+
 /// Anything that can turn a `ChatRequest` into a stream of `ChatEvent`s.
 ///
 /// Implementations own their HTTP client and auth. The harness holds this
@@ -49,4 +64,11 @@ pub trait ChatProvider: Send + Sync {
         &self,
         request: ChatRequest,
     ) -> Result<BoxStream<'static, Result<ChatEvent, ProviderError>>, ProviderError>;
+
+    /// Fetch the provider's model catalog. Default returns an empty list —
+    /// providers that don't expose one (or don't want to) fall back to a
+    /// text input on the UI side.
+    async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+        Ok(Vec::new())
+    }
 }

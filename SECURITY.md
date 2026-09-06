@@ -16,6 +16,8 @@ Email **flutterdami@gmail.com** with:
 - The commit / version you tested against.
 - Whether you'd like credit in the fix commit.
 
+> **Note:** Please encrypt any sensitive information in your report if possible.
+
 You should get an acknowledgement within 72 hours. If it's confirmed, we'll
 work on a fix in a private branch and coordinate disclosure with you.
 
@@ -36,3 +38,5 @@ Out of scope:
 - Denial of service via user-supplied prompts (rate limits are a provider
   concern).
 - Issues in third-party providers or models Mira connects to.
+
+Thank you for helping to keep Mira secure!

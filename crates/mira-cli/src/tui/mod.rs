@@ -11,7 +11,6 @@
 //! spawned loop task exits when its send channel closes.
 
 pub mod approver;
-mod diff;
 mod render;
 mod state;
 
@@ -111,7 +110,7 @@ async fn event_loop(
                 handle_harness_event(evt, &mut state, &mut agent_stream);
             }
             Some(req) = cfg.approval_rx.recv() => {
-                let preview = diff::compute_preview(&cfg.cwd, &req.call).await;
+                let preview = mira_tools::compute_preview(&cfg.cwd, &req.call).await;
                 state.pending_approval = Some(PendingApproval { request: req, preview });
             }
         }

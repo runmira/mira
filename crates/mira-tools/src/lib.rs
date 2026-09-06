@@ -11,9 +11,11 @@
 
 pub mod builtin;
 pub mod context;
+pub mod preview;
 pub mod registry;
 pub mod tool;
 
 pub use context::ToolContext;
+pub use preview::{compute_preview, DiffKind, DiffLine, DiffPreview};
 pub use registry::Registry;
 pub use tool::{Action, Tool, ToolError};

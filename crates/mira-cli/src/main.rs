@@ -1,13 +1,14 @@
 mod approver;
 mod config;
 mod repl;
+mod serve;
 mod tui;
 
 use std::io::IsTerminal;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use mira_ai::openai::{OpenAiCompatible, OpenAiConfig};
 use mira_core::SessionId;
 use mira_harness::{Approver, FileStore, Session, SessionConfig, SessionStore};
@@ -24,9 +25,9 @@ use crate::config::{MiraConfig, ProviderConfig};
 /// Every flag can also be set in `~/.mira/mira.yaml` (global) or
 /// `<cwd>/.mira/config.yaml` (per-repo). CLI flags win over env vars,
 /// which win over per-repo config, which wins over global config.
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(version, about, long_about = None)]
-struct Cli {
+pub(crate) struct Cli {
     /// Provider name — a key in `providers` in your `mira.yaml`.
     #[arg(long)]
     provider: Option<String>,
@@ -70,11 +71,29 @@ struct Cli {
     /// Skip persistence entirely — sessions are not saved to disk.
     #[arg(long)]
     no_persist: bool,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+/// Subcommands. Absent = the default chat entrypoint (TUI or REPL).
+#[derive(Subcommand, Debug, Clone)]
+enum Command {
+    /// Run Mira as a local web server. Binds to 127.0.0.1 by default; a
+    /// browser (or, later, the desktop app) is the frontend.
+    Serve(serve::ServeArgs),
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Subcommand branch — `mira serve` short-circuits the TUI path.
+    if let Some(Command::Serve(args)) = cli.command.clone() {
+        init_tracing(false);
+        return serve::run(&cli, args).await;
+    }
+
     let use_tui = !cli.simple && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
 
     init_tracing(use_tui);
@@ -266,21 +285,8 @@ fn resolve_settings(cli: &Cli, cfg: &MiraConfig) -> Result<ResolvedSettings> {
     })
 }
 
-/// Sensible base_url defaults for a handful of well-known provider
-/// names, so `--provider openrouter` alone (with only an env key set)
-/// works out of the box.
 fn default_base_url_for(name: &str) -> Option<String> {
-    Some(
-        match name {
-            "openrouter" => "https://openrouter.ai/api/v1",
-            "openai" => "https://api.openai.com/v1",
-            "anthropic" => "https://api.anthropic.com/v1",
-            "groq" => "https://api.groq.com/openai/v1",
-            "ollama" => "http://localhost:11434/v1",
-            _ => return None,
-        }
-        .to_owned(),
-    )
+    mira_config::default_base_url_for(name).map(|s| s.to_owned())
 }
 
 /// Resolve `--resume` into a concrete session record.

@@ -12,11 +12,13 @@ repository = "https://github.com/runmira/mira"
 [workspace.dependencies]
 # Internal crates — path deps so cargo publish stays honest later.
 mira-core     = { path = "crates/mira-core",    version = "0.1.0" }
+mira-config   = { path = "crates/mira-config",  version = "0.1.0" }
 mira-ai       = { path = "crates/mira-ai",      version = "0.1.0" }
 mira-tools    = { path = "crates/mira-tools",   version = "0.1.0" }
 mira-policy   = { path = "crates/mira-policy",  version = "0.1.0" }
 mira-sandbox  = { path = "crates/mira-sandbox", version = "0.1.0" }
 mira-harness  = { path = "crates/mira-harness", version = "0.1.0" }
+mira-server   = { path = "crates/mira-server",  version = "0.1.0" }
 
 # Async runtime
 tokio           = { version = "1.40", features = ["macros", "rt-multi-thread", "process", "fs", "io-util", "io-std", "sync", "signal", "time"] }
@@ -56,6 +58,11 @@ ratatui   = { version = "0.29", features = ["unstable-rendered-line-info"] }
 crossterm = { version = "0.28", features = ["event-stream"] }
 unicode-width = "0.2"
 similar   = "2"
+
+# Web (mira serve)
+axum        = { version = "0.7", features = ["ws", "macros"] }
+tower       = "0.5"
+tower-http  = { version = "0.6", features = ["fs", "trace", "cors"] }
 
 [profile.release]
 lto           = "thin"

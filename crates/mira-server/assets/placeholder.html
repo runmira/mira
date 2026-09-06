@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>mira serve</title>
+    <style>
+      body { font: 15px/1.45 -apple-system, system-ui, sans-serif; margin: 3rem auto; max-width: 40rem; color: #222; padding: 0 1rem; }
+      h1 { margin: 0 0 0.5rem; }
+      code, pre { background: #f4f4f4; padding: 0.1rem 0.35rem; border-radius: 4px; font-size: 0.9em; }
+      pre { padding: 0.75rem; overflow: auto; }
+      #log { background: #fafafa; border: 1px solid #eee; padding: 0.75rem; border-radius: 6px; height: 40vh; overflow: auto; white-space: pre-wrap; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+      input { width: 100%; padding: 0.5rem; box-sizing: border-box; font: inherit; margin-top: 0.5rem; }
+      .meta { color: #888; font-size: 0.9em; }
+    </style>
+  </head>
+  <body>
+    <h1>mira serve</h1>
+    <p class="meta">Placeholder page — the React frontend isn't built yet. This confirms the server is up and streams events from a live session over the WebSocket.</p>
+
+    <div id="log">connecting…</div>
+    <input id="input" placeholder="Type a message and press Enter…" autofocus />
+
+    <script>
+      const log = document.getElementById('log');
+      const input = document.getElementById('input');
+      const line = (s) => { log.textContent += s + '\n'; log.scrollTop = log.scrollHeight; };
+      const url = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
+      const ws = new WebSocket(url);
+      ws.onopen = () => line('[open]');
+      ws.onclose = () => line('[close]');
+      ws.onerror = (e) => line('[error] ' + (e.message || 'ws error'));
+      ws.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg.type === 'token') { log.textContent += msg.text; log.scrollTop = log.scrollHeight; }
+          else if (msg.type === 'done') line('\n[done]');
+          else if (msg.type === 'ready') line('[ready] model=' + msg.model + ' mode=' + msg.mode + ' cwd=' + msg.cwd);
+          else line('[' + msg.type + '] ' + JSON.stringify(msg).slice(0, 300));
+        } catch { line(ev.data); }
+      };
+      input.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter' || !input.value.trim()) return;
+        ws.send(JSON.stringify({ type: 'send', text: input.value }));
+        line('\n> ' + input.value);
+        input.value = '';
+      });
+    </script>
+  </body>
+</html>
