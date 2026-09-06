@@ -52,6 +52,11 @@ pub struct TuiState {
     pub pending_approval: Option<PendingApproval>,
     pub esc_pending: bool,
     pub scroll: u16,
+    /// The row offset where the tail sits in the last-rendered transcript
+    /// — total wrapped lines minus visible height. Written by the render
+    /// function so the key handler can clamp PgDn correctly and re-engage
+    /// `follow_tail` when the user scrolls back to the bottom.
+    pub transcript_tail: u16,
     /// When true, the UI auto-scrolls the transcript to the bottom on new
     /// entries. Flipped off when the user PgUps, on when they PgDn back.
     pub follow_tail: bool,
@@ -74,6 +79,7 @@ impl TuiState {
             pending_approval: None,
             esc_pending: false,
             scroll: 0,
+            transcript_tail: 0,
             follow_tail: true,
             should_quit: false,
             flash: None,

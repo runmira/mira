@@ -3,7 +3,8 @@ use futures::StreamExt;
 use mira_harness::{HarnessEvent, Session};
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-/// The interactive loop. Reads a line, streams the agent's reply, repeat.
+/// This is an updated comment for testing purposes.
+/// Adding a new comment here.
 pub async fn run(session: Session) -> Result<()> {
     let mut stdout = io::stdout();
     let mut lines = BufReader::new(io::stdin()).lines();

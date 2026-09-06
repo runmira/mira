@@ -98,7 +98,7 @@ async fn event_loop(
     let mut agent_stream: Option<BoxStream<'static, HarnessEvent>> = None;
 
     loop {
-        terminal.draw(|f| render::draw(f, &state))?;
+        terminal.draw(|f| render::draw(f, &mut state))?;
 
         tokio::select! {
             evt = input_events.next() => {
@@ -262,8 +262,18 @@ async fn handle_key(
             state.scroll = state.scroll.saturating_sub(5);
         }
         (KeyCode::PageDown, _) => {
-            state.scroll = state.scroll.saturating_add(5);
+            let new = state.scroll.saturating_add(5);
+            if new >= state.transcript_tail {
+                state.scroll = state.transcript_tail;
+                state.follow_tail = true;
+            } else {
+                state.scroll = new;
+                state.follow_tail = false;
+            }
+        }
+        (KeyCode::Home, _) => {
             state.follow_tail = false;
+            state.scroll = 0;
         }
         (KeyCode::End, _) => state.follow_tail = true,
         (KeyCode::Char(c), m) if !m.contains(KeyModifiers::CONTROL) => state.input_push(c),

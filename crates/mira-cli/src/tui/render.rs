@@ -7,7 +7,7 @@ use ratatui::Frame;
 use crate::tui::diff::{DiffKind, DiffLine};
 use crate::tui::state::{LogEntry, TuiState};
 
-pub fn draw(f: &mut Frame, state: &TuiState) {
+pub fn draw(f: &mut Frame, state: &mut TuiState) {
     // Input area grows with content up to 8 rows so a multi-line message
     // is visible while composing, then shrinks back after submit.
     let input_rows = input_display_rows(state.input()).min(6);
@@ -49,7 +49,7 @@ fn header(f: &mut Frame, area: Rect, state: &TuiState) {
     f.render_widget(Paragraph::new(line), area);
 }
 
-fn transcript(f: &mut Frame, area: Rect, state: &TuiState) {
+fn transcript(f: &mut Frame, area: Rect, state: &mut TuiState) {
     let mut lines: Vec<Line> = Vec::new();
     for entry in state.entries() {
         for l in entry_to_lines(entry) {
@@ -67,22 +67,30 @@ fn transcript(f: &mut Frame, area: Rect, state: &TuiState) {
     let text = Text::from(lines);
     let para = Paragraph::new(text).wrap(Wrap { trim: false });
 
-    // ratatui 0.29 exposes wrapped line count, which lets us compute a
-    // scroll offset that pins the tail in view when `follow_tail` is on.
+    // ratatui 0.29 exposes wrapped line count, which lets us compute the
+    // tail offset and clamp scroll into a valid range.
     let total = para.line_count(area.width) as u16;
+    let tail = total.saturating_sub(area.height);
+
     let scroll = if state.follow_tail {
-        total.saturating_sub(area.height)
+        tail
     } else {
-        state.scroll.min(total.saturating_sub(1))
+        state.scroll.min(tail)
     };
+
+    // Persist the effective scroll so PgUp/PgDn work from where the user
+    // is actually looking — not from a stale 0 they never chose.
+    state.scroll = scroll;
+    state.transcript_tail = tail;
+
     f.render_widget(para.scroll((scroll, 0)), area);
 }
 
-fn entry_to_lines(entry: &LogEntry) -> Vec<Line<'_>> {
+fn entry_to_lines(entry: &LogEntry) -> Vec<Line<'static>> {
     match entry {
         LogEntry::User(s) => vec![Line::from(vec![
             Span::styled("› ", Style::default().fg(Color::Cyan).bold()),
-            Span::styled(s.as_str(), Style::default().fg(Color::Cyan)),
+            Span::styled(s.clone(), Style::default().fg(Color::Cyan)),
         ])],
         LogEntry::Assistant(s) => s
             .lines()
@@ -109,10 +117,10 @@ fn entry_to_lines(entry: &LogEntry) -> Vec<Line<'_>> {
         }
         LogEntry::Warning(s) => vec![Line::from(vec![
             Span::styled("⚠ ", Style::default().fg(Color::Yellow).bold()),
-            Span::styled(s.as_str(), Style::default().fg(Color::Yellow)),
+            Span::styled(s.clone(), Style::default().fg(Color::Yellow)),
         ])],
         LogEntry::Info(s) => vec![Line::from(Span::styled(
-            s.as_str(),
+            s.clone(),
             Style::default().fg(Color::DarkGray).italic(),
         ))],
     }
