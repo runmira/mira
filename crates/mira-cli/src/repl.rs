@@ -55,6 +55,10 @@ pub async fn run(session: Session) -> Result<()> {
                     let msg = format!("\n[warn] {w}\n");
                     stdout.write_all(msg.as_bytes()).await?;
                 }
+                HarnessEvent::Usage { .. } => {
+                    // repl doesn't render usage inline; totals are visible via
+                    // `mira sessions ls`.
+                }
                 HarnessEvent::Done => {
                     stdout.write_all(b"\n").await?;
                     break;

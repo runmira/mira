@@ -88,6 +88,7 @@ async fn build_ready(state: &AppState) -> ServerMsg {
     let mode = state.policy.lock().await.mode();
     let history = sess.history().await;
     let turns = sess.turns().await;
+    let usage = sess.usage().await;
     ServerMsg::Ready {
         session_id: sess.id.to_string(),
         model: cfg.model,
@@ -95,6 +96,7 @@ async fn build_ready(state: &AppState) -> ServerMsg {
         cwd: state.current_cwd().await.display().to_string(),
         history,
         turns,
+        usage,
     }
 }
 

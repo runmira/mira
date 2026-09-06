@@ -305,6 +305,7 @@ fn handle_harness_event(
         HarnessEvent::ToolEnd(result) => state.push_tool_result(&result),
         HarnessEvent::Warning(w) => state.push_warning(w),
         HarnessEvent::TurnComplete => {}
+        HarnessEvent::Usage { totals, .. } => state.usage = totals,
         HarnessEvent::Done => {
             state.streaming = false;
             *agent_stream = None;

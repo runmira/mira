@@ -36,6 +36,10 @@ type Props = {
   mode: Mode;
   model: string;
   cwd: string;
+  /** Pre-formatted usage string (`↑12.3k ↓4.1k · $0.024`) or null when there's
+   *  nothing to show yet. Formatting owned by App so per-model pricing lives
+   *  in one place. */
+  usage: string | null;
   onSend: (text: string) => void;
   onSetMode: (m: Mode) => void;
   onSetModel: (m: string) => void;
@@ -51,7 +55,7 @@ type Props = {
 type Attachment = { path: string; content: string; bytes: number };
 
 export function Composer({
-  disabled, busy, mode, model, cwd,
+  disabled, busy, mode, model, cwd, usage,
   onSend, onSetMode, onSetModel, onSetEffort, onOpenPicker, onInterrupt, onNewChat, onOpenSettings, onRunReview,
 }: Props) {
   const [text, setText] = useState('');
@@ -262,6 +266,15 @@ export function Composer({
           <WorktreeChip cwd={cwd} />
 
           <span className="flex-1" />
+
+          {usage && (
+            <span
+              className="mr-1 truncate rounded-md px-1.5 py-1 text-[11px] font-mono text-muted-foreground/70"
+              title="Session tokens & estimated cost — hover the model chip for details"
+            >
+              {usage}
+            </span>
+          )}
 
           <ModePicker mode={mode} label={modeLabel} onPick={onSetMode} />
 

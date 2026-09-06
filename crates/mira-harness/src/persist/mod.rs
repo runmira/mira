@@ -13,6 +13,7 @@ pub mod file_store;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
+use mira_ai::TokenUsage;
 use mira_core::{Message, SessionId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -46,6 +47,46 @@ pub struct SessionRecord {
     /// field existed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub turns: Vec<TurnMeta>,
+    /// Aggregate token accounting across every round in the session. Zeroed
+    /// for sessions written before this field existed (or when the provider
+    /// doesn't report usage).
+    #[serde(default, skip_serializing_if = "UsageTotals::is_zero")]
+    pub usage: UsageTotals,
+}
+
+/// Running token totals for a whole session. Grows monotonically; individual
+/// rounds arrive as [`mira_ai::TokenUsage`] events which we fold in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageTotals {
+    #[serde(default)]
+    pub prompt_tokens: u64,
+    #[serde(default)]
+    pub completion_tokens: u64,
+    #[serde(default)]
+    pub cached_input_tokens: u64,
+    /// Number of provider rounds we've seen a usage report for. May be
+    /// smaller than the total number of turns if the provider omits usage on
+    /// some responses.
+    #[serde(default)]
+    pub rounds: u32,
+}
+
+impl UsageTotals {
+    pub fn is_zero(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Fold one provider-reported round into the running totals.
+    pub fn add_round(&mut self, u: TokenUsage) {
+        self.prompt_tokens += u.prompt_tokens as u64;
+        self.completion_tokens += u.completion_tokens as u64;
+        self.cached_input_tokens += u.cached_input_tokens as u64;
+        self.rounds = self.rounds.saturating_add(1);
+    }
+
+    pub fn total_tokens(&self) -> u64 {
+        self.prompt_tokens + self.completion_tokens
+    }
 }
 
 /// One user→assistant round-trip's wall-clock timing. `ended_at == None`

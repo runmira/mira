@@ -1,4 +1,5 @@
 use mira_core::{ToolCall, ToolResult};
+use mira_harness::UsageTotals;
 use mira_policy::Mode;
 use mira_tools::DiffPreview;
 
@@ -63,6 +64,10 @@ pub struct TuiState {
     pub should_quit: bool,
     /// Non-empty while showing a one-shot status blip (e.g. "model → X").
     pub flash: Option<String>,
+    /// Session-wide token totals, updated whenever the provider emits usage.
+    /// Zeroed for providers that don't report usage — the status bar renders
+    /// nothing in that case.
+    pub usage: UsageTotals,
 }
 
 impl TuiState {
@@ -83,6 +88,7 @@ impl TuiState {
             follow_tail: true,
             should_quit: false,
             flash: None,
+            usage: UsageTotals::default(),
         }
     }
 

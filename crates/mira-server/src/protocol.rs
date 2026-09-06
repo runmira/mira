@@ -4,8 +4,9 @@
 //! frames carry harness events + approval requests; client frames carry user
 //! input, approvals, and control (mode/model swap, interrupt, clear).
 
+use mira_ai::TokenUsage;
 use mira_core::{Message, ToolCall, ToolResult};
-use mira_harness::{HarnessEvent, TurnMeta};
+use mira_harness::{HarnessEvent, TurnMeta, UsageTotals};
 use mira_policy::Mode;
 use mira_review::{Finding, Progress as ReviewProgress};
 use mira_tools::DiffPreview;
@@ -51,6 +52,11 @@ pub enum ServerMsg {
         /// for legacy sessions written before turn tracking.
         #[serde(default)]
         turns: Vec<TurnMeta>,
+        /// Aggregate token usage carried over from prior turns on this
+        /// session. Zeroed for legacy sessions or providers that don't
+        /// report usage.
+        #[serde(default, skip_serializing_if = "UsageTotals::is_zero")]
+        usage: UsageTotals,
     },
     /// Fragment of assistant text.
     Token { text: String },
@@ -95,6 +101,15 @@ pub enum ServerMsg {
     /// to refresh the sidebar so the newly-titled row replaces the
     /// first-user-message fallback without waiting for the next `done`.
     SessionTitleUpdated { session_id: String, title: String },
+
+    /// Per-round + running-total token usage from the provider. Emitted at
+    /// the end of every provider round the moment a usage trailer arrives;
+    /// the UI uses `totals` for its status-bar counter and `round` for
+    /// per-turn indicators.
+    Usage {
+        round: TokenUsage,
+        totals: UsageTotals,
+    },
 }
 
 impl ServerMsg {
@@ -108,6 +123,7 @@ impl ServerMsg {
             HarnessEvent::TurnComplete => Self::TurnComplete,
             HarnessEvent::Done => Self::Done,
             HarnessEvent::Warning(text) => Self::Warning { text },
+            HarnessEvent::Usage { round, totals } => Self::Usage { round, totals },
         }
     }
 }

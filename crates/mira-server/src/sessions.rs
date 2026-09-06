@@ -129,6 +129,7 @@ pub async fn load_session(
     let mode = state.policy.lock().await.mode();
     let history = resumed.history().await;
     let turns = resumed.turns().await;
+    let usage = resumed.usage().await;
     let session_id = resumed.id.to_string();
 
     {
@@ -144,6 +145,7 @@ pub async fn load_session(
         cwd: state.current_cwd().await.display().to_string(),
         history,
         turns,
+        usage,
     });
 
     Json(serde_json::json!({ "id": session_id })).into_response()
@@ -180,6 +182,7 @@ pub async fn new_session(State(state): State<AppState>) -> Response {
     let mode = state.policy.lock().await.mode();
     let history = fresh.history().await;
     let turns = fresh.turns().await;
+    let usage = fresh.usage().await;
     let session_id = fresh.id.to_string();
 
     {
@@ -195,6 +198,7 @@ pub async fn new_session(State(state): State<AppState>) -> Response {
         cwd: cwd.display().to_string(),
         history,
         turns,
+        usage,
     });
 
     Json(serde_json::json!({ "id": session_id })).into_response()
@@ -243,6 +247,7 @@ pub async fn delete_session(
         let mode = state.policy.lock().await.mode();
         let history = fresh.history().await;
         let turns = fresh.turns().await;
+        let usage = fresh.usage().await;
         let session_id = fresh.id.to_string();
         {
             let mut guard = state.session.write().await;
@@ -255,6 +260,7 @@ pub async fn delete_session(
             cwd: cwd.display().to_string(),
             history,
             turns,
+            usage,
         });
     }
 

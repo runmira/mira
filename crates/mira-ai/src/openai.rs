@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, warn};
 
-use crate::event::{ChatEvent, FinishReason, ToolCallBuffer};
+use crate::event::{ChatEvent, FinishReason, TokenUsage, ToolCallBuffer};
 use crate::provider::{ChatProvider, ChatRequest, ModelInfo, ProviderError};
 use crate::tool_spec::ToolSpec;
 
@@ -142,6 +142,24 @@ impl ChatProvider for OpenAiCompatible {
                     }
                 };
 
+                // Usage arrives on a trailer chunk with empty `choices`.
+                // Emit it before we bail out on empty choices below.
+                if let Some(u) = chunk.usage {
+                    let cached = u
+                        .prompt_tokens_details
+                        .as_ref()
+                        .map(|d| d.cached_tokens)
+                        .unwrap_or(0);
+                    let usage = TokenUsage {
+                        prompt_tokens: u.prompt_tokens,
+                        completion_tokens: u.completion_tokens,
+                        cached_input_tokens: cached,
+                    };
+                    if tx.send(Ok(ChatEvent::Usage(usage))).await.is_err() {
+                        return;
+                    }
+                }
+
                 let Some(choice) = chunk.choices.into_iter().next() else {
                     continue;
                 };
@@ -206,6 +224,15 @@ struct WireRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<&'a str>,
     stream: bool,
+    /// Opt in to the OpenAI usage trailer on streaming responses. Providers
+    /// that don't understand this field drop it (Ollama, some OpenRouter
+    /// models) — the harness gracefully treats missing usage as zero.
+    stream_options: StreamOptions,
+}
+
+#[derive(Serialize)]
+struct StreamOptions {
+    include_usage: bool,
 }
 
 impl<'a> WireRequest<'a> {
@@ -221,6 +248,7 @@ impl<'a> WireRequest<'a> {
             max_tokens: req.max_tokens,
             reasoning_effort: effort,
             stream: true,
+            stream_options: StreamOptions { include_usage: true },
         }
     }
 }
@@ -313,7 +341,31 @@ impl<'a> From<&'a ToolSpec> for WireTool<'a> {
 
 #[derive(Deserialize)]
 struct WireChunk {
+    #[serde(default)]
     choices: Vec<WireChoice>,
+    /// Only present on the final usage-trailer chunk (empty `choices`) when
+    /// the caller opted in via `stream_options.include_usage`.
+    #[serde(default)]
+    usage: Option<WireUsage>,
+}
+
+#[derive(Deserialize)]
+struct WireUsage {
+    #[serde(default)]
+    prompt_tokens: u32,
+    #[serde(default)]
+    completion_tokens: u32,
+    /// OpenAI reports cached tokens under `prompt_tokens_details.cached_tokens`.
+    /// Anthropic's compat layer surfaces the same shape. Missing on providers
+    /// that don't support prompt caching.
+    #[serde(default)]
+    prompt_tokens_details: Option<WirePromptDetails>,
+}
+
+#[derive(Deserialize)]
+struct WirePromptDetails {
+    #[serde(default)]
+    cached_tokens: u32,
 }
 
 #[derive(Deserialize)]

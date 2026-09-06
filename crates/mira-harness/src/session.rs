@@ -19,7 +19,7 @@ const TOOL_RESULT_HISTORY_CAP: usize = 4000;
 
 use crate::approver::Approver;
 use crate::event::HarnessEvent;
-use crate::persist::{now_ms, now_secs, SessionRecord, SessionStore, TurnMeta};
+use crate::persist::{now_ms, now_secs, SessionRecord, SessionStore, TurnMeta, UsageTotals};
 
 /// Runtime configuration for a session. Everything the loop needs besides
 /// mutable state.
@@ -78,6 +78,9 @@ pub struct Session {
     /// user message; the last entry's `ended_at` is stamped when the loop
     /// emits its final `Done` event.
     turns: Arc<Mutex<Vec<TurnMeta>>>,
+    /// Aggregate token usage. Folded in whenever the provider emits a usage
+    /// trailer; persisted alongside the session.
+    usage: Arc<Mutex<UsageTotals>>,
     created_at: u64,
 
     provider: Arc<dyn ChatProvider>,
@@ -108,6 +111,7 @@ impl Session {
             history: Arc::new(Mutex::new(vec![Message::system(system_prompt)])),
             title: Arc::new(Mutex::new(None)),
             turns: Arc::new(Mutex::new(Vec::new())),
+            usage: Arc::new(Mutex::new(UsageTotals::default())),
             created_at: now_secs(),
             provider,
             registry,
@@ -138,6 +142,7 @@ impl Session {
             history: Arc::new(Mutex::new(record.messages)),
             title: Arc::new(Mutex::new(record.title)),
             turns: Arc::new(Mutex::new(record.turns)),
+            usage: Arc::new(Mutex::new(record.usage)),
             created_at: record.created_at,
             provider,
             registry,
@@ -173,6 +178,12 @@ impl Session {
     /// `history()`.
     pub async fn turns(&self) -> Vec<TurnMeta> {
         self.turns.lock().await.clone()
+    }
+
+    /// Snapshot the aggregate token usage across every provider round in
+    /// this session so far.
+    pub async fn usage(&self) -> UsageTotals {
+        *self.usage.lock().await
     }
 
     /// Stamp `ended_at` on the most recent open turn, if any. Idempotent —
@@ -305,6 +316,16 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
                 Ok(ChatEvent::ToolCalls(calls)) => {
                     pending_calls = calls;
                 }
+                Ok(ChatEvent::Usage(round)) => {
+                    let totals = {
+                        let mut u = sess.usage.lock().await;
+                        u.add_round(round);
+                        *u
+                    };
+                    // Ignore send errors — a dropped receiver just means the
+                    // UI stopped listening; the totals are still recorded.
+                    let _ = tx.send(HarnessEvent::Usage { round, totals }).await;
+                }
                 Ok(ChatEvent::Done(reason)) => {
                     finish = reason;
                     break;
@@ -421,6 +442,7 @@ async fn checkpoint(sess: &Session) {
         updated_at: now_secs(),
         title: sess.title.lock().await.clone(),
         turns: sess.turns.lock().await.clone(),
+        usage: *sess.usage.lock().await,
     };
     if let Err(e) = store.save(&record).await {
         warn!(session = %sess.id, %e, "session checkpoint failed");

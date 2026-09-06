@@ -24,7 +24,9 @@ import type {
   SettingsView,
   ToolCall,
   ToolResult,
+  UsageTotals,
 } from './types';
+import { formatUsage } from './lib/usage';
 
 type ToolEntry = {
   kind: 'tool';
@@ -125,6 +127,7 @@ export default function App() {
   const [sidebarRefresh, setSidebarRefresh] = useState(0);
   const [reviewPanelOpen, setReviewPanelOpen] = useState(false);
   const [reviewState, setReviewState] = useState<ReviewState | null>(null);
+  const [usage, setUsage] = useState<UsageTotals | null>(null);
   // Force a re-render every second while a turn is active so the live
   // "Working…" counter ticks. Cheap; the tree is small and only mounts
   // when the browser tab is visible.
@@ -174,6 +177,7 @@ export default function App() {
         // chips render on reloaded transcripts.
         setTurnTimings(rebuildTurnTimings(msg.turns ?? []));
         setExpandedTurns(new Set());
+        setUsage(msg.usage ?? null);
         setBusy(false);
         setThinking(false);
         setSidebarRefresh((n) => n + 1);
@@ -251,6 +255,9 @@ export default function App() {
         // Nickname landed on disk — refresh the sidebar so the row label
         // switches from the first-user-message fallback to the AI title.
         setSidebarRefresh((n) => n + 1);
+        break;
+      case 'usage':
+        setUsage(msg.totals);
         break;
     }
   }
@@ -416,6 +423,7 @@ export default function App() {
           mode={mode}
           model={model}
           cwd={cwd}
+          usage={formatUsage(model, usage)}
           onSend={onSend}
           onSetMode={onSetMode}
           onSetModel={onSetModel}

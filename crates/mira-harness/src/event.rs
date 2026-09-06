@@ -1,4 +1,7 @@
+use mira_ai::TokenUsage;
 use mira_core::{ToolCall, ToolResult};
+
+use crate::persist::UsageTotals;
 
 /// UI-facing event stream produced by [`crate::Session::send`].
 ///
@@ -20,4 +23,13 @@ pub enum HarnessEvent {
     Done,
     /// Non-fatal warning surfaced to the UI (e.g. denied tool call).
     Warning(String),
+    /// Token usage for the round that just finished, plus running session
+    /// totals. Emitted immediately after each provider-reported usage
+    /// trailer so the UI can update a live cost/tokens indicator.
+    Usage {
+        /// Usage for the round that just finished.
+        round: TokenUsage,
+        /// Aggregate session totals (including `round`).
+        totals: UsageTotals,
+    },
 }

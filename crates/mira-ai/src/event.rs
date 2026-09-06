@@ -16,8 +16,31 @@ pub enum ChatEvent {
     /// responsible for buffering fragments and emitting fully-formed calls
     /// once the turn ends.
     ToolCalls(Vec<ToolCall>),
+    /// Per-turn token accounting reported by the provider. For OpenAI-style
+    /// streams this arrives in a trailer chunk (`stream_options.include_usage`).
+    /// Providers that don't report usage simply never emit this event — the
+    /// harness treats absence as zero.
+    Usage(TokenUsage),
     /// The turn ended. Any partial state has been flushed via prior events.
     Done(FinishReason),
+}
+
+/// Token counts for a single model turn.
+///
+/// `cached_input_tokens` counts the prompt tokens that hit the provider's
+/// prompt cache (they're a subset of `prompt_tokens`, not additional). Kept
+/// as `u32` — OpenAI's per-request cap is well under `u32::MAX` and we
+/// aggregate on the harness side into `u64` totals.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenUsage {
+    #[serde(default)]
+    pub prompt_tokens: u32,
+    #[serde(default)]
+    pub completion_tokens: u32,
+    /// Portion of `prompt_tokens` served from the prompt cache. `0` when the
+    /// provider doesn't report it.
+    #[serde(default)]
+    pub cached_input_tokens: u32,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

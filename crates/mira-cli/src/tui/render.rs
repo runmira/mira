@@ -174,11 +174,80 @@ fn status(f: &mut Frame, area: Rect, state: &TuiState) {
     } else {
         Span::raw("")
     };
-    let line = Line::from(vec![
+    let left_line = Line::from(vec![
         Span::styled(left, Style::default().fg(Color::DarkGray)),
         hint,
     ]);
-    f.render_widget(Paragraph::new(line), area);
+
+    let usage_text = format_usage(state);
+    if usage_text.is_empty() {
+        f.render_widget(Paragraph::new(left_line), area);
+        return;
+    }
+
+    // Split so left aligns start, right aligns end. Give the right side
+    // exactly what it needs; left takes the rest.
+    let right_len = usage_text.chars().count() as u16;
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(1), Constraint::Length(right_len)])
+        .split(area);
+
+    f.render_widget(Paragraph::new(left_line), cols[0]);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            usage_text,
+            Style::default().fg(Color::DarkGray),
+        )))
+        .alignment(Alignment::Right),
+        cols[1],
+    );
+}
+
+/// Compact right-side accounting: `↑12.3k ↓4.1k · $0.024`. Empty string
+/// when the provider hasn't reported any usage yet (nothing to draw beats a
+/// row of `0`s).
+fn format_usage(state: &TuiState) -> String {
+    let u = &state.usage;
+    if u.is_zero() {
+        return String::new();
+    }
+    let mut out = format!(
+        "↑{} ↓{}",
+        short_num(u.prompt_tokens),
+        short_num(u.completion_tokens),
+    );
+    if let Some(dollars) = mira_ai::cost_usd(
+        &state.model,
+        mira_ai::TokenUsage {
+            prompt_tokens: u.prompt_tokens.min(u32::MAX as u64) as u32,
+            completion_tokens: u.completion_tokens.min(u32::MAX as u64) as u32,
+            cached_input_tokens: u.cached_input_tokens.min(u32::MAX as u64) as u32,
+        },
+    ) {
+        out.push_str(&format!(" · {}", format_dollars(dollars)));
+    }
+    out
+}
+
+fn short_num(n: u64) -> String {
+    if n < 1_000 {
+        n.to_string()
+    } else if n < 1_000_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        format!("{:.2}M", n as f64 / 1_000_000.0)
+    }
+}
+
+fn format_dollars(d: f64) -> String {
+    if d < 0.01 {
+        format!("${d:.4}")
+    } else if d < 1.0 {
+        format!("${d:.3}")
+    } else {
+        format!("${d:.2}")
+    }
 }
 
 fn approval_modal(f: &mut Frame, state: &TuiState) {

@@ -62,8 +62,22 @@ export type TurnMeta = {
   ended_at?: number | null;
 };
 
+export type TokenUsage = {
+  prompt_tokens: number;
+  completion_tokens: number;
+  /** Subset of prompt_tokens served from the provider's prompt cache. */
+  cached_input_tokens: number;
+};
+
+export type UsageTotals = {
+  prompt_tokens: number;
+  completion_tokens: number;
+  cached_input_tokens: number;
+  rounds: number;
+};
+
 export type ServerMsg =
-  | { type: 'ready'; session_id: string; model: string; mode: Mode; cwd: string; history: Message[]; turns?: TurnMeta[] }
+  | { type: 'ready'; session_id: string; model: string; mode: Mode; cwd: string; history: Message[]; turns?: TurnMeta[]; usage?: UsageTotals }
   | { type: 'token'; text: string }
   | { type: 'tool_start'; call: ToolCall }
   | { type: 'tool_end'; result: ToolResult }
@@ -78,7 +92,8 @@ export type ServerMsg =
   | { type: 'review_progress'; run_id: string; event: ReviewProgressEvent }
   | { type: 'review_result'; run_id: string; findings: ReviewFinding[] }
   | { type: 'review_error'; run_id: string; text: string }
-  | { type: 'session_title_updated'; session_id: string; title: string };
+  | { type: 'session_title_updated'; session_id: string; title: string }
+  | { type: 'usage'; round: TokenUsage; totals: UsageTotals };
 
 export type ClientMsg =
   | { type: 'send'; text: string }
