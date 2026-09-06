@@ -23,8 +23,10 @@ export async function putSettings(update: SettingsUpdate): Promise<SettingsView>
   return (await r.json()) as SettingsView;
 }
 
-export async function listSessions(): Promise<SessionSummary[]> {
-  const r = await fetch('/api/sessions');
+export async function listSessions(opts: { all?: boolean } = {}): Promise<SessionSummary[]> {
+  // axum's Query bool deserializer expects the literal string `true`, not `1`.
+  const q = opts.all ? '?all=true' : '';
+  const r = await fetch(`/api/sessions${q}`);
   if (!r.ok) throw new Error(`sessions GET ${r.status}`);
   return (await r.json()) as SessionSummary[];
 }
@@ -44,6 +46,42 @@ export async function loadSession(id: string): Promise<void> {
 export async function newSession(): Promise<void> {
   const r = await fetch('/api/sessions/new', { method: 'POST' });
   if (!r.ok) throw new Error(`sessions new ${r.status}`);
+}
+
+export type ReviewStartArgs = {
+  range?: string;
+  diff?: string;
+  pr?: number;
+  no_verify?: boolean;
+};
+
+export async function startReview(args: ReviewStartArgs): Promise<{ run_id: string }> {
+  const r = await fetch('/api/review', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(args),
+  });
+  if (!r.ok) {
+    let msg = `review POST ${r.status}`;
+    try {
+      const j = await r.json();
+      if (j.error) msg += `: ${j.error}`;
+    } catch { /* ignore */ }
+    throw new Error(msg);
+  }
+  return (await r.json()) as { run_id: string };
+}
+
+export async function deleteSession(id: string): Promise<void> {
+  const r = await fetch(`/api/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  if (!r.ok) {
+    let msg = `sessions delete ${r.status}`;
+    try {
+      const j = await r.json();
+      if (j.error) msg += `: ${j.error}`;
+    } catch { /* ignore */ }
+    throw new Error(msg);
+  }
 }
 
 export type BrowseView = {
@@ -87,6 +125,56 @@ export async function listModels(): Promise<ModelListView> {
     return { models: [], cached: false };
   }
   return (await r.json()) as ModelListView;
+}
+
+export type FileView = { path: string; bytes: number; content: string };
+
+export async function readFile(path: string): Promise<FileView> {
+  const r = await fetch(`/api/file?path=${encodeURIComponent(path)}`);
+  if (!r.ok) {
+    let msg = `file GET ${r.status}`;
+    try {
+      const j = await r.json();
+      if (j.error) msg += `: ${j.error}`;
+    } catch { /* ignore */ }
+    throw new Error(msg);
+  }
+  return (await r.json()) as FileView;
+}
+
+export type WorktreeEntry = { path: string; branch: string | null; is_current: boolean };
+
+export type GitStatusView = {
+  in_repo: boolean;
+  branch?: string | null;
+  dirty: boolean;
+  ahead: number;
+  behind: number;
+  is_worktree: boolean;
+  worktrees: WorktreeEntry[];
+};
+
+export async function getGitStatus(): Promise<GitStatusView> {
+  const r = await fetch('/api/git/status');
+  if (!r.ok) throw new Error(`git status ${r.status}`);
+  return (await r.json()) as GitStatusView;
+}
+
+export async function createWorktree(branch: string, base?: string): Promise<{ path: string; branch: string }> {
+  const r = await fetch('/api/git/worktree', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ branch, base }),
+  });
+  if (!r.ok) {
+    let msg = `worktree POST ${r.status}`;
+    try {
+      const j = await r.json();
+      if (j.error) msg += `: ${j.error}`;
+    } catch { /* ignore */ }
+    throw new Error(msg);
+  }
+  return (await r.json()) as { path: string; branch: string };
 }
 
 export async function putCwd(path: string): Promise<void> {

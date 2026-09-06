@@ -61,6 +61,36 @@ impl SessionStore for FileStore {
         cwd: &Path,
         limit: usize,
     ) -> Result<Vec<SessionRecord>, StoreError> {
+        let mut records = self.scan_all().await?;
+        records.retain(|r| r.cwd == cwd);
+        records.sort_by_key(|r| std::cmp::Reverse(r.updated_at));
+        records.truncate(limit);
+        Ok(records)
+    }
+
+    async fn list_all(&self, limit: usize) -> Result<Vec<SessionRecord>, StoreError> {
+        let mut records = self.scan_all().await?;
+        records.sort_by_key(|r| std::cmp::Reverse(r.updated_at));
+        records.truncate(limit);
+        Ok(records)
+    }
+
+    async fn delete(&self, id: &SessionId) -> Result<(), StoreError> {
+        let path = self.path_for(id);
+        match fs::remove_file(&path).await {
+            Ok(()) => Ok(()),
+            // Missing → treat as success. Users clicking "delete" twice on a
+            // stale list shouldn't see a 404 spike back at them.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+}
+
+impl FileStore {
+    /// Load every record on disk. Malformed / unreadable files are silently
+    /// skipped so one bad JSON doesn't break the whole sidebar.
+    async fn scan_all(&self) -> Result<Vec<SessionRecord>, StoreError> {
         let mut records = Vec::new();
         let mut dir = fs::read_dir(&self.root).await?;
         while let Some(entry) = dir.next_entry().await? {
@@ -74,12 +104,8 @@ impl SessionStore for FileStore {
             let Ok(record) = serde_json::from_slice::<SessionRecord>(&bytes) else {
                 continue;
             };
-            if record.cwd == cwd {
-                records.push(record);
-            }
+            records.push(record);
         }
-        records.sort_by_key(|r| std::cmp::Reverse(r.updated_at));
-        records.truncate(limit);
         Ok(records)
     }
 }
@@ -97,6 +123,8 @@ mod tests {
             messages: vec![Message::user("hi")],
             created_at: updated,
             updated_at: updated,
+            title: None,
+            turns: Vec::new(),
         }
     }
 

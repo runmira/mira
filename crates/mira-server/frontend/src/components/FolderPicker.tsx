@@ -1,5 +1,10 @@
 import { useEffect, useState } from 'react';
+import { ArrowUp, Folder, House, HardDrive } from '@phosphor-icons/react';
 import { browse, putCwd, type BrowseView } from '../api';
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { cn } from '@/lib/utils';
 
 type Props = {
   open: boolean;
@@ -32,6 +37,12 @@ export function FolderPicker({ open, onClose, onPicked }: Props) {
     }
   }
 
+  useEffect(() => {
+    if (!open || !view) return;
+    load(view.path);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showHidden]);
+
   async function pick(path: string) {
     setBusy(true);
     try {
@@ -45,86 +56,83 @@ export function FolderPicker({ open, onClose, onPicked }: Props) {
     }
   }
 
-  useEffect(() => {
-    if (!open || !view) return;
-    load(view.path);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showHidden]);
-
-  if (!open) return null;
-
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal picker" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-head">
-          <div className="modal-title">Choose project folder</div>
-          <button className="link" onClick={onClose} aria-label="Close">✕</button>
-        </div>
+    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-[38rem] gap-3">
+        <DialogHeader>
+          <DialogTitle>Choose project folder</DialogTitle>
+        </DialogHeader>
 
-        <div className="picker-quick">
+        <div className="flex flex-wrap items-center gap-1.5">
           {view?.home && (
-            <button className="chip" onClick={() => load(view.home!)}>Home</button>
+            <Button variant="outline" size="sm" onClick={() => load(view.home!)}>
+              <House className="size-3.5" /> Home
+            </Button>
           )}
-          <button className="chip" onClick={() => load('/')}>/</button>
+          <Button variant="outline" size="sm" onClick={() => load('/')}>
+            <HardDrive className="size-3.5" /> /
+          </Button>
           {view?.parent && (
-            <button className="chip" onClick={() => load(view.parent!)} title="Up one">⬆ up</button>
+            <Button variant="outline" size="sm" onClick={() => load(view.parent!)}>
+              <ArrowUp className="size-3.5" /> up
+            </Button>
           )}
-          <label className="picker-hidden">
+          <label className="ml-auto inline-flex items-center gap-1.5 text-xs text-muted-foreground">
             <input
               type="checkbox"
               checked={showHidden}
               onChange={(e) => setShowHidden(e.target.checked)}
-            /> show hidden
+              className="accent-mira-blue"
+            />
+            show hidden
           </label>
         </div>
 
-        <div className="picker-path">
-          <input
-            type="text"
-            value={manual}
-            onChange={(e) => setManual(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); load(manual.trim()); } }}
-            spellCheck={false}
-            placeholder="/absolute/path or ~/relative"
-          />
-        </div>
+        <Input
+          value={manual}
+          onChange={(e) => setManual(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); load(manual.trim()); } }}
+          spellCheck={false}
+          placeholder="/absolute/path or ~/relative"
+          className="font-mono text-xs"
+        />
 
-        {error && <div className="error">{error}</div>}
+        {error && <div className="text-xs text-destructive font-mono">{error}</div>}
 
-        <div className="picker-list">
+        <div className="max-h-[40vh] overflow-y-auto rounded-md border border-border/60 bg-background p-1">
           {view?.entries.length === 0 && !error && (
-            <div className="picker-empty">Empty folder</div>
+            <div className="px-2 py-2 text-xs text-muted-foreground">Empty folder</div>
           )}
           {view?.entries.map((e) => (
             <button
               key={e.path}
-              className={`picker-row ${e.is_dir ? 'dir' : 'file'}`}
-              onDoubleClick={() => e.is_dir && load(e.path)}
+              className={cn(
+                'flex w-full items-center gap-2 rounded px-2.5 py-1.5 text-left text-sm transition-colors',
+                e.is_dir
+                  ? 'text-foreground hover:bg-accent/10 cursor-pointer'
+                  : 'text-muted-foreground/60 cursor-default',
+              )}
               onClick={() => e.is_dir && load(e.path)}
+              onDoubleClick={() => e.is_dir && load(e.path)}
               disabled={!e.is_dir}
               title={e.path}
             >
-              <span className="glyph">{e.is_dir ? '🗀' : '·'}</span>
-              <span className="name">{e.name}</span>
+              <Folder className={cn('size-3.5 shrink-0', e.is_dir ? 'text-mira-blue' : 'text-muted-foreground/40')} />
+              <span className="truncate">{e.name}</span>
             </button>
           ))}
           {view?.truncated && (
-            <div className="picker-empty">… list truncated at 500 entries</div>
+            <div className="px-2 py-1 text-xs text-muted-foreground">… list truncated at 500 entries</div>
           )}
         </div>
 
-        <div className="modal-actions">
-          <button className="secondary" onClick={onClose} disabled={busy}>Cancel</button>
-          <button
-            className="primary"
-            onClick={() => view && pick(view.path)}
-            disabled={busy || !view}
-            title={view?.path}
-          >
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose} disabled={busy}>Cancel</Button>
+          <Button onClick={() => view && pick(view.path)} disabled={busy || !view} title={view?.path}>
             {busy ? 'Setting…' : 'Select this folder'}
-          </button>
-        </div>
-      </div>
-    </div>
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

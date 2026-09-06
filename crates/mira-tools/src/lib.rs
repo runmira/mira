@@ -11,11 +11,13 @@
 
 pub mod builtin;
 pub mod context;
+pub mod mcp;
 pub mod preview;
 pub mod registry;
 pub mod tool;
 
 pub use context::ToolContext;
+pub use mcp::{connect as connect_mcp, McpConnection, McpTool};
 pub use preview::{compute_preview, DiffKind, DiffLine, DiffPreview};
 pub use registry::Registry;
 pub use tool::{Action, Tool, ToolError};

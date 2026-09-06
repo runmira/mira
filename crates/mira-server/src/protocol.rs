@@ -5,8 +5,9 @@
 //! input, approvals, and control (mode/model swap, interrupt, clear).
 
 use mira_core::{Message, ToolCall, ToolResult};
-use mira_harness::HarnessEvent;
+use mira_harness::{HarnessEvent, TurnMeta};
 use mira_policy::Mode;
+use mira_review::{Finding, Progress as ReviewProgress};
 use mira_tools::DiffPreview;
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +23,13 @@ pub enum ClientMsg {
     SetModel { model: String },
     /// Change the permission mode.
     SetMode { mode: Mode },
+    /// Set reasoning effort for the current session. `None` (or the string
+    /// `"off"`) clears the field entirely so non-reasoning models aren't
+    /// hit with an unexpected parameter.
+    SetEffort {
+        #[serde(default)]
+        effort: Option<String>,
+    },
     /// Best-effort cancel the current turn.
     Interrupt,
     /// Ask the server to re-emit its current state (used on reconnect).
@@ -39,6 +47,10 @@ pub enum ServerMsg {
         mode: Mode,
         cwd: String,
         history: Vec<Message>,
+        /// Per-turn timing, aligned with user messages in `history`. Empty
+        /// for legacy sessions written before turn tracking.
+        #[serde(default)]
+        turns: Vec<TurnMeta>,
     },
     /// Fragment of assistant text.
     Token { text: String },
@@ -67,6 +79,22 @@ pub enum ServerMsg {
     ModeChanged { mode: Mode },
     /// A protocol-level error (bad input, unknown call_id, etc.).
     Error { text: String },
+
+    /// A `mira review` run started. Every subsequent `ReviewProgress` / `ReviewResult`
+    /// / `ReviewError` frame with this `run_id` belongs to it — the frontend
+    /// filters on it so overlapping runs don't scramble each other's UI.
+    ReviewStarted { run_id: String },
+    /// Streaming progress event from an in-flight review.
+    ReviewProgress { run_id: String, event: ReviewProgress },
+    /// Review finished — final confirmed findings list.
+    ReviewResult { run_id: String, findings: Vec<Finding> },
+    /// Review aborted with an error (bad diff, provider failure, etc.).
+    ReviewError { run_id: String, text: String },
+
+    /// A session's AI-generated nickname landed on disk. Frontend uses this
+    /// to refresh the sidebar so the newly-titled row replaces the
+    /// first-user-message fallback without waiting for the next `done`.
+    SessionTitleUpdated { session_id: String, title: String },
 }
 
 impl ServerMsg {

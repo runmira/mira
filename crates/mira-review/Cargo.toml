@@ -1,0 +1,19 @@
+[package]
+name         = "mira-review"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+description  = "Two-stage diff review (generate + hostile re-verify) used by `mira review` and the web UI."
+
+[dependencies]
+mira-core = { workspace = true }
+mira-ai   = { workspace = true }
+
+async-trait = { workspace = true }
+tokio       = { workspace = true }
+futures     = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+anyhow      = { workspace = true }
+tracing     = { workspace = true }

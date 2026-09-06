@@ -19,6 +19,7 @@ mira-tools    = { workspace = true }
 mira-policy   = { workspace = true }
 mira-sandbox  = { workspace = true }
 mira-harness  = { workspace = true }
+mira-review   = { workspace = true }
 mira-server   = { workspace = true }
 
 async-trait        = { workspace = true }

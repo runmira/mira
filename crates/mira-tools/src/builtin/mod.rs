@@ -6,6 +6,8 @@
 
 pub mod bash;
 pub mod edit;
+pub mod git;
+pub mod glob;
 pub mod grep;
 pub mod read;
 pub mod rustfmt;
@@ -21,5 +23,10 @@ pub fn register_default(reg: &mut Registry) {
     reg.register(edit::EditFile);
     reg.register(bash::Bash);
     reg.register(grep::Grep);
+    reg.register(glob::Glob);
+    reg.register(git::GitStatus);
+    reg.register(git::GitDiff);
+    reg.register(git::GitLog);
+    reg.register(git::GitCommit);
     reg.register(rustfmt::RustFmt);
 }

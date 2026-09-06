@@ -1,5 +1,7 @@
 import { useState } from 'react';
+import { CaretRight } from '@phosphor-icons/react';
 import { Markdown } from './Markdown';
+import { cn } from '@/lib/utils';
 
 /**
  * Renders assistant text, teasing apart `<think>…</think>` blocks that
@@ -72,18 +74,38 @@ function ReasoningBlock({ content, open: initiallyOpen }: { content: string; ope
   const [open, setOpen] = useState(initiallyOpen);
   const lineCount = content ? content.split('\n').length : 0;
   return (
-    <div className={`reasoning ${open ? 'open' : ''} ${initiallyOpen ? 'streaming' : ''}`}>
-      <button className="reasoning-head" onClick={() => setOpen((v) => !v)}>
-        <span className={`reasoning-chevron ${open ? 'open' : ''}`}>▸</span>
-        <span className="reasoning-label">
+    <div
+      className={cn(
+        'my-2 border-l-2 pl-2',
+        initiallyOpen ? 'border-mira-purple' : 'border-mira-purple/35',
+      )}
+    >
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="inline-flex items-center gap-2 rounded px-2 py-1 text-[12.5px] text-muted-foreground transition-colors hover:bg-accent/40 hover:text-foreground"
+      >
+        <CaretRight
+          className={cn(
+            'size-3 text-muted-foreground/60 transition-transform',
+            open && 'rotate-90 text-muted-foreground',
+          )}
+        />
+        <span
+          className={cn(
+            'font-medium text-mira-purple',
+            initiallyOpen && 'animate-pulse',
+          )}
+        >
           {initiallyOpen ? 'Reasoning…' : 'Reasoning'}
         </span>
         {!initiallyOpen && lineCount > 0 && (
-          <span className="reasoning-meta">{lineCount} line{lineCount === 1 ? '' : 's'}</span>
+          <span className="font-mono text-[11px] text-muted-foreground/70">
+            {lineCount} line{lineCount === 1 ? '' : 's'}
+          </span>
         )}
       </button>
       {open && content && (
-        <div className="reasoning-body">
+        <div className="mt-1.5 ml-2 mb-2 animate-fade-in rounded-md border border-mira-purple/15 bg-mira-purple/[0.04] px-3 py-2 text-[13.5px] text-muted-foreground">
           <Markdown text={content} />
         </div>
       )}

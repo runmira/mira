@@ -21,12 +21,16 @@ pub mod approver;
 mod browse;
 mod cwd;
 mod embedded;
+mod file;
+mod git;
 mod models;
+mod review;
 pub mod protocol;
 pub mod provider;
 mod sessions;
 mod settings;
 mod state;
+mod title;
 mod ws;
 
 use std::collections::HashMap;
@@ -101,7 +105,7 @@ pub async fn run(mut cfg: ServerConfig) -> Result<()> {
         ),
         None => Session::new(
             cfg.cfg.clone(),
-            system_prompt(&cfg.cwd),
+            system_prompt(&cfg.cwd, &cfg.registry),
             harness_provider.clone(),
             cfg.registry.clone(),
             cfg.policy.clone(),
@@ -155,9 +159,20 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
             "/api/sessions/new",
             axum::routing::post(sessions::new_session),
         )
+        .route(
+            "/api/sessions/:id",
+            axum::routing::delete(sessions::delete_session),
+        )
         .route("/api/cwd", get(cwd::get_cwd).put(cwd::put_cwd))
         .route("/api/browse", get(browse::browse))
-        .route("/api/models", get(models::list_models));
+        .route("/api/file", get(file::read_file))
+        .route("/api/models", get(models::list_models))
+        .route("/api/git/status", get(git::get_status))
+        .route(
+            "/api/git/worktree",
+            axum::routing::post(git::create_worktree),
+        )
+        .route("/api/review", axum::routing::post(review::start_review));
 
     // Frontend precedence: `--static-dir` (dev/override) > embedded assets
     // baked at compile time > inline placeholder page.
@@ -197,15 +212,50 @@ pub fn default_store() -> Result<Arc<dyn SessionStore>> {
 /// CLI) so `new_session` and `put_cwd` can recompute it from the current
 /// folder — the prompt would otherwise lie about the working directory when
 /// the user switches folders mid-session.
-pub fn system_prompt(cwd: &std::path::Path) -> String {
+///
+/// Bakes the actual `registry.specs()` list into the prompt so the model
+/// stops narrating capabilities it doesn't have (e.g. it used to confidently
+/// claim `WebSearch` / `WebFetch` because they're common in its training
+/// data). Also drops a "bash unlocks" hint — the model tends to think of
+/// `bash` as a fallback rather than the powerful escape hatch it is.
+pub fn system_prompt(cwd: &std::path::Path, registry: &Registry) -> String {
+    let tool_lines: Vec<String> = registry
+        .specs()
+        .into_iter()
+        .map(|s| format!("- {}: {}", s.name, first_sentence(&s.description)))
+        .collect();
+    let tools_block = if tool_lines.is_empty() {
+        String::from("(no tools registered — you have only free-form text.)")
+    } else {
+        tool_lines.join("\n")
+    };
+
     format!(
         "You are Mira, an interactive coding agent.\n\
-         Working directory: {}\n\n\
-         Prefer tool use over guessing. Read files before editing them; use `edit_file` \
-         with enough context in `old_string` to disambiguate. When running commands, \
-         keep them small and explain what you're doing.",
-        cwd.display()
+         Working directory: {cwd}\n\n\
+         Available tools:\n{tools_block}\n\n\
+         `bash` is a general-purpose escape hatch — through it you can run \
+         git, gh, docker, npm/pnpm/yarn, cargo, curl, jq, ripgrep, kubectl, \
+         and any other CLI on the user's system. Prefer a dedicated tool \
+         (edit_file, grep, …) when one fits; drop to bash for everything \
+         else instead of claiming you can't do it.\n\n\
+         Prefer tool use over guessing. Read files before editing them; use \
+         `edit_file` with enough context in `old_string` to disambiguate. \
+         When running commands, keep them small and explain what you're doing.",
+        cwd = cwd.display(),
     )
+}
+
+/// First sentence of a tool description — used to keep the system-prompt
+/// tool list terse. Tool descriptions can be multi-paragraph (they double
+/// as the model-facing spec); the first sentence is usually enough for the
+/// enumeration hint.
+fn first_sentence(s: &str) -> String {
+    let s = s.trim();
+    match s.find(|c: char| c == '.' || c == '\n') {
+        Some(i) => s[..i].trim().to_string(),
+        None => s.to_string(),
+    }
 }
 
 /// Neutral starting folder for a fresh session — `$HOME` when set,

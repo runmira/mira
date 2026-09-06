@@ -1,11 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
+import { CircleNotch } from '@phosphor-icons/react';
 
 /**
- * The "thinking…" indicator you see while the model is chewing on your
- * message but hasn't started streaming yet. Picks a random gerund per
- * mount (Claude Code-style), animates a spinner, and shows an elapsed
- * counter after the first second so long thinks feel intentional rather
- * than stuck.
+ * "Simmering… 4s" indicator shown while the model is thinking. Random
+ * gerund per turn; live elapsed counter after 1s. Hides on first token.
  */
 export function Thinking() {
   const verb = useMemo(() => pickVerb(), []);
@@ -20,13 +18,23 @@ export function Thinking() {
   }, [startedAt]);
 
   return (
-    <div className="thinking" role="status" aria-live="polite">
-      <span className="thinking-spinner" aria-hidden />
-      <span className="thinking-verb">{verb}</span>
-      <span className="thinking-dots" aria-hidden>
-        <span>.</span><span>.</span><span>.</span>
+    <div
+      role="status"
+      aria-live="polite"
+      className="inline-flex max-w-max animate-fade-in items-center gap-2 rounded-full border border-mira-blue/25 bg-mira-blue/[0.07] px-3 py-1.5 text-[13px] text-mira-blue/90"
+    >
+      <CircleNotch className="size-3 shrink-0 animate-spin text-mira-blue" />
+      <span className="font-medium text-foreground">{verb}</span>
+      <span className="inline-flex gap-0.5 font-semibold text-mira-blue">
+        <span className="animate-[thinking-bounce_1.2s_ease-in-out_infinite]">.</span>
+        <span className="animate-[thinking-bounce_1.2s_ease-in-out_infinite_0.15s]">.</span>
+        <span className="animate-[thinking-bounce_1.2s_ease-in-out_infinite_0.3s]">.</span>
       </span>
-      {elapsed > 0 && <span className="thinking-elapsed">{formatElapsed(elapsed)}</span>}
+      {elapsed > 0 && (
+        <span className="border-l border-white/10 pl-2 font-mono text-[11px] text-muted-foreground">
+          {formatElapsed(elapsed)}
+        </span>
+      )}
     </div>
   );
 }
@@ -38,13 +46,10 @@ function formatElapsed(secs: number): string {
   return `${m}m ${s}s`;
 }
 
-/** Grab a random verb, biased towards the whimsical over the plain. */
 function pickVerb(): string {
   return VERBS[Math.floor(Math.random() * VERBS.length)];
 }
 
-// 80+ gerunds. Kept mostly PG so a screenshot won't embarrass anyone,
-// but leaning weird so the vibe is Claude Code, not Windows loading spinner.
 const VERBS: readonly string[] = [
   'Thinking', 'Pondering', 'Musing', 'Ruminating', 'Contemplating',
   'Deliberating', 'Cerebrating', 'Cogitating', 'Reflecting', 'Considering',

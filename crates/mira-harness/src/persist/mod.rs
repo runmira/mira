@@ -34,6 +34,28 @@ pub struct SessionRecord {
     pub messages: Vec<Message>,
     pub created_at: u64,
     pub updated_at: u64,
+    /// Human-readable nickname generated after the first assistant reply.
+    /// `None` means "not yet generated"; the UI falls back to the first
+    /// user message. Skipped in the wire format when missing so we stay
+    /// backwards-compatible with sessions written before this landed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Per-turn wall-clock timing. Same ordering as user messages appear in
+    /// `messages`. Used by the UI to render "Worked for Xs" chips even
+    /// after a reload. Defaults to empty for records written before this
+    /// field existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub turns: Vec<TurnMeta>,
+}
+
+/// One user→assistant round-trip's wall-clock timing. `ended_at == None`
+/// means the turn is still in flight (or the process died mid-turn).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TurnMeta {
+    /// Milliseconds since Unix epoch.
+    pub started_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<u64>,
 }
 
 #[derive(Debug, Error)]
@@ -61,11 +83,27 @@ pub trait SessionStore: Send + Sync {
         cwd: &std::path::Path,
         limit: usize,
     ) -> Result<Vec<SessionRecord>, StoreError>;
+    /// Every session across all cwds, newest first. Used by the web
+    /// sidebar to group chats by project — the CLI resume flow still uses
+    /// `list_recent` scoped to the current folder.
+    async fn list_all(&self, limit: usize) -> Result<Vec<SessionRecord>, StoreError>;
+    /// Permanently remove a stored session. Idempotent on `NotFound` — a
+    /// double-click on the sidebar delete menu shouldn't 404.
+    async fn delete(&self, id: &SessionId) -> Result<(), StoreError>;
 }
 
 pub(crate) fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Millisecond epoch — used for turn timing (a fast turn can be under a
+/// second, so `now_secs` doesn't have the resolution we need).
+pub(crate) fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
 }

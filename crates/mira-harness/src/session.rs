@@ -19,7 +19,7 @@ const TOOL_RESULT_HISTORY_CAP: usize = 4000;
 
 use crate::approver::Approver;
 use crate::event::HarnessEvent;
-use crate::persist::{now_secs, SessionRecord, SessionStore};
+use crate::persist::{now_ms, now_secs, SessionRecord, SessionStore, TurnMeta};
 
 /// Runtime configuration for a session. Everything the loop needs besides
 /// mutable state.
@@ -34,6 +34,12 @@ pub struct SessionConfig {
     pub temperature: Option<f32>,
     #[serde(default)]
     pub max_tokens: Option<u32>,
+    /// Reasoning effort for models that expose it (OpenAI `reasoning_effort`,
+    /// Anthropic thinking budget, …). `None` = don't send the field. Values
+    /// mirror OpenAI's vocabulary: `"minimal" | "low" | "medium" | "high"`.
+    /// Providers that don't recognise the field ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 fn default_max_rounds() -> usize {
@@ -47,6 +53,7 @@ impl SessionConfig {
             max_rounds: default_max_rounds(),
             temperature: None,
             max_tokens: None,
+            reasoning_effort: None,
         }
     }
 }
@@ -64,6 +71,13 @@ pub struct Session {
     pub id: SessionId,
     cfg: Arc<Mutex<SessionConfig>>,
     history: Arc<Mutex<Vec<Message>>>,
+    /// Human-readable nickname. Generated post-hoc by the server after the
+    /// first assistant reply; the harness itself only reads + persists it.
+    title: Arc<Mutex<Option<String>>>,
+    /// Per-turn wall-clock timing. Appended when [`Session::send`] pushes a
+    /// user message; the last entry's `ended_at` is stamped when the loop
+    /// emits its final `Done` event.
+    turns: Arc<Mutex<Vec<TurnMeta>>>,
     created_at: u64,
 
     provider: Arc<dyn ChatProvider>,
@@ -92,6 +106,8 @@ impl Session {
             id: SessionId::new(),
             cfg: Arc::new(Mutex::new(cfg)),
             history: Arc::new(Mutex::new(vec![Message::system(system_prompt)])),
+            title: Arc::new(Mutex::new(None)),
+            turns: Arc::new(Mutex::new(Vec::new())),
             created_at: now_secs(),
             provider,
             registry,
@@ -120,6 +136,8 @@ impl Session {
             id: record.id,
             cfg: Arc::new(Mutex::new(record.cfg)),
             history: Arc::new(Mutex::new(record.messages)),
+            title: Arc::new(Mutex::new(record.title)),
+            turns: Arc::new(Mutex::new(record.turns)),
             created_at: record.created_at,
             provider,
             registry,
@@ -146,11 +164,60 @@ impl Session {
         self.cfg.lock().await.clone()
     }
 
+    /// Read the current nickname, if one has been generated.
+    pub async fn title(&self) -> Option<String> {
+        self.title.lock().await.clone()
+    }
+
+    /// Snapshot of per-turn timing. Same ordering as user messages in
+    /// `history()`.
+    pub async fn turns(&self) -> Vec<TurnMeta> {
+        self.turns.lock().await.clone()
+    }
+
+    /// Stamp `ended_at` on the most recent open turn, if any. Idempotent —
+    /// calling twice on the same turn keeps the first end time. Used by
+    /// callers that emit `HarnessEvent::Done` outside the harness's own
+    /// loop (e.g. `Interrupt` in the server WS handler).
+    pub async fn end_current_turn(&self) {
+        let mut guard = self.turns.lock().await;
+        if let Some(last) = guard.last_mut() {
+            if last.ended_at.is_none() {
+                last.ended_at = Some(now_ms());
+            }
+        }
+    }
+
+    /// Set the nickname and persist immediately. Callers are expected to
+    /// have generated a sensible short title; the harness doesn't validate
+    /// content beyond trimming whitespace and enforcing a hard cap so a
+    /// runaway model can't stuff the sidebar with a paragraph.
+    pub async fn set_title(&self, title: impl Into<String>) {
+        let mut t = title.into().trim().to_string();
+        if t.is_empty() { return; }
+        const MAX: usize = 80;
+        if t.chars().count() > MAX {
+            t = t.chars().take(MAX).collect();
+        }
+        *self.title.lock().await = Some(t);
+        // Flush a checkpoint so a crash/reload after title generation still
+        // shows the nickname. Failures are logged inside `checkpoint`.
+        checkpoint(self).await;
+    }
+
     /// Hot-swap the model. Applies to the next `send()` — an in-flight turn
     /// finishes on the model it started with, since `run_loop` snapshots the
     /// config at spawn time.
     pub async fn set_model(&self, model: impl Into<String>) {
         self.cfg.lock().await.model = model.into();
+    }
+
+    /// Set the reasoning-effort field for future turns. `None` clears it so
+    /// non-reasoning models aren't hit with an ignored parameter. Same
+    /// snapshot-at-spawn caveat as `set_model` — in-flight turn keeps the
+    /// prior value.
+    pub async fn set_reasoning_effort(&self, effort: Option<String>) {
+        self.cfg.lock().await.reasoning_effort = effort;
     }
 
     /// Run one user turn to completion.
@@ -160,6 +227,8 @@ impl Session {
     /// hits a checkpoint, then exits when the send channel closes.
     pub async fn send(&self, user_input: impl Into<String>) -> BoxStream<'static, HarnessEvent> {
         self.history.lock().await.push(Message::user(user_input));
+        // Open a new turn timer; `run_loop` stamps `ended_at` on the way out.
+        self.turns.lock().await.push(TurnMeta { started_at: now_ms(), ended_at: None });
 
         let cfg = self.cfg.lock().await.clone();
         let this = self.clone();
@@ -205,6 +274,7 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
             tools: sess.registry.specs(),
             temperature: cfg.temperature,
             max_tokens: cfg.max_tokens,
+            reasoning_effort: cfg.reasoning_effort.clone(),
         };
 
         let mut stream = match sess.provider.stream(req).await {
@@ -213,6 +283,8 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
                 let _ = tx
                     .send(HarnessEvent::Warning(format!("provider error: {e}")))
                     .await;
+                sess.end_current_turn().await;
+                checkpoint(&sess).await;
                 let _ = tx.send(HarnessEvent::Done).await;
                 return;
             }
@@ -261,6 +333,8 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
         let _ = tx.send(HarnessEvent::TurnComplete).await;
 
         if pending_calls.is_empty() || finish == FinishReason::Stop {
+            sess.end_current_turn().await;
+            checkpoint(&sess).await;
             let _ = tx.send(HarnessEvent::Done).await;
             return;
         }
@@ -328,6 +402,8 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
             cfg.max_rounds
         )))
         .await;
+    sess.end_current_turn().await;
+    checkpoint(&sess).await;
     let _ = tx.send(HarnessEvent::Done).await;
 }
 
@@ -343,6 +419,8 @@ async fn checkpoint(sess: &Session) {
         messages: sess.history.lock().await.clone(),
         created_at: sess.created_at,
         updated_at: now_secs(),
+        title: sess.title.lock().await.clone(),
+        turns: sess.turns.lock().await.clone(),
     };
     if let Err(e) = store.save(&record).await {
         warn!(session = %sess.id, %e, "session checkpoint failed");

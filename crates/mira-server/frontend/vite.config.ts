@@ -1,11 +1,17 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import path from 'node:path';
 
 // In dev, Vite serves the frontend and proxies /ws + /api to the Rust
 // server (default port 8787). In production, the server serves the built
 // assets directly via --static-dir dist/.
 export default defineConfig({
   plugins: [react()],
+  resolve: {
+    alias: {
+      '@': path.resolve(__dirname, './src'),
+    },
+  },
   server: {
     port: 5173,
     proxy: {

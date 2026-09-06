@@ -21,6 +21,8 @@ use mira_server::ServerConfig;
 use mira_tools::{builtin, Registry};
 use tokio::sync::Mutex;
 
+use mira_config::RuntimeState;
+
 use crate::config::MiraConfig;
 
 #[derive(Args, Debug, Clone)]
@@ -46,7 +48,17 @@ pub struct ServeArgs {
 }
 
 pub async fn run(cli: &super::Cli, args: ServeArgs) -> Result<()> {
-    let cwd = std::env::current_dir().context("failed to read cwd")?;
+    let launch_cwd = std::env::current_dir().context("failed to read cwd")?;
+    // Prefer the folder the user last picked over the process's launch
+    // directory — restarting mira shouldn't yank them back to whatever
+    // shell they happened to type the command from.
+    let state = RuntimeState::load().unwrap_or_default();
+    let cwd = state
+        .last_cwd
+        .as_ref()
+        .filter(|p| p.is_dir())
+        .cloned()
+        .unwrap_or_else(|| launch_cwd.clone());
     let cfg = MiraConfig::load(&cwd).context("load config")?;
 
     // Reuse the CLI's resolver, but don't hard-fail if the user hasn't set
@@ -58,6 +70,23 @@ pub async fn run(cli: &super::Cli, args: ServeArgs) -> Result<()> {
     let sandbox = Arc::new(Sandbox::default_scrubbed());
     let mut registry = Registry::new();
     builtin::register_default(&mut registry);
+    // Same MCP wiring as the CLI entrypoint (see main.rs): one broken
+    // server must not stop `mira serve` from booting — the user needs the
+    // Settings UI reachable to fix it.
+    for (name, server_cfg) in &cfg.mcp_servers {
+        match mira_tools::connect_mcp(name, server_cfg).await {
+            Ok(conn) => {
+                let count = conn.tools.len();
+                for tool in conn.tools {
+                    registry.register_arc(tool);
+                }
+                eprintln!("mcp `{name}`: {count} tool{} registered", if count == 1 { "" } else { "s" });
+            }
+            Err(e) => {
+                eprintln!("warning: mcp `{name}` disabled ({e:#})");
+            }
+        }
+    }
     let registry = Arc::new(registry);
 
     let mode = resolved.as_ref().map(|s| s.mode).unwrap_or_default();
@@ -84,9 +113,13 @@ pub async fn run(cli: &super::Cli, args: ServeArgs) -> Result<()> {
 
     let resume = super::resume_target(cli.resume.as_deref(), store.as_deref(), &cwd).await?;
 
-    let model = resolved
-        .as_ref()
-        .map(|s| s.model.clone())
+    // Same "last wins" logic as cwd: prefer the model the user last picked
+    // in the chip over the yaml default so a restart doesn't yank them off
+    // whichever model they were happily using.
+    let model = state
+        .last_model
+        .clone()
+        .or_else(|| resolved.as_ref().map(|s| s.model.clone()))
         .or_else(|| cfg.default_model.clone())
         .unwrap_or_else(|| "unconfigured".to_owned());
     let mut sess_cfg = SessionConfig::new(model.clone());

@@ -38,8 +38,32 @@ export type DiffPreview = {
   lines: DiffLine[];
 };
 
+export type ReviewSeverity = 'critical' | 'high' | 'medium' | 'low';
+
+export type ReviewFinding = {
+  severity: ReviewSeverity;
+  file: string;
+  line?: number | null;
+  title: string;
+  explanation: string;
+  suggested_fix?: string | null;
+  verify_note?: string | null;
+};
+
+export type ReviewProgressEvent =
+  | { kind: 'stage1_started'; diff_lines: number }
+  | { kind: 'stage1_completed'; total_findings: number }
+  | { kind: 'stage2_started'; total: number }
+  | { kind: 'stage2_item'; index: number; total: number; title: string; kept: boolean | null }
+  | { kind: 'completed'; kept: number; dropped: number };
+
+export type TurnMeta = {
+  started_at: number; // ms epoch
+  ended_at?: number | null;
+};
+
 export type ServerMsg =
-  | { type: 'ready'; session_id: string; model: string; mode: Mode; cwd: string; history: Message[] }
+  | { type: 'ready'; session_id: string; model: string; mode: Mode; cwd: string; history: Message[]; turns?: TurnMeta[] }
   | { type: 'token'; text: string }
   | { type: 'tool_start'; call: ToolCall }
   | { type: 'tool_end'; result: ToolResult }
@@ -49,13 +73,19 @@ export type ServerMsg =
   | { type: 'warning'; text: string }
   | { type: 'model_changed'; model: string }
   | { type: 'mode_changed'; mode: Mode }
-  | { type: 'error'; text: string };
+  | { type: 'error'; text: string }
+  | { type: 'review_started'; run_id: string }
+  | { type: 'review_progress'; run_id: string; event: ReviewProgressEvent }
+  | { type: 'review_result'; run_id: string; findings: ReviewFinding[] }
+  | { type: 'review_error'; run_id: string; text: string }
+  | { type: 'session_title_updated'; session_id: string; title: string };
 
 export type ClientMsg =
   | { type: 'send'; text: string }
   | { type: 'approve'; call_id: string; allow: boolean }
   | { type: 'set_model'; model: string }
   | { type: 'set_mode'; mode: Mode }
+  | { type: 'set_effort'; effort: string | null }
   | { type: 'interrupt' }
   | { type: 'sync' };
 
@@ -105,6 +135,7 @@ export type SessionSummary = {
   created_at: number;
   updated_at: number;
   message_count: number;
+  title?: string | null;
   first_user_message?: string | null;
   active: boolean;
 };

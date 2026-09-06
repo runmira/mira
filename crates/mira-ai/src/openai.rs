@@ -198,17 +198,28 @@ struct WireRequest<'a> {
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
+    /// OpenAI reasoning-effort passthrough. Providers that don't
+    /// recognise it (Groq, OpenRouter for most models, Ollama, …) drop
+    /// unknown fields silently, so it's safe to always send when set.
+    /// `"off"` is stripped upstream so the field only appears when the
+    /// user actually wants reasoning.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<&'a str>,
     stream: bool,
 }
 
 impl<'a> WireRequest<'a> {
     fn from_request(req: &'a ChatRequest) -> Self {
+        // Strip `"off"` (Mira UI sentinel) so we send *no* field for it —
+        // OpenAI rejects unknown values with a 400 rather than ignoring.
+        let effort = req.reasoning_effort.as_deref().filter(|v| *v != "off");
         Self {
             model: &req.model,
             messages: req.messages.iter().map(WireMessage::from).collect(),
             tools: req.tools.iter().map(WireTool::from).collect(),
             temperature: req.temperature,
             max_tokens: req.max_tokens,
+            reasoning_effort: effort,
             stream: true,
         }
     }

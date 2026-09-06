@@ -18,6 +18,7 @@ mira-tools    = { path = "crates/mira-tools",   version = "0.1.0" }
 mira-policy   = { path = "crates/mira-policy",  version = "0.1.0" }
 mira-sandbox  = { path = "crates/mira-sandbox", version = "0.1.0" }
 mira-harness  = { path = "crates/mira-harness", version = "0.1.0" }
+mira-review   = { path = "crates/mira-review",  version = "0.1.0" }
 mira-server   = { path = "crates/mira-server",  version = "0.1.0" }
 
 # Async runtime
@@ -63,6 +64,18 @@ similar   = "2"
 axum        = { version = "0.7", features = ["ws", "macros"] }
 tower       = "0.5"
 tower-http  = { version = "0.6", features = ["fs", "trace", "cors"] }
+
+# MCP client (Model Context Protocol) — official Rust SDK.
+# `client` enables the client role; the two transports cover stdio (subprocess
+# MCP servers like `npx @modelcontextprotocol/server-github`) and remote
+# streamable-HTTP servers. We opt out of default features to skip the server
+# side, which pulls in a lot we don't need.
+rmcp = { version = "3.2", default-features = false, features = [
+    "client",
+    "transport-child-process",
+    "transport-streamable-http-client-reqwest",
+    "reqwest",
+] }
 
 [profile.release]
 lto           = "thin"

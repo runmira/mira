@@ -10,9 +10,10 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use mira_config::RuntimeState;
 use mira_harness::{Session, SessionConfig};
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::protocol::ServerMsg;
 use crate::state::AppState;
@@ -60,6 +61,9 @@ pub async fn put_cwd(State(state): State<AppState>, Json(u): Json<CwdUpdate>) ->
         let mut guard = state.cwd.write().await;
         *guard = path.clone();
     }
+    // Persist the pick so the next `mira serve` restart lands here rather
+    // than the launch shell's cwd. Failures aren't worth propagating.
+    persist_cwd(&path);
 
     // Start a fresh session in the new folder — resuming an old chat that
     // referenced files in the old folder would just be confusing.
@@ -70,8 +74,9 @@ pub async fn put_cwd(State(state): State<AppState>, Json(u): Json<CwdUpdate>) ->
             max_rounds: prev_cfg.max_rounds,
             temperature: prev_cfg.temperature,
             max_tokens: prev_cfg.max_tokens,
+            reasoning_effort: prev_cfg.reasoning_effort.clone(),
         },
-        crate::system_prompt(&path),
+        crate::system_prompt(&path, &state.registry),
         state.harness_provider.clone(),
         state.registry.clone(),
         state.policy.clone(),
@@ -85,6 +90,7 @@ pub async fn put_cwd(State(state): State<AppState>, Json(u): Json<CwdUpdate>) ->
     let cfg = fresh.config().await;
     let mode = state.policy.lock().await.mode();
     let history = fresh.history().await;
+    let turns = fresh.turns().await;
     let session_id = fresh.id.to_string();
 
     {
@@ -99,6 +105,7 @@ pub async fn put_cwd(State(state): State<AppState>, Json(u): Json<CwdUpdate>) ->
         mode,
         cwd: path.display().to_string(),
         history,
+        turns,
     });
 
     Json(CwdView {
@@ -110,4 +117,12 @@ pub async fn put_cwd(State(state): State<AppState>, Json(u): Json<CwdUpdate>) ->
 
 fn err(status: StatusCode, msg: String) -> Response {
     (status, Json(serde_json::json!({ "error": msg }))).into_response()
+}
+
+fn persist_cwd(path: &std::path::Path) {
+    let mut s = RuntimeState::load().unwrap_or_default();
+    s.last_cwd = Some(path.to_path_buf());
+    if let Err(e) = s.save() {
+        warn!(%e, "state.yaml: save failed after cwd change");
+    }
 }

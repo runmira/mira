@@ -8,12 +8,14 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::IntoResponse;
 use futures::{SinkExt, StreamExt};
+use mira_config::RuntimeState;
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
 use crate::approver;
 use crate::protocol::{ClientMsg, ServerMsg};
 use crate::state::AppState;
+use crate::title;
 
 pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_socket(socket, state))
@@ -85,12 +87,14 @@ async fn build_ready(state: &AppState) -> ServerMsg {
     let cfg = sess.config().await;
     let mode = state.policy.lock().await.mode();
     let history = sess.history().await;
+    let turns = sess.turns().await;
     ServerMsg::Ready {
         session_id: sess.id.to_string(),
         model: cfg.model,
         mode,
         cwd: state.current_cwd().await.display().to_string(),
         history,
+        turns,
     }
 }
 
@@ -107,19 +111,46 @@ async fn dispatch(cmd: ClientMsg, state: &AppState) {
         }
         ClientMsg::SetModel { model } => {
             state.current_session().await.set_model(&model).await;
+            // Persist so the next restart lands on the same model rather
+            // than the yaml default.
+            let mut s = RuntimeState::load().unwrap_or_default();
+            s.last_model = Some(model.clone());
+            if let Err(e) = s.save() {
+                warn!(%e, "state.yaml: save failed after model change");
+            }
             let _ = state.events_tx.send(ServerMsg::ModelChanged { model });
         }
         ClientMsg::SetMode { mode } => {
             state.policy.lock().await.set_mode(mode);
             let _ = state.events_tx.send(ServerMsg::ModeChanged { mode });
         }
+        ClientMsg::SetEffort { effort } => {
+            // Normalise: empty string or literal "off" → None (skip the
+            // wire field entirely upstream). Anything else passes through
+            // as-is so future values (e.g. "very-high") work without a
+            // server-side change.
+            let normalized = effort
+                .as_deref()
+                .filter(|v| !v.is_empty() && *v != "off")
+                .map(|s| s.to_owned());
+            state
+                .current_session()
+                .await
+                .set_reasoning_effort(normalized)
+                .await;
+        }
         ClientMsg::Interrupt => {
-            let cancelled = state.current_session().await.cancel().await;
+            let sess = state.current_session().await;
+            let cancelled = sess.cancel().await;
             let text = if cancelled {
                 "turn interrupted".into()
             } else {
                 "nothing to interrupt".into()
             };
+            // Stamp the in-flight turn so the "Worked for" chip stops
+            // ticking and persists an accurate duration on the next
+            // reload.
+            sess.end_current_turn().await;
             let _ = state.events_tx.send(ServerMsg::Warning { text });
             // Send `Done` so the UI clears its busy/thinking state instead
             // of spinning forever waiting for the aborted stream.
@@ -141,6 +172,17 @@ fn spawn_turn(state: AppState, text: String) {
             // If no clients are subscribed, sends error — that's fine.
             let _ = state.events_tx.send(frame);
         }
+        // Turn wrapped up. If this session still needs a nickname, kick off
+        // a short generation call on the same provider + model. Runs on its
+        // own task so a slow / failing title call doesn't block the next
+        // user turn.
+        let model = sess.config().await.model;
+        title::spawn_if_needed(
+            sess,
+            state.harness_provider.clone(),
+            model,
+            state.events_tx.clone(),
+        );
     });
 }
 

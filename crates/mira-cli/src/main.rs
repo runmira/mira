@@ -1,6 +1,7 @@
 mod approver;
 mod config;
 mod repl;
+mod review;
 mod serve;
 mod tui;
 
@@ -82,6 +83,8 @@ enum Command {
     /// Run Mira as a local web server. Binds to 127.0.0.1 by default; a
     /// browser (or, later, the desktop app) is the frontend.
     Serve(serve::ServeArgs),
+    /// Two-stage diff review: generate findings, then hostile re-verify.
+    Review(review::ReviewArgs),
 }
 
 #[tokio::main]
@@ -92,6 +95,10 @@ async fn main() -> Result<()> {
     if let Some(Command::Serve(args)) = cli.command.clone() {
         init_tracing(false);
         return serve::run(&cli, args).await;
+    }
+    if let Some(Command::Review(args)) = cli.command.clone() {
+        init_tracing(false);
+        return review::run(&cli, args).await;
     }
 
     let use_tui = !cli.simple && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
@@ -118,6 +125,21 @@ async fn main() -> Result<()> {
     let sandbox = Arc::new(Sandbox::default_scrubbed());
     let mut registry = Registry::new();
     builtin::register_default(&mut registry);
+    // Configured MCP servers layer on top of the built-ins. A single broken
+    // entry mustn't stop Mira from starting, so failures degrade to a
+    // warning and we move on.
+    for (name, server_cfg) in &cfg.mcp_servers {
+        match mira_tools::connect_mcp(name, server_cfg).await {
+            Ok(conn) => {
+                for tool in conn.tools {
+                    registry.register_arc(tool);
+                }
+            }
+            Err(e) => {
+                eprintln!("warning: mcp `{name}` disabled ({e:#})");
+            }
+        }
+    }
     let registry = Arc::new(registry);
     let tool_ctx = ToolContext::new(cwd.clone(), sandbox);
 
@@ -171,7 +193,7 @@ async fn main() -> Result<()> {
         ),
         None => Session::new(
             sess_cfg,
-            system_prompt(&cwd),
+            system_prompt(&cwd, &registry),
             provider,
             registry,
             policy.clone(),
@@ -204,17 +226,17 @@ async fn main() -> Result<()> {
 
 /// Values that survive the CLI/env/config/default cascade and get passed
 /// down to the provider, policy, and session.
-struct ResolvedSettings {
-    base_url: String,
-    api_key: String,
-    model: String,
-    mode: Mode,
-    max_tokens: Option<u32>,
-    temperature: Option<f32>,
-    extra_headers: Vec<(String, String)>,
+pub(crate) struct ResolvedSettings {
+    pub(crate) base_url: String,
+    pub(crate) api_key: String,
+    pub(crate) model: String,
+    pub(crate) mode: Mode,
+    pub(crate) max_tokens: Option<u32>,
+    pub(crate) temperature: Option<f32>,
+    pub(crate) extra_headers: Vec<(String, String)>,
 }
 
-fn resolve_settings(cli: &Cli, cfg: &MiraConfig) -> Result<ResolvedSettings> {
+pub(crate) fn resolve_settings(cli: &Cli, cfg: &MiraConfig) -> Result<ResolvedSettings> {
     // Provider selection: --provider > MIRA_PROVIDER env > config default > "openrouter".
     let provider_name = cli
         .provider
@@ -246,9 +268,7 @@ fn resolve_settings(cli: &Cli, cfg: &MiraConfig) -> Result<ResolvedSettings> {
         .clone()
         .or_else(|| std::env::var("MIRA_API_KEY").ok())
         .or_else(|| ProviderConfig::resolved_api_key(&provider))
-        .with_context(|| {
-            format!("no api_key for provider `{provider_name}` — set --api-key, MIRA_API_KEY, or providers.{provider_name} in config")
-        })?;
+        .with_context(|| missing_api_key_hint(&provider_name))?;
 
     let model = cli
         .model
@@ -287,6 +307,25 @@ fn resolve_settings(cli: &Cli, cfg: &MiraConfig) -> Result<ResolvedSettings> {
 
 fn default_base_url_for(name: &str) -> Option<String> {
     mira_config::default_base_url_for(name).map(|s| s.to_owned())
+}
+
+/// Human-friendly "no API key" error tailored to the provider — points at
+/// its conventional env var (e.g. `GROQ_API_KEY`) plus the escape hatches
+/// (`MIRA_API_KEY`, `mira init`, per-provider yaml). Falls back to a
+/// generic hint for providers we don't have a preset env-var name for.
+fn missing_api_key_hint(provider: &str) -> String {
+    let pretty = mira_config::pretty_provider_name(provider);
+    match mira_config::default_api_key_env_for(provider) {
+        Some(env) => format!(
+            "no API key found for {pretty}. Run `mira init` to set one up globally, \
+             or set {env} or MIRA_API_KEY in your shell environment."
+        ),
+        None => format!(
+            "no API key found for {pretty}. Run `mira init` to set one up globally, \
+             set MIRA_API_KEY in your shell, or add providers.{provider}.api_key \
+             (or api_key_env) to your mira.yaml."
+        ),
+    }
 }
 
 /// Resolve `--resume` into a concrete session record.
@@ -340,13 +379,17 @@ fn init_tracing(use_tui: bool) {
     }
 }
 
-fn system_prompt(cwd: &std::path::Path) -> String {
-    format!(
-        "You are Mira, an interactive coding agent running in a terminal.\n\
-         Working directory: {}\n\n\
-         Prefer tool use over guessing. Read files before editing them; use `edit_file` \
-         with enough context in `old_string` to disambiguate. When running commands, \
-         keep them small and explain what you're doing.",
-        cwd.display()
+/// CLI-side wrapper: adds "running in a terminal" to the server's shared
+/// prompt (which is otherwise identical — enumeration of tools, bash-unlocks
+/// hint, cwd). Delegates to `mira_server::system_prompt` so the tool list
+/// stays a single source of truth.
+fn system_prompt(cwd: &std::path::Path, registry: &Registry) -> String {
+    let base = mira_server::system_prompt(cwd, registry);
+    // Tack on a terminal-flavored preamble so TUI/REPL responses don't
+    // reference "the browser" or "the panel" that only the web UI has.
+    base.replacen(
+        "You are Mira, an interactive coding agent.",
+        "You are Mira, an interactive coding agent running in a terminal.",
+        1,
     )
 }

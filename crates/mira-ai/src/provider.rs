@@ -38,6 +38,9 @@ pub struct ChatRequest {
     pub tools: Vec<ToolSpec>,
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
+    /// Reasoning effort (`"minimal" | "low" | "medium" | "high"`) — passed
+    /// through to providers that expose it. `None` skips the field.
+    pub reasoning_effort: Option<String>,
 }
 
 /// One entry in a provider's model catalog. `id` is the value you pass as

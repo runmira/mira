@@ -12,7 +12,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use mira_ai::openai::{OpenAiCompatible, OpenAiConfig};
 use mira_ai::{ChatProvider, NullProvider};
-use mira_config::{default_base_url_for, global_path, MiraConfig};
+use mira_config::{default_base_url_for, global_path, MiraConfig, RuntimeState};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
@@ -133,6 +133,12 @@ pub async fn put_settings(
 
     if let Some(model) = cfg.default_model.clone() {
         state.current_session().await.set_model(&model).await;
+        // Mirror the WS SetModel path — persist so restarts remember.
+        let mut s = RuntimeState::load().unwrap_or_default();
+        s.last_model = Some(model.clone());
+        if let Err(e) = s.save() {
+            warn!(%e, "state.yaml: save failed after settings change");
+        }
         let _ = state.events_tx.send(ServerMsg::ModelChanged { model });
     }
 
