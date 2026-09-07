@@ -8,6 +8,7 @@ import {
   Folder,
   GitBranch,
   IconContext,
+  Lightbulb,
   Link,
   Paperclip,
   Plus,
@@ -50,13 +51,15 @@ type Props = {
   onNewChat: () => void;
   onOpenSettings: () => void;
   onRunReview: (args: string) => void;
+  onRemember: (scope: 'user' | 'project', text: string) => Promise<string>;
+  onUndo: (count: number) => Promise<string>;
 };
 
 type Attachment = { path: string; content: string; bytes: number };
 
 export function Composer({
   disabled, busy, mode, model, cwd, usage,
-  onSend, onSetMode, onSetModel, onSetEffort, onOpenPicker, onInterrupt, onNewChat, onOpenSettings, onRunReview,
+  onSend, onSetMode, onSetModel, onSetEffort, onOpenPicker, onInterrupt, onNewChat, onOpenSettings, onRunReview, onRemember, onUndo,
 }: Props) {
   const [text, setText] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -66,6 +69,16 @@ export function Composer({
   const [slashIdx, setSlashIdx] = useState(0);
   const [slashFeedback, setSlashFeedback] = useState<string | null>(null);
   const [modelPopOpen, setModelPopOpen] = useState(false);
+  // Remember the mode we were on before entering plan mode, so toggling the
+  // Plan chip off returns you to that mode instead of hardcoding `manual`.
+  const [priorMode, setPriorMode] = useState<Mode>(mode === 'plan' ? 'manual' : mode);
+  useEffect(() => {
+    if (mode !== 'plan') setPriorMode(mode);
+  }, [mode]);
+  const planActive = mode === 'plan';
+  function togglePlan() {
+    onSetMode(planActive ? priorMode : 'plan');
+  }
 
   const slash = slashState(text);
   const paletteVisible = slash.mode === 'palette';
@@ -86,8 +99,10 @@ export function Composer({
       onOpenAttachPicker: () => setFilePickerOpen(true),
       onOpenSettings,
       onRunReview,
+      onRemember,
+      onUndo,
     }),
-    [onNewChat, onSetMode, onSetModel, onOpenPicker, onOpenSettings, onRunReview],
+    [onNewChat, onSetMode, onSetModel, onOpenPicker, onOpenSettings, onRunReview, onRemember, onUndo],
   );
 
   function executeCommand(cmd: SlashCommand, args: string) {
@@ -173,6 +188,12 @@ export function Composer({
         className="w-full max-w-3xl flex flex-col gap-1.5 rounded-[22px] border border-border bg-secondary/60 p-2.5"
         onSubmit={(e) => { e.preventDefault(); submit(); }}
       >
+        {planActive && (
+          <div className="flex items-center px-1.5 pt-0.5">
+            <PlanChip onExit={togglePlan} />
+          </div>
+        )}
+
         {(attachments.length > 0 || attachError) && (
           <div className="flex flex-wrap gap-1.5 px-1.5">
             {attachments.map((a) => (
@@ -219,7 +240,13 @@ export function Composer({
               }
               if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); }
             }}
-            placeholder={disabled ? 'Waiting for connection…' : 'Work with mira — try /'}
+            placeholder={
+              disabled
+                ? 'Waiting for connection…'
+                : planActive
+                  ? 'Describe your task to generate a plan…'
+                  : 'Work with mira — try /'
+            }
             disabled={disabled}
             rows={1}
             className="min-h-[1.7rem] w-full max-h-48 resize-none border-0 bg-transparent px-2.5 py-1.5 text-sm outline-none placeholder:text-muted-foreground/60 disabled:opacity-60"
@@ -267,15 +294,6 @@ export function Composer({
 
           <span className="flex-1" />
 
-          {usage && (
-            <span
-              className="mr-1 truncate rounded-md px-1.5 py-1 text-[11px] font-mono text-muted-foreground/70"
-              title="Session tokens & estimated cost — hover the model chip for details"
-            >
-              {usage}
-            </span>
-          )}
-
           <ModePicker mode={mode} label={modeLabel} onPick={onSetMode} />
 
           {busy ? (
@@ -301,6 +319,15 @@ export function Composer({
           )}
         </div>
       </form>
+
+      {usage && (
+        <div
+          className="w-full max-w-3xl px-3 text-right text-[11px] font-mono text-muted-foreground/60"
+          title="Session tokens & estimated cost"
+        >
+          {usage}
+        </div>
+      )}
 
       <FilePicker
         open={filePickerOpen}
@@ -1024,6 +1051,26 @@ function SlashButton({ onClick }: { onClick: () => void }) {
   );
 }
 
+/* ---------- plan chip (visible only while plan mode is on) ---------- */
+
+/** Active-state indicator + one-click exit. Renders only when plan mode is
+ *  on; clicking it drops the user back to their prior mode. Entering plan
+ *  mode happens via `/plan` (autocompletes) or the mode picker. */
+function PlanChip({ onExit }: { onExit: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onExit}
+      title="Plan mode on — click to exit"
+      className="inline-flex items-center gap-1.5 rounded-full bg-mira-blue/15 px-2.5 py-1.5 text-[12.5px] text-mira-blue transition-colors hover:bg-mira-blue/25"
+    >
+      <Lightbulb className="size-3 shrink-0" weight="fill" />
+      <span>Plan</span>
+      <span className="text-mira-blue/70">·</span>
+    </button>
+  );
+}
+
 /* ---------- worktree chip (branch + dirty + worktree switcher) ---------- */
 
 function WorktreeChip({ cwd }: { cwd: string }) {
@@ -1176,12 +1223,32 @@ function isLinkedWorktree(path: string, all: { path: string }[]): boolean {
 /* ---------- project chip (opens folder picker) ---------- */
 
 function ProjectChip({ cwd, onClick }: { cwd: string; onClick: () => void }) {
-  const label = cwd ? basename(cwd) : 'Choose project';
+  // Prefer the primary-worktree name when the cwd is a linked worktree so
+  // switching branches doesn't visually change the project. Falls back to
+  // the cwd basename in every other case (no git, load error, primary tree).
+  const [primary, setPrimary] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    if (!cwd) { setPrimary(null); return; }
+    getGitStatus()
+      .then((s) => {
+        if (cancelled) return;
+        setPrimary(s.is_worktree ? (s.primary_project ?? null) : null);
+      })
+      .catch(() => { if (!cancelled) setPrimary(null); });
+    return () => { cancelled = true; };
+  }, [cwd]);
+
+  const fallback = cwd ? basename(cwd) : 'Choose project';
+  const label = primary ?? fallback;
+  const title = primary
+    ? `${primary} (worktree at ${cwd})`
+    : (cwd || 'Choose a folder');
   return (
     <button
       type="button"
       onClick={onClick}
-      title={cwd || 'Choose a folder'}
+      title={title}
       className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-[12.5px] text-muted-foreground hover:bg-mira-elev2 hover:text-foreground transition-colors max-w-[12rem]"
     >
       <Folder className="size-3 shrink-0" />

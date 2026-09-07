@@ -58,11 +58,23 @@ impl Tool for Bash {
         let args: Args = call.parse_arguments()?;
         let timeout = std::time::Duration::from_millis(args.timeout_ms.min(600_000));
 
+        // Bracket the shell command with git-diff snapshots when we're in
+        // a repo. Any file bash touches that was clean before the command
+        // becomes undo-able just like an `edit_file` / `write_file` write.
+        let pre_bash = ctx.guard.as_ref().and_then(|g| g.pre_bash());
+
         let outcome = ctx
             .sandbox
             .run(&args.command, &ctx.cwd, timeout)
             .await
             .map_err(|e| ToolError::Failed(e.to_string()))?;
+
+        if let (Some(g), Some(pre)) = (&ctx.guard, &pre_bash) {
+            // Errors here shouldn't kill the tool result — surface + skip.
+            if let Err(e) = g.record_bash_changes(pre).await {
+                tracing::warn!(%e, "post-bash change tracking failed");
+            }
+        }
 
         // Compose a compact summary the model can act on. Truncate long
         // output so a single misfire can't blow the context window.

@@ -151,6 +151,9 @@ export type GitStatusView = {
   ahead: number;
   behind: number;
   is_worktree: boolean;
+  /** Basename of the primary worktree — e.g. `mira` even when the current
+   *  cwd is `mira/.mira/worktrees/diff-tes`. Absent when not in a repo. */
+  primary_project?: string | null;
   worktrees: WorktreeEntry[];
 };
 
@@ -158,6 +161,45 @@ export async function getGitStatus(): Promise<GitStatusView> {
   const r = await fetch('/api/git/status');
   if (!r.ok) throw new Error(`git status ${r.status}`);
   return (await r.json()) as GitStatusView;
+}
+
+export type UndoOp = 'overwrite' | 'create';
+export type AppliedUndo = { seq: number; path: string; op: UndoOp };
+
+export async function applyUndo(count: number): Promise<{ applied: AppliedUndo[] }> {
+  const r = await fetch('/api/undo', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ count }),
+  });
+  if (!r.ok) {
+    let msg = `undo POST ${r.status}`;
+    try {
+      const j = await r.json();
+      if (j.error) msg += `: ${j.error}`;
+    } catch { /* ignore */ }
+    throw new Error(msg);
+  }
+  return (await r.json()) as { applied: AppliedUndo[] };
+}
+
+export type MemoryScope = 'user' | 'project';
+
+export async function appendMemory(scope: MemoryScope, text: string): Promise<{ path: string; bytes: number }> {
+  const r = await fetch('/api/memory/append', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ scope, text }),
+  });
+  if (!r.ok) {
+    let msg = `memory append ${r.status}`;
+    try {
+      const j = await r.json();
+      if (j.error) msg += `: ${j.error}`;
+    } catch { /* ignore */ }
+    throw new Error(msg);
+  }
+  return (await r.json()) as { path: string; bytes: number };
 }
 
 export async function createWorktree(branch: string, base?: string): Promise<{ path: string; branch: string }> {

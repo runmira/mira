@@ -1,5 +1,7 @@
 import type { ComponentType } from 'react';
 import {
+  ArrowCounterClockwise,
+  Brain,
   Eye,
   FileText,
   Folder,
@@ -38,6 +40,12 @@ export type SlashCtx = {
   /** Kicks off a two-stage `mira review` and opens the side panel to stream
    *  progress. `args` is passed through as the git range (empty = default). */
   onRunReview: (args: string) => void;
+  /** Append a note to the current project's MIRA.md (or the user-global one
+   *  when `scope === 'user'`). Feedback message returned via the promise. */
+  onRemember: (scope: 'user' | 'project', text: string) => Promise<string>;
+  /** Revert the last N file writes the agent made this session. Resolves
+   *  with a human-readable summary; rejects with a message on error. */
+  onUndo: (count: number) => Promise<string>;
 };
 
 /** Structural type covering both Lucide and Phosphor icon components — just
@@ -119,20 +127,15 @@ export const COMMANDS: SlashCommand[] = [
   },
   {
     name: 'plan',
-    description: 'Ask for a step-by-step plan without touching files',
-    usage: '/plan <task>',
+    description: 'Toggle plan mode — the agent will call `plan` before acting',
+    usage: '/plan',
     icon: Lightbulb,
-    takesArgs: true,
-    run: (args) => {
-      const target = args.trim() || '<describe the task here>';
-      return (
-        `Read the relevant parts of the codebase, then propose a concrete ` +
-        `step-by-step plan for the task below. Do NOT edit any files — ` +
-        `planning only. List: files you'd touch, order of changes, tests ` +
-        `to add or update, and any open questions.\n\n` +
-        `Task: ${target}`
-      );
-    },
+    takesArgs: false,
+    // Simply flips mode to `plan`. The Plan chip in the composer handles the
+    // "toggle back" gesture (it remembers your prior mode). Sending a real
+    // message while plan mode is on lets the model use the plan tool
+    // naturally — no more wrapping the user's text with planning boilerplate.
+    run: (_a, ctx) => { ctx.onSetMode('plan'); return undefined; },
   },
   {
     name: 'commit',
@@ -181,6 +184,57 @@ export const COMMANDS: SlashCommand[] = [
       `Keep it tight — under 150 lines. Skip boilerplate the reader would ` +
       `already know from the ecosystem.`
     ),
+  },
+  {
+    name: 'undo',
+    description: 'Revert the last N file writes the agent made in this session',
+    usage: '/undo [N]',
+    icon: ArrowCounterClockwise,
+    takesArgs: true,
+    run: (args, ctx) => {
+      const trimmed = args.trim();
+      const n = trimmed ? Number.parseInt(trimmed, 10) : 1;
+      if (!Number.isFinite(n) || n < 1) {
+        throw new Error('usage: /undo [N]  (N is a positive integer)');
+      }
+      // Fire and forget — success/error surfaces in console + the transcript
+      // sees the reverted files reflected on the next read.
+      ctx.onUndo(n).catch((e) => {
+        // eslint-disable-next-line no-console
+        console.error('undo failed:', e);
+      });
+      return undefined;
+    },
+  },
+  {
+    name: 'remember',
+    aliases: ['note'],
+    description: 'Append a note to project memory (.mira/MIRA.md)',
+    usage: '/remember <note>   (add --user to save to ~/.mira/MIRA.md)',
+    icon: Brain,
+    takesArgs: true,
+    run: (args, ctx) => {
+      // Optional `--user` prefix routes to the global file. Everything else
+      // is treated as the note body and appended to the current project's
+      // MIRA.md. Defaults to project so the common case is one token.
+      const trimmed = args.trim();
+      if (!trimmed) throw new Error('usage: /remember <note>');
+      let scope: 'user' | 'project' = 'project';
+      let text = trimmed;
+      if (text.startsWith('--user ') || text === '--user') {
+        scope = 'user';
+        text = text.slice('--user'.length).trim();
+      }
+      if (!text) throw new Error('usage: /remember [--user] <note>');
+      // Fire and forget — success is silent (the note is now in MIRA.md),
+      // failure surfaces in the browser console. A toast system would be
+      // the right long-term home for this feedback.
+      ctx.onRemember(scope, text).catch((e) => {
+        // eslint-disable-next-line no-console
+        console.error('remember failed:', e);
+      });
+      return undefined;
+    },
   },
   {
     name: 'settings',

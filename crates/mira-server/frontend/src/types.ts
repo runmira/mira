@@ -62,6 +62,31 @@ export type TurnMeta = {
   ended_at?: number | null;
 };
 
+/* -------- interactive tools (plan / ask_user / …) -------- */
+
+export type PlanStep = {
+  description: string;
+  why?: string | null;
+};
+
+export type PlanProposal = {
+  title: string;
+  steps: PlanStep[];
+};
+
+/** Client → server reply for the plan tool. */
+export type PlanResponse = {
+  approved: boolean;
+  /** Present when the user edited before approving. */
+  steps?: PlanStep[];
+  /** Optional free-text note on cancel. */
+  note?: string;
+};
+
+/** Discriminated union of all `PromptResponse` shapes. Matches the Rust
+ *  `PromptResponse` enum (serde `tag = "kind"`, snake_case). */
+export type PromptResponse = ({ kind: 'plan' } & PlanResponse);
+
 export type TokenUsage = {
   prompt_tokens: number;
   completion_tokens: number;
@@ -93,11 +118,13 @@ export type ServerMsg =
   | { type: 'review_result'; run_id: string; findings: ReviewFinding[] }
   | { type: 'review_error'; run_id: string; text: string }
   | { type: 'session_title_updated'; session_id: string; title: string }
-  | { type: 'usage'; round: TokenUsage; totals: UsageTotals };
+  | { type: 'usage'; round: TokenUsage; totals: UsageTotals }
+  | { type: 'plan_request'; prompt_id: string; plan: PlanProposal };
 
 export type ClientMsg =
   | { type: 'send'; text: string }
   | { type: 'approve'; call_id: string; allow: boolean }
+  | ({ type: 'prompt_response'; prompt_id: string } & PromptResponse)
   | { type: 'set_model'; model: string }
   | { type: 'set_mode'; mode: Mode }
   | { type: 'set_effort'; effort: string | null }
@@ -143,6 +170,8 @@ export type SettingsUpdate = {
   providers?: ProviderUpdate[];
 };
 
+export type WorktreeMergeStatus = 'merged' | 'unmerged';
+
 export type SessionSummary = {
   id: string;
   model: string;
@@ -153,4 +182,9 @@ export type SessionSummary = {
   title?: string | null;
   first_user_message?: string | null;
   active: boolean;
+  /** Merge status of the session's worktree branch vs main/master in the
+   *  primary repo. Absent for regular (non-worktree) sessions. */
+  worktree_status?: WorktreeMergeStatus | null;
+  /** Branch name of the worktree — shown as tooltip on the merge chip. */
+  worktree_branch?: string | null;
 };

@@ -119,6 +119,7 @@ async fn main() -> Result<()> {
             base_url: settings.base_url,
             api_key: settings.api_key,
             extra_headers: settings.extra_headers,
+            prompt_caching: settings.prompt_caching,
         })
         .context("build provider")?,
     );
@@ -236,6 +237,9 @@ pub(crate) struct ResolvedSettings {
     pub(crate) max_tokens: Option<u32>,
     pub(crate) temperature: Option<f32>,
     pub(crate) extra_headers: Vec<(String, String)>,
+    /// Effective prompt-caching flag after applying the config override
+    /// and the auto-enable-for-Anthropic rule.
+    pub(crate) prompt_caching: bool,
 }
 
 pub(crate) fn resolve_settings(cli: &Cli, cfg: &MiraConfig) -> Result<ResolvedSettings> {
@@ -296,6 +300,9 @@ pub(crate) fn resolve_settings(cli: &Cli, cfg: &MiraConfig) -> Result<ResolvedSe
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
+    let prompt_caching =
+        mira_config::prompt_caching_enabled(&provider_name, &base_url, provider.prompt_caching);
+
     Ok(ResolvedSettings {
         base_url,
         api_key,
@@ -304,6 +311,7 @@ pub(crate) fn resolve_settings(cli: &Cli, cfg: &MiraConfig) -> Result<ResolvedSe
         max_tokens,
         temperature,
         extra_headers,
+        prompt_caching,
     })
 }
 

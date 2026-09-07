@@ -238,10 +238,12 @@ fn build_provider(cfg: &MiraConfig) -> Arc<dyn ChatProvider> {
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
+    let prompt_caching = mira_config::prompt_caching_enabled(name, &base_url, entry.prompt_caching);
     match OpenAiCompatible::new(OpenAiConfig {
         base_url,
         api_key,
         extra_headers,
+        prompt_caching,
     }) {
         Ok(p) => Arc::new(p),
         Err(e) => {

@@ -55,9 +55,15 @@ pub struct Finding {
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Progress {
-    Stage1Started { diff_lines: usize },
-    Stage1Completed { total_findings: usize },
-    Stage2Started { total: usize },
+    Stage1Started {
+        diff_lines: usize,
+    },
+    Stage1Completed {
+        total_findings: usize,
+    },
+    Stage2Started {
+        total: usize,
+    },
     Stage2Item {
         /// 1-based index of the finding currently under re-verify.
         index: usize,
@@ -65,7 +71,10 @@ pub enum Progress {
         title: String,
         kept: Option<bool>,
     },
-    Completed { kept: usize, dropped: usize },
+    Completed {
+        kept: usize,
+        dropped: usize,
+    },
 }
 
 /// Sink for streaming [`Progress`] events. Callers implement this to fan
@@ -99,7 +108,9 @@ pub async fn review(
 
     let mut findings = stage1_generate(provider, model, diff).await?;
     progress
-        .emit(Progress::Stage1Completed { total_findings: findings.len() })
+        .emit(Progress::Stage1Completed {
+            total_findings: findings.len(),
+        })
         .await;
 
     if verify && !findings.is_empty() {
@@ -137,12 +148,18 @@ pub async fn review(
         }
         let dropped = total - kept.len();
         progress
-            .emit(Progress::Completed { kept: kept.len(), dropped })
+            .emit(Progress::Completed {
+                kept: kept.len(),
+                dropped,
+            })
             .await;
         findings = kept;
     } else {
         progress
-            .emit(Progress::Completed { kept: findings.len(), dropped: 0 })
+            .emit(Progress::Completed {
+                kept: findings.len(),
+                dropped: 0,
+            })
             .await;
     }
 
@@ -211,13 +228,22 @@ pub async fn verify_one(
 
     let reply = complete(provider, model, system, &user).await?;
     let line = reply.trim().lines().next().unwrap_or("").trim();
-    if let Some(rest) = line.strip_prefix("CONFIRM:").or_else(|| line.strip_prefix("Confirm:")) {
+    if let Some(rest) = line
+        .strip_prefix("CONFIRM:")
+        .or_else(|| line.strip_prefix("Confirm:"))
+    {
         Ok(Verdict::Confirm(rest.trim().to_owned()))
-    } else if let Some(rest) = line.strip_prefix("REJECT:").or_else(|| line.strip_prefix("Reject:")) {
+    } else if let Some(rest) = line
+        .strip_prefix("REJECT:")
+        .or_else(|| line.strip_prefix("Reject:"))
+    {
         Ok(Verdict::Reject(rest.trim().to_owned()))
     } else {
         // Malformed — safer to keep the finding than silently drop it.
-        Ok(Verdict::Confirm(format!("verifier unclear: {}", short(line, 80))))
+        Ok(Verdict::Confirm(format!(
+            "verifier unclear: {}",
+            short(line, 80)
+        )))
     }
 }
 
@@ -295,11 +321,19 @@ fn extract_json_block(s: &str) -> Option<&str> {
     }
     let start = s.find('[')?;
     let end = s.rfind(']')?;
-    if end > start { Some(s[start..=end].trim()) } else { None }
+    if end > start {
+        Some(s[start..=end].trim())
+    } else {
+        None
+    }
 }
 
 fn short(s: &str, n: usize) -> String {
-    if s.len() <= n { s.to_string() } else { format!("{}…", &s[..n]) }
+    if s.len() <= n {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..n])
+    }
 }
 
 #[cfg(test)]

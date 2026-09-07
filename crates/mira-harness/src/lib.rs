@@ -16,6 +16,7 @@ pub mod approver;
 pub mod event;
 pub mod persist;
 pub mod session;
+pub mod verify;
 
 pub use approver::{Approver, AutoApprover};
 pub use event::HarnessEvent;

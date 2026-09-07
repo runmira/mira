@@ -9,6 +9,7 @@ use mira_tools::{Registry, ToolContext};
 use tokio::sync::{broadcast, Mutex, RwLock};
 
 use crate::approver::PendingMap;
+use crate::interactive::PendingPromptMap;
 use crate::protocol::ServerMsg;
 use crate::provider::SwappableProvider;
 
@@ -32,6 +33,9 @@ pub struct AppState {
     /// forwarder task and the approver both publish.
     pub events_tx: broadcast::Sender<ServerMsg>,
     pub pending: PendingMap,
+    /// Oneshot waiters keyed by prompt_id, used by interactive tools
+    /// (plan / ask_user / …) to receive the user's reply from the WS.
+    pub prompt_pending: PendingPromptMap,
 
     // --- pieces needed to (re)build Session instances ---
     pub registry: Arc<Registry>,

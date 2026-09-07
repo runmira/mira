@@ -6,6 +6,7 @@
 
 pub mod bash;
 pub mod edit;
+pub mod find_symbol;
 pub mod git;
 pub mod glob;
 pub mod grep;
@@ -24,6 +25,7 @@ pub fn register_default(reg: &mut Registry) {
     reg.register(bash::Bash);
     reg.register(grep::Grep);
     reg.register(glob::Glob);
+    reg.register(find_symbol::FindSymbol);
     reg.register(git::GitStatus);
     reg.register(git::GitDiff);
     reg.register(git::GitLog);

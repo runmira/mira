@@ -23,14 +23,17 @@ mod cwd;
 mod embedded;
 mod file;
 mod git;
+pub mod interactive;
+mod memory;
 mod models;
-mod review;
 pub mod protocol;
 pub mod provider;
+mod review;
 mod sessions;
 mod settings;
 mod state;
 mod title;
+mod undo;
 mod ws;
 
 use std::collections::HashMap;
@@ -84,6 +87,20 @@ pub async fn run(mut cfg: ServerConfig) -> Result<()> {
     let (events_tx, _rx0) = broadcast::channel::<protocol::ServerMsg>(256);
     let pending = Arc::new(Mutex::new(HashMap::new()));
 
+    // Interactive-tool wiring. Instantiate the channel first so we can hand
+    // it to any server-owned Tool (plan, ask_user, …) before those tools go
+    // into the registry the harness sees.
+    let prompt_channel = interactive::PromptChannel::new(events_tx.clone());
+    let prompt_pending = prompt_channel.pending();
+
+    // Copy the caller-provided registry and layer on server-only interactive
+    // tools. Registry is `Clone`, so this is cheap; the resulting Arc<Registry>
+    // is what the session actually consults.
+    let mut registry_owned: Registry = (*cfg.registry).clone();
+    registry_owned.register(interactive::PlanTool::new(prompt_channel.clone()));
+    let registry = Arc::new(registry_owned);
+    cfg.registry = registry.clone();
+
     let swappable = SwappableProvider::new(cfg.provider.clone());
     let harness_provider: Arc<dyn ChatProvider> = Arc::new(swappable.clone());
     let cwd = Arc::new(RwLock::new(cfg.cwd.clone()));
@@ -124,6 +141,7 @@ pub async fn run(mut cfg: ServerConfig) -> Result<()> {
         provider: swappable,
         events_tx,
         pending,
+        prompt_pending,
         registry: cfg.registry.clone(),
         sandbox: cfg.sandbox.clone(),
         approver,
@@ -172,7 +190,13 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
             "/api/git/worktree",
             axum::routing::post(git::create_worktree),
         )
-        .route("/api/review", axum::routing::post(review::start_review));
+        .route("/api/memory", get(memory::get_memory))
+        .route(
+            "/api/memory/append",
+            axum::routing::post(memory::append_memory),
+        )
+        .route("/api/review", axum::routing::post(review::start_review))
+        .route("/api/undo", axum::routing::post(undo::apply_undo));
 
     // Frontend precedence: `--static-dir` (dev/override) > embedded assets
     // baked at compile time > inline placeholder page.
@@ -230,7 +254,7 @@ pub fn system_prompt(cwd: &std::path::Path, registry: &Registry) -> String {
         tool_lines.join("\n")
     };
 
-    format!(
+    let base = format!(
         "You are Mira, an interactive coding agent.\n\
          Working directory: {cwd}\n\n\
          Available tools:\n{tools_block}\n\n\
@@ -241,9 +265,42 @@ pub fn system_prompt(cwd: &std::path::Path, registry: &Registry) -> String {
          else instead of claiming you can't do it.\n\n\
          Prefer tool use over guessing. Read files before editing them; use \
          `edit_file` with enough context in `old_string` to disambiguate. \
-         When running commands, keep them small and explain what you're doing.",
+         When running commands, keep them small and explain what you're doing.\n\n\
+         PLANNING RULE (mandatory).\n\
+         Before you write, edit, or run any command for a request that will \
+         touch more than one file OR requires more than a couple of discrete \
+         actions, you MUST call the `plan` tool first with a concrete \
+         step-by-step proposal, then wait for the user's approval before \
+         executing.\n\n\
+         Examples that REQUIRE `plan`: refactors, splitting a file, renaming \
+         across the codebase, adding a feature that touches multiple modules, \
+         adding a new endpoint plus its tests, migrations, cross-cutting \
+         cleanup.\n\
+         Examples that SKIP `plan`: fix a typo, rename one local variable, \
+         run one command, answer a question by reading files, read + \
+         summarize existing code.\n\n\
+         When in doubt: plan. A short approved plan beats starting to edit \
+         and having to backtrack.",
         cwd = cwd.display(),
-    )
+    );
+
+    // Append user/project memory (if any exists) so per-repo conventions and
+    // per-user preferences reach the model on every turn. Missing files are
+    // silently skipped — no forced ceremony for first-time users.
+    let memory = mira_config::load_memory_files(cwd);
+    if memory.is_empty() {
+        return base;
+    }
+    let mut out = base;
+    out.push_str("\n\n---\n");
+    for m in memory {
+        let header = match m.kind {
+            mira_config::MemoryKind::User => "User memory (from ~/.mira/MIRA.md)",
+            mira_config::MemoryKind::Project => "Project memory (from .mira/MIRA.md)",
+        };
+        out.push_str(&format!("\n## {header}\n\n{}\n", m.content.trim()));
+    }
+    out
 }
 
 /// First sentence of a tool description — used to keep the system-prompt

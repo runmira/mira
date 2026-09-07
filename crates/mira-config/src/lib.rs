@@ -81,6 +81,12 @@ pub struct ProviderConfig {
     pub api_key_env: Option<String>,
     #[serde(default)]
     pub extra_headers: BTreeMap<String, String>,
+    /// Opt in to Anthropic-style prompt caching (marks the system prompt
+    /// with `cache_control: ephemeral`). `None` = auto: on for the
+    /// `anthropic` provider name and any base_url containing `anthropic.com`;
+    /// off otherwise. Set explicitly to force one way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_caching: Option<bool>,
 }
 
 impl ProviderConfig {
@@ -97,6 +103,17 @@ impl ProviderConfig {
         }
         std::env::var("MIRA_API_KEY").ok()
     }
+}
+
+/// Effective prompt-caching decision given a provider name, resolved base
+/// URL, and the (possibly None) explicit override from `ProviderConfig`.
+/// The rule: explicit `Some(x)` always wins; otherwise auto-enable for
+/// Anthropic-flavored endpoints and leave off for everything else.
+pub fn prompt_caching_enabled(name: &str, base_url: &str, explicit: Option<bool>) -> bool {
+    if let Some(v) = explicit {
+        return v;
+    }
+    name.eq_ignore_ascii_case("anthropic") || base_url.contains("anthropic.com")
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -221,6 +238,86 @@ pub fn state_path() -> PathBuf {
         .unwrap_or_default()
         .join(".mira")
         .join("state.yaml")
+}
+
+/// One loaded memory file. Kept as a struct (rather than just `String`) so
+/// the caller can label it in the system prompt — the model reads better
+/// when it knows a section is "user-level" vs "project-level".
+#[derive(Clone, Debug)]
+pub struct MemoryFile {
+    pub kind: MemoryKind,
+    pub path: PathBuf,
+    pub content: String,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum MemoryKind {
+    /// `~/.mira/MIRA.md` — user's global preferences and conventions.
+    User,
+    /// `<cwd>/.mira/MIRA.md` — repo-specific rules and context.
+    Project,
+}
+
+/// Cap on each memory file. A runaway MIRA.md shouldn't blow the model's
+/// context window; the surplus is elided with a marker so the user notices.
+const MEMORY_MAX_BYTES: usize = 32 * 1024;
+
+/// Load user + project memory files for the given cwd. Missing files are
+/// skipped silently — the model just doesn't see that section. Files past
+/// [`MEMORY_MAX_BYTES`] are truncated with a marker rather than refused so
+/// a badly-sized file doesn't break the whole session.
+///
+/// Ordering: user memory first, project memory second. Later content has
+/// more weight in typical LLM behaviour, so project-specific rules override
+/// user-global preferences when they conflict.
+pub fn load_memory_files(cwd: &Path) -> Vec<MemoryFile> {
+    let mut out = Vec::new();
+    if let Some(m) = read_memory(MemoryKind::User, &user_memory_path()) {
+        out.push(m);
+    }
+    if let Some(m) = read_memory(MemoryKind::Project, &cwd.join(".mira").join("MIRA.md")) {
+        out.push(m);
+    }
+    out
+}
+
+fn read_memory(kind: MemoryKind, path: &Path) -> Option<MemoryFile> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let content = if raw.len() > MEMORY_MAX_BYTES {
+        let cut = floor_char_boundary(&raw, MEMORY_MAX_BYTES);
+        format!(
+            "{}\n\n… [memory file truncated at {MEMORY_MAX_BYTES} bytes; the rest was skipped]",
+            &raw[..cut]
+        )
+    } else {
+        raw
+    };
+    // Skip files that are effectively empty — user probably created a
+    // placeholder they haven't filled in yet.
+    if content.trim().is_empty() {
+        return None;
+    }
+    Some(MemoryFile {
+        kind,
+        path: path.to_path_buf(),
+        content,
+    })
+}
+
+pub fn user_memory_path() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default()
+        .join(".mira")
+        .join("MIRA.md")
+}
+
+fn floor_char_boundary(s: &str, at: usize) -> usize {
+    let mut i = at.min(s.len());
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
 }
 
 /// Sensible base_url defaults for well-known provider names.

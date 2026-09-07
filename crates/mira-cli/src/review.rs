@@ -58,6 +58,7 @@ pub async fn run(cli: &crate::Cli, args: ReviewArgs) -> Result<()> {
             base_url: settings.base_url.clone(),
             api_key: settings.api_key.clone(),
             extra_headers: settings.extra_headers.clone(),
+            prompt_caching: settings.prompt_caching,
         })
         .context("build provider")?,
     );
@@ -105,7 +106,9 @@ fn collect_diff(args: &ReviewArgs, cwd: &Path) -> Result<String> {
     if let Some(path) = &args.diff {
         return if path == "-" {
             let mut buf = String::new();
-            std::io::stdin().read_to_string(&mut buf).context("read stdin")?;
+            std::io::stdin()
+                .read_to_string(&mut buf)
+                .context("read stdin")?;
             Ok(buf)
         } else {
             std::fs::read_to_string(path).with_context(|| format!("read {path}"))
@@ -243,7 +246,12 @@ impl ProgressSink for StderrProgress {
                     if total == 1 { "" } else { "s" },
                 );
             }
-            Progress::Stage2Item { index, total, title, kept } => {
+            Progress::Stage2Item {
+                index,
+                total,
+                title,
+                kept,
+            } => {
                 if let Some(kept) = kept {
                     let (verb, color) = if kept {
                         ("kept", crossterm::style::Color::White)
@@ -258,8 +266,10 @@ impl ProgressSink for StderrProgress {
                 }
             }
             Progress::Completed { kept, dropped } => {
-                eprintln!("{} done: {kept} kept, {dropped} dropped",
-                    "▸".with(crossterm::style::Color::Cyan));
+                eprintln!(
+                    "{} done: {kept} kept, {dropped} dropped",
+                    "▸".with(crossterm::style::Color::Cyan)
+                );
             }
         }
     }
@@ -297,10 +307,18 @@ fn render(findings: &[Finding]) {
             println!("    {line}");
         }
         if let Some(fix) = &f.suggested_fix {
-            println!("    {} {}", "fix:".with(crossterm::style::Color::Green), fix);
+            println!(
+                "    {} {}",
+                "fix:".with(crossterm::style::Color::Green),
+                fix
+            );
         }
         if let Some(note) = &f.verify_note {
-            println!("    {} {}", "verified:".with(crossterm::style::Color::DarkGrey), note);
+            println!(
+                "    {} {}",
+                "verified:".with(crossterm::style::Color::DarkGrey),
+                note
+            );
         }
         println!();
     }

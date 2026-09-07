@@ -35,10 +35,19 @@ pub fn spawn_if_needed(
             return;
         }
         let history = session.history().await;
-        let user_msg = history.iter().find(|m| m.role == Role::User).and_then(|m| m.content.clone());
+        let user_msg = history
+            .iter()
+            .find(|m| m.role == Role::User)
+            .and_then(|m| m.content.clone());
         let assistant_msg = history
             .iter()
-            .find(|m| m.role == Role::Assistant && m.content.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false))
+            .find(|m| {
+                m.role == Role::Assistant
+                    && m.content
+                        .as_deref()
+                        .map(|s| !s.trim().is_empty())
+                        .unwrap_or(false)
+            })
             .and_then(|m| m.content.clone());
         let (Some(user), Some(assistant)) = (user_msg, assistant_msg) else {
             // Not enough context — leave title unset. We'll try again after
@@ -135,13 +144,22 @@ mod tests {
 
     #[test]
     fn sanitize_strips_quotes_and_trailing_punct() {
-        assert_eq!(sanitize("\"Set up Swift macOS app project.\""), "Set up Swift macOS app project");
-        assert_eq!(sanitize("**Fix video aspect ratios**"), "Fix video aspect ratios");
+        assert_eq!(
+            sanitize("\"Set up Swift macOS app project.\""),
+            "Set up Swift macOS app project"
+        );
+        assert_eq!(
+            sanitize("**Fix video aspect ratios**"),
+            "Fix video aspect ratios"
+        );
         assert_eq!(sanitize("Respond to greeting"), "Respond to greeting");
     }
 
     #[test]
     fn sanitize_takes_first_line() {
-        assert_eq!(sanitize("Respond to greeting\nExplanation here"), "Respond to greeting");
+        assert_eq!(
+            sanitize("Respond to greeting\nExplanation here"),
+            "Respond to greeting"
+        );
     }
 }

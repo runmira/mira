@@ -36,6 +36,26 @@ pub struct SessionSummary {
     pub first_user_message: Option<String>,
     /// True if this session is the one currently active on the server.
     pub active: bool,
+    /// Merge state of the session's worktree branch relative to `main`/
+    /// `master` in the primary repo. Only populated for sessions whose cwd
+    /// is a Mira-created worktree (`…/.mira/worktrees/<branch>`); `None`
+    /// otherwise (regular session, deleted worktree, no git, etc.).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree_status: Option<WorktreeMergeStatus>,
+    /// Branch name of the worktree, when [`worktree_status`] is set. Shown
+    /// as a tooltip on the merge indicator.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree_branch: Option<String>,
+}
+
+/// Where a worktree branch sits relative to its primary repo's base branch.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeMergeStatus {
+    /// Ancestor of `main`/`master` — safe to prune.
+    Merged,
+    /// Not yet merged; carries commits the base branch doesn't have.
+    Unmerged,
 }
 
 const FIRST_MSG_TRUNC: usize = 80;
@@ -48,10 +68,7 @@ pub struct ListQuery {
     pub all: bool,
 }
 
-pub async fn list_sessions(
-    State(state): State<AppState>,
-    Query(q): Query<ListQuery>,
-) -> Response {
+pub async fn list_sessions(State(state): State<AppState>, Query(q): Query<ListQuery>) -> Response {
     let Some(store) = state.store.clone() else {
         return Json(Vec::<SessionSummary>::new()).into_response();
     };
@@ -277,6 +294,7 @@ fn summarize(r: &SessionRecord, active_id: &str) -> SessionSummary {
         .map(|s| truncate(&s, FIRST_MSG_TRUNC));
     let id = r.id.to_string();
     let active = id == active_id;
+    let (worktree_status, worktree_branch) = detect_worktree_status(&r.cwd);
     SessionSummary {
         id,
         model: r.cfg.model.clone(),
@@ -287,7 +305,114 @@ fn summarize(r: &SessionRecord, active_id: &str) -> SessionSummary {
         title: r.title.clone(),
         first_user_message: first,
         active,
+        worktree_status,
+        worktree_branch,
     }
+}
+
+/// Recognise Mira-created worktrees by their canonical path shape
+/// (`…/.mira/worktrees/<branch>`) and report whether their branch has been
+/// merged into `main`/`master` in the primary repo. Anything else — regular
+/// project cwd, deleted worktree dir, non-git folder — returns `(None, None)`.
+///
+/// Runs a small handful of `git` shell-outs. At ~200 sessions this adds a
+/// perceptible pause to `GET /api/sessions?all=1`; if that becomes a problem
+/// we can memoise per (primary_repo, branch).
+fn detect_worktree_status(cwd: &std::path::Path) -> (Option<WorktreeMergeStatus>, Option<String>) {
+    // Cheap prefilter: the path must contain the Mira worktrees folder.
+    // Handles `some/.mira/worktrees/foo` and `foo/.mira/worktrees/bar`.
+    if !cwd
+        .components()
+        .zip(cwd.components().skip(1))
+        .zip(cwd.components().skip(2))
+        .any(|((a, b), c)| {
+            use std::path::Component::Normal;
+            let (Normal(a), Normal(b), Normal(c)) = (a, b, c) else {
+                return false;
+            };
+            a == std::ffi::OsStr::new(".mira")
+                && b == std::ffi::OsStr::new("worktrees")
+                && !c.is_empty()
+        })
+    {
+        return (None, None);
+    }
+    if !cwd.is_dir() {
+        // Worktree directory was deleted — nothing to report.
+        return (None, None);
+    }
+
+    let branch = match git_output(cwd, &["symbolic-ref", "--quiet", "--short", "HEAD"]) {
+        Some(b) if !b.is_empty() => b,
+        _ => return (None, None),
+    };
+
+    // Primary repo lives at the parent of `--git-common-dir` (which points at
+    // `<primary>/.git`).
+    let common_dir = match git_output(
+        cwd,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    ) {
+        Some(s) => std::path::PathBuf::from(s),
+        None => return (None, Some(branch)),
+    };
+    let primary = match common_dir.parent() {
+        Some(p) => p.to_path_buf(),
+        None => return (None, Some(branch)),
+    };
+
+    // Try main then master; whichever exists is the base. If neither does,
+    // we can't compute a merge status, so leave it null.
+    let base = ["main", "master"]
+        .iter()
+        .copied()
+        .find(|b| branch_exists(&primary, b));
+    let Some(base) = base else {
+        return (None, Some(branch));
+    };
+    if branch == base {
+        // On the base branch itself — a "worktree" of main isn't unusual;
+        // don't badge it.
+        return (None, Some(branch));
+    }
+
+    let status = if is_ancestor(&primary, &branch, base) {
+        WorktreeMergeStatus::Merged
+    } else {
+        WorktreeMergeStatus::Unmerged
+    };
+    (Some(status), Some(branch))
+}
+
+fn git_output(cwd: &std::path::Path, args: &[&str]) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .current_dir(cwd)
+        .args(args)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
+fn branch_exists(cwd: &std::path::Path, name: &str) -> bool {
+    std::process::Command::new("git")
+        .current_dir(cwd)
+        .args(["show-ref", "--verify", "--quiet"])
+        .arg(format!("refs/heads/{name}"))
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn is_ancestor(cwd: &std::path::Path, branch: &str, base: &str) -> bool {
+    std::process::Command::new("git")
+        .current_dir(cwd)
+        .args(["merge-base", "--is-ancestor", branch, base])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 fn truncate(s: &str, max: usize) -> String {

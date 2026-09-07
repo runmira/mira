@@ -2,8 +2,12 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   CaretDown,
   CaretRight,
+  CircleNotch,
   DotsThree,
   Folder,
+  GitBranch,
+  GitMerge,
+  IconContext,
   NotePencil,
   PuzzlePiece,
   SlidersHorizontal,
@@ -11,7 +15,7 @@ import {
   Trash,
 } from '@phosphor-icons/react';
 import { deleteSession, listSessions, loadSession } from '../api';
-import type { SessionSummary } from '../types';
+import type { SessionSummary, WorktreeMergeStatus } from '../types';
 import type { WsStatus } from '../ws';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
@@ -20,6 +24,9 @@ type Props = {
   status: WsStatus;
   cwd: string;
   activeSessionId: string;
+  /** True when the active session is currently streaming — drives the
+   *  pulsing indicator on that row. */
+  activeBusy: boolean;
   refreshKey: number;
   onNewChat: () => void;
   onOpenSettings: () => void;
@@ -31,7 +38,7 @@ const COLLAPSED_KEY = 'mira.sidebar.collapsed-projects';
 const PER_GROUP_LIMIT = 5;
 
 export function Sidebar({
-  status, cwd, activeSessionId, refreshKey, onNewChat, onOpenSettings, onOpenPicker, onSessionLoaded,
+  status, cwd, activeSessionId, activeBusy, refreshKey, onNewChat, onOpenSettings, onOpenPicker, onSessionLoaded,
 }: Props) {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -92,6 +99,10 @@ export function Sidebar({
   }
 
   return (
+    // Match the composer: every icon in the sidebar renders in Phosphor's
+    // `fill` weight for a chunkier, more Codex-like look. Nested contexts
+    // don't leak out — the root of the app stays on its own default.
+    <IconContext.Provider value={{ weight: 'fill', size: '1em', mirrored: false }}>
     <aside className="flex h-full min-w-0 flex-col border-r border-border bg-card">
       <div className="flex items-center justify-between px-3 pt-3.5 pb-2">
         <span className="text-[15px] font-semibold tracking-tight">Mira</span>
@@ -111,7 +122,7 @@ export function Sidebar({
         </nav>
 
         <div className="mt-4 flex flex-col gap-0.5 px-0.5">
-          <div className="px-2.5 py-1 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground/70">
+          <div className="px-2.5 py-1 text-[11.5px] font-semibold uppercase tracking-wider text-muted-foreground/80">
             Projects
           </div>
           {error && <Empty>error: {error}</Empty>}
@@ -126,7 +137,7 @@ export function Sidebar({
             return (
               <div key={g.cwd} className="flex flex-col">
                 <div
-                  className="group flex items-center gap-1.5 rounded-md px-2 py-1 text-[13px] text-muted-foreground transition-colors hover:bg-accent/50 hover:text-foreground"
+                  className="group flex items-center gap-1.5 rounded-md px-2 py-1 text-[14px] text-foreground/90 transition-colors hover:bg-accent/50 hover:text-foreground"
                   title={g.cwd}
                 >
                   <button
@@ -165,20 +176,25 @@ export function Sidebar({
                         // even when the nickname has replaced the row label.
                         title={s.first_user_message ?? s.title ?? s.id}
                         className={cn(
-                          'group grid w-full grid-cols-[1fr_auto_auto] items-center gap-1 rounded-md px-2 py-1.5 text-[12.5px] transition-colors',
+                          'group grid w-full grid-cols-[1fr_auto_auto] items-center gap-1 rounded-md px-2 py-1.5 text-[13.5px] transition-colors',
                           s.id === activeSessionId
                             ? 'bg-accent text-foreground'
-                            : 'text-muted-foreground hover:bg-accent/60 hover:text-foreground',
+                            : 'text-foreground/90 hover:bg-accent/60 hover:text-foreground',
                         )}
                       >
                         <button
                           type="button"
                           onClick={() => pickSession(s.id)}
-                          className="min-w-0 truncate text-left"
+                          className="flex min-w-0 flex-col items-start text-left"
                         >
-                          {s.first_user_message ?? 'Untitled'}
+                          <span className="w-full truncate">{s.first_user_message ?? 'Untitled'}</span>
+                          <ModelSubline model={s.model} />
                         </button>
-                        <span className="text-[10.5px] text-muted-foreground/70 group-hover:opacity-0 transition-opacity">
+                        <span className="flex items-center gap-1.5 text-[11.5px] text-muted-foreground/80 group-hover:opacity-0 transition-opacity">
+                          {s.id === activeSessionId && activeBusy && <BusySpinner />}
+                          {s.worktree_status && (
+                            <WorktreeBadge status={s.worktree_status} branch={s.worktree_branch ?? undefined} />
+                          )}
                           {timeAgo(s.updated_at)}
                         </span>
                         <RowMenu
@@ -197,7 +213,7 @@ export function Sidebar({
                     {overflow > 0 && (
                       <button
                         onClick={() => toggleShowMore(g.cwd)}
-                        className="px-2 py-1 text-left text-[11.5px] text-muted-foreground/70 transition-colors hover:text-foreground"
+                        className="px-2 py-1 text-left text-[12.5px] text-muted-foreground/80 transition-colors hover:text-foreground"
                       >
                         Show {overflow} more
                       </button>
@@ -205,7 +221,7 @@ export function Sidebar({
                     {expandedAll && g.sessions.length > PER_GROUP_LIMIT && (
                       <button
                         onClick={() => toggleShowMore(g.cwd)}
-                        className="px-2 py-1 text-left text-[11.5px] text-muted-foreground/70 transition-colors hover:text-foreground"
+                        className="px-2 py-1 text-left text-[12.5px] text-muted-foreground/80 transition-colors hover:text-foreground"
                       >
                         Show less
                       </button>
@@ -218,26 +234,26 @@ export function Sidebar({
         </div>
 
         <div className="mt-3 flex flex-col gap-0.5 px-0.5">
-          <div className="px-2.5 py-1 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground/70">
+          <div className="px-2.5 py-1 text-[11.5px] font-semibold uppercase tracking-wider text-muted-foreground/80">
             Folder
           </div>
           <button
             onClick={onOpenPicker}
             title={cwd || 'Choose a folder'}
-            className="group grid w-full grid-cols-[1fr_auto] items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[13px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+            className="group grid w-full grid-cols-[1fr_auto] items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[14px] text-foreground/90 transition-colors hover:bg-accent hover:text-foreground"
           >
             <span className="flex min-w-0 items-center gap-2">
               <Folder className="size-3.5 shrink-0 text-muted-foreground/70" />
               <span className="truncate">{shortenPath(cwd) || 'Choose folder…'}</span>
             </span>
-            <span className="text-[11px] text-muted-foreground/60 group-hover:text-muted-foreground">change</span>
+            <span className="text-[12px] text-muted-foreground/70 group-hover:text-muted-foreground">change</span>
           </button>
         </div>
       </div>
 
       <div className="flex items-center gap-2 border-t border-border px-3 py-2.5">
         <span className={cn('size-1.5 shrink-0 rounded-full', dotColor(status))} />
-        <span className="min-w-0 flex-1 truncate text-[11.5px] text-muted-foreground" title={cwd}>
+        <span className="min-w-0 flex-1 truncate text-[12.5px] text-foreground/85" title={cwd}>
           {shortenPath(cwd) || 'connecting…'}
         </span>
         <button
@@ -249,6 +265,7 @@ export function Sidebar({
         </button>
       </div>
     </aside>
+    </IconContext.Provider>
   );
 }
 
@@ -328,7 +345,7 @@ function NavItem({
       onClick={onClick}
       title={disabled ? 'Not implemented yet' : undefined}
       className={cn(
-        'flex w-full items-center gap-2.5 rounded-md px-2.5 py-1.5 text-left text-[13.5px] transition-colors',
+        'flex w-full items-center gap-2.5 rounded-md px-2.5 py-1.5 text-left text-[14.5px] transition-colors',
         disabled
           ? 'text-muted-foreground/40 cursor-not-allowed'
           : 'text-foreground hover:bg-accent',
@@ -343,7 +360,7 @@ function NavItem({
 }
 
 function Empty({ children }: { children: React.ReactNode }) {
-  return <div className="px-2.5 py-1 text-[12px] text-muted-foreground/50">{children}</div>;
+  return <div className="px-2.5 py-1 text-[13px] text-muted-foreground/60">{children}</div>;
 }
 
 function dotColor(s: WsStatus): string {
@@ -370,6 +387,102 @@ function shortenPath(p: string): string {
   const parts = p.split('/');
   if (parts.length <= 3) return p;
   return '…/' + parts.slice(-2).join('/');
+}
+
+/* ---------- row status indicators ---------- */
+
+/** Circular spinner rendered on the active session row while it's streaming.
+ *  Uses Phosphor's CircleNotch with Tailwind's spin animation — matches the
+ *  spinner in ReviewPanel so the app has one canonical "in-flight" affordance. */
+function BusySpinner() {
+  // Phosphor icons don't accept `title` directly; wrap in a span so the
+  // tooltip works.
+  return (
+    <span className="inline-flex" title="Working…" aria-label="working">
+      <CircleNotch className="size-3 animate-spin text-mira-blue" />
+    </span>
+  );
+}
+
+/** Merge state of the session's worktree branch. Filled purple `git-merge`
+ *  icon = merged into base; muted `git-branch` outline = still open. Nothing
+ *  is shown for regular (non-worktree) sessions. */
+function WorktreeBadge({ status, branch }: { status: WorktreeMergeStatus; branch?: string }) {
+  const merged = status === 'merged';
+  const title = merged
+    ? `${branch ?? 'branch'} — merged into main`
+    : `${branch ?? 'branch'} — not merged`;
+  return (
+    <span
+      className={cn(
+        'inline-flex size-3.5 items-center justify-center',
+        merged ? 'text-mira-purple' : 'text-muted-foreground/60',
+      )}
+      title={title}
+      aria-label={title}
+    >
+      {merged ? <GitMerge className="size-3" /> : <GitBranch className="size-3" />}
+    </span>
+  );
+}
+
+/* ---------- model subline (provider dot + truncated model name) ---------- */
+
+/** Tiny second line under each session title. A colored dot classifies the
+ *  provider family (OpenAI / Anthropic / Meta / Google / …) and the model
+ *  name follows, truncated so the timestamp column stays intact. Cheap and
+ *  swap-friendly — if you want real vendor SVGs later, replace the dot with
+ *  an icon lookup here and nothing else changes. */
+function ModelSubline({ model }: { model: string }) {
+  if (!model) return null;
+  const { color, family } = providerFamily(model);
+  return (
+    <span className="mt-0.5 flex w-full items-center gap-1 text-[11.5px] font-normal text-muted-foreground/80">
+      <span className={cn('inline-block size-1.5 shrink-0 rounded-full', color)} title={family} />
+      <span className="min-w-0 truncate font-mono">{shortModel(model)}</span>
+    </span>
+  );
+}
+
+/** Prefix-match model id → provider family. Longer prefixes first so
+ *  `gpt-4o-mini` doesn't collide with `gpt-4o`. Colors picked to be
+ *  distinguishable on a dark background without shouting. */
+function providerFamily(model: string): { family: string; color: string } {
+  const m = model.toLowerCase();
+  const table: [RegExp, string, string][] = [
+    [/(^|\/)o1(-|$)/,           'openai',    'bg-emerald-500'],
+    [/(^|\/)o3(-|$)/,           'openai',    'bg-emerald-500'],
+    [/(^|\/)gpt-/,              'openai',    'bg-emerald-500'],
+    [/claude/,                  'anthropic', 'bg-orange-500'],
+    [/gemini/,                  'google',    'bg-amber-400'],
+    [/deepseek/,                'deepseek',  'bg-mira-blue'],
+    [/llama/,                   'meta',      'bg-mira-purple'],
+    [/qwen/,                    'alibaba',   'bg-pink-500'],
+    [/mistral|mixtral/,         'mistral',   'bg-orange-400'],
+    [/grok|xai/,                'xai',       'bg-slate-300'],
+    [/moonshot|kimi/,           'moonshot',  'bg-fuchsia-400'],
+    [/phi/,                     'microsoft', 'bg-cyan-400'],
+  ];
+  for (const [rx, family, color] of table) {
+    if (rx.test(m)) return { family, color };
+  }
+  return { family: 'other', color: 'bg-muted-foreground/60' };
+}
+
+/** Trim `openrouter/openai/gpt-4o-mini-2024-07-18` → `gpt-4o-mini` and cap
+ *  at 22 chars. Preserves the meaningful middle segment for models that
+ *  ship dated variants. */
+function shortModel(model: string): string {
+  let m = model;
+  // Drop provider prefix if slash-separated (openrouter style).
+  const lastSlash = m.lastIndexOf('/');
+  if (lastSlash >= 0) m = m.slice(lastSlash + 1);
+  // Strip trailing `-YYYY-MM-DD` snapshot tag.
+  m = m.replace(/-\d{4}-\d{2}-\d{2}$/, '');
+  // Strip common noise suffixes.
+  m = m.replace(/-latest$/, '');
+  if (m.length > 22) m = m.slice(0, 21) + '…';
+  return m;
 }
 
 /* ---------- row overflow menu (extensible) ---------- */

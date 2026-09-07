@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 use mira_sandbox::Sandbox;
 
+use crate::guard::FileGuard;
+
 /// Ambient state made available to every tool invocation.
 ///
 /// This is the seam for adding new capabilities without changing the `Tool`
@@ -16,6 +18,10 @@ pub struct ToolContext {
     pub cwd: PathBuf,
     /// Sandbox that command-running tools should defer to.
     pub sandbox: Arc<Sandbox>,
+    /// Optional per-session file-safety layer: read-watermarks + undo
+    /// snapshots. `None` means the caller didn't wire one up (tests, some
+    /// headless runs); tools should degrade to plain file operations.
+    pub guard: Option<Arc<FileGuard>>,
 }
 
 impl ToolContext {
@@ -23,7 +29,15 @@ impl ToolContext {
         Self {
             cwd: cwd.into(),
             sandbox,
+            guard: None,
         }
+    }
+
+    /// Chainable setter used by the harness after Session::new picks a
+    /// session id — the FileGuard is scoped to that id.
+    pub fn with_guard(mut self, guard: Arc<FileGuard>) -> Self {
+        self.guard = Some(guard);
+        self
     }
 
     /// Resolve a possibly-relative path against `cwd` and ensure the result

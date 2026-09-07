@@ -61,6 +61,14 @@ impl Tool for EditFile {
             ));
         }
 
+        // Refuse to clobber if the file changed on disk since we last read
+        // it. Best-effort — no guard means no check.
+        if let Some(g) = &ctx.guard {
+            g.check_conflict(&path)
+                .await
+                .map_err(|e| ToolError::Failed(e.to_string()))?;
+        }
+
         let contents = fs::read_to_string(&path).await?;
         let count = contents.matches(&args.old_string).count();
 
@@ -80,6 +88,12 @@ impl Tool for EditFile {
             (_, false) => contents.replacen(&args.old_string, &args.new_string, 1),
         };
 
+        // Snapshot pre-image for undo before the write hits disk.
+        if let Some(g) = &ctx.guard {
+            g.snapshot_before(&path)
+                .await
+                .map_err(|e| ToolError::Failed(e.to_string()))?;
+        }
         fs::write(&path, updated.as_bytes()).await?;
 
         Ok(ToolResult::ok(

@@ -68,11 +68,16 @@ pub async fn start_review(
     // Announce, then hand off to a background task so the HTTP request
     // returns immediately — the browser subscribes to the broadcast and
     // sees the rest as it happens.
-    let _ = events_tx.send(ServerMsg::ReviewStarted { run_id: run_id.clone() });
+    let _ = events_tx.send(ServerMsg::ReviewStarted {
+        run_id: run_id.clone(),
+    });
     let run_id_bg = run_id.clone();
     let cwd_bg = cwd.clone();
     tokio::spawn(async move {
-        let sink = BroadcastSink { run_id: run_id_bg.clone(), tx: events_tx.clone() };
+        let sink = BroadcastSink {
+            run_id: run_id_bg.clone(),
+            tx: events_tx.clone(),
+        };
         match mira_review::review(&*provider, &model, &diff, &cwd_bg, verify, &sink).await {
             Ok(findings) => {
                 info!(run_id = %run_id_bg, count = findings.len(), "review finished");

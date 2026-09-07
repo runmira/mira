@@ -12,6 +12,8 @@ use mira_review::{Finding, Progress as ReviewProgress};
 use mira_tools::DiffPreview;
 use serde::{Deserialize, Serialize};
 
+use crate::interactive::{PlanProposal, PromptResponse};
+
 /// Client → server.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -20,6 +22,14 @@ pub enum ClientMsg {
     Send { text: String },
     /// Answer a pending approval prompt.
     Approve { call_id: String, allow: bool },
+    /// Answer an interactive tool prompt (plan review, question, etc.).
+    /// `prompt_id` matches the `prompt_id` on the server frame that opened
+    /// the modal.
+    PromptResponse {
+        prompt_id: String,
+        #[serde(flatten)]
+        response: PromptResponse,
+    },
     /// Hot-swap the model for the next turn.
     SetModel { model: String },
     /// Change the permission mode.
@@ -91,9 +101,15 @@ pub enum ServerMsg {
     /// filters on it so overlapping runs don't scramble each other's UI.
     ReviewStarted { run_id: String },
     /// Streaming progress event from an in-flight review.
-    ReviewProgress { run_id: String, event: ReviewProgress },
+    ReviewProgress {
+        run_id: String,
+        event: ReviewProgress,
+    },
     /// Review finished — final confirmed findings list.
-    ReviewResult { run_id: String, findings: Vec<Finding> },
+    ReviewResult {
+        run_id: String,
+        findings: Vec<Finding>,
+    },
     /// Review aborted with an error (bad diff, provider failure, etc.).
     ReviewError { run_id: String, text: String },
 
@@ -109,6 +125,14 @@ pub enum ServerMsg {
     Usage {
         round: TokenUsage,
         totals: UsageTotals,
+    },
+
+    /// The model called the `plan` tool. Open a review modal so the user can
+    /// approve / edit / cancel. Client answers with
+    /// `ClientMsg::PromptResponse` carrying a `Plan { … }` variant.
+    PlanRequest {
+        prompt_id: String,
+        plan: PlanProposal,
     },
 }
 

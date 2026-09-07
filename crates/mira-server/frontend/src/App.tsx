@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { CaretDown, CaretRight } from '@phosphor-icons/react';
 import { cn } from './lib/utils';
 import { connect, type WsClient, type WsStatus } from './ws';
-import { getSettings, newSession, startReview } from './api';
+import { appendMemory, applyUndo, getSettings, newSession, startReview } from './api';
 import { SettingsPanel } from './components/Settings';
 import { Sidebar } from './components/Sidebar';
 import { Composer } from './components/Composer';
@@ -16,10 +16,13 @@ import {
   ReviewPanel,
   type ReviewState,
 } from './components/ReviewPanel';
+import { PlanCard } from './components/PlanCard';
 import type {
   DiffPreview,
   Message,
   Mode,
+  PlanProposal,
+  PlanStep,
   ServerMsg,
   SettingsView,
   ToolCall,
@@ -34,6 +37,13 @@ type ToolEntry = {
   preview: DiffPreview | null;
   status: ToolStatus;
   result: ToolResult | null;
+  /** Only set for the `plan` tool. `proposal` arrives on `plan_request`;
+   *  `decision` fills in when the user approves/cancels. Rendered inline
+   *  as a full-fledged plan card instead of the generic tool row. */
+  plan?: {
+    proposal: PlanProposal;
+    decision: null | { approved: boolean; steps?: PlanStep[]; note?: string };
+  };
 };
 type WarningEntry = { kind: 'warning'; text: string };
 type ErrorEntry = { kind: 'error'; text: string };
@@ -134,6 +144,11 @@ export default function App() {
   const [, setNowTick] = useState(0);
   const wsRef = useRef<WsClient | null>(null);
   const paneRef = useRef<HTMLDivElement | null>(null);
+  // Plan payloads that arrived *before* their tool_start (race between the
+  // interactive tool's direct broadcast and the harness→WS forwarder). We
+  // stash by call_id and drain on tool_start so no plan ever renders as a
+  // plain running tool row.
+  const pendingProposalsRef = useRef<Map<string, PlanProposal>>(new Map());
 
   useEffect(() => {
     const c = connect(onMessage, setStatus);
@@ -195,7 +210,18 @@ export default function App() {
         break;
       case 'tool_start':
         setThinking(false);
-        setEntries((prev) => upsertToolStart(prev, msg.call));
+        setEntries((prev) => {
+          const withStart = upsertToolStart(prev, msg.call);
+          // If a plan_request arrived before this tool_start (race between
+          // the tool's direct broadcast and the harness forwarder), drain
+          // the queued proposal onto the fresh entry now.
+          const queued = pendingProposalsRef.current.get(msg.call.id);
+          if (queued) {
+            pendingProposalsRef.current.delete(msg.call.id);
+            return attachPlanProposal(withStart, msg.call.id, queued);
+          }
+          return withStart;
+        });
         break;
       case 'tool_end':
         // The model usually starts thinking again after a tool result comes
@@ -259,7 +285,34 @@ export default function App() {
       case 'usage':
         setUsage(msg.totals);
         break;
+      case 'plan_request':
+        // Server reuses the tool call id as the prompt id. Attach immediately
+        // if the tool_start already arrived; otherwise stash the proposal so
+        // tool_start can pick it up when it lands (see the tool_start case).
+        setEntries((prev) => {
+          const hit = prev.some((e) => e.kind === 'tool' && e.call.id === msg.prompt_id);
+          if (!hit) {
+            pendingProposalsRef.current.set(msg.prompt_id, msg.plan);
+            return prev;
+          }
+          return attachPlanProposal(prev, msg.prompt_id, msg.plan);
+        });
+        break;
     }
+  }
+
+  function replyToPlan(callId: string, approved: boolean, steps?: PlanStep[], note?: string) {
+    wsRef.current?.send({
+      type: 'prompt_response',
+      prompt_id: callId,
+      kind: 'plan',
+      approved,
+      steps,
+      note,
+    });
+    // Record the decision locally so the card switches to its resolved state
+    // immediately, without waiting for tool_end to round-trip.
+    setEntries((prev) => recordPlanDecision(prev, callId, { approved, steps, note }));
   }
 
   async function runReview(args: string) {
@@ -349,6 +402,7 @@ export default function App() {
         status={status}
         cwd={cwd}
         activeSessionId={sessionId}
+        activeBusy={busy}
         refreshKey={sidebarRefresh}
         onNewChat={onNewChat}
         onOpenSettings={() => setSettingsOpen(true)}
@@ -405,6 +459,7 @@ export default function App() {
                   expanded={expandedTurns.has(i)}
                   onToggle={() => toggleTurn(i)}
                   onDecide={decideApproval}
+                  onPlanReply={replyToPlan}
                   isActive={busy && i === turns.length - 1}
                 />
               ))}
@@ -433,6 +488,15 @@ export default function App() {
           onNewChat={onNewChat}
           onOpenSettings={() => setSettingsOpen(true)}
           onRunReview={runReview}
+          onRemember={async (scope, text) => {
+            const r = await appendMemory(scope, text);
+            return `remembered → ${r.path}`;
+          }}
+          onUndo={async (count) => {
+            const r = await applyUndo(count);
+            if (r.applied.length === 0) return 'nothing to undo';
+            return `reverted ${r.applied.length} write${r.applied.length === 1 ? '' : 's'}`;
+          }}
         />
       </main>
 
@@ -495,6 +559,24 @@ function updateTool(prev: Entry[], callId: string, f: (t: ToolEntry) => ToolEntr
     }
   }
   return prev;
+}
+
+function attachPlanProposal(prev: Entry[], callId: string, proposal: PlanProposal): Entry[] {
+  return updateTool(prev, callId, (t) => ({
+    ...t,
+    plan: { proposal, decision: null },
+  }));
+}
+
+function recordPlanDecision(
+  prev: Entry[],
+  callId: string,
+  decision: { approved: boolean; steps?: PlanStep[]; note?: string },
+): Entry[] {
+  return updateTool(prev, callId, (t) => {
+    if (!t.plan) return t;
+    return { ...t, plan: { ...t.plan, decision } };
+  });
 }
 
 function countUserMessages(entries: Entry[]): number {
@@ -569,7 +651,7 @@ function groupByTurn(entries: Entry[]): Turn[] {
 /* ---------- turn renderer ---------- */
 
 function TurnView({
-  turn, timing, expanded, isActive, onToggle, onDecide,
+  turn, timing, expanded, isActive, onToggle, onDecide, onPlanReply,
 }: {
   turn: Turn;
   timing: TurnTiming | null;
@@ -577,6 +659,7 @@ function TurnView({
   isActive: boolean;
   onToggle: () => void;
   onDecide: (callId: string, allow: boolean) => void;
+  onPlanReply: (callId: string, approved: boolean, steps?: PlanStep[], note?: string) => void;
 }) {
   // Split the body into "intermediate work" and the final assistant text.
   // Rule: the LAST assistant text message with non-empty content is the
@@ -604,7 +687,7 @@ function TurnView({
 
   return (
     <>
-      {turn.user && <EntryView entry={turn.user} onDecide={onDecide} />}
+      {turn.user && <EntryView entry={turn.user} onDecide={onDecide} onPlanReply={onPlanReply} />}
 
       {showWorkedChip && (
         <WorkedForChip
@@ -617,12 +700,12 @@ function TurnView({
       )}
 
       {(effectivelyExpanded || !showWorkedChip) && intermediate.map((e, i) => (
-        <EntryView key={`t-i-${i}`} entry={e} onDecide={onDecide} />
+        <EntryView key={`t-i-${i}`} entry={e} onDecide={onDecide} onPlanReply={onPlanReply} />
       ))}
 
-      {finalEntry && <EntryView entry={finalEntry} onDecide={onDecide} />}
+      {finalEntry && <EntryView entry={finalEntry} onDecide={onDecide} onPlanReply={onPlanReply} />}
       {trailing.map((e, i) => (
-        <EntryView key={`t-t-${i}`} entry={e} onDecide={onDecide} />
+        <EntryView key={`t-t-${i}`} entry={e} onDecide={onDecide} onPlanReply={onPlanReply} />
       ))}
     </>
   );
@@ -692,9 +775,11 @@ function EmptyState() {
 function EntryView({
   entry,
   onDecide,
+  onPlanReply,
 }: {
   entry: Entry;
   onDecide: (callId: string, allow: boolean) => void;
+  onPlanReply: (callId: string, approved: boolean, steps?: PlanStep[], note?: string) => void;
 }) {
   switch (entry.kind) {
     case 'msg': {
@@ -720,6 +805,20 @@ function EntryView({
       );
     }
     case 'tool':
+      // The `plan` tool gets a dedicated inline card with an editable step
+      // list; everything else falls through to the generic tool row.
+      if (entry.plan) {
+        return (
+          <div className="flex justify-start">
+            <PlanCard
+              proposal={entry.plan.proposal}
+              decision={entry.plan.decision}
+              onApprove={(steps) => onPlanReply(entry.call.id, true, steps)}
+              onCancel={(note) => onPlanReply(entry.call.id, false, undefined, note || undefined)}
+            />
+          </div>
+        );
+      }
       return (
         <div className="flex justify-start">
           <ToolCard
@@ -731,12 +830,61 @@ function EntryView({
           />
         </div>
       );
-    case 'warning':
+    case 'warning': {
+      // Special channels riding the warning stream get their own chip:
+      //   `[undo] ...`          → green success chip
+      //   `[file-conflict] ...` → amber warning chip
+      //   `[verify] … passed`   → green success chip
+      //   `[verify] … failed`   → amber warning chip
+      //   `[verify] running`    → blue in-flight chip
+      // Everything else stays the compact monospace `! …` line.
+      const undo = entry.text.match(/^\[undo\]\s*(.*)$/);
+      const conflict = entry.text.match(/^\[file-conflict\]\s*(.*)$/);
+      const verify = entry.text.match(/^\[verify\]\s*(.*)$/);
+      if (undo) {
+        return (
+          <div className="flex justify-start">
+            <div className="inline-flex items-start gap-2 rounded-md border border-emerald-500/25 bg-emerald-500/[0.06] px-3 py-1.5 text-[12.5px] text-emerald-300">
+              <span className="font-semibold">↩ undo</span>
+              <span className="min-w-0 break-words text-emerald-200/90">{undo[1]}</span>
+            </div>
+          </div>
+        );
+      }
+      if (conflict) {
+        return (
+          <div className="flex justify-start">
+            <div className="inline-flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-[12.5px] text-amber-200">
+              <span className="font-semibold">⚠ file conflict</span>
+              <span className="min-w-0 break-words text-amber-100/90">{conflict[1]}</span>
+            </div>
+          </div>
+        );
+      }
+      if (verify) {
+        const body = verify[1];
+        const passed = /passed/i.test(body);
+        const running = /running/i.test(body);
+        const cls = passed
+          ? 'border-emerald-500/25 bg-emerald-500/[0.06] text-emerald-300'
+          : running
+            ? 'border-mira-blue/25 bg-mira-blue/[0.06] text-mira-blue'
+            : 'border-amber-500/30 bg-amber-500/10 text-amber-200';
+        return (
+          <div className="flex justify-start">
+            <div className={cn('inline-flex items-start gap-2 rounded-md border px-3 py-1.5 text-[12.5px]', cls)}>
+              <span className="font-semibold">✓ verify</span>
+              <span className="min-w-0 break-words opacity-90">{body}</span>
+            </div>
+          </div>
+        );
+      }
       return (
         <div className="flex justify-start">
           <div className="font-mono text-xs text-mira-tool">! {entry.text}</div>
         </div>
       );
+    }
     case 'error':
       return (
         <div className="flex justify-start">

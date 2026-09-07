@@ -40,6 +40,13 @@ pub struct GitStatusView {
     /// `true` when the current cwd is a linked worktree (as opposed to the
     /// primary git dir). Used by the UI so the toggle can say "back to main".
     pub is_worktree: bool,
+    /// Basename of the primary worktree — the project as the user thinks of
+    /// it (`mira`), independent of which worktree folder we're currently in
+    /// (`diff-tes` etc.). The UI prefers this over the cwd's basename when
+    /// `is_worktree` is true so switching branches doesn't visually change
+    /// the project.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary_project: Option<String>,
     pub worktrees: Vec<WorktreeEntry>,
 }
 
@@ -70,6 +77,7 @@ pub async fn get_status(State(state): State<AppState>) -> Response {
             ahead: 0,
             behind: 0,
             is_worktree: false,
+            primary_project: None,
             worktrees: vec![],
         })
         .into_response();
@@ -86,6 +94,8 @@ pub async fn get_status(State(state): State<AppState>) -> Response {
         (Some(g), Some(c)) => g != c,
         _ => false,
     };
+    let primary_project = primary_worktree(&cwd)
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
 
     Json(GitStatusView {
         in_repo: true,
@@ -94,6 +104,7 @@ pub async fn get_status(State(state): State<AppState>) -> Response {
         ahead,
         behind,
         is_worktree,
+        primary_project,
         worktrees,
     })
     .into_response()
@@ -116,7 +127,12 @@ pub async fn create_worktree(
     // so switching back to "main" is just PUT /api/cwd to the primary tree.
     let primary = match primary_worktree(&cwd) {
         Some(p) => p,
-        None => return err(StatusCode::INTERNAL_SERVER_ERROR, "cannot locate primary worktree".into()),
+        None => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot locate primary worktree".into(),
+            )
+        }
     };
     let slug = branch.replace('/', "-");
     let target = primary.join(".mira").join("worktrees").join(&slug);
@@ -139,11 +155,19 @@ pub async fn create_worktree(
     }
     let out = match cmd.output() {
         Ok(o) => o,
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("git worktree add: {e}")),
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("git worktree add: {e}"),
+            )
+        }
     };
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-        return err(StatusCode::INTERNAL_SERVER_ERROR, format!("git worktree add failed: {stderr}"));
+        return err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("git worktree add failed: {stderr}"),
+        );
     }
 
     Json(CreateWorktreeView {
@@ -166,7 +190,9 @@ fn current_branch(cwd: &Path) -> Option<String> {
     let trimmed = out.trim();
     if trimmed.is_empty() {
         // Detached HEAD — surface the short sha instead.
-        run(cwd, &["rev-parse", "--short", "HEAD"]).ok().map(|s| s.trim().to_owned())
+        run(cwd, &["rev-parse", "--short", "HEAD"])
+            .ok()
+            .map(|s| s.trim().to_owned())
     } else {
         Some(trimmed.to_owned())
     }
@@ -200,7 +226,11 @@ fn porcelain_summary(cwd: &Path) -> (bool, u32, u32) {
 }
 
 fn git_common_dir(cwd: &Path) -> Option<PathBuf> {
-    let s = run(cwd, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).ok()?;
+    let s = run(
+        cwd,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )
+    .ok()?;
     Some(PathBuf::from(s.trim()))
 }
 
@@ -268,7 +298,11 @@ fn push_worktree(
     let is_current = current
         .and_then(|c| std::fs::canonicalize(&path).ok().map(|p| p == c))
         .unwrap_or(false);
-    out.push(WorktreeEntry { path, branch, is_current });
+    out.push(WorktreeEntry {
+        path,
+        branch,
+        is_current,
+    });
 }
 
 fn run(cwd: &Path, args: &[&str]) -> Result<String, std::io::Error> {

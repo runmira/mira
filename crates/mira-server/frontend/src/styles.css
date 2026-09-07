@@ -48,11 +48,12 @@
   html, body, #root { height: 100%; }
   body {
     @apply bg-background text-foreground antialiased;
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
-  }
-  @supports (font-variation-settings: normal) {
-    body { font-family: 'Inter var', 'Inter', system-ui, sans-serif; }
+    font-family: 'Manrope', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    /* Manrope reads thin at UI sizes on a dark background; 600 is what most
+       modern dark UIs (Codex, Linear, Vercel) use as their body baseline.
+       font-bold/extrabold still stand out relative to this. */
+    font-weight: 600;
+    letter-spacing: -0.005em;
   }
 
   /* Subtle scrollbars — macOS overlays default to nearly invisible on

@@ -4,7 +4,7 @@ use futures::{stream::BoxStream, StreamExt};
 use mira_ai::{ChatEvent, ChatProvider, ChatRequest, FinishReason};
 use mira_core::{Message, SessionId, ToolCall, ToolResult};
 use mira_policy::{Decision, Policy, Request as PolicyRequest};
-use mira_tools::{Registry, ToolContext};
+use mira_tools::{FileGuard, Registry, ToolContext};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::AbortHandle;
@@ -42,8 +42,12 @@ pub struct SessionConfig {
     pub reasoning_effort: Option<String>,
 }
 
+/// Ceiling on tool-call rounds within a single user turn. Guards against
+/// runaway loops (a model calling tools forever) without cutting real
+/// refactors short. Raise via `max_rounds` in `mira.yaml` when 60 isn't
+/// enough — long feature builds legitimately exceed it.
 fn default_max_rounds() -> usize {
-    24
+    60
 }
 
 impl SessionConfig {
@@ -103,10 +107,20 @@ impl Session {
         registry: Arc<Registry>,
         policy: Arc<Mutex<Policy>>,
         approver: Arc<dyn Approver>,
-        tool_ctx: ToolContext,
+        mut tool_ctx: ToolContext,
     ) -> Self {
+        let id = SessionId::new();
+        // Attach a session-scoped FileGuard for conflict detection + undo.
+        // Failure is logged and swallowed — a missing guard just means those
+        // features are disabled for this session (files still get read /
+        // written normally).
+        if let Ok(g) = FileGuard::open(&id.to_string(), tool_ctx.cwd.clone()) {
+            tool_ctx = tool_ctx.with_guard(Arc::new(g));
+        } else {
+            warn!(session = %id, "file guard init failed; undo + conflict detection disabled");
+        }
         Self {
-            id: SessionId::new(),
+            id,
             cfg: Arc::new(Mutex::new(cfg)),
             history: Arc::new(Mutex::new(vec![Message::system(system_prompt)])),
             title: Arc::new(Mutex::new(None)),
@@ -134,8 +148,15 @@ impl Session {
         registry: Arc<Registry>,
         policy: Arc<Mutex<Policy>>,
         approver: Arc<dyn Approver>,
-        tool_ctx: ToolContext,
+        mut tool_ctx: ToolContext,
     ) -> Self {
+        // Same guard wiring as `new` — seq counter picks up where the
+        // previous run left off (see FileGuard::open).
+        if let Ok(g) = FileGuard::open(&record.id.to_string(), tool_ctx.cwd.clone()) {
+            tool_ctx = tool_ctx.with_guard(Arc::new(g));
+        } else {
+            warn!(session = %record.id, "file guard init failed on resume");
+        }
         Self {
             id: record.id,
             cfg: Arc::new(Mutex::new(record.cfg)),
@@ -186,6 +207,12 @@ impl Session {
         *self.usage.lock().await
     }
 
+    /// Expose the session's undo/conflict guard. `None` when the FileGuard
+    /// failed to initialise (see the warn! in `new` / `resume_from`).
+    pub fn file_guard(&self) -> Option<Arc<FileGuard>> {
+        self.tool_ctx.guard.clone()
+    }
+
     /// Stamp `ended_at` on the most recent open turn, if any. Idempotent —
     /// calling twice on the same turn keeps the first end time. Used by
     /// callers that emit `HarnessEvent::Done` outside the harness's own
@@ -205,7 +232,9 @@ impl Session {
     /// runaway model can't stuff the sidebar with a paragraph.
     pub async fn set_title(&self, title: impl Into<String>) {
         let mut t = title.into().trim().to_string();
-        if t.is_empty() { return; }
+        if t.is_empty() {
+            return;
+        }
         const MAX: usize = 80;
         if t.chars().count() > MAX {
             t = t.chars().take(MAX).collect();
@@ -239,7 +268,10 @@ impl Session {
     pub async fn send(&self, user_input: impl Into<String>) -> BoxStream<'static, HarnessEvent> {
         self.history.lock().await.push(Message::user(user_input));
         // Open a new turn timer; `run_loop` stamps `ended_at` on the way out.
-        self.turns.lock().await.push(TurnMeta { started_at: now_ms(), ended_at: None });
+        self.turns.lock().await.push(TurnMeta {
+            started_at: now_ms(),
+            ended_at: None,
+        });
 
         let cfg = self.cfg.lock().await.clone();
         let this = self.clone();
@@ -275,7 +307,24 @@ impl Session {
 
 // ---- the loop ----
 
+/// Cap on how many times a single turn will inject verify failures back
+/// into the model before giving up. Prevents an unfixable error from
+/// looping the turn forever; the user still sees a warning frame and can
+/// intervene manually.
+const MAX_VERIFY_ATTEMPTS: usize = 3;
+
 async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEvent>) {
+    // Snapshot the set of paths already written to at turn start so a
+    // later diff tells us what *this* turn touched. When there's no
+    // FileGuard, apply-verify is disabled entirely (empty set → no
+    // detected writes → verify skipped).
+    let writes_at_turn_start: std::collections::HashSet<std::path::PathBuf> =
+        match sess.tool_ctx.guard.as_ref() {
+            Some(g) => g.written_snapshot().await,
+            None => std::collections::HashSet::new(),
+        };
+    let mut verify_attempts = 0usize;
+
     for round in 0..cfg.max_rounds {
         info!(round, "harness: model turn");
 
@@ -354,6 +403,40 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
         let _ = tx.send(HarnessEvent::TurnComplete).await;
 
         if pending_calls.is_empty() || finish == FinishReason::Stop {
+            // Apply-verify: if the model wrote source files this turn, run
+            // the project's natural safety check (cargo check / tsc / …).
+            // On failure, feed the errors back and let the model take one
+            // more crack at it — up to MAX_VERIFY_ATTEMPTS total.
+            if verify_attempts < MAX_VERIFY_ATTEMPTS {
+                if let Some((check, output)) =
+                    run_verify(&sess, &writes_at_turn_start, &tx).await
+                {
+                    verify_attempts += 1;
+                    // Inject the failure as a user message so the next
+                    // model round sees it as fresh feedback (rather than
+                    // as a tool_result which requires a matching call).
+                    let synthetic = format!(
+                        "The `{}` check just failed after your last edits:\n\n\
+                         ```\n{}\n```\n\n\
+                         Fix the errors and continue. You have {} more automatic \
+                         verify retries before I stop.",
+                        check.name,
+                        truncate_for_history(&output),
+                        MAX_VERIFY_ATTEMPTS - verify_attempts,
+                    );
+                    sess.history.lock().await.push(Message::user(synthetic));
+                    continue;
+                }
+            } else {
+                // We hit the retry cap. Emit a warning so the user knows
+                // and doesn't wonder why the errors are still there.
+                let _ = tx
+                    .send(HarnessEvent::Warning(format!(
+                        "[verify] still failing after {MAX_VERIFY_ATTEMPTS} attempts — stopping"
+                    )))
+                    .await;
+            }
+
             sess.end_current_turn().await;
             checkpoint(&sess).await;
             let _ = tx.send(HarnessEvent::Done).await;
@@ -419,7 +502,7 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
 
     let _ = tx
         .send(HarnessEvent::Warning(format!(
-            "hit max_rounds ({}); stopping",
+            "hit max_rounds ({}) — send `continue` to resume, or raise `max_rounds` in mira.yaml",
             cfg.max_rounds
         )))
         .await;
@@ -465,9 +548,7 @@ fn truncate_for_history(content: &str) -> String {
         .unwrap_or(0);
     let head = &content[..cut];
     let omitted = content.len() - cut;
-    format!(
-        "{head}\n\n… [{omitted} bytes truncated; ask again with a narrower query to see more]"
-    )
+    format!("{head}\n\n… [{omitted} bytes truncated; ask again with a narrower query to see more]")
 }
 
 fn format_action(a: mira_tools::Action) -> &'static str {
@@ -477,5 +558,50 @@ fn format_action(a: mira_tools::Action) -> &'static str {
         mira_tools::Action::Write => "Write",
         mira_tools::Action::Bash => "Bash",
         mira_tools::Action::Pure => "Pure",
+    }
+}
+
+/// Compute this turn's new writes vs the pre-turn snapshot, pick an
+/// appropriate check, and run it. Returns `Some((check, output))` only
+/// on failure — success + "no writes" + "no matching check" all return
+/// `None` so the caller emits `Done` unchanged.
+async fn run_verify(
+    sess: &Session,
+    writes_at_turn_start: &std::collections::HashSet<std::path::PathBuf>,
+    tx: &mpsc::Sender<HarnessEvent>,
+) -> Option<(crate::verify::VerifyCheck, String)> {
+    let guard = sess.tool_ctx.guard.as_ref()?;
+    let now = guard.written_snapshot().await;
+    let new_writes: Vec<std::path::PathBuf> = now
+        .difference(writes_at_turn_start)
+        .cloned()
+        .collect();
+    if new_writes.is_empty() {
+        return None;
+    }
+    let check = crate::verify::detect(&sess.tool_ctx.cwd, &new_writes)?;
+    let _ = tx
+        .send(HarnessEvent::Warning(format!(
+            "[verify] running `{}`…",
+            check.name
+        )))
+        .await;
+    let outcome = crate::verify::run(&sess.tool_ctx.sandbox, &check, &sess.tool_ctx.cwd).await;
+    if outcome.ok {
+        let _ = tx
+            .send(HarnessEvent::Warning(format!(
+                "[verify] `{}` passed",
+                check.name
+            )))
+            .await;
+        None
+    } else {
+        let _ = tx
+            .send(HarnessEvent::Warning(format!(
+                "[verify] `{}` failed — asking model to fix",
+                check.name
+            )))
+            .await;
+        Some((check, outcome.output))
     }
 }

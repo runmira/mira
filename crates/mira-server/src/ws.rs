@@ -111,6 +111,14 @@ async fn dispatch(cmd: ClientMsg, state: &AppState) {
                 warn!(call_id, "approval for unknown call");
             }
         }
+        ClientMsg::PromptResponse {
+            prompt_id,
+            response,
+        } => {
+            if !crate::interactive::resolve(&state.prompt_pending, &prompt_id, response).await {
+                warn!(prompt_id, "prompt response for unknown id");
+            }
+        }
         ClientMsg::SetModel { model } => {
             state.current_session().await.set_model(&model).await;
             // Persist so the next restart lands on the same model rather

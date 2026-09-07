@@ -33,14 +33,22 @@ pub async fn read_file(Query(q): Query<FileQuery>) -> Response {
     let expanded = shellexpand::tilde(&q.path).to_string();
     let path = match std::fs::canonicalize(&expanded) {
         Ok(p) => p,
-        Err(e) => return err(StatusCode::BAD_REQUEST, format!("cannot resolve `{expanded}`: {e}")),
+        Err(e) => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                format!("cannot resolve `{expanded}`: {e}"),
+            )
+        }
     };
     let meta = match std::fs::metadata(&path) {
         Ok(m) => m,
         Err(e) => return err(StatusCode::BAD_REQUEST, format!("stat: {e}")),
     };
     if !meta.is_file() {
-        return err(StatusCode::BAD_REQUEST, format!("not a regular file: {}", path.display()));
+        return err(
+            StatusCode::BAD_REQUEST,
+            format!("not a regular file: {}", path.display()),
+        );
     }
     if meta.len() > MAX_BYTES {
         return err(

@@ -65,6 +65,12 @@ impl Tool for ReadFile {
         }
         let raw = fs::read_to_string(&path).await?;
 
+        // Stamp a watermark so a later edit_file / write_file can detect
+        // out-of-band modifications. Best-effort; no-op when no guard.
+        if let Some(g) = &ctx.guard {
+            g.record_read(&path).await;
+        }
+
         let start = args.start_line.unwrap_or(1).saturating_sub(1);
         let end = args.end_line.unwrap_or(usize::MAX);
 

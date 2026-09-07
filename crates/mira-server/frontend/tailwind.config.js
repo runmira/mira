@@ -60,6 +60,7 @@ export default {
         sm: 'calc(var(--radius) - 4px)',
       },
       fontFamily: {
+        sans: ['Manrope', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'system-ui', 'sans-serif'],
         mono: ['ui-monospace', 'SFMono-Regular', 'SF Mono', 'Menlo', 'monospace'],
       },
       keyframes: {

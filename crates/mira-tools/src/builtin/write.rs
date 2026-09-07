@@ -47,8 +47,23 @@ impl Tool for WriteFile {
             .resolve(&args.path)
             .ok_or_else(|| ToolError::Failed(format!("path escapes cwd: {}", args.path)))?;
 
+        // Refuse to overwrite a file that was modified externally since we
+        // last saw it. Skipped when writing a brand-new path (no watermark
+        // recorded there).
+        if let Some(g) = &ctx.guard {
+            g.check_conflict(&path)
+                .await
+                .map_err(|e| ToolError::Failed(e.to_string()))?;
+        }
+
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).await?;
+        }
+        // Snapshot the pre-image (or record a `create` entry) before writing.
+        if let Some(g) = &ctx.guard {
+            g.snapshot_before(&path)
+                .await
+                .map_err(|e| ToolError::Failed(e.to_string()))?;
         }
         fs::write(&path, args.content.as_bytes()).await?;
 

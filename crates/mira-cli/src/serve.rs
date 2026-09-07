@@ -80,7 +80,10 @@ pub async fn run(cli: &super::Cli, args: ServeArgs) -> Result<()> {
                 for tool in conn.tools {
                     registry.register_arc(tool);
                 }
-                eprintln!("mcp `{name}`: {count} tool{} registered", if count == 1 { "" } else { "s" });
+                eprintln!(
+                    "mcp `{name}`: {count} tool{} registered",
+                    if count == 1 { "" } else { "s" }
+                );
             }
             Err(e) => {
                 eprintln!("warning: mcp `{name}` disabled ({e:#})");
@@ -185,6 +188,7 @@ fn build_initial_provider(resolved: &Option<super::ResolvedSettings>) -> Arc<dyn
         base_url: s.base_url.clone(),
         api_key: s.api_key.clone(),
         extra_headers: s.extra_headers.clone(),
+        prompt_caching: s.prompt_caching,
     }) {
         Ok(p) => Arc::new(p),
         Err(e) => Arc::new(NullProvider::new(format!("provider build failed: {e}"))),
