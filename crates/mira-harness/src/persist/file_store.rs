@@ -125,6 +125,7 @@ mod tests {
             updated_at: updated,
             title: None,
             turns: Vec::new(),
+            usage: Default::default(),
         }
     }
 
