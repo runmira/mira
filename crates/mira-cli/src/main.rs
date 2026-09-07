@@ -5,6 +5,8 @@ mod review;
 mod serve;
 mod tui;
 
+// Entry point for the mira CLI binary.
+
 use std::io::IsTerminal;
 use std::sync::Arc;
 
