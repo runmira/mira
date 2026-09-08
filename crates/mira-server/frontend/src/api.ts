@@ -25,10 +25,43 @@ export async function putSettings(update: SettingsUpdate): Promise<SettingsView>
 
 export async function listSessions(opts: { all?: boolean } = {}): Promise<SessionSummary[]> {
   // axum's Query bool deserializer expects the literal string `true`, not `1`.
-  const q = opts.all ? '?all=true' : '';
-  const r = await fetch(`/api/sessions${q}`);
+  // `no-store` + a cache-busting param defeat any browser/HTTP caching so
+  // fetches triggered by session_title_updated actually see fresh titles
+  // rather than a stale cached list.
+  const params = new URLSearchParams();
+  if (opts.all) params.set('all', 'true');
+  params.set('_ts', String(Date.now()));
+  const r = await fetch(`/api/sessions?${params.toString()}`, { cache: 'no-store' });
   if (!r.ok) throw new Error(`sessions GET ${r.status}`);
   return (await r.json()) as SessionSummary[];
+}
+
+export type SessionHistoryView = {
+  id: string;
+  model: string;
+  cwd: string;
+  title: string | null;
+  created_at: number;
+  updated_at: number;
+  messages: import('./types').Message[];
+};
+
+/** Read-only lookup — returns messages without swapping the active
+ *  session. Used by the SubagentPanel to rebuild a child transcript
+ *  after a browser reload. */
+export async function getSessionHistory(id: string): Promise<SessionHistoryView> {
+  const r = await fetch(`/api/sessions/${encodeURIComponent(id)}/history`, {
+    cache: 'no-store',
+  });
+  if (!r.ok) {
+    let msg = `session history ${r.status}`;
+    try {
+      const j = await r.json();
+      if (j.error) msg += `: ${j.error}`;
+    } catch { /* ignore */ }
+    throw new Error(msg);
+  }
+  return (await r.json()) as SessionHistoryView;
 }
 
 export async function loadSession(id: string): Promise<void> {
@@ -82,6 +115,41 @@ export async function deleteSession(id: string): Promise<void> {
     } catch { /* ignore */ }
     throw new Error(msg);
   }
+}
+
+/** Manual rename: set the session's title to `title`. Empty clears it. */
+export async function renameSession(id: string, title: string): Promise<{ id: string; title: string }> {
+  const r = await fetch(`/api/sessions/${encodeURIComponent(id)}/title`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title }),
+  });
+  if (!r.ok) {
+    let msg = `rename ${r.status}`;
+    try {
+      const j = await r.json();
+      if (j.error) msg += `: ${j.error}`;
+    } catch { /* ignore */ }
+    throw new Error(msg);
+  }
+  return (await r.json()) as { id: string; title: string };
+}
+
+/** AI rename: server runs the extractor on the session's first user + assistant
+ *  messages and installs the result. Errors if the session doesn't have both. */
+export async function regenerateSessionTitle(id: string): Promise<{ id: string; title: string }> {
+  const r = await fetch(`/api/sessions/${encodeURIComponent(id)}/title/regenerate`, {
+    method: 'POST',
+  });
+  if (!r.ok) {
+    let msg = `rename (ai) ${r.status}`;
+    try {
+      const j = await r.json();
+      if (j.error) msg += `: ${j.error}`;
+    } catch { /* ignore */ }
+    throw new Error(msg);
+  }
+  return (await r.json()) as { id: string; title: string };
 }
 
 export type BrowseView = {
@@ -217,6 +285,65 @@ export async function createWorktree(branch: string, base?: string): Promise<{ p
     throw new Error(msg);
   }
   return (await r.json()) as { path: string; branch: string };
+}
+
+export type McpStdioConfig = {
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  cwd: string | null;
+};
+export type McpHttpConfig = { url: string; auth: string | null };
+/** Untagged discriminant matching the Rust `McpServerConfig` — inspect
+ *  which key is present (`command` for stdio, `url` for http) to decide. */
+export type McpServerConfig = McpStdioConfig | McpHttpConfig;
+
+export type McpToolInfo = { name: string; description: string };
+
+export type McpStatusView =
+  | { kind: 'connected'; tool_count: number }
+  | { kind: 'error'; message: string }
+  | { kind: 'not_loaded' };
+
+export type McpServerView = {
+  name: string;
+  kind: 'stdio' | 'http';
+  config: McpServerConfig;
+  status: McpStatusView;
+  restart_required: boolean;
+  tools: McpToolInfo[];
+};
+
+export type McpListView = { servers: McpServerView[]; config_path: string };
+
+export async function listMcp(): Promise<McpListView> {
+  const r = await fetch('/api/mcp', { cache: 'no-store' });
+  if (!r.ok) {
+    let msg = `mcp GET ${r.status}`;
+    try {
+      const j = await r.json();
+      if (j.error) msg += `: ${j.error}`;
+    } catch { /* ignore */ }
+    throw new Error(msg);
+  }
+  return (await r.json()) as McpListView;
+}
+
+export async function putMcp(servers: Record<string, McpServerConfig>): Promise<McpListView> {
+  const r = await fetch('/api/mcp', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ servers }),
+  });
+  if (!r.ok) {
+    let msg = `mcp PUT ${r.status}`;
+    try {
+      const j = await r.json();
+      if (j.error) msg += `: ${j.error}`;
+    } catch { /* ignore */ }
+    throw new Error(msg);
+  }
+  return (await r.json()) as McpListView;
 }
 
 export async function putCwd(path: string): Promise<void> {

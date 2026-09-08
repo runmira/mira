@@ -55,4 +55,14 @@ impl Registry {
     pub fn is_empty(&self) -> bool {
         self.tools.is_empty()
     }
+
+    /// Every registered tool, in registration order. Used by callers that
+    /// need to build a filtered subset (e.g. the `agent` tool constructing
+    /// a child registry).
+    pub fn tools(&self) -> Vec<Arc<dyn Tool>> {
+        self.order
+            .iter()
+            .filter_map(|n| self.tools.get(n).cloned())
+            .collect()
+    }
 }

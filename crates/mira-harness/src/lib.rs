@@ -21,4 +21,4 @@ pub mod verify;
 pub use approver::{Approver, AutoApprover};
 pub use event::HarnessEvent;
 pub use persist::{FileStore, SessionRecord, SessionStore, StoreError, TurnMeta, UsageTotals};
-pub use session::{Session, SessionConfig};
+pub use session::{AutoExtractConfig, Session, SessionConfig};

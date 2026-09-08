@@ -9,16 +9,32 @@ import {
   GitMerge,
   IconContext,
   NotePencil,
+  PencilSimple,
   PuzzlePiece,
+  Sparkle,
   SlidersHorizontal,
   Timer,
   Trash,
 } from '@phosphor-icons/react';
-import { deleteSession, listSessions, loadSession } from '../api';
+import {
+  deleteSession,
+  listSessions,
+  loadSession,
+  regenerateSessionTitle,
+  renameSession,
+} from '../api';
 import type { SessionSummary, WorktreeMergeStatus } from '../types';
 import type { WsStatus } from '../ws';
+import { Dialog, DialogContent } from '@/components/ui/dialog';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
+
+/** Primary view rendered in the main pane. Sidebar nav items switch the
+ *  active view; the App owns the state and hides the chat composer /
+ *  transcript when a non-chat view is selected. */
+export type MainView = 'chat' | 'plugins' | 'pull-request' | 'scheduled';
 
 type Props = {
   status: WsStatus;
@@ -28,6 +44,10 @@ type Props = {
    *  pulsing indicator on that row. */
   activeBusy: boolean;
   refreshKey: number;
+  /** Highlights the matching nav item in the sidebar. */
+  activeView: MainView;
+  /** Switch the main pane to a different primary view. */
+  onNavigate: (view: MainView) => void;
   onNewChat: () => void;
   onOpenSettings: () => void;
   onOpenPicker: () => void;
@@ -38,12 +58,14 @@ const COLLAPSED_KEY = 'mira.sidebar.collapsed-projects';
 const PER_GROUP_LIMIT = 5;
 
 export function Sidebar({
-  status, cwd, activeSessionId, activeBusy, refreshKey, onNewChat, onOpenSettings, onOpenPicker, onSessionLoaded,
+  status, cwd, activeSessionId, activeBusy, refreshKey, activeView, onNavigate,
+  onNewChat, onOpenSettings, onOpenPicker, onSessionLoaded,
 }: Props) {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(() => loadCollapsed());
   const [showMore, setShowMore] = useState<Set<string>>(() => new Set());
+  const [renaming, setRenaming] = useState<SessionSummary | null>(null);
 
   useEffect(() => {
     // Fetch all sessions across every folder — grouped in-memory below.
@@ -81,6 +103,33 @@ export function Sidebar({
     }
   }
 
+  /** Optimistically stamp the title into local state so the sidebar row
+   *  updates before the server broadcast round-trips. The server also
+   *  fires `SessionTitleUpdated` on the WS channel — App handles that and
+   *  triggers a refresh, so this is belt-and-suspenders. */
+  function applyLocalTitle(id: string, title: string) {
+    setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, title } : s)));
+  }
+
+  async function applyManualRename(id: string, title: string) {
+    try {
+      const res = await renameSession(id, title);
+      applyLocalTitle(id, res.title);
+      setRenaming(null);
+    } catch (e) {
+      setError(String((e as Error).message));
+    }
+  }
+
+  /** AI rename returns the generated title so the dialog can display it and
+   *  let the user accept / re-generate / edit. Returns the string to the
+   *  caller; errors bubble so the dialog shows them inline. */
+  async function applyAiRename(id: string): Promise<string> {
+    const res = await regenerateSessionTitle(id);
+    applyLocalTitle(id, res.title);
+    return res.title;
+  }
+
   function toggleCollapsed(key: string) {
     setCollapsed((prev) => {
       const next = new Set(prev);
@@ -111,12 +160,27 @@ export function Sidebar({
       <div className="flex-1 overflow-y-auto px-1.5 pb-2">
         <nav className="flex flex-col gap-0.5 px-0.5">
           <NavItem icon={<NotePencil className="size-3.5" />} onClick={onNewChat}>
-            New chat
+            New thread
           </NavItem>
-          <NavItem icon={<PuzzlePiece className="size-3.5" />} disabled>
+          <NavItem
+            icon={<GitBranch className="size-3.5" />}
+            disabled
+            active={activeView === 'pull-request'}
+          >
+            Pull request
+          </NavItem>
+          <NavItem
+            icon={<PuzzlePiece className="size-3.5" />}
+            active={activeView === 'plugins'}
+            onClick={() => onNavigate('plugins')}
+          >
             Plugins
           </NavItem>
-          <NavItem icon={<Timer className="size-3.5" />} disabled>
+          <NavItem
+            icon={<Timer className="size-3.5" />}
+            disabled
+            active={activeView === 'scheduled'}
+          >
             Scheduled
           </NavItem>
         </nav>
@@ -174,7 +238,7 @@ export function Sidebar({
                         // Hover tooltip prefers the ORIGINAL first message so
                         // the user can still see what the chat started with
                         // even when the nickname has replaced the row label.
-                        title={s.first_user_message ?? s.title ?? s.id}
+                        title={s.title ?? s.first_user_message ?? s.id}
                         className={cn(
                           'group grid w-full grid-cols-[1fr_auto_auto] items-center gap-1 rounded-md px-2 py-1.5 text-[13.5px] transition-colors',
                           s.id === activeSessionId
@@ -187,7 +251,7 @@ export function Sidebar({
                           onClick={() => pickSession(s.id)}
                           className="flex min-w-0 flex-col items-start text-left"
                         >
-                          <span className="w-full truncate">{s.first_user_message ?? 'Untitled'}</span>
+                          <span className="w-full truncate">{s.title ?? s.first_user_message ?? 'Untitled'}</span>
                           <ModelSubline model={s.model} />
                         </button>
                         <span className="flex items-center gap-1.5 text-[11.5px] text-muted-foreground/80 group-hover:opacity-0 transition-opacity">
@@ -199,6 +263,11 @@ export function Sidebar({
                         </span>
                         <RowMenu
                           items={[
+                            {
+                              label: 'Rename session',
+                              icon: <PencilSimple className="size-3.5" />,
+                              onSelect: () => setRenaming(s),
+                            },
                             {
                               label: 'Delete session',
                               danger: true,
@@ -265,7 +334,148 @@ export function Sidebar({
         </button>
       </div>
     </aside>
+    <RenameDialog
+      session={renaming}
+      onClose={() => setRenaming(null)}
+      onManual={applyManualRename}
+      onAi={applyAiRename}
+    />
     </IconContext.Provider>
+  );
+}
+
+/* ---------- rename dialog ---------- */
+
+function RenameDialog({
+  session, onClose, onManual, onAi,
+}: {
+  session: SessionSummary | null;
+  onClose: () => void;
+  onManual: (id: string, title: string) => Promise<void>;
+  onAi: (id: string) => Promise<string>;
+}) {
+  const [value, setValue] = useState('');
+  const [aiBusy, setAiBusy] = useState(false);
+  const [saveBusy, setSaveBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [aiApplied, setAiApplied] = useState<string | null>(null);
+
+  // Hydrate the input each time the dialog opens for a different session.
+  useEffect(() => {
+    if (!session) return;
+    setValue(session.title ?? session.first_user_message ?? '');
+    setAiBusy(false);
+    setSaveBusy(false);
+    setErr(null);
+    setAiApplied(null);
+  }, [session]);
+
+  if (!session) return null;
+
+  async function submitManual(e: React.FormEvent) {
+    e.preventDefault();
+    if (!session) return;
+    const trimmed = value.trim();
+    if (!trimmed) return;
+    setSaveBusy(true);
+    setErr(null);
+    try {
+      await onManual(session.id, trimmed);
+    } catch (e2) {
+      setErr(String((e2 as Error).message));
+    } finally {
+      setSaveBusy(false);
+    }
+  }
+
+  async function submitAi() {
+    if (!session) return;
+    setAiBusy(true);
+    setErr(null);
+    setAiApplied(null);
+    try {
+      const generated = await onAi(session.id);
+      // Populate the input with the AI result. Don't auto-close so the
+      // user can see what was generated (and re-run / edit / cancel).
+      // The rename is already committed server-side by the time we get
+      // here; clicking Cancel now would leave the AI title in place.
+      setValue(generated);
+      setAiApplied(generated);
+    } catch (e2) {
+      setErr(String((e2 as Error).message));
+    } finally {
+      setAiBusy(false);
+    }
+  }
+
+  return (
+    <Dialog open={!!session} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-md p-0 gap-0 overflow-hidden">
+        <form onSubmit={submitManual} className="flex flex-col gap-4 p-5">
+          <div>
+            <div className="text-[15px] font-semibold text-foreground">Rename session</div>
+            <div className="mt-1 text-[12px] text-muted-foreground">
+              Type a new name below, or let the model pick one from the conversation.
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <label htmlFor="rename-input" className="text-[12.5px] font-medium text-foreground/85">
+              Title
+            </label>
+            <Input
+              id="rename-input"
+              value={value}
+              onChange={(e) => {
+                setValue(e.target.value);
+                setAiApplied(null);
+              }}
+              placeholder="Session name"
+              spellCheck={false}
+              autoFocus
+              disabled={saveBusy || aiBusy}
+            />
+          </div>
+
+          {aiApplied && (
+            <div className="rounded-md border border-emerald-500/40 bg-emerald-500/[0.06] px-3 py-2 text-[12.5px] text-emerald-400">
+              AI applied: <span className="font-mono">{aiApplied}</span> — click Done to close, or edit + Save.
+            </div>
+          )}
+          {err && (
+            <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12.5px] text-destructive">
+              {err}
+            </div>
+          )}
+
+          <div className="flex items-center justify-between gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={submitAi}
+              disabled={saveBusy || aiBusy}
+              className="gap-1.5"
+            >
+              <Sparkle className="size-3.5" />
+              {aiBusy ? 'Generating…' : aiApplied ? 'Regenerate' : 'Rename with AI'}
+            </Button>
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={onClose}
+                disabled={saveBusy || aiBusy}
+              >
+                {aiApplied ? 'Done' : 'Cancel'}
+              </Button>
+              <Button type="submit" disabled={saveBusy || aiBusy || !value.trim()}>
+                {saveBusy ? 'Saving…' : 'Save'}
+              </Button>
+            </div>
+          </div>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -332,10 +542,13 @@ function persistCollapsed(set: Set<string>) {
 /* ---------- little helpers ---------- */
 
 function NavItem({
-  icon, disabled, onClick, children,
+  icon, disabled, active, onClick, children,
 }: {
   icon: React.ReactNode;
   disabled?: boolean;
+  /** True when this item's view is currently rendered in the main pane —
+   *  gets the same accent treatment as an active session row. */
+  active?: boolean;
   onClick?: () => void;
   children: React.ReactNode;
 }) {
@@ -348,10 +561,21 @@ function NavItem({
         'flex w-full items-center gap-2.5 rounded-md px-2.5 py-1.5 text-left text-[14.5px] transition-colors',
         disabled
           ? 'text-muted-foreground/40 cursor-not-allowed'
-          : 'text-foreground hover:bg-accent',
+          : active
+            ? 'bg-accent text-foreground'
+            : 'text-foreground hover:bg-accent',
       )}
     >
-      <span className={cn('shrink-0', disabled ? 'text-muted-foreground/40' : 'text-muted-foreground')}>
+      <span
+        className={cn(
+          'shrink-0',
+          disabled
+            ? 'text-muted-foreground/40'
+            : active
+              ? 'text-foreground'
+              : 'text-muted-foreground',
+        )}
+      >
         {icon}
       </span>
       <span>{children}</span>

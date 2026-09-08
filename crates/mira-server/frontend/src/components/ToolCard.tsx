@@ -96,22 +96,23 @@ function CompactToolRow({
   const [expanded, setExpanded] = useState(false);
   const summary = useMemo(() => summarize(call), [call]);
 
-  const borderTint =
-    status === 'running' ? 'border-l-mira-blue/40' :
-    status === 'denied'  ? 'border-l-destructive/50' :
-    'border-l-transparent';
-
   return (
-    <div className={cn('w-full max-w-[78%] border-l-2 pl-2 -ml-2 transition-colors', borderTint)}>
+    <div className="w-full max-w-[78%]">
       <button
         onClick={() => setExpanded((v) => !v)}
-        className="flex w-full items-center gap-2.5 rounded-md px-1 py-1.5 text-left text-[13px] text-muted-foreground transition-colors hover:bg-accent/40 hover:text-foreground min-w-0"
+        // Dense, inline, no card chrome — matches the AgentCard row so a
+        // wall of tool calls reads as a compact list rather than a stack
+        // of separate cards.
+        className="flex w-full min-w-0 items-center gap-2 rounded-md px-1 py-0.5 text-left text-[13px] text-muted-foreground transition-colors hover:bg-accent/40 hover:text-foreground"
       >
         <CaretRight
-          className={cn('size-3 shrink-0 text-muted-foreground/60 transition-transform', expanded && 'rotate-90 text-muted-foreground')}
+          className={cn(
+            'size-3 shrink-0 text-muted-foreground/60 transition-transform',
+            expanded && 'rotate-90 text-muted-foreground',
+          )}
         />
-        <span className="text-muted-foreground">{summary.icon}</span>
-        <span className="flex-1 min-w-0 truncate">
+        <span className="shrink-0 text-muted-foreground">{summary.icon}</span>
+        <span className="min-w-0 flex-1 truncate">
           <span className="font-medium text-foreground">{summary.verb}</span>
           {summary.target && (
             <span className="ml-1.5 font-mono text-[12px] text-muted-foreground">{summary.target}</span>
@@ -121,7 +122,7 @@ function CompactToolRow({
       </button>
 
       {expanded && (
-        <div className="ml-6 mt-1 mb-2 flex animate-fade-in flex-col gap-1.5">
+        <div className="ml-6 mb-1.5 mt-1 flex animate-fade-in flex-col gap-1.5">
           {preview && (
             <div className="diff compact">
               {preview.lines.slice(0, 20).map((l, i) => <DiffRow key={i} line={l} />)}

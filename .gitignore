@@ -6,3 +6,9 @@
 /.mira
 testing.txt
 roadmap.txt
+subagents-plan.txt
+MEMORY_AUDIT.txt
+GOAL_AUDIT.txt
+
+# Vite dev/build artifacts
+crates/mira-server/frontend/vite.config.ts.timestamp-*.mjs

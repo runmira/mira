@@ -7,6 +7,9 @@
 //! directly; funnelling everything through here means we can tighten the
 //! screws in one place.
 
+pub mod shell;
+pub use shell::PersistentShell;
+
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;

@@ -109,6 +109,10 @@ async fn main() -> Result<()> {
 
     let cwd = std::env::current_dir().context("failed to read cwd")?;
     let cfg = MiraConfig::load(&cwd).context("load config")?;
+    // Materialise `keys:` into the process env so tools like web_search
+    // read them via their existing env-var conventions without extra
+    // plumbing. Yaml never overwrites a shell-set env value.
+    mira_config::export_keys_to_env(&cfg);
 
     // --- resolve settings across CLI / env / config / defaults
     let settings = resolve_settings(&cli, &cfg)?;
@@ -127,7 +131,10 @@ async fn main() -> Result<()> {
     // --- tools + sandbox
     let sandbox = Arc::new(Sandbox::default_scrubbed());
     let mut registry = Registry::new();
-    builtin::register_default(&mut registry);
+    builtin::register_core(&mut registry);
+    if cfg.memory.tools_enabled() {
+        builtin::register_memory(&mut registry);
+    }
     // Configured MCP servers layer on top of the built-ins. A single broken
     // entry mustn't stop Mira from starting, so failures degrade to a
     // warning and we move on.
@@ -144,7 +151,20 @@ async fn main() -> Result<()> {
         }
     }
     let registry = Arc::new(registry);
-    let tool_ctx = ToolContext::new(cwd.clone(), sandbox);
+    // Shared memory + episodic stores. `memory_remember` writes episodic
+    // entries here, and the memory snapshot below reads from the same
+    // instance so the writer and the snapshot renderer share a mutex.
+    let memory_store: Arc<dyn mira_memory::MemoryStore> =
+        Arc::new(mira_memory::FileMemoryStore::new(
+            mira_config::user_memory_path(),
+            mira_config::project_memory_path(&cwd),
+        ));
+    let episodic_store: Arc<dyn mira_memory::EpisodicStore> = Arc::new(
+        mira_memory::FileEpisodicStore::new(mira_memory::project_episodic_path(&cwd)),
+    );
+    let tool_ctx = ToolContext::new(cwd.clone(), sandbox)
+        .with_memory(memory_store)
+        .with_episodic(episodic_store.clone());
 
     // --- policy: rules from config, mode from CLI/config/default
     let policy = Policy::from_config(&PolicyConfig {
@@ -209,6 +229,25 @@ async fn main() -> Result<()> {
     } else {
         session
     };
+    // Live memory: reload user + project MIRA.md on every provider round,
+    // plus tail the most-recent episodic entries so cross-session memory
+    // is visible immediately after `memory_remember` writes it.
+    // `memory.inject_context: false` skips the snapshot wiring entirely,
+    // so the model sees exactly the same prompt as before the memory
+    // work landed — a clean bisect switch.
+    let mut session = session;
+    if cfg.memory.inject_context() {
+        session = session.with_memory_snapshot(mira_server::make_memory_snapshot_with(
+            &cwd,
+            episodic_store,
+        ));
+    }
+    if cfg.memory.auto_extract_enabled() {
+        session = session.with_auto_extract(mira_harness::AutoExtractConfig::enabled(
+            cfg.memory.extractor_model().map(str::to_owned),
+        ));
+    }
+    let session = session;
 
     if use_tui {
         tui::run(

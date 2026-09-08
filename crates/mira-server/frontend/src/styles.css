@@ -48,12 +48,15 @@
   html, body, #root { height: 100%; }
   body {
     @apply bg-background text-foreground antialiased;
-    font-family: 'Manrope', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-    /* Manrope reads thin at UI sizes on a dark background; 600 is what most
-       modern dark UIs (Codex, Linear, Vercel) use as their body baseline.
-       font-bold/extrabold still stand out relative to this. */
-    font-weight: 600;
-    letter-spacing: -0.005em;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    /* Inter's default 400 is well-tuned for UI text — no need to bump the
+       body weight the way Manrope required. Enable the stylistic-set
+       tweaks OpenAI-alike UIs commonly turn on: cv02 (open 4), cv03 (open
+       6/9), cv04 (single-story a), cv11 (single-story g) — plus `ss01`
+       for the alternate `l` that reads better at UI sizes. */
+    font-weight: 400;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11", "ss01";
+    letter-spacing: -0.011em;
   }
 
   /* Subtle scrollbars — macOS overlays default to nearly invisible on

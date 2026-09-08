@@ -119,7 +119,15 @@ export type ServerMsg =
   | { type: 'review_error'; run_id: string; text: string }
   | { type: 'session_title_updated'; session_id: string; title: string }
   | { type: 'usage'; round: TokenUsage; totals: UsageTotals }
-  | { type: 'plan_request'; prompt_id: string; plan: PlanProposal };
+  | { type: 'plan_request'; prompt_id: string; plan: PlanProposal }
+  // Subagent live-stream frames. Every subagent-related event carries the
+  // parent's tool_call id so the frontend routes it to the right panel tab.
+  | { type: 'subagent_started'; parent_call_id: string; agent_id: string; model: string; prompt: string }
+  | { type: 'subagent_token'; parent_call_id: string; text: string }
+  | { type: 'subagent_tool_start'; parent_call_id: string; call: ToolCall }
+  | { type: 'subagent_tool_end'; parent_call_id: string; result: ToolResult }
+  | { type: 'subagent_warning'; parent_call_id: string; text: string }
+  | { type: 'subagent_done'; parent_call_id: string };
 
 export type ClientMsg =
   | { type: 'send'; text: string }
@@ -146,8 +154,40 @@ export type SettingsView = {
   max_tokens?: number | null;
   temperature?: number | null;
   providers: ProviderView[];
+  keys: KeyView[];
   configured: boolean;
   config_path: string;
+  memory: MemoryView;
+};
+
+/** Effective (defaults applied) memory-runtime knobs. Every field is the
+ *  concrete value the harness would use *now*, not the raw yaml Option. */
+export type MemoryView = {
+  auto_extract: boolean;
+  tools_enabled: boolean;
+  inject_context: boolean;
+  extractor_model?: string | null;
+};
+
+export type MemoryUpdate = {
+  /** Present with null resets to default; present with value sets. */
+  auto_extract?: boolean | null;
+  tools_enabled?: boolean | null;
+  inject_context?: boolean | null;
+  extractor_model?: string | null;
+};
+
+export type KeyView = {
+  name: string;
+  /** Empty string when no key is stored (env-only or fully unset). */
+  masked: string;
+  from_env: boolean;
+};
+
+export type KeyUpdate = {
+  name: string;
+  /** Omit to keep existing key. Empty string clears. Any value sets. */
+  value?: string;
 };
 
 export type ProviderUpdate = {
@@ -168,6 +208,8 @@ export type SettingsUpdate = {
   max_tokens?: number | null;
   temperature?: number | null;
   providers?: ProviderUpdate[];
+  keys?: KeyUpdate[];
+  memory?: MemoryUpdate;
 };
 
 export type WorktreeMergeStatus = 'merged' | 'unmerged';

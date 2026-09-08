@@ -17,6 +17,7 @@ use mira_ai::{ChatProvider, NullProvider};
 use mira_harness::{FileStore, SessionConfig, SessionStore};
 use mira_policy::{Policy, PolicyConfig};
 use mira_sandbox::Sandbox;
+use mira_server::mcp::{McpBootStatus, McpToolInfo};
 use mira_server::ServerConfig;
 use mira_tools::{builtin, Registry};
 use tokio::sync::Mutex;
@@ -60,6 +61,7 @@ pub async fn run(cli: &super::Cli, args: ServeArgs) -> Result<()> {
         .cloned()
         .unwrap_or_else(|| launch_cwd.clone());
     let cfg = MiraConfig::load(&cwd).context("load config")?;
+    mira_config::export_keys_to_env(&cfg);
 
     // Reuse the CLI's resolver, but don't hard-fail if the user hasn't set
     // credentials yet — the settings UI is the fix for that.
@@ -69,24 +71,61 @@ pub async fn run(cli: &super::Cli, args: ServeArgs) -> Result<()> {
 
     let sandbox = Arc::new(Sandbox::default_scrubbed());
     let mut registry = Registry::new();
-    builtin::register_default(&mut registry);
+    builtin::register_core(&mut registry);
+    if cfg.memory.tools_enabled() {
+        builtin::register_memory(&mut registry);
+    }
     // Same MCP wiring as the CLI entrypoint (see main.rs): one broken
     // server must not stop `mira serve` from booting — the user needs the
     // Settings UI reachable to fix it.
+    //
+    // In addition to registering tools we capture per-server outcome into
+    // `mcp_boot` so the Plugins UI (`GET /api/mcp`) can render live status
+    // (connected + tool list, or the connect error) without re-attempting
+    // to connect on every request.
+    let mut mcp_boot: Vec<McpBootStatus> = Vec::with_capacity(cfg.mcp_servers.len());
     for (name, server_cfg) in &cfg.mcp_servers {
         match mira_tools::connect_mcp(name, server_cfg).await {
             Ok(conn) => {
                 let count = conn.tools.len();
+                // Snapshot each tool's spec BEFORE moving the Arc into the
+                // registry — the spec pass is cheap and gives the UI the
+                // namespaced name + description without touching the live
+                // MCP service.
+                let infos: Vec<McpToolInfo> = conn
+                    .tools
+                    .iter()
+                    .map(|t| {
+                        let spec = t.spec();
+                        McpToolInfo {
+                            name: spec.name,
+                            description: spec.description,
+                        }
+                    })
+                    .collect();
                 for tool in conn.tools {
                     registry.register_arc(tool);
                 }
+                mcp_boot.push(McpBootStatus {
+                    name: name.clone(),
+                    config: server_cfg.clone(),
+                    tools: infos,
+                    error: None,
+                });
                 eprintln!(
                     "mcp `{name}`: {count} tool{} registered",
                     if count == 1 { "" } else { "s" }
                 );
             }
             Err(e) => {
-                eprintln!("warning: mcp `{name}` disabled ({e:#})");
+                let msg = format!("{e:#}");
+                eprintln!("warning: mcp `{name}` disabled ({msg})");
+                mcp_boot.push(McpBootStatus {
+                    name: name.clone(),
+                    config: server_cfg.clone(),
+                    tools: Vec::new(),
+                    error: Some(msg),
+                });
             }
         }
     }
@@ -176,6 +215,8 @@ pub async fn run(cli: &super::Cli, args: ServeArgs) -> Result<()> {
         resume,
         bind,
         static_dir: args.static_dir,
+        memory_runtime: cfg.memory.clone(),
+        mcp_boot,
     })
     .await
 }

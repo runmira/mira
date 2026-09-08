@@ -29,9 +29,36 @@ pub struct SettingsView {
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
     pub providers: Vec<ProviderView>,
+    /// Third-party service keys (search backends etc.). Masked. The
+    /// canonical env-var name for each key is the map key itself
+    /// (`BRAVE_SEARCH_API_KEY`, `TAVILY_API_KEY`, …).
+    pub keys: Vec<KeyView>,
     /// True when a provider is actually usable — base_url + api_key present.
     pub configured: bool,
     pub config_path: String,
+    /// Cross-session memory runtime knobs. Kept in the same view so a UI
+    /// panel can render all memory-related controls without a second fetch.
+    pub memory: MemoryView,
+}
+
+/// Effective (defaults applied) view of `memory.*` for the UI. Every field
+/// carries the value the harness would use *now*, not the raw `Option`
+/// from yaml — the panel wants concrete on/off, not "unset means true."
+#[derive(Debug, Serialize)]
+pub struct MemoryView {
+    pub auto_extract: bool,
+    pub tools_enabled: bool,
+    pub inject_context: bool,
+    pub extractor_model: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct KeyView {
+    pub name: String,
+    pub masked: String,
+    /// True when the same-named var is set in the shell env — helps the
+    /// UI show "using env value" vs "using yaml value" precedence.
+    pub from_env: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -61,6 +88,35 @@ pub struct SettingsUpdate {
     pub temperature: Option<Option<f32>>,
     #[serde(default)]
     pub providers: Vec<ProviderUpdate>,
+    /// Third-party keys. Empty string clears; absence leaves untouched.
+    #[serde(default)]
+    pub keys: Vec<KeyUpdate>,
+    /// Memory-runtime patch. Absent field = leave untouched; present with
+    /// `None` = reset to default (removes the yaml override).
+    #[serde(default)]
+    pub memory: Option<MemoryUpdate>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MemoryUpdate {
+    /// Same double-Option semantics as elsewhere: absent = leave alone,
+    /// present-with-null = reset to default, present-with-value = set.
+    #[serde(default, deserialize_with = "double_option")]
+    pub auto_extract: Option<Option<bool>>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub tools_enabled: Option<Option<bool>>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub inject_context: Option<Option<bool>>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub extractor_model: Option<Option<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct KeyUpdate {
+    pub name: String,
+    /// New value. `Some("")` clears; `None` leaves whatever's stored.
+    #[serde(default)]
+    pub value: Option<String>,
 }
 
 /// Distinguishes "key absent" (returns `None`) from "key present with null"
@@ -122,6 +178,11 @@ pub async fn put_settings(
     }
     info!(path = %global_path().display(), "settings saved");
 
+    // Push any newly-added search / third-party keys into the running
+    // process env so tools that check std::env pick them up on the very
+    // next call — no restart needed.
+    mira_config::export_keys_to_env(&cfg);
+
     // Rebuild the provider from the fresh config and swap it into the live
     // session. If the config still isn't complete, fall back to NullProvider
     // so the next turn produces a helpful warning instead of the last known
@@ -161,6 +222,31 @@ fn view_from(cfg: &MiraConfig, configured: bool) -> SettingsView {
             api_key_env: p.api_key_env.clone(),
         })
         .collect();
+    // Merge yaml-stored keys with any that only exist in the shell env, so
+    // the UI shows the complete set of what tools would actually see.
+    let mut keys: Vec<KeyView> = cfg
+        .keys
+        .iter()
+        .map(|(name, value)| KeyView {
+            name: name.clone(),
+            masked: if value.is_empty() { String::new() } else { mask_key(value) },
+            from_env: std::env::var_os(name).is_some(),
+        })
+        .collect();
+    // Include known well-known keys even when unset so the UI can prompt
+    // the user to add one. Extend this list as we add tools that need
+    // third-party API keys.
+    for well_known in ["BRAVE_SEARCH_API_KEY", "TAVILY_API_KEY"] {
+        if !keys.iter().any(|k| k.name == well_known) {
+            keys.push(KeyView {
+                name: well_known.to_owned(),
+                masked: String::new(),
+                from_env: std::env::var_os(well_known).is_some(),
+            });
+        }
+    }
+    keys.sort_by(|a, b| a.name.cmp(&b.name));
+
     SettingsView {
         default_provider: cfg.default_provider.clone(),
         default_model: cfg.default_model.clone(),
@@ -168,8 +254,15 @@ fn view_from(cfg: &MiraConfig, configured: bool) -> SettingsView {
         max_tokens: cfg.max_tokens,
         temperature: cfg.temperature,
         providers,
+        keys,
         configured,
         config_path: global_path().display().to_string(),
+        memory: MemoryView {
+            auto_extract: cfg.memory.auto_extract_enabled(),
+            tools_enabled: cfg.memory.tools_enabled(),
+            inject_context: cfg.memory.inject_context(),
+            extractor_model: cfg.memory.extractor_model().map(str::to_owned),
+        },
     }
 }
 
@@ -207,6 +300,29 @@ fn apply(cfg: &mut MiraConfig, u: SettingsUpdate) {
             } else {
                 Some(env_name)
             };
+        }
+    }
+    for ku in u.keys {
+        if let Some(value) = ku.value {
+            if value.is_empty() {
+                cfg.keys.remove(&ku.name);
+            } else {
+                cfg.keys.insert(ku.name, value);
+            }
+        }
+    }
+    if let Some(mu) = u.memory {
+        if let Some(v) = mu.auto_extract {
+            cfg.memory.auto_extract = v;
+        }
+        if let Some(v) = mu.tools_enabled {
+            cfg.memory.tools_enabled = v;
+        }
+        if let Some(v) = mu.inject_context {
+            cfg.memory.inject_context = v;
+        }
+        if let Some(v) = mu.extractor_model {
+            cfg.memory.extractor_model = v.filter(|s| !s.is_empty());
         }
     }
 }

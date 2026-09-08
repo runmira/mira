@@ -24,6 +24,7 @@ mod embedded;
 mod file;
 mod git;
 pub mod interactive;
+pub mod mcp;
 mod memory;
 mod models;
 pub mod protocol;
@@ -80,6 +81,13 @@ pub struct ServerConfig {
     /// Optional path to a directory with a built frontend (index.html + assets).
     /// If `None`, the server serves an inline placeholder page at `/`.
     pub static_dir: Option<PathBuf>,
+    /// Cross-session memory runtime knobs — controls the post-round
+    /// auto-extractor. Defaults to on with no extractor-model override.
+    pub memory_runtime: mira_config::MemoryRuntimeConfig,
+    /// Per-MCP-server connect results captured by the caller before it
+    /// registered the tools. Frozen for the process lifetime — the
+    /// Plugins UI diffs yaml against this to decide "restart required."
+    pub mcp_boot: Vec<crate::mcp::McpBootStatus>,
 }
 
 /// Start the server. Blocks until the process is signaled to exit.
@@ -93,16 +101,51 @@ pub async fn run(mut cfg: ServerConfig) -> Result<()> {
     let prompt_channel = interactive::PromptChannel::new(events_tx.clone());
     let prompt_pending = prompt_channel.pending();
 
+    // Swappable provider up front — the AgentTool below needs to hold it
+    // so subagents follow any provider hot-swap the user makes in Settings.
+    let swappable = SwappableProvider::new(cfg.provider.clone());
+    let harness_provider: Arc<dyn ChatProvider> = Arc::new(swappable.clone());
+
     // Copy the caller-provided registry and layer on server-only interactive
     // tools. Registry is `Clone`, so this is cheap; the resulting Arc<Registry>
     // is what the session actually consults.
+    //
+    // Order matters here for the `agent` tool: it needs a snapshot of the
+    // registry BEFORE itself so subagents inherit peer tools without a
+    // reference to `agent` itself (nested `agent` calls are re-added at
+    // construction time with the correct depth cap).
     let mut registry_owned: Registry = (*cfg.registry).clone();
     registry_owned.register(interactive::PlanTool::new(prompt_channel.clone()));
+    let base_registry = Arc::new(registry_owned.clone());
+
+    // Named subagent types: builtins + `~/.mira/AGENTS.md` + `<cwd>/.mira/AGENTS.md`.
+    // Loaded once at boot so the tool spec that goes to the model reflects
+    // the roster on the machine that started the server.
+    let agents_registry = Arc::new(mira_agents::load(&cfg.cwd));
+    tracing::info!(
+        count = agents_registry.names().len(),
+        types = ?agents_registry.names(),
+        "agent types loaded"
+    );
+
+    let mut agent_tool = interactive::AgentTool::new(
+        harness_provider.clone(),
+        base_registry,
+        cfg.cfg.model.clone(),
+    )
+    .with_agents(agents_registry.clone())
+    // Wire the shared events broadcast so subagent child events fan
+    // out to the connected WSes and light up the SubagentPanel live.
+    .with_events_tx(events_tx.clone());
+    // Persist child sessions when the parent's store is available. The
+    // panel uses `/api/sessions/:id/history` to rebuild a child's
+    // transcript on browser reload.
+    if let Some(store) = &cfg.store {
+        agent_tool = agent_tool.with_store(store.clone());
+    }
+    registry_owned.register(agent_tool);
     let registry = Arc::new(registry_owned);
     cfg.registry = registry.clone();
-
-    let swappable = SwappableProvider::new(cfg.provider.clone());
-    let harness_provider: Arc<dyn ChatProvider> = Arc::new(swappable.clone());
     let cwd = Arc::new(RwLock::new(cfg.cwd.clone()));
     let approver: Arc<dyn Approver> = Arc::new(WsApprover::new(
         events_tx.clone(),
@@ -110,7 +153,22 @@ pub async fn run(mut cfg: ServerConfig) -> Result<()> {
         cwd.clone(),
     ));
 
-    let initial_ctx = ToolContext::new(cfg.cwd.clone(), cfg.sandbox.clone());
+    // Build the memory + episodic stores BEFORE constructing the initial
+    // Session so its `tool_ctx` gets them wired from turn zero. Otherwise
+    // the very first session's memory tools would fail with "memory store
+    // not wired" until the user triggered a folder-swap or session-swap
+    // (which is when make_tool_ctx would first run).
+    let memory_store: Arc<dyn mira_memory::MemoryStore> =
+        Arc::new(mira_memory::FileMemoryStore::new(
+            mira_config::user_memory_path(),
+            mira_config::project_memory_path(&cfg.cwd),
+        ));
+    let episodic_store: Arc<dyn mira_memory::EpisodicStore> = Arc::new(
+        mira_memory::FileEpisodicStore::new(mira_memory::project_episodic_path(&cfg.cwd)),
+    );
+    let initial_ctx = ToolContext::new(cfg.cwd.clone(), cfg.sandbox.clone())
+        .with_memory(memory_store.clone())
+        .with_episodic(episodic_store.clone());
     let mut session = match cfg.resume.take() {
         Some(record) => Session::resume_from(
             record,
@@ -133,6 +191,26 @@ pub async fn run(mut cfg: ServerConfig) -> Result<()> {
     if let Some(store) = cfg.store.clone() {
         session = session.with_store(store);
     }
+    // Live memory: re-read user + project MIRA.md on every round so edits
+    // from `/remember`, the memory tools, or the user's own text editor
+    // reach the model without a session restart. The system prompt above
+    // no longer appends memory itself — the snapshot is the single source.
+    // Skip the snapshot entirely when `memory.inject_context` is false, so
+    // the second system message doesn't get emitted at all — useful when
+    // bisecting whether the memory block is confusing the model.
+    if cfg.memory_runtime.inject_context() {
+        session = session.with_memory_snapshot(make_memory_snapshot_with(
+            &cfg.cwd,
+            episodic_store.clone(),
+        ));
+    }
+    // Auto-extractor: post-round background pass that appends durable
+    // facts to episodic. Off if the user disabled it via `mira.yaml`.
+    if cfg.memory_runtime.auto_extract_enabled() {
+        session = session.with_auto_extract(mira_harness::AutoExtractConfig::enabled(
+            cfg.memory_runtime.extractor_model().map(str::to_owned),
+        ));
+    }
 
     let state = AppState {
         session: Arc::new(RwLock::new(session)),
@@ -147,6 +225,9 @@ pub async fn run(mut cfg: ServerConfig) -> Result<()> {
         approver,
         harness_provider,
         store: cfg.store.clone(),
+        memory: Arc::new(RwLock::new(memory_store)),
+        episodic: Arc::new(RwLock::new(episodic_store)),
+        mcp_boot: Arc::new(cfg.mcp_boot),
     };
 
     let router = build_router(state, cfg.static_dir.clone());
@@ -170,6 +251,10 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         )
         .route("/api/sessions", get(sessions::list_sessions))
         .route(
+            "/api/sessions/:id/history",
+            get(sessions::get_session_history),
+        )
+        .route(
             "/api/sessions/:id/load",
             axum::routing::post(sessions::load_session),
         )
@@ -180,6 +265,14 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route(
             "/api/sessions/:id",
             axum::routing::delete(sessions::delete_session),
+        )
+        .route(
+            "/api/sessions/:id/title",
+            axum::routing::patch(sessions::set_session_title),
+        )
+        .route(
+            "/api/sessions/:id/title/regenerate",
+            axum::routing::post(sessions::regenerate_session_title),
         )
         .route("/api/cwd", get(cwd::get_cwd).put(cwd::put_cwd))
         .route("/api/browse", get(browse::browse))
@@ -196,7 +289,8 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
             axum::routing::post(memory::append_memory),
         )
         .route("/api/review", axum::routing::post(review::start_review))
-        .route("/api/undo", axum::routing::post(undo::apply_undo));
+        .route("/api/undo", axum::routing::post(undo::apply_undo))
+        .route("/api/mcp", get(mcp::get_mcp).put(mcp::put_mcp));
 
     // Frontend precedence: `--static-dir` (dev/override) > embedded assets
     // baked at compile time > inline placeholder page.
@@ -230,6 +324,38 @@ async fn inline_index() -> axum::response::Html<&'static str> {
 pub fn default_store() -> Result<Arc<dyn SessionStore>> {
     let store = FileStore::open_default().context("open session store")?;
     Ok(Arc::new(store))
+}
+
+/// Build the standard live-memory snapshot for a session bound to `cwd`.
+/// Every `Session::new` / `Session::resume_from` site in the server should
+/// pass the result through `session.with_memory_snapshot(...)` so mid-
+/// session memory edits land on the very next round.
+///
+/// The two-arg overload (`make_memory_snapshot`) is the standalone form —
+/// used by the CLI, which doesn't share an episodic store across handlers.
+/// Server-side callers should prefer [`make_memory_snapshot_with`] so the
+/// snapshot renders the same episodic entries `memory_remember` writes to.
+pub fn make_memory_snapshot(cwd: &std::path::Path) -> Arc<dyn mira_memory::MemorySnapshot> {
+    let epi: Arc<dyn mira_memory::EpisodicStore> = Arc::new(
+        mira_memory::FileEpisodicStore::new(mira_memory::project_episodic_path(cwd)),
+    );
+    make_memory_snapshot_with(cwd, epi)
+}
+
+/// Server variant that shares an existing episodic-store handle with the
+/// snapshot — so `memory_remember` (writer) and the snapshot renderer
+/// (reader) hit the same file through the same mutex.
+pub fn make_memory_snapshot_with(
+    cwd: &std::path::Path,
+    episodic: Arc<dyn mira_memory::EpisodicStore>,
+) -> Arc<dyn mira_memory::MemorySnapshot> {
+    Arc::new(
+        mira_memory::FileMemorySnapshot::new(
+            mira_config::user_memory_path(),
+            mira_config::project_memory_path(cwd),
+        )
+        .with_episodic(episodic),
+    )
 }
 
 /// System prompt for a session bound to `cwd`. Kept here (rather than in the
@@ -280,27 +406,26 @@ pub fn system_prompt(cwd: &std::path::Path, registry: &Registry) -> String {
          run one command, answer a question by reading files, read + \
          summarize existing code.\n\n\
          When in doubt: plan. A short approved plan beats starting to edit \
-         and having to backtrack.",
+         and having to backtrack.\n\n\
+         DELEGATION.\n\
+         When a subtask would take many tool calls to investigate — searching \
+         a large codebase for every use of X, reading half a dozen files to \
+         answer one question, running an exploratory probe — prefer the \
+         `agent` tool. Its child starts COLD, so write a self-contained \
+         prompt with the file paths, keywords, and shape of answer you want. \
+         The child's summary comes back as one message and its 20 tool calls \
+         never touch your context. Do NOT delegate the actual writing you \
+         were asked to do — subagents are for research and bounded probes, \
+         not the deliverable.",
         cwd = cwd.display(),
     );
 
-    // Append user/project memory (if any exists) so per-repo conventions and
-    // per-user preferences reach the model on every turn. Missing files are
-    // silently skipped — no forced ceremony for first-time users.
-    let memory = mira_config::load_memory_files(cwd);
-    if memory.is_empty() {
-        return base;
-    }
-    let mut out = base;
-    out.push_str("\n\n---\n");
-    for m in memory {
-        let header = match m.kind {
-            mira_config::MemoryKind::User => "User memory (from ~/.mira/MIRA.md)",
-            mira_config::MemoryKind::Project => "Project memory (from .mira/MIRA.md)",
-        };
-        out.push_str(&format!("\n## {header}\n\n{}\n", m.content.trim()));
-    }
-    out
+    // Memory (user + project MIRA.md) used to be baked into the prompt here,
+    // but that made every session a snapshot — mid-session edits, agent tool
+    // writes, and `/remember` calls only took effect on the *next* session.
+    // The harness now injects a live memory block on every round via a
+    // `MemorySnapshot`; this function returns the stable, cacheable prefix.
+    base
 }
 
 /// First sentence of a tool description — used to keep the system-prompt

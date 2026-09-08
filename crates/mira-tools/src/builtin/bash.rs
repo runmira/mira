@@ -63,11 +63,22 @@ impl Tool for Bash {
         // becomes undo-able just like an `edit_file` / `write_file` write.
         let pre_bash = ctx.guard.as_ref().and_then(|g| g.pre_bash());
 
-        let outcome = ctx
-            .sandbox
-            .run(&args.command, &ctx.cwd, timeout)
-            .await
-            .map_err(|e| ToolError::Failed(e.to_string()))?;
+        // Prefer the session's long-lived shell — `cd`, activated venvs
+        // and `export`s persist across calls. Fall back to the fresh
+        // `bash -lc` path when no persistent shell is attached (headless
+        // runs, tests).
+        let outcome = if let Some(shell) = &ctx.shell {
+            let mut guard = shell.lock().await;
+            guard
+                .run(&args.command, timeout)
+                .await
+                .map_err(|e| ToolError::Failed(e.to_string()))?
+        } else {
+            ctx.sandbox
+                .run(&args.command, &ctx.cwd, timeout)
+                .await
+                .map_err(|e| ToolError::Failed(e.to_string()))?
+        };
 
         if let (Some(g), Some(pre)) = (&ctx.guard, &pre_bash) {
             // Errors here shouldn't kill the tool result — surface + skip.

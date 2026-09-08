@@ -75,7 +75,7 @@ pub fn spawn_if_needed(
     });
 }
 
-async fn generate(
+pub async fn generate(
     provider: &dyn ChatProvider,
     model: &str,
     user: &str,
@@ -94,7 +94,12 @@ async fn generate(
         messages: vec![Message::system(system), Message::user(user_prompt)],
         tools: Vec::new(),
         temperature: Some(0.2),
-        max_tokens: Some(24),
+        // Reasoning-capable models (o-series, gpt-5, etc.) count thinking
+        // tokens against this budget; 24 was tight enough that some turns
+        // exhausted the cap before emitting any TextDelta and the extractor
+        // returned an empty string. 64 leaves headroom without meaningfully
+        // changing cost.
+        max_tokens: Some(64),
         // Title-generation is a short, low-signal task — don't burn thinking
         // tokens on it even if the current session has effort dialled up.
         reasoning_effort: None,
@@ -113,10 +118,15 @@ async fn generate(
 }
 
 fn sanitize(raw: &str) -> String {
-    // Take only the first line — models sometimes append explanation despite
-    // instructions. Strip surrounding quotes, trailing punctuation, and any
+    // Take the first non-empty line — models sometimes append explanation
+    // despite instructions, and some emit a leading blank/newline before the
+    // real title. Strip surrounding quotes, trailing punctuation, and any
     // wrapping markdown emphasis.
-    let line = raw.lines().next().unwrap_or("").trim();
+    let line = raw
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
     let stripped: String = line
         .trim_matches(|c: char| c == '"' || c == '\'' || c == '`' || c == '*' || c == '_')
         .trim_end_matches(|c: char| c == '.' || c == ',' || c == ':' || c == ';')
@@ -126,6 +136,30 @@ fn sanitize(raw: &str) -> String {
         stripped.chars().take(TITLE_CHAR_CAP).collect()
     } else {
         stripped
+    }
+}
+
+/// Best-effort title derived from the first user message. Used as a fallback
+/// when the model extractor returns an empty string, so the user gets *some*
+/// nickname instead of a 502.
+pub fn heuristic_from_user_message(user: &str) -> String {
+    let first_line = user
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    let words: Vec<&str> = first_line.split_whitespace().take(6).collect();
+    let joined = words.join(" ");
+    let trimmed = joined.trim_end_matches(|c: char| c == '.' || c == ',' || c == ':' || c == ';');
+    let mut chars = trimmed.chars();
+    let cased = match chars.next() {
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    };
+    if cased.chars().count() > TITLE_CHAR_CAP {
+        cased.chars().take(TITLE_CHAR_CAP).collect()
+    } else {
+        cased
     }
 }
 
@@ -161,5 +195,24 @@ mod tests {
             sanitize("Respond to greeting\nExplanation here"),
             "Respond to greeting"
         );
+    }
+
+    #[test]
+    fn sanitize_skips_leading_blank_lines() {
+        assert_eq!(sanitize("\n\nRespond to greeting"), "Respond to greeting");
+        assert_eq!(sanitize("   \n\tFix bug\nExtra"), "Fix bug");
+    }
+
+    #[test]
+    fn heuristic_takes_first_six_words_cased() {
+        assert_eq!(
+            heuristic_from_user_message("find memory leaks in the map service today"),
+            "Find memory leaks in the map"
+        );
+        assert_eq!(
+            heuristic_from_user_message("\n\nfix bug in login."),
+            "Fix bug in login"
+        );
+        assert_eq!(heuristic_from_user_message(""), "");
     }
 }

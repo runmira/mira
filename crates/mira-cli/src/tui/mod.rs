@@ -306,6 +306,12 @@ fn handle_harness_event(
         HarnessEvent::Warning(w) => state.push_warning(w),
         HarnessEvent::TurnComplete => {}
         HarnessEvent::Usage { totals, .. } => state.usage = totals,
+        HarnessEvent::MemoryLearned { count } => {
+            state.push_warning(format!(
+                "[memory] remembered {count} thing{}",
+                if count == 1 { "" } else { "s" }
+            ));
+        }
         HarnessEvent::Done => {
             state.streaming = false;
             *agent_stream = None;

@@ -10,6 +10,7 @@ description  = "Tool trait, registry, and built-in tools for the Mira harness."
 mira-core     = { workspace = true }
 mira-ai       = { workspace = true }
 mira-config   = { workspace = true }
+mira-memory   = { workspace = true }
 mira-sandbox  = { workspace = true }
 
 anyhow        = { workspace = true }
@@ -23,6 +24,9 @@ shellexpand   = { workspace = true }
 similar       = { workspace = true }
 rmcp          = { workspace = true }
 glob          = { workspace = true }
+reqwest       = { workspace = true }
+html2text     = { workspace = true }
+futures       = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

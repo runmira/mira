@@ -32,4 +32,12 @@ pub enum HarnessEvent {
         /// Aggregate session totals (including `round`).
         totals: UsageTotals,
     },
+    /// Post-round auto-extractor added N durable facts to the episodic
+    /// store. Emitted as its own frame (rather than a `Warning`) so a UI
+    /// can render it distinctly — a subtle "mira remembered N things"
+    /// chip beats a scary-looking warning banner. `count == 0` is not
+    /// emitted; the pass just stays quiet when nothing was worth keeping.
+    MemoryLearned {
+        count: usize,
+    },
 }

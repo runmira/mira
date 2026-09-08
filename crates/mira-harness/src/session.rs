@@ -2,8 +2,10 @@ use std::sync::Arc;
 
 use futures::{stream::BoxStream, StreamExt};
 use mira_ai::{ChatEvent, ChatProvider, ChatRequest, FinishReason};
-use mira_core::{Message, SessionId, ToolCall, ToolResult};
+use mira_core::{Message, Role, SessionId, ToolCall, ToolResult};
+use mira_memory::{EpisodicEntry, EpisodicSource, EpisodicStore, MemorySnapshot};
 use mira_policy::{Decision, Policy, Request as PolicyRequest};
+use mira_sandbox::PersistentShell;
 use mira_tools::{FileGuard, Registry, ToolContext};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Mutex};
@@ -50,6 +52,57 @@ fn default_max_rounds() -> usize {
     60
 }
 
+/// Post-round auto-extractor configuration.
+///
+/// Attached via [`Session::with_auto_extract`]. When set + enabled, after
+/// every user turn that included at least one tool call the harness spawns
+/// a background task that: (1) calls the extractor model with a
+/// fact-mining prompt, (2) parses the response into bullets, (3) dedups
+/// against the last N episodic entries, (4) appends survivors to the
+/// session's `EpisodicStore` (from `tool_ctx.episodic`).
+///
+/// Kept separate from [`SessionConfig`] so tests / callers that don't
+/// want the feature can leave it unset and pay nothing.
+#[derive(Clone, Debug)]
+pub struct AutoExtractConfig {
+    /// Master switch. Even when this struct is attached the extractor is
+    /// a no-op if `enabled == false` — useful for per-repo disable via
+    /// `mira.yaml` without dropping the extractor plumbing entirely.
+    pub enabled: bool,
+    /// Model passed to the extractor call. `None` = reuse the session's
+    /// active model (expensive; usually you want a cheap tier).
+    pub model: Option<String>,
+}
+
+impl AutoExtractConfig {
+    /// Convenience: on with the session's model as fallback.
+    pub fn enabled(model: Option<String>) -> Self {
+        Self {
+            enabled: true,
+            model,
+        }
+    }
+}
+
+/// How many recent episodic entries to consider when deciding whether a
+/// candidate is a duplicate. Small enough that dedup is O(N) with a
+/// substring check; big enough to catch the "I just remembered that last
+/// turn" case.
+const DEDUP_LOOKBACK: usize = 30;
+
+/// Hard wall-clock ceiling on one extraction call. If the extractor
+/// provider hangs, we log and move on rather than leaking a task per
+/// finished turn.
+const EXTRACTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Cap on how much round transcript we feed the extractor. Big rounds
+/// with fat tool results would otherwise balloon the extraction prompt.
+const EXTRACTION_INPUT_MAX: usize = 8000;
+
+/// Cap on the extractor's own reply length. Enough for a handful of
+/// bullets; short enough that a runaway extractor can't cost real money.
+const EXTRACTION_OUTPUT_TOKENS: u32 = 512;
+
 impl SessionConfig {
     pub fn new(model: impl Into<String>) -> Self {
         Self {
@@ -93,6 +146,14 @@ pub struct Session {
     approver: Arc<dyn Approver>,
     tool_ctx: ToolContext,
     store: Option<Arc<dyn SessionStore>>,
+    /// Renders the "live" memory block (user + project `MIRA.md`) on every
+    /// round so mid-session edits — from `/remember`, from a memory tool,
+    /// or straight from a text editor — reach the model on the very next
+    /// turn. Persisted history keeps only the fixed system prefix; the
+    /// live block is inserted at request time and never checkpointed.
+    memory_snapshot: Option<Arc<dyn MemorySnapshot>>,
+    /// Post-round background extraction settings. See [`AutoExtractConfig`].
+    auto_extract: Option<AutoExtractConfig>,
     /// Handle to the currently-running turn task, if any. `cancel()` aborts
     /// it; the loop's `tx.send` calls then fail as the channel closes and
     /// the frontend stops seeing new events.
@@ -110,6 +171,9 @@ impl Session {
         mut tool_ctx: ToolContext,
     ) -> Self {
         let id = SessionId::new();
+        // Stamp the session id on the tool context so tools that persist
+        // provenance-tagged state (episodic memory, undo snapshots) see it.
+        tool_ctx = tool_ctx.with_session_id(id.clone());
         // Attach a session-scoped FileGuard for conflict detection + undo.
         // Failure is logged and swallowed — a missing guard just means those
         // features are disabled for this session (files still get read /
@@ -119,6 +183,14 @@ impl Session {
         } else {
             warn!(session = %id, "file guard init failed; undo + conflict detection disabled");
         }
+        // Persistent bash: lazy — the shell struct doesn't fork bash until
+        // the first bash command lands. Storing it here just means `cd`,
+        // venvs, and env exports persist across calls for the whole session.
+        let cwd_for_shell = tool_ctx.cwd.clone();
+        tool_ctx = tool_ctx.with_shell(Arc::new(Mutex::new(PersistentShell::new(
+            cwd_for_shell,
+            true,
+        ))));
         Self {
             id,
             cfg: Arc::new(Mutex::new(cfg)),
@@ -133,6 +205,8 @@ impl Session {
             approver,
             tool_ctx,
             store: None,
+            memory_snapshot: None,
+            auto_extract: None,
             current_turn: Arc::new(Mutex::new(None)),
         }
     }
@@ -152,11 +226,19 @@ impl Session {
     ) -> Self {
         // Same guard wiring as `new` — seq counter picks up where the
         // previous run left off (see FileGuard::open).
+        tool_ctx = tool_ctx.with_session_id(record.id.clone());
         if let Ok(g) = FileGuard::open(&record.id.to_string(), tool_ctx.cwd.clone()) {
             tool_ctx = tool_ctx.with_guard(Arc::new(g));
         } else {
             warn!(session = %record.id, "file guard init failed on resume");
         }
+        // Resumed sessions get a fresh shell (bash state doesn't survive a
+        // restart), but `cd` + env persistence resumes from the next call.
+        let cwd_for_shell = tool_ctx.cwd.clone();
+        tool_ctx = tool_ctx.with_shell(Arc::new(Mutex::new(PersistentShell::new(
+            cwd_for_shell,
+            true,
+        ))));
         Self {
             id: record.id,
             cfg: Arc::new(Mutex::new(record.cfg)),
@@ -171,6 +253,8 @@ impl Session {
             approver,
             tool_ctx,
             store: None,
+            memory_snapshot: None,
+            auto_extract: None,
             current_turn: Arc::new(Mutex::new(None)),
         }
     }
@@ -178,6 +262,24 @@ impl Session {
     /// Attach a store so the session autosaves after each round.
     pub fn with_store(mut self, store: Arc<dyn SessionStore>) -> Self {
         self.store = Some(store);
+        self
+    }
+
+    /// Attach a memory snapshot. When set, the harness reads it before
+    /// every provider round and injects the rendered block as a second
+    /// system message. The block is *not* checkpointed into history — so
+    /// resumed sessions render fresh from disk, and mid-session edits are
+    /// picked up on the next turn.
+    pub fn with_memory_snapshot(mut self, snapshot: Arc<dyn MemorySnapshot>) -> Self {
+        self.memory_snapshot = Some(snapshot);
+        self
+    }
+
+    /// Enable post-round auto-extraction. Only fires when the session's
+    /// `tool_ctx.episodic` handle is also set (nothing to write to
+    /// otherwise). See [`AutoExtractConfig`] for the settings.
+    pub fn with_auto_extract(mut self, cfg: AutoExtractConfig) -> Self {
+        self.auto_extract = Some(cfg);
         self
     }
 
@@ -325,12 +427,28 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
         };
     let mut verify_attempts = 0usize;
 
+    // Where the auto-extractor's "just-finished round" slice starts. The
+    // user message for this turn was pushed in `Session::send` right
+    // before `run_loop` spawned, so it's already sitting at len()-1.
+    let turn_start_idx = sess
+        .history
+        .lock()
+        .await
+        .len()
+        .saturating_sub(1);
+    // Auto-extractor gate: only fire when the turn actually did work AND
+    // at least one tool call succeeded. Skipping error-only turns matters
+    // because a session where (say) every `memory_read` returned "not
+    // wired" would otherwise get summarized into episodic memory and
+    // pollute every future session — self-poisoning loop.
+    let mut any_successful_tool_call = false;
+
     for round in 0..cfg.max_rounds {
         info!(round, "harness: model turn");
 
         let req = ChatRequest {
             model: cfg.model.clone(),
-            messages: sess.history.lock().await.clone(),
+            messages: build_request_messages(&sess).await,
             tools: sess.registry.specs(),
             temperature: cfg.temperature,
             max_tokens: cfg.max_tokens,
@@ -439,6 +557,18 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
 
             sess.end_current_turn().await;
             checkpoint(&sess).await;
+            // Post-round auto-extraction: fire-and-forget background task
+            // that mines this round for durable facts and appends them to
+            // the episodic store. Kept off the critical path so the user
+            // isn't kept waiting on an extra provider round-trip.
+            maybe_spawn_extractor(
+                &sess,
+                &cfg,
+                turn_start_idx,
+                any_successful_tool_call,
+                tx.clone(),
+            )
+            .await;
             let _ = tx.send(HarnessEvent::Done).await;
             return;
         }
@@ -491,6 +621,9 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
                 }
             };
 
+            if !result.is_error {
+                any_successful_tool_call = true;
+            }
             sess.history.lock().await.push(Message::tool(
                 result.call_id.clone(),
                 truncate_for_history(&result.content),
@@ -604,4 +737,263 @@ async fn run_verify(
             .await;
         Some((check, outcome.output))
     }
+}
+
+/// If auto-extract is enabled and the gate passed (`any_tool_calls`), spawn
+/// a background task that mines this round for durable facts and appends
+/// them to the episodic store. Detached-fire-and-forget: the caller does
+/// NOT await this. The task holds a clone of `tx` so it can emit a
+/// `MemoryLearned` frame if the receiver is still around; the info log is
+/// always emitted so CLI users see the outcome even after the stream is
+/// closed.
+async fn maybe_spawn_extractor(
+    sess: &Session,
+    cfg: &SessionConfig,
+    turn_start_idx: usize,
+    any_tool_calls: bool,
+    tx: mpsc::Sender<HarnessEvent>,
+) {
+    if !any_tool_calls {
+        return;
+    }
+    let Some(auto) = sess.auto_extract.as_ref() else {
+        return;
+    };
+    if !auto.enabled {
+        return;
+    }
+    let Some(episodic) = sess.tool_ctx.episodic.clone() else {
+        return;
+    };
+
+    // Copy just the round's messages so we don't hang onto the session
+    // history mutex or drag the whole transcript into the spawned task.
+    let round: Vec<Message> = {
+        let hist = sess.history.lock().await;
+        if turn_start_idx >= hist.len() {
+            return;
+        }
+        hist[turn_start_idx..].to_vec()
+    };
+    let round_content = format_round_for_extraction(&round);
+    if round_content.trim().is_empty() {
+        return;
+    }
+
+    let provider = sess.provider.clone();
+    let model = auto.model.clone().unwrap_or_else(|| cfg.model.clone());
+    let session_id = sess.id.clone();
+
+    tokio::spawn(async move {
+        let result = tokio::time::timeout(
+            EXTRACTION_TIMEOUT,
+            run_extraction(provider, model, round_content, episodic, session_id),
+        )
+        .await;
+        match result {
+            Ok(Ok(count)) if count > 0 => {
+                info!(count, "auto-extract: remembered facts");
+                let _ = tx.send(HarnessEvent::MemoryLearned { count }).await;
+            }
+            Ok(Ok(_)) => {
+                // Extractor ran but nothing worth remembering — stay quiet.
+            }
+            Ok(Err(e)) => warn!(error = %e, "auto-extract: failed"),
+            Err(_) => warn!(timeout_s = EXTRACTION_TIMEOUT.as_secs(), "auto-extract: timed out"),
+        }
+    });
+}
+
+/// Extraction call → parse → dedup → append. Returns the number of
+/// entries actually written (survivors of the dedup filter).
+async fn run_extraction(
+    provider: Arc<dyn ChatProvider>,
+    model: String,
+    round_content: String,
+    episodic: Arc<dyn EpisodicStore>,
+    session_id: SessionId,
+) -> Result<usize, String> {
+    let candidates = extract_facts(provider, model, round_content)
+        .await
+        .map_err(|e| e.to_string())?;
+    if candidates.is_empty() {
+        return Ok(0);
+    }
+    let existing = episodic
+        .recent(DEDUP_LOOKBACK)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut appended = 0usize;
+    for text in candidates {
+        if is_duplicate(&text, &existing) {
+            continue;
+        }
+        let entry =
+            EpisodicEntry::now(text, EpisodicSource::Auto).with_session_id(session_id.to_string());
+        if let Err(e) = episodic.append(entry).await {
+            warn!(error = %e, "auto-extract: append failed");
+            continue;
+        }
+        appended += 1;
+    }
+    Ok(appended)
+}
+
+/// One provider call with the extraction prompt. Returns a list of
+/// candidate bullets (deduped later). Uses the streaming API for
+/// consistency with the rest of the codebase but the response is small
+/// and we just accumulate it.
+async fn extract_facts(
+    provider: Arc<dyn ChatProvider>,
+    model: String,
+    round_content: String,
+) -> Result<Vec<String>, mira_ai::ProviderError> {
+    let system = EXTRACTION_SYSTEM.to_string();
+    let user = format!("Round content:\n\n{round_content}\n\nFacts:");
+    let req = ChatRequest {
+        model,
+        messages: vec![Message::system(system), Message::user(user)],
+        tools: Vec::new(),
+        temperature: Some(0.0),
+        max_tokens: Some(EXTRACTION_OUTPUT_TOKENS),
+        reasoning_effort: None,
+    };
+    let mut stream = provider.stream(req).await?;
+    let mut text = String::new();
+    while let Some(evt) = stream.next().await {
+        match evt {
+            Ok(ChatEvent::TextDelta(t)) => text.push_str(&t),
+            Ok(ChatEvent::Done(_)) => break,
+            Ok(_) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(parse_extraction_bullets(&text))
+}
+
+/// System prompt for the extractor. Kept intentionally tight — the model
+/// only needs to know the *criteria*, not why they exist.
+const EXTRACTION_SYSTEM: &str = "\
+You extract durable, cross-session facts from a single conversation turn between a user \
+and an AI coding agent. Output ONE fact per line, each starting with '- '. \
+Include a fact ONLY if a future session with no memory of this turn would benefit from \
+knowing it while working on the same project.\n\
+\n\
+Good: repo conventions ('this repo uses pnpm not npm'), decisions with rationale \
+('we chose migration B because of concurrent writes'), gotchas ('tests need \
+SKIP_LINT=1 on macOS'), user preferences ('user prefers terse commit messages').\n\
+Bad: transient state (current file, current TODO), things the code itself already \
+documents, opinions about the assistant's own performance, one-off task details.\n\
+\n\
+If nothing is worth remembering, output the single line: NONE\n\
+Output ONLY the bullets or 'NONE'. No preamble, no explanation, no headers.";
+
+/// Turn the raw extractor response into a list of candidate facts.
+/// Handles `-` / `*` prefixes and drops empties and `NONE` sentinels.
+fn parse_extraction_bullets(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.eq_ignore_ascii_case("NONE") {
+            continue;
+        }
+        let stripped = t
+            .strip_prefix("- ")
+            .or_else(|| t.strip_prefix("* "))
+            .unwrap_or(t)
+            .trim();
+        if stripped.is_empty() {
+            continue;
+        }
+        out.push(stripped.to_string());
+    }
+    out
+}
+
+/// Render a round's messages as plain text for the extractor prompt.
+/// Only user + assistant text; tool results are skipped (they're usually
+/// large and noise for extraction — the assistant's followup captures
+/// what mattered). Bounded by `EXTRACTION_INPUT_MAX` bytes.
+fn format_round_for_extraction(msgs: &[Message]) -> String {
+    let mut out = String::new();
+    for m in msgs {
+        let content = match m.content.as_deref() {
+            Some(c) if !c.trim().is_empty() => c,
+            _ => continue,
+        };
+        let label = match m.role {
+            Role::User => "[user]",
+            Role::Assistant => "[assistant]",
+            _ => continue,
+        };
+        out.push_str(&format!("{label}\n{content}\n\n"));
+    }
+    if out.len() > EXTRACTION_INPUT_MAX {
+        let mut cut = EXTRACTION_INPUT_MAX;
+        while cut > 0 && !out.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        out.truncate(cut);
+        out.push_str("\n\n[transcript truncated for extractor]\n");
+    }
+    out.trim().to_string()
+}
+
+/// Case- and whitespace-insensitive duplicate check.
+///
+/// A candidate is a duplicate if its normalized text either contains, or
+/// is contained by, any of the recent entries. Catches the "same fact
+/// worded slightly longer" case in both directions — cheaper than
+/// embeddings and good enough at v1 scale.
+fn is_duplicate(candidate: &str, existing: &[EpisodicEntry]) -> bool {
+    let cand = normalize_for_dedup(candidate);
+    if cand.is_empty() {
+        return true;
+    }
+    for e in existing {
+        let e_norm = normalize_for_dedup(&e.text);
+        if e_norm.is_empty() {
+            continue;
+        }
+        if e_norm.contains(&cand) || cand.contains(&e_norm) {
+            return true;
+        }
+    }
+    false
+}
+
+fn normalize_for_dedup(s: &str) -> String {
+    s.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Build the message list for one provider round.
+///
+/// Starts from the persisted history (system prefix + conversation) and,
+/// when a memory snapshot is attached, splices a fresh memory block in as
+/// a *second* system message right after the prefix. That second message
+/// intentionally is never persisted — resumed sessions render memory from
+/// disk on their next round, so a mid-session edit is always live.
+///
+/// The prefix stays as message[0] so the provider's prompt cache still
+/// hits — see `mira_ai::openai::WireMessage::from_message`, which marks
+/// only the first system message with `cache_control: ephemeral`.
+async fn build_request_messages(sess: &Session) -> Vec<Message> {
+    let mut msgs = sess.history.lock().await.clone();
+    let Some(snap) = sess.memory_snapshot.as_ref() else {
+        return msgs;
+    };
+    let Some(block) = snap.render().await else {
+        return msgs;
+    };
+    // Find the first system message and insert the memory block right
+    // after it. If there is no system message (shouldn't happen in
+    // practice — `Session::new` always seeds one — but the code is
+    // defensive) fall back to prepending.
+    let insert_at = msgs
+        .iter()
+        .position(|m| matches!(m.role, Role::System))
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    msgs.insert(insert_at, Message::system(block));
+    msgs
 }

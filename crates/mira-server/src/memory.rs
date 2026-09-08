@@ -6,7 +6,7 @@
 //!                              creating parents (and the file itself) as
 //!                              needed. Returns the new byte count.
 //!
-//! The reader lives in `mira-config::load_memory_files` so both the CLI and
+//! The reader lives in `mira-memory::load_memory_files` so both the CLI and
 //! the server pick it up through the shared crate. This module is the write
 //! side — a tiny endpoint the frontend's `/remember` slash command hits.
 
@@ -16,6 +16,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use mira_memory::MemoryScope;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
@@ -34,6 +35,15 @@ pub enum Scope {
     Project,
 }
 
+impl From<Scope> for MemoryScope {
+    fn from(s: Scope) -> Self {
+        match s {
+            Scope::User => MemoryScope::User,
+            Scope::Project => MemoryScope::Project,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct AppendView {
     pub path: String,
@@ -48,55 +58,25 @@ pub async fn append_memory(
     if text.is_empty() {
         return err(StatusCode::BAD_REQUEST, "text is empty".into());
     }
-
-    let path = match req.scope {
-        Scope::User => mira_config::user_memory_path(),
-        Scope::Project => state.current_cwd().await.join(".mira").join("MIRA.md"),
-    };
-    if let Some(parent) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
+    // Route through the shared MemoryStore so this handler picks up the
+    // same per-scope mutex that the memory tools use — no read-modify-
+    // write race when `/remember` and a `memory_append` tool call collide.
+    let store = state.current_memory().await;
+    let scope: MemoryScope = req.scope.into();
+    let bytes = match store.append(scope, text).await {
+        Ok(b) => b,
+        Err(e) => {
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("mkdir {}: {e}", parent.display()),
-            );
+                format!("append memory: {e}"),
+            )
         }
-    }
-
-    // Load current contents (empty when new), append a bullet, write back.
-    // Keep formatting light — a leading `- ` per line reads well in markdown
-    // and stays scannable when the model consumes the file whole.
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    let mut body = existing;
-    if !body.is_empty() && !body.ends_with('\n') {
-        body.push('\n');
-    }
-    // Prefix each line so multi-line notes still render as one bullet.
-    let bullet = text
-        .lines()
-        .enumerate()
-        .map(|(i, l)| {
-            if i == 0 {
-                format!("- {l}")
-            } else {
-                format!("  {l}")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    body.push_str(&bullet);
-    body.push('\n');
-
-    if let Err(e) = std::fs::write(&path, body.as_bytes()) {
-        return err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("write {}: {e}", path.display()),
-        );
-    }
-
-    info!(scope = ?req.scope, path = %path.display(), bytes = body.len(), "memory append");
+    };
+    let path = store.path(scope);
+    info!(scope = ?req.scope, path = %path.display(), bytes, "memory append");
     Json(AppendView {
         path: path.display().to_string(),
-        bytes: body.len() as u64,
+        bytes,
     })
     .into_response()
 }

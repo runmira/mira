@@ -1,7 +1,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use mira_sandbox::Sandbox;
+use mira_core::SessionId;
+use mira_memory::{EpisodicStore, MemoryStore};
+use mira_sandbox::{PersistentShell, Sandbox};
+use tokio::sync::Mutex;
 
 use crate::guard::FileGuard;
 
@@ -22,6 +25,31 @@ pub struct ToolContext {
     /// snapshots. `None` means the caller didn't wire one up (tests, some
     /// headless runs); tools should degrade to plain file operations.
     pub guard: Option<Arc<FileGuard>>,
+    /// Optional long-lived shell scoped to this session. When present,
+    /// the `bash` tool routes commands through it so `cd`, activated
+    /// venvs, and `export`s persist across calls. Absent for headless /
+    /// test runs; Bash falls back to the fresh-per-call sandbox path.
+    pub shell: Option<Arc<Mutex<PersistentShell>>>,
+    /// Optional handle to the shared memory store. Tools that read or
+    /// mutate `MIRA.md` (`memory_read`, `memory_append`, `memory_edit`,
+    /// `memory_search`) go through this so per-scope locking is honored
+    /// across every writer (agent tools, HTTP endpoints, future clients).
+    /// Absent for tests that don't want a real filesystem behind memory.
+    pub memory: Option<Arc<dyn MemoryStore>>,
+    /// Optional handle to the cross-session episodic store (JSONL). The
+    /// `memory_remember` tool appends here, and the post-round
+    /// auto-extraction pass writes here too.
+    pub episodic: Option<Arc<dyn EpisodicStore>>,
+    /// Optional current session id. Attached by the harness inside
+    /// `Session::new` / `Session::resume_from` so tools that persist
+    /// state (episodic entries, undo snapshots) can stamp provenance.
+    pub session_id: Option<SessionId>,
+    /// How deeply nested the currently-executing session is under the
+    /// user's top-level chat. Parent (user-facing) = 0; first-level
+    /// subagent = 1; nested subagent = 2, etc. Read by the `agent` tool
+    /// to enforce a hard cap on runaway spawn recursion — new subagents
+    /// inherit `parent.agent_depth + 1`.
+    pub agent_depth: usize,
 }
 
 impl ToolContext {
@@ -30,6 +58,11 @@ impl ToolContext {
             cwd: cwd.into(),
             sandbox,
             guard: None,
+            shell: None,
+            memory: None,
+            episodic: None,
+            session_id: None,
+            agent_depth: 0,
         }
     }
 
@@ -37,6 +70,45 @@ impl ToolContext {
     /// session id — the FileGuard is scoped to that id.
     pub fn with_guard(mut self, guard: Arc<FileGuard>) -> Self {
         self.guard = Some(guard);
+        self
+    }
+
+    /// Attach a per-session persistent shell so bash commands share state
+    /// across calls. Same lifecycle as `guard`.
+    pub fn with_shell(mut self, shell: Arc<Mutex<PersistentShell>>) -> Self {
+        self.shell = Some(shell);
+        self
+    }
+
+    /// Attach the shared memory store so the memory tools can read/append/
+    /// edit `MIRA.md`. Wired by the server (or CLI) at startup — one store
+    /// instance is shared with the `/api/memory/append` HTTP endpoint so
+    /// concurrent writers all take the same per-scope lock.
+    pub fn with_memory(mut self, memory: Arc<dyn MemoryStore>) -> Self {
+        self.memory = Some(memory);
+        self
+    }
+
+    /// Attach the cross-session episodic store. Needed by
+    /// `memory_remember`; the harness's post-round auto-extractor also
+    /// pulls this same handle to keep provenance / dedup consistent.
+    pub fn with_episodic(mut self, episodic: Arc<dyn EpisodicStore>) -> Self {
+        self.episodic = Some(episodic);
+        self
+    }
+
+    /// Stamp the current session id. Used by episodic writes to record
+    /// which session an entry came from — useful for later consolidation
+    /// and for the review UI.
+    pub fn with_session_id(mut self, id: SessionId) -> Self {
+        self.session_id = Some(id);
+        self
+    }
+
+    /// Set the subagent nesting depth. The `agent` tool uses this to cap
+    /// runaway spawn recursion — see the constant in `AgentTool`.
+    pub fn with_agent_depth(mut self, depth: usize) -> Self {
+        self.agent_depth = depth;
         self
     }
 

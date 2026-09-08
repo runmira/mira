@@ -59,6 +59,11 @@ pub async fn run(session: Session) -> Result<()> {
                     // repl doesn't render usage inline; totals are visible via
                     // `mira sessions ls`.
                 }
+                HarnessEvent::MemoryLearned { count } => {
+                    let msg = format!("\n[memory] remembered {count} thing{}\n",
+                        if count == 1 { "" } else { "s" });
+                    stdout.write_all(msg.as_bytes()).await?;
+                }
                 HarnessEvent::Done => {
                     stdout.write_all(b"\n").await?;
                     break;

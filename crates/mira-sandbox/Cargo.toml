@@ -10,3 +10,4 @@ description  = "Command execution wrapper for the Mira harness. Starts thin; lan
 tokio     = { workspace = true }
 thiserror = { workspace = true }
 tracing   = { workspace = true }
+uuid      = { workspace = true }

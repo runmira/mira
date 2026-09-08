@@ -92,6 +92,48 @@ pub async fn list_sessions(State(state): State<AppState>, Query(q): Query<ListQu
     Json(summaries).into_response()
 }
 
+/// Read-only lookup: return a session's message history + config
+/// without swapping the active session. Used by the SubagentPanel to
+/// rehydrate a child transcript on browser reload — the panel needs the
+/// child's tool_starts/tool_ends to reconstruct its live view, and
+/// those aren't preserved anywhere on the parent's tool result.
+#[derive(Debug, Serialize)]
+pub struct SessionHistoryView {
+    pub id: String,
+    pub model: String,
+    pub cwd: String,
+    pub title: Option<String>,
+    pub created_at: u64,
+    pub updated_at: u64,
+    pub messages: Vec<mira_core::Message>,
+}
+
+pub async fn get_session_history(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    let Some(store) = state.store.clone() else {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "persistence disabled — no history available".to_string(),
+        );
+    };
+    let record = match store.load(&SessionId::from(id.as_str())).await {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::NOT_FOUND, format!("load: {e}")),
+    };
+    let view = SessionHistoryView {
+        id: record.id.to_string(),
+        model: record.cfg.model.clone(),
+        cwd: record.cwd.display().to_string(),
+        title: record.title.clone(),
+        created_at: record.created_at,
+        updated_at: record.updated_at,
+        messages: record.messages,
+    };
+    Json(view).into_response()
+}
+
 pub async fn load_session(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
@@ -117,6 +159,9 @@ pub async fn load_session(
             let mut guard = state.cwd.write().await;
             *guard = record_cwd.clone();
         }
+        // Point the shared memory store at the resumed session's project
+        // so its memory tools and `/api/memory/append` hit the right file.
+        state.rebuild_memory_for_cwd(&record_cwd).await;
         let mut s = RuntimeState::load().unwrap_or_default();
         s.last_cwd = Some(record_cwd.clone());
         if let Err(e) = s.save() {
@@ -139,6 +184,10 @@ pub async fn load_session(
     if let Some(s) = state.store.clone() {
         resumed = resumed.with_store(s);
     }
+    resumed = resumed.with_memory_snapshot(crate::make_memory_snapshot_with(
+        &state.current_cwd().await,
+        state.current_episodic().await,
+    ));
 
     // Swap under the write lock, then re-broadcast Ready so every connected
     // client rehydrates its transcript for the new session.
@@ -194,6 +243,10 @@ pub async fn new_session(State(state): State<AppState>) -> Response {
     if let Some(s) = state.store.clone() {
         fresh = fresh.with_store(s);
     }
+    fresh = fresh.with_memory_snapshot(crate::make_memory_snapshot_with(
+        &cwd,
+        state.current_episodic().await,
+    ));
 
     let cfg = fresh.config().await;
     let mode = state.policy.lock().await.mode();
@@ -260,6 +313,10 @@ pub async fn delete_session(
         if let Some(s) = state.store.clone() {
             fresh = fresh.with_store(s);
         }
+        fresh = fresh.with_memory_snapshot(crate::make_memory_snapshot_with(
+            &cwd,
+            state.current_episodic().await,
+        ));
         let cfg = fresh.config().await;
         let mode = state.policy.lock().await.mode();
         let history = fresh.history().await;
@@ -426,4 +483,158 @@ fn truncate(s: &str, max: usize) -> String {
 
 fn err(status: StatusCode, msg: String) -> Response {
     (status, Json(serde_json::json!({ "error": msg }))).into_response()
+}
+
+// ---------- rename endpoints ----------
+
+#[derive(Debug, Deserialize)]
+pub struct RenameRequest {
+    pub title: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RenameResponse {
+    pub id: String,
+    pub title: String,
+}
+
+/// `PATCH /api/sessions/:id/title` — manual rename.
+///
+/// Body: `{"title": "..."}`. Empty strings clear the title (row falls back
+/// to the first user message). Updates the on-disk record; if the target
+/// is the currently active session, also mutates the in-memory Session so
+/// live clients see the change immediately.
+pub async fn set_session_title(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(req): Json<RenameRequest>,
+) -> Response {
+    let Some(store) = state.store.clone() else {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "persistence disabled — nothing to rename".to_string(),
+        );
+    };
+    let title = req.title.trim().to_string();
+    let sid = SessionId::from(id.as_str());
+    let mut record = match store.load(&sid).await {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::NOT_FOUND, format!("load: {e}")),
+    };
+    record.title = if title.is_empty() { None } else { Some(title.clone()) };
+    if let Err(e) = store.save(&record).await {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, format!("save: {e}"));
+    }
+
+    // If this is the currently active session, mirror the change into the
+    // in-memory Session so its next checkpoint doesn't stomp what we just
+    // wrote. `set_title` handles the empty-string case (skips the assign),
+    // so we only call it when we have a non-empty title.
+    let active_id = state.current_session().await.id.to_string();
+    if active_id == id && !title.is_empty() {
+        state.current_session().await.set_title(&title).await;
+    }
+
+    let _ = state.events_tx.send(ServerMsg::SessionTitleUpdated {
+        session_id: id.clone(),
+        title: title.clone(),
+    });
+    Json(RenameResponse { id, title }).into_response()
+}
+
+/// `POST /api/sessions/:id/title/regenerate` — AI rename.
+///
+/// Runs the same `title::generate` pass as the automatic post-first-reply
+/// hook, but unconditionally — the existing `spawn_if_needed` bails when
+/// a title already exists, which is the wrong behavior for a "re-do this
+/// title" button.
+pub async fn regenerate_session_title(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    let Some(store) = state.store.clone() else {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "persistence disabled — nothing to rename".to_string(),
+        );
+    };
+    let sid = SessionId::from(id.as_str());
+    let mut record = match store.load(&sid).await {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::NOT_FOUND, format!("load: {e}")),
+    };
+
+    // Pull the first user message + first non-empty assistant reply out of
+    // history — exact same context the auto path uses.
+    let user_msg = record
+        .messages
+        .iter()
+        .find(|m| m.role == Role::User)
+        .and_then(|m| m.content.clone());
+    let assistant_msg = record
+        .messages
+        .iter()
+        .find(|m| {
+            m.role == Role::Assistant
+                && m.content
+                    .as_deref()
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false)
+        })
+        .and_then(|m| m.content.clone());
+    let (Some(user), Some(assistant)) = (user_msg, assistant_msg) else {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "session doesn't have enough context yet (needs a user message + assistant reply)"
+                .to_string(),
+        );
+    };
+
+    let provider = state.harness_provider.clone();
+    let model = record.cfg.model.clone();
+    info!(session = %id, %model, "regenerate title: calling extractor");
+    let title = match crate::title::generate(&*provider, &model, &user, &assistant).await {
+        Ok(t) if !t.is_empty() => t,
+        Ok(_) => {
+            // Extractor returned nothing (empty text stream, reasoning-only
+            // turn, whitespace-only response). Fall back to a heuristic drawn
+            // from the first user message rather than surfacing a 502 —
+            // getting *some* nickname is more useful than an error toast.
+            let fallback = crate::title::heuristic_from_user_message(&user);
+            if fallback.is_empty() {
+                warn!(session = %id, "regenerate title: extractor empty, no heuristic fallback");
+                return err(
+                    StatusCode::BAD_GATEWAY,
+                    "extractor returned an empty title".to_string(),
+                );
+            }
+            warn!(session = %id, %fallback, "regenerate title: extractor empty, using heuristic");
+            fallback
+        }
+        Err(e) => {
+            warn!(session = %id, %e, "regenerate title: generate failed");
+            return err(StatusCode::BAD_GATEWAY, format!("generate: {e}"));
+        }
+    };
+    info!(session = %id, %title, "regenerate title: generated");
+
+    record.title = Some(title.clone());
+    if let Err(e) = store.save(&record).await {
+        warn!(session = %id, %e, "regenerate title: save failed");
+        return err(StatusCode::INTERNAL_SERVER_ERROR, format!("save: {e}"));
+    }
+
+    // If this is the active session, mirror into memory so the in-flight
+    // checkpoint doesn't stomp what we just wrote.
+    let active_id = state.current_session().await.id.to_string();
+    if active_id == id {
+        state.current_session().await.set_title(&title).await;
+    }
+
+    let _ = state.events_tx.send(ServerMsg::SessionTitleUpdated {
+        session_id: id.clone(),
+        title: title.clone(),
+    });
+    info!(session = %id, %title, "regenerate title: applied");
+    Json(RenameResponse { id, title }).into_response()
 }

@@ -61,6 +61,10 @@ pub async fn put_cwd(State(state): State<AppState>, Json(u): Json<CwdUpdate>) ->
         let mut guard = state.cwd.write().await;
         *guard = path.clone();
     }
+    // Rebuild the memory store now that the project path has moved.
+    // Fresh instance = fresh per-scope mutex, but that's fine — the
+    // previous folder's writers finished when the session ended.
+    state.rebuild_memory_for_cwd(&path).await;
     // Persist the pick so the next `mira serve` restart lands here rather
     // than the launch shell's cwd. Failures aren't worth propagating.
     persist_cwd(&path);
@@ -86,6 +90,14 @@ pub async fn put_cwd(State(state): State<AppState>, Json(u): Json<CwdUpdate>) ->
     if let Some(s) = state.store.clone() {
         fresh = fresh.with_store(s);
     }
+    // Re-point the memory snapshot at the new project. User memory is
+    // unchanged; project memory now resolves against the new cwd. Uses
+    // the shared episodic handle so the snapshot reader and
+    // `memory_remember` writer hit the same in-memory mutex.
+    fresh = fresh.with_memory_snapshot(crate::make_memory_snapshot_with(
+        &path,
+        state.current_episodic().await,
+    ));
 
     let cfg = fresh.config().await;
     let mode = state.policy.lock().await.mode();

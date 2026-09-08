@@ -30,17 +30,89 @@ pub struct MiraConfig {
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
     pub providers: BTreeMap<String, ProviderConfig>,
+    /// Named third-party API keys (search backends, docs services, …).
+    /// Kept separate from `providers` because they aren't LLM providers —
+    /// they're keys tools consume via their env-var convention.
+    /// On startup, each entry is exported to the process env so tools
+    /// that already read `BRAVE_SEARCH_API_KEY` etc. pick it up
+    /// transparently. Users can still put keys in the shell env instead;
+    /// yaml wins when both are set.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub keys: BTreeMap<String, String>,
     pub permissions: PermissionsConfig,
     /// Third-party tools exposed via the Model Context Protocol. Each entry
     /// spawns a subprocess (or opens an HTTP session) at startup, discovers
     /// its tool list, and registers each tool as `mcp__<name>__<tool>`.
     pub mcp_servers: BTreeMap<String, McpServerConfig>,
+    /// Cross-session memory behavior — the auto-extractor and related knobs.
+    /// Sensible defaults, so users get the feature without editing yaml.
+    #[serde(default)]
+    pub memory: MemoryRuntimeConfig,
+}
+
+/// Runtime knobs for the auto-extractor (post-round background pass that
+/// writes durable facts to `<cwd>/.mira/episodic.jsonl`).
+///
+/// Fields are `Option`-typed so per-repo config can override a single knob
+/// (e.g. turn auto-extract off for a specific repo) without having to
+/// restate the whole block. Use [`Self::auto_extract_enabled`] and
+/// [`Self::extractor_model`] to read the *effective* value with defaults
+/// applied.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct MemoryRuntimeConfig {
+    /// Master switch. Default on: cross-session memory is only meaningful if
+    /// something accumulates without the user asking. Set to `false` in
+    /// yaml to disable auto-extraction while keeping the `memory_remember`
+    /// tool available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_extract: Option<bool>,
+    /// Model used for the extraction call. Unset falls back to the
+    /// session's active model (expensive but always works). Point this at
+    /// the provider's cheap tier — e.g. `"claude-haiku-4-5"` on Anthropic,
+    /// `"gpt-5-nano"` on OpenAI — to keep per-round cost negligible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extractor_model: Option<String>,
+    /// Register the `memory_*` agent tools. Default on. Turn off to shrink
+    /// the tool list and see whether tool-count is causing over-exploration
+    /// — useful as a bisect knob when the model seems distracted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools_enabled: Option<bool>,
+    /// Inject the live memory block (user + project MIRA.md + episodic tail)
+    /// into the system prompt each round. Default on. Turn off to prove
+    /// out whether the injected content is priming exploratory tool use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inject_context: Option<bool>,
+}
+
+impl MemoryRuntimeConfig {
+    /// Effective on/off — defaults to `true` when unset.
+    pub fn auto_extract_enabled(&self) -> bool {
+        self.auto_extract.unwrap_or(true)
+    }
+
+    /// Configured extractor model, if any. `None` means "use the session's
+    /// active model."
+    pub fn extractor_model(&self) -> Option<&str> {
+        self.extractor_model.as_deref()
+    }
+
+    /// Whether the memory tools should be registered. Defaults to `true`.
+    pub fn tools_enabled(&self) -> bool {
+        self.tools_enabled.unwrap_or(true)
+    }
+
+    /// Whether the live memory block should be injected into the system
+    /// prompt. Defaults to `true`.
+    pub fn inject_context(&self) -> bool {
+        self.inject_context.unwrap_or(true)
+    }
 }
 
 /// One MCP server entry. `untagged` so the YAML shape is either a stdio
 /// launch (`command` + optional `args`/`env`/`cwd`) or an HTTP endpoint
 /// (`url` + optional `headers`) — no explicit `type:` field needed.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum McpServerConfig {
     Stdio(McpStdioConfig),
@@ -49,7 +121,7 @@ pub enum McpServerConfig {
 
 /// Launch an MCP server as a subprocess and speak the protocol over its
 /// stdio.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct McpStdioConfig {
     pub command: String,
@@ -61,7 +133,7 @@ pub struct McpStdioConfig {
 }
 
 /// Connect to a remote MCP server via streamable HTTP.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct McpHttpConfig {
     pub url: String,
@@ -102,6 +174,25 @@ impl ProviderConfig {
             }
         }
         std::env::var("MIRA_API_KEY").ok()
+    }
+}
+
+/// Export every key in `cfg.keys` to the current process env so tools
+/// that read via `std::env::var(...)` (e.g. `BRAVE_SEARCH_API_KEY`) pick
+/// them up without any further wiring. Does not overwrite existing env
+/// values — an env-set key wins over a yaml-stored one, matching the
+/// "yaml is fallback for env" mental model.
+pub fn export_keys_to_env(cfg: &MiraConfig) {
+    for (name, value) in &cfg.keys {
+        if std::env::var_os(name).is_none() && !value.is_empty() {
+            // Safety: setting env vars is documented as `unsafe` in Rust
+            // 2024, but our callers are all on startup / single-threaded
+            // boot paths. Wrapping so this compiles on both editions.
+            #[allow(unused_unsafe)]
+            unsafe {
+                std::env::set_var(name, value);
+            }
+        }
     }
 }
 
@@ -173,12 +264,24 @@ impl MiraConfig {
         for (name, provider) in other.providers {
             self.providers.insert(name, provider);
         }
+        for (name, key) in other.keys {
+            self.keys.insert(name, key);
+        }
         for (name, server) in other.mcp_servers {
             self.mcp_servers.insert(name, server);
         }
         self.permissions.allow.extend(other.permissions.allow);
         self.permissions.ask.extend(other.permissions.ask);
         self.permissions.deny.extend(other.permissions.deny);
+        // Memory: per-field merge. `other` (per-repo) wins if it set the
+        // field; otherwise the global value stays.
+        self.memory.auto_extract = other.memory.auto_extract.or(self.memory.auto_extract);
+        self.memory.extractor_model = other
+            .memory
+            .extractor_model
+            .or(self.memory.extractor_model);
+        self.memory.tools_enabled = other.memory.tools_enabled.or(self.memory.tools_enabled);
+        self.memory.inject_context = other.memory.inject_context.or(self.memory.inject_context);
         self
     }
 }
@@ -240,70 +343,9 @@ pub fn state_path() -> PathBuf {
         .join("state.yaml")
 }
 
-/// One loaded memory file. Kept as a struct (rather than just `String`) so
-/// the caller can label it in the system prompt — the model reads better
-/// when it knows a section is "user-level" vs "project-level".
-#[derive(Clone, Debug)]
-pub struct MemoryFile {
-    pub kind: MemoryKind,
-    pub path: PathBuf,
-    pub content: String,
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum MemoryKind {
-    /// `~/.mira/MIRA.md` — user's global preferences and conventions.
-    User,
-    /// `<cwd>/.mira/MIRA.md` — repo-specific rules and context.
-    Project,
-}
-
-/// Cap on each memory file. A runaway MIRA.md shouldn't blow the model's
-/// context window; the surplus is elided with a marker so the user notices.
-const MEMORY_MAX_BYTES: usize = 32 * 1024;
-
-/// Load user + project memory files for the given cwd. Missing files are
-/// skipped silently — the model just doesn't see that section. Files past
-/// [`MEMORY_MAX_BYTES`] are truncated with a marker rather than refused so
-/// a badly-sized file doesn't break the whole session.
-///
-/// Ordering: user memory first, project memory second. Later content has
-/// more weight in typical LLM behaviour, so project-specific rules override
-/// user-global preferences when they conflict.
-pub fn load_memory_files(cwd: &Path) -> Vec<MemoryFile> {
-    let mut out = Vec::new();
-    if let Some(m) = read_memory(MemoryKind::User, &user_memory_path()) {
-        out.push(m);
-    }
-    if let Some(m) = read_memory(MemoryKind::Project, &cwd.join(".mira").join("MIRA.md")) {
-        out.push(m);
-    }
-    out
-}
-
-fn read_memory(kind: MemoryKind, path: &Path) -> Option<MemoryFile> {
-    let raw = std::fs::read_to_string(path).ok()?;
-    let content = if raw.len() > MEMORY_MAX_BYTES {
-        let cut = floor_char_boundary(&raw, MEMORY_MAX_BYTES);
-        format!(
-            "{}\n\n… [memory file truncated at {MEMORY_MAX_BYTES} bytes; the rest was skipped]",
-            &raw[..cut]
-        )
-    } else {
-        raw
-    };
-    // Skip files that are effectively empty — user probably created a
-    // placeholder they haven't filled in yet.
-    if content.trim().is_empty() {
-        return None;
-    }
-    Some(MemoryFile {
-        kind,
-        path: path.to_path_buf(),
-        content,
-    })
-}
-
+/// `~/.mira/MIRA.md` — user-global memory file path. Kept here (config
+/// crate) because the memory *reader/writer* lives in `mira-memory` and
+/// takes concrete paths; the path convention itself is config-shaped.
 pub fn user_memory_path() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -312,12 +354,9 @@ pub fn user_memory_path() -> PathBuf {
         .join("MIRA.md")
 }
 
-fn floor_char_boundary(s: &str, at: usize) -> usize {
-    let mut i = at.min(s.len());
-    while i > 0 && !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
+/// `<cwd>/.mira/MIRA.md` — project-local memory file path.
+pub fn project_memory_path(cwd: &Path) -> PathBuf {
+    cwd.join(".mira").join("MIRA.md")
 }
 
 /// Sensible base_url defaults for well-known provider names.

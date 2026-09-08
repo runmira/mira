@@ -249,13 +249,23 @@ impl<'a> WireRequest<'a> {
         // Strip `"off"` (Mira UI sentinel) so we send *no* field for it —
         // OpenAI rejects unknown values with a 400 rather than ignoring.
         let effort = req.reasoning_effort.as_deref().filter(|v| *v != "off");
+        // Only the *first* system message gets the cache-control breakpoint.
+        // The harness may inject a second system message (the live memory
+        // block); leaving it unmarked keeps it out of the cached prefix so
+        // mid-session edits don't invalidate what's cached upstream.
+        let mut first_system_seen = false;
+        let messages = req
+            .messages
+            .iter()
+            .map(|m| {
+                let is_first_system = matches!(m.role, mira_core::Role::System)
+                    && !std::mem::replace(&mut first_system_seen, true);
+                WireMessage::from_message(m, prompt_caching, is_first_system)
+            })
+            .collect();
         Self {
             model: &req.model,
-            messages: req
-                .messages
-                .iter()
-                .map(|m| WireMessage::from_message(m, prompt_caching))
-                .collect(),
+            messages,
             tools: req.tools.iter().map(WireTool::from).collect(),
             temperature: req.temperature,
             max_tokens: req.max_tokens,
@@ -315,13 +325,14 @@ impl CacheControl {
 }
 
 impl<'a> WireMessage<'a> {
-    fn from_message(m: &'a Message, prompt_caching: bool) -> Self {
-        // Mark the system prompt with cache_control when caching is on.
+    fn from_message(m: &'a Message, prompt_caching: bool, is_first_system: bool) -> Self {
+        // Mark the (first) system prompt with cache_control when caching is on.
         // Anthropic caches the prefix up to (and including) this breakpoint —
         // which covers tools + system, the biggest static chunk of every turn.
-        let is_system = matches!(m.role, mira_core::Role::System);
+        // A second system message (the harness's live memory block) is left
+        // unmarked so its per-round churn doesn't invalidate the cache.
         let content = m.content.as_deref().map(|text| {
-            if prompt_caching && is_system && !text.is_empty() {
+            if prompt_caching && is_first_system && !text.is_empty() {
                 WireContent::Blocks(vec![WireContentBlock {
                     kind: "text",
                     text,
@@ -543,5 +554,34 @@ mod tests {
         // Empty system prompt would produce an invalid text block; leave it as
         // a bare "" so the provider handles it uniformly.
         assert!(!json.contains("cache_control"));
+    }
+
+    #[test]
+    fn prompt_caching_marks_only_first_system_when_two_present() {
+        // The harness injects a second system message per round (live memory
+        // block). It MUST NOT get its own cache_control breakpoint — that
+        // would spend another breakpoint on a value that varies turn to turn
+        // and defeat the caching we're trying to protect.
+        let req = ChatRequest {
+            model: "test".into(),
+            messages: vec![
+                Message::system("PREFIX"),
+                Message::system("LIVE_MEMORY"),
+                Message::user("hello"),
+            ],
+            tools: vec![],
+            temperature: None,
+            max_tokens: None,
+            reasoning_effort: None,
+        };
+        let wire = WireRequest::from_request(&req, true);
+        let json = serde_json::to_string(&wire).unwrap();
+        // PREFIX is a content-block array with cache_control.
+        assert!(json.contains(r#""text":"PREFIX""#));
+        assert!(json.contains(r#""cache_control":{"type":"ephemeral"}"#));
+        // LIVE_MEMORY is a plain string, no cache_control.
+        assert!(json.contains(r#""content":"LIVE_MEMORY""#));
+        // Only one cache_control anywhere in the wire body.
+        assert_eq!(json.matches("cache_control").count(), 1);
     }
 }

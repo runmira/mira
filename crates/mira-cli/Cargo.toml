@@ -16,6 +16,7 @@ mira-core     = { workspace = true }
 mira-config   = { workspace = true }
 mira-ai       = { workspace = true }
 mira-tools    = { workspace = true }
+mira-memory   = { workspace = true }
 mira-policy   = { workspace = true }
 mira-sandbox  = { workspace = true }
 mira-harness  = { workspace = true }

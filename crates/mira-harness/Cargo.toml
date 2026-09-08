@@ -9,6 +9,7 @@ description  = "Agent loop for the Mira harness."
 [dependencies]
 mira-core     = { workspace = true }
 mira-ai       = { workspace = true }
+mira-memory   = { workspace = true }
 mira-tools    = { workspace = true }
 mira-policy   = { workspace = true }
 mira-sandbox  = { workspace = true }

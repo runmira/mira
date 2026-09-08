@@ -127,6 +127,12 @@ pub enum ServerMsg {
         totals: UsageTotals,
     },
 
+    /// Post-round auto-extractor recorded N durable facts to
+    /// `.mira/episodic.jsonl`. Emitted only when `count > 0`; the UI can
+    /// render a small "mira remembered N things" chip to make cross-session
+    /// memory writes visible.
+    MemoryLearned { count: usize },
+
     /// The model called the `plan` tool. Open a review modal so the user can
     /// approve / edit / cancel. Client answers with
     /// `ClientMsg::PromptResponse` carrying a `Plan { … }` variant.
@@ -134,6 +140,45 @@ pub enum ServerMsg {
         prompt_id: String,
         plan: PlanProposal,
     },
+
+    // -------- subagent (child session) event forwarding --------
+    //
+    // The `agent` tool now streams each child HarnessEvent to the parent's
+    // WS with a `parent_call_id` tag so the frontend can build a live
+    // per-child transcript in the right-side SubagentPanel. Kept as
+    // distinct variants (rather than a wrapped envelope) so the JS side
+    // pattern-matches by `type` the same way it already does.
+
+    /// A subagent has been spawned. Sent immediately before the child
+    /// begins consuming its prompt so the panel can open a tab.
+    SubagentStarted {
+        /// The parent's tool-call id — the AgentTool call that spawned
+        /// this child. Every subsequent `Subagent*` frame with the same
+        /// value belongs to this child.
+        parent_call_id: String,
+        /// Child session id — useful for future features (persistence,
+        /// deep links) but not required by the current UI.
+        agent_id: String,
+        /// Model the child is running under. Lets the panel surface a
+        /// small caption without extra bookkeeping.
+        model: String,
+        /// Full prompt the child received. Small ceiling upstream via
+        /// `truncate_for_history`, so this can safely include the raw text.
+        prompt: String,
+    },
+    /// Fragment of the child's assistant text.
+    SubagentToken { parent_call_id: String, text: String },
+    /// The child dispatched a tool call.
+    SubagentToolStart { parent_call_id: String, call: ToolCall },
+    /// The child's tool call finished.
+    SubagentToolEnd { parent_call_id: String, result: ToolResult },
+    /// A child-level warning (verify failure, hit max_rounds, etc.).
+    SubagentWarning { parent_call_id: String, text: String },
+    /// The child finished — final assistant text is already on the way as
+    /// the AgentTool's `ToolEnd` frame. This exists purely so the panel
+    /// can flip its status pill from "working" to "done" without waiting
+    /// for the parent to update the same call id.
+    SubagentDone { parent_call_id: String },
 }
 
 impl ServerMsg {
@@ -148,6 +193,7 @@ impl ServerMsg {
             HarnessEvent::Done => Self::Done,
             HarnessEvent::Warning(text) => Self::Warning { text },
             HarnessEvent::Usage { round, totals } => Self::Usage { round, totals },
+            HarnessEvent::MemoryLearned { count } => Self::MemoryLearned { count },
         }
     }
 }
