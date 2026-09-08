@@ -85,8 +85,12 @@ pub async fn list_sessions(State(state): State<AppState>, Query(q): Query<ListQu
         }
     };
     let active_id = state.current_session().await.id.to_string();
+    // Filter out subagent transcripts — they're persisted so the panel
+    // can rehydrate on reload, but they aren't standalone conversations
+    // and shouldn't clutter the sidebar as sibling threads.
     let summaries: Vec<SessionSummary> = records
         .into_iter()
+        .filter(|r| r.parent_id.is_none())
         .map(|r| summarize(&r, &active_id))
         .collect();
     Json(summaries).into_response()
@@ -285,6 +289,27 @@ pub async fn delete_session(
         );
     };
     let sid = SessionId::from(id.as_str());
+
+    // Cascade: any subagent transcripts whose parent_id matches this
+    // session get deleted first, so we don't leave orphan children on
+    // disk. Cheap best-effort — one list_all scan filtered by parent_id.
+    // On error, log but continue with the parent delete so a partial
+    // failure doesn't block the user's action.
+    if let Ok(all) = store.list_all(1000).await {
+        for child in all {
+            if child
+                .parent_id
+                .as_ref()
+                .map(|p| p.to_string() == id)
+                .unwrap_or(false)
+            {
+                if let Err(e) = store.delete(&child.id).await {
+                    warn!(child = %child.id, %e, "cascade delete failed");
+                }
+            }
+        }
+    }
+
     if let Err(e) = store.delete(&sid).await {
         return err(StatusCode::INTERNAL_SERVER_ERROR, format!("delete: {e}"));
     }

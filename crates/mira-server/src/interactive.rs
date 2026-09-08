@@ -727,6 +727,14 @@ impl Tool for AgentTool {
         if let Some(store) = &self.store {
             child = child.with_store(store.clone());
         }
+        // Tag the child with the parent's session id so the sidebar's
+        // list_sessions endpoint can filter subagent records out of the
+        // primary chat list — otherwise every spawn shows up as a
+        // standalone thread. The parent's id is the tool call's ambient
+        // session (set by Session::new on the parent's ToolContext).
+        if let Some(parent_id) = ctx.session_id.clone() {
+            child = child.with_parent_id(parent_id);
+        }
 
         info!(
             depth = child_depth,

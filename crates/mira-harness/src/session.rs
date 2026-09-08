@@ -158,6 +158,11 @@ pub struct Session {
     /// it; the loop's `tx.send` calls then fail as the channel closes and
     /// the frontend stops seeing new events.
     current_turn: Arc<Mutex<Option<AbortHandle>>>,
+    /// When set, this session was spawned as a subagent by another
+    /// session (parent). Copied into every checkpoint so the sidebar can
+    /// hide subagents from the primary chat list and delete flows can
+    /// cascade from the parent. `None` for top-level chats.
+    parent_id: Option<SessionId>,
 }
 
 impl Session {
@@ -208,6 +213,7 @@ impl Session {
             memory_snapshot: None,
             auto_extract: None,
             current_turn: Arc::new(Mutex::new(None)),
+            parent_id: None,
         }
     }
 
@@ -256,12 +262,22 @@ impl Session {
             memory_snapshot: None,
             auto_extract: None,
             current_turn: Arc::new(Mutex::new(None)),
+            parent_id: record.parent_id,
         }
     }
 
     /// Attach a store so the session autosaves after each round.
     pub fn with_store(mut self, store: Arc<dyn SessionStore>) -> Self {
         self.store = Some(store);
+        self
+    }
+
+    /// Mark this session as a subagent spawned by `parent`. The id is
+    /// serialized on every checkpoint so the sidebar can hide subagents
+    /// from the primary chat list and future delete flows can cascade
+    /// from the parent.
+    pub fn with_parent_id(mut self, parent: SessionId) -> Self {
+        self.parent_id = Some(parent);
         self
     }
 
@@ -745,6 +761,7 @@ async fn checkpoint(sess: &Session) {
         title: sess.title.lock().await.clone(),
         turns: sess.turns.lock().await.clone(),
         usage: *sess.usage.lock().await,
+        parent_id: sess.parent_id.clone(),
     };
     if let Err(e) = store.save(&record).await {
         warn!(session = %sess.id, %e, "session checkpoint failed");

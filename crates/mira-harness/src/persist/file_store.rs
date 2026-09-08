@@ -126,6 +126,7 @@ mod tests {
             title: None,
             turns: Vec::new(),
             usage: Default::default(),
+            parent_id: None,
         }
     }
 

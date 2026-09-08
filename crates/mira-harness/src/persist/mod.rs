@@ -52,6 +52,14 @@ pub struct SessionRecord {
     /// doesn't report usage).
     #[serde(default, skip_serializing_if = "UsageTotals::is_zero")]
     pub usage: UsageTotals,
+    /// Set when this session was spawned as a subagent by another session.
+    /// Points at the parent's id so the sidebar can hide it from the
+    /// primary chat list (subagents aren't user-facing conversations)
+    /// and `delete` can cascade from the parent. Absent (`None`) for
+    /// top-level chats; skipped from the wire format for backwards
+    /// compatibility with sessions written before this landed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<SessionId>,
 }
 
 /// Running token totals for a whole session. Grows monotonically; individual
