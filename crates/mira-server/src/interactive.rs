@@ -18,7 +18,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::StreamExt;
 use mira_agents::AgentRegistry;
-use mira_ai::{ChatProvider, ToolSpec};
+use mira_ai::{ChatProvider, ResponseFormat, ToolSpec};
 use mira_core::{Role, ToolCall, ToolResult};
 use mira_harness::{Approver, AutoApprover, HarnessEvent, Session, SessionConfig, SessionStore};
 use mira_policy::{Policy, PolicyConfig};
@@ -700,6 +700,24 @@ impl Tool for AgentTool {
             .max_rounds
             .or_else(|| type_def.and_then(|t| t.max_rounds))
             .unwrap_or(DEFAULT_SUBAGENT_MAX_ROUNDS);
+        // Wire the type's response_schema (if any) into the child's
+        // ChatRequest. The provider constrains the model's text output
+        // to match; the caller (parent) sees a JSON string in the tool
+        // result content plus a parsed `data` value alongside it.
+        if let Some(schema) = type_def.and_then(|t| t.response_schema.clone()) {
+            cfg.response_format = Some(ResponseFormat::JsonSchema {
+                name: type_def
+                    .map(|t| t.name.clone())
+                    .unwrap_or_else(|| "response".to_owned()),
+                schema,
+                // Strict mode gates unknown fields + requires all `required`
+                // keys — closer to a real contract at the cost of a
+                // stricter provider (OpenAI Structured Outputs, some
+                // OpenRouter models). Providers that don't support strict
+                // fall back to best-effort.
+                strict: true,
+            });
+        }
 
         // System prompt: shared base + optional per-type addendum. Kept
         // as separate lines so a persona ("You are Draco…") reads as a
@@ -871,7 +889,29 @@ impl Tool for AgentTool {
         // means.
         let content = format!("[mira-agent-id:{child_id}]\n{body_with_warnings}");
 
-        Ok(ToolResult::ok(call.id.clone(), content))
+        // When the type constrained the response via `response_schema`,
+        // the model was forced to emit JSON — parse it now so the
+        // parent gets structured data in `ToolResult.data` alongside
+        // the raw text. Parse failures are non-fatal: the parent still
+        // sees the text (provider may have relaxed strict mode). Only
+        // parse the *body* (post-marker) so the marker doesn't corrupt
+        // the JSON.
+        let mut result = ToolResult::ok(call.id.clone(), content);
+        if type_def.and_then(|t| t.response_schema.as_ref()).is_some() {
+            match serde_json::from_str::<serde_json::Value>(body_with_warnings.trim()) {
+                Ok(value) => {
+                    result.data = Some(value);
+                }
+                Err(e) => {
+                    warn!(
+                        parent_call = %parent_call_id,
+                        %e,
+                        "subagent had a response_schema but final text isn't valid JSON; leaving data unset"
+                    );
+                }
+            }
+        }
+        Ok(result)
     }
 }
 

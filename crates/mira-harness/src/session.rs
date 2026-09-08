@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use futures::{stream::BoxStream, StreamExt};
-use mira_ai::{ChatEvent, ChatProvider, ChatRequest, FinishReason};
+use mira_ai::{ChatEvent, ChatProvider, ChatRequest, FinishReason, ResponseFormat};
 use mira_core::{Message, Role, SessionId, ToolCall, ToolResult};
 use mira_memory::{EpisodicEntry, EpisodicSource, EpisodicStore, MemorySnapshot};
 use mira_policy::{Decision, Policy, Request as PolicyRequest};
@@ -42,6 +42,13 @@ pub struct SessionConfig {
     /// Providers that don't recognise the field ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// Constrain the model's text output. When set, the harness attaches
+    /// this to every `ChatRequest` for this session. AgentTool wires
+    /// this from an agent type's `response_schema` so subagents can
+    /// return structured JSON the parent parses into `ToolResult.data`.
+    /// `None` = freeform prose (default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<ResponseFormat>,
 }
 
 /// Ceiling on tool-call rounds within a single user turn. Guards against
@@ -111,6 +118,7 @@ impl SessionConfig {
             temperature: None,
             max_tokens: None,
             reasoning_effort: None,
+            response_format: None,
         }
     }
 }
@@ -475,6 +483,7 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
             temperature: cfg.temperature,
             max_tokens: cfg.max_tokens,
             reasoning_effort: cfg.reasoning_effort.clone(),
+            response_format: cfg.response_format.clone(),
         };
 
         let mut stream = match sess.provider.stream(req).await {
@@ -966,6 +975,7 @@ async fn extract_facts(
         temperature: Some(0.0),
         max_tokens: Some(EXTRACTION_OUTPUT_TOKENS),
         reasoning_effort: None,
+        response_format: None,
     };
     let mut stream = provider.stream(req).await?;
     let mut text = String::new();

@@ -285,6 +285,7 @@ async fn complete(
         // Review calls are structured/JSON-mode-ish — reasoning effort would
         // just add latency without materially improving finding quality.
         reasoning_effort: None,
+        response_format: None,
     };
     let mut stream = provider.stream(req).await.context("provider stream")?;
     let mut out = String::new();

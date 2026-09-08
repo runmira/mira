@@ -103,6 +103,7 @@ pub async fn generate(
         // Title-generation is a short, low-signal task — don't burn thinking
         // tokens on it even if the current session has effort dialled up.
         reasoning_effort: None,
+        response_format: None,
     };
     let mut stream = provider.stream(req).await.map_err(|e| e.to_string())?;
     let mut out = String::new();

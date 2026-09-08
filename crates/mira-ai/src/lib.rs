@@ -20,5 +20,5 @@ pub mod tool_spec;
 pub use event::{ChatEvent, FinishReason, TokenUsage};
 pub use null::NullProvider;
 pub use pricing::{cost_usd, price_for};
-pub use provider::{ChatProvider, ChatRequest, ModelInfo, ProviderError};
+pub use provider::{ChatProvider, ChatRequest, ModelInfo, ProviderError, ResponseFormat};
 pub use tool_spec::ToolSpec;

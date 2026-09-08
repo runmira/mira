@@ -79,6 +79,7 @@ pub async fn put_cwd(State(state): State<AppState>, Json(u): Json<CwdUpdate>) ->
             temperature: prev_cfg.temperature,
             max_tokens: prev_cfg.max_tokens,
             reasoning_effort: prev_cfg.reasoning_effort.clone(),
+            response_format: prev_cfg.response_format.clone(),
         },
         crate::system_prompt(&path, &state.registry),
         state.harness_provider.clone(),

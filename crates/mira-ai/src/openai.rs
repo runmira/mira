@@ -232,11 +232,37 @@ struct WireRequest<'a> {
     /// user actually wants reasoning.
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<&'a str>,
+    /// Structured-output constraint. Serializes to
+    /// `{"type": "json_object"}` for `JsonObject`, or
+    /// `{"type": "json_schema", "json_schema": {...}}` for the schema
+    /// variant — matches OpenAI's chat/completions shape. Providers
+    /// that don't recognise the field either enforce it (OpenAI,
+    /// OpenRouter for structured-output models) or drop it silently.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<WireResponseFormat<'a>>,
     stream: bool,
     /// Opt in to the OpenAI usage trailer on streaming responses. Providers
     /// that don't understand this field drop it (Ollama, some OpenRouter
     /// models) — the harness gracefully treats missing usage as zero.
     stream_options: StreamOptions,
+}
+
+/// Wire shape for `response_format`. Matches OpenAI's chat/completions
+/// docs — `type: "json_object"` or `type: "json_schema"` with a nested
+/// `json_schema` payload.
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum WireResponseFormat<'a> {
+    JsonObject,
+    JsonSchema { json_schema: WireJsonSchema<'a> },
+}
+
+#[derive(Serialize)]
+struct WireJsonSchema<'a> {
+    name: &'a str,
+    schema: &'a serde_json::Value,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    strict: bool,
 }
 
 #[derive(Serialize)]
@@ -263,6 +289,18 @@ impl<'a> WireRequest<'a> {
                 WireMessage::from_message(m, prompt_caching, is_first_system)
             })
             .collect();
+        let response_format = req.response_format.as_ref().map(|fmt| match fmt {
+            crate::ResponseFormat::JsonObject => WireResponseFormat::JsonObject,
+            crate::ResponseFormat::JsonSchema { name, schema, strict } => {
+                WireResponseFormat::JsonSchema {
+                    json_schema: WireJsonSchema {
+                        name: name.as_str(),
+                        schema,
+                        strict: *strict,
+                    },
+                }
+            }
+        });
         Self {
             model: &req.model,
             messages,
@@ -270,6 +308,7 @@ impl<'a> WireRequest<'a> {
             temperature: req.temperature,
             max_tokens: req.max_tokens,
             reasoning_effort: effort,
+            response_format,
             stream: true,
             stream_options: StreamOptions {
                 include_usage: true,
@@ -519,6 +558,7 @@ mod tests {
             temperature: None,
             max_tokens: None,
             reasoning_effort: None,
+            response_format: None,
         }
     }
 
@@ -573,6 +613,7 @@ mod tests {
             temperature: None,
             max_tokens: None,
             reasoning_effort: None,
+            response_format: None,
         };
         let wire = WireRequest::from_request(&req, true);
         let json = serde_json::to_string(&wire).unwrap();

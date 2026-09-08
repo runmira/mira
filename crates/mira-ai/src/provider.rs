@@ -28,9 +28,6 @@ impl From<ProviderError> for mira_core::Error {
 }
 
 /// A single completion request.
-///
-/// Non-goals for now: response format, seeds, logprobs. Add them behind
-/// `Option` fields when a caller actually needs them — no speculative surface.
 #[derive(Clone, Debug)]
 pub struct ChatRequest {
     pub model: String,
@@ -41,6 +38,34 @@ pub struct ChatRequest {
     /// Reasoning effort (`"minimal" | "low" | "medium" | "high"`) — passed
     /// through to providers that expose it. `None` skips the field.
     pub reasoning_effort: Option<String>,
+    /// Constrain the response shape. When set, the provider is told to
+    /// emit JSON matching the schema (OpenAI's `response_format:
+    /// json_schema` mode). Callers that want typed results out of a
+    /// subagent set this; leave `None` for freeform prose.
+    pub response_format: Option<ResponseFormat>,
+}
+
+/// How the model's text output should be shaped.
+///
+/// Providers that don't support structured output silently ignore this
+/// (or error at the wire level — the harness surfaces those). Currently
+/// only the OpenAI-compatible provider wires it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ResponseFormat {
+    /// Freeform JSON — any valid JSON object. Cheaper to enforce than a
+    /// full schema; useful when the caller only needs "must be JSON".
+    JsonObject,
+    /// Strict JSON matching a JSON Schema. `name` is a short identifier
+    /// the provider surfaces in errors. `strict: true` asks the provider
+    /// to reject drift (unknown fields, missing required keys); providers
+    /// that don't support strict fall back to best-effort.
+    JsonSchema {
+        name: String,
+        schema: serde_json::Value,
+        #[serde(default)]
+        strict: bool,
+    },
 }
 
 /// One entry in a provider's model catalog. `id` is the value you pass as

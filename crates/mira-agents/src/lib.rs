@@ -134,6 +134,7 @@ const BUILTIN_SOURCES: &[(&str, &str)] = &[
     ("cartographer.md", include_str!("../agents/cartographer.md")),
     ("coder.md", include_str!("../agents/coder.md")),
     ("documenter.md", include_str!("../agents/documenter.md")),
+    ("sentinel.md", include_str!("../agents/sentinel.md")),
 ];
 
 pub fn builtin() -> AgentRegistry {
@@ -148,6 +149,10 @@ pub fn builtin() -> AgentRegistry {
                 // shipped file is broken. Log loudly; don't panic (better
                 // to boot with a smaller roster than not at all).
                 tracing::error!(builtin = label, %e, "builtin agent failed to parse");
+                // Also emit to stderr during tests so bundle bugs surface
+                // even when tracing subscribers aren't wired.
+                #[cfg(test)]
+                eprintln!("[builtin parse fail] {label}: {e:#}");
             }
         }
     }
@@ -316,8 +321,31 @@ mod tests {
     #[test]
     fn builtin_registers_expected_types() {
         let reg = builtin();
-        for expected in ["explore", "reviewer", "cartographer", "coder", "documenter"] {
+        for expected in [
+            "explore",
+            "reviewer",
+            "cartographer",
+            "coder",
+            "documenter",
+            "sentinel",
+        ] {
             assert!(reg.get(expected).is_some(), "{expected} should be built in");
+        }
+    }
+
+    #[test]
+    fn builtin_schemas_parse_and_are_valid_json_objects() {
+        let reg = builtin();
+        for name in ["explore", "reviewer", "sentinel"] {
+            let ty = reg.get(name).unwrap_or_else(|| panic!("missing {name}"));
+            let schema = ty
+                .response_schema
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name} should have a response_schema"));
+            assert!(
+                schema.is_object(),
+                "{name}'s schema should be a JSON object at the top level"
+            );
         }
     }
 
