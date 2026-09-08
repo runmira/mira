@@ -22,7 +22,7 @@ use mira_ai::{ChatProvider, ResponseFormat, ToolSpec};
 use mira_core::{Role, ToolCall, ToolResult};
 use mira_harness::{Approver, AutoApprover, HarnessEvent, Session, SessionConfig, SessionStore};
 use mira_policy::{Policy, PolicyConfig};
-use mira_tools::context::ToolContext;
+use mira_tools::context::{ChildCancel, ToolContext};
 use mira_tools::tool::{spec, Action, Tool, ToolError};
 use mira_tools::Registry;
 use serde::{Deserialize, Serialize};
@@ -777,6 +777,18 @@ impl Tool for AgentTool {
             });
         }
 
+        // Register the child with the parent's turn-cancel tracker so a
+        // Stop button click cascades to every subagent still running.
+        // Falls through gracefully (registration is Option-guarded) for
+        // headless / test contexts that don't wire a tracker.
+        let tracker_ticket = if let Some(tracker) = ctx.child_tracker.clone() {
+            let cancel_hook: Box<dyn ChildCancel> = Box::new(SessionCancel(child.clone()));
+            let id = tracker.register(cancel_hook).await;
+            Some((tracker, id))
+        } else {
+            None
+        };
+
         // Drain the child's harness stream to completion. Each event is
         // re-broadcast to the parent's WS with the parent's call_id
         // attached so the SubagentPanel builds a live per-child transcript
@@ -802,6 +814,13 @@ impl Tool for AgentTool {
                 // are already forwarded above; nothing else to do locally.
                 _ => {}
             }
+        }
+
+        // De-register from the parent's tracker — child is no longer
+        // in-flight, so a subsequent parent-cancel shouldn't try to abort
+        // an already-finished task.
+        if let Some((tracker, id)) = tracker_ticket {
+            tracker.deregister(id).await;
         }
 
         // Explicit done frame so the panel can flip its status pill
@@ -1003,6 +1022,20 @@ fn route_approvals_to_parent(
         // Full inheritance from the parent means the child could touch
         // anything — treat that as write-capable.
         None => true,
+    }
+}
+
+/// Thin wrapper that lets a `Session` satisfy the `ChildCancel` contract
+/// without mira-tools taking a dependency on the harness types. When
+/// the parent's turn is interrupted, the tracker calls
+/// `SessionCancel::cancel` on each registered child, which routes to
+/// `Session::cancel` — same path a manual stop would take.
+struct SessionCancel(Session);
+
+#[async_trait]
+impl ChildCancel for SessionCancel {
+    async fn cancel(&self) {
+        let _ = self.0.cancel().await;
     }
 }
 

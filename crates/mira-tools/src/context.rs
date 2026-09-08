@@ -50,6 +50,38 @@ pub struct ToolContext {
     /// to enforce a hard cap on runaway spawn recursion — new subagents
     /// inherit `parent.agent_depth + 1`.
     pub agent_depth: usize,
+    /// Opaque handle to the parent session's active-children list. The
+    /// `agent` tool registers each child it spawns here so an interrupt
+    /// on the parent cascades to every subagent currently in flight.
+    /// Absent for headless / test contexts — the tool falls back to
+    /// spawning without registration.
+    ///
+    /// Kept `Arc<dyn ChildTracker>` so mira-tools doesn't have to know
+    /// about `Session` (which lives in mira-harness). See
+    /// [`ChildTracker`] for the two-method contract.
+    pub child_tracker: Option<Arc<dyn ChildTracker>>,
+}
+
+/// Contract the harness's `Session` fulfills to let the `agent` tool
+/// register and de-register in-flight children by ID. Keeping this at
+/// the tool-context layer avoids a `mira-tools → mira-harness` cycle.
+///
+/// `register` is called with a boxed cancel callback the parent invokes
+/// on interrupt. `deregister` removes the entry on child completion.
+#[async_trait::async_trait]
+pub trait ChildTracker: Send + Sync {
+    /// Add a new child. Returns an opaque id the caller passes back to
+    /// [`Self::deregister`] once the child finishes.
+    async fn register(&self, cancel: Box<dyn ChildCancel>) -> u64;
+    async fn deregister(&self, id: u64);
+}
+
+/// Cancellation callback the parent uses to abort a specific in-flight
+/// child. The trait is object-safe so we can hold `Box<dyn ChildCancel>`
+/// on the parent side without knowing the concrete session type.
+#[async_trait::async_trait]
+pub trait ChildCancel: Send + Sync {
+    async fn cancel(&self);
 }
 
 impl ToolContext {
@@ -63,6 +95,7 @@ impl ToolContext {
             episodic: None,
             session_id: None,
             agent_depth: 0,
+            child_tracker: None,
         }
     }
 
@@ -109,6 +142,13 @@ impl ToolContext {
     /// runaway spawn recursion — see the constant in `AgentTool`.
     pub fn with_agent_depth(mut self, depth: usize) -> Self {
         self.agent_depth = depth;
+        self
+    }
+
+    /// Attach the parent session's child tracker so the `agent` tool
+    /// can register spawned children for interrupt cascade.
+    pub fn with_child_tracker(mut self, tracker: Arc<dyn ChildTracker>) -> Self {
+        self.child_tracker = Some(tracker);
         self
     }
 

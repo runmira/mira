@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use futures::{stream::BoxStream, StreamExt};
@@ -6,6 +8,7 @@ use mira_core::{Message, Role, SessionId, ToolCall, ToolResult};
 use mira_memory::{EpisodicEntry, EpisodicSource, EpisodicStore, MemorySnapshot};
 use mira_policy::{Decision, Policy, Request as PolicyRequest};
 use mira_sandbox::PersistentShell;
+use mira_tools::context::{ChildCancel, ChildTracker};
 use mira_tools::{FileGuard, Registry, ToolContext};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Mutex};
@@ -171,6 +174,15 @@ pub struct Session {
     /// hide subagents from the primary chat list and delete flows can
     /// cascade from the parent. `None` for top-level chats.
     parent_id: Option<SessionId>,
+    /// Currently in-flight children spawned by this session — kept so an
+    /// interrupt on the parent cascades to every subagent whose turn is
+    /// still running. Each entry is a boxed cancel callback keyed by a
+    /// monotonic id (`ChildTracker` contract) so `agent` can deregister
+    /// on completion without racing new spawns.
+    children: Arc<Mutex<HashMap<u64, Box<dyn ChildCancel>>>>,
+    /// Monotonic counter that hands out ids for the `children` map. Wraps
+    /// around at u64::MAX (effectively never in a real session).
+    next_child_id: Arc<AtomicU64>,
 }
 
 impl Session {
@@ -204,6 +216,17 @@ impl Session {
             cwd_for_shell,
             true,
         ))));
+        // Wire the child-tracker onto ToolContext so the `agent` tool can
+        // register any subagent it spawns with this session's `children`
+        // map. Sharing the Arcs (rather than a getter) means the tracker
+        // and Session point at the exact same slot — no drift on rebuild.
+        let children = Arc::new(Mutex::new(HashMap::new()));
+        let next_child_id = Arc::new(AtomicU64::new(0));
+        let tracker: Arc<dyn ChildTracker> = Arc::new(SessionChildTracker {
+            children: children.clone(),
+            next_id: next_child_id.clone(),
+        });
+        tool_ctx = tool_ctx.with_child_tracker(tracker);
         Self {
             id,
             cfg: Arc::new(Mutex::new(cfg)),
@@ -222,6 +245,8 @@ impl Session {
             auto_extract: None,
             current_turn: Arc::new(Mutex::new(None)),
             parent_id: None,
+            children,
+            next_child_id,
         }
     }
 
@@ -253,6 +278,15 @@ impl Session {
             cwd_for_shell,
             true,
         ))));
+        // Same tracker wiring as `new` — resumed sessions can still spawn
+        // subagents and their turns should cascade-cancel with the parent.
+        let children = Arc::new(Mutex::new(HashMap::new()));
+        let next_child_id = Arc::new(AtomicU64::new(0));
+        let tracker: Arc<dyn ChildTracker> = Arc::new(SessionChildTracker {
+            children: children.clone(),
+            next_id: next_child_id.clone(),
+        });
+        tool_ctx = tool_ctx.with_child_tracker(tracker);
         Self {
             id: record.id,
             cfg: Arc::new(Mutex::new(record.cfg)),
@@ -271,6 +305,8 @@ impl Session {
             auto_extract: None,
             current_turn: Arc::new(Mutex::new(None)),
             parent_id: record.parent_id,
+            children,
+            next_child_id,
         }
     }
 
@@ -419,15 +455,71 @@ impl Session {
     /// Cancel the currently-running turn, if any. Any in-flight tool call
     /// finishes on its own thread (we don't kill child processes), but the
     /// model stream stops pumping events and the next round never starts.
+    ///
+    /// Cascades to any subagents this session spawned that are still
+    /// running: each registered child gets its own `cancel()` fired via
+    /// `tokio::spawn` (fire-and-forget) so pressing Stop on the parent
+    /// halts every layer of delegated work at once.
     pub async fn cancel(&self) -> bool {
-        let mut slot = self.current_turn.lock().await;
-        match slot.take() {
-            Some(h) => {
-                h.abort();
-                true
+        let cancelled_self = {
+            let mut slot = self.current_turn.lock().await;
+            match slot.take() {
+                Some(h) => {
+                    h.abort();
+                    true
+                }
+                None => false,
             }
-            None => false,
+        };
+
+        // Drain the child map and fire each child's cancel concurrently.
+        // We drain (rather than clone) so a lingering child from a
+        // previous turn that never de-registered doesn't get cancelled
+        // twice on a later interrupt.
+        let children: Vec<Box<dyn ChildCancel>> = {
+            let mut guard = self.children.lock().await;
+            guard.drain().map(|(_, c)| c).collect()
+        };
+        for child in children {
+            tokio::spawn(async move {
+                child.cancel().await;
+            });
         }
+
+        cancelled_self
+    }
+
+    /// Expose the shared child-tracker so callers can wire it into a
+    /// spawned subagent's `ToolContext`. Each subagent registers itself
+    /// on entry and de-registers on completion; parent's `cancel()`
+    /// walks the map.
+    pub fn child_tracker(&self) -> Arc<dyn ChildTracker> {
+        Arc::new(SessionChildTracker {
+            children: self.children.clone(),
+            next_id: self.next_child_id.clone(),
+        })
+    }
+}
+
+/// Concrete `ChildTracker` implementation backed by the shared
+/// `Session.children` map. Hidden behind the trait so mira-tools
+/// (where `ChildTracker` lives) doesn't take a dependency on the
+/// harness types.
+struct SessionChildTracker {
+    children: Arc<Mutex<HashMap<u64, Box<dyn ChildCancel>>>>,
+    next_id: Arc<AtomicU64>,
+}
+
+#[async_trait::async_trait]
+impl ChildTracker for SessionChildTracker {
+    async fn register(&self, cancel: Box<dyn ChildCancel>) -> u64 {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.children.lock().await.insert(id, cancel);
+        id
+    }
+
+    async fn deregister(&self, id: u64) {
+        self.children.lock().await.remove(&id);
     }
 }
 
