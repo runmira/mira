@@ -331,6 +331,14 @@ pub struct AgentTool {
     /// auto-approving them. Read-only agents keep the `AutoApprover`
     /// path — nothing dangerous to gate.
     parent_approver: Option<Arc<dyn Approver>>,
+    /// Parent's live `Policy`. When set AND the resolved type routes
+    /// approvals to the parent, the child shares the SAME Arc — so
+    /// the parent's current mode and any `always allow` rules the user
+    /// has accumulated apply to the child too. Without sharing, a
+    /// subagent that spawned mid-turn would ignore later mode swaps
+    /// (Auto → Yolo etc.), which is what caused the "still asks for
+    /// permission after I set allow-everything" bug.
+    parent_policy: Option<Arc<Mutex<Policy>>>,
 }
 
 impl AgentTool {
@@ -347,6 +355,7 @@ impl AgentTool {
             agents: Arc::new(AgentRegistry::default()),
             store: None,
             parent_approver: None,
+            parent_policy: None,
         }
     }
 
@@ -381,6 +390,14 @@ impl AgentTool {
     /// `AutoApprover` path.
     pub fn with_parent_approver(mut self, approver: Arc<dyn Approver>) -> Self {
         self.parent_approver = Some(approver);
+        self
+    }
+
+    /// Wire the parent's live `Policy`. Write-capable children share this
+    /// Arc so `Auto → Yolo` mode swaps and always-allow rules the user
+    /// clicks on the parent's approval modal apply to the child too.
+    pub fn with_parent_policy(mut self, policy: Arc<Mutex<Policy>>) -> Self {
+        self.parent_policy = Some(policy);
         self
     }
 }
@@ -600,47 +617,58 @@ impl Tool for AgentTool {
             if let Some(approver) = &self.parent_approver {
                 nested = nested.with_parent_approver(approver.clone());
             }
+            if let Some(policy) = &self.parent_policy {
+                nested = nested.with_parent_policy(policy.clone());
+            }
             child_registry.register(nested);
         }
         let child_registry = Arc::new(child_registry);
 
-        // Fresh policy: subagents run under `auto` with an AutoApprover so
-        // there's no interactive prompt on the child's turn. If you need
-        // manual gating for a delegated task, don't delegate it. Rules are
-        // empty — same policy for every subagent in MVP.
-        let policy_cfg = PolicyConfig {
-            mode: mira_policy::Mode::Auto,
-            allow: Vec::new(),
-            ask: Vec::new(),
-            deny: Vec::new(),
-        };
-        let policy = Policy::from_config(&policy_cfg)
-            .map_err(|e| ToolError::Failed(format!("subagent policy build failed: {e}")))?;
-        let policy = Arc::new(Mutex::new(policy));
-
-        // Approver selection: write-capable types route Ask decisions to
-        // the parent's UI so destructive commands never fire silently.
-        // Read-only types stay on AutoApprover — there's nothing for the
-        // user to review, and interrupting flow would defeat the whole
-        // "delegate cheap exploration" purpose.
+        // Approver + policy selection.
+        //
+        // Write-capable types (`coder`, `documenter`, or any custom type
+        // with `route_approvals_to_parent: true`) share the parent's
+        // **live Policy Arc** so:
+        //   - flipping the parent's mode (Auto → Yolo etc.) applies to
+        //     the child immediately, and
+        //   - any "always allow" rule the user adds via an approval
+        //     modal reaches the child on its next call.
+        // They also share the parent's approver, so `Ask` decisions pop
+        // the same modal the user sees for their own commands.
+        //
+        // Read-only types stay on a fresh Auto policy + AutoApprover —
+        // there's nothing for the user to review, and interrupting flow
+        // would defeat the whole "delegate cheap exploration" purpose.
         let route_to_parent = route_approvals_to_parent(type_def, effective_tools.as_deref());
-        let approver: Arc<dyn mira_harness::Approver> = if route_to_parent {
-            match &self.parent_approver {
-                Some(a) => a.clone(),
-                None => {
-                    // Fall back to auto-yes when there's no parent approver
-                    // wired (headless / test paths). Log so the operator
-                    // knows a write-capable child ran with no gate.
-                    warn!(
-                        depth = child_depth,
-                        "subagent needs parent approver but none is wired; auto-approving"
-                    );
-                    Arc::new(AutoApprover { approve_asks: true })
-                }
-            }
-        } else {
-            Arc::new(AutoApprover { approve_asks: true })
-        };
+        let (policy, approver): (Arc<Mutex<Policy>>, Arc<dyn mira_harness::Approver>) =
+            if route_to_parent {
+                let policy = match &self.parent_policy {
+                    Some(p) => p.clone(),
+                    None => {
+                        warn!(
+                            depth = child_depth,
+                            "subagent routes to parent but no parent policy wired; using fresh Auto"
+                        );
+                        Arc::new(Mutex::new(fresh_auto_policy()?))
+                    }
+                };
+                let approver: Arc<dyn mira_harness::Approver> = match &self.parent_approver {
+                    Some(a) => a.clone(),
+                    None => {
+                        warn!(
+                            depth = child_depth,
+                            "subagent routes to parent but no parent approver wired; auto-approving"
+                        );
+                        Arc::new(AutoApprover { approve_asks: true })
+                    }
+                };
+                (policy, approver)
+            } else {
+                let policy = Arc::new(Mutex::new(fresh_auto_policy()?));
+                let approver: Arc<dyn mira_harness::Approver> =
+                    Arc::new(AutoApprover { approve_asks: true });
+                (policy, approver)
+            };
 
         // Fresh ToolContext — sandbox + cwd shared with the parent so
         // edits land on the same working tree; guard is intentionally
@@ -892,6 +920,21 @@ fn tools_are_read_only_slice(names: &[String]) -> bool {
         && names
             .iter()
             .all(|n| READ_ONLY_TOOL_NAMES.contains(&n.as_str()))
+}
+
+/// Build the read-only agent fallback policy: `Auto` mode, no rules.
+/// Under `AutoApprover`, this means Read/Pure/Write/Edit auto-allow and
+/// Bash auto-approves — safe for `explore`/`reviewer` where the tools
+/// list is already restricted upstream to read-only ones.
+fn fresh_auto_policy() -> Result<Policy, ToolError> {
+    let cfg = PolicyConfig {
+        mode: mira_policy::Mode::Auto,
+        allow: Vec::new(),
+        ask: Vec::new(),
+        deny: Vec::new(),
+    };
+    Policy::from_config(&cfg)
+        .map_err(|e| ToolError::Failed(format!("subagent policy build failed: {e}")))
 }
 
 /// Decide whether this spawn should forward `Ask` decisions to the

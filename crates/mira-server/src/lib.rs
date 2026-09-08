@@ -152,7 +152,12 @@ pub async fn run(mut cfg: ServerConfig) -> Result<()> {
     // Route write-capable subagent approvals to the parent's UI so
     // `bash rm -rf ...` inside a coder subagent pops the same modal the
     // parent would. Read-only types stay on the auto-approver path.
-    .with_parent_approver(approver.clone());
+    .with_parent_approver(approver.clone())
+    // Share the parent's live Policy Arc — write-capable children see
+    // the same mode + rules the parent does, so mode swaps (Auto →
+    // Yolo) and always-allow rules the user accumulates propagate to
+    // the child immediately.
+    .with_parent_policy(cfg.policy.clone());
     // Persist child sessions when the parent's store is available. The
     // panel uses `/api/sessions/:id/history` to rebuild a child's
     // transcript on browser reload.
