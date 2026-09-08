@@ -20,7 +20,7 @@ use futures::StreamExt;
 use mira_agents::AgentRegistry;
 use mira_ai::{ChatProvider, ToolSpec};
 use mira_core::{Role, ToolCall, ToolResult};
-use mira_harness::{AutoApprover, HarnessEvent, Session, SessionConfig, SessionStore};
+use mira_harness::{Approver, AutoApprover, HarnessEvent, Session, SessionConfig, SessionStore};
 use mira_policy::{Policy, PolicyConfig};
 use mira_tools::context::ToolContext;
 use mira_tools::tool::{spec, Action, Tool, ToolError};
@@ -325,6 +325,12 @@ pub struct AgentTool {
     /// restart. `None` = ephemeral (child transcript lives in memory
     /// only, gone on reload).
     store: Option<Arc<dyn SessionStore>>,
+    /// Parent's approver (typically `WsApprover`). Wired when we want
+    /// write-capable subagents (`coder`, `documenter`) to route policy
+    /// `Ask` decisions back to the user's UI instead of silently
+    /// auto-approving them. Read-only agents keep the `AutoApprover`
+    /// path — nothing dangerous to gate.
+    parent_approver: Option<Arc<dyn Approver>>,
 }
 
 impl AgentTool {
@@ -340,6 +346,7 @@ impl AgentTool {
             events_tx: None,
             agents: Arc::new(AgentRegistry::default()),
             store: None,
+            parent_approver: None,
         }
     }
 
@@ -364,6 +371,16 @@ impl AgentTool {
     /// rebuild a child's transcript after a browser reload.
     pub fn with_store(mut self, store: Arc<dyn SessionStore>) -> Self {
         self.store = Some(store);
+        self
+    }
+
+    /// Wire the parent's approver so children of write-capable types
+    /// (`coder`, `documenter`, or any custom type with
+    /// `route_approvals_to_parent: true`) forward `Ask` decisions to the
+    /// same modal the parent would use. Read-only types keep the
+    /// `AutoApprover` path.
+    pub fn with_parent_approver(mut self, approver: Arc<dyn Approver>) -> Self {
+        self.parent_approver = Some(approver);
         self
     }
 }
@@ -472,6 +489,37 @@ impl Tool for AgentTool {
         Action::Pure
     }
 
+    fn parallel_safe(&self, call: &ToolCall) -> bool {
+        // Look up the target type (if any) and consult its explicit
+        // `parallel_safe` flag. Read-only types (explore/reviewer/…)
+        // opt in; write-capable types (coder/documenter) stay
+        // sequential until worktree isolation lands.
+        //
+        // When the type is unknown or the flag is unset, fall back to a
+        // conservative default derived from the effective tool set: a
+        // child whose tools are all read-ish is safe to parallelize; any
+        // write/edit tool → sequential.
+        let args = match call.parse_arguments::<AgentArgs>() {
+            Ok(a) => a,
+            Err(_) => return false, // bad args → play it safe
+        };
+        if let Some(name) = args.r#type.as_deref() {
+            if let Some(ty) = self.agents.get(name) {
+                if let Some(flag) = ty.parallel_safe {
+                    return flag;
+                }
+                return tools_are_read_only(ty.tools.as_deref());
+            }
+        }
+        // No named type — fall back on the caller's explicit tool list
+        // (if given) or the safe default when the child would inherit
+        // the full parent tool set (writes possible → false).
+        args.tools
+            .as_deref()
+            .map(tools_are_read_only_slice)
+            .unwrap_or(false)
+    }
+
     async fn invoke(&self, call: &ToolCall, ctx: &ToolContext) -> Result<ToolResult, ToolError> {
         let args: AgentArgs = call.parse_arguments()?;
 
@@ -549,6 +597,9 @@ impl Tool for AgentTool {
             if let Some(store) = &self.store {
                 nested = nested.with_store(store.clone());
             }
+            if let Some(approver) = &self.parent_approver {
+                nested = nested.with_parent_approver(approver.clone());
+            }
             child_registry.register(nested);
         }
         let child_registry = Arc::new(child_registry);
@@ -566,7 +617,30 @@ impl Tool for AgentTool {
         let policy = Policy::from_config(&policy_cfg)
             .map_err(|e| ToolError::Failed(format!("subagent policy build failed: {e}")))?;
         let policy = Arc::new(Mutex::new(policy));
-        let approver = Arc::new(AutoApprover { approve_asks: true });
+
+        // Approver selection: write-capable types route Ask decisions to
+        // the parent's UI so destructive commands never fire silently.
+        // Read-only types stay on AutoApprover — there's nothing for the
+        // user to review, and interrupting flow would defeat the whole
+        // "delegate cheap exploration" purpose.
+        let route_to_parent = route_approvals_to_parent(type_def, effective_tools.as_deref());
+        let approver: Arc<dyn mira_harness::Approver> = if route_to_parent {
+            match &self.parent_approver {
+                Some(a) => a.clone(),
+                None => {
+                    // Fall back to auto-yes when there's no parent approver
+                    // wired (headless / test paths). Log so the operator
+                    // knows a write-capable child ran with no gate.
+                    warn!(
+                        depth = child_depth,
+                        "subagent needs parent approver but none is wired; auto-approving"
+                    );
+                    Arc::new(AutoApprover { approve_asks: true })
+                }
+            }
+        } else {
+            Arc::new(AutoApprover { approve_asks: true })
+        };
 
         // Fresh ToolContext — sandbox + cwd shared with the parent so
         // edits land on the same working tree; guard is intentionally
@@ -792,6 +866,52 @@ fn subagent_wire(parent_call_id: &str, evt: &HarnessEvent) -> Option<ServerMsg> 
         HarnessEvent::TurnComplete
         | HarnessEvent::Usage { .. }
         | HarnessEvent::MemoryLearned { .. } => None,
+    }
+}
+
+/// Names of tools known to be side-effect-free. Kept in sync with the
+/// crate's read-only built-ins — extending this list is safe as long as
+/// the tool truly makes no filesystem or shell writes.
+const READ_ONLY_TOOL_NAMES: &[&str] = &[
+    "read_file",
+    "grep",
+    "glob",
+    "find_symbol",
+    "memory_read",
+    "memory_search",
+    "web_fetch",
+    "web_search",
+];
+
+fn tools_are_read_only(names: Option<&[String]>) -> bool {
+    names.map(tools_are_read_only_slice).unwrap_or(false)
+}
+
+fn tools_are_read_only_slice(names: &[String]) -> bool {
+    !names.is_empty()
+        && names
+            .iter()
+            .all(|n| READ_ONLY_TOOL_NAMES.contains(&n.as_str()))
+}
+
+/// Decide whether this spawn should forward `Ask` decisions to the
+/// parent's approver. Explicit type flag wins; otherwise fall back to
+/// a conservative default: read-only tool sets auto-approve, anything
+/// with write/edit/bash capability routes to the parent.
+fn route_approvals_to_parent(
+    ty: Option<&mira_agents::AgentType>,
+    effective_tools: Option<&[String]>,
+) -> bool {
+    if let Some(t) = ty {
+        if let Some(flag) = t.route_approvals_to_parent {
+            return flag;
+        }
+    }
+    match effective_tools {
+        Some(names) => !tools_are_read_only_slice(names),
+        // Full inheritance from the parent means the child could touch
+        // anything — treat that as write-capable.
+        None => true,
     }
 }
 

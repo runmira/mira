@@ -75,6 +75,22 @@ pub trait Tool: Send + Sync {
         String::new()
     }
 
+    /// Whether this tool is safe to run concurrently with other
+    /// parallel-safe tools inside the same model round.
+    ///
+    /// The default is conservative: only `Action::Read` and `Action::Pure`
+    /// tools opt in. Anything that writes / edits / shells out is
+    /// serialized by default because file conflicts and process races
+    /// aren't worth the wall-clock savings. The `agent` tool overrides
+    /// this per-call based on the target type's `parallel_safe` flag.
+    ///
+    /// Called by the harness once per pending tool call before dispatch;
+    /// the loop batches consecutive parallel-safe calls into a single
+    /// `join_all`.
+    fn parallel_safe(&self, _call: &ToolCall) -> bool {
+        matches!(self.action(), Action::Read | Action::Pure)
+    }
+
     async fn invoke(&self, call: &ToolCall, ctx: &ToolContext) -> Result<ToolResult, ToolError>;
 }
 

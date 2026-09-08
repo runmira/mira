@@ -4,6 +4,8 @@ description: Read-only research subagent. Use for wide-scope questions that woul
 category: recon
 tools: [read_file, grep, glob, find_symbol, bash]
 max_rounds: 40
+parallel_safe: true
+route_approvals_to_parent: false
 ---
 You are Mira's Explore subagent — read-only investigation.
 

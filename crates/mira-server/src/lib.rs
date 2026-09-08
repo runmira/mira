@@ -128,6 +128,18 @@ pub async fn run(mut cfg: ServerConfig) -> Result<()> {
         "agent types loaded"
     );
 
+    // Build the parent's approver up front so the AgentTool can hold a
+    // reference to it (write-capable subagents route Ask decisions back
+    // through the same modal the user sees). cwd is `Arc<RwLock<...>>`
+    // shared with the WsApprover so folder swaps flow through to diff
+    // previews for both parent and child.
+    let cwd = Arc::new(RwLock::new(cfg.cwd.clone()));
+    let approver: Arc<dyn Approver> = Arc::new(WsApprover::new(
+        events_tx.clone(),
+        pending.clone(),
+        cwd.clone(),
+    ));
+
     let mut agent_tool = interactive::AgentTool::new(
         harness_provider.clone(),
         base_registry,
@@ -136,7 +148,11 @@ pub async fn run(mut cfg: ServerConfig) -> Result<()> {
     .with_agents(agents_registry.clone())
     // Wire the shared events broadcast so subagent child events fan
     // out to the connected WSes and light up the SubagentPanel live.
-    .with_events_tx(events_tx.clone());
+    .with_events_tx(events_tx.clone())
+    // Route write-capable subagent approvals to the parent's UI so
+    // `bash rm -rf ...` inside a coder subagent pops the same modal the
+    // parent would. Read-only types stay on the auto-approver path.
+    .with_parent_approver(approver.clone());
     // Persist child sessions when the parent's store is available. The
     // panel uses `/api/sessions/:id/history` to rebuild a child's
     // transcript on browser reload.
@@ -146,12 +162,6 @@ pub async fn run(mut cfg: ServerConfig) -> Result<()> {
     registry_owned.register(agent_tool);
     let registry = Arc::new(registry_owned);
     cfg.registry = registry.clone();
-    let cwd = Arc::new(RwLock::new(cfg.cwd.clone()));
-    let approver: Arc<dyn Approver> = Arc::new(WsApprover::new(
-        events_tx.clone(),
-        pending.clone(),
-        cwd.clone(),
-    ));
 
     // Build the memory + episodic stores BEFORE constructing the initial
     // Session so its `tool_ctx` gets them wired from turn zero. Otherwise

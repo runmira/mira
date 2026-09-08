@@ -573,62 +573,31 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
             return;
         }
 
-        // Dispatch calls. Denials become tool-result messages so the model
-        // sees WHY it didn't get a result and can adapt.
-        for call in pending_calls {
-            let Some(tool) = sess.registry.get(&call.function.name) else {
-                let msg = format!("no such tool: {}", call.function.name);
-                warn!(tool = %call.function.name, "unknown tool call");
-                let result = ToolResult::err(call.id.clone(), msg);
-                sess.history.lock().await.push(Message::tool(
-                    result.call_id.clone(),
-                    truncate_for_history(&result.content),
-                ));
-                let _ = tx.send(HarnessEvent::ToolEnd(result)).await;
-                continue;
-            };
-
-            let target = tool.policy_target(&call);
-            let decision = sess.policy.lock().await.evaluate(&PolicyRequest {
-                action: tool.action(),
-                target: &target,
-            });
-
-            let allowed = match decision {
-                Decision::Allow => true,
-                Decision::Deny => false,
-                Decision::Ask => sess.approver.approve(&call, decision).await,
-            };
-
-            let _ = tx.send(HarnessEvent::ToolStart(call.clone())).await;
-
-            let result = if !allowed {
-                ToolResult::err(
-                    call.id.clone(),
-                    format!(
-                        "denied by policy: {} on `{}`",
-                        format_action(tool.action()),
-                        target
-                    ),
-                )
-            } else {
-                match tool.invoke(&call, &sess.tool_ctx).await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        error!(tool = %call.function.name, %e, "tool invocation failed");
-                        ToolResult::err(call.id.clone(), e.to_string())
+        // Dispatch calls in batches. Consecutive parallel-safe calls
+        // (`Tool::parallel_safe(...)` = true) run concurrently via
+        // `join_all`; anything else stays sequential. Preserves relative
+        // order across batches so `edit → agent → read` semantics stay
+        // intact — the model expects the batch of writes to land before
+        // the reads that follow.
+        let batches = plan_dispatch_batches(&sess, pending_calls).await;
+        for batch in batches {
+            if batch.calls.len() == 1 || !batch.parallel {
+                for call in batch.calls {
+                    if dispatch_call(&sess, call, &tx).await {
+                        any_successful_tool_call = true;
                     }
                 }
-            };
-
-            if !result.is_error {
-                any_successful_tool_call = true;
+            } else {
+                let futures: Vec<_> = batch
+                    .calls
+                    .into_iter()
+                    .map(|call| dispatch_call(&sess, call, &tx))
+                    .collect();
+                let outcomes = futures::future::join_all(futures).await;
+                if outcomes.into_iter().any(|ok| ok) {
+                    any_successful_tool_call = true;
+                }
             }
-            sess.history.lock().await.push(Message::tool(
-                result.call_id.clone(),
-                truncate_for_history(&result.content),
-            ));
-            let _ = tx.send(HarnessEvent::ToolEnd(result)).await;
         }
         checkpoint(&sess).await;
     }
@@ -642,6 +611,123 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
     sess.end_current_turn().await;
     checkpoint(&sess).await;
     let _ = tx.send(HarnessEvent::Done).await;
+}
+
+/// A group of tool calls dispatched together. `parallel = true` means
+/// every call in `calls` reported `Tool::parallel_safe(&call) == true`;
+/// the loop hands the whole slice to `join_all`. Sequential batches
+/// (either a single call or a run containing at least one non-safe
+/// tool) get their calls awaited one at a time in `calls` order.
+struct DispatchBatch {
+    calls: Vec<ToolCall>,
+    parallel: bool,
+}
+
+/// Split `pending_calls` into batches. Consecutive parallel-safe calls
+/// collapse into one parallel batch; each non-safe call becomes its own
+/// sequential batch. Unknown tools are treated as non-parallel so an
+/// error-path lookup can never accidentally parallelize.
+async fn plan_dispatch_batches(sess: &Session, calls: Vec<ToolCall>) -> Vec<DispatchBatch> {
+    let mut batches: Vec<DispatchBatch> = Vec::new();
+    let mut current: Vec<ToolCall> = Vec::new();
+
+    for call in calls {
+        let is_safe = match sess.registry.get(&call.function.name) {
+            Some(tool) => tool.parallel_safe(&call),
+            None => false,
+        };
+        if is_safe {
+            current.push(call);
+        } else {
+            if !current.is_empty() {
+                batches.push(DispatchBatch {
+                    calls: std::mem::take(&mut current),
+                    parallel: true,
+                });
+            }
+            batches.push(DispatchBatch {
+                calls: vec![call],
+                parallel: false,
+            });
+        }
+    }
+    if !current.is_empty() {
+        batches.push(DispatchBatch {
+            calls: current,
+            parallel: true,
+        });
+    }
+    batches
+}
+
+/// Dispatch a single tool call end-to-end: policy check, optional
+/// approval, `Tool::invoke`, history push, `ToolEnd` event. Returns
+/// `true` when the tool completed without error — the caller uses that
+/// to update the "any successful tool call" flag that gates the
+/// post-round auto-extractor.
+///
+/// Safe to `join_all` a slice of these when every call in the slice is
+/// `Tool::parallel_safe`: `history`, `policy`, and the mpsc `tx` are
+/// all `Send + Sync` (Arc-behind-Mutex / cloneable), and the tool_ctx
+/// is shared by design. Concurrent history pushes serialize on the
+/// history mutex, which keeps the recorded transcript coherent.
+async fn dispatch_call(
+    sess: &Session,
+    call: ToolCall,
+    tx: &mpsc::Sender<HarnessEvent>,
+) -> bool {
+    let Some(tool) = sess.registry.get(&call.function.name) else {
+        let msg = format!("no such tool: {}", call.function.name);
+        warn!(tool = %call.function.name, "unknown tool call");
+        let result = ToolResult::err(call.id.clone(), msg);
+        sess.history.lock().await.push(Message::tool(
+            result.call_id.clone(),
+            truncate_for_history(&result.content),
+        ));
+        let _ = tx.send(HarnessEvent::ToolEnd(result)).await;
+        return false;
+    };
+
+    let target = tool.policy_target(&call);
+    let decision = sess.policy.lock().await.evaluate(&PolicyRequest {
+        action: tool.action(),
+        target: &target,
+    });
+
+    let allowed = match decision {
+        Decision::Allow => true,
+        Decision::Deny => false,
+        Decision::Ask => sess.approver.approve(&call, decision).await,
+    };
+
+    let _ = tx.send(HarnessEvent::ToolStart(call.clone())).await;
+
+    let result = if !allowed {
+        ToolResult::err(
+            call.id.clone(),
+            format!(
+                "denied by policy: {} on `{}`",
+                format_action(tool.action()),
+                target
+            ),
+        )
+    } else {
+        match tool.invoke(&call, &sess.tool_ctx).await {
+            Ok(r) => r,
+            Err(e) => {
+                error!(tool = %call.function.name, %e, "tool invocation failed");
+                ToolResult::err(call.id.clone(), e.to_string())
+            }
+        }
+    };
+
+    let ok = !result.is_error;
+    sess.history.lock().await.push(Message::tool(
+        result.call_id.clone(),
+        truncate_for_history(&result.content),
+    ));
+    let _ = tx.send(HarnessEvent::ToolEnd(result)).await;
+    ok
 }
 
 /// Snapshot the session and save through the attached store, if any.

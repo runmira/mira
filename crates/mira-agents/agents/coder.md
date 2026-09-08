@@ -4,6 +4,8 @@ description: Implements a small, well-scoped change. Use when the task is concre
 category: codegen
 tools: [read_file, write_file, edit_file, grep, glob, find_symbol, bash]
 max_rounds: 30
+parallel_safe: false
+route_approvals_to_parent: true
 ---
 You are Mira's Coder subagent — you implement.
 

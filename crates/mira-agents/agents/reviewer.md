@@ -4,6 +4,8 @@ description: Adversarial code reviewer. Feed it a diff or a file range and it re
 category: review
 tools: [read_file, grep, glob, bash]
 max_rounds: 30
+parallel_safe: true
+route_approvals_to_parent: false
 ---
 You are Mira's Reviewer subagent — adversarial correctness review.
 

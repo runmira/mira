@@ -75,6 +75,21 @@ pub struct AgentType {
     /// for Round 1 structured output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_schema: Option<JsonValue>,
+    /// Whether multiple instances of this type may run concurrently in
+    /// the same parent turn. Read-only agents are safe to parallelize;
+    /// write-capable agents (`coder`, `documenter`) need worktree
+    /// isolation before parallel is safe, so they default to sequential.
+    /// `None` here means the caller falls back to a conservative
+    /// tool-inspection default at spawn time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parallel_safe: Option<bool>,
+    /// When a child of this type triggers a policy `Ask`, forward the
+    /// decision to the parent's approver (the same modal the user sees
+    /// for their own top-level commands). Read-only agents skip this by
+    /// default (nothing dangerous to gate); write-capable types route
+    /// to the parent so destructive commands never run silently.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_approvals_to_parent: Option<bool>,
 }
 
 /// Ordered map of type name → definition. `BTreeMap` for stable listing
@@ -264,6 +279,8 @@ pub fn parse_agent_md(source: &str) -> Result<AgentType> {
         max_rounds: fm.max_rounds,
         system_prompt_addendum,
         response_schema: fm.response_schema,
+        parallel_safe: fm.parallel_safe,
+        route_approvals_to_parent: fm.route_approvals_to_parent,
     })
 }
 
@@ -284,6 +301,10 @@ struct Frontmatter {
     max_rounds: Option<usize>,
     #[serde(default)]
     response_schema: Option<JsonValue>,
+    #[serde(default)]
+    parallel_safe: Option<bool>,
+    #[serde(default)]
+    route_approvals_to_parent: Option<bool>,
 }
 
 /* ---------- tests ---------- */
