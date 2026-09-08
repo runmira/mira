@@ -432,6 +432,12 @@ impl Session {
 const MAX_VERIFY_ATTEMPTS: usize = 3;
 
 async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEvent>) {
+    // Persist the user's turn-opening message right away so the sidebar
+    // shows the new thread as soon as they hit send — before the model's
+    // first response comes back. Without this, `list_sessions` (which
+    // walks disk) can't see the session because nothing has flushed yet.
+    checkpoint(&sess).await;
+
     // Snapshot the set of paths already written to at turn start so a
     // later diff tells us what *this* turn touched. When there's no
     // FileGuard, apply-verify is disabled entirely (empty set → no

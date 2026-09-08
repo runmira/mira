@@ -272,6 +272,11 @@ export default function App() {
         // A turn ended (assistant round complete). More may follow if there
         // were tool calls; if not, `done` will clear us right after.
         setThinking(true);
+        // Belt-and-suspenders sidebar refresh — the onSend-triggered
+        // refetch can race the harness's first checkpoint on a very
+        // fresh session; this fires once the first assistant round has
+        // definitively landed on disk.
+        setSidebarRefresh((n) => n + 1);
         break;
       case 'done':
         setBusy(false);
@@ -441,6 +446,11 @@ export default function App() {
     // but a keyboard-driven send would still land the message and it should
     // pull the user back to the transcript.
     setMainView('chat');
+    // Refresh the sidebar immediately so a brand-new thread shows up in
+    // the projects list on the first send, not after the model finishes
+    // responding. The harness checkpoints the pushed user message at the
+    // top of `run_loop` so this refetch sees the new row.
+    setSidebarRefresh((n) => n + 1);
     const now = Date.now();
     setEntries((prev) => {
       const next: Entry[] = [...prev, { kind: 'msg', msg: { role: 'user', content: text } }];
