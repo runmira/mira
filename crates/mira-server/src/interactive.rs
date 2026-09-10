@@ -18,7 +18,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::StreamExt;
 use mira_agents::AgentRegistry;
-use mira_ai::{ChatProvider, ResponseFormat, ToolSpec};
+use mira_ai::{ChatProvider, ToolSpec};
 use mira_core::{Role, ToolCall, ToolResult};
 use mira_harness::{Approver, AutoApprover, HarnessEvent, Session, SessionConfig, SessionStore};
 use mira_policy::{Policy, PolicyConfig};
@@ -30,6 +30,7 @@ use serde_json::json;
 use tokio::sync::{broadcast, oneshot, Mutex};
 use tracing::{info, warn};
 
+use crate::agent_worktree::WorktreeSession;
 use crate::protocol::ServerMsg;
 
 /* ---------- shared channel ---------- */
@@ -670,12 +671,67 @@ impl Tool for AgentTool {
                 (policy, approver)
             };
 
-        // Fresh ToolContext — sandbox + cwd shared with the parent so
-        // edits land on the same working tree; guard is intentionally
-        // omitted here because Session::new attaches a session-scoped one
-        // itself. Memory + episodic handles carry through so the child
-        // can read the same MIRA.md the parent sees.
-        let child_ctx = ToolContext::new(ctx.cwd.clone(), ctx.sandbox.clone())
+        // Worktree isolation for write-capable types (Round 4). When the
+        // type has `worktree: true`, spin up an ephemeral `git worktree`
+        // off HEAD and swap the child's cwd to it, so parallel writers
+        // can't stomp on each other's edits. The `WorktreeSession` is
+        // consumed after the child completes — see `merge_and_cleanup`
+        // below. Falls back to the parent cwd (with a warning) when the
+        // parent isn't a git repo or the worktree creation errors, so a
+        // misconfigured type never blocks the spawn entirely.
+        let mut worktree: Option<WorktreeSession> = None;
+        let child_cwd = if type_def.and_then(|t| t.worktree).unwrap_or(false) {
+            let type_name = type_def
+                .map(|t| t.name.as_str())
+                .unwrap_or("agent");
+            match WorktreeSession::try_create(&ctx.cwd, type_name, call.id.as_str()) {
+                Ok(Some(w)) => {
+                    info!(
+                        depth = child_depth,
+                        worktree = %w.cwd().display(),
+                        "isolating subagent in ephemeral git worktree"
+                    );
+                    let cwd = w.cwd().to_path_buf();
+                    worktree = Some(w);
+                    cwd
+                }
+                Ok(None) => {
+                    warn!(
+                        "worktree isolation requested but parent cwd is not a git \
+                         repo; running subagent in parent cwd"
+                    );
+                    if let Some(tx) = &self.events_tx {
+                        let _ = tx.send(ServerMsg::SubagentWarning {
+                            parent_call_id: call.id.to_string(),
+                            text: "worktree isolation skipped — parent cwd is not a \
+                                   git repository"
+                                .to_owned(),
+                        });
+                    }
+                    ctx.cwd.clone()
+                }
+                Err(e) => {
+                    warn!(%e, "worktree create failed; running subagent in parent cwd");
+                    if let Some(tx) = &self.events_tx {
+                        let _ = tx.send(ServerMsg::SubagentWarning {
+                            parent_call_id: call.id.to_string(),
+                            text: format!("worktree isolation failed: {e}"),
+                        });
+                    }
+                    ctx.cwd.clone()
+                }
+            }
+        } else {
+            ctx.cwd.clone()
+        };
+
+        // Fresh ToolContext — sandbox shared with the parent so shell
+        // commands still hit the same allowlist; cwd is either the parent's
+        // tree or the child's isolated worktree, depending on the type.
+        // Guard is intentionally omitted here because Session::new attaches
+        // a session-scoped one itself. Memory + episodic handles carry
+        // through so the child can read the same MIRA.md the parent sees.
+        let child_ctx = ToolContext::new(child_cwd, ctx.sandbox.clone())
             .with_agent_depth(child_depth);
         let child_ctx = if let Some(mem) = ctx.memory.clone() {
             child_ctx.with_memory(mem)
@@ -700,24 +756,20 @@ impl Tool for AgentTool {
             .max_rounds
             .or_else(|| type_def.and_then(|t| t.max_rounds))
             .unwrap_or(DEFAULT_SUBAGENT_MAX_ROUNDS);
-        // Wire the type's response_schema (if any) into the child's
-        // ChatRequest. The provider constrains the model's text output
-        // to match; the caller (parent) sees a JSON string in the tool
-        // result content plus a parsed `data` value alongside it.
-        if let Some(schema) = type_def.and_then(|t| t.response_schema.clone()) {
-            cfg.response_format = Some(ResponseFormat::JsonSchema {
-                name: type_def
-                    .map(|t| t.name.clone())
-                    .unwrap_or_else(|| "response".to_owned()),
-                schema,
-                // Strict mode gates unknown fields + requires all `required`
-                // keys — closer to a real contract at the cost of a
-                // stricter provider (OpenAI Structured Outputs, some
-                // OpenRouter models). Providers that don't support strict
-                // fall back to best-effort.
-                strict: true,
-            });
-        }
+        // Deliberately NOT wiring the type's `response_schema` into the
+        // child's `response_format` here. Provider-side JSON-schema
+        // enforcement runs on EVERY assistant text message, not just the
+        // last one — so a model like qwen sees "output must match the
+        // schema" and emits a stub JSON on turn 1 (e.g. `{"summary":
+        // "starting exploration…", "findings":[]}`) instead of calling
+        // tools first. That's why subagents were coming back truncated.
+        // The schema is still recorded in the type def and referenced in
+        // the system prompt (see `subagent_system_prompt` and each type's
+        // `.md`), and the frontend's `tryParseStructured` handles the
+        // parse best-effort. If we want a hard contract back, the fix is
+        // a `submit_report` tool the model calls on its final turn, not
+        // provider-level JSON mode.
+        let _ = type_def.and_then(|t| t.response_schema.clone());
 
         // System prompt: shared base + optional per-type addendum. Kept
         // as separate lines so a persona ("You are Draco…") reads as a
@@ -831,6 +883,28 @@ impl Tool for AgentTool {
             });
         }
 
+        // Merge the isolated worktree back into the parent tree (if we
+        // ever spun one up). Consumes the session — Drop would otherwise
+        // tear down the worktree without harvesting anything. Warnings
+        // for failed merges surface both to the parent's transcript
+        // (so a human sees them) and to the tool result (so the model
+        // reasons about them).
+        let merge_summary = if let Some(w) = worktree.take() {
+            let report = w.merge_and_cleanup();
+            for err in &report.errors {
+                warn!(parent_call_id = %parent_call_id, "worktree merge: {err}");
+                if let Some(tx) = &self.events_tx {
+                    let _ = tx.send(ServerMsg::SubagentWarning {
+                        parent_call_id: parent_call_id.clone(),
+                        text: format!("worktree merge: {err}"),
+                    });
+                }
+            }
+            report.short_summary()
+        } else {
+            None
+        };
+
         // The tool result is the child's final assistant *text*. Walk
         // history back-to-front for the last assistant message with
         // non-empty content — critical because assistant messages
@@ -874,6 +948,11 @@ impl Tool for AgentTool {
                         out.push('\n');
                     }
                 }
+                if let Some(ref s) = merge_summary {
+                    out.push_str("\n[worktree] ");
+                    out.push_str(s);
+                    out.push('\n');
+                }
                 out.push_str(
                     "\nRetry with a more direct prompt (\"summarize your \
                      findings in 5 bullets\") or run the investigation \
@@ -885,14 +964,21 @@ impl Tool for AgentTool {
 
         // Prepend any warnings the child raised so the parent notices
         // e.g. "hit max_rounds" — but keep the final text as the primary
-        // content so a healthy call is one clean summary.
-        let body_with_warnings = if warnings.is_empty() {
+        // content so a healthy call is one clean summary. Same treatment
+        // for the worktree merge summary when isolation was used: the
+        // parent LLM sees exactly which files landed in its tree.
+        let body_with_warnings = if warnings.is_empty() && merge_summary.is_none() {
             body
         } else {
             let mut out = String::new();
             for w in &warnings {
                 out.push_str("[subagent warning] ");
                 out.push_str(w);
+                out.push('\n');
+            }
+            if let Some(ref s) = merge_summary {
+                out.push_str("[worktree] ");
+                out.push_str(s);
                 out.push('\n');
             }
             out.push('\n');
@@ -1042,15 +1128,29 @@ impl ChildCancel for SessionCancel {
 fn subagent_system_prompt() -> &'static str {
     "You are a Mira subagent — a bounded delegate spawned by a parent \
      agent to accomplish one specific task.\n\n\
-     Rules:\n\
+     WORKFLOW (mandatory, in this order):\n\
+     1. INVESTIGATE. Call your tools (grep / read_file / glob / find_symbol / \
+        bash) enough times to actually answer the task. Multiple tool calls \
+        across multiple turns is normal and expected — a real research \
+        question typically needs 5-15 tool calls before you have enough to \
+        conclude. Do NOT produce your final summary until you have \
+        gathered concrete evidence.\n\
+     2. SYNTHESIZE. Once you've read the relevant files and confirmed the \
+        answer, produce ONE final assistant message containing your \
+        summary. That message is the only thing the parent sees.\n\n\
+     Hard rules:\n\
+     - Your very first turn should almost always be a tool call, not a \
+       text answer. If you emit text on turn 1 without calling any tool, \
+       you have failed the task.\n\
      - You have NO memory of the parent's conversation. The `prompt` you \
        received is the ONLY context you have.\n\
-     - Do the task, then return ONE clear plain-text summary as your \
-       final message. That summary is the only thing the parent will see.\n\
      - Do not ask clarifying questions — the parent isn't in the loop. \
        Make the best-effort inference and note assumptions in your summary.\n\
-     - You may use the tools you were given. Prefer read-only exploration \
-       over edits when the task is a research question.\n\
-     - Keep the summary tight. Bullet points, file paths, and short \
-       findings beat paragraphs."
+     - Prefer read-only exploration over edits when the task is a research \
+       question.\n\
+     - Keep the final summary tight. Bullet points, file paths, and short \
+       findings beat paragraphs. Cite `path/to/file.rs:LINE` for every \
+       concrete claim.\n\
+     - If your type has a schema in its addendum, your FINAL message must \
+       match it — but only your final message, not intermediate turns."
 }

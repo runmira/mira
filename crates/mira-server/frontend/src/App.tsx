@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { CaretDown, CaretRight } from '@phosphor-icons/react';
+import { CaretDown } from '@phosphor-icons/react';
 import { cn } from './lib/utils';
 import { connect, type WsClient, type WsStatus } from './ws';
 import { appendMemory, applyUndo, getSessionHistory, getSettings, newSession, startReview } from './api';
 import { extractAgentId } from './components/AgentCard';
 import { SettingsPanel } from './components/Settings';
 import { PluginsPanel } from './components/Plugins';
+import { PullRequestPanel } from './components/PullRequestPanel';
 import { Sidebar, type MainView } from './components/Sidebar';
 import { Composer } from './components/Composer';
 import { FolderPicker } from './components/FolderPicker';
@@ -433,6 +434,27 @@ export default function App() {
     }
   }
 
+  /** Kick off a review of a remote GitHub PR. Diff comes from the REST API
+   *  using the stored `GITHUB_TOKEN`; stage-2 verify is skipped because the
+   *  files referenced by the diff live on GitHub, not in the session cwd. */
+  async function runPrReview(owner: string, repo: string, number: number) {
+    try {
+      await startReview({ owner, repo, pr: number, no_verify: true });
+    } catch (e) {
+      const text = (e as Error).message;
+      setReviewState({
+        runId: 'local-error',
+        status: 'Review failed',
+        progressPct: null,
+        findings: null,
+        verdicts: [],
+        error: text,
+        done: true,
+      });
+      setReviewPanelOpen(true);
+    }
+  }
+
   function decideApproval(callId: string, allow: boolean) {
     wsRef.current?.send({ type: 'approve', call_id: callId, allow });
     setEntries((prev) => updateTool(prev, callId, (t) => ({
@@ -596,8 +618,8 @@ export default function App() {
         // below the viewport fold.
         'grid h-screen grid-rows-1 bg-background transition-[grid-template-columns] duration-150',
         panelOpen
-          ? 'grid-cols-[260px_minmax(0,1fr)_minmax(340px,440px)]'
-          : 'grid-cols-[260px_minmax(0,1fr)]',
+          ? 'grid-cols-[300px_minmax(0,1fr)_minmax(340px,440px)]'
+          : 'grid-cols-[300px_minmax(0,1fr)]',
       )}
     >
       <Sidebar
@@ -717,7 +739,12 @@ export default function App() {
           </div>
         )}
 
-        {mainView === 'pull-request' && <ComingSoon label="Pull request" />}
+        {mainView === 'pull-request' && (
+          <PullRequestPanel
+            onOpenSettings={() => setSettingsOpen(true)}
+            onReviewPr={runPrReview}
+          />
+        )}
         {mainView === 'scheduled' && <ComingSoon label="Scheduled" />}
       </main>
 
@@ -1036,16 +1063,15 @@ export function groupAgentRuns(entries: Entry[]): GroupItem[] {
       continue;
     }
 
-    // Generic tool run: consecutive same-name tool entries, none pending.
+    // Generic tool run: any consecutive tool entries, none pending. Mixing
+    // tool names is fine — ToolGroup renders a "Working/Worked" umbrella
+    // with per-entry verbs in the preview when the run isn't homogeneous.
     // Pending calls must render individually so the approval UI is visible
     // and unmissable — folding them into a group would hide the y/n prompt.
     if (isGroupableTool(e)) {
-      const name = (e as Entry & { kind: 'tool' }).call.function.name;
       const run: (Entry & { kind: 'tool' })[] = [];
       while (i < entries.length && isGroupableTool(entries[i])) {
-        const cand = entries[i] as Entry & { kind: 'tool' };
-        if (cand.call.function.name !== name) break;
-        run.push(cand);
+        run.push(entries[i] as Entry & { kind: 'tool' });
         i++;
       }
       out.push(
@@ -1108,9 +1134,13 @@ function WorkedForChip({
         locked ? 'cursor-default opacity-80' : 'hover:bg-accent/40 hover:text-foreground',
       )}
     >
-      {expanded
-        ? <CaretDown className="size-3 text-muted-foreground/60" />
-        : <CaretRight className="size-3 text-muted-foreground/60" />}
+      <CaretDown
+        weight="bold"
+        className={cn(
+          'size-3 text-muted-foreground/60 transition-transform',
+          !expanded && '-rotate-90',
+        )}
+      />
       <span>{label}</span>
       {active && <span className="size-1.5 animate-pulse rounded-full bg-mira-blue" />}
     </button>

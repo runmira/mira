@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   CaretDown,
   CaretRight,
+  CheckCircle,
+  Circle,
   CircleNotch,
   DotsThree,
   Folder,
@@ -164,8 +166,8 @@ export function Sidebar({
           </NavItem>
           <NavItem
             icon={<GitBranch className="size-3.5" />}
-            disabled
             active={activeView === 'pull-request'}
+            onClick={() => onNavigate('pull-request')}
           >
             Pull request
           </NavItem>
@@ -201,7 +203,7 @@ export function Sidebar({
             return (
               <div key={g.cwd} className="flex flex-col">
                 <div
-                  className="group flex items-center gap-1.5 rounded-md px-2 py-1 text-[14px] text-foreground/90 transition-colors hover:bg-accent/50 hover:text-foreground"
+                  className="group flex items-center gap-1.5 rounded-md px-2 py-1 text-[14.5px] font-semibold text-foreground/90 transition-colors hover:bg-accent/50 hover:text-foreground"
                   title={g.cwd}
                 >
                   <button
@@ -233,51 +235,15 @@ export function Sidebar({
                 {!isCollapsed && (
                   <div className="ml-3.5 flex flex-col gap-0.5 border-l border-border/40 pl-1.5">
                     {visible.map((s) => (
-                      <div
+                      <SessionRow
                         key={s.id}
-                        // Hover tooltip prefers the ORIGINAL first message so
-                        // the user can still see what the chat started with
-                        // even when the nickname has replaced the row label.
-                        title={s.title ?? s.first_user_message ?? s.id}
-                        className={cn(
-                          'group grid w-full grid-cols-[1fr_auto_auto] items-center gap-1 rounded-md px-2 py-1.5 text-[13.5px] transition-colors',
-                          s.id === activeSessionId
-                            ? 'bg-accent text-foreground'
-                            : 'text-foreground/90 hover:bg-accent/60 hover:text-foreground',
-                        )}
-                      >
-                        <button
-                          type="button"
-                          onClick={() => pickSession(s.id)}
-                          className="flex min-w-0 flex-col items-start text-left"
-                        >
-                          <span className="w-full truncate">{s.title ?? s.first_user_message ?? 'Untitled'}</span>
-                          <ModelSubline model={s.model} />
-                        </button>
-                        <span className="flex items-center gap-1.5 text-[11.5px] text-muted-foreground/80 group-hover:opacity-0 transition-opacity">
-                          {s.id === activeSessionId && activeBusy && <BusySpinner />}
-                          {s.worktree_status && (
-                            <WorktreeBadge status={s.worktree_status} branch={s.worktree_branch ?? undefined} />
-                          )}
-                          {timeAgo(s.updated_at)}
-                        </span>
-                        <RowMenu
-                          items={[
-                            {
-                              label: 'Rename session',
-                              icon: <PencilSimple className="size-3.5" />,
-                              onSelect: () => setRenaming(s),
-                            },
-                            {
-                              label: 'Delete session',
-                              danger: true,
-                              confirm: 'Delete this session? This cannot be undone.',
-                              icon: <Trash className="size-3.5" />,
-                              onSelect: () => removeSession(s.id),
-                            },
-                          ]}
-                        />
-                      </div>
+                        session={s}
+                        active={s.id === activeSessionId}
+                        activeBusy={activeBusy}
+                        onPick={() => pickSession(s.id)}
+                        onRename={() => setRenaming(s)}
+                        onDelete={() => removeSession(s.id)}
+                      />
                     ))}
                     {overflow > 0 && (
                       <button
@@ -342,6 +308,263 @@ export function Sidebar({
     />
     </IconContext.Provider>
   );
+}
+
+/* ---------- session row ---------- */
+
+/** Codex-style session row. Title on top, muted subline of
+ *  `short-id · time · optional branch · optional provider-dot`, and a
+ *  right-side status circle (running / merged / idle) — the row background
+ *  itself stays quiet even when active so the sidebar doesn't shout. */
+function SessionRow({
+  session,
+  active,
+  activeBusy,
+  onPick,
+  onRename,
+  onDelete,
+}: {
+  session: SessionSummary;
+  active: boolean;
+  activeBusy: boolean;
+  onPick: () => void;
+  onRename: () => void;
+  onDelete: () => void;
+}) {
+  const providerDot = providerFamilyDot(session.model);
+  const running = active && activeBusy;
+  return (
+    <div
+      // Hover tooltip prefers the ORIGINAL first message so the user can
+      // still see what the chat started with even when the nickname has
+      // replaced the row label.
+      title={session.title ?? session.first_user_message ?? session.id}
+      className={cn(
+        'group grid w-full grid-cols-[1fr_auto] items-start gap-1.5 rounded-md px-2 py-1.5 transition-colors',
+        active
+          ? 'bg-accent/60 text-foreground'
+          : 'text-foreground/90 hover:bg-accent/40 hover:text-foreground',
+      )}
+    >
+      <button
+        type="button"
+        onClick={onPick}
+        className="flex min-w-0 flex-col items-start gap-0.5 text-left"
+      >
+        <span
+          className={cn(
+            'w-full truncate text-[14px] leading-tight',
+            active ? 'font-semibold text-foreground' : 'font-medium text-foreground/90',
+          )}
+        >
+          {session.title ?? session.first_user_message ?? 'Untitled'}
+        </span>
+        <SublineMarquee session={session} providerDot={providerDot} />
+      </button>
+      {/* Single far-right slot. Status circle sits underneath the row
+       *  menu — both share the same absolute box so the layout never
+       *  shifts when the menu appears on hover. Space is reserved even
+       *  when the menu is hidden. */}
+      <div className="relative flex size-5 items-center justify-center pt-0.5">
+        <span
+          className={cn(
+            'absolute inset-0 flex items-center justify-center transition-opacity',
+            'group-hover:opacity-0',
+          )}
+        >
+          <SessionStatus running={running} merged={session.worktree_status === 'merged'} />
+        </span>
+        <span
+          className={cn(
+            'absolute inset-0 flex items-center justify-center opacity-0 transition-opacity',
+            'group-hover:opacity-100 focus-within:opacity-100',
+          )}
+        >
+          <RowMenu
+            items={[
+              {
+                label: 'Rename session',
+                icon: <PencilSimple className="size-3.5" />,
+                onSelect: onRename,
+              },
+              {
+                label: 'Delete session',
+                danger: true,
+                confirm: 'Delete this session? This cannot be undone.',
+                icon: <Trash className="size-3.5" />,
+                onSelect: onDelete,
+              },
+            ]}
+          />
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/** Hover-triggered marquee for the subline. At rest no animation is
+ *  applied, so the track sits at `translateX(0)` and the row reads as a
+ *  normal truncated subline. On row hover the animation kicks in,
+ *  translating the track leftward by exactly 50% — which equals the
+ *  width of the FIRST copy, so the SECOND copy scrolls in seamlessly
+ *  for a continuous loop with no visible seam. When the cursor leaves
+ *  the animation is removed entirely and the track snaps back to 0
+ *  (rather than pausing mid-scroll, which felt jerky on re-hover).
+ *
+ *  The 22px pad between copies acts as a visual gap so the loop reads
+ *  as "and here it comes again" rather than one long banner. */
+function SublineMarquee({
+  session,
+  providerDot,
+}: {
+  session: SessionSummary;
+  providerDot: { family: string; color: string } | null;
+}) {
+  return (
+    <div className="w-full overflow-hidden">
+      <div
+        className={cn(
+          'inline-flex items-center whitespace-nowrap will-change-transform',
+          'group-hover:[animation:marquee_10s_linear_infinite]',
+        )}
+      >
+        <SublineContent session={session} providerDot={providerDot} />
+        {/* Second copy is hidden at rest so a subline that fits the row
+         *  doesn't visibly repeat ("Qwen3.8-27b … Qwen3.8-27b"). It flips
+         *  to visible on hover, right as the animation begins translating
+         *  the track — the copy slides in from the right instead of
+         *  popping up in place. */}
+        <SublineContent
+          session={session}
+          providerDot={providerDot}
+          ariaHidden
+          className="invisible group-hover:visible"
+        />
+      </div>
+    </div>
+  );
+}
+
+function SublineContent({
+  session,
+  providerDot,
+  ariaHidden,
+  className,
+}: {
+  session: SessionSummary;
+  providerDot: { family: string; color: string } | null;
+  ariaHidden?: boolean;
+  className?: string;
+}) {
+  return (
+    <div
+      className={cn(
+        'flex shrink-0 items-center gap-1.5 pr-[22px] text-[11.5px] leading-tight text-muted-foreground/80',
+        className,
+      )}
+      aria-hidden={ariaHidden ? true : undefined}
+    >
+      <span className="font-mono tracking-tight">{shortModelLabel(session.model)}</span>
+      <span className="text-muted-foreground/50">·</span>
+      <span>{timeAgo(session.updated_at)}</span>
+      {session.worktree_branch && (
+        <>
+          <span className="text-muted-foreground/50">·</span>
+          <InlineBranchBadge status={session.worktree_status} branch={session.worktree_branch} />
+        </>
+      )}
+      {providerDot && (
+        <span
+          className={cn('ml-1 inline-block size-1.5 shrink-0 rounded-full', providerDot.color)}
+          title={providerDot.family}
+        />
+      )}
+    </div>
+  );
+}
+
+/** The right-side status affordance. Priority: running (spinner) > merged
+ *  (green check) > idle (empty circle outline). Matches Codex's row-status
+ *  ring — quiet by default, expressive when there's a state worth noting. */
+function SessionStatus({ running, merged }: { running: boolean; merged: boolean }) {
+  if (running) {
+    return (
+      <span
+        className="inline-flex size-4 items-center justify-center"
+        title="Streaming"
+        aria-label="working"
+      >
+        <CircleNotch className="size-3.5 animate-spin text-mira-blue" />
+      </span>
+    );
+  }
+  if (merged) {
+    return (
+      <span
+        className="inline-flex size-4 items-center justify-center text-emerald-500"
+        title="Merged"
+        aria-label="merged"
+      >
+        <CheckCircle className="size-4" weight="fill" />
+      </span>
+    );
+  }
+  return (
+    <span
+      className="inline-flex size-4 items-center justify-center text-muted-foreground/40"
+      aria-label="idle"
+    >
+      <Circle className="size-3.5" weight="regular" />
+    </span>
+  );
+}
+
+/** Inline branch chip for the subline. Just a git-branch icon (or
+ *  git-merge when merged) followed by the short branch name. No border,
+ *  no chip — it reads as a metadata pair, not a badge. */
+function InlineBranchBadge({
+  status,
+  branch,
+}: {
+  status: WorktreeMergeStatus | null | undefined;
+  branch: string;
+}) {
+  const merged = status === 'merged';
+  const Icon = merged ? GitMerge : GitBranch;
+  const short = branch.length > 20 ? branch.slice(0, 18) + '…' : branch;
+  return (
+    <span className={cn('inline-flex items-center gap-0.5', merged ? 'text-mira-purple' : 'text-muted-foreground/80')}>
+      <Icon className="size-3" weight={merged ? 'fill' : 'regular'} />
+      <span className="font-mono">{short}</span>
+    </span>
+  );
+}
+
+/** Provider-family dot only (no name). Reused inline in the subline so
+ *  the dot cluster with `time · branch · dot` reads as one metadata row. */
+function providerFamilyDot(model: string): { family: string; color: string } | null {
+  if (!model) return null;
+  return providerFamily(model);
+}
+
+/** Short, Title-cased model label for the subline. Drops any provider
+ *  prefix (`openrouter/anthropic/…`), strips date/`latest` suffixes, and
+ *  capitalises the first letter so `qwen3.8-27b` reads as `Qwen3.8-27b`.
+ *  Falls back to a neutral placeholder when the session has no model
+ *  recorded (very old sessions, freshly-created rows). */
+function shortModelLabel(model: string | null | undefined): string {
+  if (!model) return 'Model';
+  let m = model;
+  const lastSlash = m.lastIndexOf('/');
+  if (lastSlash >= 0) m = m.slice(lastSlash + 1);
+  m = m.replace(/-\d{4}-\d{2}-\d{2}$/, '');
+  m = m.replace(/-latest$/, '');
+  // Titlecase the first char without touching casing anywhere else — model
+  // ids like `gpt-4o` and `qwen3.8-27b` have meaningful mixed case beyond
+  // the first character (the `o` in `4o` is intentional).
+  if (m.length > 0) m = m[0].toUpperCase() + m.slice(1);
+  if (m.length > 20) m = m.slice(0, 19) + '…';
+  return m;
 }
 
 /* ---------- rename dialog ---------- */
@@ -613,60 +836,7 @@ function shortenPath(p: string): string {
   return '…/' + parts.slice(-2).join('/');
 }
 
-/* ---------- row status indicators ---------- */
-
-/** Circular spinner rendered on the active session row while it's streaming.
- *  Uses Phosphor's CircleNotch with Tailwind's spin animation — matches the
- *  spinner in ReviewPanel so the app has one canonical "in-flight" affordance. */
-function BusySpinner() {
-  // Phosphor icons don't accept `title` directly; wrap in a span so the
-  // tooltip works.
-  return (
-    <span className="inline-flex" title="Working…" aria-label="working">
-      <CircleNotch className="size-3 animate-spin text-mira-blue" />
-    </span>
-  );
-}
-
-/** Merge state of the session's worktree branch. Filled purple `git-merge`
- *  icon = merged into base; muted `git-branch` outline = still open. Nothing
- *  is shown for regular (non-worktree) sessions. */
-function WorktreeBadge({ status, branch }: { status: WorktreeMergeStatus; branch?: string }) {
-  const merged = status === 'merged';
-  const title = merged
-    ? `${branch ?? 'branch'} — merged into main`
-    : `${branch ?? 'branch'} — not merged`;
-  return (
-    <span
-      className={cn(
-        'inline-flex size-3.5 items-center justify-center',
-        merged ? 'text-mira-purple' : 'text-muted-foreground/60',
-      )}
-      title={title}
-      aria-label={title}
-    >
-      {merged ? <GitMerge className="size-3" /> : <GitBranch className="size-3" />}
-    </span>
-  );
-}
-
-/* ---------- model subline (provider dot + truncated model name) ---------- */
-
-/** Tiny second line under each session title. A colored dot classifies the
- *  provider family (OpenAI / Anthropic / Meta / Google / …) and the model
- *  name follows, truncated so the timestamp column stays intact. Cheap and
- *  swap-friendly — if you want real vendor SVGs later, replace the dot with
- *  an icon lookup here and nothing else changes. */
-function ModelSubline({ model }: { model: string }) {
-  if (!model) return null;
-  const { color, family } = providerFamily(model);
-  return (
-    <span className="mt-0.5 flex w-full items-center gap-1 text-[11.5px] font-normal text-muted-foreground/80">
-      <span className={cn('inline-block size-1.5 shrink-0 rounded-full', color)} title={family} />
-      <span className="min-w-0 truncate font-mono">{shortModel(model)}</span>
-    </span>
-  );
-}
+/* ---------- provider family (dot color) ---------- */
 
 /** Prefix-match model id → provider family. Longer prefixes first so
  *  `gpt-4o-mini` doesn't collide with `gpt-4o`. Colors picked to be
@@ -691,22 +861,6 @@ function providerFamily(model: string): { family: string; color: string } {
     if (rx.test(m)) return { family, color };
   }
   return { family: 'other', color: 'bg-muted-foreground/60' };
-}
-
-/** Trim `openrouter/openai/gpt-4o-mini-2024-07-18` → `gpt-4o-mini` and cap
- *  at 22 chars. Preserves the meaningful middle segment for models that
- *  ship dated variants. */
-function shortModel(model: string): string {
-  let m = model;
-  // Drop provider prefix if slash-separated (openrouter style).
-  const lastSlash = m.lastIndexOf('/');
-  if (lastSlash >= 0) m = m.slice(lastSlash + 1);
-  // Strip trailing `-YYYY-MM-DD` snapshot tag.
-  m = m.replace(/-\d{4}-\d{2}-\d{2}$/, '');
-  // Strip common noise suffixes.
-  m = m.replace(/-latest$/, '');
-  if (m.length > 22) m = m.slice(0, 21) + '…';
-  return m;
 }
 
 /* ---------- row overflow menu (extensible) ---------- */

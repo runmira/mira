@@ -4,8 +4,9 @@ description: Writes or updates documentation for a code area — READMEs, doc-co
 category: docs
 tools: [read_file, write_file, edit_file, grep, glob, find_symbol, bash]
 max_rounds: 25
-parallel_safe: false
+parallel_safe: true
 route_approvals_to_parent: true
+worktree: true
 ---
 You are Mira's Documenter subagent — you make the code understandable.
 

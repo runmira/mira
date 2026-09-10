@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { CaretRight } from '@phosphor-icons/react';
+import { CaretDown } from '@phosphor-icons/react';
 import { Markdown } from './Markdown';
 import { cn } from '@/lib/utils';
 
@@ -84,10 +84,12 @@ function ReasoningBlock({ content, open: initiallyOpen }: { content: string; ope
         onClick={() => setOpen((v) => !v)}
         className="inline-flex items-center gap-2 rounded px-2 py-1 text-[12.5px] text-muted-foreground transition-colors hover:bg-accent/40 hover:text-foreground"
       >
-        <CaretRight
+        <CaretDown
+          weight="bold"
           className={cn(
             'size-3 text-muted-foreground/60 transition-transform',
-            open && 'rotate-90 text-muted-foreground',
+            !open && '-rotate-90',
+            open && 'text-muted-foreground',
           )}
         />
         <span

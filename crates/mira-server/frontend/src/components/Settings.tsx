@@ -64,6 +64,11 @@ const KEY_META: Record<string, { label: string; help: string; url?: string }> = 
     help: 'Alternative search backend (not yet wired). Free tier.',
     url: 'https://tavily.com/',
   },
+  GITHUB_TOKEN: {
+    label: 'GitHub',
+    help: 'Powers the pull-request panel. The link opens a new-token page with the `repo` scope pre-selected — enough to list, comment on, review, and merge PRs.',
+    url: 'https://github.com/settings/tokens/new?scopes=repo&description=Mira',
+  },
 };
 
 type SectionId = 'provider' | 'preferences' | 'memory' | 'search' | 'about';

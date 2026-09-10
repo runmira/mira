@@ -560,9 +560,14 @@ function ModePicker({
       <PopoverTrigger asChild>
         <button
           type="button"
-          className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-[12.5px] text-muted-foreground hover:bg-mira-elev2 hover:text-foreground transition-colors"
+          // shrink-0 + whitespace-nowrap prevents this chip from being
+          // squeezed when a long branch name pushes the row past the
+          // composer width — before, the label would wrap onto two
+          // lines ("Ask each time" → "Ask each\ntime") and vertically
+          // bloat the whole toolbar.
+          className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-1.5 text-[12.5px] text-muted-foreground hover:bg-mira-elev2 hover:text-foreground transition-colors"
         >
-          <Circle className="size-3" />
+          <Circle className="size-3 shrink-0" />
           <span>{label}</span>
         </button>
       </PopoverTrigger>
@@ -1135,7 +1140,7 @@ function WorktreeChip({ cwd }: { cwd: string }) {
       <PopoverTrigger asChild>
         <button
           type="button"
-          className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-[12.5px] text-muted-foreground hover:bg-mira-elev2 hover:text-foreground transition-colors max-w-[14rem]"
+          className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-[12.5px] text-muted-foreground hover:bg-mira-elev2 hover:text-foreground transition-colors max-w-[10rem] min-w-0"
           title={status?.in_repo ? `branch: ${label}${status.dirty ? ' (dirty)' : ''}` : 'not a git repo'}
         >
           <GitBranch className="size-3 shrink-0" />
@@ -1249,7 +1254,7 @@ function ProjectChip({ cwd, onClick }: { cwd: string; onClick: () => void }) {
       type="button"
       onClick={onClick}
       title={title}
-      className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-[12.5px] text-muted-foreground hover:bg-mira-elev2 hover:text-foreground transition-colors max-w-[12rem]"
+      className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-[12.5px] text-muted-foreground hover:bg-mira-elev2 hover:text-foreground transition-colors max-w-[9rem] min-w-0"
     >
       <Folder className="size-3 shrink-0" />
       <span className="truncate">{label}</span>

@@ -236,7 +236,7 @@ fn view_from(cfg: &MiraConfig, configured: bool) -> SettingsView {
     // Include known well-known keys even when unset so the UI can prompt
     // the user to add one. Extend this list as we add tools that need
     // third-party API keys.
-    for well_known in ["BRAVE_SEARCH_API_KEY", "TAVILY_API_KEY"] {
+    for well_known in ["BRAVE_SEARCH_API_KEY", "TAVILY_API_KEY", "GITHUB_TOKEN"] {
         if !keys.iter().any(|k| k.name == well_known) {
             keys.push(KeyView {
                 name: well_known.to_owned(),

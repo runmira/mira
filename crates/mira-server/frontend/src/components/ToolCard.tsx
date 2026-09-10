@@ -1,20 +1,15 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  CaretRight,
+  CaretDown,
   Check,
   CircleNotch,
-  FilePlus,
-  FileText,
-  MagnifyingGlass,
-  NotePencil,
   Play,
-  Sparkle,
-  Terminal,
   X,
 } from '@phosphor-icons/react';
 import type { DiffLine, DiffPreview, ToolCall, ToolResult } from '../types';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import { infoFor } from './ToolGroup';
 
 export type ToolStatus = 'pending' | 'running' | 'denied' | 'complete';
 
@@ -53,7 +48,9 @@ export function ToolCard({ call, preview, status, result, onDecide }: Props) {
 function PendingApprovalCard({
   call, preview, onDecide,
 }: { call: ToolCall; preview: DiffPreview | null; onDecide: (a: boolean) => void }) {
-  const summary = useMemo(() => summarize(call), [call]);
+  // Pending = about to run → use the present-continuous verb ("Reading",
+  // "Running", "Editing") so the header reads as a proposal, not a receipt.
+  const summary = useMemo(() => summarize(call, 'pending'), [call]);
   const prettyArgs = useMemo(() => prettyPrint(call.function.arguments), [call.function.arguments]);
   const kindLabel = preview ? labelFor(preview.kind) : null;
 
@@ -94,7 +91,7 @@ function CompactToolRow({
   call, status, result, preview,
 }: { call: ToolCall; status: ToolStatus; result: ToolResult | null; preview: DiffPreview | null }) {
   const [expanded, setExpanded] = useState(false);
-  const summary = useMemo(() => summarize(call), [call]);
+  const summary = useMemo(() => summarize(call, status), [call, status]);
 
   return (
     <div className="w-full max-w-[78%]">
@@ -105,10 +102,12 @@ function CompactToolRow({
         // of separate cards.
         className="flex w-full min-w-0 items-center gap-2 rounded-md px-1 py-0.5 text-left text-[13px] text-muted-foreground transition-colors hover:bg-accent/40 hover:text-foreground"
       >
-        <CaretRight
+        <CaretDown
+          weight="bold"
           className={cn(
             'size-3 shrink-0 text-muted-foreground/60 transition-transform',
-            expanded && 'rotate-90 text-muted-foreground',
+            !expanded && '-rotate-90',
+            expanded && 'text-muted-foreground',
           )}
         />
         <span className="shrink-0 text-muted-foreground">{summary.icon}</span>
@@ -327,17 +326,76 @@ function DiffRow({ line }: { line: DiffLine }) {
   );
 }
 
-function summarize(call: ToolCall): { verb: string; target: string; icon: React.ReactNode } {
-  const name = call.function.name;
+/** Verb + target + icon for a single tool row. Tense follows Codex:
+ *  in-flight/pending calls read as present-continuous ("Reading foo.rs"),
+ *  finished/denied calls read as past ("Read foo.rs"). Verb map is
+ *  centralised in `ToolGroup.infoFor` so grouped and ungrouped rows stay
+ *  in lockstep. Target extraction stays here because it depends on
+ *  per-tool arg shape (`args.pattern` for grep, `args.command` for bash). */
+function summarize(
+  call: ToolCall,
+  status: ToolStatus,
+): { verb: string; target: string; icon: React.ReactNode } {
+  const info = infoFor(call.function.name);
+  const active = status === 'pending' || status === 'running';
+  const verb = active ? info.verbCont : info.verbPast;
+  const Icon = info.Icon;
+  const icon =
+    call.function.name in KNOWN
+      ? <Icon className="size-3.5" />
+      : <Play className="size-3.5" />;
+
   const args = safeParse(call.function.arguments);
-  switch (name) {
-    case 'read_file':  return { verb: 'Read',     target: shortPath(args?.path),   icon: <FileText  className="size-3.5" /> };
-    case 'write_file': return { verb: 'Wrote',    target: shortPath(args?.path),   icon: <FilePlus  className="size-3.5" /> };
-    case 'edit_file':  return { verb: 'Edited',   target: shortPath(args?.path),   icon: <NotePencil  className="size-3.5" /> };
-    case 'bash':       return { verb: 'Ran',      target: shortCmd(args?.command), icon: <Terminal  className="size-3.5" /> };
-    case 'grep':       return { verb: 'Searched', target: quote(args?.pattern),    icon: <MagnifyingGlass className="size-3.5" /> };
-    case 'rustfmt':    return { verb: 'Formatted', target: shortPath(args?.path),  icon: <Sparkle  className="size-3.5" /> };
-    default:           return { verb: name,       target: '',                       icon: <Play      className="size-3.5" /> };
+  const target = pickTarget(call.function.name, args);
+  return { verb, target, icon };
+}
+
+/** Tools with a specific `infoFor` entry — kept in sync with ToolGroup so
+ *  the icon fallback triggers for genuinely unknown names only. */
+const KNOWN: Record<string, true> = {
+  read_file: true, write_file: true, edit_file: true, grep: true, glob: true,
+  find_symbol: true, bash: true, rustfmt: true, web_fetch: true, web_search: true,
+  git_diff: true, git_status: true, git_log: true, git_commit: true,
+  memory_read: true, memory_search: true, memory_append: true, memory_edit: true,
+  memory_remember: true,
+};
+
+/** Per-tool target extractor. Uses the argument key most useful to a
+ *  human skimming the row — the file path, the command, the query — so
+ *  the row reads as `Verb <what>` at a glance. */
+function pickTarget(tool: string, args: any): string {
+  switch (tool) {
+    case 'read_file':
+    case 'write_file':
+    case 'edit_file':
+    case 'rustfmt':
+      return shortPath(args?.path);
+    case 'bash':
+      return shortCmd(args?.command);
+    case 'grep':
+      return quote(args?.pattern);
+    case 'glob':
+      return args?.pattern ? String(args.pattern) : '';
+    case 'find_symbol':
+      return args?.name ? String(args.name) : args?.query ? String(args.query) : '';
+    case 'web_fetch':
+      return args?.url ? String(args.url) : '';
+    case 'web_search':
+      return quote(args?.query);
+    case 'git_diff':
+    case 'git_log':
+    case 'git_status':
+      return '';
+    case 'git_commit':
+      return args?.message ? shortCmd(args.message) : '';
+    case 'memory_read':
+    case 'memory_search':
+    case 'memory_append':
+    case 'memory_edit':
+    case 'memory_remember':
+      return args?.path ? shortPath(args.path) : args?.query ? String(args.query) : '';
+    default:
+      return '';
   }
 }
 

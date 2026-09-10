@@ -81,11 +81,29 @@
 /* ================================================================
    Markdown (Tokyo Night vibe — trendy purple/cyan palette)
    ================================================================ */
+/* Marquee used by session-row sublines. Two identical copies of the
+   subline sit inside a `.marquee-track` and animate leftward by exactly
+   50% (== the width of one copy) so the loop seams invisibly. Playback
+   is gated behind `group-hover` in the markup — `animation-play-state`
+   defaults to paused via the `[animation-play-state:paused]` utility so
+   rows at rest stay perfectly still. */
+@keyframes marquee {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-50%); }
+}
+
 .md {
   color: hsl(var(--foreground));
-  font-size: 15px;
-  line-height: 1.72;
-  letter-spacing: 0.005em;
+  /* Inherit typography from the container so a `text-[13px]` wrapper
+     really renders at 13px. Previously .md hard-set 15px/1.72/+0.005em,
+     which made every markdown island (PR body, subagent output, assistant
+     replies) feel like a separate document. Now it reads as the surrounding
+     UI text, and callers can override with a font-size utility on the
+     `.md` element when they want a specific size. */
+  font-family: inherit;
+  font-size: inherit;
+  line-height: 1.6;
+  letter-spacing: -0.011em;
 }
 
 .md p { margin: 0 0 0.85rem; }

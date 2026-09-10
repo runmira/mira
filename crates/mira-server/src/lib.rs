@@ -17,6 +17,7 @@
 //!   rebuilds the provider and swaps it into the live session with no
 //!   restart required.
 
+mod agent_worktree;
 pub mod approver;
 mod browse;
 mod cwd;
@@ -29,6 +30,7 @@ mod memory;
 mod models;
 pub mod protocol;
 pub mod provider;
+mod pull_requests;
 mod review;
 mod sessions;
 mod settings;
@@ -305,7 +307,28 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         )
         .route("/api/review", axum::routing::post(review::start_review))
         .route("/api/undo", axum::routing::post(undo::apply_undo))
-        .route("/api/mcp", get(mcp::get_mcp).put(mcp::put_mcp));
+        .route("/api/mcp", get(mcp::get_mcp).put(mcp::put_mcp))
+        .route("/api/prs", get(pull_requests::list_pull_requests))
+        .route(
+            "/api/prs/:owner/:repo/:number",
+            get(pull_requests::get_pull_request),
+        )
+        .route(
+            "/api/prs/:owner/:repo/:number/files",
+            get(pull_requests::get_pull_request_files),
+        )
+        .route(
+            "/api/prs/:owner/:repo/:number/comments",
+            axum::routing::post(pull_requests::post_pull_request_comment),
+        )
+        .route(
+            "/api/prs/:owner/:repo/:number/reviews",
+            axum::routing::post(pull_requests::post_pull_request_review),
+        )
+        .route(
+            "/api/prs/:owner/:repo/:number/merge",
+            axum::routing::put(pull_requests::merge_pull_request),
+        );
 
     // Frontend precedence: `--static-dir` (dev/override) > embedded assets
     // baked at compile time > inline placeholder page.

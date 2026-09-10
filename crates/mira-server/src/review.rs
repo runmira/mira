@@ -33,10 +33,22 @@ pub struct ReviewRequest {
     /// Raw unified diff. Highest precedence — skips shell-out entirely.
     #[serde(default)]
     pub diff: Option<String>,
-    /// GitHub PR number. Fetches the diff via `gh pr diff <N>`.
+    /// GitHub PR number. Fetches the diff via `gh pr diff <N>` when
+    /// `owner`/`repo` are missing; via the REST API (`application/vnd.github.v3.diff`)
+    /// when they're present and a `GITHUB_TOKEN` is configured. The REST
+    /// path is what the PullRequestPanel uses so "Review with Mira" works
+    /// on any repo Mira knows about, regardless of the session's cwd.
     #[serde(default)]
     pub pr: Option<u32>,
-    /// If true, skip stage 2 (hostile re-verify). Faster, noisier.
+    /// Repo owner for the REST diff-fetch path. Ignored unless `pr` is set.
+    #[serde(default)]
+    pub owner: Option<String>,
+    /// Repo name for the REST diff-fetch path. Ignored unless `pr` is set.
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// If true, skip stage 2 (hostile re-verify). Faster, noisier. Should
+    /// be set for cross-repo reviews since stage-2 opens local files that
+    /// don't exist for a remote PR.
     #[serde(default)]
     pub no_verify: bool,
 }
@@ -51,7 +63,7 @@ pub async fn start_review(
     Json(req): Json<ReviewRequest>,
 ) -> Response {
     let cwd = state.current_cwd().await;
-    let diff = match collect_diff(&req, &cwd) {
+    let diff = match collect_diff_async(&req, &cwd).await {
         Ok(d) => d,
         Err(e) => return err(StatusCode::BAD_REQUEST, format!("collect diff: {e}")),
     };
@@ -118,11 +130,21 @@ impl ProgressSink for BroadcastSink {
 
 /* ---------- diff sourcing (mirrors CLI logic) ---------- */
 
-fn collect_diff(req: &ReviewRequest, cwd: &Path) -> anyhow::Result<String> {
+async fn collect_diff_async(req: &ReviewRequest, cwd: &Path) -> anyhow::Result<String> {
     if let Some(d) = &req.diff {
         return Ok(d.clone());
     }
     if let Some(pr) = req.pr {
+        // Prefer the REST fetch when `owner`/`repo` are supplied — the
+        // PullRequestPanel takes this path so it works even when the
+        // session isn't parked in that repo's local checkout. Fall back
+        // to `gh pr diff` when the frontend only knows the PR number and
+        // trusts that the user is already on the right cwd.
+        if let (Some(owner), Some(repo)) = (req.owner.as_deref(), req.repo.as_deref()) {
+            if let Some(token) = crate::pull_requests::resolve_github_token() {
+                return fetch_pr_diff_rest(&token, owner, repo, pr).await;
+            }
+        }
         return run_capture(cwd, &["gh", "pr", "diff", &pr.to_string()]);
     }
     // Check upfront so a missing repo produces a readable one-liner instead
@@ -132,7 +154,39 @@ fn collect_diff(req: &ReviewRequest, cwd: &Path) -> anyhow::Result<String> {
         .range
         .clone()
         .unwrap_or_else(|| default_range(cwd).unwrap_or_else(|| "HEAD".to_string()));
-    run_capture(cwd, &["git", "diff", &range])
+    // `-U15` widens the surrounding-context window from git's 3-line default.
+    // The extra context is what lets the reviewer see the guard clauses,
+    // helper calls, and type declarations that live 5-10 lines away from the
+    // changed lines — without it the model has to guess about invariants.
+    run_capture(cwd, &["git", "diff", "-U15", &range])
+}
+
+/// Fetch a PR's raw unified diff via GitHub REST. The `application/vnd.github.v3.diff`
+/// Accept header flips the response body from JSON to a straight `.diff` payload,
+/// which is exactly what `mira_review::review` wants.
+async fn fetch_pr_diff_rest(
+    token: &str,
+    owner: &str,
+    repo: &str,
+    number: u32,
+) -> anyhow::Result<String> {
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/pulls/{number}");
+    let resp = reqwest::Client::builder()
+        .user_agent("mira-server")
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?
+        .get(&url)
+        .bearer_auth(token)
+        .header("Accept", "application/vnd.github.v3.diff")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("github {status}: {}", body.chars().take(200).collect::<String>());
+    }
+    Ok(resp.text().await?)
 }
 
 fn ensure_git_repo(cwd: &Path) -> anyhow::Result<()> {

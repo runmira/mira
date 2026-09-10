@@ -128,7 +128,11 @@ pub async fn review(
                 })
                 .await;
 
-            let snippet = read_snippet(cwd, &f.file, f.line, 12);
+            // 30 lines of context each side — the 12-line default was too narrow
+            // to disprove most "missing check" / "null deref" claims because the
+            // guard often lives 15+ lines away (top of the function, or after
+            // an early return). Wider snippet = better rejection precision.
+            let snippet = read_snippet(cwd, &f.file, f.line, 30);
             let verdict = verify_one(provider, model, &f, snippet.as_deref()).await?;
             let was_kept = matches!(verdict, Verdict::Confirm(_));
             progress
@@ -173,20 +177,61 @@ pub async fn stage1_generate(
     model: &str,
     diff: &str,
 ) -> Result<Vec<Finding>> {
-    let system = "You are a senior code reviewer. You review diffs for correctness bugs, \
-                  security issues, and serious design flaws. You do NOT report style nits, \
-                  formatting, or subjective preferences. You return concrete, verifiable findings.";
+    let system = "You are a senior code reviewer doing a THOROUGH review of a diff. \
+                  Your goal is HIGH RECALL — surface every plausible correctness, \
+                  security, or reliability concern. A separate hostile-verification \
+                  pass will drop the weak ones, so it is better to over-report than \
+                  to miss a real bug.\n\n\
+                  Never flag: style, formatting, naming preferences, or subjective \
+                  taste. Focus only on bugs, security, and correctness.";
 
     let user = format!(
-        "Review the following unified diff. For each real issue you find, produce a JSON object with:\n\
-         - severity: one of \"critical\", \"high\", \"medium\", \"low\"\n\
-         - file:     path from the diff header (post-rename `b/…` path, without the `b/` prefix)\n\
-         - line:     line number in the NEW file (integer), if applicable\n\
-         - title:    one-line summary (<80 chars)\n\
-         - explanation: 2-4 sentence rationale grounded in the diff\n\
-         - suggested_fix: (optional) a concrete fix\n\n\
-         Return ONLY a JSON array wrapped in a ```json code fence. Empty array if no findings.\n\
-         Prefer FEWER, higher-confidence findings over a long list of maybes.\n\n\
+        "Review the unified diff below. Read every hunk carefully — do not skim.\n\n\
+         Walk through this checklist explicitly. For EACH category, note whether \
+         the diff introduces a risk of that class. Any 'yes' or 'maybe' becomes a \
+         finding — you can lower severity if you're not sure, but do not silently \
+         drop it.\n\n\
+         1.  **Correctness / logic**: inverted conditions, wrong operator, off-by-one, \
+             missing branch, wrong loop bound, swapped arguments, wrong return value.\n\
+         2.  **Null / None / undefined / zero-value dereference**: any access that \
+             assumes a value is present without checking.\n\
+         3.  **Error handling**: swallowed errors, `unwrap`/`panic` on fallible ops, \
+             lost error context, wrong recovery (retry when should fail-fast, etc).\n\
+         4.  **Concurrency**: data races, missing locks, TOCTOU, deadlock, incorrect \
+             use of async/await, sending non-Send data, cancellation safety.\n\
+         5.  **Resource leaks**: unclosed files/sockets/handles, unbounded caches, \
+             tasks spawned without join, subscriptions never dropped.\n\
+         6.  **Security**: injection (SQL / command / path / template), auth or \
+             authz bypass, unsafe deserialization, secret in log/response, missing \
+             rate limit, weak crypto, TOCTOU on permission checks.\n\
+         7.  **API contracts**: broke a caller invariant, changed a signature's \
+             semantics, altered idempotency, changed nullability without callers \
+             updated.\n\
+         8.  **Edge cases**: empty input, single-element input, very large input, \
+             negative numbers, integer overflow, unicode / surrogate pairs, \
+             timezone / DST, leap seconds, path traversal, `..`.\n\
+         9.  **State / lifecycle**: use-after-free / use-after-move, uninitialised \
+             read, bad state-machine transition, forgotten cleanup on error paths.\n\
+         10. **Regressions**: removed a guard, removed a test's precondition, \
+             quietly changed default behaviour.\n\
+         11. **Performance cliffs**: quadratic where linear expected, N+1 queries, \
+             unbounded fan-out, sync work on the hot path.\n\
+         12. **Missing tests for the risky part**: a subtle change with no new test \
+             is a finding (severity: low or medium).\n\n\
+         Response format:\n\
+         First, write a short reasoning block (2-6 sentences) explaining what the \
+         diff does and what you looked at. Then output a JSON array in a ```json \
+         fence with one object per finding:\n\n\
+         - severity: \"critical\" | \"high\" | \"medium\" | \"low\"\n\
+         - file: path from the diff header (post-rename `b/…` without the `b/`)\n\
+         - line: integer line number in the NEW file, when applicable\n\
+         - title: <80 chars, one line, no period at the end\n\
+         - explanation: 2-4 sentences, quote the specific lines you're worried about\n\
+         - suggested_fix: optional, one line\n\n\
+         Return `[]` inside the ```json fence ONLY if the diff is genuinely trivial \
+         (rename, doc typo, dependency bump with no code shape change). Otherwise \
+         you should almost always find something worth calling out — even a low-\
+         severity one about a missing test or an edge case.\n\n\
          Diff:\n```diff\n{diff}\n```"
     );
 
@@ -207,44 +252,62 @@ pub async fn verify_one(
     f: &Finding,
     snippet: Option<&str>,
 ) -> Result<Verdict> {
-    let system = "You are a hostile code-review verifier. Your job is to try HARD to disprove \
-                  findings other reviewers have made. Prefer REJECT unless the code clearly \
-                  has the exact issue described. Do not confirm speculation.";
+    let system = "You are a careful code-review verifier. Another reviewer flagged \
+                  a potential issue. Your job is to look at the actual code and \
+                  decide whether the finding is real.\n\n\
+                  DEFAULT TO CONFIRM. Reject only when the code clearly does NOT \
+                  have the issue described (e.g. the check the reviewer says is \
+                  missing is right there, the variable they say is unchecked is \
+                  provably non-null, the race they describe cannot happen with the \
+                  visible synchronization).\n\n\
+                  If you'd need more context to be sure — CONFIRM. If the finding \
+                  is directionally right but slightly wrong on details — CONFIRM. \
+                  If the code you can see is ambiguous — CONFIRM. A confirmed \
+                  finding still gets human review; a rejected one is silently lost.";
 
     let finding_json = serde_json::to_string_pretty(f)?;
     let snippet_block = match snippet {
-        Some(s) => format!("Actual current code at that location:\n```\n{s}\n```\n"),
-        None => "(No source snippet available — could not open the referenced file.)\n".to_string(),
+        Some(s) => format!(
+            "Actual current code around the flagged location:\n```\n{s}\n```\n"
+        ),
+        None => "(No source snippet available — the file could not be opened. \
+                 With no way to disprove, you should CONFIRM.)\n"
+            .to_string(),
     };
 
     let user = format!(
-        "A previous reviewer flagged this finding:\n\n\
-         {finding_json}\n\n\
+        "Finding to verify:\n\n{finding_json}\n\n\
          {snippet_block}\n\
-         Try to disprove it. Respond in exactly ONE line, in this format:\n\
-         `REJECT: <reason>` — if the actual code does not have the issue described.\n\
-         `CONFIRM: <reason>` — if you cannot disprove it after honest scrutiny."
+         Decide. Respond in exactly ONE line:\n\
+         `CONFIRM: <one-sentence reason grounded in the code>` — the code has the \
+             described issue, OR you can't rule it out from what you can see.\n\
+         `REJECT: <one-sentence reason grounded in the code>` — the code clearly \
+             does NOT have the issue (cite the specific line/check that disproves it)."
     );
 
     let reply = complete(provider, model, system, &user).await?;
-    let line = reply.trim().lines().next().unwrap_or("").trim();
-    if let Some(rest) = line
-        .strip_prefix("CONFIRM:")
-        .or_else(|| line.strip_prefix("Confirm:"))
-    {
-        Ok(Verdict::Confirm(rest.trim().to_owned()))
-    } else if let Some(rest) = line
-        .strip_prefix("REJECT:")
-        .or_else(|| line.strip_prefix("Reject:"))
-    {
-        Ok(Verdict::Reject(rest.trim().to_owned()))
-    } else {
-        // Malformed — safer to keep the finding than silently drop it.
-        Ok(Verdict::Confirm(format!(
-            "verifier unclear: {}",
-            short(line, 80)
-        )))
+    // Some models still ramble a sentence before the verdict, or use bold
+    // markdown. Scan every line for the first CONFIRM: / REJECT: prefix
+    // (case-insensitive) rather than only checking line 1 — that made
+    // preamble-heavy replies silently fall through to the "unclear" branch.
+    for raw in reply.lines() {
+        let line = raw.trim().trim_start_matches(['*', '#', '>', '-', ' ']);
+        let upper = line.to_uppercase();
+        if let Some(rest) = upper.strip_prefix("CONFIRM:") {
+            let reason = line[line.len() - rest.len()..].trim().to_owned();
+            return Ok(Verdict::Confirm(reason));
+        }
+        if let Some(rest) = upper.strip_prefix("REJECT:") {
+            let reason = line[line.len() - rest.len()..].trim().to_owned();
+            return Ok(Verdict::Reject(reason));
+        }
     }
+    // Malformed — safer to keep the finding than silently drop it.
+    let first_line = reply.trim().lines().next().unwrap_or("").trim();
+    Ok(Verdict::Confirm(format!(
+        "verifier unclear: {}",
+        short(first_line, 80)
+    )))
 }
 
 pub fn read_snippet(cwd: &Path, file: &str, line: Option<u32>, ctx: u32) -> Option<String> {
@@ -280,10 +343,13 @@ async fn complete(
         model: model.to_owned(),
         messages: vec![Message::system(system), Message::user(user)],
         tools: Vec::new(),
-        temperature: Some(0.1),
-        max_tokens: Some(4096),
-        // Review calls are structured/JSON-mode-ish — reasoning effort would
-        // just add latency without materially improving finding quality.
+        // Bumped from 0.1: near-deterministic sampling made the model default
+        // to "return []" too often. 0.3 keeps replies grounded but lets it
+        // consider more finding candidates. Verify pass drops the noise.
+        temperature: Some(0.3),
+        // Bumped from 4096 to fit the wider stage-1 prompt (CoT + JSON) on
+        // larger diffs without truncating findings.
+        max_tokens: Some(8192),
         reasoning_effort: None,
         response_format: None,
     };

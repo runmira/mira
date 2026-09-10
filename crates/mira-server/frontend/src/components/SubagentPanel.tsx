@@ -1,10 +1,11 @@
 import { useMemo, useState } from 'react';
-import { CircleNotch, Info, WarningCircle, X } from '@phosphor-icons/react';
+import { CaretRight, CircleNotch, Info, WarningCircle, X } from '@phosphor-icons/react';
 import type { Entry } from '../App';
 import { groupAgentRuns } from '../App';
 import type { ToolCall, ToolResult } from '../types';
 import type { ToolStatus } from './ToolCard';
 import { AssistantContent } from './AssistantContent';
+import { Markdown } from './Markdown';
 import { identityFor, extractPrompt, stripAgentIdMarker } from './AgentCard';
 import { ToolCard } from './ToolCard';
 import { ToolGroup } from './ToolGroup';
@@ -212,7 +213,7 @@ function TabBody({ tab }: { tab: SubagentTab }) {
 
           {summary && !isError && (
             <div className="max-w-full">
-              <AssistantContent text={summary} />
+              <SubagentResult text={summary} />
             </div>
           )}
 
@@ -295,7 +296,7 @@ function SubagentEntryView({ entry }: { entry: Entry }) {
       if (!text) return null;
       return (
         <div className="max-w-full">
-          <AssistantContent text={text} />
+          <SubagentResult text={text} />
         </div>
       );
     }
@@ -361,4 +362,295 @@ function StatusPill({ status, isError }: { status: ToolStatus; isError: boolean 
         </span>
       );
   }
+}
+
+/* ---------- structured-result rendering ---------- */
+
+/** Renders a subagent's final response. Agents like `explore`, `reviewer`,
+ *  and `sentinel` return JSON that matches their `response_schema` — dumping
+ *  the raw JSON blob into the markdown renderer just displays braces and
+ *  escaped quotes, so try to parse first and lay out known fields nicely.
+ *  Falls back to plain markdown when the text isn't structured (e.g. the
+ *  `coder`/`documenter` types, or free-form models that ignored the schema). */
+function SubagentResult({ text }: { text: string }) {
+  const parsed = useMemo(() => tryParseStructured(text), [text]);
+  if (!parsed) return <AssistantContent text={text} />;
+  return <StructuredView data={parsed} />;
+}
+
+type StructuredResult = {
+  /** Free-form prose field — `summary` (explore) or `notes` (sentinel). */
+  narrative?: { label: string; text: string };
+  /** Enum-like conclusion field — `verdict` from reviewer/sentinel. */
+  verdict?: { label: string; value: string; tone: 'ok' | 'warn' | 'bad' };
+  /** Boolean flags like `mission_creep` — rendered as a colored chip. */
+  flags?: { label: string; value: boolean }[];
+  /** Arrays of citation-shaped items: findings / issues / unrelated_changes. */
+  items?: { label: string; entries: StructuredItem[] };
+  /** Any additional top-level fields we don't have a rich renderer for.
+   *  Rendered as a plain key/value list so nothing gets silently dropped. */
+  extras?: { key: string; value: unknown }[];
+};
+
+type StructuredItem = {
+  path?: string;
+  line?: number;
+  severity?: string;
+  summary?: string;
+  suggestion?: string;
+  note?: string;
+  reason?: string;
+};
+
+const NARRATIVE_KEYS = ['summary', 'notes'];
+const ITEM_KEYS = ['findings', 'issues', 'unrelated_changes'];
+const VERDICT_TONE: Record<string, 'ok' | 'warn' | 'bad'> = {
+  ok: 'ok',
+  on_brief: 'ok',
+  concerning: 'warn',
+  changes_requested: 'warn',
+  off_brief: 'bad',
+};
+
+/** Try to interpret `text` as one of the known subagent response schemas.
+ *  Returns null when the text isn't valid JSON or doesn't look structured
+ *  — the caller renders it as plain markdown in that case. */
+function tryParseStructured(text: string): StructuredResult | null {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) return null;
+  let obj: unknown;
+  try {
+    obj = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
+  const record = obj as Record<string, unknown>;
+
+  const out: StructuredResult = {};
+  const consumed = new Set<string>();
+
+  for (const key of NARRATIVE_KEYS) {
+    const v = record[key];
+    if (typeof v === 'string' && v.trim()) {
+      out.narrative = { label: key, text: v };
+      consumed.add(key);
+      break;
+    }
+  }
+
+  if (typeof record.verdict === 'string' && record.verdict) {
+    const value = record.verdict;
+    out.verdict = { label: 'verdict', value, tone: VERDICT_TONE[value] ?? 'warn' };
+    consumed.add('verdict');
+  }
+
+  const flags: { label: string; value: boolean }[] = [];
+  for (const [k, v] of Object.entries(record)) {
+    if (typeof v === 'boolean') {
+      flags.push({ label: k, value: v });
+      consumed.add(k);
+    }
+  }
+  if (flags.length > 0) out.flags = flags;
+
+  for (const key of ITEM_KEYS) {
+    const v = record[key];
+    if (Array.isArray(v) && v.length > 0) {
+      out.items = { label: key, entries: v.map(coerceItem) };
+      consumed.add(key);
+      break;
+    } else if (Array.isArray(v)) {
+      // Empty array — mark consumed so it doesn't spill into `extras`, and
+      // remember it so the view can show a "no findings" line.
+      out.items = { label: key, entries: [] };
+      consumed.add(key);
+      break;
+    }
+  }
+
+  const extras: { key: string; value: unknown }[] = [];
+  for (const [k, v] of Object.entries(record)) {
+    if (consumed.has(k)) continue;
+    if (v === null || v === undefined) continue;
+    extras.push({ key: k, value: v });
+  }
+  if (extras.length > 0) out.extras = extras;
+
+  // If nothing was interpreted (unknown JSON shape), let the caller fall
+  // back to markdown so we don't produce an empty box.
+  if (!out.narrative && !out.verdict && !out.items && !out.flags && !out.extras) {
+    return null;
+  }
+  return out;
+}
+
+function coerceItem(raw: unknown): StructuredItem {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { note: String(raw) };
+  }
+  const r = raw as Record<string, unknown>;
+  const pick = (k: string): string | undefined =>
+    typeof r[k] === 'string' ? (r[k] as string) : undefined;
+  return {
+    path: pick('path'),
+    line: typeof r.line === 'number' ? (r.line as number) : undefined,
+    severity: pick('severity'),
+    summary: pick('summary'),
+    suggestion: pick('suggestion'),
+    note: pick('note'),
+    reason: pick('reason'),
+  };
+}
+
+function StructuredView({ data }: { data: StructuredResult }) {
+  return (
+    <div className="flex flex-col gap-3">
+      {data.verdict && <VerdictPill verdict={data.verdict} />}
+      {data.narrative && (
+        <div className="md">
+          <Markdown text={data.narrative.text} />
+        </div>
+      )}
+      {data.flags && data.flags.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {data.flags.map((f) => (
+            <span
+              key={f.label}
+              className={cn(
+                'rounded-full border px-2 py-0.5 text-[11px]',
+                f.value
+                  ? 'border-amber-500/30 bg-amber-500/[0.08] text-amber-300'
+                  : 'border-border bg-secondary text-muted-foreground',
+              )}
+            >
+              {humanize(f.label)}: {f.value ? 'yes' : 'no'}
+            </span>
+          ))}
+        </div>
+      )}
+      {data.items && <ItemsSection label={data.items.label} entries={data.items.entries} />}
+      {data.extras && data.extras.length > 0 && <ExtrasBlock extras={data.extras} />}
+    </div>
+  );
+}
+
+function VerdictPill({ verdict }: { verdict: NonNullable<StructuredResult['verdict']> }) {
+  const cls =
+    verdict.tone === 'ok'
+      ? 'border-emerald-500/30 bg-emerald-500/[0.08] text-emerald-400'
+      : verdict.tone === 'warn'
+        ? 'border-amber-500/30 bg-amber-500/[0.08] text-amber-300'
+        : 'border-destructive/40 bg-destructive/10 text-destructive';
+  return (
+    <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
+      <span className="text-[10.5px] font-semibold uppercase tracking-wider">
+        {humanize(verdict.label)}
+      </span>
+      <span className={cn('rounded-full border px-2 py-0.5 text-[11.5px] font-medium', cls)}>
+        {humanize(verdict.value)}
+      </span>
+    </div>
+  );
+}
+
+function ItemsSection({ label, entries }: { label: string; entries: StructuredItem[] }) {
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">
+        {humanize(label)} {entries.length > 0 && <span className="text-muted-foreground/60">({entries.length})</span>}
+      </div>
+      {entries.length === 0 ? (
+        <div className="text-[12.5px] text-muted-foreground/70">None reported.</div>
+      ) : (
+        <div className="flex flex-col gap-1.5">
+          {entries.map((it, i) => (
+            <ItemRow key={i} item={it} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ItemRow({ item }: { item: StructuredItem }) {
+  const where = item.path
+    ? item.line != null
+      ? `${item.path}:${item.line}`
+      : item.path
+    : null;
+  const body = item.summary ?? item.note ?? item.reason ?? '';
+  return (
+    <div className="rounded-md border border-border/60 bg-secondary/30 p-2.5">
+      <div className="flex items-center gap-2">
+        {item.severity && (
+          <span
+            className={cn(
+              'rounded px-1.5 py-0.5 text-[10.5px] font-semibold uppercase tracking-wider',
+              severityClass(item.severity),
+            )}
+          >
+            {item.severity}
+          </span>
+        )}
+        {body && <span className="text-[13px] text-foreground/90">{body}</span>}
+      </div>
+      {where && (
+        <div className="mt-1 flex items-center gap-1 font-mono text-[11.5px] text-muted-foreground/80">
+          <CaretRight className="size-3" />
+          <span className="truncate">{where}</span>
+        </div>
+      )}
+      {item.suggestion && (
+        <div className="mt-1.5 rounded-md border border-emerald-500/25 bg-emerald-500/[0.06] px-2 py-1 text-[12px] text-emerald-200/90">
+          <span className="mr-1 font-semibold">suggestion:</span>
+          {item.suggestion}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function severityClass(sev: string): string {
+  switch (sev.toLowerCase()) {
+    case 'critical':
+      return 'bg-destructive/20 text-destructive';
+    case 'major':
+    case 'high':
+      return 'bg-amber-500/20 text-amber-300';
+    case 'minor':
+    case 'medium':
+      return 'bg-mira-blue/20 text-mira-blue';
+    default:
+      return 'bg-secondary text-muted-foreground';
+  }
+}
+
+/** Renders anything the schema-aware view didn't recognize as key/value
+ *  rows. Prevents silent data loss when a subagent's schema drifts from
+ *  the shapes we know about. */
+function ExtrasBlock({ extras }: { extras: { key: string; value: unknown }[] }) {
+  return (
+    <div className="flex flex-col gap-1 border-t border-border/50 pt-2">
+      {extras.map(({ key, value }) => (
+        <div key={key} className="text-[12.5px]">
+          <span className="text-muted-foreground">{humanize(key)}:</span>{' '}
+          <span className="font-mono text-foreground/85 break-all">{formatExtra(value)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function formatExtra(v: unknown): string {
+  if (typeof v === 'string') return v;
+  try {
+    return JSON.stringify(v);
+  } catch {
+    return String(v);
+  }
+}
+
+function humanize(s: string): string {
+  return s.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 }

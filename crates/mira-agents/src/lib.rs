@@ -90,6 +90,14 @@ pub struct AgentType {
     /// to the parent so destructive commands never run silently.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route_approvals_to_parent: Option<bool>,
+    /// Spawn this type inside an ephemeral `git worktree` branched off
+    /// HEAD, so the child's edits land in an isolated checkout. On
+    /// return, the harness merges the child's changed/added/deleted
+    /// files back into the parent's cwd and tears the worktree down.
+    /// Read-only types leave this unset — nothing to isolate. Write-
+    /// capable types flip it on to make parallel spawns safe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<bool>,
 }
 
 /// Ordered map of type name → definition. `BTreeMap` for stable listing
@@ -286,6 +294,7 @@ pub fn parse_agent_md(source: &str) -> Result<AgentType> {
         response_schema: fm.response_schema,
         parallel_safe: fm.parallel_safe,
         route_approvals_to_parent: fm.route_approvals_to_parent,
+        worktree: fm.worktree,
     })
 }
 
@@ -310,6 +319,8 @@ struct Frontmatter {
     parallel_safe: Option<bool>,
     #[serde(default)]
     route_approvals_to_parent: Option<bool>,
+    #[serde(default)]
+    worktree: Option<bool>,
 }
 
 /* ---------- tests ---------- */
