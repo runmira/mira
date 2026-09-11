@@ -201,6 +201,7 @@ pub async fn load_session(
     let turns = resumed.turns().await;
     let usage = resumed.usage().await;
     let tasks = resumed.tasks().await;
+    let goal = resumed.goal().await;
     let session_id = resumed.id.to_string();
 
     {
@@ -218,6 +219,7 @@ pub async fn load_session(
         turns,
         usage,
         tasks,
+        goal,
     });
 
     Json(serde_json::json!({ "id": session_id })).into_response()
@@ -261,6 +263,7 @@ pub async fn new_session(State(state): State<AppState>) -> Response {
     let turns = fresh.turns().await;
     let usage = fresh.usage().await;
     let tasks = fresh.tasks().await;
+    let goal = fresh.goal().await;
     let session_id = fresh.id.to_string();
 
     {
@@ -278,6 +281,7 @@ pub async fn new_session(State(state): State<AppState>) -> Response {
         turns,
         usage,
         tasks,
+        goal,
     });
 
     Json(serde_json::json!({ "id": session_id })).into_response()
@@ -354,6 +358,7 @@ pub async fn delete_session(
         let turns = fresh.turns().await;
         let usage = fresh.usage().await;
         let tasks = fresh.tasks().await;
+        let goal = fresh.goal().await;
         let session_id = fresh.id.to_string();
         {
             let mut guard = state.session.write().await;
@@ -368,6 +373,7 @@ pub async fn delete_session(
             turns,
             usage,
             tasks,
+            goal,
         });
     }
 

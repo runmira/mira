@@ -24,6 +24,7 @@ const TOOL_RESULT_HISTORY_CAP: usize = 4000;
 
 use crate::approver::Approver;
 use crate::event::HarnessEvent;
+use crate::goal::{self, Goal, GoalStatus, GoalVerdict};
 use crate::persist::{now_ms, now_secs, SessionRecord, SessionStore, TurnMeta, UsageTotals};
 
 /// Runtime configuration for a session. Everything the loop needs besides
@@ -187,6 +188,11 @@ pub struct Session {
     /// Arc) so the `task_*` tools and the checkpoint path see one
     /// view.
     tasks: Arc<TaskStore>,
+    /// Standing `/goal` — `None` means no autonomous loop. When set +
+    /// `status.is_active()`, `run_loop` re-enters the round loop after a
+    /// clean stop until the evaluator returns a terminal verdict or the
+    /// iteration cap is hit.
+    goal: Arc<Mutex<Option<Goal>>>,
 }
 
 impl Session {
@@ -255,6 +261,7 @@ impl Session {
             parent_id: None,
             children,
             next_child_id,
+            goal: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -321,6 +328,7 @@ impl Session {
             parent_id: record.parent_id,
             children,
             next_child_id,
+            goal: Arc::new(Mutex::new(record.goal)),
         }
     }
 
@@ -387,6 +395,29 @@ impl Session {
     /// hydrate the task panel on load / reconnect.
     pub async fn tasks(&self) -> Vec<mira_tools::TaskItem> {
         self.tasks.list().await
+    }
+
+    /// Snapshot the standing goal. Returns `None` when no goal has been
+    /// set on this session (or the last one was cleared).
+    pub async fn goal(&self) -> Option<Goal> {
+        self.goal.lock().await.clone()
+    }
+
+    /// Replace the standing goal. Any previous goal — active or
+    /// terminal — is dropped in favour of the new one. Emits
+    /// `HarnessEvent::GoalSet` on the caller's event stream is the
+    /// caller's job (the harness itself emits only on the round loop's
+    /// event channel). Persists immediately.
+    pub async fn set_goal(&self, goal: Goal) {
+        *self.goal.lock().await = Some(goal);
+        checkpoint(self).await;
+    }
+
+    /// Drop the standing goal. Idempotent — clearing a session with no
+    /// goal is a no-op. Persists immediately.
+    pub async fn clear_goal(&self) {
+        *self.goal.lock().await = None;
+        checkpoint(self).await;
     }
 
     /// Expose the session's undo/conflict guard. `None` when the FileGuard
@@ -552,40 +583,65 @@ impl ChildTracker for SessionChildTracker {
 const MAX_VERIFY_ATTEMPTS: usize = 3;
 
 async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEvent>) {
-    // Persist the user's turn-opening message right away so the sidebar
-    // shows the new thread as soon as they hit send — before the model's
-    // first response comes back. Without this, `list_sessions` (which
-    // walks disk) can't see the session because nothing has flushed yet.
-    checkpoint(&sess).await;
+    // Outer `'goal_loop` wraps the per-user-turn round loop. When a
+    // standing `/goal` is active it drives the evaluator after each
+    // clean stop and, on `not_met`, injects a synthetic "keep going"
+    // user message + a fresh TurnMeta and re-enters the round loop for
+    // another autonomous turn. Sessions without a goal make exactly
+    // one pass through this outer loop — the shape matches the
+    // pre-goal behavior exactly.
+    'goal_loop: loop {
+        // Persist the user's turn-opening message right away so the sidebar
+        // shows the new thread as soon as they hit send — before the model's
+        // first response comes back. Without this, `list_sessions` (which
+        // walks disk) can't see the session because nothing has flushed yet.
+        checkpoint(&sess).await;
 
-    // Snapshot the set of paths already written to at turn start so a
-    // later diff tells us what *this* turn touched. When there's no
-    // FileGuard, apply-verify is disabled entirely (empty set → no
-    // detected writes → verify skipped).
-    let writes_at_turn_start: std::collections::HashSet<std::path::PathBuf> =
-        match sess.tool_ctx.guard.as_ref() {
-            Some(g) => g.written_snapshot().await,
-            None => std::collections::HashSet::new(),
-        };
-    let mut verify_attempts = 0usize;
+        // Snapshot the set of paths already written to at turn start so a
+        // later diff tells us what *this* turn touched. When there's no
+        // FileGuard, apply-verify is disabled entirely (empty set → no
+        // detected writes → verify skipped). Recomputed each goal
+        // iteration so a second autonomous turn only verifies its own
+        // new writes.
+        let writes_at_turn_start: std::collections::HashSet<std::path::PathBuf> =
+            match sess.tool_ctx.guard.as_ref() {
+                Some(g) => g.written_snapshot().await,
+                None => std::collections::HashSet::new(),
+            };
+        let mut verify_attempts = 0usize;
 
-    // Where the auto-extractor's "just-finished round" slice starts. The
-    // user message for this turn was pushed in `Session::send` right
-    // before `run_loop` spawned, so it's already sitting at len()-1.
-    let turn_start_idx = sess
-        .history
-        .lock()
-        .await
-        .len()
-        .saturating_sub(1);
-    // Auto-extractor gate: only fire when the turn actually did work AND
-    // at least one tool call succeeded. Skipping error-only turns matters
-    // because a session where (say) every `memory_read` returned "not
-    // wired" would otherwise get summarized into episodic memory and
-    // pollute every future session — self-poisoning loop.
-    let mut any_successful_tool_call = false;
+        // Where the auto-extractor's "just-finished round" slice starts. The
+        // user message for this turn was pushed either in `Session::send`
+        // (first goal iteration) or by us as a synthetic continuation at
+        // the bottom of the previous iteration — either way it's at
+        // len()-1.
+        let turn_start_idx = sess.history.lock().await.len().saturating_sub(1);
+        // Auto-extractor gate: only fire when the turn actually did work AND
+        // at least one tool call succeeded. Skipping error-only turns matters
+        // because a session where (say) every `memory_read` returned "not
+        // wired" would otherwise get summarized into episodic memory and
+        // pollute every future session — self-poisoning loop.
+        let mut any_successful_tool_call = false;
 
-    for round in 0..cfg.max_rounds {
+        // Outcome of the round loop below. Drives whether the outer
+        // 'goal_loop continues (goal-check tick), exits early (provider
+        // error), or emits a hit-max-rounds warning before checking.
+        #[derive(PartialEq, Eq)]
+        enum RoundOutcome {
+            /// Clean stop from the model — verify (if any) already ran.
+            CleanStop,
+            /// Ran out of `cfg.max_rounds` inside a single autonomous
+            /// turn. Common when the model dispatches lots of tools
+            /// without stopping; we still tick the goal loop.
+            MaxRounds,
+            /// Provider failed on the initial stream call. Bail on the
+            /// whole send (goal doesn't get a chance to retry — the
+            /// provider might be genuinely down).
+            ProviderError,
+        }
+        let mut round_outcome = RoundOutcome::MaxRounds;
+
+        for round in 0..cfg.max_rounds {
         info!(round, "harness: model turn");
 
         // Rolling compaction: if history has grown past the trigger,
@@ -634,10 +690,8 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
                 let _ = tx
                     .send(HarnessEvent::Warning(format!("provider error: {e}")))
                     .await;
-                sess.end_current_turn().await;
-                checkpoint(&sess).await;
-                let _ = tx.send(HarnessEvent::Done).await;
-                return;
+                round_outcome = RoundOutcome::ProviderError;
+                break;
             }
         };
 
@@ -728,22 +782,8 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
                     .await;
             }
 
-            sess.end_current_turn().await;
-            checkpoint(&sess).await;
-            // Post-round auto-extraction: fire-and-forget background task
-            // that mines this round for durable facts and appends them to
-            // the episodic store. Kept off the critical path so the user
-            // isn't kept waiting on an extra provider round-trip.
-            maybe_spawn_extractor(
-                &sess,
-                &cfg,
-                turn_start_idx,
-                any_successful_tool_call,
-                tx.clone(),
-            )
-            .await;
-            let _ = tx.send(HarnessEvent::Done).await;
-            return;
+            round_outcome = RoundOutcome::CleanStop;
+            break;
         }
 
         // Dispatch calls in batches. Consecutive parallel-safe calls
@@ -773,16 +813,150 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
             }
         }
         checkpoint(&sess).await;
+        }
+        // ---- end of round loop ----
+
+        // Common cleanup: close out the turn's timer, flush a checkpoint,
+        // fire the auto-extractor. Runs for every outcome so the UI + on
+        // -disk state are consistent whether we hit max_rounds, cleaned up
+        // gracefully, or plan to loop again for a goal iteration.
+        sess.end_current_turn().await;
+        checkpoint(&sess).await;
+        maybe_spawn_extractor(
+            &sess,
+            &cfg,
+            turn_start_idx,
+            any_successful_tool_call,
+            tx.clone(),
+        )
+        .await;
+
+        if round_outcome == RoundOutcome::MaxRounds {
+            let _ = tx
+                .send(HarnessEvent::Warning(format!(
+                    "hit max_rounds ({}) — send `continue` to resume, or raise `max_rounds` in mira.yaml",
+                    cfg.max_rounds
+                )))
+                .await;
+        }
+        if round_outcome == RoundOutcome::ProviderError {
+            // Genuine provider failure — the evaluator would just fail
+            // the same way. Exit the whole send.
+            break 'goal_loop;
+        }
+
+        // ---- goal-loop tick ----
+        //
+        // If a `/goal` is set and still active, run the evaluator and
+        // decide whether to keep going, terminate, or fall through.
+        let goal_snapshot = sess.goal.lock().await.clone();
+        let Some(mut current_goal) = goal_snapshot else {
+            break 'goal_loop; // no goal → single-pass behaviour
+        };
+        if !current_goal.status.is_active() {
+            break 'goal_loop; // already terminal
+        }
+        if current_goal.iterations >= current_goal.max_iterations {
+            current_goal.status = GoalStatus::Exhausted;
+            current_goal.last_reason = Some(format!(
+                "hit iteration cap of {}",
+                current_goal.max_iterations
+            ));
+            *sess.goal.lock().await = Some(current_goal.clone());
+            checkpoint(&sess).await;
+            let _ = tx
+                .send(HarnessEvent::GoalDone {
+                    status: current_goal.status,
+                    reason: current_goal.last_reason.clone(),
+                })
+                .await;
+            break 'goal_loop;
+        }
+
+        // Evaluate. Failures are downgraded to `not_met` with a warning
+        // so a transient provider blip doesn't kill an in-progress
+        // autonomous run — the next iteration gets another shot.
+        let eval_model = current_goal
+            .evaluator_model
+            .clone()
+            .unwrap_or_else(|| cfg.model.clone());
+        let condition = current_goal.condition.clone();
+        let transcript = sess.history.lock().await.clone();
+        let eval = match goal::evaluate(
+            sess.provider.as_ref(),
+            &eval_model,
+            &condition,
+            &transcript,
+        )
+        .await
+        {
+            Ok(e) => e,
+            Err(err) => {
+                warn!(%err, "goal evaluator failed; treating as not_met");
+                let _ = tx
+                    .send(HarnessEvent::Warning(format!(
+                        "[goal] evaluator failed: {err} — treating as not_met"
+                    )))
+                    .await;
+                goal::Evaluation {
+                    verdict: GoalVerdict::NotMet,
+                    reason: format!("evaluator error: {err}"),
+                }
+            }
+        };
+
+        // Bump iteration + record reason. The `Active` case leaves the
+        // status untouched so a `not_met` verdict keeps looping.
+        current_goal.iterations += 1;
+        current_goal.last_reason = Some(eval.reason.clone());
+        let iteration_now = current_goal.iterations;
+        let max_iterations = current_goal.max_iterations;
+        match eval.verdict {
+            GoalVerdict::Met => current_goal.status = GoalStatus::Met,
+            GoalVerdict::Impossible => current_goal.status = GoalStatus::Impossible,
+            GoalVerdict::NeedsUser => current_goal.status = GoalStatus::NeedsUser,
+            GoalVerdict::NotMet => {}
+        }
+        let status_now = current_goal.status;
+        *sess.goal.lock().await = Some(current_goal.clone());
+        checkpoint(&sess).await;
+
+        let _ = tx
+            .send(HarnessEvent::GoalProgress {
+                iteration: iteration_now,
+                max_iterations,
+                status: status_now,
+                reason: Some(eval.reason.clone()),
+            })
+            .await;
+
+        if !status_now.is_active() {
+            let _ = tx
+                .send(HarnessEvent::GoalDone {
+                    status: status_now,
+                    reason: Some(eval.reason.clone()),
+                })
+                .await;
+            break 'goal_loop;
+        }
+
+        // `not_met` — inject a synthetic continuation user message +
+        // open a new TurnMeta so the UI knows another autonomous turn
+        // just started, then loop back for another round-loop pass.
+        let synthetic = format!(
+            "Goal not yet met. Keep working toward the standing goal:\n\n{condition}\n\n\
+             Evaluator's note on iteration {iteration_now}/{max_iterations}: {reason}\n\n\
+             Continue.",
+            reason = eval.reason,
+        );
+        sess.history.lock().await.push(Message::user(synthetic));
+        sess.turns.lock().await.push(TurnMeta {
+            started_at: now_ms(),
+            ended_at: None,
+        });
+        // fall through — 'goal_loop iterates and the next round starts
     }
 
-    let _ = tx
-        .send(HarnessEvent::Warning(format!(
-            "hit max_rounds ({}) — send `continue` to resume, or raise `max_rounds` in mira.yaml",
-            cfg.max_rounds
-        )))
-        .await;
-    sess.end_current_turn().await;
-    checkpoint(&sess).await;
     let _ = tx.send(HarnessEvent::Done).await;
 }
 
@@ -937,6 +1111,7 @@ async fn checkpoint(sess: &Session) {
         usage: *sess.usage.lock().await,
         parent_id: sess.parent_id.clone(),
         tasks: sess.tasks.snapshot_all().await,
+        goal: sess.goal.lock().await.clone(),
     };
     if let Err(e) = store.save(&record).await {
         warn!(session = %sess.id, %e, "session checkpoint failed");

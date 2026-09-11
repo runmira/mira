@@ -51,6 +51,11 @@ type Props = {
   onNewChat: () => void;
   onOpenSettings: () => void;
   onRunReview: (args: string) => void;
+  /** Kick off an autonomous run. `maxIterations` is optional; server
+   *  defaults to `mira_harness::DEFAULT_MAX_ITERATIONS` when omitted. */
+  onSetGoal: (condition: string, maxIterations?: number) => void;
+  /** Drop the standing goal (if any). */
+  onClearGoal: () => void;
   onRemember: (scope: 'user' | 'project', text: string) => Promise<string>;
   onUndo: (count: number) => Promise<string>;
 };
@@ -59,7 +64,7 @@ type Attachment = { path: string; content: string; bytes: number };
 
 export function Composer({
   disabled, busy, mode, model, cwd, usage,
-  onSend, onSetMode, onSetModel, onSetEffort, onOpenPicker, onInterrupt, onNewChat, onOpenSettings, onRunReview, onRemember, onUndo,
+  onSend, onSetMode, onSetModel, onSetEffort, onOpenPicker, onInterrupt, onNewChat, onOpenSettings, onRunReview, onSetGoal, onClearGoal, onRemember, onUndo,
 }: Props) {
   const [text, setText] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -99,10 +104,12 @@ export function Composer({
       onOpenAttachPicker: () => setFilePickerOpen(true),
       onOpenSettings,
       onRunReview,
+      onSetGoal,
+      onClearGoal,
       onRemember,
       onUndo,
     }),
-    [onNewChat, onSetMode, onSetModel, onOpenPicker, onOpenSettings, onRunReview, onRemember, onUndo],
+    [onNewChat, onSetMode, onSetModel, onOpenPicker, onOpenSettings, onRunReview, onSetGoal, onClearGoal, onRemember, onUndo],
   );
 
   function executeCommand(cmd: SlashCommand, args: string) {

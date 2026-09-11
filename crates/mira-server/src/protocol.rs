@@ -6,7 +6,7 @@
 
 use mira_ai::TokenUsage;
 use mira_core::{Message, ToolCall, ToolResult};
-use mira_harness::{HarnessEvent, TurnMeta, UsageTotals};
+use mira_harness::{Goal, GoalStatus, HarnessEvent, TurnMeta, UsageTotals};
 use mira_policy::Mode;
 use mira_review::{Finding, Progress as ReviewProgress};
 use mira_tools::DiffPreview;
@@ -43,6 +43,21 @@ pub enum ClientMsg {
     },
     /// Best-effort cancel the current turn.
     Interrupt,
+    /// Set (or replace) the session's standing `/goal`. `max_iterations`
+    /// is optional — the server uses [`mira_harness::DEFAULT_MAX_ITERATIONS`]
+    /// when absent so the client doesn't have to hardcode the cap. When
+    /// `evaluator_model` is `None` the harness reuses the session's
+    /// active model (usually you want a cheaper tier here).
+    SetGoal {
+        condition: String,
+        #[serde(default)]
+        max_iterations: Option<usize>,
+        #[serde(default)]
+        evaluator_model: Option<String>,
+    },
+    /// Drop the session's standing goal. Idempotent — clearing a
+    /// session without a goal is a no-op.
+    ClearGoal,
     /// Ask the server to re-emit its current state (used on reconnect).
     Sync,
 }
@@ -73,6 +88,11 @@ pub enum ServerMsg {
         /// harness to replay tool history.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         tasks: Vec<mira_tools::TaskItem>,
+        /// Standing `/goal` — `None` when the user hasn't set one on
+        /// this session (or cleared it). Terminal statuses are also
+        /// sent so the UI can render a "last goal" chip until cleared.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        goal: Option<Goal>,
     },
     /// Fragment of assistant text.
     Token { text: String },
@@ -143,6 +163,34 @@ pub enum ServerMsg {
     /// summary before the current round's model call. UI can render a
     /// "compacted N turns" chip for transparency.
     Compacted { messages_removed: usize },
+
+    /// A `/goal` was set on this session. Emitted immediately after
+    /// `SetGoal` so the UI can flip its state without waiting for the
+    /// next turn.
+    GoalSet { goal: Goal },
+    /// The session's standing goal was cleared (by the user or the
+    /// UI). Emitted whether or not a turn is running.
+    GoalCleared,
+    /// The evaluator just ran mid-goal. `iteration` is the count
+    /// *after* the bump (1-indexed) and `status` reflects the goal
+    /// state post-evaluation. `reason` is the evaluator's free-text
+    /// note — shown in the goal panel so the user can see why the
+    /// loop is still going.
+    GoalProgress {
+        iteration: usize,
+        max_iterations: usize,
+        status: GoalStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+    /// The goal reached a terminal state and no further autonomous
+    /// iterations will run. The UI switches from the "working…" pill
+    /// to the terminal one keyed on `status`.
+    GoalDone {
+        status: GoalStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
 
     /// The model called the `plan` tool. Open a review modal so the user can
     /// approve / edit / cancel. Client answers with
@@ -225,6 +273,20 @@ impl ServerMsg {
             HarnessEvent::Usage { round, totals } => Self::Usage { round, totals },
             HarnessEvent::MemoryLearned { count } => Self::MemoryLearned { count },
             HarnessEvent::Compacted { messages_removed } => Self::Compacted { messages_removed },
+            HarnessEvent::GoalSet { goal } => Self::GoalSet { goal },
+            HarnessEvent::GoalCleared => Self::GoalCleared,
+            HarnessEvent::GoalProgress {
+                iteration,
+                max_iterations,
+                status,
+                reason,
+            } => Self::GoalProgress {
+                iteration,
+                max_iterations,
+                status,
+                reason,
+            },
+            HarnessEvent::GoalDone { status, reason } => Self::GoalDone { status, reason },
         }
     }
 }

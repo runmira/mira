@@ -78,6 +78,32 @@ export type TurnMeta = {
   ended_at?: number | null;
 };
 
+/* -------- /goal -------- */
+
+/** Terminal-or-active state of the standing goal. Matches the Rust
+ *  enum in `mira-harness/src/goal.rs` (serde `snake_case`). */
+export type GoalStatus =
+  | 'active'
+  | 'met'
+  | 'impossible'
+  | 'needs_user'
+  | 'cleared'
+  | 'exhausted';
+
+/** Standing autonomous-run objective. `condition` is the contract the
+ *  user wrote; `iterations` / `max_iterations` show the harness's
+ *  bounded loop budget; `last_reason` is the evaluator's most recent
+ *  note (the "why we're still going" line). */
+export type Goal = {
+  condition: string;
+  status: GoalStatus;
+  iterations: number;
+  max_iterations: number;
+  created_at: number;
+  last_reason?: string | null;
+  evaluator_model?: string | null;
+};
+
 /* -------- interactive tools (plan / ask_user / …) -------- */
 
 export type PlanStep = {
@@ -129,7 +155,7 @@ export type UsageTotals = {
 };
 
 export type ServerMsg =
-  | { type: 'ready'; session_id: string; model: string; mode: Mode; cwd: string; history: Message[]; turns?: TurnMeta[]; usage?: UsageTotals; tasks?: TaskItem[] }
+  | { type: 'ready'; session_id: string; model: string; mode: Mode; cwd: string; history: Message[]; turns?: TurnMeta[]; usage?: UsageTotals; tasks?: TaskItem[]; goal?: Goal | null }
   | { type: 'token'; text: string }
   | { type: 'tool_start'; call: ToolCall }
   | { type: 'tool_end'; result: ToolResult }
@@ -148,6 +174,10 @@ export type ServerMsg =
   | { type: 'usage'; round: TokenUsage; totals: UsageTotals }
   | { type: 'memory_learned'; count: number }
   | { type: 'compacted'; messages_removed: number }
+  | { type: 'goal_set'; goal: Goal }
+  | { type: 'goal_cleared' }
+  | { type: 'goal_progress'; iteration: number; max_iterations: number; status: GoalStatus; reason?: string | null }
+  | { type: 'goal_done'; status: GoalStatus; reason?: string | null }
   | { type: 'plan_request'; prompt_id: string; plan: PlanProposal }
   // Subagent live-stream frames. Every subagent-related event carries the
   // parent's tool_call id so the frontend routes it to the right panel tab.
@@ -168,6 +198,8 @@ export type ClientMsg =
   | { type: 'set_mode'; mode: Mode }
   | { type: 'set_effort'; effort: string | null }
   | { type: 'interrupt' }
+  | { type: 'set_goal'; condition: string; max_iterations?: number | null; evaluator_model?: string | null }
+  | { type: 'clear_goal' }
   | { type: 'sync' };
 
 export type ProviderView = {

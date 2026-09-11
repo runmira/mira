@@ -1,6 +1,7 @@
 use mira_ai::TokenUsage;
 use mira_core::{ToolCall, ToolResult};
 
+use crate::goal::{Goal, GoalStatus};
 use crate::persist::UsageTotals;
 
 /// UI-facing event stream produced by [`crate::Session::send`].
@@ -45,5 +46,31 @@ pub enum HarnessEvent {
     /// Fired at most once per round, at the point history was rewritten.
     Compacted {
         messages_removed: usize,
+    },
+    /// A `/goal` was set on the session. Emitted immediately when the
+    /// user sets or replaces the standing goal — even outside a
+    /// running turn, so the UI can flip its state right away.
+    GoalSet {
+        goal: Goal,
+    },
+    /// The user (or the UI) cleared the standing goal. Emitted whether
+    /// or not a turn is currently running.
+    GoalCleared,
+    /// The evaluator just ran and produced a verdict. Sent right before
+    /// the harness decides whether to loop or exit. `iteration` reflects
+    /// the count *after* the bump (so the first evaluation shows `1`).
+    GoalProgress {
+        iteration: usize,
+        max_iterations: usize,
+        status: GoalStatus,
+        /// Evaluator's free-text reason, if any.
+        reason: Option<String>,
+    },
+    /// The goal has reached a terminal state (met, impossible,
+    /// needs_user, cleared, exhausted). No more autonomous iterations
+    /// will run on this record.
+    GoalDone {
+        status: GoalStatus,
+        reason: Option<String>,
     },
 }

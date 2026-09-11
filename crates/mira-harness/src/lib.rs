@@ -14,6 +14,7 @@
 
 pub mod approver;
 pub mod event;
+pub mod goal;
 pub mod history;
 pub mod persist;
 pub mod session;
@@ -21,5 +22,6 @@ pub mod verify;
 
 pub use approver::{Approver, AutoApprover};
 pub use event::HarnessEvent;
+pub use goal::{Evaluation, Goal, GoalStatus, GoalVerdict, DEFAULT_MAX_ITERATIONS};
 pub use persist::{FileStore, SessionRecord, SessionStore, StoreError, TurnMeta, UsageTotals};
 pub use session::{AutoExtractConfig, Session, SessionConfig};

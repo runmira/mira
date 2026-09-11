@@ -1,5 +1,5 @@
 use mira_core::{ToolCall, ToolResult};
-use mira_harness::UsageTotals;
+use mira_harness::{Goal, UsageTotals};
 use mira_policy::Mode;
 use mira_tools::DiffPreview;
 
@@ -68,6 +68,10 @@ pub struct TuiState {
     /// Zeroed for providers that don't report usage — the status bar renders
     /// nothing in that case.
     pub usage: UsageTotals,
+    /// Standing `/goal`, if any. Renders as a chip in the header + a
+    /// live-updating line in the status bar during autonomous runs.
+    /// `None` means goal-directed mode is off.
+    pub goal: Option<Goal>,
 }
 
 impl TuiState {
@@ -89,6 +93,7 @@ impl TuiState {
             should_quit: false,
             flash: None,
             usage: UsageTotals::default(),
+            goal: None,
         }
     }
 

@@ -13,6 +13,7 @@ import {
   Shield,
   Sparkle,
   SlidersHorizontal,
+  Target,
 } from '@phosphor-icons/react';
 import type { Mode } from '../types';
 
@@ -40,6 +41,11 @@ export type SlashCtx = {
   /** Kicks off a two-stage `mira review` and opens the side panel to stream
    *  progress. `args` is passed through as the git range (empty = default). */
   onRunReview: (args: string) => void;
+  /** Set or replace the session's autonomous `/goal`. Empty condition
+   *  is a no-op — the composer throws so the user sees inline hint. */
+  onSetGoal: (condition: string, maxIterations?: number) => void;
+  /** Drop the standing goal (if any). */
+  onClearGoal: () => void;
   /** Append a note to the current project's MIRA.md (or the user-global one
    *  when `scope === 'user'`). Feedback message returned via the promise. */
   onRemember: (scope: 'user' | 'project', text: string) => Promise<string>;
@@ -165,6 +171,40 @@ export const COMMANDS: SlashCommand[] = [
     // opens the side panel. Returns `undefined` so the composer clears
     // instead of prefilling a text template.
     run: (args, ctx) => { ctx.onRunReview(args.trim()); return undefined; },
+  },
+  {
+    name: 'goal',
+    description: 'Set an autonomous goal — mira loops until the condition is met',
+    usage: '/goal <condition>   (or: /goal clear · /goal status)',
+    icon: Target,
+    takesArgs: true,
+    run: (args, ctx) => {
+      const body = args.trim();
+      if (!body || body === 'status') {
+        // `/goal` bare or `/goal status` prints the current state as an
+        // inline hint. Empty state == "no goal set, here's how to set
+        // one" — actionable, not just a shrug.
+        throw new Error(
+          'usage: /goal <condition>   —   describe what "done" looks like and mira will loop until an evaluator agrees.',
+        );
+      }
+      if (body === 'clear') {
+        ctx.onClearGoal();
+        return undefined;
+      }
+      // Optional `--max N` prefix bumps the iteration cap. Everything else
+      // is treated as the condition body.
+      let condition = body;
+      let maxIter: number | undefined;
+      const maxMatch = body.match(/^--max\s+(\d+)\s+([\s\S]+)$/);
+      if (maxMatch) {
+        maxIter = Number.parseInt(maxMatch[1], 10);
+        condition = maxMatch[2].trim();
+      }
+      if (!condition) throw new Error('usage: /goal <condition>');
+      ctx.onSetGoal(condition, maxIter);
+      return undefined;
+    },
   },
   {
     name: 'init',

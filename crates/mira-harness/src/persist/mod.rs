@@ -65,6 +65,12 @@ pub struct SessionRecord {
     /// sessions written before the field existed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tasks: Vec<mira_tools::TaskItem>,
+    /// Standing `/goal`, if any. Kept in the same record so resume
+    /// picks up an in-flight autonomous run instead of forgetting it.
+    /// Terminal statuses (Met / Impossible / …) are preserved too —
+    /// the UI shows a "last goal" chip until the user clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<crate::goal::Goal>,
 }
 
 /// Running token totals for a whole session. Grows monotonically; individual
@@ -146,7 +152,9 @@ pub trait SessionStore: Send + Sync {
     async fn delete(&self, id: &SessionId) -> Result<(), StoreError>;
 }
 
-pub(crate) fn now_secs() -> u64 {
+/// Seconds since the Unix epoch. Public so `goal.rs` can stamp
+/// `Goal::created_at` without duplicating the shim.
+pub fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())

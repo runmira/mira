@@ -1295,7 +1295,11 @@ fn subagent_wire(parent_call_id: &str, evt: &HarnessEvent) -> Option<ServerMsg> 
         HarnessEvent::TurnComplete
         | HarnessEvent::Usage { .. }
         | HarnessEvent::MemoryLearned { .. }
-        | HarnessEvent::Compacted { .. } => None,
+        | HarnessEvent::Compacted { .. }
+        | HarnessEvent::GoalSet { .. }
+        | HarnessEvent::GoalCleared
+        | HarnessEvent::GoalProgress { .. }
+        | HarnessEvent::GoalDone { .. } => None,
     }
 }
 

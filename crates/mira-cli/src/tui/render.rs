@@ -4,6 +4,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
+use mira_harness::GoalStatus;
 use mira_tools::{DiffKind, DiffLine};
 
 use crate::tui::state::{LogEntry, TuiState};
@@ -40,14 +41,63 @@ fn input_display_rows(input: &str) -> u16 {
 }
 
 fn header(f: &mut Frame, area: Rect, state: &TuiState) {
-    let line = Line::from(vec![
+    let mut spans = vec![
         Span::styled("mira ", Style::default().fg(Color::Magenta).bold()),
         Span::styled("· ", Style::default().fg(Color::DarkGray)),
         Span::styled(state.model.as_str(), Style::default().fg(Color::Cyan)),
         Span::styled(" · ", Style::default().fg(Color::DarkGray)),
         Span::styled(state.mode.as_str(), mode_style(state)),
-    ]);
-    f.render_widget(Paragraph::new(line), area);
+    ];
+    if let Some(g) = state.goal.as_ref() {
+        let (label, chip_style) = goal_chip(g.status);
+        spans.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled("goal ", chip_style));
+        spans.push(Span::styled(
+            format!("{}/{}", g.iterations, g.max_iterations),
+            Style::default().fg(Color::DarkGray),
+        ));
+        spans.push(Span::styled(" ", Style::default()));
+        spans.push(Span::styled(label, chip_style));
+        // Trim the condition inline so it doesn't blow past the header.
+        spans.push(Span::styled(" · ", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(
+            truncate(&g.condition, 60),
+            Style::default().fg(Color::White),
+        ));
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// Chip label + style for a given goal status. Active runs get a
+/// pulsing-cyan feel via `SLOW_BLINK`; terminal statuses render solid
+/// so the eye can distinguish "still going" from "done" at a glance.
+fn goal_chip(status: GoalStatus) -> (&'static str, Style) {
+    match status {
+        GoalStatus::Active => (
+            "▶ running",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ),
+        GoalStatus::Met => (
+            "✓ met",
+            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+        ),
+        GoalStatus::Impossible => (
+            "✗ impossible",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ),
+        GoalStatus::NeedsUser => (
+            "! needs you",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ),
+        GoalStatus::Exhausted => (
+            "◐ exhausted",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ),
+        GoalStatus::Cleared => (
+            "· cleared",
+            Style::default().fg(Color::DarkGray),
+        ),
+    }
 }
 
 fn transcript(f: &mut Frame, area: Rect, state: &mut TuiState) {

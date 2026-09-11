@@ -23,9 +23,11 @@ import { PlanCard } from './components/PlanCard';
 import { AgentCard, AgentGroup } from './components/AgentCard';
 import { SubagentPanel, type SubagentTab } from './components/SubagentPanel';
 import { TaskListPanel } from './components/TaskListPanel';
+import { GoalPanel } from './components/GoalPanel';
 import { ToolGroup } from './components/ToolGroup';
 import type {
   DiffPreview,
+  Goal,
   Message,
   Mode,
   PlanProposal,
@@ -185,6 +187,10 @@ export default function App() {
   // upserted whenever a `task_*` tool result lands. Rendered as a
   // persistent "Plan" card near the top of the transcript.
   const [tasks, setTasks] = useState<TaskItem[]>([]);
+  // Standing `/goal`, if any. Populated from `ready.goal` on socket
+  // open and mutated by `goal_set` / `goal_progress` / `goal_done` /
+  // `goal_cleared` server frames. Absent = no autonomous run set.
+  const [goal, setGoal] = useState<Goal | null>(null);
   // Force a re-render every second while a turn is active so the live
   // "Working…" counter ticks. Cheap; the tree is small and only mounts
   // when the browser tab is visible.
@@ -241,6 +247,7 @@ export default function App() {
         setExpandedTurns(new Set());
         setUsage(msg.usage ?? null);
         setTasks(msg.tasks ?? []);
+        setGoal(msg.goal ?? null);
         setBusy(false);
         setThinking(false);
         setSidebarRefresh((n) => n + 1);
@@ -365,6 +372,58 @@ export default function App() {
           },
         ]);
         break;
+      case 'goal_set':
+        setGoal(msg.goal);
+        setEntries((prev) => [
+          ...prev,
+          { kind: 'warning', text: `[goal] set: ${msg.goal.condition}` },
+        ]);
+        break;
+      case 'goal_cleared':
+        setGoal(null);
+        setEntries((prev) => [
+          ...prev,
+          { kind: 'warning', text: '[goal] cleared' },
+        ]);
+        break;
+      case 'goal_progress': {
+        const p = msg;
+        setGoal((prev) =>
+          prev
+            ? {
+                ...prev,
+                iterations: p.iteration,
+                max_iterations: p.max_iterations,
+                status: p.status,
+                last_reason: p.reason ?? prev.last_reason,
+              }
+            : prev,
+        );
+        // Also drop a compact chip into the transcript so scrolling back
+        // through history shows the loop's decision points at a glance.
+        setEntries((prev) => [
+          ...prev,
+          {
+            kind: 'warning',
+            text: `[goal] ${p.iteration}/${p.max_iterations} · ${goalStatusWord(p.status)}${p.reason ? ` · ${p.reason}` : ''}`,
+          },
+        ]);
+        break;
+      }
+      case 'goal_done': {
+        const d = msg;
+        setGoal((prev) =>
+          prev ? { ...prev, status: d.status, last_reason: d.reason ?? prev.last_reason } : prev,
+        );
+        setEntries((prev) => [
+          ...prev,
+          {
+            kind: 'warning',
+            text: `[goal] ${goalStatusWord(d.status)}${d.reason ? ` · ${d.reason}` : ''}`,
+          },
+        ]);
+        break;
+      }
       case 'subagent_started':
         setSubagentState((prev) => {
           const next = new Map(prev);
@@ -571,6 +630,24 @@ export default function App() {
   function onSetModel(m: string) { wsRef.current?.send({ type: 'set_model', model: m }); }
   function onSetEffort(e: string | null) { wsRef.current?.send({ type: 'set_effort', effort: e }); }
 
+  /** Kick off (or replace) an autonomous run against a condition. The
+   *  server broadcasts `goal_set` so the panel state syncs there — we
+   *  don't set it locally to avoid a brief drift if the server rejects
+   *  the request (e.g. empty condition). */
+  function onSetGoal(condition: string, maxIterations?: number) {
+    const trimmed = condition.trim();
+    if (!trimmed) return;
+    wsRef.current?.send({
+      type: 'set_goal',
+      condition: trimmed,
+      max_iterations: maxIterations ?? null,
+    });
+  }
+
+  function onClearGoal() {
+    wsRef.current?.send({ type: 'clear_goal' });
+  }
+
   async function onNewChat() {
     try {
       await newSession();
@@ -761,6 +838,13 @@ export default function App() {
                 <EmptyState />
               ) : (
                 <div className="mx-auto flex max-w-3xl flex-col gap-2">
+                  {goal && (
+                    <GoalPanel
+                      goal={goal}
+                      onClear={onClearGoal}
+                      onRestart={(condition, maxIter) => onSetGoal(condition, maxIter)}
+                    />
+                  )}
                   {tasks.length > 0 && <TaskListPanel tasks={tasks} />}
                   {turns.map((turn, i) => (
                     <TurnView
@@ -800,6 +884,8 @@ export default function App() {
               onNewChat={onNewChat}
               onOpenSettings={() => setSettingsOpen(true)}
               onRunReview={runReview}
+              onSetGoal={onSetGoal}
+              onClearGoal={onClearGoal}
               onRemember={async (scope, text) => {
                 const r = await appendMemory(scope, text);
                 return `remembered → ${r.path}`;
@@ -987,6 +1073,23 @@ function stampLastTurn(prev: Map<number, TurnTiming>, endedAt: number): Map<numb
   const t = clone.get(target)!;
   clone.set(target, { ...t, endedAt });
   return clone;
+}
+
+function goalStatusWord(status: Goal['status']): string {
+  switch (status) {
+    case 'active':
+      return 'still working';
+    case 'met':
+      return 'met';
+    case 'impossible':
+      return 'impossible';
+    case 'needs_user':
+      return 'needs you';
+    case 'cleared':
+      return 'cleared';
+    case 'exhausted':
+      return 'exhausted';
+  }
 }
 
 function titleFromEntries(entries: Entry[]): string {

@@ -128,6 +128,7 @@ mod tests {
             usage: Default::default(),
             parent_id: None,
             tasks: Vec::new(),
+            goal: None,
         }
     }
 

@@ -28,7 +28,7 @@ use crossterm::terminal::{
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use mira_core::Role;
-use mira_harness::{HarnessEvent, Session};
+use mira_harness::{Goal, GoalStatus, HarnessEvent, Session};
 use mira_policy::{Mode, Policy};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -128,6 +128,11 @@ async fn event_loop(
 /// resume we replay user/assistant/tool entries so it's obvious the
 /// conversation continued rather than starting empty.
 async fn hydrate_from_history(session: &Session, state: &mut TuiState) {
+    // Restore any standing goal so the header chip appears the moment
+    // a resumed session opens. Kept before the "resumed" info line so
+    // the goal is the first thing on screen when it matters.
+    state.goal = session.goal().await;
+
     let history = session.history().await;
     // Only count non-system messages when deciding whether to announce
     // "resumed"; a fresh session has just the system prompt.
@@ -318,6 +323,57 @@ fn handle_harness_event(
                 if messages_removed == 1 { "" } else { "s" }
             ));
         }
+        HarnessEvent::GoalSet { goal } => {
+            state.push_info(format!("[goal] set: {}", goal.condition));
+            state.goal = Some(goal);
+        }
+        HarnessEvent::GoalCleared => {
+            state.push_info("[goal] cleared".to_string());
+            state.goal = None;
+        }
+        HarnessEvent::GoalProgress {
+            iteration,
+            max_iterations,
+            status,
+            reason,
+        } => {
+            let status_word = match status {
+                GoalStatus::Active => "still working",
+                GoalStatus::Met => "met",
+                GoalStatus::Impossible => "impossible",
+                GoalStatus::NeedsUser => "needs you",
+                GoalStatus::Cleared => "cleared",
+                GoalStatus::Exhausted => "exhausted",
+            };
+            state.push_info(format!(
+                "[goal] {iteration}/{max_iterations} · {status_word}{}",
+                reason.as_ref().map(|r| format!(" · {r}")).unwrap_or_default()
+            ));
+            if let Some(g) = state.goal.as_mut() {
+                g.iterations = iteration;
+                g.max_iterations = max_iterations;
+                g.status = status;
+                g.last_reason = reason;
+            }
+        }
+        HarnessEvent::GoalDone { status, reason } => {
+            let word = match status {
+                GoalStatus::Met => "met",
+                GoalStatus::Impossible => "impossible",
+                GoalStatus::NeedsUser => "needs you",
+                GoalStatus::Exhausted => "exhausted",
+                GoalStatus::Cleared => "cleared",
+                GoalStatus::Active => "active",
+            };
+            let msg = match reason {
+                Some(r) => format!("[goal] {word} · {r}"),
+                None => format!("[goal] {word}"),
+            };
+            state.push_info(msg);
+            if let Some(g) = state.goal.as_mut() {
+                g.status = status;
+            }
+        }
         HarnessEvent::Done => {
             state.streaming = false;
             *agent_stream = None;
@@ -340,9 +396,12 @@ async fn run_slash(cmd: &str, state: &mut TuiState, session: &Session, cfg: &mut
 
         "/help" | "/?" => {
             state.push_info(
-                "commands: /mode <plan|manual|auto|edit|yolo> · /model <id> · /clear · /quit",
+                "commands: /mode <plan|manual|auto|edit|yolo> · /model <id> · \
+                 /goal <cond> · /goal status · /goal clear · /clear · /quit",
             );
         }
+
+        "/goal" => run_goal_slash(rest, state, session).await,
 
         "/mode" => match parse_mode(rest) {
             Some(m) => {
@@ -365,6 +424,57 @@ async fn run_slash(cmd: &str, state: &mut TuiState, session: &Session, cfg: &mut
 
         other => state.push_warning(format!("unknown command `{other}` — try /help")),
     }
+}
+
+/// Dispatch for `/goal ...` — the sub-verb decides.
+///
+/// Shape:
+/// - `/goal <condition>`     — set (or replace) the standing goal
+/// - `/goal status`          — print the current goal
+/// - `/goal clear`           — drop the goal
+async fn run_goal_slash(rest: &str, state: &mut TuiState, session: &Session) {
+    let rest = rest.trim();
+    if rest.is_empty() || rest == "status" {
+        // Snapshot to a local so the immutable borrow on `state.goal`
+        // ends before we call the `&mut` push_info helpers.
+        let snapshot = state.goal.clone();
+        match snapshot {
+            None => state.push_info(
+                "no goal set. `/goal <condition>` to start an autonomous run.".to_string(),
+            ),
+            Some(g) => {
+                let status_word = match g.status {
+                    GoalStatus::Active => "active",
+                    GoalStatus::Met => "met",
+                    GoalStatus::Impossible => "impossible",
+                    GoalStatus::NeedsUser => "needs you",
+                    GoalStatus::Cleared => "cleared",
+                    GoalStatus::Exhausted => "exhausted",
+                };
+                state.push_info(format!(
+                    "goal · {status_word} · {}/{} · {}",
+                    g.iterations, g.max_iterations, g.condition
+                ));
+                if let Some(r) = g.last_reason.as_ref() {
+                    state.push_info(format!("last note: {r}"));
+                }
+            }
+        }
+        return;
+    }
+    if rest == "clear" {
+        session.clear_goal().await;
+        state.goal = None;
+        state.push_info("[goal] cleared".to_string());
+        state.flash = Some("goal cleared".into());
+        return;
+    }
+    // Otherwise treat `rest` as the goal condition — set it.
+    let goal = Goal::new(rest);
+    session.set_goal(goal.clone()).await;
+    state.goal = Some(goal.clone());
+    state.push_info(format!("[goal] set: {}", goal.condition));
+    state.flash = Some("goal set".into());
 }
 
 fn parse_mode(s: &str) -> Option<Mode> {

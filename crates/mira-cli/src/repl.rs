@@ -1,6 +1,6 @@
 use anyhow::Result;
 use futures::StreamExt;
-use mira_harness::{HarnessEvent, Session};
+use mira_harness::{Goal, GoalStatus, HarnessEvent, Session};
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 pub async fn run(session: Session) -> Result<()> {
@@ -21,6 +21,12 @@ pub async fn run(session: Session) -> Result<()> {
         };
         let input = line.trim();
         if input.is_empty() {
+            continue;
+        }
+        // Slash commands in the REPL are the small subset users hit in
+        // headless / piped runs. TUI has the full palette.
+        if let Some(cmd) = input.strip_prefix('/') {
+            handle_repl_slash(cmd, &session, &mut stdout).await?;
             continue;
         }
 
@@ -69,6 +75,38 @@ pub async fn run(session: Session) -> Result<()> {
                     );
                     stdout.write_all(msg.as_bytes()).await?;
                 }
+                HarnessEvent::GoalSet { goal } => {
+                    let msg = format!("\n[goal] set: {}\n", goal.condition);
+                    stdout.write_all(msg.as_bytes()).await?;
+                }
+                HarnessEvent::GoalCleared => {
+                    stdout.write_all(b"\n[goal] cleared\n").await?;
+                }
+                HarnessEvent::GoalProgress {
+                    iteration,
+                    max_iterations,
+                    status,
+                    reason,
+                } => {
+                    let word = goal_status_word(status);
+                    let tail = reason
+                        .as_ref()
+                        .map(|r| format!(" · {r}"))
+                        .unwrap_or_default();
+                    let msg = format!(
+                        "\n[goal] {iteration}/{max_iterations} · {word}{tail}\n"
+                    );
+                    stdout.write_all(msg.as_bytes()).await?;
+                }
+                HarnessEvent::GoalDone { status, reason } => {
+                    let word = goal_status_word(status);
+                    let tail = reason
+                        .as_ref()
+                        .map(|r| format!(" · {r}"))
+                        .unwrap_or_default();
+                    let msg = format!("\n[goal] {word}{tail}\n");
+                    stdout.write_all(msg.as_bytes()).await?;
+                }
                 HarnessEvent::Done => {
                     stdout.write_all(b"\n").await?;
                     break;
@@ -86,4 +124,79 @@ fn oneline(s: &str) -> String {
     } else {
         first.to_owned()
     }
+}
+
+fn goal_status_word(status: GoalStatus) -> &'static str {
+    match status {
+        GoalStatus::Active => "still working",
+        GoalStatus::Met => "met",
+        GoalStatus::Impossible => "impossible",
+        GoalStatus::NeedsUser => "needs you",
+        GoalStatus::Cleared => "cleared",
+        GoalStatus::Exhausted => "exhausted",
+    }
+}
+
+/// REPL-side slash commands. Kept small: `/goal <cond>`,
+/// `/goal status`, `/goal clear`, `/help`, `/quit`. Full palette
+/// lives in the TUI.
+async fn handle_repl_slash<W>(
+    cmd: &str,
+    session: &Session,
+    stdout: &mut W,
+) -> Result<()>
+where
+    W: AsyncWriteExt + Unpin,
+{
+    let mut parts = cmd.splitn(2, ' ');
+    let head = parts.next().unwrap_or("").trim();
+    let rest = parts.next().unwrap_or("").trim();
+    match head {
+        "help" | "?" => {
+            let msg = "commands: /goal <condition> · /goal status · /goal clear · /quit\n";
+            stdout.write_all(msg.as_bytes()).await?;
+        }
+        "quit" | "q" => {
+            stdout.write_all(b"bye.\n").await?;
+            std::process::exit(0);
+        }
+        "goal" => {
+            let sub = rest.trim();
+            if sub.is_empty() || sub == "status" {
+                match session.goal().await {
+                    None => {
+                        stdout
+                            .write_all(b"no goal set. `/goal <condition>` to start.\n")
+                            .await?;
+                    }
+                    Some(g) => {
+                        let word = goal_status_word(g.status);
+                        let msg = format!(
+                            "goal · {} · {}/{} · {}\n",
+                            word, g.iterations, g.max_iterations, g.condition
+                        );
+                        stdout.write_all(msg.as_bytes()).await?;
+                        if let Some(r) = g.last_reason.as_ref() {
+                            let m = format!("last note: {r}\n");
+                            stdout.write_all(m.as_bytes()).await?;
+                        }
+                    }
+                }
+            } else if sub == "clear" {
+                session.clear_goal().await;
+                stdout.write_all(b"[goal] cleared\n").await?;
+            } else {
+                let g = Goal::new(sub);
+                session.set_goal(g.clone()).await;
+                let msg = format!("[goal] set: {}\n", g.condition);
+                stdout.write_all(msg.as_bytes()).await?;
+            }
+        }
+        other => {
+            let msg = format!("unknown command `/{other}` — try /help\n");
+            stdout.write_all(msg.as_bytes()).await?;
+        }
+    }
+    stdout.flush().await?;
+    Ok(())
 }

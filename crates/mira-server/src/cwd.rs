@@ -106,6 +106,7 @@ pub async fn put_cwd(State(state): State<AppState>, Json(u): Json<CwdUpdate>) ->
     let turns = fresh.turns().await;
     let usage = fresh.usage().await;
     let tasks = fresh.tasks().await;
+    let goal = fresh.goal().await;
     let session_id = fresh.id.to_string();
 
     {
@@ -123,6 +124,7 @@ pub async fn put_cwd(State(state): State<AppState>, Json(u): Json<CwdUpdate>) ->
         turns,
         usage,
         tasks,
+        goal,
     });
 
     Json(CwdView {

@@ -90,6 +90,7 @@ async fn build_ready(state: &AppState) -> ServerMsg {
     let turns = sess.turns().await;
     let usage = sess.usage().await;
     let tasks = sess.tasks().await;
+    let goal = sess.goal().await;
     ServerMsg::Ready {
         session_id: sess.id.to_string(),
         model: cfg.model,
@@ -99,6 +100,7 @@ async fn build_ready(state: &AppState) -> ServerMsg {
         turns,
         usage,
         tasks,
+        goal,
     }
 }
 
@@ -167,6 +169,32 @@ async fn dispatch(cmd: ClientMsg, state: &AppState) {
             // Send `Done` so the UI clears its busy/thinking state instead
             // of spinning forever waiting for the aborted stream.
             let _ = state.events_tx.send(ServerMsg::Done);
+        }
+        ClientMsg::SetGoal {
+            condition,
+            max_iterations,
+            evaluator_model,
+        } => {
+            let condition = condition.trim().to_owned();
+            if condition.is_empty() {
+                let _ = state.events_tx.send(ServerMsg::Warning {
+                    text: "goal condition cannot be empty".into(),
+                });
+                return;
+            }
+            let mut goal = mira_harness::Goal::new(condition);
+            if let Some(n) = max_iterations {
+                goal = goal.with_max_iterations(n);
+            }
+            goal = goal.with_evaluator_model(evaluator_model);
+            let sess = state.current_session().await;
+            sess.set_goal(goal.clone()).await;
+            let _ = state.events_tx.send(ServerMsg::GoalSet { goal });
+        }
+        ClientMsg::ClearGoal => {
+            let sess = state.current_session().await;
+            sess.clear_goal().await;
+            let _ = state.events_tx.send(ServerMsg::GoalCleared);
         }
         ClientMsg::Sync => {
             let ready = build_ready(state).await;
