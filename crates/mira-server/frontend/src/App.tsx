@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { CaretDown } from '@phosphor-icons/react';
+import { CaretDown, Target } from '@phosphor-icons/react';
 import { cn } from './lib/utils';
 import { connect, type WsClient, type WsStatus } from './ws';
 import { appendMemory, applyUndo, getSessionHistory, getSettings, newSession, startReview } from './api';
@@ -78,7 +78,23 @@ type ToolEntry = {
 type WarningEntry = { kind: 'warning'; text: string };
 type ErrorEntry = { kind: 'error'; text: string };
 type MsgEntry = { kind: 'msg'; msg: Message };
-export type Entry = MsgEntry | ToolEntry | WarningEntry | ErrorEntry;
+/** Structured goal event in the transcript. Rendered as its own
+ *  purple-tinted card by [`EntryView`] so goal turns visually anchor
+ *  the timeline instead of masquerading as generic warnings.
+ *  `variant: 'set'` marks the initial `/goal` moment,
+ *  `'cleared'` the user drop, `'progress'` each non-terminal
+ *  evaluator verdict, and `'done'` the terminal transition. */
+type GoalEntry = {
+  kind: 'goal';
+  variant: 'set' | 'cleared' | 'progress' | 'done';
+  iteration: number | null;
+  maxIterations: number | null;
+  status: import('./types').GoalStatus | null;
+  reason: string | null;
+  /** Only set on `variant: 'set'`. */
+  condition?: string | null;
+};
+export type Entry = MsgEntry | ToolEntry | WarningEntry | ErrorEntry | GoalEntry;
 
 type TurnTiming = {
   startedAt: number;
@@ -376,14 +392,29 @@ export default function App() {
         setGoal(msg.goal);
         setEntries((prev) => [
           ...prev,
-          { kind: 'warning', text: `[goal] set: ${msg.goal.condition}` },
+          {
+            kind: 'goal',
+            variant: 'set',
+            iteration: null,
+            maxIterations: msg.goal.max_iterations,
+            status: msg.goal.status,
+            reason: null,
+            condition: msg.goal.condition,
+          } as GoalEntry,
         ]);
         break;
       case 'goal_cleared':
         setGoal(null);
         setEntries((prev) => [
           ...prev,
-          { kind: 'warning', text: '[goal] cleared' },
+          {
+            kind: 'goal',
+            variant: 'cleared',
+            iteration: null,
+            maxIterations: null,
+            status: 'cleared',
+            reason: null,
+          } as GoalEntry,
         ]);
         break;
       case 'goal_progress': {
@@ -399,15 +430,23 @@ export default function App() {
               }
             : prev,
         );
-        // Also drop a compact chip into the transcript so scrolling back
-        // through history shows the loop's decision points at a glance.
-        setEntries((prev) => [
-          ...prev,
-          {
-            kind: 'warning',
-            text: `[goal] ${p.iteration}/${p.max_iterations} · ${goalStatusWord(p.status)}${p.reason ? ` · ${p.reason}` : ''}`,
-          },
-        ]);
+        // Progress chip: only drop into the transcript when the loop
+        // is going to keep going (status === 'active'). Terminal
+        // transitions get announced once by the following `goal_done`
+        // so we don't double-post the same "met"/"impossible" line.
+        if (p.status === 'active') {
+          setEntries((prev) => [
+            ...prev,
+            {
+              kind: 'goal',
+              variant: 'progress',
+              iteration: p.iteration,
+              maxIterations: p.max_iterations,
+              status: p.status,
+              reason: p.reason ?? null,
+            } as GoalEntry,
+          ]);
+        }
         break;
       }
       case 'goal_done': {
@@ -418,9 +457,13 @@ export default function App() {
         setEntries((prev) => [
           ...prev,
           {
-            kind: 'warning',
-            text: `[goal] ${goalStatusWord(d.status)}${d.reason ? ` · ${d.reason}` : ''}`,
-          },
+            kind: 'goal',
+            variant: 'done',
+            iteration: null,
+            maxIterations: null,
+            status: d.status,
+            reason: d.reason ?? null,
+          } as GoalEntry,
         ]);
         break;
       }
@@ -841,6 +884,8 @@ export default function App() {
                   {goal && (
                     <GoalPanel
                       goal={goal}
+                      busy={busy}
+                      activity={goalActivity(entries)}
                       onClear={onClearGoal}
                       onRestart={(condition, maxIter) => onSetGoal(condition, maxIter)}
                     />
@@ -886,6 +931,7 @@ export default function App() {
               onRunReview={runReview}
               onSetGoal={onSetGoal}
               onClearGoal={onClearGoal}
+              goal={goal}
               onRemember={async (scope, text) => {
                 const r = await appendMemory(scope, text);
                 return `remembered → ${r.path}`;
@@ -1075,21 +1121,26 @@ function stampLastTurn(prev: Map<number, TurnTiming>, endedAt: number): Map<numb
   return clone;
 }
 
-function goalStatusWord(status: Goal['status']): string {
-  switch (status) {
-    case 'active':
-      return 'still working';
-    case 'met':
-      return 'met';
-    case 'impossible':
-      return 'impossible';
-    case 'needs_user':
-      return 'needs you';
-    case 'cleared':
-      return 'cleared';
-    case 'exhausted':
-      return 'exhausted';
+/** Pull the most recent "here's what mira is doing" line off the end
+ *  of the entry list. Priority: newest running tool call > newest
+ *  tool result > latest assistant fragment head. Empty string when
+ *  there's nothing recognizable to show — the GoalPanel renders a
+ *  generic "Working" in that case. */
+function goalActivity(entries: Entry[]): string {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i];
+    if (e.kind === 'tool' && e.status === 'running') {
+      return `Running ${e.call.function.name}`;
+    }
+    if (e.kind === 'tool' && e.status === 'complete' && !e.result?.is_error) {
+      return `Ran ${e.call.function.name}`;
+    }
+    if (e.kind === 'msg' && e.msg.role === 'assistant' && (e.msg.content ?? '').trim()) {
+      const line = (e.msg.content ?? '').trim().split('\n')[0];
+      return line.length > 90 ? line.slice(0, 90) + '…' : line;
+    }
   }
+  return '';
 }
 
 function titleFromEntries(entries: Entry[]): string {
@@ -1554,5 +1605,105 @@ function EntryView({
           <div className="font-mono text-xs text-destructive">error: {entry.text}</div>
         </div>
       );
+    case 'goal':
+      return <GoalTranscriptChip entry={entry} />;
+  }
+}
+
+/** Goal lifecycle events in the transcript.
+ *
+ * Design principles:
+ *  - No border, no left accent bar, no pill. The event is anchored by
+ *    a colored Target icon + a status-tinted headline; that's enough
+ *    to distinguish a goal beat from surrounding assistant text
+ *    without a second visual layer of chrome.
+ *  - The reason (evaluator note or original condition) breathes below
+ *    the headline in muted body text, indented to align under the
+ *    headline for a clean two-tier read.
+ *  - Terminal statuses use short, positive English ("Goal met") not
+ *    protocol-speak ("goal_done · met"). */
+function GoalTranscriptChip({ entry }: { entry: GoalEntry }) {
+  const tint = goalChipTint(entry.status, entry.variant);
+  const headline = goalChipHeadline(entry);
+  const body = entry.reason ?? entry.condition ?? null;
+  return (
+    <div className="flex justify-start">
+      <div className="w-full max-w-2xl py-1.5">
+        <div className="flex items-baseline gap-2">
+          <Target
+            weight="fill"
+            className={cn(
+              // Baseline-align the icon with the headline text — the
+              // `translate-y-[1px]` nudges it visually onto the x-height
+              // instead of floating above the cap-line.
+              'size-3.5 shrink-0 translate-y-[1px]',
+              tint.icon,
+            )}
+          />
+          <span
+            className={cn(
+              'text-[13px] font-semibold tracking-tight',
+              tint.head,
+            )}
+          >
+            {headline}
+          </span>
+        </div>
+        {body && (
+          <div className="mt-1 pl-[22px] whitespace-pre-wrap break-words text-[13px] leading-relaxed text-muted-foreground">
+            {body}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function goalChipHeadline(entry: GoalEntry): string {
+  const iter = entry.iteration && entry.maxIterations
+    ? ` · iteration ${entry.iteration} of ${entry.maxIterations}`
+    : '';
+  switch (entry.variant) {
+    case 'set':
+      return 'Goal set';
+    case 'cleared':
+      return 'Goal cleared';
+    case 'progress':
+      return `Goal · still working${iter}`;
+    case 'done': {
+      const status = entry.status;
+      if (status === 'met') return 'Goal met';
+      if (status === 'impossible') return 'Goal is impossible';
+      if (status === 'needs_user') return 'Goal needs your input';
+      if (status === 'exhausted') return 'Goal hit its iteration cap';
+      if (status === 'cleared') return 'Goal cleared';
+      return 'Goal finished';
+    }
+  }
+}
+
+/** Icon + headline color per (variant, status). No bg / bar / border
+ *  fields — those live in the render function above and are always
+ *  transparent by design. */
+function goalChipTint(
+  status: GoalEntry['status'],
+  variant: GoalEntry['variant'],
+) {
+  if (variant === 'set' || variant === 'progress') {
+    return { icon: 'text-mira-purple', head: 'text-mira-purple' };
+  }
+  if (variant === 'cleared' || status === 'cleared') {
+    return { icon: 'text-muted-foreground', head: 'text-muted-foreground' };
+  }
+  switch (status) {
+    case 'met':
+      return { icon: 'text-emerald-400', head: 'text-emerald-300' };
+    case 'impossible':
+      return { icon: 'text-red-400', head: 'text-red-300' };
+    case 'needs_user':
+    case 'exhausted':
+      return { icon: 'text-amber-400', head: 'text-amber-300' };
+    default:
+      return { icon: 'text-mira-purple', head: 'text-mira-purple' };
   }
 }

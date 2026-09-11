@@ -16,6 +16,15 @@ import type { Goal, GoalStatus } from '../types';
 
 type Props = {
   goal: Goal;
+  /** True while a model turn is in flight for this session. Drives
+   *  the "working…" pulse + optional activity line. Idle status
+   *  (running goal, not busy) reads as "waiting for evaluator." */
+  busy: boolean;
+  /** Short current-activity line — e.g. the last tool that was
+   *  dispatched, or an assistant-text preview. Empty string when
+   *  we have nothing to show. Rendered muted so it fades into the
+   *  card without shouting. */
+  activity: string;
   /** Drop the standing goal — server broadcasts `goal_cleared` so this
    *  panel unmounts once the local state clears. */
   onClear: () => void;
@@ -35,11 +44,18 @@ type Props = {
  * information density, animated status only while `active`, generous
  * padding so it doesn't feel like a warning banner.
  */
-export function GoalPanel({ goal, onClear, onRestart }: Props) {
+export function GoalPanel({ goal, busy, activity, onClear, onRestart }: Props) {
   const [expanded, setExpanded] = useState(true);
   const isTerminal = goal.status !== 'active';
   const meta = statusMeta(goal.status);
   const Icon = meta.icon;
+  // "Running" means the goal is active AND a turn is in flight.
+  // "Waiting for evaluator" is the brief lull between clean stop and
+  // the evaluator's verdict. Both use the same active-status colours;
+  // only the microcopy differs.
+  const workingNow = goal.status === 'active' && busy;
+  const waitingOnEvaluator = goal.status === 'active' && !busy && goal.iterations > 0;
+  const idle = goal.status === 'active' && !busy && goal.iterations === 0;
 
   const progressPct = Math.min(
     100,
@@ -125,6 +141,54 @@ export function GoalPanel({ goal, onClear, onRestart }: Props) {
               </p>
             </div>
 
+            {/* Live status line: shows what mira is actually doing
+                right now so the panel doesn't feel frozen while the
+                model streams. Three shapes:
+                  - workingNow  → spinning dots + activity preview
+                  - waiting     → "Evaluator is checking…" muted
+                  - idle        → gentle "waiting to start" hint
+                None of these render for terminal states (met / etc). */}
+            {goal.status === 'active' && (
+              <div className={cn(
+                'mx-4 mb-2.5 flex items-center gap-2 rounded-md border px-2.5 py-1.5',
+                meta.cardBorder,
+                'bg-background/30',
+              )}>
+                {workingNow && (
+                  <>
+                    <WorkingDots className={meta.iconColor} />
+                    <span className={cn('text-[12px] font-medium', meta.iconColor)}>
+                      Working
+                    </span>
+                    {activity && (
+                      <>
+                        <span className="text-muted-foreground/50">·</span>
+                        <span className="min-w-0 truncate text-[12px] text-muted-foreground">
+                          {activity}
+                        </span>
+                      </>
+                    )}
+                  </>
+                )}
+                {waitingOnEvaluator && (
+                  <>
+                    <WorkingDots className={meta.iconColor} />
+                    <span className={cn('text-[12px] font-medium', meta.iconColor)}>
+                      Evaluator is checking…
+                    </span>
+                  </>
+                )}
+                {idle && (
+                  <>
+                    <span className={cn('size-1.5 rounded-full', meta.progressBar)} />
+                    <span className="text-[12px] text-muted-foreground">
+                      Waiting to start — send a message to kick off, or the goal will auto-run momentarily.
+                    </span>
+                  </>
+                )}
+              </div>
+            )}
+
             {/* Progress row: a slim bar with iteration count + tick marks
                 for each iteration consumed. Cheap way to encode "budget
                 used" without a heavy chart. */}
@@ -134,7 +198,7 @@ export function GoalPanel({ goal, onClear, onRestart }: Props) {
                   className={cn(
                     'absolute inset-y-0 left-0 rounded-full transition-[width] duration-500',
                     meta.progressBar,
-                    goal.status === 'active' && 'animate-pulse',
+                    goal.status === 'active' && workingNow && 'animate-pulse',
                   )}
                   style={{ width: `${progressPct}%` }}
                 />
@@ -266,6 +330,28 @@ function statusMeta(status: GoalStatus) {
         reasonLabel: 'text-muted-foreground',
       };
   }
+}
+
+/** Three bouncing dots — same visual language as the transcript's
+ *  <Thinking /> indicator, scaled down for the goal panel. Tailwind's
+ *  `animate-thinking-bounce` keyframes live in `tailwind.config.js`. */
+function WorkingDots({ className }: { className?: string }) {
+  return (
+    <span className={cn('inline-flex items-center gap-0.5', className)}>
+      <span
+        className="size-1 rounded-full bg-current"
+        style={{ animation: 'thinking-bounce 1s ease-in-out infinite', animationDelay: '0ms' }}
+      />
+      <span
+        className="size-1 rounded-full bg-current"
+        style={{ animation: 'thinking-bounce 1s ease-in-out infinite', animationDelay: '150ms' }}
+      />
+      <span
+        className="size-1 rounded-full bg-current"
+        style={{ animation: 'thinking-bounce 1s ease-in-out infinite', animationDelay: '300ms' }}
+      />
+    </span>
+  );
 }
 
 function reasonLabel(status: GoalStatus): string {

@@ -194,19 +194,11 @@ pub async fn evaluate(
 
     let user = format!("RECENT TRANSCRIPT:\n\n{transcript_str}\n\nEvaluate the goal now. Reply with the JSON object only.");
 
-    let schema = serde_json::json!({
-        "type": "object",
-        "properties": {
-            "verdict": {
-                "type": "string",
-                "enum": ["met", "not_met", "impossible", "needs_user"],
-            },
-            "reason": { "type": "string" }
-        },
-        "required": ["verdict", "reason"],
-        "additionalProperties": false,
-    });
-
+    // JsonObject rather than JsonSchema — wider provider support
+    // (Ollama, LM Studio, older OpenAI-compat servers routinely ignore
+    // strict schema mode and return partial/empty streams). Combined
+    // with the tolerant `parse_evaluation` below this survives most
+    // providers without a per-vendor branch.
     let req = ChatRequest {
         model: model.to_owned(),
         messages: vec![Message::system(system), Message::user(user)],
@@ -214,11 +206,7 @@ pub async fn evaluate(
         temperature: Some(0.0),
         max_tokens: Some(EVAL_MAX_TOKENS),
         reasoning_effort: None,
-        response_format: Some(ResponseFormat::JsonSchema {
-            name: "goal_evaluation".into(),
-            schema,
-            strict: true,
-        }),
+        response_format: Some(ResponseFormat::JsonObject),
     };
 
     let stream_res = tokio::time::timeout(EVAL_TIMEOUT, provider.stream(req)).await;

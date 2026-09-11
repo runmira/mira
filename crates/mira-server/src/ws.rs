@@ -182,7 +182,7 @@ async fn dispatch(cmd: ClientMsg, state: &AppState) {
                 });
                 return;
             }
-            let mut goal = mira_harness::Goal::new(condition);
+            let mut goal = mira_harness::Goal::new(condition.clone());
             if let Some(n) = max_iterations {
                 goal = goal.with_max_iterations(n);
             }
@@ -190,6 +190,19 @@ async fn dispatch(cmd: ClientMsg, state: &AppState) {
             let sess = state.current_session().await;
             sess.set_goal(goal.clone()).await;
             let _ = state.events_tx.send(ServerMsg::GoalSet { goal });
+            // Auto-kickoff: the goal loop only tightens after the model
+            // has produced at least one clean stop, so simply setting a
+            // goal without sending a message would idle forever. Spawn
+            // an opening turn on the user's behalf with the goal as the
+            // instruction — matches the industry `/goal` pattern where
+            // control does not sit waiting for a follow-up prompt.
+            let kickoff = format!(
+                "Start working toward this standing goal:\n\n{condition}\n\n\
+                 Plan briefly if needed, then take the first concrete step. \
+                 I'll keep looping automatically until an evaluator agrees \
+                 the goal is met.",
+            );
+            spawn_turn(state.clone(), kickoff);
         }
         ClientMsg::ClearGoal => {
             let sess = state.current_session().await;

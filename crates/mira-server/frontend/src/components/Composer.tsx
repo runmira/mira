@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   ArrowUp,
   Camera,
+  CaretDown,
   Circle,
   CircleNotch,
   File as FileIcon,
@@ -13,10 +14,11 @@ import {
   Paperclip,
   Plus,
   Square,
+  Target,
   X,
 } from '@phosphor-icons/react';
 import { createWorktree, getGitStatus, listModels, putCwd, readFile, type GitStatusView, type ModelInfo } from '../api';
-import type { Mode } from '../types';
+import type { Goal, Mode } from '../types';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandSeparator } from '@/components/ui/command';
 import { FilePicker } from './FilePicker';
@@ -56,6 +58,10 @@ type Props = {
   onSetGoal: (condition: string, maxIterations?: number) => void;
   /** Drop the standing goal (if any). */
   onClearGoal: () => void;
+  /** Session's standing `/goal`, if any. Renders a purple chip at the
+   *  top of the composer while active — mirrors the Plan chip pattern
+   *  so users know autonomy is on. */
+  goal: Goal | null;
   onRemember: (scope: 'user' | 'project', text: string) => Promise<string>;
   onUndo: (count: number) => Promise<string>;
 };
@@ -64,7 +70,7 @@ type Attachment = { path: string; content: string; bytes: number };
 
 export function Composer({
   disabled, busy, mode, model, cwd, usage,
-  onSend, onSetMode, onSetModel, onSetEffort, onOpenPicker, onInterrupt, onNewChat, onOpenSettings, onRunReview, onSetGoal, onClearGoal, onRemember, onUndo,
+  onSend, onSetMode, onSetModel, onSetEffort, onOpenPicker, onInterrupt, onNewChat, onOpenSettings, onRunReview, onSetGoal, onClearGoal, goal, onRemember, onUndo,
 }: Props) {
   const [text, setText] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -74,6 +80,10 @@ export function Composer({
   const [slashIdx, setSlashIdx] = useState(0);
   const [slashFeedback, setSlashFeedback] = useState<string | null>(null);
   const [modelPopOpen, setModelPopOpen] = useState(false);
+  // "Goal compose" — flipped on by `/goal` (bare). While on, the next
+  // Enter fires `onSetGoal(text)` instead of `onSend`. Chip stays until
+  // the user either submits the condition or clicks it to abort.
+  const [goalComposing, setGoalComposing] = useState(false);
   // Remember the mode we were on before entering plan mode, so toggling the
   // Plan chip off returns you to that mode instead of hardcoding `manual`.
   const [priorMode, setPriorMode] = useState<Mode>(mode === 'plan' ? 'manual' : mode);
@@ -106,6 +116,7 @@ export function Composer({
       onRunReview,
       onSetGoal,
       onClearGoal,
+      onEnterGoalCompose: () => setGoalComposing(true),
       onRemember,
       onUndo,
     }),
@@ -175,6 +186,17 @@ export function Composer({
       return;
     }
 
+    // Goal-compose mode: submit the text as the goal condition instead
+    // of a chat message. Clears the compose flag so the next Enter goes
+    // back to normal sends.
+    if (goalComposing) {
+      onSetGoal(trimmed);
+      setGoalComposing(false);
+      setText('');
+      setSlashFeedback(null);
+      return;
+    }
+
     const body = attachments.length > 0 ? renderAttachments(attachments, cwd) + '\n\n' + trimmed : trimmed;
     onSend(body);
     setText('');
@@ -195,9 +217,13 @@ export function Composer({
         className="w-full max-w-3xl flex flex-col gap-1.5 rounded-[22px] border border-border bg-secondary/60 p-2.5"
         onSubmit={(e) => { e.preventDefault(); submit(); }}
       >
-        {planActive && (
-          <div className="flex items-center px-1.5 pt-0.5">
-            <PlanChip onExit={togglePlan} />
+        {(planActive || goal || goalComposing) && (
+          <div className="flex flex-wrap items-center gap-1.5 px-1.5 pt-0.5">
+            {planActive && <PlanChip onExit={togglePlan} />}
+            {goalComposing && !goal && (
+              <GoalComposeChip onCancel={() => setGoalComposing(false)} />
+            )}
+            {goal && <GoalChip goal={goal} onClear={onClearGoal} />}
           </div>
         )}
 
@@ -245,14 +271,25 @@ export function Composer({
                 }
                 if (e.key === 'Escape') { e.preventDefault(); setText(''); return; }
               }
+              // Escape while goal-composing → abort the compose flow
+              // without sending anything, matching how Esc dismisses
+              // the slash palette above.
+              if (goalComposing && e.key === 'Escape') {
+                e.preventDefault();
+                setGoalComposing(false);
+                setText('');
+                return;
+              }
               if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); }
             }}
             placeholder={
               disabled
                 ? 'Waiting for connection…'
-                : planActive
-                  ? 'Describe your task to generate a plan…'
-                  : 'Work with mira — try /'
+                : goalComposing
+                  ? "Describe what 'done' looks like — mira will loop until it's met."
+                  : planActive
+                    ? 'Describe your task to generate a plan…'
+                    : 'Work with mira — try /'
             }
             disabled={disabled}
             rows={1}
@@ -357,47 +394,104 @@ function SlashPalette({
   onHover: (i: number) => void;
   onPick: (cmd: SlashCommand) => void;
 }) {
+  // Alphabetize so the palette reads as an at-a-glance menu (Codex /
+  // Claude Code pattern) — no cognitive hunting for the item you want
+  // just because it happened to be registered late. Sort is stable so
+  // aliases don't shuffle unpredictably run-to-run.
+  const sorted = useMemo(
+    () => [...matches].sort((a, b) => displayName(a).localeCompare(displayName(b))),
+    [matches],
+  );
+  // Keyboard navigation still targets the caller's `matches` order —
+  // remap the caller's activeIdx onto the sorted index so ↑↓ + Enter
+  // land on the same visual row regardless of registration order.
+  const activeName = matches[activeIdx]?.name;
+  const activeSortedIdx = sorted.findIndex((c) => c.name === activeName);
+
   return (
-    <div className="absolute bottom-full left-0 right-0 z-10 mb-2 mx-auto max-w-2xl overflow-hidden rounded-xl border border-white/10 bg-popover text-popover-foreground shadow-[0_24px_60px_-12px_rgba(0,0,0,0.9)] ring-1 ring-white/5 animate-fade-in">
-      <div className="max-h-[22rem] overflow-y-auto p-1.5">
-        {matches.map((cmd, i) => {
+    <div
+      className={cn(
+        'absolute bottom-full left-0 right-0 z-10 mb-2 mx-auto max-w-xl overflow-hidden',
+        // Slightly larger radius + subtle inner ring for the Codex-style
+        // "elevated card" feel. Shadow is soft and blurred so the popover
+        // reads as floating rather than stamped on.
+        'rounded-2xl border border-white/[0.07] bg-[#1f2024]/95 backdrop-blur-md',
+        'shadow-[0_20px_50px_-16px_rgba(0,0,0,0.85)] ring-1 ring-black/40',
+        'animate-fade-in',
+      )}
+      role="listbox"
+    >
+      <div className="max-h-[24rem] overflow-y-auto py-1.5">
+        {sorted.map((cmd, i) => {
           const Icon = cmd.icon;
-          const active = i === activeIdx;
+          const active = i === activeSortedIdx;
           return (
             <button
               key={cmd.name}
               type="button"
-              onMouseEnter={() => onHover(i)}
+              onMouseEnter={() => {
+                // Hover reports back in caller's index space so the
+                // parent's state stays coherent with its `matches`.
+                const idx = matches.findIndex((c) => c.name === cmd.name);
+                if (idx >= 0) onHover(idx);
+              }}
               onClick={() => onPick(cmd)}
+              role="option"
+              aria-selected={active}
               className={cn(
-                'flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left transition-colors',
-                active ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-accent/40',
+                // Palette rows are borderless with generous horizontal
+                // padding so the highlighted row reads as a soft band
+                // rather than a discrete button. Vertical rhythm is
+                // tight but breathable (py-1.5) — matches the density
+                // in Codex's screenshot.
+                'flex w-full items-baseline gap-3 px-4 py-1.5 text-left transition-colors',
+                active ? 'bg-white/[0.06]' : 'hover:bg-white/[0.035]',
               )}
             >
-              <Icon className={cn('size-4 shrink-0', active ? 'text-foreground' : 'text-muted-foreground')} />
-              <span className="w-24 shrink-0 text-[13.5px] font-medium capitalize text-foreground">
-                {cmd.name}
+              <Icon
+                className={cn(
+                  // Icons stay muted at rest, brighten a touch on
+                  // hover / active — mirrors the way Codex fades chrome
+                  // into the background until you look at it.
+                  'size-[15px] shrink-0 self-center transition-colors',
+                  active ? 'text-foreground/85' : 'text-foreground/55',
+                )}
+              />
+              <span
+                className={cn(
+                  'shrink-0 text-[13.5px] font-medium tracking-tight',
+                  active ? 'text-foreground' : 'text-foreground/90',
+                )}
+              >
+                {displayName(cmd)}
               </span>
-              <span className="min-w-0 flex-1 truncate text-[13px]">{cmd.description}</span>
-              {cmd.takesArgs && (
-                <span className="hidden shrink-0 font-mono text-[10.5px] text-muted-foreground/60 sm:inline">
-                  {cmd.usage.replace(`/${cmd.name}`, '').trim()}
-                </span>
-              )}
+              <span
+                className={cn(
+                  'min-w-0 flex-1 truncate text-[13px]',
+                  active ? 'text-muted-foreground' : 'text-muted-foreground/70',
+                )}
+              >
+                {cmd.description}
+              </span>
             </button>
           );
         })}
-      </div>
-      <div className="flex items-center gap-3 border-t border-border/60 bg-background/40 px-3 py-1.5 text-[11px] text-muted-foreground">
-        <Kbd>↑↓</Kbd><span>nav</span>
-        <Kbd>↵</Kbd><span>pick</span>
-        <Kbd>tab</Kbd><span>complete</span>
-        <Kbd>esc</Kbd><span>close</span>
       </div>
     </div>
   );
 }
 
+/** Human-facing label for a command. Falls back to Title-Case of the
+ *  `name` so single-word commands ("new" → "New") don't need a hand-
+ *  written label, while multi-word commands ("pull-request") can
+ *  override with a proper display string ("Pull request"). */
+function displayName(cmd: SlashCommand): string {
+  const n = cmd.name;
+  if (!n) return n;
+  return n.charAt(0).toUpperCase() + n.slice(1).replace(/-/g, ' ');
+}
+
+/** Small keyboard-key badge used inside model-picker meta rows. */
 function Kbd({ children }: { children: React.ReactNode }) {
   return (
     <kbd className="rounded border border-white/10 bg-white/5 px-1 py-0.5 font-mono text-[10px] text-mira-cyan/80">
@@ -731,7 +825,15 @@ function ModelPicker({
       <PopoverTrigger asChild>
         <button
           type="button"
-          className="inline-flex items-center gap-2 rounded-full bg-mira-elev2 px-3 py-1.5 text-foreground transition-colors hover:brightness-110 max-w-[20rem]"
+          className={cn(
+            // Capsule dropped: the button lives on the composer's own
+            // background now, matching the ChatGPT / Codex "text-only
+            // model chip" pattern. Padding stays so the click target is
+            // comfortable; hover is a subtle text-color shift instead
+            // of a chip-fill.
+            'inline-flex items-center gap-2 rounded-md px-2 py-1.5 text-foreground transition-colors',
+            'hover:text-foreground/85 max-w-[20rem]',
+          )}
         >
           <span className={cn('size-2 rounded-full shrink-0', vendorDotClass(vendorOf(current)))} />
           {/* `leading-none` on both spans normalises the visual baseline —
@@ -745,6 +847,12 @@ function ModelPicker({
           <span className="shrink-0 text-[11.5px] font-medium leading-none text-muted-foreground/80">
             {prettyEffort(effort)}
           </span>
+          {/* Same CaretDown as ToolGroup's expand handle — signals
+           *  "this opens" without stealing focus from the label. */}
+          <CaretDown
+            weight="bold"
+            className="size-3 shrink-0 text-muted-foreground/60"
+          />
         </button>
       </PopoverTrigger>
       <PopoverContent
@@ -1079,6 +1187,78 @@ function PlanChip({ onExit }: { onExit: () => void }) {
       <Lightbulb className="size-3 shrink-0" weight="fill" />
       <span>Plan</span>
       <span className="text-mira-blue/70">·</span>
+    </button>
+  );
+}
+
+/* ---------- goal compose chip (visible while typing a new goal condition) ---------- */
+
+/** Sibling of [`PlanChip`]: renders while the user is composing the
+ *  goal condition (after `/goal`). Uses a dashed border to signal
+ *  "empty / awaiting input" so it visually distinguishes from an
+ *  active goal. Click cancels the compose flow. */
+function GoalComposeChip({ onCancel }: { onCancel: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onCancel}
+      title="Composing a goal — press Enter to set, or click to cancel"
+      className="inline-flex items-center gap-1.5 rounded-full border border-dashed border-mira-purple/50 bg-mira-purple/10 px-2.5 py-1.5 text-[12.5px] text-mira-purple transition-colors hover:bg-mira-purple/20"
+    >
+      <Target className="size-3 shrink-0" weight="fill" />
+      <span className="font-medium">Goal</span>
+      <span className="text-mira-purple/70">·</span>
+      <span className="opacity-90">describe the condition ↵</span>
+    </button>
+  );
+}
+
+/* ---------- goal chip (visible while a `/goal` is set) ---------- */
+
+/** Mirrors [`PlanChip`]'s pattern so autonomy shows up in the same spot,
+ *  just tinted purple to visually distinguish "goal-directed" from
+ *  "plan-only". Body shows iteration progress + a truncated condition
+ *  so the user sees at a glance how many rounds the autonomous loop
+ *  has consumed. Click clears the goal (same as `/goal clear`). */
+function GoalChip({ goal, onClear }: { goal: Goal; onClear: () => void }) {
+  const running = goal.status === 'active';
+  const shortCond =
+    goal.condition.length > 48
+      ? `${goal.condition.slice(0, 48).trim()}…`
+      : goal.condition;
+  // Non-active statuses keep the chip visible with a tint so the user
+  // can see the terminal state at a glance without having to scroll to
+  // the GoalPanel; hover still says "click to clear".
+  const tone = running
+    ? 'bg-mira-purple/15 text-mira-purple hover:bg-mira-purple/25'
+    : goal.status === 'met'
+      ? 'bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25'
+      : goal.status === 'needs_user' || goal.status === 'exhausted'
+        ? 'bg-amber-500/15 text-amber-300 hover:bg-amber-500/25'
+        : goal.status === 'impossible'
+          ? 'bg-red-500/15 text-red-300 hover:bg-red-500/25'
+          : 'bg-secondary/60 text-muted-foreground hover:bg-secondary';
+  const title = running
+    ? `Goal running (${goal.iterations}/${goal.max_iterations}) — click to clear`
+    : `Goal ${goal.status.replace('_', ' ')} — click to clear`;
+  return (
+    <button
+      type="button"
+      onClick={onClear}
+      title={title}
+      className={cn(
+        'inline-flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-[12.5px] transition-colors',
+        tone,
+      )}
+    >
+      <Target className="size-3 shrink-0" weight="fill" />
+      <span className="font-medium">Goal</span>
+      <span className="opacity-70">·</span>
+      <span className="tabular-nums opacity-90">
+        {goal.iterations}/{goal.max_iterations}
+      </span>
+      <span className="opacity-70">·</span>
+      <span className="max-w-[240px] truncate opacity-90">{shortCond}</span>
     </button>
   );
 }

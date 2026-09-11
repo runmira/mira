@@ -46,6 +46,10 @@ export type SlashCtx = {
   onSetGoal: (condition: string, maxIterations?: number) => void;
   /** Drop the standing goal (if any). */
   onClearGoal: () => void;
+  /** Flip the composer into "goal compose" mode — the next Enter
+   *  fires `onSetGoal(text)` instead of sending as a chat message.
+   *  Owned by the Composer; the slash command dispatches into it. */
+  onEnterGoalCompose: () => void;
   /** Append a note to the current project's MIRA.md (or the user-global one
    *  when `scope === 'user'`). Feedback message returned via the promise. */
   onRemember: (scope: 'user' | 'project', text: string) => Promise<string>;
@@ -175,17 +179,25 @@ export const COMMANDS: SlashCommand[] = [
   {
     name: 'goal',
     description: 'Set an autonomous goal — mira loops until the condition is met',
-    usage: '/goal <condition>   (or: /goal clear · /goal status)',
+    usage: '/goal   (enter goal-compose · then type the condition)',
     icon: Target,
-    takesArgs: true,
+    // `takesArgs: false` so a palette pick + Enter runs immediately —
+    // that flips the composer into "goal-compose" mode without a
+    // second keystroke. Inline `/goal clear`, `/goal status`, and
+    // `/goal <condition>` still work: slashState routes any `/goal `
+    // (trailing space) into args mode, and `run` branches on `body`.
+    takesArgs: false,
     run: (args, ctx) => {
       const body = args.trim();
-      if (!body || body === 'status') {
-        // `/goal` bare or `/goal status` prints the current state as an
-        // inline hint. Empty state == "no goal set, here's how to set
-        // one" — actionable, not just a shrug.
+      if (!body) {
+        // Bare — enter goal-compose. Composer flips its submit target
+        // and the purple Goal chip appears.
+        ctx.onEnterGoalCompose();
+        return undefined;
+      }
+      if (body === 'status') {
         throw new Error(
-          'usage: /goal <condition>   —   describe what "done" looks like and mira will loop until an evaluator agrees.',
+          'goal status is shown in the top card + the purple chip when active.',
         );
       }
       if (body === 'clear') {
