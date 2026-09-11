@@ -1,0 +1,8 @@
+name: failing-test
+prompt: |
+  There is a Rust crate in the current directory with a failing test in
+  `tests/basic.rs`. The test expects `add(2, 3) == 5`, but the current
+  implementation is wrong. Fix `src/lib.rs` so `cargo test` passes.
+fixture: 04-failing-test-fixture
+verify: cargo test --quiet
+timeout_secs: 300

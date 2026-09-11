@@ -7,6 +7,7 @@ use mira_sandbox::{PersistentShell, Sandbox};
 use tokio::sync::Mutex;
 
 use crate::guard::FileGuard;
+use crate::tasks::TaskStore;
 
 /// Ambient state made available to every tool invocation.
 ///
@@ -60,6 +61,11 @@ pub struct ToolContext {
     /// about `Session` (which lives in mira-harness). See
     /// [`ChildTracker`] for the two-method contract.
     pub child_tracker: Option<Arc<dyn ChildTracker>>,
+    /// Session-scoped task list the `task_*` tools mutate. Attached
+    /// by the harness inside `Session::new` / `Session::resume_from`.
+    /// Absent for tests / headless runs — the task tools return an
+    /// error in that case.
+    pub tasks: Option<Arc<TaskStore>>,
 }
 
 /// Contract the harness's `Session` fulfills to let the `agent` tool
@@ -96,7 +102,16 @@ impl ToolContext {
             session_id: None,
             agent_depth: 0,
             child_tracker: None,
+            tasks: None,
         }
+    }
+
+    /// Attach the session-scoped task store. Wired by the harness in
+    /// `Session::new` / `Session::resume_from` so the `task_*` tools
+    /// share one view with the checkpoint path.
+    pub fn with_tasks(mut self, tasks: Arc<TaskStore>) -> Self {
+        self.tasks = Some(tasks);
+        self
     }
 
     /// Chainable setter used by the harness after Session::new picks a

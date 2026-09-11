@@ -89,6 +89,7 @@ async fn build_ready(state: &AppState) -> ServerMsg {
     let history = sess.history().await;
     let turns = sess.turns().await;
     let usage = sess.usage().await;
+    let tasks = sess.tasks().await;
     ServerMsg::Ready {
         session_id: sess.id.to_string(),
         model: cfg.model,
@@ -97,6 +98,7 @@ async fn build_ready(state: &AppState) -> ServerMsg {
         history,
         turns,
         usage,
+        tasks,
     }
 }
 

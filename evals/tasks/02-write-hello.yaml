@@ -1,0 +1,6 @@
+name: write-hello
+prompt: |
+  Create a file named `hello.txt` in the current directory containing exactly
+  the single line `hello world` (no quotes, no trailing punctuation).
+verify: 'test "$(cat hello.txt)" = "hello world"'
+timeout_secs: 120

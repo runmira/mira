@@ -1,0 +1,9 @@
+name: rust-fix
+prompt: |
+  There is a Rust project in the current directory that fails to compile.
+  Read the source, identify the compile error, and edit the file so that
+  `cargo check` passes. Do not change the intent of the program (it should
+  still print a number).
+fixture: 03-rust-fix-fixture
+verify: cargo check --quiet
+timeout_secs: 300

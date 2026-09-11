@@ -14,6 +14,7 @@
 
 pub mod approver;
 pub mod event;
+pub mod history;
 pub mod persist;
 pub mod session;
 pub mod verify;

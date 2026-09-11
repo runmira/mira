@@ -12,6 +12,22 @@ export type ToolResult = {
   call_id: string;
   content: string;
   is_error?: boolean;
+  // Optional structured data the tool returned alongside the human-readable
+  // `content`. task_* tools use it to publish current state to the UI without
+  // asking the client to re-parse `content`.
+  data?: unknown;
+};
+
+export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'deleted';
+
+export type TaskItem = {
+  id: number;
+  subject: string;
+  description?: string;
+  active_form?: string | null;
+  status: TaskStatus;
+  created_at?: number;
+  updated_at?: number;
 };
 
 export type Role = 'system' | 'user' | 'assistant' | 'tool';
@@ -83,9 +99,20 @@ export type PlanResponse = {
   note?: string;
 };
 
+/** User's answer to a review-required subagent prompt. `approved: false`
+ *  converts the child's summary into a tool-error for the parent; the
+ *  optional `note` is prepended to the summary on approval or used as
+ *  the error body on denial. */
+export type SubagentReviewResponse = {
+  approved: boolean;
+  note?: string;
+};
+
 /** Discriminated union of all `PromptResponse` shapes. Matches the Rust
  *  `PromptResponse` enum (serde `tag = "kind"`, snake_case). */
-export type PromptResponse = ({ kind: 'plan' } & PlanResponse);
+export type PromptResponse =
+  | ({ kind: 'plan' } & PlanResponse)
+  | ({ kind: 'subagent_review' } & SubagentReviewResponse);
 
 export type TokenUsage = {
   prompt_tokens: number;
@@ -102,7 +129,7 @@ export type UsageTotals = {
 };
 
 export type ServerMsg =
-  | { type: 'ready'; session_id: string; model: string; mode: Mode; cwd: string; history: Message[]; turns?: TurnMeta[]; usage?: UsageTotals }
+  | { type: 'ready'; session_id: string; model: string; mode: Mode; cwd: string; history: Message[]; turns?: TurnMeta[]; usage?: UsageTotals; tasks?: TaskItem[] }
   | { type: 'token'; text: string }
   | { type: 'tool_start'; call: ToolCall }
   | { type: 'tool_end'; result: ToolResult }
@@ -119,6 +146,8 @@ export type ServerMsg =
   | { type: 'review_error'; run_id: string; text: string }
   | { type: 'session_title_updated'; session_id: string; title: string }
   | { type: 'usage'; round: TokenUsage; totals: UsageTotals }
+  | { type: 'memory_learned'; count: number }
+  | { type: 'compacted'; messages_removed: number }
   | { type: 'plan_request'; prompt_id: string; plan: PlanProposal }
   // Subagent live-stream frames. Every subagent-related event carries the
   // parent's tool_call id so the frontend routes it to the right panel tab.
@@ -127,6 +156,8 @@ export type ServerMsg =
   | { type: 'subagent_tool_start'; parent_call_id: string; call: ToolCall }
   | { type: 'subagent_tool_end'; parent_call_id: string; result: ToolResult }
   | { type: 'subagent_warning'; parent_call_id: string; text: string }
+  | { type: 'subagent_progress'; parent_call_id: string; text: string }
+  | { type: 'subagent_review_request'; parent_call_id: string; prompt_id: string; summary: string }
   | { type: 'subagent_done'; parent_call_id: string };
 
 export type ClientMsg =

@@ -2,7 +2,7 @@
 name: documenter
 description: Writes or updates documentation for a code area — READMEs, doc-comments, module docs, examples. Reads the code, then writes docs that match reality (not intent). Never edits code.
 category: docs
-tools: [read_file, write_file, edit_file, grep, glob, find_symbol, bash]
+tools: [read_file, write_file, edit_file, grep, glob, find_symbol, find_references, find_callers, bash]
 max_rounds: 25
 parallel_safe: true
 route_approvals_to_parent: true

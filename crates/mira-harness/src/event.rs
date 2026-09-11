@@ -40,4 +40,10 @@ pub enum HarnessEvent {
     MemoryLearned {
         count: usize,
     },
+    /// The harness compacted `messages_removed` older non-system messages
+    /// into a single synthetic summary before this round's model call.
+    /// Fired at most once per round, at the point history was rewritten.
+    Compacted {
+        messages_removed: usize,
+    },
 }

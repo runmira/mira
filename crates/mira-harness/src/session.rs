@@ -9,7 +9,7 @@ use mira_memory::{EpisodicEntry, EpisodicSource, EpisodicStore, MemorySnapshot};
 use mira_policy::{Decision, Policy, Request as PolicyRequest};
 use mira_sandbox::PersistentShell;
 use mira_tools::context::{ChildCancel, ChildTracker};
-use mira_tools::{FileGuard, Registry, ToolContext};
+use mira_tools::{FileGuard, Registry, TaskStore, ToolContext};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::AbortHandle;
@@ -183,6 +183,10 @@ pub struct Session {
     /// Monotonic counter that hands out ids for the `children` map. Wraps
     /// around at u64::MAX (effectively never in a real session).
     next_child_id: Arc<AtomicU64>,
+    /// Session-scoped task list. Shared with `tool_ctx.tasks` (same
+    /// Arc) so the `task_*` tools and the checkpoint path see one
+    /// view.
+    tasks: Arc<TaskStore>,
 }
 
 impl Session {
@@ -227,6 +231,9 @@ impl Session {
             next_id: next_child_id.clone(),
         });
         tool_ctx = tool_ctx.with_child_tracker(tracker);
+        // Fresh session → empty task store.
+        let tasks = TaskStore::new();
+        tool_ctx = tool_ctx.with_tasks(tasks.clone());
         Self {
             id,
             cfg: Arc::new(Mutex::new(cfg)),
@@ -240,6 +247,7 @@ impl Session {
             policy,
             approver,
             tool_ctx,
+            tasks,
             store: None,
             memory_snapshot: None,
             auto_extract: None,
@@ -287,6 +295,11 @@ impl Session {
             next_id: next_child_id.clone(),
         });
         tool_ctx = tool_ctx.with_child_tracker(tracker);
+        // Rehydrate the task store from the persisted snapshot — id
+        // sequence continues past the largest we saw so nothing gets
+        // reassigned.
+        let tasks = TaskStore::restore(record.tasks);
+        tool_ctx = tool_ctx.with_tasks(tasks.clone());
         Self {
             id: record.id,
             cfg: Arc::new(Mutex::new(record.cfg)),
@@ -300,6 +313,7 @@ impl Session {
             policy,
             approver,
             tool_ctx,
+            tasks,
             store: None,
             memory_snapshot: None,
             auto_extract: None,
@@ -367,6 +381,12 @@ impl Session {
     /// this session so far.
     pub async fn usage(&self) -> UsageTotals {
         *self.usage.lock().await
+    }
+
+    /// Non-deleted tasks in the session's todo list. UI reads this to
+    /// hydrate the task panel on load / reconnect.
+    pub async fn tasks(&self) -> Vec<mira_tools::TaskItem> {
+        self.tasks.list().await
     }
 
     /// Expose the session's undo/conflict guard. `None` when the FileGuard
@@ -567,6 +587,36 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
 
     for round in 0..cfg.max_rounds {
         info!(round, "harness: model turn");
+
+        // Rolling compaction: if history has grown past the trigger,
+        // summarize the older tail via the provider and splice a
+        // single synthetic user message in its place. Kept inside the
+        // round loop so a long turn with many tool calls can also
+        // trigger it (not just the between-turn edge). Failure is
+        // logged and swallowed — running with un-compacted history is
+        // strictly better than aborting the turn.
+        {
+            let mut history = sess.history.lock().await;
+            match crate::history::maybe_compact(
+                &mut history,
+                sess.provider.as_ref(),
+                &cfg.model,
+            )
+            .await
+            {
+                Ok(Some(n)) => {
+                    let _ = tx
+                        .send(HarnessEvent::Compacted {
+                            messages_removed: n,
+                        })
+                        .await;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    warn!(error = %e, "compaction failed; continuing with full history");
+                }
+            }
+        }
 
         let req = ChatRequest {
             model: cfg.model.clone(),
@@ -845,10 +895,27 @@ async fn dispatch_call(
     };
 
     let ok = !result.is_error;
-    sess.history.lock().await.push(Message::tool(
-        result.call_id.clone(),
-        truncate_for_history(&result.content),
-    ));
+    {
+        let mut history = sess.history.lock().await;
+        history.push(Message::tool(
+            result.call_id.clone(),
+            truncate_for_history(&result.content),
+        ));
+        // Dedup: if this was a read / write / edit for a specific path,
+        // collapse any older `read_file` result targeting the same path
+        // to a short stub. Same-lock scope so the walk sees exactly the
+        // history we just pushed into.
+        if ok {
+            if let Some(path) = crate::history::path_from_args(&call.function.arguments) {
+                crate::history::dedup_reads_for_path(
+                    &mut history,
+                    &call.id,
+                    &call.function.name,
+                    &path,
+                );
+            }
+        }
+    }
     let _ = tx.send(HarnessEvent::ToolEnd(result)).await;
     ok
 }
@@ -869,6 +936,7 @@ async fn checkpoint(sess: &Session) {
         turns: sess.turns.lock().await.clone(),
         usage: *sess.usage.lock().await,
         parent_id: sess.parent_id.clone(),
+        tasks: sess.tasks.snapshot_all().await,
     };
     if let Err(e) = store.save(&record).await {
         warn!(session = %sess.id, %e, "session checkpoint failed");

@@ -1,0 +1,6 @@
+name: explain-repl
+prompt: |
+  In one short paragraph, explain what a REPL is and why programmers use them.
+  Do not use any tools — just answer directly.
+expect_grep: "interactive|read.eval|command"
+timeout_secs: 60

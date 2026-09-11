@@ -67,6 +67,12 @@ pub enum ServerMsg {
         /// report usage.
         #[serde(default, skip_serializing_if = "UsageTotals::is_zero")]
         usage: UsageTotals,
+        /// Session-scoped task list. Empty for sessions where the
+        /// model hasn't called `task_create`. Sent so the UI can
+        /// rehydrate the task panel on reload without asking the
+        /// harness to replay tool history.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tasks: Vec<mira_tools::TaskItem>,
     },
     /// Fragment of assistant text.
     Token { text: String },
@@ -133,6 +139,11 @@ pub enum ServerMsg {
     /// memory writes visible.
     MemoryLearned { count: usize },
 
+    /// The harness rolled up N older non-system messages into a single
+    /// summary before the current round's model call. UI can render a
+    /// "compacted N turns" chip for transparency.
+    Compacted { messages_removed: usize },
+
     /// The model called the `plan` tool. Open a review modal so the user can
     /// approve / edit / cancel. Client answers with
     /// `ClientMsg::PromptResponse` carrying a `Plan { … }` variant.
@@ -174,6 +185,25 @@ pub enum ServerMsg {
     SubagentToolEnd { parent_call_id: String, result: ToolResult },
     /// A child-level warning (verify failure, hit max_rounds, etc.).
     SubagentWarning { parent_call_id: String, text: String },
+    /// Intermediate progress update from the child, emitted when the
+    /// subagent explicitly calls the `progress` tool. Distinct from
+    /// tokens (which are freeform assistant text) and from warnings
+    /// (which imply something's off) — this is the child announcing
+    /// "here's where I am" during a long investigation.
+    SubagentProgress { parent_call_id: String, text: String },
+    /// The child produced a final summary and its type has
+    /// `review_required: true`. The parent's turn is paused; the UI
+    /// must show the proposed summary and the user picks approve or
+    /// deny (with optional note) before the tool result flows back to
+    /// the parent.
+    SubagentReviewRequest {
+        parent_call_id: String,
+        /// Prompt id the client echoes back in `PromptResponse`.
+        /// Convention: `<parent_call_id>-review`.
+        prompt_id: String,
+        /// Full proposed summary (post-warnings, pre-worktree note).
+        summary: String,
+    },
     /// The child finished — final assistant text is already on the way as
     /// the AgentTool's `ToolEnd` frame. This exists purely so the panel
     /// can flip its status pill from "working" to "done" without waiting
@@ -194,6 +224,7 @@ impl ServerMsg {
             HarnessEvent::Warning(text) => Self::Warning { text },
             HarnessEvent::Usage { round, totals } => Self::Usage { round, totals },
             HarnessEvent::MemoryLearned { count } => Self::MemoryLearned { count },
+            HarnessEvent::Compacted { messages_removed } => Self::Compacted { messages_removed },
         }
     }
 }

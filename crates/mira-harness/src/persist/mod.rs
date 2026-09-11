@@ -60,6 +60,11 @@ pub struct SessionRecord {
     /// compatibility with sessions written before this landed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<SessionId>,
+    /// Session-scoped task list — every `TaskItem` including
+    /// soft-deleted ones (so id sequence resumes exactly). Empty for
+    /// sessions written before the field existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tasks: Vec<mira_tools::TaskItem>,
 }
 
 /// Running token totals for a whole session. Grows monotonically; individual

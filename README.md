@@ -88,8 +88,9 @@ Then talk to it:
 ### Tools
 
 Built-in: `read_file`, `write_file`, `edit_file`, `bash`, `grep`, `glob`,
-`find_symbol`, `git_status` / `git_diff` / `git_log` / `git_commit`,
-`rustfmt`, `web_fetch`, `web_search`, and a set of `memory_*` tools.
+`find_symbol`, `find_references`, `find_callers`, `git_status` /
+`git_diff` / `git_log` / `git_commit`, `rustfmt`, `web_fetch`,
+`web_search`, and a set of `memory_*` tools.
 Every call goes through the permission layer.
 
 Extensible: any MCP server (`stdio` or `http`) registers its own tools —
@@ -156,6 +157,16 @@ other keys in `mira.yaml`.
   build check (`cargo check`, `tsc`, `ruff`, `go build`) and feeds
   failures back into the next turn until it fixes them or hits the retry
   cap.
+
+### Evals
+
+`mira eval` batch-runs regression tasks against the current provider /
+model and prints a pass/fail summary. Tasks live in `evals/tasks/*.yaml`
+and take one of two verifier shapes: `expect_grep` (regex against the
+final assistant message) or `verify` (shell command that must exit 0 in
+the task's isolated tempdir). Optional `fixture:` copies a seed
+directory in before the run. Uses `--json` for CI, `--task <substr>` to
+scope to a single task. Costs real API tokens — not run automatically.
 
 ### Memory
 

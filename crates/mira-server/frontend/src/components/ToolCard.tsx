@@ -354,7 +354,8 @@ function summarize(
  *  the icon fallback triggers for genuinely unknown names only. */
 const KNOWN: Record<string, true> = {
   read_file: true, write_file: true, edit_file: true, grep: true, glob: true,
-  find_symbol: true, bash: true, rustfmt: true, web_fetch: true, web_search: true,
+  find_symbol: true, find_references: true, find_callers: true, bash: true, rustfmt: true, web_fetch: true, web_search: true,
+  task_create: true, task_update: true, task_list: true, task_get: true,
   git_diff: true, git_status: true, git_log: true, git_commit: true,
   memory_read: true, memory_search: true, memory_append: true, memory_edit: true,
   memory_remember: true,
@@ -377,7 +378,17 @@ function pickTarget(tool: string, args: any): string {
     case 'glob':
       return args?.pattern ? String(args.pattern) : '';
     case 'find_symbol':
+    case 'find_references':
+    case 'find_callers':
       return args?.name ? String(args.name) : args?.query ? String(args.query) : '';
+    case 'task_create':
+      return args?.subject ? String(args.subject) : '';
+    case 'task_update':
+      return args?.task_id ? `#${args.task_id}${args.status ? ` → ${args.status}` : ''}` : '';
+    case 'task_get':
+      return args?.task_id ? `#${args.task_id}` : '';
+    case 'task_list':
+      return '';
     case 'web_fetch':
       return args?.url ? String(args.url) : '';
     case 'web_search':

@@ -2,7 +2,7 @@
 name: cartographer
 description: Architecture mapper. Read-only. Use to chart how subsystems connect, trace a flow end to end, or work out where a change should land before anything is edited.
 category: recon
-tools: [read_file, grep, glob, find_symbol, bash]
+tools: [read_file, grep, glob, find_symbol, find_references, find_callers, bash]
 max_rounds: 20
 parallel_safe: true
 route_approvals_to_parent: false

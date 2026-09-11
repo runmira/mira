@@ -229,6 +229,12 @@ export function infoFor(name: string): ToolInfo {
     case 'grep':            return { verbPast: 'Searched',   verbCont: 'Searching',     Icon: MagnifyingGlass };
     case 'glob':            return { verbPast: 'Found',      verbCont: 'Finding',       Icon: MagnifyingGlass };
     case 'find_symbol':     return { verbPast: 'Found',      verbCont: 'Finding',       Icon: MagnifyingGlass };
+    case 'find_references': return { verbPast: 'Found refs',  verbCont: 'Finding refs',  Icon: MagnifyingGlass };
+    case 'find_callers':    return { verbPast: 'Found callers', verbCont: 'Finding callers', Icon: MagnifyingGlass };
+    case 'task_create':     return { verbPast: 'Added task',  verbCont: 'Adding task',   Icon: NotePencil };
+    case 'task_update':     return { verbPast: 'Updated task', verbCont: 'Updating task', Icon: NotePencil };
+    case 'task_list':       return { verbPast: 'Listed tasks', verbCont: 'Listing tasks', Icon: FileText };
+    case 'task_get':        return { verbPast: 'Read task',   verbCont: 'Reading task',  Icon: FileText };
     case 'bash':            return { verbPast: 'Ran',        verbCont: 'Running',       Icon: Terminal };
     case 'rustfmt':         return { verbPast: 'Formatted',  verbCont: 'Formatting',    Icon: Sparkle };
     case 'web_fetch':       return { verbPast: 'Fetched',    verbCont: 'Fetching',      Icon: Globe };

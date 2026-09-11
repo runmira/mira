@@ -30,6 +30,11 @@ export type SubagentTab = {
    *  parent-side rendering conventions. Empty until events start flowing. */
   streamEntries: Entry[];
   streamDone: boolean;
+  /** Set when the child fired a review-required request. The panel
+   *  renders an inline card with Approve / Deny; both actions route
+   *  through `onReview`, which posts the `PromptResponse` and clears
+   *  this field. Null when no review is pending. */
+  pendingReview: null | { promptId: string; summary: string };
 };
 
 type Props = {
@@ -38,9 +43,13 @@ type Props = {
   onSelectTab: (callId: string) => void;
   onCloseTab: (callId: string) => void;
   onClose: () => void;
+  /** Fired when the user answers a review-required prompt. `note` is
+   *  optional and, on approval, gets prepended to the child's summary;
+   *  on denial it becomes the tool-error body. */
+  onReview: (parentCallId: string, promptId: string, approved: boolean, note?: string) => void;
 };
 
-export function SubagentPanel({ tabs, activeCallId, onSelectTab, onCloseTab, onClose }: Props) {
+export function SubagentPanel({ tabs, activeCallId, onSelectTab, onCloseTab, onClose, onReview }: Props) {
   const active = tabs.find((t) => t.callId === activeCallId) ?? tabs[0];
   if (!active) return null;
 
@@ -72,7 +81,7 @@ export function SubagentPanel({ tabs, activeCallId, onSelectTab, onCloseTab, onC
 
       {/* active tab body */}
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <TabBody tab={active} />
+        <TabBody tab={active} onReview={onReview} />
       </div>
     </aside>
   );
@@ -129,7 +138,13 @@ function TabCapsule({
  *  The prompt lives behind the "i" toggle in the header since Codex's
  *  agent windows don't show it and the user typically already knows
  *  what they asked for. */
-function TabBody({ tab }: { tab: SubagentTab }) {
+function TabBody({
+  tab,
+  onReview,
+}: {
+  tab: SubagentTab;
+  onReview: (parentCallId: string, promptId: string, approved: boolean, note?: string) => void;
+}) {
   const identity = identityFor(tab.callId);
   const prompt = extractPrompt(tab.call.function.arguments);
   // Strip the `[mira-agent-id:X]\n` marker before displaying — it's an
@@ -188,6 +203,19 @@ function TabBody({ tab }: { tab: SubagentTab }) {
             {prompt || 'No task was provided.'}
           </div>
         </div>
+      )}
+
+      {tab.pendingReview && (
+        <ReviewCard
+          review={tab.pendingReview}
+          identityTextClass={identity.textClass}
+          onApprove={(note) =>
+            onReview(tab.callId, tab.pendingReview!.promptId, true, note)
+          }
+          onDeny={(note) =>
+            onReview(tab.callId, tab.pendingReview!.promptId, false, note)
+          }
+        />
       )}
 
       {/* Live child transcript — renders like a mini chat as tokens
@@ -310,13 +338,26 @@ function SubagentEntryView({ entry }: { entry: Entry }) {
           onDecide={() => { /* subagents auto-approve — no user gate here */ }}
         />
       );
-    case 'warning':
+    case 'warning': {
+      // Progress emissions from the child's `progress` tool ride the
+      // warning stream with a `[progress]` prefix so we can style them
+      // as blue "in-flight status" chips rather than amber warnings.
+      const progress = entry.text.match(/^\[progress\]\s*(.*)$/);
+      if (progress) {
+        return (
+          <div className="inline-flex w-fit items-start gap-1.5 rounded-md border border-mira-blue/25 bg-mira-blue/[0.06] px-2 py-1 text-[11.5px] text-mira-blue">
+            <span className="font-semibold">…</span>
+            <span className="break-words">{progress[1]}</span>
+          </div>
+        );
+      }
       return (
         <div className="inline-flex w-fit items-start gap-1.5 rounded-md border border-amber-500/25 bg-amber-500/[0.06] px-2 py-1 text-[11.5px] text-amber-300">
           <span className="font-semibold">!</span>
           <span className="break-words">{entry.text}</span>
         </div>
       );
+    }
     case 'error':
       return (
         <div className="font-mono text-[11.5px] text-destructive">
@@ -653,4 +694,69 @@ function formatExtra(v: unknown): string {
 
 function humanize(s: string): string {
   return s.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+/** Approve/Deny card the SubagentPanel renders when a review-required
+ *  child has produced its final summary and is blocked on human input.
+ *  Approve returns the summary to the parent (optionally with a note
+ *  prepended); Deny turns the tool result into an error whose body is
+ *  the note. The card is dismissed as soon as the user picks either
+ *  side — App.tsx clears `pendingReview` locally, and the backend's
+ *  tool_end lands moments later with the resolved result. */
+function ReviewCard({
+  review,
+  identityTextClass,
+  onApprove,
+  onDeny,
+}: {
+  review: { promptId: string; summary: string };
+  identityTextClass: string;
+  onApprove: (note?: string) => void;
+  onDeny: (note?: string) => void;
+}) {
+  const [note, setNote] = useState('');
+
+  return (
+    <div className="rounded-lg border border-amber-500/40 bg-amber-500/[0.05] p-4">
+      <div className="mb-2 flex items-center gap-2">
+        <Info className={cn('size-4', identityTextClass)} weight="fill" />
+        <span className="text-[13px] font-semibold text-foreground">
+          Review required
+        </span>
+        <span className="ml-auto rounded-full bg-amber-500/15 px-2 py-0.5 text-[10.5px] font-semibold uppercase tracking-wider text-amber-300">
+          awaiting decision
+        </span>
+      </div>
+      <p className="mb-3 text-[12px] leading-relaxed text-muted-foreground">
+        The subagent finished and is waiting for you to approve its summary
+        before the parent gets it. Deny to send back an error instead.
+      </p>
+      <div className="mb-3 max-h-[36vh] overflow-y-auto whitespace-pre-wrap rounded-md border border-border/60 bg-background px-3 py-2 text-[13px] leading-relaxed text-foreground/85">
+        {review.summary || '(empty summary)'}
+      </div>
+      <textarea
+        value={note}
+        onChange={(e) => setNote(e.target.value)}
+        placeholder="Optional note (prepended on approve, sent as reason on deny)"
+        rows={2}
+        className="mb-3 w-full resize-none rounded-md border border-border bg-background px-3 py-2 text-[12.5px] leading-relaxed placeholder:text-muted-foreground/60 focus:border-foreground/30 focus:outline-none"
+      />
+      <div className="flex justify-end gap-1.5">
+        <button
+          type="button"
+          onClick={() => onDeny(note.trim() ? note.trim() : undefined)}
+          className="rounded-md border border-border bg-background px-3 py-1.5 text-[12.5px] text-foreground transition-colors hover:bg-accent"
+        >
+          Deny
+        </button>
+        <button
+          type="button"
+          onClick={() => onApprove(note.trim() ? note.trim() : undefined)}
+          className="rounded-md bg-emerald-500 px-3 py-1.5 text-[12.5px] font-medium text-emerald-950 transition-colors hover:bg-emerald-400"
+        >
+          Approve
+        </button>
+      </div>
+    </div>
+  );
 }

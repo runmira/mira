@@ -312,6 +312,12 @@ fn handle_harness_event(
                 if count == 1 { "" } else { "s" }
             ));
         }
+        HarnessEvent::Compacted { messages_removed } => {
+            state.push_warning(format!(
+                "[context] compacted {messages_removed} earlier message{} into a summary",
+                if messages_removed == 1 { "" } else { "s" }
+            ));
+        }
         HarnessEvent::Done => {
             state.streaming = false;
             *agent_stream = None;

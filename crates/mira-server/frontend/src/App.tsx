@@ -22,6 +22,7 @@ import {
 import { PlanCard } from './components/PlanCard';
 import { AgentCard, AgentGroup } from './components/AgentCard';
 import { SubagentPanel, type SubagentTab } from './components/SubagentPanel';
+import { TaskListPanel } from './components/TaskListPanel';
 import { ToolGroup } from './components/ToolGroup';
 import type {
   DiffPreview,
@@ -31,6 +32,7 @@ import type {
   PlanStep,
   ServerMsg,
   SettingsView,
+  TaskItem,
   ToolCall,
   ToolResult,
   UsageTotals,
@@ -49,6 +51,12 @@ export type SubagentStreamState = {
   prompt?: string;
   entries: Entry[];
   done: boolean;
+  /** When set, the child produced a summary that requires human review
+   *  before it's returned to the parent. The SubagentPanel renders an
+   *  inline card with Approve / Deny buttons; approving fires the
+   *  server-bound `PromptResponse` and clears this field. Set from the
+   *  `subagent_review_request` frame. */
+  pendingReview: null | { promptId: string; summary: string };
 };
 
 type ToolEntry = {
@@ -173,6 +181,10 @@ export default function App() {
   const [reviewPanelOpen, setReviewPanelOpen] = useState(false);
   const [reviewState, setReviewState] = useState<ReviewState | null>(null);
   const [usage, setUsage] = useState<UsageTotals | null>(null);
+  // Live task list — hydrated from `ready.tasks` on socket open and
+  // upserted whenever a `task_*` tool result lands. Rendered as a
+  // persistent "Plan" card near the top of the transcript.
+  const [tasks, setTasks] = useState<TaskItem[]>([]);
   // Force a re-render every second while a turn is active so the live
   // "Working…" counter ticks. Cheap; the tree is small and only mounts
   // when the browser tab is visible.
@@ -228,6 +240,7 @@ export default function App() {
         setTurnTimings(rebuildTurnTimings(msg.turns ?? []));
         setExpandedTurns(new Set());
         setUsage(msg.usage ?? null);
+        setTasks(msg.tasks ?? []);
         setBusy(false);
         setThinking(false);
         setSidebarRefresh((n) => n + 1);
@@ -268,6 +281,10 @@ export default function App() {
         // back before the next text token arrives.
         setThinking(true);
         setEntries((prev) => attachToolResult(prev, msg.result));
+        // Piggyback: task_* tools ship the current task or full list in
+        // `data`. Upsert so the Plan panel stays live without another
+        // round-trip.
+        setTasks((prev) => applyTaskResult(prev, msg.result));
         break;
       case 'turn_complete':
         // A turn ended (assistant round complete). More may follow if there
@@ -330,6 +347,24 @@ export default function App() {
       case 'usage':
         setUsage(msg.totals);
         break;
+      case 'memory_learned':
+        setEntries((prev) => [
+          ...prev,
+          {
+            kind: 'warning',
+            text: `[memory] remembered ${msg.count} thing${msg.count === 1 ? '' : 's'}`,
+          },
+        ]);
+        break;
+      case 'compacted':
+        setEntries((prev) => [
+          ...prev,
+          {
+            kind: 'warning',
+            text: `[context] compacted ${msg.messages_removed} earlier message${msg.messages_removed === 1 ? '' : 's'} into a summary`,
+          },
+        ]);
+        break;
       case 'subagent_started':
         setSubagentState((prev) => {
           const next = new Map(prev);
@@ -341,6 +376,7 @@ export default function App() {
             prompt: msg.prompt,
             entries: existing?.entries ?? [],
             done: false,
+            pendingReview: existing?.pendingReview ?? null,
           });
           return next;
         });
@@ -373,6 +409,26 @@ export default function App() {
         setSubagentState((prev) => updateSubagent(prev, msg.parent_call_id, (s) => ({
           ...s,
           entries: [...s.entries, { kind: 'warning', text: msg.text }],
+        })));
+        break;
+      case 'subagent_progress':
+        // Streaming intermediate summary — surfaces as a `[progress]`
+        // chip in the SubagentPanel (styled distinctly from warnings so
+        // the reader can tell "here's where I am" from "something's off").
+        setSubagentState((prev) => updateSubagent(prev, msg.parent_call_id, (s) => ({
+          ...s,
+          entries: [...s.entries, { kind: 'warning', text: `[progress] ${msg.text}` }],
+        })));
+        break;
+      case 'subagent_review_request':
+        // Auto-open the tab so the user can't miss the review — the
+        // parent's turn is blocked until Approve/Deny lands. If it's
+        // already open, we just annotate its state.
+        setAgentTabs((prev) => (prev.includes(msg.parent_call_id) ? prev : [...prev, msg.parent_call_id]));
+        setActiveAgentTab(msg.parent_call_id);
+        setSubagentState((prev) => updateSubagent(prev, msg.parent_call_id, (s) => ({
+          ...s,
+          pendingReview: { promptId: msg.prompt_id, summary: msg.summary },
         })));
         break;
       case 'subagent_done':
@@ -409,6 +465,28 @@ export default function App() {
     // Record the decision locally so the card switches to its resolved state
     // immediately, without waiting for tool_end to round-trip.
     setEntries((prev) => recordPlanDecision(prev, callId, { approved, steps, note }));
+  }
+
+  /** Answer a subagent's review-required prompt. Clears `pendingReview`
+   *  locally so the SubagentPanel immediately drops the review card; the
+   *  backend's tool_end will land shortly after with the final result. */
+  function replyToSubagentReview(
+    parentCallId: string,
+    promptId: string,
+    approved: boolean,
+    note?: string,
+  ) {
+    wsRef.current?.send({
+      type: 'prompt_response',
+      prompt_id: promptId,
+      kind: 'subagent_review',
+      approved,
+      note,
+    });
+    setSubagentState((prev) => updateSubagent(prev, parentCallId, (s) => ({
+      ...s,
+      pendingReview: null,
+    })));
   }
 
   async function runReview(args: string) {
@@ -534,6 +612,7 @@ export default function App() {
           result: entry.result,
           streamEntries: stream?.entries ?? [],
           streamDone: stream?.done ?? false,
+          pendingReview: stream?.pendingReview ?? null,
         };
       })
       .filter((t): t is SubagentTab => t !== null);
@@ -682,6 +761,7 @@ export default function App() {
                 <EmptyState />
               ) : (
                 <div className="mx-auto flex max-w-3xl flex-col gap-2">
+                  {tasks.length > 0 && <TaskListPanel tasks={tasks} />}
                   {turns.map((turn, i) => (
                     <TurnView
                       key={`turn-${i}`}
@@ -755,6 +835,7 @@ export default function App() {
           onSelectTab={setActiveAgentTab}
           onCloseTab={closeAgentTab}
           onClose={closeSubagentPanel}
+          onReview={replyToSubagentReview}
         />
       )}
 
@@ -791,6 +872,7 @@ function updateSubagent(
     parentCallId,
     entries: [],
     done: false,
+    pendingReview: null,
   };
   const next = new Map(prev);
   next.set(parentCallId, f(cur));
@@ -825,6 +907,25 @@ function attachToolResult(prev: Entry[], result: ToolResult): Entry[] {
     // Preserve "denied" state; otherwise mark done.
     status: t.status === 'denied' ? 'denied' : 'complete',
   }));
+}
+
+/**
+ * Merge a task_* tool result into the live task list.
+ *
+ * Contract: task_create / task_update / task_get emit
+ * `{ task: FullItem }`; task_list emits `{ tasks: FullItem[] }`. Any
+ * other tool (or an error result) → no-op.
+ */
+function applyTaskResult(prev: TaskItem[], result: ToolResult): TaskItem[] {
+  if (result.is_error || !result.data || typeof result.data !== 'object') return prev;
+  const d = result.data as { task?: TaskItem; tasks?: TaskItem[] };
+  if (Array.isArray(d.tasks)) return d.tasks;
+  if (d.task && typeof d.task.id === 'number') {
+    const idx = prev.findIndex((t) => t.id === d.task!.id);
+    if (idx === -1) return [...prev, d.task];
+    return [...prev.slice(0, idx), d.task, ...prev.slice(idx + 1)];
+  }
+  return prev;
 }
 
 function updateTool(prev: Entry[], callId: string, f: (t: ToolEntry) => ToolEntry): Entry[] {
@@ -1259,10 +1360,17 @@ function EntryView({
       //   `[verify] … passed`   → green success chip
       //   `[verify] … failed`   → amber warning chip
       //   `[verify] running`    → blue in-flight chip
+      //   `[progress] ...`      → blue "in-flight status" chip (subagent
+      //                            emit_progress → SubagentPanel stream)
+      //   `[memory] ...`        → violet "learned" chip
+      //   `[context] ...`       → slate "compacted" chip
       // Everything else stays the compact monospace `! …` line.
       const undo = entry.text.match(/^\[undo\]\s*(.*)$/);
       const conflict = entry.text.match(/^\[file-conflict\]\s*(.*)$/);
       const verify = entry.text.match(/^\[verify\]\s*(.*)$/);
+      const progress = entry.text.match(/^\[progress\]\s*(.*)$/);
+      const memory = entry.text.match(/^\[memory\]\s*(.*)$/);
+      const context = entry.text.match(/^\[context\]\s*(.*)$/);
       if (undo) {
         return (
           <div className="flex justify-start">
@@ -1283,6 +1391,16 @@ function EntryView({
           </div>
         );
       }
+      if (progress) {
+        return (
+          <div className="flex justify-start">
+            <div className="inline-flex items-start gap-2 rounded-md border border-mira-blue/25 bg-mira-blue/[0.06] px-3 py-1.5 text-[12.5px] text-mira-blue">
+              <span className="font-semibold">… progress</span>
+              <span className="min-w-0 break-words opacity-90">{progress[1]}</span>
+            </div>
+          </div>
+        );
+      }
       if (verify) {
         const body = verify[1];
         const passed = /passed/i.test(body);
@@ -1297,6 +1415,26 @@ function EntryView({
             <div className={cn('inline-flex items-start gap-2 rounded-md border px-3 py-1.5 text-[12.5px]', cls)}>
               <span className="font-semibold">✓ verify</span>
               <span className="min-w-0 break-words opacity-90">{body}</span>
+            </div>
+          </div>
+        );
+      }
+      if (memory) {
+        return (
+          <div className="flex justify-start">
+            <div className="inline-flex items-start gap-2 rounded-md border border-violet-500/25 bg-violet-500/[0.06] px-3 py-1.5 text-[12.5px] text-violet-300">
+              <span className="font-semibold">✦ memory</span>
+              <span className="min-w-0 break-words text-violet-200/90">{memory[1]}</span>
+            </div>
+          </div>
+        );
+      }
+      if (context) {
+        return (
+          <div className="flex justify-start">
+            <div className="inline-flex items-start gap-2 rounded-md border border-slate-500/25 bg-slate-500/[0.06] px-3 py-1.5 text-[12.5px] text-slate-300">
+              <span className="font-semibold">≡ context</span>
+              <span className="min-w-0 break-words text-slate-200/90">{context[1]}</span>
             </div>
           </div>
         );

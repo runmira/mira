@@ -18,8 +18,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::StreamExt;
 use mira_agents::AgentRegistry;
-use mira_ai::{ChatProvider, ToolSpec};
-use mira_core::{Role, ToolCall, ToolResult};
+use mira_ai::{ChatEvent, ChatProvider, ChatRequest, ToolSpec};
+use mira_core::{Message, Role, ToolCall, ToolResult};
 use mira_harness::{Approver, AutoApprover, HarnessEvent, Session, SessionConfig, SessionStore};
 use mira_policy::{Policy, PolicyConfig};
 use mira_tools::context::{ChildCancel, ToolContext};
@@ -126,12 +126,25 @@ pub struct PlanResponse {
     pub note: Option<String>,
 }
 
+/// Client → server payload for a subagent-review prompt. `approved`
+/// controls whether the child's summary flows back to the parent as
+/// a success or as an error. Optional `note` lets the reviewer leave
+/// a free-text remark — prepended to the summary on approval, used as
+/// the error body on denial.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SubagentReviewResponse {
+    pub approved: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
 /// Union of every response shape the client can send. Extend as new
 /// interactive tools land (question, options, etc.).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PromptResponse {
     Plan(PlanResponse),
+    SubagentReview(SubagentReviewResponse),
 }
 
 pub struct PlanTool {
@@ -219,6 +232,18 @@ impl Tool for PlanTool {
 
         let response = match self.channel.ask(prompt_id, msg).await {
             Some(PromptResponse::Plan(p)) => p,
+            Some(_) => {
+                // Wrong response kind — a client bug landed a subagent_review
+                // (or a future prompt shape) on a plan prompt id. Treat as a
+                // graceful cancel so the model gets an actionable result
+                // instead of hanging.
+                return Ok(ToolResult::ok(
+                    call.id.clone(),
+                    "Plan prompt received the wrong response kind — treating \
+                     as cancelled. Ask the user how they'd like to proceed."
+                        .to_owned(),
+                ));
+            }
             None => {
                 // No UI connected / user dropped the socket. Return a
                 // clear-but-not-error result so the model can adapt (e.g.
@@ -340,6 +365,13 @@ pub struct AgentTool {
     /// (Auto → Yolo etc.), which is what caused the "still asks for
     /// permission after I set allow-everything" bug.
     parent_policy: Option<Arc<Mutex<Policy>>>,
+    /// Prompt channel for review-required subagents. When wired and the
+    /// resolved type has `review_required: true`, the child's final
+    /// summary is broadcast to the UI as a `SubagentReviewRequest` and
+    /// the tool blocks until the user approves or denies via
+    /// `PromptResponse::SubagentReview`. Not required for other flows —
+    /// spawns without a channel still return their summaries normally.
+    channel: Option<PromptChannel>,
 }
 
 impl AgentTool {
@@ -357,7 +389,17 @@ impl AgentTool {
             store: None,
             parent_approver: None,
             parent_policy: None,
+            channel: None,
         }
+    }
+
+    /// Wire the interactive prompt channel so review-required types can
+    /// block on a human decision before returning. Also enables future
+    /// interactive shapes (question/options prompts) from within the
+    /// subagent flow without another builder.
+    pub fn with_prompt_channel(mut self, channel: PromptChannel) -> Self {
+        self.channel = Some(channel);
+        self
     }
 
     /// Enable live child-event forwarding. When set, each HarnessEvent
@@ -400,6 +442,110 @@ impl AgentTool {
     pub fn with_parent_policy(mut self, policy: Arc<Mutex<Policy>>) -> Self {
         self.parent_policy = Some(policy);
         self
+    }
+
+    /// LLM-as-router for `agent { type: "auto", prompt: ... }`. Runs a
+    /// tiny classification call on `self.provider` (same provider as the
+    /// parent) with a system prompt listing every registered type +
+    /// description, and returns the chosen type name. Falls back to
+    /// `explore` on any error — network, parse, unknown type — so the
+    /// spawn always makes forward progress.
+    ///
+    /// Uses the parent's `default_model` intentionally: the router runs
+    /// on the same account/rate limits the user already trusts, and
+    /// modern models pick a one-word answer in a fraction of a second
+    /// even at "big" tier. A future `agents.router_model` config knob
+    /// could pin a cheaper model, but the current shape gets to
+    /// correctness first.
+    async fn route_auto(&self, task: &str) -> String {
+        let fallback = "explore".to_owned();
+        if self.agents.types.is_empty() {
+            return fallback;
+        }
+
+        let roster = self
+            .agents
+            .types
+            .values()
+            .map(|t| {
+                let desc = if t.description.is_empty() {
+                    "(no description)"
+                } else {
+                    t.description.as_str()
+                };
+                format!("- {}: {}", t.name, desc)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let system = format!(
+            "You are a subagent router. Given a task, pick the single best \
+             subagent type from the roster below. Reply with ONLY the type \
+             name — one word, lowercase, nothing else. No explanation, no \
+             punctuation, no code fences.\n\n\
+             Roster:\n{roster}"
+        );
+
+        let req = ChatRequest {
+            model: self.default_model.clone(),
+            messages: vec![
+                Message::system(system),
+                Message::user(format!("Task: {task}")),
+            ],
+            tools: Vec::new(),
+            temperature: Some(0.0),
+            max_tokens: Some(32),
+            reasoning_effort: None,
+            response_format: None,
+        };
+
+        let mut stream = match self.provider.stream(req).await {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(%e, "auto-router: provider call failed; using explore");
+                return fallback;
+            }
+        };
+
+        let mut buf = String::new();
+        while let Some(evt) = stream.next().await {
+            match evt {
+                Ok(ChatEvent::TextDelta(t)) => buf.push_str(&t),
+                Ok(ChatEvent::Done(_)) => break,
+                Err(e) => {
+                    warn!(%e, "auto-router: stream error; using explore");
+                    return fallback;
+                }
+                _ => {}
+            }
+        }
+
+        // Take the first non-empty line, lowercase it, and strip anything
+        // that isn't a valid type-name char. Handles the common failure
+        // modes: model prefixes with "```", wraps in quotes, or answers
+        // "explore." with a trailing period.
+        let raw = buf
+            .trim()
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
+        let cleaned: String = raw
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+            .collect();
+
+        if self.agents.get(&cleaned).is_some() {
+            cleaned
+        } else {
+            warn!(
+                picked = %cleaned,
+                raw = %buf.trim(),
+                "auto-router returned unknown type; using explore"
+            );
+            fallback
+        }
     }
 }
 
@@ -444,9 +590,12 @@ impl Tool for AgentTool {
                 .collect::<Vec<_>>()
                 .join("\n");
             format!(
-                "Optional named type. Available types:\n{roster}\n\nWhen set, \
-                 defaults (tools/model/prompt) come from the type; explicit \
-                 args below still override.",
+                "Optional named type. Available types:\n{roster}\n\nSpecial \
+                 value `auto` runs a tiny classification call that picks the \
+                 best fit from the roster for you — use it when you don't \
+                 know which specialist applies, or want the router to try. \
+                 When set, defaults (tools/model/prompt) come from the type; \
+                 explicit args below still override.",
             )
         };
 
@@ -539,7 +688,27 @@ impl Tool for AgentTool {
     }
 
     async fn invoke(&self, call: &ToolCall, ctx: &ToolContext) -> Result<ToolResult, ToolError> {
-        let args: AgentArgs = call.parse_arguments()?;
+        let mut args: AgentArgs = call.parse_arguments()?;
+
+        // `type: "auto"` — LLM-as-router picks the specialist for us
+        // before the rest of the resolution runs. Falls back to `explore`
+        // internally on any failure so this branch always yields a
+        // resolvable type name and the downstream "unknown type" error
+        // path never fires for `auto`.
+        if args
+            .r#type
+            .as_deref()
+            .map(|s| s.trim().eq_ignore_ascii_case("auto"))
+            .unwrap_or(false)
+        {
+            let routed = self.route_auto(&args.prompt).await;
+            info!(
+                task = %args.prompt.chars().take(80).collect::<String>(),
+                routed = %routed,
+                "auto-routed subagent"
+            );
+            args.r#type = Some(routed);
+        }
 
         // Depth cap. The parent's ambient depth = ctx.agent_depth; the
         // child we'd spawn would be at depth = ctx.agent_depth + 1. Refuse
@@ -621,7 +790,19 @@ impl Tool for AgentTool {
             if let Some(policy) = &self.parent_policy {
                 nested = nested.with_parent_policy(policy.clone());
             }
+            if let Some(ch) = &self.channel {
+                nested = nested.with_prompt_channel(ch.clone());
+            }
             child_registry.register(nested);
+        }
+        // Streaming intermediate summaries: give every subagent a
+        // `progress` tool that broadcasts `SubagentProgress` frames on
+        // the events bus. The tool captures the parent's call id at
+        // spawn time so its emissions land on the right SubagentPanel
+        // tab. Skipped when no events channel is wired (headless / test).
+        if let Some(tx) = &self.events_tx {
+            let progress = ProgressTool::new(tx.clone(), call.id.to_string());
+            child_registry.register(progress);
         }
         let child_registry = Arc::new(child_registry);
 
@@ -986,6 +1167,73 @@ impl Tool for AgentTool {
             out
         };
 
+        // Human-in-the-loop review gate (Round 4). When the type has
+        // `review_required: true`, block returning the summary to the
+        // parent until the user approves via the prompt channel. Denial
+        // becomes a tool-error whose body is the reviewer's note (so the
+        // parent LLM can reason about the rejection). Approval with a
+        // note prepends `[reviewer] <note>` to the summary. When no
+        // channel is wired (headless / test), fail open with a warning
+        // — otherwise the tool would hang the whole session waiting for
+        // a UI that isn't there.
+        let body_with_warnings = if type_def
+            .and_then(|t| t.review_required)
+            .unwrap_or(false)
+        {
+            if let Some(channel) = &self.channel {
+                let prompt_id = format!("{}-review", parent_call_id);
+                let msg = ServerMsg::SubagentReviewRequest {
+                    parent_call_id: parent_call_id.clone(),
+                    prompt_id: prompt_id.clone(),
+                    summary: body_with_warnings.clone(),
+                };
+                info!(
+                    parent_call_id = %parent_call_id,
+                    "awaiting human review of subagent summary"
+                );
+                match channel.ask(prompt_id, msg).await {
+                    Some(PromptResponse::SubagentReview(r)) if !r.approved => {
+                        let note = r
+                            .note
+                            .filter(|n| !n.trim().is_empty())
+                            .unwrap_or_else(|| "denied by reviewer".to_owned());
+                        return Ok(ToolResult::err(
+                            call.id.clone(),
+                            format!("[reviewer denied] {note}"),
+                        ));
+                    }
+                    Some(PromptResponse::SubagentReview(r)) => match r.note {
+                        Some(n) if !n.trim().is_empty() => {
+                            format!("[reviewer] {}\n\n{body_with_warnings}", n.trim())
+                        }
+                        _ => body_with_warnings,
+                    },
+                    Some(_) => {
+                        warn!(
+                            parent_call_id = %parent_call_id,
+                            "review prompt returned wrong response kind; using summary as-is"
+                        );
+                        body_with_warnings
+                    }
+                    None => {
+                        warn!(
+                            parent_call_id = %parent_call_id,
+                            "review prompt channel dropped; using summary as-is"
+                        );
+                        body_with_warnings
+                    }
+                }
+            } else {
+                warn!(
+                    parent_call_id = %parent_call_id,
+                    "review_required set but no prompt channel wired; using summary as-is"
+                );
+                body_with_warnings
+            }
+        } else {
+            body_with_warnings
+        };
+
         // Prepend a machine-readable marker with the child's session id
         // so the frontend can rehydrate the SubagentPanel after a
         // browser reload by fetching `/api/sessions/:id/history`. The
@@ -1046,7 +1294,8 @@ fn subagent_wire(parent_call_id: &str, evt: &HarnessEvent) -> Option<ServerMsg> 
         HarnessEvent::Done => None, // Handled explicitly by caller.
         HarnessEvent::TurnComplete
         | HarnessEvent::Usage { .. }
-        | HarnessEvent::MemoryLearned { .. } => None,
+        | HarnessEvent::MemoryLearned { .. }
+        | HarnessEvent::Compacted { .. } => None,
     }
 }
 
@@ -1058,6 +1307,10 @@ const READ_ONLY_TOOL_NAMES: &[&str] = &[
     "grep",
     "glob",
     "find_symbol",
+    "find_references",
+    "find_callers",
+    "task_list",
+    "task_get",
     "memory_read",
     "memory_search",
     "web_fetch",
@@ -1130,7 +1383,7 @@ fn subagent_system_prompt() -> &'static str {
      agent to accomplish one specific task.\n\n\
      WORKFLOW (mandatory, in this order):\n\
      1. INVESTIGATE. Call your tools (grep / read_file / glob / find_symbol / \
-        bash) enough times to actually answer the task. Multiple tool calls \
+        find_references / find_callers / bash) enough times to actually answer the task. Multiple tool calls \
         across multiple turns is normal and expected — a real research \
         question typically needs 5-15 tool calls before you have enough to \
         conclude. Do NOT produce your final summary until you have \
@@ -1152,5 +1405,101 @@ fn subagent_system_prompt() -> &'static str {
        findings beat paragraphs. Cite `path/to/file.rs:LINE` for every \
        concrete claim.\n\
      - If your type has a schema in its addendum, your FINAL message must \
-       match it — but only your final message, not intermediate turns."
+       match it — but only your final message, not intermediate turns.\n\
+     - When your task takes many tool calls (5+ turns of exploration or \
+       edits), call the `progress` tool every few calls with a one-line \
+       status. The parent and the user see those updates live in the \
+       subagent panel — they're how you avoid looking stuck. Don't emit \
+       progress on every turn; just at meaningful checkpoints \
+       (\"found the auth flow, reading callers now\", \"finished the \
+       migration, running tests\")."
+}
+
+/* ---------- progress tool (streaming intermediate summaries) ---------- */
+
+/// Tool the subagent calls to yield a one-line status update to the
+/// parent + the user. Emits a `SubagentProgress` frame on the events
+/// channel; the frontend renders these as chips in the SubagentPanel
+/// so a long delegation doesn't feel opaque.
+///
+/// Constructed per-spawn inside `AgentTool::invoke` with the parent's
+/// events channel + the parent's tool-call id baked in. The subagent's
+/// registry gets this instance directly so the model has a first-class
+/// tool call (not some out-of-band side channel) to signal progress.
+pub struct ProgressTool {
+    events_tx: broadcast::Sender<ServerMsg>,
+    parent_call_id: String,
+}
+
+impl ProgressTool {
+    pub fn new(events_tx: broadcast::Sender<ServerMsg>, parent_call_id: String) -> Self {
+        Self {
+            events_tx,
+            parent_call_id,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct ProgressArgs {
+    /// One-line status. Model-facing description spells out the shape.
+    text: String,
+}
+
+#[async_trait]
+impl Tool for ProgressTool {
+    fn spec(&self) -> ToolSpec {
+        spec(
+            "progress",
+            "Emit an intermediate status update visible to the parent and \
+             the user while you keep working. Use ONCE every few tool \
+             calls during long investigations or multi-file edits so the \
+             parent isn't blind while you're exploring. Keep it to one \
+             sentence: what you just learned or what you're doing next. \
+             Do NOT emit progress on every turn — noise is worse than \
+             silence.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "One-line status. Good: 'Found 3 files touching WsApprover; reading main.rs now', 'Migration applied, running tests'. Bad: essays, verbatim tool output, repeated messages."
+                    }
+                },
+                "required": ["text"]
+            }),
+        )
+    }
+
+    fn action(&self) -> Action {
+        // No side effects on the filesystem or shell — pure signalling.
+        Action::Pure
+    }
+
+    fn parallel_safe(&self, _call: &ToolCall) -> bool {
+        true
+    }
+
+    async fn invoke(
+        &self,
+        call: &ToolCall,
+        _ctx: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let args: ProgressArgs = call.parse_arguments()?;
+        let text = args.text.trim().to_owned();
+        if text.is_empty() {
+            // Nothing to broadcast — still succeed so the model doesn't
+            // get error-looped over an empty string.
+            return Ok(ToolResult::ok(call.id.clone(), "noted (empty)"));
+        }
+        // Fire-and-forget: a zero-subscriber broadcast just drops the
+        // frame, which is fine for headless / test contexts.
+        let _ = self.events_tx.send(ServerMsg::SubagentProgress {
+            parent_call_id: self.parent_call_id.clone(),
+            text: text.clone(),
+        });
+        // Return an ack the model can key off. Keep it terse — the model
+        // shouldn't be reading progress-tool results as instructions.
+        Ok(ToolResult::ok(call.id.clone(), "progress noted"))
+    }
 }

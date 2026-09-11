@@ -6,6 +6,8 @@
 
 pub mod bash;
 pub mod edit;
+pub mod find_callers;
+pub mod find_references;
 pub mod find_symbol;
 pub mod git;
 pub mod glob;
@@ -13,6 +15,7 @@ pub mod grep;
 pub mod memory;
 pub mod read;
 pub mod rustfmt;
+pub mod task_tools;
 pub mod web_fetch;
 pub mod web_search;
 pub mod write;
@@ -37,6 +40,8 @@ pub fn register_core(reg: &mut Registry) {
     reg.register(grep::Grep);
     reg.register(glob::Glob);
     reg.register(find_symbol::FindSymbol);
+    reg.register(find_references::FindReferences);
+    reg.register(find_callers::FindCallers);
     reg.register(git::GitStatus);
     reg.register(git::GitDiff);
     reg.register(git::GitLog);
@@ -44,6 +49,10 @@ pub fn register_core(reg: &mut Registry) {
     reg.register(web_search::WebSearch);
     reg.register(web_fetch::WebFetch);
     reg.register(rustfmt::RustFmt);
+    reg.register(task_tools::TaskCreate);
+    reg.register(task_tools::TaskList);
+    reg.register(task_tools::TaskGet);
+    reg.register(task_tools::TaskUpdateTool);
 }
 
 /// Register the memory tools. Split out so callers can gate on the

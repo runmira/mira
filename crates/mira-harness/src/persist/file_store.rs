@@ -127,6 +127,7 @@ mod tests {
             turns: Vec::new(),
             usage: Default::default(),
             parent_id: None,
+            tasks: Vec::new(),
         }
     }
 

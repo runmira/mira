@@ -1,5 +1,6 @@
 mod approver;
 mod config;
+mod eval;
 mod repl;
 mod review;
 mod serve;
@@ -87,6 +88,8 @@ enum Command {
     Serve(serve::ServeArgs),
     /// Two-stage diff review: generate findings, then hostile re-verify.
     Review(review::ReviewArgs),
+    /// Batch-run regression eval tasks and print a summary.
+    Eval(eval::EvalArgs),
 }
 
 #[tokio::main]
@@ -101,6 +104,10 @@ async fn main() -> Result<()> {
     if let Some(Command::Review(args)) = cli.command.clone() {
         init_tracing(false);
         return review::run(&cli, args).await;
+    }
+    if let Some(Command::Eval(args)) = cli.command.clone() {
+        init_tracing(false);
+        return eval::run(&cli, args).await;
     }
 
     let use_tui = !cli.simple && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();

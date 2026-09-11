@@ -24,6 +24,7 @@ shellexpand   = { workspace = true }
 similar       = { workspace = true }
 rmcp          = { workspace = true }
 glob          = { workspace = true }
+regex         = { workspace = true }
 reqwest       = { workspace = true }
 html2text     = { workspace = true }
 futures       = { workspace = true }

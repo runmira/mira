@@ -159,7 +159,11 @@ pub async fn run(mut cfg: ServerConfig) -> Result<()> {
     // the same mode + rules the parent does, so mode swaps (Auto →
     // Yolo) and always-allow rules the user accumulates propagate to
     // the child immediately.
-    .with_parent_policy(cfg.policy.clone());
+    .with_parent_policy(cfg.policy.clone())
+    // Prompt channel for review-required types — the child's final
+    // summary blocks on a user Approve / Deny before returning to the
+    // parent. Same channel PlanTool uses.
+    .with_prompt_channel(prompt_channel.clone());
     // Persist child sessions when the parent's store is available. The
     // panel uses `/api/sessions/:id/history` to rebuild a child's
     // transcript on browser reload.

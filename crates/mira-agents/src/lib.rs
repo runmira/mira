@@ -98,6 +98,21 @@ pub struct AgentType {
     /// capable types flip it on to make parallel spawns safe.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<bool>,
+    /// Name of another type this one inherits defaults from. During
+    /// `resolve_inheritance` the parent's fields fill in any of the
+    /// child's unset (`None` / empty) fields — the child's explicit
+    /// settings always win. Chains are capped at `MAX_EXTENDS_DEPTH`;
+    /// cycles are detected and logged rather than crashing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extends: Option<String>,
+    /// Block the child's final summary on human approval before handing
+    /// it back to the parent. The harness broadcasts a review request
+    /// with the proposed summary; the user can approve, approve with a
+    /// note, or deny (which returns an error to the parent). Meant for
+    /// autonomous flows where an unattended parent shouldn't act on a
+    /// subagent's word without a human in the loop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_required: Option<bool>,
 }
 
 /// Ordered map of type name → definition. `BTreeMap` for stable listing
@@ -127,6 +142,100 @@ impl AgentRegistry {
     /// All type names in stable order.
     pub fn names(&self) -> Vec<String> {
         self.types.keys().cloned().collect()
+    }
+
+    /// Walk every type that has `extends` set and fold the parent's
+    /// fields into the child. The child's explicit settings always win;
+    /// the parent only fills in `None`/empty slots. Chains are capped
+    /// at `MAX_EXTENDS_DEPTH`, and cycles are detected + logged.
+    ///
+    /// Idempotent: running twice is a no-op because the second pass sees
+    /// already-filled fields and the "child wins" rule leaves them alone.
+    pub fn resolve_inheritance(&mut self) {
+        let names: Vec<String> = self.types.keys().cloned().collect();
+        let mut resolved: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for name in names {
+            let mut path: Vec<String> = Vec::new();
+            self.resolve_one(&name, &mut resolved, &mut path);
+        }
+    }
+
+    fn resolve_one(
+        &mut self,
+        name: &str,
+        resolved: &mut std::collections::HashSet<String>,
+        path: &mut Vec<String>,
+    ) {
+        if resolved.contains(name) {
+            return;
+        }
+        if path.iter().any(|n| n == name) {
+            warn!(cycle = ?path, next = name, "extends cycle — leaving unchanged");
+            return;
+        }
+        if path.len() >= MAX_EXTENDS_DEPTH {
+            warn!(chain = ?path, "extends chain too deep — capping");
+            return;
+        }
+
+        let parent_name = self.types.get(name).and_then(|t| t.extends.clone());
+        if let Some(pn) = parent_name {
+            path.push(name.to_owned());
+            self.resolve_one(&pn, resolved, path);
+            path.pop();
+
+            if let Some(parent) = self.types.get(&pn).cloned() {
+                if let Some(child) = self.types.get_mut(name) {
+                    fill_from_parent(child, &parent);
+                }
+            } else {
+                warn!(child = name, extends = %pn, "extends refers to unknown type");
+            }
+        }
+        resolved.insert(name.to_owned());
+    }
+}
+
+const MAX_EXTENDS_DEPTH: usize = 4;
+
+/// Copy any of `parent`'s fields into `child` where the child hasn't
+/// specified its own value. `extends` itself is never propagated — a
+/// child that extends `A` doesn't automatically extend `A`'s parent
+/// again (the resolver has already done that walk).
+fn fill_from_parent(child: &mut AgentType, parent: &AgentType) {
+    if child.description.is_empty() {
+        child.description = parent.description.clone();
+    }
+    if child.category.is_none() {
+        child.category = parent.category.clone();
+    }
+    if child.tools.is_none() {
+        child.tools = parent.tools.clone();
+    }
+    if child.model.is_none() {
+        child.model = parent.model.clone();
+    }
+    if child.max_rounds.is_none() {
+        child.max_rounds = parent.max_rounds;
+    }
+    if child.system_prompt_addendum.is_none() {
+        child.system_prompt_addendum = parent.system_prompt_addendum.clone();
+    }
+    if child.response_schema.is_none() {
+        child.response_schema = parent.response_schema.clone();
+    }
+    if child.parallel_safe.is_none() {
+        child.parallel_safe = parent.parallel_safe;
+    }
+    if child.route_approvals_to_parent.is_none() {
+        child.route_approvals_to_parent = parent.route_approvals_to_parent;
+    }
+    if child.worktree.is_none() {
+        child.worktree = parent.worktree;
+    }
+    if child.review_required.is_none() {
+        child.review_required = parent.review_required;
     }
 }
 
@@ -180,6 +289,7 @@ pub fn load(cwd: &Path) -> AgentRegistry {
     let project_dir = cwd.join(".mira").join("agents");
     reg.merge(load_dir(&project_dir, "project"));
 
+    reg.resolve_inheritance();
     reg
 }
 
@@ -295,6 +405,8 @@ pub fn parse_agent_md(source: &str) -> Result<AgentType> {
         parallel_safe: fm.parallel_safe,
         route_approvals_to_parent: fm.route_approvals_to_parent,
         worktree: fm.worktree,
+        extends: fm.extends,
+        review_required: fm.review_required,
     })
 }
 
@@ -321,6 +433,10 @@ struct Frontmatter {
     route_approvals_to_parent: Option<bool>,
     #[serde(default)]
     worktree: Option<bool>,
+    #[serde(default)]
+    extends: Option<String>,
+    #[serde(default)]
+    review_required: Option<bool>,
 }
 
 /* ---------- tests ---------- */
@@ -419,6 +535,93 @@ mod tests {
         );
         // description came from the override which didn't set one → empty
         assert_eq!(a.get("explore").unwrap().description, "");
+    }
+
+    #[test]
+    fn resolve_inheritance_fills_missing_fields() {
+        let parent_src = "---\nname: base\ndescription: base type\ntools: [read_file, grep]\nmodel: parent-model\nmax_rounds: 20\n---\nParent addendum.\n";
+        let child_src = "---\nname: derived\nextends: base\ndescription: derived type\n---\n";
+        let mut reg = AgentRegistry::new();
+        reg.types.insert("base".to_owned(), parse_agent_md(parent_src).unwrap());
+        reg.types.insert(
+            "derived".to_owned(),
+            parse_agent_md(child_src).unwrap(),
+        );
+        reg.resolve_inheritance();
+
+        let d = reg.get("derived").unwrap();
+        // Child kept its own description
+        assert_eq!(d.description, "derived type");
+        // Child inherited unset fields
+        assert_eq!(
+            d.tools.as_deref(),
+            Some(&["read_file".to_owned(), "grep".to_owned()][..])
+        );
+        assert_eq!(d.model.as_deref(), Some("parent-model"));
+        assert_eq!(d.max_rounds, Some(20));
+        assert_eq!(d.system_prompt_addendum.as_deref(), Some("Parent addendum."));
+    }
+
+    #[test]
+    fn resolve_inheritance_child_overrides_win() {
+        let parent_src = "---\nname: base\ntools: [read_file, grep]\nmax_rounds: 20\n---\n";
+        let child_src = "---\nname: derived\nextends: base\ntools: [glob]\nmax_rounds: 5\n---\n";
+        let mut reg = AgentRegistry::new();
+        reg.types.insert("base".to_owned(), parse_agent_md(parent_src).unwrap());
+        reg.types.insert(
+            "derived".to_owned(),
+            parse_agent_md(child_src).unwrap(),
+        );
+        reg.resolve_inheritance();
+
+        let d = reg.get("derived").unwrap();
+        assert_eq!(d.tools.as_deref(), Some(&["glob".to_owned()][..]));
+        assert_eq!(d.max_rounds, Some(5));
+    }
+
+    #[test]
+    fn resolve_inheritance_missing_parent_is_noop() {
+        let child_src = "---\nname: orphan\nextends: does-not-exist\n---\n";
+        let mut reg = AgentRegistry::new();
+        reg.types.insert("orphan".to_owned(), parse_agent_md(child_src).unwrap());
+        reg.resolve_inheritance();
+        // Should not crash, and child stays unchanged.
+        let o = reg.get("orphan").unwrap();
+        assert!(o.tools.is_none());
+    }
+
+    #[test]
+    fn resolve_inheritance_cycle_is_noop() {
+        let a = "---\nname: a\nextends: b\n---\n";
+        let b = "---\nname: b\nextends: a\n---\n";
+        let mut reg = AgentRegistry::new();
+        reg.types.insert("a".to_owned(), parse_agent_md(a).unwrap());
+        reg.types.insert("b".to_owned(), parse_agent_md(b).unwrap());
+        // Must terminate; both types remain in the registry.
+        reg.resolve_inheritance();
+        assert!(reg.get("a").is_some());
+        assert!(reg.get("b").is_some());
+    }
+
+    #[test]
+    fn resolve_inheritance_two_level_chain() {
+        let base = "---\nname: base\ntools: [read_file]\nmodel: base-model\n---\n";
+        let mid = "---\nname: mid\nextends: base\nmax_rounds: 42\n---\n";
+        let leaf = "---\nname: leaf\nextends: mid\ndescription: leaf desc\n---\n";
+        let mut reg = AgentRegistry::new();
+        reg.types.insert("base".to_owned(), parse_agent_md(base).unwrap());
+        reg.types.insert("mid".to_owned(), parse_agent_md(mid).unwrap());
+        reg.types.insert("leaf".to_owned(), parse_agent_md(leaf).unwrap());
+        reg.resolve_inheritance();
+
+        let l = reg.get("leaf").unwrap();
+        // Inherited from `mid`
+        assert_eq!(l.max_rounds, Some(42));
+        // Transitively inherited from `base` via `mid`
+        assert_eq!(l.model.as_deref(), Some("base-model"));
+        assert_eq!(l.tools.as_deref(), Some(&["read_file".to_owned()][..]));
+        // Own field preserved
+        assert_eq!(l.description, "leaf desc");
     }
 
     #[test]

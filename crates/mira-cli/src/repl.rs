@@ -3,8 +3,6 @@ use futures::StreamExt;
 use mira_harness::{HarnessEvent, Session};
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-/// This is an updated comment for testing purposes.
-/// Adding a new comment here.
 pub async fn run(session: Session) -> Result<()> {
     let mut stdout = io::stdout();
     let mut lines = BufReader::new(io::stdin()).lines();
@@ -62,6 +60,13 @@ pub async fn run(session: Session) -> Result<()> {
                 HarnessEvent::MemoryLearned { count } => {
                     let msg = format!("\n[memory] remembered {count} thing{}\n",
                         if count == 1 { "" } else { "s" });
+                    stdout.write_all(msg.as_bytes()).await?;
+                }
+                HarnessEvent::Compacted { messages_removed } => {
+                    let msg = format!(
+                        "\n[context] compacted {messages_removed} earlier message{} into a summary\n",
+                        if messages_removed == 1 { "" } else { "s" },
+                    );
                     stdout.write_all(msg.as_bytes()).await?;
                 }
                 HarnessEvent::Done => {
