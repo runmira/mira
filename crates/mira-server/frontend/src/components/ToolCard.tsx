@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
   CaretDown,
   Check,
@@ -7,7 +7,6 @@ import {
   X,
 } from '@phosphor-icons/react';
 import type { DiffLine, DiffPreview, ToolCall, ToolResult } from '../types';
-import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { infoFor } from './ToolGroup';
 
@@ -22,23 +21,15 @@ type Props = {
 };
 
 /** Two shapes:
- *  - `pending`   → loud approval card with Allow/Deny + preview
- *  - anything else → compact row, click to expand args + result */
-export function ToolCard({ call, preview, status, result, onDecide }: Props) {
-  useEffect(() => {
-    if (status !== 'pending') return;
-    function onKey(e: KeyboardEvent) {
-      const t = e.target as HTMLElement | null;
-      if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT')) return;
-      if (e.key === 'y' || e.key === 'Y') { e.preventDefault(); onDecide(true); }
-      else if (e.key === 'n' || e.key === 'N' || e.key === 'Escape') { e.preventDefault(); onDecide(false); }
-    }
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [status, onDecide]);
-
+ *  - `pending`   → preview card with "approve in composer" hint (buttons + Y/N
+ *                  shortcut live in the composer footer, not inline)
+ *  - anything else → compact row, click to expand args + result
+ *
+ *  `onDecide` is retained on the signature because the composer footer wires
+ *  through the same handler; when a card is `pending` here we ignore it. */
+export function ToolCard({ call, preview, status, result }: Props) {
   if (status === 'pending') {
-    return <PendingApprovalCard call={call} preview={preview} onDecide={onDecide} />;
+    return <PendingApprovalCard call={call} preview={preview} />;
   }
   return <CompactToolRow call={call} status={status} result={result} preview={preview} />;
 }
@@ -46,8 +37,8 @@ export function ToolCard({ call, preview, status, result, onDecide }: Props) {
 /* ---------- pending approval ---------- */
 
 function PendingApprovalCard({
-  call, preview, onDecide,
-}: { call: ToolCall; preview: DiffPreview | null; onDecide: (a: boolean) => void }) {
+  call, preview,
+}: { call: ToolCall; preview: DiffPreview | null }) {
   // Pending = about to run → use the present-continuous verb ("Reading",
   // "Running", "Editing") so the header reads as a proposal, not a receipt.
   const summary = useMemo(() => summarize(call, 'pending'), [call]);
@@ -77,9 +68,11 @@ function PendingApprovalCard({
         </pre>
       )}
 
-      <div className="flex justify-end gap-1.5 pt-0.5">
-        <Button variant="outline" size="sm" onClick={() => onDecide(false)}>Deny (n)</Button>
-        <Button variant="allow" size="sm" onClick={() => onDecide(true)}>Allow (y)</Button>
+      {/* Buttons live in the composer footer (bottom-left) so approvals
+       *  don't move around as the transcript grows. Y/N shortcut is
+       *  bound there too. */}
+      <div className="pt-0.5 text-right text-[11px] text-muted-foreground/70">
+        Allow / Deny in the composer below · <kbd className="rounded border border-border/60 bg-background/60 px-1 py-0.5 font-mono text-[10px]">y</kbd> / <kbd className="rounded border border-border/60 bg-background/60 px-1 py-0.5 font-mono text-[10px]">n</kbd>
       </div>
     </div>
   );

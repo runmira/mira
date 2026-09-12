@@ -1,17 +1,42 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   ArrowClockwise,
+  Book,
+  BookOpen,
+  BracketsCurly,
   Brain,
+  Bug,
   Check,
+  Code,
+  Database,
+  Eye,
+  FileText,
   FolderOpen,
+  Gear,
+  GitBranch,
+  GitCommit,
+  GitMerge,
+  GitPullRequest,
   Info,
   Key,
+  Lightbulb,
   MagnifyingGlass,
+  NotePencil,
+  Package,
+  Paperclip,
   Plug,
+  Rocket,
+  ScanSmiley,
+  Shield,
+  ShieldCheck,
   Sliders,
+  Sparkle,
+  Target,
+  Terminal,
+  Wrench,
   X,
 } from '@phosphor-icons/react';
-import { getSettings, putSettings } from '../api';
+import { getSettings, listSkills, putSettings, reloadSkills, type SkillView } from '../api';
 import type {
   KeyUpdate,
   MemoryUpdate,
@@ -71,12 +96,13 @@ const KEY_META: Record<string, { label: string; help: string; url?: string }> = 
   },
 };
 
-type SectionId = 'provider' | 'preferences' | 'memory' | 'search' | 'about';
+type SectionId = 'provider' | 'preferences' | 'memory' | 'skills' | 'search' | 'about';
 
 const SECTIONS: { id: SectionId; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
   { id: 'provider',    label: 'Provider',    icon: Plug },
   { id: 'preferences', label: 'Preferences', icon: Sliders },
   { id: 'memory',      label: 'Memory',      icon: Brain },
+  { id: 'skills',      label: 'Skills',      icon: Sparkle },
   { id: 'search',      label: 'Search & keys', icon: MagnifyingGlass },
   { id: 'about',       label: 'About',       icon: Info },
 ];
@@ -290,6 +316,9 @@ export function SettingsPanel({ open, onClose, onSaved }: Props) {
               {view && section === 'memory' && (
                 <MemorySection draft={draft} setDraft={setDraft} />
               )}
+              {view && section === 'skills' && (
+                <SkillsSection />
+              )}
               {view && section === 'search' && (
                 <KeysSection view={view} draft={draft} setDraft={setDraft} />
               )}
@@ -495,6 +524,421 @@ function MemorySection({
       </div>
     </SectionShell>
   );
+}
+
+/* ---------- skills ---------- */
+
+/**
+ * Loaded-skill browser. Card grid, each skill rendered as a rounded
+ * card with a colored icon badge + name + description + metadata chips.
+ * Colors + icons come from the skill's frontmatter (`color:` and
+ * `icon:` fields); unknowns fall back to stable name-hash-derived tints
+ * so user-added skills still look distinct even without opinions.
+ *
+ * Fetches `/api/skills` on mount; a "Reload from disk" button re-reads
+ * `~/.mira/skills/` + `<cwd>/.mira/skills/` (via `POST /api/skills/reload`)
+ * so newly-added skill files appear without a restart.
+ *
+ * Groups by tier (Bundled → User → Project). Each tier gets its own
+ * header row with a count. Bundled skills always render first — they're
+ * the "official" roster the user can rely on.
+ */
+function SkillsSection() {
+  const [skills, setSkills] = useState<SkillView[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [lastReload, setLastReload] = useState<number | null>(null);
+
+  useEffect(() => {
+    setLoading(true);
+    listSkills()
+      .then((s) => { setSkills(s); setError(null); })
+      .catch((e) => setError(String((e as Error).message)))
+      .finally(() => setLoading(false));
+  }, []);
+
+  async function reload() {
+    setLoading(true);
+    setError(null);
+    try {
+      const fresh = await reloadSkills();
+      setSkills(fresh);
+      setLastReload(Date.now());
+    } catch (e) {
+      setError(String((e as Error).message));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const grouped = useMemo(() => {
+    const out: Record<'bundled' | 'user' | 'project', SkillView[]> = {
+      bundled: [],
+      user: [],
+      project: [],
+    };
+    for (const s of skills ?? []) {
+      out[s.tier].push(s);
+    }
+    (['bundled', 'user', 'project'] as const).forEach((k) => {
+      out[k].sort((a, b) => a.name.localeCompare(b.name));
+    });
+    return out;
+  }, [skills]);
+
+  const total = skills?.length ?? 0;
+
+  return (
+    <SectionShell
+      title="Skills"
+      subtitle="Reusable instruction bundles the agent invokes to accomplish a specific task. Add your own to ~/.mira/skills/ (user-wide) or <cwd>/.mira/skills/ (per-repo)."
+    >
+      {/* Header strip: reload button + status. Sits above the grid so
+       *  it doesn't consume vertical space when there are many skills. */}
+      <div className="flex items-center justify-between rounded-lg border border-border/50 bg-secondary/30 px-3 py-2">
+        <div className="flex items-center gap-2">
+          <span className="text-[13px] font-medium text-foreground">
+            {loading ? 'Loading…' : `${total} skill${total === 1 ? '' : 's'} loaded`}
+          </span>
+          {lastReload && !loading && (
+            <span className="text-[11.5px] text-muted-foreground">
+              · reloaded {timeAgoSecs(lastReload)}
+            </span>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={reload}
+          disabled={loading}
+          className={cn(
+            'inline-flex items-center gap-1.5 rounded-md border border-border/70 bg-background/60 px-2.5 py-1 text-[12px] font-medium text-foreground transition-colors',
+            'hover:bg-background hover:border-border disabled:opacity-50 disabled:cursor-not-allowed',
+          )}
+          title="Re-read skill files from disk"
+        >
+          <ArrowClockwise className={cn('size-3.5', loading && 'animate-spin')} weight="bold" />
+          Reload
+        </button>
+      </div>
+
+      {error && (
+        <div className="rounded-md border border-destructive/40 bg-destructive/[0.08] px-3 py-2 text-[12px] text-destructive">
+          {error}
+        </div>
+      )}
+
+      {!error && !loading && skills != null && total === 0 && (
+        <EmptySkillsState />
+      )}
+
+      {(['bundled', 'user', 'project'] as const).map((tier) => {
+        const entries = grouped[tier];
+        if (entries.length === 0) return null;
+        return (
+          <div key={tier} className="flex flex-col gap-2.5">
+            <div className="flex items-center gap-2 px-0.5">
+              <span className={cn(
+                'inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[10.5px] font-semibold uppercase tracking-wider',
+                tierChipClass(tier),
+              )}>
+                <span className={cn('size-1.5 rounded-full', tierDotClass(tier))} />
+                {tierLabel(tier)}
+              </span>
+              <span className="text-[11.5px] text-muted-foreground">{entries.length}</span>
+            </div>
+            <div className="flex flex-col gap-2">
+              {entries.map((s) => (
+                <SkillCard key={`${tier}-${s.name}`} skill={s} />
+              ))}
+            </div>
+          </div>
+        );
+      })}
+    </SectionShell>
+  );
+}
+
+/** One skill rendered as a card. Colored icon badge on the left,
+ *  name/description stacked in the center, category + attachments chips
+ *  underneath. Hover raises the card slightly to hint at future
+ *  clickability (open the SKILL.md?), even though the current version
+ *  is display-only. */
+function SkillCard({ skill }: { skill: SkillView }) {
+  const iconKey = skill.icon ?? defaultIconKey(skill);
+  const Icon = iconFor(iconKey);
+  const palette = paletteFor(skill.color, skill.name);
+
+  return (
+    <div
+      // Card frame stays neutral (matches the "X skills loaded" strip
+      // above) so the row list reads calmly. Colour lives only on the
+      // icon square — it's the visual anchor, and lets the eye pick
+      // out a skill by its accent without overwhelming the panel.
+      className="group relative flex gap-3 rounded-lg border border-border/50 bg-secondary/30 p-3 transition-colors hover:border-border"
+    >
+      <div
+        className={cn(
+          'inline-flex size-9 shrink-0 items-center justify-center rounded-lg',
+          palette.iconBg,
+          palette.iconText,
+        )}
+      >
+        <Icon weight="duotone" className="size-5" />
+      </div>
+
+      <div className="flex min-w-0 flex-1 flex-col gap-1">
+        <div className="flex items-baseline gap-2">
+          <span className="truncate font-mono text-[13.5px] font-semibold text-foreground">
+            /{skill.name}
+          </span>
+          {skill.category && (
+            <span className={cn(
+              'shrink-0 rounded-sm px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider',
+              palette.chipBg,
+              palette.chipText,
+            )}>
+              {skill.category}
+            </span>
+          )}
+        </div>
+        <p className="text-[12.5px] leading-snug text-foreground/80">
+          {skill.description}
+        </p>
+        {skill.has_attachments && (
+          <div className="mt-0.5 inline-flex items-center gap-1 text-[10.5px] text-muted-foreground/80">
+            <Paperclip className="size-3" />
+            attached resources
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function EmptySkillsState() {
+  return (
+    <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-border/50 bg-secondary/20 px-4 py-8 text-center">
+      <div className="inline-flex size-10 items-center justify-center rounded-full bg-mira-blue/10 text-mira-blue">
+        <Sparkle weight="duotone" className="size-5" />
+      </div>
+      <div>
+        <div className="text-[13px] font-semibold text-foreground">No skills loaded</div>
+        <div className="mt-1 text-[12px] text-muted-foreground">
+          Drop a <code className="font-mono text-foreground/85">SKILL.md</code> into{' '}
+          <code className="font-mono text-foreground/85">~/.mira/skills/&lt;name&gt;/</code>{' '}
+          and hit Reload — or ask mira via <code className="font-mono text-foreground/85">/skill-creator</code>.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- skill icon + color mapping ---------- */
+
+/** Kebab-case icon name → Phosphor component. Curated so a user's
+ *  frontmatter `icon: shield-check` picks up a matching component
+ *  without every phosphor icon getting bundled. Unknown names fall
+ *  through to Sparkle. */
+function iconFor(name: string): React.ComponentType<{ className?: string; weight?: 'thin' | 'light' | 'regular' | 'bold' | 'fill' | 'duotone' }> {
+  switch (name) {
+    case 'shield-check':      return ShieldCheck;
+    case 'shield':            return Shield;
+    case 'magnifying-glass':  return MagnifyingGlass;
+    case 'bug':               return Bug;
+    case 'folder-open':       return FolderOpen;
+    case 'file-text':
+    case 'file':              return FileText;
+    case 'git-branch':        return GitBranch;
+    case 'git-commit':        return GitCommit;
+    case 'git-merge':         return GitMerge;
+    case 'git-pull-request':  return GitPullRequest;
+    case 'lightbulb':         return Lightbulb;
+    case 'target':            return Target;
+    case 'gear':
+    case 'settings':          return Gear;
+    case 'wrench':            return Wrench;
+    case 'rocket':            return Rocket;
+    case 'package':           return Package;
+    case 'database':          return Database;
+    case 'terminal':          return Terminal;
+    case 'code':              return Code;
+    case 'brackets-curly':    return BracketsCurly;
+    case 'book':              return Book;
+    case 'book-open':         return BookOpen;
+    case 'eye':               return Eye;
+    case 'scan':              return ScanSmiley;
+    case 'note-pencil':       return NotePencil;
+    case 'sparkle':
+    default:                  return Sparkle;
+  }
+}
+
+/** Pick a default icon key for a skill that didn't specify one. Bundled
+ *  skills always ship an explicit `icon:`; this only fires for user-
+ *  added ones. We nudge by category — a `git`-category skill without an
+ *  icon still reads sensibly as a git-branch. */
+function defaultIconKey(s: SkillView): string {
+  const cat = (s.category ?? '').toLowerCase();
+  switch (cat) {
+    case 'git':        return 'git-branch';
+    case 'review':     return 'magnifying-glass';
+    case 'qa':         return 'shield-check';
+    case 'debug':      return 'bug';
+    case 'meta':       return 'sparkle';
+    case 'onboarding': return 'folder-open';
+    case 'deploy':     return 'rocket';
+    default:           return 'sparkle';
+  }
+}
+
+type Palette = {
+  iconBg: string;
+  iconText: string;
+  chipBg: string;
+  chipText: string;
+};
+
+/** Color name → tailwind classes.
+ *
+ *  Each hue's classes are HARD-CODED (not template-interpolated)
+ *  because Tailwind's JIT scanner only ships classes it can see as
+ *  literal strings. `` `bg-${color}-500/15` `` compiles fine but the
+ *  class never gets emitted → the card renders unstyled. Every hue
+ *  below lists all six slots explicitly.
+ *
+ *  Unknown/missing color names hash by skill name to a stable wheel
+ *  pick, so a user-added skill with `color: whatever` still gets a
+ *  coherent card rather than a bland fallback. */
+function paletteFor(name: string | undefined, fallbackSeed: string): Palette {
+  const key = (name?.toLowerCase() ?? hashPick(fallbackSeed));
+  const normalized =
+    key === 'green'  ? 'emerald' :
+    key === 'sky'    ? 'blue' :
+    key === 'purple' ? 'violet' :
+    key === 'rose'   ? 'pink' :
+    key === 'yellow' ? 'amber' :
+    key;
+  switch (normalized) {
+    case 'emerald':
+      return {
+        iconBg:     'bg-emerald-500/15',
+        iconText:   'text-emerald-300',
+        chipBg:     'bg-emerald-500/15',
+        chipText:   'text-emerald-300',
+      };
+    case 'blue':
+      return {
+        iconBg:     'bg-blue-500/15',
+        iconText:   'text-blue-300',
+        chipBg:     'bg-blue-500/15',
+        chipText:   'text-blue-300',
+      };
+    case 'indigo':
+      return {
+        iconBg:     'bg-indigo-500/15',
+        iconText:   'text-indigo-300',
+        chipBg:     'bg-indigo-500/15',
+        chipText:   'text-indigo-300',
+      };
+    case 'violet':
+      return {
+        iconBg:     'bg-violet-500/15',
+        iconText:   'text-violet-300',
+        chipBg:     'bg-violet-500/15',
+        chipText:   'text-violet-300',
+      };
+    case 'pink':
+      return {
+        iconBg:     'bg-pink-500/15',
+        iconText:   'text-pink-300',
+        chipBg:     'bg-pink-500/15',
+        chipText:   'text-pink-300',
+      };
+    case 'amber':
+      return {
+        iconBg:     'bg-amber-500/15',
+        iconText:   'text-amber-300',
+        chipBg:     'bg-amber-500/15',
+        chipText:   'text-amber-300',
+      };
+    case 'orange':
+      return {
+        iconBg:     'bg-orange-500/15',
+        iconText:   'text-orange-300',
+        chipBg:     'bg-orange-500/15',
+        chipText:   'text-orange-300',
+      };
+    case 'red':
+      return {
+        iconBg:     'bg-red-500/15',
+        iconText:   'text-red-300',
+        chipBg:     'bg-red-500/15',
+        chipText:   'text-red-300',
+      };
+    case 'teal':
+      return {
+        iconBg:     'bg-teal-500/15',
+        iconText:   'text-teal-300',
+        chipBg:     'bg-teal-500/15',
+        chipText:   'text-teal-300',
+      };
+    case 'cyan':
+      return {
+        iconBg:     'bg-cyan-500/15',
+        iconText:   'text-cyan-300',
+        chipBg:     'bg-cyan-500/15',
+        chipText:   'text-cyan-300',
+      };
+    default:
+      return {
+        iconBg:     'bg-blue-500/15',
+        iconText:   'text-blue-300',
+        chipBg:     'bg-blue-500/15',
+        chipText:   'text-blue-300',
+      };
+  }
+}
+
+const HASH_WHEEL = ['emerald', 'blue', 'indigo', 'violet', 'pink', 'amber', 'orange', 'red', 'teal', 'cyan'];
+
+function hashPick(seed: string): string {
+  let h = 5381;
+  for (let i = 0; i < seed.length; i++) {
+    h = (h * 33) ^ seed.charCodeAt(i);
+  }
+  return HASH_WHEEL[Math.abs(h) % HASH_WHEEL.length];
+}
+
+function tierLabel(t: 'bundled' | 'user' | 'project'): string {
+  switch (t) {
+    case 'bundled': return 'Bundled';
+    case 'user':    return 'User (~/.mira/skills)';
+    case 'project': return 'Project (.mira/skills)';
+  }
+}
+
+function tierChipClass(t: 'bundled' | 'user' | 'project'): string {
+  switch (t) {
+    case 'bundled': return 'bg-mira-blue/15 text-mira-blue border border-mira-blue/25';
+    case 'user':    return 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/25';
+    case 'project': return 'bg-purple-500/15 text-purple-300 border border-purple-500/25';
+  }
+}
+
+function tierDotClass(t: 'bundled' | 'user' | 'project'): string {
+  switch (t) {
+    case 'bundled': return 'bg-mira-blue';
+    case 'user':    return 'bg-emerald-400';
+    case 'project': return 'bg-purple-400';
+  }
+}
+
+function timeAgoSecs(ts: number): string {
+  const dt = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (dt < 5) return 'just now';
+  if (dt < 60) return `${dt}s ago`;
+  if (dt < 3600) return `${Math.floor(dt / 60)}m ago`;
+  return `${Math.floor(dt / 3600)}h ago`;
 }
 
 function ToggleField({

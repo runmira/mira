@@ -94,6 +94,13 @@ pub trait EpisodicStore: Send + Sync {
     /// history.
     async fn recent(&self, limit: usize) -> Result<Vec<EpisodicEntry>, MemoryError>;
 
+    /// Atomically replace the file's entire contents with `entries`, in
+    /// the order given. Used by the consolidation path — the naive
+    /// alternative (truncate + repeated `append`) would be racy against
+    /// any concurrent reader. Writes to a temp file next to the target
+    /// and renames on success.
+    async fn overwrite_all(&self, entries: Vec<EpisodicEntry>) -> Result<(), MemoryError>;
+
     /// On-disk path — for tools that quote it back to the model / user.
     fn path(&self) -> PathBuf;
 }
@@ -159,8 +166,42 @@ impl EpisodicStore for FileEpisodicStore {
         Ok(out.split_off(start))
     }
 
+    async fn overwrite_all(&self, entries: Vec<EpisodicEntry>) -> Result<(), MemoryError> {
+        let _guard = self.lock.lock().await;
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+        // Temp-file + rename for atomicity. A crash between the two
+        // leaves the original file intact; a crash after the rename
+        // leaves the new file intact. Never a truncated JSONL.
+        let tmp_path = tmp_path_for(&self.path);
+        {
+            let mut f = fs::File::create(&tmp_path).await?;
+            for entry in &entries {
+                let mut line = serde_json::to_string(entry)?;
+                line.push('\n');
+                f.write_all(line.as_bytes()).await?;
+            }
+            f.flush().await?;
+        }
+        fs::rename(&tmp_path, &self.path).await?;
+        Ok(())
+    }
+
     fn path(&self) -> PathBuf {
         self.path.clone()
+    }
+}
+
+fn tmp_path_for(path: &Path) -> PathBuf {
+    let mut file_name = path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    file_name.push(".tmp");
+    match path.parent() {
+        Some(p) => p.join(file_name),
+        None => PathBuf::from(file_name),
     }
 }
 

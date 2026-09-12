@@ -3,9 +3,7 @@ import {
   ArrowCounterClockwise,
   Brain,
   Eye,
-  FileText,
   Folder,
-  GitCommit,
   Lightbulb,
   NotePencil,
   Paperclip,
@@ -36,7 +34,11 @@ export type SlashCtx = {
   onSetModel: (m: string) => void;
   onOpenModelPicker: () => void;
   onOpenFolderPicker: () => void;
-  onOpenAttachPicker: () => void;
+  /** Fire the browser's native OS file picker. Multi-select is supported;
+   *  the composer handles read + chip render. Kept as a control callback
+   *  (not "OpenX") so the Composer can prompt with `<input type="file">`
+   *  and receive the result in one flow. */
+  onOpenNativeFiles: () => void;
   onOpenSettings: () => void;
   /** Kicks off a two-stage `mira review` and opens the side panel to stream
    *  progress. `args` is passed through as the git range (empty = default). */
@@ -56,6 +58,11 @@ export type SlashCtx = {
   /** Revert the last N file writes the agent made this session. Resolves
    *  with a human-readable summary; rejects with a message on error. */
   onUndo: (count: number) => Promise<string>;
+  /** Invoke a named skill by sending a canned "use the `<name>` skill."
+   *  message that the model reads and turns into a `Skill` tool call.
+   *  Wired by the Composer so the same code path handles both palette
+   *  picks and typed-and-Enter'd skill invocations. */
+  onInvokeSkill: (name: string) => void;
 };
 
 /** Structural type covering both Lucide and Phosphor icon components — just
@@ -127,13 +134,16 @@ export const COMMANDS: SlashCommand[] = [
     run: (_a, ctx) => { ctx.onOpenFolderPicker(); return undefined; },
   },
   {
-    name: 'attach',
-    aliases: ['file'],
-    description: 'Attach a file to your next message',
-    usage: '/attach',
+    // Codex-style "Files and folders" — opens the OS native file picker
+    // via a hidden `<input type="file" multiple>` inside the Composer.
+    // Aliased to /attach + /file so muscle memory still works.
+    name: 'files',
+    aliases: ['file', 'attach'],
+    description: 'Attach files from your computer',
+    usage: '/files',
     icon: Paperclip,
     takesArgs: false,
-    run: (_a, ctx) => { ctx.onOpenAttachPicker(); return undefined; },
+    run: (_a, ctx) => { ctx.onOpenNativeFiles(); return undefined; },
   },
   {
     name: 'plan',
@@ -146,24 +156,6 @@ export const COMMANDS: SlashCommand[] = [
     // message while plan mode is on lets the model use the plan tool
     // naturally — no more wrapping the user's text with planning boilerplate.
     run: (_a, ctx) => { ctx.onSetMode('plan'); return undefined; },
-  },
-  {
-    name: 'commit',
-    description: 'Compose a git commit for the current changes',
-    usage: '/commit [hint]',
-    icon: GitCommit,
-    takesArgs: true,
-    run: (args) => {
-      const hint = args.trim();
-      const hintLine = hint ? `\n\nThe user hinted the change is about: ${hint}` : '';
-      return (
-        `Run \`git status\` and \`git diff --stat\`, then \`git diff\` on ` +
-        `the specific hunks. Propose a concise conventional-commit message ` +
-        `(under 72 chars for the subject). Once I approve it, stage and ` +
-        `commit the changes — do NOT push.` +
-        hintLine
-      );
-    },
   },
   {
     name: 'review',
@@ -218,25 +210,12 @@ export const COMMANDS: SlashCommand[] = [
       return undefined;
     },
   },
-  {
-    name: 'init',
-    description: 'Create a MIRA.md documenting this project',
-    usage: '/init',
-    icon: FileText,
-    takesArgs: false,
-    run: () => (
-      `Explore the current folder — read package/build files, the top-level ` +
-      `README, and skim the main source directories. Then create a MIRA.md ` +
-      `at the repo root with:\n\n` +
-      `- One-line project summary\n` +
-      `- Tech stack (languages, frameworks, key libraries)\n` +
-      `- Repo layout (top-level dirs, what each is for)\n` +
-      `- How to build / test / run\n` +
-      `- Notable conventions or gotchas future-you would want to know\n\n` +
-      `Keep it tight — under 150 lines. Skip boilerplate the reader would ` +
-      `already know from the ecosystem.`
-    ),
-  },
+  // `/commit` and `/init` used to live here as template commands. They
+  // were superseded by the `commit` and `init` bundled *skills*, which
+  // ship richer playbooks (verification steps, "do not" lists) and are
+  // user-editable via `~/.mira/skills/`. The dedupe pass in
+  // `filterCommands` guarantees a skill wins over a same-named built-in
+  // even if a stray entry sneaks back in.
   {
     name: 'undo',
     description: 'Revert the last N file writes the agent made in this session',
@@ -310,34 +289,102 @@ export const COMMANDS: SlashCommand[] = [
   },
 ];
 
-/** Palette-visibility rule: text starts with `/` and doesn't yet have a
- *  space (still typing command name). Once space is typed, we hide the
- *  palette and match against known commands for argument-mode hint. */
+/** Palette-visibility rule: text starts with `/` OR `@` and doesn't yet
+ *  have a space (still typing command name). Once space is typed, we
+ *  hide the palette and match against known commands for argument-mode
+ *  hint. `@` is a Codex-style shorthand for "attach a file" — it opens
+ *  the same palette but promotes the `files` command to the top so a
+ *  bare `@` + Enter fires the OS native file picker without further
+ *  keystrokes. Any command still matches: `@goal ship it` works. */
 export function slashState(
   text: string,
 ):
-  | { mode: 'palette'; query: string }
-  | { mode: 'args'; command: SlashCommand; args: string }
+  | { mode: 'palette'; query: string; trigger: '/' | '@' }
+  | { mode: 'args'; command: SlashCommand; args: string; trigger: '/' | '@' }
   | { mode: 'none' } {
-  if (!text.startsWith('/')) return { mode: 'none' };
+  const first = text[0];
+  if (first !== '/' && first !== '@') return { mode: 'none' };
+  const trigger = first as '/' | '@';
   const body = text.slice(1);
   const spaceIdx = body.indexOf(' ');
-  if (spaceIdx < 0) return { mode: 'palette', query: body };
+  if (spaceIdx < 0) return { mode: 'palette', query: body, trigger };
   const name = body.slice(0, spaceIdx).toLowerCase();
   const command = findCommand(name);
-  if (!command) return { mode: 'palette', query: name };
-  return { mode: 'args', command, args: body.slice(spaceIdx + 1) };
+  if (!command) return { mode: 'palette', query: name, trigger };
+  return { mode: 'args', command, args: body.slice(spaceIdx + 1), trigger };
 }
 
-export function filterCommands(query: string): SlashCommand[] {
+/** One entry in the dynamic skill list the composer merges into the
+ *  palette. Shape mirrors the `/api/skills` response so the caller can
+ *  pass the fetch result through unchanged. */
+export type PaletteSkill = {
+  name: string;
+  description: string;
+  tier?: 'bundled' | 'user' | 'project';
+};
+
+/** Palette results.
+ *
+ *  When `trigger === '@'`, the `files` command jumps to the top of the
+ *  list (matching Codex's "@ → Files and folders" behaviour). Otherwise
+ *  the natural COMMANDS order is preserved.
+ *
+ *  Empty query returns every command; a non-empty query still filters
+ *  by name/alias/description, but the same promotion applies so that
+ *  even a partial `@fi` keeps `files` at index 0.
+ *
+ *  `skills` is the dynamically-loaded roster from `/api/skills`. Each
+ *  becomes a `/<skill-name>` command that fires `ctx.onInvokeSkill`
+ *  on pick. Skills sit *after* the built-in commands in the palette so
+ *  a user typing `/co` still sees `/commit` first, not a skill named
+ *  `code-audit`. */
+export function filterCommands(
+  query: string,
+  trigger: '/' | '@' = '/',
+  skills: PaletteSkill[] = [],
+): SlashCommand[] {
   const q = query.toLowerCase().trim();
-  if (!q) return COMMANDS;
-  return COMMANDS.filter((c) => {
-    if (c.name.includes(q)) return true;
-    if (c.aliases?.some((a) => a.includes(q))) return true;
-    if (c.description.toLowerCase().includes(q)) return true;
-    return false;
-  });
+  const skillCmds = skills.map(skillToCommand);
+  // Dedupe by name — when a skill collides with a built-in (e.g. a user
+  // drops `~/.mira/skills/commit/` that shadows the built-in `commit`
+  // template), the skill wins. Otherwise the palette would show two
+  // rows with the same `/name` and different behaviour.
+  const skillNames = new Set(skillCmds.map((c) => c.name.toLowerCase()));
+  const uniqueBuiltins = COMMANDS.filter(
+    (c) => !skillNames.has(c.name.toLowerCase()),
+  );
+  const pool = [...uniqueBuiltins, ...skillCmds];
+  const base = q
+    ? pool.filter((c) => {
+        if (c.name.toLowerCase().includes(q)) return true;
+        if (c.aliases?.some((a) => a.toLowerCase().includes(q))) return true;
+        if (c.description.toLowerCase().includes(q)) return true;
+        return false;
+      })
+    : pool;
+  if (trigger !== '@') return base;
+  const files = base.find((c) => c.name === 'files');
+  if (!files) return base;
+  return [files, ...base.filter((c) => c.name !== 'files')];
+}
+
+/** Wrap a loaded skill as a slash command so the palette can render it
+ *  next to the built-in commands. Picking the entry fires
+ *  `ctx.onInvokeSkill(name)`, which the Composer turns into a canned
+ *  "use the `<name>` skill." user message. The description is what the
+ *  model sees when deciding to actually call the `Skill` tool. */
+function skillToCommand(s: PaletteSkill): SlashCommand {
+  return {
+    name: s.name,
+    description: s.description,
+    usage: `/${s.name}`,
+    icon: Sparkle,
+    takesArgs: false,
+    run: (_a, ctx) => {
+      ctx.onInvokeSkill(s.name);
+      return undefined;
+    },
+  };
 }
 
 function findCommand(name: string): SlashCommand | undefined {

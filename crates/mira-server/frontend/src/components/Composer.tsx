@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowUp,
   Camera,
@@ -18,11 +18,11 @@ import {
   X,
 } from '@phosphor-icons/react';
 import { createWorktree, getGitStatus, listModels, putCwd, readFile, type GitStatusView, type ModelInfo } from '../api';
-import type { Goal, Mode } from '../types';
+import type { DiffPreview, Goal, Mode, ToolCall } from '../types';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandSeparator } from '@/components/ui/command';
 import { FilePicker } from './FilePicker';
-import { filterCommands, slashState, type SlashCommand } from './commands';
+import { filterCommands, slashState, type PaletteSkill, type SlashCommand } from './commands';
 import { cn } from '@/lib/utils';
 
 const MODES: { value: Mode; label: string; desc: string }[] = [
@@ -64,13 +64,39 @@ type Props = {
   goal: Goal | null;
   onRemember: (scope: 'user' | 'project', text: string) => Promise<string>;
   onUndo: (count: number) => Promise<string>;
+  /** Pending tool-call approvals surfaced in the composer footer (bottom-
+   *  left). The first entry drives the visible Approve/Deny buttons + the
+   *  Y/N shortcut; the count comes from the array length so the user can
+   *  see how many are queued behind it. */
+  pendingApprovals: PendingApproval[];
+  /** Resolve a pending approval. Same signature as App's `decideApproval`. */
+  onDecideApproval: (callId: string, allow: boolean) => void;
+  /** Loaded skill roster from `/api/skills`. Rendered inline in the
+   *  slash palette after the built-in commands; picking `/<name>`
+   *  fires a canned "use the `<name>` skill." user message which the
+   *  model turns into a `Skill` tool call. Empty array = no skills or
+   *  the roster hasn't loaded yet — palette still works. */
+  skills: PaletteSkill[];
+};
+
+export type PendingApproval = {
+  callId: string;
+  call: ToolCall;
+  preview: DiffPreview | null;
 };
 
 type Attachment = { path: string; content: string; bytes: number };
 
+/** Cap on how many bytes we'll inline from a single OS-picked file. Larger
+ *  files still get a chip in the composer, but the inlined body is
+ *  truncated with a marker so a rogue 50 MB video doesn't nuke the model's
+ *  context window. Text files usually clock in well under this. */
+const NATIVE_ATTACH_MAX_BYTES = 256 * 1024;
+
 export function Composer({
   disabled, busy, mode, model, cwd, usage,
   onSend, onSetMode, onSetModel, onSetEffort, onOpenPicker, onInterrupt, onNewChat, onOpenSettings, onRunReview, onSetGoal, onClearGoal, goal, onRemember, onUndo,
+  pendingApprovals, onDecideApproval, skills,
 }: Props) {
   const [text, setText] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -80,6 +106,17 @@ export function Composer({
   const [slashIdx, setSlashIdx] = useState(0);
   const [slashFeedback, setSlashFeedback] = useState<string | null>(null);
   const [modelPopOpen, setModelPopOpen] = useState(false);
+  // Hidden `<input type="file">` — programmatically clicked by both the
+  // `/files` slash command and the `+` menu's "Attach file…" so the OS
+  // opens its native file-open dialog. Same list on both paths.
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  function openNativeFiles() {
+    // Reset value first so re-picking the same file still fires `change`.
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+      fileInputRef.current.click();
+    }
+  }
   // "Goal compose" — flipped on by `/goal` (bare). While on, the next
   // Enter fires `onSetGoal(text)` instead of `onSend`. Chip stays until
   // the user either submits the condition or clicks it to abort.
@@ -97,9 +134,20 @@ export function Composer({
 
   const slash = slashState(text);
   const paletteVisible = slash.mode === 'palette';
+  // Trigger is `/` OR `@` — `@` promotes `files` to the top of the palette
+  // so a bare `@` + Enter fires the OS native file picker without any
+  // additional keystrokes. See `filterCommands` for the promotion rule.
+  const paletteTrigger = slash.mode === 'palette' || slash.mode === 'args' ? slash.trigger : '/';
   const paletteMatches = useMemo(
-    () => (paletteVisible ? filterCommands((slash as { query: string }).query) : []),
-    [paletteVisible, slash],
+    () =>
+      paletteVisible
+        ? filterCommands(
+            (slash as { query: string }).query,
+            paletteTrigger,
+            skills,
+          )
+        : [],
+    [paletteVisible, slash, paletteTrigger, skills],
   );
 
   useEffect(() => { setSlashIdx(0); }, [text]);
@@ -111,7 +159,7 @@ export function Composer({
       onSetModel,
       onOpenModelPicker: () => setModelPopOpen(true),
       onOpenFolderPicker: onOpenPicker,
-      onOpenAttachPicker: () => setFilePickerOpen(true),
+      onOpenNativeFiles: openNativeFiles,
       onOpenSettings,
       onRunReview,
       onSetGoal,
@@ -119,8 +167,15 @@ export function Composer({
       onEnterGoalCompose: () => setGoalComposing(true),
       onRemember,
       onUndo,
+      // Skill invocation. Canned message; the model reads it and calls
+      // the `Skill` tool. The tool result then wraps the skill body in
+      // a `<system-reminder>` block so the instructions land
+      // authoritatively on the next turn.
+      onInvokeSkill: (name: string) => {
+        onSend(`Use the \`${name}\` skill.`);
+      },
     }),
-    [onNewChat, onSetMode, onSetModel, onOpenPicker, onOpenSettings, onRunReview, onSetGoal, onClearGoal, onRemember, onUndo],
+    [onNewChat, onSetMode, onSetModel, onOpenPicker, onOpenSettings, onRunReview, onSetGoal, onClearGoal, onRemember, onUndo, onSend],
   );
 
   function executeCommand(cmd: SlashCommand, args: string) {
@@ -144,9 +199,10 @@ export function Composer({
 
   function commitPaletteChoice(cmd: SlashCommand) {
     if (cmd.takesArgs) {
-      // Prefill `/<name> ` so the user starts typing arguments; palette
-      // auto-hides because there's now a space in the text.
-      setText(`/${cmd.name} `);
+      // Prefill `<trigger><name> ` so the user starts typing arguments;
+      // palette auto-hides because there's now a space in the text.
+      // Preserves whichever trigger the user typed (`/goal` vs `@goal`).
+      setText(`${paletteTrigger}${cmd.name} `);
     } else {
       executeCommand(cmd, '');
     }
@@ -166,6 +222,44 @@ export function Composer({
       setAttachError(String((e as Error).message));
     } finally {
       setAttachLoading(false);
+    }
+  }
+
+  /** Read one browser `File` (from the OS native picker) into an
+   *  Attachment. Text-shaped files inline as-is; binary/oversized files
+   *  still get a chip but the inlined content is a short placeholder so
+   *  the model at least sees "here's a file called foo.mp4 (14.2 MB)"
+   *  even when we can't ship the bytes. */
+  async function attachNativeFile(file: File) {
+    setAttachError(null);
+    setAttachLoading(true);
+    try {
+      const isBinary = looksBinary(file);
+      let content: string;
+      if (isBinary || file.size > NATIVE_ATTACH_MAX_BYTES) {
+        content = isBinary
+          ? `[binary file: ${file.name} (${formatBytes(file.size)}, ${file.type || 'unknown type'}) — content not inlined]`
+          : `[oversized file: ${file.name} (${formatBytes(file.size)}) — first ${formatBytes(NATIVE_ATTACH_MAX_BYTES)} inlined]\n\n` +
+            (await file.slice(0, NATIVE_ATTACH_MAX_BYTES).text());
+      } else {
+        content = await file.text();
+      }
+      setAttachments((prev) => [
+        // De-dupe by filename (client-side files have no path).
+        ...prev.filter((a) => a.path !== file.name),
+        { path: file.name, content, bytes: file.size },
+      ]);
+    } catch (e) {
+      setAttachError(String((e as Error).message));
+    } finally {
+      setAttachLoading(false);
+    }
+  }
+
+  async function attachNativeFiles(files: FileList | null) {
+    if (!files || files.length === 0) return;
+    for (const f of Array.from(files)) {
+      await attachNativeFile(f);
     }
   }
 
@@ -266,7 +360,7 @@ export function Composer({
                 if (e.key === 'Tab') {
                   e.preventDefault();
                   const cmd = paletteMatches[slashIdx];
-                  if (cmd) setText(`/${cmd.name}${cmd.takesArgs ? ' ' : ''}`);
+                  if (cmd) setText(`${paletteTrigger}${cmd.name}${cmd.takesArgs ? ' ' : ''}`);
                   return;
                 }
                 if (e.key === 'Escape') { e.preventDefault(); setText(''); return; }
@@ -289,7 +383,7 @@ export function Composer({
                   ? "Describe what 'done' looks like — mira will loop until it's met."
                   : planActive
                     ? 'Describe your task to generate a plan…'
-                    : 'Work with mira — try /'
+                    : 'Ask mira anything · @ for files · / for commands'
             }
             disabled={disabled}
             rows={1}
@@ -302,12 +396,13 @@ export function Composer({
               activeIdx={slashIdx}
               onHover={setSlashIdx}
               onPick={commitPaletteChoice}
+              preserveOrder={paletteTrigger === '@'}
             />
           )}
 
           {slash.mode === 'args' && (
             <div className="pointer-events-none absolute -top-6 left-0 rounded-md border border-border/60 bg-popover px-2 py-0.5 text-[11px] text-muted-foreground shadow-lg">
-              <span className="font-mono text-foreground">/{slash.command.name}</span>{' '}
+              <span className="font-mono text-foreground">{slash.trigger}{slash.command.name}</span>{' '}
               <span>{slash.command.usage.replace(`/${slash.command.name}`, '').trim()}</span>
             </div>
           )}
@@ -320,9 +415,9 @@ export function Composer({
         )}
 
         <div className="flex items-center gap-1.5 px-1">
-          <AttachMenu onAttachFile={() => setFilePickerOpen(true)} loading={attachLoading} />
+          <AttachMenu onAttachFile={openNativeFiles} loading={attachLoading} />
 
-          <SlashButton onClick={() => setText((t) => (t.startsWith('/') ? t : '/' + t))} />
+          <SlashButton onClick={() => setText((t) => (t.startsWith('/') || t.startsWith('@') ? t : '/' + t))} />
 
           <ModelPicker
             current={model}
@@ -333,8 +428,6 @@ export function Composer({
           />
 
           <ProjectChip cwd={cwd} onClick={onOpenPicker} />
-
-          <WorktreeChip cwd={cwd} />
 
           <span className="flex-1" />
 
@@ -364,20 +457,55 @@ export function Composer({
         </div>
       </form>
 
-      {usage && (
-        <div
-          className="w-full max-w-3xl px-3 text-right text-[11px] font-mono text-muted-foreground/60"
-          title="Session tokens & estimated cost"
-        >
-          {usage}
-        </div>
-      )}
+      {/* Footer strip under the composer.
+       *   Left: the first pending tool-call approval (Allow/Deny + a
+       *         "+N more" counter when the queue is deeper). Y/N keyboard
+       *         shortcut is bound while any approval is pending — see the
+       *         effect below.
+       *   Right: aggregate token/cost usage sitting immediately beside
+       *         the WorktreeChip so the "how expensive · what branch"
+       *         info reads as one metadata cluster.
+       *
+       *  When there is no pending approval, the left slot stays empty;
+       *  spacer keeps usage + worktree pinned to the right. */}
+      <div className="w-full max-w-3xl flex items-center gap-2 px-3">
+        <ApprovalFooterSlot
+          approvals={pendingApprovals}
+          onDecide={onDecideApproval}
+        />
+        <span className="flex-1" />
+        {usage && (
+          <span
+            className="font-mono text-[11px] text-muted-foreground/60"
+            title="Session tokens & estimated cost"
+          >
+            {usage}
+          </span>
+        )}
+        <WorktreeChip cwd={cwd} />
+      </div>
 
       <FilePicker
         open={filePickerOpen}
         startPath={cwd || undefined}
         onClose={() => setFilePickerOpen(false)}
         onPicked={(p) => { attachFile(p); }}
+      />
+
+      {/* Hidden native file input. `openNativeFiles()` above `.click()`s
+       *  this; the OS shows its own open dialog. `multiple` matches
+       *  Codex's picker. Kept out of the tab order (aria-hidden + no
+       *  focus ring) so keyboard users don't stumble into it. */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        aria-hidden
+        tabIndex={-1}
+        className="sr-only"
+        onChange={(e) => {
+          attachNativeFiles(e.target.files);
+        }}
       />
     </div>
     </IconContext.Provider>
@@ -387,20 +515,29 @@ export function Composer({
 /* ---------- slash palette ---------- */
 
 function SlashPalette({
-  matches, activeIdx, onHover, onPick,
+  matches, activeIdx, onHover, onPick, preserveOrder = false,
 }: {
   matches: SlashCommand[];
   activeIdx: number;
   onHover: (i: number) => void;
   onPick: (cmd: SlashCommand) => void;
+  /** When true, render matches in the exact order supplied — used by the
+   *  `@` trigger so `files` stays pinned to the top of the list instead
+   *  of getting alphabetized down under `Commit`. `/` still alphabetizes
+   *  so the full catalog reads as a scannable menu. */
+  preserveOrder?: boolean;
 }) {
-  // Alphabetize so the palette reads as an at-a-glance menu (Codex /
-  // Claude Code pattern) — no cognitive hunting for the item you want
-  // just because it happened to be registered late. Sort is stable so
-  // aliases don't shuffle unpredictably run-to-run.
+  // Alphabetize (unless the caller asked to preserve order) so the
+  // palette reads as an at-a-glance menu (Codex / Claude Code pattern) —
+  // no cognitive hunting for the item you want just because it happened
+  // to be registered late. Sort is stable so aliases don't shuffle
+  // unpredictably run-to-run.
   const sorted = useMemo(
-    () => [...matches].sort((a, b) => displayName(a).localeCompare(displayName(b))),
-    [matches],
+    () =>
+      preserveOrder
+        ? [...matches]
+        : [...matches].sort((a, b) => displayName(a).localeCompare(displayName(b))),
+    [matches, preserveOrder],
   );
   // Keyboard navigation still targets the caller's `matches` order —
   // remap the caller's activeIdx onto the sorted index so ↑↓ + Enter
@@ -588,21 +725,43 @@ function AttachmentChip({
   attachment, cwd, onRemove,
 }: { attachment: Attachment; cwd: string; onRemove: () => void }) {
   const label = relativeTo(attachment.path, cwd);
+  // "Area.mp4" → filename "Area.mp4", subtype badge "MP4". Files without
+  // an extension (`Makefile`) fall back to the byte size as the subtype
+  // so the two-line chip still fills sensibly.
+  const dot = attachment.path.lastIndexOf('.');
+  const filename = label;
+  const subtype =
+    dot > 0 && dot < attachment.path.length - 1
+      ? attachment.path.slice(dot + 1).toUpperCase()
+      : formatBytes(attachment.bytes);
   return (
     <span
-      className="inline-flex items-center gap-1.5 rounded-md border border-border/60 bg-background/60 px-2 py-1 text-[12px]"
+      className={cn(
+        // Codex-style chip: rounded card with a padded file-icon square on the
+        // left, filename bold above a muted subtype (extension). Overflow-wide
+        // filenames truncate — full path lives in the tooltip.
+        'group relative inline-flex items-center gap-2.5 rounded-xl border border-border/60 bg-background/70 py-1.5 pl-2 pr-8',
+      )}
       title={`${attachment.path} · ${formatBytes(attachment.bytes)}`}
     >
-      <FileIcon className="size-3 shrink-0 text-mira-blue" />
-      <span className="max-w-[16rem] truncate">{label}</span>
-      <span className="text-[10.5px] text-muted-foreground/70">{formatBytes(attachment.bytes)}</span>
+      <span className="inline-flex size-8 shrink-0 items-center justify-center rounded-md border border-border/70 bg-secondary/70 text-muted-foreground">
+        <FileIcon className="size-4" weight="duotone" />
+      </span>
+      <span className="flex min-w-0 flex-col">
+        <span className="max-w-[18rem] truncate text-[13px] font-semibold text-foreground">
+          {filename}
+        </span>
+        <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground/80">
+          {subtype}
+        </span>
+      </span>
       <button
         type="button"
         onClick={onRemove}
-        className="rounded-sm p-0.5 text-muted-foreground transition-colors hover:bg-accent/30 hover:text-foreground"
+        className="absolute right-1.5 top-1.5 inline-flex size-4 items-center justify-center rounded-full bg-secondary/90 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
         aria-label={`Remove ${label}`}
       >
-        <X className="size-3" />
+        <X className="size-2.5" weight="bold" />
       </button>
     </span>
   );
@@ -633,6 +792,142 @@ function renderAttachments(atts: Attachment[], cwd: string): string {
     return `### ${rel}\n\`\`\`${lang}\n${a.content}\n\`\`\``;
   });
   return `## Attached files\n\n${parts.join('\n\n')}`;
+}
+
+// Parse the "## Attached files" header out of a user message body so the
+// transcript can render each file as a Codex-style chip above the bubble
+// instead of dumping the raw fenced content into the reader's face. If
+// the body doesn't start with the marker, returns the body unchanged and
+// an empty `attachments` list.
+//
+// Hand-walks the string rather than regexing — the header shape is very
+// regular and a manual walk sidesteps the edge cases (backtick fencing +
+// non-greedy quantifiers) that made an earlier regex-based parser
+// mis-slice filenames on multi-attachment messages.
+export function parseSentAttachments(body: string): {
+  attachments: Array<{ filename: string; subtype: string }>;
+  text: string;
+} {
+  const marker = '## Attached files';
+  if (!body.startsWith(marker)) {
+    return { attachments: [], text: body };
+  }
+
+  // Skip the marker + up to two trailing newlines. Empty-line-before-the-
+  // first-header is what `renderAttachments` writes, but be lenient.
+  let i = marker.length;
+  while (i < body.length && body[i] === '\n') i++;
+
+  const attachments: Array<{ filename: string; subtype: string }> = [];
+  while (i < body.length) {
+    // Each block must start with "### " (space required). Anything else
+    // is the user's own text — bail so it survives into `text` below.
+    if (!body.startsWith('### ', i)) break;
+    i += 4;
+
+    // Filename runs to the next newline.
+    const nl = body.indexOf('\n', i);
+    if (nl < 0) break;
+    const filename = basename(body.slice(i, nl).trim());
+    i = nl + 1;
+
+    // Opening fence line: "```<lang>\n". Fence is exactly three
+    // backticks at the start of the line; lang may be empty.
+    if (!body.startsWith('```', i)) break;
+    const fenceNl = body.indexOf('\n', i);
+    if (fenceNl < 0) break;
+    i = fenceNl + 1;
+
+    // Content runs until a line that is exactly "```". Scan
+    // line-by-line so a `\`\`\`` embedded mid-line (unlikely for us, but
+    // possible in inlined source code) can't fake a fence.
+    let closed = false;
+    while (i < body.length) {
+      const eol = body.indexOf('\n', i);
+      const line = eol < 0 ? body.slice(i) : body.slice(i, eol);
+      const advance = eol < 0 ? body.length : eol + 1;
+      if (line === '```') {
+        i = advance;
+        closed = true;
+        break;
+      }
+      i = advance;
+    }
+    if (!closed) break;
+
+    // Blank lines between blocks (or before the user text) — swallow.
+    while (i < body.length && body[i] === '\n') i++;
+
+    const dot = filename.lastIndexOf('.');
+    const subtype =
+      dot > 0 && dot < filename.length - 1
+        ? filename.slice(dot + 1).toUpperCase()
+        : 'FILE';
+    attachments.push({ filename, subtype });
+  }
+
+  const text = body.slice(i);
+  return { attachments, text };
+}
+
+
+/** Read-only rendering of an attachment chip for the transcript. Same
+ *  Codex-style visual as the composer chip, minus the X (nothing to
+ *  remove on a sent message). */
+export function SentAttachmentChip({
+  filename, subtype,
+}: { filename: string; subtype: string }) {
+  return (
+    <span
+      className="inline-flex items-center gap-2.5 rounded-xl border border-border/60 bg-background/70 py-1.5 pl-2 pr-3"
+      title={filename}
+    >
+      <span className="inline-flex size-8 shrink-0 items-center justify-center rounded-md border border-border/70 bg-secondary/70 text-muted-foreground">
+        <FileIcon className="size-4" weight="duotone" />
+      </span>
+      <span className="flex min-w-0 flex-col">
+        <span className="max-w-[18rem] truncate text-[13px] font-semibold text-foreground">
+          {filename}
+        </span>
+        <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground/80">
+          {subtype}
+        </span>
+      </span>
+    </span>
+  );
+}
+
+/** Cheap "should we skip reading this as text?" heuristic. Trusts the
+ *  browser-supplied MIME type first (image/*, video/*, audio/*, and the
+ *  usual binary application/* families), then falls back to an extension
+ *  denylist so files with no MIME (Finder-attached mp4, exe, zip) still
+ *  land as binary. Anything unrecognised is treated as text — the
+ *  inlined content is capped separately so a mis-guess still can't
+ *  blow out the message. */
+function looksBinary(file: File): boolean {
+  const t = (file.type || '').toLowerCase();
+  if (t.startsWith('image/') || t.startsWith('video/') || t.startsWith('audio/')) return true;
+  if (
+    t === 'application/pdf' ||
+    t === 'application/zip' ||
+    t === 'application/x-tar' ||
+    t === 'application/x-gzip' ||
+    t === 'application/octet-stream'
+  ) return true;
+  const name = file.name.toLowerCase();
+  const dot = name.lastIndexOf('.');
+  if (dot < 0) return false;
+  const ext = name.slice(dot + 1);
+  const binaryExts = new Set([
+    'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico', 'heic', 'heif', 'svg',
+    'mp4', 'mov', 'mkv', 'webm', 'avi', 'm4v',
+    'mp3', 'wav', 'flac', 'aac', 'ogg', 'm4a',
+    'pdf', 'zip', 'gz', 'tar', 'tgz', 'bz2', '7z', 'rar',
+    'exe', 'dll', 'so', 'dylib', 'bin', 'wasm',
+    'ttf', 'otf', 'woff', 'woff2',
+    'psd', 'sketch', 'fig',
+  ]);
+  return binaryExts.has(ext);
 }
 
 function extToLang(path: string): string {
@@ -1169,6 +1464,104 @@ function SlashButton({ onClick }: { onClick: () => void }) {
       <SlashGlyph className="size-4" />
     </button>
   );
+}
+
+/* ---------- approval footer slot ---------- */
+
+/**
+ * The bottom-left affordance in the composer footer. Renders nothing when
+ * no tool call is pending. When one is pending, shows a compact tool-name
+ * pill with Allow/Deny buttons and a "+N more" counter when the queue is
+ * deeper. Y/N (Allow / Deny + queue-advance) is bound as a global keyboard
+ * shortcut while any approval is pending — matches the old inline card's
+ * shortcut so muscle memory carries over.
+ */
+function ApprovalFooterSlot({
+  approvals,
+  onDecide,
+}: {
+  approvals: PendingApproval[];
+  onDecide: (callId: string, allow: boolean) => void;
+}) {
+  const first = approvals[0] ?? null;
+  const rest = Math.max(0, approvals.length - 1);
+  const callId = first?.callId;
+
+  useEffect(() => {
+    if (!callId) return;
+    function onKey(e: KeyboardEvent) {
+      const t = e.target as HTMLElement | null;
+      // Never steal Y/N while the user is typing.
+      if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT')) return;
+      if (e.key === 'y' || e.key === 'Y') {
+        e.preventDefault();
+        onDecide(callId, true);
+      } else if (e.key === 'n' || e.key === 'N' || e.key === 'Escape') {
+        e.preventDefault();
+        onDecide(callId, false);
+      }
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [callId, onDecide]);
+
+  if (!first) return null;
+
+  // Terse tool label — matches the inline card's summary, minus icon
+  // paperwork. Falls back to the raw function name when we can't decode
+  // args (shouldn't happen for well-formed calls but keeps the UI safe).
+  const label = shortToolLabel(first.call.function.name, first.call.function.arguments);
+
+  return (
+    <div className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/40 bg-amber-500/[0.08] py-0.5 pl-2.5 pr-0.5 text-[11.5px] text-amber-100">
+      <span className="size-1.5 rounded-full bg-amber-400" />
+      <span className="font-medium text-amber-200/95">Approve</span>
+      <span className="font-mono text-amber-200/70">{label}</span>
+      {rest > 0 && (
+        <span
+          className="rounded-full bg-amber-500/25 px-1.5 text-[10.5px] font-semibold text-amber-200/95"
+          title={`${rest} more approval${rest === 1 ? '' : 's'} queued behind this one`}
+        >
+          +{rest}
+        </span>
+      )}
+      <button
+        type="button"
+        onClick={() => onDecide(first.callId, false)}
+        className="ml-0.5 inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium text-amber-100/85 transition-colors hover:bg-amber-500/20 hover:text-amber-50"
+        title="Deny (n)"
+      >
+        Deny
+      </button>
+      <button
+        type="button"
+        onClick={() => onDecide(first.callId, true)}
+        className="inline-flex items-center gap-1 rounded-full bg-emerald-500 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-950 transition-colors hover:brightness-110"
+        title="Allow (y)"
+      >
+        Allow
+      </button>
+    </div>
+  );
+}
+
+/** Best-effort short label for the pending call. Prefers a filename when
+ *  the args carry a `path`/`file` key, otherwise the tool name itself. */
+function shortToolLabel(name: string, argsRaw: string): string {
+  try {
+    const args = JSON.parse(argsRaw) as Record<string, unknown>;
+    const p = (args.path ?? args.file ?? args.file_path) as string | undefined;
+    if (typeof p === 'string' && p) {
+      const slash = p.lastIndexOf('/');
+      return slash >= 0 ? p.slice(slash + 1) : p;
+    }
+    const cmd = args.command as string | undefined;
+    if (typeof cmd === 'string' && cmd) {
+      const first = cmd.split(/\s+/, 1)[0] ?? cmd;
+      return first.length > 18 ? first.slice(0, 17) + '…' : first;
+    }
+  } catch { /* fall through */ }
+  return name;
 }
 
 /* ---------- plan chip (visible only while plan mode is on) ---------- */

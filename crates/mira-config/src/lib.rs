@@ -83,6 +83,19 @@ pub struct MemoryRuntimeConfig {
     /// out whether the injected content is priming exploratory tool use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inject_context: Option<bool>,
+    /// Score-and-select memory entries against the current turn's
+    /// context instead of dumping every file wholesale. Default on
+    /// (harness-level). Turn off to bisect whether retrieval or memory
+    /// itself is causing a regression, or when you want the model to
+    /// always see every entry regardless of turn topic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retrieval_enabled: Option<bool>,
+    /// Token budget for the rendered memory block when retrieval is on.
+    /// Approximate: `chars / 4`. Default 1500 tokens (~6 KB) — enough
+    /// for ~30 medium bullets. Bump for verbose memory files, drop if
+    /// you're squeezing every last token for the conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retrieval_token_budget: Option<u32>,
 }
 
 impl MemoryRuntimeConfig {
@@ -106,6 +119,17 @@ impl MemoryRuntimeConfig {
     /// prompt. Defaults to `true`.
     pub fn inject_context(&self) -> bool {
         self.inject_context.unwrap_or(true)
+    }
+
+    /// Whether retrieval-based selection is on. Defaults to `true`.
+    pub fn retrieval_enabled(&self) -> bool {
+        self.retrieval_enabled.unwrap_or(true)
+    }
+
+    /// Effective token budget for retrieval. `None` in yaml → harness
+    /// default (from `mira_memory::DEFAULT_TOKEN_BUDGET`).
+    pub fn retrieval_token_budget(&self) -> Option<u32> {
+        self.retrieval_token_budget
     }
 }
 
@@ -282,6 +306,14 @@ impl MiraConfig {
             .or(self.memory.extractor_model);
         self.memory.tools_enabled = other.memory.tools_enabled.or(self.memory.tools_enabled);
         self.memory.inject_context = other.memory.inject_context.or(self.memory.inject_context);
+        self.memory.retrieval_enabled = other
+            .memory
+            .retrieval_enabled
+            .or(self.memory.retrieval_enabled);
+        self.memory.retrieval_token_budget = other
+            .memory
+            .retrieval_token_budget
+            .or(self.memory.retrieval_token_budget);
         self
     }
 }
@@ -357,6 +389,23 @@ pub fn user_memory_path() -> PathBuf {
 /// `<cwd>/.mira/MIRA.md` — project-local memory file path.
 pub fn project_memory_path(cwd: &Path) -> PathBuf {
     cwd.join(".mira").join("MIRA.md")
+}
+
+/// `~/.mira/skills/` — user-global skills directory. Every `*.md` file
+/// under here overrides bundled skills of the same name.
+pub fn user_skills_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default()
+        .join(".mira")
+        .join("skills")
+}
+
+/// `<cwd>/.mira/skills/` — project-local skills directory. Files here
+/// override same-named user + bundled skills, so a repo can ship its
+/// own "how we deploy" or "how we release" playbook.
+pub fn project_skills_dir(cwd: &Path) -> PathBuf {
+    cwd.join(".mira").join("skills")
 }
 
 /// Sensible base_url defaults for well-known provider names.

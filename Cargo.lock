@@ -1385,6 +1385,7 @@ dependencies = [
  "mira-review",
  "mira-sandbox",
  "mira-server",
+ "mira-skills",
  "mira-tools",
  "ratatui",
  "regex",
@@ -1510,6 +1511,7 @@ dependencies = [
  "mira-policy",
  "mira-review",
  "mira-sandbox",
+ "mira-skills",
  "mira-tools",
  "once_cell",
  "reqwest 0.12.28",
@@ -1526,6 +1528,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mira-skills"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_yaml",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "mira-tools"
 version = "0.1.0"
 dependencies = [
@@ -1539,6 +1552,7 @@ dependencies = [
  "mira-core",
  "mira-memory",
  "mira-sandbox",
+ "mira-skills",
  "regex",
  "reqwest 0.12.28",
  "rmcp",

@@ -12,6 +12,7 @@ mira-ai       = { workspace = true }
 mira-config   = { workspace = true }
 mira-memory   = { workspace = true }
 mira-sandbox  = { workspace = true }
+mira-skills   = { workspace = true }
 
 anyhow        = { workspace = true }
 async-trait   = { workspace = true }

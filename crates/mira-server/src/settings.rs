@@ -10,8 +10,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use mira_ai::openai::{OpenAiCompatible, OpenAiConfig};
-use mira_ai::{ChatProvider, NullProvider};
+use mira_ai::{build_chat_provider, ChatProvider, NullProvider};
 use mira_config::{default_base_url_for, global_path, MiraConfig, RuntimeState};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
@@ -355,13 +354,8 @@ fn build_provider(cfg: &MiraConfig) -> Arc<dyn ChatProvider> {
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     let prompt_caching = mira_config::prompt_caching_enabled(name, &base_url, entry.prompt_caching);
-    match OpenAiCompatible::new(OpenAiConfig {
-        base_url,
-        api_key,
-        extra_headers,
-        prompt_caching,
-    }) {
-        Ok(p) => Arc::new(p),
+    match build_chat_provider(name, base_url, api_key, extra_headers, prompt_caching) {
+        Ok(p) => p,
         Err(e) => {
             warn!(%e, "settings: provider build failed, falling back to null");
             Arc::new(NullProvider::new(format!("provider build failed: {e}")))

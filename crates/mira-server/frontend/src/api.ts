@@ -201,6 +201,53 @@ export async function listModels(): Promise<ModelListView> {
   return (await r.json()) as ModelListView;
 }
 
+export type SkillView = {
+  name: string;
+  description: string;
+  category?: string;
+  /** Icon name from the skill's frontmatter (kebab-case) — the UI maps
+   *  a curated set to Phosphor components. Unknown values fall back to
+   *  a sparkle default. */
+  icon?: string;
+  /** Tailwind-flavored color name (`emerald`, `blue`, …). Frontend
+   *  maps to a preset palette; unknown values fall back to a stable
+   *  hash-derived tint. */
+  color?: string;
+  tier: 'bundled' | 'user' | 'project';
+  has_attachments: boolean;
+};
+
+export type SkillsResponse = { skills: SkillView[] };
+
+/** Loaded skill roster — bundled + user (~/.mira/skills) + project
+ *  (<cwd>/.mira/skills) merged. Powers dynamic `/<skill-name>` slash
+ *  commands in the composer palette. Returns an empty list on error
+ *  (skills are additive; a missing roster shouldn't break the palette). */
+export async function listSkills(): Promise<SkillView[]> {
+  try {
+    const r = await fetch('/api/skills');
+    if (!r.ok) return [];
+    const body = (await r.json()) as SkillsResponse;
+    return body.skills;
+  } catch {
+    return [];
+  }
+}
+
+/** Re-read `~/.mira/skills/` and `<cwd>/.mira/skills/` off disk and swap
+ *  the in-process registry. Returns the fresh roster in the same round-
+ *  trip so the caller doesn't need a follow-up `listSkills()`. */
+export async function reloadSkills(): Promise<SkillView[]> {
+  try {
+    const r = await fetch('/api/skills/reload', { method: 'POST' });
+    if (!r.ok) return [];
+    const body = (await r.json()) as SkillsResponse;
+    return body.skills;
+  } catch {
+    return [];
+  }
+}
+
 export type FileView = { path: string; bytes: number; content: string };
 
 export async function readFile(path: string): Promise<FileView> {

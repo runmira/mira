@@ -34,6 +34,7 @@ mod pull_requests;
 mod review;
 mod sessions;
 mod settings;
+mod skills;
 mod state;
 mod title;
 mod undo;
@@ -90,6 +91,11 @@ pub struct ServerConfig {
     /// registered the tools. Frozen for the process lifetime — the
     /// Plugins UI diffs yaml against this to decide "restart required."
     pub mcp_boot: Vec<crate::mcp::McpBootStatus>,
+    /// Loaded skill roster (bundled + user + project tiers merged).
+    /// Shared with the `Skill` tool so the composer palette and the
+    /// tool see the same list. `RwLock` so cwd swaps can hot-replace
+    /// the project tier without re-registering the tool.
+    pub skills: mira_tools::builtin::skill::SkillHandle,
 }
 
 /// Start the server. Blocks until the process is signaled to exit.
@@ -224,6 +230,7 @@ pub async fn run(mut cfg: ServerConfig) -> Result<()> {
             &cfg.cwd,
             episodic_store.clone(),
         ));
+        session = session.with_memory_retrieval(memory_retrieval_from(&cfg.memory_runtime));
     }
     // Auto-extractor: post-round background pass that appends durable
     // facts to episodic. Off if the user disabled it via `mira.yaml`.
@@ -249,6 +256,7 @@ pub async fn run(mut cfg: ServerConfig) -> Result<()> {
         memory: Arc::new(RwLock::new(memory_store)),
         episodic: Arc::new(RwLock::new(episodic_store)),
         mcp_boot: Arc::new(cfg.mcp_boot),
+        skills: cfg.skills.clone(),
     };
 
     let router = build_router(state, cfg.static_dir.clone());
@@ -304,6 +312,8 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
             "/api/git/worktree",
             axum::routing::post(git::create_worktree),
         )
+        .route("/api/skills", get(skills::list_skills))
+        .route("/api/skills/reload", axum::routing::post(skills::reload_skills))
         .route("/api/memory", get(memory::get_memory))
         .route(
             "/api/memory/append",
@@ -398,6 +408,21 @@ pub fn make_memory_snapshot_with(
         )
         .with_episodic(episodic),
     )
+}
+
+/// Translate the `mira.yaml`-shaped `MemoryRuntimeConfig` into the
+/// harness's `MemoryRetrievalConfig`. Kept here (rather than in
+/// `mira-harness`) so the harness stays free of the on-disk config
+/// type.
+pub fn memory_retrieval_from(
+    cfg: &mira_config::MemoryRuntimeConfig,
+) -> mira_harness::MemoryRetrievalConfig {
+    let mut out = mira_harness::MemoryRetrievalConfig::default();
+    out.enabled = cfg.retrieval_enabled();
+    if let Some(budget) = cfg.retrieval_token_budget() {
+        out.token_budget = budget as usize;
+    }
+    out
 }
 
 /// System prompt for a session bound to `cwd`. Kept here (rather than in the

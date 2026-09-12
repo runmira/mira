@@ -10,6 +10,7 @@
 //! example.
 
 pub mod builtin;
+pub mod consolidate;
 pub mod context;
 pub mod guard;
 pub mod mcp;

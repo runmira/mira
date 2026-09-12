@@ -1,6 +1,7 @@
 mod approver;
 mod config;
 mod eval;
+mod memory;
 mod repl;
 mod review;
 mod serve;
@@ -13,7 +14,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use mira_ai::openai::{OpenAiCompatible, OpenAiConfig};
+use mira_ai::build_chat_provider;
 use mira_core::SessionId;
 use mira_harness::{Approver, FileStore, Session, SessionConfig, SessionStore};
 use mira_policy::{Mode, Policy, PolicyConfig};
@@ -90,6 +91,8 @@ enum Command {
     Review(review::ReviewArgs),
     /// Batch-run regression eval tasks and print a summary.
     Eval(eval::EvalArgs),
+    /// Manage cross-session memory (MIRA.md + episodic).
+    Memory(memory::MemoryArgs),
 }
 
 #[tokio::main]
@@ -109,6 +112,10 @@ async fn main() -> Result<()> {
         init_tracing(false);
         return eval::run(&cli, args).await;
     }
+    if let Some(Command::Memory(args)) = cli.command.clone() {
+        init_tracing(false);
+        return memory::run(&cli, args).await;
+    }
 
     let use_tui = !cli.simple && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
 
@@ -125,15 +132,14 @@ async fn main() -> Result<()> {
     let settings = resolve_settings(&cli, &cfg)?;
 
     // --- provider
-    let provider = Arc::new(
-        OpenAiCompatible::new(OpenAiConfig {
-            base_url: settings.base_url,
-            api_key: settings.api_key,
-            extra_headers: settings.extra_headers,
-            prompt_caching: settings.prompt_caching,
-        })
-        .context("build provider")?,
-    );
+    let provider = build_chat_provider(
+        &settings.provider_name,
+        settings.base_url,
+        settings.api_key,
+        settings.extra_headers,
+        settings.prompt_caching,
+    )
+    .context("build provider")?;
 
     // --- tools + sandbox
     let sandbox = Arc::new(Sandbox::default_scrubbed());
@@ -141,6 +147,29 @@ async fn main() -> Result<()> {
     builtin::register_core(&mut registry);
     if cfg.memory.tools_enabled() {
         builtin::register_memory(&mut registry);
+    }
+    // Skills: load bundled + user (~/.mira/skills) + project (<cwd>/.mira/skills).
+    // Wrap in the RwLock-Arc shape the SkillTool expects — no cwd swap in
+    // the CLI path, so the lock is effectively read-only, but the shape
+    // stays consistent with `mira serve`.
+    let skills_registry = mira_skills::SkillRegistry::load_layered(
+        &mira_config::user_skills_dir(),
+        &mira_config::project_skills_dir(&cwd),
+    );
+    let skills_handle: mira_tools::builtin::skill::SkillHandle = std::sync::Arc::new(
+        tokio::sync::RwLock::new(std::sync::Arc::new(skills_registry)),
+    );
+    builtin::register_skills(&mut registry, skills_handle);
+    // `memory_consolidate` — dedup/merge a MIRA.md via a cheap model.
+    // Gated behind the same `memory.tools_enabled` switch as the other
+    // memory tools: consolidation isn't useful without them.
+    if cfg.memory.tools_enabled() {
+        let consolidate_model = cfg
+            .memory
+            .extractor_model()
+            .map(str::to_owned)
+            .unwrap_or_else(|| settings.model.clone());
+        builtin::register_consolidate(&mut registry, provider.clone(), consolidate_model);
     }
     // Configured MCP servers layer on top of the built-ins. A single broken
     // entry mustn't stop Mira from starting, so failures degrade to a
@@ -248,6 +277,7 @@ async fn main() -> Result<()> {
             &cwd,
             episodic_store,
         ));
+        session = session.with_memory_retrieval(mira_server::memory_retrieval_from(&cfg.memory));
     }
     if cfg.memory.auto_extract_enabled() {
         session = session.with_auto_extract(mira_harness::AutoExtractConfig::enabled(
@@ -276,6 +306,10 @@ async fn main() -> Result<()> {
 /// Values that survive the CLI/env/config/default cascade and get passed
 /// down to the provider, policy, and session.
 pub(crate) struct ResolvedSettings {
+    /// Provider name (`"openrouter"`, `"anthropic"`, …). Used by the
+    /// provider factory to decide between the OpenAI-compat adapter and
+    /// a native one (Anthropic Messages).
+    pub(crate) provider_name: String,
     pub(crate) base_url: String,
     pub(crate) api_key: String,
     pub(crate) model: String,
@@ -350,6 +384,7 @@ pub(crate) fn resolve_settings(cli: &Cli, cfg: &MiraConfig) -> Result<ResolvedSe
         mira_config::prompt_caching_enabled(&provider_name, &base_url, provider.prompt_caching);
 
     Ok(ResolvedSettings {
+        provider_name,
         base_url,
         api_key,
         model,

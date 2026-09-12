@@ -21,6 +21,7 @@ mira-sandbox  = { path = "crates/mira-sandbox", version = "0.1.0" }
 mira-harness  = { path = "crates/mira-harness", version = "0.1.0" }
 mira-review   = { path = "crates/mira-review",  version = "0.1.0" }
 mira-agents   = { path = "crates/mira-agents",  version = "0.1.0" }
+mira-skills   = { path = "crates/mira-skills",  version = "0.1.0" }
 mira-server   = { path = "crates/mira-server",  version = "0.1.0" }
 
 # Async runtime

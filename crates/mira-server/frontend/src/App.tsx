@@ -2,13 +2,18 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { CaretDown, Target } from '@phosphor-icons/react';
 import { cn } from './lib/utils';
 import { connect, type WsClient, type WsStatus } from './ws';
-import { appendMemory, applyUndo, getSessionHistory, getSettings, newSession, startReview } from './api';
+import { appendMemory, applyUndo, getSessionHistory, getSettings, listSkills, newSession, startReview, type SkillView } from './api';
 import { extractAgentId } from './components/AgentCard';
 import { SettingsPanel } from './components/Settings';
 import { PluginsPanel } from './components/Plugins';
 import { PullRequestPanel } from './components/PullRequestPanel';
 import { Sidebar, type MainView } from './components/Sidebar';
-import { Composer } from './components/Composer';
+import {
+  Composer,
+  parseSentAttachments,
+  SentAttachmentChip,
+  type PendingApproval,
+} from './components/Composer';
 import { FolderPicker } from './components/FolderPicker';
 import { AssistantContent } from './components/AssistantContent';
 import { ToolCard, type ToolStatus } from './components/ToolCard';
@@ -177,6 +182,27 @@ export default function App() {
   const [expandedTurns, setExpandedTurns] = useState<Set<number>>(new Set());
   const [busy, setBusy] = useState<boolean>(false);
   const [thinking, setThinking] = useState<boolean>(false);
+  // When text tokens go quiet mid-turn — typically because the model is
+  // emitting tool-call deltas that don't surface as `token` events — we
+  // want the "Thinking…" affordance back so the transcript isn't silent
+  // for the second-or-so before `tool_start` fires. `scheduleThinking`
+  // (below) sets this timer on every `token`; a follow-up token cancels
+  // it, and `tool_start` / `approval_request` / `done` clear it too so
+  // the indicator doesn't flash after the turn genuinely ends.
+  const thinkingIdleTimerRef = useRef<number | null>(null);
+  function clearThinkingIdle() {
+    if (thinkingIdleTimerRef.current != null) {
+      window.clearTimeout(thinkingIdleTimerRef.current);
+      thinkingIdleTimerRef.current = null;
+    }
+  }
+  function scheduleThinkingIdle() {
+    clearThinkingIdle();
+    thinkingIdleTimerRef.current = window.setTimeout(() => {
+      thinkingIdleTimerRef.current = null;
+      setThinking(true);
+    }, 350);
+  }
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
   // Which primary view fills the main pane. Sidebar nav items switch this;
@@ -207,6 +233,11 @@ export default function App() {
   // open and mutated by `goal_set` / `goal_progress` / `goal_done` /
   // `goal_cleared` server frames. Absent = no autonomous run set.
   const [goal, setGoal] = useState<Goal | null>(null);
+  // Loaded skill roster — powers `/<skill-name>` slash commands in the
+  // composer palette. Fetched lazily after the first WS Ready frame
+  // (server needs to be up + AppState wired). Empty on error; the
+  // palette degrades gracefully to just the built-in commands.
+  const [skills, setSkills] = useState<SkillView[]>([]);
   // Force a re-render every second while a turn is active so the live
   // "Working…" counter ticks. Cheap; the tree is small and only mounts
   // when the browser tab is visible.
@@ -266,7 +297,12 @@ export default function App() {
         setGoal(msg.goal ?? null);
         setBusy(false);
         setThinking(false);
+        clearThinkingIdle();
         setSidebarRefresh((n) => n + 1);
+        // Refresh the skill roster on every Ready — a cwd swap may
+        // change the project tier (~/.mira vs. <cwd>/.mira). Silent on
+        // failure; the palette just shows built-in commands.
+        listSkills().then(setSkills).catch(() => setSkills([]));
         // A Ready frame means the harness swapped session context (new /
         // load / resume / reconnect). If the user was parked on Plugins
         // or another management view, jump back to chat so a fresh
@@ -275,10 +311,16 @@ export default function App() {
         break;
       case 'token':
         setThinking(false);
+        // Text is streaming — hide the indicator, but arm a short idle
+        // timer so a silent gap (typically the model emitting tool-call
+        // deltas after its assistant text ends) brings the indicator
+        // back before `tool_start` finally fires.
+        scheduleThinkingIdle();
         setEntries((prev) => appendToken(prev, msg.text));
         break;
       case 'approval_request':
         setThinking(false);
+        clearThinkingIdle();
         setEntries((prev) => [
           ...prev,
           { kind: 'tool', call: msg.call, preview: msg.preview ?? null, status: 'pending', result: null },
@@ -286,6 +328,7 @@ export default function App() {
         break;
       case 'tool_start':
         setThinking(false);
+        clearThinkingIdle();
         setEntries((prev) => {
           const withStart = upsertToolStart(prev, msg.call);
           // If a plan_request arrived before this tool_start (race between
@@ -322,6 +365,7 @@ export default function App() {
       case 'done':
         setBusy(false);
         setThinking(false);
+        clearThinkingIdle();
         // Close out the most recent turn's timing.
         setTurnTimings((prev) => stampLastTurn(prev, Date.now()));
         setSidebarRefresh((n) => n + 1);
@@ -643,6 +687,19 @@ export default function App() {
     })));
   }
 
+  // Tool calls waiting for the user's Y/N decision. Surfaced in the
+  // composer footer (bottom-left) instead of inline in the transcript so
+  // the button target doesn't drift as the transcript grows. Kept oldest-
+  // first — the top of the queue is what the visible Allow/Deny + Y/N
+  // shortcut act on.
+  const pendingApprovals = useMemo<PendingApproval[]>(
+    () =>
+      entries
+        .filter((e): e is Extract<Entry, { kind: 'tool' }> => e.kind === 'tool' && e.status === 'pending')
+        .map((e) => ({ callId: e.call.id, call: e.call, preview: e.preview })),
+    [entries],
+  );
+
   function onSend(text: string) {
     // Belt-and-suspenders — the composer isn't visible on non-chat views,
     // but a keyboard-driven send would still land the message and it should
@@ -941,6 +998,9 @@ export default function App() {
                 if (r.applied.length === 0) return 'nothing to undo';
                 return `reverted ${r.applied.length} write${r.applied.length === 1 ? '' : 's'}`;
               }}
+              pendingApprovals={pendingApprovals}
+              onDecideApproval={decideApproval}
+              skills={skills}
             />
           </>
         )}
@@ -1146,8 +1206,20 @@ function goalActivity(entries: Entry[]): string {
 function titleFromEntries(entries: Entry[]): string {
   for (const e of entries) {
     if (e.kind === 'msg' && e.msg.role === 'user' && e.msg.content?.trim()) {
-      const t = e.msg.content.trim().split('\n')[0];
-      return t.length > 60 ? t.slice(0, 60) + '…' : t;
+      // Strip the `## Attached files …` header (same sanitization the
+      // sidebar's `sessionLabel` uses). Prefer the actual user prose;
+      // fall back to a filename summary when the turn was attachment-only.
+      const { attachments, text } = parseSentAttachments(e.msg.content);
+      const clean = text.trim();
+      if (clean) {
+        const first = clean.split('\n')[0];
+        return first.length > 60 ? first.slice(0, 60) + '…' : first;
+      }
+      if (attachments.length > 0) {
+        const filename = attachments[0].filename;
+        const more = attachments.length - 1;
+        return more > 0 ? `${filename} + ${more} more` : filename;
+      }
     }
   }
   return 'New chat';
@@ -1451,11 +1523,24 @@ function EntryView({
       const body = (content ?? '').trim();
       if (!body) return null;
       if (role === 'user') {
+        // Attachments live above the bubble as chips (Codex-style). The
+        // model still sees the fenced content in the body — we just hide
+        // that from the reader so the transcript stays scannable.
+        const { attachments, text } = parseSentAttachments(content ?? '');
         return (
-          <div className="flex justify-end">
-            <div className="max-w-[78%] whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-secondary px-4 py-2.5 text-[14.5px]">
-              {content}
-            </div>
+          <div className="flex flex-col items-end gap-1.5">
+            {attachments.length > 0 && (
+              <div className="flex max-w-[78%] flex-wrap justify-end gap-1.5">
+                {attachments.map((a, i) => (
+                  <SentAttachmentChip key={`att-${i}-${a.filename}`} filename={a.filename} subtype={a.subtype} />
+                ))}
+              </div>
+            )}
+            {text.trim() && (
+              <div className="max-w-[78%] whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-secondary px-4 py-2.5 text-[14.5px]">
+                {text}
+              </div>
+            )}
           </div>
         );
       }

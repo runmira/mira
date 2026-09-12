@@ -5,7 +5,10 @@ use std::sync::Arc;
 use futures::{stream::BoxStream, StreamExt};
 use mira_ai::{ChatEvent, ChatProvider, ChatRequest, FinishReason, ResponseFormat};
 use mira_core::{Message, Role, SessionId, ToolCall, ToolResult};
-use mira_memory::{EpisodicEntry, EpisodicSource, EpisodicStore, MemorySnapshot};
+use mira_memory::{
+    EpisodicEntry, EpisodicSource, EpisodicStore, MemoryQuery, MemorySnapshot,
+    DEFAULT_TOKEN_BUDGET,
+};
 use mira_policy::{Decision, Policy, Request as PolicyRequest};
 use mira_sandbox::PersistentShell;
 use mira_tools::context::{ChildCancel, ChildTracker};
@@ -95,6 +98,33 @@ impl AutoExtractConfig {
     }
 }
 
+/// Retrieval-mode settings for the memory snapshot.
+///
+/// Defaults to enabled with the standard token budget; wire from the
+/// runtime config via [`Session::with_memory_retrieval`] to override.
+#[derive(Clone, Debug)]
+pub struct MemoryRetrievalConfig {
+    /// When `false`, the harness renders memory in legacy dump-everything
+    /// mode (byte-capped, whole files pasted, episodic tail appended).
+    pub enabled: bool,
+    /// Token budget for the rendered memory block. `chars / 4` is the
+    /// approximate cost function; the snapshot renders a `<!-- memory:
+    /// used / budget tokens -->` marker so operators can tune this.
+    pub token_budget: usize,
+}
+
+impl Default for MemoryRetrievalConfig {
+    fn default() -> Self {
+        // Retrieval-on by default: it degrades gracefully to
+        // "everything fits under the budget" when memory is small, and
+        // matters immediately once it grows.
+        Self {
+            enabled: true,
+            token_budget: DEFAULT_TOKEN_BUDGET,
+        }
+    }
+}
+
 /// How many recent episodic entries to consider when deciding whether a
 /// candidate is a duplicate. Small enough that dedup is O(N) with a
 /// substring check; big enough to catch the "I just remembered that last
@@ -164,6 +194,12 @@ pub struct Session {
     /// turn. Persisted history keeps only the fixed system prefix; the
     /// live block is inserted at request time and never checkpointed.
     memory_snapshot: Option<Arc<dyn MemorySnapshot>>,
+    /// Retrieval settings applied when the harness renders the memory
+    /// snapshot. When `retrieval_enabled` is on, the harness builds a
+    /// [`MemoryQuery`] from recent conversation and hands it to the
+    /// snapshot so entries get scored + budgeted; when off, the snapshot
+    /// falls back to dumping every file wholesale (legacy behaviour).
+    memory_retrieval: MemoryRetrievalConfig,
     /// Post-round background extraction settings. See [`AutoExtractConfig`].
     auto_extract: Option<AutoExtractConfig>,
     /// Handle to the currently-running turn task, if any. `cancel()` aborts
@@ -256,6 +292,7 @@ impl Session {
             tasks,
             store: None,
             memory_snapshot: None,
+            memory_retrieval: MemoryRetrievalConfig::default(),
             auto_extract: None,
             current_turn: Arc::new(Mutex::new(None)),
             parent_id: None,
@@ -323,6 +360,7 @@ impl Session {
             tasks,
             store: None,
             memory_snapshot: None,
+            memory_retrieval: MemoryRetrievalConfig::default(),
             auto_extract: None,
             current_turn: Arc::new(Mutex::new(None)),
             parent_id: record.parent_id,
@@ -354,6 +392,15 @@ impl Session {
     /// picked up on the next turn.
     pub fn with_memory_snapshot(mut self, snapshot: Arc<dyn MemorySnapshot>) -> Self {
         self.memory_snapshot = Some(snapshot);
+        self
+    }
+
+    /// Configure how the memory snapshot is rendered — off = legacy
+    /// dump; on = retrieval-scored under a token budget. Default is on
+    /// with [`DEFAULT_TOKEN_BUDGET`]; wire from [`mira_config::MemoryRuntimeConfig`]
+    /// to expose it in `mira.yaml`.
+    pub fn with_memory_retrieval(mut self, cfg: MemoryRetrievalConfig) -> Self {
+        self.memory_retrieval = cfg;
         self
     }
 
@@ -1436,7 +1483,16 @@ async fn build_request_messages(sess: &Session) -> Vec<Message> {
     let Some(snap) = sess.memory_snapshot.as_ref() else {
         return msgs;
     };
-    let Some(block) = snap.render().await else {
+    // Retrieval: build a query from the recent conversation so scored
+    // selection can weight relevant entries above stale ones. When
+    // retrieval is off, pass `None` and the snapshot falls back to the
+    // legacy dump-everything shape.
+    let query = if sess.memory_retrieval.enabled {
+        Some(build_memory_query(&msgs, sess.memory_retrieval.token_budget))
+    } else {
+        None
+    };
+    let Some(block) = snap.render(query.as_ref()).await else {
         return msgs;
     };
     // Find the first system message and insert the memory block right
@@ -1450,4 +1506,60 @@ async fn build_request_messages(sess: &Session) -> Vec<Message> {
         .unwrap_or(0);
     msgs.insert(insert_at, Message::system(block));
     msgs
+}
+
+/// Build a retrieval query from the tail of the conversation. Weighted
+/// toward the most-recent user message (that's what the model is about
+/// to act on) plus a small slice of the preceding assistant/tool turns
+/// for topical context. Deliberately cheap — no tokenisation here; the
+/// scorer does that itself.
+///
+/// Cap on total query length keeps IDF calculation snappy even when a
+/// tool result was gigantic in the last round.
+fn build_memory_query(msgs: &[Message], token_budget: usize) -> MemoryQuery {
+    const QUERY_CHAR_CAP: usize = 4000;
+    const QUERY_TAIL_MESSAGES: usize = 6;
+
+    let mut pieces: Vec<String> = Vec::new();
+    let mut used = 0usize;
+    // Walk from the newest message backward. The last user message is
+    // the primary signal; earlier context supports it. Skip system
+    // messages entirely (that's where memory itself lives — self-
+    // referential scoring is not useful).
+    for m in msgs.iter().rev().take(QUERY_TAIL_MESSAGES * 2) {
+        if matches!(m.role, Role::System) {
+            continue;
+        }
+        let Some(body) = m.content.as_deref() else {
+            continue;
+        };
+        let trimmed = body.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let take = trimmed.len().min(QUERY_CHAR_CAP.saturating_sub(used));
+        if take == 0 {
+            break;
+        }
+        pieces.push(trimmed[..take].to_string());
+        used += take;
+        if pieces.len() >= QUERY_TAIL_MESSAGES || used >= QUERY_CHAR_CAP {
+            break;
+        }
+    }
+    // Reverse so oldest-first reads naturally.
+    pieces.reverse();
+    MemoryQuery {
+        context: pieces.join("\n"),
+        token_budget: Some(token_budget),
+        now_secs: now_secs_wall(),
+    }
+}
+
+fn now_secs_wall() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }

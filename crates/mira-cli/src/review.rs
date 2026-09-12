@@ -13,8 +13,7 @@ use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use clap::Args;
 use crossterm::style::Stylize;
-use mira_ai::openai::{OpenAiCompatible, OpenAiConfig};
-use mira_ai::ChatProvider;
+use mira_ai::{build_chat_provider, ChatProvider};
 use mira_review::{review, Finding, Progress, ProgressSink, Severity};
 
 use crate::config::MiraConfig;
@@ -53,15 +52,14 @@ pub async fn run(cli: &crate::Cli, args: ReviewArgs) -> Result<()> {
     let cfg = MiraConfig::load(&cwd).context("load config")?;
     let settings = crate::resolve_settings(cli, &cfg)?;
 
-    let provider: Box<dyn ChatProvider> = Box::new(
-        OpenAiCompatible::new(OpenAiConfig {
-            base_url: settings.base_url.clone(),
-            api_key: settings.api_key.clone(),
-            extra_headers: settings.extra_headers.clone(),
-            prompt_caching: settings.prompt_caching,
-        })
-        .context("build provider")?,
-    );
+    let provider: std::sync::Arc<dyn ChatProvider> = build_chat_provider(
+        &settings.provider_name,
+        settings.base_url.clone(),
+        settings.api_key.clone(),
+        settings.extra_headers.clone(),
+        settings.prompt_caching,
+    )
+    .context("build provider")?;
 
     let diff = collect_diff(&args, &cwd).context("collect diff")?;
     if diff.trim().is_empty() {

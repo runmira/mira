@@ -1,9 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
-import { CircleNotch } from '@phosphor-icons/react';
 
 /**
- * "Simmering… 4s" indicator shown while the model is thinking. Random
- * gerund per turn; live elapsed counter after 1s. Hides on first token.
+ * "Simmering 4s" indicator shown while the model is thinking.
+ *
+ * Text-only — no icon, no pill, no bouncing dots. A slow horizontal
+ * shimmer sweeps through the letters via `background-clip: text` so the
+ * indicator reads as motion without stealing attention from the
+ * transcript. Random gerund per turn; live elapsed counter after 1s.
+ * Hides on first token / tool_start.
  */
 export function Thinking() {
   const verb = useMemo(() => pickVerb(), []);
@@ -17,24 +21,28 @@ export function Thinking() {
     return () => clearInterval(id);
   }, [startedAt]);
 
+  const label = elapsed > 0 ? `${verb} ${formatElapsed(elapsed)}` : verb;
+
   return (
     <div
       role="status"
       aria-live="polite"
-      className="inline-flex max-w-max animate-fade-in items-center gap-2 rounded-full border border-mira-blue/25 bg-mira-blue/[0.07] px-3 py-1.5 text-[13px] text-mira-blue/90"
+      className="animate-fade-in text-[13.5px] font-medium tracking-tight"
     >
-      <CircleNotch className="size-3 shrink-0 animate-spin text-mira-blue" />
-      <span className="font-medium text-foreground">{verb}</span>
-      <span className="inline-flex gap-0.5 font-semibold text-mira-blue">
-        <span className="animate-[thinking-bounce_1.2s_ease-in-out_infinite]">.</span>
-        <span className="animate-[thinking-bounce_1.2s_ease-in-out_infinite_0.15s]">.</span>
-        <span className="animate-[thinking-bounce_1.2s_ease-in-out_infinite_0.3s]">.</span>
+      <span
+        // Gradient text: a bright band travels through the muted-grey base.
+        // `bg-clip-text` + `text-transparent` lets the moving gradient show
+        // through the glyphs. `background-size: 200%` gives the shimmer
+        // enough runway to feel like a sweep, not a flash.
+        className="animate-text-shimmer inline-block bg-clip-text text-transparent"
+        style={{
+          backgroundImage:
+            'linear-gradient(90deg, hsl(0 0% 100% / 0.28) 0%, hsl(0 0% 100% / 0.28) 40%, hsl(0 0% 100% / 0.95) 50%, hsl(0 0% 100% / 0.28) 60%, hsl(0 0% 100% / 0.28) 100%)',
+          backgroundSize: '200% 100%',
+        }}
+      >
+        {label}
       </span>
-      {elapsed > 0 && (
-        <span className="border-l border-white/10 pl-2 font-mono text-[11px] text-muted-foreground">
-          {formatElapsed(elapsed)}
-        </span>
-      )}
     </div>
   );
 }

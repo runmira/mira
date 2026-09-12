@@ -15,6 +15,7 @@
 pub mod episodic;
 pub mod file_store;
 pub mod loader;
+pub mod retrieval;
 pub mod snapshot;
 pub mod store;
 
@@ -23,5 +24,9 @@ pub use episodic::{
 };
 pub use file_store::FileMemoryStore;
 pub use loader::{load_memory_files, MemoryFile, MemoryKind, MEMORY_MAX_BYTES};
+pub use retrieval::{
+    approx_tokens, parse_md_bullets, select_top_k, CandidateSource, MemoryQuery,
+    RetrievalCandidate, DEFAULT_TOKEN_BUDGET, RECENT_EPISODIC_FLOOR,
+};
 pub use snapshot::{FileMemorySnapshot, MemorySnapshot};
 pub use store::{search, MemoryError, MemoryMatch, MemoryScope, MemoryStore};

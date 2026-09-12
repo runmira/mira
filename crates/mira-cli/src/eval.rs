@@ -26,7 +26,7 @@ use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use clap::Args;
 use futures::StreamExt;
-use mira_ai::openai::{OpenAiCompatible, OpenAiConfig};
+use mira_ai::build_chat_provider;
 use mira_core::ToolCall;
 use mira_harness::{Approver, HarnessEvent, Session, SessionConfig};
 use mira_policy::{Decision, Mode, Policy, PolicyConfig};
@@ -127,15 +127,14 @@ pub async fn run(cli: &crate::Cli, args: EvalArgs) -> Result<()> {
     }
 
     // Shared provider so all tasks reuse one HTTP client.
-    let provider: Arc<dyn mira_ai::ChatProvider> = Arc::new(
-        OpenAiCompatible::new(OpenAiConfig {
-            base_url: settings.base_url.clone(),
-            api_key: settings.api_key.clone(),
-            extra_headers: settings.extra_headers.clone(),
-            prompt_caching: settings.prompt_caching,
-        })
-        .context("build provider")?,
-    );
+    let provider: Arc<dyn mira_ai::ChatProvider> = build_chat_provider(
+        &settings.provider_name,
+        settings.base_url.clone(),
+        settings.api_key.clone(),
+        settings.extra_headers.clone(),
+        settings.prompt_caching,
+    )
+    .context("build provider")?;
 
     let mut outcomes = Vec::with_capacity(specs.len());
     for (path, spec) in specs {

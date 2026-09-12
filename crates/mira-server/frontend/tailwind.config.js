@@ -60,11 +60,8 @@ export default {
         sm: 'calc(var(--radius) - 4px)',
       },
       fontFamily: {
-        // Inter is the closest freely-distributable stand-in for OpenAI's
-        // proprietary Söhne / OpenAI Sans. The `Tight` variant is used by
-        // headings for the slightly-condensed feel their display type has.
-        sans:  ['Inter', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'system-ui', 'sans-serif'],
-        tight: ['"Inter Tight"', 'Inter', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'system-ui', 'sans-serif'],
+        sans:  ['Ubuntu', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'system-ui', 'sans-serif'],
+        tight: ['Ubuntu', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'system-ui', 'sans-serif'],
         mono:  ['ui-monospace', 'SFMono-Regular', 'SF Mono', 'Menlo', 'monospace'],
       },
       keyframes: {
@@ -84,11 +81,19 @@ export default {
           '0%, 60%, 100%': { opacity: '0.25', transform: 'translateY(0)' },
           '30%':           { opacity: '1',    transform: 'translateY(-2px)' },
         },
+        // Sweeping highlight for the "Thinking…" text — background-clipped
+        // to the glyphs so a bright band travels through the letters.
+        // Values chosen so the visible band lands ON the text at t=50%.
+        'text-shimmer': {
+          '0%':   { 'background-position': '200% 0' },
+          '100%': { 'background-position': '-200% 0' },
+        },
       },
       animation: {
         'accordion-down': 'accordion-down 0.14s ease-out',
         'accordion-up':   'accordion-up 0.14s ease-out',
         'fade-in':        'fade-in 0.14s ease-out',
+        'text-shimmer':   'text-shimmer 2.4s linear infinite',
       },
     },
   },

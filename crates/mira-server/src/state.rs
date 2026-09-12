@@ -60,6 +60,11 @@ pub struct AppState {
     /// the Plugins UI treats yaml drift from this snapshot as
     /// "restart required."
     pub mcp_boot: McpBootSnapshot,
+    /// Currently-loaded skill roster (bundled + user + project). Shared
+    /// with the `Skill` tool; the `/api/skills` handler reads it to
+    /// power the composer palette. `RwLock` so a cwd swap can replace
+    /// the project tier without any handler re-plumbing.
+    pub skills: mira_tools::builtin::skill::SkillHandle,
 }
 
 impl AppState {

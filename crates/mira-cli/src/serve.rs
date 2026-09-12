@@ -12,8 +12,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Args;
-use mira_ai::openai::{OpenAiCompatible, OpenAiConfig};
-use mira_ai::{ChatProvider, NullProvider};
+use mira_ai::{build_chat_provider, ChatProvider, NullProvider};
 use mira_harness::{FileStore, SessionConfig, SessionStore};
 use mira_policy::{Policy, PolicyConfig};
 use mira_sandbox::Sandbox;
@@ -74,6 +73,34 @@ pub async fn run(cli: &super::Cli, args: ServeArgs) -> Result<()> {
     builtin::register_core(&mut registry);
     if cfg.memory.tools_enabled() {
         builtin::register_memory(&mut registry);
+    }
+    // Skills: bundled + user + project, three tiers overriding by name.
+    // The RwLock lets the server hot-swap the project tier on cwd change
+    // (see the `put_cwd` handler) without re-registering the tool.
+    let skills_registry = mira_skills::SkillRegistry::load_layered(
+        &mira_config::user_skills_dir(),
+        &mira_config::project_skills_dir(&cwd),
+    );
+    let skills_handle: mira_tools::builtin::skill::SkillHandle = std::sync::Arc::new(
+        tokio::sync::RwLock::new(std::sync::Arc::new(skills_registry)),
+    );
+    builtin::register_skills(&mut registry, skills_handle.clone());
+    // `memory_consolidate` — dedup/merge a MIRA.md via a cheap model.
+    // Uses the extractor-model config knob (same fallback path as the
+    // background auto-extractor), or the initial session model when no
+    // cheap tier is configured. Gated behind `memory.tools_enabled`.
+    if cfg.memory.tools_enabled() {
+        let fallback = resolved
+            .as_ref()
+            .map(|s| s.model.clone())
+            .or_else(|| cfg.default_model.clone())
+            .unwrap_or_else(|| "unconfigured".to_owned());
+        let consolidate_model = cfg
+            .memory
+            .extractor_model()
+            .map(str::to_owned)
+            .unwrap_or(fallback);
+        builtin::register_consolidate(&mut registry, provider.clone(), consolidate_model);
     }
     // Same MCP wiring as the CLI entrypoint (see main.rs): one broken
     // server must not stop `mira serve` from booting — the user needs the
@@ -217,6 +244,7 @@ pub async fn run(cli: &super::Cli, args: ServeArgs) -> Result<()> {
         static_dir: args.static_dir,
         memory_runtime: cfg.memory.clone(),
         mcp_boot,
+        skills: skills_handle,
     })
     .await
 }
@@ -225,13 +253,14 @@ fn build_initial_provider(resolved: &Option<super::ResolvedSettings>) -> Arc<dyn
     let Some(s) = resolved else {
         return Arc::new(NullProvider::default());
     };
-    match OpenAiCompatible::new(OpenAiConfig {
-        base_url: s.base_url.clone(),
-        api_key: s.api_key.clone(),
-        extra_headers: s.extra_headers.clone(),
-        prompt_caching: s.prompt_caching,
-    }) {
-        Ok(p) => Arc::new(p),
+    match build_chat_provider(
+        &s.provider_name,
+        s.base_url.clone(),
+        s.api_key.clone(),
+        s.extra_headers.clone(),
+        s.prompt_caching,
+    ) {
+        Ok(p) => p,
         Err(e) => Arc::new(NullProvider::new(format!("provider build failed: {e}"))),
     }
 }

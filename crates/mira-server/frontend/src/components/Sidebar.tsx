@@ -27,6 +27,7 @@ import {
 } from '../api';
 import type { SessionSummary, WorktreeMergeStatus } from '../types';
 import type { WsStatus } from '../ws';
+import { parseSentAttachments } from './Composer';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -37,6 +38,25 @@ import { cn } from '@/lib/utils';
  *  active view; the App owns the state and hides the chat composer /
  *  transcript when a non-chat view is selected. */
 export type MainView = 'chat' | 'plugins' | 'pull-request' | 'scheduled';
+
+/** Human-readable session label. Strips the `## Attached files … ` block
+ *  from `first_user_message` so an image-only first turn doesn't read as
+ *  a wall of markdown; falls back to a filename summary when the user
+ *  sent nothing but attachments. */
+function sessionLabel(s: SessionSummary): string {
+  if (s.title) return s.title;
+  const raw = s.first_user_message ?? '';
+  if (!raw) return 'Untitled';
+  const { attachments, text } = parseSentAttachments(raw);
+  const clean = text.trim();
+  if (clean) return clean;
+  if (attachments.length > 0) {
+    const first = attachments[0].filename;
+    const more = attachments.length - 1;
+    return more > 0 ? `${first} + ${more} more` : first;
+  }
+  return raw;
+}
 
 type Props = {
   status: WsStatus;
@@ -335,10 +355,10 @@ function SessionRow({
   const running = active && activeBusy;
   return (
     <div
-      // Hover tooltip prefers the ORIGINAL first message so the user can
-      // still see what the chat started with even when the nickname has
-      // replaced the row label.
-      title={session.title ?? session.first_user_message ?? session.id}
+      // Hover tooltip prefers the cleaned-up label (no `## Attached
+      // files` markdown blob) so an attachment-only turn still hovers
+      // sensibly. Falls back to session id when everything is empty.
+      title={sessionLabel(session) || session.id}
       className={cn(
         'group grid w-full grid-cols-[1fr_auto] items-start gap-1.5 rounded-md px-2 py-1.5 transition-colors',
         active
@@ -357,7 +377,7 @@ function SessionRow({
             active ? 'font-semibold text-foreground' : 'font-medium text-foreground/90',
           )}
         >
-          {session.title ?? session.first_user_message ?? 'Untitled'}
+          {sessionLabel(session)}
         </span>
         <SublineMarquee session={session} providerDot={providerDot} />
       </button>
@@ -488,13 +508,16 @@ function SublineContent({
  *  ring — quiet by default, expressive when there's a state worth noting. */
 function SessionStatus({ running, merged }: { running: boolean; merged: boolean }) {
   if (running) {
+    // Same spinner the transcript uses in <Thinking /> and every
+    // ToolGroup / AgentCard while a call is in flight — size-3 mira-blue
+    // CircleNotch, no size-3.5 outlier.
     return (
       <span
         className="inline-flex size-4 items-center justify-center"
         title="Streaming"
         aria-label="working"
       >
-        <CircleNotch className="size-3.5 animate-spin text-mira-blue" />
+        <CircleNotch className="size-3 shrink-0 animate-spin text-mira-blue" />
       </span>
     );
   }
@@ -586,7 +609,10 @@ function RenameDialog({
   // Hydrate the input each time the dialog opens for a different session.
   useEffect(() => {
     if (!session) return;
-    setValue(session.title ?? session.first_user_message ?? '');
+    // Seed the rename input with the cleaned-up label so the user isn't
+    // editing a raw "## Attached files …" markdown blob when their first
+    // turn was an attachment.
+    setValue(session.title ?? (session.first_user_message ? sessionLabel(session) : ''));
     setAiBusy(false);
     setSaveBusy(false);
     setErr(null);

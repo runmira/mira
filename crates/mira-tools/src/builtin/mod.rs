@@ -15,6 +15,7 @@ pub mod grep;
 pub mod memory;
 pub mod read;
 pub mod rustfmt;
+pub mod skill;
 pub mod task_tools;
 pub mod web_fetch;
 pub mod web_search;
@@ -64,4 +65,26 @@ pub fn register_memory(reg: &mut Registry) {
     reg.register(memory::MemoryAppend);
     reg.register(memory::MemoryEdit);
     reg.register(memory::MemoryRemember);
+}
+
+/// Register the `skill` tool with a shared handle to the loaded skill
+/// registry. Split out so callers that don't want the surface (e.g.
+/// tests, headless CLI runs with no skill dir) can skip it. Requires
+/// [`SkillHandle`] — see the `mira-server` boot path for how the
+/// registry is loaded from `~/.mira/skills` + `<cwd>/.mira/skills`.
+pub fn register_skills(reg: &mut Registry, skills: skill::SkillHandle) {
+    reg.register(skill::SkillTool::new(skills));
+}
+
+/// Register the `memory_consolidate` tool. Constructed with a
+/// [`ChatProvider`](mira_ai::ChatProvider) handle + model at boot —
+/// the tool makes an out-of-band provider call, and the standard
+/// [`ToolContext`](crate::ToolContext) doesn't carry a provider. Same
+/// pattern the server-side `AgentTool` uses.
+pub fn register_consolidate(
+    reg: &mut Registry,
+    provider: std::sync::Arc<dyn mira_ai::ChatProvider>,
+    model: String,
+) {
+    reg.register(memory::MemoryConsolidate::new(provider, model));
 }

@@ -218,6 +218,12 @@ async fn dispatch(cmd: ClientMsg, state: &AppState) {
 
 fn spawn_turn(state: AppState, text: String) {
     tokio::spawn(async move {
+        // Refresh the skill registry from disk before the turn starts.
+        // Cheap — a handful of file reads — and picks up any skill the
+        // model wrote via `write_file` on a previous turn (or the user
+        // saved from an editor). Without this, the `Skill` tool's spec
+        // is snapshotted at server boot and stale for the whole session.
+        crate::skills::reload_registry(&state).await;
         let sess = state.current_session().await;
         let mut stream = sess.send(text).await;
         while let Some(evt) = stream.next().await {
