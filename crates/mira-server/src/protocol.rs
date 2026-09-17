@@ -13,6 +13,7 @@ use mira_tools::DiffPreview;
 use serde::{Deserialize, Serialize};
 
 use crate::interactive::{AskUserProposal, PlanProposal, PromptResponse};
+use crate::slot::BackgroundMode;
 
 /// Client → server.
 #[derive(Clone, Debug, Deserialize)]
@@ -74,6 +75,30 @@ pub enum ClientMsg {
     ClearGoal,
     /// Ask the server to re-emit its current state (used on reconnect).
     Sync,
+    /// Watch a specific session on this WS connection. Multi-session
+    /// clients switch between sessions by sending Attach rather than
+    /// hitting `POST /api/sessions/:id/load` — attaching doesn't kill
+    /// any in-flight turn on the previous session, it just re-points
+    /// this socket's event forwarder.
+    ///
+    /// The server responds by:
+    /// 1. Decrementing the previously-attached slot's `attached` count.
+    /// 2. Swapping the forwarder's subscription to the target slot's
+    ///    events channel.
+    /// 3. Incrementing the new slot's `attached` count.
+    /// 4. Emitting a fresh `Ready` frame for the new session.
+    /// 5. Updating the server's `active` pointer so subsequent
+    ///    HTTP calls target this session.
+    Attach { session_id: String },
+    /// Detach from any session on this WS connection — used when a client
+    /// wants to explicitly stop watching without closing the socket. Rare
+    /// on the current UI (tab close does the same job); provided for
+    /// completeness so a future "let this session finish in the background"
+    /// affordance has a clean signal to send.
+    Detach,
+    /// Update the *attached* session's background mode. Applies to how
+    /// the approver answers `Ask` decisions when no client is attached.
+    SetBackgroundMode { mode: BackgroundMode },
 }
 
 /// Server → client.
@@ -184,6 +209,23 @@ pub enum ServerMsg {
     /// to refresh the sidebar so the newly-titled row replaces the
     /// first-user-message fallback without waiting for the next `done`.
     SessionTitleUpdated { session_id: String, title: String },
+
+    /// A session's background-mode was changed. Confirms `SetBackgroundMode`.
+    BackgroundModeChanged {
+        session_id: String,
+        mode: BackgroundMode,
+    },
+
+    /// A background-only session transitioned running → idle. Emitted when
+    /// a turn finishes on a slot with zero attached clients, so the sidebar
+    /// can drop the "running" indicator even though nobody's tab is
+    /// receiving the per-turn `Done` frame.
+    SessionBackgroundIdle { session_id: String },
+
+    /// Same idea for the running-transition — emitted on the SLOT's own
+    /// channel when a turn kicks off, so if a client attaches mid-turn
+    /// it can pick up the "still running" indicator without polling.
+    SessionBackgroundRunning { session_id: String },
 
     /// Per-round + running-total token usage from the provider. Emitted at
     /// the end of every provider round the moment a usage trailer arrives;

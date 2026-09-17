@@ -1,11 +1,29 @@
-//! Sessions API — list recent sessions for the current cwd and resume one
-//! into the live server without a restart.
+//! Sessions API — list live + persisted sessions, create/load/delete,
+//! set titles, toggle background mode.
 //!
-//! `GET    /api/sessions`           → summary list, newest first
-//! `POST   /api/sessions/:id/load`  → swap the live session for the stored one
-//! `DELETE /api/sessions/:id`       → remove a stored session; if it's the
-//!                                    active one, start a fresh session in
-//!                                    the same folder
+//! ## Multi-session model
+//!
+//! Sessions the server has *loaded* live in `state.slots` as
+//! [`SessionSlot`](crate::slot::SessionSlot) instances, each with its own
+//! broadcast bus. Sessions the user has never opened this run still exist
+//! as [`SessionRecord`]s on disk; loading one materializes a slot for it
+//! via [`crate::slot::build_slot`].
+//!
+//! Endpoints:
+//! - `GET    /api/sessions`                — summary list (live + persisted),
+//!                                            with `running` and `attached`
+//!                                            hints for the sidebar.
+//! - `GET    /api/sessions/:id/history`    — persisted history for
+//!                                            rehydrating a subagent panel
+//!                                            on reload.
+//! - `POST   /api/sessions/:id/load`       — ensure a slot exists for `id`
+//!                                            and mark it active.
+//! - `POST   /api/sessions/new`            — create a fresh slot.
+//! - `DELETE /api/sessions/:id`            — abort turn, drop slot,
+//!                                            delete record.
+//! - `PATCH  /api/sessions/:id/title`      — manual rename.
+//! - `POST   /api/sessions/:id/title/regenerate` — AI rename.
+//! - `PUT    /api/sessions/:id/background` — swap background mode.
 
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
@@ -13,11 +31,12 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use mira_config::RuntimeState;
 use mira_core::{Role, SessionId};
-use mira_harness::{Session, SessionConfig, SessionRecord};
+use mira_harness::{SessionConfig, SessionRecord};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::protocol::ServerMsg;
+use crate::slot::BackgroundMode;
 use crate::state::AppState;
 
 #[derive(Debug, Serialize)]
@@ -28,33 +47,34 @@ pub struct SessionSummary {
     pub created_at: u64,
     pub updated_at: u64,
     pub message_count: usize,
-    /// AI-generated short nickname. `None` until the title-generation task
-    /// runs (after the first assistant reply).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// First non-empty user message, truncated. `None` for empty sessions.
     pub first_user_message: Option<String>,
-    /// True if this session is the one currently active on the server.
+    /// True when this session is the server's `active` pointer (HTTP
+    /// handlers without a session_id target it).
     pub active: bool,
-    /// Merge state of the session's worktree branch relative to `main`/
-    /// `master` in the primary repo. Only populated for sessions whose cwd
-    /// is a Mira-created worktree (`…/.mira/worktrees/<branch>`); `None`
-    /// otherwise (regular session, deleted worktree, no git, etc.).
+    /// True when a WS forwarder is currently subscribed to this slot's
+    /// event stream. Sidebar renders a small "•" indicator.
+    #[serde(default)]
+    pub attached: bool,
+    /// True when a turn task is currently in flight on this slot. The UI
+    /// shows a running spinner so background sessions announce their
+    /// state without an active client.
+    #[serde(default)]
+    pub running: bool,
+    /// Background-mode policy for this slot when no client is attached.
+    /// Only populated for live slots; persisted sessions default to the
+    /// safe fallback when loaded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_mode: Option<BackgroundMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worktree_status: Option<WorktreeMergeStatus>,
-    /// Branch name of the worktree, when [`worktree_status`] is set. Shown
-    /// as a tooltip on the merge indicator.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worktree_branch: Option<String>,
-    /// Running token totals for the session. Omitted when zero to keep the
-    /// list response small.
     #[serde(skip_serializing_if = "SessionUsageView::is_empty")]
     pub usage: SessionUsageView,
 }
 
-/// Compact projection of the persisted usage totals. Named separately from
-/// the harness's `UsageTotals` so the wire format stays stable if the
-/// harness type grows more fields.
 #[derive(Debug, Default, Serialize)]
 pub struct SessionUsageView {
     pub prompt_tokens: u64,
@@ -69,13 +89,10 @@ impl SessionUsageView {
     }
 }
 
-/// Where a worktree branch sits relative to its primary repo's base branch.
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorktreeMergeStatus {
-    /// Ancestor of `main`/`master` — safe to prune.
     Merged,
-    /// Not yet merged; carries commits the base branch doesn't have.
     Unmerged,
 }
 
@@ -83,15 +100,16 @@ const FIRST_MSG_TRUNC: usize = 80;
 
 #[derive(Debug, Deserialize)]
 pub struct ListQuery {
-    /// `?all=1` returns sessions across every cwd (used by the web sidebar
-    /// to group by project). Omit or `all=0` for just the current cwd.
     #[serde(default)]
     pub all: bool,
 }
 
 pub async fn list_sessions(State(state): State<AppState>, Query(q): Query<ListQuery>) -> Response {
     let Some(store) = state.store.clone() else {
-        return Json(Vec::<SessionSummary>::new()).into_response();
+        // No persistence — return only live slots. Cheap loop; a normal
+        // server has O(1) slots at any time.
+        let live: Vec<SessionSummary> = summarize_live(&state).await;
+        return Json(live).into_response();
     };
     let records = if q.all {
         match store.list_all(200).await {
@@ -105,23 +123,100 @@ pub async fn list_sessions(State(state): State<AppState>, Query(q): Query<ListQu
             Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("list: {e}")),
         }
     };
-    let active_id = state.current_session().await.id.to_string();
-    // Filter out subagent transcripts — they're persisted so the panel
-    // can rehydrate on reload, but they aren't standalone conversations
-    // and shouldn't clutter the sidebar as sibling threads.
-    let summaries: Vec<SessionSummary> = records
+    let active_id = state.active.read().await.to_string();
+
+    // Cache live-slot metadata so we can annotate persisted rows without a
+    // fresh read of state.slots per iteration.
+    let live_meta = live_slot_metadata(&state).await;
+
+    // Persisted records → summaries.
+    let mut summaries: Vec<SessionSummary> = records
         .into_iter()
         .filter(|r| r.parent_id.is_none())
-        .map(|r| summarize(&r, &active_id))
+        .map(|r| summarize_record(&r, &active_id, &live_meta))
         .collect();
+
+    // Any live slot the user just started that hasn't yet been checkpointed
+    // to disk (or is running under `--no-persist`) still needs to show up
+    // in the sidebar. Add slots whose id isn't in the persisted list.
+    let known_ids: std::collections::HashSet<String> =
+        summaries.iter().map(|s| s.id.clone()).collect();
+    for slot in state.list_slots().await {
+        let id = slot.id.to_string();
+        if known_ids.contains(&id) {
+            continue;
+        }
+        summaries.push(SessionSummary {
+            id: id.clone(),
+            model: slot.session.read().await.config().await.model,
+            cwd: slot.cwd.read().await.display().to_string(),
+            created_at: 0,
+            updated_at: 0,
+            message_count: 0,
+            title: None,
+            first_user_message: None,
+            active: id == active_id,
+            attached: slot.is_attached(),
+            running: slot.is_running().await,
+            background_mode: Some(*slot.background_mode.read().await),
+            worktree_status: None,
+            worktree_branch: None,
+            usage: SessionUsageView::default(),
+        });
+    }
     Json(summaries).into_response()
 }
 
-/// Read-only lookup: return a session's message history + config
-/// without swapping the active session. Used by the SubagentPanel to
-/// rehydrate a child transcript on browser reload — the panel needs the
-/// child's tool_starts/tool_ends to reconstruct its live view, and
-/// those aren't preserved anywhere on the parent's tool result.
+/// Metadata about currently-live slots, snapshotted in one pass so we don't
+/// re-lock `state.slots` per record.
+struct LiveMeta {
+    attached: bool,
+    running: bool,
+    background_mode: BackgroundMode,
+}
+
+async fn live_slot_metadata(state: &AppState) -> std::collections::HashMap<String, LiveMeta> {
+    let mut out = std::collections::HashMap::new();
+    for slot in state.list_slots().await {
+        out.insert(
+            slot.id.to_string(),
+            LiveMeta {
+                attached: slot.is_attached(),
+                running: slot.is_running().await,
+                background_mode: *slot.background_mode.read().await,
+            },
+        );
+    }
+    out
+}
+
+async fn summarize_live(state: &AppState) -> Vec<SessionSummary> {
+    let active_id = state.active.read().await.to_string();
+    let mut out = Vec::new();
+    for slot in state.list_slots().await {
+        let id = slot.id.to_string();
+        let sess = slot.session.read().await;
+        out.push(SessionSummary {
+            id: id.clone(),
+            model: sess.config().await.model,
+            cwd: slot.cwd.read().await.display().to_string(),
+            created_at: 0,
+            updated_at: 0,
+            message_count: 0,
+            title: sess.title().await,
+            first_user_message: None,
+            active: id == active_id,
+            attached: slot.is_attached(),
+            running: slot.is_running().await,
+            background_mode: Some(*slot.background_mode.read().await),
+            worktree_status: None,
+            worktree_branch: None,
+            usage: SessionUsageView::default(),
+        });
+    }
+    out
+}
+
 #[derive(Debug, Serialize)]
 pub struct SessionHistoryView {
     pub id: String,
@@ -131,10 +226,6 @@ pub struct SessionHistoryView {
     pub created_at: u64,
     pub updated_at: u64,
     pub messages: Vec<mira_core::Message>,
-    /// Diff previews for edit/write calls in this session, keyed by
-    /// tool call id. Same shape as the Ready frame's `previews` — the
-    /// subagent panel reuses `historyToEntries` and needs the same
-    /// preview attachment path on reload.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub previews: std::collections::HashMap<String, mira_tools::DiffPreview>,
 }
@@ -170,252 +261,164 @@ pub async fn load_session(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Response {
-    let Some(store) = state.store.clone() else {
-        return err(
-            StatusCode::BAD_REQUEST,
-            "persistence disabled — nothing to resume".to_string(),
-        );
-    };
-    let record = match store.load(&SessionId::from(id.as_str())).await {
-        Ok(r) => r,
-        Err(e) => return err(StatusCode::NOT_FOUND, format!("load: {e}")),
-    };
-
-    // Adopt the session's original cwd — otherwise clicking a chat from a
-    // different project silently runs it against whatever folder happens
-    // to be active, which is worse than useless. Shared Arc means the
-    // approver sees the same swap for diff previews.
-    let record_cwd = record.cwd.clone();
-    if record_cwd.is_dir() {
-        {
-            let mut guard = state.cwd.write().await;
-            *guard = record_cwd.clone();
+    let sid = SessionId::from(id.as_str());
+    let slot = match state.ensure_slot(&sid).await {
+        Ok(s) => s,
+        Err(e) => {
+            let status = if e.contains("persistence disabled") {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::NOT_FOUND
+            };
+            return err(status, e);
         }
-        // Point the shared memory store at the resumed session's project
-        // so its memory tools and `/api/memory/append` hit the right file.
-        state.rebuild_memory_for_cwd(&record_cwd).await;
+    };
+    // Persist last_cwd so the next server restart lands on the same folder.
+    let cwd = slot.cwd.read().await.clone();
+    if cwd.is_dir() {
         let mut s = RuntimeState::load().unwrap_or_default();
-        s.last_cwd = Some(record_cwd.clone());
+        s.last_cwd = Some(cwd);
         if let Err(e) = s.save() {
             warn!(%e, "state.yaml: save failed after session load");
         }
     }
-
-    // Rebuild a Session with the SAME harness pieces the server started with,
-    // so the WsApprover / provider / policy all continue to route through the
-    // live server plumbing. `tool_ctx` uses the (now updated) shared cwd —
-    // which is the record's cwd from the swap above.
-    let mut resumed = Session::resume_from(
-        record,
-        state.harness_provider.clone(),
-        state.registry.clone(),
-        state.policy.clone(),
-        state.approver.clone(),
-        state.make_tool_ctx().await,
-    );
-    if let Some(s) = state.store.clone() {
-        resumed = resumed.with_store(s);
-    }
-    resumed = resumed.with_memory_snapshot(crate::make_memory_snapshot_with(
-        &state.current_cwd().await,
-        state.current_episodic().await,
-    ));
-
-    // Swap under the write lock, then re-broadcast Ready so every connected
-    // client rehydrates its transcript for the new session.
-    let cfg = resumed.config().await;
-    let mode = state.policy.lock().await.mode();
-    let history = resumed.history().await;
-    let turns = resumed.turns().await;
-    let usage = resumed.usage().await;
-    let tasks = resumed.tasks().await;
-    let goal = resumed.goal().await;
-    let previews = resumed.previews().await;
-    let session_id = resumed.id.to_string();
-
-    {
-        let mut guard = state.session.write().await;
-        *guard = resumed;
-    }
-    info!(id = %session_id, "session resumed");
-
-    let _ = state.events_tx.send(ServerMsg::Ready {
-        session_id: session_id.clone(),
-        model: cfg.model,
-        mode,
-        cwd: state.current_cwd().await.display().to_string(),
-        history,
-        turns,
-        usage,
-        tasks,
-        goal,
-        previews,
-    });
-
-    Json(serde_json::json!({ "id": session_id })).into_response()
+    state.set_active(slot.id.clone()).await;
+    let ready = build_ready_for_slot(&slot, &state).await;
+    let _ = slot.events_tx.send(ready);
+    info!(id = %slot.id, "session loaded / re-attached");
+    Json(serde_json::json!({ "id": slot.id.to_string() })).into_response()
 }
 
-/// Create a fresh session (no history) reusing the currently active
-/// folder, model, and provider. Only the transcript resets — the workspace
-/// the user picked, and the model they last swapped to, stay put.
 pub async fn new_session(State(state): State<AppState>) -> Response {
     let prev = state.current_session().await;
     let prev_cfg = prev.config().await;
     let cwd = state.current_cwd().await;
-
-    let mut fresh = Session::new(
-        SessionConfig {
-            model: prev_cfg.model.clone(),
-            max_rounds: prev_cfg.max_rounds,
-            temperature: prev_cfg.temperature,
-            max_tokens: prev_cfg.max_tokens,
-            reasoning_effort: prev_cfg.reasoning_effort.clone(),
-            response_format: prev_cfg.response_format.clone(),
-        },
-        crate::system_prompt(&cwd, &state.registry),
-        state.harness_provider.clone(),
-        state.registry.clone(),
-        state.policy.clone(),
-        state.approver.clone(),
-        state.make_tool_ctx().await,
-    );
-    if let Some(s) = state.store.clone() {
-        fresh = fresh.with_store(s);
-    }
-    fresh = fresh.with_memory_snapshot(crate::make_memory_snapshot_with(
-        &cwd,
-        state.current_episodic().await,
-    ));
-
-    let cfg = fresh.config().await;
-    let mode = state.policy.lock().await.mode();
-    let history = fresh.history().await;
-    let turns = fresh.turns().await;
-    let usage = fresh.usage().await;
-    let tasks = fresh.tasks().await;
-    let goal = fresh.goal().await;
-    let previews = fresh.previews().await;
-    let session_id = fresh.id.to_string();
-
-    {
-        let mut guard = state.session.write().await;
-        *guard = fresh;
-    }
-    info!(id = %session_id, cwd = %cwd.display(), model = %cfg.model, "new session");
-
-    let _ = state.events_tx.send(ServerMsg::Ready {
-        session_id: session_id.clone(),
-        model: cfg.model,
-        mode,
-        cwd: cwd.display().to_string(),
-        history,
-        turns,
-        usage,
-        tasks,
-        goal,
-        previews,
-    });
-
-    Json(serde_json::json!({ "id": session_id })).into_response()
+    let cfg = SessionConfig {
+        model: prev_cfg.model.clone(),
+        max_rounds: prev_cfg.max_rounds,
+        temperature: prev_cfg.temperature,
+        max_tokens: prev_cfg.max_tokens,
+        reasoning_effort: prev_cfg.reasoning_effort.clone(),
+        response_format: prev_cfg.response_format.clone(),
+    };
+    let deps = state.slot_deps();
+    let slot = crate::slot::build_slot(cwd, cfg, None, &deps).await;
+    let slot_id = slot.id.clone();
+    state.insert_slot(slot.clone()).await;
+    state.set_active(slot_id.clone()).await;
+    let ready = build_ready_for_slot(&slot, &state).await;
+    let _ = slot.events_tx.send(ready);
+    info!(id = %slot_id, "new session slot");
+    Json(serde_json::json!({ "id": slot_id.to_string() })).into_response()
 }
 
 pub async fn delete_session(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Response {
-    let Some(store) = state.store.clone() else {
-        return err(
-            StatusCode::BAD_REQUEST,
-            "persistence disabled — nothing to delete".to_string(),
-        );
-    };
     let sid = SessionId::from(id.as_str());
 
-    // Cascade: any subagent transcripts whose parent_id matches this
-    // session get deleted first, so we don't leave orphan children on
-    // disk. Cheap best-effort — one list_all scan filtered by parent_id.
-    // On error, log but continue with the parent delete so a partial
-    // failure doesn't block the user's action.
-    if let Ok(all) = store.list_all(1000).await {
-        for child in all {
-            if child
-                .parent_id
-                .as_ref()
-                .map(|p| p.to_string() == id)
-                .unwrap_or(false)
-            {
-                if let Err(e) = store.delete(&child.id).await {
-                    warn!(child = %child.id, %e, "cascade delete failed");
+    // Cascade: any persisted subagent transcripts belong to this parent.
+    if let Some(store) = state.store.clone() {
+        if let Ok(all) = store.list_all(1000).await {
+            for child in all {
+                if child
+                    .parent_id
+                    .as_ref()
+                    .map(|p| p.to_string() == id)
+                    .unwrap_or(false)
+                {
+                    if let Err(e) = store.delete(&child.id).await {
+                        warn!(child = %child.id, %e, "cascade delete failed");
+                    }
                 }
             }
         }
+        if let Err(e) = store.delete(&sid).await {
+            return err(StatusCode::INTERNAL_SERVER_ERROR, format!("delete: {e}"));
+        }
     }
 
-    if let Err(e) = store.delete(&sid).await {
-        return err(StatusCode::INTERNAL_SERVER_ERROR, format!("delete: {e}"));
+    // Tear down the live slot if any. Aborts the in-flight turn so it
+    // stops pumping tokens; the AttachGuard on any WS forwarder is
+    // dropped when the socket next closes.
+    if let Some(slot) = state.remove_slot(&sid).await {
+        if let Some(h) = slot.turn.lock().await.take() {
+            h.abort();
+        }
+        let _ = slot.session.read().await.cancel().await;
     }
 
-    // If the deleted row is the currently loaded session, roll a fresh one
-    // in the same folder so the UI doesn't keep a dangling session_id.
-    let active_id = state.current_session().await.id.to_string();
-    if active_id == id {
-        let prev_cfg = state.current_session().await.config().await;
-        let cwd = state.current_cwd().await;
-        let mut fresh = Session::new(
-            SessionConfig {
-                model: prev_cfg.model.clone(),
+    // If we just deleted the active session, promote *some* remaining
+    // slot to active. Prefer an existing live slot; if none, spin up a
+    // fresh one in the deleted session's folder so the HTTP surface has
+    // an active target.
+    let mut promoted: Option<String> = None;
+    let active_now = state.active.read().await.clone();
+    if active_now.to_string() == id {
+        let remaining = state.list_slots().await;
+        if let Some(next) = remaining.into_iter().next() {
+            promoted = Some(next.id.to_string());
+            state.set_active(next.id.clone()).await;
+        } else {
+            let prev_cfg = state.current_session().await.config().await;
+            let cwd = state.current_cwd().await;
+            let cfg = SessionConfig {
+                model: prev_cfg.model,
                 max_rounds: prev_cfg.max_rounds,
                 temperature: prev_cfg.temperature,
                 max_tokens: prev_cfg.max_tokens,
                 reasoning_effort: prev_cfg.reasoning_effort.clone(),
                 response_format: prev_cfg.response_format.clone(),
-            },
-            crate::system_prompt(&cwd, &state.registry),
-            state.harness_provider.clone(),
-            state.registry.clone(),
-            state.policy.clone(),
-            state.approver.clone(),
-            state.make_tool_ctx().await,
-        );
-        if let Some(s) = state.store.clone() {
-            fresh = fresh.with_store(s);
+            };
+            let deps = state.slot_deps();
+            let fresh = crate::slot::build_slot(cwd, cfg, None, &deps).await;
+            let fid = fresh.id.clone();
+            state.insert_slot(fresh.clone()).await;
+            state.set_active(fid.clone()).await;
+            promoted = Some(fid.to_string());
+            let ready = build_ready_for_slot(&fresh, &state).await;
+            let _ = fresh.events_tx.send(ready);
         }
-        fresh = fresh.with_memory_snapshot(crate::make_memory_snapshot_with(
-            &cwd,
-            state.current_episodic().await,
-        ));
-        let cfg = fresh.config().await;
-        let mode = state.policy.lock().await.mode();
-        let history = fresh.history().await;
-        let turns = fresh.turns().await;
-        let usage = fresh.usage().await;
-        let tasks = fresh.tasks().await;
-        let goal = fresh.goal().await;
-        let previews = fresh.previews().await;
-        let session_id = fresh.id.to_string();
-        {
-            let mut guard = state.session.write().await;
-            *guard = fresh;
-        }
-        let _ = state.events_tx.send(ServerMsg::Ready {
-            session_id,
-            model: cfg.model,
-            mode,
-            cwd: cwd.display().to_string(),
-            history,
-            turns,
-            usage,
-            tasks,
-            goal,
-            previews,
-        });
     }
 
-    info!(%id, "session deleted");
-    Json(serde_json::json!({ "ok": true })).into_response()
+    info!(%id, promoted = ?promoted, "session deleted");
+    Json(serde_json::json!({ "ok": true, "promoted": promoted })).into_response()
 }
 
-fn summarize(r: &SessionRecord, active_id: &str) -> SessionSummary {
+/// Build a Ready frame for `slot` from its live session state.
+async fn build_ready_for_slot(
+    slot: &crate::slot::SessionSlot,
+    state: &AppState,
+) -> ServerMsg {
+    let sess = slot.session.read().await.clone();
+    let cfg = sess.config().await;
+    let mode = state.policy.lock().await.mode();
+    let history = sess.history().await;
+    let turns = sess.turns().await;
+    let usage = sess.usage().await;
+    let tasks = sess.tasks().await;
+    let goal = sess.goal().await;
+    let previews = sess.previews().await;
+    ServerMsg::Ready {
+        session_id: sess.id.to_string(),
+        model: cfg.model,
+        mode,
+        cwd: slot.cwd.read().await.display().to_string(),
+        history,
+        turns,
+        usage,
+        tasks,
+        goal,
+        previews,
+    }
+}
+
+fn summarize_record(
+    r: &SessionRecord,
+    active_id: &str,
+    live_meta: &std::collections::HashMap<String, LiveMeta>,
+) -> SessionSummary {
     let first = r
         .messages
         .iter()
@@ -423,10 +426,10 @@ fn summarize(r: &SessionRecord, active_id: &str) -> SessionSummary {
         .and_then(|m| m.content.clone())
         .map(|s| truncate(&s, FIRST_MSG_TRUNC));
     let id = r.id.to_string();
-    let active = id == active_id;
     let (worktree_status, worktree_branch) = detect_worktree_status(&r.cwd);
+    let live = live_meta.get(&id);
     SessionSummary {
-        id,
+        id: id.clone(),
         model: r.cfg.model.clone(),
         cwd: r.cwd.display().to_string(),
         created_at: r.created_at,
@@ -434,7 +437,10 @@ fn summarize(r: &SessionRecord, active_id: &str) -> SessionSummary {
         message_count: r.messages.iter().filter(|m| m.role != Role::System).count(),
         title: r.title.clone(),
         first_user_message: first,
-        active,
+        active: id == active_id,
+        attached: live.map(|m| m.attached).unwrap_or(false),
+        running: live.map(|m| m.running).unwrap_or(false),
+        background_mode: live.map(|m| m.background_mode),
         worktree_status,
         worktree_branch,
         usage: SessionUsageView {
@@ -446,17 +452,7 @@ fn summarize(r: &SessionRecord, active_id: &str) -> SessionSummary {
     }
 }
 
-/// Recognise Mira-created worktrees by their canonical path shape
-/// (`…/.mira/worktrees/<branch>`) and report whether their branch has been
-/// merged into `main`/`master` in the primary repo. Anything else — regular
-/// project cwd, deleted worktree dir, non-git folder — returns `(None, None)`.
-///
-/// Runs a small handful of `git` shell-outs. At ~200 sessions this adds a
-/// perceptible pause to `GET /api/sessions?all=1`; if that becomes a problem
-/// we can memoise per (primary_repo, branch).
 fn detect_worktree_status(cwd: &std::path::Path) -> (Option<WorktreeMergeStatus>, Option<String>) {
-    // Cheap prefilter: the path must contain the Mira worktrees folder.
-    // Handles `some/.mira/worktrees/foo` and `foo/.mira/worktrees/bar`.
     if !cwd
         .components()
         .zip(cwd.components().skip(1))
@@ -474,7 +470,6 @@ fn detect_worktree_status(cwd: &std::path::Path) -> (Option<WorktreeMergeStatus>
         return (None, None);
     }
     if !cwd.is_dir() {
-        // Worktree directory was deleted — nothing to report.
         return (None, None);
     }
 
@@ -483,8 +478,6 @@ fn detect_worktree_status(cwd: &std::path::Path) -> (Option<WorktreeMergeStatus>
         _ => return (None, None),
     };
 
-    // Primary repo lives at the parent of `--git-common-dir` (which points at
-    // `<primary>/.git`).
     let common_dir = match git_output(
         cwd,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
@@ -497,8 +490,6 @@ fn detect_worktree_status(cwd: &std::path::Path) -> (Option<WorktreeMergeStatus>
         None => return (None, Some(branch)),
     };
 
-    // Try main then master; whichever exists is the base. If neither does,
-    // we can't compute a merge status, so leave it null.
     let base = ["main", "master"]
         .iter()
         .copied()
@@ -507,8 +498,6 @@ fn detect_worktree_status(cwd: &std::path::Path) -> (Option<WorktreeMergeStatus>
         return (None, Some(branch));
     };
     if branch == base {
-        // On the base branch itself — a "worktree" of main isn't unusual;
-        // don't badge it.
         return (None, Some(branch));
     }
 
@@ -577,12 +566,6 @@ pub struct RenameResponse {
     pub title: String,
 }
 
-/// `PATCH /api/sessions/:id/title` — manual rename.
-///
-/// Body: `{"title": "..."}`. Empty strings clear the title (row falls back
-/// to the first user message). Updates the on-disk record; if the target
-/// is the currently active session, also mutates the in-memory Session so
-/// live clients see the change immediately.
 pub async fn set_session_title(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
@@ -609,28 +592,23 @@ pub async fn set_session_title(
         return err(StatusCode::INTERNAL_SERVER_ERROR, format!("save: {e}"));
     }
 
-    // If this is the currently active session, mirror the change into the
-    // in-memory Session so its next checkpoint doesn't stomp what we just
-    // wrote. `set_title` handles the empty-string case (skips the assign),
-    // so we only call it when we have a non-empty title.
-    let active_id = state.current_session().await.id.to_string();
-    if active_id == id && !title.is_empty() {
-        state.current_session().await.set_title(&title).await;
+    if let Some(slot) = state.slot(&sid).await {
+        if !title.is_empty() {
+            slot.session.read().await.set_title(&title).await;
+        }
     }
+    // Fan out so any watching sidebar refreshes regardless of which
+    // session it's currently focused on.
+    state
+        .broadcast_all(ServerMsg::SessionTitleUpdated {
+            session_id: id.clone(),
+            title: title.clone(),
+        })
+        .await;
 
-    let _ = state.events_tx.send(ServerMsg::SessionTitleUpdated {
-        session_id: id.clone(),
-        title: title.clone(),
-    });
     Json(RenameResponse { id, title }).into_response()
 }
 
-/// `POST /api/sessions/:id/title/regenerate` — AI rename.
-///
-/// Runs the same `title::generate` pass as the automatic post-first-reply
-/// hook, but unconditionally — the existing `spawn_if_needed` bails when
-/// a title already exists, which is the wrong behavior for a "re-do this
-/// title" button.
 pub async fn regenerate_session_title(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
@@ -647,8 +625,6 @@ pub async fn regenerate_session_title(
         Err(e) => return err(StatusCode::NOT_FOUND, format!("load: {e}")),
     };
 
-    // Pull the first user message + first non-empty assistant reply out of
-    // history — exact same context the auto path uses.
     let user_msg = record
         .messages
         .iter()
@@ -679,10 +655,6 @@ pub async fn regenerate_session_title(
     let title = match crate::title::generate(&*provider, &model, &user, &assistant).await {
         Ok(t) if !t.is_empty() => t,
         Ok(_) => {
-            // Extractor returned nothing (empty text stream, reasoning-only
-            // turn, whitespace-only response). Fall back to a heuristic drawn
-            // from the first user message rather than surfacing a 502 —
-            // getting *some* nickname is more useful than an error toast.
             let fallback = crate::title::heuristic_from_user_message(&user);
             if fallback.is_empty() {
                 warn!(session = %id, "regenerate title: extractor empty, no heuristic fallback");
@@ -707,17 +679,51 @@ pub async fn regenerate_session_title(
         return err(StatusCode::INTERNAL_SERVER_ERROR, format!("save: {e}"));
     }
 
-    // If this is the active session, mirror into memory so the in-flight
-    // checkpoint doesn't stomp what we just wrote.
-    let active_id = state.current_session().await.id.to_string();
-    if active_id == id {
-        state.current_session().await.set_title(&title).await;
+    if let Some(slot) = state.slot(&sid).await {
+        slot.session.read().await.set_title(&title).await;
     }
+    state
+        .broadcast_all(ServerMsg::SessionTitleUpdated {
+            session_id: id.clone(),
+            title: title.clone(),
+        })
+        .await;
 
-    let _ = state.events_tx.send(ServerMsg::SessionTitleUpdated {
-        session_id: id.clone(),
-        title: title.clone(),
-    });
     info!(session = %id, %title, "regenerate title: applied");
     Json(RenameResponse { id, title }).into_response()
+}
+
+// ---------- background-mode endpoint ----------
+
+#[derive(Debug, Deserialize)]
+pub struct BackgroundModeUpdate {
+    pub mode: BackgroundMode,
+}
+
+/// `PUT /api/sessions/:id/background` — set the slot's background mode.
+/// Errors if the slot isn't loaded (background mode only makes sense for
+/// live slots; a persisted-but-not-loaded session has no channels to gate).
+pub async fn set_background_mode_http(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<BackgroundModeUpdate>,
+) -> Response {
+    let sid = SessionId::from(id.as_str());
+    let Some(slot) = state.slot(&sid).await else {
+        return err(
+            StatusCode::NOT_FOUND,
+            format!("session `{id}` is not loaded; open it before changing background mode"),
+        );
+    };
+    {
+        let mut guard = slot.background_mode.write().await;
+        *guard = body.mode;
+    }
+    state
+        .broadcast_all(ServerMsg::BackgroundModeChanged {
+            session_id: id.clone(),
+            mode: body.mode,
+        })
+        .await;
+    Json(serde_json::json!({ "id": id, "mode": body.mode })).into_response()
 }

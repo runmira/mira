@@ -1,4 +1,4 @@
-import type { SessionSummary, SettingsUpdate, SettingsView } from './types';
+import type { BackgroundMode, SessionSummary, SettingsUpdate, SettingsView } from './types';
 
 export async function getSettings(): Promise<SettingsView> {
   const r = await fetch('/api/settings');
@@ -77,9 +77,33 @@ export async function loadSession(id: string): Promise<void> {
   }
 }
 
-export async function newSession(): Promise<void> {
+export async function newSession(): Promise<{ id: string }> {
   const r = await fetch('/api/sessions/new', { method: 'POST' });
   if (!r.ok) throw new Error(`sessions new ${r.status}`);
+  return (await r.json()) as { id: string };
+}
+
+/** Set a session's background mode. Only valid for slots the server has
+ *  already materialized (persisted-but-not-open sessions have no slot,
+ *  so nothing to gate). Callers typically attach first and set mode
+ *  right after, or hit this after the slot is known to be live. */
+export async function setSessionBackgroundMode(
+  id: string,
+  mode: BackgroundMode,
+): Promise<void> {
+  const r = await fetch(`/api/sessions/${encodeURIComponent(id)}/background`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode }),
+  });
+  if (!r.ok) {
+    let msg = `background mode ${r.status}`;
+    try {
+      const j = await r.json();
+      if (j.error) msg += `: ${j.error}`;
+    } catch { /* ignore */ }
+    throw new Error(msg);
+  }
 }
 
 export type ReviewStartArgs = {
@@ -656,7 +680,7 @@ export async function mergePullRequest(
   if (!r.ok) throw new Error(await readError(r, 'merge PUT'));
 }
 
-export async function putCwd(path: string): Promise<void> {
+export async function putCwd(path: string): Promise<{ session_id?: string }> {
   const r = await fetch('/api/cwd', {
     method: 'PUT',
     headers: { 'content-type': 'application/json' },
@@ -670,4 +694,7 @@ export async function putCwd(path: string): Promise<void> {
     } catch { /* ignore */ }
     throw new Error(msg);
   }
+  // Server returns { path, home, session_id? }. Return just the id so
+  // callers can WS-attach to the freshly-materialized slot.
+  return (await r.json()) as { session_id?: string };
 }

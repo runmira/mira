@@ -1,21 +1,30 @@
-//! HTTP + WebSocket server that fronts a Mira `Session` for browser UIs.
+//! HTTP + WebSocket server that fronts Mira `Session`s for browser UIs.
 //!
-//! The CLI builds the harness stack (provider, registry, policy, session)
-//! and hands it to [`run`]. The server does the rest: WebSocket at `/ws`
-//! for realtime chat, plus static assets under `/` served from disk (dev)
-//! or embedded (release, later).
+//! The CLI builds the harness stack (provider, registry, policy, initial
+//! session config) and hands it to [`run`]. The server does the rest:
+//! WebSocket at `/ws` for realtime chat, plus static assets under `/`
+//! served from disk (dev) or embedded (release).
 //!
-//! ## Wire model
+//! ## Multi-session wire model
 //!
-//! - One long-lived `Session` per server invocation.
-//! - Outbound events fan out through a `tokio::sync::broadcast` — every
-//!   connected WS subscribes.
-//! - Approval prompts arrive as [`protocol::ServerMsg::ApprovalRequest`];
-//!   the client answers with [`protocol::ClientMsg::Approve`], which
-//!   routes back to the awaiting oneshot via [`approver::resolve`].
-//! - `GET/PUT /api/settings` reads/writes `~/.mira/mira.yaml`. `PUT`
-//!   rebuilds the provider and swaps it into the live session with no
-//!   restart required.
+//! The server holds a MAP of live `SessionSlot`s. Each slot owns its own:
+//! - `events_tx` broadcast bus (WS forwarders subscribe per slot)
+//! - `pending` approval map (per-slot oneshots)
+//! - `cwd`, `memory`, `episodic` (per-session project scope)
+//! - `approver` (a WsApprover wired to the slot's channels + background
+//!    mode)
+//! - `registry` (base + PlanTool/AskUserTool/AgentTool wired to the
+//!    slot's prompt channel)
+//!
+//! A WS connection picks which session it's watching by sending
+//! `Attach { session_id }`. Handlers without a session_id in the URL
+//! (settings PUT, cwd PUT, memory append, undo, …) route to the
+//! `state.active` pointer, updated on each attach.
+//!
+//! Approval prompts arrive as
+//! [`protocol::ServerMsg::ApprovalRequest`]; the client answers with
+//! [`protocol::ClientMsg::Approve`], which routes back to the awaiting
+//! oneshot via [`approver::resolve`].
 
 mod agent_worktree;
 pub mod approver;
@@ -36,6 +45,7 @@ mod review;
 mod sessions;
 mod settings;
 mod skills;
+pub mod slot;
 mod state;
 mod title;
 mod undo;
@@ -50,12 +60,12 @@ use anyhow::{Context, Result};
 use axum::routing::get;
 use axum::Router;
 use mira_ai::ChatProvider;
-use mira_harness::{Approver, FileStore, Session, SessionConfig, SessionRecord, SessionStore};
+use mira_harness::{FileStore, SessionConfig, SessionRecord, SessionStore};
 use mira_policy::Policy;
 use mira_sandbox::Sandbox;
-use mira_tools::{Registry, ToolContext};
+use mira_tools::Registry;
 use tokio::net::TcpListener;
-use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock};
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
@@ -69,8 +79,9 @@ pub fn has_embedded_frontend() -> bool {
     embedded::has_frontend()
 }
 
-/// Build args for [`run`]. Everything the server needs except the session,
-/// which is constructed inside `run` so it can bake in the WsApprover.
+/// Build args for [`run`]. Everything the server needs except the initial
+/// slot, which is constructed inside `run` so its channels are wired
+/// consistently with the WsApprover / PromptChannel / AgentTool.
 pub struct ServerConfig {
     pub cfg: SessionConfig,
     pub provider: Arc<dyn ChatProvider>,
@@ -93,44 +104,17 @@ pub struct ServerConfig {
     /// Plugins UI diffs yaml against this to decide "restart required."
     pub mcp_boot: Vec<crate::mcp::McpBootStatus>,
     /// Loaded skill roster (bundled + user + project tiers merged).
-    /// Shared with the `Skill` tool so the composer palette and the
-    /// tool see the same list. `RwLock` so cwd swaps can hot-replace
-    /// the project tier without re-registering the tool.
     pub skills: mira_tools::builtin::skill::SkillHandle,
 }
 
 /// Start the server. Blocks until the process is signaled to exit.
-pub async fn run(mut cfg: ServerConfig) -> Result<()> {
-    let (events_tx, _rx0) = broadcast::channel::<protocol::ServerMsg>(256);
-    let pending = Arc::new(Mutex::new(HashMap::new()));
-
-    // Interactive-tool wiring. Instantiate the channel first so we can hand
-    // it to any server-owned Tool (plan, ask_user, …) before those tools go
-    // into the registry the harness sees.
-    let prompt_channel = interactive::PromptChannel::new(events_tx.clone());
-    let prompt_pending = prompt_channel.pending();
-
-    // Swappable provider up front — the AgentTool below needs to hold it
-    // so subagents follow any provider hot-swap the user makes in Settings.
+pub async fn run(cfg: ServerConfig) -> Result<()> {
+    // Swappable provider up front — every slot's AgentTool holds a
+    // reference so a settings hot-swap flows through to subagents.
     let swappable = SwappableProvider::new(cfg.provider.clone());
     let harness_provider: Arc<dyn ChatProvider> = Arc::new(swappable.clone());
 
-    // Copy the caller-provided registry and layer on server-only interactive
-    // tools. Registry is `Clone`, so this is cheap; the resulting Arc<Registry>
-    // is what the session actually consults.
-    //
-    // Order matters here for the `agent` tool: it needs a snapshot of the
-    // registry BEFORE itself so subagents inherit peer tools without a
-    // reference to `agent` itself (nested `agent` calls are re-added at
-    // construction time with the correct depth cap).
-    let mut registry_owned: Registry = (*cfg.registry).clone();
-    registry_owned.register(interactive::PlanTool::new(prompt_channel.clone()));
-    registry_owned.register(interactive::AskUserTool::new(prompt_channel.clone()));
-    let base_registry = Arc::new(registry_owned.clone());
-
-    // Named subagent types: builtins + `~/.mira/AGENTS.md` + `<cwd>/.mira/AGENTS.md`.
-    // Loaded once at boot so the tool spec that goes to the model reflects
-    // the roster on the machine that started the server.
+    // Named subagent types — loaded once at boot.
     let agents_registry = Arc::new(mira_agents::load(&cfg.cwd));
     tracing::info!(
         count = agents_registry.names().len(),
@@ -138,112 +122,17 @@ pub async fn run(mut cfg: ServerConfig) -> Result<()> {
         "agent types loaded"
     );
 
-    // Build the parent's approver up front so the AgentTool can hold a
-    // reference to it (write-capable subagents route Ask decisions back
-    // through the same modal the user sees). cwd is `Arc<RwLock<...>>`
-    // shared with the WsApprover so folder swaps flow through to diff
-    // previews for both parent and child.
-    let cwd = Arc::new(RwLock::new(cfg.cwd.clone()));
-    let approver: Arc<dyn Approver> = Arc::new(WsApprover::new(
-        events_tx.clone(),
-        pending.clone(),
-        cwd.clone(),
-    ));
+    // The base registry is the caller's registry — slot factories layer
+    // PlanTool/AskUserTool/AgentTool on top per session.
+    let base_registry = cfg.registry.clone();
 
-    let mut agent_tool = interactive::AgentTool::new(
-        harness_provider.clone(),
-        base_registry,
-        cfg.cfg.model.clone(),
-    )
-    .with_agents(agents_registry.clone())
-    // Wire the shared events broadcast so subagent child events fan
-    // out to the connected WSes and light up the SubagentPanel live.
-    .with_events_tx(events_tx.clone())
-    // Route write-capable subagent approvals to the parent's UI so
-    // `bash rm -rf ...` inside a coder subagent pops the same modal the
-    // parent would. Read-only types stay on the auto-approver path.
-    .with_parent_approver(approver.clone())
-    // Share the parent's live Policy Arc — write-capable children see
-    // the same mode + rules the parent does, so mode swaps (Auto →
-    // Yolo) and always-allow rules the user accumulates propagate to
-    // the child immediately.
-    .with_parent_policy(cfg.policy.clone())
-    // Prompt channel for review-required types — the child's final
-    // summary blocks on a user Approve / Deny before returning to the
-    // parent. Same channel PlanTool uses.
-    .with_prompt_channel(prompt_channel.clone());
-    // Persist child sessions when the parent's store is available. The
-    // panel uses `/api/sessions/:id/history` to rebuild a child's
-    // transcript on browser reload.
-    if let Some(store) = &cfg.store {
-        agent_tool = agent_tool.with_store(store.clone());
-    }
-    registry_owned.register(agent_tool);
-    let registry = Arc::new(registry_owned);
-    cfg.registry = registry.clone();
+    // Cross-session scratchpad — shared across every slot's AgentTool.
+    // Entries are keyed by parent session id inside, so a slot's peers see
+    // each other's notes but two separate sessions stay isolated.
+    let scratchpads = Arc::new(Mutex::new(HashMap::new()));
 
-    // Build the memory + episodic stores BEFORE constructing the initial
-    // Session so its `tool_ctx` gets them wired from turn zero. Otherwise
-    // the very first session's memory tools would fail with "memory store
-    // not wired" until the user triggered a folder-swap or session-swap
-    // (which is when make_tool_ctx would first run).
-    let memory_store: Arc<dyn mira_memory::MemoryStore> =
-        Arc::new(mira_memory::FileMemoryStore::new(
-            mira_config::user_memory_path(),
-            mira_config::project_memory_path(&cfg.cwd),
-        ));
-    let episodic_store: Arc<dyn mira_memory::EpisodicStore> = Arc::new(
-        mira_memory::FileEpisodicStore::new(mira_memory::project_episodic_path(&cfg.cwd)),
-    );
-    let initial_ctx = ToolContext::new(cfg.cwd.clone(), cfg.sandbox.clone())
-        .with_memory(memory_store.clone())
-        .with_episodic(episodic_store.clone());
-    let mut session = match cfg.resume.take() {
-        Some(record) => Session::resume_from(
-            record,
-            harness_provider.clone(),
-            cfg.registry.clone(),
-            cfg.policy.clone(),
-            approver.clone(),
-            initial_ctx,
-        ),
-        None => Session::new(
-            cfg.cfg.clone(),
-            system_prompt(&cfg.cwd, &cfg.registry),
-            harness_provider.clone(),
-            cfg.registry.clone(),
-            cfg.policy.clone(),
-            approver.clone(),
-            initial_ctx,
-        ),
-    };
-    if let Some(store) = cfg.store.clone() {
-        session = session.with_store(store);
-    }
-    // Live memory: re-read user + project MIRA.md on every round so edits
-    // from `/remember`, the memory tools, or the user's own text editor
-    // reach the model without a session restart. The system prompt above
-    // no longer appends memory itself — the snapshot is the single source.
-    // Skip the snapshot entirely when `memory.inject_context` is false, so
-    // the second system message doesn't get emitted at all — useful when
-    // bisecting whether the memory block is confusing the model.
-    if cfg.memory_runtime.inject_context() {
-        session = session
-            .with_memory_snapshot(make_memory_snapshot_with(&cfg.cwd, episodic_store.clone()));
-        session = session.with_memory_retrieval(memory_retrieval_from(&cfg.memory_runtime));
-    }
-    // Auto-extractor: post-round background pass that appends durable
-    // facts to episodic. Off if the user disabled it via `mira.yaml`.
-    if cfg.memory_runtime.auto_extract_enabled() {
-        session = session.with_auto_extract(mira_harness::AutoExtractConfig::enabled(
-            cfg.memory_runtime.extractor_model().map(str::to_owned),
-        ));
-    }
-
-    // Bind the listener up-front so we know the exact port to embed in
-    // OAuth callback URLs. Doing this before AppState is constructed
-    // lets us pass `local_port` in — the alternative (Arc<AtomicU16>
-    // updated later) is uglier and racy for early sign-in attempts.
+    // Bind the listener up-front so the OAuth callback URL can embed the
+    // real port before AppState is finalised.
     let listener = TcpListener::bind(cfg.bind)
         .await
         .with_context(|| format!("bind {}", cfg.bind))?;
@@ -252,25 +141,43 @@ pub async fn run(mut cfg: ServerConfig) -> Result<()> {
         .map(|a| a.port())
         .unwrap_or(cfg.bind.port());
 
-    let state = AppState {
-        session: Arc::new(RwLock::new(session)),
+    // Build the initial slot. Seeded from the ServerConfig's `resume` (if
+    // present) so a `mira serve --resume <id>` picks up where it left off.
+    let deps = crate::slot::SlotDeps {
         policy: cfg.policy.clone(),
-        cwd,
-        provider: swappable,
-        events_tx,
-        pending,
-        prompt_pending,
-        registry: cfg.registry.clone(),
         sandbox: cfg.sandbox.clone(),
-        approver,
-        harness_provider,
+        harness_provider: harness_provider.clone(),
+        base_registry: base_registry.clone(),
+        agents_registry: agents_registry.clone(),
         store: cfg.store.clone(),
-        memory: Arc::new(RwLock::new(memory_store)),
-        episodic: Arc::new(RwLock::new(episodic_store)),
+        memory_runtime: cfg.memory_runtime.clone(),
+        scratchpads: scratchpads.clone(),
+        default_model_for_agents: cfg.cfg.model.clone(),
+    };
+    let initial_slot =
+        crate::slot::build_slot(cfg.cwd.clone(), cfg.cfg.clone(), cfg.resume, &deps).await;
+    let initial_id = initial_slot.id.clone();
+
+    let mut slots = HashMap::new();
+    slots.insert(initial_id.clone(), initial_slot);
+
+    let state = AppState {
+        slots: Arc::new(RwLock::new(slots)),
+        active: Arc::new(RwLock::new(initial_id)),
+        policy: cfg.policy.clone(),
+        sandbox: cfg.sandbox.clone(),
+        provider: swappable,
+        harness_provider,
+        base_registry,
+        agents_registry,
+        store: cfg.store.clone(),
         mcp_boot: Arc::new(cfg.mcp_boot),
         skills: cfg.skills.clone(),
         pending_oauth: oauth::new_pending_store(),
         local_port,
+        memory_runtime: cfg.memory_runtime.clone(),
+        scratchpads,
+        default_model_for_agents: cfg.cfg.model.clone(),
     };
 
     // Filesystem watcher for skills — picks up `npx skills add`
@@ -282,9 +189,7 @@ pub async fn run(mut cfg: ServerConfig) -> Result<()> {
 
     // OAuth token refresh: rotate ChatGPT / Codex short-lived API keys
     // before they expire so a signed-in session survives long chats
-    // without a re-signin. Boot rehydrate immediately hot-swaps the
-    // provider off any persisted bundle (in case the last run's yaml
-    // key is now stale) before spawning the periodic loop.
+    // without a re-signin.
     oauth::refresh::boot_rehydrate(&state).await;
     oauth::refresh::spawn(state.clone());
 
@@ -315,12 +220,6 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
             "/api/auth/openai/start",
             axum::routing::post(oauth::openai::start),
         )
-        // The OAuth callback for OpenAI/ChatGPT sign-in lands on a
-        // temporary one-shot listener bound to 127.0.0.1:1455 (or 1457)
-        // that `oauth::openai::start` spins up per flow — this main
-        // server never sees /auth/callback. Codex's OAuth client_id is
-        // registered against those specific ports at OpenAI's Hydra
-        // allow-list, so we couldn't use our own port anyway.
         .route("/api/sessions", get(sessions::list_sessions))
         .route(
             "/api/sessions/:id/history",
@@ -345,6 +244,10 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route(
             "/api/sessions/:id/title/regenerate",
             axum::routing::post(sessions::regenerate_session_title),
+        )
+        .route(
+            "/api/sessions/:id/background",
+            axum::routing::put(sessions::set_background_mode_http),
         )
         .route("/api/cwd", get(cwd::get_cwd).put(cwd::put_cwd))
         .route("/api/browse", get(browse::browse))
@@ -413,8 +316,6 @@ async fn health() -> &'static str {
 }
 
 async fn inline_index() -> axum::response::Html<&'static str> {
-    // Placeholder until the built React app is available. Enough to confirm
-    // the server is up and shove a WS ping through in the browser console.
     axum::response::Html(include_str!("../assets/placeholder.html"))
 }
 
@@ -426,14 +327,6 @@ pub fn default_store() -> Result<Arc<dyn SessionStore>> {
 }
 
 /// Build the standard live-memory snapshot for a session bound to `cwd`.
-/// Every `Session::new` / `Session::resume_from` site in the server should
-/// pass the result through `session.with_memory_snapshot(...)` so mid-
-/// session memory edits land on the very next round.
-///
-/// The two-arg overload (`make_memory_snapshot`) is the standalone form —
-/// used by the CLI, which doesn't share an episodic store across handlers.
-/// Server-side callers should prefer [`make_memory_snapshot_with`] so the
-/// snapshot renders the same episodic entries `memory_remember` writes to.
 pub fn make_memory_snapshot(cwd: &std::path::Path) -> Arc<dyn mira_memory::MemorySnapshot> {
     let epi: Arc<dyn mira_memory::EpisodicStore> = Arc::new(mira_memory::FileEpisodicStore::new(
         mira_memory::project_episodic_path(cwd),
@@ -458,9 +351,7 @@ pub fn make_memory_snapshot_with(
 }
 
 /// Translate the `mira.yaml`-shaped `MemoryRuntimeConfig` into the
-/// harness's `MemoryRetrievalConfig`. Kept here (rather than in
-/// `mira-harness`) so the harness stays free of the on-disk config
-/// type.
+/// harness's `MemoryRetrievalConfig`.
 pub fn memory_retrieval_from(
     cfg: &mira_config::MemoryRuntimeConfig,
 ) -> mira_harness::MemoryRetrievalConfig {
@@ -472,16 +363,10 @@ pub fn memory_retrieval_from(
     out
 }
 
-/// System prompt for a session bound to `cwd`. Kept here (rather than in the
-/// CLI) so `new_session` and `put_cwd` can recompute it from the current
-/// folder — the prompt would otherwise lie about the working directory when
-/// the user switches folders mid-session.
-///
-/// Bakes the actual `registry.specs()` list into the prompt so the model
-/// stops narrating capabilities it doesn't have (e.g. it used to confidently
-/// claim `WebSearch` / `WebFetch` because they're common in its training
-/// data). Also drops a "bash unlocks" hint — the model tends to think of
-/// `bash` as a fallback rather than the powerful escape hatch it is.
+/// System prompt for a session bound to `cwd`. Passed into
+/// `Session::new`; kept here (rather than in the CLI) so `new_session`,
+/// `put_cwd`, and every slot factory can recompute it from the current
+/// folder.
 pub fn system_prompt(cwd: &std::path::Path, registry: &Registry) -> String {
     let tool_lines: Vec<String> = registry
         .specs()
@@ -548,18 +433,9 @@ pub fn system_prompt(cwd: &std::path::Path, registry: &Registry) -> String {
         cwd = cwd.display(),
     );
 
-    // Memory (user + project MIRA.md) used to be baked into the prompt here,
-    // but that made every session a snapshot — mid-session edits, agent tool
-    // writes, and `/remember` calls only took effect on the *next* session.
-    // The harness now injects a live memory block on every round via a
-    // `MemorySnapshot`; this function returns the stable, cacheable prefix.
     base
 }
 
-/// First sentence of a tool description — used to keep the system-prompt
-/// tool list terse. Tool descriptions can be multi-paragraph (they double
-/// as the model-facing spec); the first sentence is usually enough for the
-/// enumeration hint.
 fn first_sentence(s: &str) -> String {
     let s = s.trim();
     match s.find(|c: char| c == '.' || c == '\n') {
@@ -569,10 +445,14 @@ fn first_sentence(s: &str) -> String {
 }
 
 /// Neutral starting folder for a fresh session — `$HOME` when set,
-/// otherwise the process cwd. Used so a "new chat" isn't tied to whatever
-/// folder happened to be active in the previous session.
+/// otherwise the process cwd.
 pub fn default_start_cwd() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")))
 }
+
+// Unused imports elsewhere reference these; keep them re-exported for the
+// small-handler crates that used to reach into `state.session` directly.
+#[allow(unused_imports)]
+pub(crate) use tokio::sync::broadcast;

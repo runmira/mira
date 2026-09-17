@@ -104,7 +104,7 @@ pub async fn list_skills(State(state): State<AppState>) -> Json<SkillsResponse> 
     let reg = state.skills.read().await.clone();
     let shared_dir = mira_config::shared_skills_dir();
     let user_dir = mira_config::user_skills_dir();
-    let cwd = state.cwd.read().await.clone();
+    let cwd = state.current_cwd().await;
     let project_dirs = mira_config::well_known_project_skills_dirs(&cwd);
 
     let skills = reg
@@ -133,7 +133,7 @@ pub async fn list_skills(State(state): State<AppState>) -> Json<SkillsResponse> 
 /// through this, so a skill the model just created via `write_file`
 /// becomes invocable on the next user message without a restart.
 pub async fn reload_registry(state: &AppState) {
-    let cwd = state.cwd.read().await.clone();
+    let cwd = state.current_cwd().await;
     let fresh = SkillRegistry::load_layered(
         &mira_config::shared_skills_dir(),
         &mira_config::user_skills_dir(),
@@ -165,7 +165,7 @@ pub async fn get_skill(
     };
     let shared_dir = mira_config::shared_skills_dir();
     let user_dir = mira_config::user_skills_dir();
-    let cwd = state.cwd.read().await.clone();
+    let cwd = state.current_cwd().await;
     let project_dirs = mira_config::well_known_project_skills_dirs(&cwd);
     let tier = tier_of(&s, &shared_dir, &user_dir, &project_dirs);
     let attachments = s
@@ -208,7 +208,7 @@ pub fn spawn_skill_watcher(state: AppState) {
 }
 
 async fn run_watcher(state: AppState) -> anyhow::Result<()> {
-    let cwd = state.cwd.read().await.clone();
+    let cwd = state.current_cwd().await;
     let mut paths: Vec<PathBuf> = vec![
         mira_config::shared_skills_dir(),
         mira_config::user_skills_dir(),
@@ -247,7 +247,7 @@ async fn run_watcher(state: AppState) -> anyhow::Result<()> {
         reload_registry(&state).await;
         let count = state.skills.read().await.skills.len();
         tracing::debug!(count, "skill watcher: reloaded");
-        broadcast_reloaded(&state.events_tx);
+        broadcast_reloaded_all(&state).await;
     }
     Ok(())
 }
@@ -257,6 +257,14 @@ fn broadcast_reloaded(tx: &broadcast::Sender<ServerMsg>) {
     // fine, the browser just picks up the fresh roster on its next
     // fetch.
     let _ = tx.send(ServerMsg::SkillsReloaded);
+}
+
+/// Fan out `SkillsReloaded` to every live slot's channel so a background
+/// tab watching a different session also refetches.
+async fn broadcast_reloaded_all(state: &AppState) {
+    for slot in state.list_slots().await {
+        broadcast_reloaded(&slot.events_tx);
+    }
 }
 
 fn tier_of(

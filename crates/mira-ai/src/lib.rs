@@ -22,6 +22,7 @@ pub mod openai;
 pub mod pricing;
 pub mod provider;
 pub mod tool_spec;
+pub mod typesafe;
 
 pub use event::{ChatEvent, FinishReason, TokenUsage};
 pub use factory::build_chat_provider;

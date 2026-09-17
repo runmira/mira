@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { CaretDown, Target } from '@phosphor-icons/react';
 import { cn } from './lib/utils';
 import { connect, type WsClient, type WsStatus } from './ws';
-import { appendMemory, applyUndo, getSessionHistory, getSettings, listSkills, newSession, startReview, type SkillView } from './api';
+import { appendMemory, applyUndo, getSessionHistory, getSettings, listSkills, newSession, setSessionBackgroundMode, startReview, type SkillView } from './api';
 import { extractAgentId } from './components/AgentCard';
 import { SettingsSurface } from './components/Settings';
 import { PluginsPanel } from './components/Plugins';
@@ -616,6 +616,15 @@ export default function App() {
         // switches from the first-user-message fallback to the AI title.
         setSidebarRefresh((n) => n + 1);
         break;
+      case 'background_mode_changed':
+      case 'session_background_idle':
+      case 'session_background_running':
+        // These frames drive the sidebar's per-session running / attached
+        // / mode indicators. The simplest refresh path is to poke the
+        // Sidebar's refetch counter — it re-hits /api/sessions which
+        // reports the current live-slot metadata.
+        setSidebarRefresh((n) => n + 1);
+        break;
       case 'usage':
         setUsage(msg.totals);
         break;
@@ -1028,7 +1037,12 @@ export default function App() {
 
   async function onNewChat() {
     try {
-      await newSession();
+      const { id } = await newSession();
+      // The server just built a fresh slot for `id`, marked it active,
+      // and published a Ready on ITS channel. Our WS forwarder is still
+      // subscribed to the previous slot — attach so we start receiving
+      // the new slot's frames (Ready + subsequent tokens).
+      wsRef.current?.attach(id);
     } catch (e) {
       setEntries((prev) => [...prev, { kind: 'error', text: `new chat: ${(e as Error).message}` }]);
     }
@@ -1172,6 +1186,11 @@ export default function App() {
         onOpenSettings={() => openSettings()}
         onOpenPicker={() => setPickerOpen(true)}
         onSessionLoaded={() => { /* Ready broadcast refreshes + jumps to chat */ }}
+        onAttachSession={(id) => wsRef.current?.attach(id)}
+        onSetBackgroundMode={async (id, mode) => {
+          await setSessionBackgroundMode(id, mode);
+          setSidebarRefresh((n) => n + 1);
+        }}
         settingsSection={settingsSection}
         onSettingsSectionChange={setSettingsSection}
         onExitSettings={exitSettings}
@@ -1269,6 +1288,7 @@ export default function App() {
               onSetModel={onSetModel}
               onSetEffort={onSetEffort}
               onOpenPicker={() => setPickerOpen(true)}
+              onCwdSwitched={(_path, id) => { if (id) wsRef.current?.attach(id); }}
               onInterrupt={() => wsRef.current?.send({ type: 'interrupt' })}
               onNewChat={onNewChat}
               onOpenSettings={() => openSettings()}
@@ -1328,7 +1348,13 @@ export default function App() {
       <FolderPicker
         open={pickerOpen}
         onClose={() => setPickerOpen(false)}
-        onPicked={() => { /* Ready broadcast refreshes */ }}
+        onPicked={(_path, id) => {
+          // Server built a fresh slot for the new cwd. Attach the WS so
+          // the freshly-published Ready lands in our transcript — without
+          // this, the socket keeps forwarding the previous slot's frames
+          // and the UI silently stays on the old folder.
+          if (id) wsRef.current?.attach(id);
+        }}
       />
       <ReviewPanel
         open={reviewPanelOpen}

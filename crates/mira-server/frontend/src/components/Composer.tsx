@@ -55,6 +55,11 @@ type Props = {
   /** Reasoning-effort setter. Pass `null` (or "off") to disable. */
   onSetEffort: (e: string | null) => void;
   onOpenPicker: () => void;
+  /** Called after a successful in-composer cwd switch (Composer's own
+   *  quick-switch dropdown, not the FolderPicker dialog). `sessionId` is
+   *  the fresh slot the server built for the new folder — App attaches
+   *  its WS to it so the new Ready lands in the transcript. */
+  onCwdSwitched?: (path: string, sessionId?: string) => void;
   onInterrupt: () => void;
   onNewChat: () => void;
   onOpenSettings: () => void;
@@ -94,7 +99,7 @@ const NATIVE_ATTACH_MAX_BYTES = 256 * 1024;
 
 export function Composer({
   disabled, busy, mode, model, providerName, cwd, usage,
-  onSend, onSetMode, onSetModel, onSetEffort, onOpenPicker, onInterrupt, onNewChat, onOpenSettings, onRunReview, onSetGoal, onClearGoal, goal, onRemember, onUndo,
+  onSend, onSetMode, onSetModel, onSetEffort, onOpenPicker, onCwdSwitched, onInterrupt, onNewChat, onOpenSettings, onRunReview, onSetGoal, onClearGoal, goal, onRemember, onUndo,
   skills,
 }: Props) {
   const [text, setText] = useState('');
@@ -525,7 +530,7 @@ export function Composer({
       <div className="w-full max-w-3xl flex items-center gap-2 px-3">
         <span className="flex-1" />
         <UsageReadout usage={usage} model={model} />
-        <WorktreeChip cwd={cwd} />
+        <WorktreeChip cwd={cwd} onCwdSwitched={onCwdSwitched} />
       </div>
 
       <FilePicker
@@ -1667,7 +1672,13 @@ function UsageReadout({ usage, model }: { usage: UsageTotals | null; model: stri
 
 /* ---------- worktree chip (branch + dirty + worktree switcher) ---------- */
 
-function WorktreeChip({ cwd }: { cwd: string }) {
+function WorktreeChip({
+  cwd,
+  onCwdSwitched,
+}: {
+  cwd: string;
+  onCwdSwitched?: (path: string, sessionId?: string) => void;
+}) {
   const [open, setOpen] = useState(false);
   const [status, setStatus] = useState<GitStatusView | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -1692,9 +1703,13 @@ function WorktreeChip({ cwd }: { cwd: string }) {
   async function switchTo(path: string) {
     setBusy(true);
     try {
-      await putCwd(path);
-      // `Ready` broadcast will refresh the parent; also refresh git state so
-      // the chip label reflects the new worktree before the WS event lands.
+      const { session_id } = await putCwd(path);
+      // Hand the new slot id up to the parent so it can attach its WS.
+      // Without this, the socket keeps forwarding the old slot's frames
+      // and the transcript silently stays on the previous folder.
+      onCwdSwitched?.(path, session_id);
+      // Also refresh git state so the chip label reflects the new
+      // worktree before the WS attach lands.
       await refresh();
       setOpen(false);
     } catch (e) {

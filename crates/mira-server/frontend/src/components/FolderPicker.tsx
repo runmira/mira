@@ -9,7 +9,11 @@ import { cn } from '@/lib/utils';
 type Props = {
   open: boolean;
   onClose: () => void;
-  onPicked: (path: string) => void;
+  /** Fires after the server confirmed the cwd swap. `sessionId` is the id
+   *  of the fresh slot the server materialized for the new folder — the
+   *  caller should `attach()` its WS to it so the new Ready lands in the
+   *  transcript. `undefined` on legacy servers that don't return it. */
+  onPicked: (path: string, sessionId?: string) => void;
 };
 
 export function FolderPicker({ open, onClose, onPicked }: Props) {
@@ -46,8 +50,8 @@ export function FolderPicker({ open, onClose, onPicked }: Props) {
   async function pick(path: string) {
     setBusy(true);
     try {
-      await putCwd(path);
-      onPicked(path);
+      const { session_id } = await putCwd(path);
+      onPicked(path, session_id);
       onClose();
     } catch (e) {
       setError(String((e as Error).message));

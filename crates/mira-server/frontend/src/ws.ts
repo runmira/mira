@@ -1,9 +1,16 @@
-import type { ClientMsg, ServerMsg } from './types';
+import type { BackgroundMode, ClientMsg, ServerMsg } from './types';
 
 export type WsStatus = 'connecting' | 'open' | 'closed';
 
 export interface WsClient {
   send(msg: ClientMsg): void;
+  /** Convenience: swap which session this WS is watching. Server updates
+   *  its per-connection attached slot, replays a fresh Ready, and points
+   *  the process-wide `active` pointer here so subsequent HTTP calls
+   *  target the same session. */
+  attach(sessionId: string): void;
+  /** Set the currently-attached session's background mode. */
+  setBackgroundMode(mode: BackgroundMode): void;
   close(): void;
 }
 
@@ -63,14 +70,22 @@ export function connect(
 
   open();
 
+  function sendMsg(msg: ClientMsg) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(msg));
+    } else {
+      // Queue so a submit made during a brief drop still lands.
+      queue.push(msg);
+    }
+  }
+
   return {
-    send(msg) {
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify(msg));
-      } else {
-        // Queue so a submit made during a brief drop still lands.
-        queue.push(msg);
-      }
+    send: sendMsg,
+    attach(sessionId) {
+      sendMsg({ type: 'attach', session_id: sessionId });
+    },
+    setBackgroundMode(mode) {
+      sendMsg({ type: 'set_background_mode', mode });
     },
     close() {
       stopped = true;

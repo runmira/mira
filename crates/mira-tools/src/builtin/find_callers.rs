@@ -116,15 +116,30 @@ impl Tool for FindCallers {
             cmd.push_str(&shell_quote(&resolved.to_string_lossy()));
         }
 
+        let (final_cmd, fell_back) = if crate::builtin::rg::rg_available() {
+            (cmd.clone(), false)
+        } else if let Some(fallback) = crate::builtin::rg::translate_to_grep(&cmd) {
+            (fallback, true)
+        } else {
+            return Err(ToolError::Failed(
+                "ripgrep (`rg`) is not installed and this find_callers \
+                 query can't be translated to POSIX grep. Install ripgrep \
+                 (`brew install ripgrep` or `cargo install ripgrep`)."
+                    .to_string(),
+            ));
+        };
+
         let outcome = ctx
             .sandbox
-            .run(&cmd, &ctx.cwd, Duration::from_secs(30))
+            .run(&final_cmd, &ctx.cwd, Duration::from_secs(30))
             .await
             .map_err(|e| ToolError::Failed(e.to_string()))?;
 
         let filtered = drop_definition_lines(&outcome.output, name, args.max_results.min(2000));
         let body = if filtered.trim().is_empty() {
             format!("no callers of `{name}`")
+        } else if fell_back {
+            format!("{}{}", crate::builtin::rg::FALLBACK_NOTICE, filtered)
         } else {
             filtered
         };

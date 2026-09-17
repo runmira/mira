@@ -24,7 +24,7 @@ import {
   regenerateSessionTitle,
   renameSession,
 } from '../api';
-import type { SessionSummary, WorktreeMergeStatus } from '../types';
+import type { BackgroundMode, SessionSummary, WorktreeMergeStatus } from '../types';
 import type { WsStatus } from '../ws';
 import { parseSentAttachments } from './Composer';
 import { costUsd, formatDollars } from '../lib/usage';
@@ -81,6 +81,14 @@ type Props = {
   onOpenSettings: () => void;
   onOpenPicker: () => void;
   onSessionLoaded: () => void;
+  /** WS-native session switch. When present, the sidebar sends
+   *  `Attach { session_id }` instead of hitting `POST /load` — no HTTP
+   *  round-trip, no reload flash on the transcript, and the previously
+   *  attached slot keeps running in the background. */
+  onAttachSession?: (id: string) => void;
+  /** Change a session's background mode. Provided by the app so the
+   *  RowMenu can call `PUT /api/sessions/:id/background`. */
+  onSetBackgroundMode?: (id: string, mode: BackgroundMode) => Promise<void>;
   /** Settings-mode state. Ignored unless `activeView === 'settings'`,
    *  in which case the sidebar renders the section tabs + a "Back to
    *  app" pill instead of the default nav. */
@@ -94,7 +102,8 @@ const PER_GROUP_LIMIT = 5;
 
 export function Sidebar({
   status, cwd, activeSessionId, activeBusy, refreshKey, activeView, onNavigate,
-  onNewChat, onOpenSettings, onOpenPicker, onSessionLoaded,
+  onNewChat, onOpenSettings, onOpenPicker, onSessionLoaded, onAttachSession,
+  onSetBackgroundMode,
   settingsSection = 'provider',
   onSettingsSectionChange,
   onExitSettings,
@@ -115,6 +124,20 @@ export function Sidebar({
   const groups = useMemo(() => groupByCwd(sessions, cwd), [sessions, cwd]);
 
   async function pickSession(id: string) {
+    // Prefer WS attach — no HTTP round-trip, no reload flash, and the
+    // previously attached slot keeps making progress in the background.
+    // Fall back to POST /load if the WS helper isn't wired (shouldn't
+    // happen in the shipped app, but keeps the component reusable).
+    if (onAttachSession) {
+      try {
+        onAttachSession(id);
+        onSessionLoaded();
+        return;
+      } catch (e) {
+        setError(String((e as Error).message));
+        return;
+      }
+    }
     try { await loadSession(id); onSessionLoaded(); }
     catch (e) { setError(String((e as Error).message)); }
   }
@@ -340,6 +363,11 @@ export function Sidebar({
                         onPick={() => pickSession(s.id)}
                         onRename={() => setRenaming(s)}
                         onDelete={() => removeSession(s.id)}
+                        onSetBackgroundMode={
+                          onSetBackgroundMode
+                            ? (mode) => onSetBackgroundMode(s.id, mode).catch((e) => setError(String(e.message ?? e)))
+                            : undefined
+                        }
                       />
                     ))}
                     {overflow > 0 && (
@@ -409,6 +437,7 @@ function SessionRow({
   onPick,
   onRename,
   onDelete,
+  onSetBackgroundMode,
 }: {
   session: SessionSummary;
   active: boolean;
@@ -416,9 +445,19 @@ function SessionRow({
   onPick: () => void;
   onRename: () => void;
   onDelete: () => void;
+  /** Optional — when provided, the RowMenu shows a "Background mode ▸"
+   *  submenu with Deny / AutoApprove / Park. Only meaningful for slots
+   *  the server has materialized (persisted-but-not-loaded sessions
+   *  have no runtime; the endpoint 404s until the session is loaded). */
+  onSetBackgroundMode?: (mode: BackgroundMode) => void;
 }) {
   const providerDot = providerFamilyDot(session.model);
-  const running = active && activeBusy;
+  // A session is "running" from the sidebar's POV either because it's the
+  // active session with a live in-flight turn (activeBusy), OR because the
+  // server reports its slot has a background turn still going. The second
+  // case is what makes multi-session actually visible — you can leave a
+  // tab, watch a different session, and this row keeps its spinner.
+  const running = (active && activeBusy) || session.running === true;
   return (
     <div
       // Hover tooltip prefers the cleaned-up label (no `## Attached
@@ -467,20 +506,12 @@ function SessionRow({
           )}
         >
           <RowMenu
-            items={[
-              {
-                label: 'Rename session',
-                icon: <PencilSimple className="size-3.5" />,
-                onSelect: onRename,
-              },
-              {
-                label: 'Delete session',
-                danger: true,
-                confirm: 'Delete this session? This cannot be undone.',
-                icon: <Trash className="size-3.5" />,
-                onSelect: onDelete,
-              },
-            ]}
+            items={backgroundMenuItems({
+              session,
+              onRename,
+              onDelete,
+              onSetBackgroundMode,
+            })}
           />
         </span>
       </div>
@@ -1004,8 +1035,55 @@ type RowMenuItem = {
   danger?: boolean;
   /** Confirmation prompt shown before running `onSelect`. Skips confirm if null. */
   confirm?: string | null;
+  /** Optional check-mark rendered on the right — used by radio-style
+   *  sub-items so the current background mode reads at a glance. */
+  checked?: boolean;
   onSelect: () => void | Promise<void>;
 };
+
+/** RowMenu items for a session row. Renders rename + delete plus, when the
+ *  caller wired a background-mode handler, three radio-style items for
+ *  the current per-slot policy. The three modes always render (rather
+ *  than hiding when the slot isn't loaded) so the user can see the
+ *  choice; clicking on a persisted-but-not-loaded row 404s — callers
+ *  should typically attach first. */
+function backgroundMenuItems(args: {
+  session: SessionSummary;
+  onRename: () => void;
+  onDelete: () => void;
+  onSetBackgroundMode?: (mode: BackgroundMode) => void;
+}): RowMenuItem[] {
+  const items: RowMenuItem[] = [
+    {
+      label: 'Rename session',
+      icon: <PencilSimple className="size-3.5" />,
+      onSelect: args.onRename,
+    },
+  ];
+  if (args.onSetBackgroundMode) {
+    const current = args.session.background_mode ?? null;
+    const modes: Array<{ mode: BackgroundMode; label: string; desc: string }> = [
+      { mode: 'deny', label: 'Background: Auto-deny', desc: 'Safe default — approvals silently fail if you leave.' },
+      { mode: 'auto_approve', label: 'Background: Auto-approve', desc: 'Trust this session to keep going without you.' },
+      { mode: 'park', label: 'Background: Wait for me', desc: 'Park approvals until you re-attach.' },
+    ];
+    for (const m of modes) {
+      items.push({
+        label: m.label,
+        checked: current === m.mode,
+        onSelect: () => args.onSetBackgroundMode!(m.mode),
+      });
+    }
+  }
+  items.push({
+    label: 'Delete session',
+    danger: true,
+    confirm: 'Delete this session? This cannot be undone.',
+    icon: <Trash className="size-3.5" />,
+    onSelect: args.onDelete,
+  });
+  return items;
+}
 
 function RowMenu({ items }: { items: RowMenuItem[] }) {
   const [open, setOpen] = useState(false);
@@ -1093,7 +1171,13 @@ function RowMenu({ items }: { items: RowMenuItem[] }) {
                 )}
               >
                 {it.icon && <span className="shrink-0 text-muted-foreground">{it.icon}</span>}
-                <span>{it.label}</span>
+                <span className="flex-1">{it.label}</span>
+                {it.checked && (
+                  <CheckCircle
+                    weight="fill"
+                    className="size-3.5 shrink-0 text-emerald-500"
+                  />
+                )}
               </button>
             ))}
           </div>

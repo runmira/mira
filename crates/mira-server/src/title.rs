@@ -12,10 +12,10 @@ use futures::StreamExt;
 use mira_ai::{ChatEvent, ChatProvider, ChatRequest};
 use mira_core::{Message, Role};
 use mira_harness::Session;
-use tokio::sync::broadcast;
 use tracing::{debug, warn};
 
 use crate::protocol::ServerMsg;
+use crate::state::AppState;
 
 const TITLE_CHAR_CAP: usize = 60;
 
@@ -28,7 +28,7 @@ pub fn spawn_if_needed(
     session: Session,
     provider: Arc<dyn ChatProvider>,
     model: String,
-    events_tx: broadcast::Sender<ServerMsg>,
+    state: AppState,
 ) {
     tokio::spawn(async move {
         if session.title().await.is_some() {
@@ -59,10 +59,15 @@ pub fn spawn_if_needed(
             Ok(title) if !title.is_empty() => {
                 debug!(session = %session.id, %title, "title generated");
                 session.set_title(&title).await;
-                let _ = events_tx.send(ServerMsg::SessionTitleUpdated {
-                    session_id: session.id.to_string(),
-                    title,
-                });
+                // Fan out — a client watching a different session still
+                // needs to refresh the sidebar so the renamed row lands
+                // without a manual reload.
+                state
+                    .broadcast_all(ServerMsg::SessionTitleUpdated {
+                        session_id: session.id.to_string(),
+                        title,
+                    })
+                    .await;
             }
             Ok(_) => {
                 // Model returned an empty title (whitespace / punctuation only).

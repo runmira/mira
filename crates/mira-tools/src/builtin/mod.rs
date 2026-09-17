@@ -16,6 +16,7 @@ pub mod git;
 pub mod glob;
 pub mod grep;
 pub mod memory;
+pub(crate) mod rg;
 pub mod read;
 pub mod rustfmt;
 pub mod skill;

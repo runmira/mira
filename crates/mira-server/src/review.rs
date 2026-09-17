@@ -72,7 +72,7 @@ pub async fn start_review(
     }
 
     let run_id = Uuid::new_v4().to_string();
-    let events_tx = state.events_tx.clone();
+    let events_tx = state.events_tx().await;
     let provider = state.harness_provider.clone();
     let model = state.current_session().await.config().await.model;
     let verify = !req.no_verify;

@@ -1,126 +1,240 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use mira_agents::AgentRegistry;
 use mira_ai::ChatProvider;
+use mira_config::MemoryRuntimeConfig;
+use mira_core::SessionId;
 use mira_harness::{Approver, Session, SessionStore};
-use mira_memory::{EpisodicStore, FileEpisodicStore, FileMemoryStore, MemoryStore};
+use mira_memory::{EpisodicStore, MemoryStore};
 use mira_policy::Policy;
 use mira_sandbox::Sandbox;
 use mira_tools::{Registry, ToolContext};
 use tokio::sync::{broadcast, Mutex, RwLock};
 
 use crate::approver::PendingMap;
-use crate::interactive::PendingPromptMap;
+use crate::interactive::{PendingPromptMap, ScratchpadEntry};
 use crate::mcp::McpBootSnapshot;
 use crate::oauth::PendingFlowStore;
 use crate::protocol::ServerMsg;
 use crate::provider::SwappableProvider;
+use crate::slot::{SessionSlot, SlotDeps};
 
 /// Shared state handed to every axum handler.
 ///
-/// The server hosts a single long-lived `Session`. Multiple browser tabs
-/// connect to the same server and see the same conversation. `cwd` and
-/// `session` live behind locks so the sessions/cwd APIs can hot-swap them
-/// without restarting the server or dropping connected clients.
+/// The server hosts a **map** of live [`SessionSlot`]s. Every session has
+/// its own broadcast bus, approval map, cwd, memory stores, and approver —
+/// so a turn on session A can keep streaming into A's channel even while a
+/// browser tab is watching session B.
+///
+/// `active` is the "most recently attached" session id — HTTP handlers
+/// without a session_id in the URL (settings, memory append, undo, …)
+/// operate on this slot. The WS handler is different: it tracks each
+/// connection's own `attached_id` so two tabs can watch two sessions.
 #[derive(Clone)]
 pub struct AppState {
-    pub session: Arc<RwLock<Session>>,
-    pub policy: Arc<Mutex<Policy>>,
-    /// Working directory the harness sees. Shared with the `WsApprover` so
-    /// diff previews line up with wherever the user just switched to.
-    pub cwd: Arc<RwLock<PathBuf>>,
-    /// The provider baked into `session`. Held here too so the settings API
-    /// can hot-swap it when the user reconfigures without restarting.
-    pub provider: SwappableProvider,
-    /// Fan-out for outbound frames. WS handlers subscribe; the harness
-    /// forwarder task and the approver both publish.
-    pub events_tx: broadcast::Sender<ServerMsg>,
-    pub pending: PendingMap,
-    /// Oneshot waiters keyed by prompt_id, used by interactive tools
-    /// (plan / ask_user / …) to receive the user's reply from the WS.
-    pub prompt_pending: PendingPromptMap,
+    // ---------- multi-session runtime ----------
+    /// Live slots keyed by session id. Insert on new / load / cwd-switch;
+    /// remove on delete_session (which also aborts the running turn).
+    pub slots: Arc<RwLock<HashMap<SessionId, Arc<SessionSlot>>>>,
+    /// "Most recently active" pointer used by HTTP handlers that don't
+    /// carry a session id. WS attach updates this so the next HTTP call
+    /// targets the session the user is watching.
+    pub active: Arc<RwLock<SessionId>>,
 
-    // --- pieces needed to (re)build Session instances ---
-    pub registry: Arc<Registry>,
+    // ---------- process-wide shared bits ----------
+    pub policy: Arc<Mutex<Policy>>,
     pub sandbox: Arc<Sandbox>,
-    pub approver: Arc<dyn Approver>,
+    pub provider: SwappableProvider,
     pub harness_provider: Arc<dyn ChatProvider>,
+    /// Pre-agent, pre-interactive registry snapshot. Slot factories layer
+    /// PlanTool / AskUserTool / AgentTool on top per session.
+    pub base_registry: Arc<Registry>,
+    pub agents_registry: Arc<AgentRegistry>,
     pub store: Option<Arc<dyn SessionStore>>,
-    /// Currently-active memory store. Bound to the current cwd's project
-    /// path so the per-scope mutex serializes every writer (memory tools,
-    /// `/api/memory/append`, future clients). Rebuilt on cwd change via
-    /// [`AppState::rebuild_memory_for_cwd`].
-    pub memory: Arc<RwLock<Arc<dyn MemoryStore>>>,
-    /// Currently-active episodic (cross-session) store. Same lifecycle as
-    /// `memory` — rebuilt on cwd change. `memory_remember` writes here;
-    /// the memory snapshot renders the most-recent N entries into every
-    /// round's live memory block.
-    pub episodic: Arc<RwLock<Arc<dyn EpisodicStore>>>,
-    /// MCP connect results captured once at server startup. Frozen for the
-    /// lifetime of the process — we don't live-reload connections yet, so
-    /// the Plugins UI treats yaml drift from this snapshot as
-    /// "restart required."
     pub mcp_boot: McpBootSnapshot,
-    /// Currently-loaded skill roster (bundled + user + project). Shared
-    /// with the `Skill` tool; the `/api/skills` handler reads it to
-    /// power the composer palette. `RwLock` so a cwd swap can replace
-    /// the project tier without any handler re-plumbing.
     pub skills: mira_tools::builtin::skill::SkillHandle,
-    /// In-flight OAuth PKCE flows, keyed by an opaque flow_id. Populated
-    /// by the `/api/auth/<p>/start` handler and drained by the matching
-    /// `/api/auth/<p>/callback`. Kept in memory only — a server restart
-    /// invalidates every pending sign-in, which is fine because the
-    /// browser round-trip is over in seconds.
     pub pending_oauth: PendingFlowStore,
-    /// TCP port this server bound to. Needed by the OAuth flow so we
-    /// can construct a loopback callback URL (`http://127.0.0.1:<port>/…`)
-    /// that the browser can reach back on the same interface.
     pub local_port: u16,
+    /// Memory-runtime config carried on state so `build_slot` can consult it
+    /// when constructing a slot for a newly loaded session.
+    pub memory_runtime: MemoryRuntimeConfig,
+    /// Cross-session scratchpad. AgentTool instances scope their entries
+    /// by parent session id, so this Mutex is process-shared but the
+    /// notes stay isolated per session.
+    pub scratchpads:
+        Arc<Mutex<HashMap<String, Vec<ScratchpadEntry>>>>,
+    /// Default model handed to AgentTool for subagent spawns when the call
+    /// doesn't override it. Snapshotted from the initial session config.
+    pub default_model_for_agents: String,
 }
 
 impl AppState {
-    /// Cheap Arc-clone of the current live session.
+    // ---------- slot lookups ----------
+
+    /// Return the "most recently attached" slot. HTTP handlers with no
+    /// session id in the URL default here.
+    pub async fn active_slot(&self) -> Arc<SessionSlot> {
+        let id = self.active.read().await.clone();
+        let slots = self.slots.read().await;
+        slots
+            .get(&id)
+            .cloned()
+            .expect("active session id must exist in slots")
+    }
+
+    pub async fn slot(&self, id: &SessionId) -> Option<Arc<SessionSlot>> {
+        self.slots.read().await.get(id).cloned()
+    }
+
+    /// Find a slot by string id — used by handlers that receive a path
+    /// parameter and don't want to build a SessionId every time.
+    pub async fn slot_str(&self, id: &str) -> Option<Arc<SessionSlot>> {
+        self.slot(&SessionId::from(id)).await
+    }
+
+    pub async fn list_slots(&self) -> Vec<Arc<SessionSlot>> {
+        self.slots.read().await.values().cloned().collect()
+    }
+
+    pub async fn insert_slot(&self, slot: Arc<SessionSlot>) {
+        let id = slot.id.clone();
+        self.slots.write().await.insert(id, slot);
+    }
+
+    pub async fn remove_slot(&self, id: &SessionId) -> Option<Arc<SessionSlot>> {
+        self.slots.write().await.remove(id)
+    }
+
+    pub async fn set_active(&self, id: SessionId) {
+        *self.active.write().await = id;
+    }
+
+    // ---------- backwards-compat accessors ----------
+    //
+    // Existing handlers (memory, review, skills, undo, settings, title,
+    // cwd, sessions, oauth::refresh, pull_requests, git, …) were written
+    // against a singleton `state.session`/`state.events_tx`/`state.cwd`.
+    // The methods below preserve that surface by routing to the ACTIVE
+    // slot's fields — so a handler operating on "the current session"
+    // still behaves the way the user's action just implied.
+
+    /// Cheap clone of the active slot's Session.
     pub async fn current_session(&self) -> Session {
-        self.session.read().await.clone()
+        self.active_slot().await.session.read().await.clone()
     }
 
     pub async fn current_cwd(&self) -> PathBuf {
-        self.cwd.read().await.clone()
+        self.active_slot().await.cwd.read().await.clone()
     }
 
-    /// Fresh ToolContext bound to the current cwd + shared sandbox and
-    /// the active memory + episodic stores, so tools inside a session share
-    /// the same per-scope mutex with `/api/memory/append` and every
-    /// `memory_remember` call routes through the same file handle.
-    pub async fn make_tool_ctx(&self) -> ToolContext {
-        ToolContext::new(self.current_cwd().await, self.sandbox.clone())
-            .with_memory(self.current_memory().await)
-            .with_episodic(self.current_episodic().await)
-    }
-
-    /// Cheap Arc-clone of the current memory store.
     pub async fn current_memory(&self) -> Arc<dyn MemoryStore> {
-        self.memory.read().await.clone()
+        self.active_slot().await.memory.read().await.clone()
     }
 
-    /// Cheap Arc-clone of the current episodic store.
     pub async fn current_episodic(&self) -> Arc<dyn EpisodicStore> {
-        self.episodic.read().await.clone()
+        self.active_slot().await.episodic.read().await.clone()
     }
 
-    /// Build fresh [`FileMemoryStore`] + [`FileEpisodicStore`] scoped to
-    /// `cwd` and swap them in. Called after any cwd change (`put_cwd`,
-    /// `load_session`) so subsequent tool calls, HTTP writes, and episodic
-    /// reads target the correct project.
+    /// Active slot's broadcast sender. Fanout target for handlers that
+    /// broadcast to whichever tab happens to be watching the active
+    /// session (title updates, cwd swap Ready, ModelChanged, …).
+    pub async fn events_tx(&self) -> broadcast::Sender<ServerMsg> {
+        self.active_slot().await.events_tx.clone()
+    }
+
+    pub async fn pending(&self) -> PendingMap {
+        self.active_slot().await.pending.clone()
+    }
+
+    pub async fn prompt_pending(&self) -> PendingPromptMap {
+        self.active_slot().await.prompt_pending.clone()
+    }
+
+    pub async fn approver(&self) -> Arc<dyn Approver> {
+        self.active_slot().await.approver.clone()
+    }
+
+    pub async fn registry(&self) -> Arc<Registry> {
+        self.active_slot().await.registry.clone()
+    }
+
+    /// Shared handle to the active slot's cwd RwLock. Kept for
+    /// backwards-compat with handlers that took an `Arc<RwLock<PathBuf>>`
+    /// directly (skills watcher, WsApprover for other slots, …).
+    pub async fn cwd_handle(&self) -> Arc<RwLock<PathBuf>> {
+        self.active_slot().await.cwd.clone()
+    }
+
+    /// Build a `ToolContext` bound to the active slot.
+    pub async fn make_tool_ctx(&self) -> ToolContext {
+        self.active_slot()
+            .await
+            .make_tool_ctx(self.sandbox.clone())
+            .await
+    }
+
+    /// Swap the active slot's memory/episodic stores after its cwd changed.
     pub async fn rebuild_memory_for_cwd(&self, cwd: &std::path::Path) {
-        let mem: Arc<dyn MemoryStore> = Arc::new(FileMemoryStore::new(
-            mira_config::user_memory_path(),
-            mira_config::project_memory_path(cwd),
-        ));
-        *self.memory.write().await = mem;
-        let epi: Arc<dyn EpisodicStore> = Arc::new(FileEpisodicStore::new(
-            mira_memory::project_episodic_path(cwd),
-        ));
-        *self.episodic.write().await = epi;
+        self.active_slot().await.rebuild_memory(cwd).await;
+    }
+
+    /// Shared bundle handed to `build_slot` — snapshotted from `AppState`
+    /// each time a new slot is spun up.
+    pub fn slot_deps(&self) -> SlotDeps {
+        SlotDeps {
+            policy: self.policy.clone(),
+            sandbox: self.sandbox.clone(),
+            harness_provider: self.harness_provider.clone(),
+            base_registry: self.base_registry.clone(),
+            agents_registry: self.agents_registry.clone(),
+            store: self.store.clone(),
+            memory_runtime: self.memory_runtime.clone(),
+            scratchpads: self.scratchpads.clone(),
+            default_model_for_agents: self.default_model_for_agents.clone(),
+        }
+    }
+
+    /// Fan a message out to every live slot's `events_tx`.
+    ///
+    /// The WS forwarder subscribes to exactly one slot at a time — so a
+    /// frame published only on slot A never reaches a client that's
+    /// watching slot B. For session-lifecycle events (title updated,
+    /// background running/idle, background-mode changed) that would break
+    /// sidebar refresh: change slot A's mode and clients watching B would
+    /// miss it. Fanning out keeps every attached client's sidebar
+    /// eventually consistent regardless of which session they're
+    /// currently focused on.
+    pub async fn broadcast_all(&self, msg: ServerMsg) {
+        for slot in self.list_slots().await {
+            let _ = slot.events_tx.send(msg.clone());
+        }
+    }
+
+    /// Return the slot for `id`, materializing one from a persisted record
+    /// if it isn't already loaded. Returns `Err` when persistence is
+    /// disabled or the record doesn't exist.
+    ///
+    /// Both `WS Attach { id }` and `POST /api/sessions/:id/load` go
+    /// through this so a click on a sidebar row for a session the server
+    /// hasn't opened yet still lands cleanly.
+    pub async fn ensure_slot(&self, id: &SessionId) -> Result<Arc<SessionSlot>, String> {
+        if let Some(slot) = self.slot(id).await {
+            return Ok(slot);
+        }
+        let Some(store) = self.store.clone() else {
+            return Err(
+                "persistence disabled — cannot materialize a slot for an unloaded session"
+                    .to_string(),
+            );
+        };
+        let record = store.load(id).await.map_err(|e| format!("load: {e}"))?;
+        let cwd = record.cwd.clone();
+        let cfg = record.cfg.clone();
+        let deps = self.slot_deps();
+        let slot = crate::slot::build_slot(cwd, cfg, Some(record), &deps).await;
+        self.insert_slot(slot.clone()).await;
+        Ok(slot)
     }
 }

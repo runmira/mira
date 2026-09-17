@@ -191,6 +191,11 @@ export type UsageTotals = {
   rounds: number;
 };
 
+/** Per-session policy for how the approver answers `Ask` decisions when
+ *  no client is currently attached. See slot.rs BackgroundMode for
+ *  authoritative semantics. */
+export type BackgroundMode = 'deny' | 'auto_approve' | 'park';
+
 export type ServerMsg =
   | { type: 'ready'; session_id: string; model: string; mode: Mode; cwd: string; history: Message[]; turns?: TurnMeta[]; usage?: UsageTotals; tasks?: TaskItem[]; goal?: Goal | null; previews?: Record<string, DiffPreview> }
   | { type: 'token'; text: string }
@@ -211,6 +216,9 @@ export type ServerMsg =
   | { type: 'review_result'; run_id: string; findings: ReviewFinding[] }
   | { type: 'review_error'; run_id: string; text: string }
   | { type: 'session_title_updated'; session_id: string; title: string }
+  | { type: 'background_mode_changed'; session_id: string; mode: BackgroundMode }
+  | { type: 'session_background_idle'; session_id: string }
+  | { type: 'session_background_running'; session_id: string }
   | { type: 'usage'; round: TokenUsage; totals: UsageTotals }
   | { type: 'memory_learned'; count: number }
   | { type: 'compacted'; messages_removed: number }
@@ -253,7 +261,18 @@ export type ClientMsg =
   | { type: 'interrupt' }
   | { type: 'set_goal'; condition: string; max_iterations?: number | null; evaluator_model?: string | null }
   | { type: 'clear_goal' }
-  | { type: 'sync' };
+  | { type: 'sync' }
+  /** Switch which session this WS is watching. Server updates its
+   *  per-connection attached_id, swaps the forwarder's subscription,
+   *  and emits a fresh Ready for the new session. */
+  | { type: 'attach'; session_id: string }
+  /** Fall back to the server's `active` pointer without closing the
+   *  socket. Rarely needed by the current UI (tab close does the same
+   *  work) but harmless to expose. */
+  | { type: 'detach' }
+  /** Set the attached session's background mode — controls how the
+   *  approver answers `Ask` decisions when no client is watching. */
+  | { type: 'set_background_mode'; mode: BackgroundMode };
 
 export type ProviderView = {
   name: string;
@@ -339,7 +358,19 @@ export type SessionSummary = {
   message_count: number;
   title?: string | null;
   first_user_message?: string | null;
+  /** True when this session is the server's `active` pointer — HTTP
+   *  handlers without a session_id in the URL target it. */
   active: boolean;
+  /** True when at least one WS forwarder is currently subscribed to this
+   *  slot's event stream. Sidebar renders a "•" indicator. */
+  attached?: boolean;
+  /** True when a turn task is in flight on this slot right now. Sidebar
+   *  shows a spinner so background sessions announce their state even
+   *  when no client is watching them. */
+  running?: boolean;
+  /** Background-mode setting for the slot. Absent for persisted sessions
+   *  that haven't been loaded yet (they have no runtime slot). */
+  background_mode?: BackgroundMode | null;
   /** Merge status of the session's worktree branch vs main/master in the
    *  primary repo. Absent for regular (non-worktree) sessions. */
   worktree_status?: WorktreeMergeStatus | null;
