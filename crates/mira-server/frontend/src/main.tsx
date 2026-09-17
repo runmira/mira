@@ -2,6 +2,8 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { IconContext } from '@phosphor-icons/react';
 import App from './App';
+import { AuthGate } from './components/AuthGate';
+import { OnboardingGate } from './components/onboarding/OnboardingGate';
 import './styles.css';
 
 // Global icon defaults: duotone weight for that two-tone dynamic feel, and
@@ -10,7 +12,11 @@ import './styles.css';
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <IconContext.Provider value={{ weight: 'duotone', size: '1em', mirrored: false }}>
-      <App />
+      <AuthGate>
+        <OnboardingGate>
+          <App />
+        </OnboardingGate>
+      </AuthGate>
     </IconContext.Provider>
   </StrictMode>,
 );

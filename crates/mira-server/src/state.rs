@@ -12,6 +12,7 @@ use tokio::sync::{broadcast, Mutex, RwLock};
 use crate::approver::PendingMap;
 use crate::interactive::PendingPromptMap;
 use crate::mcp::McpBootSnapshot;
+use crate::oauth::PendingFlowStore;
 use crate::protocol::ServerMsg;
 use crate::provider::SwappableProvider;
 
@@ -65,6 +66,16 @@ pub struct AppState {
     /// power the composer palette. `RwLock` so a cwd swap can replace
     /// the project tier without any handler re-plumbing.
     pub skills: mira_tools::builtin::skill::SkillHandle,
+    /// In-flight OAuth PKCE flows, keyed by an opaque flow_id. Populated
+    /// by the `/api/auth/<p>/start` handler and drained by the matching
+    /// `/api/auth/<p>/callback`. Kept in memory only — a server restart
+    /// invalidates every pending sign-in, which is fine because the
+    /// browser round-trip is over in seconds.
+    pub pending_oauth: PendingFlowStore,
+    /// TCP port this server bound to. Needed by the OAuth flow so we
+    /// can construct a loopback callback URL (`http://127.0.0.1:<port>/…`)
+    /// that the browser can reach back on the same interface.
+    pub local_port: u16,
 }
 
 impl AppState {
@@ -107,8 +118,9 @@ impl AppState {
             mira_config::project_memory_path(cwd),
         ));
         *self.memory.write().await = mem;
-        let epi: Arc<dyn EpisodicStore> =
-            Arc::new(FileEpisodicStore::new(mira_memory::project_episodic_path(cwd)));
+        let epi: Arc<dyn EpisodicStore> = Arc::new(FileEpisodicStore::new(
+            mira_memory::project_episodic_path(cwd),
+        ));
         *self.episodic.write().await = epi;
     }
 }

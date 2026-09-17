@@ -33,10 +33,18 @@ use mira_ai::{ChatEvent, ChatProvider, ChatRequest};
 use mira_core::{Message, Role, ToolCallId};
 use serde_json::Value;
 
-/// Non-system message count at which compaction fires. Roughly
-/// "30ish tool-heavy rounds"; below this, compaction never touches
-/// history.
+/// Non-system message count at which compaction fires unconditionally,
+/// as a belt-and-suspenders ceiling on top of the token-based trigger.
+/// A session that stays under this AND under 60% of the model's context
+/// window never compacts; crossing either fires it.
 const COMPACT_TRIGGER: usize = 60;
+
+/// Fraction of the model's context window at which compaction becomes
+/// eligible. 0.6 leaves headroom for the pending user turn, tool
+/// results, and the model's own response before the provider starts
+/// rejecting requests for being too long. Tuned conservatively — the
+/// summarizer costs a full provider round-trip.
+const COMPACT_TOKEN_FRACTION: f64 = 0.6;
 
 /// Number of most-recent non-system messages compaction keeps raw
 /// after summarizing the older tail.
@@ -65,7 +73,7 @@ const SUPERSEDING_TOOLS: &[&str] = &["read_file", "write_file", "edit_file"];
 /// - `just_appended_call_id` identifies the call we just handled; we
 ///   never touch its result.
 pub fn dedup_reads_for_path(
-    history: &mut Vec<Message>,
+    history: &mut [Message],
     just_appended_call_id: &ToolCallId,
     tool_name: &str,
     path: &str,
@@ -141,23 +149,42 @@ fn is_stub(content: &str) -> bool {
 /// summarized and replaced by a single synthetic message, or `None`
 /// if compaction isn't needed / can't be done safely.
 ///
-/// Rules:
-/// - Skip the leading run of system messages (they stay put).
-/// - Trigger only when the non-system tail exceeds `COMPACT_TRIGGER`.
-/// - Preserve the last `COMPACT_KEEP_RECENT` messages raw.
-/// - Walk `end` left until it points at a `Role::User` boundary — the
-///   only place we can split without tearing apart an
-///   assistant/tool_result pair. If no such boundary exists in the
-///   older tail, return `None`.
-pub fn find_compact_range(history: &[Message]) -> Option<Range<usize>> {
+/// Two independent triggers, whichever fires first:
+///  - **Token pressure**: estimated tokens exceed
+///    `COMPACT_TOKEN_FRACTION * model_context_window(model)`. This is
+///    the real gate — a session of 40 huge tool results should compact
+///    before it hits the model's context wall, even if message count is
+///    modest. Audit Gap #3.
+///  - **Message count ceiling**: `COMPACT_TRIGGER` non-system messages.
+///    Belt-and-suspenders for models with an oversized window
+///    (Gemini's 1M) where the token trigger would never fire but the
+///    provider round-trips still get slow and expensive.
+///
+/// Rules for the range itself:
+///  - Skip the leading run of system messages (they stay put).
+///  - Preserve the last `COMPACT_KEEP_RECENT` messages raw.
+///  - Walk `end` left until it points at a `Role::User` boundary — the
+///    only place we can split without tearing apart an
+///    assistant/tool_result pair. Both OpenAI and Anthropic reject a
+///    tool message that isn't answering an assistant call in the
+///    immediately-preceding turn.
+pub fn find_compact_range(history: &[Message], model: &str) -> Option<Range<usize>> {
     let system_end = history
         .iter()
         .take_while(|m| m.role == Role::System)
         .count();
     let non_system_len = history.len() - system_end;
-    if non_system_len <= COMPACT_TRIGGER {
+
+    let count_trigger = non_system_len > COMPACT_TRIGGER;
+    let token_trigger = {
+        let window = model_context_window(model);
+        let budget = ((window as f64) * COMPACT_TOKEN_FRACTION) as usize;
+        estimated_tokens(&history[system_end..]) > budget
+    };
+    if !count_trigger && !token_trigger {
         return None;
     }
+
     let start = system_end;
     let naive_end = history.len().saturating_sub(COMPACT_KEEP_RECENT);
     let mut end = naive_end;
@@ -168,6 +195,54 @@ pub fn find_compact_range(history: &[Message]) -> Option<Range<usize>> {
         return None;
     }
     Some(start..end)
+}
+
+/// Rough char-based token estimate. Real tokenization varies by model
+/// (BPE / SentencePiece / tiktoken); 4 chars ≈ 1 token is the
+/// widely-cited approximation and is close enough for a *trigger*
+/// decision — a factor-of-two error just means we compact a little
+/// sooner or later. Structured fields (tool_calls, tool_call_id) are
+/// counted so a batch of fat argument JSON also drives compaction.
+pub fn estimated_tokens(msgs: &[Message]) -> usize {
+    let mut chars: usize = 0;
+    for m in msgs {
+        if let Some(c) = &m.content {
+            chars += c.len();
+        }
+        for tc in &m.tool_calls {
+            chars += tc.function.name.len();
+            chars += tc.function.arguments.len();
+        }
+        // Small fixed overhead per message for the role/wire wrapper —
+        // ~4 tokens each is roughly what OpenAI's tokenizer adds.
+        chars += 16;
+    }
+    chars / 4
+}
+
+/// Best-effort context-window lookup keyed on the model id. Prefix
+/// match keeps the table small and forgiving of provider version
+/// bumps — `claude-opus-4-7`, `claude-3-5-sonnet-latest`, etc. all
+/// resolve via the "claude" branch. Unknown ids get a conservative
+/// 128k default so we don't over-fill smaller windows we haven't
+/// catalogued yet.
+pub fn model_context_window(model: &str) -> usize {
+    let m = model.to_ascii_lowercase();
+    if m.contains("claude") {
+        200_000
+    } else if m.contains("gemini") {
+        1_000_000
+    } else if m.contains("gpt-4o") || m.contains("gpt-4-turbo") || m.contains("gpt-4.1") {
+        128_000
+    } else if m.contains("gpt-4-32k") {
+        32_768
+    } else if m.contains("gpt-4") {
+        8_192
+    } else if m.contains("gpt-3.5") {
+        16_385
+    } else {
+        128_000
+    }
 }
 
 /// If history exceeds the compaction threshold, summarize the older
@@ -182,7 +257,7 @@ pub async fn maybe_compact(
     provider: &dyn ChatProvider,
     model: &str,
 ) -> Result<Option<usize>> {
-    let Some(range) = find_compact_range(history) else {
+    let Some(range) = find_compact_range(history, model) else {
         return Ok(None);
     };
     let count = range.end - range.start;
@@ -371,7 +446,7 @@ mod tests {
         for i in 0..COMPACT_TRIGGER {
             h.push(Message::user(format!("u{i}")));
         }
-        assert_eq!(find_compact_range(&h), None);
+        assert_eq!(find_compact_range(&h, "claude-opus-4-7"), None);
     }
 
     #[test]
@@ -385,8 +460,60 @@ mod tests {
             h.push(Message::assistant(format!("a{i}")));
             h.push(Message::tool(cid(&format!("t{i}")), "tool result"));
         }
-        let r = find_compact_range(&h).expect("should compact");
+        let r = find_compact_range(&h, "claude-opus-4-7").expect("should compact");
         assert!(r.start >= 1);
         assert_eq!(h[r.end].role, Role::User, "end must sit on user boundary");
+    }
+
+    #[test]
+    fn compact_fires_on_token_pressure_even_below_message_count() {
+        // Small model window + a handful of fat tool results = token
+        // trigger fires long before message count does. Audit Gap #3
+        // regression: the old count-only trigger let big results blow
+        // past the context wall silently.
+        let mut h = vec![Message::system("system prompt")];
+        // 15 rounds × 3 messages = 45 non-system messages (below the
+        // 60-message count trigger) but with fat tool results we clear
+        // 60% of GPT-3.5's 16k window many times over. Need at least
+        // enough total length that KEEP_RECENT still leaves an older
+        // tail to summarise.
+        for i in 0..15 {
+            h.push(Message::user(format!("u{i}")));
+            h.push(Message::assistant(format!("a{i}")));
+            // ~40KB per tool result → ~10k tokens → 150k tokens total,
+            // vs the ~9.8k trigger for gpt-3.5's 16k window.
+            h.push(Message::tool(cid(&format!("t{i}")), "x".repeat(40_000)));
+        }
+        assert!(
+            (h.len() - 1) < COMPACT_TRIGGER,
+            "must stay below count trigger to prove token trigger fired independently"
+        );
+        let r = find_compact_range(&h, "gpt-3.5-turbo").expect("token pressure should fire");
+        assert!(r.start >= 1);
+        assert_eq!(h[r.end].role, Role::User);
+    }
+
+    #[test]
+    fn compact_stays_quiet_below_token_and_count_thresholds() {
+        // Small history well under both triggers → no compaction.
+        let mut h = vec![Message::system("s")];
+        for i in 0..8 {
+            h.push(Message::user(format!("u{i}")));
+            h.push(Message::assistant(format!("a{i}")));
+        }
+        assert_eq!(find_compact_range(&h, "claude-opus-4-7"), None);
+    }
+
+    #[test]
+    fn model_context_window_prefix_matches() {
+        assert_eq!(model_context_window("claude-opus-4-7"), 200_000);
+        assert_eq!(model_context_window("Claude-3-5-Sonnet"), 200_000);
+        assert_eq!(model_context_window("gemini-1.5-pro"), 1_000_000);
+        assert_eq!(model_context_window("gpt-4o-mini"), 128_000);
+        assert_eq!(model_context_window("gpt-4-turbo-2024-04-09"), 128_000);
+        assert_eq!(model_context_window("gpt-4-32k"), 32_768);
+        assert_eq!(model_context_window("gpt-4-0613"), 8_192);
+        assert_eq!(model_context_window("gpt-3.5-turbo"), 16_385);
+        assert_eq!(model_context_window("some-unknown-model"), 128_000);
     }
 }

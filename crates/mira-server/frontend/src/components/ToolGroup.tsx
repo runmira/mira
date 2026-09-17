@@ -2,8 +2,10 @@ import { useMemo, useState } from 'react';
 import {
   Brain,
   CaretDown,
+  ChatCircleDots,
   CheckCircle,
   CircleNotch,
+  ClipboardText,
   FilePlus,
   FileText,
   GitBranch,
@@ -14,8 +16,8 @@ import {
   NotePencil,
   Sparkle,
   Terminal,
+  UsersThree,
   WarningCircle,
-  Wrench,
 } from '@phosphor-icons/react';
 import type { DiffPreview, ToolCall, ToolResult } from '../types';
 import { ToolCard, type ToolStatus } from './ToolCard';
@@ -24,13 +26,16 @@ import { cn } from '@/lib/utils';
 /** Flat modern chip for a run of consecutive tool calls — no card border,
  *  no background box. Single row:
  *
- *      ▸ 🔧 Working × 3   Read foo.rs · Grepped "x" · Ran ls              ✓
+ *      Exploring 2 reads, 4 searches                                    ✓
  *
- *  Umbrella verb ("Working" while any is in-flight, "Worked" once every
- *  entry has landed) mirrors Codex's Exploring/Explored pattern. When all
- *  entries share a tool name the umbrella collapses to that tool's own
- *  verb (Reading→Read, Searching→Searched, …) so a homogeneous run reads
- *  as tightly as before.
+ *  Umbrella verb mirrors Codex's Exploring/Explored pattern:
+ *    - homogeneous run (all same tool) → the tool's own verb (Read/Searched/…)
+ *      trailed by the target list (`foo.rs, bar.rs, +1 more`)
+ *    - heterogeneous read+search only → Exploring / Explored + count summary
+ *    - anything else → Working / Worked + count summary
+ *
+ *  Counts read as `N reads, N searches, N writes, …` in a stable order so a
+ *  glance tells the user WHAT was done, not just HOW MANY things were done.
  *
  *  Click expands to reveal the individual ToolCards, tightly stacked
  *  underneath with no extra chrome. Only rendered when the run has 2+
@@ -53,48 +58,65 @@ export function ToolGroup({
   const done = entries.length - running - errored;
   const anyActive = running > 0;
 
-  // Homogeneous run → use the tool's own verb + icon. Mixed run → generic
-  // "Working/Worked" umbrella with a wrench icon so the eye picks up on
-  // "this is a batch of different things" at a glance.
+  // Homogeneous run → use the tool's own verb + inline target list.
+  // Heterogeneous run → Exploring/Working umbrella + categorized counts
+  // so the reader sees "2 reads, 4 searches" instead of a mixed target
+  // salad.
   const names = new Set(entries.map((e) => e.call.function.name));
   const homogeneous = names.size === 1;
+  const counts = useMemo(() => countsByCategory(entries.map((e) => e.call)), [entries]);
+  const exploratory = useMemo(
+    () => entries.every((e) => isExploratoryCategory(categoryFor(e.call.function.name))),
+    [entries],
+  );
   const header = useMemo(() => {
     if (homogeneous) {
       const info = infoFor(entries[0].call.function.name);
-      return { verb: anyActive ? info.verbCont : info.verbPast, Icon: info.Icon };
+      return { verb: anyActive ? info.verbCont : info.verbPast };
     }
-    return { verb: anyActive ? 'Working' : 'Worked', Icon: Wrench };
-  }, [homogeneous, entries, anyActive]);
+    if (exploratory) {
+      return { verb: anyActive ? 'Exploring' : 'Explored' };
+    }
+    return { verb: anyActive ? 'Working' : 'Worked' };
+  }, [homogeneous, entries, anyActive, exploratory]);
 
-  const preview = useMemo(
-    () => previewLine(entries.map((e) => e.call), homogeneous),
-    [entries, homogeneous],
-  );
+  const trailingText = useMemo(() => {
+    if (homogeneous) return previewLine(entries.map((e) => e.call), true);
+    const summary = countsPhrase(counts);
+    return { text: summary, title: summary };
+  }, [entries, homogeneous, counts]);
 
   return (
     <div className="w-full max-w-[78%]">
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
-        className="group flex w-full min-w-0 items-center gap-2 rounded-md px-1 py-0.5 text-left text-[13px] transition-colors hover:bg-accent/40"
+        className="group flex w-full min-w-0 items-center gap-1.5 rounded-md px-1 py-0.5 text-left text-[13px] transition-colors hover:bg-accent/40"
       >
+        <span className="shrink-0 text-muted-foreground">{header.verb}</span>
+        {homogeneous && <CountBadge n={entries.length} />}
+        <span
+          className={cn(
+            'min-w-0 flex-1 truncate text-[12.5px]',
+            // Homogeneous keeps the mono target-list look; heterogeneous
+            // uses the tighter categorised phrase which reads better in
+            // the UI's default sans-serif.
+            homogeneous
+              ? 'font-mono text-[12px] text-muted-foreground/85'
+              : 'text-foreground/85',
+          )}
+          title={trailingText.title}
+        >
+          {trailingText.text}
+        </span>
         <CaretDown
           weight="bold"
           className={cn(
-            'size-3 shrink-0 text-muted-foreground/60 transition-transform',
+            'size-3 shrink-0 text-foreground/70 transition-all',
             !expanded && '-rotate-90',
-            expanded && 'text-muted-foreground',
+            !expanded && 'opacity-0 group-hover:opacity-100',
           )}
         />
-        <header.Icon className="size-3.5 shrink-0 text-mira-tool" />
-        <span className="shrink-0 font-medium text-foreground">{header.verb}</span>
-        <CountBadge n={entries.length} />
-        <span
-          className="min-w-0 flex-1 truncate font-mono text-[12px] text-muted-foreground"
-          title={preview.title}
-        >
-          {preview.text}
-        </span>
         <StatusCluster running={running} done={done} errored={errored} />
       </button>
 
@@ -120,7 +142,9 @@ export function ToolGroup({
 }
 
 /** Small pill next to the verb: `3`. Fills the same role as a count in
- *  a chat sidebar — a glance says "these belong together". */
+ *  a chat sidebar — a glance says "these belong together". Only shown for
+ *  homogeneous runs; heterogeneous runs already carry per-category counts
+ *  inline in the header text. */
 function CountBadge({ n }: { n: number }) {
   return (
     <span className="inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-secondary px-1.5 text-[10.5px] font-medium text-muted-foreground">
@@ -208,6 +232,127 @@ function previewLine(
   return { text: `${head} · +${parts.length - 2} more`, title: fullTitle };
 }
 
+/* ---------- categorization ---------- */
+
+/** High-level activity buckets used for the Codex-style
+ *  "Exploring 2 reads, 4 searches" header text. Categories group tools
+ *  by *what the user cares about seeing* — a `git_diff` reads the tree,
+ *  a `memory_append` writes to disk, etc. — not by internal harness
+ *  taxonomy. Extend when new tool families land. */
+export type ToolCategory =
+  | 'read'
+  | 'search'
+  | 'write'
+  | 'edit'
+  | 'run'
+  | 'fetch'
+  | 'skill'
+  | 'other';
+
+/** Order the header pieces are emitted in. Reads before searches before
+ *  mutations matches the natural narrative ("I looked, then I acted");
+ *  keeping the order stable also avoids the header dancing around as
+ *  new calls stream in. */
+const CATEGORY_ORDER: ToolCategory[] = [
+  'read',
+  'search',
+  'write',
+  'edit',
+  'run',
+  'fetch',
+  'skill',
+  'other',
+];
+
+/** Singular/plural label per bucket. Kept out of the switch below so
+ *  pluralisation stays consistent everywhere the counts are surfaced
+ *  (ToolGroup header, WorkedForChip summary). */
+const CATEGORY_LABEL: Record<ToolCategory, { one: string; many: string }> = {
+  read:   { one: 'read',    many: 'reads'    },
+  search: { one: 'search',  many: 'searches' },
+  write:  { one: 'write',   many: 'writes'   },
+  edit:   { one: 'edit',    many: 'edits'    },
+  run:    { one: 'command', many: 'commands' },
+  fetch:  { one: 'fetch',   many: 'fetches'  },
+  skill:  { one: 'skill',   many: 'skills'   },
+  other:  { one: 'call',    many: 'calls'    },
+};
+
+/** Map a raw tool name to its user-facing bucket. Unknown tools fall
+ *  through to `other` so a stray extension tool still shows up in the
+ *  count rather than vanishing. */
+export function categoryFor(name: string): ToolCategory {
+  switch (name) {
+    case 'read_file':
+    case 'memory_read':
+    case 'memory_search':
+    case 'task_get':
+    case 'task_list':
+    case 'git_log':
+    case 'git_status':
+    case 'git_diff':
+      return 'read';
+    case 'grep':
+    case 'glob':
+    case 'find_symbol':
+    case 'find_references':
+    case 'find_callers':
+    case 'web_search':
+      return 'search';
+    case 'write_file':
+    case 'memory_append':
+    case 'memory_edit':
+    case 'memory_remember':
+    case 'task_create':
+    case 'task_update':
+    case 'git_commit':
+      return 'write';
+    case 'edit_file':
+      return 'edit';
+    case 'bash':
+    case 'rustfmt':
+      return 'run';
+    case 'web_fetch':
+      return 'fetch';
+    case 'skill':
+      return 'skill';
+    default:
+      return 'other';
+  }
+}
+
+/** True for categories that read the world but don't mutate it —
+ *  used to pick the "Exploring / Explored" umbrella verb over
+ *  "Working / Worked" when a run only observed things. */
+export function isExploratoryCategory(cat: ToolCategory): boolean {
+  return cat === 'read' || cat === 'search' || cat === 'fetch';
+}
+
+/** Count how many calls land in each bucket. Returns a Map so callers
+ *  can iterate in `CATEGORY_ORDER` deterministically. Empty buckets
+ *  are omitted. */
+export function countsByCategory(calls: ToolCall[]): Map<ToolCategory, number> {
+  const out = new Map<ToolCategory, number>();
+  for (const c of calls) {
+    const cat = categoryFor(c.function.name);
+    out.set(cat, (out.get(cat) ?? 0) + 1);
+  }
+  return out;
+}
+
+/** Render a `2 reads, 4 searches, 1 write` phrase from a category map.
+ *  Empty input → empty string so callers can `if (phrase) …` cleanly. */
+export function countsPhrase(counts: Map<ToolCategory, number>): string {
+  const parts: string[] = [];
+  for (const cat of CATEGORY_ORDER) {
+    const n = counts.get(cat) ?? 0;
+    if (n === 0) continue;
+    const label = n === 1 ? CATEGORY_LABEL[cat].one : CATEGORY_LABEL[cat].many;
+    parts.push(`${n} ${label}`);
+  }
+  return parts.join(', ');
+}
+
 /* ---------- helpers ---------- */
 
 type ToolInfo = {
@@ -248,6 +393,10 @@ export function infoFor(name: string): ToolInfo {
     case 'memory_append':   return { verbPast: 'Remembered', verbCont: 'Remembering',   Icon: Brain };
     case 'memory_edit':     return { verbPast: 'Remembered', verbCont: 'Remembering',   Icon: Brain };
     case 'memory_remember': return { verbPast: 'Remembered', verbCont: 'Remembering',   Icon: Brain };
+    case 'skill':           return { verbPast: 'Used',       verbCont: 'Using',         Icon: Sparkle };
+    case 'ask_user':        return { verbPast: 'Asked you',  verbCont: 'Waiting on you', Icon: ChatCircleDots };
+    case 'plan':            return { verbPast: 'Proposed a plan', verbCont: 'Drafting a plan', Icon: ClipboardText };
+    case 'agent':           return { verbPast: 'Delegated',  verbCont: 'Delegating',    Icon: UsersThree };
     default:                return { verbPast: name,         verbCont: name,            Icon: FileText };
   }
 }

@@ -228,7 +228,11 @@ fn view_from(cfg: &MiraConfig, configured: bool) -> SettingsView {
         .iter()
         .map(|(name, value)| KeyView {
             name: name.clone(),
-            masked: if value.is_empty() { String::new() } else { mask_key(value) },
+            masked: if value.is_empty() {
+                String::new()
+            } else {
+                mask_key(value)
+            },
             from_env: std::env::var_os(name).is_some(),
         })
         .collect();
@@ -324,6 +328,13 @@ fn apply(cfg: &mut MiraConfig, u: SettingsUpdate) {
             cfg.memory.extractor_model = v.filter(|s| !s.is_empty());
         }
     }
+}
+
+/// Public alias so other modules (e.g. the OAuth callback) can hot-swap
+/// the live provider without duplicating this recipe. Kept behind the
+/// same name for callers inside settings.rs itself.
+pub fn build_provider_from(cfg: &MiraConfig) -> Arc<dyn ChatProvider> {
+    build_provider(cfg)
 }
 
 /// Try to build a real provider from `cfg`. On any missing piece, fall back

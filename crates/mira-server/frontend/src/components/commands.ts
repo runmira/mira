@@ -78,6 +78,13 @@ export type SlashCommand = {
   icon: IconComponent;
   /** True when free-text after the name is meaningful (arg mode). */
   takesArgs: boolean;
+  /** True for skill invocations. The Composer special-cases these so
+   *  picking a skill from the palette REPLACES the `/query` trigger
+   *  with a `@skill:<name>` mention chip instead of firing an ambient
+   *  effect + clearing the composer. Distinguishes from ordinary
+   *  "control" commands (`/new`, `/mode plan`, `/settings`, …) whose
+   *  `run` fires a side effect and returns `undefined`. */
+  isSkill?: boolean;
   run: (args: string, ctx: SlashCtx) => string | undefined;
 };
 
@@ -289,29 +296,65 @@ export const COMMANDS: SlashCommand[] = [
   },
 ];
 
-/** Palette-visibility rule: text starts with `/` OR `@` and doesn't yet
- *  have a space (still typing command name). Once space is typed, we
- *  hide the palette and match against known commands for argument-mode
- *  hint. `@` is a Codex-style shorthand for "attach a file" — it opens
- *  the same palette but promotes the `files` command to the top so a
- *  bare `@` + Enter fires the OS native file picker without further
- *  keystrokes. Any command still matches: `@goal ship it` works. */
+/** Palette-visibility rule: the composer contains a `/` or `@` trigger
+ *  either at position 0 (the classic "start typing / to open the
+ *  palette") OR at the tail of the text preceded by whitespace or a
+ *  chip mention (so `hello /gril` and `@skill:foo /gril` also open the
+ *  palette). Once a space is typed after the command name, we switch
+ *  to args mode. `@` promotes the `files` command to the top so a
+ *  bare `@` + Enter fires the OS native file picker.
+ *
+ *  `triggerStart` is the index of the trigger character in `text`.
+ *  Callers use it to splice the trigger + query span out when the user
+ *  picks a palette entry so mid-message triggers don't clobber the
+ *  surrounding prose.
+ *
+ *  Args mode (`/name arg`) is only detected when the trigger is at
+ *  position 0 — a mid-message `/mode plan` is unusual and would
+ *  otherwise fight with normal typing (spaces mean "end command"
+ *  mid-sentence). */
 export function slashState(
   text: string,
 ):
-  | { mode: 'palette'; query: string; trigger: '/' | '@' }
-  | { mode: 'args'; command: SlashCommand; args: string; trigger: '/' | '@' }
+  | { mode: 'palette'; query: string; trigger: '/' | '@'; triggerStart: number }
+  | { mode: 'args'; command: SlashCommand; args: string; trigger: '/' | '@'; triggerStart: number }
   | { mode: 'none' } {
   const first = text[0];
-  if (first !== '/' && first !== '@') return { mode: 'none' };
-  const trigger = first as '/' | '@';
-  const body = text.slice(1);
-  const spaceIdx = body.indexOf(' ');
-  if (spaceIdx < 0) return { mode: 'palette', query: body, trigger };
-  const name = body.slice(0, spaceIdx).toLowerCase();
-  const command = findCommand(name);
-  if (!command) return { mode: 'palette', query: name, trigger };
-  return { mode: 'args', command, args: body.slice(spaceIdx + 1), trigger };
+  if (first === '/' || first === '@') {
+    const trigger = first as '/' | '@';
+    const body = text.slice(1);
+    const spaceIdx = body.indexOf(' ');
+    if (spaceIdx < 0) {
+      return { mode: 'palette', query: body, trigger, triggerStart: 0 };
+    }
+    const name = body.slice(0, spaceIdx).toLowerCase();
+    const command = findCommand(name);
+    if (!command) {
+      return { mode: 'palette', query: name, trigger, triggerStart: 0 };
+    }
+    return { mode: 'args', command, args: body.slice(spaceIdx + 1), trigger, triggerStart: 0 };
+  }
+  // Tail-of-text trigger: `<prefix><ws|mention><trigger><word chars>`
+  // with no trailing space. Preserves the mid-message palette flow
+  // (`hello /gril` opens the palette on `gril`) without needing caret
+  // tracking. Skipped when the text starts with a trigger — that's
+  // already handled above.
+  const m = /(?:^|\s|@skill:[A-Za-z0-9_-]+)([/@])([A-Za-z0-9_-]*)$/.exec(text);
+  if (m) {
+    const trigger = m[1] as '/' | '@';
+    const query = m[2];
+    // `m.index` points at the start of the whole match — advance past
+    // the leading char (whitespace or the end of a mention token) so
+    // `triggerStart` lands on the trigger itself.
+    const leadLen = m[0].length - (trigger.length + query.length);
+    return {
+      mode: 'palette',
+      query,
+      trigger,
+      triggerStart: (m.index ?? 0) + leadLen,
+    };
+  }
+  return { mode: 'none' };
 }
 
 /** One entry in the dynamic skill list the composer merges into the
@@ -320,7 +363,16 @@ export function slashState(
 export type PaletteSkill = {
   name: string;
   description: string;
-  tier?: 'bundled' | 'user' | 'project';
+  tier?: 'bundled' | 'shared' | 'user' | 'project';
+  /** Frontmatter `color:` — powers chip tinting in the composer and
+   *  the sent user bubble. Optional; when absent the renderer hashes
+   *  the name to a stable palette entry so unopinionated skills still
+   *  read as distinct. */
+  color?: string;
+  /** Frontmatter `icon:` — currently unused by the chip renderer (it
+   *  ships with a leading dot), but forwarded so future variants can
+   *  swap in a Phosphor icon per skill. */
+  icon?: string;
 };
 
 /** Palette results.
@@ -380,6 +432,10 @@ function skillToCommand(s: PaletteSkill): SlashCommand {
     usage: `/${s.name}`,
     icon: Sparkle,
     takesArgs: false,
+    isSkill: true,
+    // The Composer handles skill picks directly (see `commitPaletteChoice`),
+    // so this `run` is only reached if something bypasses the palette and
+    // invokes the command by name — kept as a safe fallback.
     run: (_a, ctx) => {
       ctx.onInvokeSkill(s.name);
       return undefined;

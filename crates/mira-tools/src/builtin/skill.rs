@@ -96,6 +96,13 @@ impl Tool for SkillTool {
                      for this codebase and will produce a more predictable \
                      result. The skill body is returned as this tool's result \
                      and MUST be followed exactly on the next turn.\n\n\
+                     When a user message contains an `@skill:<name>` mention, \
+                     treat it as an explicit invocation directive: call this \
+                     tool with `name` set to that skill and `args` set to the \
+                     rest of the user's message (with the `@skill:<name>` \
+                     token stripped). Multiple mentions in one message mean \
+                     invoke each in order, sharing the same surrounding \
+                     context as `args`.\n\n\
                      Available skills:\n{roster}",
                 ),
                 names.iter().map(|n| Value::String(n.clone())).collect(),

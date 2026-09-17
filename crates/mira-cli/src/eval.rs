@@ -171,7 +171,12 @@ fn discover_tasks(dir: &Path, filter: Option<&str>) -> Result<Vec<(PathBuf, Task
     }
     let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)?
         .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| matches!(p.extension().and_then(|s| s.to_str()), Some("yaml") | Some("yml")))
+        .filter(|p| {
+            matches!(
+                p.extension().and_then(|s| s.to_str()),
+                Some("yaml") | Some("yml")
+            )
+        })
         .collect();
     entries.sort();
     let mut out = Vec::new();
@@ -184,8 +189,8 @@ fn discover_tasks(dir: &Path, filter: Option<&str>) -> Result<Vec<(PathBuf, Task
         }
         let text =
             std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-        let mut spec: TaskSpec = serde_yaml::from_str(&text)
-            .with_context(|| format!("parse {}", path.display()))?;
+        let mut spec: TaskSpec =
+            serde_yaml::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
         if spec.name.is_none() {
             spec.name = Some(stem.to_owned());
         }

@@ -98,9 +98,7 @@ impl Tool for FindCallers {
         // \b NAME \s* \( — the leading \b handles the preceding-char case
         // (`.NAME(`, `::NAME(`, `NAME(` all match; `xNAME(` doesn't).
         let pattern = format!(r"\b{}\s*\(", regex_escape(name));
-        let mut cmd = String::from(
-            "rg --line-number --no-heading --color never --max-columns 300",
-        );
+        let mut cmd = String::from("rg --line-number --no-heading --color never --max-columns 300");
         // Over-fetch: post-filtering will drop some hits, so give rg
         // headroom before we cap in-process.
         let raw_cap = args.max_results.saturating_mul(2).clamp(50, 4000);
@@ -154,8 +152,12 @@ fn drop_definition_lines(rg_out: &str, name: &str, max: usize) -> String {
     let mut out = String::new();
     let mut kept = 0usize;
     for line in rg_out.lines() {
-        let Some((path, rest)) = line.split_once(':') else { continue };
-        let Some((_lineno, content)) = rest.split_once(':') else { continue };
+        let Some((path, rest)) = line.split_once(':') else {
+            continue;
+        };
+        let Some((_lineno, content)) = rest.split_once(':') else {
+            continue;
+        };
         let lang = lang_of(path);
         if let Some(re) = defs.get(lang) {
             if re.is_match(content) {

@@ -29,6 +29,30 @@ pub struct WorktreeEntry {
     pub is_current: bool,
 }
 
+/// One branch entry for the worktree picker. Local + remote refs
+/// (deduped on short name — a local `foo` hides `origin/foo`, but the
+/// upstream tracking hint is preserved). `in_worktree` flags branches
+/// that are already checked out somewhere so the UI can hide them
+/// from the "switch to" list.
+#[derive(Debug, Serialize)]
+pub struct BranchEntry {
+    /// Short name: `main`, `dami/fix-map-leaks`, or `origin/some-remote`
+    /// when only a remote copy exists (`remote:` also flagged).
+    pub name: String,
+    /// `true` when this branch has no local ref — only a remote-tracking
+    /// ref. Clicking such a branch in the UI creates a local branch
+    /// tracking the remote at worktree-add time.
+    pub is_remote: bool,
+    /// `true` when this branch is currently checked out in some
+    /// worktree (primary or linked). Used by the UI to filter the
+    /// "switch to" list — you can't create a worktree on a branch
+    /// that's already checked out elsewhere.
+    pub in_worktree: bool,
+    /// The upstream ref, if configured — surfaced as a subtle hint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct GitStatusView {
     pub in_repo: bool,
@@ -48,6 +72,11 @@ pub struct GitStatusView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub primary_project: Option<String>,
     pub worktrees: Vec<WorktreeEntry>,
+    /// All branches (local + remote), deduped on short name. Sorted
+    /// with the currently-checked-out branch first, then alphabetical.
+    /// Empty when not in a repo.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub branches: Vec<BranchEntry>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -79,6 +108,7 @@ pub async fn get_status(State(state): State<AppState>) -> Response {
             is_worktree: false,
             primary_project: None,
             worktrees: vec![],
+            branches: vec![],
         })
         .into_response();
     }
@@ -96,6 +126,7 @@ pub async fn get_status(State(state): State<AppState>) -> Response {
     };
     let primary_project = primary_worktree(&cwd)
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
+    let branches = list_branches(&cwd, &worktrees);
 
     Json(GitStatusView {
         in_repo: true,
@@ -106,6 +137,7 @@ pub async fn get_status(State(state): State<AppState>) -> Response {
         is_worktree,
         primary_project,
         worktrees,
+        branches,
     })
     .into_response()
 }
@@ -142,14 +174,31 @@ pub async fn create_worktree(
         }
     }
 
-    // If the branch already exists, `git worktree add <path> <branch>` checks
-    // it out; if not, `-b <branch>` creates it off `base`.
-    let branch_exists = branch_exists(&cwd, branch);
+    // Three shapes for `git worktree add`, decided by whether a matching
+    // local branch already exists and — if not — whether a remote-tracking
+    // ref exists we can use as the start point:
+    //   1. local `<branch>` exists         → `git worktree add <path> <branch>`
+    //   2. only `<remote>/<branch>` exists → `git worktree add -b <branch>
+    //                                        <path> <remote>/<branch>`
+    //      (creates a local tracking branch; the branch picker for a fresh
+    //      remote is the common case that used to require dropping to a
+    //      terminal to `git fetch && git checkout -b`.)
+    //   3. brand-new branch                → `git worktree add -b <branch>
+    //                                        <path> <base>` (base defaults
+    //                                        to HEAD)
+    let branch_exists_locally = branch_exists(&cwd, branch);
+    let remote_ref = if branch_exists_locally {
+        None
+    } else {
+        remote_branch_ref(&cwd, branch)
+    };
     let base = req.base.as_deref().unwrap_or("HEAD");
     let mut cmd = Command::new("git");
     cmd.current_dir(&cwd).arg("worktree").arg("add");
-    if branch_exists {
+    if branch_exists_locally {
         cmd.arg(&target).arg(branch);
+    } else if let Some(remote) = &remote_ref {
+        cmd.arg("-b").arg(branch).arg(&target).arg(remote);
     } else {
         cmd.arg("-b").arg(branch).arg(&target).arg(base);
     }
@@ -254,6 +303,166 @@ fn branch_exists(cwd: &Path, branch: &str) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+/// If exactly one remote has a branch with this short name, return the
+/// full remote-tracking short-ref (`origin/foo`). Ambiguous names
+/// (present on `origin` and `upstream`) return `None` — the user
+/// should qualify. Missing remote returns `None` too, which the
+/// caller treats as "create a fresh branch off base."
+fn remote_branch_ref(cwd: &Path, branch: &str) -> Option<String> {
+    // `for-each-ref` on remotes only, filtering the short name via
+    // `--format`. Cheaper than parsing full refnames ourselves.
+    let out = run(
+        cwd,
+        &["for-each-ref", "--format=%(refname:short)", "refs/remotes/"],
+    )
+    .ok()?;
+    let matches: Vec<String> = out
+        .lines()
+        .filter_map(|l| {
+            let short = l.trim();
+            if short.is_empty() || short.ends_with("/HEAD") {
+                return None;
+            }
+            // `origin/foo` → strip `origin/`, compare to `foo`.
+            let (_remote, name) = short.split_once('/')?;
+            (name == branch).then(|| short.to_owned())
+        })
+        .collect();
+    if matches.len() == 1 {
+        Some(matches.into_iter().next().unwrap())
+    } else {
+        // Zero (branch doesn't exist upstream) or ambiguous (multiple
+        // remotes have it) → let the caller fall through to the "fresh
+        // branch off base" path.
+        None
+    }
+}
+
+/// Enumerate all branches (local + remote), dedupe on short name so a
+/// local `foo` hides `origin/foo` from the picker (but still records
+/// the upstream), and flag branches already checked out in one of the
+/// listed worktrees.
+///
+/// Uses `git for-each-ref --format='%(refname)|…'` so we get the
+/// full ref (`refs/heads/foo`, `refs/remotes/origin/foo`) and can
+/// classify unambiguously — a heuristic on the short name would
+/// misclassify branches like `dami/fix-foo` if a remote were ever
+/// called `dami`. `refs/remotes/*/HEAD` symbolic refs are dropped.
+fn list_branches(cwd: &Path, worktrees: &[WorktreeEntry]) -> Vec<BranchEntry> {
+    let Ok(out) = run(
+        cwd,
+        &[
+            "for-each-ref",
+            "--format=%(refname)|%(refname:short)|%(upstream:short)",
+            "refs/heads/",
+            "refs/remotes/",
+        ],
+    ) else {
+        return vec![];
+    };
+
+    let checked_out: std::collections::HashSet<String> =
+        worktrees.iter().filter_map(|w| w.branch.clone()).collect();
+
+    // Collect locals in a map keyed by name so remotes can dedupe
+    // against them in one pass without a second lookup. Remotes we
+    // stash separately and merge at the end.
+    let mut locals: std::collections::BTreeMap<String, BranchEntry> =
+        std::collections::BTreeMap::new();
+    let mut remotes: Vec<BranchEntry> = Vec::new();
+
+    for line in out.lines() {
+        let mut parts = line.splitn(3, '|');
+        let (Some(full), Some(short), upstream) =
+            (parts.next(), parts.next(), parts.next().unwrap_or(""))
+        else {
+            continue;
+        };
+        let full = full.trim();
+        let short = short.trim();
+        let upstream = upstream.trim();
+        if full.is_empty() || short.is_empty() {
+            continue;
+        }
+        // Drop `refs/remotes/<remote>/HEAD` — symbolic ref, not a real
+        // branch. Points at whatever the remote's default branch is,
+        // which is already in the list under its own name. Gate on the
+        // FULL refname: `%(refname:short)` for a symbolic ref can be
+        // just `origin` on some git versions (they strip the `/HEAD`
+        // suffix), which would slip past a short-name check and get
+        // pushed as a branch literally named `HEAD` — then
+        // `git worktree add -b HEAD` fails because HEAD isn't a valid
+        // branch name.
+        if full.ends_with("/HEAD") {
+            continue;
+        }
+
+        if let Some(rest) = full.strip_prefix("refs/heads/") {
+            // Belt-and-suspenders: `HEAD` is never a valid local
+            // branch. Should be unreachable via `refs/heads/HEAD`, but
+            // filtering here means any future code path can't spawn
+            // the same "HEAD as a branch" surprise.
+            if rest == "HEAD" {
+                continue;
+            }
+            locals.entry(rest.to_owned()).or_insert(BranchEntry {
+                name: rest.to_owned(),
+                is_remote: false,
+                in_worktree: checked_out.contains(rest),
+                upstream: if upstream.is_empty() {
+                    None
+                } else {
+                    Some(upstream.to_owned())
+                },
+            });
+        } else if let Some(rest) = full.strip_prefix("refs/remotes/") {
+            // `rest` is `<remote>/<branch>` — strip the remote prefix
+            // to get the branch name a user would type at
+            // `git checkout`.
+            let (_remote, name) = match rest.split_once('/') {
+                Some(t) => t,
+                None => continue,
+            };
+            if name == "HEAD" {
+                continue;
+            }
+            remotes.push(BranchEntry {
+                name: name.to_owned(),
+                is_remote: true,
+                in_worktree: false,
+                upstream: Some(short.to_owned()),
+            });
+        }
+    }
+
+    // Merge remotes on top of locals: if a local of the same short
+    // name exists, drop the remote entry (the local wins the picker
+    // slot). If two remotes ship the same branch (rare — usually
+    // origin vs upstream fork), keep only the first; `remote_branch_ref`
+    // will return None on ambiguity at create-time and fall back
+    // safely to the base-branch path.
+    let mut out_vec: Vec<BranchEntry> = locals.into_values().collect();
+    let mut seen_remote: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for r in remotes {
+        if out_vec.iter().any(|b| b.name == r.name) {
+            continue;
+        }
+        if !seen_remote.insert(r.name.clone()) {
+            continue;
+        }
+        out_vec.push(r);
+    }
+
+    // Local first, then remote; alphabetical within each group so the
+    // picker is deterministic across reloads.
+    out_vec.sort_by(|a, b| {
+        a.is_remote
+            .cmp(&b.is_remote)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    out_vec
 }
 
 /// `git worktree list --porcelain` groups per worktree with blank-line

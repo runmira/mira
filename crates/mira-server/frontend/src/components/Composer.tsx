@@ -18,11 +18,13 @@ import {
   X,
 } from '@phosphor-icons/react';
 import { createWorktree, getGitStatus, listModels, putCwd, readFile, type GitStatusView, type ModelInfo } from '../api';
-import type { DiffPreview, Goal, Mode, ToolCall } from '../types';
+import type { DiffPreview, Goal, Mode, ToolCall, UsageTotals } from '../types';
+import { costUsd, formatDollars, shortNum } from '../lib/usage';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandSeparator } from '@/components/ui/command';
 import { FilePicker } from './FilePicker';
 import { filterCommands, slashState, type PaletteSkill, type SlashCommand } from './commands';
+import { MentionInput, type MentionInputHandle } from './MentionInput';
 import { cn } from '@/lib/utils';
 
 const MODES: { value: Mode; label: string; desc: string }[] = [
@@ -38,11 +40,15 @@ type Props = {
   busy: boolean;
   mode: Mode;
   model: string;
+  /** Configured routing provider (openrouter, openai, groq, …). Shown as
+   *  the "Provider" row in the model picker so users see who's actually
+   *  serving the request, not the model family extracted from the id. */
+  providerName?: string | null;
   cwd: string;
-  /** Pre-formatted usage string (`↑12.3k ↓4.1k · $0.024`) or null when there's
-   *  nothing to show yet. Formatting owned by App so per-model pricing lives
-   *  in one place. */
-  usage: string | null;
+  /** Running session totals. Rendered as the composer's footer readout;
+   *  cost is priced against the currently-selected model. Null (or all-zero)
+   *  hides the readout entirely — no "$0.00" for a fresh session. */
+  usage: UsageTotals | null;
   onSend: (text: string) => void;
   onSetMode: (m: Mode) => void;
   onSetModel: (m: string) => void;
@@ -64,13 +70,6 @@ type Props = {
   goal: Goal | null;
   onRemember: (scope: 'user' | 'project', text: string) => Promise<string>;
   onUndo: (count: number) => Promise<string>;
-  /** Pending tool-call approvals surfaced in the composer footer (bottom-
-   *  left). The first entry drives the visible Approve/Deny buttons + the
-   *  Y/N shortcut; the count comes from the array length so the user can
-   *  see how many are queued behind it. */
-  pendingApprovals: PendingApproval[];
-  /** Resolve a pending approval. Same signature as App's `decideApproval`. */
-  onDecideApproval: (callId: string, allow: boolean) => void;
   /** Loaded skill roster from `/api/skills`. Rendered inline in the
    *  slash palette after the built-in commands; picking `/<name>`
    *  fires a canned "use the `<name>` skill." user message which the
@@ -94,9 +93,9 @@ type Attachment = { path: string; content: string; bytes: number };
 const NATIVE_ATTACH_MAX_BYTES = 256 * 1024;
 
 export function Composer({
-  disabled, busy, mode, model, cwd, usage,
+  disabled, busy, mode, model, providerName, cwd, usage,
   onSend, onSetMode, onSetModel, onSetEffort, onOpenPicker, onInterrupt, onNewChat, onOpenSettings, onRunReview, onSetGoal, onClearGoal, goal, onRemember, onUndo,
-  pendingApprovals, onDecideApproval, skills,
+  skills,
 }: Props) {
   const [text, setText] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -106,6 +105,27 @@ export function Composer({
   const [slashIdx, setSlashIdx] = useState(0);
   const [slashFeedback, setSlashFeedback] = useState<string | null>(null);
   const [modelPopOpen, setModelPopOpen] = useState(false);
+  // Imperative handle on the contenteditable mention input. Powers
+  // caret-aware skill-mention insertion (palette picks land at the
+  // cursor), programmatic clears (post-send), and palette prefills
+  // (`/mode <arg>`). Typing itself flows through the `onChange` prop
+  // — the parent never force-writes into the DOM during a keystroke.
+  const mentionRef = useRef<MentionInputHandle | null>(null);
+
+  /** Programmatically replace the whole composer content with `next`
+   *  (canonical form: plain text + `@skill:<name>` tokens). Delegates
+   *  to the MentionInput's imperative API so the DOM chip nodes get
+   *  rebuilt; the input's `onChange` handler then re-syncs React state
+   *  so callers don't need to `setText(next)` themselves. */
+  function updateText(next: string) {
+    if (mentionRef.current) {
+      mentionRef.current.setText(next);
+    } else {
+      // Ref not attached yet (shouldn't happen after mount) — fall
+      // back to React state so we don't drop the update entirely.
+      setText(next);
+    }
+  }
   // Hidden `<input type="file">` — programmatically clicked by both the
   // `/files` slash command and the `+` menu's "Attach file…" so the OS
   // opens its native file-open dialog. Same list on both paths.
@@ -167,12 +187,16 @@ export function Composer({
       onEnterGoalCompose: () => setGoalComposing(true),
       onRemember,
       onUndo,
-      // Skill invocation. Canned message; the model reads it and calls
-      // the `Skill` tool. The tool result then wraps the skill body in
-      // a `<system-reminder>` block so the instructions land
-      // authoritatively on the next turn.
+      // Skill invocation. Insert an `@skill:<name>` chip at the caret
+      // rather than firing the message immediately — that used to dump
+      // a bare "Use the X skill" with no context, so the model always
+      // had to ask "what for?". The token renders as a live chip in
+      // the contenteditable input AND in the sent user bubble; the
+      // `Skill` tool description teaches the model to treat the token
+      // as an invocation directive with the surrounding prose as the
+      // argument.
       onInvokeSkill: (name: string) => {
-        onSend(`Use the \`${name}\` skill.`);
+        mentionRef.current?.insertMention(name);
       },
     }),
     [onNewChat, onSetMode, onSetModel, onOpenPicker, onOpenSettings, onRunReview, onSetGoal, onClearGoal, onRemember, onUndo, onSend],
@@ -184,10 +208,10 @@ export function Composer({
       const template = cmd.run(args, ctx);
       if (template === undefined) {
         // Control command — clear the composer.
-        setText('');
+        updateText('');
       } else {
         // Template — replace composer text so the user can review + send.
-        setText(template);
+        updateText(template);
       }
     } catch (e) {
       // Control command threw a usage/validation error. Keep the text so
@@ -198,11 +222,26 @@ export function Composer({
   }
 
   function commitPaletteChoice(cmd: SlashCommand) {
+    // Prefix = text before the trigger char. Preserves any prose the
+    // user wrote before `/gril` so mid-message picks (`hello /gril`)
+    // don't nuke the surrounding text.
+    const prefix = slash.mode === 'palette' || slash.mode === 'args'
+      ? text.slice(0, slash.triggerStart)
+      : '';
+    if (cmd.isSkill) {
+      // Skill pick — splice out the `/query` and drop in a mention
+      // token so it renders as an inline chip. `updateText` mutates
+      // the DOM through the mention input's imperative handle, so the
+      // chip appears in the composer immediately.
+      updateText(`${prefix}@skill:${cmd.name} `);
+      return;
+    }
     if (cmd.takesArgs) {
-      // Prefill `<trigger><name> ` so the user starts typing arguments;
-      // palette auto-hides because there's now a space in the text.
-      // Preserves whichever trigger the user typed (`/goal` vs `@goal`).
-      setText(`${paletteTrigger}${cmd.name} `);
+      // Prefill `<prefix><trigger><name> ` so the user starts typing
+      // arguments; palette auto-hides because there's now a space in
+      // the text. Preserves whichever trigger the user typed
+      // (`/goal` vs `@goal`).
+      updateText(`${prefix}${paletteTrigger}${cmd.name} `);
     } else {
       executeCommand(cmd, '');
     }
@@ -286,14 +325,14 @@ export function Composer({
     if (goalComposing) {
       onSetGoal(trimmed);
       setGoalComposing(false);
-      setText('');
+      updateText('');
       setSlashFeedback(null);
       return;
     }
 
     const body = attachments.length > 0 ? renderAttachments(attachments, cwd) + '\n\n' + trimmed : trimmed;
     onSend(body);
-    setText('');
+    updateText('');
     setAttachments([]);
     setAttachError(null);
     setSlashFeedback(null);
@@ -335,9 +374,10 @@ export function Composer({
         )}
 
         <div className="relative">
-          <textarea
+          <MentionInput
+            handleRef={mentionRef}
             value={text}
-            onChange={(e) => { setText(e.target.value); setSlashFeedback(null); }}
+            onChange={(next) => { setText(next); setSlashFeedback(null); }}
             onKeyDown={(e) => {
               // Palette is open → arrows navigate, Enter picks, Esc closes.
               if (paletteVisible && paletteMatches.length > 0) {
@@ -360,10 +400,20 @@ export function Composer({
                 if (e.key === 'Tab') {
                   e.preventDefault();
                   const cmd = paletteMatches[slashIdx];
-                  if (cmd) setText(`${paletteTrigger}${cmd.name}${cmd.takesArgs ? ' ' : ''}`);
+                  if (cmd) {
+                    const prefix = slash.mode === 'palette' ? text.slice(0, slash.triggerStart) : '';
+                    updateText(`${prefix}${paletteTrigger}${cmd.name}${cmd.takesArgs ? ' ' : ''}`);
+                  }
                   return;
                 }
-                if (e.key === 'Escape') { e.preventDefault(); setText(''); return; }
+                if (e.key === 'Escape') {
+                  e.preventDefault();
+                  // Escape only clears the trigger span, not the whole
+                  // composer — mid-message prefix survives.
+                  const prefix = slash.mode === 'palette' ? text.slice(0, slash.triggerStart) : '';
+                  updateText(prefix);
+                  return;
+                }
               }
               // Escape while goal-composing → abort the compose flow
               // without sending anything, matching how Esc dismisses
@@ -371,10 +421,19 @@ export function Composer({
               if (goalComposing && e.key === 'Escape') {
                 e.preventDefault();
                 setGoalComposing(false);
-                setText('');
+                updateText('');
                 return;
               }
-              if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); }
+              // Shift+Enter inserts a literal newline. Contenteditable
+              // doesn't have a built-in Shift+Enter handler that plays
+              // nicely with our `\n`-based canonical text — `insertText`
+              // with a `\n` is the least-surprise path.
+              if (e.key === 'Enter' && e.shiftKey) {
+                e.preventDefault();
+                document.execCommand('insertText', false, '\n');
+                return;
+              }
+              if (e.key === 'Enter') { e.preventDefault(); submit(); }
             }}
             placeholder={
               disabled
@@ -386,8 +445,8 @@ export function Composer({
                     : 'Ask mira anything · @ for files · / for commands'
             }
             disabled={disabled}
-            rows={1}
-            className="min-h-[1.7rem] w-full max-h-48 resize-none border-0 bg-transparent px-2.5 py-1.5 text-sm outline-none placeholder:text-muted-foreground/60 disabled:opacity-60"
+            roster={skills}
+            ariaLabel="Message composer"
           />
 
           {paletteVisible && paletteMatches.length > 0 && (
@@ -417,10 +476,11 @@ export function Composer({
         <div className="flex items-center gap-1.5 px-1">
           <AttachMenu onAttachFile={openNativeFiles} loading={attachLoading} />
 
-          <SlashButton onClick={() => setText((t) => (t.startsWith('/') || t.startsWith('@') ? t : '/' + t))} />
+          <SlashButton onClick={() => updateText(text.startsWith('/') || text.startsWith('@') ? text : '/' + text)} />
 
           <ModelPicker
             current={model}
+            providerName={providerName ?? null}
             onPick={onSetModel}
             onSetEffort={onSetEffort}
             open={modelPopOpen}
@@ -457,31 +517,14 @@ export function Composer({
         </div>
       </form>
 
-      {/* Footer strip under the composer.
-       *   Left: the first pending tool-call approval (Allow/Deny + a
-       *         "+N more" counter when the queue is deeper). Y/N keyboard
-       *         shortcut is bound while any approval is pending — see the
-       *         effect below.
-       *   Right: aggregate token/cost usage sitting immediately beside
-       *         the WorktreeChip so the "how expensive · what branch"
-       *         info reads as one metadata cluster.
-       *
-       *  When there is no pending approval, the left slot stays empty;
-       *  spacer keeps usage + worktree pinned to the right. */}
+      {/* Footer strip under the composer — usage + worktree only. The
+       *  approval pill used to live here; it moved onto the pending
+       *  tool card in the transcript so approvals sit next to the
+       *  diff/args they act on and don't jump around as the transcript
+       *  grows. Global Y/N shortcut is bound at the App level. */}
       <div className="w-full max-w-3xl flex items-center gap-2 px-3">
-        <ApprovalFooterSlot
-          approvals={pendingApprovals}
-          onDecide={onDecideApproval}
-        />
         <span className="flex-1" />
-        {usage && (
-          <span
-            className="font-mono text-[11px] text-muted-foreground/60"
-            title="Session tokens & estimated cost"
-          >
-            {usage}
-          </span>
-        )}
+        <UsageReadout usage={usage} model={model} />
         <WorktreeChip cwd={cwd} />
       </div>
 
@@ -1044,9 +1087,10 @@ const CODING_MATCHERS: { label: string; match: (id: string) => boolean }[] = [
 ];
 
 function ModelPicker({
-  current, onPick, onSetEffort, open, onOpenChange,
+  current, providerName, onPick, onSetEffort, open, onOpenChange,
 }: {
   current: string;
+  providerName: string | null;
   onPick: (m: string) => void;
   onSetEffort: (e: string | null) => void;
   open: boolean;
@@ -1102,7 +1146,10 @@ function ModelPicker({
   }
 
   const currentInfo = models?.find((m) => m.id === current) ?? null;
-  const providerLabel = prettyVendor(vendorOf(current) || currentInfo?.owned_by || 'other');
+  // Prefer the actually-configured routing provider — that's who's serving
+  // the call (e.g. OpenRouter). Fall back to vendor extracted from the
+  // model id, then to whatever the API reported.
+  const providerLabel = prettyVendor(providerName || vendorOf(current) || currentInfo?.owned_by || 'other');
 
   const { suggested, groups } = useMemo(() => {
     if (!models) return { suggested: [] as ModelInfo[], groups: [] as Group[] };
@@ -1399,8 +1446,14 @@ function prettyVendor(key: string): string {
   const overrides: Record<string, string> = {
     openai: 'OpenAI', anthropic: 'Anthropic', google: 'Google', xai: 'xAI',
     meta: 'Meta', 'meta-llama': 'Meta', mistralai: 'Mistral', deepseek: 'DeepSeek',
-    qwen: 'Qwen', amazon: 'Amazon', cohere: 'Cohere', groq: 'Groq',
+    qwen: 'Qwen', alibaba: 'Alibaba', amazon: 'Amazon', cohere: 'Cohere', groq: 'Groq',
     perplexity: 'Perplexity', microsoft: 'Microsoft', moonshotai: 'Moonshot AI',
+    moonshot: 'Moonshot AI', openrouter: 'OpenRouter', 'open-router': 'OpenRouter',
+    huggingface: 'Hugging Face', 'hugging-face': 'Hugging Face',
+    together: 'Together', togetherai: 'Together', 'together-ai': 'Together',
+    fireworks: 'Fireworks', fireworksai: 'Fireworks', 'fireworks-ai': 'Fireworks',
+    databricks: 'Databricks', nvidia: 'NVIDIA', ollama: 'Ollama', lmstudio: 'LM Studio',
+    other: 'Unknown',
   };
   return overrides[key.toLowerCase()] ?? key.charAt(0).toUpperCase() + key.slice(1);
 }
@@ -1408,7 +1461,10 @@ function prettyVendor(key: string): string {
 function prettyLabel(id: string): string {
   if (!id) return '';
   const slash = id.indexOf('/');
-  return slash > 0 ? id.slice(slash + 1) : id;
+  const raw = slash > 0 ? id.slice(slash + 1) : id;
+  // Capitalise the first letter without touching the rest — model ids like
+  // `gpt-4o` and `qwen3.8-27b` have meaningful mixed case beyond position 0.
+  return raw.length > 0 ? raw[0].toUpperCase() + raw.slice(1) : raw;
 }
 
 function formatCtx(n: number): string {
@@ -1466,103 +1522,8 @@ function SlashButton({ onClick }: { onClick: () => void }) {
   );
 }
 
-/* ---------- approval footer slot ---------- */
-
-/**
- * The bottom-left affordance in the composer footer. Renders nothing when
- * no tool call is pending. When one is pending, shows a compact tool-name
- * pill with Allow/Deny buttons and a "+N more" counter when the queue is
- * deeper. Y/N (Allow / Deny + queue-advance) is bound as a global keyboard
- * shortcut while any approval is pending — matches the old inline card's
- * shortcut so muscle memory carries over.
- */
-function ApprovalFooterSlot({
-  approvals,
-  onDecide,
-}: {
-  approvals: PendingApproval[];
-  onDecide: (callId: string, allow: boolean) => void;
-}) {
-  const first = approvals[0] ?? null;
-  const rest = Math.max(0, approvals.length - 1);
-  const callId = first?.callId;
-
-  useEffect(() => {
-    if (!callId) return;
-    function onKey(e: KeyboardEvent) {
-      const t = e.target as HTMLElement | null;
-      // Never steal Y/N while the user is typing.
-      if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT')) return;
-      if (e.key === 'y' || e.key === 'Y') {
-        e.preventDefault();
-        onDecide(callId, true);
-      } else if (e.key === 'n' || e.key === 'N' || e.key === 'Escape') {
-        e.preventDefault();
-        onDecide(callId, false);
-      }
-    }
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [callId, onDecide]);
-
-  if (!first) return null;
-
-  // Terse tool label — matches the inline card's summary, minus icon
-  // paperwork. Falls back to the raw function name when we can't decode
-  // args (shouldn't happen for well-formed calls but keeps the UI safe).
-  const label = shortToolLabel(first.call.function.name, first.call.function.arguments);
-
-  return (
-    <div className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/40 bg-amber-500/[0.08] py-0.5 pl-2.5 pr-0.5 text-[11.5px] text-amber-100">
-      <span className="size-1.5 rounded-full bg-amber-400" />
-      <span className="font-medium text-amber-200/95">Approve</span>
-      <span className="font-mono text-amber-200/70">{label}</span>
-      {rest > 0 && (
-        <span
-          className="rounded-full bg-amber-500/25 px-1.5 text-[10.5px] font-semibold text-amber-200/95"
-          title={`${rest} more approval${rest === 1 ? '' : 's'} queued behind this one`}
-        >
-          +{rest}
-        </span>
-      )}
-      <button
-        type="button"
-        onClick={() => onDecide(first.callId, false)}
-        className="ml-0.5 inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium text-amber-100/85 transition-colors hover:bg-amber-500/20 hover:text-amber-50"
-        title="Deny (n)"
-      >
-        Deny
-      </button>
-      <button
-        type="button"
-        onClick={() => onDecide(first.callId, true)}
-        className="inline-flex items-center gap-1 rounded-full bg-emerald-500 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-950 transition-colors hover:brightness-110"
-        title="Allow (y)"
-      >
-        Allow
-      </button>
-    </div>
-  );
-}
-
-/** Best-effort short label for the pending call. Prefers a filename when
- *  the args carry a `path`/`file` key, otherwise the tool name itself. */
-function shortToolLabel(name: string, argsRaw: string): string {
-  try {
-    const args = JSON.parse(argsRaw) as Record<string, unknown>;
-    const p = (args.path ?? args.file ?? args.file_path) as string | undefined;
-    if (typeof p === 'string' && p) {
-      const slash = p.lastIndexOf('/');
-      return slash >= 0 ? p.slice(slash + 1) : p;
-    }
-    const cmd = args.command as string | undefined;
-    if (typeof cmd === 'string' && cmd) {
-      const first = cmd.split(/\s+/, 1)[0] ?? cmd;
-      return first.length > 18 ? first.slice(0, 17) + '…' : first;
-    }
-  } catch { /* fall through */ }
-  return name;
-}
+// (shortToolLabel removed with the composer approval footer — the
+// inline card renders its own label via ToolCard's `summarize`.)
 
 /* ---------- plan chip (visible only while plan mode is on) ---------- */
 
@@ -1656,6 +1617,54 @@ function GoalChip({ goal, onClear }: { goal: Goal; onClear: () => void }) {
   );
 }
 
+/* ---------- session usage readout (tokens + $ cost) ---------- */
+
+/**
+ * Footer readout for the running session. Cost is the headline — it's the
+ * lever people actually reason about — with token counts as smaller
+ * context on the left. Hover reveals a fuller breakdown so power users can
+ * still see the raw numbers without them shouting in the chrome.
+ *
+ * Renders nothing at all while the session is empty, so a fresh chat
+ * doesn't lie by showing "$0.00" before the first turn.
+ */
+function UsageReadout({ usage, model }: { usage: UsageTotals | null; model: string }) {
+  if (!usage) return null;
+  if (usage.prompt_tokens === 0 && usage.completion_tokens === 0) return null;
+  const cost = costUsd(model, usage);
+  const cached = usage.cached_input_tokens;
+  const tooltip = [
+    `Prompt tokens: ${usage.prompt_tokens.toLocaleString()}`,
+    cached > 0 ? `  of which cached: ${cached.toLocaleString()}` : null,
+    `Completion tokens: ${usage.completion_tokens.toLocaleString()}`,
+    `Rounds: ${usage.rounds}`,
+    cost != null ? `Estimated cost: ${formatDollars(cost)}` : 'Unknown model pricing',
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  return (
+    <div
+      className="inline-flex items-center gap-2 rounded-full border border-border/60 bg-secondary/40 px-2.5 py-1 text-[12px] leading-none"
+      title={tooltip}
+    >
+      <span className="font-mono tabular-nums text-muted-foreground/80">
+        ↑{shortNum(usage.prompt_tokens)}
+        {' '}
+        ↓{shortNum(usage.completion_tokens)}
+      </span>
+      {cost != null && (
+        <>
+          <span className="text-muted-foreground/40">·</span>
+          <span className="font-mono tabular-nums font-semibold text-emerald-400">
+            {formatDollars(cost)}
+          </span>
+        </>
+      )}
+    </div>
+  );
+}
+
 /* ---------- worktree chip (branch + dirty + worktree switcher) ---------- */
 
 function WorktreeChip({ cwd }: { cwd: string }) {
@@ -1702,6 +1711,22 @@ function WorktreeChip({ cwd }: { cwd: string }) {
     try {
       const wt = await createWorktree(branch);
       setNewBranch('');
+      await switchTo(wt.path);
+    } catch (e) {
+      setLoadError(String((e as Error).message));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Click-through for an existing (or remote-only) branch in the
+   *  "Switch to branch" list. Reuses the same `createWorktree` →
+   *  `switchTo` path as the "New worktree" input; the backend picks
+   *  between checkout-existing, create-tracking, and create-fresh. */
+  async function createAndSwitchTo(branch: string) {
+    setBusy(true);
+    try {
+      const wt = await createWorktree(branch);
       await switchTo(wt.path);
     } catch (e) {
       setLoadError(String((e as Error).message));
@@ -1762,6 +1787,46 @@ function WorktreeChip({ cwd }: { cwd: string }) {
                 </button>
               ))}
             </div>
+            {(() => {
+              // Existing branches not already checked out in a worktree.
+              // Clicking creates `.mira/worktrees/<branch>` (or a local
+              // tracking branch on top of the remote) and switches to it
+              // via the same `createWorktree` → `switchTo` path the
+              // "New worktree" input takes.
+              const available = (status.branches ?? []).filter((b) => !b.in_worktree);
+              if (available.length === 0) return null;
+              return (
+                <div className="mt-1.5 border-t border-border/60 pt-1.5">
+                  <div className="px-2.5 pb-1 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    Switch to branch
+                  </div>
+                  <div className="max-h-56 overflow-y-auto flex flex-col">
+                    {available.map((b) => (
+                      <button
+                        key={`${b.is_remote ? 'r' : 'l'}:${b.name}`}
+                        type="button"
+                        disabled={busy}
+                        onClick={() => createAndSwitchTo(b.name)}
+                        className={cn(
+                          'flex items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[13px] transition-colors',
+                          'text-muted-foreground hover:bg-accent/40 hover:text-foreground',
+                          busy && 'opacity-50',
+                        )}
+                        title={b.upstream ? `tracks ${b.upstream}` : b.name}
+                      >
+                        <GitBranch className="size-3.5 shrink-0 opacity-60" />
+                        <span className="min-w-0 flex-1 truncate">{b.name}</span>
+                        {b.is_remote && (
+                          <span className="rounded-sm bg-secondary/60 px-1 text-[9.5px] uppercase tracking-wider text-muted-foreground">
+                            remote
+                          </span>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              );
+            })()}
             <div className="mt-1.5 border-t border-border/60 pt-1.5">
               <div className="px-2.5 pb-1 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">
                 New worktree

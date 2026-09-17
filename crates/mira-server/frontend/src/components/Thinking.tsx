@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useState } from 'react';
+import miraLogo from '../assets/mira-logo.png';
 
 /**
  * "Simmering 4s" indicator shown while the model is thinking.
  *
- * Text-only — no icon, no pill, no bouncing dots. A slow horizontal
- * shimmer sweeps through the letters via `background-clip: text` so the
- * indicator reads as motion without stealing attention from the
- * transcript. Random gerund per turn; live elapsed counter after 1s.
- * Hides on first token / tool_start.
+ * Mira logo rotating alongside a random gerund with a slow
+ * left-to-right shimmer sweep. The logo spins at 3s / revolution —
+ * fast enough to signal life, slow enough not to be dizzying next to
+ * quiet prose. Live elapsed counter after 1s. Hides on first token /
+ * tool_start.
  */
 export function Thinking() {
   const verb = useMemo(() => pickVerb(), []);
@@ -27,8 +28,19 @@ export function Thinking() {
     <div
       role="status"
       aria-live="polite"
-      className="animate-fade-in text-[13.5px] font-medium tracking-tight"
+      className="flex animate-fade-in items-center gap-2 text-[13.5px] font-medium tracking-tight"
     >
+      {/* Slow rotation — Tailwind's built-in `animate-spin` is 1s
+          linear, which reads as urgent/jittery next to prose. 3s
+          linear keeps the motion present but calm, matching the
+          shimmer sweep timing. */}
+      <img
+        src={miraLogo}
+        alt=""
+        aria-hidden="true"
+        draggable={false}
+        className="size-4 shrink-0 rounded-full object-contain animate-[spin_3s_linear_infinite]"
+      />
       <span
         // Gradient text: a bright band travels through the muted-grey base.
         // `bg-clip-text` + `text-transparent` lets the moving gradient show

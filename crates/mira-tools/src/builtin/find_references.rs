@@ -94,9 +94,7 @@ impl Tool for FindReferences {
         }
 
         let pattern = format!(r"\b{}\b", regex_escape(name));
-        let mut cmd = String::from(
-            "rg --line-number --no-heading --color never --max-columns 300",
-        );
+        let mut cmd = String::from("rg --line-number --no-heading --color never --max-columns 300");
         cmd.push_str(&format!(" --max-count {}", args.max_results.min(2000)));
         for g in globs_for(args.language.as_deref()) {
             cmd.push_str(&format!(" -g {}", shell_quote(g)));

@@ -12,7 +12,7 @@ use mira_review::{Finding, Progress as ReviewProgress};
 use mira_tools::DiffPreview;
 use serde::{Deserialize, Serialize};
 
-use crate::interactive::{PlanProposal, PromptResponse};
+use crate::interactive::{AskUserProposal, PlanProposal, PromptResponse};
 
 /// Client → server.
 #[derive(Clone, Debug, Deserialize)]
@@ -54,6 +54,20 @@ pub enum ClientMsg {
         max_iterations: Option<usize>,
         #[serde(default)]
         evaluator_model: Option<String>,
+        /// Optional external verifier — a shell command whose exit
+        /// code (and optional stdout regex) gates the "Met" verdict.
+        /// See [`mira_harness::VerifyCommand`] for the contract.
+        #[serde(default)]
+        verify: Option<mira_harness::VerifyCommand>,
+        /// Optional hard token budget (input + output, summed across
+        /// all rounds). Breach → `Exhausted`.
+        #[serde(default)]
+        budget_tokens: Option<u64>,
+        /// Optional hard USD budget. Requires the active model to be
+        /// in `mira-ai`'s pricing table; unpriced models skip the USD
+        /// check silently.
+        #[serde(default)]
+        budget_usd: Option<f64>,
     },
     /// Drop the session's standing goal. Idempotent — clearing a
     /// session without a goal is a no-op.
@@ -93,6 +107,14 @@ pub enum ServerMsg {
         /// sent so the UI can render a "last goal" chip until cleared.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         goal: Option<Goal>,
+        /// Persisted diff previews for edit/write tool calls, keyed by
+        /// tool call id. The frontend attaches them to the matching
+        /// tool entry during `historyToEntries` so a reloaded transcript
+        /// renders the real diff instead of falling back to an
+        /// arg-only reconstruction. Empty for legacy sessions written
+        /// before this landed.
+        #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+        previews: std::collections::HashMap<String, DiffPreview>,
     },
     /// Fragment of assistant text.
     Token { text: String },
@@ -115,6 +137,25 @@ pub enum ServerMsg {
     },
     /// Non-fatal warning surfaced to the UI.
     Warning { text: String },
+    /// One line of live stdout+stderr from a still-running tool call.
+    /// The renderer routes lines by `call_id` under the matching
+    /// pending tool card so the user sees progress before the final
+    /// `ToolEnd` frame lands.
+    ToolProgress { call_id: String, line: String },
+    /// Diff preview computed for an `edit_file` / `write_file` call.
+    /// Fires whether or not the call was approval-gated so live UIs
+    /// always have the real diff, not just the reconstruction. Also
+    /// persisted; see `Ready.previews` for the reload path.
+    ToolPreview {
+        call_id: String,
+        preview: DiffPreview,
+    },
+    /// The skill registry was reloaded (a file change was detected in
+    /// one of the four skill directories, or a manual reload was
+    /// triggered). The frontend refetches `/api/skills` when it sees
+    /// this so the composer palette and Settings panel pick up new /
+    /// edited skills automatically.
+    SkillsReloaded,
     /// Model changed (echoes SetModel).
     ModelChanged { model: String },
     /// Mode changed (echoes SetMode).
@@ -199,6 +240,13 @@ pub enum ServerMsg {
         prompt_id: String,
         plan: PlanProposal,
     },
+    /// The model called the `ask_user` tool with a batch of clarifying
+    /// questions. Client renders the question card and answers with
+    /// `ClientMsg::PromptResponse` carrying an `AskUser { … }` variant.
+    AskUserRequest {
+        prompt_id: String,
+        proposal: AskUserProposal,
+    },
 
     // -------- subagent (child session) event forwarding --------
     //
@@ -207,7 +255,6 @@ pub enum ServerMsg {
     // per-child transcript in the right-side SubagentPanel. Kept as
     // distinct variants (rather than a wrapped envelope) so the JS side
     // pattern-matches by `type` the same way it already does.
-
     /// A subagent has been spawned. Sent immediately before the child
     /// begins consuming its prompt so the panel can open a tab.
     SubagentStarted {
@@ -226,19 +273,34 @@ pub enum ServerMsg {
         prompt: String,
     },
     /// Fragment of the child's assistant text.
-    SubagentToken { parent_call_id: String, text: String },
+    SubagentToken {
+        parent_call_id: String,
+        text: String,
+    },
     /// The child dispatched a tool call.
-    SubagentToolStart { parent_call_id: String, call: ToolCall },
+    SubagentToolStart {
+        parent_call_id: String,
+        call: ToolCall,
+    },
     /// The child's tool call finished.
-    SubagentToolEnd { parent_call_id: String, result: ToolResult },
+    SubagentToolEnd {
+        parent_call_id: String,
+        result: ToolResult,
+    },
     /// A child-level warning (verify failure, hit max_rounds, etc.).
-    SubagentWarning { parent_call_id: String, text: String },
+    SubagentWarning {
+        parent_call_id: String,
+        text: String,
+    },
     /// Intermediate progress update from the child, emitted when the
     /// subagent explicitly calls the `progress` tool. Distinct from
     /// tokens (which are freeform assistant text) and from warnings
     /// (which imply something's off) — this is the child announcing
     /// "here's where I am" during a long investigation.
-    SubagentProgress { parent_call_id: String, text: String },
+    SubagentProgress {
+        parent_call_id: String,
+        text: String,
+    },
     /// The child produced a final summary and its type has
     /// `review_required: true`. The parent's turn is paused; the UI
     /// must show the proposed summary and the user picks approve or
@@ -257,6 +319,23 @@ pub enum ServerMsg {
     /// can flip its status pill from "working" to "done" without waiting
     /// for the parent to update the same call id.
     SubagentDone { parent_call_id: String },
+    /// A subagent posted an entry to the parent session's shared
+    /// scratchpad via the `scratchpad_note` tool. Peers spawned from the
+    /// same session share one pad so parallel researchers can see each
+    /// other's mid-flight findings without waiting for a final summary
+    /// round-trip.
+    SubagentScratchpadNote {
+        /// The `agent`-tool call id that spawned the author. Lets the
+        /// panel attribute the note to the right child tab in addition
+        /// to the shared pad view.
+        parent_call_id: String,
+        /// The parent session's id — the pad key. Multiple `parent_call_id`
+        /// values can share this when a single user turn spawned several
+        /// children in parallel.
+        parent_session_id: String,
+        /// The posted note. `author` is the subagent type (e.g. `explore`).
+        entry: crate::interactive::ScratchpadEntry,
+    },
 }
 
 impl ServerMsg {
@@ -287,6 +366,10 @@ impl ServerMsg {
                 reason,
             },
             HarnessEvent::GoalDone { status, reason } => Self::GoalDone { status, reason },
+            HarnessEvent::ToolProgress { call_id, line } => Self::ToolProgress { call_id, line },
+            HarnessEvent::ToolPreview { call_id, preview } => {
+                Self::ToolPreview { call_id, preview }
+            }
         }
     }
 }

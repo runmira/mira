@@ -16,8 +16,12 @@ export const PopoverContent = React.forwardRef<
       align={align}
       sideOffset={sideOffset}
       className={cn(
-        'z-50 w-72 rounded-lg border border-white/10 bg-popover text-popover-foreground outline-none ' +
-          'shadow-[0_20px_50px_-12px_rgba(0,0,0,0.85),0_0_0_1px_rgba(255,255,255,0.02)] ring-1 ring-white/5 ' +
+        // Elevated surface — brighter border so the boundary is
+        // visible against the near-black background, tighter ring so
+        // the whole popover has a clear silhouette even without the
+        // heavy drop shadow.
+        'z-50 w-72 rounded-lg border border-border bg-popover text-popover-foreground outline-none ' +
+          'shadow-[0_20px_50px_-12px_rgba(0,0,0,0.85),0_0_0_1px_rgba(255,255,255,0.04)] ring-1 ring-white/10 ' +
           'data-[state=open]:animate-fade-in p-1',
         className,
       )}

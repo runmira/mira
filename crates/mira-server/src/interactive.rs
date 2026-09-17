@@ -145,6 +145,264 @@ pub struct SubagentReviewResponse {
 pub enum PromptResponse {
     Plan(PlanResponse),
     SubagentReview(SubagentReviewResponse),
+    AskUser(AskUserResponse),
+}
+
+/* ---------- ask-user tool ---------- */
+
+/// One question the model wants the user to answer. Rendered in the
+/// transcript as a card with the question text and a set of clickable
+/// options; the user can pick one (or many, when `multi_select` is on)
+/// or write free text via the "Tell mira what to do differently"
+/// affordance appended to every question.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AskUserQuestion {
+    /// The question itself. Full sentence, question mark included.
+    pub question: String,
+    /// Short chip-style label (max ~12 chars). Rendered above the
+    /// question as an at-a-glance topic marker (`Backend`, `Scope`,
+    /// `Auth flow`). Optional — the card falls back to just showing
+    /// the question when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    /// Available choices — 2-4 entries. Each option's `label` is what
+    /// the user clicks; `description` is optional secondary text; a
+    /// truthy `recommended` flag surfaces a "Recommended" badge so the
+    /// user sees the model's preferred pick at a glance.
+    pub options: Vec<AskUserOption>,
+    /// When true, options render as multi-select checkboxes; when
+    /// false (default) they're single-select radios. `custom` free
+    /// text is always available regardless.
+    #[serde(default)]
+    pub multi_select: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AskUserOption {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// `true` marks this option as the model's recommended pick. The
+    /// UI shows a "Recommended" chip; at most one option per question
+    /// should carry this (the tool doesn't enforce it — the model
+    /// decides, and multiple recommendations render fine anyway).
+    #[serde(default)]
+    pub recommended: bool,
+}
+
+/// The model's structured question set. Sent to the client as a
+/// `ServerMsg::AskUserRequest`; answered as [`AskUserResponse`].
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AskUserProposal {
+    pub questions: Vec<AskUserQuestion>,
+}
+
+/// User-supplied answers, one entry per question in the order the tool
+/// posed them. Empty vec = user cancelled the whole card without
+/// answering.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AskUserResponse {
+    pub answers: Vec<AskUserAnswer>,
+    /// True when the user dismissed the card without answering. The
+    /// tool renders that as a graceful "user preferred not to answer"
+    /// result so the model can decide what to do next.
+    #[serde(default)]
+    pub cancelled: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AskUserAnswer {
+    /// Labels of options the user selected. Empty when they used the
+    /// free-text path instead. On single-select questions this has
+    /// exactly one entry; on multi-select, one or more.
+    #[serde(default)]
+    pub picked: Vec<String>,
+    /// Free text the user entered via "Tell mira what to do
+    /// differently". `None` when they picked an option instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom: Option<String>,
+}
+
+pub struct AskUserTool {
+    channel: PromptChannel,
+}
+
+impl AskUserTool {
+    pub fn new(channel: PromptChannel) -> Self {
+        Self { channel }
+    }
+}
+
+#[derive(Deserialize)]
+struct AskUserArgs {
+    questions: Vec<AskUserQuestion>,
+}
+
+#[async_trait]
+impl Tool for AskUserTool {
+    fn spec(&self) -> ToolSpec {
+        spec(
+            "ask_user",
+            "Ask the user 1-4 structured clarifying questions before \
+             committing to a plan or an implementation approach. Prefer \
+             this over guessing when a request could plausibly be \
+             shaped several ways and the choice will materially affect \
+             the code you write — target user vs. admin, permissions \
+             model, scope boundary, storage backend, auth flow, \
+             framework choice, migration vs. rewrite, etc.\n\n\
+             Each question offers 2-4 concrete options; mark exactly \
+             one option `recommended: true` when you have a considered \
+             preference, otherwise leave them all unmarked. Users can \
+             always answer with free text via a built-in \"Tell mira \
+             what to do differently\" affordance you don't need to \
+             include as an option — the UI adds it automatically.\n\n\
+             When NOT to call this: the request is unambiguous, or a \
+             single quick file read would resolve the ambiguity, or \
+             you're mid-execution and picking would derail the flow. \
+             When in doubt: ask. A short clarification round beats \
+             building the wrong thing.\n\n\
+             After answers come back, use them to shape a concrete \
+             `plan` proposal (or execute directly if the request is \
+             small). Do not chain `ask_user` calls — pose every \
+             question you need in one call.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "questions": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 4,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "question": {
+                                    "type": "string",
+                                    "description": "Full question, ending with '?'."
+                                },
+                                "header": {
+                                    "type": "string",
+                                    "description": "Very short label (max ~12 chars) — chip-style topic marker like 'Backend' or 'Scope'."
+                                },
+                                "options": {
+                                    "type": "array",
+                                    "minItems": 2,
+                                    "maxItems": 4,
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "label": {
+                                                "type": "string",
+                                                "description": "Short click target — 1-5 words."
+                                            },
+                                            "description": {
+                                                "type": "string",
+                                                "description": "Optional single-sentence explanation of trade-offs."
+                                            },
+                                            "recommended": {
+                                                "type": "boolean",
+                                                "description": "Set to true on the model's preferred option; a 'Recommended' badge shows in the UI."
+                                            }
+                                        },
+                                        "required": ["label"],
+                                        "additionalProperties": false
+                                    }
+                                },
+                                "multi_select": {
+                                    "type": "boolean",
+                                    "description": "Set true when several options can apply simultaneously (features to enable, roles to include). Defaults to false = single-choice."
+                                }
+                            },
+                            "required": ["question", "options"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["questions"],
+                "additionalProperties": false
+            }),
+        )
+    }
+
+    fn action(&self) -> Action {
+        Action::Pure
+    }
+
+    async fn invoke(&self, call: &ToolCall, _ctx: &ToolContext) -> Result<ToolResult, ToolError> {
+        let args: AskUserArgs = call.parse_arguments()?;
+        let proposal = AskUserProposal {
+            questions: args.questions,
+        };
+        let prompt_id = call.id.to_string();
+        let msg = ServerMsg::AskUserRequest {
+            prompt_id: prompt_id.clone(),
+            proposal: proposal.clone(),
+        };
+
+        let response = match self.channel.ask(prompt_id, msg).await {
+            Some(PromptResponse::AskUser(r)) => r,
+            Some(_) => {
+                return Ok(ToolResult::ok(
+                    call.id.clone(),
+                    "Ask-user prompt received the wrong response kind — treating \
+                     as cancelled. Ask the user how they'd like to proceed."
+                        .to_owned(),
+                ));
+            }
+            None => {
+                return Ok(ToolResult::ok(
+                    call.id.clone(),
+                    "Ask-user prompt cancelled — no UI available. Ask the user \
+                     (in plain text) how they'd like to proceed."
+                        .to_owned(),
+                ));
+            }
+        };
+
+        if response.cancelled {
+            return Ok(ToolResult::ok(
+                call.id.clone(),
+                "User dismissed the question card without answering. Ask \
+                 for the missing context in plain text, or propose your \
+                 best guess and let the user course-correct."
+                    .to_owned(),
+            ));
+        }
+
+        // Compose a readable summary the model can act on. Pair each
+        // question with its resolved answer — either the picked
+        // options or the free-text "differently" note.
+        let mut body = String::from(
+            "User answered. Use these choices to shape the next step (typically a `plan` call):\n\n",
+        );
+        for (idx, q) in proposal.questions.iter().enumerate() {
+            let a = response.answers.get(idx);
+            let header = q.header.as_deref().unwrap_or("Q");
+            body.push_str(&format!("[{header}] {}\n", q.question));
+            match a {
+                None => body.push_str("  → (no answer captured)\n"),
+                Some(a) if a.picked.is_empty() && a.custom.is_none() => {
+                    body.push_str("  → (skipped)\n");
+                }
+                Some(a) => {
+                    if !a.picked.is_empty() {
+                        body.push_str("  → picked: ");
+                        body.push_str(&a.picked.join(", "));
+                        body.push('\n');
+                    }
+                    if let Some(txt) = a.custom.as_deref() {
+                        let txt = txt.trim();
+                        if !txt.is_empty() {
+                            body.push_str("  → user said: ");
+                            body.push_str(txt);
+                            body.push('\n');
+                        }
+                    }
+                }
+            }
+            body.push('\n');
+        }
+        Ok(ToolResult::ok(call.id.clone(), body))
+    }
 }
 
 pub struct PlanTool {
@@ -298,10 +556,12 @@ impl Tool for PlanTool {
 const MAX_AGENT_DEPTH: usize = 2;
 
 /// Per-child ceiling on rounds when the caller didn't pin `max_rounds`.
-/// Deliberately lower than the top-level session default (60) — subagents
-/// exist to bound context, so if 30 rounds isn't enough the delegation
-/// probably shouldn't be a subagent at all.
-const DEFAULT_SUBAGENT_MAX_ROUNDS: usize = 30;
+/// Held at the same generous default as top-level sessions (200) — the
+/// prior tighter cap (30) was routinely hit by exploratory work that
+/// wasn't actually looping, just doing legit multi-step research. If a
+/// subagent genuinely deserves a lower ceiling, its agent-type `.md`
+/// still overrides via its own `max_rounds` frontmatter.
+const DEFAULT_SUBAGENT_MAX_ROUNDS: usize = 200;
 
 /// The `agent` tool. A parent session invokes it to delegate a bounded
 /// piece of work to a child session with:
@@ -372,6 +632,21 @@ pub struct AgentTool {
     /// `PromptResponse::SubagentReview`. Not required for other flows —
     /// spawns without a channel still return their summaries normally.
     channel: Option<PromptChannel>,
+    /// Shared per-parent-session scratchpad. Each entry is one note a
+    /// subagent posted via `scratchpad_note`; peers spawned from the
+    /// same session see it either via a header block prepended to their
+    /// initial prompt (spawn-time snapshot) or via `scratchpad_read`
+    /// (live poll from within a child turn). Keyed by the parent's
+    /// session id so a sibling running in parallel sees the same pad
+    /// but two independent sessions stay isolated.
+    ///
+    /// In-memory only — a process restart wipes the pad. That's the
+    /// right call for a *mid-flight coordination* buffer: the notes
+    /// describe transient state ("I already grepped auth.rs, nothing
+    /// there") that's rarely useful in a later session. If we later
+    /// want durability we can serialize entries alongside the parent
+    /// SessionRecord.
+    scratchpads: Arc<Mutex<HashMap<String, Vec<ScratchpadEntry>>>>,
 }
 
 impl AgentTool {
@@ -390,6 +665,7 @@ impl AgentTool {
             parent_approver: None,
             parent_policy: None,
             channel: None,
+            scratchpads: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -577,9 +853,18 @@ impl Tool for AgentTool {
         // Enumerate the loaded types so the model sees the roster and
         // description right in the tool spec, not just as freeform prose.
         let type_names = self.agents.names();
+        // Advertised enum. Always include the sentinel `auto` so the
+        // LLM-as-router path is reachable through strict-schema providers
+        // (OpenAI structured tools, Anthropic in strict mode) — without
+        // this, providers reject the arg before `invoke` ever runs, even
+        // though the description mentions `auto` as a valid value.
+        let mut type_enum = type_names.clone();
+        if !type_enum.iter().any(|n| n == "auto") {
+            type_enum.push("auto".to_owned());
+        }
         let type_description = if type_names.is_empty() {
-            "Named agent type. No types are currently registered — omit this \
-             field."
+            "Named agent type. No types are currently registered — pass \
+             `auto` to let the router decide, or omit this field."
                 .to_owned()
         } else {
             let roster = self
@@ -621,7 +906,7 @@ impl Tool for AgentTool {
                     },
                     "type": {
                         "type": "string",
-                        "enum": type_names,
+                        "enum": type_enum,
                         "description": type_description,
                     },
                     "tools": {
@@ -763,7 +1048,9 @@ impl Tool for AgentTool {
         // remain possible up to MAX_AGENT_DEPTH.
         let mut child_registry = Registry::new();
         let allow = effective_tools.as_ref().map(|list| {
-            list.iter().cloned().collect::<std::collections::HashSet<_>>()
+            list.iter()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>()
         });
         for tool in self.base_registry.tools() {
             let name = tool.spec().name;
@@ -804,6 +1091,27 @@ impl Tool for AgentTool {
             let progress = ProgressTool::new(tx.clone(), call.id.to_string());
             child_registry.register(progress);
         }
+        // Cross-subagent shared scratchpad: keyed by the parent's session
+        // id so peers spawned from the same session share one pad, but
+        // two independent sessions stay isolated. When there's no parent
+        // session id in context (headless / one-shot tests) we skip
+        // wiring entirely — the pad becomes a no-op instead of leaking
+        // notes across unrelated calls under a synthetic key.
+        let parent_session_id = ctx.session_id.as_ref().map(|s| s.to_string());
+        if let Some(pid) = &parent_session_id {
+            let author = scratchpad_author(type_def);
+            child_registry.register(ScratchpadNoteTool::new(
+                self.scratchpads.clone(),
+                pid.clone(),
+                call.id.to_string(),
+                author,
+                self.events_tx.clone(),
+            ));
+            child_registry.register(ScratchpadReadTool::new(
+                self.scratchpads.clone(),
+                pid.clone(),
+            ));
+        }
         let child_registry = Arc::new(child_registry);
 
         // Approver + policy selection.
@@ -822,6 +1130,16 @@ impl Tool for AgentTool {
         // there's nothing for the user to review, and interrupting flow
         // would defeat the whole "delegate cheap exploration" purpose.
         let route_to_parent = route_approvals_to_parent(type_def, effective_tools.as_deref());
+        // Pull the parent's explicit deny rules so a read-only subagent
+        // spawned on a fresh Auto policy still refuses whatever the user
+        // told the parent to refuse (e.g. `Deny(Read("**/.env"))`).
+        // Without this the parent's secrets are readable by any spawned
+        // `explore`/`reviewer` agent — an approval-UX-bypasses-containment
+        // hole the audit called out under Gap #1.
+        let inherited_denies: Vec<String> = match &self.parent_policy {
+            Some(p) => p.lock().await.deny_source().to_vec(),
+            None => Vec::new(),
+        };
         let (policy, approver): (Arc<Mutex<Policy>>, Arc<dyn mira_harness::Approver>) =
             if route_to_parent {
                 let policy = match &self.parent_policy {
@@ -831,7 +1149,7 @@ impl Tool for AgentTool {
                             depth = child_depth,
                             "subagent routes to parent but no parent policy wired; using fresh Auto"
                         );
-                        Arc::new(Mutex::new(fresh_auto_policy()?))
+                        Arc::new(Mutex::new(fresh_auto_policy(&inherited_denies)?))
                     }
                 };
                 let approver: Arc<dyn mira_harness::Approver> = match &self.parent_approver {
@@ -846,7 +1164,7 @@ impl Tool for AgentTool {
                 };
                 (policy, approver)
             } else {
-                let policy = Arc::new(Mutex::new(fresh_auto_policy()?));
+                let policy = Arc::new(Mutex::new(fresh_auto_policy(&inherited_denies)?));
                 let approver: Arc<dyn mira_harness::Approver> =
                     Arc::new(AutoApprover { approve_asks: true });
                 (policy, approver)
@@ -862,9 +1180,7 @@ impl Tool for AgentTool {
         // misconfigured type never blocks the spawn entirely.
         let mut worktree: Option<WorktreeSession> = None;
         let child_cwd = if type_def.and_then(|t| t.worktree).unwrap_or(false) {
-            let type_name = type_def
-                .map(|t| t.name.as_str())
-                .unwrap_or("agent");
+            let type_name = type_def.map(|t| t.name.as_str()).unwrap_or("agent");
             match WorktreeSession::try_create(&ctx.cwd, type_name, call.id.as_str()) {
                 Ok(Some(w)) => {
                     info!(
@@ -912,8 +1228,8 @@ impl Tool for AgentTool {
         // Guard is intentionally omitted here because Session::new attaches
         // a session-scoped one itself. Memory + episodic handles carry
         // through so the child can read the same MIRA.md the parent sees.
-        let child_ctx = ToolContext::new(child_cwd, ctx.sandbox.clone())
-            .with_agent_depth(child_depth);
+        let child_ctx =
+            ToolContext::new(child_cwd, ctx.sandbox.clone()).with_agent_depth(child_depth);
         let child_ctx = if let Some(mem) = ctx.memory.clone() {
             child_ctx.with_memory(mem)
         } else {
@@ -1022,13 +1338,30 @@ impl Tool for AgentTool {
             None
         };
 
+        // Prepend a snapshot of the shared scratchpad to the child's
+        // opening message so a spawn that fires *after* peers have
+        // posted notes sees them from turn 1 — waiting for the model to
+        // remember to call `scratchpad_read` would defeat the point on
+        // short-lived children. When the pad is empty (first spawn of
+        // the session, or nobody has posted yet), we pass the prompt
+        // through unchanged so the initial context stays lean.
+        let prompt_with_pad = if let Some(pid) = &parent_session_id {
+            let snapshot = self.scratchpads.lock().await.get(pid).cloned();
+            match snapshot.as_deref().and_then(format_scratchpad_block) {
+                Some(block) => format!("{block}{}", args.prompt),
+                None => args.prompt.clone(),
+            }
+        } else {
+            args.prompt.clone()
+        };
+
         // Drain the child's harness stream to completion. Each event is
         // re-broadcast to the parent's WS with the parent's call_id
         // attached so the SubagentPanel builds a live per-child transcript
         // as tokens arrive. Warnings and tool-call counts are captured
         // locally so a truly empty run still returns something useful in
         // the tool result.
-        let mut stream = child.send(args.prompt.clone()).await;
+        let mut stream = child.send(prompt_with_pad).await;
         let mut warnings: Vec<String> = Vec::new();
         let mut tool_call_count: usize = 0;
         while let Some(evt) = stream.next().await {
@@ -1114,9 +1447,7 @@ impl Tool for AgentTool {
                 // Common causes: model looped on tool calls and hit
                 // max_rounds, or a small model refused to produce text
                 // after tool use.
-                let mut out = String::from(
-                    "Subagent finished without producing a text summary.",
-                );
+                let mut out = String::from("Subagent finished without producing a text summary.");
                 out.push_str(&format!(
                     " It made {tool_call_count} tool call{}.",
                     if tool_call_count == 1 { "" } else { "s" }
@@ -1176,10 +1507,7 @@ impl Tool for AgentTool {
         // channel is wired (headless / test), fail open with a warning
         // — otherwise the tool would hang the whole session waiting for
         // a UI that isn't there.
-        let body_with_warnings = if type_def
-            .and_then(|t| t.review_required)
-            .unwrap_or(false)
-        {
+        let body_with_warnings = if type_def.and_then(|t| t.review_required).unwrap_or(false) {
             if let Some(channel) = &self.channel {
                 let prompt_id = format!("{}-review", parent_call_id);
                 let msg = ServerMsg::SubagentReviewRequest {
@@ -1299,7 +1627,9 @@ fn subagent_wire(parent_call_id: &str, evt: &HarnessEvent) -> Option<ServerMsg> 
         | HarnessEvent::GoalSet { .. }
         | HarnessEvent::GoalCleared
         | HarnessEvent::GoalProgress { .. }
-        | HarnessEvent::GoalDone { .. } => None,
+        | HarnessEvent::GoalDone { .. }
+        | HarnessEvent::ToolProgress { .. }
+        | HarnessEvent::ToolPreview { .. } => None,
     }
 }
 
@@ -1332,16 +1662,18 @@ fn tools_are_read_only_slice(names: &[String]) -> bool {
             .all(|n| READ_ONLY_TOOL_NAMES.contains(&n.as_str()))
 }
 
-/// Build the read-only agent fallback policy: `Auto` mode, no rules.
-/// Under `AutoApprover`, this means Read/Pure/Write/Edit auto-allow and
-/// Bash auto-approves — safe for `explore`/`reviewer` where the tools
-/// list is already restricted upstream to read-only ones.
-fn fresh_auto_policy() -> Result<Policy, ToolError> {
+/// Build the read-only agent fallback policy: `Auto` mode, no allow/ask
+/// rules, and the parent's explicit deny list carried through so denies
+/// like `Deny(Read("**/.env"))` still apply to spawned children. Under
+/// `AutoApprover` this means Read/Pure/Write/Edit auto-allow and Bash
+/// auto-approves — safe for `explore`/`reviewer` where the tools list is
+/// already restricted upstream to read-only ones.
+fn fresh_auto_policy(inherited_denies: &[String]) -> Result<Policy, ToolError> {
     let cfg = PolicyConfig {
         mode: mira_policy::Mode::Auto,
         allow: Vec::new(),
         ask: Vec::new(),
-        deny: Vec::new(),
+        deny: inherited_denies.to_vec(),
     };
     Policy::from_config(&cfg)
         .map_err(|e| ToolError::Failed(format!("subagent policy build failed: {e}")))
@@ -1416,7 +1748,15 @@ fn subagent_system_prompt() -> &'static str {
        subagent panel — they're how you avoid looking stuck. Don't emit \
        progress on every turn; just at meaningful checkpoints \
        (\"found the auth flow, reading callers now\", \"finished the \
-       migration, running tests\")."
+       migration, running tests\").\n\
+     - Peer subagents may be running in parallel on the same session. \
+       They share a scratchpad you can read with `scratchpad_read` and \
+       append to with `scratchpad_note`. Use it for coordination: post \
+       one-line findings a sibling would want (\"nothing under \
+       crates/mira-tools\", \"auth flow is in src/auth/session.rs\") and \
+       read it before diving into work that overlaps with a peer. Do \
+       NOT put your final summary on the scratchpad — that still comes \
+       back to the parent as your final assistant message."
 }
 
 /* ---------- progress tool (streaming intermediate summaries) ---------- */
@@ -1484,11 +1824,7 @@ impl Tool for ProgressTool {
         true
     }
 
-    async fn invoke(
-        &self,
-        call: &ToolCall,
-        _ctx: &ToolContext,
-    ) -> Result<ToolResult, ToolError> {
+    async fn invoke(&self, call: &ToolCall, _ctx: &ToolContext) -> Result<ToolResult, ToolError> {
         let args: ProgressArgs = call.parse_arguments()?;
         let text = args.text.trim().to_owned();
         if text.is_empty() {
@@ -1505,5 +1841,525 @@ impl Tool for ProgressTool {
         // Return an ack the model can key off. Keep it terse — the model
         // shouldn't be reading progress-tool results as instructions.
         Ok(ToolResult::ok(call.id.clone(), "progress noted"))
+    }
+}
+
+/* ---------- shared scratchpad (cross-subagent findings) ---------- */
+
+/// One note on the shared scratchpad. Peers spawned from the same
+/// parent session read these to avoid duplicating each other's work.
+/// `author` is the child's type name (or `agent` when no type was
+/// pinned) so a reader can attribute findings without guessing.
+#[derive(Clone, Debug, Serialize)]
+pub struct ScratchpadEntry {
+    /// Type name of the subagent that wrote the note (e.g. `explore`).
+    pub author: String,
+    /// Seconds since UNIX epoch. Best-effort — a system clock going
+    /// backwards produces 0, which is fine for ordering (entries are
+    /// vec-ordered anyway; this is provenance).
+    pub ts: u64,
+    /// The note itself. Trimmed at write time; enforced to be
+    /// non-empty (empty writes are dropped silently by the tool).
+    pub text: String,
+}
+
+/// Hard cap on scratchpad size to keep prompt injection bounded. When
+/// the pad exceeds this many entries, the oldest is dropped on write —
+/// so a runaway note-happy child can't blow the child prompt on peers
+/// spawned later. 64 is generous for coordinating a handful of parallel
+/// researchers without silently choking the injection block.
+const SCRATCHPAD_MAX_ENTRIES: usize = 64;
+
+/// Hard cap on a single note. Notes are meant to be one-liners; a
+/// verbose write is either a wrong tool choice (should be the final
+/// summary) or an accident. Truncating with an ellipsis keeps the
+/// pad legible without failing the write.
+const SCRATCHPAD_MAX_NOTE_BYTES: usize = 2048;
+
+/// Return an "author" label for scratchpad entries emitted by this
+/// subagent. Falls back to `agent` when no type is pinned so the
+/// column stays populated even for raw calls.
+fn scratchpad_author(type_def: Option<&mira_agents::AgentType>) -> String {
+    type_def
+        .map(|t| t.name.clone())
+        .unwrap_or_else(|| "agent".to_owned())
+}
+
+/// Format the current pad as a Markdown block suitable for prepending
+/// to a child's initial user prompt. Returns `None` when the pad is
+/// empty — the caller should skip injection entirely rather than emit
+/// an empty header.
+fn format_scratchpad_block(entries: &[ScratchpadEntry]) -> Option<String> {
+    if entries.is_empty() {
+        return None;
+    }
+    let mut out = String::from(
+        "## Shared notes from peer subagents\n\n\
+         These notes were left by other subagents working on this session. \
+         Use them to avoid duplicating their work; treat them as advisory, \
+         not authoritative. You can add your own with `scratchpad_note` \
+         and read the latest with `scratchpad_read`.\n\n",
+    );
+    for e in entries {
+        out.push_str("- ");
+        out.push_str(&e.author);
+        out.push_str(": ");
+        out.push_str(&e.text);
+        out.push('\n');
+    }
+    out.push_str("\n---\n\n");
+    Some(out)
+}
+
+/// Tool the subagent calls to append a one-line finding to the pad
+/// shared with its peers. Bound at construction time to the parent's
+/// session id so the note lands in the right pad even when the child
+/// itself has a distinct session id.
+pub struct ScratchpadNoteTool {
+    store: Arc<Mutex<HashMap<String, Vec<ScratchpadEntry>>>>,
+    parent_session_id: String,
+    parent_call_id: String,
+    author: String,
+    events_tx: Option<broadcast::Sender<ServerMsg>>,
+}
+
+impl ScratchpadNoteTool {
+    pub fn new(
+        store: Arc<Mutex<HashMap<String, Vec<ScratchpadEntry>>>>,
+        parent_session_id: String,
+        parent_call_id: String,
+        author: String,
+        events_tx: Option<broadcast::Sender<ServerMsg>>,
+    ) -> Self {
+        Self {
+            store,
+            parent_session_id,
+            parent_call_id,
+            author,
+            events_tx,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct ScratchpadNoteArgs {
+    text: String,
+}
+
+#[async_trait]
+impl Tool for ScratchpadNoteTool {
+    fn spec(&self) -> ToolSpec {
+        spec(
+            "scratchpad_note",
+            "Post a one-line finding to the shared scratchpad visible to \
+             every peer subagent in this session. Use this when you \
+             discover something a sibling searcher would want to know \
+             (\"nothing relevant under crates/mira-tools\", \"auth flow \
+             lives in src/auth/session.rs\") so parallel work doesn't \
+             duplicate yours. Notes are advisory, not final answers — \
+             keep them to one sentence. Your FINAL summary still goes \
+             back to the parent as your assistant text, not here.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "One-line finding. Good: 'grepped for WsApprover in crates/, only mira-server/lib.rs hits'. Bad: essays, verbatim tool output, the final summary."
+                    }
+                },
+                "required": ["text"],
+                "additionalProperties": false
+            }),
+        )
+    }
+
+    fn action(&self) -> Action {
+        // No filesystem/shell side effects — pure signalling to peers.
+        Action::Pure
+    }
+
+    fn parallel_safe(&self, _call: &ToolCall) -> bool {
+        true
+    }
+
+    async fn invoke(&self, call: &ToolCall, _ctx: &ToolContext) -> Result<ToolResult, ToolError> {
+        let args: ScratchpadNoteArgs = call.parse_arguments()?;
+        let mut text = args.text.trim().to_owned();
+        if text.is_empty() {
+            return Ok(ToolResult::ok(call.id.clone(), "noted (empty)"));
+        }
+        if text.len() > SCRATCHPAD_MAX_NOTE_BYTES {
+            // Truncate at char boundary — a naive slice can panic on
+            // multi-byte codepoints. Then tack on an ellipsis so the
+            // reader can tell it was cut.
+            let mut cut = SCRATCHPAD_MAX_NOTE_BYTES;
+            while !text.is_char_boundary(cut) && cut > 0 {
+                cut -= 1;
+            }
+            text.truncate(cut);
+            text.push('…');
+        }
+        let entry = ScratchpadEntry {
+            author: self.author.clone(),
+            ts: now_secs(),
+            text: text.clone(),
+        };
+        {
+            let mut guard = self.store.lock().await;
+            let pad = guard
+                .entry(self.parent_session_id.clone())
+                .or_insert_with(Vec::new);
+            pad.push(entry.clone());
+            // Bound the pad. Drops from the front so the newest are
+            // always kept — the assumption is that later findings
+            // supersede earlier ones in a well-behaved run.
+            while pad.len() > SCRATCHPAD_MAX_ENTRIES {
+                pad.remove(0);
+            }
+        }
+        if let Some(tx) = &self.events_tx {
+            let _ = tx.send(ServerMsg::SubagentScratchpadNote {
+                parent_call_id: self.parent_call_id.clone(),
+                parent_session_id: self.parent_session_id.clone(),
+                entry: entry.clone(),
+            });
+        }
+        Ok(ToolResult::ok(call.id.clone(), "note posted"))
+    }
+}
+
+/// Tool the subagent calls to read the current scratchpad — the
+/// live view, not the spawn-time snapshot. Useful when a child has
+/// been running long enough that a peer may have added notes after
+/// spawn.
+pub struct ScratchpadReadTool {
+    store: Arc<Mutex<HashMap<String, Vec<ScratchpadEntry>>>>,
+    parent_session_id: String,
+}
+
+impl ScratchpadReadTool {
+    pub fn new(
+        store: Arc<Mutex<HashMap<String, Vec<ScratchpadEntry>>>>,
+        parent_session_id: String,
+    ) -> Self {
+        Self {
+            store,
+            parent_session_id,
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for ScratchpadReadTool {
+    fn spec(&self) -> ToolSpec {
+        spec(
+            "scratchpad_read",
+            "Read the current shared scratchpad — every note peers have \
+             posted so far this session. Prefer this over guessing what \
+             siblings are doing when your task overlaps with theirs. \
+             Returns each note as `<author>: <text>`; empty when nobody \
+             has posted yet.",
+            json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+        )
+    }
+
+    fn action(&self) -> Action {
+        Action::Read
+    }
+
+    fn parallel_safe(&self, _call: &ToolCall) -> bool {
+        true
+    }
+
+    async fn invoke(&self, call: &ToolCall, _ctx: &ToolContext) -> Result<ToolResult, ToolError> {
+        let guard = self.store.lock().await;
+        let body = match guard.get(&self.parent_session_id) {
+            None => String::from("(scratchpad empty)"),
+            Some(pad) if pad.is_empty() => String::from("(scratchpad empty)"),
+            Some(pad) => {
+                let mut out = String::new();
+                for e in pad {
+                    out.push_str("- ");
+                    out.push_str(&e.author);
+                    out.push_str(": ");
+                    out.push_str(&e.text);
+                    out.push('\n');
+                }
+                out
+            }
+        };
+        Ok(ToolResult::ok(call.id.clone(), body))
+    }
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mira_ai::NullProvider;
+    use mira_core::message::{ToolCallFunction, ToolCallKind};
+    use mira_core::{ToolCall, ToolCallId};
+    use mira_sandbox::{Sandbox, SandboxConfig};
+    use std::path::PathBuf;
+
+    fn make_agent_tool_with_types(names: &[&str]) -> AgentTool {
+        let mut reg = AgentRegistry::default();
+        for name in names {
+            reg.types.insert(
+                (*name).to_owned(),
+                mira_agents::AgentType {
+                    name: (*name).to_owned(),
+                    description: format!("{name} test type"),
+                    category: None,
+                    tools: None,
+                    model: None,
+                    max_rounds: None,
+                    system_prompt_addendum: None,
+                    response_schema: None,
+                    parallel_safe: None,
+                    route_approvals_to_parent: None,
+                    worktree: None,
+                    extends: None,
+                    review_required: None,
+                },
+            );
+        }
+        AgentTool::new(
+            Arc::new(NullProvider::default()),
+            Arc::new(Registry::new()),
+            "test-model".to_owned(),
+        )
+        .with_agents(Arc::new(reg))
+    }
+
+    #[test]
+    fn spec_type_enum_always_includes_auto() {
+        // With registered types, `auto` must appear alongside them so a
+        // strict-schema provider accepts `type: "auto"`.
+        let tool = make_agent_tool_with_types(&["explore", "reviewer"]);
+        let spec = tool.spec();
+        let enum_vals: Vec<String> = spec.parameters["properties"]["type"]["enum"]
+            .as_array()
+            .expect("type.enum should be an array")
+            .iter()
+            .map(|v| v.as_str().unwrap().to_owned())
+            .collect();
+        assert!(
+            enum_vals.contains(&"auto".to_owned()),
+            "auto must be in the enum, got: {enum_vals:?}"
+        );
+        assert!(enum_vals.contains(&"explore".to_owned()));
+        assert!(enum_vals.contains(&"reviewer".to_owned()));
+    }
+
+    #[test]
+    fn spec_type_enum_includes_auto_when_registry_empty() {
+        // Even with no registered types, `auto` should be advertised so
+        // the router is reachable. (Empty type_names + no auto would
+        // leave the enum empty and providers reject any value.)
+        let tool = make_agent_tool_with_types(&[]);
+        let spec = tool.spec();
+        let enum_vals: Vec<String> = spec.parameters["properties"]["type"]["enum"]
+            .as_array()
+            .expect("type.enum should be an array")
+            .iter()
+            .map(|v| v.as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(enum_vals, vec!["auto".to_owned()]);
+    }
+
+    #[test]
+    fn format_scratchpad_block_returns_none_when_empty() {
+        assert!(format_scratchpad_block(&[]).is_none());
+    }
+
+    #[test]
+    fn format_scratchpad_block_renders_entries() {
+        let entries = vec![
+            ScratchpadEntry {
+                author: "explore".to_owned(),
+                ts: 0,
+                text: "found auth flow in src/auth/session.rs".to_owned(),
+            },
+            ScratchpadEntry {
+                author: "cartographer".to_owned(),
+                ts: 0,
+                text: "no callers in mira-tools".to_owned(),
+            },
+        ];
+        let block = format_scratchpad_block(&entries).expect("non-empty");
+        assert!(block.contains("Shared notes from peer subagents"));
+        assert!(block.contains("explore: found auth flow"));
+        assert!(block.contains("cartographer: no callers"));
+        // Must end with the separator so the child's own prompt reads
+        // as a distinct section.
+        assert!(block.trim_end().ends_with("---"));
+    }
+
+    fn make_tool_call(args: serde_json::Value) -> ToolCall {
+        ToolCall {
+            id: ToolCallId::new(),
+            kind: ToolCallKind::Function,
+            function: ToolCallFunction {
+                name: "scratchpad_note".to_owned(),
+                arguments: args.to_string(),
+            },
+        }
+    }
+
+    fn dummy_ctx() -> ToolContext {
+        ToolContext::new(
+            PathBuf::from("."),
+            Arc::new(Sandbox::new(SandboxConfig::default())),
+        )
+    }
+
+    #[tokio::test]
+    async fn scratchpad_note_and_read_roundtrip() {
+        let store: Arc<Mutex<HashMap<String, Vec<ScratchpadEntry>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let key = "sess_a".to_owned();
+        let note = ScratchpadNoteTool::new(
+            store.clone(),
+            key.clone(),
+            "call_1".to_owned(),
+            "explore".to_owned(),
+            None,
+        );
+        let ctx = dummy_ctx();
+        let call = make_tool_call(json!({ "text": "found the auth flow" }));
+        note.invoke(&call, &ctx).await.expect("note ok");
+
+        let read = ScratchpadReadTool::new(store.clone(), key.clone());
+        let call = make_tool_call(json!({}));
+        let result = read.invoke(&call, &ctx).await.expect("read ok");
+        assert!(result.content.contains("explore: found the auth flow"));
+    }
+
+    #[tokio::test]
+    async fn scratchpads_are_isolated_by_session_id() {
+        let store: Arc<Mutex<HashMap<String, Vec<ScratchpadEntry>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        // Writer bound to sess_a.
+        let note = ScratchpadNoteTool::new(
+            store.clone(),
+            "sess_a".to_owned(),
+            "call_1".to_owned(),
+            "explore".to_owned(),
+            None,
+        );
+        let ctx = dummy_ctx();
+        note.invoke(&make_tool_call(json!({ "text": "note for A" })), &ctx)
+            .await
+            .expect("note ok");
+
+        // Reader bound to sess_b — must not see A's notes.
+        let read_b = ScratchpadReadTool::new(store.clone(), "sess_b".to_owned());
+        let result = read_b
+            .invoke(&make_tool_call(json!({})), &ctx)
+            .await
+            .expect("read ok");
+        assert!(
+            result.content.contains("empty"),
+            "sess_b should be empty, got: {}",
+            result.content
+        );
+
+        // Reader bound to sess_a — sees its own notes.
+        let read_a = ScratchpadReadTool::new(store.clone(), "sess_a".to_owned());
+        let result = read_a
+            .invoke(&make_tool_call(json!({})), &ctx)
+            .await
+            .expect("read ok");
+        assert!(result.content.contains("note for A"));
+    }
+
+    #[tokio::test]
+    async fn scratchpad_enforces_entry_cap() {
+        let store: Arc<Mutex<HashMap<String, Vec<ScratchpadEntry>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let key = "sess_cap".to_owned();
+        let note = ScratchpadNoteTool::new(
+            store.clone(),
+            key.clone(),
+            "call_1".to_owned(),
+            "explore".to_owned(),
+            None,
+        );
+        let ctx = dummy_ctx();
+        for i in 0..(SCRATCHPAD_MAX_ENTRIES + 5) {
+            note.invoke(
+                &make_tool_call(json!({ "text": format!("note {i}") })),
+                &ctx,
+            )
+            .await
+            .expect("note ok");
+        }
+        let pad = store.lock().await.get(&key).cloned().unwrap_or_default();
+        assert_eq!(pad.len(), SCRATCHPAD_MAX_ENTRIES, "cap should hold");
+        // Front should have been dropped, so the first surviving entry
+        // is note 5 (indices 0..4 are gone).
+        assert!(pad.first().unwrap().text.starts_with("note 5"));
+        assert!(pad
+            .last()
+            .unwrap()
+            .text
+            .starts_with(&format!("note {}", SCRATCHPAD_MAX_ENTRIES + 4)));
+    }
+
+    #[tokio::test]
+    async fn scratchpad_note_truncates_oversized_text() {
+        let store: Arc<Mutex<HashMap<String, Vec<ScratchpadEntry>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let key = "sess_trunc".to_owned();
+        let note = ScratchpadNoteTool::new(
+            store.clone(),
+            key.clone(),
+            "call_1".to_owned(),
+            "explore".to_owned(),
+            None,
+        );
+        let ctx = dummy_ctx();
+        let big = "x".repeat(SCRATCHPAD_MAX_NOTE_BYTES * 2);
+        note.invoke(&make_tool_call(json!({ "text": big })), &ctx)
+            .await
+            .expect("note ok");
+        let pad = store.lock().await.get(&key).cloned().unwrap_or_default();
+        let stored = &pad[0].text;
+        // Stored text: at most cap bytes of `x` plus the ellipsis marker.
+        assert!(stored.ends_with('…'));
+        assert!(
+            stored.len() <= SCRATCHPAD_MAX_NOTE_BYTES + '…'.len_utf8(),
+            "stored len {} should be within cap+ellipsis",
+            stored.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn scratchpad_note_ignores_empty_text() {
+        let store: Arc<Mutex<HashMap<String, Vec<ScratchpadEntry>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let note = ScratchpadNoteTool::new(
+            store.clone(),
+            "sess_empty".to_owned(),
+            "call_1".to_owned(),
+            "explore".to_owned(),
+            None,
+        );
+        let ctx = dummy_ctx();
+        note.invoke(&make_tool_call(json!({ "text": "   " })), &ctx)
+            .await
+            .expect("note ok");
+        assert!(store.lock().await.get("sess_empty").is_none());
     }
 }

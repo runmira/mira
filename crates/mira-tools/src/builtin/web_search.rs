@@ -168,7 +168,10 @@ fn format_results(rows: &[BraveResult]) -> String {
         out.push_str(&format!("   {}\n", r.url));
         // Strip Brave's `<strong>` highlight markup so the snippet reads
         // clean; harmless if any leak through.
-        let snippet = r.description.replace("<strong>", "").replace("</strong>", "");
+        let snippet = r
+            .description
+            .replace("<strong>", "")
+            .replace("</strong>", "");
         if !snippet.trim().is_empty() {
             out.push_str(&format!("   {}\n", snippet.trim()));
         }

@@ -1,6 +1,7 @@
 mod approver;
 mod config;
 mod eval;
+mod goal;
 mod memory;
 mod repl;
 mod review;
@@ -93,6 +94,9 @@ enum Command {
     Eval(eval::EvalArgs),
     /// Manage cross-session memory (MIRA.md + episodic).
     Memory(memory::MemoryArgs),
+    /// Set, clear, inspect, or resume the standing `/goal` on the
+    /// most recent session for the current folder.
+    Goal(goal::GoalArgs),
 }
 
 #[tokio::main]
@@ -115,6 +119,10 @@ async fn main() -> Result<()> {
     if let Some(Command::Memory(args)) = cli.command.clone() {
         init_tracing(false);
         return memory::run(&cli, args).await;
+    }
+    if let Some(Command::Goal(args)) = cli.command.clone() {
+        init_tracing(false);
+        return goal::run(&cli, args).await;
     }
 
     let use_tui = !cli.simple && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
@@ -153,13 +161,14 @@ async fn main() -> Result<()> {
     // the CLI path, so the lock is effectively read-only, but the shape
     // stays consistent with `mira serve`.
     let skills_registry = mira_skills::SkillRegistry::load_layered(
+        &mira_config::shared_skills_dir(),
         &mira_config::user_skills_dir(),
-        &mira_config::project_skills_dir(&cwd),
+        &mira_config::well_known_project_skills_dirs(&cwd),
     );
     let skills_handle: mira_tools::builtin::skill::SkillHandle = std::sync::Arc::new(
         tokio::sync::RwLock::new(std::sync::Arc::new(skills_registry)),
     );
-    builtin::register_skills(&mut registry, skills_handle);
+    builtin::register_skills(&mut registry, skills_handle.clone());
     // `memory_consolidate` — dedup/merge a MIRA.md via a cheap model.
     // Gated behind the same `memory.tools_enabled` switch as the other
     // memory tools: consolidation isn't useful without them.
@@ -273,10 +282,8 @@ async fn main() -> Result<()> {
     // work landed — a clean bisect switch.
     let mut session = session;
     if cfg.memory.inject_context() {
-        session = session.with_memory_snapshot(mira_server::make_memory_snapshot_with(
-            &cwd,
-            episodic_store,
-        ));
+        session = session
+            .with_memory_snapshot(mira_server::make_memory_snapshot_with(&cwd, episodic_store));
         session = session.with_memory_retrieval(mira_server::memory_retrieval_from(&cfg.memory));
     }
     if cfg.memory.auto_extract_enabled() {
@@ -295,11 +302,12 @@ async fn main() -> Result<()> {
                 policy,
                 approval_rx: approval_rx.expect("tui branch created a receiver"),
                 cwd: cwd.clone(),
+                skills: skills_handle,
             },
         )
         .await
     } else {
-        repl::run(session).await
+        repl::run(session, skills_handle).await
     }
 }
 

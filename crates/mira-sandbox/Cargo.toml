@@ -7,7 +7,12 @@ license      = { workspace = true }
 description  = "Command execution wrapper for the Mira harness. Starts thin; landlock/seatbelt slot in later."
 
 [dependencies]
-tokio     = { workspace = true }
-thiserror = { workspace = true }
-tracing   = { workspace = true }
-uuid      = { workspace = true }
+tokio        = { workspace = true }
+thiserror    = { workspace = true }
+tracing      = { workspace = true }
+uuid         = { workspace = true }
+# PTY-backed shell — spawns bash attached to a pseudo-terminal so
+# TUI apps (npm/npx installers, cargo progress bars, gh) render and
+# stream output line-by-line instead of blocking on `isatty()` checks.
+portable-pty = "0.8"
+tempfile = "3"

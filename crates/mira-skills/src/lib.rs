@@ -163,13 +163,24 @@ impl SkillRegistry {
         self.skills.keys().cloned().collect()
     }
 
-    /// Full three-tier resolve: bundled → user (~/.mira/skills) →
-    /// project (<cwd>/.mira/skills). Each tier overrides the previous
-    /// by name. Missing directories are treated as empty.
-    pub fn load_layered(user_dir: &Path, project_dir: &Path) -> Self {
+    /// Full multi-tier resolve: bundled → shared (~/.agents/skills) →
+    /// user (~/.mira/skills) → each entry of `project_dirs` in order.
+    /// Each tier overrides the previous by name; missing directories
+    /// are treated as empty.
+    ///
+    /// `project_dirs` lets a repo ship skills under any well-known
+    /// convention interchangeably — `<cwd>/.mira/skills/`,
+    /// `<cwd>/.agents/skills/`, `<cwd>/.claude/skills/`,
+    /// `<cwd>/.codex/skills/`, `<cwd>/.cursor/skills/`. `npx skills
+    /// add …` writes to whichever one already exists; scanning the
+    /// whole set means the same install command works everywhere.
+    pub fn load_layered(shared_dir: &Path, user_dir: &Path, project_dirs: &[PathBuf]) -> Self {
         let mut reg = builtin();
+        reg.merge(load_dir(shared_dir));
         reg.merge(load_dir(user_dir));
-        reg.merge(load_dir(project_dir));
+        for p in project_dirs {
+            reg.merge(load_dir(p));
+        }
         reg
     }
 }
@@ -187,13 +198,28 @@ impl SkillRegistry {
 /// and referencing it here.
 const BUILTIN_SOURCES: &[(&str, &str)] = &[
     ("verify", include_str!("../skills/verify/SKILL.md")),
-    ("code-review", include_str!("../skills/code-review/SKILL.md")),
+    (
+        "code-review",
+        include_str!("../skills/code-review/SKILL.md"),
+    ),
     ("init", include_str!("../skills/init/SKILL.md")),
     ("commit", include_str!("../skills/commit/SKILL.md")),
-    ("security-review", include_str!("../skills/security-review/SKILL.md")),
-    ("skill-creator", include_str!("../skills/skill-creator/SKILL.md")),
-    ("git-workflow", include_str!("../skills/git-workflow/SKILL.md")),
-    ("debug-systematically", include_str!("../skills/debug-systematically/SKILL.md")),
+    (
+        "security-review",
+        include_str!("../skills/security-review/SKILL.md"),
+    ),
+    (
+        "skill-creator",
+        include_str!("../skills/skill-creator/SKILL.md"),
+    ),
+    (
+        "git-workflow",
+        include_str!("../skills/git-workflow/SKILL.md"),
+    ),
+    (
+        "debug-systematically",
+        include_str!("../skills/debug-systematically/SKILL.md"),
+    ),
 ];
 
 pub fn builtin() -> SkillRegistry {
@@ -297,8 +323,8 @@ fn walk_skills(dir: &Path, depth: usize, reg: &mut SkillRegistry) {
 fn load_flat_file(path: &Path) -> Result<Skill> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("read skill file {}", path.display()))?;
-    let mut s = parse_skill_md(&raw)
-        .with_context(|| format!("parse skill file {}", path.display()))?;
+    let mut s =
+        parse_skill_md(&raw).with_context(|| format!("parse skill file {}", path.display()))?;
     s.source = Some(path.to_path_buf());
     s.source_dir = None;
     Ok(s)
@@ -307,8 +333,7 @@ fn load_flat_file(path: &Path) -> Result<Skill> {
 fn load_skill_dir(dir: &Path, skill_md: &Path) -> Result<Skill> {
     let raw = std::fs::read_to_string(skill_md)
         .with_context(|| format!("read {}", skill_md.display()))?;
-    let mut s = parse_skill_md(&raw)
-        .with_context(|| format!("parse {}", skill_md.display()))?;
+    let mut s = parse_skill_md(&raw).with_context(|| format!("parse {}", skill_md.display()))?;
     s.source = Some(skill_md.to_path_buf());
     s.source_dir = Some(dir.to_path_buf());
     Ok(s)
@@ -339,8 +364,7 @@ pub fn parse_skill_md(raw: &str) -> Result<Skill> {
         #[serde(default)]
         color: Option<String>,
     }
-    let fm: Fm = serde_yaml::from_str(frontmatter)
-        .with_context(|| "parse YAML frontmatter")?;
+    let fm: Fm = serde_yaml::from_str(frontmatter).with_context(|| "parse YAML frontmatter")?;
     if fm.name.trim().is_empty() {
         return Err(anyhow!("skill `name` must be non-empty"));
     }
@@ -375,7 +399,9 @@ pub fn parse_skill_md(raw: &str) -> Result<Skill> {
 /// name + description are required, and there's no sensible default.
 fn split_frontmatter(raw: &str) -> Result<(&str, &str)> {
     let raw = raw.trim_start_matches('\u{feff}'); // BOM
-    let raw = raw.strip_prefix("---\n").or_else(|| raw.strip_prefix("---\r\n"))
+    let raw = raw
+        .strip_prefix("---\n")
+        .or_else(|| raw.strip_prefix("---\r\n"))
         .ok_or_else(|| anyhow!("missing YAML frontmatter (must start with `---`)"))?;
     // Find the closing `---` line. Accept both `\n---\n` and `\n---\r\n`.
     let closer_idx = raw
@@ -443,7 +469,10 @@ mod tests {
     fn builtins_load() {
         let reg = builtin();
         assert!(reg.get("verify").is_some(), "expected verify builtin");
-        assert!(reg.get("code-review").is_some(), "expected code-review builtin");
+        assert!(
+            reg.get("code-review").is_some(),
+            "expected code-review builtin"
+        );
         assert!(reg.get("init").is_some(), "expected init builtin");
         // Every builtin should have a non-empty body.
         for name in reg.names() {
@@ -525,11 +554,19 @@ mod tests {
     #[test]
     fn load_layered_respects_precedence() {
         let tmp = tempdir().unwrap();
+        let shared_dir = tmp.path().join("shared");
         let user_dir = tmp.path().join("user");
         let project_dir = tmp.path().join("project");
+        fs::create_dir_all(&shared_dir).unwrap();
         fs::create_dir_all(&user_dir).unwrap();
         fs::create_dir_all(&project_dir).unwrap();
-        // Project override wins over user, which wins over builtin.
+        // Project override wins over user, which wins over shared, which
+        // wins over builtin.
+        fs::write(
+            shared_dir.join("verify.md"),
+            "---\nname: verify\ndescription: shared override\n---\nShared body.\n",
+        )
+        .unwrap();
         fs::write(
             user_dir.join("verify.md"),
             "---\nname: verify\ndescription: user override\n---\nUser body.\n",
@@ -540,7 +577,7 @@ mod tests {
             "---\nname: verify\ndescription: project override\n---\nProject body.\n",
         )
         .unwrap();
-        let reg = SkillRegistry::load_layered(&user_dir, &project_dir);
+        let reg = SkillRegistry::load_layered(&shared_dir, &user_dir, &[project_dir.clone()]);
         let v = reg.get("verify").unwrap();
         assert_eq!(v.description, "project override");
         assert_eq!(v.body, "Project body.");
@@ -583,11 +620,7 @@ mod tests {
         )
         .unwrap();
         fs::create_dir_all(dir.join("references")).unwrap();
-        fs::write(
-            dir.join("references").join("fine-print.md"),
-            "not a skill",
-        )
-        .unwrap();
+        fs::write(dir.join("references").join("fine-print.md"), "not a skill").unwrap();
         let reg = load_dir(tmp.path());
         assert!(reg.get("with-refs").is_some());
         // No spurious skill from the nested reference file.
@@ -597,6 +630,7 @@ mod tests {
     #[test]
     fn load_layered_falls_through_to_user_then_builtin() {
         let tmp = tempdir().unwrap();
+        let shared_dir = tmp.path().join("shared");
         let user_dir = tmp.path().join("user");
         let project_dir = tmp.path().join("project");
         fs::create_dir_all(&user_dir).unwrap();
@@ -607,9 +641,50 @@ mod tests {
             "---\nname: verify\ndescription: user override\n---\nUser body.\n",
         )
         .unwrap();
-        let reg = SkillRegistry::load_layered(&user_dir, &project_dir);
+        let reg = SkillRegistry::load_layered(&shared_dir, &user_dir, &[project_dir.clone()]);
         assert_eq!(reg.get("verify").unwrap().description, "user override");
         // `code-review` came only from the builtin tier.
         assert!(reg.get("code-review").is_some());
+    }
+
+    #[test]
+    fn load_layered_reads_shared_agents_dir() {
+        // A skill only in ~/.agents/skills should be discoverable.
+        let tmp = tempdir().unwrap();
+        let shared_dir = tmp.path().join("shared");
+        let user_dir = tmp.path().join("user");
+        let project_dir = tmp.path().join("project");
+        fs::create_dir_all(&shared_dir).unwrap();
+        fs::write(
+            shared_dir.join("grill-me.md"),
+            "---\nname: grill-me\ndescription: pressure-test\n---\nAsk hard questions.\n",
+        )
+        .unwrap();
+        let reg = SkillRegistry::load_layered(&shared_dir, &user_dir, &[project_dir.clone()]);
+        assert_eq!(reg.get("grill-me").unwrap().description, "pressure-test",);
+    }
+
+    #[test]
+    fn load_layered_user_overrides_shared() {
+        // User's ~/.mira/skills should win over ~/.agents/skills so
+        // hand-authored overrides beat npx-installed packages.
+        let tmp = tempdir().unwrap();
+        let shared_dir = tmp.path().join("shared");
+        let user_dir = tmp.path().join("user");
+        let project_dir = tmp.path().join("project");
+        fs::create_dir_all(&shared_dir).unwrap();
+        fs::create_dir_all(&user_dir).unwrap();
+        fs::write(
+            shared_dir.join("verify.md"),
+            "---\nname: verify\ndescription: shared\n---\nShared.\n",
+        )
+        .unwrap();
+        fs::write(
+            user_dir.join("verify.md"),
+            "---\nname: verify\ndescription: user wins\n---\nUser.\n",
+        )
+        .unwrap();
+        let reg = SkillRegistry::load_layered(&shared_dir, &user_dir, &[project_dir.clone()]);
+        assert_eq!(reg.get("verify").unwrap().description, "user wins");
     }
 }

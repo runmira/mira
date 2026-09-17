@@ -149,10 +149,11 @@ impl FileGuard {
 
         // Rehydrate read watermarks from the persisted snapshot so a restart
         // mid-session keeps its "these files were seen at version X" memory.
-        let watermarks: HashMap<PathBuf, Watermark> = match std::fs::read_to_string(root.join("watermarks.json")) {
-            Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
-            Err(_) => HashMap::new(),
-        };
+        let watermarks: HashMap<PathBuf, Watermark> =
+            match std::fs::read_to_string(root.join("watermarks.json")) {
+                Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
+                Err(_) => HashMap::new(),
+            };
         let written: HashSet<PathBuf> = match std::fs::read_to_string(root.join("written.json")) {
             Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
             Err(_) => HashSet::new(),
@@ -199,7 +200,10 @@ impl FileGuard {
     /// looked like so a later write can detect out-of-band changes.
     pub async fn record_read(&self, abs_path: &Path) {
         if let Ok(Some(w)) = Watermark::of(abs_path).await {
-            self.watermarks.lock().await.insert(abs_path.to_path_buf(), w);
+            self.watermarks
+                .lock()
+                .await
+                .insert(abs_path.to_path_buf(), w);
             self.persist_maps().await;
         }
     }
@@ -368,7 +372,8 @@ impl FileGuard {
     /// untracked.
     pub fn pre_bash(&self) -> Option<BashSnapshot> {
         let head = git_output(&self.cwd, &["rev-parse", "HEAD"])?;
-        let porcelain = git_output(&self.cwd, &["status", "--porcelain=v1", "-z"]).unwrap_or_default();
+        let porcelain =
+            git_output(&self.cwd, &["status", "--porcelain=v1", "-z"]).unwrap_or_default();
         Some(BashSnapshot {
             head,
             dirty: parse_porcelain_z(&porcelain),
@@ -459,7 +464,11 @@ pub struct BashSnapshot {
 }
 
 fn git_output(cwd: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git").current_dir(cwd).args(args).output().ok()?;
+    let out = Command::new("git")
+        .current_dir(cwd)
+        .args(args)
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }

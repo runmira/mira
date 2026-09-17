@@ -4,8 +4,11 @@
 //! can pick and choose (they aren't forced into a "kitchen sink" registration).
 //! [`register_default`] wires the whole set for a typical agent.
 
+pub mod apply_patch;
+pub mod ast_grep;
 pub mod bash;
 pub mod edit;
+pub mod file_outline;
 pub mod find_callers;
 pub mod find_references;
 pub mod find_symbol;
@@ -37,12 +40,15 @@ pub fn register_core(reg: &mut Registry) {
     reg.register(read::ReadFile);
     reg.register(write::WriteFile);
     reg.register(edit::EditFile);
+    reg.register(apply_patch::ApplyPatch);
     reg.register(bash::Bash);
     reg.register(grep::Grep);
     reg.register(glob::Glob);
     reg.register(find_symbol::FindSymbol);
     reg.register(find_references::FindReferences);
     reg.register(find_callers::FindCallers);
+    reg.register(ast_grep::AstGrep);
+    reg.register(file_outline::FileOutline);
     reg.register(git::GitStatus);
     reg.register(git::GitDiff);
     reg.register(git::GitLog);

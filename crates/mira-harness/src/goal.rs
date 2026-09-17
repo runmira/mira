@@ -20,10 +20,13 @@
 //! the main model's own judgement, which the industry consensus flags as
 //! the biggest way agents lie their way out of a goal.
 
+use std::path::Path;
 use std::time::Duration;
 
 use mira_ai::{ChatEvent, ChatProvider, ChatRequest, ResponseFormat};
 use mira_core::{Message, Role};
+use mira_sandbox::Sandbox;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 use tracing::warn;
@@ -60,6 +63,160 @@ pub struct Goal {
     /// affordable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evaluator_model: Option<String>,
+    /// Optional external verifier — a shell command whose exit-code
+    /// (and optionally stdout regex) gates the "Met" verdict.
+    ///
+    /// Runs before the LLM evaluator on every iteration. When the
+    /// verify command *fails*, the harness short-circuits to `NotMet`
+    /// with the command output as the reason and skips the LLM call
+    /// entirely — this is the fix for the "gaming the verifier"
+    /// failure mode where the main model claims to have finished
+    /// without any observable evidence. When the verify command
+    /// passes, the LLM still runs (it may catch semantic problems the
+    /// script can't).
+    ///
+    /// Absent (`None`) preserves the transcript-only behaviour that
+    /// shipped in v0.1 of `/goal`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify: Option<VerifyCommand>,
+    /// Optional hard token budget (input + output, summed across
+    /// every provider round in this session). Checked after each
+    /// iteration; on breach the goal transitions to `Exhausted` with
+    /// a "budget exceeded" reason. `None` disables the token check.
+    ///
+    /// Complements `max_iterations`: an iteration cap bounds *count*,
+    /// while `budget_tokens` bounds *spend* — a 20-iteration loop
+    /// with 200K-token turns can burn a lot before the count cap
+    /// fires, and this closes that hole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_tokens: Option<u64>,
+    /// Optional hard USD budget, computed from the session's
+    /// accumulated token usage and the active model's list price via
+    /// [`mira_ai::cost_usd`]. Checked after each iteration; on breach
+    /// the goal transitions to `Exhausted` with a "budget exceeded"
+    /// reason.
+    ///
+    /// Unpriced models (no entry in `MODEL_PRICES`) skip the USD
+    /// check entirely — token cost can't be computed, so the check
+    /// no-ops rather than reporting a false pass. Use
+    /// `budget_tokens` when working with a self-hosted or otherwise
+    /// unpriced model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_usd: Option<f64>,
+}
+
+/// External verifier for a goal. A shell command whose exit-code
+/// (and optionally a regex against stdout) tells the harness whether
+/// the goal condition is observably met.
+///
+/// Example — "cargo test until every test passes":
+/// ```yaml
+/// verify:
+///   command: cargo test --all
+///   # expected_exit defaults to 0
+///   timeout_secs: 300
+/// ```
+///
+/// Example — "no `v1` call sites remain":
+/// ```yaml
+/// verify:
+///   command: grep -rn "api.v1" src/
+///   expected_exit: 1   # grep returns 1 when there are no matches
+/// ```
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VerifyCommand {
+    /// Shell fragment run as `bash -lc <command>` via the session's
+    /// sandbox. Runs in the session's cwd.
+    pub command: String,
+    /// Exit code that indicates "goal condition met". Defaults to 0
+    /// via [`VerifyCommand::expected_exit`], but a rule like
+    /// `grep -c … src/` naturally wants 1 (no match).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_exit: Option<i32>,
+    /// Optional regex the command's stdout (plus stderr — the sandbox
+    /// merges the two) must match for the check to pass. Applied on
+    /// top of the exit-code check: both must hold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expect_stdout: Option<String>,
+    /// Wall-clock cap. Defaults to 300s. Kept generous so a real
+    /// `cargo test` on a fresh checkout has room, but capped so a
+    /// broken command can't wedge the goal loop forever.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+}
+
+impl VerifyCommand {
+    /// Exit code that indicates the goal condition holds. Defaults to
+    /// `0` — matches the standard "run this and see if it succeeded"
+    /// intuition; override only for shape-of-output checks (grep,
+    /// diff, etc.).
+    pub fn expected_exit(&self) -> i32 {
+        self.expected_exit.unwrap_or(0)
+    }
+
+    /// Timeout for a single run. 300 seconds by default — enough for
+    /// a small-to-medium test suite; a big monorepo should raise this.
+    pub fn timeout_secs(&self) -> u64 {
+        self.timeout_secs.unwrap_or(300)
+    }
+}
+
+/// Outcome of one verify run — returned in a shape the harness can
+/// translate directly into a `NotMet` reason without re-formatting.
+#[derive(Clone, Debug)]
+pub struct VerifyOutcome {
+    /// True when the command's exit code matches
+    /// `VerifyCommand::expected_exit` AND (when set) `expect_stdout`
+    /// matches the merged stdout/stderr.
+    pub passed: bool,
+    /// Actual exit code from the command. `-1` means timeout.
+    pub exit_code: i32,
+    /// Merged stdout+stderr transcript, truncated to
+    /// [`VERIFY_OUTPUT_CAP`] bytes so a chatty script can't bloat the
+    /// evaluator's context downstream.
+    pub output: String,
+    /// True when the command hit `timeout_secs` before completing.
+    pub timed_out: bool,
+}
+
+impl VerifyOutcome {
+    /// A short one-liner suitable for `Goal::last_reason` and the
+    /// synthetic "keep working" continuation message when the check
+    /// fails. Prefers the useful signal (exit code + tail of output)
+    /// over a wall of transcript.
+    pub fn short_reason(&self) -> String {
+        let tail = tail_lines(&self.output, 20);
+        if self.timed_out {
+            format!("verify timed out. Last output:\n{tail}")
+        } else if !self.passed {
+            format!(
+                "verify failed (exit {}). Last output:\n{tail}",
+                self.exit_code
+            )
+        } else {
+            "verify passed".to_owned()
+        }
+    }
+}
+
+/// Cap on the merged stdout/stderr we keep after a verify run — big
+/// enough to be diagnostic, small enough that a `cargo test` failure
+/// dump doesn't dominate the evaluator's context.
+pub const VERIFY_OUTPUT_CAP: usize = 32 * 1024;
+
+/// Return the last `n` lines of `s` with the leading elided marker
+/// when we truncated.
+fn tail_lines(s: &str, n: usize) -> String {
+    let lines: Vec<&str> = s.lines().collect();
+    if lines.len() <= n {
+        return s.to_owned();
+    }
+    let mut out = String::from("[… earlier output elided]\n");
+    for l in &lines[lines.len() - n..] {
+        out.push_str(l);
+        out.push('\n');
+    }
+    out
 }
 
 /// Terminal-or-active status. Once a goal leaves `Active` the harness
@@ -110,6 +267,9 @@ impl Goal {
             created_at: crate::persist::now_secs(),
             last_reason: None,
             evaluator_model: None,
+            verify: None,
+            budget_tokens: None,
+            budget_usd: None,
         }
     }
 
@@ -125,6 +285,112 @@ impl Goal {
     pub fn with_evaluator_model(mut self, model: Option<String>) -> Self {
         self.evaluator_model = model;
         self
+    }
+
+    /// Attach an external verifier. See [`VerifyCommand`] for the
+    /// contract — a shell command whose exit code (and optional
+    /// stdout regex) gates the "Met" verdict on every iteration.
+    pub fn with_verify(mut self, verify: Option<VerifyCommand>) -> Self {
+        self.verify = verify;
+        self
+    }
+
+    /// Hard token budget (input + output). `None` disables the check.
+    pub fn with_budget_tokens(mut self, tokens: Option<u64>) -> Self {
+        self.budget_tokens = tokens;
+        self
+    }
+
+    /// Hard USD budget. Requires the active model to be priced (see
+    /// `mira-ai/src/pricing.rs`); unpriced models skip the check.
+    pub fn with_budget_usd(mut self, usd: Option<f64>) -> Self {
+        self.budget_usd = usd;
+        self
+    }
+}
+
+/// Outcome of a budget check. `None` means the check didn't apply
+/// (no budget set, or the model isn't priced for the USD variant).
+/// `Some(Ok)` means under budget; `Some(Err(reason))` means the cap
+/// was breached and the caller should transition the goal to
+/// `Exhausted` with `reason`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BudgetCheck {
+    /// No budget configured, or the USD budget couldn't be computed
+    /// because the model isn't priced. Skip the check without
+    /// affecting the goal.
+    Skipped,
+    /// Under both budgets.
+    Under,
+    /// One of the budgets was exceeded. String is a short user-facing
+    /// reason for `last_reason`.
+    Exceeded(String),
+}
+
+/// Evaluate any configured budgets against a running usage total.
+/// Pure — no I/O, safe to call after each iteration.
+///
+/// Order: token budget first (cheap, always computable), then USD
+/// (skipped for unpriced models). First breach wins the reason.
+pub fn check_budget(
+    budget_tokens: Option<u64>,
+    budget_usd: Option<f64>,
+    model: &str,
+    usage: crate::persist::UsageTotals,
+) -> BudgetCheck {
+    if budget_tokens.is_none() && budget_usd.is_none() {
+        return BudgetCheck::Skipped;
+    }
+
+    if let Some(cap) = budget_tokens {
+        let total = usage.total_tokens();
+        if total > cap {
+            return BudgetCheck::Exceeded(format!(
+                "token budget exceeded: {total} used (cap {cap})"
+            ));
+        }
+    }
+
+    if let Some(cap) = budget_usd {
+        // Fold the running total into a synthetic TokenUsage for the
+        // pricing helper — its inputs are per-round but the math is
+        // linear in each field, so summing across rounds gives the
+        // right dollar total (modulo the u32 → u64 conversion, which
+        // saturates safely).
+        let synth = mira_ai::TokenUsage {
+            prompt_tokens: clip_u64_to_u32(usage.prompt_tokens),
+            completion_tokens: clip_u64_to_u32(usage.completion_tokens),
+            cached_input_tokens: clip_u64_to_u32(usage.cached_input_tokens),
+        };
+        match mira_ai::cost_usd(model, synth) {
+            Some(actual) if actual > cap => {
+                return BudgetCheck::Exceeded(format!(
+                    "USD budget exceeded: ${actual:.2} used (cap ${cap:.2}, model `{model}`)"
+                ));
+            }
+            Some(_) => {}
+            None => {
+                // Unpriced model — token budget was our only hope. If
+                // it was set and we got here, it passed. If it wasn't,
+                // we skip.
+                if budget_tokens.is_none() {
+                    return BudgetCheck::Skipped;
+                }
+            }
+        }
+    }
+
+    BudgetCheck::Under
+}
+
+/// Saturating u64 → u32 for the pricing hop. Sessions that actually
+/// hit u32::MAX (4B) tokens have bigger problems than a rounding
+/// error in the cost estimate.
+fn clip_u64_to_u32(n: u64) -> u32 {
+    if n > u32::MAX as u64 {
+        u32::MAX
+    } else {
+        n as u32
     }
 }
 
@@ -242,9 +508,8 @@ pub async fn evaluate(
 /// (some providers wrap `json_schema` mode in a code fence anyway) —
 /// we grab the outermost `{ … }` and try that.
 fn parse_evaluation(raw: &str) -> Result<Evaluation, String> {
-    let json_str = extract_json_object(raw).ok_or_else(|| {
-        format!("evaluator reply did not contain a JSON object: {raw:?}")
-    })?;
+    let json_str = extract_json_object(raw)
+        .ok_or_else(|| format!("evaluator reply did not contain a JSON object: {raw:?}"))?;
     #[derive(Deserialize)]
     struct Reply {
         verdict: String,
@@ -258,7 +523,10 @@ fn parse_evaluation(raw: &str) -> Result<Evaluation, String> {
         "impossible" => GoalVerdict::Impossible,
         "needs_user" => GoalVerdict::NeedsUser,
         other => {
-            warn!(?other, "evaluator returned unknown verdict, treating as not_met");
+            warn!(
+                ?other,
+                "evaluator returned unknown verdict, treating as not_met"
+            );
             GoalVerdict::NotMet
         }
     };
@@ -301,6 +569,85 @@ fn extract_json_object(s: &str) -> Option<&str> {
         }
     }
     None
+}
+
+/// Run one verification pass against the goal's `verify` command.
+///
+/// Returns:
+///   - `Ok(VerifyOutcome { passed: true, .. })` when exit code (and
+///     optional stdout regex) matched — the LLM evaluator should
+///     still run on top of this to catch semantic issues the script
+///     can't observe.
+///   - `Ok(VerifyOutcome { passed: false, .. })` when the check
+///     failed — the caller short-circuits to `NotMet` with
+///     `VerifyOutcome::short_reason()` as the reason and skips the
+///     LLM call entirely.
+///   - `Err(_)` when the sandbox itself couldn't run the command
+///     (spawn error, invalid regex, etc.). Callers treat this as a
+///     `NotMet` too so a broken verify command doesn't wedge the
+///     goal loop — a warning gets emitted alongside.
+pub async fn run_verify(
+    sandbox: &Sandbox,
+    cwd: &Path,
+    verify: &VerifyCommand,
+) -> anyhow::Result<VerifyOutcome> {
+    // Compile the stdout regex up-front — a bad regex is a config
+    // error we should surface once, not on every iteration.
+    let stdout_re = match verify.expect_stdout.as_deref() {
+        Some(pat) => Some(
+            Regex::new(pat)
+                .map_err(|e| anyhow::anyhow!("invalid `expect_stdout` regex `{pat}`: {e}"))?,
+        ),
+        None => None,
+    };
+
+    let outcome = sandbox
+        .run(
+            &verify.command,
+            cwd,
+            Duration::from_secs(verify.timeout_secs()),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("verify command failed to run: {e}"))?;
+
+    // Truncate before we hand it back — chatty commands would
+    // otherwise dominate the evaluator's context window on the next
+    // iteration.
+    let output = truncate_output(&outcome.output, VERIFY_OUTPUT_CAP);
+
+    let exit_ok = !outcome.timed_out && outcome.exit_code == verify.expected_exit();
+    let stdout_ok = match &stdout_re {
+        Some(re) => re.is_match(&output),
+        None => true,
+    };
+    let passed = exit_ok && stdout_ok;
+
+    Ok(VerifyOutcome {
+        passed,
+        exit_code: outcome.exit_code,
+        output,
+        timed_out: outcome.timed_out,
+    })
+}
+
+/// Cap `s` at `max_bytes`, keeping the *tail* — the interesting bits
+/// of a `cargo test` run are the failed assertions at the end, not
+/// the compilation preamble. Char-boundary-safe.
+fn truncate_output(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_owned();
+    }
+    let start = s.len() - max_bytes;
+    // Walk forward to the next char boundary — a naive slice can
+    // panic on multi-byte UTF-8 (unlikely in tool output but cheap
+    // to guard).
+    let mut safe_start = start;
+    while safe_start < s.len() && !s.is_char_boundary(safe_start) {
+        safe_start += 1;
+    }
+    let mut out = String::from("[… earlier output elided]\n");
+    out.push_str(&s[safe_start..]);
+    out
 }
 
 /// Format a transcript slice for the evaluator prompt. Each message
@@ -376,5 +723,241 @@ mod tests {
         let out = format_transcript(&msgs, 1500);
         assert!(out.contains("elided"));
         assert!(out.len() < 2500);
+    }
+
+    #[test]
+    fn verify_expected_exit_defaults_to_zero() {
+        let v = VerifyCommand {
+            command: "true".into(),
+            expected_exit: None,
+            expect_stdout: None,
+            timeout_secs: None,
+        };
+        assert_eq!(v.expected_exit(), 0);
+        assert_eq!(v.timeout_secs(), 300);
+    }
+
+    #[test]
+    fn verify_outcome_reason_shapes() {
+        let passing = VerifyOutcome {
+            passed: true,
+            exit_code: 0,
+            output: "ok\n".into(),
+            timed_out: false,
+        };
+        assert!(passing.short_reason().contains("passed"));
+
+        let failing = VerifyOutcome {
+            passed: false,
+            exit_code: 1,
+            output: (0..30).map(|i| format!("line {i}\n")).collect(),
+            timed_out: false,
+        };
+        let r = failing.short_reason();
+        assert!(r.contains("failed"));
+        assert!(r.contains("exit 1"));
+        // Tail includes recent lines, elides earlier ones.
+        assert!(r.contains("line 29"));
+        assert!(!r.contains("line 0\n"));
+
+        let tmo = VerifyOutcome {
+            passed: false,
+            exit_code: -1,
+            output: "hung\n".into(),
+            timed_out: true,
+        };
+        assert!(tmo.short_reason().contains("timed out"));
+    }
+
+    #[tokio::test]
+    async fn run_verify_passes_on_zero_exit() {
+        use mira_sandbox::{Sandbox, SandboxConfig};
+        let sandbox = Sandbox::new(SandboxConfig::default());
+        let cwd = std::env::current_dir().unwrap();
+        let v = VerifyCommand {
+            command: "true".into(),
+            expected_exit: None,
+            expect_stdout: None,
+            timeout_secs: Some(5),
+        };
+        let out = run_verify(&sandbox, &cwd, &v).await.unwrap();
+        assert!(out.passed);
+        assert_eq!(out.exit_code, 0);
+    }
+
+    #[tokio::test]
+    async fn run_verify_fails_on_nonzero_exit() {
+        use mira_sandbox::{Sandbox, SandboxConfig};
+        let sandbox = Sandbox::new(SandboxConfig::default());
+        let cwd = std::env::current_dir().unwrap();
+        let v = VerifyCommand {
+            command: "false".into(),
+            expected_exit: None,
+            expect_stdout: None,
+            timeout_secs: Some(5),
+        };
+        let out = run_verify(&sandbox, &cwd, &v).await.unwrap();
+        assert!(!out.passed);
+        assert_ne!(out.exit_code, 0);
+    }
+
+    #[tokio::test]
+    async fn run_verify_honors_custom_expected_exit() {
+        // `grep` returns 1 when no match — that's a common "goal
+        // condition met" shape ("no v1 call sites remain"). The
+        // verify should count that as pass when expected_exit=1.
+        use mira_sandbox::{Sandbox, SandboxConfig};
+        let sandbox = Sandbox::new(SandboxConfig::default());
+        let cwd = std::env::current_dir().unwrap();
+        let v = VerifyCommand {
+            command: "echo hello | grep xyz".into(),
+            expected_exit: Some(1),
+            expect_stdout: None,
+            timeout_secs: Some(5),
+        };
+        let out = run_verify(&sandbox, &cwd, &v).await.unwrap();
+        assert!(
+            out.passed,
+            "grep-no-match should pass with expected_exit=1, got {out:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_verify_stdout_regex_gates_pass() {
+        use mira_sandbox::{Sandbox, SandboxConfig};
+        let sandbox = Sandbox::new(SandboxConfig::default());
+        let cwd = std::env::current_dir().unwrap();
+        // Exit 0 but stdout regex doesn't match → fail.
+        let v = VerifyCommand {
+            command: "echo greeting".into(),
+            expected_exit: Some(0),
+            expect_stdout: Some(r"^bye".into()),
+            timeout_secs: Some(5),
+        };
+        let out = run_verify(&sandbox, &cwd, &v).await.unwrap();
+        assert!(!out.passed);
+
+        // Exit 0 and regex matches → pass.
+        let v2 = VerifyCommand {
+            command: "echo greeting".into(),
+            expected_exit: Some(0),
+            expect_stdout: Some(r"greeting".into()),
+            timeout_secs: Some(5),
+        };
+        let out2 = run_verify(&sandbox, &cwd, &v2).await.unwrap();
+        assert!(out2.passed);
+    }
+
+    /* ---- budget check ---- */
+
+    fn usage_with(prompt: u64, completion: u64) -> crate::persist::UsageTotals {
+        crate::persist::UsageTotals {
+            prompt_tokens: prompt,
+            completion_tokens: completion,
+            cached_input_tokens: 0,
+            rounds: 1,
+        }
+    }
+
+    #[test]
+    fn budget_check_skips_when_no_budgets_configured() {
+        let out = check_budget(None, None, "gpt-4o-mini", usage_with(100_000, 50_000));
+        assert!(matches!(out, BudgetCheck::Skipped));
+    }
+
+    #[test]
+    fn budget_check_token_cap_breach() {
+        let out = check_budget(Some(1_000), None, "gpt-4o-mini", usage_with(800, 500));
+        match out {
+            BudgetCheck::Exceeded(msg) => {
+                assert!(msg.contains("token budget"));
+                assert!(msg.contains("1300"));
+                assert!(msg.contains("1000"));
+            }
+            other => panic!("expected Exceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn budget_check_under_token_cap() {
+        let out = check_budget(Some(10_000), None, "gpt-4o-mini", usage_with(800, 500));
+        assert!(matches!(out, BudgetCheck::Under));
+    }
+
+    #[test]
+    fn budget_check_usd_cap_breach() {
+        // gpt-4o-mini: $0.15/M input, $0.60/M output. 1M input + 1M
+        // output = $0.15 + $0.60 = $0.75. Cap at $0.10 → breach.
+        let out = check_budget(
+            None,
+            Some(0.10),
+            "gpt-4o-mini",
+            usage_with(1_000_000, 1_000_000),
+        );
+        match out {
+            BudgetCheck::Exceeded(msg) => {
+                assert!(msg.contains("USD budget"));
+                assert!(msg.contains("$0.75"));
+                assert!(msg.contains("$0.10"));
+            }
+            other => panic!("expected Exceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn budget_check_usd_under_cap() {
+        let out = check_budget(
+            None,
+            Some(10.0),
+            "gpt-4o-mini",
+            usage_with(1_000_000, 1_000_000),
+        );
+        assert!(matches!(out, BudgetCheck::Under));
+    }
+
+    #[test]
+    fn budget_check_unpriced_model_skips_usd_but_honors_tokens() {
+        // Model not in the pricing table → USD check can't compute.
+        // With a token cap set and under, that's Under (token check
+        // passed; USD skipped silently).
+        let out = check_budget(
+            Some(10_000),
+            Some(1.0),
+            "some-local-model",
+            usage_with(100, 50),
+        );
+        assert!(matches!(out, BudgetCheck::Under));
+
+        // With only a USD cap and no token cap on an unpriced model,
+        // Skipped — nothing to check.
+        let out2 = check_budget(None, Some(1.0), "some-local-model", usage_with(100, 50));
+        assert!(matches!(out2, BudgetCheck::Skipped));
+    }
+
+    #[test]
+    fn budget_check_token_cap_breach_wins_over_usd() {
+        // Both set, token cap fires first (order in the check
+        // function). Verifies the reason mentions tokens.
+        let out = check_budget(Some(100), Some(10.0), "gpt-4o-mini", usage_with(500, 500));
+        match out {
+            BudgetCheck::Exceeded(msg) => assert!(msg.contains("token")),
+            other => panic!("expected token-cap Exceeded, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_verify_bad_regex_errors() {
+        use mira_sandbox::{Sandbox, SandboxConfig};
+        let sandbox = Sandbox::new(SandboxConfig::default());
+        let cwd = std::env::current_dir().unwrap();
+        let v = VerifyCommand {
+            command: "true".into(),
+            expected_exit: None,
+            // Unclosed bracket — real bad regex.
+            expect_stdout: Some("[unclosed".into()),
+            timeout_secs: Some(5),
+        };
+        let res = run_verify(&sandbox, &cwd, &v).await;
+        assert!(res.is_err(), "bad regex should surface as Err");
     }
 }

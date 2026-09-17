@@ -157,8 +157,7 @@ async fn consolidate_md(
     }
 
     eprintln!("consolidating {} …", path.display());
-    let consolidated =
-        consolidate_bullets(provider, model, &current, instruction).await?;
+    let consolidated = consolidate_bullets(provider, model, &current, instruction).await?;
 
     println!("--- proposed consolidation ---");
     println!("{consolidated}");
@@ -208,14 +207,17 @@ async fn consolidate_episodic(
         bail!("{} is empty; nothing to consolidate", path.display());
     }
 
-    eprintln!("consolidating {} · {} entries …", path.display(), entries.len());
+    eprintln!(
+        "consolidating {} · {} entries …",
+        path.display(),
+        entries.len()
+    );
     let serialised = entries
         .iter()
         .map(|e| format!("- {}", e.text.trim()))
         .collect::<Vec<_>>()
         .join("\n");
-    let consolidated =
-        consolidate_bullets(provider, model, &serialised, instruction).await?;
+    let consolidated = consolidate_bullets(provider, model, &serialised, instruction).await?;
 
     let new_entries: Vec<EpisodicEntry> = parse_bullets(&consolidated)
         .into_iter()
@@ -232,7 +234,11 @@ async fn consolidate_episodic(
         println!("- {}", e.text);
     }
     println!("--- end ---");
-    eprintln!("before: {} entries  ·  after: {} entries", entries.len(), new_entries.len());
+    eprintln!(
+        "before: {} entries  ·  after: {} entries",
+        entries.len(),
+        new_entries.len()
+    );
 
     if dry_run {
         eprintln!("dry run — nothing written");

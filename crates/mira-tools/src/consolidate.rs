@@ -112,10 +112,7 @@ pub async fn consolidate_bullets(
 }
 
 async fn read_text(
-    mut stream: futures::stream::BoxStream<
-        'static,
-        Result<ChatEvent, mira_ai::ProviderError>,
-    >,
+    mut stream: futures::stream::BoxStream<'static, Result<ChatEvent, mira_ai::ProviderError>>,
 ) -> Result<String> {
     let mut buf = String::new();
     while let Some(evt) = stream.next().await {

@@ -46,6 +46,27 @@ pub struct SessionSummary {
     /// as a tooltip on the merge indicator.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worktree_branch: Option<String>,
+    /// Running token totals for the session. Omitted when zero to keep the
+    /// list response small.
+    #[serde(skip_serializing_if = "SessionUsageView::is_empty")]
+    pub usage: SessionUsageView,
+}
+
+/// Compact projection of the persisted usage totals. Named separately from
+/// the harness's `UsageTotals` so the wire format stays stable if the
+/// harness type grows more fields.
+#[derive(Debug, Default, Serialize)]
+pub struct SessionUsageView {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub rounds: u32,
+}
+
+impl SessionUsageView {
+    fn is_empty(&self) -> bool {
+        self.prompt_tokens == 0 && self.completion_tokens == 0 && self.rounds == 0
+    }
 }
 
 /// Where a worktree branch sits relative to its primary repo's base branch.
@@ -110,6 +131,12 @@ pub struct SessionHistoryView {
     pub created_at: u64,
     pub updated_at: u64,
     pub messages: Vec<mira_core::Message>,
+    /// Diff previews for edit/write calls in this session, keyed by
+    /// tool call id. Same shape as the Ready frame's `previews` — the
+    /// subagent panel reuses `historyToEntries` and needs the same
+    /// preview attachment path on reload.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub previews: std::collections::HashMap<String, mira_tools::DiffPreview>,
 }
 
 pub async fn get_session_history(
@@ -134,6 +161,7 @@ pub async fn get_session_history(
         created_at: record.created_at,
         updated_at: record.updated_at,
         messages: record.messages,
+        previews: record.previews,
     };
     Json(view).into_response()
 }
@@ -202,6 +230,7 @@ pub async fn load_session(
     let usage = resumed.usage().await;
     let tasks = resumed.tasks().await;
     let goal = resumed.goal().await;
+    let previews = resumed.previews().await;
     let session_id = resumed.id.to_string();
 
     {
@@ -220,6 +249,7 @@ pub async fn load_session(
         usage,
         tasks,
         goal,
+        previews,
     });
 
     Json(serde_json::json!({ "id": session_id })).into_response()
@@ -264,6 +294,7 @@ pub async fn new_session(State(state): State<AppState>) -> Response {
     let usage = fresh.usage().await;
     let tasks = fresh.tasks().await;
     let goal = fresh.goal().await;
+    let previews = fresh.previews().await;
     let session_id = fresh.id.to_string();
 
     {
@@ -282,6 +313,7 @@ pub async fn new_session(State(state): State<AppState>) -> Response {
         usage,
         tasks,
         goal,
+        previews,
     });
 
     Json(serde_json::json!({ "id": session_id })).into_response()
@@ -359,6 +391,7 @@ pub async fn delete_session(
         let usage = fresh.usage().await;
         let tasks = fresh.tasks().await;
         let goal = fresh.goal().await;
+        let previews = fresh.previews().await;
         let session_id = fresh.id.to_string();
         {
             let mut guard = state.session.write().await;
@@ -374,6 +407,7 @@ pub async fn delete_session(
             usage,
             tasks,
             goal,
+            previews,
         });
     }
 
@@ -403,6 +437,12 @@ fn summarize(r: &SessionRecord, active_id: &str) -> SessionSummary {
         active,
         worktree_status,
         worktree_branch,
+        usage: SessionUsageView {
+            prompt_tokens: r.usage.prompt_tokens,
+            completion_tokens: r.usage.completion_tokens,
+            cached_input_tokens: r.usage.cached_input_tokens,
+            rounds: r.usage.rounds,
+        },
     }
 }
 
@@ -560,7 +600,11 @@ pub async fn set_session_title(
         Ok(r) => r,
         Err(e) => return err(StatusCode::NOT_FOUND, format!("load: {e}")),
     };
-    record.title = if title.is_empty() { None } else { Some(title.clone()) };
+    record.title = if title.is_empty() {
+        None
+    } else {
+        Some(title.clone())
+    };
     if let Err(e) = store.save(&record).await {
         return err(StatusCode::INTERNAL_SERVER_ERROR, format!("save: {e}"));
     }

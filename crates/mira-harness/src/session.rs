@@ -1,18 +1,18 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 
 use futures::{stream::BoxStream, StreamExt};
 use mira_ai::{ChatEvent, ChatProvider, ChatRequest, FinishReason, ResponseFormat};
 use mira_core::{Message, Role, SessionId, ToolCall, ToolResult};
 use mira_memory::{
-    EpisodicEntry, EpisodicSource, EpisodicStore, MemoryQuery, MemorySnapshot,
-    DEFAULT_TOKEN_BUDGET,
+    EpisodicEntry, EpisodicSource, EpisodicStore, MemoryQuery, MemorySnapshot, DEFAULT_TOKEN_BUDGET,
 };
-use mira_policy::{Decision, Policy, Request as PolicyRequest};
-use mira_sandbox::PersistentShell;
-use mira_tools::context::{ChildCancel, ChildTracker};
-use mira_tools::{FileGuard, Registry, TaskStore, ToolContext};
+use mira_policy::{Decision, Mode, Policy, Request as PolicyRequest};
+use mira_sandbox::{PersistentShell, SandboxProfile};
+use mira_tools::context::{ChildCancel, ChildTracker, ToolProgressSink};
+use mira_tools::{compute_preview, DiffPreview, FileGuard, Registry, TaskStore, ToolContext};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::AbortHandle;
@@ -28,6 +28,67 @@ const TOOL_RESULT_HISTORY_CAP: usize = 4000;
 use crate::approver::Approver;
 use crate::event::HarnessEvent;
 use crate::goal::{self, Goal, GoalStatus, GoalVerdict};
+
+/// Type alias for the slot the harness parks the current turn's event
+/// sender into so long-running tools can stream progress out. Held
+/// behind a `std::sync::Mutex` because [`ToolProgressSink::emit`] is
+/// synchronous — locking a tokio mutex from a sync callback isn't
+/// safe. Held very briefly (send-and-return) so std lock contention
+/// doesn't matter.
+type ProgressSlot = Arc<StdMutex<Option<mpsc::Sender<HarnessEvent>>>>;
+
+/// Bridge from tools that emit live output (bash) → the current turn's
+/// event stream. Attached once to the session's `ToolContext` and kept
+/// there for the session's lifetime; each turn installs its own tx via
+/// [`TurnProgress::install`] and drops it via [`TurnProgress::clear`]
+/// so lines from a stale run don't fan into a fresh turn.
+struct TurnProgress {
+    slot: ProgressSlot,
+}
+
+impl TurnProgress {
+    fn new(slot: ProgressSlot) -> Self {
+        Self { slot }
+    }
+}
+
+impl ToolProgressSink for TurnProgress {
+    fn emit(&self, call_id: &str, line: &str) {
+        // std::sync::Mutex — poisoning shouldn't take down the session,
+        // so grab it defensively and fall back to a no-op.
+        let Ok(guard) = self.slot.lock() else { return };
+        if let Some(tx) = guard.as_ref() {
+            // try_send: don't block the sync callback if the channel
+            // buffer is full. A dropped progress line is fine — the
+            // final `ToolEnd` still carries the whole transcript.
+            let _ = tx.try_send(HarnessEvent::ToolProgress {
+                call_id: call_id.to_owned(),
+                line: line.to_owned(),
+            });
+        }
+    }
+}
+
+/// RAII helper that clears the progress slot when it drops. Ensures
+/// `run_loop` unwiring happens regardless of whether the turn ended
+/// normally, cancellation, or panic.
+struct ProgressSlotGuard {
+    slot: ProgressSlot,
+}
+
+impl ProgressSlotGuard {
+    fn new(slot: ProgressSlot) -> Self {
+        Self { slot }
+    }
+}
+
+impl Drop for ProgressSlotGuard {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.slot.lock() {
+            *guard = None;
+        }
+    }
+}
 use crate::persist::{now_ms, now_secs, SessionRecord, SessionStore, TurnMeta, UsageTotals};
 
 /// Runtime configuration for a session. Everything the loop needs besides
@@ -60,10 +121,11 @@ pub struct SessionConfig {
 
 /// Ceiling on tool-call rounds within a single user turn. Guards against
 /// runaway loops (a model calling tools forever) without cutting real
-/// refactors short. Raise via `max_rounds` in `mira.yaml` when 60 isn't
-/// enough — long feature builds legitimately exceed it.
+/// refactors short. Set high so a genuine feature build or repo-wide
+/// refactor never trips it in practice — the runaway-loop guard still
+/// bites, just at 200 rounds instead of a number a real task can hit.
 fn default_max_rounds() -> usize {
-    60
+    200
 }
 
 /// Post-round auto-extractor configuration.
@@ -229,6 +291,20 @@ pub struct Session {
     /// clean stop until the evaluator returns a terminal verdict or the
     /// iteration cap is hit.
     goal: Arc<Mutex<Option<Goal>>>,
+    /// The current turn's event sender, when a turn is active. Long-
+    /// running tools (bash today, others later) route live output
+    /// through the [`ToolProgressSink`] attached to `tool_ctx`; that
+    /// sink reads from this slot so a fresh turn always sees the right
+    /// tx and lines from a cancelled turn don't leak into the next.
+    progress_slot: ProgressSlot,
+    /// Diff previews for edit/write calls, keyed by tool call id.
+    /// Computed inside `dispatch_call` before the tool runs (so the
+    /// "before" file state is still accurate), broadcast live as a
+    /// `HarnessEvent::ToolPreview`, and persisted alongside the
+    /// history so a reloaded transcript renders the same diff the
+    /// user saw. Missing entries fall through to the client's
+    /// arg-only fallback preview.
+    previews: Arc<Mutex<HashMap<String, DiffPreview>>>,
 }
 
 impl Session {
@@ -257,10 +333,29 @@ impl Session {
         // Persistent bash: lazy — the shell struct doesn't fork bash until
         // the first bash command lands. Storing it here just means `cd`,
         // venvs, and env exports persist across calls for the whole session.
+        //
+        // The initial sandbox profile is derived from the policy's mode
+        // so a session that starts in `plan` gets Restricted seatbelt
+        // even before the user issues the first `/mode` command. Mode
+        // changes later flow through `Session::set_sandbox_profile` and
+        // respawn the shell on next use.
+        // Grab the mode via try_lock — Session::new/resume_from are
+        // sync, and at construction the caller owns the Arc so there's
+        // no real contention. On the (impossible-in-practice) contended
+        // branch we fall back to the default profile and log; the
+        // profile will get corrected on the first `/mode` change.
+        let initial_profile = policy
+            .try_lock()
+            .map(|p| profile_for_mode(p.mode()))
+            .unwrap_or_else(|_| {
+                warn!("policy lock contended during Session construction; defaulting sandbox profile");
+                SandboxProfile::default()
+            });
         let cwd_for_shell = tool_ctx.cwd.clone();
-        tool_ctx = tool_ctx.with_shell(Arc::new(Mutex::new(PersistentShell::new(
+        tool_ctx = tool_ctx.with_shell(Arc::new(Mutex::new(PersistentShell::with_profile(
             cwd_for_shell,
             true,
+            initial_profile,
         ))));
         // Wire the child-tracker onto ToolContext so the `agent` tool can
         // register any subagent it spawns with this session's `children`
@@ -276,6 +371,13 @@ impl Session {
         // Fresh session → empty task store.
         let tasks = TaskStore::new();
         tool_ctx = tool_ctx.with_tasks(tasks.clone());
+        // Progress bridge: shared slot the harness parks the current
+        // turn's tx into. The sink itself is a thin wrapper over the
+        // slot; both live for the session's lifetime.
+        let progress_slot: ProgressSlot = Arc::new(StdMutex::new(None));
+        let progress_sink: Arc<dyn ToolProgressSink> =
+            Arc::new(TurnProgress::new(progress_slot.clone()));
+        tool_ctx = tool_ctx.with_progress(progress_sink);
         Self {
             id,
             cfg: Arc::new(Mutex::new(cfg)),
@@ -299,6 +401,8 @@ impl Session {
             children,
             next_child_id,
             goal: Arc::new(Mutex::new(None)),
+            progress_slot,
+            previews: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -325,10 +429,24 @@ impl Session {
         }
         // Resumed sessions get a fresh shell (bash state doesn't survive a
         // restart), but `cd` + env persistence resumes from the next call.
+        // Same mode-derived profile treatment as `Session::new`.
+        // Grab the mode via try_lock — Session::new/resume_from are
+        // sync, and at construction the caller owns the Arc so there's
+        // no real contention. On the (impossible-in-practice) contended
+        // branch we fall back to the default profile and log; the
+        // profile will get corrected on the first `/mode` change.
+        let initial_profile = policy
+            .try_lock()
+            .map(|p| profile_for_mode(p.mode()))
+            .unwrap_or_else(|_| {
+                warn!("policy lock contended during Session construction; defaulting sandbox profile");
+                SandboxProfile::default()
+            });
         let cwd_for_shell = tool_ctx.cwd.clone();
-        tool_ctx = tool_ctx.with_shell(Arc::new(Mutex::new(PersistentShell::new(
+        tool_ctx = tool_ctx.with_shell(Arc::new(Mutex::new(PersistentShell::with_profile(
             cwd_for_shell,
             true,
+            initial_profile,
         ))));
         // Same tracker wiring as `new` — resumed sessions can still spawn
         // subagents and their turns should cascade-cancel with the parent.
@@ -344,6 +462,12 @@ impl Session {
         // reassigned.
         let tasks = TaskStore::restore(record.tasks);
         tool_ctx = tool_ctx.with_tasks(tasks.clone());
+        // Same progress bridge as `new` — resumed sessions stream
+        // bash output too.
+        let progress_slot: ProgressSlot = Arc::new(StdMutex::new(None));
+        let progress_sink: Arc<dyn ToolProgressSink> =
+            Arc::new(TurnProgress::new(progress_slot.clone()));
+        tool_ctx = tool_ctx.with_progress(progress_sink);
         Self {
             id: record.id,
             cfg: Arc::new(Mutex::new(record.cfg)),
@@ -367,6 +491,8 @@ impl Session {
             children,
             next_child_id,
             goal: Arc::new(Mutex::new(record.goal)),
+            progress_slot,
+            previews: Arc::new(Mutex::new(record.previews)),
         }
     }
 
@@ -450,6 +576,13 @@ impl Session {
         self.goal.lock().await.clone()
     }
 
+    /// Snapshot the captured diff previews (keyed by tool call id).
+    /// The server pulls this on Ready so a reloaded transcript can
+    /// restore the same diffs that rendered live.
+    pub async fn previews(&self) -> HashMap<String, DiffPreview> {
+        self.previews.lock().await.clone()
+    }
+
     /// Replace the standing goal. Any previous goal — active or
     /// terminal — is dropped in favour of the new one. Emits
     /// `HarnessEvent::GoalSet` on the caller's event stream is the
@@ -520,12 +653,42 @@ impl Session {
         self.cfg.lock().await.reasoning_effort = effort;
     }
 
+    /// Update the persistent shell's sandbox profile — usually called in
+    /// response to a `/mode` change. When the profile actually changes,
+    /// the shell marks itself dirty so the next bash call respawns with
+    /// the new seatbelt policy; a `plan → auto` switch takes effect
+    /// without a session restart (`cd` / `export` state is lost on
+    /// respawn — the trade for a real containment change).
+    pub async fn set_sandbox_profile(&self, profile: SandboxProfile) {
+        if let Some(shell) = &self.tool_ctx.shell {
+            shell.lock().await.set_profile(profile);
+        }
+    }
+
     /// Run one user turn to completion.
     ///
     /// The returned stream ends with [`HarnessEvent::Done`]. Callers may
     /// drop it early to cancel — the task keeps mutating history until it
     /// hits a checkpoint, then exits when the send channel closes.
     pub async fn send(&self, user_input: impl Into<String>) -> BoxStream<'static, HarnessEvent> {
+        // Repair history before appending the new user turn. A prior
+        // interrupt can abort the loop between `history.push(assistant_msg)`
+        // (with tool_calls) and the matching `Message::tool(...)` push in
+        // `dispatch_call`, leaving orphaned tool_calls in the transcript.
+        // Providers (both Anthropic and OpenAI) reject that shape on the
+        // next request, and even when they don't, the extra reasoning
+        // burns latency. Synthesize a short error tool result for each
+        // dangling call so the transcript stays well-formed.
+        {
+            let mut hist = self.history.lock().await;
+            let repaired = repair_dangling_tool_calls(&mut hist);
+            if repaired > 0 {
+                warn!(
+                    count = repaired,
+                    "history: repaired dangling tool_calls left by a prior interrupt"
+                );
+            }
+        }
         self.history.lock().await.push(Message::user(user_input));
         // Open a new turn timer; `run_loop` stamps `ended_at` on the way out.
         self.turns.lock().await.push(TurnMeta {
@@ -630,6 +793,16 @@ impl ChildTracker for SessionChildTracker {
 const MAX_VERIFY_ATTEMPTS: usize = 3;
 
 async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEvent>) {
+    // Park a clone of the current turn's tx into the shared progress
+    // slot so tools that stream live output (bash's PTY reader) can
+    // fan lines into this turn's event stream. Cleared in the guard
+    // below when the turn winds down so cancelled / dead tools can't
+    // spray into a subsequent turn.
+    if let Ok(mut slot) = sess.progress_slot.lock() {
+        *slot = Some(tx.clone());
+    }
+    let _progress_guard = ProgressSlotGuard::new(sess.progress_slot.clone());
+
     // Outer `'goal_loop` wraps the per-user-turn round loop. When a
     // standing `/goal` is active it drives the evaluator after each
     // clean stop and, on `not_met`, injects a synthetic "keep going"
@@ -685,181 +858,220 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
             /// whole send (goal doesn't get a chance to retry — the
             /// provider might be genuinely down).
             ProviderError,
+            /// Mid-stream failure (SSE dropped, wall-clock timeout, or
+            /// upstream `Err(_)` frame). Distinct from `CleanStop` so
+            /// the goal evaluator doesn't judge a truncated transcript
+            /// as if the model finished on its own.
+            StreamError,
         }
         let mut round_outcome = RoundOutcome::MaxRounds;
 
         for round in 0..cfg.max_rounds {
-        info!(round, "harness: model turn");
+            info!(round, "harness: model turn");
 
-        // Rolling compaction: if history has grown past the trigger,
-        // summarize the older tail via the provider and splice a
-        // single synthetic user message in its place. Kept inside the
-        // round loop so a long turn with many tool calls can also
-        // trigger it (not just the between-turn edge). Failure is
-        // logged and swallowed — running with un-compacted history is
-        // strictly better than aborting the turn.
-        {
-            let mut history = sess.history.lock().await;
-            match crate::history::maybe_compact(
-                &mut history,
-                sess.provider.as_ref(),
-                &cfg.model,
-            )
-            .await
+            // Rolling compaction: if history has grown past the trigger,
+            // summarize the older tail via the provider and splice a
+            // single synthetic user message in its place. Kept inside the
+            // round loop so a long turn with many tool calls can also
+            // trigger it (not just the between-turn edge). Failure is
+            // logged and swallowed — running with un-compacted history is
+            // strictly better than aborting the turn.
             {
-                Ok(Some(n)) => {
-                    let _ = tx
-                        .send(HarnessEvent::Compacted {
-                            messages_removed: n,
-                        })
-                        .await;
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    warn!(error = %e, "compaction failed; continuing with full history");
-                }
-            }
-        }
-
-        let req = ChatRequest {
-            model: cfg.model.clone(),
-            messages: build_request_messages(&sess).await,
-            tools: sess.registry.specs(),
-            temperature: cfg.temperature,
-            max_tokens: cfg.max_tokens,
-            reasoning_effort: cfg.reasoning_effort.clone(),
-            response_format: cfg.response_format.clone(),
-        };
-
-        let mut stream = match sess.provider.stream(req).await {
-            Ok(s) => s,
-            Err(e) => {
-                let _ = tx
-                    .send(HarnessEvent::Warning(format!("provider error: {e}")))
-                    .await;
-                round_outcome = RoundOutcome::ProviderError;
-                break;
-            }
-        };
-
-        let mut assistant_text = String::new();
-        let mut pending_calls: Vec<ToolCall> = Vec::new();
-        let mut finish: FinishReason = FinishReason::Other;
-
-        while let Some(evt) = stream.next().await {
-            match evt {
-                Ok(ChatEvent::TextDelta(t)) => {
-                    assistant_text.push_str(&t);
-                    if tx.send(HarnessEvent::Token(t)).await.is_err() {
-                        return;
+                let mut history = sess.history.lock().await;
+                match crate::history::maybe_compact(
+                    &mut history,
+                    sess.provider.as_ref(),
+                    &cfg.model,
+                )
+                .await
+                {
+                    Ok(Some(n)) => {
+                        let _ = tx
+                            .send(HarnessEvent::Compacted {
+                                messages_removed: n,
+                            })
+                            .await;
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        warn!(error = %e, "compaction failed; continuing with full history");
                     }
                 }
-                Ok(ChatEvent::ToolCalls(calls)) => {
-                    pending_calls = calls;
-                }
-                Ok(ChatEvent::Usage(round)) => {
-                    let totals = {
-                        let mut u = sess.usage.lock().await;
-                        u.add_round(round);
-                        *u
-                    };
-                    // Ignore send errors — a dropped receiver just means the
-                    // UI stopped listening; the totals are still recorded.
-                    let _ = tx.send(HarnessEvent::Usage { round, totals }).await;
-                }
-                Ok(ChatEvent::Done(reason)) => {
-                    finish = reason;
-                    break;
-                }
+            }
+
+            let req = ChatRequest {
+                model: cfg.model.clone(),
+                messages: build_request_messages(&sess).await,
+                tools: sess.registry.specs(),
+                temperature: cfg.temperature,
+                max_tokens: cfg.max_tokens,
+                reasoning_effort: cfg.reasoning_effort.clone(),
+                response_format: cfg.response_format.clone(),
+            };
+
+            let mut stream = match sess.provider.stream(req).await {
+                Ok(s) => s,
                 Err(e) => {
                     let _ = tx
-                        .send(HarnessEvent::Warning(format!("stream error: {e}")))
+                        .send(HarnessEvent::Warning(format!("provider error: {e}")))
                         .await;
+                    round_outcome = RoundOutcome::ProviderError;
                     break;
                 }
+            };
+
+            let mut assistant_text = String::new();
+            let mut pending_calls: Vec<ToolCall> = Vec::new();
+            let mut finish: FinishReason = FinishReason::Other;
+            // Tracks whether the stream ended cleanly (Done frame) or
+            // via error/timeout. Only a clean Done keeps CleanStop
+            // eligibility; anything else routes into `StreamError` so
+            // the goal evaluator can skip a truncated transcript
+            // instead of scoring the model on partial output.
+            let mut stream_errored = false;
+            // Per-round wall-clock guard on the provider stream — a
+            // hung SSE socket used to park the turn indefinitely. The
+            // ceiling matches other bounded LLM calls (evaluator /
+            // extractor) so a legitimate long stream still completes;
+            // pathological hangs surface as `StreamError`.
+            const STREAM_TIMEOUT_SECS: u64 = 300;
+            let stream_deadline = tokio::time::Instant::now()
+                + std::time::Duration::from_secs(STREAM_TIMEOUT_SECS);
+
+            loop {
+                let next = tokio::time::timeout_at(stream_deadline, stream.next()).await;
+                match next {
+                    Err(_) => {
+                        stream_errored = true;
+                        let _ = tx
+                            .send(HarnessEvent::Warning(format!(
+                                "stream timed out after {STREAM_TIMEOUT_SECS}s — turn aborted"
+                            )))
+                            .await;
+                        break;
+                    }
+                    Ok(None) => break,
+                    Ok(Some(evt)) => match evt {
+                        Ok(ChatEvent::TextDelta(t)) => {
+                            assistant_text.push_str(&t);
+                            if tx.send(HarnessEvent::Token(t)).await.is_err() {
+                                return;
+                            }
+                        }
+                        Ok(ChatEvent::ToolCalls(calls)) => {
+                            pending_calls = calls;
+                        }
+                        Ok(ChatEvent::Usage(round)) => {
+                            let totals = {
+                                let mut u = sess.usage.lock().await;
+                                u.add_round(round);
+                                *u
+                            };
+                            // Ignore send errors — a dropped receiver just means the
+                            // UI stopped listening; the totals are still recorded.
+                            let _ = tx.send(HarnessEvent::Usage { round, totals }).await;
+                        }
+                        Ok(ChatEvent::Done(reason)) => {
+                            finish = reason;
+                            break;
+                        }
+                        Err(e) => {
+                            stream_errored = true;
+                            let _ = tx
+                                .send(HarnessEvent::Warning(format!("stream error: {e}")))
+                                .await;
+                            break;
+                        }
+                    },
+                }
             }
-        }
+            // Fold stream error / timeout into the round outcome so the
+            // goal-loop tick below sees StreamError instead of falling
+            // through to CleanStop with a truncated assistant message.
+            if stream_errored {
+                round_outcome = RoundOutcome::StreamError;
+            }
 
-        // Record the assistant turn — may carry text, tool calls, or both.
-        let assistant_msg = if pending_calls.is_empty() {
-            Message::assistant(assistant_text.clone())
-        } else if assistant_text.is_empty() {
-            Message::assistant_calls(pending_calls.clone())
-        } else {
-            let mut m = Message::assistant(assistant_text.clone());
-            m.tool_calls = pending_calls.clone();
-            m
-        };
-        sess.history.lock().await.push(assistant_msg);
-        checkpoint(&sess).await;
-        let _ = tx.send(HarnessEvent::TurnComplete).await;
+            // Record the assistant turn — may carry text, tool calls, or both.
+            let assistant_msg = if pending_calls.is_empty() {
+                Message::assistant(assistant_text.clone())
+            } else if assistant_text.is_empty() {
+                Message::assistant_calls(pending_calls.clone())
+            } else {
+                let mut m = Message::assistant(assistant_text.clone());
+                m.tool_calls = pending_calls.clone();
+                m
+            };
+            sess.history.lock().await.push(assistant_msg);
+            checkpoint(&sess).await;
+            let _ = tx.send(HarnessEvent::TurnComplete).await;
 
-        if pending_calls.is_empty() || finish == FinishReason::Stop {
-            // Apply-verify: if the model wrote source files this turn, run
-            // the project's natural safety check (cargo check / tsc / …).
-            // On failure, feed the errors back and let the model take one
-            // more crack at it — up to MAX_VERIFY_ATTEMPTS total.
-            if verify_attempts < MAX_VERIFY_ATTEMPTS {
-                if let Some((check, output)) =
-                    run_verify(&sess, &writes_at_turn_start, &tx).await
-                {
-                    verify_attempts += 1;
-                    // Inject the failure as a user message so the next
-                    // model round sees it as fresh feedback (rather than
-                    // as a tool_result which requires a matching call).
-                    let synthetic = format!(
-                        "The `{}` check just failed after your last edits:\n\n\
+            if pending_calls.is_empty() || finish == FinishReason::Stop {
+                // Apply-verify: if the model wrote source files this turn, run
+                // the project's natural safety check (cargo check / tsc / …).
+                // On failure, feed the errors back and let the model take one
+                // more crack at it — up to MAX_VERIFY_ATTEMPTS total.
+                if verify_attempts < MAX_VERIFY_ATTEMPTS {
+                    if let Some((check, output)) =
+                        run_verify(&sess, &writes_at_turn_start, &tx).await
+                    {
+                        verify_attempts += 1;
+                        // Inject the failure as a user message so the next
+                        // model round sees it as fresh feedback (rather than
+                        // as a tool_result which requires a matching call).
+                        let synthetic = format!(
+                            "The `{}` check just failed after your last edits:\n\n\
                          ```\n{}\n```\n\n\
                          Fix the errors and continue. You have {} more automatic \
                          verify retries before I stop.",
-                        check.name,
-                        truncate_for_history(&output),
-                        MAX_VERIFY_ATTEMPTS - verify_attempts,
-                    );
-                    sess.history.lock().await.push(Message::user(synthetic));
-                    continue;
-                }
-            } else {
-                // We hit the retry cap. Emit a warning so the user knows
-                // and doesn't wonder why the errors are still there.
-                let _ = tx
-                    .send(HarnessEvent::Warning(format!(
+                            check.name,
+                            truncate_for_history(&output),
+                            MAX_VERIFY_ATTEMPTS - verify_attempts,
+                        );
+                        sess.history.lock().await.push(Message::user(synthetic));
+                        continue;
+                    }
+                } else {
+                    // We hit the retry cap. Emit a warning so the user knows
+                    // and doesn't wonder why the errors are still there.
+                    let _ = tx
+                        .send(HarnessEvent::Warning(format!(
                         "[verify] still failing after {MAX_VERIFY_ATTEMPTS} attempts — stopping"
                     )))
-                    .await;
+                        .await;
+                }
+
+                round_outcome = RoundOutcome::CleanStop;
+                break;
             }
 
-            round_outcome = RoundOutcome::CleanStop;
-            break;
-        }
-
-        // Dispatch calls in batches. Consecutive parallel-safe calls
-        // (`Tool::parallel_safe(...)` = true) run concurrently via
-        // `join_all`; anything else stays sequential. Preserves relative
-        // order across batches so `edit → agent → read` semantics stay
-        // intact — the model expects the batch of writes to land before
-        // the reads that follow.
-        let batches = plan_dispatch_batches(&sess, pending_calls).await;
-        for batch in batches {
-            if batch.calls.len() == 1 || !batch.parallel {
-                for call in batch.calls {
-                    if dispatch_call(&sess, call, &tx).await {
+            // Dispatch calls in batches. Consecutive parallel-safe calls
+            // (`Tool::parallel_safe(...)` = true) run concurrently via
+            // `join_all`; anything else stays sequential. Preserves relative
+            // order across batches so `edit → agent → read` semantics stay
+            // intact — the model expects the batch of writes to land before
+            // the reads that follow.
+            let batches = plan_dispatch_batches(&sess, pending_calls).await;
+            for batch in batches {
+                if batch.calls.len() == 1 || !batch.parallel {
+                    for call in batch.calls {
+                        if dispatch_call(&sess, call, &tx).await {
+                            any_successful_tool_call = true;
+                        }
+                    }
+                } else {
+                    let futures: Vec<_> = batch
+                        .calls
+                        .into_iter()
+                        .map(|call| dispatch_call(&sess, call, &tx))
+                        .collect();
+                    let outcomes = futures::future::join_all(futures).await;
+                    if outcomes.into_iter().any(|ok| ok) {
                         any_successful_tool_call = true;
                     }
                 }
-            } else {
-                let futures: Vec<_> = batch
-                    .calls
-                    .into_iter()
-                    .map(|call| dispatch_call(&sess, call, &tx))
-                    .collect();
-                let outcomes = futures::future::join_all(futures).await;
-                if outcomes.into_iter().any(|ok| ok) {
-                    any_successful_tool_call = true;
-                }
             }
-        }
-        checkpoint(&sess).await;
+            checkpoint(&sess).await;
         }
         // ---- end of round loop ----
 
@@ -891,6 +1103,14 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
             // the same way. Exit the whole send.
             break 'goal_loop;
         }
+        if round_outcome == RoundOutcome::StreamError {
+            // Mid-stream drop / wall-clock timeout — the transcript is
+            // truncated, so grading the goal on this iteration would be
+            // meaningless (and could flip a passing goal to `impossible`
+            // on an infra glitch). Exit the send; the next user turn
+            // can retry cleanly.
+            break 'goal_loop;
+        }
 
         // ---- goal-loop tick ----
         //
@@ -911,6 +1131,7 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
             ));
             *sess.goal.lock().await = Some(current_goal.clone());
             checkpoint(&sess).await;
+            record_goal_outcome_to_episodic(&sess, &current_goal).await;
             let _ = tx
                 .send(HarnessEvent::GoalDone {
                     status: current_goal.status,
@@ -920,6 +1141,50 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
             break 'goal_loop;
         }
 
+        // External verifier gate. When the goal declares a
+        // `verify` command, we run it BEFORE the LLM evaluator on
+        // every iteration:
+        //   - fail → short-circuit to `NotMet` with the command's
+        //     tail-output as the reason; SKIP the LLM call entirely
+        //     (this is the anti-gaming fix — a model that claims
+        //     "tests pass" can't lie its way past `cargo test`).
+        //   - pass → still call the LLM evaluator; the script is a
+        //     *necessary* condition, not a sufficient one (tests can
+        //     pass while the API is nonsensical).
+        //   - run error → treated as `NotMet` with a warning so a
+        //     broken verify command doesn't wedge the goal loop.
+        let condition = current_goal.condition.clone();
+        let mut short_circuit_eval: Option<goal::Evaluation> = None;
+        if let Some(verify) = current_goal.verify.clone() {
+            match goal::run_verify(&sess.tool_ctx.sandbox, &sess.tool_ctx.cwd, &verify).await {
+                Ok(outcome) if outcome.passed => {
+                    // Fall through to the LLM evaluator.
+                }
+                Ok(outcome) => {
+                    // Verify failed — short-circuit to NotMet with the
+                    // command's output as the reason. The LLM never sees
+                    // the transcript this iteration, so we save both cost
+                    // and a wrong verdict.
+                    short_circuit_eval = Some(goal::Evaluation {
+                        verdict: GoalVerdict::NotMet,
+                        reason: outcome.short_reason(),
+                    });
+                }
+                Err(err) => {
+                    warn!(%err, "goal verify command errored; treating as not_met");
+                    let _ = tx
+                        .send(HarnessEvent::Warning(format!(
+                            "[goal] verify command errored: {err} — treating as not_met"
+                        )))
+                        .await;
+                    short_circuit_eval = Some(goal::Evaluation {
+                        verdict: GoalVerdict::NotMet,
+                        reason: format!("verify error: {err}"),
+                    });
+                }
+            }
+        }
+
         // Evaluate. Failures are downgraded to `not_met` with a warning
         // so a transient provider blip doesn't kill an in-progress
         // autonomous run — the next iteration gets another shot.
@@ -927,27 +1192,24 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
             .evaluator_model
             .clone()
             .unwrap_or_else(|| cfg.model.clone());
-        let condition = current_goal.condition.clone();
         let transcript = sess.history.lock().await.clone();
-        let eval = match goal::evaluate(
-            sess.provider.as_ref(),
-            &eval_model,
-            &condition,
-            &transcript,
-        )
-        .await
-        {
-            Ok(e) => e,
-            Err(err) => {
-                warn!(%err, "goal evaluator failed; treating as not_met");
-                let _ = tx
-                    .send(HarnessEvent::Warning(format!(
-                        "[goal] evaluator failed: {err} — treating as not_met"
-                    )))
-                    .await;
-                goal::Evaluation {
-                    verdict: GoalVerdict::NotMet,
-                    reason: format!("evaluator error: {err}"),
+        let eval = if let Some(pre) = short_circuit_eval {
+            pre
+        } else {
+            match goal::evaluate(sess.provider.as_ref(), &eval_model, &condition, &transcript).await
+            {
+                Ok(e) => e,
+                Err(err) => {
+                    warn!(%err, "goal evaluator failed; treating as not_met");
+                    let _ = tx
+                        .send(HarnessEvent::Warning(format!(
+                            "[goal] evaluator failed: {err} — treating as not_met"
+                        )))
+                        .await;
+                    goal::Evaluation {
+                        verdict: GoalVerdict::NotMet,
+                        reason: format!("evaluator error: {err}"),
+                    }
                 }
             }
         };
@@ -964,6 +1226,29 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
             GoalVerdict::NeedsUser => current_goal.status = GoalStatus::NeedsUser,
             GoalVerdict::NotMet => {}
         }
+
+        // Budget check. Runs even when the LLM said Met — a cap
+        // breach is a terminal state either way, but we want a
+        // truthful reason. Only overrides an *Active* verdict; a
+        // clean `Met` from the LLM wins over a budget breach that
+        // happens on the same iteration (the work finished, cost
+        // just crept over — no reason to hide the success).
+        if current_goal.status.is_active() {
+            let usage_now = *sess.usage.lock().await;
+            match goal::check_budget(
+                current_goal.budget_tokens,
+                current_goal.budget_usd,
+                &cfg.model,
+                usage_now,
+            ) {
+                goal::BudgetCheck::Exceeded(reason) => {
+                    current_goal.status = GoalStatus::Exhausted;
+                    current_goal.last_reason = Some(reason);
+                }
+                goal::BudgetCheck::Skipped | goal::BudgetCheck::Under => {}
+            }
+        }
+
         let status_now = current_goal.status;
         *sess.goal.lock().await = Some(current_goal.clone());
         checkpoint(&sess).await;
@@ -978,6 +1263,7 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
             .await;
 
         if !status_now.is_active() {
+            record_goal_outcome_to_episodic(&sess, &current_goal).await;
             let _ = tx
                 .send(HarnessEvent::GoalDone {
                     status: status_now,
@@ -1065,11 +1351,7 @@ async fn plan_dispatch_batches(sess: &Session, calls: Vec<ToolCall>) -> Vec<Disp
 /// all `Send + Sync` (Arc-behind-Mutex / cloneable), and the tool_ctx
 /// is shared by design. Concurrent history pushes serialize on the
 /// history mutex, which keeps the recorded transcript coherent.
-async fn dispatch_call(
-    sess: &Session,
-    call: ToolCall,
-    tx: &mpsc::Sender<HarnessEvent>,
-) -> bool {
+async fn dispatch_call(sess: &Session, call: ToolCall, tx: &mpsc::Sender<HarnessEvent>) -> bool {
     let Some(tool) = sess.registry.get(&call.function.name) else {
         let msg = format!("no such tool: {}", call.function.name);
         warn!(tool = %call.function.name, "unknown tool call");
@@ -1082,19 +1364,67 @@ async fn dispatch_call(
         return false;
     };
 
-    let target = tool.policy_target(&call);
-    let decision = sess.policy.lock().await.evaluate(&PolicyRequest {
-        action: tool.action(),
-        target: &target,
-    });
+    // Every path/target this call would touch. For single-target tools
+    // this is a one-element vec matching the old `policy_target()`
+    // return; for multi-target tools (apply_patch) it's every affected
+    // source AND destination. Deny wins over Ask wins over Allow: the
+    // first Deny fails the whole call; any Ask (with no Deny) opens
+    // one approval modal for the batch.
+    let targets = tool.policy_targets(&call);
+    let action = tool.action();
+    let mut has_ask = false;
+    let mut deny_target: Option<String> = None;
+    {
+        let policy = sess.policy.lock().await;
+        for t in &targets {
+            let d = policy.evaluate(&PolicyRequest { action, target: t });
+            match d {
+                Decision::Deny => {
+                    deny_target = Some(t.clone());
+                    break;
+                }
+                Decision::Ask => has_ask = true,
+                Decision::Allow => {}
+            }
+        }
+    }
 
-    let allowed = match decision {
-        Decision::Allow => true,
-        Decision::Deny => false,
-        Decision::Ask => sess.approver.approve(&call, decision).await,
+    let allowed = if deny_target.is_some() {
+        false
+    } else if has_ask {
+        sess.approver.approve(&call, Decision::Ask).await
+    } else {
+        true
     };
+    // For the denial message we prefer the specific target that failed;
+    // callers can then see exactly which path violated policy.
+    let target = deny_target
+        .clone()
+        .unwrap_or_else(|| targets.first().cloned().unwrap_or_default());
 
     let _ = tx.send(HarnessEvent::ToolStart(call.clone())).await;
+
+    // Capture the diff preview *before* running the tool so the "before"
+    // file state matches what the user saw live. `compute_preview` is a
+    // no-op for tools without a natural preview (bash, read_file, etc.),
+    // so the map only ever grows with edit/write entries. Persisted via
+    // `checkpoint` and broadcast so both live auto-allow flows and
+    // reloaded transcripts render the real diff instead of the arg-only
+    // reconstruction fallback.
+    if allowed {
+        if let Some(preview) = compute_preview(&sess.tool_ctx.cwd, &call).await {
+            sess.previews
+                .lock()
+                .await
+                .insert(call.id.to_string(), preview.clone());
+            let _ = tx
+                .send(HarnessEvent::ToolPreview {
+                    call_id: call.id.to_string(),
+                    preview,
+                })
+                .await;
+        }
+    }
 
     let result = if !allowed {
         ToolResult::err(
@@ -1141,6 +1471,72 @@ async fn dispatch_call(
     ok
 }
 
+/// Write a one-line summary of a just-terminated `/goal` into the
+/// session's episodic store (if one is wired). Cross-session
+/// carryover: a future session inspecting `.mira/episodic.jsonl`
+/// picks up "we tried X, verdict was Y" and can reason about it.
+///
+/// Only runs on non-`Cleared` terminal states — a user-cancelled
+/// goal isn't a learning signal, just a manual abort. Failures are
+/// warned and swallowed; a broken episodic write should never kill
+/// the harness loop.
+async fn record_goal_outcome_to_episodic(sess: &Session, goal: &Goal) {
+    let Some(episodic) = sess.tool_ctx.episodic.clone() else {
+        return;
+    };
+    let Some(text) = goal_outcome_summary(goal) else {
+        return;
+    };
+    let mut entry = EpisodicEntry::now(text, EpisodicSource::Auto);
+    entry = entry.with_session_id(sess.id.to_string());
+    if let Err(e) = episodic.append(entry).await {
+        warn!(%e, "episodic write for goal outcome failed");
+    }
+}
+
+/// Format a terminal-goal outcome as a one-liner for `.mira/episodic.jsonl`.
+/// Returns `None` for goals that aren't in a learning-worthy terminal
+/// state (Active mid-loop, or Cleared by the user).
+fn goal_outcome_summary(goal: &Goal) -> Option<String> {
+    let verdict = match goal.status {
+        GoalStatus::Met => "met",
+        GoalStatus::Impossible => "impossible",
+        GoalStatus::NeedsUser => "needs_user",
+        GoalStatus::Exhausted => "exhausted",
+        GoalStatus::Cleared | GoalStatus::Active => return None,
+    };
+    let contract = one_line(&goal.condition, 200);
+    let reason = goal
+        .last_reason
+        .as_deref()
+        .map(|r| one_line(r, 240))
+        .unwrap_or_else(|| "(no evaluator reason recorded)".to_owned());
+    Some(format!(
+        "Goal outcome: {verdict} after {n}/{cap} iteration{s}. \
+         Contract: \"{contract}\". Reason: {reason}",
+        n = goal.iterations,
+        cap = goal.max_iterations,
+        s = if goal.iterations == 1 { "" } else { "s" },
+    ))
+}
+
+/// Collapse newlines and trim `s` to at most `max` chars — episodic
+/// entries are one JSON line each, so multi-paragraph content should
+/// flatten before writing.
+fn one_line(s: &str, max: usize) -> String {
+    let flat = s
+        .replace(['\n', '\r'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if flat.chars().count() <= max {
+        return flat;
+    }
+    let mut out: String = flat.chars().take(max).collect();
+    out.push('…');
+    out
+}
+
 /// Snapshot the session and save through the attached store, if any.
 /// Failures are logged and swallowed — losing a checkpoint shouldn't kill
 /// the running conversation.
@@ -1159,6 +1555,7 @@ async fn checkpoint(sess: &Session) {
         parent_id: sess.parent_id.clone(),
         tasks: sess.tasks.snapshot_all().await,
         goal: sess.goal.lock().await.clone(),
+        previews: sess.previews.lock().await.clone(),
     };
     if let Err(e) = store.save(&record).await {
         warn!(session = %sess.id, %e, "session checkpoint failed");
@@ -1205,10 +1602,8 @@ async fn run_verify(
 ) -> Option<(crate::verify::VerifyCheck, String)> {
     let guard = sess.tool_ctx.guard.as_ref()?;
     let now = guard.written_snapshot().await;
-    let new_writes: Vec<std::path::PathBuf> = now
-        .difference(writes_at_turn_start)
-        .cloned()
-        .collect();
+    let new_writes: Vec<std::path::PathBuf> =
+        now.difference(writes_at_turn_start).cloned().collect();
     if new_writes.is_empty() {
         return None;
     }
@@ -1299,7 +1694,10 @@ async fn maybe_spawn_extractor(
                 // Extractor ran but nothing worth remembering — stay quiet.
             }
             Ok(Err(e)) => warn!(error = %e, "auto-extract: failed"),
-            Err(_) => warn!(timeout_s = EXTRACTION_TIMEOUT.as_secs(), "auto-extract: timed out"),
+            Err(_) => warn!(
+                timeout_s = EXTRACTION_TIMEOUT.as_secs(),
+                "auto-extract: timed out"
+            ),
         }
     });
 }
@@ -1464,7 +1862,10 @@ fn is_duplicate(candidate: &str, existing: &[EpisodicEntry]) -> bool {
 }
 
 fn normalize_for_dedup(s: &str) -> String {
-    s.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ")
+    s.to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Build the message list for one provider round.
@@ -1488,7 +1889,10 @@ async fn build_request_messages(sess: &Session) -> Vec<Message> {
     // retrieval is off, pass `None` and the snapshot falls back to the
     // legacy dump-everything shape.
     let query = if sess.memory_retrieval.enabled {
-        Some(build_memory_query(&msgs, sess.memory_retrieval.token_budget))
+        Some(build_memory_query(
+            &msgs,
+            sess.memory_retrieval.token_budget,
+        ))
     } else {
         None
     };
@@ -1562,4 +1966,232 @@ fn now_secs_wall() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Map a policy [`Mode`] to the [`SandboxProfile`] the persistent shell
+/// should spawn under. The mapping is deliberately conservative:
+///
+///   - `plan` and `manual` → `Restricted` (deny writes and network) —
+///     these modes exist for read-only exploration and per-call user
+///     approval respectively; a bash command that slipped past the
+///     approver still can't damage the filesystem or exfiltrate data.
+///   - `auto` and `edit` → `Workspace` — the working posture. Writes
+///     under cwd + `~/.mira`, network open for `curl` / `git fetch` /
+///     package managers.
+///   - `yolo` → `Unrestricted` — no seatbelt. Only what the user
+///     explicitly asked for.
+pub fn profile_for_mode(mode: Mode) -> SandboxProfile {
+    match mode {
+        Mode::Plan | Mode::Manual => SandboxProfile::Restricted,
+        Mode::Auto | Mode::Edit => SandboxProfile::Workspace,
+        Mode::Yolo => SandboxProfile::Unrestricted,
+    }
+}
+
+/// Walk history and synthesize a `Message::tool` error reply for every
+/// tool_call on the most recent assistant message that lacks a matching
+/// `tool_call_id` response. Called at the top of `send` so an
+/// interrupted turn (abort between `history.push(assistant_msg)` and
+/// the `Message::tool(...)` push in `dispatch_call`) can't leave a
+/// broken transcript that the provider rejects on the next request.
+///
+/// Returns the number of orphaned calls that were filled in. Zero means
+/// history was already coherent — the common case.
+fn repair_dangling_tool_calls(history: &mut Vec<Message>) -> usize {
+    let assistant_idx = match history
+        .iter()
+        .rposition(|m| m.role == Role::Assistant && !m.tool_calls.is_empty())
+    {
+        Some(idx) => idx,
+        None => return 0,
+    };
+
+    let expected_ids: Vec<String> = history[assistant_idx]
+        .tool_calls
+        .iter()
+        .map(|c| c.id.to_string())
+        .collect();
+
+    // Any messages already sitting after this assistant turn that answer
+    // one of its calls. Provider order isn't guaranteed strict, so we
+    // check by id rather than positional pairing.
+    let answered: std::collections::HashSet<String> = history[assistant_idx + 1..]
+        .iter()
+        .filter_map(|m| m.tool_call_id.as_ref().map(|id| id.to_string()))
+        .collect();
+
+    let missing: Vec<String> = expected_ids
+        .into_iter()
+        .filter(|id| !answered.contains(id))
+        .collect();
+
+    if missing.is_empty() {
+        return 0;
+    }
+
+    let n = missing.len();
+    for call_id in missing {
+        // The exact wording is stable copy — the model reads this back
+        // as the tool's own output. Kept short so it doesn't bloat the
+        // context; kept explicit so the model can see WHY the call
+        // returned nothing and choose whether to retry.
+        history.push(Message::tool(
+            call_id.into(),
+            "(previous turn was interrupted — this tool call did not complete)".to_owned(),
+        ));
+    }
+    n
+}
+
+#[cfg(test)]
+mod history_repair_tests {
+    use super::*;
+    use mira_core::message::{ToolCallFunction, ToolCallKind};
+    use mira_core::{ToolCall, ToolCallId};
+
+    fn call(id: &str, name: &str) -> ToolCall {
+        ToolCall {
+            id: ToolCallId::from(id),
+            kind: ToolCallKind::Function,
+            function: ToolCallFunction {
+                name: name.to_owned(),
+                arguments: "{}".to_owned(),
+            },
+        }
+    }
+
+    #[test]
+    fn coherent_history_is_untouched() {
+        let mut hist = vec![
+            Message::user("hi"),
+            {
+                let mut m = Message::assistant("");
+                m.tool_calls = vec![call("c1", "read_file")];
+                m
+            },
+            Message::tool(ToolCallId::from("c1"), "ok"),
+        ];
+        assert_eq!(repair_dangling_tool_calls(&mut hist), 0);
+        assert_eq!(hist.len(), 3);
+    }
+
+    #[test]
+    fn dangling_call_gets_synthetic_reply() {
+        let mut hist = vec![
+            Message::user("hi"),
+            {
+                let mut m = Message::assistant("");
+                m.tool_calls = vec![call("c1", "read_file"), call("c2", "bash")];
+                m
+            },
+            // Only c1 was answered before interrupt.
+            Message::tool(ToolCallId::from("c1"), "ok"),
+        ];
+        assert_eq!(repair_dangling_tool_calls(&mut hist), 1);
+        // c2 now has a placeholder result appended.
+        let last = hist.last().unwrap();
+        assert_eq!(last.role, Role::Tool);
+        assert_eq!(
+            last.tool_call_id.as_ref().map(|id| id.to_string()),
+            Some("c2".to_owned())
+        );
+        assert!(last
+            .content
+            .as_deref()
+            .unwrap_or("")
+            .contains("interrupted"));
+    }
+
+    #[test]
+    fn history_with_no_assistant_calls_is_noop() {
+        let mut hist = vec![Message::user("hi"), Message::assistant("hey")];
+        assert_eq!(repair_dangling_tool_calls(&mut hist), 0);
+    }
+}
+
+#[cfg(test)]
+mod goal_outcome_tests {
+    use super::*;
+
+    fn goal_with(status: GoalStatus, iterations: usize, reason: Option<&str>) -> Goal {
+        let mut g = Goal::new("Make the tests pass");
+        g.status = status;
+        g.iterations = iterations;
+        g.last_reason = reason.map(String::from);
+        g
+    }
+
+    #[test]
+    fn active_goal_yields_no_summary() {
+        assert!(goal_outcome_summary(&goal_with(GoalStatus::Active, 0, None)).is_none());
+    }
+
+    #[test]
+    fn cleared_goal_yields_no_summary() {
+        // A user-cancelled goal isn't a learning signal.
+        assert!(
+            goal_outcome_summary(&goal_with(GoalStatus::Cleared, 5, Some("user cleared")))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn met_goal_records_verdict_and_reason() {
+        let g = goal_with(
+            GoalStatus::Met,
+            3,
+            Some("All 42 tests pass; grep found no v1 sites"),
+        );
+        let s = goal_outcome_summary(&g).unwrap();
+        assert!(s.starts_with("Goal outcome: met after 3/20 iterations."));
+        assert!(s.contains("Make the tests pass"));
+        assert!(s.contains("All 42 tests pass"));
+    }
+
+    #[test]
+    fn exhausted_goal_records_iteration_cap() {
+        let g = goal_with(GoalStatus::Exhausted, 20, Some("hit iteration cap of 20"));
+        let s = goal_outcome_summary(&g).unwrap();
+        assert!(s.contains("exhausted"));
+        assert!(s.contains("20/20"));
+    }
+
+    #[test]
+    fn needs_user_goal_recorded() {
+        let g = goal_with(GoalStatus::NeedsUser, 4, Some("missing GITHUB_TOKEN"));
+        let s = goal_outcome_summary(&g).unwrap();
+        assert!(s.contains("needs_user"));
+        assert!(s.contains("GITHUB_TOKEN"));
+    }
+
+    #[test]
+    fn missing_reason_gets_placeholder() {
+        let g = goal_with(GoalStatus::Impossible, 2, None);
+        let s = goal_outcome_summary(&g).unwrap();
+        assert!(s.contains("impossible"));
+        assert!(s.contains("no evaluator reason recorded"));
+    }
+
+    #[test]
+    fn one_iteration_uses_singular() {
+        let g = goal_with(GoalStatus::Met, 1, Some("done"));
+        let s = goal_outcome_summary(&g).unwrap();
+        assert!(s.contains("1/20 iteration."), "singular form: {s}");
+    }
+
+    #[test]
+    fn one_line_flattens_newlines_and_truncates() {
+        let long = format!("line one\nline two\r\nline three {}", "x".repeat(500));
+        let out = one_line(&long, 100);
+        assert!(!out.contains('\n'));
+        assert!(!out.contains('\r'));
+        assert!(out.ends_with('…'));
+        assert!(out.chars().count() <= 101, "len {}", out.chars().count());
+    }
+
+    #[test]
+    fn one_line_short_input_untouched_except_flattening() {
+        let s = one_line("a\nb  c", 50);
+        assert_eq!(s, "a b c");
+    }
 }

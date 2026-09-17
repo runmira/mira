@@ -16,7 +16,12 @@ export function Markdown({ text }: Props) {
     <div className="md">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
-        rehypePlugins={[[rehypeHighlight, { detect: true, ignoreMissing: true }]]}
+        // `detect: false` — only highlight fences that explicitly declare
+        // a language. Auto-detection guessed models' unlabeled markdown
+        // blocks as Python and painted them in syntax colors, eating the
+        // actual formatting (**bold**, `→`, etc.) inside. Falling back
+        // to plain monospaced is strictly safer.
+        rehypePlugins={[[rehypeHighlight, { detect: false, ignoreMissing: true }]]}
         components={{
           // react-markdown wraps fenced code in `<pre><code>...</code></pre>`.
           // We manage our own container inside the code renderer, so make the

@@ -224,10 +224,12 @@ impl ChatProvider for Anthropic {
                         let msg = serde_json::from_str::<ErrorEvent>(&evt.data)
                             .map(|e| format!("{}: {}", e.error.kind, e.error.message))
                             .unwrap_or_else(|_| evt.data.clone());
-                        let _ = tx.send(Err(ProviderError::Status {
-                            status: 200,
-                            body: msg,
-                        })).await;
+                        let _ = tx
+                            .send(Err(ProviderError::Status {
+                                status: 200,
+                                body: msg,
+                            }))
+                            .await;
                         return;
                     }
                     "ping" | "" => {
@@ -579,10 +581,9 @@ fn build_messages(messages: &[Message]) -> Result<Vec<WireMessage<'_>>, Provider
         match msg.role {
             Role::System => {}
             Role::Tool => {
-                let call_id = msg
-                    .tool_call_id
-                    .as_ref()
-                    .ok_or_else(|| ProviderError::Config("tool message missing tool_call_id".into()))?;
+                let call_id = msg.tool_call_id.as_ref().ok_or_else(|| {
+                    ProviderError::Config("tool message missing tool_call_id".into())
+                })?;
                 pending_tool_results.push(WireContentBlock::ToolResult {
                     tool_use_id: call_id.as_str(),
                     content: msg.content.as_deref().unwrap_or(""),
@@ -828,10 +829,7 @@ mod tests {
 
     #[test]
     fn system_hoisted_to_top_level_and_removed_from_messages() {
-        let req = req_with(vec![
-            Message::system("SYS"),
-            Message::user("hi"),
-        ]);
+        let req = req_with(vec![Message::system("SYS"), Message::user("hi")]);
         let body = WireRequest::build(&req, false).unwrap();
         let json = serde_json::to_value(&body).unwrap();
         assert_eq!(json["system"], serde_json::json!("SYS"));
@@ -858,10 +856,7 @@ mod tests {
 
     #[test]
     fn caching_off_serializes_system_as_string() {
-        let req = req_with(vec![
-            Message::system("SYS"),
-            Message::user("hi"),
-        ]);
+        let req = req_with(vec![Message::system("SYS"), Message::user("hi")]);
         let body = WireRequest::build(&req, false).unwrap();
         let json = serde_json::to_value(&body).unwrap();
         assert!(json["system"].is_string());
@@ -1130,6 +1125,9 @@ mod tests {
             }
             other => panic!("expected Usage, got {other:?}"),
         }
-        assert!(matches!(&events[4], ChatEvent::Done(FinishReason::ToolCalls)));
+        assert!(matches!(
+            &events[4],
+            ChatEvent::Done(FinishReason::ToolCalls)
+        ));
     }
 }

@@ -22,7 +22,12 @@ struct Args {
 }
 
 fn default_timeout_ms() -> u64 {
-    120_000
+    // 5 minutes. Bash routinely covers slow-networking commands
+    // (npm/gh/git clone, docker build) and Node-based installers like
+    // `npx skills add …` that spend a while resolving deps. Live PTY
+    // streaming means the user sees progress the whole time, so a
+    // higher default doesn't feel like a stall.
+    300_000
 }
 
 #[async_trait]
@@ -63,6 +68,22 @@ impl Tool for Bash {
         // becomes undo-able just like an `edit_file` / `write_file` write.
         let pre_bash = ctx.guard.as_ref().and_then(|g| g.pre_bash());
 
+        // Live-output pump. When the harness wired a progress sink into
+        // ToolContext, every stdout+stderr line from the PTY-backed
+        // shell fans out to it while the command runs. Sink is best-
+        // effort — a failure to send never blocks the command.
+        let progress_tx = ctx.progress.as_ref().map(|sink| {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+            let sink = sink.clone();
+            let call_id = call.id.to_string();
+            tokio::spawn(async move {
+                while let Some(line) = rx.recv().await {
+                    sink.emit(&call_id, &line);
+                }
+            });
+            tx
+        });
+
         // Prefer the session's long-lived shell — `cd`, activated venvs
         // and `export`s persist across calls. Fall back to the fresh
         // `bash -lc` path when no persistent shell is attached (headless
@@ -70,12 +91,12 @@ impl Tool for Bash {
         let outcome = if let Some(shell) = &ctx.shell {
             let mut guard = shell.lock().await;
             guard
-                .run(&args.command, timeout)
+                .run_streaming(&args.command, timeout, progress_tx)
                 .await
                 .map_err(|e| ToolError::Failed(e.to_string()))?
         } else {
             ctx.sandbox
-                .run(&args.command, &ctx.cwd, timeout)
+                .run_streaming(&args.command, &ctx.cwd, timeout, progress_tx)
                 .await
                 .map_err(|e| ToolError::Failed(e.to_string()))?
         };

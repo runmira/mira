@@ -73,7 +73,7 @@ impl From<WireScope> for MemoryScope {
     }
 }
 
-fn store<'a>(ctx: &'a ToolContext) -> Result<&'a std::sync::Arc<dyn mira_memory::MemoryStore>, ToolError> {
+fn store(ctx: &ToolContext) -> Result<&std::sync::Arc<dyn mira_memory::MemoryStore>, ToolError> {
     ctx.memory
         .as_ref()
         .ok_or_else(|| ToolError::Failed("memory store not wired into ToolContext".into()))
@@ -436,14 +436,10 @@ impl MemoryConsolidate {
             ));
         }
 
-        let consolidated = consolidate_bullets(
-            self.provider.as_ref(),
-            &self.model,
-            &current,
-            instruction,
-        )
-        .await
-        .map_err(|e| ToolError::Failed(format!("consolidate: {e}")))?;
+        let consolidated =
+            consolidate_bullets(self.provider.as_ref(), &self.model, &current, instruction)
+                .await
+                .map_err(|e| ToolError::Failed(format!("consolidate: {e}")))?;
 
         // Backup — `.pre-consolidate-<unix_ts>.bak` next to the source.
         // Skip the backup silently on IO error rather than failing the
@@ -454,10 +450,7 @@ impl MemoryConsolidate {
             tracing::warn!(?e, backup = %backup_path.display(), "consolidate: backup write failed");
         }
 
-        let after_bytes = s
-            .overwrite(scope, &consolidated)
-            .await
-            .map_err(map_err)?;
+        let after_bytes = s.overwrite(scope, &consolidated).await.map_err(map_err)?;
 
         Ok(ToolResult::ok(
             call.id.clone(),
@@ -652,17 +645,17 @@ mod tests {
 
         MemoryAppend
             .invoke(
-                &call("memory_append", json!({"scope": "project", "text": "hello"})),
+                &call(
+                    "memory_append",
+                    json!({"scope": "project", "text": "hello"}),
+                ),
                 &ctx,
             )
             .await
             .unwrap();
 
         let r = MemoryRead
-            .invoke(
-                &call("memory_read", json!({"scope": "project"})),
-                &ctx,
-            )
+            .invoke(&call("memory_read", json!({"scope": "project"})), &ctx)
             .await
             .unwrap();
         assert!(r.content.contains("- hello"));
@@ -699,7 +692,10 @@ mod tests {
         let ctx = ctx_with_store(tmp.path());
         MemoryAppend
             .invoke(
-                &call("memory_append", json!({"scope": "project", "text": "old bullet"})),
+                &call(
+                    "memory_append",
+                    json!({"scope": "project", "text": "old bullet"}),
+                ),
                 &ctx,
             )
             .await
@@ -782,10 +778,7 @@ mod tests {
         let tmp = tempdir().unwrap();
         let ctx = ToolContext::new(tmp.path(), Arc::new(Sandbox::default_scrubbed()));
         let err = MemoryRemember
-            .invoke(
-                &call("memory_remember", json!({"text": "nope"})),
-                &ctx,
-            )
+            .invoke(&call("memory_remember", json!({"text": "nope"})), &ctx)
             .await
             .unwrap_err();
         assert!(format!("{err}").contains("episodic store not wired"));

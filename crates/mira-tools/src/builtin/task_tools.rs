@@ -181,12 +181,7 @@ impl Tool for TaskGet {
         let args: GetArgs = call.parse_arguments()?;
         match store.get(args.task_id).await {
             Some(t) => {
-                let content = format!(
-                    "task #{} [{}]: {}",
-                    t.id,
-                    t.status.as_str(),
-                    t.subject
-                );
+                let content = format!("task #{} [{}]: {}", t.id, t.status.as_str(), t.subject);
                 let data = json!({ "task": t });
                 Ok(ToolResult {
                     call_id: call.id.clone(),
@@ -278,12 +273,7 @@ impl Tool for TaskUpdateTool {
         };
         match store.update(args.task_id, patch).await {
             Some(t) => {
-                let content = format!(
-                    "task #{} → {}: {}",
-                    t.id,
-                    t.status.as_str(),
-                    t.subject
-                );
+                let content = format!("task #{} → {}: {}", t.id, t.status.as_str(), t.subject);
                 let data = json!({ "task": t });
                 Ok(ToolResult {
                     call_id: call.id.clone(),

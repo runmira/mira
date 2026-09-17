@@ -134,11 +134,48 @@ export type SubagentReviewResponse = {
   note?: string;
 };
 
+/* ask_user tool — model-supplied clarifying questions. */
+export type AskUserOption = {
+  label: string;
+  description?: string | null;
+  /** Model's preferred pick; the UI renders a "Recommended" badge. */
+  recommended?: boolean;
+};
+
+export type AskUserQuestion = {
+  question: string;
+  /** Short chip label (max ~12 chars). Rendered above the question. */
+  header?: string | null;
+  options: AskUserOption[];
+  /** When true, the question renders as multi-select checkboxes. */
+  multi_select?: boolean;
+};
+
+export type AskUserProposal = {
+  questions: AskUserQuestion[];
+};
+
+/** One answer per question, in the order the tool posed them. Empty
+ *  `picked` + null `custom` = skipped; `picked` populated = picked
+ *  options; `custom` populated = user used the free-text "Tell mira
+ *  what to do differently" affordance. */
+export type AskUserAnswer = {
+  picked: string[];
+  custom?: string | null;
+};
+
+export type AskUserResponse = {
+  answers: AskUserAnswer[];
+  /** True when the user dismissed the whole card without answering. */
+  cancelled?: boolean;
+};
+
 /** Discriminated union of all `PromptResponse` shapes. Matches the Rust
  *  `PromptResponse` enum (serde `tag = "kind"`, snake_case). */
 export type PromptResponse =
   | ({ kind: 'plan' } & PlanResponse)
-  | ({ kind: 'subagent_review' } & SubagentReviewResponse);
+  | ({ kind: 'subagent_review' } & SubagentReviewResponse)
+  | ({ kind: 'ask_user' } & AskUserResponse);
 
 export type TokenUsage = {
   prompt_tokens: number;
@@ -155,7 +192,7 @@ export type UsageTotals = {
 };
 
 export type ServerMsg =
-  | { type: 'ready'; session_id: string; model: string; mode: Mode; cwd: string; history: Message[]; turns?: TurnMeta[]; usage?: UsageTotals; tasks?: TaskItem[]; goal?: Goal | null }
+  | { type: 'ready'; session_id: string; model: string; mode: Mode; cwd: string; history: Message[]; turns?: TurnMeta[]; usage?: UsageTotals; tasks?: TaskItem[]; goal?: Goal | null; previews?: Record<string, DiffPreview> }
   | { type: 'token'; text: string }
   | { type: 'tool_start'; call: ToolCall }
   | { type: 'tool_end'; result: ToolResult }
@@ -163,6 +200,9 @@ export type ServerMsg =
   | { type: 'done' }
   | { type: 'approval_request'; call: ToolCall; preview?: DiffPreview | null }
   | { type: 'warning'; text: string }
+  | { type: 'tool_progress'; call_id: string; line: string }
+  | { type: 'tool_preview'; call_id: string; preview: DiffPreview }
+  | { type: 'skills_reloaded' }
   | { type: 'model_changed'; model: string }
   | { type: 'mode_changed'; mode: Mode }
   | { type: 'error'; text: string }
@@ -179,6 +219,7 @@ export type ServerMsg =
   | { type: 'goal_progress'; iteration: number; max_iterations: number; status: GoalStatus; reason?: string | null }
   | { type: 'goal_done'; status: GoalStatus; reason?: string | null }
   | { type: 'plan_request'; prompt_id: string; plan: PlanProposal }
+  | { type: 'ask_user_request'; prompt_id: string; proposal: AskUserProposal }
   // Subagent live-stream frames. Every subagent-related event carries the
   // parent's tool_call id so the frontend routes it to the right panel tab.
   | { type: 'subagent_started'; parent_call_id: string; agent_id: string; model: string; prompt: string }
@@ -188,7 +229,19 @@ export type ServerMsg =
   | { type: 'subagent_warning'; parent_call_id: string; text: string }
   | { type: 'subagent_progress'; parent_call_id: string; text: string }
   | { type: 'subagent_review_request'; parent_call_id: string; prompt_id: string; summary: string }
-  | { type: 'subagent_done'; parent_call_id: string };
+  | { type: 'subagent_done'; parent_call_id: string }
+  | {
+      type: 'subagent_scratchpad_note';
+      parent_call_id: string;
+      parent_session_id: string;
+      entry: ScratchpadEntry;
+    };
+
+export type ScratchpadEntry = {
+  author: string;
+  ts: number;
+  text: string;
+};
 
 export type ClientMsg =
   | { type: 'send'; text: string }
@@ -292,4 +345,7 @@ export type SessionSummary = {
   worktree_status?: WorktreeMergeStatus | null;
   /** Branch name of the worktree — shown as tooltip on the merge chip. */
   worktree_branch?: string | null;
+  /** Running token totals across the session's turns. Omitted (or all-zero)
+   *  for empty sessions that haven't hit the provider yet. */
+  usage?: UsageTotals;
 };

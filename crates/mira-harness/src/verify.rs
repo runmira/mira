@@ -44,12 +44,12 @@ pub struct VerifyOutcome {
 pub fn detect(cwd: &Path, writes: &[PathBuf]) -> Option<VerifyCheck> {
     let ext = |p: &PathBuf| p.extension().map(|e| e.to_string_lossy().into_owned());
     let touched_rust = writes.iter().any(|p| ext(p).as_deref() == Some("rs"));
-    let touched_ts = writes.iter().any(|p| {
-        matches!(ext(p).as_deref(), Some("ts" | "tsx" | "mts" | "cts"))
-    });
-    let touched_js = writes.iter().any(|p| {
-        matches!(ext(p).as_deref(), Some("js" | "jsx" | "mjs" | "cjs"))
-    });
+    let touched_ts = writes
+        .iter()
+        .any(|p| matches!(ext(p).as_deref(), Some("ts" | "tsx" | "mts" | "cts")));
+    let touched_js = writes
+        .iter()
+        .any(|p| matches!(ext(p).as_deref(), Some("js" | "jsx" | "mjs" | "cjs")));
     let touched_py = writes.iter().any(|p| ext(p).as_deref() == Some("py"));
     let touched_go = writes.iter().any(|p| ext(p).as_deref() == Some("go"));
 
@@ -70,9 +70,7 @@ pub fn detect(cwd: &Path, writes: &[PathBuf]) -> Option<VerifyCheck> {
             timeout: Duration::from_secs(180),
         });
     }
-    if touched_py
-        && (cwd.join("pyproject.toml").exists() || cwd.join("setup.py").exists())
-    {
+    if touched_py && (cwd.join("pyproject.toml").exists() || cwd.join("setup.py").exists()) {
         return Some(VerifyCheck {
             name: "ruff check",
             command: "ruff check .".into(),

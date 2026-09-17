@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'react';
 import {
   ArrowDown,
+  ArrowRight,
   ArrowUp,
   Check,
-  CheckCircle,
+  Info,
   Lightbulb,
   Plus,
-  Prohibit,
   Trash,
 } from '@phosphor-icons/react';
 import type { PlanProposal, PlanStep } from '../types';
@@ -14,13 +14,18 @@ import { cn } from '@/lib/utils';
 
 /**
  * Inline plan card — rendered directly in the transcript as the assistant's
- * tool output. Editable while awaiting a decision; collapses to a compact
- * summary once the user approves or cancels so the conversation history
- * stays readable.
+ * `plan` tool output. Editable while awaiting a decision; collapses to a
+ * compact summary once the user approves or cancels so the conversation
+ * history stays readable.
+ *
+ * Visual language matches AskUserCard: flat, monochrome, no colored
+ * strokes. State lives in fills and hairline dividers. The only accent
+ * color is the header lightbulb — a wordmark, not a stroke — and the
+ * capsule "Approve" CTA is a solid `bg-foreground` pill.
  *
  * Card states:
  *  - `decision: null`      → editable proposal + approve/cancel controls
- *  - `decision.approved`   → green "Plan approved" summary with final steps
+ *  - `decision.approved`   → neutral "Plan approved" summary with final steps
  *  - !decision.approved    → dimmed "Plan cancelled" summary + note
  */
 
@@ -78,31 +83,26 @@ export function PlanCard({ proposal, decision, onApprove, onCancel }: Props) {
   const canApprove = steps.length > 0 && steps.every((s) => s.description.trim().length > 0);
 
   return (
-    <div
-      className={cn(
-        'w-full max-w-[90%] overflow-hidden rounded-xl border border-mira-blue/25 bg-gradient-to-b from-mira-blue/[0.06] to-transparent shadow-[0_1px_0_hsl(0_0%_100%/0.03)_inset]',
-        'animate-fade-in',
-      )}
-    >
-      {/* header */}
-      <div className="flex items-center gap-2 border-b border-mira-blue/15 bg-mira-blue/[0.04] px-4 py-2.5">
-        <div className="flex size-6 shrink-0 items-center justify-center rounded-full bg-mira-blue/20 text-mira-blue">
-          <Lightbulb className="size-3.5" weight="fill" />
-        </div>
+    <div className="w-full max-w-[90%] overflow-hidden rounded-2xl border border-border/40 bg-card/80 backdrop-blur animate-fade-in">
+      {/* Header — lightbulb wordmark + plan title + step count. */}
+      <div className="flex items-center gap-2.5 px-4 pt-3.5 pb-3">
+        <Lightbulb weight="fill" className="size-3.5 text-mira-blue" />
         <div className="min-w-0 flex-1">
-          <div className="text-[10.5px] font-semibold uppercase tracking-wider text-mira-blue/80">
+          <div className="text-[10px] font-semibold uppercase tracking-[0.11em] text-muted-foreground/80">
             Proposed plan
           </div>
-          <div className="truncate text-[14px] font-semibold text-foreground">{proposal.title}</div>
+          <div className="truncate text-[13.5px] font-semibold text-foreground">
+            {proposal.title}
+          </div>
         </div>
-        <span className="shrink-0 rounded-full bg-mira-blue/10 px-2 py-0.5 text-[10.5px] font-semibold text-mira-blue">
+        <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
           {steps.length} step{steps.length === 1 ? '' : 's'}
         </span>
       </div>
 
-      {/* steps */}
-      <div className="px-4 py-3">
-        <div className="flex flex-col gap-1.5">
+      {/* Steps — hairline divider above, each row as a flat tile. */}
+      <div className="border-t border-border/30 px-3 py-3">
+        <div className="flex flex-col gap-1">
           {steps.map((s, i) => (
             <StepRow
               key={i}
@@ -118,32 +118,33 @@ export function PlanCard({ proposal, decision, onApprove, onCancel }: Props) {
         <button
           type="button"
           onClick={add}
-          className="mt-2 inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-[12px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          className="mt-1.5 inline-flex items-center gap-1.5 rounded-md px-2 py-1.5 text-[11.5px] text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
         >
           <Plus className="size-3" /> Add step
         </button>
       </div>
 
-      {/* footer */}
-      <div className="flex flex-col gap-2 border-t border-mira-blue/15 bg-mira-blue/[0.03] px-4 py-2.5">
+      {/* Footer — note field + cancel/approve. Same monochrome CTA
+          language as AskUserCard: filled `bg-foreground` capsule for
+          the primary action, quiet ghost for cancel. */}
+      <div className="flex flex-col gap-2 border-t border-border/30 bg-background/30 px-4 py-2.5">
         <input
           type="text"
           value={note}
           onChange={(e) => setNote(e.target.value)}
           placeholder="Optional note (shown if you cancel)"
-          className="w-full rounded-md border border-border/60 bg-background/60 px-2.5 py-1.5 text-[12px] outline-none placeholder:text-muted-foreground/50 focus:border-mira-blue/40"
+          className="w-full rounded-md bg-secondary/50 px-2.5 py-1.5 text-[12px] outline-none placeholder:text-muted-foreground/50 focus:bg-secondary/70"
         />
         <div className="flex items-center justify-between">
-          <div className="text-[11px] text-muted-foreground">
+          <div className="text-[11px] text-muted-foreground/80">
             {dirty ? 'Approve will run the edited plan' : '⌘↵ to approve'}
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5">
             <button
               type="button"
               onClick={() => onCancel(note)}
-              className="inline-flex items-center gap-1 rounded-md px-2.5 py-1.5 text-[12.5px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              className="rounded-md px-2.5 py-1.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
             >
-              <Prohibit className="size-3.5" />
               Cancel
             </button>
             <button
@@ -151,12 +152,14 @@ export function PlanCard({ proposal, decision, onApprove, onCancel }: Props) {
               onClick={() => onApprove(steps)}
               disabled={!canApprove}
               className={cn(
-                'inline-flex items-center gap-1 rounded-md bg-mira-blue px-2.5 py-1.5 text-[12.5px] font-semibold text-background transition-opacity hover:opacity-90',
-                !canApprove && 'opacity-40 cursor-not-allowed',
+                'inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-[11.5px] font-semibold transition-all',
+                canApprove
+                  ? 'bg-foreground text-background hover:brightness-95'
+                  : 'cursor-not-allowed bg-secondary/60 text-muted-foreground',
               )}
             >
-              <Check className="size-3.5" weight="bold" />
               {dirty ? 'Approve with edits' : 'Approve'}
+              <ArrowRight className="size-3" weight="bold" />
             </button>
           </div>
         </div>
@@ -178,8 +181,8 @@ type StepRowProps = {
 
 function StepRow({ index, step, onChange, onMoveUp, onMoveDown, onRemove }: StepRowProps) {
   return (
-    <div className="group flex items-start gap-2 rounded-md border border-transparent px-1.5 py-1.5 transition-colors hover:border-border/40 hover:bg-secondary/40">
-      <span className="mt-[3px] shrink-0 rounded-full bg-secondary px-1.5 py-0.5 text-[10.5px] font-semibold text-muted-foreground">
+    <div className="group flex items-start gap-2.5 rounded-xl bg-secondary/40 px-3 py-2 transition-colors hover:bg-secondary/60">
+      <span className="mt-[3px] inline-flex size-5 shrink-0 items-center justify-center rounded-full bg-background/60 text-[10.5px] font-semibold text-muted-foreground ring-1 ring-inset ring-border">
         {index + 1}
       </span>
       <div className="min-w-0 flex-1">
@@ -232,7 +235,7 @@ function IconBtn({
       onClick={onClick}
       disabled={disabled}
       title={title}
-      className="rounded p-1 text-muted-foreground/70 transition-colors hover:bg-accent hover:text-foreground disabled:opacity-30 disabled:hover:bg-transparent"
+      className="rounded p-1 text-muted-foreground/70 transition-colors hover:bg-background/60 hover:text-foreground disabled:opacity-30 disabled:hover:bg-transparent"
     >
       {children}
     </button>
@@ -247,35 +250,35 @@ function ResolvedPlan({ proposal, decision }: { proposal: PlanProposal; decision
   return (
     <div
       className={cn(
-        'w-full max-w-[90%] overflow-hidden rounded-xl border',
-        approved
-          ? 'border-emerald-500/25 bg-emerald-500/[0.03]'
-          : 'border-border/60 bg-secondary/30 opacity-80',
+        'w-full max-w-[90%] overflow-hidden rounded-xl border border-border/40 bg-card/60',
+        !approved && 'opacity-85',
       )}
     >
-      <div
-        className={cn(
-          'flex items-center gap-2 border-b px-4 py-2 text-[12.5px]',
-          approved ? 'border-emerald-500/15 text-emerald-400' : 'border-border/40 text-muted-foreground',
-        )}
-      >
+      <div className="flex items-center gap-2 border-b border-border/30 px-3.5 py-2 text-[11.5px] text-muted-foreground">
         {approved ? (
-          <CheckCircle className="size-4 shrink-0" weight="fill" />
+          <Check className="size-3.5 text-foreground/70" weight="bold" />
         ) : (
-          <Prohibit className="size-4 shrink-0" weight="fill" />
+          <Info className="size-3.5 text-muted-foreground" weight="regular" />
         )}
-        <span className="font-semibold">
+        <span className="font-semibold text-foreground">
           {approved ? 'Plan approved' : 'Plan cancelled'}
         </span>
-        <span className="text-muted-foreground/70">·</span>
+        <span className="text-muted-foreground/60">·</span>
         <span className="truncate">{proposal.title}</span>
       </div>
-      <ol className="flex flex-col gap-1 px-4 py-2.5 text-[12.5px]">
+      <ol className="flex flex-col gap-1 px-3.5 py-2.5 text-[12.5px]">
         {steps.map((s, i) => (
           <li key={i} className="flex gap-2">
-            <span className="mt-[1px] shrink-0 text-muted-foreground/70">{i + 1}.</span>
+            <span className="mt-[1px] shrink-0 tabular-nums text-muted-foreground/70">
+              {i + 1}.
+            </span>
             <div className="min-w-0 flex-1">
-              <div className={cn(!approved && 'line-through decoration-muted-foreground/40')}>
+              <div
+                className={cn(
+                  'text-foreground/90',
+                  !approved && 'line-through decoration-muted-foreground/40',
+                )}
+              >
                 {s.description}
               </div>
               {s.why && (
@@ -286,7 +289,7 @@ function ResolvedPlan({ proposal, decision }: { proposal: PlanProposal; decision
         ))}
       </ol>
       {decision.note && !approved && (
-        <div className="border-t border-border/40 px-4 py-2 text-[11.5px] text-muted-foreground">
+        <div className="border-t border-border/30 px-3.5 py-2 text-[11.5px] text-muted-foreground">
           <span className="font-semibold">note:</span> {decision.note}
         </div>
       )}

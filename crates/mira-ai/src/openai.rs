@@ -291,15 +291,17 @@ impl<'a> WireRequest<'a> {
             .collect();
         let response_format = req.response_format.as_ref().map(|fmt| match fmt {
             crate::ResponseFormat::JsonObject => WireResponseFormat::JsonObject,
-            crate::ResponseFormat::JsonSchema { name, schema, strict } => {
-                WireResponseFormat::JsonSchema {
-                    json_schema: WireJsonSchema {
-                        name: name.as_str(),
-                        schema,
-                        strict: *strict,
-                    },
-                }
-            }
+            crate::ResponseFormat::JsonSchema {
+                name,
+                schema,
+                strict,
+            } => WireResponseFormat::JsonSchema {
+                json_schema: WireJsonSchema {
+                    name: name.as_str(),
+                    schema,
+                    strict: *strict,
+                },
+            },
         });
         Self {
             model: &req.model,

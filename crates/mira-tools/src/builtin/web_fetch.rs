@@ -103,7 +103,10 @@ impl Tool for WebFetch {
 
         let resp = client
             .get(url)
-            .header("Accept", "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5")
+            .header(
+                "Accept",
+                "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5",
+            )
             .send()
             .await
             .map_err(|e| ToolError::Failed(format!("fetch: {e}")))?;
@@ -118,9 +121,7 @@ impl Tool for WebFetch {
         let final_url = resp.url().to_string();
 
         if !status.is_success() {
-            return Err(ToolError::Failed(format!(
-                "GET {url} returned {status}"
-            )));
+            return Err(ToolError::Failed(format!("GET {url} returned {status}")));
         }
 
         // Cap the downloaded body so a stray 500MB endpoint doesn't OOM us.

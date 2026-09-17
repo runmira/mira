@@ -1,0 +1,109 @@
+{
+  "name": "mira-vscode",
+  "displayName": "Mira Coding Agent",
+  "description": "Open-source coding agent — read code, edit files, run commands, and delegate to subagents, all with the model you choose.",
+  "version": "0.1.1",
+  "publisher": "runmira",
+  "license": "Apache-2.0",
+  "preview": true,
+  "homepage": "https://github.com/runmira/mira",
+  "bugs": {
+    "url": "https://github.com/runmira/mira/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/runmira/mira.git",
+    "directory": "extensions/vscode"
+  },
+  "qna": "marketplace",
+  "engines": {
+    "vscode": "^1.93.0",
+    "node": ">=20"
+  },
+  "categories": ["AI", "Chat"],
+  "keywords": [
+    "mira",
+    "agent",
+    "coding agent",
+    "coding assistant",
+    "chat",
+    "ai",
+    "llm",
+    "openrouter",
+    "anthropic",
+    "openai",
+    "claude",
+    "gemini",
+    "gpt",
+    "tool use"
+  ],
+  "icon": "icon.png",
+  "galleryBanner": {
+    "color": "#131417",
+    "theme": "dark"
+  },
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onChatParticipant:mira.mira"
+  ],
+  "contributes": {
+    "chatParticipants": [
+      {
+        "id": "mira.mira",
+        "fullName": "Mira",
+        "name": "mira",
+        "description": "Ask Mira to read code, run commands, edit files, or delegate to a subagent.",
+        "isSticky": true,
+        "commands": [
+          { "name": "reset",  "description": "Start a fresh chat session (drops in-memory history)." },
+          { "name": "mode",   "description": "Set the permission mode: plan | manual | auto | edit | yolo." },
+          { "name": "model",  "description": "Hot-swap the model for the next turn." }
+        ]
+      }
+    ],
+    "configuration": {
+      "title": "Mira",
+      "properties": {
+        "mira.baseUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8787",
+          "description": "Base URL of the running `mira serve` instance. Loopback by default; change if you're tunnelling to a remote host."
+        },
+        "mira.showToolCalls": {
+          "type": "boolean",
+          "default": true,
+          "description": "Render each tool call the model makes (name + short arg summary + result). Turn off to see only the model's prose."
+        },
+        "mira.followActiveFolder": {
+          "type": "boolean",
+          "default": true,
+          "description": "Point the Mira session at whichever workspace folder VS Code has open. Uses PUT /api/cwd on each chat request when the folder changes."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "mira.openWebUI",
+        "title": "Mira: Open Web UI in Browser"
+      },
+      {
+        "command": "mira.showStatus",
+        "title": "Mira: Show Connection Status"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch":   "tsc -watch -p ./",
+    "package": "npx --yes @vscode/vsce package"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/vscode": "^1.93.0",
+    "@types/ws": "^8.5.12",
+    "typescript": "^5.5.4"
+  }
+}

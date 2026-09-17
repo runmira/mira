@@ -14,7 +14,6 @@ import {
   PencilSimple,
   PuzzlePiece,
   Sparkle,
-  SlidersHorizontal,
   Timer,
   Trash,
 } from '@phosphor-icons/react';
@@ -28,6 +27,11 @@ import {
 import type { SessionSummary, WorktreeMergeStatus } from '../types';
 import type { WsStatus } from '../ws';
 import { parseSentAttachments } from './Composer';
+import { costUsd, formatDollars } from '../lib/usage';
+import miraLogo from '../assets/mira-logo.png';
+import { SETTINGS_SECTIONS, type SettingsSectionId } from './Settings';
+import { UserCard } from './UserCard';
+import { ArrowLeft } from '@phosphor-icons/react';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -36,8 +40,11 @@ import { cn } from '@/lib/utils';
 
 /** Primary view rendered in the main pane. Sidebar nav items switch the
  *  active view; the App owns the state and hides the chat composer /
- *  transcript when a non-chat view is selected. */
-export type MainView = 'chat' | 'plugins' | 'pull-request' | 'scheduled';
+ *  transcript when a non-chat view is selected. `'settings'` is a
+ *  first-class view (not a dialog) — when active, the sidebar swaps
+ *  its default nav for the settings-tab list and shows a "Back to
+ *  app" pill up top. */
+export type MainView = 'chat' | 'plugins' | 'pull-request' | 'scheduled' | 'settings';
 
 /** Human-readable session label. Strips the `## Attached files … ` block
  *  from `first_user_message` so an image-only first turn doesn't read as
@@ -74,6 +81,12 @@ type Props = {
   onOpenSettings: () => void;
   onOpenPicker: () => void;
   onSessionLoaded: () => void;
+  /** Settings-mode state. Ignored unless `activeView === 'settings'`,
+   *  in which case the sidebar renders the section tabs + a "Back to
+   *  app" pill instead of the default nav. */
+  settingsSection?: SettingsSectionId;
+  onSettingsSectionChange?: (id: SettingsSectionId) => void;
+  onExitSettings?: () => void;
 };
 
 const COLLAPSED_KEY = 'mira.sidebar.collapsed-projects';
@@ -82,6 +95,9 @@ const PER_GROUP_LIMIT = 5;
 export function Sidebar({
   status, cwd, activeSessionId, activeBusy, refreshKey, activeView, onNavigate,
   onNewChat, onOpenSettings, onOpenPicker, onSessionLoaded,
+  settingsSection = 'provider',
+  onSettingsSectionChange,
+  onExitSettings,
 }: Props) {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -176,9 +192,59 @@ export function Sidebar({
     <IconContext.Provider value={{ weight: 'fill', size: '1em', mirrored: false }}>
     <aside className="flex h-full min-w-0 flex-col border-r border-border bg-card">
       <div className="flex items-center justify-between px-3 pt-3.5 pb-2">
-        <span className="text-[15px] font-semibold tracking-tight">Mira</span>
+        <div className="flex items-center gap-1.5">
+          <img
+            src={miraLogo}
+            alt="Mira"
+            className="size-5 rounded-full object-contain"
+            draggable={false}
+          />
+          <span className="text-[15px] font-semibold tracking-tight">Mira</span>
+        </div>
       </div>
 
+      {activeView === 'settings' ? (
+        // Settings mode — the sidebar becomes the section picker. The
+        // "Back to app" pill up top pops the user back to whatever view
+        // they were on before entering settings; the rest of the app
+        // (projects, folder chip, status footer) is hidden to keep the
+        // context single-purpose while they're configuring things.
+        <div className="flex-1 overflow-y-auto px-3 pb-2 pt-1">
+          <button
+            type="button"
+            onClick={() => onExitSettings?.()}
+            className="mb-3 inline-flex items-center gap-1.5 rounded-full border border-border bg-secondary/60 px-3 py-1.5 text-[12.5px] text-foreground/90 transition-colors hover:bg-secondary hover:text-foreground"
+          >
+            <ArrowLeft className="size-3.5" />
+            Back to app
+          </button>
+          <div className="mb-1.5 px-1 text-[11.5px] font-semibold uppercase tracking-wider text-muted-foreground/80">
+            Settings
+          </div>
+          <nav className="flex flex-col gap-0.5">
+            {SETTINGS_SECTIONS.map((s) => {
+              const active = settingsSection === s.id;
+              const Icon = s.icon;
+              return (
+                <button
+                  key={s.id}
+                  type="button"
+                  onClick={() => onSettingsSectionChange?.(s.id)}
+                  className={cn(
+                    'flex items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-[13.5px] transition-colors',
+                    active
+                      ? 'bg-accent text-foreground'
+                      : 'text-foreground/80 hover:bg-accent/60 hover:text-foreground',
+                  )}
+                >
+                  <Icon className={cn('size-4 shrink-0', active ? 'text-mira-blue' : 'text-muted-foreground')} />
+                  <span>{s.label}</span>
+                </button>
+              );
+            })}
+          </nav>
+        </div>
+      ) : (
       <div className="flex-1 overflow-y-auto px-1.5 pb-2">
         <nav className="flex flex-col gap-0.5 px-0.5">
           <NavItem icon={<NotePencil className="size-3.5" />} onClick={onNewChat}>
@@ -239,6 +305,17 @@ export function Sidebar({
                     <Folder className={cn('size-3.5 shrink-0', g.isCurrent ? 'text-mira-blue' : 'text-muted-foreground/70')} />
                     <span className={cn('truncate', g.isCurrent && 'text-foreground')}>{g.label}</span>
                   </button>
+                  {(() => {
+                    const total = groupCost(g.sessions);
+                    return total != null ? (
+                      <span
+                        className="mr-1 font-mono text-[11px] tabular-nums text-emerald-400/80"
+                        title={`Total spend across ${g.sessions.length} session${g.sessions.length === 1 ? '' : 's'} in this project`}
+                      >
+                        {formatDollars(total)}
+                      </span>
+                    ) : null;
+                  })()}
                   <RowMenu
                     items={[
                       {
@@ -305,20 +382,9 @@ export function Sidebar({
           </button>
         </div>
       </div>
+      )}
 
-      <div className="flex items-center gap-2 border-t border-border px-3 py-2.5">
-        <span className={cn('size-1.5 shrink-0 rounded-full', dotColor(status))} />
-        <span className="min-w-0 flex-1 truncate text-[12.5px] text-foreground/85" title={cwd}>
-          {shortenPath(cwd) || 'connecting…'}
-        </span>
-        <button
-          onClick={onOpenSettings}
-          title="Settings"
-          className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-        >
-          <SlidersHorizontal className="size-4" />
-        </button>
-      </div>
+      <UserCard status={status} onOpenSettings={onOpenSettings} />
     </aside>
     <RenameDialog
       session={renaming}
@@ -487,6 +553,20 @@ function SublineContent({
       <span className="font-mono tracking-tight">{shortModelLabel(session.model)}</span>
       <span className="text-muted-foreground/50">·</span>
       <span>{timeAgo(session.updated_at)}</span>
+      {(() => {
+        const c = sessionCost(session);
+        return c != null ? (
+          <>
+            <span className="text-muted-foreground/50">·</span>
+            <span
+              className="font-mono tracking-tight text-emerald-400/80"
+              title={usageBreakdown(session)}
+            >
+              {formatDollars(c)}
+            </span>
+          </>
+        ) : null;
+      })()}
       {session.worktree_branch && (
         <>
           <span className="text-muted-foreground/50">·</span>
@@ -836,12 +916,39 @@ function Empty({ children }: { children: React.ReactNode }) {
   return <div className="px-2.5 py-1 text-[13px] text-muted-foreground/60">{children}</div>;
 }
 
-function dotColor(s: WsStatus): string {
-  switch (s) {
-    case 'open':       return 'bg-emerald-500';
-    case 'connecting': return 'bg-amber-500';
-    case 'closed':     return 'bg-rose-500';
+function sessionCost(s: SessionSummary): number | null {
+  if (!s.usage) return null;
+  if (s.usage.prompt_tokens === 0 && s.usage.completion_tokens === 0) return null;
+  return costUsd(s.model, s.usage);
+}
+
+/** Sum of known session costs in the group. Sessions on unpriced models are
+ *  skipped rather than treated as $0 so the badge doesn't lie by omission —
+ *  if nothing is priceable, the badge just doesn't render. */
+function groupCost(sessions: SessionSummary[]): number | null {
+  let total = 0;
+  let any = false;
+  for (const s of sessions) {
+    const c = sessionCost(s);
+    if (c == null) continue;
+    total += c;
+    any = true;
   }
+  return any ? total : null;
+}
+
+function usageBreakdown(s: SessionSummary): string {
+  const u = s.usage;
+  if (!u) return '';
+  const parts: string[] = [
+    `↑${u.prompt_tokens.toLocaleString()} prompt`,
+    `↓${u.completion_tokens.toLocaleString()} completion`,
+  ];
+  if (u.cached_input_tokens > 0) {
+    parts.push(`${u.cached_input_tokens.toLocaleString()} cached`);
+  }
+  parts.push(`${u.rounds} round${u.rounds === 1 ? '' : 's'}`);
+  return parts.join(' · ');
 }
 
 function timeAgo(unixSecs: number): string {

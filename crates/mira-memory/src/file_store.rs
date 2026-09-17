@@ -80,12 +80,7 @@ impl MemoryStore for FileMemoryStore {
         Ok(body.len() as u64)
     }
 
-    async fn replace(
-        &self,
-        scope: MemoryScope,
-        old: &str,
-        new: &str,
-    ) -> Result<u64, MemoryError> {
+    async fn replace(&self, scope: MemoryScope, old: &str, new: &str) -> Result<u64, MemoryError> {
         if old.is_empty() {
             return Err(MemoryError::Empty);
         }
@@ -239,7 +234,9 @@ mod tests {
     async fn replace_ambiguous_errors() {
         let tmp = tempdir().unwrap();
         let s = store_in(tmp.path());
-        s.overwrite(MemoryScope::Project, "dup\ndup\n").await.unwrap();
+        s.overwrite(MemoryScope::Project, "dup\ndup\n")
+            .await
+            .unwrap();
         let err = s
             .replace(MemoryScope::Project, "dup", "unique")
             .await

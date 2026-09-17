@@ -35,11 +35,17 @@ export const DialogContent = React.forwardRef<
         // Elevated card + soft inner highlight along the top edge sells the
         // "floating above the app" feel that pure `bg-popover` + border
         // couldn't do on a pitch-black backdrop.
+        //
+        // Centering: static `translate(-50%, -50%)` positions the dialog.
+        // `animate-dialog-in` bakes that same translate into every
+        // keyframe — a plain `animate-fade-in` overrides the transform
+        // during play so the dialog opens in the bottom-right quadrant
+        // then snaps back to the middle when the animation ends.
         'fixed left-1/2 top-1/2 z-50 w-full max-w-lg -translate-x-1/2 -translate-y-1/2 ' +
           'rounded-xl border border-white/10 bg-popover text-popover-foreground ' +
           'shadow-[0_24px_60px_-12px_rgba(0,0,0,0.9),0_0_0_1px_rgba(255,255,255,0.02)] ' +
           'ring-1 ring-white/5 ' +
-          'p-5 gap-4 flex flex-col data-[state=open]:animate-fade-in',
+          'p-5 gap-4 flex flex-col data-[state=open]:animate-dialog-in',
         className,
       )}
       {...props}

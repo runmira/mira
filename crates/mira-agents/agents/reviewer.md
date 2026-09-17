@@ -3,7 +3,7 @@ name: reviewer
 description: Adversarial code reviewer. Feed it a diff or a file range and it returns findings with severity + line references. Runs fresh — never saw the deliberation that produced the change.
 category: review
 tools: [read_file, grep, glob, bash]
-max_rounds: 30
+max_rounds: 200
 parallel_safe: true
 route_approvals_to_parent: false
 response_schema:

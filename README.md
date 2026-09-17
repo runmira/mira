@@ -131,6 +131,17 @@ Round-tripped features:
   writers no longer stomp on each other.
 - **Stop cascades** — pressing Stop on the parent halts every in-flight
   subagent (and grand-subagent) in one action.
+- **Live progress** — a subagent calls the `progress` tool during long
+  investigations to yield a one-line status; the parent's UI renders it
+  as a chip in the SubagentPanel so a multi-minute delegation stops
+  looking opaque.
+- **Auto-routing** — pass `type: "auto"` and a tiny classifier picks
+  the best specialist from the roster for the task. Useful when the
+  parent isn't sure which subagent applies.
+- **Shared scratchpad** — peer subagents running in parallel on the
+  same session share a pad through `scratchpad_note` / `scratchpad_read`,
+  so a fan-out of researchers can coordinate mid-flight instead of
+  duplicating each other's work.
 
 ### Code review
 
@@ -238,10 +249,10 @@ Adding a new subagent type is dropping a markdown file into
 - [x] Interactive plan tool + undo + apply-verify loop
 - [x] MCP client (stdio + http)
 - [x] Subagents: named types, parallel dispatch, approval routing, worktree isolation
+- [x] Subagent streaming intermediate summaries + `type: "auto"` router + shared scratchpad
 - [x] Two-stage code review (`mira review` + Review panel)
 - [x] Pull-request panel (browse / review / merge GitHub PRs)
 - [x] Token usage + cost tracking + prompt caching
-- [ ] Subagent streaming intermediate summaries + `type: "auto"` router
 - [ ] Native Anthropic + Bedrock adapters
 - [ ] Editor extension (VS Code, then Zed via ACP)
 - [ ] Sandboxing: `landlock` (Linux), `sandbox-exec` (macOS)

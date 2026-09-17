@@ -74,12 +74,14 @@ pub async fn run(cli: &super::Cli, args: ServeArgs) -> Result<()> {
     if cfg.memory.tools_enabled() {
         builtin::register_memory(&mut registry);
     }
-    // Skills: bundled + user + project, three tiers overriding by name.
-    // The RwLock lets the server hot-swap the project tier on cwd change
-    // (see the `put_cwd` handler) without re-registering the tool.
+    // Skills: bundled + shared (~/.agents/skills) + user + project, four
+    // tiers overriding by name. The RwLock lets the server hot-swap the
+    // project tier on cwd change (see the `put_cwd` handler) without
+    // re-registering the tool.
     let skills_registry = mira_skills::SkillRegistry::load_layered(
+        &mira_config::shared_skills_dir(),
         &mira_config::user_skills_dir(),
-        &mira_config::project_skills_dir(&cwd),
+        &mira_config::well_known_project_skills_dirs(&cwd),
     );
     let skills_handle: mira_tools::builtin::skill::SkillHandle = std::sync::Arc::new(
         tokio::sync::RwLock::new(std::sync::Arc::new(skills_registry)),

@@ -267,9 +267,7 @@ pub async fn verify_one(
 
     let finding_json = serde_json::to_string_pretty(f)?;
     let snippet_block = match snippet {
-        Some(s) => format!(
-            "Actual current code around the flagged location:\n```\n{s}\n```\n"
-        ),
+        Some(s) => format!("Actual current code around the flagged location:\n```\n{s}\n```\n"),
         None => "(No source snippet available — the file could not be opened. \
                  With no way to disprove, you should CONFIRM.)\n"
             .to_string(),

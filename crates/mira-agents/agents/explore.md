@@ -3,7 +3,7 @@ name: explore
 description: Read-only research subagent. Use for wide-scope questions that would take many reads/greps to answer ("where is X defined and how is it used?"). Returns a concise summary.
 category: recon
 tools: [read_file, grep, glob, find_symbol, find_references, find_callers, task_list, task_get, bash]
-max_rounds: 40
+max_rounds: 200
 parallel_safe: true
 route_approvals_to_parent: false
 response_schema:

@@ -102,10 +102,7 @@ impl TaskStore {
     pub fn restore(items: Vec<TaskItem>) -> Arc<Self> {
         let next_id = items.iter().map(|t| t.id).max().unwrap_or(0);
         Arc::new(Self {
-            inner: Mutex::new(Inner {
-                items,
-                next_id,
-            }),
+            inner: Mutex::new(Inner { items, next_id }),
         })
     }
 
@@ -265,6 +262,11 @@ mod tests {
             )
             .await;
         let c = restored.create("c".into(), "".into(), None).await;
-        assert!(c.id > b.id, "new id {} should exceed prior max {}", c.id, b.id);
+        assert!(
+            c.id > b.id,
+            "new id {} should exceed prior max {}",
+            c.id,
+            b.id
+        );
     }
 }

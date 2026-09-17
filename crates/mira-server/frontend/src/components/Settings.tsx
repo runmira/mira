@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   ArrowClockwise,
   Book,
@@ -34,9 +34,9 @@ import {
   Target,
   Terminal,
   Wrench,
-  X,
 } from '@phosphor-icons/react';
-import { getSettings, listSkills, putSettings, reloadSkills, type SkillView } from '../api';
+import { getSettings, getSkill, listSkills, putSettings, reloadSkills, type SkillDetail, type SkillView } from '../api';
+import { Markdown } from './Markdown';
 import type {
   KeyUpdate,
   MemoryUpdate,
@@ -46,9 +46,12 @@ import type {
   SettingsView,
 } from '../types';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
-import { Input } from '@/components/ui/input';
+import { SectionInput } from '@/components/ui/input';
+import { Select } from '@/components/ui/select';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import openrouterIcon from '../assets/openrouter-icon.png';
+import chatgptIcon from '../assets/chatgpt-icon.svg';
 
 /**
  * Two-pane settings: sidebar of sections on the left, the active section's
@@ -57,13 +60,59 @@ import { cn } from '@/lib/utils';
  * users can jump between sections without losing work.
  */
 
+/**
+ * Provider presets: name → base URL + a sensible default model for a
+ * first turn. Every entry works today via the backend's OpenAI-compat
+ * adapter (or the native Anthropic adapter for `anthropic`).
+ *
+ * Ordering roughly follows expected popularity for coding: gateways
+ * first, then major hosted models, then hot new API providers, then
+ * local runtimes at the bottom. If you add a provider here, mirror it
+ * in `crates/mira-config/src/lib.rs::default_base_url_for` so the CLI
+ * gets the same defaults, and in `default_api_key_env_for` if the
+ * provider has a conventional env-var name.
+ *
+ * `suggested_model` is intentionally blank when I couldn't confirm a
+ * coding-relevant default at ship time — shipping a stale model id
+ * gives users a confusing 404 on their first turn; a blank field
+ * makes them pick one on purpose.
+ */
 const PROVIDER_PRESETS = [
-  { name: 'openrouter', base_url: 'https://openrouter.ai/api/v1', suggested_model: 'google/gemini-2.5-flash' },
-  { name: 'openai',     base_url: 'https://api.openai.com/v1',    suggested_model: 'gpt-4o-mini' },
-  { name: 'anthropic',  base_url: 'https://api.anthropic.com/v1', suggested_model: 'claude-sonnet-4-5' },
-  { name: 'groq',       base_url: 'https://api.groq.com/openai/v1', suggested_model: 'moonshotai/kimi-k2-instruct' },
-  { name: 'ollama',     base_url: 'http://localhost:11434/v1',    suggested_model: 'llama3.1' },
+  // Gateways
+  { name: 'openrouter', base_url: 'https://openrouter.ai/api/v1',                     suggested_model: 'google/gemini-2.5-flash' },
+  // Major hosted
+  { name: 'openai',     base_url: 'https://api.openai.com/v1',                        suggested_model: 'gpt-4o-mini' },
+  { name: 'anthropic',  base_url: 'https://api.anthropic.com/v1',                     suggested_model: 'claude-sonnet-4-5' },
+  { name: 'google',     base_url: 'https://generativelanguage.googleapis.com/v1beta/openai', suggested_model: 'gemini-2.5-flash' },
+  // Fast / cheap inference
+  { name: 'deepseek',   base_url: 'https://api.deepseek.com/v1',                      suggested_model: 'deepseek-chat' },
+  { name: 'groq',       base_url: 'https://api.groq.com/openai/v1',                   suggested_model: 'moonshotai/kimi-k2-instruct' },
+  { name: 'cerebras',   base_url: 'https://api.cerebras.ai/v1',                       suggested_model: '' },
+  { name: 'xai',        base_url: 'https://api.x.ai/v1',                              suggested_model: 'grok-code-fast-1' },
+  // Model bazaars
+  { name: 'together',   base_url: 'https://api.together.xyz/v1',                      suggested_model: '' },
+  { name: 'fireworks',  base_url: 'https://api.fireworks.ai/inference/v1',            suggested_model: '' },
+  { name: 'hyperbolic', base_url: 'https://api.hyperbolic.xyz/v1',                    suggested_model: '' },
+  { name: 'novita',     base_url: 'https://api.novita.ai/v3/openai',                  suggested_model: '' },
+  // Search-augmented + regionals
+  { name: 'perplexity', base_url: 'https://api.perplexity.ai',                        suggested_model: '' },
+  { name: 'mistral',    base_url: 'https://api.mistral.ai/v1',                        suggested_model: 'codestral-latest' },
+  { name: 'moonshot',   base_url: 'https://api.moonshot.ai/v1',                       suggested_model: '' },
+  // Local runtimes
+  { name: 'ollama',     base_url: 'http://localhost:11434/v1',                        suggested_model: 'llama3.1' },
+  { name: 'lmstudio',   base_url: 'http://localhost:1234/v1',                         suggested_model: '' },
+  { name: 'llamacpp',   base_url: 'http://localhost:8080/v1',                         suggested_model: '' },
 ];
+
+/**
+ * Providers that expose an OAuth PKCE sign-in flow. Users of these
+ * providers can skip pasting an API key entirely — the dropdown surfaces
+ * a "Sign in" badge so the affordance is discoverable without picking
+ * each provider first, and the ProviderSection renders the matching
+ * sign-in button once selected. Keep in sync with the OAuth handlers
+ * registered in `mira-server/src/oauth/` (`openrouter.rs`, `openai.rs`).
+ */
+const OAUTH_PROVIDERS: ReadonlySet<string> = new Set(['openrouter', 'openai']);
 
 const MODES: Mode[] = ['plan', 'manual', 'auto', 'edit', 'yolo'];
 
@@ -96,9 +145,16 @@ const KEY_META: Record<string, { label: string; help: string; url?: string }> = 
   },
 };
 
-type SectionId = 'provider' | 'preferences' | 'memory' | 'skills' | 'search' | 'about';
+export type SettingsSectionId = 'provider' | 'preferences' | 'memory' | 'skills' | 'search' | 'about';
 
-const SECTIONS: { id: SectionId; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
+/** Section metadata exported so the Sidebar can render the same nav in
+ *  its "settings mode" (the settings surface is now inline in the main
+ *  pane, not a dialog — the sidebar drives section selection). */
+export const SETTINGS_SECTIONS: {
+  id: SettingsSectionId;
+  label: string;
+  icon: React.ComponentType<{ className?: string }>;
+}[] = [
   { id: 'provider',    label: 'Provider',    icon: Plug },
   { id: 'preferences', label: 'Preferences', icon: Sliders },
   { id: 'memory',      label: 'Memory',      icon: Brain },
@@ -107,10 +163,24 @@ const SECTIONS: { id: SectionId; label: string; icon: React.ComponentType<{ clas
   { id: 'about',       label: 'About',       icon: Info },
 ];
 
-type Props = {
-  open: boolean;
-  onClose: () => void;
+// Local alias — the exported name is `SETTINGS_SECTIONS` (used by the
+// Sidebar); everywhere inside this file we still refer to it as
+// `SECTIONS` to keep the diff tight.
+const SECTIONS = SETTINGS_SECTIONS;
+
+type SurfaceProps = {
+  /** Which section to render — driven by the sidebar. */
+  section: SettingsSectionId;
+  onSectionChange: (id: SettingsSectionId) => void;
   onSaved: (v: SettingsView) => void;
+  /** Called when the user hits "Back to App" or otherwise leaves
+   *  settings — the caller pops back to the previous main view. */
+  onExit: () => void;
+  /** Bumps whenever the backend broadcasts `skills_reloaded` (fs
+   *  watcher detected a `SKILL.md` change). Threaded into the Skills
+   *  panel so its list re-fetches automatically without the user
+   *  clicking Reload. */
+  skillsVersion?: number;
 };
 
 type Draft = {
@@ -146,24 +216,51 @@ const EMPTY_DRAFT: Draft = {
   memory: EMPTY_MEMORY,
 };
 
-export function SettingsPanel({ open, onClose, onSaved }: Props) {
+export function SettingsSurface({
+  section,
+  onSectionChange: _onSectionChange,
+  onSaved,
+  onExit,
+  skillsVersion = 0,
+}: SurfaceProps) {
   const [view, setView] = useState<SettingsView | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT);
-  const [section, setSection] = useState<SectionId>('provider');
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
+  // Refetch settings from the server without re-hydrating the draft.
+  // Used after an OAuth sign-in flow lands a new key server-side —
+  // the UI needs to see `has_api_key: true` without clobbering any
+  // in-progress edits.
+  const refetch = () => {
+    getSettings()
+      .then((v) => {
+        setView(v);
+        // Only rehydrate the API-key visibility flag; keep other draft
+        // fields untouched so a mid-edit doesn't get reset.
+        const p = v.providers.find((x) => x.name === draft.providerName);
+        setDraft((d) => ({
+          ...d,
+          showReplaceKey: !(p?.has_api_key || p?.api_key_env),
+        }));
+        onSaved(v);
+      })
+      .catch(() => { /* leave stale view; user can retry */ });
+  };
+
+  // Load once on mount. The surface persists across section swaps
+  // (the sidebar changes `section` without unmounting us), so we
+  // shouldn't re-hydrate on every section click — that would drop
+  // in-progress edits when the user navigates away and back.
   useEffect(() => {
-    if (!open) return;
     setLoadError(null);
     setSaveError(null);
-    setSection('provider');
     getSettings()
       .then((v) => { setView(v); hydrate(v); })
       .catch((e) => setLoadError(String(e.message ?? e)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+  }, []);
 
   function hydrate(v: SettingsView) {
     const pName = v.default_provider ?? 'openrouter';
@@ -215,7 +312,8 @@ export function SettingsPanel({ open, onClose, onSaved }: Props) {
       });
       setView(v);
       onSaved(v);
-      onClose();
+      // Stay in settings — the sidebar handles navigation now.
+      // Users click "Back to App" (or another sidebar item) to leave.
     } catch (e) {
       setSaveError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -238,125 +336,89 @@ export function SettingsPanel({ open, onClose, onSaved }: Props) {
     return false;
   }, [draft, view]);
 
+  const currentLabel = SECTIONS.find((s) => s.id === section)?.label ?? 'Settings';
+
   return (
-    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-3xl p-0 gap-0 overflow-hidden">
-        <div className="flex h-[560px] max-h-[80vh]">
-          {/* --- sidebar --- */}
-          <aside className="flex w-[180px] shrink-0 flex-col border-r border-border/60 bg-secondary/30">
-            <div className="flex items-center justify-between px-4 pt-4 pb-3">
-              <span className="text-[15px] font-semibold tracking-tight">Settings</span>
-              <button
-                type="button"
-                onClick={onClose}
-                className="rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
-                aria-label="Close"
-              >
-                <X className="size-4" />
-              </button>
-            </div>
-            <nav className="flex flex-col gap-0.5 px-2 py-2">
-              {SECTIONS.map((s) => {
-                const active = section === s.id;
-                const Icon = s.icon;
-                return (
-                  <button
-                    key={s.id}
-                    type="button"
-                    onClick={() => setSection(s.id)}
-                    className={cn(
-                      'flex items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-[13.5px] transition-colors',
-                      active
-                        ? 'bg-accent text-foreground'
-                        : 'text-foreground/80 hover:bg-accent/60 hover:text-foreground',
-                    )}
-                  >
-                    <Icon className={cn('size-4 shrink-0', active ? 'text-mira-blue' : 'text-muted-foreground')} />
-                    <span>{s.label}</span>
-                  </button>
-                );
-              })}
-            </nav>
-            <div className="flex-1" />
-            {view && (
-              <div className="px-3 pb-3 text-[10.5px] text-muted-foreground/70">
-                <div
-                  className={cn(
-                    'inline-flex items-center gap-1.5 rounded-full px-2 py-0.5',
-                    view.configured
-                      ? 'bg-emerald-500/10 text-emerald-400'
-                      : 'bg-amber-500/10 text-amber-300',
-                  )}
-                >
-                  <span className={cn('size-1.5 rounded-full', view.configured ? 'bg-emerald-500' : 'bg-amber-500')} />
-                  {view.configured ? 'Configured' : 'Needs API key'}
-                </div>
-              </div>
+    <div className="flex min-w-0 flex-1 flex-col">
+      {/* Top bar mirrors the chat/other-view header height so the layout
+          doesn't shift when the user enters settings. */}
+      <div className="flex h-11 shrink-0 items-center gap-3 border-b border-border/60 px-4">
+        <span className="min-w-0 flex-1 truncate text-[13.5px] text-foreground">{currentLabel}</span>
+        {view && (
+          <div
+            className={cn(
+              'inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[10.5px]',
+              view.configured
+                ? 'bg-emerald-500/10 text-emerald-400'
+                : 'bg-amber-500/10 text-amber-300',
             )}
-          </aside>
+          >
+            <span className={cn('size-1.5 rounded-full', view.configured ? 'bg-emerald-500' : 'bg-amber-500')} />
+            {view.configured ? 'Configured' : 'Needs API key'}
+          </div>
+        )}
+      </div>
 
-          {/* --- active section --- */}
-          <div className="flex min-w-0 flex-1 flex-col">
-            <div className="flex-1 overflow-y-auto px-6 py-5">
-              {loadError && (
-                <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12.5px] text-destructive">
-                  error: {loadError}
-                </div>
-              )}
-              {!view && !loadError && (
-                <div className="text-[12.5px] text-muted-foreground">loading…</div>
-              )}
-
-              {view && section === 'provider' && (
-                <ProviderSection view={view} draft={draft} setDraft={setDraft} />
-              )}
-              {view && section === 'preferences' && (
-                <PreferencesSection draft={draft} setDraft={setDraft} />
-              )}
-              {view && section === 'memory' && (
-                <MemorySection draft={draft} setDraft={setDraft} />
-              )}
-              {view && section === 'skills' && (
-                <SkillsSection />
-              )}
-              {view && section === 'search' && (
-                <KeysSection view={view} draft={draft} setDraft={setDraft} />
-              )}
-              {view && section === 'about' && (
-                <AboutSection view={view} />
-              )}
+      <div className="flex-1 overflow-y-auto">
+        <div className="mx-auto w-full max-w-2xl px-6 py-6">
+          {loadError && (
+            <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12.5px] text-destructive">
+              error: {loadError}
             </div>
+          )}
+          {!view && !loadError && (
+            <div className="text-[12.5px] text-muted-foreground">loading…</div>
+          )}
 
-            {view && (
-              <div className="flex items-center justify-between border-t border-border/60 px-6 py-3">
-                <div className="text-[11.5px] text-muted-foreground">
-                  {saveError ? <span className="text-destructive">{saveError}</span>
-                    : dirty ? 'Unsaved changes'
-                    : 'Up to date'}
-                </div>
-                <div className="flex items-center gap-2">
-                  <Button variant="outline" onClick={onClose} disabled={saving}>Cancel</Button>
-                  <Button onClick={onSave} disabled={saving || !dirty}>
-                    {saving ? 'Saving…' : 'Save'}
-                  </Button>
-                </div>
-              </div>
-            )}
+          {view && section === 'provider' && (
+            <ProviderSection view={view} draft={draft} setDraft={setDraft} refetch={refetch} />
+          )}
+          {view && section === 'preferences' && (
+            <PreferencesSection draft={draft} setDraft={setDraft} />
+          )}
+          {view && section === 'memory' && (
+            <MemorySection draft={draft} setDraft={setDraft} />
+          )}
+          {view && section === 'skills' && (
+            <SkillsSection version={skillsVersion} />
+          )}
+          {view && section === 'search' && (
+            <KeysSection view={view} draft={draft} setDraft={setDraft} />
+          )}
+          {view && section === 'about' && (
+            <AboutSection view={view} />
+          )}
+        </div>
+      </div>
+
+      {view && (
+        <div className="flex items-center justify-between border-t border-border/60 px-6 py-3">
+          <div className="text-[11.5px] text-muted-foreground">
+            {saveError ? <span className="text-destructive">{saveError}</span>
+              : dirty ? 'Unsaved changes'
+              : 'Up to date'}
+          </div>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" onClick={onExit} disabled={saving}>Back to app</Button>
+            <Button onClick={onSave} disabled={saving || !dirty}>
+              {saving ? 'Saving…' : 'Save'}
+            </Button>
           </div>
         </div>
-      </DialogContent>
-    </Dialog>
+      )}
+    </div>
   );
 }
 
 /* ---------- section: provider ---------- */
 
 function ProviderSection({
-  view, draft, setDraft,
+  view, draft, setDraft, refetch,
 }: {
   view: SettingsView;
   draft: Draft;
   setDraft: (u: (d: Draft) => Draft) => void;
+  refetch: () => void;
 }) {
   const preset = PROVIDER_PRESETS.find((x) => x.name === draft.providerName);
   const stored = view.providers.find((x) => x.name === draft.providerName);
@@ -389,17 +451,23 @@ function ProviderSection({
       subtitle="Where Mira sends chat requests. All providers speak the OpenAI-compatible /chat/completions wire."
     >
       <Field label="Provider" hint="Preset endpoints — you can override the base URL below.">
-        <select
+        <Select
           value={draft.providerName}
-          onChange={(e) => onProviderChange(e.target.value)}
-          className="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-1 focus:ring-ring"
-        >
-          {PROVIDER_PRESETS.map((p) => <option key={p.name} value={p.name}>{p.name}</option>)}
-        </select>
+          onChange={onProviderChange}
+          options={PROVIDER_PRESETS.map((p) => ({
+            value: p.name,
+            label: p.name,
+            hint: p.base_url,
+            // Surface OAuth support up-front so users don't have to
+            // pick each provider one-by-one to discover that
+            // OpenRouter / OpenAI let them skip pasting an API key.
+            badge: OAUTH_PROVIDERS.has(p.name) ? 'Sign in' : undefined,
+          }))}
+        />
       </Field>
 
       <Field label="Base URL">
-        <Input
+        <SectionInput
           value={draft.baseUrl}
           onChange={(e) => setDraft((d) => ({ ...d, baseUrl: e.target.value }))}
           placeholder={preset?.base_url}
@@ -407,17 +475,35 @@ function ProviderSection({
         />
       </Field>
 
-      <ApiKeyField
-        status={keyStatus}
-        showInput={draft.showReplaceKey}
-        value={draft.apiKey}
-        onChange={(v) => setDraft((d) => ({ ...d, apiKey: v }))}
-        onReplace={() => setDraft((d) => ({ ...d, showReplaceKey: true, apiKey: '' }))}
-        onCancelReplace={() => setDraft((d) => ({ ...d, showReplaceKey: false, apiKey: '' }))}
-      />
+      {/* OAuth providers get a sign-in-first flow. When a key is
+       *  already stored (signed in), we show a compact "Signed in"
+       *  badge plus a "Sign in again" affordance — the OAuth path is
+       *  the primary way to authenticate, so we don't clutter the
+       *  panel with the paste-a-key input by default.
+       *
+       *  Non-OAuth providers keep the classic ApiKeyField because
+       *  pasting a key is their only option. */}
+      {OAUTH_PROVIDERS.has(draft.providerName) ? (
+        <Field label="Sign in">
+          <OauthProviderPanel
+            providerName={draft.providerName}
+            keyStatus={keyStatus}
+            onSignedIn={refetch}
+          />
+        </Field>
+      ) : (
+        <ApiKeyField
+          status={keyStatus}
+          showInput={draft.showReplaceKey}
+          value={draft.apiKey}
+          onChange={(v) => setDraft((d) => ({ ...d, apiKey: v }))}
+          onReplace={() => setDraft((d) => ({ ...d, showReplaceKey: true, apiKey: '' }))}
+          onCancelReplace={() => setDraft((d) => ({ ...d, showReplaceKey: false, apiKey: '' }))}
+        />
+      )}
 
       <Field label="Model" hint="The specific model id sent with each request.">
-        <Input
+        <SectionInput
           value={draft.model}
           onChange={(e) => setDraft((d) => ({ ...d, model: e.target.value }))}
           placeholder={preset?.suggested_model}
@@ -442,20 +528,22 @@ function PreferencesSection({
       subtitle="Defaults new sessions inherit. Override per-session via the composer chips."
     >
       <Field label="Default mode" hint={MODE_DESCRIPTIONS[draft.mode]}>
-        <select
+        <Select<Mode>
           value={draft.mode}
-          onChange={(e) => setDraft((d) => ({ ...d, mode: e.target.value as Mode }))}
-          className="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus:ring-1 focus:ring-ring"
-        >
-          {MODES.map((m) => <option key={m} value={m}>{m}</option>)}
-        </select>
+          onChange={(v) => setDraft((d) => ({ ...d, mode: v }))}
+          options={MODES.map((m) => ({
+            value: m,
+            label: m,
+            hint: MODE_DESCRIPTIONS[m],
+          }))}
+        />
       </Field>
 
       <Field
         label="Max tokens"
         hint="Cap on tokens the model can emit per response. Leave blank for the provider default."
       >
-        <Input
+        <SectionInput
           type="number"
           value={draft.maxTokens}
           onChange={(e) => setDraft((d) => ({ ...d, maxTokens: e.target.value }))}
@@ -509,7 +597,7 @@ function MemorySection({
         label="Extractor model"
         hint="Model id used for the extraction call. Leave blank to reuse the session's active model (works but is expensive). Point at your provider's cheap tier — e.g. claude-haiku-4-5, gpt-5-nano, deepseek-chat — for negligible per-round cost."
       >
-        <Input
+        <SectionInput
           value={draft.memory.extractor_model ?? ''}
           onChange={(e) => update('extractor_model', e.target.value || null)}
           placeholder="(uses session model)"
@@ -543,19 +631,29 @@ function MemorySection({
  * header row with a count. Bundled skills always render first — they're
  * the "official" roster the user can rely on.
  */
-function SkillsSection() {
+function SkillsSection({ version = 0 }: { version?: number }) {
   const [skills, setSkills] = useState<SkillView[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastReload, setLastReload] = useState<number | null>(null);
+  // Name of the skill whose detail drawer is open (null = closed). The
+  // drawer fetches the full payload lazily on open so the list-view
+  // fetch stays cheap.
+  const [selected, setSelected] = useState<string | null>(null);
 
   useEffect(() => {
     setLoading(true);
     listSkills()
-      .then((s) => { setSkills(s); setError(null); })
+      .then((s) => {
+        setSkills(s);
+        setError(null);
+        // Stamp reload time on any fetch trigger so the "reloaded Xs
+        // ago" hint applies to auto-reloads (via the fs watcher) too.
+        if (version > 0) setLastReload(Date.now());
+      })
       .catch((e) => setError(String((e as Error).message)))
       .finally(() => setLoading(false));
-  }, []);
+  }, [version]);
 
   async function reload() {
     setLoading(true);
@@ -572,15 +670,16 @@ function SkillsSection() {
   }
 
   const grouped = useMemo(() => {
-    const out: Record<'bundled' | 'user' | 'project', SkillView[]> = {
+    const out: Record<'bundled' | 'shared' | 'user' | 'project', SkillView[]> = {
       bundled: [],
+      shared: [],
       user: [],
       project: [],
     };
     for (const s of skills ?? []) {
       out[s.tier].push(s);
     }
-    (['bundled', 'user', 'project'] as const).forEach((k) => {
+    (['bundled', 'shared', 'user', 'project'] as const).forEach((k) => {
       out[k].sort((a, b) => a.name.localeCompare(b.name));
     });
     return out;
@@ -631,7 +730,7 @@ function SkillsSection() {
         <EmptySkillsState />
       )}
 
-      {(['bundled', 'user', 'project'] as const).map((tier) => {
+      {(['bundled', 'shared', 'user', 'project'] as const).map((tier) => {
         const entries = grouped[tier];
         if (entries.length === 0) return null;
         return (
@@ -648,33 +747,43 @@ function SkillsSection() {
             </div>
             <div className="flex flex-col gap-2">
               {entries.map((s) => (
-                <SkillCard key={`${tier}-${s.name}`} skill={s} />
+                <SkillCard
+                  key={`${tier}-${s.name}`}
+                  skill={s}
+                  onOpen={() => setSelected(s.name)}
+                />
               ))}
             </div>
           </div>
         );
       })}
+
+      <SkillDetailDialog
+        name={selected}
+        onClose={() => setSelected(null)}
+      />
     </SectionShell>
   );
 }
 
-/** One skill rendered as a card. Colored icon badge on the left,
- *  name/description stacked in the center, category + attachments chips
- *  underneath. Hover raises the card slightly to hint at future
- *  clickability (open the SKILL.md?), even though the current version
- *  is display-only. */
-function SkillCard({ skill }: { skill: SkillView }) {
+/** One skill rendered as a clickable card. Colored icon badge on the
+ *  left, name/description stacked in the center, category + attachments
+ *  chips underneath. Clicking opens the detail dialog with the SKILL.md
+ *  body rendered as markdown. */
+function SkillCard({ skill, onOpen }: { skill: SkillView; onOpen: () => void }) {
   const iconKey = skill.icon ?? defaultIconKey(skill);
   const Icon = iconFor(iconKey);
   const palette = paletteFor(skill.color, skill.name);
 
   return (
-    <div
+    <button
+      type="button"
+      onClick={onOpen}
       // Card frame stays neutral (matches the "X skills loaded" strip
       // above) so the row list reads calmly. Colour lives only on the
       // icon square — it's the visual anchor, and lets the eye pick
       // out a skill by its accent without overwhelming the panel.
-      className="group relative flex gap-3 rounded-lg border border-border/50 bg-secondary/30 p-3 transition-colors hover:border-border"
+      className="group relative flex gap-3 rounded-lg border border-border/50 bg-secondary/30 p-3 text-left transition-colors hover:border-border hover:bg-secondary/40 focus:outline-none focus-visible:ring-1 focus-visible:ring-mira-blue"
     >
       <div
         className={cn(
@@ -710,6 +819,181 @@ function SkillCard({ skill }: { skill: SkillView }) {
             attached resources
           </div>
         )}
+      </div>
+    </button>
+  );
+}
+
+/** Detail drawer for one skill — opens on card click, fetches the full
+ *  SKILL.md body + attached files from `/api/skills/:name`, and renders
+ *  the body as markdown. `name === null` closes the dialog; a name-swap
+ *  transitions cleanly by keying the loader on `name`. */
+function SkillDetailDialog({
+  name,
+  onClose,
+}: {
+  name: string | null;
+  onClose: () => void;
+}) {
+  const [detail, setDetail] = useState<SkillDetail | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (name === null) {
+      setDetail(null);
+      setError(null);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    getSkill(name)
+      .then((d) => {
+        if (cancelled) return;
+        if (d) setDetail(d);
+        else setError(`no skill named ${name}`);
+      })
+      .catch((e) => {
+        if (!cancelled) setError(String((e as Error).message));
+      })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [name]);
+
+  const open = name !== null;
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-2xl p-0 gap-0 overflow-hidden">
+        <div className="flex h-[560px] max-h-[80vh] flex-col">
+          {/* Header: icon badge + name + tier chip. Mirrors the card
+              styling so it feels like the card expanded rather than a
+              separate view. */}
+          {detail ? (
+            <SkillDetailHeader detail={detail} />
+          ) : (
+            <div className="flex items-center gap-3 border-b border-border/60 px-5 py-4">
+              <div className="size-9 shrink-0 rounded-lg bg-secondary/60" />
+              <div className="flex min-w-0 flex-1 flex-col gap-1">
+                <div className="h-4 w-32 rounded bg-secondary/60" />
+                <div className="h-3 w-52 rounded bg-secondary/40" />
+              </div>
+            </div>
+          )}
+
+          <div className="flex-1 overflow-y-auto px-5 py-4">
+            {loading && !detail && (
+              <div className="text-[12.5px] text-muted-foreground">loading…</div>
+            )}
+            {error && (
+              <div className="rounded-md border border-destructive/40 bg-destructive/[0.08] px-3 py-2 text-[12px] text-destructive">
+                {error}
+              </div>
+            )}
+            {detail && (
+              <div className="flex flex-col gap-4">
+                {/* Body — the SKILL.md markdown. The invoked skill sees
+                    this exact text as a system-reminder, so showing it
+                    verbatim doubles as documentation for what the model
+                    is about to do. */}
+                <div className="rounded-lg border border-border/50 bg-background/40 px-4 py-3">
+                  {detail.body.trim().length === 0 ? (
+                    <div className="text-[12px] italic text-muted-foreground">
+                      (this skill has no body)
+                    </div>
+                  ) : (
+                    <Markdown text={detail.body} />
+                  )}
+                </div>
+
+                {detail.attachments.length > 0 && (
+                  <div className="flex flex-col gap-1.5">
+                    <div className="text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">
+                      Attached files ({detail.attachments.length})
+                    </div>
+                    <ul className="flex flex-col gap-1 rounded-md border border-border/50 bg-secondary/20 px-3 py-2">
+                      {detail.attachments.map((f) => (
+                        <li
+                          key={f}
+                          className="flex items-center gap-2 font-mono text-[11.5px] text-foreground/85"
+                        >
+                          <Paperclip className="size-3 shrink-0 text-muted-foreground" />
+                          {f}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {detail.source && (
+                  <div className="flex flex-col gap-1.5">
+                    <div className="text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">
+                      Source
+                    </div>
+                    <div className="rounded-md border border-border/50 bg-secondary/20 px-3 py-2 font-mono text-[11.5px] text-foreground/80 break-all">
+                      {detail.source}
+                    </div>
+                  </div>
+                )}
+
+                {!detail.source && (
+                  <div className="text-[11.5px] text-muted-foreground">
+                    Bundled skill — ships with the binary. Drop a file at{' '}
+                    <code className="font-mono text-foreground/85">
+                      ~/.mira/skills/{detail.name}/SKILL.md
+                    </code>{' '}
+                    to override.
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function SkillDetailHeader({ detail }: { detail: SkillDetail }) {
+  const iconKey = detail.icon ?? defaultIconKey(detail);
+  const Icon = iconFor(iconKey);
+  const palette = paletteFor(detail.color, detail.name);
+  return (
+    <div className="flex items-start gap-3 border-b border-border/60 px-5 py-4">
+      <div
+        className={cn(
+          'inline-flex size-9 shrink-0 items-center justify-center rounded-lg',
+          palette.iconBg,
+          palette.iconText,
+        )}
+      >
+        <Icon weight="duotone" className="size-5" />
+      </div>
+      <div className="flex min-w-0 flex-1 flex-col gap-1">
+        <div className="flex items-center gap-2">
+          <span className="truncate font-mono text-[14px] font-semibold text-foreground">
+            /{detail.name}
+          </span>
+          <span className={cn(
+            'shrink-0 rounded-full px-2 py-0.5 text-[9.5px] font-semibold uppercase tracking-wider',
+            tierChipClass(detail.tier),
+          )}>
+            {tierLabel(detail.tier)}
+          </span>
+          {detail.category && (
+            <span className={cn(
+              'shrink-0 rounded-sm px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider',
+              palette.chipBg,
+              palette.chipText,
+            )}>
+              {detail.category}
+            </span>
+          )}
+        </div>
+        <p className="text-[12.5px] leading-snug text-foreground/80">
+          {detail.description}
+        </p>
       </div>
     </div>
   );
@@ -776,8 +1060,9 @@ function iconFor(name: string): React.ComponentType<{ className?: string; weight
 /** Pick a default icon key for a skill that didn't specify one. Bundled
  *  skills always ship an explicit `icon:`; this only fires for user-
  *  added ones. We nudge by category — a `git`-category skill without an
- *  icon still reads sensibly as a git-branch. */
-function defaultIconKey(s: SkillView): string {
+ *  icon still reads sensibly as a git-branch. Accepts either the list-
+ *  view or the detail payload — both carry `category`. */
+function defaultIconKey(s: { category?: string }): string {
   const cat = (s.category ?? '').toLowerCase();
   switch (cat) {
     case 'git':        return 'git-branch';
@@ -909,25 +1194,30 @@ function hashPick(seed: string): string {
   return HASH_WHEEL[Math.abs(h) % HASH_WHEEL.length];
 }
 
-function tierLabel(t: 'bundled' | 'user' | 'project'): string {
+type Tier = 'bundled' | 'shared' | 'user' | 'project';
+
+function tierLabel(t: Tier): string {
   switch (t) {
     case 'bundled': return 'Bundled';
+    case 'shared':  return 'Shared (~/.agents/skills)';
     case 'user':    return 'User (~/.mira/skills)';
     case 'project': return 'Project (.mira/skills)';
   }
 }
 
-function tierChipClass(t: 'bundled' | 'user' | 'project'): string {
+function tierChipClass(t: Tier): string {
   switch (t) {
     case 'bundled': return 'bg-mira-blue/15 text-mira-blue border border-mira-blue/25';
+    case 'shared':  return 'bg-amber-500/15 text-amber-300 border border-amber-500/25';
     case 'user':    return 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/25';
     case 'project': return 'bg-purple-500/15 text-purple-300 border border-purple-500/25';
   }
 }
 
-function tierDotClass(t: 'bundled' | 'user' | 'project'): string {
+function tierDotClass(t: Tier): string {
   switch (t) {
     case 'bundled': return 'bg-mira-blue';
+    case 'shared':  return 'bg-amber-400';
     case 'user':    return 'bg-emerald-400';
     case 'project': return 'bg-purple-400';
   }
@@ -1101,7 +1391,7 @@ function KeysSection({
                 )}
                 {editing && (
                   <div className="flex gap-2">
-                    <Input
+                    <SectionInput
                       type="password"
                       value={pending ?? ''}
                       onChange={(e) => updateValue(k.name, e.target.value)}
@@ -1154,6 +1444,18 @@ function AboutSection({ view }: { view: SettingsView }) {
 
 /* ---------- shared bits ---------- */
 
+/**
+ * Section wrapper. Renders a small subgroup header above a soft grey
+ * card that contains the section's rows, separated by hairlines —
+ * the "Settings app" pattern (ChatGPT/Codex use it too). Every direct
+ * child becomes one row; falsy children (from `condition && <Row/>`
+ * patterns) are dropped so we don't get empty rows or stray borders.
+ *
+ * Elevation: `bg-mira-elev1/60` sits one step above the page bg
+ * (`mira-bg`), which is what the palette was designed for. The
+ * hairline dividers are `border-border/30` — visible enough to
+ * separate but quiet enough not to dominate.
+ */
 function SectionShell({
   title, subtitle, children,
 }: {
@@ -1161,13 +1463,30 @@ function SectionShell({
   subtitle?: string;
   children: React.ReactNode;
 }) {
+  const rows = React.Children.toArray(children).filter(Boolean);
   return (
-    <div className="flex flex-col gap-4">
-      <div>
-        <div className="text-[16px] font-semibold text-foreground">{title}</div>
-        {subtitle && <div className="mt-1 text-[12.5px] text-muted-foreground">{subtitle}</div>}
+    <div className="flex flex-col gap-3">
+      <div className="px-1">
+        <div className="text-[18px] font-semibold tracking-tight text-foreground">
+          {title}
+        </div>
+        {subtitle && (
+          <div className="mt-1 text-[12.5px] text-muted-foreground/85">{subtitle}</div>
+        )}
       </div>
-      <div className="flex flex-col gap-4">{children}</div>
+      <div className="overflow-hidden rounded-xl border border-border/50 bg-mira-elev1/60">
+        {rows.map((child, i) => (
+          <div
+            key={i}
+            className={cn(
+              'px-4 py-3.5',
+              i < rows.length - 1 && 'border-b border-border/30',
+            )}
+          >
+            {child}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -1213,7 +1532,7 @@ function ApiKeyField({
       )}
       {(status.kind === 'none' || showInput) && (
         <div className="flex gap-2">
-          <Input
+          <SectionInput
             type="password"
             value={value}
             onChange={(e) => onChange(e.target.value)}
@@ -1255,5 +1574,171 @@ function SavedBadge({
       <span className="flex-1 min-w-0 font-mono text-xs overflow-hidden text-ellipsis whitespace-nowrap">{masked}</span>
       <Button variant="outline" size="sm" onClick={onClick} type="button">{action}</Button>
     </div>
+  );
+}
+
+/** Per-provider OAuth affordances — label, icon, description. Kept
+ *  as a small config table so adding a third OAuth provider later
+ *  needs only one entry, not another wrapper component. */
+type OauthSpec = {
+  label: string;
+  icon: string;
+  description: React.ReactNode;
+};
+
+const OAUTH_SPECS: Record<string, OauthSpec> = {
+  openrouter: {
+    label: 'Sign in with OpenRouter',
+    icon: openrouterIcon,
+    description: (
+      <>
+        Sign in with your OpenRouter account and we'll receive a key
+        automatically — stored in your local <code>mira.yaml</code>.
+      </>
+    ),
+  },
+  openai: {
+    label: 'Sign in with ChatGPT',
+    icon: chatgptIcon,
+    description: (
+      <>
+        Use your ChatGPT Plus / Pro / Team subscription instead of an API key.
+        Mira refreshes the underlying token in the background so long sessions
+        don't get logged out.
+      </>
+    ),
+  },
+};
+
+/**
+ * OAuth sign-in panel for providers that expose a PKCE flow. When
+ * `keyStatus` says a key is already stored (signed in), we show a
+ * compact "Signed in" chip with a "Sign in again" link. Otherwise we
+ * show the primary white-pill CTA.
+ *
+ * The polling approach (repeated `GET /api/settings` until
+ * `has_api_key` flips) avoids adding a WebSocket/EventSource just for
+ * this; a user who bails part-way just leaves the panel in `awaiting`
+ * until the 3-min ceiling — no long-term harm.
+ */
+function OauthProviderPanel({
+  providerName,
+  keyStatus,
+  onSignedIn,
+}: {
+  providerName: string;
+  keyStatus: { kind: 'literal' | 'env' | 'none'; masked?: string; name?: string };
+  onSignedIn: () => void;
+}) {
+  const spec = OAUTH_SPECS[providerName];
+  const [status, setStatus] = useState<'idle' | 'awaiting' | 'error'>('idle');
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const alreadySignedIn = keyStatus.kind === 'literal';
+
+  async function begin() {
+    setErrorMsg(null);
+    setStatus('awaiting');
+    try {
+      const resp = await fetch(`/api/auth/${providerName}/start`, { method: 'POST' });
+      if (!resp.ok) throw new Error(`start ${resp.status}`);
+      const { authorize_url } = (await resp.json()) as { authorize_url: string };
+      window.open(authorize_url, '_blank', 'noopener,noreferrer');
+      const deadline = Date.now() + 3 * 60 * 1000;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 1500));
+        try {
+          const s = (await fetch('/api/settings').then((r) => r.json())) as SettingsView;
+          const p = s.providers.find((x) => x.name === providerName);
+          if (p?.has_api_key) {
+            setStatus('idle');
+            onSignedIn();
+            return;
+          }
+        } catch { /* transient — keep polling */ }
+      }
+      setStatus('error');
+      setErrorMsg('Sign-in timed out. Try again in a new tab.');
+    } catch (e) {
+      setStatus('error');
+      setErrorMsg(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  if (!spec) return null;
+
+  return (
+    <div className="flex flex-col gap-2">
+      {alreadySignedIn ? (
+        <div className="flex items-center gap-3 rounded-md border border-emerald-500/40 bg-emerald-500/[0.06] px-3 py-2 text-[12.5px]">
+          <Check weight="bold" className="size-4 shrink-0 text-emerald-400" />
+          <div className="flex-1 min-w-0">
+            <div className="text-foreground">Signed in</div>
+            <div className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">
+              {keyStatus.masked}
+            </div>
+          </div>
+          <SignInPill
+            spec={spec}
+            status={status}
+            onClick={begin}
+            label="Sign in again"
+          />
+        </div>
+      ) : (
+        <SignInPill
+          spec={spec}
+          status={status}
+          onClick={begin}
+          label={spec.label}
+        />
+      )}
+      {status === 'error' && errorMsg && (
+        <div className="text-[11.5px] text-destructive">{errorMsg}</div>
+      )}
+      <div className="text-[11.5px] text-muted-foreground">{spec.description}</div>
+    </div>
+  );
+}
+
+/**
+ * The primary CTA: white-bg capsule with the provider mark on the
+ * left. Feels distinct from Mira's own outline/secondary buttons so
+ * "sign in with X" reads as an *action taken with X's brand*, not a
+ * generic form control. Bg stays white when disabled (mid-flow) but
+ * with a subtle opacity so the disabled state still telegraphs.
+ */
+function SignInPill({
+  spec,
+  status,
+  onClick,
+  label,
+}: {
+  spec: OauthSpec;
+  status: 'idle' | 'awaiting' | 'error';
+  onClick: () => void;
+  label: string;
+}) {
+  const awaiting = status === 'awaiting';
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={awaiting}
+      className={cn(
+        'inline-flex items-center gap-2 self-start rounded-full bg-white px-4 py-1.5 text-[13px] font-medium text-black',
+        'shadow-sm ring-1 ring-black/10 transition-all',
+        'hover:bg-white/95 hover:shadow-md',
+        'disabled:cursor-wait disabled:opacity-70 disabled:hover:bg-white disabled:hover:shadow-sm',
+      )}
+    >
+      <img
+        src={spec.icon}
+        alt=""
+        aria-hidden="true"
+        draggable={false}
+        className="size-4 shrink-0 rounded-sm object-contain"
+      />
+      {awaiting ? 'Waiting for browser…' : label}
+    </button>
   );
 }

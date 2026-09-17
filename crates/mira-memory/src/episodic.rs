@@ -248,9 +248,12 @@ mod tests {
         let tmp = tempdir().unwrap();
         let s = store_in(tmp.path());
         for i in 0..5 {
-            s.append(EpisodicEntry::now(format!("entry-{i}"), EpisodicSource::Auto))
-                .await
-                .unwrap();
+            s.append(EpisodicEntry::now(
+                format!("entry-{i}"),
+                EpisodicSource::Auto,
+            ))
+            .await
+            .unwrap();
         }
         let recent = s.recent(2).await.unwrap();
         assert_eq!(recent.len(), 2);

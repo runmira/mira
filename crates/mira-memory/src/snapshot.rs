@@ -92,7 +92,11 @@ impl MemorySnapshot for FileMemorySnapshot {
         // Episodic tail size depends on the mode: retrieval wants a wider
         // pool to score against; dump mode uses the smaller explicit
         // limit so we don't inflate the un-retrieved prompt.
-        let episodic_pool_size = if query.is_some() { 100 } else { self.episodic_limit };
+        let episodic_pool_size = if query.is_some() {
+            100
+        } else {
+            self.episodic_limit
+        };
         let episodic = match self.episodic.as_ref() {
             Some(s) => s.recent(episodic_pool_size).await.unwrap_or_default(),
             None => Vec::new(),
@@ -273,10 +277,7 @@ mod tests {
         .unwrap();
         let s = FileMemorySnapshot::new(tmp.path().join("u.md"), p);
         // Budget wide enough for one bullet + header + budget marker.
-        let rendered = s
-            .render(Some(&q("pnpm install failed", 20)))
-            .await
-            .unwrap();
+        let rendered = s.render(Some(&q("pnpm install failed", 20))).await.unwrap();
         assert!(rendered.contains("pnpm"));
         assert!(rendered.contains("<!-- memory:"));
     }

@@ -77,6 +77,19 @@ export default {
           from: { opacity: '0', transform: 'translateY(4px)' },
           to:   { opacity: '1', transform: 'translateY(0)' },
         },
+        // Centered-dialog entrance. Must include the `-50%, -50%`
+        // centering translate inside the keyframe because any `transform`
+        // property in the animation completely overrides the element's
+        // static `transform: translate(-50%, -50%)` — without this, the
+        // dialog plays a `translateY(4px)`-only transform during
+        // animation (top-left of the box lands at screen center →
+        // bottom-right quadrant), then snaps back to true center when
+        // the animation clears. That was the "opens bottom-right, janks
+        // to middle" bug.
+        'dialog-in': {
+          from: { opacity: '0', transform: 'translate(-50%, calc(-50% + 8px)) scale(0.98)' },
+          to:   { opacity: '1', transform: 'translate(-50%, -50%) scale(1)' },
+        },
         'thinking-bounce': {
           '0%, 60%, 100%': { opacity: '0.25', transform: 'translateY(0)' },
           '30%':           { opacity: '1',    transform: 'translateY(-2px)' },
@@ -93,6 +106,7 @@ export default {
         'accordion-down': 'accordion-down 0.14s ease-out',
         'accordion-up':   'accordion-up 0.14s ease-out',
         'fade-in':        'fade-in 0.14s ease-out',
+        'dialog-in':      'dialog-in 0.14s ease-out',
         'text-shimmer':   'text-shimmer 2.4s linear infinite',
       },
     },

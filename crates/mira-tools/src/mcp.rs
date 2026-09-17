@@ -22,6 +22,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -30,9 +31,7 @@ use mira_config::{McpHttpConfig, McpServerConfig, McpStdioConfig};
 use mira_core::{ToolCall, ToolResult};
 use rmcp::model::{CallToolRequestParams, ContentBlock, Tool as RemoteTool};
 use rmcp::service::RunningService;
-use rmcp::transport::{
-    ConfigureCommandExt, StreamableHttpClientTransport, TokioChildProcess,
-};
+use rmcp::transport::{ConfigureCommandExt, StreamableHttpClientTransport, TokioChildProcess};
 use rmcp::{RoleClient, ServiceExt};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use tokio::process::Command;
@@ -40,6 +39,15 @@ use tracing::warn;
 
 use crate::context::ToolContext;
 use crate::tool::{Action, Tool, ToolError};
+
+/// Upper bound on a single MCP `call_tool` round-trip. A wedged remote
+/// (network stall, buggy stdio server holding the pipe open) used to
+/// block the harness round loop indefinitely — the audit flagged this
+/// under Gap #2. Two minutes is generous for real work (a long grep on
+/// a large index, a slow fetch) while still guaranteeing the model turn
+/// eventually makes progress. If a real workload needs more, we'll add
+/// a per-server override in config.
+const MCP_CALL_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// One connected MCP server, plus the wrapped tool handles produced from
 /// its tool list. Holding this keeps the underlying transport (and, for
@@ -76,9 +84,7 @@ pub async fn connect(name: &str, cfg: &McpServerConfig) -> Result<McpConnection>
 
     let tools: Vec<Arc<dyn Tool>> = remote_tools
         .into_iter()
-        .map(|t| {
-            Arc::new(McpTool::new(name.to_owned(), service.clone(), t)) as Arc<dyn Tool>
-        })
+        .map(|t| Arc::new(McpTool::new(name.to_owned(), service.clone(), t)) as Arc<dyn Tool>)
         .collect();
 
     Ok(McpConnection {
@@ -190,12 +196,17 @@ impl McpTool {
         let description = remote
             .description
             .map(|c| c.into_owned())
-            .unwrap_or_else(|| format!("Remote MCP tool `{remote_name}` from server `{server_name}`."));
+            .unwrap_or_else(|| {
+                format!("Remote MCP tool `{remote_name}` from server `{server_name}`.")
+            });
         // The remote schema arrives as `Arc<JsonObject>`; clone into a Value so
         // we can hand it to the provider as-is. Fall back to a permissive
         // empty-object schema if the remote omitted one.
         let parameters = JsonValue::Object(JsonMap::from_iter(
-            remote.input_schema.iter().map(|(k, v)| (k.clone(), v.clone())),
+            remote
+                .input_schema
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone())),
         ));
         let parameters = if parameters.as_object().map(|m| m.is_empty()).unwrap_or(true) {
             serde_json::json!({ "type": "object", "properties": {} })
@@ -239,32 +250,49 @@ impl Tool for McpTool {
         // `JsonObject`, so we parse and enforce that shape — a non-object
         // top-level value (rare but seen with weaker models) is a client
         // error worth surfacing.
-        let arguments: Option<JsonMap<String, JsonValue>> = if call.function.arguments.trim().is_empty()
-        {
-            None
-        } else {
-            match serde_json::from_str::<JsonValue>(&call.function.arguments) {
-                Ok(JsonValue::Object(m)) => Some(m),
-                Ok(JsonValue::Null) => None,
-                Ok(other) => {
-                    return Err(ToolError::InvalidArgs(format!(
-                        "expected JSON object, got {other:?}"
-                    )))
+        let arguments: Option<JsonMap<String, JsonValue>> =
+            if call.function.arguments.trim().is_empty() {
+                None
+            } else {
+                match serde_json::from_str::<JsonValue>(&call.function.arguments) {
+                    Ok(JsonValue::Object(m)) => Some(m),
+                    Ok(JsonValue::Null) => None,
+                    Ok(other) => {
+                        return Err(ToolError::InvalidArgs(format!(
+                            "expected JSON object, got {other:?}"
+                        )))
+                    }
+                    Err(e) => return Err(ToolError::InvalidArgs(e.to_string())),
                 }
-                Err(e) => return Err(ToolError::InvalidArgs(e.to_string())),
-            }
-        };
+            };
 
         let mut params = CallToolRequestParams::new(self.remote_name.clone());
         if let Some(args) = arguments {
             params = params.with_arguments(args);
         }
 
-        let result = self
-            .service
-            .call_tool(params)
+        // Bounded round-trip: an unresponsive MCP server used to hang
+        // the whole tool loop. On timeout we surface a `Failed` error
+        // (mapped to a normal tool error result upstream) so the model
+        // can react / retry and the turn can continue.
+        let result = match tokio::time::timeout(MCP_CALL_TIMEOUT, self.service.call_tool(params))
             .await
-            .map_err(|e| ToolError::Failed(format!("mcp `{}`: {e}", self.server_name)))?;
+        {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
+                return Err(ToolError::Failed(format!(
+                    "mcp `{}`: {e}",
+                    self.server_name
+                )))
+            }
+            Err(_) => {
+                return Err(ToolError::Failed(format!(
+                    "mcp `{}`: call timed out after {}s",
+                    self.server_name,
+                    MCP_CALL_TIMEOUT.as_secs()
+                )))
+            }
+        };
 
         let body = flatten_content(&result.content);
         let call_id = call.id.clone();

@@ -153,8 +153,7 @@ impl AgentRegistry {
     /// already-filled fields and the "child wins" rule leaves them alone.
     pub fn resolve_inheritance(&mut self) {
         let names: Vec<String> = self.types.keys().cloned().collect();
-        let mut resolved: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        let mut resolved: std::collections::HashSet<String> = std::collections::HashSet::new();
         for name in names {
             let mut path: Vec<String> = Vec::new();
             self.resolve_one(&name, &mut resolved, &mut path);
@@ -331,10 +330,8 @@ pub fn load_dir(dir: &Path, scope: &str) -> AgentRegistry {
 }
 
 fn load_file(path: &Path) -> Result<AgentType> {
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("read {}", path.display()))?;
-    parse_agent_md(&raw)
-        .with_context(|| format!("parse {}", path.display()))
+    let raw = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    parse_agent_md(&raw).with_context(|| format!("parse {}", path.display()))
 }
 
 /* ---------- parser ---------- */
@@ -350,9 +347,7 @@ pub fn parse_agent_md(source: &str) -> Result<AgentType> {
     let after_open = source
         .strip_prefix("---\n")
         .or_else(|| source.strip_prefix("---\r\n"))
-        .ok_or_else(|| {
-            anyhow!("missing frontmatter — expected file to start with `---`")
-        })?;
+        .ok_or_else(|| anyhow!("missing frontmatter — expected file to start with `---`"))?;
 
     let end = after_open
         .find("\n---\n")
@@ -383,8 +378,7 @@ pub fn parse_agent_md(source: &str) -> Result<AgentType> {
         .trim_start_matches("---")
         .trim_start_matches('\n');
 
-    let fm: Frontmatter = serde_yaml::from_str(fm_raw)
-        .context("frontmatter is not valid YAML")?;
+    let fm: Frontmatter = serde_yaml::from_str(fm_raw).context("frontmatter is not valid YAML")?;
 
     if fm.name.trim().is_empty() {
         return Err(anyhow!("frontmatter is missing required `name`"));
@@ -542,11 +536,10 @@ mod tests {
         let parent_src = "---\nname: base\ndescription: base type\ntools: [read_file, grep]\nmodel: parent-model\nmax_rounds: 20\n---\nParent addendum.\n";
         let child_src = "---\nname: derived\nextends: base\ndescription: derived type\n---\n";
         let mut reg = AgentRegistry::new();
-        reg.types.insert("base".to_owned(), parse_agent_md(parent_src).unwrap());
-        reg.types.insert(
-            "derived".to_owned(),
-            parse_agent_md(child_src).unwrap(),
-        );
+        reg.types
+            .insert("base".to_owned(), parse_agent_md(parent_src).unwrap());
+        reg.types
+            .insert("derived".to_owned(), parse_agent_md(child_src).unwrap());
         reg.resolve_inheritance();
 
         let d = reg.get("derived").unwrap();
@@ -559,7 +552,10 @@ mod tests {
         );
         assert_eq!(d.model.as_deref(), Some("parent-model"));
         assert_eq!(d.max_rounds, Some(20));
-        assert_eq!(d.system_prompt_addendum.as_deref(), Some("Parent addendum."));
+        assert_eq!(
+            d.system_prompt_addendum.as_deref(),
+            Some("Parent addendum.")
+        );
     }
 
     #[test]
@@ -567,11 +563,10 @@ mod tests {
         let parent_src = "---\nname: base\ntools: [read_file, grep]\nmax_rounds: 20\n---\n";
         let child_src = "---\nname: derived\nextends: base\ntools: [glob]\nmax_rounds: 5\n---\n";
         let mut reg = AgentRegistry::new();
-        reg.types.insert("base".to_owned(), parse_agent_md(parent_src).unwrap());
-        reg.types.insert(
-            "derived".to_owned(),
-            parse_agent_md(child_src).unwrap(),
-        );
+        reg.types
+            .insert("base".to_owned(), parse_agent_md(parent_src).unwrap());
+        reg.types
+            .insert("derived".to_owned(), parse_agent_md(child_src).unwrap());
         reg.resolve_inheritance();
 
         let d = reg.get("derived").unwrap();
@@ -583,7 +578,8 @@ mod tests {
     fn resolve_inheritance_missing_parent_is_noop() {
         let child_src = "---\nname: orphan\nextends: does-not-exist\n---\n";
         let mut reg = AgentRegistry::new();
-        reg.types.insert("orphan".to_owned(), parse_agent_md(child_src).unwrap());
+        reg.types
+            .insert("orphan".to_owned(), parse_agent_md(child_src).unwrap());
         reg.resolve_inheritance();
         // Should not crash, and child stays unchanged.
         let o = reg.get("orphan").unwrap();
@@ -609,9 +605,12 @@ mod tests {
         let mid = "---\nname: mid\nextends: base\nmax_rounds: 42\n---\n";
         let leaf = "---\nname: leaf\nextends: mid\ndescription: leaf desc\n---\n";
         let mut reg = AgentRegistry::new();
-        reg.types.insert("base".to_owned(), parse_agent_md(base).unwrap());
-        reg.types.insert("mid".to_owned(), parse_agent_md(mid).unwrap());
-        reg.types.insert("leaf".to_owned(), parse_agent_md(leaf).unwrap());
+        reg.types
+            .insert("base".to_owned(), parse_agent_md(base).unwrap());
+        reg.types
+            .insert("mid".to_owned(), parse_agent_md(mid).unwrap());
+        reg.types
+            .insert("leaf".to_owned(), parse_agent_md(leaf).unwrap());
         reg.resolve_inheritance();
 
         let l = reg.get("leaf").unwrap();
@@ -637,10 +636,14 @@ mod tests {
     /// dev-deps. Best-effort cleanup via Drop.
     struct TmpDir(PathBuf);
     impl TmpDir {
-        fn path(&self) -> &Path { &self.0 }
+        fn path(&self) -> &Path {
+            &self.0
+        }
     }
     impl Drop for TmpDir {
-        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
     fn tempdir() -> TmpDir {
         let mut p = std::env::temp_dir();

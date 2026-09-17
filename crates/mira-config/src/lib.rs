@@ -300,10 +300,7 @@ impl MiraConfig {
         // Memory: per-field merge. `other` (per-repo) wins if it set the
         // field; otherwise the global value stays.
         self.memory.auto_extract = other.memory.auto_extract.or(self.memory.auto_extract);
-        self.memory.extractor_model = other
-            .memory
-            .extractor_model
-            .or(self.memory.extractor_model);
+        self.memory.extractor_model = other.memory.extractor_model.or(self.memory.extractor_model);
         self.memory.tools_enabled = other.memory.tools_enabled.or(self.memory.tools_enabled);
         self.memory.inject_context = other.memory.inject_context.or(self.memory.inject_context);
         self.memory.retrieval_enabled = other
@@ -401,6 +398,19 @@ pub fn user_skills_dir() -> PathBuf {
         .join("skills")
 }
 
+/// `~/.agents/skills/` — the emerging cross-tool convention for locally
+/// installed skills. `npx skills add owner/pkg@name` (mattpocock's
+/// installer, Codex, and other agents that follow the same convention)
+/// drops files here, so scanning it means the same one-line install
+/// command works for Mira with zero extra tooling.
+pub fn shared_skills_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default()
+        .join(".agents")
+        .join("skills")
+}
+
 /// `<cwd>/.mira/skills/` — project-local skills directory. Files here
 /// override same-named user + bundled skills, so a repo can ship its
 /// own "how we deploy" or "how we release" playbook.
@@ -408,14 +418,69 @@ pub fn project_skills_dir(cwd: &Path) -> PathBuf {
     cwd.join(".mira").join("skills")
 }
 
-/// Sensible base_url defaults for well-known provider names.
+/// `<cwd>/.agents/skills/` — project-local cross-tool convention.
+/// `npx skills add …` drops files here when the current directory
+/// already has an `.agents` folder (Codex-style project layout).
+/// Scanned alongside `<cwd>/.mira/skills/` so both work interchangeably.
+pub fn project_agents_skills_dir(cwd: &Path) -> PathBuf {
+    cwd.join(".agents").join("skills")
+}
+
+/// Well-known project-local skill directories, in precedence order —
+/// later entries override same-named skills from earlier ones. Includes
+/// every convention we've seen in the wild:
+///
+///   `<cwd>/.mira/skills/`     — Mira's own convention
+///   `<cwd>/.agents/skills/`   — cross-tool "agents" convention
+///   `<cwd>/.claude/skills/`   — Claude Code
+///   `<cwd>/.codex/skills/`    — Codex
+///   `<cwd>/.cursor/skills/`   — Cursor
+///
+/// The `npx skills add …` installer picks whichever of these already
+/// exists in the project, so scanning the whole set means the same
+/// one-line install works whether the user has one, several, or none
+/// of the tool-specific folders.
+pub fn well_known_project_skills_dirs(cwd: &Path) -> Vec<PathBuf> {
+    vec![
+        cwd.join(".mira").join("skills"),
+        cwd.join(".agents").join("skills"),
+        cwd.join(".claude").join("skills"),
+        cwd.join(".codex").join("skills"),
+        cwd.join(".cursor").join("skills"),
+    ]
+}
+
+/// Sensible base_url defaults for well-known provider names. Keep in
+/// sync with the frontend's `PROVIDER_PRESETS` in
+/// `mira-server/frontend/src/components/Settings.tsx` — the two lists
+/// should agree so the CLI and web UI resolve the same URL from the
+/// same short name.
 pub fn default_base_url_for(name: &str) -> Option<&'static str> {
     Some(match name {
+        // Gateways
         "openrouter" => "https://openrouter.ai/api/v1",
+        // Major hosted
         "openai" => "https://api.openai.com/v1",
         "anthropic" => "https://api.anthropic.com/v1",
+        "google" => "https://generativelanguage.googleapis.com/v1beta/openai",
+        // Fast / cheap inference
+        "deepseek" => "https://api.deepseek.com/v1",
         "groq" => "https://api.groq.com/openai/v1",
+        "cerebras" => "https://api.cerebras.ai/v1",
+        "xai" => "https://api.x.ai/v1",
+        // Model bazaars
+        "together" => "https://api.together.xyz/v1",
+        "fireworks" => "https://api.fireworks.ai/inference/v1",
+        "hyperbolic" => "https://api.hyperbolic.xyz/v1",
+        "novita" => "https://api.novita.ai/v3/openai",
+        // Search-augmented + regionals
+        "perplexity" => "https://api.perplexity.ai",
+        "mistral" => "https://api.mistral.ai/v1",
+        "moonshot" | "moonshotai" => "https://api.moonshot.ai/v1",
+        // Local runtimes
         "ollama" => "http://localhost:11434/v1",
+        "lmstudio" => "http://localhost:1234/v1",
+        "llamacpp" => "http://localhost:8080/v1",
         _ => return None,
     })
 }
@@ -428,13 +493,22 @@ pub fn default_api_key_env_for(name: &str) -> Option<&'static str> {
         "openrouter" => "OPENROUTER_API_KEY",
         "openai" => "OPENAI_API_KEY",
         "anthropic" => "ANTHROPIC_API_KEY",
+        // Google's OpenAI-compat endpoint accepts a Gemini API key.
+        // GEMINI_API_KEY is the conventional name in google's docs.
+        "google" => "GEMINI_API_KEY",
         "groq" => "GROQ_API_KEY",
+        "cerebras" => "CEREBRAS_API_KEY",
         "together" => "TOGETHER_API_KEY",
         "fireworks" => "FIREWORKS_API_KEY",
+        "hyperbolic" => "HYPERBOLIC_API_KEY",
+        "novita" => "NOVITA_API_KEY",
         "perplexity" => "PERPLEXITY_API_KEY",
+        "mistral" => "MISTRAL_API_KEY",
         "xai" => "XAI_API_KEY",
         "deepseek" => "DEEPSEEK_API_KEY",
         "moonshot" | "moonshotai" => "MOONSHOT_API_KEY",
+        // Local runtimes typically don't require a key — leaving no
+        // env-var hint is the right signal.
         _ => return None,
     })
 }
@@ -446,14 +520,21 @@ pub fn pretty_provider_name(name: &str) -> String {
         "openrouter" => "OpenRouter".into(),
         "openai" => "OpenAI".into(),
         "anthropic" => "Anthropic".into(),
+        "google" => "Google (Gemini)".into(),
         "groq" => "Groq".into(),
+        "cerebras" => "Cerebras".into(),
         "together" => "Together".into(),
         "fireworks" => "Fireworks".into(),
+        "hyperbolic" => "Hyperbolic".into(),
+        "novita" => "Novita".into(),
         "perplexity" => "Perplexity".into(),
+        "mistral" => "Mistral".into(),
         "xai" => "xAI".into(),
         "deepseek" => "DeepSeek".into(),
         "moonshot" | "moonshotai" => "Moonshot AI".into(),
         "ollama" => "Ollama".into(),
+        "lmstudio" => "LM Studio".into(),
+        "llamacpp" => "llama.cpp".into(),
         other => {
             let mut chars = other.chars();
             match chars.next() {
@@ -532,5 +613,88 @@ mod tests {
             Some("l-url")
         );
         assert!(merged.providers.contains_key("local"));
+    }
+
+    /* ---- provider preset registry ---- */
+
+    /// The full roster the UI's PROVIDER_PRESETS list ships. Keeping
+    /// the test hardcoded so a UI/config drift shows up as a build
+    /// failure rather than a silent gap where the CLI can't resolve
+    /// a name the picker offers.
+    const EXPECTED_PROVIDERS: &[&str] = &[
+        "openrouter",
+        "openai",
+        "anthropic",
+        "google",
+        "deepseek",
+        "groq",
+        "cerebras",
+        "xai",
+        "together",
+        "fireworks",
+        "hyperbolic",
+        "novita",
+        "perplexity",
+        "mistral",
+        "moonshot",
+        "ollama",
+        "lmstudio",
+        "llamacpp",
+    ];
+
+    #[test]
+    fn every_expected_provider_has_a_base_url() {
+        for name in EXPECTED_PROVIDERS {
+            assert!(
+                default_base_url_for(name).is_some(),
+                "missing base URL for `{name}`"
+            );
+        }
+    }
+
+    #[test]
+    fn hosted_providers_declare_an_api_key_env() {
+        // Local runtimes (ollama, lmstudio, llamacpp) don't need a
+        // key — everything else should have a conventional env var.
+        for name in EXPECTED_PROVIDERS
+            .iter()
+            .filter(|n| !matches!(**n, "ollama" | "lmstudio" | "llamacpp"))
+        {
+            assert!(
+                default_api_key_env_for(name).is_some(),
+                "hosted provider `{name}` should declare an api-key env var"
+            );
+        }
+    }
+
+    #[test]
+    fn every_expected_provider_has_a_pretty_name() {
+        for name in EXPECTED_PROVIDERS {
+            let pretty = pretty_provider_name(name);
+            assert!(!pretty.is_empty(), "empty pretty name for `{name}`");
+            // Not just the raw input (which would mean the fallback
+            // ran) — every listed provider deserves an intentional
+            // display name. Brands that go lowercase-first on
+            // purpose (`xAI`, `llama.cpp`) are still fine because
+            // the whole string differs from the raw slug.
+            assert_ne!(
+                pretty, *name,
+                "pretty name for `{name}` should have an explicit branch, got the raw slug"
+            );
+        }
+    }
+
+    #[test]
+    fn moonshot_and_moonshotai_alias() {
+        // The picker uses `moonshot` but historic yaml files may say
+        // `moonshotai` — both must resolve.
+        assert_eq!(
+            default_api_key_env_for("moonshotai"),
+            default_api_key_env_for("moonshot"),
+        );
+        assert_eq!(
+            pretty_provider_name("moonshotai"),
+            pretty_provider_name("moonshot"),
+        );
     }
 }

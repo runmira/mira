@@ -40,3 +40,15 @@ thiserror    = { workspace = true }
 tracing      = { workspace = true }
 uuid         = { workspace = true }
 reqwest      = { workspace = true }
+# Filesystem watcher for skill hot-reload — picks up new / edited
+# SKILL.md files without the user clicking Reload.
+notify       = "6"
+# OAuth PKCE flow for provider sign-ins (OpenRouter, ChatGPT Codex).
+# Small, single-purpose crates; only ever loaded on the auth path.
+sha2         = "0.10"
+base64       = "0.22"
+rand         = "0.8"
+urlencoding  = "2"
+
+[dev-dependencies]
+tempfile = "3"

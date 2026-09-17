@@ -10,11 +10,13 @@
 
 pub mod file_store;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
 use mira_ai::TokenUsage;
 use mira_core::{Message, SessionId};
+use mira_tools::DiffPreview;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -71,6 +73,15 @@ pub struct SessionRecord {
     /// the UI shows a "last goal" chip until the user clears it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<crate::goal::Goal>,
+    /// Diff previews for `edit_file` / `write_file` calls, keyed by
+    /// the tool call id. Captured at dispatch time (just before the
+    /// tool runs) so the "before" file state matches what the user
+    /// saw live. On reload the frontend attaches these to the
+    /// matching tool entry so the transcript renders the same diff
+    /// it did during the live session, instead of falling back to the
+    /// arg-only `ReconstructedPreview`. Empty for legacy records.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub previews: HashMap<String, DiffPreview>,
 }
 
 /// Running token totals for a whole session. Grows monotonically; individual

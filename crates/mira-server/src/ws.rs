@@ -91,6 +91,7 @@ async fn build_ready(state: &AppState) -> ServerMsg {
     let usage = sess.usage().await;
     let tasks = sess.tasks().await;
     let goal = sess.goal().await;
+    let previews = sess.previews().await;
     ServerMsg::Ready {
         session_id: sess.id.to_string(),
         model: cfg.model,
@@ -101,6 +102,7 @@ async fn build_ready(state: &AppState) -> ServerMsg {
         usage,
         tasks,
         goal,
+        previews,
     }
 }
 
@@ -136,6 +138,16 @@ async fn dispatch(cmd: ClientMsg, state: &AppState) {
         }
         ClientMsg::SetMode { mode } => {
             state.policy.lock().await.set_mode(mode);
+            // Propagate to the session's persistent shell so the
+            // seatbelt profile actually reflects the new mode on the
+            // next bash call — otherwise `plan → auto` would keep the
+            // Restricted profile until session restart.
+            let profile = mira_harness::profile_for_mode(mode);
+            state
+                .current_session()
+                .await
+                .set_sandbox_profile(profile)
+                .await;
             let _ = state.events_tx.send(ServerMsg::ModeChanged { mode });
         }
         ClientMsg::SetEffort { effort } => {
@@ -156,8 +168,19 @@ async fn dispatch(cmd: ClientMsg, state: &AppState) {
         ClientMsg::Interrupt => {
             let sess = state.current_session().await;
             let cancelled = sess.cancel().await;
+            // Drain any pending approval modal as a denial so a
+            // half-answered approval doesn't leave the round loop
+            // parked on `oneshot::recv()`. Audit Gap #2 called out
+            // "connected client that never answers parks the whole
+            // harness" — cancellation now unblocks those waiters
+            // too, not just the model stream.
+            let denied = approver::drain_pending_as_denied(&state.pending).await;
             let text = if cancelled {
-                "turn interrupted".into()
+                if denied > 0 {
+                    format!("turn interrupted (denied {denied} pending approval(s))")
+                } else {
+                    "turn interrupted".into()
+                }
             } else {
                 "nothing to interrupt".into()
             };
@@ -174,6 +197,9 @@ async fn dispatch(cmd: ClientMsg, state: &AppState) {
             condition,
             max_iterations,
             evaluator_model,
+            verify,
+            budget_tokens,
+            budget_usd,
         } => {
             let condition = condition.trim().to_owned();
             if condition.is_empty() {
@@ -187,6 +213,9 @@ async fn dispatch(cmd: ClientMsg, state: &AppState) {
                 goal = goal.with_max_iterations(n);
             }
             goal = goal.with_evaluator_model(evaluator_model);
+            goal = goal.with_verify(verify);
+            goal = goal.with_budget_tokens(budget_tokens);
+            goal = goal.with_budget_usd(budget_usd);
             let sess = state.current_session().await;
             sess.set_goal(goal.clone()).await;
             let _ = state.events_tx.send(ServerMsg::GoalSet { goal });

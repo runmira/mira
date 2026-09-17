@@ -57,8 +57,8 @@ impl WorktreeSession {
         }
         let primary = primary_worktree(parent_cwd)
             .ok_or_else(|| anyhow!("could not locate primary worktree"))?;
-        let base_sha = current_head_sha(parent_cwd)
-            .ok_or_else(|| anyhow!("could not resolve HEAD sha"))?;
+        let base_sha =
+            current_head_sha(parent_cwd).ok_or_else(|| anyhow!("could not resolve HEAD sha"))?;
 
         // Slug pieces: type name for grep-ability, first 8 chars of the
         // call id for traceability across the child transcript, and a
@@ -166,10 +166,9 @@ impl WorktreeSession {
                 if dst.exists() {
                     if let Err(e) = std::fs::remove_file(&dst) {
                         warn!("delete {}: {}", dst.display(), e);
-                        report.errors.push(format!(
-                            "delete {}: {e}",
-                            rel_path.display()
-                        ));
+                        report
+                            .errors
+                            .push(format!("delete {}: {e}", rel_path.display()));
                     } else {
                         report.files_deleted.push(rel_path.to_path_buf());
                     }
@@ -249,9 +248,7 @@ pub(crate) struct MergeReport {
 
 impl MergeReport {
     pub fn is_empty(&self) -> bool {
-        self.files_merged.is_empty()
-            && self.files_deleted.is_empty()
-            && self.errors.is_empty()
+        self.files_merged.is_empty() && self.files_deleted.is_empty() && self.errors.is_empty()
     }
 
     /// Compact one-liner for the tool result / parent transcript, e.g.
@@ -301,9 +298,7 @@ fn is_git_repo(cwd: &Path) -> bool {
         .current_dir(cwd)
         .args(["rev-parse", "--is-inside-work-tree"])
         .output()
-        .map(|o| {
-            o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true"
-        })
+        .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true")
         .unwrap_or(false)
 }
 
@@ -365,18 +360,15 @@ fn git_diff_name_status(cwd: &Path, base: &str) -> Result<Vec<(String, PathBuf)>
         let is_rename_or_copy = status.starts_with('R') || status.starts_with('C');
         let p1_end = next_nul(&bytes, i)
             .ok_or_else(|| anyhow!("malformed diff-z: missing path terminator"))?;
-        let path1 = PathBuf::from(
-            std::str::from_utf8(&bytes[i..p1_end]).context("diff path not utf-8")?,
-        );
+        let path1 =
+            PathBuf::from(std::str::from_utf8(&bytes[i..p1_end]).context("diff path not utf-8")?);
         i = p1_end + 1;
 
         if is_rename_or_copy {
-            let p2_end = next_nul(&bytes, i).ok_or_else(|| {
-                anyhow!("malformed diff-z: missing rename target terminator")
-            })?;
+            let p2_end = next_nul(&bytes, i)
+                .ok_or_else(|| anyhow!("malformed diff-z: missing rename target terminator"))?;
             let path2 = PathBuf::from(
-                std::str::from_utf8(&bytes[i..p2_end])
-                    .context("rename target not utf-8")?,
+                std::str::from_utf8(&bytes[i..p2_end]).context("rename target not utf-8")?,
             );
             i = p2_end + 1;
             // Rename = old path goes away, new path appears with old content.
@@ -522,8 +514,9 @@ mod tests {
         run(&repo.dir, &["add", "."]);
         run(&repo.dir, &["commit", "-q", "-m", "add existing"]);
 
-        let session =
-            WorktreeSession::try_create(&repo.dir, "coder", "abcd1234ef").unwrap().unwrap();
+        let session = WorktreeSession::try_create(&repo.dir, "coder", "abcd1234ef")
+            .unwrap()
+            .unwrap();
 
         // Child modifies one file + creates a new one.
         std::fs::write(session.cwd().join("existing.txt"), b"edited\n").unwrap();
@@ -548,10 +541,12 @@ mod tests {
             "new file\n"
         );
         // Worktree should be gone.
-        assert!(!repo.dir.join(".mira").join("worktrees").exists()
-            || std::fs::read_dir(repo.dir.join(".mira").join("worktrees"))
-                .map(|d| d.count() == 0)
-                .unwrap_or(true));
+        assert!(
+            !repo.dir.join(".mira").join("worktrees").exists()
+                || std::fs::read_dir(repo.dir.join(".mira").join("worktrees"))
+                    .map(|d| d.count() == 0)
+                    .unwrap_or(true)
+        );
     }
 
     #[test]
@@ -561,8 +556,9 @@ mod tests {
         run(&repo.dir, &["add", "."]);
         run(&repo.dir, &["commit", "-q", "-m", "add gone"]);
 
-        let session =
-            WorktreeSession::try_create(&repo.dir, "coder", "abcd1234").unwrap().unwrap();
+        let session = WorktreeSession::try_create(&repo.dir, "coder", "abcd1234")
+            .unwrap()
+            .unwrap();
         std::fs::remove_file(session.cwd().join("gone.txt")).unwrap();
 
         let report = session.merge_and_cleanup();
@@ -579,8 +575,9 @@ mod tests {
         let repo = GitRepo::init();
         let path;
         {
-            let s =
-                WorktreeSession::try_create(&repo.dir, "coder", "callid01").unwrap().unwrap();
+            let s = WorktreeSession::try_create(&repo.dir, "coder", "callid01")
+                .unwrap()
+                .unwrap();
             path = s.cwd().to_path_buf();
             // Simulate an error path — drop without calling merge_and_cleanup.
         }

@@ -22,6 +22,11 @@ pub mod verify;
 
 pub use approver::{Approver, AutoApprover};
 pub use event::HarnessEvent;
-pub use goal::{Evaluation, Goal, GoalStatus, GoalVerdict, DEFAULT_MAX_ITERATIONS};
+pub use goal::{
+    BudgetCheck, Evaluation, Goal, GoalStatus, GoalVerdict, VerifyCommand, VerifyOutcome,
+    DEFAULT_MAX_ITERATIONS,
+};
 pub use persist::{FileStore, SessionRecord, SessionStore, StoreError, TurnMeta, UsageTotals};
-pub use session::{AutoExtractConfig, MemoryRetrievalConfig, Session, SessionConfig};
+pub use session::{
+    profile_for_mode, AutoExtractConfig, MemoryRetrievalConfig, Session, SessionConfig,
+};

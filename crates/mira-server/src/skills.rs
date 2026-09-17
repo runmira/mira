@@ -7,13 +7,20 @@
 //! flows (creating a skill on disk) happen through the `skill-creator`
 //! skill itself, not through this endpoint.
 
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
-use axum::extract::State;
+use axum::extract::{Path as AxumPath, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use mira_skills::{Skill, SkillRegistry};
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
+use tokio::sync::broadcast;
 
+use crate::protocol::ServerMsg;
 use crate::state::AppState;
 
 /// One entry in the `/api/skills` response.
@@ -51,6 +58,11 @@ pub struct SkillView {
 #[serde(rename_all = "snake_case")]
 pub enum SkillTier {
     Bundled,
+    /// `~/.agents/skills/` — the cross-tool convention (installed via
+    /// `npx skills add …`, or hand-dropped). Separate from `User` so
+    /// the UI can label packaged installs distinctly from the user's
+    /// own hand-authored overrides under `~/.mira/skills/`.
+    Shared,
     User,
     Project,
 }
@@ -60,10 +72,40 @@ pub struct SkillsResponse {
     pub skills: Vec<SkillView>,
 }
 
+/// Full skill payload returned by `GET /api/skills/:name`. Superset of
+/// [`SkillView`] with the markdown body and attached-file names, so the
+/// detail drawer can render the SKILL.md and show what siblings ship
+/// alongside it in the directory-shape case.
+#[derive(Debug, Serialize)]
+pub struct SkillDetail {
+    pub name: String,
+    pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    pub tier: SkillTier,
+    /// The SKILL.md body — instructions the model reads when the skill
+    /// is invoked. Rendered as markdown in the settings detail drawer.
+    pub body: String,
+    /// Attachment filenames (relative to the skill's directory). Empty
+    /// for bundled builtins and flat-file skills.
+    pub attachments: Vec<String>,
+    /// Where the skill was loaded from. `None` for bundled builtins;
+    /// `Some(path)` for `~/.mira/skills/…` or `<cwd>/.mira/skills/…`.
+    /// Shown in the detail drawer so users can find and edit the file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
 pub async fn list_skills(State(state): State<AppState>) -> Json<SkillsResponse> {
     let reg = state.skills.read().await.clone();
+    let shared_dir = mira_config::shared_skills_dir();
     let user_dir = mira_config::user_skills_dir();
-    let project_dir = mira_config::project_skills_dir(&*state.cwd.read().await);
+    let cwd = state.cwd.read().await.clone();
+    let project_dirs = mira_config::well_known_project_skills_dirs(&cwd);
 
     let skills = reg
         .skills
@@ -74,7 +116,7 @@ pub async fn list_skills(State(state): State<AppState>) -> Json<SkillsResponse> 
             category: s.category.clone(),
             icon: s.icon.clone(),
             color: s.color.clone(),
-            tier: tier_of(s, &user_dir, &project_dir),
+            tier: tier_of(s, &shared_dir, &user_dir, &project_dirs),
             has_attachments: !s.attached_files().is_empty(),
         })
         .collect();
@@ -93,8 +135,9 @@ pub async fn list_skills(State(state): State<AppState>) -> Json<SkillsResponse> 
 pub async fn reload_registry(state: &AppState) {
     let cwd = state.cwd.read().await.clone();
     let fresh = SkillRegistry::load_layered(
+        &mira_config::shared_skills_dir(),
         &mira_config::user_skills_dir(),
-        &mira_config::project_skills_dir(&cwd),
+        &mira_config::well_known_project_skills_dirs(&cwd),
     );
     let mut w = state.skills.write().await;
     *w = Arc::new(fresh);
@@ -107,22 +150,138 @@ pub async fn reload_skills(State(state): State<AppState>) -> Json<SkillsResponse
     list_skills(State(state)).await
 }
 
-fn tier_of(s: &Skill, user_dir: &std::path::Path, project_dir: &std::path::Path) -> SkillTier {
+/// `GET /api/skills/:name` — full detail for one skill.
+///
+/// Returns 404 when the name doesn't resolve against the current
+/// registry. The registry is a merged three-tier snapshot; the response
+/// reflects the effective skill (project > user > bundled).
+pub async fn get_skill(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> Response {
+    let reg = state.skills.read().await.clone();
+    let Some(s) = reg.get(&name).cloned() else {
+        return (StatusCode::NOT_FOUND, format!("no skill named `{name}`")).into_response();
+    };
+    let shared_dir = mira_config::shared_skills_dir();
+    let user_dir = mira_config::user_skills_dir();
+    let cwd = state.cwd.read().await.clone();
+    let project_dirs = mira_config::well_known_project_skills_dirs(&cwd);
+    let tier = tier_of(&s, &shared_dir, &user_dir, &project_dirs);
+    let attachments = s
+        .attached_files()
+        .into_iter()
+        .filter_map(|p| p.to_str().map(str::to_owned))
+        .collect();
+    let detail = SkillDetail {
+        name: s.name.clone(),
+        description: s.description.clone(),
+        category: s.category.clone(),
+        icon: s.icon.clone(),
+        color: s.color.clone(),
+        tier,
+        body: s.body.clone(),
+        attachments,
+        source: s.source.as_ref().map(|p| p.display().to_string()),
+    };
+    Json(detail).into_response()
+}
+
+/// Spawn a background task that watches all four skill directories and
+/// hot-reloads the registry on any change, then broadcasts a
+/// `SkillsReloaded` event so connected clients refetch `/api/skills`
+/// without the user hitting the Reload button.
+///
+/// The watcher is coalesced with a short debounce because editors
+/// often emit multiple events per save (write → rename → chmod). One
+/// registry rebuild + one broadcast per debounce window is plenty.
+///
+/// A `cwd` swap is picked up on the next user turn (the same
+/// `reload_registry` runs there) — dynamically re-registering
+/// watchers on cwd change adds complexity for a rare event.
+pub fn spawn_skill_watcher(state: AppState) {
+    tokio::spawn(async move {
+        if let Err(e) = run_watcher(state).await {
+            tracing::warn!(%e, "skill watcher stopped");
+        }
+    });
+}
+
+async fn run_watcher(state: AppState) -> anyhow::Result<()> {
+    let cwd = state.cwd.read().await.clone();
+    let mut paths: Vec<PathBuf> = vec![
+        mira_config::shared_skills_dir(),
+        mira_config::user_skills_dir(),
+    ];
+    paths.extend(mira_config::well_known_project_skills_dirs(&cwd));
+
+    // std channel bridge: notify is sync, tokio broadcast is async.
+    let (raw_tx, mut raw_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let mut watcher: RecommendedWatcher = notify::recommended_watcher(move |res| {
+        // Any event → coalesce to a single "dirty" ping. We don't
+        // filter on file extension here — a `SKILL.md` write, a
+        // directory rename, or a new subdir all mean "re-scan".
+        if let Ok(_ev) = res {
+            let _ = raw_tx.send(());
+        }
+    })?;
+
+    for p in &paths {
+        // Ensure the directory exists so notify doesn't refuse to watch
+        // it. `create_dir_all` is idempotent; ignore errors (permissions
+        // etc — the tier just won't be watched and the manual Reload
+        // button still works).
+        let _ = std::fs::create_dir_all(p);
+        if let Err(e) = watcher.watch(p, RecursiveMode::Recursive) {
+            tracing::debug!(?p, %e, "skill watcher: skipping path");
+        }
+    }
+
+    // Debounce + reload loop. `raw_rx.recv().await` blocks until at
+    // least one change; the second `while` drains everything that
+    // arrived in the debounce window so a burst of editor events
+    // collapses into one reload.
+    while raw_rx.recv().await.is_some() {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        while raw_rx.try_recv().is_ok() {}
+        reload_registry(&state).await;
+        let count = state.skills.read().await.skills.len();
+        tracing::debug!(count, "skill watcher: reloaded");
+        broadcast_reloaded(&state.events_tx);
+    }
+    Ok(())
+}
+
+fn broadcast_reloaded(tx: &broadcast::Sender<ServerMsg>) {
+    // Broadcast fails when there are no active subscribers — that's
+    // fine, the browser just picks up the fresh roster on its next
+    // fetch.
+    let _ = tx.send(ServerMsg::SkillsReloaded);
+}
+
+fn tier_of(
+    s: &Skill,
+    shared_dir: &std::path::Path,
+    user_dir: &std::path::Path,
+    project_dirs: &[PathBuf],
+) -> SkillTier {
     let Some(source) = s.source.as_ref() else {
         return SkillTier::Bundled;
     };
-    // Match by prefix — `source` points at either `<dir>/SKILL.md`
-    // (dir shape) or `<dir>/<name>.md` (flat shape). Either lives
-    // under the user or project directory, so a prefix check is
-    // enough.
-    if source.starts_with(project_dir) {
+    // Match by prefix. Every well-known project location (`.mira`,
+    // `.agents`, `.claude`, `.codex`, `.cursor`) maps to `Project` —
+    // the UI groups them together as "this repo's skills" regardless
+    // of which convention the SKILL.md happens to live under.
+    if project_dirs.iter().any(|p| source.starts_with(p)) {
         SkillTier::Project
     } else if source.starts_with(user_dir) {
         SkillTier::User
+    } else if source.starts_with(shared_dir) {
+        SkillTier::Shared
     } else {
-        // Skill loaded from an unexpected path — treat as user. This
-        // shouldn't normally happen; the loader only reads from the
-        // two known directories plus the bundled tier.
+        // Loaded from an unexpected path — treat as user. Shouldn't
+        // normally happen; the loader only reads the known dirs plus
+        // the bundled tier.
         SkillTier::User
     }
 }

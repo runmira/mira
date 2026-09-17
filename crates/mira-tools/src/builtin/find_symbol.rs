@@ -99,10 +99,11 @@ impl Tool for FindSymbol {
         let patterns = patterns_for(args.language.as_deref(), name);
         // ripgrep alternation via `-e` per pattern — cleaner than one giant
         // regex and lets each pattern carry its own file-type filter via `-g`.
-        let mut cmd = String::from(
-            "rg --line-number --no-heading --color never --max-count 5",
-        );
-        cmd.push_str(&format!(" --max-columns 300 --max-count {}", args.max_results.min(500)));
+        let mut cmd = String::from("rg --line-number --no-heading --color never --max-count 5");
+        cmd.push_str(&format!(
+            " --max-columns 300 --max-count {}",
+            args.max_results.min(500)
+        ));
         for (pat, globs) in &patterns {
             for g in globs.iter() {
                 cmd.push_str(&format!(" -g {}", shell_quote(g)));
@@ -141,16 +142,36 @@ fn patterns_for(lang: Option<&str>, name: &str) -> Vec<(String, &'static [&'stat
     let all = |lang: &str| -> Vec<(String, &'static [&'static str])> {
         match lang {
             "rust" => vec![
-                (format!(r"(^|\s)(pub(\(.*?\))?\s+)?(async\s+)?fn\s+{n}\b"), &["*.rs"]),
-                (format!(r"(^|\s)(pub(\(.*?\))?\s+)?(struct|enum|trait|type|const|static|mod|union)\s+{n}\b"), &["*.rs"]),
+                (
+                    format!(r"(^|\s)(pub(\(.*?\))?\s+)?(async\s+)?fn\s+{n}\b"),
+                    &["*.rs"],
+                ),
+                (
+                    format!(
+                        r"(^|\s)(pub(\(.*?\))?\s+)?(struct|enum|trait|type|const|static|mod|union)\s+{n}\b"
+                    ),
+                    &["*.rs"],
+                ),
                 (format!(r"impl(\s+<[^>]+>)?\s+{n}\b"), &["*.rs"]),
                 (format!(r"macro_rules!\s+{n}\b"), &["*.rs"]),
             ],
             "ts" | "js" => vec![
-                (format!(r"(^|\s)(export\s+)?(async\s+)?function\s+{n}\b"), &["*.ts", "*.tsx", "*.js", "*.jsx", "*.mts", "*.mjs"]),
-                (format!(r"(^|\s)(export\s+)?(abstract\s+)?class\s+{n}\b"), &["*.ts", "*.tsx", "*.js", "*.jsx"]),
-                (format!(r"(^|\s)(export\s+)?(interface|type|enum)\s+{n}\b"), &["*.ts", "*.tsx"]),
-                (format!(r"(^|\s)(export\s+)?(const|let|var)\s+{n}\b"), &["*.ts", "*.tsx", "*.js", "*.jsx"]),
+                (
+                    format!(r"(^|\s)(export\s+)?(async\s+)?function\s+{n}\b"),
+                    &["*.ts", "*.tsx", "*.js", "*.jsx", "*.mts", "*.mjs"],
+                ),
+                (
+                    format!(r"(^|\s)(export\s+)?(abstract\s+)?class\s+{n}\b"),
+                    &["*.ts", "*.tsx", "*.js", "*.jsx"],
+                ),
+                (
+                    format!(r"(^|\s)(export\s+)?(interface|type|enum)\s+{n}\b"),
+                    &["*.ts", "*.tsx"],
+                ),
+                (
+                    format!(r"(^|\s)(export\s+)?(const|let|var)\s+{n}\b"),
+                    &["*.ts", "*.tsx", "*.js", "*.jsx"],
+                ),
             ],
             "python" => vec![
                 (format!(r"^\s*(async\s+)?def\s+{n}\b"), &["*.py"]),
@@ -163,8 +184,16 @@ fn patterns_for(lang: Option<&str>, name: &str) -> Vec<(String, &'static [&'stat
                 (format!(r"^var\s+{n}\b|^const\s+{n}\b"), &["*.go"]),
             ],
             "java" => vec![
-                (format!(r"(public|private|protected|static|final|\s)+\s+{n}\s*\("), &["*.java"]),
-                (format!(r"(public|private|protected|abstract|static|final|\s)+\s+(class|interface|enum|record)\s+{n}\b"), &["*.java"]),
+                (
+                    format!(r"(public|private|protected|static|final|\s)+\s+{n}\s*\("),
+                    &["*.java"],
+                ),
+                (
+                    format!(
+                        r"(public|private|protected|abstract|static|final|\s)+\s+(class|interface|enum|record)\s+{n}\b"
+                    ),
+                    &["*.java"],
+                ),
             ],
             _ => vec![(format!(r"\b{n}\b"), &[] as &[&str])],
         }

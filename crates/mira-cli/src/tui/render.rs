@@ -75,11 +75,15 @@ fn goal_chip(status: GoalStatus) -> (&'static str, Style) {
     match status {
         GoalStatus::Active => (
             "▶ running",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ),
         GoalStatus::Met => (
             "✓ met",
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
         ),
         GoalStatus::Impossible => (
             "✗ impossible",
@@ -87,16 +91,17 @@ fn goal_chip(status: GoalStatus) -> (&'static str, Style) {
         ),
         GoalStatus::NeedsUser => (
             "! needs you",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         ),
         GoalStatus::Exhausted => (
             "◐ exhausted",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         ),
-        GoalStatus::Cleared => (
-            "· cleared",
-            Style::default().fg(Color::DarkGray),
-        ),
+        GoalStatus::Cleared => ("· cleared", Style::default().fg(Color::DarkGray)),
     }
 }
 

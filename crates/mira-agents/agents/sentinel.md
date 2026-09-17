@@ -3,7 +3,7 @@ name: sentinel
 description: Diff auditor. Given the parent's original brief and a diff, determines whether the change stays in scope or drifts. Catches mission-creep in delegated work. Read-only. Best used after a coder subagent returns — feed sentinel the brief + the diff.
 category: review
 tools: [read_file, grep, glob, bash]
-max_rounds: 15
+max_rounds: 200
 parallel_safe: true
 route_approvals_to_parent: false
 response_schema:

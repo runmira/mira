@@ -409,10 +409,7 @@ pub async fn post_pull_request_review(
     Json(body): Json<ReviewBody>,
 ) -> Response {
     let event = body.event.to_uppercase();
-    if !matches!(
-        event.as_str(),
-        "APPROVE" | "REQUEST_CHANGES" | "COMMENT"
-    ) {
+    if !matches!(event.as_str(), "APPROVE" | "REQUEST_CHANGES" | "COMMENT") {
         return err(
             StatusCode::BAD_REQUEST,
             format!("invalid review event: {}", body.event),
@@ -442,7 +439,10 @@ pub async fn merge_pull_request(
     AxumPath((owner, repo, number)): AxumPath<(String, String, u64)>,
     Json(body): Json<MergeBody>,
 ) -> Response {
-    let method = body.method.unwrap_or_else(|| "merge".to_string()).to_lowercase();
+    let method = body
+        .method
+        .unwrap_or_else(|| "merge".to_string())
+        .to_lowercase();
     if !matches!(method.as_str(), "merge" | "squash" | "rebase") {
         return err(
             StatusCode::BAD_REQUEST,
@@ -667,13 +667,12 @@ async fn handle<T: serde::de::DeserializeOwned>(resp: reqwest::Response) -> Resu
     // GitHub returns `{"message": "..."}` for most errors.
     let msg = serde_json::from_str::<Value>(&text)
         .ok()
-        .and_then(|v| {
-            v.get("message")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
+        .and_then(|v| v.get("message").and_then(Value::as_str).map(str::to_owned))
         .unwrap_or_else(|| text.chars().take(200).collect());
-    Err(GhError { status: Some(status.as_u16()), message: msg })
+    Err(GhError {
+        status: Some(status.as_u16()),
+        message: msg,
+    })
 }
 
 /// Fallible-only shim: `gh_get<Vec<X>>` above uses `Err(String)` in the
@@ -690,7 +689,10 @@ struct GhError {
 
 impl GhError {
     fn network(m: String) -> Self {
-        Self { status: None, message: m }
+        Self {
+            status: None,
+            message: m,
+        }
     }
 }
 
@@ -910,7 +912,10 @@ fn timeline_from(v: &Value) -> Option<TimelineEventView> {
         ),
         "reviewed" => (
             "review".to_string(),
-            v.get("state").and_then(Value::as_str).unwrap_or("").to_string(),
+            v.get("state")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
         ),
         "merged" => ("merged".to_string(), String::new()),
         "closed" => ("closed".to_string(), String::new()),
@@ -959,10 +964,7 @@ fn check_run_from(v: &Value) -> CheckRunView {
             .get("conclusion")
             .and_then(Value::as_str)
             .map(str::to_owned),
-        url: v
-            .get("html_url")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
+        url: v.get("html_url").and_then(Value::as_str).map(str::to_owned),
     }
 }
 

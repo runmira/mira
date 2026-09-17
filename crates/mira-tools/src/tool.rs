@@ -75,6 +75,19 @@ pub trait Tool: Send + Sync {
         String::new()
     }
 
+    /// Every path/target this call would act on, for policy gating. The
+    /// dispatcher evaluates each entry independently — any single Deny
+    /// fails the whole call, and any single Ask triggers an approval
+    /// modal covering the batch. Default returns `vec![policy_target()]`,
+    /// which matches every single-target tool (read_file, edit_file,
+    /// bash, ...). Multi-path tools (`apply_patch` in particular)
+    /// override to return every affected source AND destination so a
+    /// deny rule on any one path can't be bypassed via a batch that
+    /// starts with an innocent target.
+    fn policy_targets(&self, call: &ToolCall) -> Vec<String> {
+        vec![self.policy_target(call)]
+    }
+
     /// Whether this tool is safe to run concurrently with other
     /// parallel-safe tools inside the same model round.
     ///

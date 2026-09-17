@@ -340,20 +340,22 @@ function SubagentEntryView({ entry }: { entry: Entry }) {
       );
     case 'warning': {
       // Progress emissions from the child's `progress` tool ride the
-      // warning stream with a `[progress]` prefix so we can style them
-      // as blue "in-flight status" chips rather than amber warnings.
+      // warning stream with a `[progress]` prefix so we get a distinct
+      // "in-flight status" chip vs. the amber warning tone. Both share
+      // the same shape (subtle secondary fill, no colored stroke) — the
+      // semantic hint lives in the icon + accent text.
       const progress = entry.text.match(/^\[progress\]\s*(.*)$/);
       if (progress) {
         return (
-          <div className="inline-flex w-fit items-start gap-1.5 rounded-md border border-mira-blue/25 bg-mira-blue/[0.06] px-2 py-1 text-[11.5px] text-mira-blue">
-            <span className="font-semibold">…</span>
+          <div className="inline-flex w-fit items-start gap-1.5 rounded-md bg-secondary/60 px-2 py-1 text-[11.5px] text-foreground/80">
+            <span className="font-semibold text-mira-blue">…</span>
             <span className="break-words">{progress[1]}</span>
           </div>
         );
       }
       return (
-        <div className="inline-flex w-fit items-start gap-1.5 rounded-md border border-amber-500/25 bg-amber-500/[0.06] px-2 py-1 text-[11.5px] text-amber-300">
-          <span className="font-semibold">!</span>
+        <div className="inline-flex w-fit items-start gap-1.5 rounded-md bg-secondary/60 px-2 py-1 text-[11.5px] text-foreground/80">
+          <span className="font-semibold text-amber-400">!</span>
           <span className="break-words">{entry.text}</span>
         </div>
       );
@@ -368,9 +370,14 @@ function SubagentEntryView({ entry }: { entry: Entry }) {
 }
 
 function StatusPill({ status, isError }: { status: ToolStatus; isError: boolean }) {
+  // All pills share the same shape (soft secondary fill, no border);
+  // the semantic hint is a single accent-colored glyph or word so the
+  // scan is still 1-2ms without leaning on colored strokes.
+  const base =
+    'inline-flex items-center gap-1 rounded-full bg-secondary/70 px-2 py-0.5 text-[11px]';
   if (isError) {
     return (
-      <span className="inline-flex items-center gap-1 rounded-full border border-destructive/40 bg-destructive/10 px-2 py-0.5 text-[11px] text-destructive">
+      <span className={cn(base, 'text-destructive')}>
         <WarningCircle className="size-3" weight="fill" />
         error
       </span>
@@ -378,30 +385,18 @@ function StatusPill({ status, isError }: { status: ToolStatus; isError: boolean 
   }
   switch (status) {
     case 'pending':
-      return (
-        <span className="rounded-full border border-amber-500/30 bg-amber-500/[0.08] px-2 py-0.5 text-[11px] text-amber-300">
-          awaiting approval
-        </span>
-      );
+      return <span className={cn(base, 'text-amber-300')}>awaiting approval</span>;
     case 'running':
       return (
-        <span className="inline-flex items-center gap-1 rounded-full border border-mira-blue/30 bg-mira-blue/[0.08] px-2 py-0.5 text-[11px] text-mira-blue">
+        <span className={cn(base, 'text-mira-blue')}>
           <CircleNotch className="size-3 animate-spin" />
           working
         </span>
       );
     case 'denied':
-      return (
-        <span className="rounded-full border border-border bg-secondary px-2 py-0.5 text-[11px] text-muted-foreground">
-          denied
-        </span>
-      );
+      return <span className={cn(base, 'text-muted-foreground')}>denied</span>;
     case 'complete':
-      return (
-        <span className="rounded-full border border-emerald-500/30 bg-emerald-500/[0.08] px-2 py-0.5 text-[11px] text-emerald-400">
-          done
-        </span>
-      );
+      return <span className={cn(base, 'text-emerald-400')}>done</span>;
   }
 }
 
@@ -412,11 +407,85 @@ function StatusPill({ status, isError }: { status: ToolStatus; isError: boolean 
  *  the raw JSON blob into the markdown renderer just displays braces and
  *  escaped quotes, so try to parse first and lay out known fields nicely.
  *  Falls back to plain markdown when the text isn't structured (e.g. the
- *  `coder`/`documenter` types, or free-form models that ignored the schema). */
+ *  `coder`/`documenter` types, or free-form models that ignored the schema).
+ *
+ *  Models routinely wrap the required JSON in a ```json``` fence and
+ *  prefix a sentence of prose ("Final answer:"). We split the two so
+ *  the prose still reads as prose and the fenced JSON gets the
+ *  structured view instead of being dumped as a code block. */
 function SubagentResult({ text }: { text: string }) {
-  const parsed = useMemo(() => tryParseStructured(text), [text]);
-  if (!parsed) return <AssistantContent text={text} />;
-  return <StructuredView data={parsed} />;
+  const split = useMemo(() => extractStructured(text), [text]);
+  if (!split) return <AssistantContent text={text} />;
+  return (
+    <div className="flex flex-col gap-3">
+      {split.prose && <AssistantContent text={split.prose} />}
+      <StructuredView data={split.data} />
+    </div>
+  );
+}
+
+/** Try three shapes, in order, and return the first that parses to a
+ *  recognisable structured result:
+ *   1. The whole text is a bare `{ ... }` object.
+ *   2. The text ends with a ```json ...``` fenced block; the prose
+ *      before the fence is preserved and rendered above the parsed view.
+ *   3. The text contains an inline `{ ... }` block we can extract.
+ *  Returns `null` when nothing structured could be salvaged — the
+ *  caller falls back to the plain markdown renderer. */
+function extractStructured(
+  text: string,
+): { data: StructuredResult; prose: string } | null {
+  const raw = text.trim();
+
+  // Case 1 — bare JSON object.
+  if (raw.startsWith('{') && raw.endsWith('}')) {
+    const parsed = tryParseStructured(raw);
+    if (parsed) return { data: parsed, prose: '' };
+  }
+
+  // Case 2 — fenced ```json ... ``` (or plain ``` ... ``` where the
+  // body happens to be JSON). Take the LAST fence in the text so a
+  // model that quotes a JSON snippet mid-reasoning and then emits
+  // the real final answer still wins.
+  const fenceRe = /```(?:json)?\s*\n?([\s\S]*?)\n?```/gi;
+  let lastMatch: RegExpExecArray | null = null;
+  let m: RegExpExecArray | null;
+  while ((m = fenceRe.exec(raw)) !== null) {
+    lastMatch = m;
+  }
+  if (lastMatch) {
+    const body = lastMatch[1].trim();
+    if (body.startsWith('{') && body.endsWith('}')) {
+      const parsed = tryParseStructured(body);
+      if (parsed) {
+        const before = raw.slice(0, lastMatch.index).trim();
+        const after = raw.slice(lastMatch.index + lastMatch[0].length).trim();
+        // Prose is anything outside the fence. Prefer whichever side
+        // has content; if both do, keep both joined by a paragraph
+        // break so the shape reads naturally.
+        const prose = [before, after].filter(Boolean).join('\n\n');
+        return { data: parsed, prose };
+      }
+    }
+  }
+
+  // Case 3 — an inline `{ ... }` block somewhere in the text (last
+  // resort — handles models that emit prose + a bare object without
+  // a fence).
+  const openIdx = raw.indexOf('{');
+  const closeIdx = raw.lastIndexOf('}');
+  if (openIdx >= 0 && closeIdx > openIdx) {
+    const body = raw.slice(openIdx, closeIdx + 1);
+    const parsed = tryParseStructured(body);
+    if (parsed) {
+      const before = raw.slice(0, openIdx).trim();
+      const after = raw.slice(closeIdx + 1).trim();
+      const prose = [before, after].filter(Boolean).join('\n\n');
+      return { data: parsed, prose };
+    }
+  }
+
+  return null;
 }
 
 type StructuredResult = {
@@ -559,10 +628,8 @@ function StructuredView({ data }: { data: StructuredResult }) {
             <span
               key={f.label}
               className={cn(
-                'rounded-full border px-2 py-0.5 text-[11px]',
-                f.value
-                  ? 'border-amber-500/30 bg-amber-500/[0.08] text-amber-300'
-                  : 'border-border bg-secondary text-muted-foreground',
+                'rounded-full bg-secondary/70 px-2 py-0.5 text-[11px]',
+                f.value ? 'text-amber-300' : 'text-muted-foreground',
               )}
             >
               {humanize(f.label)}: {f.value ? 'yes' : 'no'}
@@ -577,18 +644,23 @@ function StructuredView({ data }: { data: StructuredResult }) {
 }
 
 function VerdictPill({ verdict }: { verdict: NonNullable<StructuredResult['verdict']> }) {
-  const cls =
+  const toneText =
     verdict.tone === 'ok'
-      ? 'border-emerald-500/30 bg-emerald-500/[0.08] text-emerald-400'
+      ? 'text-emerald-400'
       : verdict.tone === 'warn'
-        ? 'border-amber-500/30 bg-amber-500/[0.08] text-amber-300'
-        : 'border-destructive/40 bg-destructive/10 text-destructive';
+        ? 'text-amber-300'
+        : 'text-destructive';
   return (
     <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
       <span className="text-[10.5px] font-semibold uppercase tracking-wider">
         {humanize(verdict.label)}
       </span>
-      <span className={cn('rounded-full border px-2 py-0.5 text-[11.5px] font-medium', cls)}>
+      <span
+        className={cn(
+          'rounded-full bg-secondary/70 px-2 py-0.5 text-[11.5px] font-medium',
+          toneText,
+        )}
+      >
         {humanize(verdict.value)}
       </span>
     </div>
@@ -622,7 +694,7 @@ function ItemRow({ item }: { item: StructuredItem }) {
     : null;
   const body = item.summary ?? item.note ?? item.reason ?? '';
   return (
-    <div className="rounded-md border border-border/60 bg-secondary/30 p-2.5">
+    <div className="rounded-xl bg-secondary/40 p-2.5">
       <div className="flex items-center gap-2">
         {item.severity && (
           <span
@@ -643,8 +715,8 @@ function ItemRow({ item }: { item: StructuredItem }) {
         </div>
       )}
       {item.suggestion && (
-        <div className="mt-1.5 rounded-md border border-emerald-500/25 bg-emerald-500/[0.06] px-2 py-1 text-[12px] text-emerald-200/90">
-          <span className="mr-1 font-semibold">suggestion:</span>
+        <div className="mt-1.5 rounded-md bg-background/60 px-2 py-1 text-[12px] text-foreground/80">
+          <span className="mr-1 font-semibold text-emerald-400">suggestion:</span>
           {item.suggestion}
         </div>
       )}
@@ -653,17 +725,20 @@ function ItemRow({ item }: { item: StructuredItem }) {
 }
 
 function severityClass(sev: string): string {
+  // Fill-only variants — no borders. Tone is carried by the label
+  // text; the background stays a subtle neutral tint of the same hue
+  // so the pill still scans by color without shouting.
   switch (sev.toLowerCase()) {
     case 'critical':
-      return 'bg-destructive/20 text-destructive';
+      return 'bg-destructive/15 text-destructive';
     case 'major':
     case 'high':
-      return 'bg-amber-500/20 text-amber-300';
+      return 'bg-amber-500/15 text-amber-300';
     case 'minor':
     case 'medium':
-      return 'bg-mira-blue/20 text-mira-blue';
+      return 'bg-mira-blue/15 text-mira-blue';
     default:
-      return 'bg-secondary text-muted-foreground';
+      return 'bg-secondary/70 text-muted-foreground';
   }
 }
 
@@ -717,42 +792,44 @@ function ReviewCard({
   const [note, setNote] = useState('');
 
   return (
-    <div className="rounded-lg border border-amber-500/40 bg-amber-500/[0.05] p-4">
-      <div className="mb-2 flex items-center gap-2">
-        <Info className={cn('size-4', identityTextClass)} weight="fill" />
-        <span className="text-[13px] font-semibold text-foreground">
+    <div className="overflow-hidden rounded-2xl border border-border/40 bg-card/80 backdrop-blur">
+      <div className="flex items-center gap-2 px-4 pt-3.5 pb-3">
+        <Info className={cn('size-3.5', identityTextClass)} weight="fill" />
+        <span className="text-[12.5px] font-semibold tracking-tight text-foreground">
           Review required
         </span>
-        <span className="ml-auto rounded-full bg-amber-500/15 px-2 py-0.5 text-[10.5px] font-semibold uppercase tracking-wider text-amber-300">
+        <span className="ml-auto rounded-full bg-secondary/70 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.11em] text-muted-foreground">
           awaiting decision
         </span>
       </div>
-      <p className="mb-3 text-[12px] leading-relaxed text-muted-foreground">
-        The subagent finished and is waiting for you to approve its summary
-        before the parent gets it. Deny to send back an error instead.
-      </p>
-      <div className="mb-3 max-h-[36vh] overflow-y-auto whitespace-pre-wrap rounded-md border border-border/60 bg-background px-3 py-2 text-[13px] leading-relaxed text-foreground/85">
-        {review.summary || '(empty summary)'}
+      <div className="border-t border-border/30 px-4 py-3">
+        <p className="mb-2.5 text-[12px] leading-relaxed text-muted-foreground">
+          The subagent finished and is waiting for you to approve its summary
+          before the parent gets it. Deny to send back an error instead.
+        </p>
+        <div className="mb-3 max-h-[36vh] overflow-y-auto whitespace-pre-wrap rounded-xl bg-secondary/40 px-3 py-2 text-[13px] leading-relaxed text-foreground/85">
+          {review.summary || '(empty summary)'}
+        </div>
+        <textarea
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+          placeholder="Optional note (prepended on approve, sent as reason on deny)"
+          rows={2}
+          className="w-full resize-none rounded-md bg-secondary/50 px-2.5 py-1.5 text-[12px] leading-relaxed outline-none placeholder:text-muted-foreground/50 focus:bg-secondary/70"
+        />
       </div>
-      <textarea
-        value={note}
-        onChange={(e) => setNote(e.target.value)}
-        placeholder="Optional note (prepended on approve, sent as reason on deny)"
-        rows={2}
-        className="mb-3 w-full resize-none rounded-md border border-border bg-background px-3 py-2 text-[12.5px] leading-relaxed placeholder:text-muted-foreground/60 focus:border-foreground/30 focus:outline-none"
-      />
-      <div className="flex justify-end gap-1.5">
+      <div className="flex items-center justify-end gap-1.5 border-t border-border/30 bg-background/30 px-4 py-2.5">
         <button
           type="button"
           onClick={() => onDeny(note.trim() ? note.trim() : undefined)}
-          className="rounded-md border border-border bg-background px-3 py-1.5 text-[12.5px] text-foreground transition-colors hover:bg-accent"
+          className="rounded-md px-2.5 py-1.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
         >
           Deny
         </button>
         <button
           type="button"
           onClick={() => onApprove(note.trim() ? note.trim() : undefined)}
-          className="rounded-md bg-emerald-500 px-3 py-1.5 text-[12.5px] font-medium text-emerald-950 transition-colors hover:bg-emerald-400"
+          className="inline-flex items-center gap-1.5 rounded-full bg-foreground px-3.5 py-1.5 text-[11.5px] font-semibold text-background transition-all hover:brightness-95"
         >
           Approve
         </button>

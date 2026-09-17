@@ -65,12 +65,7 @@ pub trait MemoryStore: Send + Sync {
     /// `old` is missing or appears more than once — same rule the `Edit`
     /// file tool uses, and for the same reason (silent multi-replace is a
     /// footgun). Returns the new byte count.
-    async fn replace(
-        &self,
-        scope: MemoryScope,
-        old: &str,
-        new: &str,
-    ) -> Result<u64, MemoryError>;
+    async fn replace(&self, scope: MemoryScope, old: &str, new: &str) -> Result<u64, MemoryError>;
 
     /// Blow away the file's contents and rewrite from scratch. Meant for
     /// consolidation passes; day-to-day edits should go through `replace`.

@@ -4,7 +4,7 @@ import { cn } from './lib/utils';
 import { connect, type WsClient, type WsStatus } from './ws';
 import { appendMemory, applyUndo, getSessionHistory, getSettings, listSkills, newSession, startReview, type SkillView } from './api';
 import { extractAgentId } from './components/AgentCard';
-import { SettingsPanel } from './components/Settings';
+import { SettingsSurface } from './components/Settings';
 import { PluginsPanel } from './components/Plugins';
 import { PullRequestPanel } from './components/PullRequestPanel';
 import { Sidebar, type MainView } from './components/Sidebar';
@@ -14,6 +14,7 @@ import {
   SentAttachmentChip,
   type PendingApproval,
 } from './components/Composer';
+import { SkillMentionText } from './components/SkillMention';
 import { FolderPicker } from './components/FolderPicker';
 import { AssistantContent } from './components/AssistantContent';
 import { ToolCard, type ToolStatus } from './components/ToolCard';
@@ -25,12 +26,15 @@ import {
   type ReviewState,
 } from './components/ReviewPanel';
 import { PlanCard } from './components/PlanCard';
+import { AskUserCard, type AskUserDecision } from './components/AskUserCard';
 import { AgentCard, AgentGroup } from './components/AgentCard';
+import miraLogo from './assets/mira-logo.png';
 import { SubagentPanel, type SubagentTab } from './components/SubagentPanel';
 import { TaskListPanel } from './components/TaskListPanel';
 import { GoalPanel } from './components/GoalPanel';
-import { ToolGroup } from './components/ToolGroup';
+import { countsByCategory, countsPhrase, ToolGroup } from './components/ToolGroup';
 import type {
+  AskUserProposal,
   DiffPreview,
   Goal,
   Message,
@@ -44,7 +48,6 @@ import type {
   ToolResult,
   UsageTotals,
 } from './types';
-import { formatUsage } from './lib/usage';
 
 /** Live per-child state for the subagent panel — mirrors the shape of
  *  the parent's own transcript so the panel body can reuse EntryView-style
@@ -78,6 +81,14 @@ type ToolEntry = {
   plan?: {
     proposal: PlanProposal;
     decision: null | { approved: boolean; steps?: PlanStep[]; note?: string };
+  };
+  /** Only set for the `ask_user` tool. `proposal` arrives on
+   *  `ask_user_request`; `decision` fills in when the user submits or
+   *  skips. Rendered inline as the AskUserCard (multi-choice questions
+   *  + "Tell mira what to do differently"). */
+  askUser?: {
+    proposal: AskUserProposal;
+    decision: AskUserDecision | null;
   };
 };
 type WarningEntry = { kind: 'warning'; text: string };
@@ -126,7 +137,14 @@ type TurnTiming = {
  * the harness writes a "denied by policy: …" content string into the tool
  * message.
  */
-export function historyToEntries(history: Message[]): Entry[] {
+export function historyToEntries(
+  history: Message[],
+  /** Persisted diff previews from `SessionRecord.previews` (Ready
+   *  frame). Attaches per call id so a reloaded transcript shows the
+   *  same diff the user saw live, instead of dropping to the arg-only
+   *  reconstruction fallback. */
+  previews?: Record<string, DiffPreview>,
+): Entry[] {
   // First pass — index tool results by call_id so the assistant walk can
   // attach them in O(1) rather than re-scanning history for each call.
   const resultByCallId = new Map<string, ToolResult>();
@@ -156,16 +174,133 @@ export function historyToEntries(history: Message[]): Entry[] {
       entries.push({ kind: 'msg', msg: m });
     }
     for (const call of m.tool_calls ?? []) {
-      entries.push({
+      const result = resultByCallId.get(call.id) ?? null;
+      const entry: ToolEntry = {
         kind: 'tool',
         call,
-        preview: null,
+        preview: previews?.[call.id] ?? null,
         status: 'complete',
-        result: resultByCallId.get(call.id) ?? null,
-      });
+        result,
+      };
+      // On reload the `ask_user_request` / `plan_request` live frames
+      // don't fire, so rebuild the interactive-card state directly from
+      // the persisted call args (the proposal) + tool result text (the
+      // resolved decision). Without this, completed interactive tools
+      // render as raw JSON args.
+      if (call.function.name === 'ask_user') {
+        const restored = restoreAskUserFromCall(call, result);
+        if (restored) entry.askUser = restored;
+      } else if (call.function.name === 'plan') {
+        const restored = restorePlanFromCall(call, result);
+        if (restored) entry.plan = restored;
+      }
+      entries.push(entry);
     }
   }
   return entries;
+}
+
+/** Reconstruct the ask_user proposal + decision from persisted tool
+ *  state. `call.function.arguments` is the JSON we sent to the tool
+ *  (i.e. the AskUserProposal); `result.content` is the textual summary
+ *  the tool wrote back — parseable because we own both sides of that
+ *  format (see `AskUserTool::invoke` in `interactive.rs`). */
+function restoreAskUserFromCall(
+  call: ToolCall,
+  result: ToolResult | null,
+): { proposal: AskUserProposal; decision: AskUserDecision } | undefined {
+  let proposal: AskUserProposal;
+  try {
+    const args = JSON.parse(call.function.arguments) as { questions?: unknown };
+    if (!Array.isArray(args.questions)) return undefined;
+    proposal = { questions: args.questions as AskUserProposal['questions'] };
+  } catch {
+    return undefined;
+  }
+  const decision = parseAskUserResultText(result?.content ?? '', proposal.questions.length);
+  return { proposal, decision };
+}
+
+/** Reconstruct the plan proposal + decision from persisted tool state.
+ *  Same shape as `restoreAskUserFromCall`: the args carry the proposal,
+ *  the result text carries the verdict + edited steps. */
+function restorePlanFromCall(
+  call: ToolCall,
+  result: ToolResult | null,
+): { proposal: PlanProposal; decision: null | { approved: boolean; steps?: PlanStep[]; note?: string } } | undefined {
+  let proposal: PlanProposal;
+  try {
+    const args = JSON.parse(call.function.arguments) as { title?: unknown; steps?: unknown };
+    if (typeof args.title !== 'string' || !Array.isArray(args.steps)) return undefined;
+    proposal = { title: args.title, steps: args.steps as PlanStep[] };
+  } catch {
+    return undefined;
+  }
+  const decision = parsePlanResultText(result?.content ?? '');
+  return { proposal, decision };
+}
+
+/** Parse the plan tool's result body — see `PlanTool::invoke` in
+ *  `interactive.rs` for the exact strings emitted. Missing result →
+ *  render as no-decision-yet so the card stays actionable. */
+function parsePlanResultText(text: string):
+  | null
+  | { approved: boolean; steps?: PlanStep[]; note?: string } {
+  if (!text.trim()) return null;
+  if (/^Plan cancelled by user/i.test(text)) {
+    const noteMatch = text.match(/Note:\s*(.+?)(?:\n\n|$)/s);
+    return { approved: false, note: noteMatch ? noteMatch[1].trim() : undefined };
+  }
+  if (/^Plan approved/i.test(text)) {
+    // Parse `1. description (why)` lines from the "Agreed steps:" block.
+    const steps: PlanStep[] = [];
+    const stepsBlock = text.split(/Agreed steps:\s*\n/i)[1] ?? '';
+    for (const raw of stepsBlock.split('\n')) {
+      const m = raw.match(/^\s*\d+\.\s*(.+?)(?:\s*\(([^)]+)\))?\s*$/);
+      if (m) steps.push({ description: m[1].trim(), why: m[2]?.trim() ?? null });
+    }
+    return { approved: true, steps: steps.length > 0 ? steps : undefined };
+  }
+  return null;
+}
+
+/** Parse the tool result text into structured answers. Falls back to
+ *  `cancelled: true` when the tool wrote its "dismissed" / "cancelled"
+ *  copy. Anything we can't parse becomes an empty answer so the resolved
+ *  card still lines up with the proposal by index. */
+function parseAskUserResultText(text: string, expectedQuestions: number): AskUserDecision {
+  if (/dismissed the question card/i.test(text) || /prompt cancelled/i.test(text)) {
+    return { cancelled: true };
+  }
+  const answers: { picked: string[]; custom: string | null }[] = [];
+  let curr: { picked: string[]; custom: string | null } | null = null;
+  for (const raw of text.split('\n')) {
+    const line = raw.trimEnd();
+    // Each answered question starts with `[Header] question…`.
+    if (/^\[[^\]]+\]/.test(line)) {
+      if (curr) answers.push(curr);
+      curr = { picked: [], custom: null };
+      continue;
+    }
+    if (!curr) continue;
+    const trimmed = line.trim();
+    const pickedMatch = trimmed.match(/^→\s*picked:\s*(.+)$/);
+    if (pickedMatch) {
+      curr.picked = pickedMatch[1].split(',').map((s) => s.trim()).filter(Boolean);
+      continue;
+    }
+    const customMatch = trimmed.match(/^→\s*user said:\s*(.+)$/);
+    if (customMatch) {
+      curr.custom = customMatch[1];
+      continue;
+    }
+    // "(skipped)" / "(no answer captured)" — leave the empty defaults.
+  }
+  if (curr) answers.push(curr);
+  while (answers.length < expectedQuestions) {
+    answers.push({ picked: [], custom: null });
+  }
+  return { cancelled: false, answers };
 }
 
 export default function App() {
@@ -203,12 +338,33 @@ export default function App() {
       setThinking(true);
     }, 350);
   }
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
   // Which primary view fills the main pane. Sidebar nav items switch this;
   // starting a chat / loading a session snaps back to 'chat' so the user
   // isn't stranded on a management screen when the model streams a reply.
   const [mainView, setMainView] = useState<MainView>('chat');
+  // Settings is a first-class main view (not a dialog) — the sidebar
+  // renders the section tabs while the surface fills the main pane.
+  // `settingsSection` drives which section is shown; `settingsReturnTo`
+  // remembers where the user came from so "Back to app" pops them back
+  // to the chat / plugins / PR view they were on.
+  const [settingsSection, setSettingsSection] = useState<import('./components/Settings').SettingsSectionId>('provider');
+  const [settingsReturnTo, setSettingsReturnTo] = useState<MainView>('chat');
+  // Enter settings by remembering the current non-settings view, then
+  // swapping the main pane to `settings`. Guarded against being called
+  // while already in settings (would clobber the return-to).
+  function openSettings() {
+    setMainView((prev) => {
+      if (prev !== 'settings') setSettingsReturnTo(prev);
+      return 'settings';
+    });
+  }
+  // Leave settings — pop back to wherever the user was. Falls back to
+  // chat if the remembered view was somehow also settings (shouldn't
+  // happen, but a stale value shouldn't strand the user).
+  function exitSettings() {
+    setMainView(settingsReturnTo === 'settings' ? 'chat' : settingsReturnTo);
+  }
   // Right-side subagent panel: `agentTabs` is the ordered list of open
   // agent call_ids; `activeAgentTab` is the visible one. Panel is open
   // iff `agentTabs.length > 0`. Tab bodies are derived from `entries`
@@ -221,6 +377,7 @@ export default function App() {
   // frames the AgentTool broadcasts as its child streams events.
   const [subagentState, setSubagentState] = useState<Map<string, SubagentStreamState>>(new Map());
   const [configured, setConfigured] = useState<boolean | null>(null);
+  const [providerName, setProviderName] = useState<string | null>(null);
   const [sidebarRefresh, setSidebarRefresh] = useState(0);
   const [reviewPanelOpen, setReviewPanelOpen] = useState(false);
   const [reviewState, setReviewState] = useState<ReviewState | null>(null);
@@ -238,6 +395,11 @@ export default function App() {
   // (server needs to be up + AppState wired). Empty on error; the
   // palette degrades gracefully to just the built-in commands.
   const [skills, setSkills] = useState<SkillView[]>([]);
+  // Bumps each time the backend broadcasts `SkillsReloaded` (filesystem
+  // watcher detected a change). Passed to the Settings panel so its
+  // Skills tab re-fetches when a `SKILL.md` lands / vanishes / edits
+  // while it's open.
+  const [skillsVersion, setSkillsVersion] = useState(0);
   // Force a re-render every second while a turn is active so the live
   // "Working…" counter ticks. Cheap; the tree is small and only mounts
   // when the browser tab is visible.
@@ -249,6 +411,12 @@ export default function App() {
   // stash by call_id and drain on tool_start so no plan ever renders as a
   // plain running tool row.
   const pendingProposalsRef = useRef<Map<string, PlanProposal>>(new Map());
+  // Same race-guard pattern as pendingProposalsRef but for the ask_user
+  // tool: `ask_user_request` might arrive before the matching
+  // `tool_start` (they broadcast on the same channel but the harness
+  // doesn't guarantee arrival order). Stash the proposal here so the
+  // tool_start case can drain it onto the fresh entry.
+  const pendingAskUserRef = useRef<Map<string, AskUserProposal>>(new Map());
 
   useEffect(() => {
     const c = connect(onMessage, setStatus);
@@ -261,9 +429,13 @@ export default function App() {
     getSettings()
       .then((v) => {
         setConfigured(v.configured);
-        if (!v.configured) setSettingsOpen(true);
+        setProviderName(v.default_provider ?? null);
+        if (!v.configured) openSettings();
       })
       .catch(() => setConfigured(false));
+    // openSettings is stable within this component's lifetime; deps
+    // deliberately empty so this only runs once on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -286,7 +458,7 @@ export default function App() {
         setModel(msg.model);
         setMode(msg.mode);
         setCwd(msg.cwd);
-        setEntries(historyToEntries(msg.history));
+        setEntries(historyToEntries(msg.history, msg.previews));
         // Server-persisted turn timing is aligned with user-message order
         // (turn 0 = first user msg). Rebuild the local Map so "Worked for"
         // chips render on reloaded transcripts.
@@ -330,16 +502,21 @@ export default function App() {
         setThinking(false);
         clearThinkingIdle();
         setEntries((prev) => {
-          const withStart = upsertToolStart(prev, msg.call);
+          let next = upsertToolStart(prev, msg.call);
           // If a plan_request arrived before this tool_start (race between
           // the tool's direct broadcast and the harness forwarder), drain
           // the queued proposal onto the fresh entry now.
-          const queued = pendingProposalsRef.current.get(msg.call.id);
-          if (queued) {
+          const planQ = pendingProposalsRef.current.get(msg.call.id);
+          if (planQ) {
             pendingProposalsRef.current.delete(msg.call.id);
-            return attachPlanProposal(withStart, msg.call.id, queued);
+            next = attachPlanProposal(next, msg.call.id, planQ);
           }
-          return withStart;
+          const askQ = pendingAskUserRef.current.get(msg.call.id);
+          if (askQ) {
+            pendingAskUserRef.current.delete(msg.call.id);
+            next = attachAskUserProposal(next, msg.call.id, askQ);
+          }
+          return next;
         });
         break;
       case 'tool_end':
@@ -372,6 +549,34 @@ export default function App() {
         break;
       case 'warning':
         setEntries((prev) => [...prev, { kind: 'warning', text: msg.text }]);
+        break;
+      case 'tool_progress':
+        // Live output streaming is intentionally not rendered in the
+        // UI — the completed `tool_end` frame carries the full
+        // transcript for the model, and users don't want a
+        // scrolling terminal panel for every bash call. The backend
+        // still emits these frames so future features (verbose
+        // debugging, live-follow toggle) can opt back in.
+        break;
+      case 'tool_preview':
+        // The harness computes a diff preview for edit/write calls
+        // just before execution and fires this frame regardless of
+        // approval mode. Attach it to the matching in-flight tool
+        // entry so auto-allowed writes get the same rich diff view
+        // that approval-gated ones already do via ApprovalRequest.
+        setEntries((prev) =>
+          prev.map((e) => {
+            if (e.kind !== 'tool' || e.call.id !== msg.call_id) return e;
+            return { ...e, preview: msg.preview };
+          }),
+        );
+        break;
+      case 'skills_reloaded':
+        // A skill file appeared / changed / vanished. Refetch the
+        // roster so the composer palette + the Settings panel pick
+        // up the new state without a click.
+        listSkills().then(setSkills).catch(() => {});
+        setSkillsVersion((n) => n + 1);
         break;
       case 'error':
         setEntries((prev) => [...prev, { kind: 'error', text: msg.text }]);
@@ -583,6 +788,19 @@ export default function App() {
           done: true,
         })));
         break;
+      case 'subagent_scratchpad_note':
+        // Cross-subagent shared findings. Surface as a distinct chip in
+        // the author's tab so a viewer can see who posted what, and keep
+        // the raw text so a future "Shared notes" pane can dedupe by
+        // (session, ts) if we surface it more prominently later.
+        setSubagentState((prev) => updateSubagent(prev, msg.parent_call_id, (s) => ({
+          ...s,
+          entries: [
+            ...s.entries,
+            { kind: 'warning', text: `[note ${msg.entry.author}] ${msg.entry.text}` },
+          ],
+        })));
+        break;
       case 'plan_request':
         // Server reuses the tool call id as the prompt id. Attach immediately
         // if the tool_start already arrived; otherwise stash the proposal so
@@ -594,6 +812,18 @@ export default function App() {
             return prev;
           }
           return attachPlanProposal(prev, msg.prompt_id, msg.plan);
+        });
+        break;
+      case 'ask_user_request':
+        // Same race-guard pattern as plan_request — attach immediately when
+        // the tool_start already landed; stash otherwise.
+        setEntries((prev) => {
+          const hit = prev.some((e) => e.kind === 'tool' && e.call.id === msg.prompt_id);
+          if (!hit) {
+            pendingAskUserRef.current.set(msg.prompt_id, msg.proposal);
+            return prev;
+          }
+          return attachAskUserProposal(prev, msg.prompt_id, msg.proposal);
         });
         break;
     }
@@ -611,6 +841,29 @@ export default function App() {
     // Record the decision locally so the card switches to its resolved state
     // immediately, without waiting for tool_end to round-trip.
     setEntries((prev) => recordPlanDecision(prev, callId, { approved, steps, note }));
+  }
+
+  /** Send answers (or a skip) for an `ask_user` prompt back to the
+   *  server and flip the card into its resolved state locally. */
+  function replyToAskUser(callId: string, decision: AskUserDecision) {
+    if (decision.cancelled) {
+      wsRef.current?.send({
+        type: 'prompt_response',
+        prompt_id: callId,
+        kind: 'ask_user',
+        answers: [],
+        cancelled: true,
+      });
+    } else {
+      wsRef.current?.send({
+        type: 'prompt_response',
+        prompt_id: callId,
+        kind: 'ask_user',
+        answers: decision.answers,
+        cancelled: false,
+      });
+    }
+    setEntries((prev) => recordAskUserDecision(prev, callId, decision));
   }
 
   /** Answer a subagent's review-required prompt. Clears `pendingReview`
@@ -687,11 +940,10 @@ export default function App() {
     })));
   }
 
-  // Tool calls waiting for the user's Y/N decision. Surfaced in the
-  // composer footer (bottom-left) instead of inline in the transcript so
-  // the button target doesn't drift as the transcript grows. Kept oldest-
-  // first — the top of the queue is what the visible Allow/Deny + Y/N
-  // shortcut act on.
+  // Tool calls waiting for the user's Y/N decision. The Allow / Deny /
+  // Always-allow buttons render inline on the pending tool card in
+  // the transcript. Kept oldest-first — the top of the queue is what
+  // the Y/N global shortcut targets.
   const pendingApprovals = useMemo<PendingApproval[]>(
     () =>
       entries
@@ -699,6 +951,32 @@ export default function App() {
         .map((e) => ({ callId: e.call.id, call: e.call, preview: e.preview })),
     [entries],
   );
+
+  // Global Y/N shortcut for the first pending approval. Rebinds when
+  // the head-of-queue call changes so back-to-back approvals each
+  // pick up their own listener. Skipped while the user is typing so
+  // "y" and "n" in the composer/settings don't fire the decision.
+  const firstPendingCallId = pendingApprovals[0]?.callId ?? null;
+  useEffect(() => {
+    if (!firstPendingCallId) return;
+    function onKey(e: KeyboardEvent) {
+      const t = e.target as HTMLElement | null;
+      if (t) {
+        const tag = t.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+        if (t.isContentEditable) return;
+      }
+      if (e.key === 'y' || e.key === 'Y') {
+        e.preventDefault();
+        decideApproval(firstPendingCallId, true);
+      } else if (e.key === 'n' || e.key === 'N') {
+        e.preventDefault();
+        decideApproval(firstPendingCallId, false);
+      }
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [firstPendingCallId]);
 
   function onSend(text: string) {
     // Belt-and-suspenders — the composer isn't visible on non-chat views,
@@ -758,6 +1036,7 @@ export default function App() {
 
   const settingsHandler = (v: SettingsView) => {
     setConfigured(v.configured);
+    setProviderName(v.default_provider ?? null);
     if (v.default_model) setModel(v.default_model);
     if (v.default_mode) setMode(v.default_mode as Mode);
   };
@@ -823,7 +1102,7 @@ export default function App() {
     if (!agentId) return;
     try {
       const view = await getSessionHistory(agentId);
-      const rebuilt = historyToEntries(view.messages);
+      const rebuilt = historyToEntries(view.messages, view.previews);
       setSubagentState((prev) => updateSubagent(prev, callId, (s) => ({
         ...s,
         agentId,
@@ -890,9 +1169,12 @@ export default function App() {
           setMainView('chat');
           await onNewChat();
         }}
-        onOpenSettings={() => setSettingsOpen(true)}
+        onOpenSettings={() => openSettings()}
         onOpenPicker={() => setPickerOpen(true)}
         onSessionLoaded={() => { /* Ready broadcast refreshes + jumps to chat */ }}
+        settingsSection={settingsSection}
+        onSettingsSectionChange={setSettingsSection}
+        onExitSettings={exitSettings}
       />
 
       <main className="flex min-w-0 min-h-0 flex-col">
@@ -926,7 +1208,7 @@ export default function App() {
                   No provider configured —{' '}
                   <button
                     className="underline underline-offset-2 hover:text-amber-100"
-                    onClick={() => setSettingsOpen(true)}
+                    onClick={() => openSettings()}
                   >
                     open Settings
                   </button>{' '}
@@ -957,8 +1239,12 @@ export default function App() {
                       onToggle={() => toggleTurn(i)}
                       onDecide={decideApproval}
                       onPlanReply={replyToPlan}
+                      onAskUserReply={replyToAskUser}
                       onOpenAgent={openAgentTab}
                       isActive={busy && i === turns.length - 1}
+                      skills={skills}
+                      mode={mode}
+                      onSetMode={onSetMode}
                     />
                   ))}
                   {thinking && (
@@ -975,8 +1261,9 @@ export default function App() {
               busy={busy}
               mode={mode}
               model={model}
+              providerName={providerName}
               cwd={cwd}
-              usage={formatUsage(model, usage)}
+              usage={usage}
               onSend={onSend}
               onSetMode={onSetMode}
               onSetModel={onSetModel}
@@ -984,7 +1271,7 @@ export default function App() {
               onOpenPicker={() => setPickerOpen(true)}
               onInterrupt={() => wsRef.current?.send({ type: 'interrupt' })}
               onNewChat={onNewChat}
-              onOpenSettings={() => setSettingsOpen(true)}
+              onOpenSettings={() => openSettings()}
               onRunReview={runReview}
               onSetGoal={onSetGoal}
               onClearGoal={onClearGoal}
@@ -998,8 +1285,6 @@ export default function App() {
                 if (r.applied.length === 0) return 'nothing to undo';
                 return `reverted ${r.applied.length} write${r.applied.length === 1 ? '' : 's'}`;
               }}
-              pendingApprovals={pendingApprovals}
-              onDecideApproval={decideApproval}
               skills={skills}
             />
           </>
@@ -1013,11 +1298,20 @@ export default function App() {
 
         {mainView === 'pull-request' && (
           <PullRequestPanel
-            onOpenSettings={() => setSettingsOpen(true)}
+            onOpenSettings={() => openSettings()}
             onReviewPr={runPrReview}
           />
         )}
         {mainView === 'scheduled' && <ComingSoon label="Scheduled" />}
+        {mainView === 'settings' && (
+          <SettingsSurface
+            section={settingsSection}
+            onSectionChange={setSettingsSection}
+            onSaved={settingsHandler}
+            onExit={exitSettings}
+            skillsVersion={skillsVersion}
+          />
+        )}
       </main>
 
       {panelOpen && (
@@ -1031,11 +1325,6 @@ export default function App() {
         />
       )}
 
-      <SettingsPanel
-        open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
-        onSaved={settingsHandler}
-      />
       <FolderPicker
         open={pickerOpen}
         onClose={() => setPickerOpen(false)}
@@ -1130,6 +1419,11 @@ function updateTool(prev: Entry[], callId: string, f: (t: ToolEntry) => ToolEntr
   return prev;
 }
 
+// `appendProgress` was removed with the Live Output panel — the
+// `tool_progress` handler now no-ops in `onMessage`. Backend keeps
+// emitting the frames so a future opt-in "watch stream" toggle can
+// wire back in without another round of plumbing.
+
 function attachPlanProposal(prev: Entry[], callId: string, proposal: PlanProposal): Entry[] {
   return updateTool(prev, callId, (t) => ({
     ...t,
@@ -1145,6 +1439,24 @@ function recordPlanDecision(
   return updateTool(prev, callId, (t) => {
     if (!t.plan) return t;
     return { ...t, plan: { ...t.plan, decision } };
+  });
+}
+
+function attachAskUserProposal(prev: Entry[], callId: string, proposal: AskUserProposal): Entry[] {
+  return updateTool(prev, callId, (t) => ({
+    ...t,
+    askUser: { proposal, decision: null },
+  }));
+}
+
+function recordAskUserDecision(
+  prev: Entry[],
+  callId: string,
+  decision: AskUserDecision,
+): Entry[] {
+  return updateTool(prev, callId, (t) => {
+    if (!t.askUser) return t;
+    return { ...t, askUser: { ...t.askUser, decision } };
   });
 }
 
@@ -1254,7 +1566,7 @@ function groupByTurn(entries: Entry[]): Turn[] {
 /* ---------- turn renderer ---------- */
 
 function TurnView({
-  turn, timing, expanded, isActive, onToggle, onDecide, onPlanReply, onOpenAgent,
+  turn, timing, expanded, isActive, onToggle, onDecide, onPlanReply, onAskUserReply, onOpenAgent, skills, mode, onSetMode,
 }: {
   turn: Turn;
   timing: TurnTiming | null;
@@ -1263,9 +1575,20 @@ function TurnView({
   onToggle: () => void;
   onDecide: (callId: string, allow: boolean) => void;
   onPlanReply: (callId: string, approved: boolean, steps?: PlanStep[], note?: string) => void;
+  /** Answer callback for the `ask_user` clarification tool. */
+  onAskUserReply: (callId: string, decision: AskUserDecision) => void;
   /** Opens (or focuses) the right-side SubagentPanel tab for the given
    *  agent call. Wired from App.tsx via `openAgentTab`. */
   onOpenAgent: (callId: string) => void;
+  /** Loaded skill roster — passed through so the user bubble can render
+   *  `@skill:<name>` mentions as pretty chips (icon + display label +
+   *  hash-derived color) rather than raw tokens. */
+  skills: SkillView[];
+  /** Session mode + setter — plumbed to pending tool-approval cards so
+   *  the "Always allow" button can bump the mode to `edit` (auto
+   *  everything unless a rule blocks) for the current session. */
+  mode: Mode;
+  onSetMode: (m: Mode) => void;
 }) {
   // Split the body into "intermediate work" and the final assistant text.
   // Rule: the LAST assistant text message with non-empty content is the
@@ -1281,11 +1604,6 @@ function TurnView({
   // Non-agent entries pass through unchanged.
   const intermediate = useMemo(() => groupAgentRuns(intermediateRaw), [intermediateRaw]);
 
-  const durationMs = timing
-    ? (timing.endedAt ?? Date.now()) - timing.startedAt
-    : null;
-  const showWorkedChip = (intermediate.length > 0 || isActive) && durationMs != null;
-
   // While a turn is in flight, force the intermediate section open so
   // in-progress tool calls (esp. pending approval bubbles) stay visible.
   // The user can collapse it after `done` fires. A pending approval
@@ -1293,20 +1611,76 @@ function TurnView({
   const hasPendingApproval = intermediateRaw.some(
     (e) => e.kind === 'tool' && e.status === 'pending',
   );
-  const forceOpen = isActive || hasPendingApproval;
+  const hasPendingAskUser = intermediateRaw.some(
+    (e) => e.kind === 'tool' && e.askUser != null && e.askUser.decision === null,
+  );
+  const hasPendingPlan = intermediateRaw.some(
+    (e) => e.kind === 'tool' && e.plan != null && e.plan.decision === null,
+  );
+  // `waitingForUser` covers every state where mira has handed the turn
+  // back to the human: approval prompts, plan review, ask_user cards.
+  // The "Working…" timer pauses while this is true so the elapsed
+  // display reflects work-done-by-mira, not wall-clock-minus-thinking.
+  const waitingForUser = hasPendingApproval || hasPendingAskUser || hasPendingPlan;
+
+  // Freeze the timer during wait periods. `waitStartedRef` marks the
+  // wall-clock instant the current wait began; `waitAccumRef` keeps the
+  // running total of prior wait segments in this same turn (so a
+  // turn with multiple approval rounds still reads correctly). Both are
+  // per-turn state — the component instance is stable across renders. */
+  const waitStartedRef = useRef<number | null>(null);
+  const waitAccumRef = useRef<number>(0);
+  useEffect(() => {
+    const now = Date.now();
+    if (waitingForUser && waitStartedRef.current === null) {
+      waitStartedRef.current = now;
+    } else if (!waitingForUser && waitStartedRef.current !== null) {
+      waitAccumRef.current += now - waitStartedRef.current;
+      waitStartedRef.current = null;
+    }
+  }, [waitingForUser]);
+
+  const activeWaitMs =
+    waitStartedRef.current !== null ? Date.now() - waitStartedRef.current : 0;
+  const totalWaitMs = waitAccumRef.current + activeWaitMs;
+  const rawDurationMs = timing
+    ? (timing.endedAt ?? Date.now()) - timing.startedAt
+    : null;
+  const durationMs =
+    rawDurationMs !== null ? Math.max(0, rawDurationMs - totalWaitMs) : null;
+  const showWorkedChip = (intermediate.length > 0 || isActive) && durationMs != null;
+
+  const forceOpen = isActive || hasPendingApproval || hasPendingAskUser || hasPendingPlan;
   const effectivelyExpanded = expanded || forceOpen;
+
+  // Codex-style categorised activity phrase ("3 reads, 4 searches, 1 write")
+  // shown next to the "Worked for" duration so a collapsed turn still tells
+  // the reader WHAT mira did, not just for how long. Counts every tool
+  // entry across the whole turn body — some flows put the assistant text
+  // BEFORE the tool run (e.g. "huh?" turns, or turns interrupted after the
+  // model started answering), which would land tools in `trailing` rather
+  // than `intermediateRaw` and drop them from the count.
+  const activitySummary = useMemo(() => {
+    const calls = turn.body
+      .filter((e): e is Extract<Entry, { kind: 'tool' }> => e.kind === 'tool')
+      .map((e) => e.call);
+    if (calls.length === 0) return '';
+    return countsPhrase(countsByCategory(calls));
+  }, [turn.body]);
 
   return (
     <>
-      {turn.user && <EntryView entry={turn.user} onDecide={onDecide} onPlanReply={onPlanReply} onOpenAgent={onOpenAgent} />}
+      {turn.user && <EntryView entry={turn.user} onDecide={onDecide} onPlanReply={onPlanReply} onAskUserReply={onAskUserReply} onOpenAgent={onOpenAgent} skills={skills} mode={mode} onSetMode={onSetMode} />}
 
       {showWorkedChip && (
         <WorkedForChip
           durationMs={durationMs!}
           active={isActive && timing?.endedAt == null}
+          waitingForUser={waitingForUser}
           expanded={effectivelyExpanded}
           locked={forceOpen}
           onToggle={onToggle}
+          activity={activitySummary}
         />
       )}
 
@@ -1340,13 +1714,13 @@ function TurnView({
           );
         }
         return (
-          <EntryView key={`t-i-${i}`} entry={item.entry} onDecide={onDecide} onPlanReply={onPlanReply} onOpenAgent={onOpenAgent} />
+          <EntryView key={`t-i-${i}`} entry={item.entry} onDecide={onDecide} onPlanReply={onPlanReply} onAskUserReply={onAskUserReply} onOpenAgent={onOpenAgent} skills={skills} mode={mode} onSetMode={onSetMode} />
         );
       })}
 
-      {finalEntry && <EntryView entry={finalEntry} onDecide={onDecide} onPlanReply={onPlanReply} onOpenAgent={onOpenAgent} />}
+      {finalEntry && <EntryView entry={finalEntry} onDecide={onDecide} onPlanReply={onPlanReply} onAskUserReply={onAskUserReply} onOpenAgent={onOpenAgent} skills={skills} mode={mode} onSetMode={onSetMode} />}
       {trailing.map((e, i) => (
-        <EntryView key={`t-t-${i}`} entry={e} onDecide={onDecide} onPlanReply={onPlanReply} onOpenAgent={onOpenAgent} />
+        <EntryView key={`t-t-${i}`} entry={e} onDecide={onDecide} onPlanReply={onPlanReply} onAskUserReply={onAskUserReply} onOpenAgent={onOpenAgent} skills={skills} mode={mode} onSetMode={onSetMode} />
       ))}
     </>
   );
@@ -1363,9 +1737,11 @@ export type GroupItem =
   | { kind: 'agent-group'; entries: (Entry & { kind: 'tool' })[] }
   | { kind: 'tool-group'; entries: (Entry & { kind: 'tool' })[] };
 
-/** Types that render as their own cards (agent, plan) — never fold into
- *  a generic tool-group. Agent has its own AgentGroup path. */
-const SPECIAL_TOOLS = new Set(['agent', 'plan']);
+/** Types that render as their own cards (agent, plan, ask_user) — never
+ *  fold into a generic tool-group. Agent has its own AgentGroup path;
+ *  plan and ask_user each swap in for the tool row when their proposal
+ *  attaches, so grouping would hide the interactive card. */
+const SPECIAL_TOOLS = new Set(['agent', 'plan', 'ask_user']);
 
 export function groupAgentRuns(entries: Entry[]): GroupItem[] {
   const out: GroupItem[] = [];
@@ -1439,37 +1815,100 @@ function findFinalAssistantIndex(body: Entry[]): number {
 }
 
 function WorkedForChip({
-  durationMs, active, expanded, locked, onToggle,
+  durationMs, active, waitingForUser, expanded, locked, onToggle, activity,
 }: {
   durationMs: number;
   active: boolean;
+  /** True while mira has handed the turn back to the user (approval,
+   *  plan review, ask_user card). The chip flips to a "Waiting for you"
+   *  label and drops the duration — the timer visibly pauses. */
+  waitingForUser: boolean;
   expanded: boolean;
   /** Force-open due to in-flight work or a pending approval — the chip
    *  goes non-interactive so the user can't collapse away important state. */
   locked: boolean;
   onToggle: () => void;
+  /** Categorised activity phrase ("3 reads, 4 searches, 1 write") for the
+   *  turn's intermediate work — appended after the duration so a collapsed
+   *  turn still surfaces WHAT mira did. Empty when nothing ran (e.g. a
+   *  no-tool answer). */
+  activity: string;
 }) {
-  const label = active ? `Working… ${formatDuration(durationMs)}` : `Worked for ${formatDuration(durationMs)}`;
+  const durationLabel = waitingForUser
+    ? 'Waiting for you'
+    : active
+      ? `Working… ${formatDuration(durationMs)}`
+      : `Worked for ${formatDuration(durationMs)}`;
+  const dot = waitingForUser
+    ? 'bg-amber-400'
+    : active
+      ? 'bg-mira-blue'
+      : null;
+  // "Active" here = the turn is still running (blue dot) or waiting
+  // for the user (amber dot). In either case the label needs full
+  // contrast — it's telling the user *something is happening*.
+  // Idle "Worked for" recedes into muted grey so scrolling past
+  // finished turns doesn't visually shout; hover brings it back.
+  const isActive = active || waitingForUser;
   return (
     <button
       type="button"
       onClick={locked ? undefined : onToggle}
       disabled={locked}
       title={locked ? 'Auto-expanded while in progress' : undefined}
+      // `group` so the trailing caret can key off hover state via
+      // `group-hover:*` — hidden until the row is hovered or already
+      // expanded, so a collapsed transcript stays quiet.
       className={cn(
-        'flex w-fit items-center gap-1.5 rounded-md px-2 py-1 text-[12.5px] text-muted-foreground transition-colors',
+        'group flex w-fit items-center gap-1.5 rounded-md px-2 py-1 text-[13px] font-semibold transition-colors',
+        // Idle: muted grey. Hover/active/expanded: full contrast.
+        isActive || expanded ? 'text-foreground/90' : 'text-muted-foreground/70',
         locked ? 'cursor-default opacity-80' : 'hover:bg-accent/40 hover:text-foreground',
       )}
     >
+      <span>{durationLabel}</span>
+      {activity && (
+        // Middle-dot separator + un-bolded activity phrase so the
+        // duration stays the primary read and the counts trail as a
+        // subtitle. Hidden while waiting on the user — the amber
+        // "Waiting for you" label is already carrying the message.
+        !waitingForUser && (
+          <>
+            <span
+              aria-hidden
+              className={cn(
+                'font-normal opacity-70',
+                isActive || expanded ? 'text-foreground/60' : 'text-muted-foreground/50',
+              )}
+            >
+              ·
+            </span>
+            <span
+              className={cn(
+                'font-normal',
+                isActive || expanded ? 'text-foreground/70' : 'text-muted-foreground/70',
+              )}
+            >
+              {activity}
+            </span>
+          </>
+        )
+      )}
+      {dot && <span className={cn('size-1.5 animate-pulse rounded-full', dot)} />}
       <CaretDown
         weight="bold"
         className={cn(
-          'size-3 text-muted-foreground/60 transition-transform',
+          'size-3.5 transition-all',
+          // Caret adopts the row's text colour so it fades with the
+          // label instead of standing out against the muted grey.
+          isActive || expanded ? 'text-foreground/70' : 'text-muted-foreground/70',
           !expanded && '-rotate-90',
+          // Hide when collapsed AND not hovered; always show when
+          // expanded (or hovered) so state is legible without
+          // needing a second visual language for open/closed.
+          !expanded && 'opacity-0 group-hover:opacity-100',
         )}
       />
-      <span>{label}</span>
-      {active && <span className="size-1.5 animate-pulse rounded-full bg-mira-blue" />}
     </button>
   );
 }
@@ -1484,8 +1923,13 @@ function formatDuration(ms: number): string {
 
 function EmptyState() {
   return (
-    <div className="flex min-h-full flex-col items-center justify-center gap-3 text-muted-foreground">
-      <div className="size-10 rounded-full border border-border bg-secondary" />
+    <div className="flex min-h-full flex-col items-center justify-center gap-4 text-muted-foreground">
+      <img
+        src={miraLogo}
+        alt="Mira"
+        className="size-20 rounded-full object-contain drop-shadow-[0_0_28px_rgba(88,101,242,0.35)]"
+        draggable={false}
+      />
       <div className="text-[22px] font-normal tracking-tight text-foreground">
         What should we build today?
       </div>
@@ -1510,11 +1954,29 @@ function EntryView({
   onDecide,
   onPlanReply,
   onOpenAgent,
+  skills,
+  mode,
+  onSetMode,
+  onAskUserReply,
 }: {
   entry: Entry;
   onDecide: (callId: string, allow: boolean) => void;
   onPlanReply: (callId: string, approved: boolean, steps?: PlanStep[], note?: string) => void;
   onOpenAgent: (callId: string) => void;
+  /** Answer callback for the `ask_user` tool card. Fires when the user
+   *  submits picks (or dismisses); flips the card into its resolved
+   *  state locally and posts back to the server. */
+  onAskUserReply?: (callId: string, decision: AskUserDecision) => void;
+  /** Roster used by the user bubble to pretty-print `@skill:<name>`
+   *  mentions. Defaults to empty when the parent doesn't pass one
+   *  (e.g. tool/plan/agent entries never touch it). */
+  skills?: SkillView[];
+  /** Session mode + setter — forwarded to the pending tool-approval
+   *  card so its "Always allow" button can bump the session out of a
+   *  gating mode. Optional so tool/plan/agent-only callers don't have
+   *  to pass them. */
+  mode?: Mode;
+  onSetMode?: (m: Mode) => void;
 }) {
   switch (entry.kind) {
     case 'msg': {
@@ -1538,7 +2000,7 @@ function EntryView({
             )}
             {text.trim() && (
               <div className="max-w-[78%] whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-secondary px-4 py-2.5 text-[14.5px]">
-                {text}
+                <SkillMentionText text={text} roster={skills ?? []} />
               </div>
             )}
           </div>
@@ -1554,9 +2016,10 @@ function EntryView({
     }
     case 'tool':
       // The `plan` tool gets a dedicated inline card with an editable step
-      // list; the `agent` tool gets a compact per-agent card so parallel
-      // spawns don't dominate the transcript. Everything else falls
-      // through to the generic tool row.
+      // list; the `ask_user` tool gets a multi-choice question card; the
+      // `agent` tool gets a compact per-agent card so parallel spawns
+      // don't dominate the transcript. Everything else falls through to
+      // the generic tool row.
       if (entry.plan) {
         return (
           <div className="flex justify-start">
@@ -1565,6 +2028,22 @@ function EntryView({
               decision={entry.plan.decision}
               onApprove={(steps) => onPlanReply(entry.call.id, true, steps)}
               onCancel={(note) => onPlanReply(entry.call.id, false, undefined, note || undefined)}
+            />
+          </div>
+        );
+      }
+      if (entry.askUser) {
+        return (
+          <div className="flex justify-start">
+            <AskUserCard
+              proposal={entry.askUser.proposal}
+              decision={entry.askUser.decision}
+              onSubmit={(answers) =>
+                onAskUserReply?.(entry.call.id, { cancelled: false, answers })
+              }
+              onCancel={() =>
+                onAskUserReply?.(entry.call.id, { cancelled: true })
+              }
             />
           </div>
         );
@@ -1589,6 +2068,8 @@ function EntryView({
             status={entry.status}
             result={entry.result}
             onDecide={(allow) => onDecide(entry.call.id, allow)}
+            mode={mode}
+            onSetMode={onSetMode}
           />
         </div>
       );

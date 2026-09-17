@@ -129,6 +129,7 @@ mod tests {
             parent_id: None,
             tasks: Vec::new(),
             goal: None,
+            previews: Default::default(),
         }
     }
 

@@ -28,6 +28,7 @@ pub mod interactive;
 pub mod mcp;
 mod memory;
 mod models;
+mod oauth;
 pub mod protocol;
 pub mod provider;
 mod pull_requests;
@@ -124,6 +125,7 @@ pub async fn run(mut cfg: ServerConfig) -> Result<()> {
     // construction time with the correct depth cap).
     let mut registry_owned: Registry = (*cfg.registry).clone();
     registry_owned.register(interactive::PlanTool::new(prompt_channel.clone()));
+    registry_owned.register(interactive::AskUserTool::new(prompt_channel.clone()));
     let base_registry = Arc::new(registry_owned.clone());
 
     // Named subagent types: builtins + `~/.mira/AGENTS.md` + `<cwd>/.mira/AGENTS.md`.
@@ -226,10 +228,8 @@ pub async fn run(mut cfg: ServerConfig) -> Result<()> {
     // the second system message doesn't get emitted at all — useful when
     // bisecting whether the memory block is confusing the model.
     if cfg.memory_runtime.inject_context() {
-        session = session.with_memory_snapshot(make_memory_snapshot_with(
-            &cfg.cwd,
-            episodic_store.clone(),
-        ));
+        session = session
+            .with_memory_snapshot(make_memory_snapshot_with(&cfg.cwd, episodic_store.clone()));
         session = session.with_memory_retrieval(memory_retrieval_from(&cfg.memory_runtime));
     }
     // Auto-extractor: post-round background pass that appends durable
@@ -239,6 +239,18 @@ pub async fn run(mut cfg: ServerConfig) -> Result<()> {
             cfg.memory_runtime.extractor_model().map(str::to_owned),
         ));
     }
+
+    // Bind the listener up-front so we know the exact port to embed in
+    // OAuth callback URLs. Doing this before AppState is constructed
+    // lets us pass `local_port` in — the alternative (Arc<AtomicU16>
+    // updated later) is uglier and racy for early sign-in attempts.
+    let listener = TcpListener::bind(cfg.bind)
+        .await
+        .with_context(|| format!("bind {}", cfg.bind))?;
+    let local_port = listener
+        .local_addr()
+        .map(|a| a.port())
+        .unwrap_or(cfg.bind.port());
 
     let state = AppState {
         session: Arc::new(RwLock::new(session)),
@@ -257,13 +269,26 @@ pub async fn run(mut cfg: ServerConfig) -> Result<()> {
         episodic: Arc::new(RwLock::new(episodic_store)),
         mcp_boot: Arc::new(cfg.mcp_boot),
         skills: cfg.skills.clone(),
+        pending_oauth: oauth::new_pending_store(),
+        local_port,
     };
 
-    let router = build_router(state, cfg.static_dir.clone());
+    // Filesystem watcher for skills — picks up `npx skills add`
+    // installs, hand-authored `SKILL.md` files, and the model's own
+    // `write_file` outputs without the user clicking Reload. Broadcasts
+    // `SkillsReloaded` on every debounced change so connected clients
+    // refetch the roster.
+    skills::spawn_skill_watcher(state.clone());
 
-    let listener = TcpListener::bind(cfg.bind)
-        .await
-        .with_context(|| format!("bind {}", cfg.bind))?;
+    // OAuth token refresh: rotate ChatGPT / Codex short-lived API keys
+    // before they expire so a signed-in session survives long chats
+    // without a re-signin. Boot rehydrate immediately hot-swaps the
+    // provider off any persisted bundle (in case the last run's yaml
+    // key is now stale) before spawning the periodic loop.
+    oauth::refresh::boot_rehydrate(&state).await;
+    oauth::refresh::spawn(state.clone());
+
+    let router = build_router(state, cfg.static_dir.clone());
     info!(addr = %cfg.bind, "mira serve: listening");
 
     axum::serve(listener, router).await.context("axum serve")?;
@@ -278,6 +303,24 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
             "/api/settings",
             get(settings::get_settings).put(settings::put_settings),
         )
+        .route(
+            "/api/auth/openrouter/start",
+            axum::routing::post(oauth::openrouter::start),
+        )
+        .route(
+            "/api/auth/openrouter/callback",
+            get(oauth::openrouter::callback),
+        )
+        .route(
+            "/api/auth/openai/start",
+            axum::routing::post(oauth::openai::start),
+        )
+        // The OAuth callback for OpenAI/ChatGPT sign-in lands on a
+        // temporary one-shot listener bound to 127.0.0.1:1455 (or 1457)
+        // that `oauth::openai::start` spins up per flow — this main
+        // server never sees /auth/callback. Codex's OAuth client_id is
+        // registered against those specific ports at OpenAI's Hydra
+        // allow-list, so we couldn't use our own port anyway.
         .route("/api/sessions", get(sessions::list_sessions))
         .route(
             "/api/sessions/:id/history",
@@ -313,7 +356,11 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
             axum::routing::post(git::create_worktree),
         )
         .route("/api/skills", get(skills::list_skills))
-        .route("/api/skills/reload", axum::routing::post(skills::reload_skills))
+        .route(
+            "/api/skills/reload",
+            axum::routing::post(skills::reload_skills),
+        )
+        .route("/api/skills/:name", get(skills::get_skill))
         .route("/api/memory", get(memory::get_memory))
         .route(
             "/api/memory/append",
@@ -388,9 +435,9 @@ pub fn default_store() -> Result<Arc<dyn SessionStore>> {
 /// Server-side callers should prefer [`make_memory_snapshot_with`] so the
 /// snapshot renders the same episodic entries `memory_remember` writes to.
 pub fn make_memory_snapshot(cwd: &std::path::Path) -> Arc<dyn mira_memory::MemorySnapshot> {
-    let epi: Arc<dyn mira_memory::EpisodicStore> = Arc::new(
-        mira_memory::FileEpisodicStore::new(mira_memory::project_episodic_path(cwd)),
-    );
+    let epi: Arc<dyn mira_memory::EpisodicStore> = Arc::new(mira_memory::FileEpisodicStore::new(
+        mira_memory::project_episodic_path(cwd),
+    ));
     make_memory_snapshot_with(cwd, epi)
 }
 
@@ -474,6 +521,20 @@ pub fn system_prompt(cwd: &std::path::Path, registry: &Registry) -> String {
          summarize existing code.\n\n\
          When in doubt: plan. A short approved plan beats starting to edit \
          and having to backtrack.\n\n\
+         CLARIFY FIRST WHEN AMBIGUOUS.\n\
+         Before you propose a plan for a request that could plausibly be \
+         shaped several different ways — target user vs. admin, permissions \
+         model, scope boundary, storage backend, framework choice, migration \
+         vs. rewrite — call the `ask_user` tool with 1-4 structured multiple- \
+         choice questions. Mark exactly one option `recommended: true` when \
+         you have a considered preference. The UI automatically adds a \
+         \"Tell mira what to do differently\" free-text path to every \
+         question, so you don't need to include it as an option. Use the \
+         user's answers to shape the subsequent `plan` call. Do NOT chain \
+         `ask_user` calls — ask everything you need in one round. Skip \
+         `ask_user` when the request is unambiguous, when a quick file read \
+         would resolve the ambiguity, or when you're mid-execution and \
+         picking would derail the flow.\n\n\
          DELEGATION.\n\
          When a subtask would take many tool calls to investigate — searching \
          a large codebase for every use of X, reading half a dozen files to \

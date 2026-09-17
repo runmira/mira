@@ -33,7 +33,7 @@ pub const RECENT_EPISODIC_FLOOR: usize = 5;
 /// Approximate token count for `s`. The 4-chars-per-token heuristic is
 /// what OpenAI docs suggest for English; close enough for a soft budget.
 pub fn approx_tokens(s: &str) -> usize {
-    (s.chars().count() + 3) / 4
+    s.chars().count().div_ceil(4)
 }
 
 /// Where a candidate came from. Used both for provenance labelling in
@@ -273,7 +273,7 @@ pub fn select_top_k(
             _ => None,
         })
         .collect();
-    recent_episodic_idx.sort_by(|a, b| b.1.cmp(&a.1));
+    recent_episodic_idx.sort_by_key(|a| std::cmp::Reverse(a.1));
     let mut must_include: std::collections::HashSet<usize> = recent_episodic_idx
         .into_iter()
         .take(RECENT_EPISODIC_FLOOR)
@@ -456,7 +456,10 @@ mod tests {
         // The bullet mentioning "pnpm" should win over the unrelated one.
         let bullets = vec![
             md("we use pnpm not npm", CandidateSource::ProjectMd),
-            md("dark mode toggle sits in the header", CandidateSource::ProjectMd),
+            md(
+                "dark mode toggle sits in the header",
+                CandidateSource::ProjectMd,
+            ),
         ];
         let sel = select_top_k(bullets, &q("pnpm install failed", 1000, 1_700_000_000));
         assert_eq!(sel.len(), 2); // both fit
@@ -510,10 +513,7 @@ mod tests {
         let mut candidates: Vec<RetrievalCandidate> = (0..RECENT_EPISODIC_FLOOR as u64)
             .map(|i| ep(&format!("episodic {i}"), now - i * 86_400))
             .collect();
-        candidates.push(md(
-            "user memory: we use pnpm",
-            CandidateSource::UserMd,
-        ));
+        candidates.push(md("user memory: we use pnpm", CandidateSource::UserMd));
         let sel = select_top_k(candidates.clone(), &q("pnpm build", 500, now));
         // All RECENT_EPISODIC_FLOOR + the MIRA.md entry should be in.
         assert_eq!(sel.len(), RECENT_EPISODIC_FLOOR + 1);

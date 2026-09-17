@@ -61,6 +61,12 @@ pub struct Policy {
     allow: Vec<Rule>,
     ask: Vec<Rule>,
     deny: Vec<Rule>,
+    /// Raw deny strings kept alongside the parsed rules so subagents can
+    /// rebuild a policy that inherits the parent's explicit denies (see
+    /// [`Self::deny_source`]). Without this, an autonomous read-only child
+    /// would silently lose e.g. `Deny(Read("**/.env"))` when the parent
+    /// spawns it on a fresh Auto policy.
+    deny_source: Vec<String>,
 }
 
 impl Policy {
@@ -82,6 +88,7 @@ impl Policy {
                 .iter()
                 .map(|s| s.parse())
                 .collect::<Result<_, _>>()?,
+            deny_source: cfg.deny.clone(),
         })
     }
 
@@ -91,6 +98,15 @@ impl Policy {
 
     pub fn set_mode(&mut self, mode: Mode) {
         self.mode = mode;
+    }
+
+    /// Original deny-rule strings, in the order they were parsed. Used
+    /// by subagent spawn plumbing so a child that runs on a fresh Auto
+    /// policy still inherits explicit denies the user (or the parent's
+    /// config) set. Returning the raw form (rather than parsed `Rule`s)
+    /// keeps the child free to rebuild them cleanly via `from_config`.
+    pub fn deny_source(&self) -> &[String] {
+        &self.deny_source
     }
 
     /// Evaluate a request. Precedence: deny > ask > mode default > allow.

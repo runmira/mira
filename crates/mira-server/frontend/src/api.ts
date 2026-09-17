@@ -44,6 +44,7 @@ export type SessionHistoryView = {
   created_at: number;
   updated_at: number;
   messages: import('./types').Message[];
+  previews?: Record<string, import('./types').DiffPreview>;
 };
 
 /** Read-only lookup — returns messages without swapping the active
@@ -213,7 +214,7 @@ export type SkillView = {
    *  maps to a preset palette; unknown values fall back to a stable
    *  hash-derived tint. */
   color?: string;
-  tier: 'bundled' | 'user' | 'project';
+  tier: 'bundled' | 'shared' | 'user' | 'project';
   has_attachments: boolean;
 };
 
@@ -248,6 +249,41 @@ export async function reloadSkills(): Promise<SkillView[]> {
   }
 }
 
+/** Full skill payload — superset of `SkillView` with the SKILL.md body,
+ *  attached-file names, and the on-disk source path. Powers the detail
+ *  drawer in Settings > Skills. `body` is the raw markdown the agent
+ *  reads when the skill is invoked; render it with the shared Markdown
+ *  component. */
+export type SkillDetail = {
+  name: string;
+  description: string;
+  category?: string;
+  icon?: string;
+  color?: string;
+  tier: 'bundled' | 'shared' | 'user' | 'project';
+  /** Raw markdown body of the SKILL.md file. */
+  body: string;
+  /** Attachment filenames relative to the skill's directory. Empty for
+   *  bundled builtins and flat-file skills. */
+  attachments: string[];
+  /** Absolute path where the skill file lives. Absent for bundled
+   *  builtins (they live inside the binary, not on disk). */
+  source?: string;
+};
+
+/** Fetch one skill's full body + attachments. Returns `null` when the
+ *  name doesn't resolve — the caller shows an error state instead of
+ *  throwing. */
+export async function getSkill(name: string): Promise<SkillDetail | null> {
+  try {
+    const r = await fetch(`/api/skills/${encodeURIComponent(name)}`);
+    if (!r.ok) return null;
+    return (await r.json()) as SkillDetail;
+  } catch {
+    return null;
+  }
+}
+
 export type FileView = { path: string; bytes: number; content: string };
 
 export async function readFile(path: string): Promise<FileView> {
@@ -265,6 +301,22 @@ export async function readFile(path: string): Promise<FileView> {
 
 export type WorktreeEntry = { path: string; branch: string | null; is_current: boolean };
 
+export type BranchEntry = {
+  /** Short branch name — `main`, `dami/fix-map-leaks`. Never carries a
+   *  remote prefix; use `is_remote` to disambiguate. */
+  name: string;
+  /** True when only a remote-tracking ref exists for this branch.
+   *  Clicking such an entry creates a new local branch tracking the
+   *  remote at worktree-add time. */
+  is_remote: boolean;
+  /** True when this branch is already checked out somewhere. The
+   *  picker hides these from the "switch to" list (git forbids two
+   *  worktrees on the same branch). */
+  in_worktree: boolean;
+  /** Upstream tracking ref, if configured (e.g. `origin/main`). */
+  upstream?: string | null;
+};
+
 export type GitStatusView = {
   in_repo: boolean;
   branch?: string | null;
@@ -276,6 +328,9 @@ export type GitStatusView = {
    *  cwd is `mira/.mira/worktrees/diff-tes`. Absent when not in a repo. */
   primary_project?: string | null;
   worktrees: WorktreeEntry[];
+  /** All branches (local + remote), deduped on short name. Present
+   *  in-repo, absent when `in_repo` is false. */
+  branches?: BranchEntry[];
 };
 
 export async function getGitStatus(): Promise<GitStatusView> {

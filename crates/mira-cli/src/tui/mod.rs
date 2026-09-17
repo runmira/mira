@@ -30,6 +30,7 @@ use futures::StreamExt;
 use mira_core::Role;
 use mira_harness::{Goal, GoalStatus, HarnessEvent, Session};
 use mira_policy::{Mode, Policy};
+use mira_tools::builtin::skill::SkillHandle;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tokio::sync::{mpsc, Mutex};
@@ -48,6 +49,10 @@ pub struct TuiConfig {
     pub approval_rx: mpsc::UnboundedReceiver<ApprovalRequest>,
     /// Repo root — used to resolve relative paths in edit/write diff previews.
     pub cwd: std::path::PathBuf,
+    /// Loaded skill registry — the same handle the `Skill` tool consults.
+    /// Backs `/skills` (list) and `/skill <name>` (detail) so the user can
+    /// inspect the roster without leaving the TUI.
+    pub skills: SkillHandle,
 }
 
 pub async fn run(session: Session, cfg: TuiConfig) -> Result<()> {
@@ -347,7 +352,10 @@ fn handle_harness_event(
             };
             state.push_info(format!(
                 "[goal] {iteration}/{max_iterations} · {status_word}{}",
-                reason.as_ref().map(|r| format!(" · {r}")).unwrap_or_default()
+                reason
+                    .as_ref()
+                    .map(|r| format!(" · {r}"))
+                    .unwrap_or_default()
             ));
             if let Some(g) = state.goal.as_mut() {
                 g.iterations = iteration;
@@ -374,6 +382,16 @@ fn handle_harness_event(
                 g.status = status;
             }
         }
+        HarnessEvent::ToolProgress { line, .. } => {
+            // Stream live tool output into the transcript as info
+            // rows. Line-per-row keeps scroll-back searchable and
+            // avoids any partial-line rendering headaches.
+            state.push_info(line);
+        }
+        HarnessEvent::ToolPreview { .. } => {
+            // The TUI already renders diffs via its own approval flow;
+            // skip the harness-side preview to avoid double rendering.
+        }
         HarnessEvent::Done => {
             state.streaming = false;
             *agent_stream = None;
@@ -397,11 +415,16 @@ async fn run_slash(cmd: &str, state: &mut TuiState, session: &Session, cfg: &mut
         "/help" | "/?" => {
             state.push_info(
                 "commands: /mode <plan|manual|auto|edit|yolo> · /model <id> · \
-                 /goal <cond> · /goal status · /goal clear · /clear · /quit",
+                 /goal <cond> · /goal status · /goal clear · /skills · \
+                 /skill <name> · /clear · /quit",
             );
         }
 
         "/goal" => run_goal_slash(rest, state, session).await,
+
+        "/skills" => run_skills_slash(state, &cfg.skills).await,
+
+        "/skill" => run_skill_slash(rest, state, &cfg.skills).await,
 
         "/mode" => match parse_mode(rest) {
             Some(m) => {
@@ -475,6 +498,64 @@ async fn run_goal_slash(rest: &str, state: &mut TuiState, session: &Session) {
     state.goal = Some(goal.clone());
     state.push_info(format!("[goal] set: {}", goal.condition));
     state.flash = Some("goal set".into());
+}
+
+/// `/skills` — one line per loaded skill (bundled + user + project
+/// merged, same view the composer palette in `mira serve` sees). Fires
+/// as info entries so scroll-back keeps them.
+async fn run_skills_slash(state: &mut TuiState, skills: &SkillHandle) {
+    let reg = skills.read().await.clone();
+    if reg.skills.is_empty() {
+        state.push_info(
+            "no skills loaded. drop a SKILL.md into ~/.mira/skills/<name>/ to add one.".to_string(),
+        );
+        return;
+    }
+    state.push_info(format!(
+        "{} skill{} loaded:",
+        reg.skills.len(),
+        if reg.skills.len() == 1 { "" } else { "s" }
+    ));
+    for s in reg.skills.values() {
+        state.push_info(format!("  /{:<24} {}", s.name, s.description));
+    }
+}
+
+/// `/skill <name>` — description + source + attachment list + body.
+/// Emitted line-by-line so the terminal transcript stays scroll-back
+/// searchable rather than being one giant blob.
+async fn run_skill_slash(rest: &str, state: &mut TuiState, skills: &SkillHandle) {
+    let name = rest.split_whitespace().next().unwrap_or("").trim();
+    if name.is_empty() {
+        state.push_warning("usage: /skill <name>".into());
+        return;
+    }
+    let reg = skills.read().await.clone();
+    let Some(s) = reg.get(name).cloned() else {
+        state.push_warning(format!("no skill named `{name}` — `/skills` to list."));
+        return;
+    };
+    state.push_info(format!("/{} — {}", s.name, s.description));
+    match s.source.as_ref() {
+        Some(p) => state.push_info(format!("source: {}", p.display())),
+        None => state.push_info("source: (bundled)".to_string()),
+    }
+    let attachments = s.attached_files();
+    if !attachments.is_empty() {
+        state.push_info(format!(
+            "attached ({}): {}",
+            attachments.len(),
+            attachments
+                .iter()
+                .filter_map(|p| p.to_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+        ));
+    }
+    state.push_info("---".to_string());
+    for line in s.body.lines() {
+        state.push_info(line.to_string());
+    }
 }
 
 fn parse_mode(s: &str) -> Option<Mode> {
