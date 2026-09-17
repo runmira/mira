@@ -34,6 +34,7 @@ import { TaskListPanel } from './components/TaskListPanel';
 import { GoalPanel } from './components/GoalPanel';
 import { countsByCategory, countsPhrase, ToolGroup } from './components/ToolGroup';
 import type {
+  ApprovalScope,
   AskUserProposal,
   DiffPreview,
   Goal,
@@ -941,8 +942,8 @@ export default function App() {
     }
   }
 
-  function decideApproval(callId: string, allow: boolean) {
-    wsRef.current?.send({ type: 'approve', call_id: callId, allow });
+  function decideApproval(callId: string, allow: boolean, scope: ApprovalScope = 'once') {
+    wsRef.current?.send({ type: 'approve', call_id: callId, allow, scope });
     setEntries((prev) => updateTool(prev, callId, (t) => ({
       ...t,
       status: allow ? 'running' : 'denied',
@@ -1599,7 +1600,7 @@ function TurnView({
   expanded: boolean;
   isActive: boolean;
   onToggle: () => void;
-  onDecide: (callId: string, allow: boolean) => void;
+  onDecide: (callId: string, allow: boolean, scope?: ApprovalScope) => void;
   onPlanReply: (callId: string, approved: boolean, steps?: PlanStep[], note?: string) => void;
   /** Answer callback for the `ask_user` clarification tool. */
   onAskUserReply: (callId: string, decision: AskUserDecision) => void;
@@ -1986,7 +1987,7 @@ function EntryView({
   onAskUserReply,
 }: {
   entry: Entry;
-  onDecide: (callId: string, allow: boolean) => void;
+  onDecide: (callId: string, allow: boolean, scope?: ApprovalScope) => void;
   onPlanReply: (callId: string, approved: boolean, steps?: PlanStep[], note?: string) => void;
   onOpenAgent: (callId: string) => void;
   /** Answer callback for the `ask_user` tool card. Fires when the user
@@ -2093,7 +2094,7 @@ function EntryView({
             preview={entry.preview}
             status={entry.status}
             result={entry.result}
-            onDecide={(allow) => onDecide(entry.call.id, allow)}
+            onDecide={(allow, scope) => onDecide(entry.call.id, allow, scope)}
             mode={mode}
             onSetMode={onSetMode}
           />

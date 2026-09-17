@@ -174,11 +174,18 @@ async fn dispatch(
             debug!(len = text.len(), "ws: send");
             spawn_turn(state.clone(), slot, text).await;
         }
-        ClientMsg::Approve { call_id, allow } => {
-            if !approver::resolve(&slot.pending, &call_id, allow).await {
-                warn!(call_id, "approval for unknown call");
+        ClientMsg::Approve {
+            call_id,
+            allow,
+            scope,
+        } => match approver::resolve(&slot.pending, &call_id, allow).await {
+            Some(call) => {
+                if allow && !matches!(scope, crate::protocol::ApprovalScope::Once) {
+                    apply_scope_widening(state, &slot, &call, scope).await;
+                }
             }
-        }
+            None => warn!(call_id, "approval for unknown call"),
+        },
         ClientMsg::PromptResponse {
             prompt_id,
             response,
@@ -367,6 +374,108 @@ async fn dispatch(
                 .await;
         }
     }
+}
+
+/// Widen the session's policy in response to an "Allow for session" /
+/// "Allow always" approval. Builds one rule per policy target the call
+/// would touch (usually one; `apply_patch` returns every source + dest)
+/// and appends it to the shared `Policy`'s allow list. On `Always`
+/// scope, the same rules also get appended to `~/.mira/mira.yaml` so
+/// they survive a restart.
+///
+/// Never fails the WS handler — a bad target or write error is logged
+/// and surfaced as a Warning frame so the user can see something went
+/// wrong without losing the one-shot approval that already resolved.
+async fn apply_scope_widening(
+    state: &AppState,
+    slot: &Arc<SessionSlot>,
+    call: &mira_core::ToolCall,
+    scope: crate::protocol::ApprovalScope,
+) {
+    let Some(tool) = state.base_registry.get(&call.function.name) else {
+        // Interactive/agent tools aren't in base_registry — they run at
+        // `Action::Pure` so they wouldn't have triggered Ask anyway. Silent
+        // no-op is the right thing.
+        return;
+    };
+    let rule_strings: Vec<String> = tool
+        .policy_targets(call)
+        .into_iter()
+        .filter(|t| !t.is_empty())
+        .map(|t| rule_string_for(tool.action(), &t))
+        .collect();
+
+    if rule_strings.is_empty() {
+        return;
+    }
+
+    // Session scope: add to the in-memory policy. Failure per rule is
+    // logged and the loop continues so a single bad target doesn't
+    // silently swallow the rest.
+    {
+        let mut policy = state.policy.lock().await;
+        for r in &rule_strings {
+            if let Err(e) = policy.add_allow_rule(r) {
+                warn!(rule = %r, %e, "scope widen: parse failed; skipping");
+            }
+        }
+    }
+
+    let persisted = matches!(scope, crate::protocol::ApprovalScope::Always);
+    if persisted {
+        if let Err(e) = persist_allow_rules(&rule_strings).await {
+            warn!(%e, "scope widen: persist to global config failed");
+            let _ = slot.events_tx.send(ServerMsg::Warning {
+                text: format!("saved for this session; couldn't persist to config: {e}"),
+            });
+        }
+    }
+
+    let _ = slot.events_tx.send(ServerMsg::Warning {
+        text: format!(
+            "policy: added {} allow rule{} ({}): {}",
+            rule_strings.len(),
+            if rule_strings.len() == 1 { "" } else { "s" },
+            if persisted { "persistent" } else { "session-only" },
+            rule_strings.join(", "),
+        ),
+    });
+}
+
+/// Render a `(Action, target)` pair as a policy DSL rule that
+/// [`mira_policy::Policy::add_allow_rule`] can parse. Bash calls use
+/// the raw command string as an exact-match; file actions wrap the
+/// path in the corresponding `Read/Edit/Write(path)` form (glob-
+/// exact — the path is literal, not a wildcard).
+fn rule_string_for(action: mira_tools::Action, target: &str) -> String {
+    match action {
+        mira_tools::Action::Bash => format!("Bash({target})"),
+        mira_tools::Action::Read => format!("Read({target})"),
+        mira_tools::Action::Edit => format!("Edit({target})"),
+        mira_tools::Action::Write => format!("Write({target})"),
+        // Pure never gates; if we somehow got here just synthesize
+        // something the parser will reject so the caller logs + skips.
+        mira_tools::Action::Pure => String::new(),
+    }
+}
+
+/// Append rules to `~/.mira/mira.yaml`'s `permissions.allow` and save.
+/// Loads the on-disk file fresh (not the merged runtime view) so we
+/// only ever write user-owned config, never a per-repo overlay.
+async fn persist_allow_rules(rules: &[String]) -> anyhow::Result<()> {
+    let rules = rules.to_vec();
+    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        let mut cfg = mira_config::MiraConfig::load_global()?;
+        for r in rules {
+            if !cfg.permissions.allow.contains(&r) {
+                cfg.permissions.allow.push(r);
+            }
+        }
+        cfg.save_global()?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("blocking task join: {e}"))?
 }
 
 /// Spawn a turn task on `slot`, storing its JoinHandle on the slot so

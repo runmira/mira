@@ -100,6 +100,20 @@ impl Policy {
         self.mode = mode;
     }
 
+    /// Parse `rule_str` and append it to the allow list. Used by the
+    /// server when the user picks "Allow for this session" on an
+    /// approval prompt: the specific target the model just asked about
+    /// gets promoted from `Ask` to `Allow` for the rest of the session.
+    ///
+    /// No dedup — repeated identical calls grow the list linearly, but
+    /// `Policy::evaluate` uses `.any()` so the observable behaviour is
+    /// unchanged and the extra memory is negligible for a session.
+    pub fn add_allow_rule(&mut self, rule_str: &str) -> Result<(), RuleParseError> {
+        let rule: Rule = rule_str.parse()?;
+        self.allow.push(rule);
+        Ok(())
+    }
+
     /// Original deny-rule strings, in the order they were parsed. Used
     /// by subagent spawn plumbing so a child that runs on a fresh Auto
     /// policy still inherits explicit denies the user (or the parent's
@@ -107,6 +121,11 @@ impl Policy {
     /// keeps the child free to rebuild them cleanly via `from_config`.
     pub fn deny_source(&self) -> &[String] {
         &self.deny_source
+    }
+
+    /// Number of allow rules — mainly for tests / diagnostics.
+    pub fn allow_count(&self) -> usize {
+        self.allow.len()
     }
 
     /// Evaluate a request. Precedence: deny > ask > mode default > allow.
@@ -126,5 +145,55 @@ impl Policy {
         let d = self.mode.default_for(req.action);
         debug!(?req, ?d, mode = ?self.mode, "policy: mode default");
         d
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_ask_policy() -> Policy {
+        Policy::from_config(&PolicyConfig {
+            mode: Mode::default(),
+            allow: vec![],
+            ask: vec!["Bash(*)".into()],
+            deny: vec![],
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn add_allow_rule_promotes_a_specific_target_from_ask_to_allow() {
+        let mut p = base_ask_policy();
+        let cmd = "git status";
+        assert_eq!(
+            p.evaluate(&Request {
+                action: Action::Bash,
+                target: cmd
+            }),
+            Decision::Ask
+        );
+        p.add_allow_rule(&format!("Bash({cmd})")).unwrap();
+        assert_eq!(
+            p.evaluate(&Request {
+                action: Action::Bash,
+                target: cmd
+            }),
+            Decision::Allow
+        );
+        // A sibling command still asks — the rule was scoped, not blanket.
+        assert_eq!(
+            p.evaluate(&Request {
+                action: Action::Bash,
+                target: "git push"
+            }),
+            Decision::Ask
+        );
+    }
+
+    #[test]
+    fn add_allow_rule_rejects_a_malformed_string() {
+        let mut p = base_ask_policy();
+        assert!(p.add_allow_rule("not a rule").is_err());
     }
 }

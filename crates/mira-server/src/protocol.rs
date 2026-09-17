@@ -15,14 +15,40 @@ use serde::{Deserialize, Serialize};
 use crate::interactive::{AskUserProposal, PlanProposal, PromptResponse};
 use crate::slot::BackgroundMode;
 
+/// Scope on an `Approve` reply — how long the user's decision applies
+/// for. `Once` (the default and legacy shape) affects only the current
+/// call. `Session` promotes the target to `Allow` on the session's
+/// in-memory policy so identical follow-up calls skip the modal.
+/// `Always` also appends the rule to `~/.mira/mira.yaml` so it persists
+/// across sessions.
+///
+/// Only meaningful when the reply's `allow` is `true` — a scoped deny
+/// isn't a concept the current UI exposes.
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalScope {
+    #[default]
+    Once,
+    Session,
+    Always,
+}
+
 /// Client → server.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMsg {
     /// Start a new user turn.
     Send { text: String },
-    /// Answer a pending approval prompt.
-    Approve { call_id: String, allow: bool },
+    /// Answer a pending approval prompt. `scope` says whether the
+    /// decision only covers this specific call, or should also add a
+    /// rule to the session policy (and optionally persist it) so
+    /// identical future calls skip the modal.
+    Approve {
+        call_id: String,
+        allow: bool,
+        #[serde(default)]
+        scope: ApprovalScope,
+    },
     /// Answer an interactive tool prompt (plan review, question, etc.).
     /// `prompt_id` matches the `prompt_id` on the server frame that opened
     /// the modal.

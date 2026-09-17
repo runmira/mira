@@ -40,7 +40,13 @@ use tracing::warn;
 use crate::protocol::ServerMsg;
 use crate::slot::BackgroundMode;
 
-pub type PendingMap = Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>;
+/// Per-slot pending approval registry. Keyed by tool call id. Each
+/// entry carries the oneshot the approver is waiting on AND a copy of
+/// the `ToolCall` so the WS handler can build a scope-widening
+/// allow-rule ("Allow for session" / "Allow always") without the
+/// client having to echo call args back over the wire.
+pub type PendingEntry = (oneshot::Sender<bool>, ToolCall);
+pub type PendingMap = Arc<Mutex<HashMap<String, PendingEntry>>>;
 
 /// Upper bound on how long we wait for a user's Allow/Deny click before
 /// treating the pending approval as denied. A parked session with nobody
@@ -118,7 +124,10 @@ impl Approver for WsApprover {
 
         let (tx, rx) = oneshot::channel();
         let call_id: String = call.id.to_string();
-        self.pending.lock().await.insert(call_id.clone(), tx);
+        self.pending
+            .lock()
+            .await
+            .insert(call_id.clone(), (tx, call.clone()));
 
         // Compute a diff preview for edit/write tools before asking; other
         // tools (bash, etc.) get `None` and the UI shows raw args.
@@ -164,23 +173,35 @@ impl Approver for WsApprover {
 /// modal was blocking the turn. Returns how many pending entries were
 /// resolved.
 pub async fn drain_pending_as_denied(pending: &PendingMap) -> usize {
-    let entries: Vec<oneshot::Sender<bool>> = {
+    let entries: Vec<PendingEntry> = {
         let mut guard = pending.lock().await;
-        guard.drain().map(|(_, tx)| tx).collect()
+        guard.drain().map(|(_, entry)| entry).collect()
     };
     let n = entries.len();
-    for tx in entries {
+    for (tx, _call) in entries {
         let _ = tx.send(false);
     }
     n
 }
 
-/// Resolve a pending approval — called by the WS reader when the client sends
-/// an `Approve` frame. Returns `true` if a waiter was found for the id.
-pub async fn resolve(pending: &PendingMap, call_id: &str, allow: bool) -> bool {
-    let sender = pending.lock().await.remove(call_id);
-    match sender {
-        Some(tx) => tx.send(allow).is_ok(),
-        None => false,
+/// Resolve a pending approval — called by the WS reader when the client
+/// sends an `Approve` frame. Returns `Some(call)` (the original
+/// `ToolCall` the modal was gating) when a waiter was found and
+/// resolved; `None` when the call_id doesn't match anything pending
+/// (stale reply, race).
+///
+/// Handing the `ToolCall` back lets the caller build a scope-widening
+/// rule ("Allow for session") server-side without trusting the client
+/// to echo the args faithfully.
+pub async fn resolve(pending: &PendingMap, call_id: &str, allow: bool) -> Option<ToolCall> {
+    let entry = pending.lock().await.remove(call_id)?;
+    let (tx, call) = entry;
+    if tx.send(allow).is_err() {
+        // Receiver dropped (turn was aborted between insert and resolve).
+        // The oneshot's absence means the approve outcome doesn't matter
+        // anymore, but the call still identifies which rule the user
+        // wanted to widen — return it so the scope side-effect can run.
+        warn!(call_id, "approval channel closed before resolve");
     }
+    Some(call)
 }

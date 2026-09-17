@@ -7,7 +7,7 @@ import {
   Play,
   X,
 } from '@phosphor-icons/react';
-import type { DiffLine, DiffPreview, Mode, ToolCall, ToolResult } from '../types';
+import type { ApprovalScope, DiffLine, DiffPreview, Mode, ToolCall, ToolResult } from '../types';
 import { cn } from '@/lib/utils';
 import { infoFor } from './ToolGroup';
 
@@ -77,12 +77,17 @@ type Props = {
   preview: DiffPreview | null;
   status: ToolStatus;
   result: ToolResult | null;
-  onDecide: (allow: boolean) => void;
-  /** Current session mode. `manual` and `auto` are gating modes where
-   *  the Approve card can offer an "Always allow" affordance that
-   *  bumps to `edit` (auto-approve everything unless a rule blocks).
-   *  Omitted for callers that don't want the mode-swap UI (e.g. the
-   *  subagent panel replay). */
+  /** Approve/deny with an optional scope. `once` (or omitted) matches
+   *  the legacy single-shot behavior; `session` also adds the exact
+   *  target to the in-memory allowlist; `always` also persists it to
+   *  `~/.mira/mira.yaml`. Denies are always single-shot. */
+  onDecide: (allow: boolean, scope?: ApprovalScope) => void;
+  /** Current session mode. Legacy: the card used to offer an
+   *  "Always allow" that swaps the whole session to `edit` mode. That
+   *  option is now hidden — scope-widening on the approve buttons
+   *  covers the case without a blanket mode change. Retained on the
+   *  type for backward-compat with call sites (e.g. subagent panel
+   *  replay) that already pass it. */
   mode?: Mode;
   onSetMode?: (m: Mode) => void;
 };
@@ -93,15 +98,13 @@ type Props = {
  *                  shortcut is bound at the App level so it fires no
  *                  matter which card is on screen.
  *  - anything else → compact row, click to expand args + result. */
-export function ToolCard({ call, preview, status, result, onDecide, mode, onSetMode }: Props) {
+export function ToolCard({ call, preview, status, result, onDecide, mode: _mode, onSetMode: _onSetMode }: Props) {
   if (status === 'pending') {
     return (
       <PendingApprovalCard
         call={call}
         preview={preview}
         onDecide={onDecide}
-        mode={mode}
-        onSetMode={onSetMode}
       />
     );
   }
@@ -111,24 +114,18 @@ export function ToolCard({ call, preview, status, result, onDecide, mode, onSetM
 /* ---------- pending approval ---------- */
 
 function PendingApprovalCard({
-  call, preview, onDecide, mode, onSetMode,
+  call, preview, onDecide,
 }: {
   call: ToolCall;
   preview: DiffPreview | null;
-  onDecide: (allow: boolean) => void;
-  mode?: Mode;
-  onSetMode?: (m: Mode) => void;
+  onDecide: (allow: boolean, scope?: ApprovalScope) => void;
 }) {
   // Pending = about to run → use the present-continuous verb ("Reading",
   // "Running", "Editing") so the header reads as a proposal, not a receipt.
   const summary = useMemo(() => summarize(call, 'pending'), [call]);
   const prettyArgs = useMemo(() => prettyPrint(call.function.arguments), [call.function.arguments]);
   const kindLabel = preview ? labelFor(preview.kind) : null;
-  // "Always allow" bumps the session out of a gating mode into `edit`
-  // (auto-approve everything unless a rule blocks). Only offered when
-  // the current mode actually gates — hidden in `edit`/`yolo` where
-  // the option is a no-op and would just clutter the card.
-  const showAlways = onSetMode != null && (mode === 'manual' || mode === 'auto' || mode === 'plan');
+  const [scopeMenuOpen, setScopeMenuOpen] = useState(false);
 
   return (
     <div className="flex w-full max-w-[78%] flex-col gap-2 overflow-hidden rounded-2xl border border-border/40 bg-card/80 p-3.5 backdrop-blur">
@@ -153,46 +150,83 @@ function PendingApprovalCard({
         </pre>
       )}
 
-      {/* Buttons live on the card itself so approvals stay next to the
-       *  diff/args they act on. Y/N keyboard shortcut is bound at the
-       *  App level and applies to the first pending card. Same
-       *  monochrome CTA style as AskUserCard: filled tiles, no color
-       *  strokes; the primary action is a solid foreground pill. */}
-      <div className="flex items-center gap-1.5 pt-1">
-        {showAlways && (
-          <button
-            type="button"
-            onClick={() => { onSetMode?.('edit'); onDecide(true); }}
-            className="mr-auto inline-flex items-center rounded-md px-2.5 py-1.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
-            title="Allow this and switch the session to 'Auto everything' — future writes and commands run without asking (unless a rule blocks)"
-          >
-            Always allow
-          </button>
-        )}
+      {/* Buttons: Deny — Allow (primary) — caret opens a scope menu.
+       *  Primary click is `allow: true, scope: once` (same as before).
+       *  The caret exposes the widening scopes without cluttering the
+       *  default action. Y/N keyboard shortcut still fires the default
+       *  Allow/Deny; scope choice is mouse-only for now. */}
+      <div className="flex items-center gap-1.5 pt-1 relative">
         <button
           type="button"
           onClick={() => onDecide(false)}
-          className={cn(
-            'rounded-md px-2.5 py-1.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground',
-            !showAlways && 'ml-auto',
-          )}
+          className="ml-auto rounded-md px-2.5 py-1.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
           title="Deny (n)"
         >
           Deny
         </button>
-        <button
-          type="button"
-          onClick={() => onDecide(true)}
-          className="inline-flex items-center gap-1 rounded-full bg-foreground px-3.5 py-1.5 text-[11.5px] font-semibold text-background transition-all hover:brightness-95"
-          title="Allow (y)"
-        >
-          Allow
-        </button>
+        <div className="inline-flex overflow-hidden rounded-full bg-foreground">
+          <button
+            type="button"
+            onClick={() => onDecide(true, 'once')}
+            className="px-3.5 py-1.5 text-[11.5px] font-semibold text-background transition-all hover:brightness-95"
+            title="Allow this one call (y)"
+          >
+            Allow
+          </button>
+          <button
+            type="button"
+            onClick={() => setScopeMenuOpen(v => !v)}
+            aria-expanded={scopeMenuOpen}
+            aria-label="More approve options"
+            className="border-l border-background/25 px-2 text-background transition-all hover:brightness-95"
+            title="More scope options"
+          >
+            <CaretDown size={12} weight="bold" />
+          </button>
+        </div>
+        {scopeMenuOpen && (
+          <div
+            className="absolute right-0 top-full z-20 mt-1 flex min-w-[220px] flex-col rounded-md border border-border/40 bg-popover p-1 shadow-lg"
+            onMouseLeave={() => setScopeMenuOpen(false)}
+          >
+            <ScopeMenuItem
+              label="Allow for this session"
+              hint="Skip the prompt for this exact target until the process restarts."
+              onClick={() => { setScopeMenuOpen(false); onDecide(true, 'session'); }}
+            />
+            <ScopeMenuItem
+              label="Always allow"
+              hint="Also save the rule to ~/.mira/mira.yaml — persists across restarts."
+              onClick={() => { setScopeMenuOpen(false); onDecide(true, 'always'); }}
+            />
+          </div>
+        )}
       </div>
       <div className="text-right text-[10.5px] text-muted-foreground/60">
         <kbd className="rounded bg-secondary/70 px-1 py-0.5 font-mono text-[10px]">y</kbd> allow · <kbd className="rounded bg-secondary/70 px-1 py-0.5 font-mono text-[10px]">n</kbd> deny
       </div>
     </div>
+  );
+}
+
+function ScopeMenuItem({
+  label,
+  hint,
+  onClick,
+}: {
+  label: string;
+  hint: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="flex flex-col items-start gap-0.5 rounded-sm px-2.5 py-1.5 text-left text-[12px] transition-colors hover:bg-secondary/70"
+    >
+      <span className="font-medium text-foreground">{label}</span>
+      <span className="text-[10.5px] text-muted-foreground">{hint}</span>
+    </button>
   );
 }
 

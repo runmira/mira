@@ -251,9 +251,16 @@ export type ScratchpadEntry = {
   text: string;
 };
 
+/** Scope on an `approve` reply. `once` only affects this specific call.
+ *  `session` promotes the exact target to `Allow` on the in-memory
+ *  policy so identical follow-up calls skip the modal. `always` also
+ *  appends the rule to `~/.mira/mira.yaml` so it survives a restart.
+ *  Meaningful only when `allow: true`. */
+export type ApprovalScope = 'once' | 'session' | 'always';
+
 export type ClientMsg =
   | { type: 'send'; text: string }
-  | { type: 'approve'; call_id: string; allow: boolean }
+  | { type: 'approve'; call_id: string; allow: boolean; scope?: ApprovalScope }
   | ({ type: 'prompt_response'; prompt_id: string } & PromptResponse)
   | { type: 'set_model'; model: string }
   | { type: 'set_mode'; mode: Mode }
