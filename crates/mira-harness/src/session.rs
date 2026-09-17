@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::AbortHandle;
 use tokio_stream::wrappers::ReceiverStream;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 /// How much of a tool result actually goes back into the model's context.
@@ -24,6 +25,13 @@ use tracing::{error, info, warn};
 /// every provider's per-request cap — cap in the harness so the frontend
 /// still sees the full result but the model only sees a preview.
 const TOOL_RESULT_HISTORY_CAP: usize = 4000;
+
+/// When we truncate, how much of the cap goes to the tail. The head is
+/// usually most relevant (first lines of a diff, start of a file listing),
+/// but for many bash tools the tail carries the actual outcome (test
+/// summary, error message, exit banner). Keeping ~20% of the budget for
+/// the tail preserves that signal without shrinking the head too much.
+const TOOL_RESULT_TAIL_FRACTION: f64 = 0.2;
 
 use crate::approver::Approver;
 use crate::event::HarnessEvent;
@@ -89,6 +97,29 @@ impl Drop for ProgressSlotGuard {
         }
     }
 }
+
+/// RAII helper that clears the per-turn cancel slot when it drops.
+/// Ensures a leftover token from a cancelled or panicked turn can't
+/// be re-fired against the next turn. Held behind a tokio `Mutex`
+/// because `Session::current_cancel` is async-locked; drop uses a
+/// non-blocking `try_lock` and, on the (unlikely) contended branch,
+/// spawns a short cleanup task so the guard's drop never blocks.
+struct CancelSlotGuard {
+    slot: Arc<Mutex<Option<CancellationToken>>>,
+}
+
+impl Drop for CancelSlotGuard {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.slot.try_lock() {
+            *guard = None;
+            return;
+        }
+        let slot = self.slot.clone();
+        tokio::spawn(async move {
+            *slot.lock().await = None;
+        });
+    }
+}
 use crate::persist::{now_ms, now_secs, SessionRecord, SessionStore, TurnMeta, UsageTotals};
 
 /// Runtime configuration for a session. Everything the loop needs besides
@@ -117,6 +148,15 @@ pub struct SessionConfig {
     /// `None` = freeform prose (default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_format: Option<ResponseFormat>,
+    /// Optional cheaper model used only for rolling compaction. A long
+    /// session on Opus can compact with Haiku for roughly a 15× cost
+    /// drop; the compactor's job is single-shot summarization, so a
+    /// smaller model handles it fine. `None` = reuse `model`.
+    ///
+    /// The compaction *trigger* still uses `model`'s context window —
+    /// only the summarizer call swaps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compactor_model: Option<String>,
 }
 
 /// Ceiling on tool-call rounds within a single user turn. Guards against
@@ -215,6 +255,7 @@ impl SessionConfig {
             max_tokens: None,
             reasoning_effort: None,
             response_format: None,
+            compactor_model: None,
         }
     }
 }
@@ -305,6 +346,13 @@ pub struct Session {
     /// user saw. Missing entries fall through to the client's
     /// arg-only fallback preview.
     previews: Arc<Mutex<HashMap<String, DiffPreview>>>,
+    /// The cancellation token for the currently-running turn, if any.
+    /// Installed by `run_loop` at turn start and cleared at the end.
+    /// [`Session::cancel`] fires this BEFORE aborting the turn's tokio
+    /// task, giving long-running tools (bash, web_fetch) a chance to
+    /// clean up native resources (kill child processes, close sockets)
+    /// instead of being torn down mid-await.
+    current_cancel: Arc<Mutex<Option<CancellationToken>>>,
 }
 
 impl Session {
@@ -403,6 +451,7 @@ impl Session {
             goal: Arc::new(Mutex::new(None)),
             progress_slot,
             previews: Arc::new(Mutex::new(HashMap::new())),
+            current_cancel: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -493,6 +542,7 @@ impl Session {
             goal: Arc::new(Mutex::new(record.goal)),
             progress_slot,
             previews: Arc::new(Mutex::new(record.previews)),
+            current_cancel: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -722,6 +772,16 @@ impl Session {
     /// `tokio::spawn` (fire-and-forget) so pressing Stop on the parent
     /// halts every layer of delegated work at once.
     pub async fn cancel(&self) -> bool {
+        // Fire the cooperative cancel first so tools observing the
+        // token (bash, web_fetch) can clean up native resources
+        // (kill child processes, close sockets) before the outer
+        // tokio task is torn down by `abort()` below. A tool that
+        // doesn't observe the token still gets aborted — this is
+        // strictly additive.
+        if let Some(token) = self.current_cancel.lock().await.take() {
+            token.cancel();
+        }
+
         let cancelled_self = {
             let mut slot = self.current_turn.lock().await;
             match slot.take() {
@@ -792,6 +852,20 @@ impl ChildTracker for SessionChildTracker {
 /// intervene manually.
 const MAX_VERIFY_ATTEMPTS: usize = 3;
 
+/// How many consecutive rounds with an identical tool-call signature
+/// (same set of `(name, canonicalized-args)`) constitutes a stuck loop.
+/// On the Nth such round the harness skips dispatch, emits a warning,
+/// and injects a "try a different approach" nudge as a user message
+/// so the model breaks out on its own instead of grinding through the
+/// full 200-round `max_rounds` ceiling.
+///
+/// 3 = allow two identical rounds (retry with the same args once) but
+/// intervene on the third. Loose enough that a legitimate retry after
+/// a transient tool failure passes; tight enough to catch the classic
+/// "grep for the same pattern forever" and "read the same file 4 times"
+/// patterns cheaply.
+const STUCK_LOOP_THRESHOLD: usize = 3;
+
 async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEvent>) {
     // Park a clone of the current turn's tx into the shared progress
     // slot so tools that stream live output (bash's PTY reader) can
@@ -802,6 +876,16 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
         *slot = Some(tx.clone());
     }
     let _progress_guard = ProgressSlotGuard::new(sess.progress_slot.clone());
+
+    // Fresh cancellation token for this turn. Stored on the session
+    // so `Session::cancel` can fire it; also threaded through
+    // `dispatch_call` into each tool invocation's `ToolContext` so
+    // long-running tools observe it. Cleared on turn wind-down.
+    let turn_cancel = CancellationToken::new();
+    *sess.current_cancel.lock().await = Some(turn_cancel.clone());
+    let _cancel_guard = CancelSlotGuard {
+        slot: sess.current_cancel.clone(),
+    };
 
     // Outer `'goal_loop` wraps the per-user-turn round loop. When a
     // standing `/goal` is active it drives the evaluator after each
@@ -866,6 +950,14 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
         }
         let mut round_outcome = RoundOutcome::MaxRounds;
 
+        // Stuck-loop detector. Fingerprint of the previous round's
+        // tool-call set (name + canonicalized args, order-independent).
+        // Rounds with an identical fingerprint accumulate; on the Nth
+        // in a row we skip dispatch and inject a "try something
+        // different" nudge instead of grinding through max_rounds.
+        let mut prev_call_fingerprint: Option<u64> = None;
+        let mut consecutive_dupe_rounds: usize = 0;
+
         for round in 0..cfg.max_rounds {
             info!(round, "harness: model turn");
 
@@ -878,10 +970,15 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
             // strictly better than aborting the turn.
             {
                 let mut history = sess.history.lock().await;
+                let summarizer_model = cfg
+                    .compactor_model
+                    .as_deref()
+                    .unwrap_or(&cfg.model);
                 match crate::history::maybe_compact(
                     &mut history,
                     sess.provider.as_ref(),
                     &cfg.model,
+                    summarizer_model,
                 )
                 .await
                 {
@@ -1043,6 +1140,45 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
 
                 round_outcome = RoundOutcome::CleanStop;
                 break;
+            }
+
+            // Stuck-loop guard. If the model is issuing the exact same
+            // set of tool calls (name + canonicalized args, order-
+            // independent) round after round, it's not making progress
+            // — a nudge is cheaper than letting it grind to `max_rounds`.
+            let fp = fingerprint_calls(&pending_calls);
+            if Some(fp) == prev_call_fingerprint {
+                consecutive_dupe_rounds += 1;
+            } else {
+                consecutive_dupe_rounds = 1;
+                prev_call_fingerprint = Some(fp);
+            }
+            if consecutive_dupe_rounds >= STUCK_LOOP_THRESHOLD {
+                warn!(
+                    consecutive = consecutive_dupe_rounds,
+                    "stuck-loop detected — skipping dispatch, injecting nudge"
+                );
+                let _ = tx
+                    .send(HarnessEvent::Warning(format!(
+                        "[stuck-loop] the model has called the same tools with the same arguments \
+                         {consecutive_dupe_rounds} rounds in a row — asking it to try a different \
+                         approach"
+                    )))
+                    .await;
+                sess.history.lock().await.push(Message::user(
+                    "You've made the same set of tool calls with the same arguments several rounds \
+                     in a row. That's a strong sign the current approach isn't making progress. \
+                     Try something different: a narrower or wider query, a different tool, a \
+                     different file, or step back and reconsider the plan. If you genuinely can't \
+                     make progress, stop and tell me what you tried and what's blocking you."
+                        .to_owned(),
+                ));
+                // Reset so we don't fire again on the very next round if
+                // the model happens to repeat once more; it gets a fresh
+                // window to change course.
+                consecutive_dupe_rounds = 0;
+                prev_call_fingerprint = None;
+                continue;
             }
 
             // Dispatch calls in batches. Consecutive parallel-safe calls
@@ -1436,7 +1572,13 @@ async fn dispatch_call(sess: &Session, call: ToolCall, tx: &mpsc::Sender<Harness
             ),
         )
     } else {
-        match tool.invoke(&call, &sess.tool_ctx).await {
+        // Snap a per-call clone of tool_ctx with the current turn's
+        // cancellation token attached. Cheap (all fields are Arcs);
+        // done per-call so a token cancelled after this dispatch
+        // doesn't affect the next call's clone.
+        let mut per_call_ctx = sess.tool_ctx.clone();
+        per_call_ctx.cancel = sess.current_cancel.lock().await.clone();
+        match tool.invoke(&call, &per_call_ctx).await {
             Ok(r) => r,
             Err(e) => {
                 error!(tool = %call.function.name, %e, "tool invocation failed");
@@ -1562,23 +1704,142 @@ async fn checkpoint(sess: &Session) {
     }
 }
 
-/// Truncate a tool result to a size the model can safely re-ingest. We keep
-/// the head (usually the most relevant part — first lines of a diff, the
-/// start of a file listing) and add a marker line telling the model how
-/// much was elided.
+/// Truncate a tool result to a size the model can safely re-ingest.
+/// Keeps a head slice (the start of the output, usually most relevant)
+/// AND a tail slice (last lines — where test summaries, error messages,
+/// and exit banners tend to live). A marker between the two tells the
+/// model how many bytes were elided.
 fn truncate_for_history(content: &str) -> String {
     if content.len() <= TOOL_RESULT_HISTORY_CAP {
         return content.to_owned();
     }
-    let cut = content
-        .char_indices()
-        .take_while(|(i, _)| *i < TOOL_RESULT_HISTORY_CAP)
-        .map(|(i, _)| i)
-        .last()
-        .unwrap_or(0);
-    let head = &content[..cut];
-    let omitted = content.len() - cut;
-    format!("{head}\n\n… [{omitted} bytes truncated; ask again with a narrower query to see more]")
+    let tail_budget = ((TOOL_RESULT_HISTORY_CAP as f64) * TOOL_RESULT_TAIL_FRACTION) as usize;
+    let head_budget = TOOL_RESULT_HISTORY_CAP.saturating_sub(tail_budget);
+
+    let head_end = char_boundary_at_most(content, head_budget);
+    let tail_start = char_boundary_at_least(content, content.len().saturating_sub(tail_budget));
+
+    // If head + tail would overlap (short content that squeaked past
+    // the length check due to fractional accounting), fall back to a
+    // pure-head slice.
+    if tail_start <= head_end {
+        let head = &content[..head_end];
+        let omitted = content.len() - head_end;
+        return format!(
+            "{head}\n\n… [{omitted} bytes truncated; ask again with a narrower query to see more]"
+        );
+    }
+
+    let head = &content[..head_end];
+    let tail = &content[tail_start..];
+    let omitted = tail_start - head_end;
+    format!(
+        "{head}\n\n… [{omitted} bytes truncated in the middle; ask with a narrower query for more] …\n\n{tail}"
+    )
+}
+
+/// Order-independent fingerprint of a set of tool calls. Two rounds
+/// with the same `(tool_name, canonicalized_args)` multiset produce
+/// the same u64 — used by the round loop's stuck-loop detector to
+/// notice "same batch, again."
+///
+/// - Args are canonicalized (recursively sorted-key JSON) so
+///   `{"path":"a","limit":10}` and `{"limit":10,"path":"a"}` collide.
+/// - Calls are put in a `BTreeSet` before hashing so call ORDER
+///   within a round doesn't matter.
+/// - Bad JSON in a call's arguments hashes the raw string — worst
+///   case we don't collide on trivially-reordered malformed args,
+///   which is fine (the detector just doesn't fire on the first
+///   dupe round).
+fn fingerprint_calls(calls: &[ToolCall]) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::collections::BTreeSet;
+    use std::hash::{Hash, Hasher};
+
+    let mut entries: BTreeSet<(String, String)> = BTreeSet::new();
+    for c in calls {
+        let canon = canonicalize_args(&c.function.arguments);
+        entries.insert((c.function.name.clone(), canon));
+    }
+    let mut hasher = DefaultHasher::new();
+    for (n, a) in &entries {
+        n.hash(&mut hasher);
+        a.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// Serialize a JSON args blob with recursively sorted object keys.
+/// Falls back to the raw string on parse failure — the detector can
+/// still catch textually-identical duplicates.
+fn canonicalize_args(raw: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(v) => {
+            let mut out = String::new();
+            write_canonical_json(&mut out, &v);
+            out
+        }
+        Err(_) => raw.to_owned(),
+    }
+}
+
+fn write_canonical_json(out: &mut String, v: &serde_json::Value) {
+    match v {
+        serde_json::Value::Null => out.push_str("null"),
+        serde_json::Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        serde_json::Value::Number(n) => out.push_str(&n.to_string()),
+        serde_json::Value::String(s) => {
+            out.push_str(&serde_json::to_string(s).unwrap_or_default());
+        }
+        serde_json::Value::Array(a) => {
+            out.push('[');
+            for (i, item) in a.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_canonical_json(out, item);
+            }
+            out.push(']');
+        }
+        serde_json::Value::Object(m) => {
+            let mut keys: Vec<&String> = m.keys().collect();
+            keys.sort();
+            out.push('{');
+            for (i, k) in keys.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&serde_json::to_string(k).unwrap_or_default());
+                out.push(':');
+                write_canonical_json(out, &m[k.as_str()]);
+            }
+            out.push('}');
+        }
+    }
+}
+
+/// Largest char boundary `<= target`. Safe to slice `content[..idx]`.
+fn char_boundary_at_most(content: &str, target: usize) -> usize {
+    if target >= content.len() {
+        return content.len();
+    }
+    let mut idx = target;
+    while idx > 0 && !content.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
+/// Smallest char boundary `>= target`. Safe to slice `content[idx..]`.
+fn char_boundary_at_least(content: &str, target: usize) -> usize {
+    if target >= content.len() {
+        return content.len();
+    }
+    let mut idx = target;
+    while idx < content.len() && !content.is_char_boundary(idx) {
+        idx += 1;
+    }
+    idx
 }
 
 fn format_action(a: mira_tools::Action) -> &'static str {
@@ -2193,5 +2454,145 @@ mod goal_outcome_tests {
     fn one_line_short_input_untouched_except_flattening() {
         let s = one_line("a\nb  c", 50);
         assert_eq!(s, "a b c");
+    }
+}
+
+#[cfg(test)]
+mod stuck_loop_tests {
+    use super::*;
+    use mira_core::message::{ToolCallFunction, ToolCallKind};
+    use mira_core::ToolCallId;
+
+    fn call(id: &str, name: &str, args: &str) -> ToolCall {
+        ToolCall {
+            id: ToolCallId::from(id),
+            kind: ToolCallKind::Function,
+            function: ToolCallFunction {
+                name: name.to_owned(),
+                arguments: args.to_owned(),
+            },
+        }
+    }
+
+    #[test]
+    fn identical_rounds_produce_matching_fingerprints() {
+        let a = vec![call("1", "grep", r#"{"pattern":"foo","path":"src"}"#)];
+        let b = vec![call("2", "grep", r#"{"pattern":"foo","path":"src"}"#)];
+        assert_eq!(fingerprint_calls(&a), fingerprint_calls(&b));
+    }
+
+    #[test]
+    fn reordered_args_hash_the_same() {
+        // The classic "did the model swap key order" test.
+        let a = vec![call("1", "read_file", r#"{"path":"a.rs","limit":10}"#)];
+        let b = vec![call("2", "read_file", r#"{"limit":10,"path":"a.rs"}"#)];
+        assert_eq!(fingerprint_calls(&a), fingerprint_calls(&b));
+    }
+
+    #[test]
+    fn reordered_calls_within_a_round_hash_the_same() {
+        // The stuck-loop condition is a *set* match — the model
+        // permuting its tool_calls list shouldn't defeat the detector.
+        let ab = vec![
+            call("1", "grep", r#"{"pattern":"x"}"#),
+            call("2", "read_file", r#"{"path":"a"}"#),
+        ];
+        let ba = vec![
+            call("3", "read_file", r#"{"path":"a"}"#),
+            call("4", "grep", r#"{"pattern":"x"}"#),
+        ];
+        assert_eq!(fingerprint_calls(&ab), fingerprint_calls(&ba));
+    }
+
+    #[test]
+    fn different_args_diverge() {
+        let a = vec![call("1", "grep", r#"{"pattern":"foo"}"#)];
+        let b = vec![call("2", "grep", r#"{"pattern":"bar"}"#)];
+        assert_ne!(fingerprint_calls(&a), fingerprint_calls(&b));
+    }
+
+    #[test]
+    fn different_tool_names_diverge() {
+        let a = vec![call("1", "grep", r#"{"pattern":"foo"}"#)];
+        let b = vec![call("2", "rg", r#"{"pattern":"foo"}"#)];
+        assert_ne!(fingerprint_calls(&a), fingerprint_calls(&b));
+    }
+
+    #[test]
+    fn malformed_args_still_hash_stably() {
+        // Not valid JSON — falls back to raw-string hash, which is
+        // stable and still catches textually-identical dupes.
+        let a = vec![call("1", "weird", "not-json{{")];
+        let b = vec![call("2", "weird", "not-json{{")];
+        assert_eq!(fingerprint_calls(&a), fingerprint_calls(&b));
+    }
+
+    #[test]
+    fn nested_object_key_order_is_canonicalized() {
+        let a = vec![call(
+            "1",
+            "cfg",
+            r#"{"opts":{"b":1,"a":2},"flag":true}"#,
+        )];
+        let b = vec![call(
+            "2",
+            "cfg",
+            r#"{"flag":true,"opts":{"a":2,"b":1}}"#,
+        )];
+        assert_eq!(fingerprint_calls(&a), fingerprint_calls(&b));
+    }
+}
+
+#[cfg(test)]
+mod truncate_tests {
+    use super::*;
+
+    #[test]
+    fn short_content_passes_through() {
+        let s = "short output";
+        assert_eq!(truncate_for_history(s), s);
+    }
+
+    #[test]
+    fn long_content_keeps_head_and_tail() {
+        // A long payload with a distinctive head and a distinctive tail
+        // (e.g. a test-summary line at the end of a bash log).
+        let head_marker = "==== HEAD MARKER ====";
+        let tail_marker = "==== TAIL MARKER: 42 passed, 0 failed ====";
+        let filler = "x".repeat(TOOL_RESULT_HISTORY_CAP * 3);
+        let payload = format!("{head_marker}\n{filler}\n{tail_marker}");
+        let out = truncate_for_history(&payload);
+
+        assert!(
+            out.contains(head_marker),
+            "head should survive: {}",
+            &out[..out.len().min(200)]
+        );
+        assert!(
+            out.contains(tail_marker),
+            "tail should survive so test summaries reach the model"
+        );
+        assert!(
+            out.contains("truncated"),
+            "should include an elision marker"
+        );
+        assert!(
+            out.len() <= TOOL_RESULT_HISTORY_CAP + 200,
+            "truncated output should stay near the cap (got {} bytes)",
+            out.len()
+        );
+    }
+
+    #[test]
+    fn multibyte_content_stays_on_char_boundaries() {
+        // Emoji + CJK to ensure we never slice mid-UTF-8.
+        let head = "🚀 launching ";
+        let tail = " 完了しました 🎉";
+        let payload = format!("{head}{}{tail}", "à".repeat(TOOL_RESULT_HISTORY_CAP));
+        let out = truncate_for_history(&payload);
+        // The mere fact that this returns (no panic) proves boundary
+        // safety; the assertion just confirms both ends survive.
+        assert!(out.starts_with("🚀 launching"), "head start: {out}");
+        assert!(out.ends_with("🎉"), "tail end: {out}");
     }
 }

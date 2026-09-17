@@ -250,19 +250,26 @@ pub fn model_context_window(model: &str) -> usize {
 /// into its place. Returns `Ok(Some(count))` with the number of
 /// messages replaced when compaction happened, `Ok(None)` when no-op.
 ///
+/// `session_model` gates the trigger (its context window is what we're
+/// trying not to blow past). `summarizer_model` is the model that
+/// actually writes the summary — usually a cheaper tier than the
+/// session model. Caller resolves the default (e.g. reuse
+/// `session_model`) before calling.
+///
 /// Errors surface provider failures — the caller decides to log and
 /// continue with the uncompacted history.
 pub async fn maybe_compact(
     history: &mut Vec<Message>,
     provider: &dyn ChatProvider,
-    model: &str,
+    session_model: &str,
+    summarizer_model: &str,
 ) -> Result<Option<usize>> {
-    let Some(range) = find_compact_range(history, model) else {
+    let Some(range) = find_compact_range(history, session_model) else {
         return Ok(None);
     };
     let count = range.end - range.start;
     let tail_text = render_tail(&history[range.clone()]);
-    let summary = summarize_tail(provider, model, &tail_text).await?;
+    let summary = summarize_tail(provider, summarizer_model, &tail_text).await?;
     let synthetic = Message::user(format!(
         "[MEMORY OF EARLIER CONVERSATION — the previous {count} messages were summarized to save context.]\n\n{summary}\n\n[END MEMORY]"
     ));

@@ -90,10 +90,33 @@ impl Tool for Bash {
         // runs, tests).
         let outcome = if let Some(shell) = &ctx.shell {
             let mut guard = shell.lock().await;
-            guard
-                .run_streaming(&args.command, timeout, progress_tx)
-                .await
-                .map_err(|e| ToolError::Failed(e.to_string()))?
+            match ctx.cancel.clone() {
+                Some(token) => {
+                    // Cooperative cancel: race the shell call against
+                    // the turn's cancel token. On cancel, `interrupt()`
+                    // kills the running child so a Stop doesn't wait
+                    // for the deadline; return a synthetic outcome so
+                    // the transcript records what happened.
+                    tokio::select! {
+                        biased;
+                        _ = token.cancelled() => {
+                            guard.interrupt();
+                            mira_sandbox::Outcome {
+                                exit_code: -1,
+                                timed_out: false,
+                                output: "(cancelled by user; running child was killed)".into(),
+                            }
+                        }
+                        res = guard.run_streaming(&args.command, timeout, progress_tx) => {
+                            res.map_err(|e| ToolError::Failed(e.to_string()))?
+                        }
+                    }
+                }
+                None => guard
+                    .run_streaming(&args.command, timeout, progress_tx)
+                    .await
+                    .map_err(|e| ToolError::Failed(e.to_string()))?,
+            }
         } else {
             ctx.sandbox
                 .run_streaming(&args.command, &ctx.cwd, timeout, progress_tx)

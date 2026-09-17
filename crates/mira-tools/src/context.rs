@@ -5,6 +5,7 @@ use mira_core::SessionId;
 use mira_memory::{EpisodicStore, MemoryStore};
 use mira_sandbox::{PersistentShell, Sandbox};
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 use crate::guard::FileGuard;
 use crate::tasks::TaskStore;
@@ -72,6 +73,21 @@ pub struct ToolContext {
     /// command is still executing. Absent for headless runs; the tool
     /// falls back to the return-at-end path.
     pub progress: Option<Arc<dyn ToolProgressSink>>,
+    /// Cooperative cancellation signal for the current turn. The
+    /// harness installs a fresh token at the start of every turn and
+    /// fires it from [`Session::cancel`] BEFORE aborting the turn's
+    /// tokio task, so long-running tools (bash, web_fetch) get a
+    /// chance to shut down cleanly — killing their child process,
+    /// closing sockets — rather than being torn down mid-await by a
+    /// hard `abort()`.
+    ///
+    /// Tools that don't observe this still work: the `abort()` still
+    /// fires as a fallback. Observing it just makes cancellation
+    /// visible to native resources the async runtime doesn't own.
+    ///
+    /// `None` in headless / test contexts; tools should treat that as
+    /// "no cancellation" and never assume the token is present.
+    pub cancel: Option<CancellationToken>,
 }
 
 /// Contract the harness's `Session` fulfills to let the `agent` tool
@@ -122,7 +138,17 @@ impl ToolContext {
             child_tracker: None,
             tasks: None,
             progress: None,
+            cancel: None,
         }
+    }
+
+    /// Attach a cooperative cancellation token. Wired by the harness
+    /// per-turn so tools can observe interrupts and clean up native
+    /// resources (child processes, sockets) before the surrounding
+    /// tokio task is aborted.
+    pub fn with_cancel(mut self, token: CancellationToken) -> Self {
+        self.cancel = Some(token);
+        self
     }
 
     /// Attach the live-progress emitter. Wired by the harness so bash

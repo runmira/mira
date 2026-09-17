@@ -27,6 +27,7 @@ mira-server   = { path = "crates/mira-server",  version = "0.1.0" }
 # Async runtime
 tokio           = { version = "1.40", features = ["macros", "rt-multi-thread", "process", "fs", "io-util", "io-std", "sync", "signal", "time"] }
 tokio-stream    = { version = "0.1", features = ["sync"] }
+tokio-util      = { version = "0.7", features = ["rt"] }
 futures         = "0.3"
 async-trait     = "0.1"
 

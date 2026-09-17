@@ -85,7 +85,7 @@ impl Tool for WebFetch {
         Action::Pure
     }
 
-    async fn invoke(&self, call: &ToolCall, _ctx: &ToolContext) -> Result<ToolResult, ToolError> {
+    async fn invoke(&self, call: &ToolCall, ctx: &ToolContext) -> Result<ToolResult, ToolError> {
         let args: Args = call.parse_arguments()?;
         let url = args.url.trim();
         if !(url.starts_with("http://") || url.starts_with("https://")) {
@@ -94,6 +94,15 @@ impl Tool for WebFetch {
             ));
         }
         let cap = args.max_chars.unwrap_or(MAX_TEXT_CHARS).clamp(500, 40_000);
+        let cancel = ctx.cancel.clone();
+
+        // Bail early if we were cancelled between rounds — no need to
+        // spin up an http client just to abort it immediately.
+        if let Some(t) = cancel.as_ref() {
+            if t.is_cancelled() {
+                return Err(ToolError::Failed("cancelled by user".into()));
+            }
+        }
 
         let client = reqwest::Client::builder()
             .timeout(HTTP_TIMEOUT)
@@ -101,15 +110,28 @@ impl Tool for WebFetch {
             .build()
             .map_err(|e| ToolError::Failed(format!("http client build: {e}")))?;
 
-        let resp = client
+        // Race the request against the cancel token so a user-initiated
+        // Stop drops the connection promptly instead of waiting for
+        // HTTP_TIMEOUT (20s) or a slow-drip server.
+        let send_fut = client
             .get(url)
             .header(
                 "Accept",
                 "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5",
             )
-            .send()
-            .await
-            .map_err(|e| ToolError::Failed(format!("fetch: {e}")))?;
+            .send();
+        let resp = match cancel.clone() {
+            Some(token) => tokio::select! {
+                biased;
+                _ = token.cancelled() => {
+                    return Err(ToolError::Failed("cancelled by user".into()));
+                }
+                r = send_fut => r.map_err(|e| ToolError::Failed(format!("fetch: {e}")))?,
+            },
+            None => send_fut
+                .await
+                .map_err(|e| ToolError::Failed(format!("fetch: {e}")))?,
+        };
 
         let status = resp.status();
         let content_type = resp
@@ -126,10 +148,23 @@ impl Tool for WebFetch {
 
         // Cap the downloaded body so a stray 500MB endpoint doesn't OOM us.
         // We read as a byte stream and stop after MAX_DOWNLOAD_BYTES.
+        // Each chunk-read is also raced against cancel so a slow server
+        // can't keep us receiving after the user hit Stop.
         let mut bytes = Vec::new();
         let mut stream = resp.bytes_stream();
         use futures::StreamExt;
-        while let Some(chunk) = stream.next().await {
+        loop {
+            let next = match cancel.clone() {
+                Some(token) => tokio::select! {
+                    biased;
+                    _ = token.cancelled() => {
+                        return Err(ToolError::Failed("cancelled by user".into()));
+                    }
+                    n = stream.next() => n,
+                },
+                None => stream.next().await,
+            };
+            let Some(chunk) = next else { break };
             let chunk = chunk.map_err(|e| ToolError::Failed(format!("body read: {e}")))?;
             let remaining = MAX_DOWNLOAD_BYTES.saturating_sub(bytes.len());
             if remaining == 0 {

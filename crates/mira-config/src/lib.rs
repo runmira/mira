@@ -29,6 +29,13 @@ pub struct MiraConfig {
     pub default_mode: Option<String>,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
+    /// Cheaper model used only for rolling history compaction. Long
+    /// sessions on Opus/Sonnet can compact with Haiku for a large cost
+    /// drop; the compactor's job is single-shot summarization, so a
+    /// smaller tier handles it fine. Unset falls back to the session's
+    /// active model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compactor_model: Option<String>,
     pub providers: BTreeMap<String, ProviderConfig>,
     /// Named third-party API keys (search backends, docs services, …).
     /// Kept separate from `providers` because they aren't LLM providers —
@@ -285,6 +292,7 @@ impl MiraConfig {
         self.default_mode = other.default_mode.or(self.default_mode);
         self.max_tokens = other.max_tokens.or(self.max_tokens);
         self.temperature = other.temperature.or(self.temperature);
+        self.compactor_model = other.compactor_model.or(self.compactor_model);
         for (name, provider) in other.providers {
             self.providers.insert(name, provider);
         }

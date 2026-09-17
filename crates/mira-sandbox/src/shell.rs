@@ -402,6 +402,20 @@ impl PersistentShell {
         Ok(())
     }
 
+    /// Cooperative-cancel signal from the harness: kill the running
+    /// child immediately so a Stop from the user doesn't wait for the
+    /// next bash call to trigger a reset. Idempotent — a shell that
+    /// wasn't running (or already reset) is untouched. Marks dirty so
+    /// the reader thread's pending output can't leak into the next
+    /// command's transcript.
+    ///
+    /// This is a thin wrapper over [`Self::reset`] with a friendlier
+    /// name at the call site (bash tool observing `ctx.cancel`).
+    pub fn interrupt(&mut self) {
+        self.reset();
+        self.dirty.store(true, Ordering::SeqCst);
+    }
+
     /// Tear down the current shell. Idempotent. Called after timeouts,
     /// on other unrecoverable errors, and at the top of `run_streaming`
     /// when a prior cancellation left the shell dirty.

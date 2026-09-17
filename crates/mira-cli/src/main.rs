@@ -249,6 +249,7 @@ async fn main() -> Result<()> {
     let mut sess_cfg = SessionConfig::new(settings.model.clone());
     sess_cfg.max_tokens = settings.max_tokens;
     sess_cfg.temperature = settings.temperature;
+    sess_cfg.compactor_model = settings.compactor_model.clone();
 
     let session = match resume_target(cli.resume.as_deref(), store.as_deref(), &cwd).await? {
         Some(record) => Session::resume_from(
@@ -324,6 +325,7 @@ pub(crate) struct ResolvedSettings {
     pub(crate) mode: Mode,
     pub(crate) max_tokens: Option<u32>,
     pub(crate) temperature: Option<f32>,
+    pub(crate) compactor_model: Option<String>,
     pub(crate) extra_headers: Vec<(String, String)>,
     /// Effective prompt-caching flag after applying the config override
     /// and the auto-enable-for-Anthropic rule.
@@ -381,6 +383,7 @@ pub(crate) fn resolve_settings(cli: &Cli, cfg: &MiraConfig) -> Result<ResolvedSe
 
     let max_tokens = cli.max_tokens.or(cfg.max_tokens);
     let temperature = cli.temperature.or(cfg.temperature);
+    let compactor_model = cfg.compactor_model.clone();
 
     let extra_headers = provider
         .extra_headers
@@ -399,6 +402,7 @@ pub(crate) fn resolve_settings(cli: &Cli, cfg: &MiraConfig) -> Result<ResolvedSe
         mode,
         max_tokens,
         temperature,
+        compactor_model,
         extra_headers,
         prompt_caching,
     })

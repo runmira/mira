@@ -300,6 +300,7 @@ pub async fn new_session(State(state): State<AppState>) -> Response {
         max_tokens: prev_cfg.max_tokens,
         reasoning_effort: prev_cfg.reasoning_effort.clone(),
         response_format: prev_cfg.response_format.clone(),
+        compactor_model: prev_cfg.compactor_model.clone(),
     };
     let deps = state.slot_deps();
     let slot = crate::slot::build_slot(cwd, cfg, None, &deps).await;
@@ -370,6 +371,7 @@ pub async fn delete_session(
                 max_tokens: prev_cfg.max_tokens,
                 reasoning_effort: prev_cfg.reasoning_effort.clone(),
                 response_format: prev_cfg.response_format.clone(),
+                compactor_model: prev_cfg.compactor_model.clone(),
             };
             let deps = state.slot_deps();
             let fresh = crate::slot::build_slot(cwd, cfg, None, &deps).await;
