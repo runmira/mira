@@ -137,9 +137,36 @@ async fn login_openai(no_browser: bool) -> Result<()> {
     let code = cb.code.ok_or_else(|| anyhow!("callback missing `code`"))?;
 
     eprintln!("· exchanging authorization code + minting API key…");
-    let bundle = openai::exchange_code(&code, &verifier, &redirect_uri)
-        .await
-        .context("openai token exchange")?;
+    let bundle = match openai::exchange_code(&code, &verifier, &redirect_uri).await {
+        Ok(b) => b,
+        Err(e) => {
+            // Consumer ChatGPT accounts (Free / Plus) don't have an
+            // "API organization" attached to them until the user
+            // creates one — OpenAI's token-exchange endpoint then
+            // refuses the id_token with `missing organization_id`.
+            // Codex CLI hides this behind an extra browser step; we
+            // don't do that step yet (see mira#3), so turn the raw
+            // 401 into an actionable message instead.
+            let msg = e.to_string();
+            if msg.contains("missing organization_id")
+                || msg.contains("invalid_subject_token")
+            {
+                bail!(
+                    "OpenAI rejected the token exchange because your ChatGPT \
+                     account isn't attached to an API organization yet.\n\n\
+                     Fix it in ~30 seconds:\n  \
+                     1. Open https://platform.openai.com/settings/organization\n  \
+                     2. Create an organization (free — one click).\n  \
+                     3. Re-run `mira login openai`.\n\n\
+                     If you'd rather skip the OpenAI-specific setup, \
+                     `mira login openrouter` works with any account and \
+                     gives you access to GPT / Claude / Gemini / everything \
+                     through one key."
+                );
+            }
+            return Err(e).context("openai token exchange");
+        }
+    };
     store::save(openai::PROVIDER, &bundle).context("save openai token bundle")?;
     auth_config::write_provider_key(openai::PROVIDER, &bundle.api_key)
         .context("mirror openai key into mira.yaml")?;
