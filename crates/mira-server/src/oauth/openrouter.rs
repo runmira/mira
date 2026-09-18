@@ -103,18 +103,17 @@ struct ExchangeResponse {
     key: String,
 }
 
-pub async fn callback(
-    State(state): State<AppState>,
-    Query(q): Query<CallbackQuery>,
-) -> Response {
+pub async fn callback(State(state): State<AppState>, Query(q): Query<CallbackQuery>) -> Response {
     // Provider-declined case: OpenRouter appends `error` / `error_description`
     // to the redirect when the user cancels or auth fails. Surface it to the
     // browser as a friendly page so the user knows to close the tab.
     if let Some(err) = q.error {
         let desc = q.error_description.as_deref().unwrap_or("no description");
-        return html_page(&format!(
-            "OpenRouter sign-in failed: {err}",
-        ), &format!("Error: {err} — {desc}. You can close this tab."), false);
+        return html_page(
+            &format!("OpenRouter sign-in failed: {err}",),
+            &format!("Error: {err} — {desc}. You can close this tab."),
+            false,
+        );
     }
 
     let Some(code) = q.code else {

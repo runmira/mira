@@ -302,7 +302,9 @@ async fn handle_callback(state: &LoopbackState, q: CallbackFields) -> Result<(),
         let desc = q.error_description.as_deref().unwrap_or("no description");
         return Err(format!("OpenAI reported: {err} — {desc}"));
     }
-    let code = q.code.ok_or_else(|| "missing `code` on callback".to_owned())?;
+    let code = q
+        .code
+        .ok_or_else(|| "missing `code` on callback".to_owned())?;
     let flow_id = q
         .state
         .ok_or_else(|| "missing `state` on callback (CSRF guard rejected)".to_owned())?;

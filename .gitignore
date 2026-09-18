@@ -13,3 +13,10 @@ GOAL_AUDIT.txt
 
 # Vite dev/build artifacts
 crates/mira-server/frontend/vite.config.ts.timestamp-*.mjs
+
+# Local dev artifacts — Claude Code / npm caches, TUI todo scratch.
+# Not part of any release; kept out so `git add -A` stays safe.
+.claude/
+.agents/
+.npm-cache/
+TUI_TODO.txt

@@ -59,7 +59,10 @@ pub async fn apply_undo(State(state): State<AppState>, Json(req): Json<UndoReque
                     paths.join(", ")
                 )
             };
-            let _ = state.events_tx().await.send(ServerMsg::Warning { text: summary });
+            let _ = state
+                .events_tx()
+                .await
+                .send(ServerMsg::Warning { text: summary });
             Json(UndoView { applied }).into_response()
         }
         Err(e) => err(StatusCode::BAD_REQUEST, e.to_string()),

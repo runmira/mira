@@ -86,10 +86,9 @@ fn load_at(path: &std::path::Path) -> Result<Option<TokenBundle>> {
     if !path.exists() {
         return Ok(None);
     }
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("read {}", path.display()))?;
-    let bundle: TokenBundle = serde_json::from_str(&raw)
-        .with_context(|| format!("parse {}", path.display()))?;
+    let raw = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let bundle: TokenBundle =
+        serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
     Ok(Some(bundle))
 }
 
@@ -160,7 +159,10 @@ mod tests {
             obtained_at: now_secs(),
         };
         assert!(b.is_near_expiry(200), "should fire when buffer > remaining");
-        assert!(!b.is_near_expiry(50), "should stay quiet when buffer < remaining");
+        assert!(
+            !b.is_near_expiry(50),
+            "should stay quiet when buffer < remaining"
+        );
     }
 
     #[test]

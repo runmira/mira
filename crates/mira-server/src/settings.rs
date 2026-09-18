@@ -199,7 +199,10 @@ pub async fn put_settings(
         if let Err(e) = s.save() {
             warn!(%e, "state.yaml: save failed after settings change");
         }
-        let _ = state.events_tx().await.send(ServerMsg::ModelChanged { model });
+        let _ = state
+            .events_tx()
+            .await
+            .send(ServerMsg::ModelChanged { model });
     }
 
     let view = view_from(&cfg, is_configured(&cfg));

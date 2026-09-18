@@ -58,4 +58,29 @@ impl Mode {
             Mode::Yolo => "yolo",
         }
     }
+
+    /// Cycle to the next mode in a fixed order. Wraps around; used by
+    /// the TUI's Shift+Tab shortcut to give users a keyboard-only path
+    /// through the permission ladder without opening `/mode`.
+    pub fn next(self) -> Mode {
+        match self {
+            Mode::Plan => Mode::Manual,
+            Mode::Manual => Mode::Auto,
+            Mode::Auto => Mode::Edit,
+            Mode::Edit => Mode::Yolo,
+            Mode::Yolo => Mode::Plan,
+        }
+    }
+
+    /// Human-friendly one-liner used on the input-box chip. Matches
+    /// Claude Code's `accept edits on` phrasing where it maps cleanly.
+    pub fn chip_label(self) -> &'static str {
+        match self {
+            Mode::Plan => "plan mode",
+            Mode::Manual => "ask on writes",
+            Mode::Auto => "auto approve writes",
+            Mode::Edit => "accept edits on",
+            Mode::Yolo => "yolo · no gating",
+        }
+    }
 }

@@ -196,9 +196,7 @@ pub async fn run(cli: &super::Cli, args: ServeArgs) -> Result<()> {
     let mut sess_cfg = SessionConfig::new(model.clone());
     sess_cfg.max_tokens = resolved.as_ref().and_then(|s| s.max_tokens);
     sess_cfg.temperature = resolved.as_ref().and_then(|s| s.temperature);
-    sess_cfg.compactor_model = resolved
-        .as_ref()
-        .and_then(|s| s.compactor_model.clone());
+    sess_cfg.compactor_model = resolved.as_ref().and_then(|s| s.compactor_model.clone());
 
     let host: IpAddr = args
         .host

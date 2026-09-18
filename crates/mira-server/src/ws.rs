@@ -436,7 +436,11 @@ async fn apply_scope_widening(
             "policy: added {} allow rule{} ({}): {}",
             rule_strings.len(),
             if rule_strings.len() == 1 { "" } else { "s" },
-            if persisted { "persistent" } else { "session-only" },
+            if persisted {
+                "persistent"
+            } else {
+                "session-only"
+            },
             rule_strings.join(", "),
         ),
     });

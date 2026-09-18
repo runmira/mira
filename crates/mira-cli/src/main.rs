@@ -1,8 +1,14 @@
 mod approver;
 mod config;
+mod config_cmd;
+mod doctor;
 mod eval;
 mod goal;
+mod init;
 mod memory;
+mod models;
+mod permissions;
+mod providers;
 mod repl;
 mod review;
 mod serve;
@@ -74,6 +80,11 @@ pub(crate) struct Cli {
     #[arg(long, value_name = "ID", num_args = 0..=1, default_missing_value = "")]
     resume: Option<String>,
 
+    /// Show an interactive picker of recent sessions for the current
+    /// folder before launching. Pick fresh with `0` / Enter / Esc.
+    #[arg(long, short = 'P')]
+    pick: bool,
+
     /// Skip persistence entirely — sessions are not saved to disk.
     #[arg(long)]
     no_persist: bool,
@@ -85,6 +96,20 @@ pub(crate) struct Cli {
 /// Subcommands. Absent = the default chat entrypoint (TUI or REPL).
 #[derive(Subcommand, Debug, Clone)]
 enum Command {
+    /// First-run setup: write a `mira.yaml` with a provider, API key,
+    /// and default model. Interactive on a TTY; flag-driven otherwise.
+    Init(init::InitArgs),
+    /// Diagnose the local install — config, provider, dirs, skills,
+    /// MCP servers, memory. `--ping` also probes the provider.
+    Doctor(doctor::DoctorArgs),
+    /// Inspect or edit `mira.yaml` (path, show, edit, get, set).
+    Config(config_cmd::ConfigArgs),
+    /// List every provider preset and whether it's configured.
+    Providers(providers::ProvidersArgs),
+    /// List models offered by the currently configured provider.
+    Models(models::ModelsArgs),
+    /// List or edit permission rules (allow/ask/deny) in `mira.yaml`.
+    Permissions(permissions::PermissionsArgs),
     /// Run Mira as a local web server. Binds to 127.0.0.1 by default; a
     /// browser (or, later, the desktop app) is the frontend.
     Serve(serve::ServeArgs),
@@ -103,26 +128,23 @@ enum Command {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Subcommand branch — `mira serve` short-circuits the TUI path.
-    if let Some(Command::Serve(args)) = cli.command.clone() {
+    // Subcommand branch — every non-default command short-circuits
+    // before we build the session, provider, and tools.
+    if let Some(cmd) = cli.command.clone() {
         init_tracing(false);
-        return serve::run(&cli, args).await;
-    }
-    if let Some(Command::Review(args)) = cli.command.clone() {
-        init_tracing(false);
-        return review::run(&cli, args).await;
-    }
-    if let Some(Command::Eval(args)) = cli.command.clone() {
-        init_tracing(false);
-        return eval::run(&cli, args).await;
-    }
-    if let Some(Command::Memory(args)) = cli.command.clone() {
-        init_tracing(false);
-        return memory::run(&cli, args).await;
-    }
-    if let Some(Command::Goal(args)) = cli.command.clone() {
-        init_tracing(false);
-        return goal::run(&cli, args).await;
+        return match cmd {
+            Command::Init(args) => init::run(&cli, args).await,
+            Command::Doctor(args) => doctor::run(&cli, args).await,
+            Command::Config(args) => config_cmd::run(&cli, args).await,
+            Command::Providers(args) => providers::run(&cli, args).await,
+            Command::Models(args) => models::run(&cli, args).await,
+            Command::Permissions(args) => permissions::run(&cli, args).await,
+            Command::Serve(args) => serve::run(&cli, args).await,
+            Command::Review(args) => review::run(&cli, args).await,
+            Command::Eval(args) => eval::run(&cli, args).await,
+            Command::Memory(args) => memory::run(&cli, args).await,
+            Command::Goal(args) => goal::run(&cli, args).await,
+        };
     }
 
     let use_tui = !cli.simple && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
@@ -251,7 +273,22 @@ async fn main() -> Result<()> {
     sess_cfg.temperature = settings.temperature;
     sess_cfg.compactor_model = settings.compactor_model.clone();
 
-    let session = match resume_target(cli.resume.as_deref(), store.as_deref(), &cwd).await? {
+    // --pick short-circuits --resume: show a picker, and use the chosen
+    // record as the resume target. Cancelling drops through to a fresh
+    // session.
+    let picked = if cli.pick {
+        match store.as_deref() {
+            Some(s) => pick_session(s, &cwd).await?,
+            None => {
+                eprintln!("--pick needs persistence, but --no-persist is set (or no home dir)");
+                None
+            }
+        }
+    } else {
+        resume_target(cli.resume.as_deref(), store.as_deref(), &cwd).await?
+    };
+
+    let session = match picked {
         Some(record) => Session::resume_from(
             record,
             provider,
@@ -304,6 +341,7 @@ async fn main() -> Result<()> {
                 approval_rx: approval_rx.expect("tui branch created a receiver"),
                 cwd: cwd.clone(),
                 skills: skills_handle,
+                store: store.clone(),
             },
         )
         .await
@@ -455,6 +493,90 @@ async fn resume_target(
         }
     } else {
         Ok(Some(store.load(&SessionId::from(flag)).await?))
+    }
+}
+
+/// Interactive picker for `--pick`. Lists up to 20 recent sessions in
+/// the current folder, prints a numbered menu, and reads a line from
+/// stdin. `0`, empty, or non-numeric input starts fresh. Runs before
+/// the TUI takes over the terminal, so plain stdout/stdin is fine.
+async fn pick_session(
+    store: &dyn SessionStore,
+    cwd: &std::path::Path,
+) -> Result<Option<mira_harness::SessionRecord>> {
+    use std::io::{IsTerminal, Write};
+
+    let recent = store.list_recent(cwd, 20).await?;
+    if recent.is_empty() {
+        eprintln!("no saved sessions for `{}` — starting fresh.", cwd.display());
+        return Ok(None);
+    }
+    if !std::io::stdin().is_terminal() {
+        // No TTY → can't prompt; refuse and let the caller fall through.
+        eprintln!("--pick needs a terminal; ignoring and starting fresh.");
+        return Ok(None);
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    eprintln!("recent sessions in {}:", cwd.display());
+    for (i, rec) in recent.iter().enumerate() {
+        let title = rec
+            .title
+            .clone()
+            .or_else(|| first_user_message(rec))
+            .unwrap_or_else(|| "(no messages yet)".into());
+        let title = title.trim().replace('\n', " ");
+        let short = if title.chars().count() > 60 {
+            let head: String = title.chars().take(60).collect();
+            format!("{head}…")
+        } else {
+            title
+        };
+        let msgs = rec
+            .messages
+            .iter()
+            .filter(|m| !matches!(m.role, mira_core::Role::System))
+            .count();
+        let ago = human_ago(now.saturating_sub(rec.updated_at / 1000));
+        eprintln!("  [{:2}] {}  · {} msg · {}", i + 1, short, msgs, ago);
+    }
+    eprint!("pick (1-{} · 0 or empty = fresh): ", recent.len());
+    std::io::stderr().flush().ok();
+
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .context("read picker input")?;
+    let choice: usize = line.trim().parse().unwrap_or(0);
+    if choice == 0 || choice > recent.len() {
+        return Ok(None);
+    }
+    Ok(recent.into_iter().nth(choice - 1))
+}
+
+fn first_user_message(rec: &mira_harness::SessionRecord) -> Option<String> {
+    rec.messages
+        .iter()
+        .find(|m| matches!(m.role, mira_core::Role::User))
+        .and_then(|m| m.content.clone())
+}
+
+fn human_ago(secs: u64) -> String {
+    const MIN: u64 = 60;
+    const HOUR: u64 = 60 * MIN;
+    const DAY: u64 = 24 * HOUR;
+    if secs < MIN {
+        format!("{secs}s ago")
+    } else if secs < HOUR {
+        format!("{}m ago", secs / MIN)
+    } else if secs < DAY {
+        format!("{}h ago", secs / HOUR)
+    } else {
+        format!("{}d ago", secs / DAY)
     }
 }
 

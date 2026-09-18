@@ -363,9 +363,7 @@ impl<'a> Call<'a> {
     /// Send the request and return all answers keyed by question id.
     pub async fn send(self) -> Result<BTreeMap<String, Answer>, TypeSafeError> {
         if self.questions.is_empty() {
-            return Err(TypeSafeError::Decode(
-                "no questions provided".into(),
-            ));
+            return Err(TypeSafeError::Decode("no questions provided".into()));
         }
         let body = Request {
             state: &self.state,
@@ -456,7 +454,10 @@ mod tests {
         assert_eq!(v["model"], DEFAULT_MODEL);
         // tag + snake_case
         assert_eq!(v["questions"]["department"]["type"], "choice");
-        assert_eq!(v["questions"]["department"]["instructions"], "Which team should handle this");
+        assert_eq!(
+            v["questions"]["department"]["instructions"],
+            "Which team should handle this"
+        );
         assert_eq!(
             v["questions"]["department"]["criteria"]["billing"],
             "Payment or subscription issues"
@@ -568,10 +569,7 @@ mod tests {
         unsafe {
             std::env::remove_var("TYPESAFE_API_KEY");
         }
-        matches!(
-            SystemOneClient::from_env(),
-            Err(TypeSafeError::NoApiKey)
-        );
+        matches!(SystemOneClient::from_env(), Err(TypeSafeError::NoApiKey));
     }
 
     /// Live end-to-end check. Skipped unless TYPESAFE_API_KEY is set.
@@ -596,7 +594,7 @@ mod tests {
             .expect("live call");
         match answers.get("is_urgent") {
             Some(Answer::Noul { noul }) => {
-                assert!((0.0f64..=1.0f64).contains(&noul));
+                assert!((0.0f64..=1.0f64).contains(noul));
             }
             other => panic!("unexpected answer: {other:?}"),
         }

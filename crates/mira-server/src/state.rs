@@ -63,8 +63,7 @@ pub struct AppState {
     /// Cross-session scratchpad. AgentTool instances scope their entries
     /// by parent session id, so this Mutex is process-shared but the
     /// notes stay isolated per session.
-    pub scratchpads:
-        Arc<Mutex<HashMap<String, Vec<ScratchpadEntry>>>>,
+    pub scratchpads: Arc<Mutex<HashMap<String, Vec<ScratchpadEntry>>>>,
     /// Default model handed to AgentTool for subagent spawns when the call
     /// doesn't override it. Snapshotted from the initial session config.
     pub default_model_for_agents: String,

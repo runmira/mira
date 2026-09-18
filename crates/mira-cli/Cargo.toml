@@ -40,4 +40,8 @@ crossterm     = { workspace = true }
 unicode-width = { workspace = true }
 similar       = { workspace = true }
 regex         = { workspace = true }
+base64        = "0.22"
+# Syntax highlighting inside fenced code blocks. `default-fancy` uses the
+# pure-Rust fancy-regex engine so we don't pull the C++ oniguruma dep.
+syntect       = { version = "5", default-features = false, features = ["default-fancy"] }
 tempfile      = "3"

@@ -1,6 +1,54 @@
 {
   "version": 1,
   "skills": {
+    "companion-clis": {
+      "source": "runpod/runpod-plugins-official",
+      "sourceType": "github",
+      "skillPath": "plugins/runpod/skills/companion-clis/SKILL.md",
+      "computedHash": "ddecb1d2441d0cebbd08085fc0008412d5e0a5e0862a676e9076118b3ccecf6f"
+    },
+    "flash": {
+      "source": "runpod/runpod-plugins-official",
+      "sourceType": "github",
+      "skillPath": "plugins/runpod/skills/flash/SKILL.md",
+      "computedHash": "aa303a1d57b32b335d52137f9fd7cdf9b62640f42cd4186bbf77c22bf8ed3960"
+    },
+    "runpod": {
+      "source": "runpod/runpod-plugins-official",
+      "sourceType": "github",
+      "skillPath": "plugins/runpod/skills/runpod/SKILL.md",
+      "computedHash": "3e62bf29d874732e45c2b5ce49aee3545c306e48dced177303f29e62254c1731"
+    },
+    "runpod-mcp": {
+      "source": "runpod/runpod-plugins-official",
+      "sourceType": "github",
+      "skillPath": "plugins/runpod/skills/runpod-mcp/SKILL.md",
+      "computedHash": "8f235a6216cbcd83039958841623b5ca20d0873890d5c88ee29905b79565b16e"
+    },
+    "runpod-migrate": {
+      "source": "runpod/runpod-plugins-official",
+      "sourceType": "github",
+      "skillPath": "plugins/runpod/skills/runpod-migrate/SKILL.md",
+      "computedHash": "b82cdd2bf75025e7c84254a8e60a0c5920daf6b9e33c0d3bbf44274a8aa0d81a"
+    },
+    "runpod-templates": {
+      "source": "runpod/runpod-plugins-official",
+      "sourceType": "github",
+      "skillPath": "plugins/runpod/skills/runpod-templates/SKILL.md",
+      "computedHash": "2e96dde97f39c276cc21ad0588efd8548d7c72360103f9fe8f05a1cc21e85c85"
+    },
+    "runpod-usage": {
+      "source": "runpod/runpod-plugins-official",
+      "sourceType": "github",
+      "skillPath": "plugins/runpod/skills/runpod-usage/SKILL.md",
+      "computedHash": "185267f9449ae323568dd1e18690d8c15cc4282593044e99fdf2af9d3fdd7224"
+    },
+    "runpodctl": {
+      "source": "runpod/runpod-plugins-official",
+      "sourceType": "github",
+      "skillPath": "plugins/runpod/skills/runpodctl/SKILL.md",
+      "computedHash": "4d17354b4af4156c8d380b269393befd0561b660c68a4dc4435340ca6f6032d2"
+    },
     "typesafe-ai": {
       "source": "typesafe-ai/skills",
       "sourceType": "github",

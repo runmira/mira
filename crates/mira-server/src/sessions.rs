@@ -389,10 +389,7 @@ pub async fn delete_session(
 }
 
 /// Build a Ready frame for `slot` from its live session state.
-async fn build_ready_for_slot(
-    slot: &crate::slot::SessionSlot,
-    state: &AppState,
-) -> ServerMsg {
+async fn build_ready_for_slot(slot: &crate::slot::SessionSlot, state: &AppState) -> ServerMsg {
     let sess = slot.session.read().await.clone();
     let cfg = sess.config().await;
     let mode = state.policy.lock().await.mode();

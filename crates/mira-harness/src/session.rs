@@ -396,7 +396,9 @@ impl Session {
             .try_lock()
             .map(|p| profile_for_mode(p.mode()))
             .unwrap_or_else(|_| {
-                warn!("policy lock contended during Session construction; defaulting sandbox profile");
+                warn!(
+                    "policy lock contended during Session construction; defaulting sandbox profile"
+                );
                 SandboxProfile::default()
             });
         let cwd_for_shell = tool_ctx.cwd.clone();
@@ -488,7 +490,9 @@ impl Session {
             .try_lock()
             .map(|p| profile_for_mode(p.mode()))
             .unwrap_or_else(|_| {
-                warn!("policy lock contended during Session construction; defaulting sandbox profile");
+                warn!(
+                    "policy lock contended during Session construction; defaulting sandbox profile"
+                );
                 SandboxProfile::default()
             });
         let cwd_for_shell = tool_ctx.cwd.clone();
@@ -970,10 +974,7 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
             // strictly better than aborting the turn.
             {
                 let mut history = sess.history.lock().await;
-                let summarizer_model = cfg
-                    .compactor_model
-                    .as_deref()
-                    .unwrap_or(&cfg.model);
+                let summarizer_model = cfg.compactor_model.as_deref().unwrap_or(&cfg.model);
                 match crate::history::maybe_compact(
                     &mut history,
                     sess.provider.as_ref(),
@@ -1032,8 +1033,8 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
             // extractor) so a legitimate long stream still completes;
             // pathological hangs surface as `StreamError`.
             const STREAM_TIMEOUT_SECS: u64 = 300;
-            let stream_deadline = tokio::time::Instant::now()
-                + std::time::Duration::from_secs(STREAM_TIMEOUT_SECS);
+            let stream_deadline =
+                tokio::time::Instant::now() + std::time::Duration::from_secs(STREAM_TIMEOUT_SECS);
 
             loop {
                 let next = tokio::time::timeout_at(stream_deadline, stream.next()).await;
@@ -2529,16 +2530,8 @@ mod stuck_loop_tests {
 
     #[test]
     fn nested_object_key_order_is_canonicalized() {
-        let a = vec![call(
-            "1",
-            "cfg",
-            r#"{"opts":{"b":1,"a":2},"flag":true}"#,
-        )];
-        let b = vec![call(
-            "2",
-            "cfg",
-            r#"{"flag":true,"opts":{"a":2,"b":1}}"#,
-        )];
+        let a = vec![call("1", "cfg", r#"{"opts":{"b":1,"a":2},"flag":true}"#)];
+        let b = vec![call("2", "cfg", r#"{"flag":true,"opts":{"a":2,"b":1}}"#)];
         assert_eq!(fingerprint_calls(&a), fingerprint_calls(&b));
     }
 }

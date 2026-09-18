@@ -80,20 +80,14 @@ pub struct SandboxConfig {
 /// old "refuse to run without a real sandbox" error — Linux Landlock
 /// support is a follow-up. `Unrestricted` deliberately skips
 /// `sandbox-exec` entirely so `yolo` still runs there.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+// Workspace-scoped writes only — matches the pre-mode-aware behaviour so
+// callers that never opt in still get sensible containment.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum SandboxProfile {
     Restricted,
+    #[default]
     Workspace,
     Unrestricted,
-}
-
-impl Default for SandboxProfile {
-    fn default() -> Self {
-        // The safe default: workspace-scoped writes only. Matches the
-        // pre-mode-aware behaviour so callers that never opt in still
-        // get sensible containment.
-        Self::Workspace
-    }
 }
 
 pub struct Sandbox {
@@ -111,10 +105,7 @@ fn workspace_root(path: &Path) -> Result<PathBuf, SandboxError> {
 }
 
 #[cfg(target_os = "macos")]
-fn contained_command(
-    root: &Path,
-    profile: SandboxProfile,
-) -> Result<CommandBuilder, SandboxError> {
+fn contained_command(root: &Path, profile: SandboxProfile) -> Result<CommandBuilder, SandboxError> {
     // `Unrestricted` bypasses sandbox-exec entirely — that's the whole
     // point of `yolo` mode. Everything else builds a per-profile
     // seatbelt policy and wraps bash.
@@ -231,14 +222,8 @@ impl Sandbox {
         deadline: Duration,
         progress: Option<ProgressSink>,
     ) -> Result<Outcome, SandboxError> {
-        self.run_with_profile(
-            command,
-            cwd,
-            deadline,
-            SandboxProfile::default(),
-            progress,
-        )
-        .await
+        self.run_with_profile(command, cwd, deadline, SandboxProfile::default(), progress)
+            .await
     }
 
     /// Run under a caller-picked [`SandboxProfile`]. Used by the harness

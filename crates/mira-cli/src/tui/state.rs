@@ -1,7 +1,10 @@
+use std::time::Instant;
+
 use mira_core::{ToolCall, ToolResult};
 use mira_harness::{Goal, UsageTotals};
 use mira_policy::Mode;
 use mira_tools::DiffPreview;
+
 
 use crate::tui::approver::ApprovalRequest;
 
@@ -13,6 +16,17 @@ pub struct PendingApproval {
     pub preview: Option<DiffPreview>,
 }
 
+/// Full tool result content is capped at this many bytes so a runaway
+/// tool doesn't balloon the session's memory footprint. Enough for a
+/// typical ripgrep hit list or a few dozen lines of build output.
+const TOOL_RESULT_MAX_BYTES: usize = 8 * 1024;
+
+/// Visible-entry cap. Once exceeded, the oldest entries are dropped
+/// and `TuiState::dropped_entries` grows so the render layer can show
+/// "… N earlier entries truncated" at the top. Mirrors the harness's
+/// own history-compaction model rather than growing memory forever.
+const MAX_ENTRIES: usize = 500;
+
 /// One row in the visible transcript.
 ///
 /// Assistant tokens accumulate onto the trailing `Assistant` entry so a
@@ -21,10 +35,74 @@ pub struct PendingApproval {
 pub enum LogEntry {
     User(String),
     Assistant(String),
-    ToolCall { name: String, args: String },
-    ToolResult { ok: bool, snippet: String },
+    ToolCall {
+        name: String,
+        args: String,
+        /// Diff preview computed at approval time (or, in auto-approve
+        /// modes, when the tool call arrives). Rendered inside the
+        /// tool group after a successful Edit/Write so the user sees
+        /// exactly what changed, not just "wrote N bytes".
+        preview: Option<DiffPreview>,
+        /// Tool-call id from the underlying `ToolCall.id`. Used by
+        /// the event loop to look this entry back up when the paired
+        /// preview arrives asynchronously.
+        call_id: String,
+    },
+    ToolResult {
+        ok: bool,
+        snippet: String,
+        /// Full (possibly truncated at [`TOOL_RESULT_MAX_BYTES`]) tool
+        /// output. `Ctrl+E` toggles [`expanded`] to render this in full
+        /// instead of the one-line snippet.
+        full: String,
+        expanded: bool,
+    },
     Warning(String),
     Info(String),
+}
+
+/// Which overlay list is open above the composer, if any.
+///
+/// `Slash` fires when the composer starts with `/` — the filter is the
+/// rest of the line. `AtFile` fires when there's an `@word` at cursor —
+/// the filter is what comes after `@`, and completions come from
+/// `rg --files` in the cwd.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Palette {
+    None,
+    Slash,
+    AtFile,
+}
+
+pub struct PaletteState {
+    pub kind: Palette,
+    /// Selection cursor within the filtered results (0-based).
+    pub cursor: usize,
+    /// The last-computed filtered results (indices into the source list).
+    /// Rebuilt whenever the composer or `kind` changes.
+    pub matches: Vec<PaletteItem>,
+}
+
+impl PaletteState {
+    pub fn none() -> Self {
+        Self {
+            kind: Palette::None,
+            cursor: 0,
+            matches: Vec::new(),
+        }
+    }
+}
+
+/// One entry in a palette result list.
+///
+/// `insert` is the string to substitute into the composer when the user
+/// picks this item (replacing the trigger + filter run). `title` is the
+/// primary rendering, `detail` the greyed hint on the right.
+#[derive(Clone, Debug)]
+pub struct PaletteItem {
+    pub insert: String,
+    pub title: String,
+    pub detail: String,
 }
 
 /// All state the render loop reads.
@@ -38,6 +116,9 @@ pub struct TuiState {
 
     /// Composer buffer. May contain '\n' for multi-line input (Ctrl+J).
     input: String,
+    /// Byte offset of the caret within `input`. Always at a char
+    /// boundary. All input mutations move it consistently.
+    cursor: usize,
     /// Ring of submitted messages for up/down arrow recall.
     history: Vec<String>,
     /// Cursor into `history` when browsing; `None` means we're on a fresh
@@ -49,6 +130,10 @@ pub struct TuiState {
 
     pub mode: Mode,
     pub model: String,
+    /// Cached `git rev-parse --abbrev-ref HEAD` — populated once on
+    /// startup, then shown as a `⎇ <branch>` chip in the header.
+    /// `None` when the cwd isn't a git repo or the command failed.
+    pub git_branch: Option<String>,
     pub streaming: bool,
     pub pending_approval: Option<PendingApproval>,
     pub esc_pending: bool,
@@ -58,6 +143,10 @@ pub struct TuiState {
     /// function so the key handler can clamp PgDn correctly and re-engage
     /// `follow_tail` when the user scrolls back to the bottom.
     pub transcript_tail: u16,
+    /// Height of the transcript viewport as of the last draw. Written by
+    /// the render function; read by the key handler so PgUp/PgDn move by
+    /// a real page instead of a hard-coded step.
+    pub viewport_height: u16,
     /// When true, the UI auto-scrolls the transcript to the bottom on new
     /// entries. Flipped off when the user PgUps, on when they PgDn back.
     pub follow_tail: bool,
@@ -72,6 +161,37 @@ pub struct TuiState {
     /// live-updating line in the status bar during autonomous runs.
     /// `None` means goal-directed mode is off.
     pub goal: Option<Goal>,
+    /// Overlay above the composer. `Palette::None` = no overlay.
+    pub palette: PaletteState,
+    /// When the current provider stream started. Drives the "3.2s"
+    /// elapsed counter next to the "thinking" indicator so long silent
+    /// pauses look alive instead of hung. Cleared on `HarnessEvent::Done`.
+    pub stream_started_at: Option<Instant>,
+    /// Whether crossterm mouse capture is currently on. Off by default
+    /// so the terminal's own text selection keeps working; Alt+M
+    /// toggles it. The event loop reads this to enable/disable capture
+    /// as it changes.
+    pub mouse_capture: bool,
+    /// How many entries have been dropped off the front of `entries`
+    /// to stay under [`MAX_ENTRIES`]. Zero on a fresh session; render
+    /// prepends "… N earlier entries truncated" whenever this is
+    /// non-zero.
+    pub dropped_entries: usize,
+    /// Ctrl+R search mode. `None` when off; when set, the overlay is
+    /// active and typing goes to the query instead of the composer.
+    pub search: Option<SearchState>,
+}
+
+/// Reverse-search state — populated when Ctrl+R is pressed.
+///
+/// Hits are stored as (entry_index, byte_offset_into_entry_text). The
+/// active hit is `hits[cursor]`; the render layer uses it to force
+/// scroll to reveal the matched entry.
+#[derive(Clone, Debug, Default)]
+pub struct SearchState {
+    pub query: String,
+    pub hits: Vec<(usize, usize)>,
+    pub cursor: usize,
 }
 
 impl TuiState {
@@ -79,21 +199,29 @@ impl TuiState {
         Self {
             entries: Vec::new(),
             input: String::new(),
+            cursor: 0,
             history: Vec::new(),
             history_cursor: None,
             history_stash: String::new(),
             mode,
             model,
+            git_branch: None,
             streaming: false,
             pending_approval: None,
             esc_pending: false,
             scroll: 0,
             transcript_tail: 0,
+            viewport_height: 0,
             follow_tail: true,
             should_quit: false,
             flash: None,
             usage: UsageTotals::default(),
             goal: None,
+            palette: PaletteState::none(),
+            stream_started_at: None,
+            mouse_capture: false,
+            dropped_entries: 0,
+            search: None,
         }
     }
 
@@ -105,20 +233,34 @@ impl TuiState {
 
     pub fn clear_entries(&mut self) {
         self.entries.clear();
+        self.dropped_entries = 0;
         self.scroll = 0;
         self.follow_tail = true;
     }
 
+    /// Drop entries from the front until we're back under [`MAX_ENTRIES`],
+    /// bumping `dropped_entries` so the render layer can show the
+    /// truncation notice. Called from every push helper.
+    fn enforce_cap(&mut self) {
+        while self.entries.len() > MAX_ENTRIES {
+            self.entries.remove(0);
+            self.dropped_entries = self.dropped_entries.saturating_add(1);
+        }
+    }
+
     pub fn push_user(&mut self, s: String) {
         self.entries.push(LogEntry::User(s));
+        self.enforce_cap();
     }
 
     pub fn push_info(&mut self, s: impl Into<String>) {
         self.entries.push(LogEntry::Info(s.into()));
+        self.enforce_cap();
     }
 
     pub fn push_warning(&mut self, s: String) {
         self.entries.push(LogEntry::Warning(s));
+        self.enforce_cap();
     }
 
     /// Append a streamed assistant token onto the tail assistant entry —
@@ -128,6 +270,7 @@ impl TuiState {
             buf.push_str(t);
         } else {
             self.entries.push(LogEntry::Assistant(t.to_owned()));
+            self.enforce_cap();
         }
     }
 
@@ -135,14 +278,39 @@ impl TuiState {
         self.entries.push(LogEntry::ToolCall {
             name: call.function.name.clone(),
             args: call.function.arguments.clone(),
+            preview: None,
+            call_id: call.id.to_string(),
         });
+        self.enforce_cap();
+    }
+
+    /// Attach a diff preview to the most-recent matching `ToolCall`
+    /// entry — invoked when the approval receiver computes one, so
+    /// the tool group can render the diff once the call completes.
+    /// Silent no-op if no matching entry is found (rare — the entry
+    /// may have scrolled off under `MAX_ENTRIES`).
+    pub fn attach_preview(&mut self, id: &str, p: DiffPreview) {
+        for e in self.entries.iter_mut().rev() {
+            if let LogEntry::ToolCall {
+                call_id, preview, ..
+            } = e
+            {
+                if call_id == id {
+                    *preview = Some(p);
+                    return;
+                }
+            }
+        }
     }
 
     pub fn push_tool_result(&mut self, r: &ToolResult) {
         self.entries.push(LogEntry::ToolResult {
             ok: !r.is_error,
             snippet: first_line(&r.content, 200),
+            full: truncate_bytes(&r.content, TOOL_RESULT_MAX_BYTES),
+            expanded: false,
         });
+        self.enforce_cap();
     }
 
     /// Replay a tool result from history — we don't know its is_error
@@ -159,17 +327,214 @@ impl TuiState {
         self.entries.push(LogEntry::ToolResult {
             ok: !is_error,
             snippet: first_line(content, 200),
+            full: truncate_bytes(content, TOOL_RESULT_MAX_BYTES),
+            expanded: false,
         });
+        self.enforce_cap();
     }
 
     /// Push a raw tool call from history (name + args string).
     pub fn push_tool_call_raw(&mut self, name: String, args: String) {
-        self.entries.push(LogEntry::ToolCall { name, args });
+        self.entries.push(LogEntry::ToolCall {
+            name,
+            args,
+            preview: None,
+            call_id: String::new(),
+        });
+        self.enforce_cap();
     }
 
     /// Push an already-complete assistant message from history.
     pub fn push_assistant(&mut self, s: String) {
         self.entries.push(LogEntry::Assistant(s));
+        self.enforce_cap();
+    }
+
+    /// Toggle the `expanded` flag on the most recent tool-result entry.
+    /// Returns `true` when it found one to toggle so the key handler can
+    /// flash a hint on no-op ("no tool result yet").
+    pub fn toggle_last_tool_result(&mut self) -> bool {
+        for e in self.entries.iter_mut().rev() {
+            if let LogEntry::ToolResult { expanded, .. } = e {
+                *expanded = !*expanded;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Name + args of the tool call currently in flight — a trailing
+    /// `ToolCall` entry without a matching `ToolResult` after it.
+    /// Returned by [`Self::in_flight_tool`] so the Ctrl+C handler can
+    /// name the tool it just interrupted.
+    pub fn in_flight_tool(&self) -> Option<(String, String)> {
+        for e in self.entries.iter().rev() {
+            match e {
+                LogEntry::ToolResult { .. } => return None,
+                LogEntry::ToolCall { name, args, .. } => {
+                    return Some((name.clone(), args.clone()));
+                }
+                // Skip info/warning/token entries — they can appear
+                // between a ToolCall and its ToolResult (streaming
+                // progress lines) without changing what's in flight.
+                _ => continue,
+            }
+        }
+        None
+    }
+
+    /// Text of the last assistant reply, if any — the target of `Ctrl+Y`.
+    pub fn last_assistant_text(&self) -> Option<&str> {
+        for e in self.entries.iter().rev() {
+            if let LogEntry::Assistant(s) = e {
+                return Some(s);
+            }
+        }
+        None
+    }
+
+    /// Flatten the whole visible transcript into a plain-text
+    /// conversation dump — target of `Ctrl+Shift+C`. Tool call/results
+    /// are annotated in-line so a pasted transcript still reads as a
+    /// coherent session log outside the TUI.
+    pub fn transcript_plaintext(&self) -> String {
+        let mut out = String::new();
+        for e in &self.entries {
+            match e {
+                LogEntry::User(s) => {
+                    out.push_str("> ");
+                    out.push_str(s);
+                    out.push_str("\n\n");
+                }
+                LogEntry::Assistant(s) => {
+                    out.push_str(s);
+                    if !s.ends_with('\n') {
+                        out.push('\n');
+                    }
+                    out.push('\n');
+                }
+                LogEntry::ToolCall { name, args, .. } => {
+                    out.push_str(&format!("[tool] {name}({args})\n"));
+                }
+                LogEntry::ToolResult {
+                    ok, snippet, full, ..
+                } => {
+                    let mark = if *ok { "ok" } else { "err" };
+                    let body = if full.is_empty() { snippet } else { full };
+                    out.push_str(&format!("[{mark}] {body}\n\n"));
+                }
+                LogEntry::Warning(s) => {
+                    out.push_str(&format!("[warn] {s}\n\n"));
+                }
+                LogEntry::Info(s) => {
+                    out.push_str(&format!("[info] {s}\n"));
+                }
+            }
+        }
+        out
+    }
+
+    // ---- search ----
+
+    pub fn search_open(&mut self) {
+        if self.search.is_none() {
+            self.search = Some(SearchState::default());
+        }
+    }
+
+    pub fn search_close(&mut self) {
+        self.search = None;
+    }
+
+    pub fn search_push(&mut self, c: char) {
+        if let Some(s) = self.search.as_mut() {
+            s.query.push(c);
+        }
+        self.recompute_hits();
+    }
+
+    pub fn search_backspace(&mut self) {
+        if let Some(s) = self.search.as_mut() {
+            s.query.pop();
+        }
+        self.recompute_hits();
+    }
+
+    pub fn search_next(&mut self) {
+        if let Some(s) = self.search.as_mut() {
+            if !s.hits.is_empty() {
+                s.cursor = (s.cursor + 1) % s.hits.len();
+            }
+        }
+    }
+
+    pub fn search_prev(&mut self) {
+        if let Some(s) = self.search.as_mut() {
+            if !s.hits.is_empty() {
+                s.cursor = if s.cursor == 0 {
+                    s.hits.len() - 1
+                } else {
+                    s.cursor - 1
+                };
+            }
+        }
+    }
+
+    /// The (entry_index, byte_offset) of the currently focused search
+    /// hit — used by the transcript renderer to scroll to it.
+    pub fn active_hit(&self) -> Option<(usize, usize)> {
+        let s = self.search.as_ref()?;
+        s.hits.get(s.cursor).copied()
+    }
+
+    fn recompute_hits(&mut self) {
+        let Some(s) = self.search.as_mut() else {
+            return;
+        };
+        s.hits.clear();
+        s.cursor = 0;
+        if s.query.is_empty() {
+            return;
+        }
+        let needle = s.query.to_ascii_lowercase();
+        for (idx, e) in self.entries.iter().enumerate() {
+            let hay = entry_text(e).to_ascii_lowercase();
+            let mut start = 0usize;
+            while let Some(off) = hay[start..].find(&needle) {
+                s.hits.push((idx, start + off));
+                start += off + needle.len();
+            }
+        }
+    }
+
+    /// Session-scoped allow-rule string for a specific tool call, or
+    /// `None` when we can't derive one (unknown tool, missing arg).
+    ///
+    /// Kept in state.rs (rather than approver.rs) because it's a pure
+    /// function of the call shape and is used by both the approval
+    /// modal and the `/permissions add` slash flow.
+    pub fn rule_for_call(call: &ToolCall) -> Option<String> {
+        let name = call.function.name.as_str();
+        let args: serde_json::Value =
+            serde_json::from_str(&call.function.arguments).unwrap_or_default();
+        match name {
+            "shell" | "bash" => {
+                let cmd = args.get("cmd").and_then(|v| v.as_str())?;
+                Some(format!("Bash({cmd})"))
+            }
+            "edit_file" | "write_file" | "apply_patch" | "create_file" => {
+                let path = args
+                    .get("path")
+                    .or_else(|| args.get("target"))
+                    .and_then(|v| v.as_str())?;
+                Some(format!("Edit({path})"))
+            }
+            "read_file" | "view_file" => {
+                let path = args.get("path").and_then(|v| v.as_str())?;
+                Some(format!("Read({path})"))
+            }
+            _ => None,
+        }
     }
 
     // ---- input ----
@@ -178,35 +543,122 @@ impl TuiState {
         &self.input
     }
 
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
     pub fn input_push(&mut self, c: char) {
         self.leave_history_browse();
-        self.input.push(c);
+        self.input.insert(self.cursor, c);
+        self.cursor += c.len_utf8();
     }
 
     pub fn input_push_str(&mut self, s: &str) {
         self.leave_history_browse();
-        self.input.push_str(s);
+        self.input.insert_str(self.cursor, s);
+        self.cursor += s.len();
     }
 
     pub fn input_newline(&mut self) {
-        self.leave_history_browse();
-        self.input.push('\n');
+        self.input_push('\n');
     }
 
     pub fn input_backspace(&mut self) {
         self.leave_history_browse();
-        self.input.pop();
+        if self.cursor == 0 {
+            return;
+        }
+        let prev = prev_char_boundary(&self.input, self.cursor);
+        self.input.drain(prev..self.cursor);
+        self.cursor = prev;
+    }
+
+    pub fn input_delete_forward(&mut self) {
+        self.leave_history_browse();
+        if self.cursor >= self.input.len() {
+            return;
+        }
+        let next = next_char_boundary(&self.input, self.cursor);
+        self.input.drain(self.cursor..next);
     }
 
     pub fn input_clear(&mut self) -> String {
         self.history_cursor = None;
         self.history_stash.clear();
+        self.cursor = 0;
         std::mem::take(&mut self.input)
     }
 
     pub fn is_input_empty(&self) -> bool {
         self.input.trim().is_empty()
     }
+
+    // ---- cursor movement ----
+
+    pub fn move_left(&mut self) {
+        if self.cursor > 0 {
+            self.cursor = prev_char_boundary(&self.input, self.cursor);
+        }
+    }
+
+    pub fn move_right(&mut self) {
+        if self.cursor < self.input.len() {
+            self.cursor = next_char_boundary(&self.input, self.cursor);
+        }
+    }
+
+    pub fn move_word_left(&mut self) {
+        self.cursor = word_boundary_left(&self.input, self.cursor);
+    }
+
+    pub fn move_word_right(&mut self) {
+        self.cursor = word_boundary_right(&self.input, self.cursor);
+    }
+
+    /// Move to the start of the current visual line (segment between
+    /// '\n' boundaries containing the cursor).
+    pub fn move_line_start(&mut self) {
+        self.cursor = line_start(&self.input, self.cursor);
+    }
+
+    pub fn move_line_end(&mut self) {
+        self.cursor = line_end(&self.input, self.cursor);
+    }
+
+    pub fn kill_word_left(&mut self) {
+        self.leave_history_browse();
+        let mut start = word_boundary_left(&self.input, self.cursor);
+        // Also swallow one run of horizontal whitespace before the word so
+        // consecutive Ctrl+W doesn't leave double-space litter. Newlines
+        // stay — killing across a line break usually isn't wanted.
+        let bytes = self.input.as_bytes();
+        while start > 0 && (bytes[start - 1] == b' ' || bytes[start - 1] == b'\t') {
+            start -= 1;
+        }
+        self.input.drain(start..self.cursor);
+        self.cursor = start;
+    }
+
+    pub fn kill_word_right(&mut self) {
+        self.leave_history_browse();
+        let end = word_boundary_right(&self.input, self.cursor);
+        self.input.drain(self.cursor..end);
+    }
+
+    pub fn kill_to_line_start(&mut self) {
+        self.leave_history_browse();
+        let start = line_start(&self.input, self.cursor);
+        self.input.drain(start..self.cursor);
+        self.cursor = start;
+    }
+
+    pub fn kill_to_line_end(&mut self) {
+        self.leave_history_browse();
+        let end = line_end(&self.input, self.cursor);
+        self.input.drain(self.cursor..end);
+    }
+
+    // ---- history recall ----
 
     /// Record a submitted message so up-arrow can recall it later.
     pub fn remember_submission(&mut self, s: &str) {
@@ -234,6 +686,7 @@ impl TuiState {
         };
         self.history_cursor = Some(next);
         self.input = self.history[next].clone();
+        self.cursor = self.input.len();
     }
 
     /// Down-arrow: step forward. Past the newest, restore the stash.
@@ -246,6 +699,7 @@ impl TuiState {
             self.history_cursor = None;
             self.input = std::mem::take(&mut self.history_stash);
         }
+        self.cursor = self.input.len();
     }
 
     /// Any input mutation (typing, backspace, paste) drops us out of
@@ -259,6 +713,100 @@ impl TuiState {
     }
 }
 
+// ---- text helpers (public within crate for testing) ----
+
+fn prev_char_boundary(s: &str, byte: usize) -> usize {
+    let mut i = byte.saturating_sub(1);
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+fn next_char_boundary(s: &str, byte: usize) -> usize {
+    let mut i = byte + 1;
+    while i < s.len() && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i.min(s.len())
+}
+
+/// Walk left over whitespace, then over the word body (identifier-ish
+/// runs — anything that isn't whitespace or an ASCII punctuation break).
+/// Stops at start of buffer.
+fn word_boundary_left(s: &str, byte: usize) -> usize {
+    let bytes = s.as_bytes();
+    let mut i = byte;
+    // Skip trailing whitespace between cursor and word.
+    while i > 0 && is_wordbreak(bytes[i - 1]) {
+        i -= 1;
+    }
+    // Skip the word body.
+    while i > 0 && !is_wordbreak(bytes[i - 1]) {
+        i -= 1;
+    }
+    // Realign to a char boundary — safe because we only walked ASCII
+    // wordbreak bytes (each is a full char), but wordy content may span
+    // multi-byte chars we walked into byte-by-byte.
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+fn word_boundary_right(s: &str, byte: usize) -> usize {
+    let bytes = s.as_bytes();
+    let mut i = byte;
+    let len = bytes.len();
+    while i < len && is_wordbreak(bytes[i]) {
+        i += 1;
+    }
+    while i < len && !is_wordbreak(bytes[i]) {
+        i += 1;
+    }
+    while i < len && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i.min(len)
+}
+
+fn is_wordbreak(b: u8) -> bool {
+    // Match the emacs/bash convention: whitespace and ASCII punctuation
+    // are breaks; letters/digits/underscore are word.
+    b.is_ascii_whitespace() || (b.is_ascii_punctuation() && b != b'_')
+}
+
+fn line_start(s: &str, byte: usize) -> usize {
+    s[..byte].rfind('\n').map(|i| i + 1).unwrap_or(0)
+}
+
+fn line_end(s: &str, byte: usize) -> usize {
+    match s[byte..].find('\n') {
+        Some(off) => byte + off,
+        None => s.len(),
+    }
+}
+
+/// Flatten one entry to plain text for search matching. Preserves
+/// content — assistant paragraphs, user messages, tool args, tool
+/// results.
+fn entry_text(e: &LogEntry) -> String {
+    match e {
+        LogEntry::User(s)
+        | LogEntry::Assistant(s)
+        | LogEntry::Warning(s)
+        | LogEntry::Info(s) => s.clone(),
+        LogEntry::ToolCall { name, args, .. } => format!("{name} {args}"),
+        LogEntry::ToolResult { snippet, full, .. } => {
+            if full.is_empty() {
+                snippet.clone()
+            } else {
+                full.clone()
+            }
+        }
+    }
+}
+
 fn first_line(s: &str, max: usize) -> String {
     let line = s.lines().next().unwrap_or("").trim();
     if line.chars().count() <= max {
@@ -266,5 +814,143 @@ fn first_line(s: &str, max: usize) -> String {
     } else {
         let truncated: String = line.chars().take(max).collect();
         format!("{truncated}…")
+    }
+}
+
+/// Truncate at the last char boundary ≤ `max`, preserving valid UTF-8.
+fn truncate_bytes(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_owned();
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = s[..end].to_owned();
+    out.push_str("\n… (truncated)");
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cursor_left_right_ascii() {
+        let mut st = TuiState::new("m".into(), Mode::Manual);
+        for c in "hello".chars() {
+            st.input_push(c);
+        }
+        assert_eq!(st.cursor(), 5);
+        st.move_left();
+        st.move_left();
+        assert_eq!(st.cursor(), 3);
+        st.input_push('X');
+        assert_eq!(st.input(), "helXlo");
+        assert_eq!(st.cursor(), 4);
+    }
+
+    #[test]
+    fn cursor_walks_multibyte() {
+        // "héllo" — 'é' is 2 bytes (U+00E9).
+        let mut st = TuiState::new("m".into(), Mode::Manual);
+        for c in "héllo".chars() {
+            st.input_push(c);
+        }
+        // 5 chars → 6 bytes total.
+        assert_eq!(st.input().len(), 6);
+        assert_eq!(st.cursor(), 6);
+        st.move_line_start();
+        assert_eq!(st.cursor(), 0);
+        st.move_right(); // past 'h'
+        assert_eq!(st.cursor(), 1);
+        st.move_right(); // past 'é' (2 bytes)
+        assert_eq!(st.cursor(), 3);
+    }
+
+    #[test]
+    fn word_jump_and_kill() {
+        let mut st = TuiState::new("m".into(), Mode::Manual);
+        st.input_push_str("hello world foo");
+        st.move_line_start();
+        st.move_word_right();
+        assert_eq!(st.cursor(), 5);
+        st.move_word_right();
+        assert_eq!(st.cursor(), 11);
+        st.kill_word_left();
+        assert_eq!(st.input(), "hello foo");
+    }
+
+    #[test]
+    fn line_home_end_multiline() {
+        let mut st = TuiState::new("m".into(), Mode::Manual);
+        st.input_push_str("first\nsecond line");
+        st.move_line_start();
+        assert_eq!(st.cursor(), 6);
+        st.move_line_end();
+        assert_eq!(st.cursor(), st.input().len());
+    }
+
+    #[test]
+    fn rule_for_call_covers_common_tools() {
+        use mira_core::message::{ToolCallFunction, ToolCallKind};
+        use mira_core::ToolCall;
+        let mk = |name: &str, args: &str| ToolCall {
+            id: "1".into(),
+            kind: ToolCallKind::Function,
+            function: ToolCallFunction {
+                name: name.into(),
+                arguments: args.into(),
+            },
+        };
+        assert_eq!(
+            TuiState::rule_for_call(&mk("shell", r#"{"cmd":"cargo test"}"#)).as_deref(),
+            Some("Bash(cargo test)")
+        );
+        assert_eq!(
+            TuiState::rule_for_call(&mk("edit_file", r#"{"path":"src/main.rs"}"#)).as_deref(),
+            Some("Edit(src/main.rs)")
+        );
+        assert_eq!(
+            TuiState::rule_for_call(&mk("read_file", r#"{"path":"README.md"}"#)).as_deref(),
+            Some("Read(README.md)")
+        );
+        assert_eq!(
+            TuiState::rule_for_call(&mk("unknown_tool", r#"{}"#)),
+            None
+        );
+    }
+
+    #[test]
+    fn search_finds_and_cycles() {
+        let mut st = TuiState::new("m".into(), Mode::Manual);
+        st.entries.push(LogEntry::User("hello world".into()));
+        st.entries.push(LogEntry::Assistant("goodbye world".into()));
+        st.entries.push(LogEntry::Info("world peace".into()));
+        st.search_open();
+        for c in "world".chars() {
+            st.search_push(c);
+        }
+        let s = st.search.as_ref().unwrap();
+        assert_eq!(s.hits.len(), 3);
+        assert_eq!(s.cursor, 0);
+        st.search_next();
+        assert_eq!(st.search.as_ref().unwrap().cursor, 1);
+    }
+
+    #[test]
+    fn tool_result_expand_toggles_last() {
+        let mut st = TuiState::new("m".into(), Mode::Manual);
+        st.entries.push(LogEntry::ToolResult {
+            ok: true,
+            snippet: "one".into(),
+            full: "one\ntwo\nthree".into(),
+            expanded: false,
+        });
+        assert!(st.toggle_last_tool_result());
+        let LogEntry::ToolResult { expanded, .. } = st.entries.last().unwrap() else {
+            unreachable!()
+        };
+        assert!(*expanded);
     }
 }

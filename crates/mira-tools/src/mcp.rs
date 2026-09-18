@@ -275,24 +275,23 @@ impl Tool for McpTool {
         // the whole tool loop. On timeout we surface a `Failed` error
         // (mapped to a normal tool error result upstream) so the model
         // can react / retry and the turn can continue.
-        let result = match tokio::time::timeout(MCP_CALL_TIMEOUT, self.service.call_tool(params))
-            .await
-        {
-            Ok(Ok(r)) => r,
-            Ok(Err(e)) => {
-                return Err(ToolError::Failed(format!(
-                    "mcp `{}`: {e}",
-                    self.server_name
-                )))
-            }
-            Err(_) => {
-                return Err(ToolError::Failed(format!(
-                    "mcp `{}`: call timed out after {}s",
-                    self.server_name,
-                    MCP_CALL_TIMEOUT.as_secs()
-                )))
-            }
-        };
+        let result =
+            match tokio::time::timeout(MCP_CALL_TIMEOUT, self.service.call_tool(params)).await {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => {
+                    return Err(ToolError::Failed(format!(
+                        "mcp `{}`: {e}",
+                        self.server_name
+                    )))
+                }
+                Err(_) => {
+                    return Err(ToolError::Failed(format!(
+                        "mcp `{}`: call timed out after {}s",
+                        self.server_name,
+                        MCP_CALL_TIMEOUT.as_secs()
+                    )))
+                }
+            };
 
         let body = flatten_content(&result.content);
         let call_id = call.id.clone();

@@ -577,14 +577,15 @@ mod tests {
             "---\nname: verify\ndescription: project override\n---\nProject body.\n",
         )
         .unwrap();
-        let reg = SkillRegistry::load_layered(&shared_dir, &user_dir, &[project_dir.clone()]);
+        let reg =
+            SkillRegistry::load_layered(&shared_dir, &user_dir, std::slice::from_ref(&project_dir));
         let v = reg.get("verify").unwrap();
         assert_eq!(v.description, "project override");
         assert_eq!(v.body, "Project body.");
     }
 
     #[test]
-    fn load_dir_reads_skill_directory_with_SKILL_md() {
+    fn load_dir_reads_skill_directory_with_skill_md() {
         let tmp = tempdir().unwrap();
         let dir = tmp.path().join("deploy-preview");
         fs::create_dir_all(&dir).unwrap();
@@ -641,7 +642,8 @@ mod tests {
             "---\nname: verify\ndescription: user override\n---\nUser body.\n",
         )
         .unwrap();
-        let reg = SkillRegistry::load_layered(&shared_dir, &user_dir, &[project_dir.clone()]);
+        let reg =
+            SkillRegistry::load_layered(&shared_dir, &user_dir, std::slice::from_ref(&project_dir));
         assert_eq!(reg.get("verify").unwrap().description, "user override");
         // `code-review` came only from the builtin tier.
         assert!(reg.get("code-review").is_some());
@@ -660,7 +662,8 @@ mod tests {
             "---\nname: grill-me\ndescription: pressure-test\n---\nAsk hard questions.\n",
         )
         .unwrap();
-        let reg = SkillRegistry::load_layered(&shared_dir, &user_dir, &[project_dir.clone()]);
+        let reg =
+            SkillRegistry::load_layered(&shared_dir, &user_dir, std::slice::from_ref(&project_dir));
         assert_eq!(reg.get("grill-me").unwrap().description, "pressure-test",);
     }
 
@@ -684,7 +687,8 @@ mod tests {
             "---\nname: verify\ndescription: user wins\n---\nUser.\n",
         )
         .unwrap();
-        let reg = SkillRegistry::load_layered(&shared_dir, &user_dir, &[project_dir.clone()]);
+        let reg =
+            SkillRegistry::load_layered(&shared_dir, &user_dir, std::slice::from_ref(&project_dir));
         assert_eq!(reg.get("verify").unwrap().description, "user wins");
     }
 }
