@@ -1,17 +1,19 @@
 //! Browser-driven OAuth sign-in flows for external providers.
 //!
-//! Each supported provider has its own submodule (`openrouter`, later
-//! `chatgpt_codex`) but they share the PKCE primitives in [`pkce`] and
-//! the in-memory pending-flow state exposed through
-//! [`PendingFlowStore`]. The server exposes a `POST /api/auth/<p>/start`
-//! endpoint that returns an authorize URL the UI opens in a new tab,
-//! and a `GET /api/auth/<p>/callback` endpoint the provider redirects
-//! back to. On success the resulting API key is written into the user's
-//! `mira.yaml` under `providers.<p>.api_key` so the existing settings
-//! + provider-hot-swap machinery reuses it without any special-casing.
+//! Each supported provider has its own submodule (`openrouter`,
+//! `openai`) but they share the PKCE primitives + token store + wire
+//! helpers in the `mira-auth` crate. The server exposes a
+//! `POST /api/auth/<p>/start` endpoint that returns an authorize URL
+//! the UI opens in a new tab, and a `GET /api/auth/<p>/callback`
+//! endpoint the provider redirects back to. On success the resulting
+//! API key is written into the user's `mira.yaml` under
+//! `providers.<p>.api_key` so the existing settings +
+//! provider-hot-swap machinery reuses it without any special-casing.
 //!
 //! Nothing in this module owns provider-specific business logic beyond
-//! the request/response shape — provider adapters live in `mira-ai`.
+//! the request/response shape and the "hot-swap the live provider"
+//! server-only bit — pure request/response adapters live in
+//! `mira_auth::providers`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -20,9 +22,7 @@ use tokio::sync::Mutex;
 
 pub mod openai;
 pub mod openrouter;
-pub mod pkce;
 pub mod refresh;
-pub mod store;
 
 /// A PKCE code verifier stashed server-side while the browser round-
 /// trips the authorization request. Keyed by an opaque `flow_id` we

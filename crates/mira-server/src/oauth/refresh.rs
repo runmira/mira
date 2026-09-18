@@ -53,7 +53,7 @@ async fn tick(state: &AppState) -> anyhow::Result<()> {
     // OpenAI is the only OAuth-managed provider with refresh today.
     // OpenRouter's PKCE flow returns a durable API key with no
     // refresh — nothing to do there.
-    if let Some(bundle) = super::store::load("openai")? {
+    if let Some(bundle) = mira_auth::store::load("openai")? {
         if bundle.is_near_expiry(REFRESH_LEEWAY) {
             debug!(
                 expires_at = bundle.expires_at,

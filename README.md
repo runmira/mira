@@ -56,9 +56,24 @@ Two ways to talk to Mira. Both share the same harness, the same session
 store (`~/.mira/sessions/`), and the same config (`~/.mira/mira.yaml`) —
 swap between them freely.
 
+**Sign in (recommended):**
+
+```bash
+mira login openrouter          # or: mira login openai
+```
+
+Opens your browser, PKCE OAuth round-trip, writes the resulting key to
+`~/.mira/mira.yaml`. `openai` is "Sign in with ChatGPT" — Mira mints and
+refreshes API keys against your ChatGPT account and stashes the token
+bundle in `~/.mira/auth/openai.json` (mode 0600). Pass `--no-browser`
+(or set `MIRA_NO_BROWSER=1`) for headless / SSH sessions to just print
+the URL. `mira auth status` shows what's signed in; `mira logout <p>`
+forgets it.
+
 **Terminal (TUI):**
 
 ```bash
+# After `mira login`, or manually:
 export MIRA_API_KEY=sk-or-v1-...                 # e.g. an OpenRouter key
 export MIRA_BASE_URL=https://openrouter.ai/api/v1
 export MIRA_MODEL=google/gemini-2.5-flash

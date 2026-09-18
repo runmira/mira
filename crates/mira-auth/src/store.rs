@@ -82,7 +82,7 @@ pub fn load(provider: &str) -> Result<Option<TokenBundle>> {
     load_at(&token_path(provider))
 }
 
-fn load_at(path: &std::path::Path) -> Result<Option<TokenBundle>> {
+pub fn load_at(path: &std::path::Path) -> Result<Option<TokenBundle>> {
     if !path.exists() {
         return Ok(None);
     }
@@ -100,7 +100,7 @@ pub fn save(provider: &str, bundle: &TokenBundle) -> Result<()> {
     save_at(&token_path(provider), bundle)
 }
 
-fn save_at(path: &std::path::Path, bundle: &TokenBundle) -> Result<()> {
+pub fn save_at(path: &std::path::Path, bundle: &TokenBundle) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow!("token path has no parent"))?;
@@ -132,9 +132,21 @@ fn save_at(path: &std::path::Path, bundle: &TokenBundle) -> Result<()> {
         fs::set_permissions(&tmp, perms).ok();
     }
 
-    fs::rename(&tmp, &path)
+    fs::rename(&tmp, path)
         .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
     Ok(())
+}
+
+/// Delete the token file for `provider`. `Ok(false)` when the file
+/// wasn't there to begin with (idempotent — `mira logout` on a
+/// never-signed-in provider isn't an error).
+pub fn delete(provider: &str) -> Result<bool> {
+    let path = token_path(provider);
+    if !path.exists() {
+        return Ok(false);
+    }
+    fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
+    Ok(true)
 }
 
 pub fn now_secs() -> u64 {
@@ -167,9 +179,6 @@ mod tests {
 
     #[test]
     fn roundtrip_atomic_write() {
-        // Hermetic — pass an explicit root instead of mutating $HOME
-        // (which would race with every other test in the workspace
-        // that reads home / cache paths).
         let temp = tempfile::tempdir().unwrap();
         let path = token_path_at(temp.path(), "openai_test");
 
