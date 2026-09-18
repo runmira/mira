@@ -4,6 +4,7 @@ description: Review the current diff for correctness bugs, subtle logic errors, 
 category: review
 icon: magnifying-glass
 color: blue
+slash: review
 ---
 
 You are reviewing the *current working-tree diff* for correctness. This is a focused review — do not rewrite prose, do not lint, do not suggest architectural refactors. Your only job is to find bugs that would ship if this diff merged as-is.

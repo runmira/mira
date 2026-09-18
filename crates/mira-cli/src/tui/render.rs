@@ -18,9 +18,16 @@ use crate::tui::state::{LogEntry, Palette, TuiState};
 // per-span. Truecolor-only — 16-color terminals fall back to their
 // closest match automatically via ratatui/crossterm.
 const SALMON: Color = Color::Rgb(232, 156, 104);
-const CREAM: Color = Color::Rgb(226, 210, 182);
+// Paper-white with a barely-there warm tint. The mockup's assistant
+// and user text reads crisp near-white against the obsidian bg — the
+// earlier `(232, 216, 188)` was too khaki, making prose look dim vs.
+// the coral accents.
+const CREAM: Color = Color::Rgb(240, 235, 226);
 const MUTED: Color = Color::Rgb(140, 130, 118);
 const DIM: Color = Color::Rgb(96, 90, 82);
+/// Hairline color for the coral separator above the composer. Half
+/// alpha of `SALMON` so the line reads as an accent, not another chip.
+const HAIRLINE: Color = Color::Rgb(160, 96, 60);
 
 /// Mira's brand mark — the script-M is the closest Unicode analogue
 /// of the flowing wave/M in the vector logo. Rendered wherever the
@@ -46,30 +53,35 @@ fn pulsed_logo(secs: f32) -> Color {
 pub fn draw(f: &mut Frame, state: &mut TuiState) {
     // Input area grows with content up to 8 rows so a multi-line message
     // is visible while composing, then shrinks back after submit.
+    // (#3, #4) Composer now uses a *top-only* coral hairline instead of
+    // a full box border — 1 border row + N body rows, not 2 borders + N.
     let input_rows = input_display_rows(state.input()).min(6);
-    let input_height = input_rows + 2; // + top/bottom border
+    let input_height = input_rows + 1;
 
     let root = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
-            Constraint::Min(1),
+            Constraint::Length(1), // header
+            Constraint::Length(1), // (#6) breathing space between header and transcript
+            Constraint::Min(1),    // transcript
             Constraint::Length(input_height),
-            Constraint::Length(1),
+            Constraint::Length(1), // single unified footer (#3)
         ])
         .split(f.area());
 
     header(f, root[0], state);
-    transcript(f, root[1], state);
-    input(f, root[2], state);
-    status(f, root[3], state);
+    // root[1] is a deliberate blank row — matches the mockup's air
+    // between the header rule and the first `> user` prompt.
+    transcript(f, root[2], state);
+    input(f, root[3], state);
+    status(f, root[4], state);
 
     // Overlays: palette above the input, approval modal centered.
     if state.palette.kind != Palette::None && !state.palette.matches.is_empty() {
-        palette(f, root[2], state);
+        palette(f, root[3], state);
     }
     if state.search.is_some() {
-        search_overlay(f, root[2], state);
+        search_overlay(f, root[3], state);
     }
     // Inline approval renders as a transcript block below the tool
     // call that triggered it — no centered modal.
@@ -118,24 +130,22 @@ fn header(f: &mut Frame, area: Rect, state: &TuiState) {
     let left = Line::from(spans);
 
     // Usage chip on the right side of the header, so the bottom status
-    // row can stay purely a hint/flash area.
-    let usage_text = format_usage(state);
-    if usage_text.is_empty() {
+    // row can stay purely a hint/flash area. Rendered as styled spans
+    // (not a plain string) so the dollar figure can flip red past
+    // `state.budget_usd` without repainting the whole chip.
+    let usage_spans = format_usage_spans(state);
+    if usage_spans.is_empty() {
         f.render_widget(Paragraph::new(left), area);
         return;
     }
-    let right_len = usage_text.chars().count() as u16;
+    let right_len: usize = usage_spans.iter().map(|s| s.content.chars().count()).sum();
     let cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(1), Constraint::Length(right_len)])
+        .constraints([Constraint::Min(1), Constraint::Length(right_len as u16)])
         .split(area);
     f.render_widget(Paragraph::new(left), cols[0]);
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            usage_text,
-            Style::default().fg(MUTED),
-        )))
-        .alignment(Alignment::Right),
+        Paragraph::new(Line::from(usage_spans)).alignment(Alignment::Right),
         cols[1],
     );
 }
@@ -258,6 +268,9 @@ fn transcript(f: &mut Frame, area: Rect, state: &mut TuiState) {
                 }
                 if batch_end < entries.len() {
                     lines.push(Line::from(""));
+                    if matches!(entries.get(batch_end), Some(LogEntry::User(_))) {
+                        lines.push(Line::from(""));
+                    }
                 }
                 i = batch_end;
                 continue;
@@ -330,8 +343,14 @@ fn transcript(f: &mut Frame, area: Rect, state: &mut TuiState) {
         }
         // One blank row between entries — anything more and it looks
         // like the transcript has scroll gaps.
+        // (#7) When the *next* entry is a user prompt, add a second
+        // blank row so the `> user` line gets breathing space above
+        // and below (matches the landing mockup's paragraph rhythm).
         if i + consumed < entries.len() {
             lines.push(Line::from(""));
+            if matches!(entries.get(i + consumed), Some(LogEntry::User(_))) {
+                lines.push(Line::from(""));
+            }
         }
         i += consumed;
     }
@@ -592,19 +611,12 @@ fn tool_group_lines(
             Style::default().fg(Color::Red).bold(),
         ));
     }
-    if let Some(r) = result {
-        if !r.expanded && multi_line(r.full) {
-            header.push(Span::styled(
-                "  (ctrl+e to expand)",
-                Style::default().fg(MUTED).italic(),
-            ));
-        } else if r.expanded {
-            header.push(Span::styled(
-                "  (ctrl+e to collapse)",
-                Style::default().fg(MUTED).italic(),
-            ));
-        }
-    }
+    // Expandability is signaled implicitly by the truncated `└` snippet
+    // below the header — no chevron. The previous `⌄` suffix was getting
+    // orphaned by `Paragraph::wrap` when the header exceeded terminal
+    // width (ratatui broke on the leading whitespace and dropped the
+    // lone glyph onto its own row, reading as a stray `;`-ish mark in
+    // fonts without U+2304). `Ctrl+E` is still discoverable via `/help`.
 
     let mut out: Vec<Line<'static>> = vec![Line::from(header)];
 
@@ -636,15 +648,28 @@ fn tool_group_lines(
             }
         }
         (_, Some(r)) => {
-            let body = if r.snippet.is_empty() {
-                "(no output)".to_owned()
-            } else {
-                truncate(r.snippet, 200)
-            };
-            out.push(Line::from(vec![
-                Span::styled("  └  ", Style::default().fg(DIM)),
-                Span::styled(body, Style::default().fg(MUTED)),
-            ]));
+            // (#1, #2) A green-dot success + a bare "exit=0" snippet is
+            // pure noise — the dot already says "worked." Suppress the
+            // body row in that specific case; if Bash produced real
+            // output the user still sees the chevron and can Ctrl+E.
+            let bash_success_no_output = r.ok
+                && r.snippet.trim() == "exit=0"
+                && !r.full
+                    .split("--- output ---\n")
+                    .nth(1)
+                    .map(|o| !o.trim().is_empty())
+                    .unwrap_or(false);
+            if !bash_success_no_output {
+                let body = if r.snippet.is_empty() {
+                    "(no output)".to_owned()
+                } else {
+                    truncate(r.snippet, 200)
+                };
+                out.push(Line::from(vec![
+                    Span::styled("  └  ", Style::default().fg(DIM)),
+                    Span::styled(body, Style::default().fg(MUTED)),
+                ]));
+            }
         }
     }
 
@@ -720,10 +745,6 @@ fn batch_verb_noun(family: &str) -> (&'static str, &'static str) {
         "Search" => ("Searching", "queries"),
         _ => ("Calling", "tools"),
     }
-}
-
-fn multi_line(s: &str) -> bool {
-    s.lines().count() > 1 || s.chars().count() > 200
 }
 
 /// A `Line` is "empty" when every span it holds is blank. Used to
@@ -849,34 +870,31 @@ fn summarize_tool(name: &str, args: &str) -> (String, String) {
     }
 }
 
-fn input(f: &mut Frame, area: Rect, state: &TuiState) {
-    let border_color = if state.streaming { MUTED } else { SALMON };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(border_color))
-        .title(Span::styled(
-            " ▸▸ ",
-            Style::default().fg(SALMON).bold(),
-        ))
-        // Bottom-right chip: `[edit · shift+tab to cycle]`. Matches
-        // Claude's "accept edits on (shift+tab to cycle)" affordance.
-        .title_bottom(
-            Line::from(vec![
-                Span::styled("  ", Style::default()),
-                Span::styled(state.mode.chip_label(), mode_style(state)),
-                Span::styled(
-                    "  · shift+tab to cycle  ",
-                    Style::default().fg(MUTED),
-                ),
-            ])
-            .right_aligned(),
-        );
+/// Prompt prefix rendered inline on the first input line. `▸` is
+/// U+25B8 (narrow triangle) so it lays out as one column each in a
+/// monospace font — the whole prefix is three columns wide.
+const PROMPT: &str = "▸▸ ";
+const PROMPT_COLS: u16 = 3;
+/// Continuation-line indent so multi-line input aligns under the first
+/// character after `▸▸ ` instead of hanging out into the margin.
+const PROMPT_CONT: &str = "   ";
 
+fn input(f: &mut Frame, area: Rect, state: &TuiState) {
+    // (asks 1 & 2) Composer top border is a full-width coral hairline —
+    // no title interrupting it. The `▸▸` prompt lives inside the body,
+    // inline with the text the user is typing (matches the landing
+    // mockup where the arrow sits on the same line as the message).
+    let hairline_color = if state.streaming { MUTED } else { HAIRLINE };
+    let block = Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(hairline_color));
+
+    let prompt_style = Style::default().fg(SALMON).bold();
     let body: Text = if state.input().is_empty() {
-        Line::from(Span::styled(
-            "message · enter send · ctrl+j newline · / cmd · @ file · esc esc quit",
-            Style::default().fg(MUTED),
-        ))
+        Line::from(vec![
+            Span::styled(PROMPT, prompt_style),
+            Span::styled("message", Style::default().fg(DIM).italic()),
+        ])
         .into()
     } else {
         // Split on '\n' rather than .lines() so a trailing newline shows
@@ -884,17 +902,28 @@ fn input(f: &mut Frame, area: Rect, state: &TuiState) {
         let segments: Vec<Line> = state
             .input()
             .split('\n')
-            .map(|l| Line::from(Span::styled(l.to_owned(), Style::default().fg(CREAM))))
+            .enumerate()
+            .map(|(i, l)| {
+                let (prefix, style) = if i == 0 {
+                    (PROMPT, prompt_style)
+                } else {
+                    (PROMPT_CONT, Style::default())
+                };
+                Line::from(vec![
+                    Span::styled(prefix, style),
+                    Span::styled(l.to_owned(), Style::default().fg(CREAM)),
+                ])
+            })
             .collect();
         Text::from(segments)
     };
     f.render_widget(Paragraph::new(body).block(block), area);
 
-    // Position the terminal caret at the cursor byte offset. Column is
-    // char-based (breaks visually for wide CJK, but at least keys land
-    // at the right byte). +1 skips the box border.
+    // Position the terminal caret. Body starts +1 row below the top
+    // hairline; every line carries the PROMPT_COLS-wide prefix, so the
+    // caret is offset by that width regardless of which row it's on.
     let (row, col) = cursor_visual(state.input(), state.cursor());
-    f.set_cursor_position((area.x + 1 + col, area.y + 1 + row));
+    f.set_cursor_position((area.x + PROMPT_COLS + col, area.y + 1 + row));
 }
 
 /// Wrap the input into (row, col) cell coordinates for the caret.
@@ -986,25 +1015,55 @@ fn palette(f: &mut Frame, input_area: Rect, state: &TuiState) {
 }
 
 fn status(f: &mut Frame, area: Rect, state: &TuiState) {
-    // Streaming indicator lives in the transcript and the usage chip
-    // is in the header — the status row is pure hints/flash.
-    let line: Line<'static> = if state.esc_pending {
+    // (#3 + #9) Unified single-row footer:
+    //   left  = hint / flash / esc-pending
+    //   right = mode chip in its own color + `shift+tab to cycle`
+    // Split with a Layout so the right side is always right-anchored
+    // regardless of hint length.
+    let left: Line<'static> = if state.esc_pending {
+        let hint = if !state.is_input_empty() {
+            "press esc again to clear input"
+        } else {
+            "press esc again to quit"
+        };
         Line::from(Span::styled(
-            "press esc again to quit",
+            format!(" {hint}"),
             Style::default().fg(SALMON).bold(),
         ))
     } else if let Some(flash) = &state.flash {
         Line::from(Span::styled(
-            flash.clone(),
+            format!(" {flash}"),
             Style::default().fg(Color::Green).italic(),
         ))
     } else {
+        // (ask 3) Trimmed to the five actions the mockup shows —
+        // `ctrl+r search` and `ctrl+e expand` were pushing the hint
+        // wider than the composer and doubling as noise. Both are still
+        // discoverable via `/help`.
         Line::from(Span::styled(
-            "enter send · / cmd · @ file · shift+tab mode · pgup/dn or wheel scroll · ctrl+r search · ctrl+e expand · esc esc quit",
+            " enter send · / cmd · @ file · shift+tab mode · esc esc quit",
             Style::default().fg(MUTED),
         ))
     };
-    f.render_widget(Paragraph::new(line), area);
+
+    let right = Line::from(vec![
+        Span::styled(state.mode.chip_label(), mode_style(state)),
+        Span::styled(
+            " · shift+tab to cycle ",
+            Style::default().fg(MUTED),
+        ),
+    ]);
+    let right_len = right.spans.iter().map(|s| s.content.chars().count()).sum::<usize>() as u16;
+
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(1), Constraint::Length(right_len)])
+        .split(area);
+    f.render_widget(Paragraph::new(left), cols[0]);
+    f.render_widget(
+        Paragraph::new(right).alignment(Alignment::Right),
+        cols[1],
+    );
 }
 
 /// Rotate through a small vocabulary of streaming-verbs based on
@@ -1019,21 +1078,28 @@ fn streaming_label(secs: f32) -> &'static str {
     WORDS[idx]
 }
 
-/// Compact right-side accounting: `↑12.3k ↓4.1k · 15% · $0.024`. Empty
-/// when the provider hasn't reported any usage yet.
-fn format_usage(state: &TuiState) -> String {
+/// Compact right-side accounting as styled spans: `↑12.3k ↓4.1k · 15% · $0.024`.
+/// Dollar figure paints red when `state.budget_usd` is set and the
+/// running cost has met or exceeded it. Empty when the provider hasn't
+/// reported any usage yet.
+fn format_usage_spans(state: &TuiState) -> Vec<Span<'static>> {
     let u = &state.usage;
     if u.is_zero() {
-        return String::new();
+        return Vec::new();
     }
-    let mut out = format!(
-        "↑{} ↓{}",
-        short_num(u.prompt_tokens),
-        short_num(u.completion_tokens),
-    );
+    let muted = Style::default().fg(MUTED);
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    spans.push(Span::styled(
+        format!(
+            "↑{} ↓{}",
+            short_num(u.prompt_tokens),
+            short_num(u.completion_tokens)
+        ),
+        muted,
+    ));
     if let Some(ctx) = model_context_len(&state.model) {
         let pct = ((u.prompt_tokens as f64 / ctx as f64) * 100.0).min(999.0);
-        out.push_str(&format!(" · {pct:.0}%"));
+        spans.push(Span::styled(format!(" · {pct:.0}%"), muted));
     }
     if let Some(dollars) = mira_ai::cost_usd(
         &state.model,
@@ -1043,9 +1109,27 @@ fn format_usage(state: &TuiState) -> String {
             cached_input_tokens: u.cached_input_tokens.min(u32::MAX as u64) as u32,
         },
     ) {
-        out.push_str(&format!(" · {}", format_dollars(dollars)));
+        spans.push(Span::styled(" · ".to_owned(), muted));
+        let over = state
+            .budget_usd
+            .map(|cap| dollars >= cap)
+            .unwrap_or(false);
+        let dollar_style = if over {
+            Style::default()
+                .fg(Color::Red)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            muted
+        };
+        let mut label = format_dollars(dollars);
+        if let Some(cap) = state.budget_usd {
+            // Show the cap alongside so the user sees the runway shrink
+            // without having to `/cost`.
+            label.push_str(&format!("/${cap:.2}"));
+        }
+        spans.push(Span::styled(label, dollar_style));
     }
-    out
+    spans
 }
 
 /// Best-effort context window size for common model IDs. Substring

@@ -20,6 +20,14 @@ use std::sync::LazyLock;
 
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
+
+/// Prose text color — mirrors the `CREAM` constant in `render.rs` so
+/// plain assistant/user paragraphs render bright near-white instead of
+/// falling back to whatever the terminal picked for its default fg
+/// (typically a dimmer gray that made prose read faint next to coral
+/// accents). Duplicated (not re-exported) because `markdown.rs` is
+/// deliberately independent of `render.rs` for testability.
+const PROSE: Color = Color::Rgb(240, 235, 226);
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{FontStyle, Style as SynStyle, Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
@@ -226,15 +234,18 @@ fn is_fence_close(line: &str) -> bool {
 }
 
 fn emit_code_block(out: &mut Vec<Line<'static>>, lang: &str, code: &str) {
-    let label = if lang.is_empty() {
-        "─── code ───".to_owned()
-    } else {
-        format!("─── {lang} ───")
-    };
-    out.push(Line::from(Span::styled(
-        label,
-        Style::default().fg(Color::DarkGray).italic(),
-    )));
+    // Small language tag on its own line, no decorative rules. The
+    // previous `─── ts ───` / `─── end ───` frame turned into stray
+    // "ts" / "end" bleed-through in terminals whose fonts render the
+    // U+2500 box chars as narrow glyphs, so the block stopped looking
+    // like a block. A single dim label + a solid gutter reads as code
+    // in any monospace font.
+    if !lang.is_empty() {
+        out.push(Line::from(Span::styled(
+            format!(" {lang}"),
+            Style::default().fg(Color::DarkGray).italic(),
+        )));
+    }
 
     let syntax = SYNTAX_SET
         .find_syntax_by_token(lang)
@@ -242,16 +253,19 @@ fn emit_code_block(out: &mut Vec<Line<'static>>, lang: &str, code: &str) {
         .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
     let mut h = HighlightLines::new(syntax, &THEME);
 
+    // `▎` (U+258E LEFT ONE QUARTER BLOCK) reads as a solid spine even
+    // when `│` (U+2502) collapses to a thin ambiguous line. Coloured
+    // dim so it frames without competing with the highlighted code.
+    let gutter_style = Style::default().fg(Color::Rgb(120, 120, 128));
+
     for raw_line in LinesWithEndings::from(code) {
         // syntect may fail on pathological input; fall back to a
         // plain line rather than dropping content.
         let ranges: Vec<(SynStyle, &str)> = h
             .highlight_line(raw_line, &SYNTAX_SET)
             .unwrap_or_else(|_| vec![(SynStyle::default(), raw_line)]);
-        let mut spans: Vec<Span<'static>> = vec![Span::styled(
-            "│ ",
-            Style::default().fg(Color::DarkGray),
-        )];
+        let mut spans: Vec<Span<'static>> =
+            vec![Span::styled("▎ ", gutter_style)];
         for (style, chunk) in ranges {
             // Trim only the trailing newline so per-line layout stays
             // one Line per source line.
@@ -263,11 +277,6 @@ fn emit_code_block(out: &mut Vec<Line<'static>>, lang: &str, code: &str) {
         }
         out.push(Line::from(spans));
     }
-
-    out.push(Line::from(Span::styled(
-        "─── end ───",
-        Style::default().fg(Color::DarkGray).italic(),
-    )));
 }
 
 fn syntect_to_ratatui(s: SynStyle) -> Style {
@@ -426,7 +435,7 @@ fn inline_spans(line: &str) -> Vec<Span<'static>> {
                 flush_plain(&mut out, line, plain_start, i);
                 out.push(Span::styled(
                     line[i + 2..close].to_owned(),
-                    Style::default().add_modifier(Modifier::BOLD),
+                    Style::default().fg(PROSE).add_modifier(Modifier::BOLD),
                 ));
                 i = close + 2;
                 plain_start = i;
@@ -440,7 +449,7 @@ fn inline_spans(line: &str) -> Vec<Span<'static>> {
                 flush_plain(&mut out, line, plain_start, i);
                 out.push(Span::styled(
                     line[i + 1..close].to_owned(),
-                    Style::default().add_modifier(Modifier::ITALIC),
+                    Style::default().fg(PROSE).add_modifier(Modifier::ITALIC),
                 ));
                 i = close + 1;
                 plain_start = i;
@@ -459,7 +468,10 @@ fn inline_spans(line: &str) -> Vec<Span<'static>> {
 
 fn flush_plain(out: &mut Vec<Span<'static>>, s: &str, start: usize, end: usize) {
     if end > start {
-        out.push(Span::raw(s[start..end].to_owned()));
+        out.push(Span::styled(
+            s[start..end].to_owned(),
+            Style::default().fg(PROSE),
+        ));
     }
 }
 
@@ -569,20 +581,28 @@ mod tests {
     #[test]
     fn fenced_code_block_syntax_highlights() {
         let lines = render("before\n```rust\nfn main() {}\n```\nafter");
-        // before, ─── rust ───, `│ fn main() {}` styled, ─── end ───, after
-        assert!(lines.len() >= 5);
+        // before, ` rust`, `▎ fn main() {}` styled, after
+        assert!(lines.len() >= 4);
         assert!(lines[1]
             .spans
             .iter()
             .any(|s| s.content.contains("rust")));
+        // No closing "end" marker should ever land in the transcript —
+        // it used to render as bleed-through text when the box chars
+        // rendered narrow.
+        assert!(lines
+            .iter()
+            .all(|l| l.spans.iter().all(|s| !s.content.contains("end"))));
         // The code line should contain some highlighted spans (>1
-        // span means syntect broke it into tokens).
+        // span means syntect broke it into tokens) and lead with the
+        // solid gutter mark.
         let code_line = lines.iter().find(|l| {
             l.spans
                 .iter()
                 .any(|s| s.content.contains("main") || s.content.contains("fn"))
         });
         assert!(code_line.is_some());
+        assert!(code_line.unwrap().spans[0].content.starts_with('▎'));
     }
 
     #[test]

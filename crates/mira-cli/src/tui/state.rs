@@ -157,6 +157,12 @@ pub struct TuiState {
     /// Zeroed for providers that don't report usage — the status bar renders
     /// nothing in that case.
     pub usage: UsageTotals,
+    /// Optional session-wide spend cap in USD. When set, the header
+    /// dollar figure paints red past the cap, and
+    /// [`super::start_stream`] blocks the next send until the user
+    /// either raises the cap or clears it with `/budget off`. Wired
+    /// through `/budget <$X>` in the TUI. Not persisted across sessions.
+    pub budget_usd: Option<f64>,
     /// Standing `/goal`, if any. Renders as a chip in the header + a
     /// live-updating line in the status bar during autonomous runs.
     /// `None` means goal-directed mode is off.
@@ -216,6 +222,7 @@ impl TuiState {
             should_quit: false,
             flash: None,
             usage: UsageTotals::default(),
+            budget_usd: None,
             goal: None,
             palette: PaletteState::none(),
             stream_started_at: None,
@@ -587,6 +594,18 @@ impl TuiState {
         self.history_stash.clear();
         self.cursor = 0;
         std::mem::take(&mut self.input)
+    }
+
+    /// Overwrite the composer buffer wholesale and place the cursor at
+    /// the end. Used by `start_stream` to return a rejected message to
+    /// the composer when the budget guardrail blocks a send — the user
+    /// shouldn't have to retype what they wrote.
+    pub fn input_replace(&mut self, s: &str) {
+        self.input.clear();
+        self.input.push_str(s);
+        self.cursor = self.input.len();
+        self.history_cursor = None;
+        self.history_stash.clear();
     }
 
     pub fn is_input_empty(&self) -> bool {

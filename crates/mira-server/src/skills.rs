@@ -41,6 +41,11 @@ pub struct SkillView {
     /// stable hash-derived tint.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// Slash-command alias this skill mounts on. `None` when the skill
+    /// opted out with `slash: false`. Browser front-ends can use this
+    /// to surface `/review` etc. in their own command palette.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slash: Option<String>,
     /// Which tier this skill came from. `bundled` = shipped in the
     /// binary; `user` = loaded from `~/.mira/skills/`; `project` =
     /// loaded from `<cwd>/.mira/skills/`. Distinguished by inspecting
@@ -86,6 +91,9 @@ pub struct SkillDetail {
     pub icon: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// Slash-command alias — see [`SkillView::slash`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slash: Option<String>,
     pub tier: SkillTier,
     /// The SKILL.md body — instructions the model reads when the skill
     /// is invoked. Rendered as markdown in the settings detail drawer.
@@ -116,6 +124,7 @@ pub async fn list_skills(State(state): State<AppState>) -> Json<SkillsResponse> 
             category: s.category.clone(),
             icon: s.icon.clone(),
             color: s.color.clone(),
+            slash: s.slash.clone(),
             tier: tier_of(s, &shared_dir, &user_dir, &project_dirs),
             has_attachments: !s.attached_files().is_empty(),
         })
@@ -179,6 +188,7 @@ pub async fn get_skill(
         category: s.category.clone(),
         icon: s.icon.clone(),
         color: s.color.clone(),
+        slash: s.slash.clone(),
         tier,
         body: s.body.clone(),
         attachments,

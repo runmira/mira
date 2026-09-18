@@ -73,6 +73,22 @@ pub struct Skill {
     /// palette; unknown names fall back to a stable hash-derived tint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// Slash-command alias mounted on this skill. When `Some("review")`,
+    /// the TUI treats `/review [args]` as "invoke the skill named by
+    /// `self.name` with these args" — a shortcut that saves the user
+    /// from typing "please use the code-review skill".
+    ///
+    /// Defaults, applied by [`parse_skill_md`]:
+    /// - unset frontmatter → `Some(self.name.clone())` (auto-mount)
+    /// - `slash: false`     → `None` (opt out — for skills that only
+    ///   make sense when the model picks them autonomously)
+    /// - `slash: <alias>`   → `Some(alias)` (rename, e.g. code-review
+    ///   → /review)
+    ///
+    /// Reserved slashes (`/help`, `/mode`, `/model`, …) always win over
+    /// a skill alias — the TUI drops the collision with a warning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slash: Option<String>,
     /// The markdown body — the actual step-by-step instructions the
     /// agent will follow when the skill is invoked. Wrapped in a
     /// `<system-reminder>` block on delivery so the model treats it as
@@ -363,6 +379,17 @@ pub fn parse_skill_md(raw: &str) -> Result<Skill> {
         icon: Option<String>,
         #[serde(default)]
         color: Option<String>,
+        /// Three shapes — an alias string, `false` (opt out), or omitted
+        /// (defaults to the skill's name). Modeled as untagged so YAML
+        /// can write `slash: review` or `slash: false` without wrapping.
+        #[serde(default)]
+        slash: Option<SlashSpec>,
+    }
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum SlashSpec {
+        Alias(String),
+        Enabled(bool),
     }
     let fm: Fm = serde_yaml::from_str(frontmatter).with_context(|| "parse YAML frontmatter")?;
     if fm.name.trim().is_empty() {
@@ -381,12 +408,29 @@ pub fn parse_skill_md(raw: &str) -> Result<Skill> {
             }
         })
     };
+    let name = fm.name.trim().to_owned();
+    // Resolve the slash alias. Default is auto-mount under the skill
+    // name so a brand-new SKILL.md gets its own `/name` for free.
+    let slash = match fm.slash {
+        None => Some(name.clone()),
+        Some(SlashSpec::Enabled(false)) => None,
+        Some(SlashSpec::Enabled(true)) => Some(name.clone()),
+        Some(SlashSpec::Alias(a)) => {
+            let t = a.trim().trim_start_matches('/').to_owned();
+            if t.is_empty() {
+                Some(name.clone())
+            } else {
+                Some(t)
+            }
+        }
+    };
     Ok(Skill {
-        name: fm.name.trim().to_owned(),
+        name,
         description: fm.description.trim().to_owned(),
         category: trim_or_none(fm.category),
         icon: trim_or_none(fm.icon),
         color: trim_or_none(fm.color),
+        slash,
         body: body.trim().to_owned(),
         source: None,
         source_dir: None,
@@ -432,6 +476,32 @@ mod tests {
         assert_eq!(s.description, "verify a change");
         assert_eq!(s.body, "Run the tests.");
         assert!(s.category.is_none());
+        // No `slash:` frontmatter → auto-mount under the skill name.
+        assert_eq!(s.slash.as_deref(), Some("verify"));
+    }
+
+    #[test]
+    fn slash_alias_wins() {
+        let raw =
+            "---\nname: code-review\ndescription: review\nslash: review\n---\nBody.\n";
+        let s = parse_skill_md(raw).unwrap();
+        assert_eq!(s.slash.as_deref(), Some("review"));
+    }
+
+    #[test]
+    fn slash_alias_strips_leading_slash() {
+        let raw =
+            "---\nname: code-review\ndescription: review\nslash: /review\n---\nBody.\n";
+        let s = parse_skill_md(raw).unwrap();
+        assert_eq!(s.slash.as_deref(), Some("review"));
+    }
+
+    #[test]
+    fn slash_false_opts_out() {
+        let raw =
+            "---\nname: internal-helper\ndescription: internal\nslash: false\n---\nBody.\n";
+        let s = parse_skill_md(raw).unwrap();
+        assert!(s.slash.is_none());
     }
 
     #[test]
@@ -527,7 +597,8 @@ mod tests {
                 category: None,
                 icon: None,
                 color: None,
-                body: "old body".into(),
+                slash: None,
+                body:"old body".into(),
                 source: None,
                 source_dir: None,
             },
@@ -541,7 +612,8 @@ mod tests {
                 category: None,
                 icon: None,
                 color: None,
-                body: "new body".into(),
+                slash: None,
+                body:"new body".into(),
                 source: None,
                 source_dir: None,
             },

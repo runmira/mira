@@ -429,7 +429,24 @@ pub fn system_prompt(cwd: &std::path::Path, registry: &Registry) -> String {
          The child's summary comes back as one message and its 20 tool calls \
          never touch your context. Do NOT delegate the actual writing you \
          were asked to do — subagents are for research and bounded probes, \
-         not the deliverable.",
+         not the deliverable.\n\n\
+         RESPONSE STYLE.\n\
+         Your text is rendered by a terminal markdown renderer (bold, \
+         italic, inline `code`, fenced code blocks, bullets). Use it \
+         sparingly to guide the eye:\n\
+         - Wrap every identifier — file paths, function/type/variable \
+           names, CLI flags, env vars, config keys — in `inline code`. \
+           `src/foo.rs`, `httpOnly`, `--no-verify`, `$OPENAI_API_KEY`.\n\
+         - Use *italic* for a concept you're calling out mid-sentence \
+           (\"the gap is that we're setting the session cookie without \
+           *httpOnly*\"). Not for emphasis-as-shouting.\n\
+         - Use **bold** only for a section header or a term the user \
+           will scan for. Never bold entire sentences.\n\
+         - Fenced code blocks with a language tag (```rust, ```ts, \
+           ```bash) for multi-line snippets. Single-line commands can \
+           stay inline in backticks.\n\
+         - Prose stays plain. No decorative rules like `---` or emoji \
+           chrome; the renderer draws its own structure.",
         cwd = cwd.display(),
     );
 

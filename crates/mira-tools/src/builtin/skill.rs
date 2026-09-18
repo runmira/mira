@@ -286,6 +286,7 @@ mod tests {
             category: None,
             icon: None,
             color: None,
+            slash: None,
             body: body.into(),
             source: None,
             source_dir: None,

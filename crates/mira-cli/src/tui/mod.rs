@@ -79,6 +79,8 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/save", "export the transcript as markdown"),
     ("/sessions", "list recent sessions in this folder"),
     ("/resume", "show shell command to resume a session"),
+    ("/budget", "cap this session's spend (e.g. /budget $2 · /budget off)"),
+    ("/cost", "print token & dollar breakdown for this session"),
     ("/clear", "clear the visible transcript"),
     ("/quit", "exit the TUI"),
 ];
@@ -168,7 +170,7 @@ async fn event_loop(
                 }
             }
             Some(evt) = next_agent_event(&mut agent_stream) => {
-                handle_harness_event(evt, &mut state, &mut agent_stream);
+                handle_harness_event(evt, &mut state, &mut agent_stream, &cfg.cwd).await;
             }
             Some(req) = cfg.approval_rx.recv() => {
                 let preview = mira_tools::compute_preview(&cfg.cwd, &req.call).await;
@@ -340,6 +342,32 @@ async fn handle_terminal_event(
     }
 }
 
+/// Drop the current harness stream and record a warning entry.
+/// Invoked from both Ctrl+C and (single-press) Esc during a turn, so
+/// the two shortcuts stay in sync — no risk of one leaving the state
+/// half-torn-down.
+fn interrupt_stream(
+    state: &mut TuiState,
+    agent_stream: &mut Option<BoxStream<'static, HarnessEvent>>,
+) {
+    if agent_stream.is_none() {
+        return;
+    }
+    let msg = match state.in_flight_tool() {
+        Some((name, args)) => {
+            let short = truncate_for_warning(&args, 80);
+            format!(
+                "interrupted while `{name}({short})` was running — tool result discarded"
+            )
+        }
+        None => "interrupted".to_owned(),
+    };
+    *agent_stream = None;
+    state.streaming = false;
+    state.stream_started_at = None;
+    state.push_warning(msg);
+}
+
 /// Scroll the transcript by `n` rows toward the top.
 fn scroll_up(state: &mut TuiState, n: u16) {
     state.follow_tail = false;
@@ -408,24 +436,7 @@ async fn handle_key(
 
     match (key.code, key.modifiers) {
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-            if agent_stream.is_some() {
-                // If a tool was in flight, name it in the warning so
-                // the user knows their `Ctrl+C` cut mid-execution and
-                // its result was thrown away.
-                let msg = match state.in_flight_tool() {
-                    Some((name, args)) => {
-                        let short = truncate_for_warning(&args, 80);
-                        format!(
-                            "interrupted while `{name}({short})` was running — tool result discarded"
-                        )
-                    }
-                    None => "interrupted".to_owned(),
-                };
-                *agent_stream = None;
-                state.streaming = false;
-                state.stream_started_at = None;
-                state.push_warning(msg);
-            }
+            interrupt_stream(state, agent_stream);
         }
         (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
             if state.is_input_empty() {
@@ -444,12 +455,30 @@ async fn handle_key(
             refresh_palette(state, cfg, file_index).await;
         }
         (KeyCode::Esc, _) => {
+            // Three-way route:
+            //   1. Turn in flight → single Esc interrupts (matches the
+            //      "esc to interrupt" hint in the streaming line).
+            //   2. Text in composer → Esc x2 clears the buffer.
+            //   3. Empty composer, idle → Esc x2 quits.
+            // Second-press behavior is set by `esc_pending`; the flash
+            // string tells the user what the *next* Esc will do so they
+            // don't guess.
+            if agent_stream.is_some() {
+                interrupt_stream(state, agent_stream);
+                state.esc_pending = false;
+                return;
+            }
             if state.esc_pending {
-                state.should_quit = true;
+                if !state.is_input_empty() {
+                    let _ = state.input_clear();
+                    state.flash = Some("input cleared".into());
+                } else {
+                    state.should_quit = true;
+                }
             } else {
                 state.esc_pending = true;
             }
-            return; // don't reset esc_pending below
+            return;
         }
         (KeyCode::Enter, m) if !m.intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL) => {
             if state.is_input_empty() || state.streaming {
@@ -458,14 +487,15 @@ async fn handle_key(
             let text = state.input_clear();
             state.palette = state::PaletteState::none();
             if text.starts_with('/') {
-                run_slash(&text, state, session, cfg).await;
+                // A slash command may either mutate local state (e.g. `/model`)
+                // or synthesize a user message to send (e.g. `/review`, which
+                // asks the model to invoke the code-review skill). Only the
+                // latter opens a stream.
+                if let Some(followup) = run_slash(&text, state, session, cfg).await {
+                    start_stream(state, session, agent_stream, followup).await;
+                }
             } else {
-                state.remember_submission(&text);
-                state.push_user(text.clone());
-                state.streaming = true;
-                state.stream_started_at = Some(std::time::Instant::now());
-                state.follow_tail = true;
-                *agent_stream = Some(session.send(text).await);
+                start_stream(state, session, agent_stream, text).await;
             }
         }
         // ---- composer editing ----
@@ -592,14 +622,19 @@ async fn handle_approval_key(key: KeyEvent, state: &mut TuiState, cfg: &TuiConfi
     // 'y' = allow once. 'n' / Esc = deny.
     if matches!(key.code, KeyCode::Char('a') | KeyCode::Char('A')) {
         if let Some(pending) = state.pending_approval.take() {
-            let msg = match TuiState::rule_for_call(&pending.request.call) {
+            // (#2, #8) Only log when we actually mutated policy —
+            // "session-allow: <rule>" is new state worth surfacing.
+            // A quiet "allowing once only" flash sufficed for the y
+            // path; a full info line every approval was noise.
+            match TuiState::rule_for_call(&pending.request.call) {
                 Some(rule) => match cfg.policy.lock().await.add_allow_rule(&rule) {
-                    Ok(_) => format!("[policy] session-allow: {rule}"),
-                    Err(e) => format!("[policy] couldn't add rule: {e}"),
+                    Ok(_) => state.push_info(format!("[policy] session-allow: {rule}")),
+                    Err(e) => state.push_warning(format!("[policy] couldn't add rule: {e}")),
                 },
-                None => "[policy] no exact rule for this tool — allowing once only".to_owned(),
-            };
-            state.push_info(msg);
+                None => {
+                    state.flash = Some("allowed once (no reusable rule)".into());
+                }
+            }
             let _ = pending.request.reply.send(true);
         }
         return;
@@ -751,10 +786,12 @@ fn open_palette(state: &mut TuiState, kind: Palette, matches: Vec<PaletteItem>) 
     };
 }
 
-/// Slash command palette source: built-in commands plus (when the user
-/// is typing after `/skill `) the loaded skill names.
-async fn slash_matches(_state: &TuiState, filter: &str, _cfg: &TuiConfig) -> Vec<PaletteItem> {
-    SLASH_COMMANDS
+/// Slash command palette source: built-in commands first, then any
+/// skill that mounts a slash alias (frontmatter `slash:` or default
+/// to the skill's name). Reserved built-ins shadow skill aliases so
+/// a rogue skill can't hijack `/quit`.
+async fn slash_matches(_state: &TuiState, filter: &str, cfg: &TuiConfig) -> Vec<PaletteItem> {
+    let mut items: Vec<PaletteItem> = SLASH_COMMANDS
         .iter()
         .filter(|(name, _)| name.trim_start_matches('/').to_ascii_lowercase().contains(filter))
         .map(|(name, desc)| PaletteItem {
@@ -762,7 +799,27 @@ async fn slash_matches(_state: &TuiState, filter: &str, _cfg: &TuiConfig) -> Vec
             title: (*name).to_owned(),
             detail: (*desc).to_owned(),
         })
-        .collect()
+        .collect();
+
+    let reg = cfg.skills.read().await.clone();
+    for s in reg.skills.values() {
+        let Some(alias) = s.slash.as_deref() else {
+            continue;
+        };
+        let slash = format!("/{alias}");
+        if is_reserved_slash(&slash) {
+            continue;
+        }
+        if !alias.to_ascii_lowercase().contains(filter) {
+            continue;
+        }
+        items.push(PaletteItem {
+            insert: slash.clone(),
+            title: slash,
+            detail: format!("skill · {}", s.description),
+        });
+    }
+    items
 }
 
 async fn ensure_file_index<'a>(
@@ -894,14 +951,27 @@ fn copy_to_clipboard(text: &str) {
     let _ = out.flush();
 }
 
-fn handle_harness_event(
+async fn handle_harness_event(
     evt: HarnessEvent,
     state: &mut TuiState,
     agent_stream: &mut Option<BoxStream<'static, HarnessEvent>>,
+    cwd: &std::path::Path,
 ) {
     match evt {
         HarnessEvent::Token(t) => state.append_token(&t),
-        HarnessEvent::ToolStart(call) => state.push_tool_call(&call),
+        HarnessEvent::ToolStart(call) => {
+            state.push_tool_call(&call);
+            // (ask 4) Compute the diff preview eagerly, not just on
+            // approval — otherwise session-allow'd `edit_file` /
+            // `write_file` calls render as a bare "edited /path (1
+            // replacement)" line with no coloured diff, which is the
+            // whole point of showing the change inline. `compute_preview`
+            // returns `None` for tools that don't produce diffs, so
+            // this is a no-op for `read_file`, `bash`, etc.
+            if let Some(p) = mira_tools::compute_preview(cwd, &call).await {
+                state.attach_preview(&call.id.to_string(), p);
+            }
+        }
         HarnessEvent::ToolEnd(result) => state.push_tool_result(&result),
         HarnessEvent::Warning(w) => state.push_warning(w),
         HarnessEvent::TurnComplete => {}
@@ -992,7 +1062,123 @@ fn handle_harness_event(
     }
 }
 
-async fn run_slash(cmd: &str, state: &mut TuiState, session: &Session, cfg: &mut TuiConfig) {
+/// Push a user message and open the harness stream — factored so the
+/// composer-enter path and slash-triggered skill invocations both hit
+/// the same wiring (`remember_submission`, follow_tail, stream_started_at).
+///
+/// If the session's cost has already exceeded `state.budget_usd`, this
+/// refuses to send and pushes a warning instead. The user's cap → the
+/// user's call: they either raise it (`/budget $X`) or clear it
+/// (`/budget off`) before the next turn goes out.
+async fn start_stream(
+    state: &mut TuiState,
+    session: &Session,
+    agent_stream: &mut Option<BoxStream<'static, HarnessEvent>>,
+    text: String,
+) {
+    if let Some(cap) = state.budget_usd {
+        if let Some(spent) = current_cost_usd(state) {
+            if spent >= cap {
+                state.push_warning(format!(
+                    "over budget — {} spent ≥ ${:.2} cap. \
+                     /budget off to keep going · /budget $X to raise",
+                    format_dollars_short(spent),
+                    cap,
+                ));
+                // Return the text to the composer so the user's message
+                // isn't silently lost by the guardrail.
+                let _ = state.input_replace(&text);
+                return;
+            }
+        }
+    }
+    state.remember_submission(&text);
+    state.push_user(text.clone());
+    state.streaming = true;
+    state.stream_started_at = Some(std::time::Instant::now());
+    state.follow_tail = true;
+    *agent_stream = Some(session.send(text).await);
+}
+
+/// Current session cost in USD, if the model is priced and the provider
+/// has reported at least one usage round. Mirrors the formula used in
+/// the header status strip so both surfaces agree.
+pub(super) fn current_cost_usd(state: &TuiState) -> Option<f64> {
+    let u = &state.usage;
+    if u.is_zero() {
+        return None;
+    }
+    mira_ai::cost_usd(
+        &state.model,
+        mira_ai::TokenUsage {
+            prompt_tokens: u.prompt_tokens.min(u32::MAX as u64) as u32,
+            completion_tokens: u.completion_tokens.min(u32::MAX as u64) as u32,
+            cached_input_tokens: u.cached_input_tokens.min(u32::MAX as u64) as u32,
+        },
+    )
+}
+
+/// Short USD format that keeps small values readable (`$0.024`) and
+/// large ones compact (`$12.4`). Mirrors the render.rs helper — kept
+/// as a private duplicate to avoid re-exporting a whole rendering
+/// module just for one formatter.
+fn format_dollars_short(d: f64) -> String {
+    if d >= 1.0 {
+        format!("${d:.2}")
+    } else {
+        format!("${d:.3}")
+    }
+}
+
+/// Parse the argument to `/budget`. Accepts `off`, `clear`, `none` for
+/// disable; otherwise strips a leading `$` and reads an f64.
+fn parse_budget(rest: &str) -> Result<Option<f64>, String> {
+    let t = rest.trim();
+    if t.is_empty() {
+        return Err("usage: /budget $X · /budget off".into());
+    }
+    if matches!(t.to_ascii_lowercase().as_str(), "off" | "clear" | "none") {
+        return Ok(None);
+    }
+    let raw = t.trim_start_matches('$').trim();
+    let n: f64 = raw
+        .parse()
+        .map_err(|_| format!("can't parse `{t}` as a dollar amount"))?;
+    if !n.is_finite() || n <= 0.0 {
+        return Err(format!("budget must be positive · got {t}"));
+    }
+    Ok(Some(n))
+}
+
+/// True when `head` (with the leading `/`) is one of the built-in slash
+/// commands. Built-ins always win over a skill alias — a skill named
+/// `mode.md` can't shadow `/mode`.
+fn is_reserved_slash(head: &str) -> bool {
+    SLASH_COMMANDS.iter().any(|(name, _)| *name == head)
+        || matches!(head, "/q" | "/?" | "/perms")
+}
+
+/// Look up a skill by its slash alias. Returns the underlying skill
+/// name so callers can synthesize an invocation regardless of whether
+/// the alias matches the skill's own name (`/verify` → `verify`) or
+/// renames it (`/review` → `code-review`).
+async fn find_skill_by_slash(
+    slash: &str,
+    skills: &mira_tools::builtin::skill::SkillHandle,
+) -> Option<String> {
+    let reg = skills.read().await.clone();
+    reg.skills
+        .values()
+        .find(|s| s.slash.as_deref() == Some(slash))
+        .map(|s| s.name.clone())
+}
+
+async fn run_slash(
+    cmd: &str,
+    state: &mut TuiState,
+    session: &Session,
+    cfg: &mut TuiConfig,
+) -> Option<String> {
     let mut parts = cmd.trim().splitn(2, ' ');
     let head = parts.next().unwrap_or("");
     let rest = parts.next().unwrap_or("").trim();
@@ -1022,12 +1208,28 @@ async fn run_slash(cmd: &str, state: &mut TuiState, session: &Session, cfg: &mut
             state.push_info(
                 "commands: /mode <plan|manual|auto|edit|yolo> · /model <id> · \
                  /goal <cond> · /goal status · /goal clear · /skills · \
-                 /skill <name> · /permissions [add \"Rule(...)\"] · \
+                 /skill <name> · /budget <$X|off> · \
+                 /permissions [add \"Rule(...)\"] · \
                  /undo [N] · /save [path] · /clear · /quit  ·  \
                  keys: @ file · / cmd · ctrl+r search · \
                  ctrl+y copy last reply · ctrl+e expand last tool · \
                  ctrl+w kill word",
             );
+            // Also enumerate the mounted skill slashes — they change
+            // per project, so hard-coding them in the line above would
+            // rot. `/skills` still shows the full detail view.
+            let reg = cfg.skills.read().await.clone();
+            let mut aliases: Vec<String> = reg
+                .skills
+                .values()
+                .filter_map(|s| s.slash.as_deref().map(|a| format!("/{a}")))
+                .filter(|s| !is_reserved_slash(s))
+                .collect();
+            aliases.sort();
+            aliases.dedup();
+            if !aliases.is_empty() {
+                state.push_info(format!("skill slashes: {}", aliases.join(" · ")));
+            }
         }
 
         "/goal" => run_goal_slash(rest, state, session).await,
@@ -1065,8 +1267,70 @@ async fn run_slash(cmd: &str, state: &mut TuiState, session: &Session, cfg: &mut
             }
         }
 
-        other => state.push_warning(format!("unknown command `{other}` — try /help")),
+        "/budget" => match parse_budget(rest) {
+            Ok(None) => {
+                state.budget_usd = None;
+                state.flash = Some("budget cleared".into());
+            }
+            Ok(Some(cap)) => {
+                state.budget_usd = Some(cap);
+                state.flash = Some(format!("budget → ${cap:.2}"));
+                if let Some(spent) = current_cost_usd(state) {
+                    if spent >= cap {
+                        state.push_warning(format!(
+                            "already at {} — next send blocked until you raise or clear the cap",
+                            format_dollars_short(spent)
+                        ));
+                    }
+                }
+            }
+            Err(msg) => state.push_warning(msg),
+        },
+
+        "/cost" => {
+            let u = state.usage;
+            if u.is_zero() {
+                state.push_info("no usage reported yet".to_string());
+            } else {
+                let mut line = format!(
+                    "cost · ↑{} ↓{} (cached {}) · {} rounds",
+                    u.prompt_tokens, u.completion_tokens, u.cached_input_tokens, u.rounds
+                );
+                if let Some(spent) = current_cost_usd(state) {
+                    line.push_str(&format!(" · {}", format_dollars_short(spent)));
+                    if let Some(cap) = state.budget_usd {
+                        let left = (cap - spent).max(0.0);
+                        line.push_str(&format!(
+                            " / ${cap:.2} cap · ${left:.3} left"
+                        ));
+                    }
+                } else if state.budget_usd.is_some() {
+                    line.push_str(" · (model unpriced — budget won't trip)");
+                }
+                state.push_info(line);
+            }
+        }
+
+        // Fall through to the skill registry: any skill whose
+        // frontmatter declares `slash: X` (default `X = skill.name`)
+        // mounts as `/X`. Reserved commands above always win.
+        other => {
+            let alias = other.trim_start_matches('/');
+            if let Some(skill_name) = find_skill_by_slash(alias, &cfg.skills).await {
+                state.flash = Some(format!("skill → {skill_name}"));
+                let arg_line = if rest.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n\nInvocation arg: {rest}")
+                };
+                return Some(format!(
+                    "Please invoke the `{skill_name}` skill.{arg_line}"
+                ));
+            }
+            state.push_warning(format!("unknown command `{other}` — try /help"));
+        }
     }
+    None
 }
 
 /// Dispatch for `/goal ...` — the sub-verb decides.
