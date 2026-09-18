@@ -2,8 +2,8 @@
 //!
 //! Both OpenRouter and OpenAI/Codex use identical S256 challenge
 //! semantics, so this module carries the reusable half. The
-//! provider-specific code (endpoint URLs, param names) lives in the
-//! provider submodule.
+//! provider-specific code (endpoint URLs, param names) lives in
+//! [`crate::providers`].
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;

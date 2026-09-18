@@ -1,38 +1,28 @@
-//! OpenRouter "Sign in with OpenRouter" — PKCE OAuth flow.
+//! Server axum handlers for the "Sign in with OpenRouter" PKCE flow.
 //!
-//! Flow:
+//! The pure OAuth mechanics (URL construction, code exchange, key
+//! yaml-mirroring) live in [`mira_auth::providers::openrouter`] +
+//! [`mira_auth::config`]. This file wires them into axum so the
+//! browser can drive the flow, and adds the server-only bits:
 //!
-//! 1. Frontend calls `POST /api/auth/openrouter/start`. We generate a
-//!    PKCE verifier + a flow_id, stash the verifier in `PendingFlowStore`
-//!    keyed by flow_id, and return the fully-formed authorize URL for
-//!    the UI to open in a new browser tab.
-//! 2. Browser lands on `openrouter.ai/auth?...`, user grants access.
-//! 3. OpenRouter redirects back to `GET /api/auth/openrouter/callback`
-//!    on our loopback listener with `?code=...&state=<flow_id>`.
-//! 4. We look up the verifier by flow_id, POST to
-//!    `openrouter.ai/api/v1/auth/keys` with the code + verifier, and
-//!    receive a `{ "key": "sk-or-..." }` response.
-//! 5. The key is written into `~/.mira/mira.yaml` under
-//!    `providers.openrouter.api_key`, the live provider is hot-swapped
-//!    the same way `PUT /api/settings` does it, and the browser sees a
-//!    tiny "you can close this tab" HTML page.
-//!
-//! Everything sensitive stays server-side: the verifier never leaves
-//! this process and the returned key is written straight to disk (mode
-//! 0600 on Unix — see `mira-config::save_global`) without ever passing
-//! back through the browser.
+//! * Server-side PKCE verifier storage (the frontend triggers `start`
+//!   and the browser triggers `callback` — the two sides don't share
+//!   process state, so we stash the verifier in [`super::PendingFlow`]).
+//! * Hot-swapping the live [`crate::provider::SwappableProvider`] the
+//!   moment we have a fresh key, so the very next chat call uses it.
 
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
 use axum::Json;
-use mira_config::{default_base_url_for, MiraConfig, ProviderConfig};
+use mira_auth::config as auth_config;
+use mira_auth::pkce::{gen_flow_id, gen_verifier};
+use mira_auth::providers::openrouter;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::state::AppState;
 
-use super::pkce::{code_challenge_s256, gen_flow_id, gen_verifier};
 use super::PendingFlow;
 
 /// Reply to `POST /api/auth/openrouter/start`. The UI opens `authorize_url`
@@ -46,7 +36,6 @@ pub struct StartResponse {
 
 pub async fn start(State(state): State<AppState>) -> Response {
     let verifier = gen_verifier();
-    let challenge = code_challenge_s256(&verifier);
     let flow_id = gen_flow_id();
 
     // Store server-side so we can validate the callback. Keyed by
@@ -55,26 +44,21 @@ pub async fn start(State(state): State<AppState>) -> Response {
     state.pending_oauth.lock().await.insert(
         flow_id.clone(),
         PendingFlow {
-            verifier,
-            provider: "openrouter".to_owned(),
+            verifier: verifier.clone(),
+            provider: openrouter::PROVIDER.to_owned(),
             started_at: std::time::Instant::now(),
         },
     );
 
-    // OpenRouter accepts `callback_url` as a query param on the
-    // authorize endpoint. We point it at our loopback callback route
-    // on this same server so no external URL registration is needed.
-    // The `state` param carries our flow_id round-trip.
+    // OpenRouter's PKCE flow accepts any caller-specified callback,
+    // so we point it back at our own axum route on the main server
+    // port. No temporary loopback needed here (unlike OpenAI's Codex
+    // client, which allow-lists 1455/1457 only).
     let callback = format!(
         "http://127.0.0.1:{}/api/auth/openrouter/callback",
         state.local_port
     );
-    let authorize_url = format!(
-        "https://openrouter.ai/auth?callback_url={cb}&code_challenge={ch}&code_challenge_method=S256&state={st}",
-        cb = urlencoding::encode(&callback),
-        ch = urlencoding::encode(&challenge),
-        st = urlencoding::encode(&flow_id),
-    );
+    let authorize_url = openrouter::authorize_url(&callback, &verifier, &flow_id);
 
     Json(StartResponse {
         authorize_url,
@@ -91,26 +75,14 @@ pub struct CallbackQuery {
     pub error_description: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-struct ExchangeBody<'a> {
-    code: &'a str,
-    code_verifier: &'a str,
-    code_challenge_method: &'a str,
-}
-
-#[derive(Debug, Deserialize)]
-struct ExchangeResponse {
-    key: String,
-}
-
 pub async fn callback(State(state): State<AppState>, Query(q): Query<CallbackQuery>) -> Response {
-    // Provider-declined case: OpenRouter appends `error` / `error_description`
-    // to the redirect when the user cancels or auth fails. Surface it to the
-    // browser as a friendly page so the user knows to close the tab.
+    // Provider-declined case: OpenRouter appends `error` /
+    // `error_description` to the redirect when the user cancels or
+    // auth fails. Surface it to the browser as a friendly page.
     if let Some(err) = q.error {
         let desc = q.error_description.as_deref().unwrap_or("no description");
         return html_page(
-            &format!("OpenRouter sign-in failed: {err}",),
+            &format!("OpenRouter sign-in failed: {err}"),
             &format!("Error: {err} — {desc}. You can close this tab."),
             false,
         );
@@ -141,7 +113,7 @@ pub async fn callback(State(state): State<AppState>, Query(q): Query<CallbackQue
             false,
         );
     };
-    if pending.provider != "openrouter" {
+    if pending.provider != openrouter::PROVIDER {
         return html_page(
             "OpenRouter sign-in failed",
             "Callback session mismatch. Please try again.",
@@ -149,79 +121,19 @@ pub async fn callback(State(state): State<AppState>, Query(q): Query<CallbackQue
         );
     }
 
-    // Exchange the authorization code for an API key.
-    let client = reqwest::Client::new();
-    let resp = match client
-        .post("https://openrouter.ai/api/v1/auth/keys")
-        .json(&ExchangeBody {
-            code: &code,
-            code_verifier: &pending.verifier,
-            code_challenge_method: "S256",
-        })
-        .send()
-        .await
-    {
-        Ok(r) => r,
+    // Exchange, mirror into yaml, hot-swap the live provider.
+    let key = match openrouter::exchange_code(&code, &pending.verifier).await {
+        Ok(k) => k,
         Err(e) => {
-            warn!(%e, "openrouter oauth: token exchange request failed");
+            warn!(%e, "openrouter oauth: exchange failed");
             return html_page(
                 "OpenRouter sign-in failed",
-                &format!("Couldn't reach openrouter.ai: {e}"),
+                &format!("Token exchange failed: {e}"),
                 false,
             );
         }
     };
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        warn!(%status, %body, "openrouter oauth: exchange returned non-2xx");
-        return html_page(
-            "OpenRouter sign-in failed",
-            &format!("Token exchange failed ({status}): {body}"),
-            false,
-        );
-    }
-    let exchange: ExchangeResponse = match resp.json().await {
-        Ok(v) => v,
-        Err(e) => {
-            warn!(%e, "openrouter oauth: bad json from exchange");
-            return html_page(
-                "OpenRouter sign-in failed",
-                &format!("Bad response from token exchange: {e}"),
-                false,
-            );
-        }
-    };
-
-    // Persist the key into ~/.mira/mira.yaml so the same
-    // ProviderConfig::resolved_api_key path used for every other
-    // provider just works. Also set default_provider so the UI
-    // immediately shows OpenRouter as the active choice.
-    let mut cfg = match MiraConfig::load_global() {
-        Ok(c) => c,
-        Err(e) => {
-            return html_page(
-                "OpenRouter sign-in failed",
-                &format!("Couldn't load config to persist key: {e}"),
-                false,
-            );
-        }
-    };
-    let entry = cfg
-        .providers
-        .entry("openrouter".to_owned())
-        .or_insert_with(|| ProviderConfig {
-            base_url: default_base_url_for("openrouter").map(str::to_owned),
-            ..Default::default()
-        });
-    entry.api_key = Some(exchange.key);
-    if entry.base_url.is_none() {
-        entry.base_url = default_base_url_for("openrouter").map(str::to_owned);
-    }
-    if cfg.default_provider.is_none() {
-        cfg.default_provider = Some("openrouter".to_owned());
-    }
-    if let Err(e) = cfg.save_global() {
+    if let Err(e) = auth_config::write_provider_key(openrouter::PROVIDER, &key) {
         return html_page(
             "OpenRouter sign-in failed",
             &format!("Got the key but couldn't save config: {e}"),
@@ -231,9 +143,14 @@ pub async fn callback(State(state): State<AppState>, Query(q): Query<CallbackQue
 
     // Hot-swap the live provider so the very next chat turn uses the
     // new key without a server restart. Same recipe as `put_settings`.
-    let provider = super::super::settings::build_provider_from(&cfg);
-    state.provider.set(provider);
-    crate::models::invalidate();
+    match mira_config::MiraConfig::load_global() {
+        Ok(cfg) => {
+            let provider = super::super::settings::build_provider_from(&cfg);
+            state.provider.set(provider);
+            crate::models::invalidate();
+        }
+        Err(e) => warn!(%e, "openrouter oauth: post-write config reload failed"),
+    }
 
     info!("openrouter oauth: sign-in complete; provider hot-swapped");
     html_page(
@@ -243,40 +160,12 @@ pub async fn callback(State(state): State<AppState>, Query(q): Query<CallbackQue
     )
 }
 
-/// Tiny self-contained HTML page rendered back to the browser at the
-/// end of the round trip. No frameworks, no assets — the whole page
-/// lives in this string. Success page auto-closes the tab after a
-/// couple seconds when the browser allows it.
+/// Wrap [`mira_auth::loopback::html_page`] into an axum `Response`.
+/// The loopback helper returns a plain string because it's also used
+/// by hand-rolled HTTP responders that don't have axum in scope; here
+/// we can lean on axum's `Html` extractor.
 fn html_page(title: &str, body: &str, success: bool) -> Response {
-    let color = if success { "#22c55e" } else { "#ef4444" };
-    let auto_close = if success {
-        "<script>setTimeout(() => window.close(), 1500);</script>"
-    } else {
-        ""
-    };
-    let html = format!(
-        r#"<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <title>Mira — {title}</title>
-    <style>
-      body {{ background: #0b0b0b; color: #eaeaea; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; height: 100vh; display: flex; align-items: center; justify-content: center; }}
-      .card {{ text-align: center; padding: 24px 32px; border: 1px solid #222; border-radius: 12px; background: #131313; max-width: 480px; }}
-      .dot {{ display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: {color}; margin-right: 8px; vertical-align: middle; }}
-      h1 {{ font-size: 16px; margin: 0 0 12px 0; font-weight: 600; }}
-      p {{ font-size: 14px; margin: 0; color: #b0b0b0; }}
-    </style>
-  </head>
-  <body>
-    <div class="card">
-      <h1><span class="dot"></span>{title}</h1>
-      <p>{body}</p>
-    </div>
-    {auto_close}
-  </body>
-</html>"#
-    );
+    let html = mira_auth::loopback::html_page(title, body, success);
     let status = if success {
         StatusCode::OK
     } else {

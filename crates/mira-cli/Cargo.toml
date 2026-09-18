@@ -23,6 +23,7 @@ mira-harness  = { workspace = true }
 mira-review   = { workspace = true }
 mira-skills   = { workspace = true }
 mira-server   = { workspace = true }
+mira-auth     = { workspace = true }
 
 async-trait        = { workspace = true }
 tokio              = { workspace = true }

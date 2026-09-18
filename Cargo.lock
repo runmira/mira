@@ -1584,6 +1584,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "mira-auth"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "mira-config",
+ "rand 0.8.8",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "urlencoding",
+]
+
+[[package]]
 name = "mira-cli"
 version = "0.2.0"
 dependencies = [
@@ -1594,6 +1612,7 @@ dependencies = [
  "crossterm",
  "futures",
  "mira-ai",
+ "mira-auth",
  "mira-config",
  "mira-core",
  "mira-harness",
@@ -1721,12 +1740,12 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
- "base64 0.22.1",
  "futures",
  "include_dir",
  "mime_guess",
  "mira-agents",
  "mira-ai",
+ "mira-auth",
  "mira-config",
  "mira-core",
  "mira-harness",
@@ -1738,11 +1757,9 @@ dependencies = [
  "mira-tools",
  "notify",
  "once_cell",
- "rand 0.8.8",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
- "sha2",
  "shellexpand",
  "tempfile",
  "thiserror 2.0.20",
@@ -1751,7 +1768,6 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
- "urlencoding",
  "uuid",
 ]
 

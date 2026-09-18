@@ -5,6 +5,7 @@ mod doctor;
 mod eval;
 mod goal;
 mod init;
+mod login;
 mod memory;
 mod models;
 mod permissions;
@@ -122,6 +123,12 @@ enum Command {
     /// Set, clear, inspect, or resume the standing `/goal` on the
     /// most recent session for the current folder.
     Goal(goal::GoalArgs),
+    /// Sign in with a provider via browser OAuth (openrouter, openai).
+    Login(login::LoginArgs),
+    /// Forget a provider's credentials from mira.yaml + auth store.
+    Logout(login::LogoutArgs),
+    /// Inspect sign-in status or force-refresh a token bundle.
+    Auth(login::AuthArgs),
 }
 
 #[tokio::main]
@@ -144,6 +151,9 @@ async fn main() -> Result<()> {
             Command::Eval(args) => eval::run(&cli, args).await,
             Command::Memory(args) => memory::run(&cli, args).await,
             Command::Goal(args) => goal::run(&cli, args).await,
+            Command::Login(args) => login::run_login(args).await,
+            Command::Logout(args) => login::run_logout(args).await,
+            Command::Auth(args) => login::run_auth(args).await,
         };
     }
 
@@ -152,6 +162,12 @@ async fn main() -> Result<()> {
     init_tracing(use_tui);
 
     let cwd = std::env::current_dir().context("failed to read cwd")?;
+    // If an OAuth-managed provider (openai) is close to expiry, refresh
+    // the bundle synchronously before we load config — otherwise the
+    // stale api_key in yaml would flow into the provider build below
+    // and the first chat turn would 401. Fast no-op when no bundle is
+    // stored or the current key is still fresh.
+    login::auto_refresh_if_needed().await;
     let cfg = MiraConfig::load(&cwd).context("load config")?;
     // Materialise `keys:` into the process env so tools like web_search
     // read them via their existing env-var conventions without extra
