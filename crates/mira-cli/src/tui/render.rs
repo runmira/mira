@@ -13,30 +13,25 @@ use crate::tui::state::{LogEntry, Palette, TuiState};
 
 // ---- Palette ----
 //
-// Loaded once on first use from `~/.mira/theme.yaml`, falling through
-// per-key to a warm salmon + cream default. Truecolor-only — 16-color
-// terminals fall back to their closest match automatically via
-// ratatui/crossterm. Every callsite uses the identifier bare — the
-// `LazyLock` derefs to `Color` in method-call position, and we spell
-// it `*NAME` in the few argument-position uses.
+// Backed by `crate::tui::theme` — an `RwLock`-guarded global that
+// `/theme <name>`, `/theme reload`, and `/theme save` mutate at
+// runtime. Every callsite goes through one of the shim fns below;
+// each is a single read-lock acquisition, cheap enough for the 100ms
+// render tick.
+//
+// Truecolor-only — 16-color terminals fall back to their closest
+// match automatically via ratatui/crossterm.
 
 use crate::tui::theme;
-use std::sync::LazyLock;
 
-static THEME: LazyLock<theme::Theme> = LazyLock::new(theme::load);
-
-/// `Color`-returning getters. Each is a two-line fn instead of a
-/// `LazyLock<Color>` so callers can still write `Style::default().fg(SALMON())`
-/// without an explicit deref. `#[inline]` lets the compiler fold the
-/// call into a single load of the static. Names stay uppercase to
-/// signal "palette constant" at every callsite even though Rust
-/// convention normally wants snake_case for functions.
-#[allow(non_snake_case)] #[inline] fn SALMON() -> Color   { THEME.salmon }
-#[allow(non_snake_case)] #[inline] fn CREAM() -> Color    { THEME.cream }
-#[allow(non_snake_case)] #[inline] fn MUTED() -> Color    { THEME.muted }
-#[allow(non_snake_case)] #[inline] fn DIM() -> Color      { THEME.dim }
-#[allow(non_snake_case)] #[inline] fn HAIRLINE() -> Color { THEME.hairline }
-#[allow(non_snake_case)] #[inline] fn PROSE() -> Color    { THEME.prose }
+/// Names stay uppercase to signal "palette constant" at every callsite
+/// even though Rust convention normally wants snake_case for functions.
+#[allow(non_snake_case)] #[inline] fn SALMON() -> Color   { theme::current().salmon }
+#[allow(non_snake_case)] #[inline] fn CREAM() -> Color    { theme::current().cream }
+#[allow(non_snake_case)] #[inline] fn MUTED() -> Color    { theme::current().muted }
+#[allow(non_snake_case)] #[inline] fn DIM() -> Color      { theme::current().dim }
+#[allow(non_snake_case)] #[inline] fn HAIRLINE() -> Color { theme::current().hairline }
+#[allow(non_snake_case)] #[inline] fn PROSE() -> Color    { theme::current().prose }
 
 /// Mira's brand mark — the script-M is the closest Unicode analogue
 /// of the flowing wave/M in the vector logo. Rendered wherever the

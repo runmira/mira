@@ -89,6 +89,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/resume", "show shell command to resume a session"),
     ("/budget", "cap this session's spend (e.g. /budget $2 · /budget off)"),
     ("/cost", "print token & dollar breakdown for this session"),
+    ("/theme", "swap palette (`/theme` · `/theme <name>` · `/theme reload` · `/theme save`)"),
     ("/clear", "clear the visible transcript"),
     ("/quit", "exit the TUI"),
 ];
@@ -1202,6 +1203,57 @@ fn parse_budget(rest: &str) -> Result<Option<f64>, String> {
     Ok(Some(n))
 }
 
+/// `/theme` sub-dispatch.
+///
+/// Shape:
+/// - `/theme`            — list bundled presets + point at the yaml.
+/// - `/theme <name>`     — apply a bundled preset (in-memory).
+/// - `/theme reload`     — re-read `~/.mira/theme.yaml`.
+/// - `/theme save`       — write the current palette to yaml (persists).
+fn run_theme_slash(rest: &str, state: &mut TuiState) {
+    let rest = rest.trim();
+    if rest.is_empty() {
+        state.push_info(format!(
+            "theme file: {}",
+            crate::tui::theme::theme_path().display()
+        ));
+        state.push_info("presets:".to_string());
+        for (name, _, desc) in crate::tui::theme::PRESETS {
+            state.push_info(format!("  {name:<10} — {desc}"));
+        }
+        state.push_info(
+            "usage: /theme <name> · /theme reload · /theme save".to_string(),
+        );
+        return;
+    }
+    match rest {
+        "reload" => match crate::tui::theme::reload() {
+            Ok(path) => {
+                state.flash = Some("theme reloaded".into());
+                state.push_info(format!("theme ← {}", path.display()));
+            }
+            Err(e) => state.push_warning(format!("reload failed: {e}")),
+        },
+        "save" => match crate::tui::theme::save_current_to_disk() {
+            Ok(path) => {
+                state.flash = Some("theme saved".into());
+                state.push_info(format!("theme → {}", path.display()));
+            }
+            Err(e) => state.push_warning(format!("save failed: {e}")),
+        },
+        name => match crate::tui::theme::preset(name) {
+            Some((t, desc)) => {
+                crate::tui::theme::set(t);
+                state.flash = Some(format!("theme → {name}"));
+                state.push_info(format!("theme · {name} — {desc}"));
+            }
+            None => state.push_warning(format!(
+                "unknown theme `{name}` — try /theme to list presets"
+            )),
+        },
+    }
+}
+
 /// True when `head` (with the leading `/`) is one of the built-in slash
 /// commands. Built-ins always win over a skill alias — a skill named
 /// `mode.md` can't shadow `/mode`.
@@ -1362,6 +1414,8 @@ async fn run_slash(
                 state.push_info(line);
             }
         }
+
+        "/theme" => run_theme_slash(rest, state),
 
         // Fall through to the skill registry: any skill whose
         // frontmatter declares `slash: X` (default `X = skill.name`)
