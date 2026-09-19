@@ -99,6 +99,30 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
 /// look hung.
 const STREAM_TICK: std::time::Duration = std::time::Duration::from_millis(100);
 
+/// Duration a provider-error flash stays visible on the status row.
+/// One second lands as "a beat you can't miss" without wasting screen
+/// space on a persistent banner — the yellow warning line is still
+/// there in the transcript for the details.
+const ERROR_FLASH_DURATION: std::time::Duration = std::time::Duration::from_millis(1000);
+
+/// Pull a short label out of a provider-error warning when the
+/// warning names an auth or rate-limit failure. Returns `None` for
+/// anything else — we don't want to red-flash on every warning, only
+/// the ones that mean the model won't respond until the user acts.
+fn classify_provider_error(msg: &str) -> Option<String> {
+    let m = msg.to_ascii_lowercase();
+    if m.contains(" 401") || m.contains("unauthorized") || m.contains("invalid api key") {
+        return Some("provider 401 — check API key".to_owned());
+    }
+    if m.contains(" 429") || m.contains("rate limit") || m.contains("rate_limited") || m.contains("too many requests") {
+        return Some("provider 429 — rate limited".to_owned());
+    }
+    if m.contains(" 403") || m.contains("forbidden") {
+        return Some("provider 403 — access denied".to_owned());
+    }
+    None
+}
+
 pub async fn run(session: Session, cfg: TuiConfig) -> Result<()> {
     let mut terminal = enter()?;
     // Track the terminating state's mouse-capture flag so `leave`
@@ -199,6 +223,11 @@ async fn event_loop(
             // elapsed counter advances even during silent gaps. Guard
             // with `state.streaming` so we don't burn CPU when idle.
             _ = tokio::time::sleep(STREAM_TICK), if state.streaming => {}
+            // Redraw tick during an error flash so the red bar clears
+            // itself once the deadline passes without the user having
+            // to press a key. Cheap — fires at most a handful of
+            // times per flash.
+            _ = tokio::time::sleep(STREAM_TICK), if state.error_flash_active() => {}
         }
 
         if state.should_quit {
@@ -277,7 +306,7 @@ async fn hydrate_from_history(session: &Session, state: &mut TuiState) {
         state.push_info(format!("  │   cwd  {cwd_short}"));
         state.push_info("  │".to_string());
         state.push_info("  │   / commands   @ files   shift+tab mode   ctrl+r search".to_string());
-        state.push_info("  │   ctrl+e expand tool   alt+↑↓ scroll   esc esc quit".to_string());
+        state.push_info("  │   ctrl+↑↓ prev/next turn   alt+↑↓ scroll   ctrl+e expand tool   esc esc quit".to_string());
         state.push_info("  ╰─".to_string());
         state.push_info("".to_string());
         return;
@@ -338,9 +367,12 @@ async fn handle_terminal_event(
 ) {
     match evt {
         Event::Paste(s) => {
-            state.input_push_str(&s);
+            handle_paste(&s, state);
             state.esc_pending = false;
-            state.flash = None;
+            // Don't clobber the flash — `handle_paste` sets it on a
+            // large-paste collapse so the user gets confirmation the
+            // 500 lines they just dropped in are safely stashed and
+            // will expand on submit.
             refresh_palette(state, cfg, file_index).await;
         }
         Event::Key(k) if k.kind == crossterm::event::KeyEventKind::Press => {
@@ -349,6 +381,27 @@ async fn handle_terminal_event(
         Event::Mouse(m) => handle_mouse(m, state),
         _ => {}
     }
+}
+
+/// Route bracketed-paste content: small pastes go straight into the
+/// composer as normal text; large ones get stashed as a
+/// `[[paste:N]]` placeholder rendered as `[pasted N lines]`. Split
+/// out so the composer's `Ctrl+V` (via bracketed paste) and any
+/// future `/paste` command hit the same collapsing logic.
+fn handle_paste(s: &str, state: &mut TuiState) {
+    let line_count = s.matches('\n').count() + 1;
+    let char_count = s.chars().count();
+    let big = line_count >= state::PASTE_COLLAPSE_LINES
+        || char_count >= state::PASTE_COLLAPSE_CHARS;
+    if !big {
+        state.input_push_str(s);
+        return;
+    }
+    let token = state.stash_paste(s.to_owned());
+    state.input_push_str(&token);
+    state.flash = Some(format!(
+        "collapsed paste ({line_count} lines) — enter sends full text, ctrl+x to remove"
+    ));
 }
 
 /// Drop the current harness stream and record a warning entry.
@@ -403,6 +456,75 @@ fn scroll_down(state: &mut TuiState, n: u16) {
 fn page_step(state: &TuiState) -> u16 {
     let vh = state.viewport_height.max(4);
     vh.saturating_sub(2).max(1)
+}
+
+/// Ctrl+↑ — step to the previous user prompt. Sets `follow_tail = false`
+/// so the transcript stays put, then defers to the render layer's
+/// `entry_row_starts` (via a hint stored on state) to scroll it in.
+fn jump_to_prev_user_turn(state: &mut TuiState) {
+    let anchor = state.turn_nav_anchor();
+    let next = match anchor {
+        Some(idx) => state.user_entry_before(idx),
+        None => state.prev_user_entry_idx(state.scroll),
+    };
+    match next {
+        Some(idx) => {
+            state.set_turn_nav_anchor(Some(idx));
+            state.turn_scroll_target = Some(idx);
+            state.follow_tail = false;
+            state.flash = Some(format!(
+                "turn {}/{}",
+                user_ordinal(state, idx),
+                user_count(state)
+            ));
+        }
+        None => {
+            state.flash = Some("no earlier user turn".into());
+        }
+    }
+}
+
+/// Ctrl+↓ — step to the next user prompt (or the tail if we've reached
+/// the last one).
+fn jump_to_next_user_turn(state: &mut TuiState) {
+    let anchor = state.turn_nav_anchor();
+    let next = anchor.and_then(|idx| state.user_entry_after(idx));
+    match next {
+        Some(idx) => {
+            state.set_turn_nav_anchor(Some(idx));
+            state.turn_scroll_target = Some(idx);
+            state.follow_tail = false;
+            state.flash = Some(format!(
+                "turn {}/{}",
+                user_ordinal(state, idx),
+                user_count(state)
+            ));
+        }
+        None => {
+            // Past the newest turn — snap back to live tail.
+            state.set_turn_nav_anchor(None);
+            state.follow_tail = true;
+            state.turn_scroll_target = None;
+            state.flash = Some("caught up".into());
+        }
+    }
+}
+
+fn user_ordinal(state: &TuiState, idx: usize) -> usize {
+    state
+        .entries()
+        .iter()
+        .take(idx + 1)
+        .filter(|e| matches!(e, state::LogEntry::User { .. }))
+        .count()
+}
+
+fn user_count(state: &TuiState) -> usize {
+    state
+        .entries()
+        .iter()
+        .filter(|e| matches!(e, state::LogEntry::User { .. }))
+        .count()
 }
 
 fn handle_mouse(m: MouseEvent, state: &mut TuiState) {
@@ -493,7 +615,14 @@ async fn handle_key(
             if state.is_input_empty() || state.streaming {
                 return;
             }
-            let text = state.input_clear();
+            let raw = state.input_clear();
+            // Expand `[[paste:N]]` placeholders back to their full
+            // content before shipping the message off. Then drop the
+            // stashed pastes so a subsequent turn starts clean — the
+            // full text now lives in the transcript entry that
+            // push_user records below.
+            let text = state.expand_pastes(&raw);
+            state.pastes.clear();
             state.palette = state::PaletteState::none();
             if text.starts_with('/') {
                 // A slash command may either mutate local state (e.g. `/model`)
@@ -556,6 +685,18 @@ async fn handle_key(
             state.kill_to_line_end();
             refresh_palette(state, cfg, file_index).await;
         }
+        (KeyCode::Char('x'), KeyModifiers::CONTROL) => {
+            // Ctrl+X removes the collapsed paste placeholder under
+            // (or immediately next to) the caret. Silent no-op when
+            // the cursor isn't inside one — we don't want to hijack
+            // the shortcut in the general case.
+            if state.remove_paste_at_cursor() {
+                state.flash = Some("paste removed".into());
+                refresh_palette(state, cfg, file_index).await;
+                state.esc_pending = false;
+                return;
+            }
+        }
         (KeyCode::Char('y'), KeyModifiers::CONTROL) => match state.last_assistant_text() {
             Some(text) => {
                 copy_to_clipboard(text);
@@ -610,6 +751,21 @@ async fn handle_key(
         // Must come before the bare `(Up, _)` history arm below.
         (KeyCode::Up, KeyModifiers::ALT) => scroll_up(state, 1),
         (KeyCode::Down, KeyModifiers::ALT) => scroll_down(state, 1),
+        // Ctrl+Up / Ctrl+Down jumps between user turns. Anchored so a
+        // sequence of presses walks steadily back through history
+        // rather than snapping to the newest turn every time. Returns
+        // early so the `turn 3/5` flash survives past the trailing
+        // `state.flash = None` clear that closes the handler.
+        (KeyCode::Up, KeyModifiers::CONTROL) => {
+            jump_to_prev_user_turn(state);
+            state.esc_pending = false;
+            return;
+        }
+        (KeyCode::Down, KeyModifiers::CONTROL) => {
+            jump_to_next_user_turn(state);
+            state.esc_pending = false;
+            return;
+        }
         (KeyCode::PageUp, _) => scroll_up(state, page_step(state)),
         (KeyCode::PageDown, _) => scroll_down(state, page_step(state)),
         // ---- history recall ----
@@ -744,6 +900,11 @@ fn accept_palette(state: &mut TuiState) {
             let cursor = new_input.len();
             replace_input(state, new_input, cursor);
         }
+        Palette::SavePath => {
+            let new_input = format!("/save {}", item.insert);
+            let cursor = new_input.len();
+            replace_input(state, new_input, cursor);
+        }
         Palette::None => {}
     }
     state.palette = state::PaletteState::none();
@@ -797,6 +958,19 @@ async fn refresh_palette(
         let filter = filter.trim_start().to_ascii_lowercase();
         let matches = theme_matches(&filter);
         open_palette(state, Palette::Theme, matches);
+        return;
+    }
+
+    // `/save <partial-path>` — reuse the rg-driven file index for
+    // completion so the pattern matches `@file`. Also offers
+    // sensible defaults (`transcript.md`, dated timestamp) when the
+    // arg is empty. Matches Aider/Claude Code's tab-completion feel
+    // on filenames.
+    if let Some(filter) = state.input().strip_prefix("/save ") {
+        let filter = filter.trim_start();
+        let files = ensure_file_index(file_index, &cfg.cwd).await;
+        let matches = save_path_matches(files, filter, &cfg.cwd);
+        open_palette(state, Palette::SavePath, matches);
         return;
     }
 
@@ -954,6 +1128,63 @@ async fn list_files(cwd: &std::path::Path) -> Vec<String> {
     .unwrap_or_default()
 }
 
+/// Completions for `/save <path>` — first the two ready-to-pick
+/// defaults (`transcript.md` under cwd, a dated one under `.mira/`),
+/// then the file index filtered by substring so the user can
+/// overwrite an existing file with tab-completion.
+fn save_path_matches(files: &[String], filter: &str, cwd: &std::path::Path) -> Vec<PaletteItem> {
+    let filter = filter.trim();
+    let filter_lc = filter.to_ascii_lowercase();
+    let mut out: Vec<PaletteItem> = Vec::new();
+
+    // Suggest defaults regardless of filter — they lead the list when
+    // the arg is empty, and fall behind exact substrings otherwise.
+    if filter.is_empty() {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        out.push(PaletteItem {
+            insert: "transcript.md".to_owned(),
+            title: "transcript.md".to_owned(),
+            detail: format!("into {}", cwd.display()),
+        });
+        out.push(PaletteItem {
+            insert: format!(".mira/transcript-{ts}.md"),
+            title: format!(".mira/transcript-{ts}.md"),
+            detail: "dated · under .mira/".to_owned(),
+        });
+    }
+
+    let mut scored: Vec<(u32, &String)> = files
+        .iter()
+        .filter_map(|f| {
+            if filter.is_empty() {
+                return Some((3, f));
+            }
+            let hay = f.to_ascii_lowercase();
+            if hay.starts_with(&filter_lc) {
+                Some((0, f))
+            } else if hay.contains(&filter_lc) {
+                Some((1, f))
+            } else if fuzzy_subseq(&hay, &filter_lc) {
+                Some((2, f))
+            } else {
+                None
+            }
+        })
+        .collect();
+    scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.len().cmp(&b.1.len())));
+    for (_, f) in scored.into_iter().take(20) {
+        out.push(PaletteItem {
+            insert: f.clone(),
+            title: f.clone(),
+            detail: "overwrite".to_owned(),
+        });
+    }
+    out
+}
+
 fn at_file_matches(files: &[String], filter: &str) -> Vec<PaletteItem> {
     let filter = filter.trim();
     let mut scored: Vec<(u32, &String)> = files
@@ -1073,7 +1304,16 @@ async fn handle_harness_event(
             }
         }
         HarnessEvent::ToolEnd(result) => state.push_tool_result(&result),
-        HarnessEvent::Warning(w) => state.push_warning(w),
+        HarnessEvent::Warning(w) => {
+            // Auth / rate-limit warnings are silent-killers if they
+            // scroll past as a yellow line — mira looks "hung" while
+            // the user misses the 401. Detect them here and paint the
+            // status row red for a beat so it's impossible to ignore.
+            if let Some(label) = classify_provider_error(&w) {
+                state.error_flash(label, ERROR_FLASH_DURATION);
+            }
+            state.push_warning(w);
+        }
         HarnessEvent::TurnComplete => {}
         HarnessEvent::Usage { totals, .. } => state.usage = totals,
         HarnessEvent::MemoryLearned { count } => {
@@ -1155,6 +1395,15 @@ async fn handle_harness_event(
             // skip the harness-side preview to avoid double rendering.
         }
         HarnessEvent::Done => {
+            // Stamp the completed user turn with its wall-clock reply
+            // time so the transcript grows a `· 12.4s` chip below the
+            // `> user` line. Cap at u32 max in case a stream ran for
+            // days (would only happen with a broken provider — no
+            // reason to widen the field for it).
+            if let Some(t0) = state.stream_started_at {
+                let ms = t0.elapsed().as_millis().min(u32::MAX as u128) as u32;
+                state.record_last_user_elapsed(ms);
+            }
             state.streaming = false;
             state.stream_started_at = None;
             *agent_stream = None;
@@ -1364,7 +1613,7 @@ async fn run_slash(
                  /undo [N] · /save [path] · /clear · /quit  ·  \
                  keys: @ file · / cmd · ctrl+r search · \
                  ctrl+y copy last reply · ctrl+e expand last tool · \
-                 ctrl+w kill word",
+                 ctrl+w kill word · ctrl+↑↓ jump turns · ctrl+x drop paste",
             );
             // Also enumerate the mounted skill slashes — they change
             // per project, so hard-coding them in the line above would
@@ -1684,9 +1933,12 @@ fn run_save_slash(rest: &str, state: &mut TuiState, cwd: &std::path::Path) {
     let mut out = String::new();
     for e in state.entries() {
         match e {
-            state::LogEntry::User(s) => {
+            state::LogEntry::User { text, elapsed_ms } => {
                 out.push_str("**you:** ");
-                out.push_str(s);
+                out.push_str(text);
+                if let Some(ms) = elapsed_ms {
+                    out.push_str(&format!("  _· reply in {:.1}s_", *ms as f32 / 1000.0));
+                }
                 out.push_str("\n\n");
             }
             state::LogEntry::Assistant(s) => {

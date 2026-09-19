@@ -33,7 +33,15 @@ const MAX_ENTRIES: usize = 500;
 /// streaming reply reads as one paragraph, not one entry per token.
 #[derive(Clone, Debug)]
 pub enum LogEntry {
-    User(String),
+    User {
+        text: String,
+        /// Wall-clock milliseconds between `start_stream` and the first
+        /// `HarnessEvent::Done` that landed after it. Rendered as a
+        /// `· 12.4s` chip on the `> user` prompt line so users can see
+        /// how long the model took to reply. `None` for in-flight
+        /// turns and for replays from disk (no start timestamp).
+        elapsed_ms: Option<u32>,
+    },
     Assistant(String),
     ToolCall {
         name: String,
@@ -84,6 +92,10 @@ pub enum Palette {
     /// Fires when the composer starts with `/theme ` — completions
     /// are the bundled presets plus the `reload` / `save` verbs.
     Theme,
+    /// Fires when the composer starts with `/save ` — completions
+    /// come from the file index (same rg output the `@file` picker
+    /// uses) plus a handful of sensible defaults.
+    SavePath,
 }
 
 pub struct PaletteState {
@@ -198,7 +210,68 @@ pub struct TuiState {
     /// Ctrl+R search mode. `None` when off; when set, the overlay is
     /// active and typing goes to the query instead of the composer.
     pub search: Option<SearchState>,
+    /// Live pastes stashed out of the composer buffer. When a bracketed
+    /// paste larger than [`PASTE_COLLAPSE_LINES`] arrives, the actual
+    /// content lands here and the composer gets a `[[paste:<id>]]`
+    /// placeholder — rendered visually as `[pasted N lines]`. On
+    /// submit, [`Self::expand_pastes`] swaps placeholders back for
+    /// their full text. Cleared with the composer.
+    pub pastes: Vec<PasteChunk>,
+    /// Next id for [`Self::stash_paste`]. Monotonic per TUI process —
+    /// never re-used within a session so the placeholder-to-content
+    /// map stays stable even after some pastes are removed.
+    next_paste_id: u32,
+    /// When non-`None`, the status bar paints a red `!` chip until this
+    /// instant. Fired by [`Self::error_flash`] on provider 401/429
+    /// warnings — a full-second visual beat that's harder to miss
+    /// than a yellow line scrolling past. Cleared naturally once
+    /// `Instant::now()` passes the deadline.
+    pub error_flash_until: Option<Instant>,
+    /// One-line label for the current error flash — shown red-bg in
+    /// the status row while [`Self::error_flash_until`] is live.
+    pub error_flash_label: Option<String>,
+    /// Anchor entry index for turn-nav (`Ctrl+↑` / `Ctrl+↓`). Persisted
+    /// across presses so a sequence steps backwards through the user
+    /// prompts one at a time. Reset any time the composer accepts a
+    /// keystroke or a new user message lands.
+    turn_nav_idx: Option<usize>,
+    /// One-shot scroll request from the key handler to the render
+    /// layer: "scroll so entry `idx` sits near the top of the visible
+    /// area." Consumed on the next draw so a follow-up scroll from
+    /// the user doesn't get stomped.
+    pub turn_scroll_target: Option<usize>,
 }
+
+/// Placeholder token that stands in for a stashed paste inside
+/// `state.input`. Kept short so a normal-width composer can hold
+/// several placeholders without wrapping; the visible rendering is
+/// `[pasted N lines]`, done at draw time.
+pub fn paste_placeholder(id: u32) -> String {
+    format!("[[paste:{id}]]")
+}
+
+/// A collapsed paste, stashed out of the composer buffer. See
+/// [`TuiState::pastes`].
+#[derive(Clone, Debug)]
+pub struct PasteChunk {
+    pub id: u32,
+    /// Full pasted content, verbatim.
+    pub content: String,
+    /// Line count at stash time — cached so we don't recount for the
+    /// placeholder label on every render.
+    pub lines: usize,
+}
+
+/// Any bracketed paste with at least this many lines (or a hard char
+/// count above [`PASTE_COLLAPSE_CHARS`]) gets collapsed to a
+/// placeholder. Chosen so a normal multi-line message you meant to
+/// paste (5-10 lines of context) still lives in the composer, but a
+/// 500-line dump doesn't scroll it off screen.
+pub const PASTE_COLLAPSE_LINES: usize = 12;
+/// Character cap — long single-line pastes (e.g. a full URL-encoded
+/// blob or a wide one-line CSV) also count as "big" even if they
+/// don't have many newlines.
+pub const PASTE_COLLAPSE_CHARS: usize = 800;
 
 /// Reverse-search state — populated when Ctrl+R is pressed.
 ///
@@ -241,7 +314,176 @@ impl TuiState {
             mouse_capture: false,
             dropped_entries: 0,
             search: None,
+            pastes: Vec::new(),
+            next_paste_id: 1,
+            error_flash_until: None,
+            error_flash_label: None,
+            turn_nav_idx: None,
+            turn_scroll_target: None,
         }
+    }
+
+    // ---- pastes ----
+
+    /// Stash a large paste and return the placeholder token to insert
+    /// into the composer in its place. Called from the paste handler
+    /// when the incoming text is big enough to warrant collapsing.
+    pub fn stash_paste(&mut self, content: String) -> String {
+        let lines = content.matches('\n').count() + 1;
+        let id = self.next_paste_id;
+        self.next_paste_id += 1;
+        self.pastes.push(PasteChunk { id, content, lines });
+        paste_placeholder(id)
+    }
+
+    /// Expand every `[[paste:N]]` placeholder in `text` back to its
+    /// stashed content. Unknown or malformed ids stay literal — the
+    /// user may have typed them by hand.
+    pub fn expand_pastes(&self, text: &str) -> String {
+        if self.pastes.is_empty() || !text.contains("[[paste:") {
+            return text.to_owned();
+        }
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
+        while let Some(hit) = rest.find("[[paste:") {
+            out.push_str(&rest[..hit]);
+            let after = &rest[hit + "[[paste:".len()..];
+            let Some(end) = after.find("]]") else {
+                out.push_str(&rest[hit..]);
+                rest = "";
+                break;
+            };
+            let id_part = &after[..end];
+            match id_part.parse::<u32>() {
+                Ok(id) => match self.pastes.iter().find(|p| p.id == id) {
+                    Some(p) => out.push_str(&p.content),
+                    None => {
+                        // Placeholder without a stash — leave it literal.
+                        out.push_str("[[paste:");
+                        out.push_str(id_part);
+                        out.push_str("]]");
+                    }
+                },
+                Err(_) => {
+                    out.push_str("[[paste:");
+                    out.push_str(id_part);
+                    out.push_str("]]");
+                }
+            }
+            rest = &after[end + 2..];
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// Erase the placeholder around/near `self.cursor` and drop the
+    /// paired stash. Returns `true` if a placeholder was found and
+    /// removed. Used by `Ctrl+X` in the composer.
+    pub fn remove_paste_at_cursor(&mut self) -> bool {
+        // Find any placeholder whose byte range covers or borders the
+        // cursor. Prefer the placeholder whose range contains the
+        // cursor; fall back to the nearest one on the same line.
+        let input = self.input.clone();
+        for p in self.pastes.clone() {
+            let tok = paste_placeholder(p.id);
+            let Some(pos) = input.find(&tok) else { continue };
+            let end = pos + tok.len();
+            if self.cursor >= pos && self.cursor <= end {
+                self.input.drain(pos..end);
+                if self.cursor > end {
+                    self.cursor -= tok.len();
+                } else {
+                    self.cursor = pos;
+                }
+                self.pastes.retain(|q| q.id != p.id);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Trigger a red-flash beat in the status bar for `duration`, with
+    /// `label` as the one-line message. Overrides any previous flash
+    /// still in flight.
+    pub fn error_flash(&mut self, label: impl Into<String>, duration: std::time::Duration) {
+        self.error_flash_until = Some(Instant::now() + duration);
+        self.error_flash_label = Some(label.into());
+    }
+
+    /// True while an error flash is still visible. Cheap enough to call
+    /// on every render tick.
+    pub fn error_flash_active(&self) -> bool {
+        self.error_flash_until.map(|t| Instant::now() < t).unwrap_or(false)
+    }
+
+    /// Record how long the most-recent user turn took. Called from the
+    /// event loop on `HarnessEvent::Done` so the `> user` prompt line
+    /// grows a `· 12.4s` chip once its reply lands. Silent no-op when
+    /// no user entry exists (edge case: stream started via slash-only
+    /// path with no `push_user` before it).
+    pub fn record_last_user_elapsed(&mut self, ms: u32) {
+        for e in self.entries.iter_mut().rev() {
+            if let LogEntry::User { elapsed_ms, .. } = e {
+                *elapsed_ms = Some(ms);
+                return;
+            }
+        }
+    }
+
+    /// Byte offset of the previous `User` entry's start in a
+    /// paragraph-height iteration — used by Ctrl+↑ to jump between
+    /// turns. Returns entry indices (not row offsets); the render
+    /// layer maps indices → rows via `entry_row_starts`.
+    pub fn prev_user_entry_idx(&self, before_row: u16) -> Option<usize> {
+        // Fall back is "the current view's top" — we don't know that
+        // here, so callers pass in an approximate scroll position and
+        // we return the nearest user entry above it.
+        let _ = before_row; // reserved for future row-aware refinement
+        self.entries
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, e)| matches!(e, LogEntry::User { .. }))
+            .map(|(i, _)| i)
+    }
+
+    /// Index of the user entry immediately preceding `idx`. Used by
+    /// `Ctrl+↑` to walk backward from the currently-visible one.
+    pub fn user_entry_before(&self, idx: usize) -> Option<usize> {
+        if idx == 0 {
+            return None;
+        }
+        self.entries[..idx]
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, e)| matches!(e, LogEntry::User { .. }))
+            .map(|(i, _)| i)
+    }
+
+    /// Index of the user entry immediately following `idx`.
+    pub fn user_entry_after(&self, idx: usize) -> Option<usize> {
+        let start = idx.saturating_add(1);
+        if start >= self.entries.len() {
+            return None;
+        }
+        self.entries[start..]
+            .iter()
+            .enumerate()
+            .find(|(_, e)| matches!(e, LogEntry::User { .. }))
+            .map(|(off, _)| start + off)
+    }
+
+    /// The entry index the caret is currently anchored to when the user
+    /// jumps between turns — persisted across Ctrl+↑ presses so a
+    /// sequence walks steadily backward through history rather than
+    /// hunting from the tail each time.
+    pub fn turn_nav_anchor(&self) -> Option<usize> {
+        self.turn_nav_idx
+    }
+
+    pub fn set_turn_nav_anchor(&mut self, idx: Option<usize>) {
+        self.turn_nav_idx = idx;
     }
 
     // ---- transcript ----
@@ -268,8 +510,15 @@ impl TuiState {
     }
 
     pub fn push_user(&mut self, s: String) {
-        self.entries.push(LogEntry::User(s));
+        self.entries.push(LogEntry::User {
+            text: s,
+            elapsed_ms: None,
+        });
         self.enforce_cap();
+        // A fresh user turn resets the turn-nav anchor — Ctrl+↑ from
+        // here should walk *this* turn's history, not still be pointed
+        // at whatever the previous session was scrolled to.
+        self.turn_nav_idx = None;
     }
 
     pub fn push_info(&mut self, s: impl Into<String>) {
@@ -426,9 +675,9 @@ impl TuiState {
         let mut out = String::new();
         for e in &self.entries {
             match e {
-                LogEntry::User(s) => {
+                LogEntry::User { text, .. } => {
                     out.push_str("> ");
-                    out.push_str(s);
+                    out.push_str(text);
                     out.push_str("\n\n");
                 }
                 LogEntry::Assistant(s) => {
@@ -829,8 +1078,8 @@ fn line_end(s: &str, byte: usize) -> usize {
 /// results.
 fn entry_text(e: &LogEntry) -> String {
     match e {
-        LogEntry::User(s)
-        | LogEntry::Assistant(s)
+        LogEntry::User { text, .. } => text.clone(),
+        LogEntry::Assistant(s)
         | LogEntry::Warning(s)
         | LogEntry::Info(s) => s.clone(),
         LogEntry::ToolCall { name, args, .. } => format!("{name} {args}"),
@@ -961,7 +1210,10 @@ mod tests {
     #[test]
     fn search_finds_and_cycles() {
         let mut st = TuiState::new("m".into(), Mode::Manual);
-        st.entries.push(LogEntry::User("hello world".into()));
+        st.entries.push(LogEntry::User {
+            text: "hello world".into(),
+            elapsed_ms: None,
+        });
         st.entries.push(LogEntry::Assistant("goodbye world".into()));
         st.entries.push(LogEntry::Info("world peace".into()));
         st.search_open();
@@ -973,6 +1225,60 @@ mod tests {
         assert_eq!(s.cursor, 0);
         st.search_next();
         assert_eq!(st.search.as_ref().unwrap().cursor, 1);
+    }
+
+    #[test]
+    fn paste_stash_and_expand_round_trip() {
+        let mut st = TuiState::new("m".into(), Mode::Manual);
+        st.input_push_str("before ");
+        let token = st.stash_paste("hello\nworld\nlots\nof\nlines".into());
+        st.input_push_str(&token);
+        st.input_push_str(" after");
+        assert!(st.input().contains("[[paste:1]]"));
+        let expanded = st.expand_pastes(st.input());
+        assert_eq!(expanded, "before hello\nworld\nlots\nof\nlines after");
+    }
+
+    #[test]
+    fn remove_paste_at_cursor_drops_stash() {
+        let mut st = TuiState::new("m".into(), Mode::Manual);
+        let token = st.stash_paste("x\ny\nz".into());
+        st.input_push_str("hi ");
+        st.input_push_str(&token);
+        // Cursor sits at end of token; removal drops both placeholder
+        // and stashed content, and the composer keeps the surrounding
+        // text intact.
+        assert!(st.remove_paste_at_cursor());
+        assert_eq!(st.input(), "hi ");
+        assert!(st.pastes.is_empty());
+    }
+
+    #[test]
+    fn user_ordinal_walks_backward_from_anchor() {
+        let mut st = TuiState::new("m".into(), Mode::Manual);
+        st.push_user("first".into());
+        st.push_assistant("reply".into());
+        st.push_user("second".into());
+        st.push_assistant("reply2".into());
+        st.push_user("third".into());
+        // Anchor at last user; step should land on "second".
+        let last = st.prev_user_entry_idx(0).unwrap();
+        let before = st.user_entry_before(last).unwrap();
+        let earliest = st.user_entry_before(before).unwrap();
+        assert!(matches!(&st.entries()[earliest], LogEntry::User { text, .. } if text == "first"));
+        assert!(st.user_entry_before(earliest).is_none());
+    }
+
+    #[test]
+    fn record_last_user_elapsed_stamps_most_recent() {
+        let mut st = TuiState::new("m".into(), Mode::Manual);
+        st.push_user("go".into());
+        st.push_assistant("done".into());
+        st.record_last_user_elapsed(4200);
+        match st.entries().first().unwrap() {
+            LogEntry::User { elapsed_ms, .. } => assert_eq!(*elapsed_ms, Some(4200)),
+            _ => panic!("expected user"),
+        }
     }
 
     #[test]

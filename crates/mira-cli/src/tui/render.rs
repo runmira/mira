@@ -207,6 +207,20 @@ fn transcript(f: &mut Frame, area: Rect, state: &mut TuiState) {
     // always points at what `/undo` will actually roll back.
     let undoable_call_idx = last_undoable_call_idx(state.entries());
 
+    // Identity of the entry that is currently receiving live tokens —
+    // used to render its trailing edge with a soft cursor and to skip
+    // plan-card detection (which flickers if the model is mid-list).
+    // Only when `state.streaming` is true; a completed reply that
+    // happens to sit at the tail shouldn't be marked as live.
+    let streaming_tail_idx: Option<usize> = if state.streaming {
+        state
+            .entries()
+            .iter()
+            .rposition(|e| matches!(e, LogEntry::Assistant(_)))
+    } else {
+        None
+    };
+
     let mut lines: Vec<Line> = Vec::new();
     if state.dropped_entries > 0 {
         lines.push(Line::from(Span::styled(
@@ -278,7 +292,7 @@ fn transcript(f: &mut Frame, area: Rect, state: &mut TuiState) {
                 }
                 if batch_end < entries.len() {
                     lines.push(Line::from(""));
-                    if matches!(entries.get(batch_end), Some(LogEntry::User(_))) {
+                    if matches!(entries.get(batch_end), Some(LogEntry::User { .. })) {
                         lines.push(Line::from(""));
                     }
                 }
@@ -337,7 +351,13 @@ fn transcript(f: &mut Frame, area: Rect, state: &mut TuiState) {
             );
             (g, if paired { 2 } else { 1 })
         } else {
-            let mut ls = entry_to_lines_highlight(entry, &query, hit_this_entry);
+            let is_streaming_here = streaming_tail_idx == Some(i);
+            let mut ls = entry_to_lines_highlight_streaming(
+                entry,
+                &query,
+                hit_this_entry,
+                is_streaming_here,
+            );
             // Plan mode: prepend a blue gutter to assistant lines so it's
             // obvious the model is brainstorming, not executing. Applies
             // only to assistant text; user/info/warn keep their normal
@@ -369,7 +389,7 @@ fn transcript(f: &mut Frame, area: Rect, state: &mut TuiState) {
         // and below (matches the landing mockup's paragraph rhythm).
         if i + consumed < entries.len() {
             lines.push(Line::from(""));
-            if matches!(entries.get(i + consumed), Some(LogEntry::User(_))) {
+            if matches!(entries.get(i + consumed), Some(LogEntry::User { .. })) {
                 lines.push(Line::from(""));
             }
         }
@@ -432,9 +452,17 @@ fn transcript(f: &mut Frame, area: Rect, state: &mut TuiState) {
     let total = para.line_count(area.width) as u16;
     let tail = total.saturating_sub(area.height);
 
-    // Search override: scroll to the hit's entry so it lands in view.
-    // Falls back to follow-tail behavior when no active hit.
-    let scroll = if let Some((entry_idx, _)) = active_hit {
+    // Precedence: turn-nav jump > active search hit > follow-tail >
+    // wherever the user last scrolled to.
+    let scroll = if let Some(idx) = state.turn_scroll_target {
+        let start = entry_row_starts
+            .get(idx)
+            .copied()
+            .unwrap_or(0) as u16;
+        // Anchor the user prompt line near the top so what comes after
+        // (assistant reply, tool group) fills the viewport.
+        start.saturating_sub(1).min(tail)
+    } else if let Some((entry_idx, _)) = active_hit {
         let start = entry_row_starts
             .get(entry_idx)
             .copied()
@@ -447,6 +475,9 @@ fn transcript(f: &mut Frame, area: Rect, state: &mut TuiState) {
     } else {
         state.scroll.min(tail)
     };
+    // Turn-nav scroll is one-shot — consume it so a subsequent user
+    // PgDn doesn't get snapped back to the anchor on next render.
+    state.turn_scroll_target = None;
 
     // Persist the effective scroll so PgUp/PgDn work from where the user
     // is actually looking — not from a stale 0 they never chose.
@@ -480,11 +511,24 @@ fn transcript(f: &mut Frame, area: Rect, state: &mut TuiState) {
     f.render_widget(para.scroll((scroll, 0)), area);
 }
 
-/// Render one entry with optional case-insensitive query highlighting.
-/// The `focused` flag marks this entry as containing the *active* hit
-/// (as opposed to any other match) — used to underline the row so the
-/// user can tell which of N matches is current.
-fn entry_to_lines_highlight(entry: &LogEntry, query: &str, focused: bool) -> Vec<Line<'static>> {
+fn entry_to_lines_highlight_streaming(
+    entry: &LogEntry,
+    query: &str,
+    focused: bool,
+    streaming: bool,
+) -> Vec<Line<'static>> {
+    // For an in-flight assistant entry, render via the streaming path:
+    //   - Suppress the plan-card conversion (flickers as steps stream
+    //     in mid-list).
+    //   - Add a soft `▍` cursor after the last non-empty span so it's
+    //     obvious tokens are still landing, even during a silent gap.
+    if streaming {
+        if let LogEntry::Assistant(s) = entry {
+            let mut out = markdown::render(s);
+            append_streaming_cursor(&mut out);
+            return out;
+        }
+    }
     if query.is_empty() {
         return entry_to_lines(entry);
     }
@@ -537,7 +581,7 @@ fn highlight_line<'a>(line: Line<'a>, query: &str, focused: bool) -> Line<'a> {
 
 fn entry_to_lines(entry: &LogEntry) -> Vec<Line<'static>> {
     match entry {
-        LogEntry::User(s) => user_lines(s),
+        LogEntry::User { text, elapsed_ms } => user_lines(text, *elapsed_ms),
         LogEntry::Assistant(s) => {
             // (#5) When the assistant reply is a "Plan:" doc, render
             // as a bordered card with checkbox steps — matches the
@@ -588,24 +632,65 @@ fn entry_to_lines(entry: &LogEntry) -> Vec<Line<'static>> {
 /// its own row(s). Multi-line messages (Ctrl+J) get the `> ` marker on
 /// the first row only and a hanging indent on the rest so paragraphs
 /// read cleanly.
-fn user_lines(s: &str) -> Vec<Line<'static>> {
+///
+/// When `elapsed_ms` is `Some`, a small `· 12.4s` chip trails the
+/// first line — the response-time-per-turn readout the user asked for.
+fn user_lines(s: &str, elapsed_ms: Option<u32>) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
     let mut first = true;
+    // Placeholders in the text render as `[pasted N lines]`; the actual
+    // content lives in `TuiState::pastes` and gets stitched back in on
+    // submit. We do the swap here only for display — the transcript
+    // entry itself was written *after* expand_pastes(), so any User
+    // rendered via this path is already fully-expanded prose.
     for line in s.lines() {
         let mark = if first { "> " } else { "  " };
-        out.push(Line::from(vec![
+        let mut spans = vec![
             Span::styled(mark, Style::default().fg(SALMON()).bold()),
             Span::styled(line.to_owned(), Style::default().fg(CREAM())),
-        ]));
+        ];
+        if first {
+            if let Some(ms) = elapsed_ms {
+                spans.push(Span::styled(
+                    format!("   · {}", format_turn_elapsed(ms)),
+                    Style::default().fg(MUTED()).italic(),
+                ));
+            }
+        }
+        out.push(Line::from(spans));
         first = false;
     }
     if out.is_empty() {
-        out.push(Line::from(Span::styled(
+        let mut spans = vec![Span::styled(
             "> ",
             Style::default().fg(SALMON()).bold(),
-        )));
+        )];
+        if let Some(ms) = elapsed_ms {
+            spans.push(Span::styled(
+                format!("   · {}", format_turn_elapsed(ms)),
+                Style::default().fg(MUTED()).italic(),
+            ));
+        }
+        out.push(Line::from(spans));
     }
     out
+}
+
+/// Compact "wall time between user submit and stream done":
+/// - Under 10s: one decimal ("6.4s").
+/// - Under a minute: whole seconds ("42s").
+/// - Above: minutes+seconds ("1m 07s").
+fn format_turn_elapsed(ms: u32) -> String {
+    let secs = ms as f32 / 1000.0;
+    if secs < 10.0 {
+        format!("{secs:.1}s")
+    } else if secs < 60.0 {
+        format!("{}s", secs as u32)
+    } else {
+        let m = (secs as u32) / 60;
+        let s = (secs as u32) % 60;
+        format!("{m}m {s:02}s")
+    }
 }
 
 /// A rendered ToolResult passed alongside its ToolCall so the group can
@@ -989,10 +1074,10 @@ fn input(f: &mut Frame, area: Rect, state: &TuiState) {
                 } else {
                     (PROMPT_CONT, Style::default())
                 };
-                Line::from(vec![
-                    Span::styled(prefix, style),
-                    Span::styled(l.to_owned(), Style::default().fg(CREAM())),
-                ])
+                let mut spans: Vec<Span<'static>> =
+                    vec![Span::styled(prefix, style)];
+                spans.extend(render_composer_line(l, state));
+                Line::from(spans)
             })
             .collect();
         Text::from(segments)
@@ -1004,6 +1089,63 @@ fn input(f: &mut Frame, area: Rect, state: &TuiState) {
     // caret is offset by that width regardless of which row it's on.
     let (row, col) = cursor_visual(state.input(), state.cursor());
     f.set_cursor_position((area.x + PROMPT_COLS + col, area.y + 1 + row));
+}
+
+/// Split one composer line around any `[[paste:N]]` placeholders and
+/// render each stash as a compact `[pasted N lines]` chip. Non-paste
+/// text renders in the usual cream. The visual char-count changes,
+/// but `cursor_visual` still works off the raw byte cursor so caret
+/// placement lands where the user is typing — worst case the caret
+/// sits inside the placeholder text, which reads as a natural
+/// "you're editing this token" affordance.
+fn render_composer_line(line: &str, state: &TuiState) -> Vec<Span<'static>> {
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut cursor = 0;
+    while let Some(hit) = line[cursor..].find("[[paste:") {
+        let start = cursor + hit;
+        if start > cursor {
+            out.push(Span::styled(
+                line[cursor..start].to_owned(),
+                Style::default().fg(CREAM()),
+            ));
+        }
+        let after_open = start + "[[paste:".len();
+        let Some(rel_end) = line[after_open..].find("]]") else {
+            // Malformed — treat the rest of the line as plain text.
+            out.push(Span::styled(
+                line[start..].to_owned(),
+                Style::default().fg(CREAM()),
+            ));
+            return out;
+        };
+        let end = after_open + rel_end;
+        let id_part = &line[after_open..end];
+        let after_close = end + 2;
+        let label = match id_part.parse::<u32>().ok().and_then(|id| {
+            state.pastes.iter().find(|p| p.id == id)
+        }) {
+            Some(p) => format!(" [pasted {} line{}] ", p.lines, if p.lines == 1 { "" } else { "s" }),
+            None => format!(" [pasted ?] "),
+        };
+        out.push(Span::styled(
+            label,
+            Style::default()
+                .fg(Color::Black)
+                .bg(SALMON())
+                .add_modifier(Modifier::BOLD),
+        ));
+        cursor = after_close;
+    }
+    if cursor < line.len() {
+        out.push(Span::styled(
+            line[cursor..].to_owned(),
+            Style::default().fg(CREAM()),
+        ));
+    }
+    if out.is_empty() {
+        out.push(Span::raw(String::new()));
+    }
+    out
 }
 
 /// Wrap the input into (row, col) cell coordinates for the caret.
@@ -1053,6 +1195,7 @@ fn palette(f: &mut Frame, input_area: Rect, state: &TuiState) {
         Palette::AtFile => " files (rg --files) ",
         Palette::Model => " models ",
         Palette::Theme => " themes ",
+        Palette::SavePath => " save transcript to… ",
         Palette::None => "",
     };
 
@@ -1097,6 +1240,30 @@ fn palette(f: &mut Frame, input_area: Rect, state: &TuiState) {
 }
 
 fn status(f: &mut Frame, area: Rect, state: &TuiState) {
+    // Error flash trumps everything — a red-bg row for the full
+    // duration of `state.error_flash_until`. Renders the row solid
+    // so the label reads as an alert bar rather than a floating chip
+    // that could get lost against the transcript.
+    if state.error_flash_active() {
+        let label = state
+            .error_flash_label
+            .as_deref()
+            .unwrap_or("provider error");
+        let bar = format!(" ⚠  {label}");
+        let bar = pad_to_width(&bar, area.width as usize);
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                bar,
+                Style::default()
+                    .fg(Color::White)
+                    .bg(Color::Red)
+                    .add_modifier(Modifier::BOLD),
+            ))),
+            area,
+        );
+        return;
+    }
+
     // (#3 + #9) Unified single-row footer:
     //   left  = hint / flash / esc-pending
     //   right = mode chip in its own color + `shift+tab to cycle`
@@ -1636,6 +1803,45 @@ fn mode_style(state: &TuiState) -> Style {
         Yolo => Color::Red,
     };
     Style::default().fg(color).add_modifier(Modifier::BOLD)
+}
+
+/// Append a subtle `▍` cursor to the last non-empty line of a
+/// streaming assistant entry. Uses the salmon accent + bold so the
+/// eye can see progress even during a silent provider pause. Empty
+/// input (assistant just started) gets a single cursor row so the
+/// user isn't looking at nothing.
+fn append_streaming_cursor(lines: &mut Vec<Line<'static>>) {
+    let cursor = Span::styled(
+        "▍",
+        Style::default().fg(SALMON()).add_modifier(Modifier::BOLD),
+    );
+    if let Some(last) = lines.iter_mut().rev().find(|l| !line_is_empty(l)) {
+        last.spans.push(Span::raw(" "));
+        last.spans.push(cursor);
+        return;
+    }
+    lines.push(Line::from(cursor));
+}
+
+/// Pad `s` on the right with spaces so its char-count reaches `width`,
+/// or truncate with `…` if it already exceeds. Used by the status bar
+/// so a solid-color background (error flash) covers the whole row —
+/// otherwise the terminal shows the transcript underneath the tail
+/// end of the row.
+fn pad_to_width(s: &str, width: usize) -> String {
+    let count = s.chars().count();
+    if count == width {
+        return s.to_owned();
+    }
+    if count > width {
+        let cut: String = s.chars().take(width.saturating_sub(1)).collect();
+        return format!("{cut}…");
+    }
+    let mut out = s.to_owned();
+    for _ in count..width {
+        out.push(' ');
+    }
+    out
 }
 
 fn truncate(s: &str, max: usize) -> String {
