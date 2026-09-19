@@ -307,7 +307,7 @@ async fn main() -> Result<()> {
     let session = match picked {
         Some(record) => Session::resume_from(
             record,
-            provider,
+            provider.clone(),
             registry,
             policy.clone(),
             approver,
@@ -316,7 +316,7 @@ async fn main() -> Result<()> {
         None => Session::new(
             sess_cfg,
             system_prompt(&cwd, &registry),
-            provider,
+            provider.clone(),
             registry,
             policy.clone(),
             approver,
@@ -348,6 +348,32 @@ async fn main() -> Result<()> {
     let session = session;
 
     if use_tui {
+        // (#1) Fire-and-forget model catalog fetch — populates the
+        // `/model <TAB>` autocomplete without blocking startup. A slow
+        // provider (or an offline one) just means the palette shows no
+        // completions until the fetch lands. Uses the same
+        // ChatProvider handle that just built the session.
+        let models = std::sync::Arc::new(tokio::sync::RwLock::new(Vec::<String>::new()));
+        {
+            let models = models.clone();
+            let provider_for_models = provider.clone();
+            tokio::spawn(async move {
+                match provider_for_models.list_models().await {
+                    Ok(list) => {
+                        let mut ids: Vec<String> =
+                            list.into_iter().map(|m| m.id).collect();
+                        ids.sort();
+                        ids.dedup();
+                        *models.write().await = ids;
+                    }
+                    Err(e) => tracing::debug!(
+                        %e,
+                        "tui: model list fetch failed; /model autocomplete will stay empty"
+                    ),
+                }
+            });
+        }
+
         tui::run(
             session,
             tui::TuiConfig {
@@ -358,6 +384,7 @@ async fn main() -> Result<()> {
                 cwd: cwd.clone(),
                 skills: skills_handle,
                 store: store.clone(),
+                models,
             },
         )
         .await

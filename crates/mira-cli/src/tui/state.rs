@@ -47,6 +47,12 @@ pub enum LogEntry {
         /// the event loop to look this entry back up when the paired
         /// preview arrives asynchronously.
         call_id: String,
+        /// Wall-clock stamp when the ToolStart event arrived. Read by
+        /// the renderer to draw a `· 1.2s` ticker next to in-flight
+        /// `◐` tool headers so long file reads / long bash calls stop
+        /// looking hung. Not stored in the session record because
+        /// `Instant` isn't monotonic across process restarts anyway.
+        started_at: Instant,
     },
     ToolResult {
         ok: bool,
@@ -72,6 +78,9 @@ pub enum Palette {
     None,
     Slash,
     AtFile,
+    /// Fires when the composer starts with `/model ` — completions
+    /// come from the live provider's model list (cached).
+    Model,
 }
 
 pub struct PaletteState {
@@ -287,6 +296,7 @@ impl TuiState {
             args: call.function.arguments.clone(),
             preview: None,
             call_id: call.id.to_string(),
+            started_at: Instant::now(),
         });
         self.enforce_cap();
     }
@@ -341,12 +351,17 @@ impl TuiState {
     }
 
     /// Push a raw tool call from history (name + args string).
+    /// Replay path — the call already completed on a previous run so
+    /// `started_at` is only cosmetic (the ticker never renders for
+    /// replayed calls because they always have a matching result
+    /// pushed right after).
     pub fn push_tool_call_raw(&mut self, name: String, args: String) {
         self.entries.push(LogEntry::ToolCall {
             name,
             args,
             preview: None,
             call_id: String::new(),
+            started_at: Instant::now(),
         });
         self.enforce_cap();
     }
