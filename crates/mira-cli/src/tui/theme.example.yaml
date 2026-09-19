@@ -1,0 +1,29 @@
+# ~/.mira/theme.yaml
+#
+# Uncomment any key to override the default. Missing keys keep the
+# built-in warm cream + coral palette. Values are `#RRGGBB` hex (leading
+# `#` optional). Bad values fall through to the default; a broken file
+# never wedges the TUI.
+
+# Coral accent — the `▸▸` prompt, mode chips, tool-call verbs, section
+# headers. The Mira brand color.
+# salmon:   "#e89c68"
+
+# Bright paper-white — user prompts, model IDs, tool-call arguments,
+# first-run onboarding text.
+# cream:    "#f0ebe2"
+
+# Secondary text — hints, footer, dim chips, metadata like the
+# `↑12.3k ↓4.1k` token strip.
+# muted:    "#8c8276"
+
+# Even quieter — separator glyphs (`└`, `│`), code-block gutter, the
+# plan-mode assistant gutter.
+# dim:      "#605a52"
+
+# Composer top border — the coral hairline above the input area.
+# hairline: "#a0603c"
+
+# Assistant markdown paragraphs. Split from `cream` so a theme can
+# tint prose distinctly. Defaults to whatever `cream` is set to.
+# prose:    "#f0ebe2"

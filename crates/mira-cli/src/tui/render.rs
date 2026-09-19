@@ -11,23 +11,27 @@ use mira_tools::{DiffKind, DiffLine, DiffPreview};
 use crate::tui::markdown;
 use crate::tui::state::{LogEntry, Palette, TuiState};
 
-// ---- Claude-style palette ----
+// ---- Palette ----
 //
-// Warm salmon / cream + neutral grays. Kept as `const` RGBs (not
-// `Style` constants) so callers can freely combine them with modifiers
-// per-span. Truecolor-only — 16-color terminals fall back to their
-// closest match automatically via ratatui/crossterm.
-const SALMON: Color = Color::Rgb(232, 156, 104);
-// Paper-white with a barely-there warm tint. The mockup's assistant
-// and user text reads crisp near-white against the obsidian bg — the
-// earlier `(232, 216, 188)` was too khaki, making prose look dim vs.
-// the coral accents.
-const CREAM: Color = Color::Rgb(240, 235, 226);
-const MUTED: Color = Color::Rgb(140, 130, 118);
-const DIM: Color = Color::Rgb(96, 90, 82);
-/// Hairline color for the coral separator above the composer. Half
-/// alpha of `SALMON` so the line reads as an accent, not another chip.
-const HAIRLINE: Color = Color::Rgb(160, 96, 60);
+// Backed by `crate::tui::theme` — an `RwLock`-guarded global that
+// `/theme <name>`, `/theme reload`, and `/theme save` mutate at
+// runtime. Every callsite goes through one of the shim fns below;
+// each is a single read-lock acquisition, cheap enough for the 100ms
+// render tick.
+//
+// Truecolor-only — 16-color terminals fall back to their closest
+// match automatically via ratatui/crossterm.
+
+use crate::tui::theme;
+
+/// Names stay uppercase to signal "palette constant" at every callsite
+/// even though Rust convention normally wants snake_case for functions.
+#[allow(non_snake_case)] #[inline] fn SALMON() -> Color   { theme::current().salmon }
+#[allow(non_snake_case)] #[inline] fn CREAM() -> Color    { theme::current().cream }
+#[allow(non_snake_case)] #[inline] fn MUTED() -> Color    { theme::current().muted }
+#[allow(non_snake_case)] #[inline] fn DIM() -> Color      { theme::current().dim }
+#[allow(non_snake_case)] #[inline] fn HAIRLINE() -> Color { theme::current().hairline }
+#[allow(non_snake_case)] #[inline] fn PROSE() -> Color    { theme::current().prose }
 
 /// Mira's brand mark — the script-M is the closest Unicode analogue
 /// of the flowing wave/M in the vector logo. Rendered wherever the
@@ -96,35 +100,35 @@ fn header(f: &mut Frame, area: Rect, state: &TuiState) {
     let mut spans = vec![
         Span::styled(
             format!("{LOGO} mira "),
-            Style::default().fg(SALMON).bold(),
+            Style::default().fg(SALMON()).bold(),
         ),
-        Span::styled("· ", Style::default().fg(DIM)),
-        Span::styled(state.model.as_str(), Style::default().fg(CREAM)),
-        Span::styled(" · ", Style::default().fg(DIM)),
+        Span::styled("· ", Style::default().fg(DIM())),
+        Span::styled(state.model.as_str(), Style::default().fg(CREAM())),
+        Span::styled(" · ", Style::default().fg(DIM())),
         Span::styled(state.mode.as_str(), mode_style(state)),
     ];
     if let Some(branch) = state.git_branch.as_deref() {
-        spans.push(Span::styled(" · ", Style::default().fg(DIM)));
+        spans.push(Span::styled(" · ", Style::default().fg(DIM())));
         spans.push(Span::styled(
             format!("⎇ {branch}"),
-            Style::default().fg(MUTED),
+            Style::default().fg(MUTED()),
         ));
     }
     if let Some(g) = state.goal.as_ref() {
         let (label, chip_style) = goal_chip(g.status);
-        spans.push(Span::styled(" · ", Style::default().fg(DIM)));
+        spans.push(Span::styled(" · ", Style::default().fg(DIM())));
         spans.push(Span::styled("goal ", chip_style));
         spans.push(Span::styled(
             format!("{}/{}", g.iterations, g.max_iterations),
-            Style::default().fg(MUTED),
+            Style::default().fg(MUTED()),
         ));
         spans.push(Span::styled(" ", Style::default()));
         spans.push(Span::styled(label, chip_style));
         // Trim the condition inline so it doesn't blow past the header.
-        spans.push(Span::styled(" · ", Style::default().fg(DIM)));
+        spans.push(Span::styled(" · ", Style::default().fg(DIM())));
         spans.push(Span::styled(
             truncate(&g.condition, 60),
-            Style::default().fg(CREAM),
+            Style::default().fg(CREAM()),
         ));
     }
     let left = Line::from(spans);
@@ -197,6 +201,12 @@ fn transcript(f: &mut Frame, area: Rect, state: &mut TuiState) {
         .unwrap_or_default();
     let active_hit = state.active_hit();
 
+    // (#2) Locate the most-recent successful edit_file/write_file/
+    // apply_patch/create_file call. Only *that one* gets the
+    // `/undo to revert` chip below its result, so the affordance
+    // always points at what `/undo` will actually roll back.
+    let undoable_call_idx = last_undoable_call_idx(state.entries());
+
     let mut lines: Vec<Line> = Vec::new();
     if state.dropped_entries > 0 {
         lines.push(Line::from(Span::styled(
@@ -205,7 +215,7 @@ fn transcript(f: &mut Frame, area: Rect, state: &mut TuiState) {
                 state.dropped_entries,
                 if state.dropped_entries == 1 { "y" } else { "ies" },
             ),
-            Style::default().fg(MUTED).italic(),
+            Style::default().fg(MUTED()).italic(),
         )));
         lines.push(Line::from(""));
     }
@@ -285,6 +295,7 @@ fn transcript(f: &mut Frame, area: Rect, state: &mut TuiState) {
             name,
             args,
             preview,
+            started_at,
             ..
         } = entry
         {
@@ -306,13 +317,23 @@ fn transcript(f: &mut Frame, area: Rect, state: &mut TuiState) {
                 None
             };
             let hit_next = paired && active_hit.map(|(idx, _)| idx) == Some(i + 1);
+            // Only feed the elapsed timer to the renderer for
+            // in-flight calls — a completed call's ticker is noise.
+            let elapsed = if result.is_none() {
+                Some(started_at.elapsed())
+            } else {
+                None
+            };
+            let is_undoable_here = undoable_call_idx == Some(i);
             let g = tool_group_lines(
                 name,
                 args,
                 result,
                 preview.as_ref(),
+                elapsed,
                 &query,
                 hit_this_entry || hit_next,
+                is_undoable_here,
             );
             (g, if paired { 2 } else { 1 })
         } else {
@@ -376,10 +397,31 @@ fn transcript(f: &mut Frame, area: Rect, state: &mut TuiState) {
         }
     }
     if lines.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "  (empty. type a message and press enter.)",
-            Style::default().fg(MUTED),
-        )));
+        // (#3) First-run onboarding card. Three lines that answer the
+        // three "how do I…" questions first-timers actually have. Fades
+        // out the moment the transcript has any entry — including our
+        // own `push_info` boot line — so it never competes with real
+        // content. Styled small and quiet so it reads as scaffolding.
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled("▸▸", Style::default().fg(SALMON()).bold()),
+            Span::styled("  ask anything", Style::default().fg(CREAM())),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled("/ ", Style::default().fg(SALMON()).bold()),
+            Span::styled(" commands  ·  ", Style::default().fg(MUTED())),
+            Span::styled("@", Style::default().fg(SALMON()).bold()),
+            Span::styled("  include a file", Style::default().fg(MUTED())),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled("shift+tab ", Style::default().fg(SALMON()).bold()),
+            Span::styled("cycle modes  ·  ", Style::default().fg(MUTED())),
+            Span::styled("/help ", Style::default().fg(SALMON()).bold()),
+            Span::styled("for everything else", Style::default().fg(MUTED())),
+        ]));
     }
 
     let text = Text::from(lines);
@@ -428,7 +470,7 @@ fn transcript(f: &mut Frame, area: Rect, state: &mut TuiState) {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 msg.to_owned(),
-                Style::default().fg(SALMON).bold(),
+                Style::default().fg(SALMON()).bold(),
             )))
             .alignment(Alignment::Right),
             chip,
@@ -496,13 +538,25 @@ fn highlight_line<'a>(line: Line<'a>, query: &str, focused: bool) -> Line<'a> {
 fn entry_to_lines(entry: &LogEntry) -> Vec<Line<'static>> {
     match entry {
         LogEntry::User(s) => user_lines(s),
-        LogEntry::Assistant(s) => markdown::render(s),
+        LogEntry::Assistant(s) => {
+            // (#5) When the assistant reply is a "Plan:" doc, render
+            // as a bordered card with checkbox steps — matches the
+            // approval card's visual weight so a plan lands as a
+            // discrete object in the transcript rather than a wall
+            // of markdown. Any other assistant reply falls through
+            // to the standard markdown renderer.
+            if let Some(plan) = try_parse_plan(s) {
+                render_plan_card(&plan)
+            } else {
+                markdown::render(s)
+            }
+        }
         LogEntry::ToolCall {
             name,
             args,
             preview,
             ..
-        } => tool_group_lines(name, args, None, preview.as_ref(), "", false),
+        } => tool_group_lines(name, args, None, preview.as_ref(), None, "", false, false),
         LogEntry::ToolResult {
             ok,
             snippet,
@@ -517,7 +571,7 @@ fn entry_to_lines(entry: &LogEntry) -> Vec<Line<'static>> {
                 full: full.as_str(),
                 expanded: *expanded,
             };
-            tool_group_lines("(result)", "", Some(result), None, "", false)
+            tool_group_lines("(result)", "", Some(result), None, None, "", false, false)
         }
         LogEntry::Warning(s) => vec![Line::from(vec![
             Span::styled("⚠ ", Style::default().fg(Color::Yellow).bold()),
@@ -525,7 +579,7 @@ fn entry_to_lines(entry: &LogEntry) -> Vec<Line<'static>> {
         ])],
         LogEntry::Info(s) => vec![Line::from(Span::styled(
             s.clone(),
-            Style::default().fg(MUTED).italic(),
+            Style::default().fg(MUTED()).italic(),
         ))],
     }
 }
@@ -540,15 +594,15 @@ fn user_lines(s: &str) -> Vec<Line<'static>> {
     for line in s.lines() {
         let mark = if first { "> " } else { "  " };
         out.push(Line::from(vec![
-            Span::styled(mark, Style::default().fg(SALMON).bold()),
-            Span::styled(line.to_owned(), Style::default().fg(CREAM)),
+            Span::styled(mark, Style::default().fg(SALMON()).bold()),
+            Span::styled(line.to_owned(), Style::default().fg(CREAM())),
         ]));
         first = false;
     }
     if out.is_empty() {
         out.push(Line::from(Span::styled(
             "> ",
-            Style::default().fg(SALMON).bold(),
+            Style::default().fg(SALMON()).bold(),
         )));
     }
     out
@@ -578,24 +632,26 @@ fn tool_group_lines(
     args: &str,
     result: Option<GroupResult<'_>>,
     preview: Option<&DiffPreview>,
+    elapsed: Option<std::time::Duration>,
     query: &str,
     focused: bool,
+    is_last_undoable: bool,
 ) -> Vec<Line<'static>> {
     let (label, summary) = summarize_tool(name, args);
     let (mark_glyph, mark_color) = match result {
         Some(r) if r.ok => ("● ", Color::Green),
         Some(_) => ("● ", Color::Red),
-        None => ("◐ ", SALMON),
+        None => ("◐ ", SALMON()),
     };
     let mut header: Vec<Span<'static>> = vec![
         Span::styled(mark_glyph, Style::default().fg(mark_color).bold()),
-        Span::styled(label, Style::default().fg(SALMON).bold()),
+        Span::styled(label, Style::default().fg(SALMON()).bold()),
     ];
     if !summary.is_empty() {
         header.push(Span::styled(" ", Style::default()));
         header.push(Span::styled(
             truncate(&summary, 140),
-            Style::default().fg(CREAM),
+            Style::default().fg(CREAM()),
         ));
     }
     // Show `+N -M` diff stats when the call carries a preview so
@@ -610,6 +666,19 @@ fn tool_group_lines(
             format!(" -{dels}", ),
             Style::default().fg(Color::Red).bold(),
         ));
+    }
+    // (#4) In-flight elapsed ticker — only when there's no result yet.
+    // Render pass fires every 100ms while streaming, so this updates
+    // continuously with no extra timer plumbing. Sub-second calls stay
+    // silent to avoid flicker on the common fast-path.
+    if let Some(d) = elapsed {
+        let secs = d.as_secs_f32();
+        if secs >= 0.6 {
+            header.push(Span::styled(
+                format!(" · {}", format_elapsed(secs)),
+                Style::default().fg(MUTED()),
+            ));
+        }
     }
     // Expandability is signaled implicitly by the truncated `└` snippet
     // below the header — no chevron. The previous `⌄` suffix was getting
@@ -634,7 +703,7 @@ fn tool_group_lines(
             if p.lines.len() > cap {
                 out.push(Line::from(Span::styled(
                     format!("     … {} more diff lines", p.lines.len() - cap),
-                    Style::default().fg(MUTED).italic(),
+                    Style::default().fg(MUTED()).italic(),
                 )));
             }
         }
@@ -642,8 +711,8 @@ fn tool_group_lines(
         (_, Some(r)) if r.expanded && !r.full.is_empty() => {
             for line in r.full.lines() {
                 out.push(Line::from(vec![
-                    Span::styled("  │  ", Style::default().fg(DIM)),
-                    Span::styled(line.to_owned(), Style::default().fg(MUTED)),
+                    Span::styled("  │  ", Style::default().fg(DIM())),
+                    Span::styled(line.to_owned(), Style::default().fg(MUTED())),
                 ]));
             }
         }
@@ -666,11 +735,22 @@ fn tool_group_lines(
                     truncate(r.snippet, 200)
                 };
                 out.push(Line::from(vec![
-                    Span::styled("  └  ", Style::default().fg(DIM)),
-                    Span::styled(body, Style::default().fg(MUTED)),
+                    Span::styled("  └  ", Style::default().fg(DIM())),
+                    Span::styled(body, Style::default().fg(MUTED())),
                 ]));
             }
         }
+    }
+
+    // (#2) Undo affordance on the most-recent successful write.
+    // Rendered as a small dim chip so it points at `/undo` without
+    // shouting for attention on every edit.
+    if is_last_undoable {
+        out.push(Line::from(vec![
+            Span::styled("     ", Style::default()),
+            Span::styled("/undo", Style::default().fg(SALMON()).bold()),
+            Span::styled(" to revert", Style::default().fg(MUTED()).italic()),
+        ]));
     }
 
     if query.is_empty() {
@@ -711,7 +791,7 @@ fn batched_tool_group_lines(family: &str, entries: &[(String, String)]) -> Vec<L
         Span::styled("● ", Style::default().fg(Color::Green).bold()),
         Span::styled(
             format!("{verb} {n} {noun}"),
-            Style::default().fg(SALMON).bold(),
+            Style::default().fg(SALMON()).bold(),
         ),
     ]);
 
@@ -723,8 +803,8 @@ fn batched_tool_group_lines(family: &str, entries: &[(String, String)]) -> Vec<L
             truncate(summary, 140)
         };
         out.push(Line::from(vec![
-            Span::styled("  └  ", Style::default().fg(DIM)),
-            Span::styled(body, Style::default().fg(MUTED)),
+            Span::styled("  └  ", Style::default().fg(DIM())),
+            Span::styled(body, Style::default().fg(MUTED())),
         ]));
     }
     out
@@ -780,21 +860,21 @@ fn streaming_indicator_line(state: &TuiState) -> Line<'static> {
             format!("{LOGO} "),
             Style::default().fg(pulsed_logo(secs)).bold(),
         ),
-        Span::styled(label, Style::default().fg(SALMON).bold()),
+        Span::styled(label, Style::default().fg(SALMON()).bold()),
         Span::styled(
             format!("… ({}", fmt_secs(secs)),
-            Style::default().fg(MUTED),
+            Style::default().fg(MUTED()),
         ),
     ];
     if state.usage.completion_tokens > 0 {
         spans.push(Span::styled(
             format!(" · ↓{} tokens", short_num(state.usage.completion_tokens)),
-            Style::default().fg(MUTED),
+            Style::default().fg(MUTED()),
         ));
     }
     spans.push(Span::styled(
         " · esc to interrupt)",
-        Style::default().fg(MUTED),
+        Style::default().fg(MUTED()),
     ));
     Line::from(spans)
 }
@@ -884,16 +964,16 @@ fn input(f: &mut Frame, area: Rect, state: &TuiState) {
     // no title interrupting it. The `▸▸` prompt lives inside the body,
     // inline with the text the user is typing (matches the landing
     // mockup where the arrow sits on the same line as the message).
-    let hairline_color = if state.streaming { MUTED } else { HAIRLINE };
+    let hairline_color = if state.streaming { MUTED() } else { HAIRLINE() };
     let block = Block::default()
         .borders(Borders::TOP)
         .border_style(Style::default().fg(hairline_color));
 
-    let prompt_style = Style::default().fg(SALMON).bold();
+    let prompt_style = Style::default().fg(SALMON()).bold();
     let body: Text = if state.input().is_empty() {
         Line::from(vec![
             Span::styled(PROMPT, prompt_style),
-            Span::styled("message", Style::default().fg(DIM).italic()),
+            Span::styled("message", Style::default().fg(DIM()).italic()),
         ])
         .into()
     } else {
@@ -911,7 +991,7 @@ fn input(f: &mut Frame, area: Rect, state: &TuiState) {
                 };
                 Line::from(vec![
                     Span::styled(prefix, style),
-                    Span::styled(l.to_owned(), Style::default().fg(CREAM)),
+                    Span::styled(l.to_owned(), Style::default().fg(CREAM())),
                 ])
             })
             .collect();
@@ -971,13 +1051,15 @@ fn palette(f: &mut Frame, input_area: Rect, state: &TuiState) {
     let title = match state.palette.kind {
         Palette::Slash => " commands ",
         Palette::AtFile => " files (rg --files) ",
+        Palette::Model => " models ",
+        Palette::Theme => " themes ",
         Palette::None => "",
     };
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(SALMON))
-        .title(Span::styled(title, Style::default().fg(SALMON).bold()));
+        .border_style(Style::default().fg(SALMON()))
+        .title(Span::styled(title, Style::default().fg(SALMON()).bold()));
 
     let items: Vec<ListItem> = state
         .palette
@@ -986,13 +1068,13 @@ fn palette(f: &mut Frame, input_area: Rect, state: &TuiState) {
         .map(|m| {
             let mut spans = vec![Span::styled(
                 m.title.clone(),
-                Style::default().fg(CREAM),
+                Style::default().fg(CREAM()),
             )];
             if !m.detail.is_empty() {
                 spans.push(Span::raw("  "));
                 spans.push(Span::styled(
                     m.detail.clone(),
-                    Style::default().fg(MUTED).italic(),
+                    Style::default().fg(MUTED()).italic(),
                 ));
             }
             ListItem::new(Line::from(spans))
@@ -1003,8 +1085,8 @@ fn palette(f: &mut Frame, input_area: Rect, state: &TuiState) {
         .block(block)
         .highlight_style(
             Style::default()
-                .bg(DIM)
-                .fg(SALMON)
+                .bg(DIM())
+                .fg(SALMON())
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("› ");
@@ -1028,7 +1110,7 @@ fn status(f: &mut Frame, area: Rect, state: &TuiState) {
         };
         Line::from(Span::styled(
             format!(" {hint}"),
-            Style::default().fg(SALMON).bold(),
+            Style::default().fg(SALMON()).bold(),
         ))
     } else if let Some(flash) = &state.flash {
         Line::from(Span::styled(
@@ -1042,7 +1124,7 @@ fn status(f: &mut Frame, area: Rect, state: &TuiState) {
         // discoverable via `/help`.
         Line::from(Span::styled(
             " enter send · / cmd · @ file · shift+tab mode · esc esc quit",
-            Style::default().fg(MUTED),
+            Style::default().fg(MUTED()),
         ))
     };
 
@@ -1050,7 +1132,7 @@ fn status(f: &mut Frame, area: Rect, state: &TuiState) {
         Span::styled(state.mode.chip_label(), mode_style(state)),
         Span::styled(
             " · shift+tab to cycle ",
-            Style::default().fg(MUTED),
+            Style::default().fg(MUTED()),
         ),
     ]);
     let right_len = right.spans.iter().map(|s| s.content.chars().count()).sum::<usize>() as u16;
@@ -1087,7 +1169,7 @@ fn format_usage_spans(state: &TuiState) -> Vec<Span<'static>> {
     if u.is_zero() {
         return Vec::new();
     }
-    let muted = Style::default().fg(MUTED);
+    let muted = Style::default().fg(MUTED());
     let mut spans: Vec<Span<'static>> = Vec::new();
     spans.push(Span::styled(
         format!(
@@ -1182,6 +1264,154 @@ fn format_dollars(d: f64) -> String {
     }
 }
 
+/// (#5) A model reply that reads as a plan proposal. Detected by a
+/// heading line starting with `# Plan`, `## Plan`, or a first line of
+/// `Plan:` (case-insensitive), followed by a numbered or bulleted
+/// list. Returns the parsed shape so [`render_plan_card`] can lay it
+/// out as a bordered card.
+struct Plan {
+    title: String,
+    steps: Vec<String>,
+}
+
+fn try_parse_plan(s: &str) -> Option<Plan> {
+    let mut lines = s.lines().peekable();
+    let first = lines.next()?.trim();
+    // Accept `# Plan …`, `## Plan …`, or `Plan: …` / `Plan …` / plain `Plan`
+    let title = if let Some(rest) = first.strip_prefix("# Plan") {
+        rest.trim_start_matches(':').trim().to_owned()
+    } else if let Some(rest) = first.strip_prefix("## Plan") {
+        rest.trim_start_matches(':').trim().to_owned()
+    } else if let Some(rest) = first.to_ascii_lowercase().strip_prefix("plan") {
+        // Accept `Plan`, `Plan:`, `Plan — foo`. Anything after is the title.
+        let rest = rest.trim_start_matches(':').trim();
+        if rest.is_empty() && first.eq_ignore_ascii_case("plan") {
+            String::new()
+        } else if !rest.is_empty() {
+            rest.to_owned()
+        } else {
+            return None;
+        }
+    } else {
+        return None;
+    };
+
+    // Collect numbered- or bulleted-list steps. Blank lines end the
+    // step run; anything not-a-list-item after that ends parsing.
+    let mut steps: Vec<String> = Vec::new();
+    for raw in lines {
+        let line = raw.trim();
+        if line.is_empty() && steps.is_empty() {
+            continue; // skip blanks before the list starts
+        }
+        if line.is_empty() {
+            break; // stop at the blank line after the list
+        }
+        // `1. do X`, `12. do Y`, `- do X`, `* do Y`
+        let step = if let Some(rest) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
+            rest.to_owned()
+        } else {
+            let digits: String = line.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if digits.is_empty() {
+                break;
+            }
+            let after = &line[digits.len()..];
+            if let Some(rest) = after.strip_prefix(". ").or_else(|| after.strip_prefix(") ")) {
+                rest.to_owned()
+            } else {
+                break;
+            }
+        };
+        steps.push(step);
+    }
+
+    if steps.len() < 2 {
+        return None; // one-step "plan" is just a sentence, don't box it
+    }
+    Some(Plan { title, steps })
+}
+
+fn render_plan_card(plan: &Plan) -> Vec<Line<'static>> {
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let bar_style = Style::default().fg(SALMON());
+    // Top rule with inline title chip
+    let mut header: Vec<Span<'static>> = vec![
+        Span::styled("╭─ ", bar_style),
+        Span::styled("plan", Style::default().fg(SALMON()).bold()),
+    ];
+    if !plan.title.is_empty() {
+        header.push(Span::styled("  ", Style::default()));
+        header.push(Span::styled(plan.title.clone(), Style::default().fg(CREAM()).bold()));
+    }
+    out.push(Line::from(header));
+
+    for step in &plan.steps {
+        out.push(Line::from(vec![
+            Span::styled("│  ", bar_style),
+            Span::styled("[ ] ", Style::default().fg(MUTED())),
+            Span::styled(step.clone(), Style::default().fg(CREAM())),
+        ]));
+    }
+    // Footer hint — no interaction yet, but signal the card affordance.
+    out.push(Line::from(vec![
+        Span::styled("╰─ ", bar_style),
+        Span::styled(
+            "review the plan · say `go` / `edit` / `cancel`",
+            Style::default().fg(MUTED()).italic(),
+        ),
+    ]));
+    out
+}
+
+/// True when `name` is one of the tools that mira-tools journals into
+/// `.mira/.undo/` — i.e. exactly the set `/undo` can roll back. Same
+/// list `summarize_tool` gives an "Edit" / "Write" label to.
+fn is_undoable_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "edit_file" | "write_file" | "apply_patch" | "create_file"
+    )
+}
+
+/// Index of the last entry that's an undoable, *successful* tool call.
+/// Scans backwards, stops at the first paired `(call, result)` where
+/// the tool is a writer and the result is ok. Returns `None` when no
+/// such call is in the visible transcript.
+fn last_undoable_call_idx(entries: &[LogEntry]) -> Option<usize> {
+    if entries.is_empty() {
+        return None;
+    }
+    let mut i = entries.len();
+    while i > 0 {
+        i -= 1;
+        if let LogEntry::ToolCall { name, .. } = &entries[i] {
+            if !is_undoable_tool(name) {
+                continue;
+            }
+            match entries.get(i + 1) {
+                Some(LogEntry::ToolResult { ok: true, .. }) => return Some(i),
+                _ => continue,
+            }
+        }
+    }
+    None
+}
+
+/// `1.4s` under 10s, `12s` under a minute, `1m03s` above. Keeps the
+/// in-flight tool ticker compact whether the call takes a beat or
+/// half a minute (rare — usually a Bash that hasn't crashed yet).
+fn format_elapsed(secs: f32) -> String {
+    if secs < 10.0 {
+        format!("{secs:.1}s")
+    } else if secs < 60.0 {
+        format!("{}s", secs as u32)
+    } else {
+        let mins = (secs as u32) / 60;
+        let rem = (secs as u32) % 60;
+        format!("{mins}m{rem:02}s")
+    }
+}
+
 /// Small search bar rendered just above the composer while Ctrl+R is
 /// active. Shows the query, hit count, and cursor position. Enter/n
 /// cycles; Esc closes.
@@ -1251,11 +1481,11 @@ fn approval_prompt_lines(pending: &crate::tui::state::PendingApproval) -> Vec<Li
         ),
         Span::styled(
             friendly.clone(),
-            Style::default().fg(SALMON).bold(),
+            Style::default().fg(SALMON()).bold(),
         ),
         Span::styled(
             "  ·  approval required",
-            Style::default().fg(CREAM),
+            Style::default().fg(CREAM()),
         ),
     ];
     if let Some(preview) = &pending.preview {
@@ -1264,14 +1494,14 @@ fn approval_prompt_lines(pending: &crate::tui::state::PendingApproval) -> Vec<Li
             DiffKind::Overwrite => "overwrite",
             DiffKind::Create => "create",
         };
-        header.push(Span::styled("  ·  ", Style::default().fg(DIM)));
+        header.push(Span::styled("  ·  ", Style::default().fg(DIM())));
         header.push(Span::styled(
             preview.path.clone(),
-            Style::default().fg(CREAM).bold(),
+            Style::default().fg(CREAM()).bold(),
         ));
         header.push(Span::styled(
             format!("  ({kind_label})"),
-            Style::default().fg(MUTED),
+            Style::default().fg(MUTED()),
         ));
     }
     out.push(Line::from(header));
@@ -1287,7 +1517,7 @@ fn approval_prompt_lines(pending: &crate::tui::state::PendingApproval) -> Vec<Li
         if preview.lines.len() > 24 {
             out.push(Line::from(Span::styled(
                 format!("     … {} more diff lines", preview.lines.len() - 24),
-                Style::default().fg(MUTED).italic(),
+                Style::default().fg(MUTED()).italic(),
             )));
         }
     } else if !primary.is_empty() {
@@ -1295,14 +1525,14 @@ fn approval_prompt_lines(pending: &crate::tui::state::PendingApproval) -> Vec<Li
         // Keep it on one line — the outer Paragraph::wrap handles reflow
         // gracefully at any terminal width.
         out.push(Line::from(vec![
-            Span::styled("     $  ", Style::default().fg(DIM)),
-            Span::styled(primary, Style::default().fg(CREAM)),
+            Span::styled("     $  ", Style::default().fg(DIM())),
+            Span::styled(primary, Style::default().fg(CREAM())),
         ]));
     } else {
         for l in pretty_args(args).lines().take(6) {
             out.push(Line::from(vec![
                 Span::styled("     ", Style::default()),
-                Span::styled(l.to_owned(), Style::default().fg(CREAM)),
+                Span::styled(l.to_owned(), Style::default().fg(CREAM())),
             ]));
         }
     }
@@ -1318,17 +1548,17 @@ fn approval_prompt_lines(pending: &crate::tui::state::PendingApproval) -> Vec<Li
                 .bg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("  approve       ", Style::default().fg(CREAM)),
+        Span::styled("  approve       ", Style::default().fg(CREAM())),
         Span::styled(
             " a ",
             Style::default()
                 .fg(Color::Black)
-                .bg(SALMON)
+                .bg(SALMON())
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             "  always this session       ",
-            Style::default().fg(CREAM),
+            Style::default().fg(CREAM()),
         ),
         Span::styled(
             " n ",
@@ -1337,7 +1567,7 @@ fn approval_prompt_lines(pending: &crate::tui::state::PendingApproval) -> Vec<Li
                 .bg(Color::Red)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("  deny", Style::default().fg(CREAM)),
+        Span::styled("  deny", Style::default().fg(CREAM())),
     ]));
 
     // Bottom rule closes the block.
@@ -1352,7 +1582,7 @@ fn approval_prompt_lines(pending: &crate::tui::state::PendingApproval) -> Vec<Li
 fn rule_line() -> Line<'static> {
     Line::from(Span::styled(
         "  ─────────────────────────────────────────────────────────────",
-        Style::default().fg(DIM),
+        Style::default().fg(DIM()),
     ))
 }
 
@@ -1363,7 +1593,7 @@ fn indented_diff_line(d: &DiffLine) -> Line<'static> {
     match d {
         DiffLine::Ctx(s) => Line::from(vec![
             Span::raw("   "),
-            Span::styled(s.clone(), Style::default().fg(MUTED)),
+            Span::styled(s.clone(), Style::default().fg(MUTED())),
         ]),
         DiffLine::Add(s) => Line::from(vec![
             Span::styled("  +", Style::default().fg(Color::Green).bold()),
@@ -1375,7 +1605,7 @@ fn indented_diff_line(d: &DiffLine) -> Line<'static> {
         ]),
         DiffLine::HunkGap => Line::from(Span::styled(
             "    ⋯",
-            Style::default().fg(DIM).italic(),
+            Style::default().fg(DIM()).italic(),
         )),
     }
 }

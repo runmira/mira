@@ -14,6 +14,7 @@ pub mod approver;
 mod markdown;
 mod render;
 mod state;
+mod theme;
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -64,6 +65,13 @@ pub struct TuiConfig {
     /// re-launch prior conversations without leaving the TUI.
     /// `None` when persistence is disabled (`--no-persist`).
     pub store: Option<Arc<dyn SessionStore>>,
+    /// Live provider's model catalog — populated in the background at
+    /// boot via `ChatProvider::list_models`. Read on every `/model `
+    /// palette open so autocomplete has the real per-provider ids
+    /// (`google/gemini-2.5-flash`, `sonnet-4-6`, …). Empty when the
+    /// fetch is in flight or the provider doesn't expose a catalog;
+    /// the palette handles both by silently showing no completions.
+    pub models: Arc<tokio::sync::RwLock<Vec<String>>>,
 }
 
 /// Built-in slash commands the palette suggests. Order is display order.
@@ -81,6 +89,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/resume", "show shell command to resume a session"),
     ("/budget", "cap this session's spend (e.g. /budget $2 · /budget off)"),
     ("/cost", "print token & dollar breakdown for this session"),
+    ("/theme", "swap palette (`/theme` · `/theme <name>` · `/theme reload` · `/theme save`)"),
     ("/clear", "clear the visible transcript"),
     ("/quit", "exit the TUI"),
 ];
@@ -721,6 +730,20 @@ fn accept_palette(state: &mut TuiState) {
             let cursor = start + item.insert.len();
             replace_input(state, new_input, cursor);
         }
+        Palette::Model => {
+            // Rewrite the whole line to `/model <picked-id>`. No tail
+            // to preserve — `/model` doesn't take further args.
+            let new_input = format!("/model {}", item.insert);
+            let cursor = new_input.len();
+            replace_input(state, new_input, cursor);
+        }
+        Palette::Theme => {
+            // Same shape as `/model` — rewrite the whole line so
+            // partial-arg typos get cleaned up when the user picks.
+            let new_input = format!("/theme {}", item.insert);
+            let cursor = new_input.len();
+            replace_input(state, new_input, cursor);
+        }
         Palette::None => {}
     }
     state.palette = state::PaletteState::none();
@@ -757,6 +780,26 @@ async fn refresh_palette(
         return;
     }
 
+    // (#1) `/model <partial>` — completions from the live provider's
+    // model catalog. Cached in TuiConfig so the fetch runs in the
+    // background at boot and every subsequent open is a Vec lookup.
+    if let Some(filter) = state.input().strip_prefix("/model ") {
+        let filter = filter.trim_start().to_ascii_lowercase();
+        let matches = model_matches(&filter, cfg).await;
+        open_palette(state, Palette::Model, matches);
+        return;
+    }
+
+    // `/theme <partial>` — bundled presets + the two housekeeping
+    // verbs (`reload`, `save`). Same UX contract as `/model` so the
+    // pattern reads the same across every arg-taking slash.
+    if let Some(filter) = state.input().strip_prefix("/theme ") {
+        let filter = filter.trim_start().to_ascii_lowercase();
+        let matches = theme_matches(&filter);
+        open_palette(state, Palette::Theme, matches);
+        return;
+    }
+
     // @file picker when the cursor sits inside an `@word` run.
     if let Some((word_start, word_end)) = find_at_word(state.input(), state.cursor()) {
         let filter = state.input()[word_start + 1..word_end].to_ascii_lowercase();
@@ -768,6 +811,63 @@ async fn refresh_palette(
 
     // No trigger — close the palette.
     state.palette = state::PaletteState::none();
+}
+
+/// Filter the bundled theme presets + housekeeping verbs. Same
+/// substring match as `slash_matches` uses so the palette feels
+/// identical across `/model` and `/theme`.
+fn theme_matches(filter: &str) -> Vec<PaletteItem> {
+    // Presets first, then the two verbs, so a bare `/theme <TAB>` lists
+    // the roster before the housekeeping actions.
+    let mut items: Vec<PaletteItem> = crate::tui::theme::PRESETS
+        .iter()
+        .filter(|(name, _, _)| filter.is_empty() || name.to_ascii_lowercase().contains(filter))
+        .map(|(name, _, desc)| PaletteItem {
+            insert: (*name).to_owned(),
+            title: (*name).to_owned(),
+            detail: (*desc).to_owned(),
+        })
+        .collect();
+    for (verb, desc) in [
+        ("reload", "re-read ~/.mira/theme.yaml"),
+        ("save", "write current palette to yaml (persists)"),
+    ] {
+        if filter.is_empty() || verb.contains(filter) {
+            items.push(PaletteItem {
+                insert: verb.to_owned(),
+                title: verb.to_owned(),
+                detail: desc.to_owned(),
+            });
+        }
+    }
+    items
+}
+
+/// Filter the cached model catalog with a substring match on the id
+/// and stamp each result as ready-to-insert (`insert` = model id,
+/// `title` = same, `detail` = provider hint pulled from the id prefix
+/// when there is one — `openai/…`, `anthropic/…`, etc.).
+async fn model_matches(filter: &str, cfg: &TuiConfig) -> Vec<PaletteItem> {
+    let models = cfg.models.read().await;
+    if models.is_empty() {
+        return Vec::new();
+    }
+    let mut out: Vec<PaletteItem> = models
+        .iter()
+        .filter(|id| filter.is_empty() || id.to_ascii_lowercase().contains(filter))
+        .map(|id| {
+            let detail = id.split_once('/').map(|(p, _)| p.to_owned()).unwrap_or_default();
+            PaletteItem {
+                insert: id.clone(),
+                title: id.clone(),
+                detail,
+            }
+        })
+        .collect();
+    // Cap the palette — a provider catalog can be hundreds of models
+    // (OpenRouter), and the overlay itself caps at 8 rows anyway.
+    out.truncate(32);
+    out
 }
 
 fn open_palette(state: &mut TuiState, kind: Palette, matches: Vec<PaletteItem>) {
@@ -1150,6 +1250,57 @@ fn parse_budget(rest: &str) -> Result<Option<f64>, String> {
     Ok(Some(n))
 }
 
+/// `/theme` sub-dispatch.
+///
+/// Shape:
+/// - `/theme`            — list bundled presets + point at the yaml.
+/// - `/theme <name>`     — apply a bundled preset (in-memory).
+/// - `/theme reload`     — re-read `~/.mira/theme.yaml`.
+/// - `/theme save`       — write the current palette to yaml (persists).
+fn run_theme_slash(rest: &str, state: &mut TuiState) {
+    let rest = rest.trim();
+    if rest.is_empty() {
+        state.push_info(format!(
+            "theme file: {}",
+            crate::tui::theme::theme_path().display()
+        ));
+        state.push_info("presets:".to_string());
+        for (name, _, desc) in crate::tui::theme::PRESETS {
+            state.push_info(format!("  {name:<10} — {desc}"));
+        }
+        state.push_info(
+            "usage: /theme <name> · /theme reload · /theme save".to_string(),
+        );
+        return;
+    }
+    match rest {
+        "reload" => match crate::tui::theme::reload() {
+            Ok(path) => {
+                state.flash = Some("theme reloaded".into());
+                state.push_info(format!("theme ← {}", path.display()));
+            }
+            Err(e) => state.push_warning(format!("reload failed: {e}")),
+        },
+        "save" => match crate::tui::theme::save_current_to_disk() {
+            Ok(path) => {
+                state.flash = Some("theme saved".into());
+                state.push_info(format!("theme → {}", path.display()));
+            }
+            Err(e) => state.push_warning(format!("save failed: {e}")),
+        },
+        name => match crate::tui::theme::preset(name) {
+            Some((t, desc)) => {
+                crate::tui::theme::set(t);
+                state.flash = Some(format!("theme → {name}"));
+                state.push_info(format!("theme · {name} — {desc}"));
+            }
+            None => state.push_warning(format!(
+                "unknown theme `{name}` — try /theme to list presets"
+            )),
+        },
+    }
+}
+
 /// True when `head` (with the leading `/`) is one of the built-in slash
 /// commands. Built-ins always win over a skill alias — a skill named
 /// `mode.md` can't shadow `/mode`.
@@ -1310,6 +1461,8 @@ async fn run_slash(
                 state.push_info(line);
             }
         }
+
+        "/theme" => run_theme_slash(rest, state),
 
         // Fall through to the skill registry: any skill whose
         // frontmatter declares `slash: X` (default `X = skill.name`)

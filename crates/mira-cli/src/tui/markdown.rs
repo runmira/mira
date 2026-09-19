@@ -21,13 +21,14 @@ use std::sync::LazyLock;
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 
-/// Prose text color — mirrors the `CREAM` constant in `render.rs` so
-/// plain assistant/user paragraphs render bright near-white instead of
-/// falling back to whatever the terminal picked for its default fg
-/// (typically a dimmer gray that made prose read faint next to coral
-/// accents). Duplicated (not re-exported) because `markdown.rs` is
-/// deliberately independent of `render.rs` for testability.
-const PROSE: Color = Color::Rgb(240, 235, 226);
+/// Prose text color. Reads the live theme on every call so `/theme
+/// <name>` updates the next render tick. `Color` is `Copy` so the
+/// read lock releases immediately; the hot path is a single atomic
+/// on the uncontended read side of an `RwLock`.
+#[inline]
+fn prose() -> Color {
+    crate::tui::theme::current().prose
+}
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{FontStyle, Style as SynStyle, Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
@@ -435,7 +436,7 @@ fn inline_spans(line: &str) -> Vec<Span<'static>> {
                 flush_plain(&mut out, line, plain_start, i);
                 out.push(Span::styled(
                     line[i + 2..close].to_owned(),
-                    Style::default().fg(PROSE).add_modifier(Modifier::BOLD),
+                    Style::default().fg(prose()).add_modifier(Modifier::BOLD),
                 ));
                 i = close + 2;
                 plain_start = i;
@@ -449,7 +450,7 @@ fn inline_spans(line: &str) -> Vec<Span<'static>> {
                 flush_plain(&mut out, line, plain_start, i);
                 out.push(Span::styled(
                     line[i + 1..close].to_owned(),
-                    Style::default().fg(PROSE).add_modifier(Modifier::ITALIC),
+                    Style::default().fg(prose()).add_modifier(Modifier::ITALIC),
                 ));
                 i = close + 1;
                 plain_start = i;
@@ -470,7 +471,7 @@ fn flush_plain(out: &mut Vec<Span<'static>>, s: &str, start: usize, end: usize) 
     if end > start {
         out.push(Span::styled(
             s[start..end].to_owned(),
-            Style::default().fg(PROSE),
+            Style::default().fg(prose()),
         ));
     }
 }
