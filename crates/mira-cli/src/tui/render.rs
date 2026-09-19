@@ -1052,6 +1052,7 @@ fn palette(f: &mut Frame, input_area: Rect, state: &TuiState) {
         Palette::Slash => " commands ",
         Palette::AtFile => " files (rg --files) ",
         Palette::Model => " models ",
+        Palette::Theme => " themes ",
         Palette::None => "",
     };
 

@@ -81,6 +81,9 @@ pub enum Palette {
     /// Fires when the composer starts with `/model ` — completions
     /// come from the live provider's model list (cached).
     Model,
+    /// Fires when the composer starts with `/theme ` — completions
+    /// are the bundled presets plus the `reload` / `save` verbs.
+    Theme,
 }
 
 pub struct PaletteState {

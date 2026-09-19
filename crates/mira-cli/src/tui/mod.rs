@@ -737,6 +737,13 @@ fn accept_palette(state: &mut TuiState) {
             let cursor = new_input.len();
             replace_input(state, new_input, cursor);
         }
+        Palette::Theme => {
+            // Same shape as `/model` — rewrite the whole line so
+            // partial-arg typos get cleaned up when the user picks.
+            let new_input = format!("/theme {}", item.insert);
+            let cursor = new_input.len();
+            replace_input(state, new_input, cursor);
+        }
         Palette::None => {}
     }
     state.palette = state::PaletteState::none();
@@ -783,6 +790,16 @@ async fn refresh_palette(
         return;
     }
 
+    // `/theme <partial>` — bundled presets + the two housekeeping
+    // verbs (`reload`, `save`). Same UX contract as `/model` so the
+    // pattern reads the same across every arg-taking slash.
+    if let Some(filter) = state.input().strip_prefix("/theme ") {
+        let filter = filter.trim_start().to_ascii_lowercase();
+        let matches = theme_matches(&filter);
+        open_palette(state, Palette::Theme, matches);
+        return;
+    }
+
     // @file picker when the cursor sits inside an `@word` run.
     if let Some((word_start, word_end)) = find_at_word(state.input(), state.cursor()) {
         let filter = state.input()[word_start + 1..word_end].to_ascii_lowercase();
@@ -794,6 +811,36 @@ async fn refresh_palette(
 
     // No trigger — close the palette.
     state.palette = state::PaletteState::none();
+}
+
+/// Filter the bundled theme presets + housekeeping verbs. Same
+/// substring match as `slash_matches` uses so the palette feels
+/// identical across `/model` and `/theme`.
+fn theme_matches(filter: &str) -> Vec<PaletteItem> {
+    // Presets first, then the two verbs, so a bare `/theme <TAB>` lists
+    // the roster before the housekeeping actions.
+    let mut items: Vec<PaletteItem> = crate::tui::theme::PRESETS
+        .iter()
+        .filter(|(name, _, _)| filter.is_empty() || name.to_ascii_lowercase().contains(filter))
+        .map(|(name, _, desc)| PaletteItem {
+            insert: (*name).to_owned(),
+            title: (*name).to_owned(),
+            detail: (*desc).to_owned(),
+        })
+        .collect();
+    for (verb, desc) in [
+        ("reload", "re-read ~/.mira/theme.yaml"),
+        ("save", "write current palette to yaml (persists)"),
+    ] {
+        if filter.is_empty() || verb.contains(filter) {
+            items.push(PaletteItem {
+                insert: verb.to_owned(),
+                title: verb.to_owned(),
+                detail: desc.to_owned(),
+            });
+        }
+    }
+    items
 }
 
 /// Filter the cached model catalog with a substring match on the id
