@@ -33,16 +33,19 @@ const MAX_ENTRIES: usize = 500;
 /// streaming reply reads as one paragraph, not one entry per token.
 #[derive(Clone, Debug)]
 pub enum LogEntry {
-    User {
-        text: String,
-        /// Wall-clock milliseconds between `start_stream` and the first
-        /// `HarnessEvent::Done` that landed after it. Rendered as a
-        /// `· 12.4s` chip on the `> user` prompt line so users can see
-        /// how long the model took to reply. `None` for in-flight
-        /// turns and for replays from disk (no start timestamp).
-        elapsed_ms: Option<u32>,
-    },
+    User(String),
     Assistant(String),
+    /// Turn-end marker: rendered under the assistant reply as
+    /// `✳ Baked for 12.4s`. Pushed once per `HarnessEvent::Done`, so
+    /// the transcript grows a visual full-stop after every reply — a
+    /// design borrowed from Claude Code. Verb is chosen at render
+    /// time from [`super::render::turn_verb_past`] using the
+    /// millisecond bucket, so an identical duration always reads the
+    /// same word ("baked for 4s" every time, not a random flavor
+    /// each render).
+    TurnEnd {
+        elapsed_ms: u32,
+    },
     ToolCall {
         name: String,
         args: String,
@@ -416,20 +419,6 @@ impl TuiState {
         self.error_flash_until.map(|t| Instant::now() < t).unwrap_or(false)
     }
 
-    /// Record how long the most-recent user turn took. Called from the
-    /// event loop on `HarnessEvent::Done` so the `> user` prompt line
-    /// grows a `· 12.4s` chip once its reply lands. Silent no-op when
-    /// no user entry exists (edge case: stream started via slash-only
-    /// path with no `push_user` before it).
-    pub fn record_last_user_elapsed(&mut self, ms: u32) {
-        for e in self.entries.iter_mut().rev() {
-            if let LogEntry::User { elapsed_ms, .. } = e {
-                *elapsed_ms = Some(ms);
-                return;
-            }
-        }
-    }
-
     /// Byte offset of the previous `User` entry's start in a
     /// paragraph-height iteration — used by Ctrl+↑ to jump between
     /// turns. Returns entry indices (not row offsets); the render
@@ -443,7 +432,7 @@ impl TuiState {
             .iter()
             .enumerate()
             .rev()
-            .find(|(_, e)| matches!(e, LogEntry::User { .. }))
+            .find(|(_, e)| matches!(e, LogEntry::User(_)))
             .map(|(i, _)| i)
     }
 
@@ -457,7 +446,7 @@ impl TuiState {
             .iter()
             .enumerate()
             .rev()
-            .find(|(_, e)| matches!(e, LogEntry::User { .. }))
+            .find(|(_, e)| matches!(e, LogEntry::User(_)))
             .map(|(i, _)| i)
     }
 
@@ -470,7 +459,7 @@ impl TuiState {
         self.entries[start..]
             .iter()
             .enumerate()
-            .find(|(_, e)| matches!(e, LogEntry::User { .. }))
+            .find(|(_, e)| matches!(e, LogEntry::User(_)))
             .map(|(off, _)| start + off)
     }
 
@@ -510,15 +499,21 @@ impl TuiState {
     }
 
     pub fn push_user(&mut self, s: String) {
-        self.entries.push(LogEntry::User {
-            text: s,
-            elapsed_ms: None,
-        });
+        self.entries.push(LogEntry::User(s));
         self.enforce_cap();
         // A fresh user turn resets the turn-nav anchor — Ctrl+↑ from
         // here should walk *this* turn's history, not still be pointed
         // at whatever the previous session was scrolled to.
         self.turn_nav_idx = None;
+    }
+
+    /// Push a turn-end marker with the wall-clock reply time. Called
+    /// from the event loop on `HarnessEvent::Done` so the transcript
+    /// grows a `✳ Baked for 12.4s` line under the last assistant
+    /// reply — the visual full stop between turns.
+    pub fn push_turn_end(&mut self, elapsed_ms: u32) {
+        self.entries.push(LogEntry::TurnEnd { elapsed_ms });
+        self.enforce_cap();
     }
 
     pub fn push_info(&mut self, s: impl Into<String>) {
@@ -675,10 +670,16 @@ impl TuiState {
         let mut out = String::new();
         for e in &self.entries {
             match e {
-                LogEntry::User { text, .. } => {
+                LogEntry::User(s) => {
                     out.push_str("> ");
-                    out.push_str(text);
+                    out.push_str(s);
                     out.push_str("\n\n");
+                }
+                LogEntry::TurnEnd { elapsed_ms } => {
+                    out.push_str(&format!(
+                        "[{}]\n\n",
+                        crate::tui::render::turn_end_label(*elapsed_ms)
+                    ));
                 }
                 LogEntry::Assistant(s) => {
                     out.push_str(s);
@@ -1078,10 +1079,13 @@ fn line_end(s: &str, byte: usize) -> usize {
 /// results.
 fn entry_text(e: &LogEntry) -> String {
     match e {
-        LogEntry::User { text, .. } => text.clone(),
-        LogEntry::Assistant(s)
+        LogEntry::User(s)
+        | LogEntry::Assistant(s)
         | LogEntry::Warning(s)
         | LogEntry::Info(s) => s.clone(),
+        LogEntry::TurnEnd { elapsed_ms } => {
+            format!("baked for {}ms", elapsed_ms)
+        }
         LogEntry::ToolCall { name, args, .. } => format!("{name} {args}"),
         LogEntry::ToolResult { snippet, full, .. } => {
             if full.is_empty() {
@@ -1210,10 +1214,7 @@ mod tests {
     #[test]
     fn search_finds_and_cycles() {
         let mut st = TuiState::new("m".into(), Mode::Manual);
-        st.entries.push(LogEntry::User {
-            text: "hello world".into(),
-            elapsed_ms: None,
-        });
+        st.entries.push(LogEntry::User("hello world".into()));
         st.entries.push(LogEntry::Assistant("goodbye world".into()));
         st.entries.push(LogEntry::Info("world peace".into()));
         st.search_open();
@@ -1265,19 +1266,19 @@ mod tests {
         let last = st.prev_user_entry_idx(0).unwrap();
         let before = st.user_entry_before(last).unwrap();
         let earliest = st.user_entry_before(before).unwrap();
-        assert!(matches!(&st.entries()[earliest], LogEntry::User { text, .. } if text == "first"));
+        assert!(matches!(&st.entries()[earliest], LogEntry::User(s) if s == "first"));
         assert!(st.user_entry_before(earliest).is_none());
     }
 
     #[test]
-    fn record_last_user_elapsed_stamps_most_recent() {
+    fn push_turn_end_appends_marker() {
         let mut st = TuiState::new("m".into(), Mode::Manual);
         st.push_user("go".into());
         st.push_assistant("done".into());
-        st.record_last_user_elapsed(4200);
-        match st.entries().first().unwrap() {
-            LogEntry::User { elapsed_ms, .. } => assert_eq!(*elapsed_ms, Some(4200)),
-            _ => panic!("expected user"),
+        st.push_turn_end(4200);
+        match st.entries().last().unwrap() {
+            LogEntry::TurnEnd { elapsed_ms } => assert_eq!(*elapsed_ms, 4200),
+            _ => panic!("expected turn-end marker"),
         }
     }
 

@@ -292,7 +292,7 @@ fn transcript(f: &mut Frame, area: Rect, state: &mut TuiState) {
                 }
                 if batch_end < entries.len() {
                     lines.push(Line::from(""));
-                    if matches!(entries.get(batch_end), Some(LogEntry::User { .. })) {
+                    if matches!(entries.get(batch_end), Some(LogEntry::User(_))) {
                         lines.push(Line::from(""));
                     }
                 }
@@ -389,7 +389,7 @@ fn transcript(f: &mut Frame, area: Rect, state: &mut TuiState) {
         // and below (matches the landing mockup's paragraph rhythm).
         if i + consumed < entries.len() {
             lines.push(Line::from(""));
-            if matches!(entries.get(i + consumed), Some(LogEntry::User { .. })) {
+            if matches!(entries.get(i + consumed), Some(LogEntry::User(_))) {
                 lines.push(Line::from(""));
             }
         }
@@ -581,7 +581,8 @@ fn highlight_line<'a>(line: Line<'a>, query: &str, focused: bool) -> Line<'a> {
 
 fn entry_to_lines(entry: &LogEntry) -> Vec<Line<'static>> {
     match entry {
-        LogEntry::User { text, elapsed_ms } => user_lines(text, *elapsed_ms),
+        LogEntry::User(s) => user_lines(s),
+        LogEntry::TurnEnd { elapsed_ms } => turn_end_lines(*elapsed_ms),
         LogEntry::Assistant(s) => {
             // (#5) When the assistant reply is a "Plan:" doc, render
             // as a bordered card with checkbox steps — matches the
@@ -632,48 +633,140 @@ fn entry_to_lines(entry: &LogEntry) -> Vec<Line<'static>> {
 /// its own row(s). Multi-line messages (Ctrl+J) get the `> ` marker on
 /// the first row only and a hanging indent on the rest so paragraphs
 /// read cleanly.
-///
-/// When `elapsed_ms` is `Some`, a small `· 12.4s` chip trails the
-/// first line — the response-time-per-turn readout the user asked for.
-fn user_lines(s: &str, elapsed_ms: Option<u32>) -> Vec<Line<'static>> {
+fn user_lines(s: &str) -> Vec<Line<'static>> {
     let mut out: Vec<Line<'static>> = Vec::new();
     let mut first = true;
-    // Placeholders in the text render as `[pasted N lines]`; the actual
-    // content lives in `TuiState::pastes` and gets stitched back in on
-    // submit. We do the swap here only for display — the transcript
-    // entry itself was written *after* expand_pastes(), so any User
-    // rendered via this path is already fully-expanded prose.
     for line in s.lines() {
         let mark = if first { "> " } else { "  " };
-        let mut spans = vec![
+        out.push(Line::from(vec![
             Span::styled(mark, Style::default().fg(SALMON()).bold()),
             Span::styled(line.to_owned(), Style::default().fg(CREAM())),
-        ];
-        if first {
-            if let Some(ms) = elapsed_ms {
-                spans.push(Span::styled(
-                    format!("   · {}", format_turn_elapsed(ms)),
-                    Style::default().fg(MUTED()).italic(),
-                ));
-            }
-        }
-        out.push(Line::from(spans));
+        ]));
         first = false;
     }
     if out.is_empty() {
-        let mut spans = vec![Span::styled(
+        out.push(Line::from(Span::styled(
             "> ",
             Style::default().fg(SALMON()).bold(),
-        )];
-        if let Some(ms) = elapsed_ms {
-            spans.push(Span::styled(
-                format!("   · {}", format_turn_elapsed(ms)),
-                Style::default().fg(MUTED()).italic(),
-            ));
-        }
-        out.push(Line::from(spans));
+        )));
     }
     out
+}
+
+/// Turn-end marker rendered under the assistant reply:
+///
+///     ✳ Baked for 12.4s
+///
+/// Muted italic so it reads as a full stop, not a headline. Verb is
+/// picked from [`turn_verb_past`] against the millisecond bucket so
+/// the same duration always reads the same word.
+fn turn_end_lines(elapsed_ms: u32) -> Vec<Line<'static>> {
+    vec![Line::from(vec![
+        Span::styled("✳ ", Style::default().fg(SALMON())),
+        Span::styled(
+            turn_end_label(elapsed_ms),
+            Style::default().fg(MUTED()).italic(),
+        ),
+    ])]
+}
+
+/// Shared label so the transcript-plaintext export and the on-screen
+/// renderer agree on wording (avoids "Baked for 4s" in the TUI but
+/// "12300ms" in the markdown save).
+pub fn turn_end_label(elapsed_ms: u32) -> String {
+    format!(
+        "{} for {}",
+        turn_verb_past(elapsed_ms),
+        format_turn_elapsed(elapsed_ms)
+    )
+}
+
+/// Past-tense counterpart to the streaming vocabulary — picked from a
+/// deterministic bucket of `elapsed_ms` so an identical reply time
+/// always reads the same. The set is curated for the cooking /
+/// "gently applied thought" register that reads as playful without
+/// undermining a serious reply.
+fn turn_verb_past(elapsed_ms: u32) -> &'static str {
+    const WORDS: &[&str] = &[
+        "Baked",
+        "Brewed",
+        "Cooked",
+        "Simmered",
+        "Steeped",
+        "Percolated",
+        "Wrangled",
+        "Pondered",
+        "Cogitated",
+        "Mused",
+        "Sizzled",
+        "Roasted",
+        "Whisked",
+        "Stirred",
+        "Seasoned",
+        "Marinated",
+        "Chopped",
+        "Kneaded",
+        "Blended",
+        "Fermented",
+        "Concocted",
+        "Crafted",
+        "Forged",
+        "Tinkered",
+        "Hacked",
+        "Wrestled",
+        "Untangled",
+        "Investigated",
+        "Devised",
+        "Dreamed",
+        "Schemed",
+        "Calculated",
+        "Reasoned",
+        "Explored",
+        "Assembled",
+        "Refined",
+        "Polished",
+        "Orchestrated",
+        "Discovered",
+        "Conjured",
+        "Analyzed",
+        "Decoded",
+        "Debugged",
+        "Prototyped",
+        "Architected",
+        "Engineered",
+        "Compiled",
+        "Rendered",
+        "Optimized",
+        "Configured",
+        "Refactored",
+        "Researched",
+        "Surveyed",
+        "Scanned",
+        "Traced",
+        "Mapped",
+        "Indexed",
+        "Linked",
+        "Connected",
+        "Shaped",
+        "Invented",
+        "Imagined",
+        "Envisioned",
+        "Experimented",
+        "Improvised",
+        "Solved",
+        "Cracked",
+        "Unraveled",
+        "Untwisted",
+        "Unfolded",
+        "Sautéed",
+        "Grilled",
+        "Basted",
+        "Broiled",
+        "Glazed",
+    ];
+
+    let idx = ((elapsed_ms / 173) as usize) % WORDS.len();
+    WORDS[idx]
 }
 
 /// Compact "wall time between user submit and stream done":

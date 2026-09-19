@@ -515,7 +515,7 @@ fn user_ordinal(state: &TuiState, idx: usize) -> usize {
         .entries()
         .iter()
         .take(idx + 1)
-        .filter(|e| matches!(e, state::LogEntry::User { .. }))
+        .filter(|e| matches!(e, state::LogEntry::User(_)))
         .count()
 }
 
@@ -523,7 +523,7 @@ fn user_count(state: &TuiState) -> usize {
     state
         .entries()
         .iter()
-        .filter(|e| matches!(e, state::LogEntry::User { .. }))
+        .filter(|e| matches!(e, state::LogEntry::User(_)))
         .count()
 }
 
@@ -1395,14 +1395,13 @@ async fn handle_harness_event(
             // skip the harness-side preview to avoid double rendering.
         }
         HarnessEvent::Done => {
-            // Stamp the completed user turn with its wall-clock reply
-            // time so the transcript grows a `· 12.4s` chip below the
-            // `> user` line. Cap at u32 max in case a stream ran for
-            // days (would only happen with a broken provider — no
-            // reason to widen the field for it).
+            // Drop a `✳ Baked for 12.4s` marker into the transcript so
+            // the reply is visibly bounded — matches Claude Code's
+            // full-stop treatment. Cap at u32 max in case a stream
+            // ran for days (broken provider); no reason to widen.
             if let Some(t0) = state.stream_started_at {
                 let ms = t0.elapsed().as_millis().min(u32::MAX as u128) as u32;
-                state.record_last_user_elapsed(ms);
+                state.push_turn_end(ms);
             }
             state.streaming = false;
             state.stream_started_at = None;
@@ -1933,13 +1932,16 @@ fn run_save_slash(rest: &str, state: &mut TuiState, cwd: &std::path::Path) {
     let mut out = String::new();
     for e in state.entries() {
         match e {
-            state::LogEntry::User { text, elapsed_ms } => {
+            state::LogEntry::User(s) => {
                 out.push_str("**you:** ");
-                out.push_str(text);
-                if let Some(ms) = elapsed_ms {
-                    out.push_str(&format!("  _· reply in {:.1}s_", *ms as f32 / 1000.0));
-                }
+                out.push_str(s);
                 out.push_str("\n\n");
+            }
+            state::LogEntry::TurnEnd { elapsed_ms } => {
+                out.push_str(&format!(
+                    "_· {}_\n\n",
+                    crate::tui::render::turn_end_label(*elapsed_ms)
+                ));
             }
             state::LogEntry::Assistant(s) => {
                 out.push_str(s);
