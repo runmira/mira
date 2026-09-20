@@ -6,6 +6,7 @@ use mira_policy::Mode;
 use mira_tools::DiffPreview;
 
 use crate::tui::approver::ApprovalRequest;
+use crate::tui::render::layout::TranscriptLayout;
 
 /// An approval request enriched with an optional diff preview (present
 /// only for edit_file / write_file calls). The preview is computed
@@ -13,6 +14,33 @@ use crate::tui::approver::ApprovalRequest;
 pub struct PendingApproval {
     pub request: ApprovalRequest,
     pub preview: Option<DiffPreview>,
+}
+
+/// One item in the agent's task list, as the TUI sees it.
+///
+/// Hydrated from the structured `data` payloads that `task_create` /
+/// `task_update` / `task_list` return (mirrors
+/// `mira_tools::tasks::TaskItem`); the TUI never talks to the task
+/// store directly — it just observes the tool stream.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+pub struct TaskItem {
+    pub id: u32,
+    pub subject: String,
+    /// Present-continuous form shown while the task is in progress
+    /// ("Running tests"). Falls back to `subject`.
+    #[serde(default)]
+    pub active_form: Option<String>,
+    pub status: TaskStatus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskStatus {
+    Pending,
+    InProgress,
+    Completed,
+    /// Soft-deleted on the wire — dropped from the panel on upsert.
+    Deleted,
 }
 
 /// Full tool result content is capped at this many bytes so a runaway
@@ -38,12 +66,20 @@ pub enum LogEntry {
     /// `✳ Baked for 12.4s`. Pushed once per `HarnessEvent::Done`, so
     /// the transcript grows a visual full-stop after every reply — a
     /// design borrowed from Claude Code. Verb is chosen at render
-    /// time from [`super::render::turn_verb_past`] using the
-    /// millisecond bucket, so an identical duration always reads the
-    /// same word ("baked for 4s" every time, not a random flavor
-    /// each render).
+    /// time from [`crate::tui::components::status::turn_end_label`]
+    /// using the millisecond bucket, so an identical duration always
+    /// reads the same word ("baked for 4s" every time, not a random
+    /// flavor each render).
     TurnEnd {
         elapsed_ms: u32,
+        /// Receipt — what this turn actually did, computed at push
+        /// time by scanning the turn's entries. Zero when the turn
+        /// ran no tools, so the marker stays a quiet full-stop.
+        files: u16,
+        adds: u32,
+        dels: u32,
+        tools: u16,
+        cost: Option<f64>,
     },
     ToolCall {
         name: String,
@@ -72,9 +108,22 @@ pub enum LogEntry {
         /// instead of the one-line snippet.
         full: String,
         expanded: bool,
+        /// User override for auto-collapse (`1–9` toggles recent
+        /// groups): `None` = automatic (groups from turns before the
+        /// last user prompt render header-only), `Some(false)` = pinned
+        /// open, `Some(true)` = explicitly collapsed.
+        collapsed_override: Option<bool>,
     },
     Warning(String),
     Info(String),
+    /// First-run startup banner — structured so the component renders
+    /// it with brand colors (info lines are muted-italic by design).
+    Welcome {
+        model: String,
+        mode: Mode,
+        cwd: String,
+        tip: &'static str,
+    },
 }
 
 /// Which overlay list is open above the composer, if any.
@@ -156,23 +205,30 @@ pub struct TuiState {
 
     pub mode: Mode,
     pub model: String,
-    /// Cached `git rev-parse --abbrev-ref HEAD` — populated once on
-    /// startup, then shown as a `⎇ <branch>` chip in the header.
-    /// `None` when the cwd isn't a git repo or the command failed.
+    /// Cached `git rev-parse --abbrev-ref HEAD` — refreshed at
+    /// startup and after every turn, shown as a `⎇ <branch>` chip in
+    /// the header. `None` when the cwd isn't a git repo.
     pub git_branch: Option<String>,
+    /// Uncommitted-change count from `git status --porcelain`,
+    /// refreshed with the branch. `Some(0)` = clean worktree; `None`
+    /// outside a repo or when git failed.
+    pub git_dirty: Option<u32>,
+    /// Last output line of the in-flight tool `(call_id, line)` — the
+    /// live tail under the `◐` header so a 90-second command doesn't
+    /// look hung. Cleared on ToolEnd / interrupt.
+    pub tool_tail: Option<(String, String)>,
     pub streaming: bool,
     pub pending_approval: Option<PendingApproval>,
     pub esc_pending: bool,
     pub scroll: u16,
-    /// The row offset where the tail sits in the last-rendered transcript
-    /// — total wrapped lines minus visible height. Written by the render
-    /// function so the key handler can clamp PgDn correctly and re-engage
-    /// `follow_tail` when the user scrolls back to the bottom.
-    pub transcript_tail: u16,
-    /// Height of the transcript viewport as of the last draw. Written by
-    /// the render function; read by the key handler so PgUp/PgDn move by
-    /// a real page instead of a hard-coded step.
+    /// Height of the transcript viewport, kept in sync from both the
+    /// resize event and the draw pass. Read by the key handler so
+    /// PgUp/PgDn move by a real page instead of a hard-coded step.
     pub viewport_height: u16,
+    /// Width of the transcript viewport. Wrapping — and therefore the
+    /// whole transcript layout — depends on it; a width change
+    /// invalidates the derived layout cache.
+    pub viewport_width: u16,
     /// When true, the UI auto-scrolls the transcript to the bottom on new
     /// entries. Flipped off when the user PgUps, on when they PgDn back.
     pub follow_tail: bool,
@@ -194,6 +250,16 @@ pub struct TuiState {
     /// either raises the cap or clears it with `/budget off`. Wired
     /// through `/budget <$X>` in the TUI. Not persisted across sessions.
     pub budget_usd: Option<f64>,
+    /// Messages typed while a turn was streaming. Sent FIFO as each
+    /// turn completes; ↑ while streaming pops the newest back into the
+    /// composer for editing. Survives an interrupt so nothing the user
+    /// typed is lost.
+    pub queued: Vec<String>,
+    /// The agent's task list, hydrated from `task_*` tool payloads.
+    /// Rendered under the streaming indicator with checkboxes so the
+    /// user can follow the plan while the agent works. Empty until the
+    /// agent first touches the task tools.
+    pub tasks: Vec<TaskItem>,
     /// Standing `/goal`, if any. Renders as a chip in the header + a
     /// live-updating line in the status bar during autonomous runs.
     /// `None` means goal-directed mode is off.
@@ -247,6 +313,14 @@ pub struct TuiState {
     /// area." Consumed on the next draw so a follow-up scroll from
     /// the user doesn't get stomped.
     pub turn_scroll_target: Option<usize>,
+    /// Derived transcript geometry, cached by the render pass and
+    /// invalidated by resize. **Derived state, not authoritative** —
+    /// scroll handlers read `cached_tail()` off it; they never write
+    /// it. `None` until the first draw or after a width change.
+    pub layout_cache: Option<TranscriptLayout>,
+    /// Process start instant — drives the goal panel's breathing
+    /// animation phase so the pulse doesn't need its own timer.
+    pub booted_at: Instant,
 }
 
 /// Placeholder token that stands in for a stashed paste inside
@@ -304,18 +378,22 @@ impl TuiState {
             mode,
             model,
             git_branch: None,
+            git_dirty: None,
+            tool_tail: None,
             streaming: false,
             pending_approval: None,
             esc_pending: false,
             scroll: 0,
-            transcript_tail: 0,
             viewport_height: 0,
+            viewport_width: 0,
             follow_tail: true,
             should_quit: false,
             flash: None,
             usage: UsageTotals::default(),
             turn_usage_baseline: UsageTotals::default(),
             budget_usd: None,
+            queued: Vec::new(),
+            tasks: Vec::new(),
             goal: None,
             palette: PaletteState::none(),
             stream_started_at: None,
@@ -328,7 +406,53 @@ impl TuiState {
             error_flash_label: None,
             turn_nav_idx: None,
             turn_scroll_target: None,
+            layout_cache: None,
+            booted_at: Instant::now(),
         }
+    }
+
+    // ---- viewport / derived layout ----
+
+    /// Explicit resize transition — the event loop calls this on
+    /// `Event::Resize` (and the draw pass on first frame). Updates the
+    /// viewport, invalidates derived layout when the width changed
+    /// (wrapping is width-dependent), and reconciles scroll so the
+    /// view lands somewhere valid.
+    pub fn handle_resize(&mut self, width: u16, height: u16) {
+        let width_changed = self.viewport_width != width;
+        self.viewport_width = width;
+        self.viewport_height = height;
+        if width_changed {
+            // Wrapping is width-dependent — the row table is meaningless
+            // at a new width. The next draw rebuilds it and clamps
+            // scroll; reconcile below defers via the missing cache.
+            self.layout_cache = None;
+        }
+        self.reconcile_scroll();
+    }
+
+    /// Clamp scroll back into the valid range after a viewport change.
+    /// Following the tail re-snaps to it; a user-held position is
+    /// clamped so it never points past the end. No-op when the layout
+    /// cache can't describe the current viewport (next draw fixes it).
+    pub fn reconcile_scroll(&mut self) {
+        let Some(tail) = self.cached_tail() else {
+            return;
+        };
+        if self.follow_tail {
+            self.scroll = tail;
+        } else {
+            self.scroll = self.scroll.min(tail);
+        }
+    }
+
+    /// Tail offset (max valid scroll) from the derived layout cache —
+    /// what scroll handlers clamp against. At most one event stale
+    /// (content may have grown since the last draw); handlers tolerate
+    /// that and the next draw corrects everything. `None` before the
+    /// first draw or after a width-changing resize.
+    pub fn cached_tail(&self) -> Option<u16> {
+        self.layout_cache.as_ref().map(|l| l.tail())
     }
 
     // ---- pastes ----
@@ -516,12 +640,57 @@ impl TuiState {
         self.turn_nav_idx = None;
     }
 
-    /// Push a turn-end marker with the wall-clock reply time. Called
-    /// from the event loop on `HarnessEvent::Done` so the transcript
-    /// grows a `✳ Baked for 12.4s` line under the last assistant
-    /// reply — the visual full stop between turns.
-    pub fn push_turn_end(&mut self, elapsed_ms: u32) {
-        self.entries.push(LogEntry::TurnEnd { elapsed_ms });
+    /// Push a turn-end marker with the wall-clock reply time plus a
+    /// receipt of what the turn did (files written, diff sizes, tools
+    /// run, this turn's spend). Called from the event loop on
+    /// `HarnessEvent::Done` so the transcript grows a `✳ Baked for
+    /// 12.4s · 3 files (+18 −4) · 7 tools` line under the last
+    /// assistant reply — the visual full stop between turns.
+    pub fn push_turn_end(&mut self, elapsed_ms: u32, tokens: u64, cost: Option<f64>) {
+        let _ = tokens;
+        let turn_start = self
+            .entries
+            .iter()
+            .rposition(|e| matches!(e, LogEntry::User(_)));
+        let (mut files, mut adds, mut dels, mut tools) = (0u16, 0u32, 0u32, 0u16);
+        for e in self.entries.iter().skip(turn_start.unwrap_or(0)) {
+            if let LogEntry::ToolCall { name, preview, .. } = e {
+                // Task bookkeeping is suppressed from the stream — it
+                // doesn't count as work the user saw happening.
+                if crate::tui::components::is_task_tool(name) {
+                    continue;
+                }
+                tools += 1;
+                if crate::tui::components::tool_call::is_undoable_tool(name) {
+                    files += 1;
+                }
+                if let Some(p) = preview {
+                    let (a, d) = crate::tui::components::tool_result::diff_stats(p);
+                    adds += a as u32;
+                    dels += d as u32;
+                }
+            }
+        }
+        self.entries.push(LogEntry::TurnEnd {
+            elapsed_ms,
+            files,
+            adds,
+            dels,
+            tools,
+            cost,
+        });
+        self.enforce_cap();
+    }
+
+    /// Push the startup banner. One structured entry (not a pile of
+    /// info lines) so the component can render it with brand colors.
+    pub fn push_welcome(&mut self, model: String, mode: Mode, cwd: String, tip: &'static str) {
+        self.entries.push(LogEntry::Welcome {
+            model,
+            mode,
+            cwd,
+            tip,
+        });
         self.enforce_cap();
     }
 
@@ -582,6 +751,7 @@ impl TuiState {
             snippet: first_line(&r.content, 200),
             full: truncate_bytes(&r.content, TOOL_RESULT_MAX_BYTES),
             expanded: false,
+            collapsed_override: None,
         });
         self.enforce_cap();
     }
@@ -602,6 +772,7 @@ impl TuiState {
             snippet: first_line(content, 200),
             full: truncate_bytes(content, TOOL_RESULT_MAX_BYTES),
             expanded: false,
+            collapsed_override: None,
         });
         self.enforce_cap();
     }
@@ -633,12 +804,85 @@ impl TuiState {
     /// flash a hint on no-op ("no tool result yet").
     pub fn toggle_last_tool_result(&mut self) -> bool {
         for e in self.entries.iter_mut().rev() {
-            if let LogEntry::ToolResult { expanded, .. } = e {
+            if let LogEntry::ToolResult {
+                expanded,
+                collapsed_override,
+                ..
+            } = e
+            {
                 *expanded = !*expanded;
+                // Full output is meaningless under auto-collapse — pin
+                // the group open whenever we expand it.
+                if *expanded {
+                    *collapsed_override = Some(false);
+                }
                 return true;
             }
         }
         false
+    }
+
+    /// Toggle auto-collapse for the `n`-th most recent tool group
+    /// (1-based; `1` = the newest). Task-bookkeeping calls don't count
+    /// — they render nowhere. Returns `false` when there are fewer
+    /// than `n` toggleable groups or the newest such call is still
+    /// in-flight (no result to collapse).
+    pub fn toggle_nth_tool_group_from_end(&mut self, n: usize) -> bool {
+        if n == 0 {
+            return false;
+        }
+        let current_turn_start = self
+            .entries
+            .iter()
+            .rposition(|e| matches!(e, LogEntry::User(s) if !s.trim().is_empty()));
+        let mut seen = 0usize;
+        for i in (0..self.entries.len()).rev() {
+            let name = match &self.entries[i] {
+                LogEntry::ToolCall { name, .. } => name.clone(),
+                _ => continue,
+            };
+            if crate::tui::components::is_task_tool(&name) {
+                continue;
+            }
+            seen += 1;
+            if seen < n {
+                continue;
+            }
+            let result_idx = match self.entries.get(i + 1) {
+                Some(LogEntry::ToolResult { .. }) => i + 1,
+                _ => return false, // in-flight call — nothing to toggle
+            };
+            let auto_collapsed = current_turn_start.is_some_and(|start| i < start);
+            if let LogEntry::ToolResult {
+                collapsed_override,
+                ..
+            } = &mut self.entries[result_idx]
+            {
+                *collapsed_override = Some(!collapsed_override.unwrap_or(auto_collapsed));
+            }
+            return true;
+        }
+        false
+    }
+
+    /// Drop the visible transcript back to the start of the last user
+    /// turn and return that turn's prompt for editing. Pairs with
+    /// `Session::rewind_last_turn` — call both (state first) for a
+    /// consistent edit-and-retry.
+    pub fn rewind_last_turn(&mut self) -> Option<String> {
+        let idx = self
+            .entries
+            .iter()
+            .rposition(|e| matches!(e, LogEntry::User(s) if !s.trim().is_empty()))?;
+        let text = match &self.entries[idx] {
+            LogEntry::User(s) => s.clone(),
+            _ => unreachable!("rposition matched User"),
+        };
+        self.entries.truncate(idx);
+        self.turn_nav_idx = None;
+        self.turn_scroll_target = None;
+        self.follow_tail = true;
+        Some(text)
     }
 
     /// Name + args of the tool call currently in flight — a trailing
@@ -652,9 +896,10 @@ impl TuiState {
                 LogEntry::ToolCall { name, args, .. } => {
                     return Some((name.clone(), args.clone()));
                 }
-                // Skip info/warning/token entries — they can appear
-                // between a ToolCall and its ToolResult (streaming
-                // progress lines) without changing what's in flight.
+                // Skip info/warning/token/banner entries — they can
+                // appear between a ToolCall and its ToolResult
+                // (streaming progress lines) without changing what's
+                // in flight.
                 _ => continue,
             }
         }
@@ -684,10 +929,10 @@ impl TuiState {
                     out.push_str(s);
                     out.push_str("\n\n");
                 }
-                LogEntry::TurnEnd { elapsed_ms } => {
+                LogEntry::TurnEnd { elapsed_ms, .. } => {
                     out.push_str(&format!(
                         "[{}]\n\n",
-                        crate::tui::render::turn_end_label(*elapsed_ms)
+                        crate::tui::components::status::turn_end_label(*elapsed_ms)
                     ));
                 }
                 LogEntry::Assistant(s) => {
@@ -713,9 +958,102 @@ impl TuiState {
                 LogEntry::Info(s) => {
                     out.push_str(&format!("[info] {s}\n"));
                 }
+                LogEntry::Welcome { model, cwd, tip, .. } => {
+                    out.push_str(&format!("mira · {model} · {cwd}\n> {tip}\n\n"));
+                }
             }
         }
         out
+    }
+
+    // ---- live tool tail ----
+
+    /// Record the newest output line of the in-flight tool. Blank
+    /// lines are skipped so a silent stretch keeps the last real one.
+    pub fn set_tool_tail(&mut self, call_id: &str, line: &str) {
+        let trimmed = line.trim_end();
+        if trimmed.trim().is_empty() {
+            return;
+        }
+        let mut short: String = trimmed.chars().take(160).collect();
+        if short.len() != trimmed.len() {
+            short.push('…');
+        }
+        self.tool_tail = Some((call_id.to_owned(), short));
+    }
+
+    pub fn clear_tool_tail(&mut self) {
+        self.tool_tail = None;
+    }
+
+    // ---- message queue ----
+
+    /// Park a composed message for sending when the current turn
+    /// finishes. Returns the queue depth for the flash message.
+    pub fn queue_message(&mut self, text: String) -> usize {
+        self.queued.push(text);
+        self.queued.len()
+    }
+
+    /// Pop the newest queued message back into the composer (↑ while
+    /// streaming). Returns `false` when the queue is empty.
+    pub fn pop_queued_to_input(&mut self) -> bool {
+        match self.queued.pop() {
+            Some(text) => {
+                self.input_replace(&text);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Take the oldest queued message — the event loop calls this on
+    /// `HarnessEvent::Done` to auto-send.
+    pub fn take_next_queued(&mut self) -> Option<String> {
+        if self.queued.is_empty() {
+            None
+        } else {
+            Some(self.queued.remove(0))
+        }
+    }
+
+    // ---- task list ----
+
+    /// Hydrate the task list from a `task_*` tool result's structured
+    /// `data` payload. Shapes seen on the wire:
+    /// - `{ "task": <TaskItem> }`  (create / get / update)
+    /// - `{ "tasks": [<TaskItem>…] }` (list)
+    ///
+    /// Unknown shapes are ignored silently — the panel just stays as-is.
+    /// `deleted` tasks are dropped from the view.
+    pub fn apply_task_payload(&mut self, r: &ToolResult) {
+        let Some(data) = r.data.as_ref() else {
+            return;
+        };
+        if let Some(task) = data.get("task") {
+            let Ok(item) = serde_json::from_value::<TaskItem>(task.clone()) else {
+                return;
+            };
+            self.upsert_task(item);
+        } else if let Some(tasks) = data.get("tasks") {
+            let Ok(items) = serde_json::from_value::<Vec<TaskItem>>(tasks.clone()) else {
+                return;
+            };
+            for item in items {
+                self.upsert_task(item);
+            }
+        }
+    }
+
+    fn upsert_task(&mut self, item: TaskItem) {
+        if item.status == TaskStatus::Deleted {
+            self.tasks.retain(|t| t.id != item.id);
+            return;
+        }
+        match self.tasks.iter_mut().find(|t| t.id == item.id) {
+            Some(slot) => *slot = item,
+            None => self.tasks.push(item),
+        }
     }
 
     // ---- search ----
@@ -1091,8 +1429,11 @@ fn entry_text(e: &LogEntry) -> String {
         LogEntry::User(s) | LogEntry::Assistant(s) | LogEntry::Warning(s) | LogEntry::Info(s) => {
             s.clone()
         }
-        LogEntry::TurnEnd { elapsed_ms } => {
+        LogEntry::TurnEnd { elapsed_ms, .. } => {
             format!("baked for {}ms", elapsed_ms)
+        }
+        LogEntry::Welcome { model, cwd, tip, .. } => {
+            format!("mira {model} {cwd} {tip}")
         }
         LogEntry::ToolCall { name, args, .. } => format!("{name} {args}"),
         LogEntry::ToolResult { snippet, full, .. } => {
@@ -1276,15 +1617,50 @@ mod tests {
     }
 
     #[test]
-    fn push_turn_end_appends_marker() {
+    fn push_turn_end_computes_receipt() {
         let mut st = TuiState::new("m".into(), Mode::Manual);
         st.push_user("go".into());
+        st.push_tool_call_raw("edit_file".into(), r#"{"path":"a.rs"}"#.into());
+        st.push_tool_result_replay("edited");
+        st.push_tool_call_raw("shell".into(), r#"{"cmd":"ls"}"#.into());
+        st.push_tool_result_replay("exit=0");
         st.push_assistant("done".into());
-        st.push_turn_end(4200);
+        st.push_turn_end(4200, 900, Some(0.021));
         match st.entries().last().unwrap() {
-            LogEntry::TurnEnd { elapsed_ms } => assert_eq!(*elapsed_ms, 4200),
+            LogEntry::TurnEnd {
+                elapsed_ms,
+                files,
+                adds,
+                dels,
+                tools,
+                cost,
+            } => {
+                assert_eq!(*elapsed_ms, 4200);
+                assert_eq!(*files, 1);
+                assert_eq!(*tools, 2);
+                assert_eq!(*cost, Some(0.021));
+                assert_eq!((*adds, *dels), (0, 0)); // replay path has no previews
+            }
             _ => panic!("expected turn-end marker"),
         }
+    }
+
+    #[test]
+    fn tool_tail_keeps_last_real_line() {
+        let mut st = TuiState::new("m".into(), Mode::Manual);
+        st.set_tool_tail("c1", "compiling foo
+");
+        st.set_tool_tail("c1", "   
+");
+        st.set_tool_tail("c1", "3 tests passed");
+        assert_eq!(
+            st.tool_tail
+                .as_ref()
+                .map(|(a, b)| (a.as_str(), b.as_str())),
+            Some(("c1", "3 tests passed"))
+        );
+        st.clear_tool_tail();
+        assert!(st.tool_tail.is_none());
     }
 
     #[test]
@@ -1295,11 +1671,137 @@ mod tests {
             snippet: "one".into(),
             full: "one\ntwo\nthree".into(),
             expanded: false,
+            collapsed_override: None,
         });
         assert!(st.toggle_last_tool_result());
         let LogEntry::ToolResult { expanded, .. } = st.entries.last().unwrap() else {
             unreachable!()
         };
         assert!(*expanded);
+    }
+
+    #[test]
+    fn toggle_nth_tool_group_flips_collapse_override() {
+        let mut st = TuiState::new("m".into(), Mode::Manual);
+        st.push_user("turn one".into());
+        st.push_tool_call_raw("read_file".into(), r#"{"path":"a.rs"}"#.into());
+        st.push_tool_result_replay("ok");
+        st.push_user("turn two".into());
+        st.push_tool_call_raw("read_file".into(), r#"{"path":"b.rs"}"#.into());
+        st.push_tool_result_replay("ok");
+
+        // Group 2 (older turn) is auto-collapsed; toggling pins it open.
+        assert!(st.toggle_nth_tool_group_from_end(2));
+        let idx = st
+            .entries()
+            .iter()
+            .position(|e| matches!(e, LogEntry::ToolCall { name, .. } if name == "read_file") )
+            .and_then(|i| match st.entries().get(i + 1) {
+                Some(LogEntry::ToolResult { collapsed_override, .. }) => Some(*collapsed_override),
+                _ => None,
+            });
+        assert_eq!(idx, Some(Some(false)));
+
+        // Toggling again re-collapses.
+        assert!(st.toggle_nth_tool_group_from_end(2));
+        let idx = st
+            .entries()
+            .iter()
+            .position(|e| matches!(e, LogEntry::ToolCall { name, .. } if name == "read_file"))
+            .and_then(|i| match st.entries().get(i + 1) {
+                Some(LogEntry::ToolResult { collapsed_override, .. }) => Some(*collapsed_override),
+                _ => None,
+            });
+        assert_eq!(idx, Some(Some(true)));
+
+        // More groups than exist → falls back to typing the digit.
+        assert!(!st.toggle_nth_tool_group_from_end(5));
+    }
+
+    #[test]
+    fn rewind_last_turn_truncates_transcript() {
+        let mut st = TuiState::new("m".into(), Mode::Manual);
+        st.push_user("first prompt".into());
+        st.push_assistant("reply".into());
+        st.push_user("second prompt".into());
+        st.push_assistant("reply2".into());
+        st.push_turn_end(1000, 0, None);
+
+        let text = st.rewind_last_turn().unwrap();
+        assert_eq!(text, "second prompt");
+        // Everything from the last user prompt onward is gone.
+        assert_eq!(st.entries().len(), 2); // first prompt + reply
+        assert!(matches!(st.entries().last(), Some(LogEntry::Assistant(_))));
+
+        // Composer gets the prompt back for editing.
+        st.input_replace(&text);
+        assert_eq!(st.input(), "second prompt");
+
+        // And repeated rewinds walk further back.
+        assert_eq!(st.rewind_last_turn().unwrap(), "first prompt");
+        assert!(st.entries().is_empty());
+        assert!(st.rewind_last_turn().is_none());
+    }
+
+    #[test]
+    fn resize_invalidates_layout_and_reconciles_scroll() {
+        let mut st = TuiState::new("m".into(), Mode::Manual);
+        st.handle_resize(80, 24);
+        assert_eq!(st.viewport_width, 80);
+        assert_eq!(st.viewport_height, 24);
+        assert!(st.layout_cache.is_none());
+
+        // Simulate the draw pass caching a layout measured at width 80.
+        st.layout_cache = Some(crate::tui::render::layout::TranscriptLayout {
+            height: 24,
+            total_rows: 200,
+            entry_row_starts: vec![],
+        });
+
+        // Height-only resize: cache survives (wrapping is width-bound);
+        // reconcile clamps against the cached region height (one frame
+        // stale — the next draw recomputes with the new region).
+        st.scroll = 500;
+        st.follow_tail = false;
+        st.handle_resize(80, 10);
+        assert!(st.layout_cache.is_some());
+        assert_eq!(st.scroll, 176); // 200 - 24 (cached region height)
+
+        // Width change: cache invalidated; reconcile defers to the next
+        // draw instead of using stale metrics.
+        st.handle_resize(120, 10);
+        assert!(st.layout_cache.is_none());
+        assert_eq!(st.scroll, 176); // untouched — clamped on next frame
+    }
+
+    #[test]
+    fn follow_tail_snaps_on_resize_reconcile() {
+        let mut st = TuiState::new("m".into(), Mode::Manual);
+        st.handle_resize(80, 24);
+        st.layout_cache = Some(crate::tui::render::layout::TranscriptLayout {
+            height: 24,
+            total_rows: 100,
+            entry_row_starts: vec![],
+        });
+        st.follow_tail = true;
+        st.scroll = 0;
+        st.handle_resize(80, 30);
+        assert_eq!(st.scroll, 76); // tail from cached region height (100 - 24)
+    }
+
+    #[test]
+    fn cached_tail_survives_until_width_change() {
+        let mut st = TuiState::new("m".into(), Mode::Manual);
+        st.handle_resize(80, 24);
+        st.layout_cache = Some(crate::tui::render::layout::TranscriptLayout {
+            height: 20,
+            total_rows: 100,
+            entry_row_starts: vec![],
+        });
+        assert_eq!(st.cached_tail(), Some(80));
+        // A width-changing resize drops the cache — handlers then
+        // degrade gracefully until the next draw rebuilds it.
+        st.handle_resize(120, 24);
+        assert_eq!(st.cached_tail(), None);
     }
 }

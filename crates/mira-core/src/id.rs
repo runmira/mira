@@ -53,3 +53,7 @@ macro_rules! string_id {
 string_id!(SessionId, "sess");
 string_id!(MessageId, "msg");
 string_id!(ToolCallId, "call");
+
+// Keep ID construction centralized so callers cannot accidentally change the
+// provider-neutral format used by the harness.
+

@@ -191,11 +191,7 @@ fn blockquote_split(line: &str) -> Option<(usize, &str)> {
     let mut rest = line.trim_start();
     while let Some(stripped) = rest.strip_prefix("> ").or_else(|| rest.strip_prefix('>')) {
         depth += 1;
-        rest = if stripped.starts_with(' ') {
-            &stripped[1..]
-        } else {
-            stripped
-        };
+        rest = stripped.strip_prefix(' ').unwrap_or(stripped);
         // Only accept an unspaced `>` if it's the last char on the line.
         if depth > 0 && rest.is_empty() && line.trim_end().ends_with('>') {
             break;
@@ -278,6 +274,44 @@ fn emit_code_block(out: &mut Vec<Line<'static>>, lang: &str, code: &str) {
             spans.push(Span::styled(content, syntect_to_ratatui(style)));
         }
         out.push(Line::from(spans));
+    }
+}
+
+/// Highlight one line of code with the syntax matched from a file
+/// path (extension-driven: `.rs`, `.ts`, `.tsx`, …). Returns `None`
+/// for blank lines or when the highlighter chokes.
+///
+/// Stateless per line on purpose: diff rows interleave two versions
+/// of a file (removed lines from the old, added from the new), so a
+/// shared multi-line highlighter state would corrupt both. Per-line
+/// highlighting still colors keywords/strings/types correctly.
+pub(crate) fn highlight_code_line(line: &str, path: &str) -> Option<Vec<Span<'static>>> {
+    if line.trim().is_empty() {
+        return None;
+    }
+    let syntax = SYNTAX_SET
+        .find_syntax_for_file(path)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
+    let mut h = HighlightLines::new(syntax, &THEME);
+    // syntect wants the trailing newline for its line-ending handling.
+    let with_nl = format!("{line}\n");
+    let ranges = h
+        .highlight_line(&with_nl, &SYNTAX_SET)
+        .ok()?;
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (style, chunk) in ranges {
+        let content = chunk.trim_end_matches('\n').to_owned();
+        if content.is_empty() {
+            continue;
+        }
+        spans.push(Span::styled(content, syntect_to_ratatui(style)));
+    }
+    if spans.is_empty() {
+        None
+    } else {
+        Some(spans)
     }
 }
 

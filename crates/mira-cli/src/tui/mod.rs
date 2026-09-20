@@ -1,50 +1,47 @@
 //! Full-screen ratatui frontend for the Mira harness.
 //!
-//! The event loop selects across three sources:
+//! Module layout — three layers with one job each:
 //!
-//! 1. Keyboard events from `crossterm::event::EventStream`
-//! 2. Harness events from the stream returned by `Session::send`
-//! 3. Approval requests from [`approver::TuiApprover`]
+//! - [`state`] owns *what is happening* (entries, composer, viewport,
+//!   derived-layout cache).
+//! - [`render`] + [`components`] own *how things look* (blocks → lines)
+//!   and *where they go* ([`render::layout`]).
+//! - [`event_loop`] + [`input`] own *what happens when the world moves*
+//!   (terminal events, harness events, approvals).
 //!
-//! Slash commands (`/help`, `/mode`, `/model`, `/clear`, `/quit`) are
-//! handled inline. `Ctrl+C` drops the current agent stream — the harness's
-//! spawned loop task exits when its send channel closes.
+//! Slash commands (`/help`, `/mode`, `/model`, `/clear`, `/quit`, …)
+//! live here at the crate face since they're the CLI surface. `Ctrl+C`
+//! drops the current agent stream — the harness's spawned loop task
+//! exits when its send channel closes.
 
 pub mod approver;
+mod components;
+pub(crate) mod event_loop;
+mod input;
 mod markdown;
-mod render;
+pub(crate) mod render;
 mod state;
 mod theme;
 
-use std::io::Write;
+pub use approver::TuiApprover;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
-use base64::engine::general_purpose::STANDARD as B64;
-use base64::Engine;
-use crossterm::event::{
-    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
-    EventStream, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind,
-};
+use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use futures::stream::BoxStream;
-use futures::StreamExt;
-use mira_core::Role;
-use mira_harness::{Goal, GoalStatus, HarnessEvent, Session, SessionStore};
+use mira_harness::{Goal, GoalStatus, Session, SessionStore};
 use mira_policy::{Mode, Policy};
 use mira_tools::builtin::skill::SkillHandle;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
-use std::io::stdout;
 use tokio::sync::{mpsc, Mutex};
 
-use approver::ApprovalRequest;
-pub use approver::TuiApprover;
-use state::{Palette, PaletteItem, PendingApproval, TuiState};
+use event_loop::{current_cost_usd, event_loop, format_dollars_short};
 
 /// Everything the TUI needs beyond what `Session` already owns.
 pub struct TuiConfig {
@@ -53,7 +50,7 @@ pub struct TuiConfig {
     /// Handle to the shared policy so `/mode` can update it live.
     pub policy: Arc<Mutex<Policy>>,
     /// Receiver paired with the [`TuiApprover`] handed to `Session`.
-    pub approval_rx: mpsc::UnboundedReceiver<ApprovalRequest>,
+    pub approval_rx: mpsc::UnboundedReceiver<approver::ApprovalRequest>,
     /// Repo root — used to resolve relative paths in edit/write diff previews.
     pub cwd: std::path::PathBuf,
     /// Loaded skill registry — the same handle the `Skill` tool consults.
@@ -75,7 +72,7 @@ pub struct TuiConfig {
 }
 
 /// Built-in slash commands the palette suggests. Order is display order.
-const SLASH_COMMANDS: &[(&str, &str)] = &[
+pub(crate) const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/help", "list commands"),
     (
         "/mode",
@@ -102,39 +99,6 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/clear", "clear the visible transcript"),
     ("/quit", "exit the TUI"),
 ];
-
-/// How often to redraw while a stream is in flight — drives the
-/// elapsed-time counter next to "thinking" so long silent gaps don't
-/// look hung.
-const STREAM_TICK: std::time::Duration = std::time::Duration::from_millis(100);
-
-/// Duration a provider-error flash stays visible on the status row.
-/// One second lands as "a beat you can't miss" without wasting screen
-/// space on a persistent banner — the yellow warning line is still
-/// there in the transcript for the details.
-const ERROR_FLASH_DURATION: std::time::Duration = std::time::Duration::from_millis(1000);
-
-/// Pull a short label out of a provider-error warning when the
-/// warning names an auth or rate-limit failure. Returns `None` for
-/// anything else — we don't want to red-flash on every warning, only
-/// the ones that mean the model won't respond until the user acts.
-fn classify_provider_error(msg: &str) -> Option<String> {
-    let m = msg.to_ascii_lowercase();
-    if m.contains(" 401") || m.contains("unauthorized") || m.contains("invalid api key") {
-        return Some("provider 401 — check API key".to_owned());
-    }
-    if m.contains(" 429")
-        || m.contains("rate limit")
-        || m.contains("rate_limited")
-        || m.contains("too many requests")
-    {
-        return Some("provider 429 — rate limited".to_owned());
-    }
-    if m.contains(" 403") || m.contains("forbidden") {
-        return Some("provider 403 — access denied".to_owned());
-    }
-    None
-}
 
 pub async fn run(session: Session, cfg: TuiConfig) -> Result<()> {
     let mut terminal = enter()?;
@@ -166,7 +130,7 @@ fn leave(
 ) -> Result<()> {
     disable_raw_mode()?;
     if mouse_capture {
-        let _ = execute!(terminal.backend_mut(), DisableMouseCapture);
+        let _ = execute!(terminal.backend_mut(), crossterm::event::DisableMouseCapture);
     }
     execute!(
         terminal.backend_mut(),
@@ -177,1430 +141,11 @@ fn leave(
     Ok(())
 }
 
-// ---- loop ----
-
-async fn event_loop(
-    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
-    session: Session,
-    mut cfg: TuiConfig,
-    mouse_capture_out: &mut bool,
-) -> Result<()> {
-    let mut state = TuiState::new(cfg.model.clone(), cfg.mode);
-    // Start with mouse capture off so text selection works by default.
-    // Alt+M will toggle it on for scroll-wheel driving.
-    state.mouse_capture = false;
-    state.git_branch = detect_git_branch(&cfg.cwd).await;
-    hydrate_from_history(&session, &mut state).await;
-
-    // File index for `@` completion — a one-shot `rg --files` in the cwd,
-    // shared between palette openings so we don't reshell for every '@'.
-    // Computed lazily on first use.
-    let mut file_index: Option<Vec<String>> = None;
-
-    let mut input_events = EventStream::new();
-    let mut agent_stream: Option<BoxStream<'static, HarnessEvent>> = None;
-
-    loop {
-        terminal.draw(|f| render::draw(f, &mut state))?;
-
-        tokio::select! {
-            evt = input_events.next() => {
-                match evt {
-                    Some(Ok(e)) => handle_terminal_event(e, &mut state, &session, &mut agent_stream, &mut cfg, &mut file_index).await,
-                    Some(Err(_)) | None => break,
-                }
-            }
-            Some(evt) = next_agent_event(&mut agent_stream) => {
-                handle_harness_event(evt, &mut state, &mut agent_stream, &cfg.cwd).await;
-            }
-            Some(req) = cfg.approval_rx.recv() => {
-                let preview = mira_tools::compute_preview(&cfg.cwd, &req.call).await;
-                // Stash the diff on the matching ToolCall entry so
-                // the completed tool group can render it once the
-                // ToolResult lands (closes the "approve → what
-                // actually changed?" feedback loop).
-                if let Some(p) = preview.as_ref() {
-                    state.attach_preview(&req.call.id.to_string(), p.clone());
-                }
-                state.pending_approval = Some(PendingApproval { request: req, preview });
-                // Snap to tail so the inline prompt is visible even if
-                // the user had scrolled up mid-turn to read history.
-                state.follow_tail = true;
-            }
-            // Redraw tick while the stream is running so the "3.2s"
-            // elapsed counter advances even during silent gaps. Guard
-            // with `state.streaming` so we don't burn CPU when idle.
-            _ = tokio::time::sleep(STREAM_TICK), if state.streaming => {}
-            // Redraw tick during an error flash so the red bar clears
-            // itself once the deadline passes without the user having
-            // to press a key. Cheap — fires at most a handful of
-            // times per flash.
-            _ = tokio::time::sleep(STREAM_TICK), if state.error_flash_active() => {}
-        }
-
-        if state.should_quit {
-            break;
-        }
-    }
-
-    *mouse_capture_out = state.mouse_capture;
-    Ok(())
-}
-
-/// Detect the current git branch by shelling out. Runs at startup
-/// only (branch changes mid-session are rare enough to not be worth
-/// a filesystem watcher). Returns `None` outside a repo or on any
-/// failure.
-async fn detect_git_branch(cwd: &std::path::Path) -> Option<String> {
-    let cwd = cwd.to_owned();
-    tokio::task::spawn_blocking(move || {
-        let out = std::process::Command::new("git")
-            .args(["rev-parse", "--abbrev-ref", "HEAD"])
-            .current_dir(&cwd)
-            .output()
-            .ok()?;
-        if !out.status.success() {
-            return None;
-        }
-        let s = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-        if s.is_empty() || s == "HEAD" {
-            None
-        } else {
-            Some(s)
-        }
-    })
-    .await
-    .ok()
-    .flatten()
-}
-
-/// Rebuild the visible transcript from a session's history. On a fresh
-/// session (only a system message) we just show the welcome line; on
-/// resume we replay user/assistant/tool entries so it's obvious the
-/// conversation continued rather than starting empty.
-async fn hydrate_from_history(session: &Session, state: &mut TuiState) {
-    // Restore any standing goal so the header chip appears the moment
-    // a resumed session opens. Kept before the "resumed" info line so
-    // the goal is the first thing on screen when it matters.
-    state.goal = session.goal().await;
-
-    let history = session.history().await;
-    // Only count non-system messages when deciding whether to announce
-    // "resumed"; a fresh session has just the system prompt.
-    let visible_count = history.iter().filter(|m| m.role != Role::System).count();
-
-    if visible_count == 0 {
-        let cwd = std::env::current_dir()
-            .ok()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "~".into());
-        // Compact cwd — strip $HOME → `~` so the banner width doesn't
-        // depend on how deep the user's home path is nested.
-        let cwd_short = if let Some(home) = std::env::var_os("HOME") {
-            let home = home.to_string_lossy().to_string();
-            cwd.strip_prefix(&home)
-                .map(|rest| format!("~{rest}"))
-                .unwrap_or(cwd)
-        } else {
-            cwd
-        };
-
-        state.push_info("".to_string());
-        state.push_info(format!(
-            "  ╭─  ℳ  mira  ·  {}  ·  {}  ─╮",
-            state.model,
-            state.mode.as_str()
-        ));
-        state.push_info(format!("  │   cwd  {cwd_short}"));
-        state.push_info("  │".to_string());
-        state.push_info("  │   / commands   @ files   shift+tab mode   ctrl+r search".to_string());
-        state.push_info(
-            "  │   ctrl+↑↓ prev/next turn   alt+↑↓ scroll   ctrl+e expand tool   esc esc quit"
-                .to_string(),
-        );
-        state.push_info("  ╰─".to_string());
-        state.push_info("".to_string());
-        return;
-    }
-
-    state.push_info(format!(
-        "resumed session {} · {} message{}",
-        session.id,
-        visible_count,
-        if visible_count == 1 { "" } else { "s" }
-    ));
-
-    for msg in history {
-        match msg.role {
-            Role::System => {}
-            Role::User => {
-                if let Some(c) = msg.content {
-                    state.push_user(c);
-                }
-            }
-            Role::Assistant => {
-                if let Some(c) = msg.content.as_deref() {
-                    if !c.is_empty() {
-                        state.push_assistant(c.to_owned());
-                    }
-                }
-                for call in msg.tool_calls {
-                    state.push_tool_call_raw(call.function.name, call.function.arguments);
-                }
-            }
-            Role::Tool => {
-                if let Some(c) = msg.content {
-                    state.push_tool_result_replay(&c);
-                }
-            }
-        }
-    }
-}
-
-async fn next_agent_event(
-    stream: &mut Option<BoxStream<'static, HarnessEvent>>,
-) -> Option<HarnessEvent> {
-    match stream {
-        Some(s) => s.next().await,
-        // If there's no live stream, park forever. `tokio::select!` polls
-        // us again as soon as one appears.
-        None => std::future::pending().await,
-    }
-}
-
-async fn handle_terminal_event(
-    evt: Event,
-    state: &mut TuiState,
-    session: &Session,
-    agent_stream: &mut Option<BoxStream<'static, HarnessEvent>>,
-    cfg: &mut TuiConfig,
-    file_index: &mut Option<Vec<String>>,
-) {
-    match evt {
-        Event::Paste(s) => {
-            handle_paste(&s, state);
-            state.esc_pending = false;
-            // Don't clobber the flash — `handle_paste` sets it on a
-            // large-paste collapse so the user gets confirmation the
-            // 500 lines they just dropped in are safely stashed and
-            // will expand on submit.
-            refresh_palette(state, cfg, file_index).await;
-        }
-        Event::Key(k) if k.kind == crossterm::event::KeyEventKind::Press => {
-            handle_key(k, state, session, agent_stream, cfg, file_index).await;
-        }
-        Event::Mouse(m) => handle_mouse(m, state),
-        _ => {}
-    }
-}
-
-/// Route bracketed-paste content: small pastes go straight into the
-/// composer as normal text; large ones get stashed as a
-/// `[[paste:N]]` placeholder rendered as `[pasted N lines]`. Split
-/// out so the composer's `Ctrl+V` (via bracketed paste) and any
-/// future `/paste` command hit the same collapsing logic.
-fn handle_paste(s: &str, state: &mut TuiState) {
-    let line_count = s.matches('\n').count() + 1;
-    let char_count = s.chars().count();
-    let big =
-        line_count >= state::PASTE_COLLAPSE_LINES || char_count >= state::PASTE_COLLAPSE_CHARS;
-    if !big {
-        state.input_push_str(s);
-        return;
-    }
-    let token = state.stash_paste(s.to_owned());
-    state.input_push_str(&token);
-    state.flash = Some(format!(
-        "collapsed paste ({line_count} lines) — enter sends full text, ctrl+x to remove"
-    ));
-}
-
-/// Drop the current harness stream and record a warning entry.
-/// Invoked from both Ctrl+C and (single-press) Esc during a turn, so
-/// the two shortcuts stay in sync — no risk of one leaving the state
-/// half-torn-down.
-fn interrupt_stream(
-    state: &mut TuiState,
-    agent_stream: &mut Option<BoxStream<'static, HarnessEvent>>,
-) {
-    if agent_stream.is_none() {
-        return;
-    }
-    let msg = match state.in_flight_tool() {
-        Some((name, args)) => {
-            let short = truncate_for_warning(&args, 80);
-            format!("interrupted while `{name}({short})` was running — tool result discarded")
-        }
-        None => "interrupted".to_owned(),
-    };
-    *agent_stream = None;
-    state.streaming = false;
-    state.stream_started_at = None;
-    state.push_warning(msg);
-}
-
-/// Scroll the transcript by `n` rows toward the top.
-fn scroll_up(state: &mut TuiState, n: u16) {
-    state.follow_tail = false;
-    state.scroll = state.scroll.saturating_sub(n);
-}
-
-/// Scroll the transcript by `n` rows toward the bottom. Re-engages
-/// follow-tail once the user catches up with the newest content, so
-/// streamed tokens keep landing in view.
-fn scroll_down(state: &mut TuiState, n: u16) {
-    let new = state.scroll.saturating_add(n);
-    if new >= state.transcript_tail {
-        state.scroll = state.transcript_tail;
-        state.follow_tail = true;
-    } else {
-        state.scroll = new;
-        state.follow_tail = false;
-    }
-}
-
-/// A page's worth of rows for PgUp/PgDn — most of the viewport, minus a
-/// small overlap so the reader can anchor on a familiar line between
-/// jumps. Clamped to a sane minimum for tiny terminals.
-fn page_step(state: &TuiState) -> u16 {
-    let vh = state.viewport_height.max(4);
-    vh.saturating_sub(2).max(1)
-}
-
-/// Ctrl+↑ — step to the previous user prompt. Sets `follow_tail = false`
-/// so the transcript stays put, then defers to the render layer's
-/// `entry_row_starts` (via a hint stored on state) to scroll it in.
-fn jump_to_prev_user_turn(state: &mut TuiState) {
-    let anchor = state.turn_nav_anchor();
-    let next = match anchor {
-        Some(idx) => state.user_entry_before(idx),
-        None => state.prev_user_entry_idx(state.scroll),
-    };
-    match next {
-        Some(idx) => {
-            state.set_turn_nav_anchor(Some(idx));
-            state.turn_scroll_target = Some(idx);
-            state.follow_tail = false;
-            state.flash = Some(format!(
-                "turn {}/{}",
-                user_ordinal(state, idx),
-                user_count(state)
-            ));
-        }
-        None => {
-            state.flash = Some("no earlier user turn".into());
-        }
-    }
-}
-
-/// Ctrl+↓ — step to the next user prompt (or the tail if we've reached
-/// the last one).
-fn jump_to_next_user_turn(state: &mut TuiState) {
-    let anchor = state.turn_nav_anchor();
-    let next = anchor.and_then(|idx| state.user_entry_after(idx));
-    match next {
-        Some(idx) => {
-            state.set_turn_nav_anchor(Some(idx));
-            state.turn_scroll_target = Some(idx);
-            state.follow_tail = false;
-            state.flash = Some(format!(
-                "turn {}/{}",
-                user_ordinal(state, idx),
-                user_count(state)
-            ));
-        }
-        None => {
-            // Past the newest turn — snap back to live tail.
-            state.set_turn_nav_anchor(None);
-            state.follow_tail = true;
-            state.turn_scroll_target = None;
-            state.flash = Some("caught up".into());
-        }
-    }
-}
-
-fn user_ordinal(state: &TuiState, idx: usize) -> usize {
-    state
-        .entries()
-        .iter()
-        .take(idx + 1)
-        .filter(|e| matches!(e, state::LogEntry::User(_)))
-        .count()
-}
-
-fn user_count(state: &TuiState) -> usize {
-    state
-        .entries()
-        .iter()
-        .filter(|e| matches!(e, state::LogEntry::User(_)))
-        .count()
-}
-
-fn handle_mouse(m: MouseEvent, state: &mut TuiState) {
-    match m.kind {
-        MouseEventKind::ScrollUp => scroll_up(state, 3),
-        MouseEventKind::ScrollDown => scroll_down(state, 3),
-        _ => {}
-    }
-}
-
-async fn handle_key(
-    key: KeyEvent,
-    state: &mut TuiState,
-    session: &Session,
-    agent_stream: &mut Option<BoxStream<'static, HarnessEvent>>,
-    cfg: &mut TuiConfig,
-    file_index: &mut Option<Vec<String>>,
-) {
-    // Approval modal steals the keys.
-    if state.pending_approval.is_some() {
-        handle_approval_key(key, state, cfg).await;
-        return;
-    }
-
-    // Search overlay steals the keys (typing goes to the query, not the
-    // composer). Esc / Enter close it.
-    if state.search.is_some() {
-        handle_search_key(key, state);
-        return;
-    }
-
-    // Palette steals a few keys (arrows, Tab, Esc, Enter) — everything
-    // else falls through to composer editing, then we refresh the
-    // palette's matches based on the new input.
-    if state.palette.kind != Palette::None {
-        if handle_palette_key(key, state) {
-            return;
-        }
-    }
-
-    match (key.code, key.modifiers) {
-        (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-            interrupt_stream(state, agent_stream);
-        }
-        (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
-            if state.is_input_empty() {
-                state.should_quit = true;
-            } else {
-                state.input_delete_forward();
-            }
-        }
-        // Ctrl+J → newline in the composer. Terminals send LF (0x0A) for
-        // Ctrl+J and CR (0x0D) for Enter, which crossterm maps to
-        // KeyCode::Enter with the CONTROL modifier for the LF case.
-        (KeyCode::Char('j'), KeyModifiers::CONTROL)
-        | (KeyCode::Enter, KeyModifiers::CONTROL)
-        | (KeyCode::Enter, KeyModifiers::SHIFT) => {
-            state.input_newline();
-            refresh_palette(state, cfg, file_index).await;
-        }
-        (KeyCode::Esc, _) => {
-            // Three-way route:
-            //   1. Turn in flight → single Esc interrupts (matches the
-            //      "esc to interrupt" hint in the streaming line).
-            //   2. Text in composer → Esc x2 clears the buffer.
-            //   3. Empty composer, idle → Esc x2 quits.
-            // Second-press behavior is set by `esc_pending`; the flash
-            // string tells the user what the *next* Esc will do so they
-            // don't guess.
-            if agent_stream.is_some() {
-                interrupt_stream(state, agent_stream);
-                state.esc_pending = true;
-                return;
-            }
-            if state.esc_pending {
-                if !state.is_input_empty() {
-                    let _ = state.input_clear();
-                    state.flash = Some("input cleared".into());
-                    // Clearing the buffer is a terminal action — the
-                    // double-press is consumed. Without this the next
-                    // stray Esc would quit, which is the exact
-                    // "three Esc to clear then quit" footgun we're
-                    // here to remove.
-                    state.esc_pending = false;
-                } else {
-                    state.should_quit = true;
-                }
-            } else {
-                state.esc_pending = true;
-            }
-            return;
-        }
-        (KeyCode::Enter, m) if !m.intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL) => {
-            if state.is_input_empty() || state.streaming {
-                return;
-            }
-            let raw = state.input_clear();
-            // Expand `[[paste:N]]` placeholders back to their full
-            // content before shipping the message off. Then drop the
-            // stashed pastes so a subsequent turn starts clean — the
-            // full text now lives in the transcript entry that
-            // push_user records below.
-            let text = state.expand_pastes(&raw);
-            state.pastes.clear();
-            state.palette = state::PaletteState::none();
-            if text.starts_with('/') {
-                // A slash command may either mutate local state (e.g. `/model`)
-                // or synthesize a user message to send (e.g. `/review`, which
-                // asks the model to invoke the code-review skill). Only the
-                // latter opens a stream.
-                if let Some(followup) = run_slash(&text, state, session, cfg).await {
-                    start_stream(state, session, agent_stream, followup).await;
-                }
-            } else {
-                start_stream(state, session, agent_stream, text).await;
-            }
-        }
-        // ---- composer editing ----
-        (KeyCode::Backspace, KeyModifiers::ALT) => {
-            state.kill_word_left();
-            refresh_palette(state, cfg, file_index).await;
-        }
-        (KeyCode::Char('d'), KeyModifiers::ALT) => {
-            state.kill_word_right();
-            refresh_palette(state, cfg, file_index).await;
-        }
-        (KeyCode::Backspace, _) => {
-            state.input_backspace();
-            refresh_palette(state, cfg, file_index).await;
-        }
-        (KeyCode::Delete, _) => {
-            state.input_delete_forward();
-            refresh_palette(state, cfg, file_index).await;
-        }
-        (KeyCode::Left, KeyModifiers::ALT) => state.move_word_left(),
-        (KeyCode::Left, _) => state.move_left(),
-        (KeyCode::Right, KeyModifiers::ALT) => state.move_word_right(),
-        (KeyCode::Right, _) => state.move_right(),
-        (KeyCode::Home, _) => state.move_line_start(),
-        (KeyCode::End, _) => state.move_line_end(),
-        (KeyCode::Char('a'), KeyModifiers::CONTROL) => state.move_line_start(),
-        (KeyCode::Char('e'), KeyModifiers::CONTROL) => {
-            // Ctrl+E toggles the last tool result unless the composer
-            // has content — then it acts as "line end" per emacs
-            // convention. This makes the shortcut discoverable without
-            // stealing an editing keystroke.
-            if state.is_input_empty() {
-                if !state.toggle_last_tool_result() {
-                    state.flash = Some("no tool result to expand".into());
-                }
-            } else {
-                state.move_line_end();
-            }
-        }
-        (KeyCode::Char('w'), KeyModifiers::CONTROL) => {
-            state.kill_word_left();
-            refresh_palette(state, cfg, file_index).await;
-        }
-        (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
-            state.kill_to_line_start();
-            refresh_palette(state, cfg, file_index).await;
-        }
-        (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
-            state.kill_to_line_end();
-            refresh_palette(state, cfg, file_index).await;
-        }
-        (KeyCode::Char('x'), KeyModifiers::CONTROL) => {
-            // Ctrl+X removes the collapsed paste placeholder under
-            // (or immediately next to) the caret. Silent no-op when
-            // the cursor isn't inside one — we don't want to hijack
-            // the shortcut in the general case.
-            if state.remove_paste_at_cursor() {
-                state.flash = Some("paste removed".into());
-                refresh_palette(state, cfg, file_index).await;
-                state.esc_pending = false;
-                return;
-            }
-        }
-        (KeyCode::Char('y'), KeyModifiers::CONTROL) => match state.last_assistant_text() {
-            Some(text) => {
-                copy_to_clipboard(text);
-                state.flash = Some(format!("copied {} bytes", text.len()));
-            }
-            None => state.flash = Some("nothing to copy — no assistant reply yet".into()),
-        },
-        // Ctrl+Shift+C dumps the full visible transcript as plain text
-        // via OSC 52. Complements Ctrl+Y (last assistant only) so users
-        // don't have to fight mouse-capture to grab an older reply.
-        (KeyCode::Char('C'), m)
-            if m.contains(KeyModifiers::CONTROL) && m.contains(KeyModifiers::SHIFT) =>
-        {
-            let text = state.transcript_plaintext();
-            if text.is_empty() {
-                state.flash = Some("nothing to copy — transcript is empty".into());
-            } else {
-                copy_to_clipboard(&text);
-                state.flash = Some(format!("copied transcript ({} bytes)", text.len()));
-            }
-        }
-        (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
-            state.search_open();
-        }
-        (KeyCode::Char('m'), KeyModifiers::ALT) => {
-            // Toggle mouse capture. When on, terminals stop letting
-            // the user select text natively; when off, our ratatui
-            // scroll shortcuts still work (they're key-based).
-            state.mouse_capture = !state.mouse_capture;
-            let mut out = stdout();
-            if state.mouse_capture {
-                let _ = execute!(out, EnableMouseCapture);
-                state.flash = Some("mouse capture: on".into());
-            } else {
-                let _ = execute!(out, DisableMouseCapture);
-                state.flash = Some("mouse capture: off (select with mouse)".into());
-            }
-        }
-        // Shift+Tab cycles permission mode (Plan → Manual → Auto → Edit
-        // → Yolo → Plan). Mirrors Claude Code's "shift+tab to cycle" hint
-        // — a keyboard-only path so users don't need /mode.
-        (KeyCode::BackTab, _) => {
-            let next = state.mode.next();
-            state.mode = next;
-            cfg.policy.lock().await.set_mode(next);
-            state.flash = Some(format!("mode → {}", next.as_str()));
-            return;
-        }
-        // ---- transcript scroll ----
-        // Alt+Up/Down scrolls the transcript line-by-line — Mac laptops
-        // rarely have PageUp/Down keys, so this gives them a native path.
-        // Must come before the bare `(Up, _)` history arm below.
-        (KeyCode::Up, KeyModifiers::ALT) => scroll_up(state, 1),
-        (KeyCode::Down, KeyModifiers::ALT) => scroll_down(state, 1),
-        // Ctrl+Up / Ctrl+Down jumps between user turns. Anchored so a
-        // sequence of presses walks steadily back through history
-        // rather than snapping to the newest turn every time. Returns
-        // early so the `turn 3/5` flash survives past the trailing
-        // `state.flash = None` clear that closes the handler.
-        (KeyCode::Up, KeyModifiers::CONTROL) => {
-            jump_to_prev_user_turn(state);
-            state.esc_pending = false;
-            return;
-        }
-        (KeyCode::Down, KeyModifiers::CONTROL) => {
-            jump_to_next_user_turn(state);
-            state.esc_pending = false;
-            return;
-        }
-        (KeyCode::PageUp, _) => scroll_up(state, page_step(state)),
-        (KeyCode::PageDown, _) => scroll_down(state, page_step(state)),
-        // ---- history recall ----
-        (KeyCode::Up, _) => state.history_prev(),
-        (KeyCode::Down, _) => state.history_next(),
-        // ---- printable ----
-        (KeyCode::Char(c), m) if !m.contains(KeyModifiers::CONTROL) => {
-            state.input_push(c);
-            refresh_palette(state, cfg, file_index).await;
-        }
-        _ => {}
-    }
-    state.esc_pending = false;
-    state.flash = None;
-}
-
-async fn handle_approval_key(key: KeyEvent, state: &mut TuiState, cfg: &TuiConfig) {
-    // 'a' = always allow this exact call (session-scoped rule) then allow this call.
-    // 'y' = allow once. 'n' / Esc = deny.
-    if matches!(key.code, KeyCode::Char('a') | KeyCode::Char('A')) {
-        if let Some(pending) = state.pending_approval.take() {
-            // (#2, #8) Only log when we actually mutated policy —
-            // "session-allow: <rule>" is new state worth surfacing.
-            // A quiet "allowing once only" flash sufficed for the y
-            // path; a full info line every approval was noise.
-            match TuiState::rule_for_call(&pending.request.call) {
-                Some(rule) => match cfg.policy.lock().await.add_allow_rule(&rule) {
-                    Ok(_) => state.push_info(format!("[policy] session-allow: {rule}")),
-                    Err(e) => state.push_warning(format!("[policy] couldn't add rule: {e}")),
-                },
-                None => {
-                    state.flash = Some("allowed once (no reusable rule)".into());
-                }
-            }
-            let _ = pending.request.reply.send(true);
-        }
-        return;
-    }
-    let allow = match key.code {
-        KeyCode::Char('y') | KeyCode::Char('Y') => Some(true),
-        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Some(false),
-        _ => None,
-    };
-    let Some(allow) = allow else { return };
-    if let Some(pending) = state.pending_approval.take() {
-        let _ = pending.request.reply.send(allow);
-    }
-}
-
-fn handle_search_key(key: KeyEvent, state: &mut TuiState) {
-    match (key.code, key.modifiers) {
-        (KeyCode::Esc, _) => state.search_close(),
-        (KeyCode::Enter, _) | (KeyCode::Char('n'), KeyModifiers::CONTROL) => state.search_next(),
-        (KeyCode::Char('p'), KeyModifiers::CONTROL) => state.search_prev(),
-        (KeyCode::Backspace, _) => state.search_backspace(),
-        (KeyCode::Char(c), m) if !m.contains(KeyModifiers::CONTROL) => state.search_push(c),
-        _ => {}
-    }
-}
-
-/// Handle keys the palette wants to intercept. Returns `true` when the
-/// key was consumed (caller skips its own dispatch).
-fn handle_palette_key(key: KeyEvent, state: &mut TuiState) -> bool {
-    match (key.code, key.modifiers) {
-        (KeyCode::Esc, _) => {
-            state.palette = state::PaletteState::none();
-            true
-        }
-        (KeyCode::Up, _) => {
-            if !state.palette.matches.is_empty() {
-                state.palette.cursor = state.palette.cursor.saturating_sub(1);
-            }
-            true
-        }
-        (KeyCode::Down, _) => {
-            let last = state.palette.matches.len().saturating_sub(1);
-            state.palette.cursor = (state.palette.cursor + 1).min(last);
-            true
-        }
-        (KeyCode::Tab, _) | (KeyCode::Enter, KeyModifiers::NONE) => {
-            accept_palette(state);
-            true
-        }
-        _ => false,
-    }
-}
-
-/// Replace the current trigger (`/…` or `@…`) with the selected
-/// palette item's `insert` string, close the palette, and place the
-/// cursor at the end of the completion.
-fn accept_palette(state: &mut TuiState) {
-    let Some(item) = state.palette.matches.get(state.palette.cursor).cloned() else {
-        state.palette = state::PaletteState::none();
-        return;
-    };
-    match state.palette.kind {
-        Palette::Slash => {
-            let rest_after_slash = &state.input()[1..];
-            let word_end = rest_after_slash
-                .find(char::is_whitespace)
-                .map(|i| i + 1)
-                .unwrap_or_else(|| state.input().len());
-            // Rewrite the leading "/word" run with the picked slash
-            // command, preserving anything after the first whitespace.
-            let tail = state.input()[word_end..].to_owned();
-            let new_input = format!("{} {}", item.insert, tail.trim_start());
-            let cursor = item.insert.len() + 1; // right after the space
-            let cleaned = new_input.trim_end().to_owned();
-            let cursor = cursor.min(cleaned.len());
-            replace_input(state, cleaned, cursor);
-        }
-        Palette::AtFile => {
-            let (start, end) = at_word_bounds(state.input(), state.cursor());
-            let mut new_input = String::new();
-            new_input.push_str(&state.input()[..start]);
-            new_input.push_str(&item.insert);
-            new_input.push_str(&state.input()[end..]);
-            let cursor = start + item.insert.len();
-            replace_input(state, new_input, cursor);
-        }
-        Palette::Model => {
-            // Rewrite the whole line to `/model <picked-id>`. No tail
-            // to preserve — `/model` doesn't take further args.
-            let new_input = format!("/model {}", item.insert);
-            let cursor = new_input.len();
-            replace_input(state, new_input, cursor);
-        }
-        Palette::Theme => {
-            // Same shape as `/model` — rewrite the whole line so
-            // partial-arg typos get cleaned up when the user picks.
-            let new_input = format!("/theme {}", item.insert);
-            let cursor = new_input.len();
-            replace_input(state, new_input, cursor);
-        }
-        Palette::SavePath => {
-            let new_input = format!("/save {}", item.insert);
-            let cursor = new_input.len();
-            replace_input(state, new_input, cursor);
-        }
-        Palette::None => {}
-    }
-    state.palette = state::PaletteState::none();
-}
-
-/// Whole-input replace via the state helpers so history-browse and
-/// cursor invariants stay consistent.
-fn replace_input(state: &mut TuiState, new_input: String, new_cursor: usize) {
-    // Cheapest way to reset both fields without exposing them mutably.
-    state.input_clear();
-    state.input_push_str(&new_input);
-    // input_push_str moves the cursor to end; walk it back to the
-    // requested position by moving left char-by-char.
-    while state.cursor() > new_cursor {
-        state.move_left();
-    }
-}
-
-/// Recompute the palette matches based on the composer's current
-/// contents. Called after every input mutation. Opens or closes the
-/// palette as needed.
-async fn refresh_palette(
-    state: &mut TuiState,
-    cfg: &TuiConfig,
-    file_index: &mut Option<Vec<String>>,
-) {
-    // Slash palette wins when the very first char is '/', regardless of
-    // where the cursor sits — matches how users think about slash
-    // commands ("it's a slash line").
-    if state.input().starts_with('/') && !state.input().contains(' ') {
-        let filter = state.input().trim_start_matches('/').to_ascii_lowercase();
-        let matches = slash_matches(state, &filter, cfg).await;
-        open_palette(state, Palette::Slash, matches);
-        return;
-    }
-
-    // (#1) `/model <partial>` — completions from the live provider's
-    // model catalog. Cached in TuiConfig so the fetch runs in the
-    // background at boot and every subsequent open is a Vec lookup.
-    if let Some(filter) = state.input().strip_prefix("/model ") {
-        let filter = filter.trim_start().to_ascii_lowercase();
-        let matches = model_matches(&filter, cfg).await;
-        open_palette(state, Palette::Model, matches);
-        return;
-    }
-
-    // `/theme <partial>` — bundled presets + the two housekeeping
-    // verbs (`reload`, `save`). Same UX contract as `/model` so the
-    // pattern reads the same across every arg-taking slash.
-    if let Some(filter) = state.input().strip_prefix("/theme ") {
-        let filter = filter.trim_start().to_ascii_lowercase();
-        let matches = theme_matches(&filter);
-        open_palette(state, Palette::Theme, matches);
-        return;
-    }
-
-    // `/save <partial-path>` — reuse the rg-driven file index for
-    // completion so the pattern matches `@file`. Also offers
-    // sensible defaults (`transcript.md`, dated timestamp) when the
-    // arg is empty. Matches Aider/Claude Code's tab-completion feel
-    // on filenames.
-    if let Some(filter) = state.input().strip_prefix("/save ") {
-        let filter = filter.trim_start();
-        let files = ensure_file_index(file_index, &cfg.cwd).await;
-        let matches = save_path_matches(files, filter, &cfg.cwd);
-        open_palette(state, Palette::SavePath, matches);
-        return;
-    }
-
-    // @file picker when the cursor sits inside an `@word` run.
-    if let Some((word_start, word_end)) = find_at_word(state.input(), state.cursor()) {
-        let filter = state.input()[word_start + 1..word_end].to_ascii_lowercase();
-        let files = ensure_file_index(file_index, &cfg.cwd).await;
-        let matches = at_file_matches(files, &filter);
-        open_palette(state, Palette::AtFile, matches);
-        return;
-    }
-
-    // No trigger — close the palette.
-    state.palette = state::PaletteState::none();
-}
-
-/// Filter the bundled theme presets + housekeeping verbs. Same
-/// substring match as `slash_matches` uses so the palette feels
-/// identical across `/model` and `/theme`.
-fn theme_matches(filter: &str) -> Vec<PaletteItem> {
-    // Presets first, then the two verbs, so a bare `/theme <TAB>` lists
-    // the roster before the housekeeping actions.
-    let mut items: Vec<PaletteItem> = crate::tui::theme::PRESETS
-        .iter()
-        .filter(|(name, _, _)| filter.is_empty() || name.to_ascii_lowercase().contains(filter))
-        .map(|(name, _, desc)| PaletteItem {
-            insert: (*name).to_owned(),
-            title: (*name).to_owned(),
-            detail: (*desc).to_owned(),
-        })
-        .collect();
-    for (verb, desc) in [
-        ("reload", "re-read ~/.mira/theme.yaml"),
-        ("save", "write current palette to yaml (persists)"),
-    ] {
-        if filter.is_empty() || verb.contains(filter) {
-            items.push(PaletteItem {
-                insert: verb.to_owned(),
-                title: verb.to_owned(),
-                detail: desc.to_owned(),
-            });
-        }
-    }
-    items
-}
-
-/// Filter the cached model catalog with a substring match on the id
-/// and stamp each result as ready-to-insert (`insert` = model id,
-/// `title` = same, `detail` = provider hint pulled from the id prefix
-/// when there is one — `openai/…`, `anthropic/…`, etc.).
-async fn model_matches(filter: &str, cfg: &TuiConfig) -> Vec<PaletteItem> {
-    let models = cfg.models.read().await;
-    if models.is_empty() {
-        return Vec::new();
-    }
-    let mut out: Vec<PaletteItem> = models
-        .iter()
-        .filter(|id| filter.is_empty() || id.to_ascii_lowercase().contains(filter))
-        .map(|id| {
-            let detail = id
-                .split_once('/')
-                .map(|(p, _)| p.to_owned())
-                .unwrap_or_default();
-            PaletteItem {
-                insert: id.clone(),
-                title: id.clone(),
-                detail,
-            }
-        })
-        .collect();
-    // Cap the palette — a provider catalog can be hundreds of models
-    // (OpenRouter), and the overlay itself caps at 8 rows anyway.
-    out.truncate(32);
-    out
-}
-
-fn open_palette(state: &mut TuiState, kind: Palette, matches: Vec<PaletteItem>) {
-    let cursor = if matches.is_empty() {
-        0
-    } else {
-        state.palette.cursor.min(matches.len() - 1)
-    };
-    // Reset cursor when switching kinds so a fresh open doesn't inherit
-    // a stale selection from a different list.
-    let cursor = if state.palette.kind != kind {
-        0
-    } else {
-        cursor
-    };
-    state.palette = state::PaletteState {
-        kind,
-        cursor,
-        matches,
-    };
-}
-
-/// Slash command palette source: built-in commands first, then any
-/// skill that mounts a slash alias (frontmatter `slash:` or default
-/// to the skill's name). Reserved built-ins shadow skill aliases so
-/// a rogue skill can't hijack `/quit`.
-async fn slash_matches(_state: &TuiState, filter: &str, cfg: &TuiConfig) -> Vec<PaletteItem> {
-    let mut items: Vec<PaletteItem> = SLASH_COMMANDS
-        .iter()
-        .filter(|(name, _)| {
-            name.trim_start_matches('/')
-                .to_ascii_lowercase()
-                .contains(filter)
-        })
-        .map(|(name, desc)| PaletteItem {
-            insert: (*name).to_owned(),
-            title: (*name).to_owned(),
-            detail: (*desc).to_owned(),
-        })
-        .collect();
-
-    let reg = cfg.skills.read().await.clone();
-    for s in reg.skills.values() {
-        let Some(alias) = s.slash.as_deref() else {
-            continue;
-        };
-        let slash = format!("/{alias}");
-        if is_reserved_slash(&slash) {
-            continue;
-        }
-        if !alias.to_ascii_lowercase().contains(filter) {
-            continue;
-        }
-        items.push(PaletteItem {
-            insert: slash.clone(),
-            title: slash,
-            detail: format!("skill · {}", s.description),
-        });
-    }
-    items
-}
-
-async fn ensure_file_index<'a>(
-    file_index: &'a mut Option<Vec<String>>,
-    cwd: &std::path::Path,
-) -> &'a [String] {
-    if file_index.is_none() {
-        *file_index = Some(list_files(cwd).await);
-    }
-    file_index.as_deref().unwrap_or(&[])
-}
-
-/// Shell out to `rg --files` in the cwd — respects .gitignore and is
-/// present anywhere Mira runs (built-in rg dep). Falls back to an empty
-/// list on any error, which just means the palette shows "no matches".
-async fn list_files(cwd: &std::path::Path) -> Vec<String> {
-    let cwd = cwd.to_owned();
-    tokio::task::spawn_blocking(move || {
-        let out = std::process::Command::new("rg")
-            .arg("--files")
-            .current_dir(&cwd)
-            .output();
-        match out {
-            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .map(str::to_owned)
-                .collect(),
-            _ => Vec::new(),
-        }
-    })
-    .await
-    .unwrap_or_default()
-}
-
-/// Completions for `/save <path>` — first the two ready-to-pick
-/// defaults (`transcript.md` under cwd, a dated one under `.mira/`),
-/// then the file index filtered by substring so the user can
-/// overwrite an existing file with tab-completion.
-fn save_path_matches(files: &[String], filter: &str, cwd: &std::path::Path) -> Vec<PaletteItem> {
-    let filter = filter.trim();
-    let filter_lc = filter.to_ascii_lowercase();
-    let mut out: Vec<PaletteItem> = Vec::new();
-
-    // Suggest defaults regardless of filter — they lead the list when
-    // the arg is empty, and fall behind exact substrings otherwise.
-    if filter.is_empty() {
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        out.push(PaletteItem {
-            insert: "transcript.md".to_owned(),
-            title: "transcript.md".to_owned(),
-            detail: format!("into {}", cwd.display()),
-        });
-        out.push(PaletteItem {
-            insert: format!(".mira/transcript-{ts}.md"),
-            title: format!(".mira/transcript-{ts}.md"),
-            detail: "dated · under .mira/".to_owned(),
-        });
-    }
-
-    let mut scored: Vec<(u32, &String)> = files
-        .iter()
-        .filter_map(|f| {
-            if filter.is_empty() {
-                return Some((3, f));
-            }
-            let hay = f.to_ascii_lowercase();
-            if hay.starts_with(&filter_lc) {
-                Some((0, f))
-            } else if hay.contains(&filter_lc) {
-                Some((1, f))
-            } else if fuzzy_subseq(&hay, &filter_lc) {
-                Some((2, f))
-            } else {
-                None
-            }
-        })
-        .collect();
-    scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.len().cmp(&b.1.len())));
-    for (_, f) in scored.into_iter().take(20) {
-        out.push(PaletteItem {
-            insert: f.clone(),
-            title: f.clone(),
-            detail: "overwrite".to_owned(),
-        });
-    }
-    out
-}
-
-fn at_file_matches(files: &[String], filter: &str) -> Vec<PaletteItem> {
-    let filter = filter.trim();
-    let mut scored: Vec<(u32, &String)> = files
-        .iter()
-        .filter_map(|f| {
-            if filter.is_empty() {
-                return Some((0, f));
-            }
-            let hay = f.to_ascii_lowercase();
-            if hay.starts_with(filter) {
-                Some((0, f))
-            } else if hay.contains(filter) {
-                Some((1, f))
-            } else if fuzzy_subseq(&hay, filter) {
-                Some((2, f))
-            } else {
-                None
-            }
-        })
-        .collect();
-    scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.len().cmp(&b.1.len())));
-    scored
-        .into_iter()
-        .take(20)
-        .map(|(_, f)| PaletteItem {
-            insert: format!("@{f}"),
-            title: f.clone(),
-            detail: String::new(),
-        })
-        .collect()
-}
-
-/// `needle` is a subsequence of `hay` (char-wise, case-preserved by the
-/// caller). Fast enough for a few thousand files typed against on every
-/// keystroke.
-fn fuzzy_subseq(hay: &str, needle: &str) -> bool {
-    let mut ni = needle.chars();
-    let mut nc = ni.next();
-    for hc in hay.chars() {
-        if Some(hc) == nc {
-            nc = ni.next();
-            if nc.is_none() {
-                return true;
-            }
-        }
-    }
-    nc.is_none()
-}
-
-/// Locate the `@word` run under the cursor, if any. Returns
-/// `(start_of_@, one_past_end_of_word)`. Requires `@` to be preceded by
-/// whitespace or the start of a line — matches the informal convention
-/// so an email address like foo@bar doesn't trip the picker.
-fn find_at_word(s: &str, cursor: usize) -> Option<(usize, usize)> {
-    let before = &s[..cursor];
-    // Walk back from cursor to find '@' before any whitespace.
-    let at_pos = before.rfind(|c: char| c == '@' || c.is_whitespace())?;
-    if !s[at_pos..].starts_with('@') {
-        return None;
-    }
-    // Must be at start-of-line or preceded by whitespace to count.
-    if at_pos > 0 {
-        let prev = s[..at_pos].chars().next_back();
-        if !matches!(prev, Some(c) if c.is_whitespace()) {
-            return None;
-        }
-    }
-    // Find end of the word (whitespace or end).
-    let after_at = at_pos + 1;
-    let end = s[after_at..]
-        .find(char::is_whitespace)
-        .map(|off| after_at + off)
-        .unwrap_or_else(|| s.len());
-    if end < cursor {
-        return None; // cursor is past the word — don't hijack
-    }
-    Some((at_pos, end))
-}
-
-/// Same bounds as `find_at_word` but assumes the cursor is inside one
-/// (used by `accept_palette`).
-fn at_word_bounds(s: &str, cursor: usize) -> (usize, usize) {
-    find_at_word(s, cursor).unwrap_or((cursor, cursor))
-}
-
-/// Copy `text` to the terminal clipboard via OSC 52. Works on iTerm2,
-/// modern Terminal.app, Kitty, WezTerm, and through SSH sessions that
-/// forward the escape sequence. Silent no-op if stdout fails.
-fn copy_to_clipboard(text: &str) {
-    let payload = B64.encode(text.as_bytes());
-    // The BEL (\x07) terminator has the widest compatibility.
-    let seq = format!("\x1b]52;c;{payload}\x07");
-    let mut out = std::io::stdout();
-    let _ = out.write_all(seq.as_bytes());
-    let _ = out.flush();
-}
-
-async fn handle_harness_event(
-    evt: HarnessEvent,
-    state: &mut TuiState,
-    agent_stream: &mut Option<BoxStream<'static, HarnessEvent>>,
-    cwd: &std::path::Path,
-) {
-    match evt {
-        HarnessEvent::Token(t) => state.append_token(&t),
-        HarnessEvent::ToolStart(call) => {
-            state.push_tool_call(&call);
-            // (ask 4) Compute the diff preview eagerly, not just on
-            // approval — otherwise session-allow'd `edit_file` /
-            // `write_file` calls render as a bare "edited /path (1
-            // replacement)" line with no coloured diff, which is the
-            // whole point of showing the change inline. `compute_preview`
-            // returns `None` for tools that don't produce diffs, so
-            // this is a no-op for `read_file`, `bash`, etc.
-            if let Some(p) = mira_tools::compute_preview(cwd, &call).await {
-                state.attach_preview(&call.id.to_string(), p);
-            }
-        }
-        HarnessEvent::ToolEnd(result) => state.push_tool_result(&result),
-        HarnessEvent::Warning(w) => {
-            // Auth / rate-limit warnings are silent-killers if they
-            // scroll past as a yellow line — mira looks "hung" while
-            // the user misses the 401. Detect them here and paint the
-            // status row red for a beat so it's impossible to ignore.
-            if let Some(label) = classify_provider_error(&w) {
-                state.error_flash(label, ERROR_FLASH_DURATION);
-            }
-            state.push_warning(w);
-        }
-        HarnessEvent::TurnComplete => {}
-        HarnessEvent::Usage { totals, .. } => state.usage = totals,
-        HarnessEvent::MemoryLearned { count } => {
-            state.push_warning(format!(
-                "[memory] remembered {count} thing{}",
-                if count == 1 { "" } else { "s" }
-            ));
-        }
-        HarnessEvent::Compacted { messages_removed } => {
-            state.push_warning(format!(
-                "[context] compacted {messages_removed} earlier message{} into a summary",
-                if messages_removed == 1 { "" } else { "s" }
-            ));
-        }
-        HarnessEvent::GoalSet { goal } => {
-            state.push_info(format!("[goal] set: {}", goal.condition));
-            state.goal = Some(goal);
-        }
-        HarnessEvent::GoalCleared => {
-            state.push_info("[goal] cleared".to_string());
-            state.goal = None;
-        }
-        HarnessEvent::GoalProgress {
-            iteration,
-            max_iterations,
-            status,
-            reason,
-        } => {
-            let status_word = match status {
-                GoalStatus::Active => "still working",
-                GoalStatus::Met => "met",
-                GoalStatus::Impossible => "impossible",
-                GoalStatus::NeedsUser => "needs you",
-                GoalStatus::Cleared => "cleared",
-                GoalStatus::Exhausted => "exhausted",
-            };
-            state.push_info(format!(
-                "[goal] {iteration}/{max_iterations} · {status_word}{}",
-                reason
-                    .as_ref()
-                    .map(|r| format!(" · {r}"))
-                    .unwrap_or_default()
-            ));
-            if let Some(g) = state.goal.as_mut() {
-                g.iterations = iteration;
-                g.max_iterations = max_iterations;
-                g.status = status;
-                g.last_reason = reason;
-            }
-        }
-        HarnessEvent::GoalDone { status, reason } => {
-            let word = match status {
-                GoalStatus::Met => "met",
-                GoalStatus::Impossible => "impossible",
-                GoalStatus::NeedsUser => "needs you",
-                GoalStatus::Exhausted => "exhausted",
-                GoalStatus::Cleared => "cleared",
-                GoalStatus::Active => "active",
-            };
-            let msg = match reason {
-                Some(r) => format!("[goal] {word} · {r}"),
-                None => format!("[goal] {word}"),
-            };
-            state.push_info(msg);
-            if let Some(g) = state.goal.as_mut() {
-                g.status = status;
-            }
-        }
-        HarnessEvent::ToolProgress { .. } => {
-            // Deliberately silent. The pulsing `ℳ` indicator + the
-            // in-flight `◐` on the tool call already show "something
-            // is happening"; dumping every stdout line as an info
-            // entry buries the actual transcript in shell noise.
-            // Final content still lands via `ToolEnd` and is one
-            // Ctrl+E away.
-        }
-        HarnessEvent::ToolPreview { .. } => {
-            // The TUI already renders diffs via its own approval flow;
-            // skip the harness-side preview to avoid double rendering.
-        }
-        HarnessEvent::Done => {
-            // Drop a `✳ Baked for 12.4s` marker into the transcript so
-            // the reply is visibly bounded — matches Claude Code's
-            // full-stop treatment. Cap at u32 max in case a stream
-            // ran for days (broken provider); no reason to widen.
-            if let Some(t0) = state.stream_started_at {
-                let ms = t0.elapsed().as_millis().min(u32::MAX as u128) as u32;
-                state.push_turn_end(ms);
-            }
-            state.streaming = false;
-            state.stream_started_at = None;
-            *agent_stream = None;
-        }
-    }
-}
-
-/// Push a user message and open the harness stream — factored so the
-/// composer-enter path and slash-triggered skill invocations both hit
-/// the same wiring (`remember_submission`, follow_tail, stream_started_at).
-///
-/// If the session's cost has already exceeded `state.budget_usd`, this
-/// refuses to send and pushes a warning instead. The user's cap → the
-/// user's call: they either raise it (`/budget $X`) or clear it
-/// (`/budget off`) before the next turn goes out.
-async fn start_stream(
-    state: &mut TuiState,
-    session: &Session,
-    agent_stream: &mut Option<BoxStream<'static, HarnessEvent>>,
-    text: String,
-) {
-    if let Some(cap) = state.budget_usd {
-        if let Some(spent) = current_cost_usd(state) {
-            if spent >= cap {
-                state.push_warning(format!(
-                    "over budget — {} spent ≥ ${:.2} cap. \
-                     /budget off to keep going · /budget $X to raise",
-                    format_dollars_short(spent),
-                    cap,
-                ));
-                // Return the text to the composer so the user's message
-                // isn't silently lost by the guardrail.
-                let _ = state.input_replace(&text);
-                return;
-            }
-        }
-    }
-    state.remember_submission(&text);
-    state.push_user(text.clone());
-    state.streaming = true;
-    // Snapshot the running session totals so the in-turn indicator can
-    // show this turn's delta, not the whole session's total.
-    state.turn_usage_baseline = state.usage;
-    state.stream_started_at = Some(std::time::Instant::now());
-    state.follow_tail = true;
-    *agent_stream = Some(session.send(text).await);
-}
-
-/// Current session cost in USD, if the model is priced and the provider
-/// has reported at least one usage round. Mirrors the formula used in
-/// the header status strip so both surfaces agree.
-pub(super) fn current_cost_usd(state: &TuiState) -> Option<f64> {
-    let u = &state.usage;
-    if u.is_zero() {
-        return None;
-    }
-    mira_ai::cost_usd(
-        &state.model,
-        mira_ai::TokenUsage {
-            prompt_tokens: u.prompt_tokens.min(u32::MAX as u64) as u32,
-            completion_tokens: u.completion_tokens.min(u32::MAX as u64) as u32,
-            cached_input_tokens: u.cached_input_tokens.min(u32::MAX as u64) as u32,
-        },
-    )
-}
-
-/// Short USD format that keeps small values readable (`$0.024`) and
-/// large ones compact (`$12.4`). Mirrors the render.rs helper — kept
-/// as a private duplicate to avoid re-exporting a whole rendering
-/// module just for one formatter.
-fn format_dollars_short(d: f64) -> String {
-    if d >= 1.0 {
-        format!("${d:.2}")
-    } else {
-        format!("${d:.3}")
-    }
-}
-
-/// Parse the argument to `/budget`. Accepts `off`, `clear`, `none` for
-/// disable; otherwise strips a leading `$` and reads an f64.
-fn parse_budget(rest: &str) -> Result<Option<f64>, String> {
-    let t = rest.trim();
-    if t.is_empty() {
-        return Err("usage: /budget $X · /budget off".into());
-    }
-    if matches!(t.to_ascii_lowercase().as_str(), "off" | "clear" | "none") {
-        return Ok(None);
-    }
-    let raw = t.trim_start_matches('$').trim();
-    let n: f64 = raw
-        .parse()
-        .map_err(|_| format!("can't parse `{t}` as a dollar amount"))?;
-    if !n.is_finite() || n <= 0.0 {
-        return Err(format!("budget must be positive · got {t}"));
-    }
-    Ok(Some(n))
-}
-
-/// `/theme` sub-dispatch.
-///
-/// Shape:
-/// - `/theme`            — list bundled presets + point at the yaml.
-/// - `/theme <name>`     — apply a bundled preset (in-memory).
-/// - `/theme reload`     — re-read `~/.mira/theme.yaml`.
-/// - `/theme save`       — write the current palette to yaml (persists).
-fn run_theme_slash(rest: &str, state: &mut TuiState) {
-    let rest = rest.trim();
-    if rest.is_empty() {
-        state.push_info(format!(
-            "theme file: {}",
-            crate::tui::theme::theme_path().display()
-        ));
-        state.push_info("presets:".to_string());
-        for (name, _, desc) in crate::tui::theme::PRESETS {
-            state.push_info(format!("  {name:<10} — {desc}"));
-        }
-        state.push_info("usage: /theme <name> · /theme reload · /theme save".to_string());
-        return;
-    }
-    match rest {
-        "reload" => match crate::tui::theme::reload() {
-            Ok(path) => {
-                state.flash = Some("theme reloaded".into());
-                state.push_info(format!("theme ← {}", path.display()));
-            }
-            Err(e) => state.push_warning(format!("reload failed: {e}")),
-        },
-        "save" => match crate::tui::theme::save_current_to_disk() {
-            Ok(path) => {
-                state.flash = Some("theme saved".into());
-                state.push_info(format!("theme → {}", path.display()));
-            }
-            Err(e) => state.push_warning(format!("save failed: {e}")),
-        },
-        name => match crate::tui::theme::preset(name) {
-            Some((t, desc)) => {
-                crate::tui::theme::set(t);
-                state.flash = Some(format!("theme → {name}"));
-                state.push_info(format!("theme · {name} — {desc}"));
-            }
-            None => state.push_warning(format!(
-                "unknown theme `{name}` — try /theme to list presets"
-            )),
-        },
-    }
-}
-
-/// True when `head` (with the leading `/`) is one of the built-in slash
-/// commands. Built-ins always win over a skill alias — a skill named
-/// `mode.md` can't shadow `/mode`.
-fn is_reserved_slash(head: &str) -> bool {
-    SLASH_COMMANDS.iter().any(|(name, _)| *name == head) || matches!(head, "/q" | "/?" | "/perms")
-}
-
-/// Look up a skill by its slash alias. Returns the underlying skill
-/// name so callers can synthesize an invocation regardless of whether
-/// the alias matches the skill's own name (`/verify` → `verify`) or
-/// renames it (`/review` → `code-review`).
-async fn find_skill_by_slash(
-    slash: &str,
-    skills: &mira_tools::builtin::skill::SkillHandle,
-) -> Option<String> {
-    let reg = skills.read().await.clone();
-    reg.skills
-        .values()
-        .find(|s| s.slash.as_deref() == Some(slash))
-        .map(|s| s.name.clone())
-}
+// ---- slash commands ----
 
 async fn run_slash(
     cmd: &str,
-    state: &mut TuiState,
+    state: &mut state::TuiState,
     session: &Session,
     cfg: &mut TuiConfig,
 ) -> Option<String> {
@@ -1638,7 +183,8 @@ async fn run_slash(
                  /undo [N] · /save [path] · /clear · /quit  ·  \
                  keys: @ file · / cmd · ctrl+r search · \
                  ctrl+y copy last reply · ctrl+e expand last tool · \
-                 ctrl+w kill word · ctrl+↑↓ jump turns · ctrl+x drop paste",
+                 ctrl+w kill word · ctrl+↑↓ jump turns · ctrl+x drop paste · \
+                 ctrl+z undo write · ctrl+p retry last turn · 1-9 toggle tools",
             );
             // Also enumerate the mounted skill slashes — they change
             // per project, so hard-coding them in the line above would
@@ -1756,13 +302,104 @@ async fn run_slash(
     None
 }
 
+/// Parse the argument to `/budget`. Accepts `off`, `clear`, `none` for
+/// disable; otherwise strips a leading `$` and reads an f64.
+fn parse_budget(rest: &str) -> Result<Option<f64>, String> {
+    let t = rest.trim();
+    if t.is_empty() {
+        return Err("usage: /budget $X · /budget off".into());
+    }
+    if matches!(t.to_ascii_lowercase().as_str(), "off" | "clear" | "none") {
+        return Ok(None);
+    }
+    let raw = t.trim_start_matches('$').trim();
+    let n: f64 = raw
+        .parse()
+        .map_err(|_| format!("can't parse `{t}` as a dollar amount"))?;
+    if !n.is_finite() || n <= 0.0 {
+        return Err(format!("budget must be positive · got {t}"));
+    }
+    Ok(Some(n))
+}
+
+/// `/theme` sub-dispatch.
+///
+/// Shape:
+/// - `/theme`            — list bundled presets + point at the yaml.
+/// - `/theme <name>`     — apply a bundled preset (in-memory).
+/// - `/theme reload`     — re-read `~/.mira/theme.yaml`.
+/// - `/theme save`       — write the current palette to yaml (persists).
+fn run_theme_slash(rest: &str, state: &mut state::TuiState) {
+    let rest = rest.trim();
+    if rest.is_empty() {
+        state.push_info(format!(
+            "theme file: {}",
+            crate::tui::theme::theme_path().display()
+        ));
+        state.push_info("presets:".to_string());
+        for (name, _, desc) in crate::tui::theme::PRESETS {
+            state.push_info(format!("  {name:<10} — {desc}"));
+        }
+        state.push_info("usage: /theme <name> · /theme reload · /theme save".to_string());
+        return;
+    }
+    match rest {
+        "reload" => match crate::tui::theme::reload() {
+            Ok(path) => {
+                state.flash = Some("theme reloaded".into());
+                state.push_info(format!("theme ← {}", path.display()));
+            }
+            Err(e) => state.push_warning(format!("reload failed: {e}")),
+        },
+        "save" => match crate::tui::theme::save_current_to_disk() {
+            Ok(path) => {
+                state.flash = Some("theme saved".into());
+                state.push_info(format!("theme → {}", path.display()));
+            }
+            Err(e) => state.push_warning(format!("save failed: {e}")),
+        },
+        name => match crate::tui::theme::preset(name) {
+            Some((t, desc)) => {
+                crate::tui::theme::set(t);
+                state.flash = Some(format!("theme → {name}"));
+                state.push_info(format!("theme · {name} — {desc}"));
+            }
+            None => state.push_warning(format!(
+                "unknown theme `{name}` — try /theme to list presets"
+            )),
+        },
+    }
+}
+
+/// True when `head` (with the leading `/`) is one of the built-in slash
+/// commands. Built-ins always win over a skill alias — a skill named
+/// `mode.md` can't shadow `/mode`.
+pub(crate) fn is_reserved_slash(head: &str) -> bool {
+    SLASH_COMMANDS.iter().any(|(name, _)| *name == head) || matches!(head, "/q" | "/?" | "/perms")
+}
+
+/// Look up a skill by its slash alias. Returns the underlying skill
+/// name so callers can synthesize an invocation regardless of whether
+/// the alias matches the skill's own name (`/verify` → `verify`) or
+/// renames it (`/review` → `code-review`).
+async fn find_skill_by_slash(
+    slash: &str,
+    skills: &mira_tools::builtin::skill::SkillHandle,
+) -> Option<String> {
+    let reg = skills.read().await.clone();
+    reg.skills
+        .values()
+        .find(|s| s.slash.as_deref() == Some(slash))
+        .map(|s| s.name.clone())
+}
+
 /// Dispatch for `/goal ...` — the sub-verb decides.
 ///
 /// Shape:
 /// - `/goal <condition>`     — set (or replace) the standing goal
 /// - `/goal status`          — print the current goal
 /// - `/goal clear`           — drop the goal
-async fn run_goal_slash(rest: &str, state: &mut TuiState, session: &Session) {
+async fn run_goal_slash(rest: &str, state: &mut state::TuiState, session: &Session) {
     let rest = rest.trim();
     if rest.is_empty() || rest == "status" {
         // Snapshot to a local so the immutable borrow on `state.goal`
@@ -1810,7 +447,10 @@ async fn run_goal_slash(rest: &str, state: &mut TuiState, session: &Session) {
 /// `/skills` — one line per loaded skill (bundled + user + project
 /// merged, same view the composer palette in `mira serve` sees). Fires
 /// as info entries so scroll-back keeps them.
-async fn run_skills_slash(state: &mut TuiState, skills: &SkillHandle) {
+async fn run_skills_slash(
+    state: &mut state::TuiState,
+    skills: &SkillHandle,
+) {
     let reg = skills.read().await.clone();
     if reg.skills.is_empty() {
         state.push_info(
@@ -1831,7 +471,7 @@ async fn run_skills_slash(state: &mut TuiState, skills: &SkillHandle) {
 /// `/skill <name>` — description + source + attachment list + body.
 /// Emitted line-by-line so the terminal transcript stays scroll-back
 /// searchable rather than being one giant blob.
-async fn run_skill_slash(rest: &str, state: &mut TuiState, skills: &SkillHandle) {
+async fn run_skill_slash(rest: &str, state: &mut state::TuiState, skills: &SkillHandle) {
     let name = rest.split_whitespace().next().unwrap_or("").trim();
     if name.is_empty() {
         state.push_warning("usage: /skill <name>".into());
@@ -1868,7 +508,7 @@ async fn run_skill_slash(rest: &str, state: &mut TuiState, skills: &SkillHandle)
 /// `/undo [N]` — revert the last N file writes made in this session.
 /// Defaults to 1. No-op with a clean flash message when there's
 /// nothing on the guard's stack (or no guard at all).
-async fn run_undo_slash(rest: &str, state: &mut TuiState, session: &Session) {
+async fn run_undo_slash(rest: &str, state: &mut state::TuiState, session: &Session) {
     let n: usize = rest.trim().parse().unwrap_or(1);
     let Some(guard) = session.file_guard() else {
         state.push_warning("undo isn't wired for this session (no FileGuard)".into());
@@ -1899,7 +539,7 @@ async fn run_undo_slash(rest: &str, state: &mut TuiState, session: &Session) {
 /// - `/permissions`                    → list current allow rules
 /// - `/permissions add "Rule(...)"`    → session-scoped add
 /// - `/permissions add Bash(cargo test:*)` → also accepted (quotes optional)
-async fn run_permissions_slash(rest: &str, state: &mut TuiState, cfg: &TuiConfig) {
+async fn run_permissions_slash(rest: &str, state: &mut state::TuiState, cfg: &TuiConfig) {
     let rest = rest.trim();
     if rest.is_empty() || rest == "ls" || rest == "list" {
         let policy = cfg.policy.lock().await;
@@ -1936,7 +576,7 @@ async fn run_permissions_slash(rest: &str, state: &mut TuiState, cfg: &TuiConfig
 /// `/save [path]` — dump the visible transcript to a markdown file.
 /// Default path is `<cwd>/.mira/transcript-<epoch>.md`; a caller-supplied
 /// path is used verbatim.
-fn run_save_slash(rest: &str, state: &mut TuiState, cwd: &std::path::Path) {
+fn run_save_slash(rest: &str, state: &mut state::TuiState, cwd: &std::path::Path) {
     let path: PathBuf = if rest.is_empty() {
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1957,10 +597,10 @@ fn run_save_slash(rest: &str, state: &mut TuiState, cwd: &std::path::Path) {
                 out.push_str(s);
                 out.push_str("\n\n");
             }
-            state::LogEntry::TurnEnd { elapsed_ms } => {
+            state::LogEntry::TurnEnd { elapsed_ms, .. } => {
                 out.push_str(&format!(
                     "_· {}_\n\n",
-                    crate::tui::render::turn_end_label(*elapsed_ms)
+                    crate::tui::components::status::turn_end_label(*elapsed_ms)
                 ));
             }
             state::LogEntry::Assistant(s) => {
@@ -1983,6 +623,11 @@ fn run_save_slash(rest: &str, state: &mut TuiState, cwd: &std::path::Path) {
             state::LogEntry::Info(s) => {
                 out.push_str(&format!("_{s}_\n\n"));
             }
+            state::LogEntry::Welcome { model, cwd, tip, .. } => {
+                out.push_str(&format!(
+                    "_mira · {model} · {cwd}_\n\n> {tip}\n\n"
+                ));
+            }
         }
     }
     match std::fs::write(&path, out) {
@@ -1997,7 +642,7 @@ fn run_save_slash(rest: &str, state: &mut TuiState, cwd: &std::path::Path) {
 /// `/sessions` — list up to 15 recent sessions in the current cwd
 /// with a title + relative-time chip. Read-only: switching to a
 /// different session requires re-launching mira (see `/resume`).
-async fn run_sessions_slash(state: &mut TuiState, cfg: &TuiConfig) {
+async fn run_sessions_slash(state: &mut state::TuiState, cfg: &TuiConfig) {
     let Some(store) = cfg.store.as_ref() else {
         state.push_warning("session persistence is off (`--no-persist`?) — nothing to list".into());
         return;
@@ -2045,7 +690,7 @@ async fn run_sessions_slash(state: &mut TuiState, cfg: &TuiConfig) {
 /// print the exact shell command that resumes the target session, so
 /// the user can `Ctrl+C` out and paste it. `<id>` optional — omitted
 /// resumes the most recent.
-async fn run_resume_slash(rest: &str, state: &mut TuiState, cfg: &TuiConfig) {
+async fn run_resume_slash(rest: &str, state: &mut state::TuiState, cfg: &TuiConfig) {
     let target = rest.trim();
     let cmd = if target.is_empty() {
         "mira --resume ''".to_string()
@@ -2104,16 +749,6 @@ fn fmt_relative(secs: u64) -> String {
     } else {
         format!("{}d ago", secs / 86_400)
     }
-}
-
-/// Truncate arbitrary content for a one-line warning display — safe
-/// on multi-byte chars and appends `…` when it clips.
-fn truncate_for_warning(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        return s.to_owned();
-    }
-    let head: String = s.chars().take(max_chars).collect();
-    format!("{head}…")
 }
 
 fn parse_mode(s: &str) -> Option<Mode> {

@@ -579,6 +579,16 @@ impl Session {
         self.history.lock().await.clone()
     }
 
+    /// Drop history back to the start of the most recent user turn:
+    /// removes that user message and everything after it (assistant
+    /// reply, tool calls and results). Returns the removed prompt text
+    /// so a UI can put it back in the composer for editing. `None`
+    /// when there's no user turn to rewind to.
+    pub async fn rewind_last_turn(&self) -> Option<String> {
+        let mut history = self.history.lock().await;
+        rewind_last_turn_in_history(&mut history)
+    }
+
     pub async fn config(&self) -> SessionConfig {
         self.cfg.lock().await.clone()
     }
@@ -2257,6 +2267,21 @@ pub fn profile_for_mode(mode: Mode, repo_root: &std::path::Path) -> SandboxProfi
 ///
 /// Returns the number of orphaned calls that were filled in. Zero means
 /// history was already coherent — the common case.
+/// Rewind helper for [`Session::rewind_last_turn`] — unit-testable
+/// pure function over the history vec. Finds the last non-empty user
+/// message and truncates the history to just before it.
+fn rewind_last_turn_in_history(history: &mut Vec<Message>) -> Option<String> {
+    let idx = history
+        .iter()
+        .rposition(|m| {
+            m.role == Role::User
+                && m.content.as_deref().is_some_and(|c| !c.trim().is_empty())
+        })?;
+    let text = history[idx].content.clone().unwrap_or_default();
+    history.truncate(idx);
+    Some(text)
+}
+
 fn repair_dangling_tool_calls(history: &mut Vec<Message>) -> usize {
     let assistant_idx = match history
         .iter()
@@ -2392,6 +2417,59 @@ mod history_repair_tests {
     fn history_with_no_assistant_calls_is_noop() {
         let mut hist = vec![Message::user("hi"), Message::assistant("hey")];
         assert_eq!(repair_dangling_tool_calls(&mut hist), 0);
+    }
+}
+
+#[cfg(test)]
+mod rewind_tests {
+    use super::*;
+
+    #[test]
+    fn rewind_truncates_from_last_user_message() {
+        let mut hist = vec![
+            Message::system("sys"),
+            Message::user("first"),
+            Message::assistant("reply"),
+            Message::user("second"),
+            Message::assistant("reply2"),
+        ];
+        let text = rewind_last_turn_in_history(&mut hist).unwrap();
+        assert_eq!(text, "second");
+        assert_eq!(hist.len(), 3);
+        assert!(matches!(hist.last().unwrap().role, Role::Assistant));
+    }
+
+    #[test]
+    fn rewind_repeats_until_exhausted() {
+        let mut hist = vec![
+            Message::system("sys"),
+            Message::user("first"),
+            Message::assistant("reply"),
+        ];
+        assert_eq!(
+            rewind_last_turn_in_history(&mut hist).unwrap(),
+            "first"
+        );
+        assert_eq!(hist.len(), 1);
+        // Only the system prompt left — nothing to rewind to.
+        assert!(rewind_last_turn_in_history(&mut hist).is_none());
+    }
+
+    #[test]
+    fn rewind_skips_empty_user_messages() {
+        let mut hist = vec![
+            Message::system("sys"),
+            Message::user("real"),
+            Message::assistant("ok"),
+            Message::user("   "),
+        ];
+        assert_eq!(
+            rewind_last_turn_in_history(&mut hist).unwrap(),
+            "real"
+        );
+        // Truncates AT `real` — the empty user message and the reply
+        // after it are gone too.
+        assert_eq!(hist.len(), 1);
     }
 }
 

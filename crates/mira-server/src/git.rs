@@ -517,10 +517,9 @@ fn push_worktree(
 fn run(cwd: &Path, args: &[&str]) -> Result<String, std::io::Error> {
     let out = Command::new("git").current_dir(cwd).args(args).output()?;
     if !out.status.success() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            String::from_utf8_lossy(&out.stderr).to_string(),
-        ));
+       return Err(std::io::Error::other(
+    String::from_utf8_lossy(&out.stderr).to_string(),
+));
     }
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }

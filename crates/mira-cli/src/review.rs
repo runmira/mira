@@ -4,6 +4,12 @@
 //! lives in `mira-review` so `mira-server` can drive the same thing over HTTP.
 //! This module handles CLI flags, diff collection (git / gh / stdin), colored
 //! terminal rendering, and `--comment` posting to GitHub.
+//!
+//! **Vendor-agnostic design**: The review functionality is deliberately designed
+//! to remain independent of any specific AI provider (e.g., GPT, LFM, etc.).
+//! This allows the same review pipeline to be reused across different models
+//! and providers without modification, supporting multi-vendor compatibility
+//! and reducing coupling between the review engine and the underlying model.
 
 use std::io::Read;
 use std::path::Path;
@@ -62,6 +68,7 @@ pub async fn run(cli: &crate::Cli, args: ReviewArgs) -> Result<()> {
     .context("build provider")?;
 
     let diff = collect_diff(&args, &cwd).context("collect diff")?;
+    // Stop before invoking the model when there is nothing to review.
     if diff.trim().is_empty() {
         eprintln!("no diff to review");
         return Ok(());

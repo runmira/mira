@@ -4,6 +4,9 @@
 //! [`ChatProvider`], which yields a stream of [`ChatEvent`]s. Two concrete
 //! implementations ship in-tree:
 //!
+//! NOTE(mira): this module is intentionally vendor-agnostic so new providers
+//! can be added as isolated crates without touching the harness core.
+//!
 //! * [`openai::OpenAiCompatible`] — covers OpenAI, OpenRouter, Groq, Together,
 //!   local runners (llama.cpp, LM Studio, Ollama `/v1`), and Anthropic's
 //!   OpenAI-compat endpoint.
@@ -13,6 +16,9 @@
 //!
 //! Adding a new native adapter is a new module that implements
 //! [`ChatProvider`] — no changes needed in the harness.
+//!
+//! Entry point for the provider abstraction; keep this module free of
+//! vendor-specific logic so adapters stay isolated.
 
 pub mod anthropic;
 pub mod event;

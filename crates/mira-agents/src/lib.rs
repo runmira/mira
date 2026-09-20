@@ -1,6 +1,9 @@
 //! Named subagent types loaded from per-agent `.md` files with YAML
 //! frontmatter — same shape Claude Code uses for its agent files.
 //!
+//! This module provides the core agent type registry and loading logic
+//! used by the Mira CLI to discover and instantiate specialized subagents.
+//!
 //! Each file looks like:
 //!
 //! ```markdown

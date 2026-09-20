@@ -22,7 +22,7 @@ pub mod tool;
 pub use context::ToolContext;
 pub use guard::{AppliedUndo, FileGuard, GuardError, UndoEntry, UndoOp};
 pub use mcp::{connect as connect_mcp, McpConnection, McpTool};
-pub use preview::{compute_preview, DiffKind, DiffLine, DiffPreview};
+pub use preview::{compute_preview, DiffHunk, DiffKind, DiffLine, DiffPreview, DiffRow};
 pub use registry::Registry;
 pub use tasks::{TaskItem, TaskStatus, TaskStore, TaskUpdate};
 pub use tool::{Action, Tool, ToolError};
