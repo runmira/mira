@@ -10,7 +10,7 @@ use mira_memory::{
     EpisodicEntry, EpisodicSource, EpisodicStore, MemoryQuery, MemorySnapshot, DEFAULT_TOKEN_BUDGET,
 };
 use mira_policy::{Decision, Mode, Policy, Request as PolicyRequest};
-use mira_sandbox::{PersistentShell, SandboxProfile};
+use mira_sandbox::{Sandbox, SandboxProfile};
 use mira_tools::context::{ChildCancel, ChildTracker, ToolProgressSink};
 use mira_tools::{compute_preview, DiffPreview, FileGuard, Registry, TaskStore, ToolContext};
 use serde::{Deserialize, Serialize};
@@ -355,6 +355,30 @@ pub struct Session {
     current_cancel: Arc<Mutex<Option<CancellationToken>>>,
 }
 
+/// Build the sandbox this session starts with, derived from the policy's
+/// current mode, and install it on the tool context.
+///
+/// Uses `try_lock` because `Session::new` / `resume_from` are sync, and at
+/// construction the caller owns the `Arc` so there's no real contention. On
+/// the (impossible-in-practice) contended branch we fall back to the
+/// auto-mode profile and log; the profile gets corrected on the first
+/// `/mode` change.
+///
+/// Install the sandbox selected by the current policy into the tool context.
+/// The `Arc<Sandbox>` is shared by tools, and its profile can be updated in place.
+fn install_sandbox(tool_ctx: &mut ToolContext, policy: &Arc<Mutex<Policy>>) {
+    let repo_root = tool_ctx.cwd.clone();
+    let mode = match policy.try_lock() {
+        Ok(p) => p.mode(),
+        Err(_) => {
+            warn!("policy lock contended during Session construction; defaulting sandbox profile");
+            Mode::Auto
+        }
+    };
+    let sandbox = Sandbox::with_profile(profile_for_mode(mode, &repo_root));
+    tool_ctx.sandbox = Arc::new(sandbox);
+}
+
 impl Session {
     pub fn new(
         cfg: SessionConfig,
@@ -378,35 +402,14 @@ impl Session {
         } else {
             warn!(session = %id, "file guard init failed; undo + conflict detection disabled");
         }
-        // Persistent bash: lazy — the shell struct doesn't fork bash until
-        // the first bash command lands. Storing it here just means `cd`,
-        // venvs, and env exports persist across calls for the whole session.
-        //
-        // The initial sandbox profile is derived from the policy's mode
-        // so a session that starts in `plan` gets Restricted seatbelt
-        // even before the user issues the first `/mode` command. Mode
-        // changes later flow through `Session::set_sandbox_profile` and
-        // respawn the shell on next use.
-        // Grab the mode via try_lock — Session::new/resume_from are
-        // sync, and at construction the caller owns the Arc so there's
-        // no real contention. On the (impossible-in-practice) contended
-        // branch we fall back to the default profile and log; the
-        // profile will get corrected on the first `/mode` change.
-        let initial_profile = policy
-            .try_lock()
-            .map(|p| profile_for_mode(p.mode()))
-            .unwrap_or_else(|_| {
-                warn!(
-                    "policy lock contended during Session construction; defaulting sandbox profile"
-                );
-                SandboxProfile::default()
-            });
-        let cwd_for_shell = tool_ctx.cwd.clone();
-        tool_ctx = tool_ctx.with_shell(Arc::new(Mutex::new(PersistentShell::with_profile(
-            cwd_for_shell,
-            true,
-            initial_profile,
-        ))));
+        // Sandbox: each command is now an independent sandboxed process
+        // (`Sandbox::run_with_timeout`), so there is no persistent shell —
+        // `cd`, venvs and env exports do not carry between bash calls.
+        // The initial profile is derived from the policy's mode so a
+        // session that starts in `plan` is offline from the first call.
+        // Mode changes later flow through `Session::set_sandbox_profile`
+        // and apply to the next command.
+        install_sandbox(&mut tool_ctx, &policy);
         // Wire the child-tracker onto ToolContext so the `agent` tool can
         // register any subagent it spawns with this session's `children`
         // map. Sharing the Arcs (rather than a getter) means the tracker
@@ -478,29 +481,8 @@ impl Session {
         } else {
             warn!(session = %record.id, "file guard init failed on resume");
         }
-        // Resumed sessions get a fresh shell (bash state doesn't survive a
-        // restart), but `cd` + env persistence resumes from the next call.
-        // Same mode-derived profile treatment as `Session::new`.
-        // Grab the mode via try_lock — Session::new/resume_from are
-        // sync, and at construction the caller owns the Arc so there's
-        // no real contention. On the (impossible-in-practice) contended
-        // branch we fall back to the default profile and log; the
-        // profile will get corrected on the first `/mode` change.
-        let initial_profile = policy
-            .try_lock()
-            .map(|p| profile_for_mode(p.mode()))
-            .unwrap_or_else(|_| {
-                warn!(
-                    "policy lock contended during Session construction; defaulting sandbox profile"
-                );
-                SandboxProfile::default()
-            });
-        let cwd_for_shell = tool_ctx.cwd.clone();
-        tool_ctx = tool_ctx.with_shell(Arc::new(Mutex::new(PersistentShell::with_profile(
-            cwd_for_shell,
-            true,
-            initial_profile,
-        ))));
+        // Same mode-derived sandbox treatment as `Session::new`.
+        install_sandbox(&mut tool_ctx, &policy);
         // Same tracker wiring as `new` — resumed sessions can still spawn
         // subagents and their turns should cascade-cancel with the parent.
         let children = Arc::new(Mutex::new(HashMap::new()));
@@ -707,16 +689,19 @@ impl Session {
         self.cfg.lock().await.reasoning_effort = effort;
     }
 
-    /// Update the persistent shell's sandbox profile — usually called in
-    /// response to a `/mode` change. When the profile actually changes,
-    /// the shell marks itself dirty so the next bash call respawns with
-    /// the new seatbelt policy; a `plan → auto` switch takes effect
-    /// without a session restart (`cd` / `export` state is lost on
-    /// respawn — the trade for a real containment change).
+    /// Cheap snapshot of the current sandbox. `Sandbox` is a small `Clone`
+    /// value, so callers take a copy instead of holding the lock across an
+    /// await point.
+    pub fn current_sandbox(&self) -> Sandbox {
+        self.tool_ctx.sandbox.as_ref().clone()
+    }
+
+    /// Replace the sandbox profile — usually called in response to a
+    /// `/mode` change. Takes effect on the next command; commands already
+    /// running finish under the profile they started with. Each command is
+    /// its own sandboxed process, so nothing needs respawning.
     pub async fn set_sandbox_profile(&self, profile: SandboxProfile) {
-        if let Some(shell) = &self.tool_ctx.shell {
-            shell.lock().await.set_profile(profile);
-        }
+        self.tool_ctx.sandbox.set_profile(profile);
     }
 
     /// Run one user turn to completion.
@@ -782,6 +767,11 @@ impl Session {
         // tokio task is torn down by `abort()` below. A tool that
         // doesn't observe the token still gets aborted — this is
         // strictly additive.
+        //
+        // Note: sandboxed commands run via `mira_sandbox` don't observe
+        // this token, but they are spawned with `kill_on_drop` and a
+        // process-group kill guard, so aborting the turn task tears the
+        // process group down.
         if let Some(token) = self.current_cancel.lock().await.take() {
             token.cancel();
         }
@@ -1293,7 +1283,9 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
         let condition = current_goal.condition.clone();
         let mut short_circuit_eval: Option<goal::Evaluation> = None;
         if let Some(verify) = current_goal.verify.clone() {
-            match goal::run_verify(&sess.tool_ctx.sandbox, &sess.tool_ctx.cwd, &verify).await {
+            // Snapshot the sandbox so no lock is held across the await.
+            let sandbox = sess.current_sandbox();
+            match goal::run_verify(&sandbox, &sess.tool_ctx.cwd, &verify).await {
                 Ok(outcome) if outcome.passed => {
                     // Fall through to the LLM evaluator.
                 }
@@ -1876,7 +1868,9 @@ async fn run_verify(
             check.name
         )))
         .await;
-    let outcome = crate::verify::run(&sess.tool_ctx.sandbox, &check, &sess.tool_ctx.cwd).await;
+    // Snapshot the sandbox so no lock is held across the await.
+    let sandbox = sess.current_sandbox();
+    let outcome = crate::verify::run(&sandbox, &check, &sess.tool_ctx.cwd).await;
     if outcome.ok {
         let _ = tx
             .send(HarnessEvent::Warning(format!(
@@ -2230,23 +2224,27 @@ fn now_secs_wall() -> u64 {
         .unwrap_or(0)
 }
 
-/// Map a policy [`Mode`] to the [`SandboxProfile`] the persistent shell
-/// should spawn under. The mapping is deliberately conservative:
+/// Map a policy [`Mode`] to the [`SandboxProfile`] commands should run
+/// under. `SandboxProfile` only expresses a repo root, extra dirs, network,
+/// and timeout, so the mapping is smaller than the old
+/// Restricted/Workspace/Unrestricted split:
 ///
-///   - `plan` and `manual` → `Restricted` (deny writes and network) —
-///     these modes exist for read-only exploration and per-call user
-///     approval respectively; a bash command that slipped past the
-///     approver still can't damage the filesystem or exfiltrate data.
-///   - `auto` and `edit` → `Workspace` — the working posture. Writes
-///     under cwd + `~/.mira`, network open for `curl` / `git fetch` /
+///   - `plan` and `manual` → offline. Exploration and per-call approval
+///     modes; a bash command that slipped past the approver can't
+///     exfiltrate over the network. The repo is still writable, so
+///     write containment in these modes now rests on the policy/approver
+///     rather than the sandbox.
+///   - `auto` and `edit` → network open for `curl` / `git fetch` /
 ///     package managers.
-///   - `yolo` → `Unrestricted` — no seatbelt. Only what the user
-///     explicitly asked for.
-pub fn profile_for_mode(mode: Mode) -> SandboxProfile {
+///   - `yolo` → same as `auto`. There is no unsandboxed option on
+///     `Sandbox`; `mira_sandbox::run_unsandboxed` exists but is
+///     deliberately not wired here (its docs say not to use it for
+///     model-generated commands).
+pub fn profile_for_mode(mode: Mode, repo_root: &std::path::Path) -> SandboxProfile {
+    let base = SandboxProfile::new(repo_root);
     match mode {
-        Mode::Plan | Mode::Manual => SandboxProfile::Restricted,
-        Mode::Auto | Mode::Edit => SandboxProfile::Workspace,
-        Mode::Yolo => SandboxProfile::Unrestricted,
+        Mode::Plan | Mode::Manual => base.network(false),
+        Mode::Auto | Mode::Edit | Mode::Yolo => base.network(true),
     }
 }
 
@@ -2303,6 +2301,32 @@ fn repair_dangling_tool_calls(history: &mut Vec<Message>) -> usize {
         ));
     }
     n
+}
+
+#[cfg(test)]
+mod sandbox_mode_tests {
+    use super::*;
+
+    #[test]
+    fn plan_and_manual_are_offline() {
+        let root = std::path::Path::new("/tmp/repo");
+        assert!(!profile_for_mode(Mode::Plan, root).network);
+        assert!(!profile_for_mode(Mode::Manual, root).network);
+    }
+
+    #[test]
+    fn working_modes_have_network() {
+        let root = std::path::Path::new("/tmp/repo");
+        assert!(profile_for_mode(Mode::Auto, root).network);
+        assert!(profile_for_mode(Mode::Edit, root).network);
+        assert!(profile_for_mode(Mode::Yolo, root).network);
+    }
+
+    #[test]
+    fn profile_is_rooted_at_repo() {
+        let root = std::path::Path::new("/tmp/repo");
+        assert_eq!(profile_for_mode(Mode::Auto, root).repo_root, root);
+    }
 }
 
 #[cfg(test)]

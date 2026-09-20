@@ -1,0 +1,8 @@
+name: rename-symbol
+prompt: |
+  In the current directory, there is a Rust library with a function named `get` that looks up configuration values.
+  Rename this function to `lookup` while maintaining the same functionality. Update all usages of the function
+  throughout the codebase.
+fixture: 05-rename-symbol-fixture
+verify: cargo test --quiet
+timeout_secs: 300

@@ -1,3 +1,4 @@
+
 //! `git_diff` — unstaged / staged / historical changes.
 
 use async_trait::async_trait;
@@ -16,11 +17,14 @@ pub struct GitDiff;
 struct DiffArgs {
     #[serde(default)]
     staged: bool,
+
     #[serde(default)]
     path: Option<String>,
+
     /// A commit or range like `HEAD~3..HEAD`. When set, overrides `staged`.
     #[serde(default)]
     commit: Option<String>,
+
     /// `--stat` summary instead of full diff.
     #[serde(default)]
     stat: bool,
@@ -38,10 +42,21 @@ impl Tool for GitDiff {
             json!({
                 "type": "object",
                 "properties": {
-                    "staged": { "type": "boolean", "default": false },
-                    "path":   { "type": "string" },
-                    "commit": { "type": "string", "description": "Ref or range, e.g. `HEAD~3..HEAD`." },
-                    "stat":   { "type": "boolean", "default": false }
+                    "staged": {
+                        "type": "boolean",
+                        "default": false
+                    },
+                    "path": {
+                        "type": "string"
+                    },
+                    "commit": {
+                        "type": "string",
+                        "description": "Ref or range, e.g. `HEAD~3..HEAD`."
+                    },
+                    "stat": {
+                        "type": "boolean",
+                        "default": false
+                    }
                 },
                 "additionalProperties": false
             }),
@@ -52,31 +67,48 @@ impl Tool for GitDiff {
         Action::Read
     }
 
-    async fn invoke(&self, call: &ToolCall, ctx: &ToolContext) -> Result<ToolResult, ToolError> {
+    async fn invoke(
+        &self,
+        call: &ToolCall,
+        ctx: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
         let args: DiffArgs = call.parse_arguments()?;
-        let mut cmd = String::from("git --no-pager diff");
+
+        let mut git_args = vec![
+            "--no-pager".to_owned(),
+            "diff".to_owned(),
+        ];
+
         if args.stat {
-            cmd.push_str(" --stat");
+            git_args.push("--stat".to_owned());
         }
-        if let Some(c) = &args.commit {
-            cmd.push(' ');
-            cmd.push_str(&super::shell_quote(c));
+
+        if let Some(commit) = &args.commit {
+            git_args.push(commit.clone());
         } else if args.staged {
-            cmd.push_str(" --staged");
+            git_args.push("--staged".to_owned());
         }
-        if let Some(p) = &args.path {
+
+        if let Some(path) = &args.path {
             let resolved = ctx
-                .resolve(p)
-                .ok_or_else(|| ToolError::Failed(format!("path escapes cwd: {p}")))?;
-            cmd.push_str(" -- ");
-            cmd.push_str(&super::shell_quote(&resolved.to_string_lossy()));
+                .resolve(path)
+                .ok_or_else(|| {
+                    ToolError::Failed(format!("path escapes repository: {path}"))
+                })?;
+
+            git_args.push("--".to_owned());
+            git_args.push(resolved.to_string_lossy().into_owned());
         }
-        let out = super::run_git(ctx, &cmd, 30).await?;
-        let body = if out.output.trim().is_empty() {
+
+        let out = super::run_git(ctx, &git_args, 30).await?;
+        let output = out.combined_output();
+
+        let body = if output.trim().is_empty() {
             "(no diff)".to_owned()
         } else {
-            super::truncate(&out.output, 32_000)
+            super::truncate(&output, 32_000)
         };
+
         Ok(ToolResult::ok(call.id.clone(), body))
     }
 }

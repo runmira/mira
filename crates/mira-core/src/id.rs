@@ -3,6 +3,8 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+// NOTE: IDs are opaque to us. We only format new ones; anything deserialized
+// is taken verbatim so cross-provider round-trips stay lossless.
 /// Typed IDs. Newtypes over `String` because provider IDs (OpenAI, Anthropic)
 /// are not necessarily UUIDs — we accept whatever shape the wire uses.
 macro_rules! string_id {

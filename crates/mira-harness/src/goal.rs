@@ -109,10 +109,13 @@ pub struct Goal {
 /// (and optionally a regex against stdout) tells the harness whether
 /// the goal condition is observably met.
 ///
+/// The command runs inside the sandbox, which is offline by default,
+/// so it must not need the network.
+///
 /// Example — "cargo test until every test passes":
 /// ```yaml
 /// verify:
-///   command: cargo test --all
+///   command: cargo test --all --offline
 ///   # expected_exit defaults to 0
 ///   timeout_secs: 300
 /// ```
@@ -125,17 +128,21 @@ pub struct Goal {
 /// ```
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VerifyCommand {
-    /// Shell fragment run as `bash -lc <command>` via the session's
-    /// sandbox. Runs in the session's cwd.
+    /// Shell fragment run as `bash -c <command>` via the session's
+    /// sandbox. Runs in the session's cwd. The sandbox execs binaries
+    /// directly (no shell parsing), so the harness wraps this fragment
+    /// in `bash -c` itself.
     pub command: String,
     /// Exit code that indicates "goal condition met". Defaults to 0
     /// via [`VerifyCommand::expected_exit`], but a rule like
     /// `grep -c … src/` naturally wants 1 (no match).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_exit: Option<i32>,
-    /// Optional regex the command's stdout (plus stderr — the sandbox
-    /// merges the two) must match for the check to pass. Applied on
-    /// top of the exit-code check: both must hold.
+    /// Optional regex the command's output must match for the check
+    /// to pass. The sandbox captures stdout and stderr separately;
+    /// they are joined (stderr appended after stdout) before the
+    /// regex runs. Applied on top of the exit-code check: both must
+    /// hold.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expect_stdout: Option<String>,
     /// Wall-clock cap. Defaults to 300s. Kept generous so a real
@@ -167,11 +174,12 @@ impl VerifyCommand {
 pub struct VerifyOutcome {
     /// True when the command's exit code matches
     /// `VerifyCommand::expected_exit` AND (when set) `expect_stdout`
-    /// matches the merged stdout/stderr.
+    /// matches the combined stdout/stderr.
     pub passed: bool,
-    /// Actual exit code from the command. `-1` means timeout.
+    /// Actual exit code from the command. `-1` means timeout or
+    /// termination by signal (the sandbox reports `None` for both).
     pub exit_code: i32,
-    /// Merged stdout+stderr transcript, truncated to
+    /// Combined stdout+stderr transcript, truncated to
     /// [`VERIFY_OUTPUT_CAP`] bytes so a chatty script can't bloat the
     /// evaluator's context downstream.
     pub output: String,
@@ -199,7 +207,7 @@ impl VerifyOutcome {
     }
 }
 
-/// Cap on the merged stdout/stderr we keep after a verify run — big
+/// Cap on the combined stdout/stderr we keep after a verify run — big
 /// enough to be diagnostic, small enough that a `cargo test` failure
 /// dump doesn't dominate the evaluator's context.
 pub const VERIFY_OUTPUT_CAP: usize = 32 * 1024;
@@ -601,21 +609,23 @@ pub async fn run_verify(
         None => None,
     };
 
+    // The sandbox execs a binary directly (no shell parsing), so wrap
+    // the user's shell fragment in `bash -c` ourselves. Deliberately not
+    // `-l`: a login shell re-sources profile files that may not be
+    // visible inside the sandbox, and PATH is already passed through.
+    let args = vec!["-c".to_owned(), verify.command.clone()];
+
     let outcome = sandbox
-        .run(
-            &verify.command,
-            cwd,
-            Duration::from_secs(verify.timeout_secs()),
-        )
+        .run_with_timeout("bash", &args, cwd, verify.timeout_secs())
         .await
-        .map_err(|e| anyhow::anyhow!("verify command failed to run: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("verify command failed to run: {e:#}"))?;
 
     // Truncate before we hand it back — chatty commands would
     // otherwise dominate the evaluator's context window on the next
     // iteration.
-    let output = truncate_output(&outcome.output, VERIFY_OUTPUT_CAP);
+    let output = truncate_output(&outcome.combined_output(), VERIFY_OUTPUT_CAP);
 
-    let exit_ok = !outcome.timed_out && outcome.exit_code == verify.expected_exit();
+    let exit_ok = !outcome.timed_out && outcome.exit_code == Some(verify.expected_exit());
     let stdout_ok = match &stdout_re {
         Some(re) => re.is_match(&output),
         None => true,
@@ -624,7 +634,9 @@ pub async fn run_verify(
 
     Ok(VerifyOutcome {
         passed,
-        exit_code: outcome.exit_code,
+        // `None` means timeout or killed by a signal; keep the -1
+        // convention so downstream formatting is unchanged.
+        exit_code: outcome.exit_code.unwrap_or(-1),
         output,
         timed_out: outcome.timed_out,
     })
@@ -683,6 +695,13 @@ fn format_transcript(messages: &[Message], cap: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Sandbox rooted at the current directory, plus that directory
+    /// for use as the command's cwd.
+    fn test_sandbox() -> (Sandbox, std::path::PathBuf) {
+        let cwd = std::env::current_dir().unwrap();
+        (Sandbox::new(cwd.clone()), cwd)
+    }
 
     #[test]
     fn parse_bare_json() {
@@ -771,9 +790,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_verify_passes_on_zero_exit() {
-        use mira_sandbox::{Sandbox, SandboxConfig};
-        let sandbox = Sandbox::new(SandboxConfig::default());
-        let cwd = std::env::current_dir().unwrap();
+        let (sandbox, cwd) = test_sandbox();
         let v = VerifyCommand {
             command: "true".into(),
             expected_exit: None,
@@ -787,9 +804,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_verify_fails_on_nonzero_exit() {
-        use mira_sandbox::{Sandbox, SandboxConfig};
-        let sandbox = Sandbox::new(SandboxConfig::default());
-        let cwd = std::env::current_dir().unwrap();
+        let (sandbox, cwd) = test_sandbox();
         let v = VerifyCommand {
             command: "false".into(),
             expected_exit: None,
@@ -806,9 +821,7 @@ mod tests {
         // `grep` returns 1 when no match — that's a common "goal
         // condition met" shape ("no v1 call sites remain"). The
         // verify should count that as pass when expected_exit=1.
-        use mira_sandbox::{Sandbox, SandboxConfig};
-        let sandbox = Sandbox::new(SandboxConfig::default());
-        let cwd = std::env::current_dir().unwrap();
+        let (sandbox, cwd) = test_sandbox();
         let v = VerifyCommand {
             command: "echo hello | grep xyz".into(),
             expected_exit: Some(1),
@@ -824,9 +837,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_verify_stdout_regex_gates_pass() {
-        use mira_sandbox::{Sandbox, SandboxConfig};
-        let sandbox = Sandbox::new(SandboxConfig::default());
-        let cwd = std::env::current_dir().unwrap();
+        let (sandbox, cwd) = test_sandbox();
         // Exit 0 but stdout regex doesn't match → fail.
         let v = VerifyCommand {
             command: "echo greeting".into(),
@@ -846,6 +857,21 @@ mod tests {
         };
         let out2 = run_verify(&sandbox, &cwd, &v2).await.unwrap();
         assert!(out2.passed);
+    }
+
+    #[tokio::test]
+    async fn run_verify_timeout_reports_minus_one() {
+        let (sandbox, cwd) = test_sandbox();
+        let v = VerifyCommand {
+            command: "sleep 10".into(),
+            expected_exit: None,
+            expect_stdout: None,
+            timeout_secs: Some(1),
+        };
+        let out = run_verify(&sandbox, &cwd, &v).await.unwrap();
+        assert!(!out.passed);
+        assert!(out.timed_out);
+        assert_eq!(out.exit_code, -1);
     }
 
     /* ---- budget check ---- */
@@ -947,9 +973,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_verify_bad_regex_errors() {
-        use mira_sandbox::{Sandbox, SandboxConfig};
-        let sandbox = Sandbox::new(SandboxConfig::default());
-        let cwd = std::env::current_dir().unwrap();
+        let (sandbox, cwd) = test_sandbox();
         let v = VerifyCommand {
             command: "true".into(),
             expected_exit: None,

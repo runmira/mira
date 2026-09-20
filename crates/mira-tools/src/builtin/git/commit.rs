@@ -1,3 +1,4 @@
+
 //! `git_commit` — create a commit. Never passes `--no-verify` — hooks are the
 //! user's safety net and this tool refuses to bypass them.
 
@@ -17,10 +18,12 @@ pub struct GitCommit;
 #[derive(Deserialize)]
 struct CommitArgs {
     message: String,
+
     /// Include tracked-and-modified files (`git commit -a`). Untracked files
     /// are never auto-staged; the model must `git add` them explicitly via bash.
     #[serde(default)]
     all: bool,
+
     #[serde(default)]
     amend: bool,
 }
@@ -37,9 +40,17 @@ impl Tool for GitCommit {
             json!({
                 "type": "object",
                 "properties": {
-                    "message": { "type": "string" },
-                    "all":     { "type": "boolean", "default": false },
-                    "amend":   { "type": "boolean", "default": false }
+                    "message": {
+                        "type": "string"
+                    },
+                    "all": {
+                        "type": "boolean",
+                        "default": false
+                    },
+                    "amend": {
+                        "type": "boolean",
+                        "default": false
+                    }
                 },
                 "required": ["message"],
                 "additionalProperties": false
@@ -56,34 +67,80 @@ impl Tool for GitCommit {
             Ok(a) => a,
             Err(_) => return "git commit".to_owned(),
         };
-        build_commit_command(&args)
+
+        build_commit_display(&args)
     }
 
-    async fn invoke(&self, call: &ToolCall, ctx: &ToolContext) -> Result<ToolResult, ToolError> {
+    async fn invoke(
+        &self,
+        call: &ToolCall,
+        ctx: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
         let args: CommitArgs = call.parse_arguments()?;
-        let cmd = build_commit_command(&args);
-        let out = super::run_git(ctx, &cmd, 60).await?;
+
+        if args.message.trim().is_empty() {
+            return Err(ToolError::Failed(
+                "commit message cannot be empty".to_owned(),
+            ));
+        }
+
+        let git_args = build_commit_args(&args);
+
+        let out = super::run_git(ctx, &git_args, 60).await?;
+
         let mut body = String::new();
-        body.push_str(&format!("$ {cmd}\n"));
-        body.push_str(&format!("exit={}\n", out.exit_code));
+
+        body.push_str(&format!("$ {}\n", build_commit_display(&args)));
+        body.push_str(&format!("exit={:?}\n", out.exit_code));
+
         if out.timed_out {
             body.push_str("(command timed out)\n");
         }
+
+        let output = out.combined_output();
+
         body.push_str("--- output ---\n");
-        body.push_str(&super::truncate(&out.output, 16_000));
+        body.push_str(&super::truncate(&output, 16_000));
+
         Ok(ToolResult::ok(call.id.clone(), body))
     }
 }
 
-fn build_commit_command(args: &CommitArgs) -> String {
-    let mut cmd = String::from("git commit");
+fn build_commit_args(args: &CommitArgs) -> Vec<String> {
+    let mut git_args = vec!["commit".to_owned()];
+
     if args.all {
-        cmd.push_str(" -a");
+        git_args.push("-a".to_owned());
     }
+
     if args.amend {
-        cmd.push_str(" --amend");
+        git_args.push("--amend".to_owned());
     }
-    cmd.push_str(" -m ");
-    cmd.push_str(&super::shell_quote(&args.message));
-    cmd
+
+    git_args.push("-m".to_owned());
+    git_args.push(args.message.clone());
+
+    git_args
+}
+
+fn build_commit_display(args: &CommitArgs) -> String {
+    let mut command = String::from("git commit");
+
+    if args.all {
+        command.push_str(" -a");
+    }
+
+    if args.amend {
+        command.push_str(" --amend");
+    }
+
+    command.push_str(" -m ");
+    command.push_str(&display_quote(&args.message));
+
+    command
+}
+
+fn display_quote(value: &str) -> String {
+    let escaped = value.replace('\'', "'\\''");
+    format!("'{escaped}'")
 }

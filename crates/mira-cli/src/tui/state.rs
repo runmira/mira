@@ -184,6 +184,11 @@ pub struct TuiState {
     /// Zeroed for providers that don't report usage — the status bar renders
     /// nothing in that case.
     pub usage: UsageTotals,
+    /// Session token totals captured at the start of the current turn.
+    /// The in-turn streaming indicator renders `usage - turn_usage_baseline`
+    /// so each turn's counter starts at zero instead of inheriting the
+    /// previous turn's running total. Re-snapshotted on every `start_stream`.
+    pub turn_usage_baseline: UsageTotals,
     /// Optional session-wide spend cap in USD. When set, the header
     /// dollar figure paints red past the cap, and
     /// [`super::start_stream`] blocks the next send until the user
@@ -310,6 +315,7 @@ impl TuiState {
             should_quit: false,
             flash: None,
             usage: UsageTotals::default(),
+            turn_usage_baseline: UsageTotals::default(),
             budget_usd: None,
             goal: None,
             palette: PaletteState::none(),

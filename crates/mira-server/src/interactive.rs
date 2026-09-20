@@ -2109,7 +2109,7 @@ mod tests {
     use mira_ai::NullProvider;
     use mira_core::message::{ToolCallFunction, ToolCallKind};
     use mira_core::{ToolCall, ToolCallId};
-    use mira_sandbox::{Sandbox, SandboxConfig};
+    use mira_sandbox::Sandbox;
     use std::path::PathBuf;
 
     fn make_agent_tool_with_types(names: &[&str]) -> AgentTool {
@@ -2220,7 +2220,7 @@ mod tests {
     fn dummy_ctx() -> ToolContext {
         ToolContext::new(
             PathBuf::from("."),
-            Arc::new(Sandbox::new(SandboxConfig::default())),
+            Arc::new(Sandbox::new(PathBuf::from("."))),
         )
     }
 

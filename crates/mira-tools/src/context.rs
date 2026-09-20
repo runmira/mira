@@ -1,10 +1,10 @@
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use mira_core::SessionId;
 use mira_memory::{EpisodicStore, MemoryStore};
-use mira_sandbox::{PersistentShell, Sandbox};
-use tokio::sync::Mutex;
+use mira_sandbox::Sandbox;
 use tokio_util::sync::CancellationToken;
 
 use crate::guard::FileGuard;
@@ -12,125 +12,125 @@ use crate::tasks::TaskStore;
 
 /// Ambient state made available to every tool invocation.
 ///
-/// This is the seam for adding new capabilities without changing the `Tool`
-/// trait: session metadata, cancellation tokens, memory handles, an LSP
-/// client, etc. Keep additions optional (`Option<T>`) so tools can degrade
-/// gracefully when a facility isn't wired up.
+/// This is the seam for adding new capabilities without changing the
+/// `Tool` trait: session metadata, cancellation tokens, memory handles,
+/// an LSP client, etc. Keep additions optional (`Option<T>`) so tools
+/// can degrade gracefully when a facility isn't wired up.
 #[derive(Clone)]
 pub struct ToolContext {
-    /// The repo root. Tools that touch the filesystem MUST canonicalize
-    /// against this and refuse to escape it.
+    /// Absolute repository root.
+    ///
+    /// This is the filesystem security boundary for the session.
+    /// It never changes when the logical working directory changes.
+    pub repo_root: PathBuf,
+
+    /// Current logical working directory for the session.
+    ///
+    /// This is used to resolve relative paths and to provide the
+    /// working directory for command execution. It is independent
+    /// of the sandbox security boundary.
     pub cwd: PathBuf,
-    /// Sandbox that command-running tools should defer to.
+
+    /// Sandbox that command-running tools must defer to.
+    ///
+    /// The sandbox is responsible for OS-level process isolation
+    /// such as macOS Seatbelt or Linux Bubblewrap. Tools should not
+    /// contain command-specific sandbox logic.
     pub sandbox: Arc<Sandbox>,
-    /// Optional per-session file-safety layer: read-watermarks + undo
-    /// snapshots. `None` means the caller didn't wire one up (tests, some
-    /// headless runs); tools should degrade to plain file operations.
+
+    /// Optional per-session file-safety layer: read-watermarks +
+    /// undo snapshots.
+    ///
+    /// `None` means the caller didn't wire one up (tests, some
+    /// headless runs); tools degrade to plain file operations.
     pub guard: Option<Arc<FileGuard>>,
-    /// Optional long-lived shell scoped to this session. When present,
-    /// the `bash` tool routes commands through it so `cd`, activated
-    /// venvs, and `export`s persist across calls. Absent for headless /
-    /// test runs; Bash falls back to the fresh-per-call sandbox path.
-    pub shell: Option<Arc<Mutex<PersistentShell>>>,
-    /// Optional handle to the shared memory store. Tools that read or
-    /// mutate `MIRA.md` (`memory_read`, `memory_append`, `memory_edit`,
-    /// `memory_search`) go through this so per-scope locking is honored
-    /// across every writer (agent tools, HTTP endpoints, future clients).
-    /// Absent for tests that don't want a real filesystem behind memory.
+
+    /// Optional handle to the shared memory store.
+    ///
+    /// Tools that read or mutate `MIRA.md` go through this so
+    /// per-scope locking is honored across every writer.
     pub memory: Option<Arc<dyn MemoryStore>>,
-    /// Optional handle to the cross-session episodic store (JSONL). The
-    /// `memory_remember` tool appends here, and the post-round
-    /// auto-extraction pass writes here too.
+
+    /// Optional handle to the cross-session episodic store.
+    ///
+    /// `memory_remember` and post-round extraction use this store.
     pub episodic: Option<Arc<dyn EpisodicStore>>,
-    /// Optional current session id. Attached by the harness inside
-    /// `Session::new` / `Session::resume_from` so tools that persist
-    /// state (episodic entries, undo snapshots) can stamp provenance.
+
+    /// Optional current session id.
+    ///
+    /// Attached by the harness so persisted state can retain
+    /// provenance.
     pub session_id: Option<SessionId>,
-    /// How deeply nested the currently-executing session is under the
-    /// user's top-level chat. Parent (user-facing) = 0; first-level
-    /// subagent = 1; nested subagent = 2, etc. Read by the `agent` tool
-    /// to enforce a hard cap on runaway spawn recursion — new subagents
-    /// inherit `parent.agent_depth + 1`.
+
+    /// How deeply nested the current session is under the user's
+    /// top-level chat.
+    ///
+    /// Parent = 0, first-level subagent = 1, etc.
     pub agent_depth: usize,
-    /// Opaque handle to the parent session's active-children list. The
-    /// `agent` tool registers each child it spawns here so an interrupt
-    /// on the parent cascades to every subagent currently in flight.
-    /// Absent for headless / test contexts — the tool falls back to
-    /// spawning without registration.
+
+    /// Opaque handle to the parent session's active-children list.
     ///
-    /// Kept `Arc<dyn ChildTracker>` so mira-tools doesn't have to know
-    /// about `Session` (which lives in mira-harness). See
-    /// [`ChildTracker`] for the two-method contract.
+    /// The `agent` tool registers each spawned child here so an
+    /// interrupt on the parent can cascade to in-flight subagents.
     pub child_tracker: Option<Arc<dyn ChildTracker>>,
-    /// Session-scoped task list the `task_*` tools mutate. Attached
-    /// by the harness inside `Session::new` / `Session::resume_from`.
-    /// Absent for tests / headless runs — the task tools return an
-    /// error in that case.
+
+    /// Session-scoped task list.
     pub tasks: Option<Arc<TaskStore>>,
-    /// Optional live-progress emitter — the `bash` tool forwards each
-    /// stdout+stderr line from a running command through here so the
-    /// UI can render output under the pending tool card while the
-    /// command is still executing. Absent for headless runs; the tool
-    /// falls back to the return-at-end path.
+
+    /// Optional live-progress emitter.
+    ///
+    /// Command-running tools forward stdout/stderr lines through this
+    /// sink so the UI can render them while the command is executing.
     pub progress: Option<Arc<dyn ToolProgressSink>>,
-    /// Cooperative cancellation signal for the current turn. The
-    /// harness installs a fresh token at the start of every turn and
-    /// fires it from [`Session::cancel`] BEFORE aborting the turn's
-    /// tokio task, so long-running tools (bash, web_fetch) get a
-    /// chance to shut down cleanly — killing their child process,
-    /// closing sockets — rather than being torn down mid-await by a
-    /// hard `abort()`.
+
+    /// Cooperative cancellation signal for the current turn.
     ///
-    /// Tools that don't observe this still work: the `abort()` still
-    /// fires as a fallback. Observing it just makes cancellation
-    /// visible to native resources the async runtime doesn't own.
-    ///
-    /// `None` in headless / test contexts; tools should treat that as
-    /// "no cancellation" and never assume the token is present.
+    /// The harness installs a fresh token at the beginning of every
+    /// turn and fires it before aborting the turn's Tokio task.
     pub cancel: Option<CancellationToken>,
 }
 
 /// Contract the harness's `Session` fulfills to let the `agent` tool
-/// register and de-register in-flight children by ID. Keeping this at
-/// the tool-context layer avoids a `mira-tools → mira-harness` cycle.
-///
-/// `register` is called with a boxed cancel callback the parent invokes
-/// on interrupt. `deregister` removes the entry on child completion.
+/// register and de-register in-flight children by ID.
 #[async_trait::async_trait]
 pub trait ChildTracker: Send + Sync {
-    /// Add a new child. Returns an opaque id the caller passes back to
-    /// [`Self::deregister`] once the child finishes.
+    /// Add a new child and return its opaque registration id.
     async fn register(&self, cancel: Box<dyn ChildCancel>) -> u64;
+
+    /// Remove a previously registered child.
     async fn deregister(&self, id: u64);
 }
 
-/// Cancellation callback the parent uses to abort a specific in-flight
-/// child. The trait is object-safe so we can hold `Box<dyn ChildCancel>`
-/// on the parent side without knowing the concrete session type.
+/// Cancellation callback used by the parent session to stop a
+/// specific in-flight child.
 #[async_trait::async_trait]
 pub trait ChildCancel: Send + Sync {
     async fn cancel(&self);
 }
 
-/// Contract the harness fulfills to receive live per-line output from a
-/// still-running tool call. Used today by the `bash` tool to stream PTY
-/// output into the transcript; wired into other long-running tools as
-/// they need it. Non-blocking best-effort — the tool doesn't fail if
-/// the sink drops.
+/// Contract used by the harness to receive live per-line output from
+/// long-running tools.
 pub trait ToolProgressSink: Send + Sync {
-    /// Called with each stdout+stderr line as it lands. `call_id` maps
-    /// back to the corresponding `ToolStart` event so the renderer can
-    /// route the line under the right pending card.
+    /// Called whenever a stdout/stderr line arrives.
+    ///
+    /// `call_id` maps the line back to the corresponding ToolStart
+    /// event so the renderer can place it under the pending tool card.
     fn emit(&self, call_id: &str, line: &str);
 }
 
 impl ToolContext {
-    pub fn new(cwd: impl Into<PathBuf>, sandbox: Arc<Sandbox>) -> Self {
+    /// Create a context whose initial working directory is the repo root.
+    pub fn new(
+        repo_root: impl Into<PathBuf>,
+        sandbox: Arc<Sandbox>,
+    ) -> Self {
+        let repo_root = repo_root.into();
+
         Self {
-            cwd: cwd.into(),
+            cwd: repo_root.clone(),
+            repo_root,
             sandbox,
             guard: None,
-            shell: None,
             memory: None,
             episodic: None,
             session_id: None,
@@ -142,123 +142,126 @@ impl ToolContext {
         }
     }
 
-    /// Attach a cooperative cancellation token. Wired by the harness
-    /// per-turn so tools can observe interrupts and clean up native
-    /// resources (child processes, sockets) before the surrounding
-    /// tokio task is aborted.
+    /// Attach a cooperative cancellation token.
     pub fn with_cancel(mut self, token: CancellationToken) -> Self {
         self.cancel = Some(token);
         self
     }
 
-    /// Attach the live-progress emitter. Wired by the harness so bash
-    /// (and any future long-running tool) can stream output to the UI
-    /// while it runs.
-    pub fn with_progress(mut self, sink: Arc<dyn ToolProgressSink>) -> Self {
+    /// Attach the live-progress emitter.
+    pub fn with_progress(
+        mut self,
+        sink: Arc<dyn ToolProgressSink>,
+    ) -> Self {
         self.progress = Some(sink);
         self
     }
 
-    /// Attach the session-scoped task store. Wired by the harness in
-    /// `Session::new` / `Session::resume_from` so the `task_*` tools
-    /// share one view with the checkpoint path.
+    /// Attach the session-scoped task store.
     pub fn with_tasks(mut self, tasks: Arc<TaskStore>) -> Self {
         self.tasks = Some(tasks);
         self
     }
 
-    /// Chainable setter used by the harness after Session::new picks a
-    /// session id — the FileGuard is scoped to that id.
+    /// Attach the per-session file guard.
     pub fn with_guard(mut self, guard: Arc<FileGuard>) -> Self {
         self.guard = Some(guard);
         self
     }
 
-    /// Attach a per-session persistent shell so bash commands share state
-    /// across calls. Same lifecycle as `guard`.
-    pub fn with_shell(mut self, shell: Arc<Mutex<PersistentShell>>) -> Self {
-        self.shell = Some(shell);
-        self
-    }
-
-    /// Attach the shared memory store so the memory tools can read/append/
-    /// edit `MIRA.md`. Wired by the server (or CLI) at startup — one store
-    /// instance is shared with the `/api/memory/append` HTTP endpoint so
-    /// concurrent writers all take the same per-scope lock.
-    pub fn with_memory(mut self, memory: Arc<dyn MemoryStore>) -> Self {
+    /// Attach the shared memory store.
+    pub fn with_memory(
+        mut self,
+        memory: Arc<dyn MemoryStore>,
+    ) -> Self {
         self.memory = Some(memory);
         self
     }
 
-    /// Attach the cross-session episodic store. Needed by
-    /// `memory_remember`; the harness's post-round auto-extractor also
-    /// pulls this same handle to keep provenance / dedup consistent.
-    pub fn with_episodic(mut self, episodic: Arc<dyn EpisodicStore>) -> Self {
+    /// Attach the cross-session episodic store.
+    pub fn with_episodic(
+        mut self,
+        episodic: Arc<dyn EpisodicStore>,
+    ) -> Self {
         self.episodic = Some(episodic);
         self
     }
 
-    /// Stamp the current session id. Used by episodic writes to record
-    /// which session an entry came from — useful for later consolidation
-    /// and for the review UI.
+    /// Stamp the current session id.
     pub fn with_session_id(mut self, id: SessionId) -> Self {
         self.session_id = Some(id);
         self
     }
 
-    /// Set the subagent nesting depth. The `agent` tool uses this to cap
-    /// runaway spawn recursion — see the constant in `AgentTool`.
+    /// Set the subagent nesting depth.
     pub fn with_agent_depth(mut self, depth: usize) -> Self {
         self.agent_depth = depth;
         self
     }
 
-    /// Attach the parent session's child tracker so the `agent` tool
-    /// can register spawned children for interrupt cascade.
-    pub fn with_child_tracker(mut self, tracker: Arc<dyn ChildTracker>) -> Self {
+    /// Attach the parent session's child tracker.
+    pub fn with_child_tracker(
+        mut self,
+        tracker: Arc<dyn ChildTracker>,
+    ) -> Self {
         self.child_tracker = Some(tracker);
         self
     }
 
-    /// Resolve a possibly-relative path against `cwd` and ensure the result
-    /// stays inside the cwd — or under the user's `~/.mira/` config dir,
-    /// which is a permitted second destination for skill installers,
-    /// memory writers, and prompt generators. Returns `None` if the path
-    /// escapes both roots.
+    /// Change the logical working directory.
     ///
-    /// Symlink-safe: any existing prefix of the target is canonicalized
-    /// through the OS, so a symlink committed inside the workspace
-    /// (`.env → ~/.ssh/id_rsa`) that would pass a lexical `starts_with`
-    /// check is caught here and refused. New-file paths (destination
-    /// doesn't exist yet, e.g. `write_file`) canonicalize the deepest
-    /// existing ancestor and append the trailing components — so a
-    /// legitimate `write_file` to a not-yet-created subdirectory still
-    /// works while a symlink further up the chain still gets resolved.
+    /// This does NOT change the sandbox boundary. The sandbox remains
+    /// rooted at `repo_root`.
+    pub fn with_cwd(mut self, cwd: impl Into<PathBuf>) -> Option<Self> {
+        let cwd = cwd.into();
+        let resolved = self.resolve_path(&cwd)?;
+
+        if !resolved.is_dir() {
+            return None;
+        }
+
+        self.cwd = resolved;
+        Some(self)
+    }
+
+    /// Resolve a possibly-relative path against the current working
+    /// directory and ensure it remains inside the repository root or
+    /// the explicitly permitted `~/.mira` directory.
+    ///
+    /// Existing symlinks are resolved before containment is checked.
+    /// For paths that don't exist yet, the deepest existing ancestor
+    /// is canonicalized and the missing tail is appended.
     pub fn resolve(&self, path: &str) -> Option<PathBuf> {
         let expanded = shellexpand::tilde(path);
         let candidate = Path::new(expanded.as_ref());
+
         let joined = if candidate.is_absolute() {
             candidate.to_path_buf()
         } else {
             self.cwd.join(candidate)
         };
-        let normalized = normalize(&joined);
-        // Real path: existing-prefix canonicalize + trailing tail so
-        // symlinks anywhere in the chain surface as their true target
-        // before we check containment.
+
+        self.resolve_path(&joined)
+    }
+
+    /// Resolve a path that has already been converted to an absolute
+    /// candidate.
+    fn resolve_path(&self, path: &Path) -> Option<PathBuf> {
+        let normalized = normalize(path);
         let resolved = resolve_symlinks(&normalized)?;
 
-        if let Ok(cwd_canon) = std::fs::canonicalize(&self.cwd) {
-            if resolved.starts_with(&cwd_canon) {
-                return Some(resolved);
-            }
+        let repo_root = std::fs::canonicalize(&self.repo_root).ok()?;
+
+        if resolved.starts_with(&repo_root) {
+            return Some(resolved);
         }
-        // Second allowed root: the user's ~/.mira/ config dir. Kept
-        // narrow to the mira subtree — not the full home dir. Falls
-        // back to a lexical check when the dir doesn't exist yet, since
-        // `canonicalize` of a missing dir fails; the fallback is safe
-        // because `mira_home_dir()` is derived from `$HOME` (not user
-        // input) so it can't be aliased to look like it's inside cwd.
+
+        // Second explicitly permitted root:
+        //
+        // ~/.mira
+        //
+        // This is intentionally much narrower than permitting the
+        // entire home directory.
         if let Some(mira_home) = mira_home_dir() {
             match std::fs::canonicalize(&mira_home) {
                 Ok(canon) => {
@@ -268,65 +271,79 @@ impl ToolContext {
                 }
                 Err(_) => {
                     let normalized_home = normalize(&mira_home);
-                    if normalized.starts_with(&normalized_home) {
-                        return Some(normalized);
+
+                    if resolved.starts_with(&normalized_home) {
+                        return Some(resolved);
                     }
                 }
             }
         }
+
         None
     }
 }
 
-/// Absolute path to `~/.mira/` if `$HOME` is set. Cached-free: called
-/// once per path resolution, and `std::env::var_os` is cheap.
+/// Absolute path to ~/.mira if HOME is available.
 fn mira_home_dir() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
+
     Some(PathBuf::from(home).join(".mira"))
 }
 
-/// Canonicalize the longest existing prefix of `path` and re-append
-/// the trailing components. Returns `None` only when NO prefix of the
-/// path exists — including the filesystem root, so in practice this
-/// is a very unusual failure. Symlinks in the existing prefix are
-/// resolved to their real targets; missing tail components are kept
-/// as-is (matching `write_file`'s "create a new path" semantics).
+/// Canonicalize the longest existing prefix of a path and append
+/// missing components.
+///
+/// This makes symlink escapes detectable even when the final
+/// destination does not exist yet.
 fn resolve_symlinks(path: &Path) -> Option<PathBuf> {
     if let Ok(canon) = std::fs::canonicalize(path) {
         return Some(canon);
     }
+
     let mut existing = path.to_path_buf();
-    let mut trailing: Vec<std::ffi::OsString> = Vec::new();
+    let mut trailing = Vec::<std::ffi::OsString>::new();
+
     loop {
         if let Ok(canon) = std::fs::canonicalize(&existing) {
             let mut result = canon;
+
             for component in trailing.iter().rev() {
                 result.push(component);
             }
+
             return Some(result);
         }
+
         let name = existing.file_name()?.to_owned();
         trailing.push(name);
+
         if !existing.pop() {
             return None;
         }
     }
 }
 
-/// Pure lexical normalization: resolve `.` and `..` without touching the FS.
-fn normalize(p: &Path) -> PathBuf {
+/// Pure lexical normalization.
+///
+/// Resolves `.` and `..` without touching the filesystem.
+fn normalize(path: &Path) -> PathBuf {
     use std::path::Component;
-    let mut out = PathBuf::new();
-    for c in p.components() {
-        match c {
+
+    let mut output = PathBuf::new();
+
+    for component in path.components() {
+        match component {
             Component::ParentDir => {
-                out.pop();
+                output.pop();
             }
             Component::CurDir => {}
-            other => out.push(other.as_os_str()),
+            other => {
+                output.push(other.as_os_str());
+            }
         }
     }
-    out
+
+    output
 }
 
 #[cfg(test)]
@@ -334,32 +351,33 @@ mod tests {
     use super::*;
 
     fn ctx_for(cwd: PathBuf) -> ToolContext {
-        ToolContext::new(
-            cwd,
-            std::sync::Arc::new(mira_sandbox::Sandbox::default_scrubbed()),
-        )
+        let sandbox = Arc::new(Sandbox::default_scrubbed());
+
+        ToolContext::new(cwd, sandbox)
     }
 
     #[test]
     fn resolve_refuses_symlink_that_escapes_cwd() {
-        // Repo layout:
-        //   <cwd>/config -> <outside>/secret.txt
-        // The lexical check would accept `config` (it's inside cwd),
-        // but the symlink points outside → resolve() must refuse.
         let cwd = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
+
         let secret = outside.path().join("secret.txt");
+
         std::fs::write(&secret, "shh").unwrap();
+
         let link = cwd.path().join("config");
+
         #[cfg(unix)]
         std::os::unix::fs::symlink(&secret, &link).unwrap();
+
         #[cfg(windows)]
         std::os::windows::fs::symlink_file(&secret, &link).unwrap();
 
         let ctx = ctx_for(cwd.path().to_path_buf());
+
         assert!(
             ctx.resolve("config").is_none(),
-            "symlink escaping cwd must not resolve"
+            "symlink escaping repo must not resolve"
         );
     }
 
@@ -367,23 +385,68 @@ mod tests {
     fn resolve_accepts_regular_file_inside_cwd() {
         let cwd = tempfile::tempdir().unwrap();
         let inside = cwd.path().join("hello.txt");
+
         std::fs::write(&inside, "hi").unwrap();
+
         let ctx = ctx_for(cwd.path().to_path_buf());
-        let resolved = ctx.resolve("hello.txt").expect("should resolve");
+
+        let resolved = ctx
+            .resolve("hello.txt")
+            .expect("should resolve");
+
         assert!(resolved.ends_with("hello.txt"));
     }
 
     #[test]
-    fn resolve_accepts_new_file_in_nonexistent_subdir_inside_cwd() {
-        // write_file semantics: destination doesn't exist yet — the
-        // symlink-safe path must fall back to canonicalising the
-        // deepest existing ancestor + appending the missing tail.
+    fn resolve_accepts_new_file_in_nonexistent_subdir() {
         let cwd = tempfile::tempdir().unwrap();
+
         let ctx = ctx_for(cwd.path().to_path_buf());
+
         let resolved = ctx
             .resolve("new_subdir/inner/file.txt")
-            .expect("should resolve non-existent path under cwd");
-        assert!(resolved.starts_with(cwd.path().canonicalize().unwrap()));
+            .expect("should resolve non-existent path");
+
+        let canonical_cwd = cwd.path().canonicalize().unwrap();
+
+        assert!(resolved.starts_with(canonical_cwd));
         assert!(resolved.ends_with("file.txt"));
     }
+
+    #[test]
+    fn cwd_can_move_inside_repo() {
+        let cwd = tempfile::tempdir().unwrap();
+
+        let subdir = cwd.path().join("src");
+        std::fs::create_dir(&subdir).unwrap();
+
+        let ctx = ctx_for(cwd.path().to_path_buf());
+
+        let ctx = ctx
+            .with_cwd(subdir.clone())
+            .expect("cwd should be valid");
+
+        assert_eq!(
+            ctx.cwd,
+            subdir.canonicalize().unwrap()
+        );
+
+        assert_eq!(
+            ctx.repo_root,
+            cwd.path().canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn cwd_cannot_escape_repo() {
+        let cwd = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+
+        let ctx = ctx_for(cwd.path().to_path_buf());
+
+        assert!(
+            ctx.with_cwd(outside.path()).is_none()
+        );
+    }
 }
+

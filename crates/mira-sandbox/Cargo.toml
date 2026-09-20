@@ -1,18 +1,29 @@
+
 [package]
 name         = "mira-sandbox"
 version      = { workspace = true }
 edition      = { workspace = true }
 rust-version = { workspace = true }
 license      = { workspace = true }
-description  = "Command execution wrapper for the Mira harness. Starts thin; landlock/seatbelt slot in later."
+description  = "Command execution wrapper for the Mira harness."
 
 [dependencies]
 tokio        = { workspace = true }
 thiserror    = { workspace = true }
 tracing      = { workspace = true }
 uuid         = { workspace = true }
-# PTY-backed shell — spawns bash attached to a pseudo-terminal so
-# TUI apps (npm/npx installers, cargo progress bars, gh) render and
-# stream output line-by-line instead of blocking on `isatty()` checks.
+anyhow = { workspace = true }
+
+# PTY-backed shell — keeps interactive developer commands behaving like
+# they would in a real terminal.
 portable-pty = "0.8"
+
+# Temporary workspace / sandbox directories.
 tempfile = "3"
+
+# Home-directory discovery.
+dirs = "5"
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", features = ["signal", "process"] }
+

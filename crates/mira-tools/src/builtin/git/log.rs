@@ -1,3 +1,4 @@
+
 //! `git_log` — recent commits.
 
 use async_trait::async_trait;
@@ -16,8 +17,10 @@ pub struct GitLog;
 struct LogArgs {
     #[serde(default = "default_log_limit")]
     limit: usize,
+
     #[serde(default)]
     path: Option<String>,
+
     /// When true, one-line-per-commit output (the default). Set to false to
     /// get the full commit message + author for each commit.
     #[serde(default = "default_true")]
@@ -27,6 +30,7 @@ struct LogArgs {
 fn default_log_limit() -> usize {
     20
 }
+
 fn default_true() -> bool {
     true
 }
@@ -42,9 +46,19 @@ impl Tool for GitLog {
             json!({
                 "type": "object",
                 "properties": {
-                    "limit":   { "type": "integer", "minimum": 1, "maximum": 500, "default": 20 },
-                    "path":    { "type": "string" },
-                    "oneline": { "type": "boolean", "default": true }
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 500,
+                        "default": 20
+                    },
+                    "path": {
+                        "type": "string"
+                    },
+                    "oneline": {
+                        "type": "boolean",
+                        "default": true
+                    }
                 },
                 "additionalProperties": false
             }),
@@ -55,27 +69,56 @@ impl Tool for GitLog {
         Action::Read
     }
 
-    async fn invoke(&self, call: &ToolCall, ctx: &ToolContext) -> Result<ToolResult, ToolError> {
+    async fn invoke(
+        &self,
+        call: &ToolCall,
+        ctx: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
         let args: LogArgs = call.parse_arguments()?;
-        let mut cmd = format!("git --no-pager log --graph --decorate -n {}", args.limit);
+
+        if args.limit == 0 {
+            return Err(ToolError::Failed(
+                "limit must be greater than zero".to_owned(),
+            ));
+        }
+
+        let limit = args.limit.min(500);
+
+        let mut git_args = vec![
+            "--no-pager".to_owned(),
+            "log".to_owned(),
+            "--graph".to_owned(),
+            "--decorate".to_owned(),
+            "-n".to_owned(),
+            limit.to_string(),
+        ];
+
         if args.oneline {
-            cmd.push_str(" --oneline");
+            git_args.push("--oneline".to_owned());
         } else {
-            cmd.push_str(" --pretty=format:'%h %an, %ar%n  %s%n'");
+            git_args.push("--pretty=format:%h %an, %ar%n  %s%n".to_owned());
         }
-        if let Some(p) = &args.path {
+
+        if let Some(path) = &args.path {
             let resolved = ctx
-                .resolve(p)
-                .ok_or_else(|| ToolError::Failed(format!("path escapes cwd: {p}")))?;
-            cmd.push_str(" -- ");
-            cmd.push_str(&super::shell_quote(&resolved.to_string_lossy()));
+                .resolve(path)
+                .ok_or_else(|| {
+                    ToolError::Failed(format!("path escapes repository: {path}"))
+                })?;
+
+            git_args.push("--".to_owned());
+            git_args.push(resolved.to_string_lossy().into_owned());
         }
-        let out = super::run_git(ctx, &cmd, 30).await?;
-        let body = if out.output.trim().is_empty() {
+
+        let out = super::run_git(ctx, &git_args, 30).await?;
+        let output = out.combined_output();
+
+        let body = if output.trim().is_empty() {
             "(no commits)".to_owned()
         } else {
-            super::truncate(&out.output, 16_000)
+            super::truncate(&output, 16_000)
         };
+
         Ok(ToolResult::ok(call.id.clone(), body))
     }
 }

@@ -1,3 +1,4 @@
+
 //! `git_status` — current branch, ahead/behind, and per-file status.
 
 use async_trait::async_trait;
@@ -31,9 +32,25 @@ impl Tool for GitStatus {
         Action::Read
     }
 
-    async fn invoke(&self, call: &ToolCall, ctx: &ToolContext) -> Result<ToolResult, ToolError> {
-        let out = super::run_git(ctx, "git status --porcelain=v1 --branch", 15).await?;
-        Ok(ToolResult::ok(call.id.clone(), format_status(&out.output)))
+    async fn invoke(
+        &self,
+        call: &ToolCall,
+        ctx: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let args = vec![
+            "status".to_owned(),
+            "--porcelain=v1".to_owned(),
+            "--branch".to_owned(),
+        ];
+
+        let out = super::run_git(ctx, &args, 15).await?;
+
+        let output = out.combined_output();
+
+        Ok(ToolResult::ok(
+            call.id.clone(),
+            format_status(&output),
+        ))
     }
 }
 
@@ -42,6 +59,7 @@ impl Tool for GitStatus {
 fn format_status(raw: &str) -> String {
     let mut out = String::new();
     let mut file_count = 0usize;
+
     for line in raw.lines() {
         if let Some(rest) = line.strip_prefix("## ") {
             out.push_str("branch: ");
@@ -49,11 +67,14 @@ fn format_status(raw: &str) -> String {
             out.push('\n');
             continue;
         }
+
         if line.len() < 3 {
             continue;
         }
+
         let (code, path) = line.split_at(2);
         let path = path.trim_start();
+
         let label = match code {
             "??" => "untracked",
             " M" => "modified",
@@ -67,11 +88,14 @@ fn format_status(raw: &str) -> String {
             "UU" => "conflict",
             other => other.trim(),
         };
+
         out.push_str(&format!("  {label}: {path}\n"));
         file_count += 1;
     }
+
     if file_count == 0 {
         out.push_str("(working tree clean)\n");
     }
+
     out
 }

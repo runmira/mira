@@ -31,7 +31,7 @@ use crate::tui::theme;
 #[allow(non_snake_case)] #[inline] fn MUTED() -> Color    { theme::current().muted }
 #[allow(non_snake_case)] #[inline] fn DIM() -> Color      { theme::current().dim }
 #[allow(non_snake_case)] #[inline] fn HAIRLINE() -> Color { theme::current().hairline }
-#[allow(non_snake_case)] #[inline] fn PROSE() -> Color    { theme::current().prose }
+
 
 /// Mira's brand mark — the script-M is the closest Unicode analogue
 /// of the flowing wave/M in the vector logo. Rendered wherever the
@@ -1044,9 +1044,13 @@ fn streaming_indicator_line(state: &TuiState) -> Line<'static> {
             Style::default().fg(MUTED()),
         ),
     ];
-    if state.usage.completion_tokens > 0 {
+    let turn_completion = state
+        .usage
+        .completion_tokens
+        .saturating_sub(state.turn_usage_baseline.completion_tokens);
+    if turn_completion > 0 {
         spans.push(Span::styled(
-            format!(" · ↓{} tokens", short_num(state.usage.completion_tokens)),
+            format!(" · ↓{} tokens", short_num(turn_completion)),
             Style::default().fg(MUTED()),
         ));
     }

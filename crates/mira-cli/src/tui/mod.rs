@@ -127,8 +127,9 @@ pub async fn run(session: Session, cfg: TuiConfig) -> Result<()> {
     let mut terminal = enter()?;
     // Track the terminating state's mouse-capture flag so `leave`
     // can pair a matching Disable with any Enable the event loop
-    // toggled on. Starts `true` because `enter()` turns capture on.
-    let mut mouse_capture_on = true;
+    // toggled on. Starts `false` because text selection works by
+    // default; Alt+M enables capture for scroll-wheel driving.
+    let mut mouse_capture_on = false;
     let outcome = event_loop(&mut terminal, session, cfg, &mut mouse_capture_on).await;
     leave(&mut terminal, mouse_capture_on)?;
     outcome
@@ -139,15 +140,13 @@ pub async fn run(session: Session, cfg: TuiConfig) -> Result<()> {
 fn enter() -> Result<Terminal<CrosstermBackend<std::io::Stdout>>> {
     enable_raw_mode()?;
     let mut out = std::io::stdout();
-    // Mouse capture on by default so scroll-wheel drives the transcript
-    // (matches Claude Code / most modern TUIs). Users who want native
+    // Text selection works by default. Users who want native
     // text selection can toggle with Alt+M — most terminals also honour
     // Option/Shift+drag as a "bypass capture" selection modifier.
     execute!(
         out,
         EnterAlternateScreen,
-        EnableBracketedPaste,
-        EnableMouseCapture
+        EnableBracketedPaste
     )?;
     Ok(Terminal::new(CrosstermBackend::new(out))?)
 }
@@ -178,9 +177,9 @@ async fn event_loop(
     mouse_capture_out: &mut bool,
 ) -> Result<()> {
     let mut state = TuiState::new(cfg.model.clone(), cfg.mode);
-    // `enter()` already turned mouse capture on; mirror it in state so
-    // Alt+M can toggle correctly on first press.
-    state.mouse_capture = true;
+    // Start with mouse capture off so text selection works by default.
+// Alt+M will toggle it on for scroll-wheel driving.
+    state.mouse_capture = false;
     state.git_branch = detect_git_branch(&cfg.cwd).await;
     hydrate_from_history(&session, &mut state).await;
 
@@ -596,13 +595,19 @@ async fn handle_key(
             // don't guess.
             if agent_stream.is_some() {
                 interrupt_stream(state, agent_stream);
-                state.esc_pending = false;
+                state.esc_pending = true;
                 return;
             }
             if state.esc_pending {
                 if !state.is_input_empty() {
                     let _ = state.input_clear();
                     state.flash = Some("input cleared".into());
+                    // Clearing the buffer is a terminal action — the
+                    // double-press is consumed. Without this the next
+                    // stray Esc would quit, which is the exact
+                    // "three Esc to clear then quit" footgun we're
+                    // here to remove.
+                    state.esc_pending = false;
                 } else {
                     state.should_quit = true;
                 }
@@ -1443,6 +1448,9 @@ async fn start_stream(
     state.remember_submission(&text);
     state.push_user(text.clone());
     state.streaming = true;
+    // Snapshot the running session totals so the in-turn indicator can
+    // show this turn's delta, not the whole session's total.
+    state.turn_usage_baseline = state.usage;
     state.stream_started_at = Some(std::time::Instant::now());
     state.follow_tail = true;
     *agent_stream = Some(session.send(text).await);

@@ -205,7 +205,8 @@ async fn dispatch(
         }
         ClientMsg::SetMode { mode } => {
             state.policy.lock().await.set_mode(mode);
-            let profile = mira_harness::profile_for_mode(mode);
+            let repo_root = state.sandbox.profile().repo_root.clone();
+            let profile = mira_harness::profile_for_mode(mode, &repo_root);
             // Propagate to EVERY slot's session so a background session's
             // next bash call also honors the new profile. Doing this per
             // slot is cheap (a handful of Arc<RwLock<..>> reads).
@@ -214,7 +215,7 @@ async fn dispatch(
                     .session
                     .read()
                     .await
-                    .set_sandbox_profile(profile)
+                    .set_sandbox_profile(profile.clone())
                     .await;
                 let _ = slot_arc.events_tx.send(ServerMsg::ModeChanged { mode });
             }

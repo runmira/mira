@@ -1,3 +1,4 @@
+
 use async_trait::async_trait;
 use mira_ai::ToolSpec;
 use mira_core::{ToolCall, ToolResult};
@@ -9,24 +10,20 @@ use crate::tool::{spec, Action, Tool, ToolError};
 
 /// Run a shell command through the sandbox.
 ///
-/// We deliberately do not let the model exec arbitrary argv — everything
-/// goes through `bash -lc "..."` so we get consistent quoting semantics and
-/// a single string for the policy engine to gate on.
+/// The command is executed as `bash -lc <command>` inside the session
+/// sandbox. The sandbox remains responsible for filesystem, network,
+/// credential, timeout, and process isolation.
 pub struct Bash;
 
 #[derive(Deserialize)]
 struct Args {
     command: String,
+
     #[serde(default = "default_timeout_ms")]
     timeout_ms: u64,
 }
 
 fn default_timeout_ms() -> u64 {
-    // 5 minutes. Bash routinely covers slow-networking commands
-    // (npm/gh/git clone, docker build) and Node-based installers like
-    // `npx skills add …` that spend a while resolving deps. Live PTY
-    // streaming means the user sees progress the whole time, so a
-    // higher default doesn't feel like a stall.
     300_000
 }
 
@@ -35,18 +32,21 @@ impl Tool for Bash {
     fn spec(&self) -> ToolSpec {
         spec(
             "bash",
-            "Run a shell command via `bash -lc`. Working directory is the \
-             repo root. Combined stdout/stderr is returned. Default timeout \
-             120s; override with `timeout_ms` (max 600000).",
+            "Run a shell command via `bash -lc` inside the sandbox. \
+             Working directory is the current session directory. \
+             Combined stdout/stderr is returned. Default timeout is \
+             300 seconds; override with `timeout_ms` (maximum 600000).",
             json!({
                 "type": "object",
                 "properties": {
-                    "command":    { "type": "string" },
+                    "command": {
+                        "type": "string"
+                    },
                     "timeout_ms": {
                         "type": "integer",
                         "minimum": 100,
                         "maximum": 600000,
-                        "default": 120000
+                        "default": 300000
                     }
                 },
                 "required": ["command"],
@@ -59,87 +59,83 @@ impl Tool for Bash {
         Action::Bash
     }
 
-    async fn invoke(&self, call: &ToolCall, ctx: &ToolContext) -> Result<ToolResult, ToolError> {
+    async fn invoke(
+        &self,
+        call: &ToolCall,
+        ctx: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
         let args: Args = call.parse_arguments()?;
-        let timeout = std::time::Duration::from_millis(args.timeout_ms.min(600_000));
 
-        // Bracket the shell command with git-diff snapshots when we're in
-        // a repo. Any file bash touches that was clean before the command
-        // becomes undo-able just like an `edit_file` / `write_file` write.
-        let pre_bash = ctx.guard.as_ref().and_then(|g| g.pre_bash());
+        let timeout_ms = args.timeout_ms.min(600_000);
+        let timeout = std::time::Duration::from_millis(timeout_ms);
 
-        // Live-output pump. When the harness wired a progress sink into
-        // ToolContext, every stdout+stderr line from the PTY-backed
-        // shell fans out to it while the command runs. Sink is best-
-        // effort — a failure to send never blocks the command.
-        let progress_tx = ctx.progress.as_ref().map(|sink| {
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-            let sink = sink.clone();
-            let call_id = call.id.to_string();
-            tokio::spawn(async move {
-                while let Some(line) = rx.recv().await {
-                    sink.emit(&call_id, &line);
-                }
-            });
-            tx
-        });
+        // Track filesystem changes caused by the command when the
+        // FileGuard is available.
+        let pre_bash = ctx
+            .guard
+            .as_ref()
+            .and_then(|guard| guard.pre_bash());
 
-        // Prefer the session's long-lived shell — `cd`, activated venvs
-        // and `export`s persist across calls. Fall back to the fresh
-        // `bash -lc` path when no persistent shell is attached (headless
-        // runs, tests).
-        let outcome = if let Some(shell) = &ctx.shell {
-            let mut guard = shell.lock().await;
-            match ctx.cancel.clone() {
-                Some(token) => {
-                    // Cooperative cancel: race the shell call against
-                    // the turn's cancel token. On cancel, `interrupt()`
-                    // kills the running child so a Stop doesn't wait
-                    // for the deadline; return a synthetic outcome so
-                    // the transcript records what happened.
-                    tokio::select! {
-                        biased;
-                        _ = token.cancelled() => {
-                            guard.interrupt();
-                            mira_sandbox::Outcome {
-                                exit_code: -1,
-                                timed_out: false,
-                                output: "(cancelled by user; running child was killed)".into(),
-                            }
-                        }
-                        res = guard.run_streaming(&args.command, timeout, progress_tx) => {
-                            res.map_err(|e| ToolError::Failed(e.to_string()))?
-                        }
-                    }
-                }
-                None => guard
-                    .run_streaming(&args.command, timeout, progress_tx)
-                    .await
-                    .map_err(|e| ToolError::Failed(e.to_string()))?,
-            }
-        } else {
-            ctx.sandbox
-                .run_streaming(&args.command, &ctx.cwd, timeout, progress_tx)
-                .await
-                .map_err(|e| ToolError::Failed(e.to_string()))?
-        };
+        // Bash is deliberately invoked as a binary with argv.
+        //
+        // The command string is interpreted only by this explicit shell.
+        // It is never concatenated into a larger shell command by Mira.
+        let command_args = vec![
+            "-lc".to_owned(),
+            args.command.clone(),
+        ];
 
-        if let (Some(g), Some(pre)) = (&ctx.guard, &pre_bash) {
-            // Errors here shouldn't kill the tool result — surface + skip.
-            if let Err(e) = g.record_bash_changes(pre).await {
-                tracing::warn!(%e, "post-bash change tracking failed");
+        let outcome = ctx
+            .sandbox
+            .run_with_timeout(
+                "bash",
+                &command_args,
+                &ctx.cwd,
+                timeout.as_secs().max(1),
+            )
+            .await
+            .map_err(|e| ToolError::Failed(e.to_string()))?;
+
+        if let (Some(guard), Some(pre)) = (&ctx.guard, &pre_bash) {
+            if let Err(e) = guard.record_bash_changes(pre).await {
+                tracing::warn!(
+                    %e,
+                    "post-bash change tracking failed"
+                );
             }
         }
 
-        // Compose a compact summary the model can act on. Truncate long
-        // output so a single misfire can't blow the context window.
+        let mut output = String::new();
+
+        output.push_str(&outcome.stdout);
+
+        if !outcome.stderr.is_empty() {
+            if !output.is_empty() {
+                output.push('\n');
+            }
+
+            output.push_str(&outcome.stderr);
+        }
+
         let mut body = String::new();
-        body.push_str(&format!("exit={}\n", outcome.exit_code));
+
+        match outcome.exit_code {
+            Some(code) => {
+                body.push_str(&format!("exit={code}\n"));
+            }
+
+            None => {
+                body.push_str("exit=unknown\n");
+            }
+        }
+
         if outcome.timed_out {
             body.push_str("(command timed out)\n");
         }
+
         body.push_str("--- output ---\n");
-        body.push_str(&truncate(&outcome.output, 32_000));
+        body.push_str(&truncate(&output, 32_000));
+
         Ok(ToolResult::ok(call.id.clone(), body))
     }
 }
@@ -148,8 +144,11 @@ fn truncate(s: &str, limit: usize) -> String {
     if s.len() <= limit {
         return s.to_owned();
     }
+
     let head_end = floor_boundary(s, limit / 2);
-    let tail_start = ceil_boundary(s, s.len().saturating_sub(limit / 2));
+    let tail_start =
+        ceil_boundary(s, s.len().saturating_sub(limit / 2));
+
     format!(
         "{}\n... [truncated {} bytes] ...\n{}",
         &s[..head_end],
@@ -158,20 +157,23 @@ fn truncate(s: &str, limit: usize) -> String {
     )
 }
 
-/// Round `at` down to the nearest char boundary (never past `s.len()`).
 fn floor_boundary(s: &str, at: usize) -> usize {
     let mut i = at.min(s.len());
+
     while i > 0 && !s.is_char_boundary(i) {
         i -= 1;
     }
+
     i
 }
 
-/// Round `at` up to the nearest char boundary.
 fn ceil_boundary(s: &str, at: usize) -> usize {
     let mut i = at.min(s.len());
+
     while i < s.len() && !s.is_char_boundary(i) {
         i += 1;
     }
+
     i
 }
+
