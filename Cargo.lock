@@ -1581,7 +1581,7 @@ dependencies = [
 
 [[package]]
 name = "mira-agents"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "serde",
@@ -1592,7 +1592,7 @@ dependencies = [
 
 [[package]]
 name = "mira-ai"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1610,7 +1610,7 @@ dependencies = [
 
 [[package]]
 name = "mira-auth"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1628,7 +1628,7 @@ dependencies = [
 
 [[package]]
 name = "mira-cli"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1664,7 +1664,7 @@ dependencies = [
 
 [[package]]
 name = "mira-config"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "serde",
@@ -1673,7 +1673,7 @@ dependencies = [
 
 [[package]]
 name = "mira-core"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -1683,7 +1683,7 @@ dependencies = [
 
 [[package]]
 name = "mira-harness"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1707,7 +1707,7 @@ dependencies = [
 
 [[package]]
 name = "mira-memory"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "async-trait",
  "serde",
@@ -1720,7 +1720,7 @@ dependencies = [
 
 [[package]]
 name = "mira-policy"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "glob",
  "mira-core",
@@ -1733,7 +1733,7 @@ dependencies = [
 
 [[package]]
 name = "mira-review"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1748,7 +1748,7 @@ dependencies = [
 
 [[package]]
 name = "mira-sandbox"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -1763,7 +1763,7 @@ dependencies = [
 
 [[package]]
 name = "mira-server"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1801,7 +1801,7 @@ dependencies = [
 
 [[package]]
 name = "mira-skills"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "serde",
@@ -1812,7 +1812,7 @@ dependencies = [
 
 [[package]]
 name = "mira-tools"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "async-trait",
