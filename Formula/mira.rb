@@ -15,24 +15,24 @@ class Mira < Formula
   on_macos do
     on_arm do
       url "https://github.com/runmira/mira/releases/download/v#{version}/mira-darwin-arm64.tar.gz"
-      sha256 "REPLACE_ME"
+      sha256 "8c35faaf299ce7de981651fa066febe198bed2c8d35c33c59e85ba54842d585d"
     end
 
     on_intel do
       url "https://github.com/runmira/mira/releases/download/v#{version}/mira-darwin-x86_64.tar.gz"
-      sha256 "REPLACE_ME"
+      sha256 "b4690adbc2d0eb2519243d3d2d5ba28c8aafa373075b1b3f95c036242def6a30"
     end
   end
 
   on_linux do
     on_arm do
       url "https://github.com/runmira/mira/releases/download/v#{version}/mira-linux-arm64.tar.gz"
-      sha256 "REPLACE_ME"
+      sha256 "d93ab5bc0d4690dc0e93144dd9b7d755fe3bebf350438ef90ed249bb7c50acbb"
     end
 
     on_intel do
       url "https://github.com/runmira/mira/releases/download/v#{version}/mira-linux-x86_64.tar.gz"
-      sha256 "REPLACE_ME"
+      sha256 "f8e81b401ff9e95fa7a4aeca0568bc802dde1e7fd94deb4be09608ccd8557361"
     end
   end
 
