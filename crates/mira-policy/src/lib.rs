@@ -124,6 +124,11 @@ impl Policy {
     }
 
     /// Number of allow rules — mainly for tests / diagnostics.
+    ///
+    /// Kept as a separate accessor rather than exposing `self.allow.len()`
+    /// directly so the policy layer stays opaque to callers; it also makes
+    /// it straightforward to add assertions or logging later without
+    /// touching every test that checks rule counts.
     pub fn allow_count(&self) -> usize {
         self.allow.len()
     }
