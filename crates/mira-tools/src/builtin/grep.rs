@@ -1,4 +1,3 @@
-
 use async_trait::async_trait;
 use mira_ai::ToolSpec;
 use mira_core::{ToolCall, ToolResult};
@@ -78,11 +77,7 @@ impl Tool for Grep {
         Action::Read
     }
 
-    async fn invoke(
-        &self,
-        call: &ToolCall,
-        ctx: &ToolContext,
-    ) -> Result<ToolResult, ToolError> {
+    async fn invoke(&self, call: &ToolCall, ctx: &ToolContext) -> Result<ToolResult, ToolError> {
         let args: Args = call.parse_arguments()?;
 
         if args.max_results == 0 {
@@ -92,8 +87,6 @@ impl Tool for Grep {
         }
 
         let max_results = args.max_results.min(2000);
-
-      
 
         let mut command_args = vec![
             "--line-number".to_owned(),
@@ -122,37 +115,21 @@ impl Tool for Grep {
         if let Some(path) = &args.path {
             let resolved = ctx
                 .resolve(path)
-                .ok_or_else(|| {
-                    ToolError::Failed(format!(
-                        "path escapes repository: {path}"
-                    ))
-                })?;
+                .ok_or_else(|| ToolError::Failed(format!("path escapes repository: {path}")))?;
 
-            command_args.push(
-                resolved.to_string_lossy().into_owned()
-            );
+            command_args.push(resolved.to_string_lossy().into_owned());
         } else {
-            command_args.push(
-                ctx.cwd.to_string_lossy().into_owned()
-            );
+            command_args.push(ctx.cwd.to_string_lossy().into_owned());
         }
 
         let outcome = ctx
             .sandbox
-            .run_with_timeout(
-                "rg",
-                &command_args,
-                &ctx.cwd,
-                30,
-            )
+            .run_with_timeout("rg", &command_args, &ctx.cwd, 30)
             .await
             .map_err(|e| ToolError::Failed(e.to_string()))?;
 
         if outcome.timed_out {
-            let mut body = format!(
-                "search timed out after 30 seconds for /{}/",
-                args.pattern
-            );
+            let mut body = format!("search timed out after 30 seconds for /{}/", args.pattern);
 
             if !outcome.stdout.is_empty() {
                 body.push('\n');
@@ -192,9 +169,7 @@ impl Tool for Grep {
             )),
 
             Some(code) => {
-                let mut body = format!(
-                    "ripgrep failed with exit code {code}"
-                );
+                let mut body = format!("ripgrep failed with exit code {code}");
 
                 if !outcome.stderr.is_empty() {
                     body.push('\n');

@@ -83,8 +83,7 @@ fn load(path: &std::path::Path) -> Result<MiraConfig> {
     if !path.exists() {
         return Ok(MiraConfig::default());
     }
-    let raw =
-        std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let raw = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     serde_yaml::from_str(&raw).with_context(|| format!("parse {}", path.display()))
 }
 
@@ -130,7 +129,11 @@ fn add(bucket: Bucket, rule: &str, local: bool) -> Result<()> {
     let mut cfg = load(&path)?;
     let list = list_for(&mut cfg, bucket);
     if list.iter().any(|r| r == rule) {
-        eprintln!("already present in {} of {}", bucket_name(bucket), path.display());
+        eprintln!(
+            "already present in {} of {}",
+            bucket_name(bucket),
+            path.display()
+        );
         return Ok(());
     }
     list.push(rule.to_owned());

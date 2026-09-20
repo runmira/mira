@@ -66,10 +66,7 @@ impl Sandbox {
     }
 
     pub fn set_profile(&self, profile: SandboxProfile) {
-        *self
-            .profile
-            .write()
-            .expect("sandbox profile lock poisoned") = profile;
+        *self.profile.write().expect("sandbox profile lock poisoned") = profile;
     }
 
     pub fn backend(&self) -> SandboxBackend {

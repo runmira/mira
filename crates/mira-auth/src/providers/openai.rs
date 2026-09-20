@@ -79,11 +79,7 @@ pub fn authorize_url(redirect_uri: &str, verifier: &str, state: &str) -> String 
 /// Full sign-in exchange: POST the auth-code for tokens, then RFC 8693
 /// the id_token for an `sk-…` API key. Returns a bundle callers can
 /// hand to [`crate::store::save`] verbatim.
-pub async fn exchange_code(
-    code: &str,
-    verifier: &str,
-    redirect_uri: &str,
-) -> Result<TokenBundle> {
+pub async fn exchange_code(code: &str, verifier: &str, redirect_uri: &str) -> Result<TokenBundle> {
     let tokens = post_authorization_code(code, verifier, redirect_uri).await?;
     // The RFC 8693 step: exchange the id_token (which carries the
     // ChatGPT account/org info) for an API key.

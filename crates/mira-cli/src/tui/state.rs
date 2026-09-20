@@ -5,7 +5,6 @@ use mira_harness::{Goal, UsageTotals};
 use mira_policy::Mode;
 use mira_tools::DiffPreview;
 
-
 use crate::tui::approver::ApprovalRequest;
 
 /// An approval request enriched with an optional diff preview (present
@@ -395,7 +394,9 @@ impl TuiState {
         let input = self.input.clone();
         for p in self.pastes.clone() {
             let tok = paste_placeholder(p.id);
-            let Some(pos) = input.find(&tok) else { continue };
+            let Some(pos) = input.find(&tok) else {
+                continue;
+            };
             let end = pos + tok.len();
             if self.cursor >= pos && self.cursor <= end {
                 self.input.drain(pos..end);
@@ -422,7 +423,9 @@ impl TuiState {
     /// True while an error flash is still visible. Cheap enough to call
     /// on every render tick.
     pub fn error_flash_active(&self) -> bool {
-        self.error_flash_until.map(|t| Instant::now() < t).unwrap_or(false)
+        self.error_flash_until
+            .map(|t| Instant::now() < t)
+            .unwrap_or(false)
     }
 
     /// Byte offset of the previous `User` entry's start in a
@@ -1085,10 +1088,9 @@ fn line_end(s: &str, byte: usize) -> usize {
 /// results.
 fn entry_text(e: &LogEntry) -> String {
     match e {
-        LogEntry::User(s)
-        | LogEntry::Assistant(s)
-        | LogEntry::Warning(s)
-        | LogEntry::Info(s) => s.clone(),
+        LogEntry::User(s) | LogEntry::Assistant(s) | LogEntry::Warning(s) | LogEntry::Info(s) => {
+            s.clone()
+        }
         LogEntry::TurnEnd { elapsed_ms } => {
             format!("baked for {}ms", elapsed_ms)
         }
@@ -1211,10 +1213,7 @@ mod tests {
             TuiState::rule_for_call(&mk("read_file", r#"{"path":"README.md"}"#)).as_deref(),
             Some("Read(README.md)")
         );
-        assert_eq!(
-            TuiState::rule_for_call(&mk("unknown_tool", r#"{}"#)),
-            None
-        );
+        assert_eq!(TuiState::rule_for_call(&mk("unknown_tool", r#"{}"#)), None);
     }
 
     #[test]

@@ -360,8 +360,7 @@ async fn main() -> Result<()> {
             tokio::spawn(async move {
                 match provider_for_models.list_models().await {
                     Ok(list) => {
-                        let mut ids: Vec<String> =
-                            list.into_iter().map(|m| m.id).collect();
+                        let mut ids: Vec<String> = list.into_iter().map(|m| m.id).collect();
                         ids.sort();
                         ids.dedup();
                         *models.write().await = ids;
@@ -551,7 +550,10 @@ async fn pick_session(
 
     let recent = store.list_recent(cwd, 20).await?;
     if recent.is_empty() {
-        eprintln!("no saved sessions for `{}` — starting fresh.", cwd.display());
+        eprintln!(
+            "no saved sessions for `{}` — starting fresh.",
+            cwd.display()
+        );
         return Ok(None);
     }
     if !std::io::stdin().is_terminal() {

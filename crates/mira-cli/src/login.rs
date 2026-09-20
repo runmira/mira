@@ -148,9 +148,7 @@ async fn login_openai(no_browser: bool) -> Result<()> {
             // don't do that step yet (see mira#3), so turn the raw
             // 401 into an actionable message instead.
             let msg = e.to_string();
-            if msg.contains("missing organization_id")
-                || msg.contains("invalid_subject_token")
-            {
+            if msg.contains("missing organization_id") || msg.contains("invalid_subject_token") {
                 bail!(
                     "OpenAI rejected the token exchange because your ChatGPT \
                      account isn't attached to an API organization yet.\n\n\
@@ -220,7 +218,11 @@ pub async fn run_logout(args: LogoutArgs) -> Result<()> {
             if bundle {
                 parts.push("token bundle");
             }
-            println!("✓ signed out of {}: cleared {}.", args.provider.key(), parts.join(" + "));
+            println!(
+                "✓ signed out of {}: cleared {}.",
+                args.provider.key(),
+                parts.join(" + ")
+            );
         }
     }
     Ok(())
@@ -255,8 +257,7 @@ pub async fn run_auth(args: AuthArgs) -> Result<()> {
 }
 
 fn run_auth_status() -> Result<()> {
-    let cfg = mira_config::MiraConfig::load_global()
-        .context("load ~/.mira/mira.yaml")?;
+    let cfg = mira_config::MiraConfig::load_global().context("load ~/.mira/mira.yaml")?;
     let default = cfg.default_provider.as_deref().unwrap_or("(none)");
     println!("default provider: {default}");
     println!();

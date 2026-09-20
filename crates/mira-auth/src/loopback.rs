@@ -93,20 +93,19 @@ pub async fn await_callback(
                 timeout.as_secs()
             ));
         }
-        let (mut socket, _peer) =
-            match tokio::time::timeout(remaining, listener.accept()).await {
-                Ok(Ok(v)) => v,
-                Ok(Err(e)) => {
-                    warn!(%e, "loopback accept failed");
-                    continue;
-                }
-                Err(_) => {
-                    return Err(anyhow!(
-                        "timed out after {}s waiting for browser callback",
-                        timeout.as_secs()
-                    ))
-                }
-            };
+        let (mut socket, _peer) = match tokio::time::timeout(remaining, listener.accept()).await {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => {
+                warn!(%e, "loopback accept failed");
+                continue;
+            }
+            Err(_) => {
+                return Err(anyhow!(
+                    "timed out after {}s waiting for browser callback",
+                    timeout.as_secs()
+                ))
+            }
+        };
 
         // Read one HTTP request. Browsers send small requests (<4KB
         // headers), so a single read is enough in practice.
@@ -221,7 +220,8 @@ mod tests {
 
     #[test]
     fn parses_typical_openai_callback() {
-        let req = "GET /auth/callback?code=abc123&state=fl0w HTTP/1.1\r\nHost: localhost:1455\r\n\r\n";
+        let req =
+            "GET /auth/callback?code=abc123&state=fl0w HTTP/1.1\r\nHost: localhost:1455\r\n\r\n";
         let cb = parse_callback_query(req);
         assert_eq!(cb.code.as_deref(), Some("abc123"));
         assert_eq!(cb.state.as_deref(), Some("fl0w"));

@@ -150,10 +150,9 @@ pub fn reload() -> Result<PathBuf> {
         set(Theme::default());
         return Ok(path);
     }
-    let raw = std::fs::read_to_string(&path)
-        .with_context(|| format!("read {}", path.display()))?;
-    let file: ThemeFile = serde_yaml::from_str(&raw)
-        .with_context(|| format!("parse {}", path.display()))?;
+    let raw = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    let file: ThemeFile =
+        serde_yaml::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
     set(file.merge_over_defaults());
     Ok(path)
 }
@@ -165,8 +164,7 @@ pub fn save_current_to_disk() -> Result<PathBuf> {
     let t = current();
     let path = theme_path();
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("mkdir {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
     }
     let out = ThemeFile::from(&t);
     let yaml = serde_yaml::to_string(&out).context("serialize theme")?;
@@ -311,8 +309,14 @@ mod tests {
 
     #[test]
     fn parse_hex_accepts_with_and_without_hash() {
-        assert!(matches!(parse_hex("#123456"), Some(Color::Rgb(0x12, 0x34, 0x56))));
-        assert!(matches!(parse_hex("123456"), Some(Color::Rgb(0x12, 0x34, 0x56))));
+        assert!(matches!(
+            parse_hex("#123456"),
+            Some(Color::Rgb(0x12, 0x34, 0x56))
+        ));
+        assert!(matches!(
+            parse_hex("123456"),
+            Some(Color::Rgb(0x12, 0x34, 0x56))
+        ));
     }
 
     #[test]

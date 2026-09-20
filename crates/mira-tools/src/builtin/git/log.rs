@@ -1,4 +1,3 @@
-
 //! `git_log` — recent commits.
 
 use async_trait::async_trait;
@@ -69,11 +68,7 @@ impl Tool for GitLog {
         Action::Read
     }
 
-    async fn invoke(
-        &self,
-        call: &ToolCall,
-        ctx: &ToolContext,
-    ) -> Result<ToolResult, ToolError> {
+    async fn invoke(&self, call: &ToolCall, ctx: &ToolContext) -> Result<ToolResult, ToolError> {
         let args: LogArgs = call.parse_arguments()?;
 
         if args.limit == 0 {
@@ -102,9 +97,7 @@ impl Tool for GitLog {
         if let Some(path) = &args.path {
             let resolved = ctx
                 .resolve(path)
-                .ok_or_else(|| {
-                    ToolError::Failed(format!("path escapes repository: {path}"))
-                })?;
+                .ok_or_else(|| ToolError::Failed(format!("path escapes repository: {path}")))?;
 
             git_args.push("--".to_owned());
             git_args.push(resolved.to_string_lossy().into_owned());

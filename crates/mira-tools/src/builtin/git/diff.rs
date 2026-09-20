@@ -1,4 +1,3 @@
-
 //! `git_diff` — unstaged / staged / historical changes.
 
 use async_trait::async_trait;
@@ -67,17 +66,10 @@ impl Tool for GitDiff {
         Action::Read
     }
 
-    async fn invoke(
-        &self,
-        call: &ToolCall,
-        ctx: &ToolContext,
-    ) -> Result<ToolResult, ToolError> {
+    async fn invoke(&self, call: &ToolCall, ctx: &ToolContext) -> Result<ToolResult, ToolError> {
         let args: DiffArgs = call.parse_arguments()?;
 
-        let mut git_args = vec![
-            "--no-pager".to_owned(),
-            "diff".to_owned(),
-        ];
+        let mut git_args = vec!["--no-pager".to_owned(), "diff".to_owned()];
 
         if args.stat {
             git_args.push("--stat".to_owned());
@@ -92,9 +84,7 @@ impl Tool for GitDiff {
         if let Some(path) = &args.path {
             let resolved = ctx
                 .resolve(path)
-                .ok_or_else(|| {
-                    ToolError::Failed(format!("path escapes repository: {path}"))
-                })?;
+                .ok_or_else(|| ToolError::Failed(format!("path escapes repository: {path}")))?;
 
             git_args.push("--".to_owned());
             git_args.push(resolved.to_string_lossy().into_owned());

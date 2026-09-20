@@ -1,4 +1,3 @@
-
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -120,10 +119,7 @@ pub trait ToolProgressSink: Send + Sync {
 
 impl ToolContext {
     /// Create a context whose initial working directory is the repo root.
-    pub fn new(
-        repo_root: impl Into<PathBuf>,
-        sandbox: Arc<Sandbox>,
-    ) -> Self {
+    pub fn new(repo_root: impl Into<PathBuf>, sandbox: Arc<Sandbox>) -> Self {
         let repo_root = repo_root.into();
 
         Self {
@@ -149,10 +145,7 @@ impl ToolContext {
     }
 
     /// Attach the live-progress emitter.
-    pub fn with_progress(
-        mut self,
-        sink: Arc<dyn ToolProgressSink>,
-    ) -> Self {
+    pub fn with_progress(mut self, sink: Arc<dyn ToolProgressSink>) -> Self {
         self.progress = Some(sink);
         self
     }
@@ -170,19 +163,13 @@ impl ToolContext {
     }
 
     /// Attach the shared memory store.
-    pub fn with_memory(
-        mut self,
-        memory: Arc<dyn MemoryStore>,
-    ) -> Self {
+    pub fn with_memory(mut self, memory: Arc<dyn MemoryStore>) -> Self {
         self.memory = Some(memory);
         self
     }
 
     /// Attach the cross-session episodic store.
-    pub fn with_episodic(
-        mut self,
-        episodic: Arc<dyn EpisodicStore>,
-    ) -> Self {
+    pub fn with_episodic(mut self, episodic: Arc<dyn EpisodicStore>) -> Self {
         self.episodic = Some(episodic);
         self
     }
@@ -200,10 +187,7 @@ impl ToolContext {
     }
 
     /// Attach the parent session's child tracker.
-    pub fn with_child_tracker(
-        mut self,
-        tracker: Arc<dyn ChildTracker>,
-    ) -> Self {
+    pub fn with_child_tracker(mut self, tracker: Arc<dyn ChildTracker>) -> Self {
         self.child_tracker = Some(tracker);
         self
     }
@@ -390,9 +374,7 @@ mod tests {
 
         let ctx = ctx_for(cwd.path().to_path_buf());
 
-        let resolved = ctx
-            .resolve("hello.txt")
-            .expect("should resolve");
+        let resolved = ctx.resolve("hello.txt").expect("should resolve");
 
         assert!(resolved.ends_with("hello.txt"));
     }
@@ -422,19 +404,11 @@ mod tests {
 
         let ctx = ctx_for(cwd.path().to_path_buf());
 
-        let ctx = ctx
-            .with_cwd(subdir.clone())
-            .expect("cwd should be valid");
+        let ctx = ctx.with_cwd(subdir.clone()).expect("cwd should be valid");
 
-        assert_eq!(
-            ctx.cwd,
-            subdir.canonicalize().unwrap()
-        );
+        assert_eq!(ctx.cwd, subdir.canonicalize().unwrap());
 
-        assert_eq!(
-            ctx.repo_root,
-            cwd.path().canonicalize().unwrap()
-        );
+        assert_eq!(ctx.repo_root, cwd.path().canonicalize().unwrap());
     }
 
     #[test]
@@ -444,9 +418,6 @@ mod tests {
 
         let ctx = ctx_for(cwd.path().to_path_buf());
 
-        assert!(
-            ctx.with_cwd(outside.path()).is_none()
-        );
+        assert!(ctx.with_cwd(outside.path()).is_none());
     }
 }
-

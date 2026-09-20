@@ -1,4 +1,3 @@
-
 //! Locate symbol definitions across the repo.
 //!
 //! Cheaper alternative to LSP: recognises the common definition shapes for
@@ -89,19 +88,13 @@ impl Tool for FindSymbol {
         Action::Read
     }
 
-    async fn invoke(
-        &self,
-        call: &ToolCall,
-        ctx: &ToolContext,
-    ) -> Result<ToolResult, ToolError> {
+    async fn invoke(&self, call: &ToolCall, ctx: &ToolContext) -> Result<ToolResult, ToolError> {
         let args: Args = call.parse_arguments()?;
 
         let name = args.name.trim();
 
         if name.is_empty() {
-            return Err(ToolError::InvalidArgs(
-                "name is empty".into(),
-            ));
+            return Err(ToolError::InvalidArgs("name is empty".into()));
         }
 
         if !name
@@ -154,38 +147,25 @@ impl Tool for FindSymbol {
         }
 
         if let Some(path) = &args.path {
-            let resolved = ctx.resolve(path).ok_or_else(|| {
-                ToolError::Failed(format!(
-                    "path escapes repository: {path}"
-                ))
-            })?;
+            let resolved = ctx
+                .resolve(path)
+                .ok_or_else(|| ToolError::Failed(format!("path escapes repository: {path}")))?;
 
-            command_args.push(
-                resolved.to_string_lossy().into_owned()
-            );
+            command_args.push(resolved.to_string_lossy().into_owned());
         } else {
-            command_args.push(
-                ctx.cwd.to_string_lossy().into_owned()
-            );
+            command_args.push(ctx.cwd.to_string_lossy().into_owned());
         }
 
         let outcome = ctx
             .sandbox
-            .run_with_timeout(
-                "rg",
-                &command_args,
-                &ctx.cwd,
-                30,
-            )
+            .run_with_timeout("rg", &command_args, &ctx.cwd, 30)
             .await
             .map_err(|e| ToolError::Failed(e.to_string()))?;
 
         if outcome.timed_out {
             return Ok(ToolResult::ok(
                 call.id.clone(),
-                format!(
-                    "find_symbol timed out after 30 seconds for `{name}`"
-                ),
+                format!("find_symbol timed out after 30 seconds for `{name}`"),
             ));
         }
 
@@ -205,15 +185,11 @@ impl Tool for FindSymbol {
 
             Some(1) => Ok(ToolResult::ok(
                 call.id.clone(),
-                format!(
-                    "no definition-shaped match for `{name}`"
-                ),
+                format!("no definition-shaped match for `{name}`"),
             )),
 
             Some(code) => {
-                let mut body = format!(
-                    "ripgrep failed with exit code {code}"
-                );
+                let mut body = format!("ripgrep failed with exit code {code}");
 
                 if !outcome.stderr.is_empty() {
                     body.push('\n');
@@ -236,19 +212,14 @@ impl Tool for FindSymbol {
 }
 
 /// (pattern, file globs). Empty globs = no filter.
-fn patterns_for(
-    lang: Option<&str>,
-    name: &str,
-) -> Vec<(String, &'static [&'static str])> {
+fn patterns_for(lang: Option<&str>, name: &str) -> Vec<(String, &'static [&'static str])> {
     let n = regex_escape(name);
 
     let all = |lang: &str| -> Vec<(String, &'static [&'static str])> {
         match lang {
             "rust" => vec![
                 (
-                    format!(
-                        r"(^|\s)(pub(\(.*?\))?\s+)?(async\s+)?fn\s+{n}\b"
-                    ),
+                    format!(r"(^|\s)(pub(\(.*?\))?\s+)?(async\s+)?fn\s+{n}\b"),
                     &["*.rs"],
                 ),
                 (
@@ -257,85 +228,44 @@ fn patterns_for(
                     ),
                     &["*.rs"],
                 ),
-                (
-                    format!(r"impl(\s+<[^>]+>)?\s+{n}\b"),
-                    &["*.rs"],
-                ),
-                (
-                    format!(r"macro_rules!\s+{n}\b"),
-                    &["*.rs"],
-                ),
+                (format!(r"impl(\s+<[^>]+>)?\s+{n}\b"), &["*.rs"]),
+                (format!(r"macro_rules!\s+{n}\b"), &["*.rs"]),
             ],
 
             "ts" | "js" => vec![
                 (
-                    format!(
-                        r"(^|\s)(export\s+)?(async\s+)?function\s+{n}\b"
-                    ),
-                    &[
-                        "*.ts",
-                        "*.tsx",
-                        "*.js",
-                        "*.jsx",
-                        "*.mts",
-                        "*.mjs",
-                    ],
+                    format!(r"(^|\s)(export\s+)?(async\s+)?function\s+{n}\b"),
+                    &["*.ts", "*.tsx", "*.js", "*.jsx", "*.mts", "*.mjs"],
                 ),
                 (
-                    format!(
-                        r"(^|\s)(export\s+)?(abstract\s+)?class\s+{n}\b"
-                    ),
+                    format!(r"(^|\s)(export\s+)?(abstract\s+)?class\s+{n}\b"),
                     &["*.ts", "*.tsx", "*.js", "*.jsx"],
                 ),
                 (
-                    format!(
-                        r"(^|\s)(export\s+)?(interface|type|enum)\s+{n}\b"
-                    ),
+                    format!(r"(^|\s)(export\s+)?(interface|type|enum)\s+{n}\b"),
                     &["*.ts", "*.tsx"],
                 ),
                 (
-                    format!(
-                        r"(^|\s)(export\s+)?(const|let|var)\s+{n}\b"
-                    ),
+                    format!(r"(^|\s)(export\s+)?(const|let|var)\s+{n}\b"),
                     &["*.ts", "*.tsx", "*.js", "*.jsx"],
                 ),
             ],
 
             "python" => vec![
-                (
-                    format!(r"^\s*(async\s+)?def\s+{n}\b"),
-                    &["*.py"],
-                ),
-                (
-                    format!(r"^\s*class\s+{n}\b"),
-                    &["*.py"],
-                ),
-                (
-                    format!(r"^\s*{n}\s*="),
-                    &["*.py"],
-                ),
+                (format!(r"^\s*(async\s+)?def\s+{n}\b"), &["*.py"]),
+                (format!(r"^\s*class\s+{n}\b"), &["*.py"]),
+                (format!(r"^\s*{n}\s*="), &["*.py"]),
             ],
 
             "go" => vec![
-                (
-                    format!(r"^func(\s+\([^)]*\))?\s+{n}\b"),
-                    &["*.go"],
-                ),
-                (
-                    format!(r"^type\s+{n}\b"),
-                    &["*.go"],
-                ),
-                (
-                    format!(r"^var\s+{n}\b|^const\s+{n}\b"),
-                    &["*.go"],
-                ),
+                (format!(r"^func(\s+\([^)]*\))?\s+{n}\b"), &["*.go"]),
+                (format!(r"^type\s+{n}\b"), &["*.go"]),
+                (format!(r"^var\s+{n}\b|^const\s+{n}\b"), &["*.go"]),
             ],
 
             "java" => vec![
                 (
-                    format!(
-                        r"(public|private|protected|static|final|\s)+\s+{n}\s*\("
-                    ),
+                    format!(r"(public|private|protected|static|final|\s)+\s+{n}\s*\("),
                     &["*.java"],
                 ),
                 (
@@ -346,12 +276,7 @@ fn patterns_for(
                 ),
             ],
 
-            _ => vec![
-                (
-                    format!(r"\b{n}\b"),
-                    &[] as &[&str],
-                ),
-            ],
+            _ => vec![(format!(r"\b{n}\b"), &[] as &[&str])],
         }
     };
 
@@ -361,13 +286,7 @@ fn patterns_for(
         None => {
             let mut out = Vec::new();
 
-            for language in [
-                "rust",
-                "ts",
-                "python",
-                "go",
-                "java",
-            ] {
+            for language in ["rust", "ts", "python", "go", "java"] {
                 out.extend(all(language));
             }
 

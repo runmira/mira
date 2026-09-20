@@ -26,12 +26,31 @@ use crate::tui::theme;
 
 /// Names stay uppercase to signal "palette constant" at every callsite
 /// even though Rust convention normally wants snake_case for functions.
-#[allow(non_snake_case)] #[inline] fn SALMON() -> Color   { theme::current().salmon }
-#[allow(non_snake_case)] #[inline] fn CREAM() -> Color    { theme::current().cream }
-#[allow(non_snake_case)] #[inline] fn MUTED() -> Color    { theme::current().muted }
-#[allow(non_snake_case)] #[inline] fn DIM() -> Color      { theme::current().dim }
-#[allow(non_snake_case)] #[inline] fn HAIRLINE() -> Color { theme::current().hairline }
-
+#[allow(non_snake_case)]
+#[inline]
+fn SALMON() -> Color {
+    theme::current().salmon
+}
+#[allow(non_snake_case)]
+#[inline]
+fn CREAM() -> Color {
+    theme::current().cream
+}
+#[allow(non_snake_case)]
+#[inline]
+fn MUTED() -> Color {
+    theme::current().muted
+}
+#[allow(non_snake_case)]
+#[inline]
+fn DIM() -> Color {
+    theme::current().dim
+}
+#[allow(non_snake_case)]
+#[inline]
+fn HAIRLINE() -> Color {
+    theme::current().hairline
+}
 
 /// Mira's brand mark — the script-M is the closest Unicode analogue
 /// of the flowing wave/M in the vector logo. Rendered wherever the
@@ -227,7 +246,11 @@ fn transcript(f: &mut Frame, area: Rect, state: &mut TuiState) {
             format!(
                 "  … {} earlier entr{} truncated",
                 state.dropped_entries,
-                if state.dropped_entries == 1 { "y" } else { "ies" },
+                if state.dropped_entries == 1 {
+                    "y"
+                } else {
+                    "ies"
+                },
             ),
             Style::default().fg(MUTED()).italic(),
         )));
@@ -271,7 +294,9 @@ fn transcript(f: &mut Frame, area: Rect, state: &mut TuiState) {
                 // expanded ones render individually so the user's Ctrl+E
                 // toggle isn't silently swallowed.
                 match entries.get(batch_end + 1) {
-                    Some(LogEntry::ToolResult { expanded: false, .. }) => {
+                    Some(LogEntry::ToolResult {
+                        expanded: false, ..
+                    }) => {
                         batch.push((f, s));
                         batch_end += 2;
                     }
@@ -455,21 +480,13 @@ fn transcript(f: &mut Frame, area: Rect, state: &mut TuiState) {
     // Precedence: turn-nav jump > active search hit > follow-tail >
     // wherever the user last scrolled to.
     let scroll = if let Some(idx) = state.turn_scroll_target {
-        let start = entry_row_starts
-            .get(idx)
-            .copied()
-            .unwrap_or(0) as u16;
+        let start = entry_row_starts.get(idx).copied().unwrap_or(0) as u16;
         // Anchor the user prompt line near the top so what comes after
         // (assistant reply, tool group) fills the viewport.
         start.saturating_sub(1).min(tail)
     } else if let Some((entry_idx, _)) = active_hit {
-        let start = entry_row_starts
-            .get(entry_idx)
-            .copied()
-            .unwrap_or(0) as u16;
-        start
-            .saturating_sub(area.height / 3)
-            .min(tail)
+        let start = entry_row_starts.get(entry_idx).copied().unwrap_or(0) as u16;
+        start.saturating_sub(area.height / 3).min(tail)
     } else if state.follow_tail {
         tail
     } else {
@@ -837,11 +854,11 @@ fn tool_group_lines(
     if let Some(p) = preview {
         let (adds, dels) = diff_stats(p);
         header.push(Span::styled(
-            format!("  +{adds}", ),
+            format!("  +{adds}",),
             Style::default().fg(Color::Green).bold(),
         ));
         header.push(Span::styled(
-            format!(" -{dels}", ),
+            format!(" -{dels}",),
             Style::default().fg(Color::Red).bold(),
         ));
     }
@@ -901,7 +918,8 @@ fn tool_group_lines(
             // output the user still sees the chevron and can Ctrl+E.
             let bash_success_no_output = r.ok
                 && r.snippet.trim() == "exit=0"
-                && !r.full
+                && !r
+                    .full
                     .split("--- output ---\n")
                     .nth(1)
                     .map(|o| !o.trim().is_empty())
@@ -1080,25 +1098,16 @@ fn fmt_secs(secs: f32) -> String {
 /// as a summary.
 fn summarize_tool(name: &str, args: &str) -> (String, String) {
     let v: serde_json::Value = serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
-    let get = |k: &str| -> Option<String> {
-        v.get(k).and_then(|x| x.as_str()).map(|s| s.to_owned())
-    };
-    let one_line = |s: String| -> String {
-        s.lines().next().unwrap_or("").to_owned()
-    };
+    let get =
+        |k: &str| -> Option<String> { v.get(k).and_then(|x| x.as_str()).map(|s| s.to_owned()) };
+    let one_line = |s: String| -> String { s.lines().next().unwrap_or("").to_owned() };
     match name {
-        "read_file" | "view_file" => (
-            "Read".to_owned(),
-            get("path").unwrap_or_default(),
-        ),
+        "read_file" | "view_file" => ("Read".to_owned(), get("path").unwrap_or_default()),
         "edit_file" | "apply_patch" => (
             "Edit".to_owned(),
             get("path").or_else(|| get("target")).unwrap_or_default(),
         ),
-        "write_file" | "create_file" => (
-            "Write".to_owned(),
-            get("path").unwrap_or_default(),
-        ),
+        "write_file" | "create_file" => ("Write".to_owned(), get("path").unwrap_or_default()),
         "shell" | "bash" => (
             "Bash".to_owned(),
             one_line(get("cmd").or_else(|| get("command")).unwrap_or_default()),
@@ -1111,14 +1120,8 @@ fn summarize_tool(name: &str, args: &str) -> (String, String) {
             "Grep".to_owned(),
             get("pattern").or_else(|| get("query")).unwrap_or_default(),
         ),
-        "web_fetch" | "fetch" => (
-            "Fetch".to_owned(),
-            get("url").unwrap_or_default(),
-        ),
-        "web_search" => (
-            "Search".to_owned(),
-            get("query").unwrap_or_default(),
-        ),
+        "web_fetch" | "fetch" => ("Fetch".to_owned(), get("url").unwrap_or_default()),
+        "web_search" => ("Search".to_owned(), get("query").unwrap_or_default()),
         _ => {
             // Fallback: keep the raw name; surface the first string arg
             // as the summary so unknown tools still show something.
@@ -1171,8 +1174,7 @@ fn input(f: &mut Frame, area: Rect, state: &TuiState) {
                 } else {
                     (PROMPT_CONT, Style::default())
                 };
-                let mut spans: Vec<Span<'static>> =
-                    vec![Span::styled(prefix, style)];
+                let mut spans: Vec<Span<'static>> = vec![Span::styled(prefix, style)];
                 spans.extend(render_composer_line(l, state));
                 Line::from(spans)
             })
@@ -1218,10 +1220,16 @@ fn render_composer_line(line: &str, state: &TuiState) -> Vec<Span<'static>> {
         let end = after_open + rel_end;
         let id_part = &line[after_open..end];
         let after_close = end + 2;
-        let label = match id_part.parse::<u32>().ok().and_then(|id| {
-            state.pastes.iter().find(|p| p.id == id)
-        }) {
-            Some(p) => format!(" [pasted {} line{}] ", p.lines, if p.lines == 1 { "" } else { "s" }),
+        let label = match id_part
+            .parse::<u32>()
+            .ok()
+            .and_then(|id| state.pastes.iter().find(|p| p.id == id))
+        {
+            Some(p) => format!(
+                " [pasted {} line{}] ",
+                p.lines,
+                if p.lines == 1 { "" } else { "s" }
+            ),
             None => format!(" [pasted ?] "),
         };
         out.push(Span::styled(
@@ -1306,10 +1314,7 @@ fn palette(f: &mut Frame, input_area: Rect, state: &TuiState) {
         .matches
         .iter()
         .map(|m| {
-            let mut spans = vec![Span::styled(
-                m.title.clone(),
-                Style::default().fg(CREAM()),
-            )];
+            let mut spans = vec![Span::styled(m.title.clone(), Style::default().fg(CREAM()))];
             if !m.detail.is_empty() {
                 spans.push(Span::raw("  "));
                 spans.push(Span::styled(
@@ -1394,22 +1399,20 @@ fn status(f: &mut Frame, area: Rect, state: &TuiState) {
 
     let right = Line::from(vec![
         Span::styled(state.mode.chip_label(), mode_style(state)),
-        Span::styled(
-            " · shift+tab to cycle ",
-            Style::default().fg(MUTED()),
-        ),
+        Span::styled(" · shift+tab to cycle ", Style::default().fg(MUTED())),
     ]);
-    let right_len = right.spans.iter().map(|s| s.content.chars().count()).sum::<usize>() as u16;
+    let right_len = right
+        .spans
+        .iter()
+        .map(|s| s.content.chars().count())
+        .sum::<usize>() as u16;
 
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Min(1), Constraint::Length(right_len)])
         .split(area);
     f.render_widget(Paragraph::new(left), cols[0]);
-    f.render_widget(
-        Paragraph::new(right).alignment(Alignment::Right),
-        cols[1],
-    );
+    f.render_widget(Paragraph::new(right).alignment(Alignment::Right), cols[1]);
 }
 
 /// Rotate through a small vocabulary of streaming-verbs based on
@@ -1417,7 +1420,13 @@ fn status(f: &mut Frame, area: Rect, state: &TuiState) {
 /// long silent gaps instead of just repeating "thinking".
 fn streaming_label(secs: f32) -> &'static str {
     const WORDS: &[&str] = &[
-        "Wrangling", "Thinking", "Pondering", "Cogitating", "Musing", "Simmering", "Brewing",
+        "Wrangling",
+        "Thinking",
+        "Pondering",
+        "Cogitating",
+        "Musing",
+        "Simmering",
+        "Brewing",
         "Percolating",
     ];
     let idx = ((secs / 4.0) as usize) % WORDS.len();
@@ -1456,14 +1465,9 @@ fn format_usage_spans(state: &TuiState) -> Vec<Span<'static>> {
         },
     ) {
         spans.push(Span::styled(" · ".to_owned(), muted));
-        let over = state
-            .budget_usd
-            .map(|cap| dollars >= cap)
-            .unwrap_or(false);
+        let over = state.budget_usd.map(|cap| dollars >= cap).unwrap_or(false);
         let dollar_style = if over {
-            Style::default()
-                .fg(Color::Red)
-                .add_modifier(Modifier::BOLD)
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
         } else {
             muted
         };
@@ -1580,7 +1584,10 @@ fn try_parse_plan(s: &str) -> Option<Plan> {
                 break;
             }
             let after = &line[digits.len()..];
-            if let Some(rest) = after.strip_prefix(". ").or_else(|| after.strip_prefix(") ")) {
+            if let Some(rest) = after
+                .strip_prefix(". ")
+                .or_else(|| after.strip_prefix(") "))
+            {
                 rest.to_owned()
             } else {
                 break;
@@ -1605,7 +1612,10 @@ fn render_plan_card(plan: &Plan) -> Vec<Line<'static>> {
     ];
     if !plan.title.is_empty() {
         header.push(Span::styled("  ", Style::default()));
-        header.push(Span::styled(plan.title.clone(), Style::default().fg(CREAM()).bold()));
+        header.push(Span::styled(
+            plan.title.clone(),
+            Style::default().fg(CREAM()).bold(),
+        ));
     }
     out.push(Line::from(header));
 
@@ -1710,7 +1720,9 @@ fn search_overlay(f: &mut Frame, input_area: Rect, state: &TuiState) {
         Span::styled("/", Style::default().fg(Color::DarkGray)),
         Span::styled(
             s.query.clone(),
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled("_", Style::default().fg(Color::DarkGray)),
     ]);
@@ -1739,18 +1751,9 @@ fn approval_prompt_lines(pending: &crate::tui::state::PendingApproval) -> Vec<Li
 
     // Header: warning glyph + friendly tool name + (optional) target.
     let mut header: Vec<Span<'static>> = vec![
-        Span::styled(
-            "  ⚠  ",
-            Style::default().fg(Color::Yellow).bold(),
-        ),
-        Span::styled(
-            friendly.clone(),
-            Style::default().fg(SALMON()).bold(),
-        ),
-        Span::styled(
-            "  ·  approval required",
-            Style::default().fg(CREAM()),
-        ),
+        Span::styled("  ⚠  ", Style::default().fg(Color::Yellow).bold()),
+        Span::styled(friendly.clone(), Style::default().fg(SALMON()).bold()),
+        Span::styled("  ·  approval required", Style::default().fg(CREAM())),
     ];
     if let Some(preview) = &pending.preview {
         let kind_label = match preview.kind {
@@ -1820,10 +1823,7 @@ fn approval_prompt_lines(pending: &crate::tui::state::PendingApproval) -> Vec<Li
                 .bg(SALMON())
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            "  always this session       ",
-            Style::default().fg(CREAM()),
-        ),
+        Span::styled("  always this session       ", Style::default().fg(CREAM())),
         Span::styled(
             " n ",
             Style::default()
@@ -1867,10 +1867,7 @@ fn indented_diff_line(d: &DiffLine) -> Line<'static> {
             Span::styled("  -", Style::default().fg(Color::Red).bold()),
             Span::styled(s.clone(), Style::default().fg(Color::Red)),
         ]),
-        DiffLine::HunkGap => Line::from(Span::styled(
-            "    ⋯",
-            Style::default().fg(DIM()).italic(),
-        )),
+        DiffLine::HunkGap => Line::from(Span::styled("    ⋯", Style::default().fg(DIM()).italic())),
     }
 }
 
@@ -1882,8 +1879,7 @@ fn plan_gutter(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
     lines
         .into_iter()
         .map(|l| {
-            let mut spans: Vec<Span<'static>> =
-                vec![Span::styled("│ ", gutter_style)];
+            let mut spans: Vec<Span<'static>> = vec![Span::styled("│ ", gutter_style)];
             spans.extend(l.spans);
             Line::from(spans)
         })

@@ -1,4 +1,3 @@
-
 use std::path::{Path, PathBuf};
 
 /// Filesystem/network capabilities granted to a sandboxed command.
@@ -131,10 +130,7 @@ impl SandboxProfile {
             profile.push_str("(allow file-write*");
 
             for path in &writable {
-                profile.push_str(&format!(
-                    " (subpath \"{}\")",
-                    escape(path)
-                ));
+                profile.push_str(&format!(" (subpath \"{}\")", escape(path)));
             }
 
             profile.push_str(")\n");
@@ -153,10 +149,7 @@ impl SandboxProfile {
             profile.push_str("(deny file-write*");
 
             for path in &protected {
-                profile.push_str(&format!(
-                    " (subpath \"{}\")",
-                    escape(path)
-                ));
+                profile.push_str(&format!(" (subpath \"{}\")", escape(path)));
             }
 
             profile.push_str(")\n");
@@ -176,10 +169,7 @@ impl SandboxProfile {
             profile.push_str("(deny file-read* file-write*");
 
             for path in &denied {
-                profile.push_str(&format!(
-                    " (subpath \"{}\")",
-                    escape(path)
-                ));
+                profile.push_str(&format!(" (subpath \"{}\")", escape(path)));
             }
 
             profile.push_str(")\n");
@@ -228,11 +218,7 @@ impl SandboxProfile {
         // Repository
         // --------------------------------------------------------------
 
-        bind_rw(
-            &mut args,
-            &self.repo_root,
-            &self.repo_root,
-        );
+        bind_rw(&mut args, &self.repo_root, &self.repo_root);
 
         // --------------------------------------------------------------
         // Explicit read-only directories
@@ -380,9 +366,7 @@ fn hard_denied() -> Vec<PathBuf> {
         return Vec::new();
     };
 
-    resolve_existing(vec![
-        home.join("Library/Keychains"),
-    ])
+    resolve_existing(vec![home.join("Library/Keychains")])
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -425,19 +409,12 @@ pub fn credentials_for(binary: &str, args: &[String]) -> Vec<PathBuf> {
 
         "gpg" | "gpg2" => &[".gnupg"],
 
-        "git" if reaches_remote(args) => {
-            &[".ssh", ".gnupg"]
-        }
+        "git" if reaches_remote(args) => &[".ssh", ".gnupg"],
 
         _ => &[],
     };
 
-    resolve_existing(
-        wanted
-            .iter()
-            .map(|dir| home.join(dir))
-            .collect(),
-    )
+    resolve_existing(wanted.iter().map(|dir| home.join(dir)).collect())
 }
 
 /// Extract the executable name from a potentially absolute path.
@@ -447,23 +424,14 @@ pub fn command_name(binary: &str) -> String {
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| binary.to_string());
 
-    name.strip_suffix(".exe")
-        .unwrap_or(&name)
-        .to_string()
+    name.strip_suffix(".exe").unwrap_or(&name).to_string()
 }
 
 /// Determine whether a git invocation can reach a remote.
 ///
 /// This is intentionally conservative.
 fn reaches_remote(args: &[String]) -> bool {
-    const REMOTE_COMMANDS: &[&str] = &[
-        "push",
-        "fetch",
-        "pull",
-        "clone",
-        "ls-remote",
-        "remote",
-    ];
+    const REMOTE_COMMANDS: &[&str] = &["push", "fetch", "pull", "clone", "ls-remote", "remote"];
 
     args.iter()
         .find(|arg| !arg.starts_with('-'))

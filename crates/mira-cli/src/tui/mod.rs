@@ -31,7 +31,6 @@ use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use std::io::stdout;
 use futures::stream::BoxStream;
 use futures::StreamExt;
 use mira_core::Role;
@@ -40,6 +39,7 @@ use mira_policy::{Mode, Policy};
 use mira_tools::builtin::skill::SkillHandle;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use std::io::stdout;
 use tokio::sync::{mpsc, Mutex};
 
 use approver::ApprovalRequest;
@@ -77,7 +77,10 @@ pub struct TuiConfig {
 /// Built-in slash commands the palette suggests. Order is display order.
 const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/help", "list commands"),
-    ("/mode", "switch permission mode (plan|manual|auto|edit|yolo)"),
+    (
+        "/mode",
+        "switch permission mode (plan|manual|auto|edit|yolo)",
+    ),
     ("/model", "switch model for this session"),
     ("/goal", "set / inspect / clear the standing goal"),
     ("/skills", "list loaded skills"),
@@ -87,9 +90,15 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/save", "export the transcript as markdown"),
     ("/sessions", "list recent sessions in this folder"),
     ("/resume", "show shell command to resume a session"),
-    ("/budget", "cap this session's spend (e.g. /budget $2 · /budget off)"),
+    (
+        "/budget",
+        "cap this session's spend (e.g. /budget $2 · /budget off)",
+    ),
     ("/cost", "print token & dollar breakdown for this session"),
-    ("/theme", "swap palette (`/theme` · `/theme <name>` · `/theme reload` · `/theme save`)"),
+    (
+        "/theme",
+        "swap palette (`/theme` · `/theme <name>` · `/theme reload` · `/theme save`)",
+    ),
     ("/clear", "clear the visible transcript"),
     ("/quit", "exit the TUI"),
 ];
@@ -114,7 +123,11 @@ fn classify_provider_error(msg: &str) -> Option<String> {
     if m.contains(" 401") || m.contains("unauthorized") || m.contains("invalid api key") {
         return Some("provider 401 — check API key".to_owned());
     }
-    if m.contains(" 429") || m.contains("rate limit") || m.contains("rate_limited") || m.contains("too many requests") {
+    if m.contains(" 429")
+        || m.contains("rate limit")
+        || m.contains("rate_limited")
+        || m.contains("too many requests")
+    {
         return Some("provider 429 — rate limited".to_owned());
     }
     if m.contains(" 403") || m.contains("forbidden") {
@@ -143,11 +156,7 @@ fn enter() -> Result<Terminal<CrosstermBackend<std::io::Stdout>>> {
     // Text selection works by default. Users who want native
     // text selection can toggle with Alt+M — most terminals also honour
     // Option/Shift+drag as a "bypass capture" selection modifier.
-    execute!(
-        out,
-        EnterAlternateScreen,
-        EnableBracketedPaste
-    )?;
+    execute!(out, EnterAlternateScreen, EnableBracketedPaste)?;
     Ok(Terminal::new(CrosstermBackend::new(out))?)
 }
 
@@ -178,7 +187,7 @@ async fn event_loop(
 ) -> Result<()> {
     let mut state = TuiState::new(cfg.model.clone(), cfg.mode);
     // Start with mouse capture off so text selection works by default.
-// Alt+M will toggle it on for scroll-wheel driving.
+    // Alt+M will toggle it on for scroll-wheel driving.
     state.mouse_capture = false;
     state.git_branch = detect_git_branch(&cfg.cwd).await;
     hydrate_from_history(&session, &mut state).await;
@@ -305,7 +314,10 @@ async fn hydrate_from_history(session: &Session, state: &mut TuiState) {
         state.push_info(format!("  │   cwd  {cwd_short}"));
         state.push_info("  │".to_string());
         state.push_info("  │   / commands   @ files   shift+tab mode   ctrl+r search".to_string());
-        state.push_info("  │   ctrl+↑↓ prev/next turn   alt+↑↓ scroll   ctrl+e expand tool   esc esc quit".to_string());
+        state.push_info(
+            "  │   ctrl+↑↓ prev/next turn   alt+↑↓ scroll   ctrl+e expand tool   esc esc quit"
+                .to_string(),
+        );
         state.push_info("  ╰─".to_string());
         state.push_info("".to_string());
         return;
@@ -390,8 +402,8 @@ async fn handle_terminal_event(
 fn handle_paste(s: &str, state: &mut TuiState) {
     let line_count = s.matches('\n').count() + 1;
     let char_count = s.chars().count();
-    let big = line_count >= state::PASTE_COLLAPSE_LINES
-        || char_count >= state::PASTE_COLLAPSE_CHARS;
+    let big =
+        line_count >= state::PASTE_COLLAPSE_LINES || char_count >= state::PASTE_COLLAPSE_CHARS;
     if !big {
         state.input_push_str(s);
         return;
@@ -417,9 +429,7 @@ fn interrupt_stream(
     let msg = match state.in_flight_tool() {
         Some((name, args)) => {
             let short = truncate_for_warning(&args, 80);
-            format!(
-                "interrupted while `{name}({short})` was running — tool result discarded"
-            )
+            format!("interrupted while `{name}({short})` was running — tool result discarded")
         }
         None => "interrupted".to_owned(),
     };
@@ -1035,7 +1045,10 @@ async fn model_matches(filter: &str, cfg: &TuiConfig) -> Vec<PaletteItem> {
         .iter()
         .filter(|id| filter.is_empty() || id.to_ascii_lowercase().contains(filter))
         .map(|id| {
-            let detail = id.split_once('/').map(|(p, _)| p.to_owned()).unwrap_or_default();
+            let detail = id
+                .split_once('/')
+                .map(|(p, _)| p.to_owned())
+                .unwrap_or_default();
             PaletteItem {
                 insert: id.clone(),
                 title: id.clone(),
@@ -1057,7 +1070,11 @@ fn open_palette(state: &mut TuiState, kind: Palette, matches: Vec<PaletteItem>) 
     };
     // Reset cursor when switching kinds so a fresh open doesn't inherit
     // a stale selection from a different list.
-    let cursor = if state.palette.kind != kind { 0 } else { cursor };
+    let cursor = if state.palette.kind != kind {
+        0
+    } else {
+        cursor
+    };
     state.palette = state::PaletteState {
         kind,
         cursor,
@@ -1072,7 +1089,11 @@ fn open_palette(state: &mut TuiState, kind: Palette, matches: Vec<PaletteItem>) 
 async fn slash_matches(_state: &TuiState, filter: &str, cfg: &TuiConfig) -> Vec<PaletteItem> {
     let mut items: Vec<PaletteItem> = SLASH_COMMANDS
         .iter()
-        .filter(|(name, _)| name.trim_start_matches('/').to_ascii_lowercase().contains(filter))
+        .filter(|(name, _)| {
+            name.trim_start_matches('/')
+                .to_ascii_lowercase()
+                .contains(filter)
+        })
         .map(|(name, desc)| PaletteItem {
             insert: (*name).to_owned(),
             title: (*name).to_owned(),
@@ -1524,9 +1545,7 @@ fn run_theme_slash(rest: &str, state: &mut TuiState) {
         for (name, _, desc) in crate::tui::theme::PRESETS {
             state.push_info(format!("  {name:<10} — {desc}"));
         }
-        state.push_info(
-            "usage: /theme <name> · /theme reload · /theme save".to_string(),
-        );
+        state.push_info("usage: /theme <name> · /theme reload · /theme save".to_string());
         return;
     }
     match rest {
@@ -1561,8 +1580,7 @@ fn run_theme_slash(rest: &str, state: &mut TuiState) {
 /// commands. Built-ins always win over a skill alias — a skill named
 /// `mode.md` can't shadow `/mode`.
 fn is_reserved_slash(head: &str) -> bool {
-    SLASH_COMMANDS.iter().any(|(name, _)| *name == head)
-        || matches!(head, "/q" | "/?" | "/perms")
+    SLASH_COMMANDS.iter().any(|(name, _)| *name == head) || matches!(head, "/q" | "/?" | "/perms")
 }
 
 /// Look up a skill by its slash alias. Returns the underlying skill
@@ -1707,9 +1725,7 @@ async fn run_slash(
                     line.push_str(&format!(" · {}", format_dollars_short(spent)));
                     if let Some(cap) = state.budget_usd {
                         let left = (cap - spent).max(0.0);
-                        line.push_str(&format!(
-                            " / ${cap:.2} cap · ${left:.3} left"
-                        ));
+                        line.push_str(&format!(" / ${cap:.2} cap · ${left:.3} left"));
                     }
                 } else if state.budget_usd.is_some() {
                     line.push_str(" · (model unpriced — budget won't trip)");
@@ -1732,9 +1748,7 @@ async fn run_slash(
                 } else {
                     format!("\n\nInvocation arg: {rest}")
                 };
-                return Some(format!(
-                    "Please invoke the `{skill_name}` skill.{arg_line}"
-                ));
+                return Some(format!("Please invoke the `{skill_name}` skill.{arg_line}"));
             }
             state.push_warning(format!("unknown command `{other}` — try /help"));
         }
@@ -1916,9 +1930,7 @@ async fn run_permissions_slash(rest: &str, state: &mut TuiState, cfg: &TuiConfig
         }
         return;
     }
-    state.push_warning(
-        "usage: /permissions  ·  /permissions add \"Rule(pattern)\"".into(),
-    );
+    state.push_warning("usage: /permissions  ·  /permissions add \"Rule(pattern)\"".into());
 }
 
 /// `/save [path]` — dump the visible transcript to a markdown file.
@@ -1987,9 +1999,7 @@ fn run_save_slash(rest: &str, state: &mut TuiState, cwd: &std::path::Path) {
 /// different session requires re-launching mira (see `/resume`).
 async fn run_sessions_slash(state: &mut TuiState, cfg: &TuiConfig) {
     let Some(store) = cfg.store.as_ref() else {
-        state.push_warning(
-            "session persistence is off (`--no-persist`?) — nothing to list".into(),
-        );
+        state.push_warning("session persistence is off (`--no-persist`?) — nothing to list".into());
         return;
     };
     match store.list_recent(&cfg.cwd, 15).await {
@@ -2023,7 +2033,9 @@ async fn run_sessions_slash(state: &mut TuiState, cfg: &TuiConfig) {
                 let age = fmt_relative(now.saturating_sub(rec.updated_at));
                 state.push_info(format!("  {id_short}  ·  {age:>8}  ·  {title}"));
             }
-            state.push_info("resume: run `mira --resume <id>` (or `mira --pick`) from a new shell.".to_string());
+            state.push_info(
+                "resume: run `mira --resume <id>` (or `mira --pick`) from a new shell.".to_string(),
+            );
         }
     }
 }

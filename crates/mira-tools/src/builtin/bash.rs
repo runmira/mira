@@ -1,4 +1,3 @@
-
 use async_trait::async_trait;
 use mira_ai::ToolSpec;
 use mira_core::{ToolCall, ToolResult};
@@ -59,11 +58,7 @@ impl Tool for Bash {
         Action::Bash
     }
 
-    async fn invoke(
-        &self,
-        call: &ToolCall,
-        ctx: &ToolContext,
-    ) -> Result<ToolResult, ToolError> {
+    async fn invoke(&self, call: &ToolCall, ctx: &ToolContext) -> Result<ToolResult, ToolError> {
         let args: Args = call.parse_arguments()?;
 
         let timeout_ms = args.timeout_ms.min(600_000);
@@ -71,28 +66,17 @@ impl Tool for Bash {
 
         // Track filesystem changes caused by the command when the
         // FileGuard is available.
-        let pre_bash = ctx
-            .guard
-            .as_ref()
-            .and_then(|guard| guard.pre_bash());
+        let pre_bash = ctx.guard.as_ref().and_then(|guard| guard.pre_bash());
 
         // Bash is deliberately invoked as a binary with argv.
         //
         // The command string is interpreted only by this explicit shell.
         // It is never concatenated into a larger shell command by Mira.
-        let command_args = vec![
-            "-lc".to_owned(),
-            args.command.clone(),
-        ];
+        let command_args = vec!["-lc".to_owned(), args.command.clone()];
 
         let outcome = ctx
             .sandbox
-            .run_with_timeout(
-                "bash",
-                &command_args,
-                &ctx.cwd,
-                timeout.as_secs().max(1),
-            )
+            .run_with_timeout("bash", &command_args, &ctx.cwd, timeout.as_secs().max(1))
             .await
             .map_err(|e| ToolError::Failed(e.to_string()))?;
 
@@ -146,8 +130,7 @@ fn truncate(s: &str, limit: usize) -> String {
     }
 
     let head_end = floor_boundary(s, limit / 2);
-    let tail_start =
-        ceil_boundary(s, s.len().saturating_sub(limit / 2));
+    let tail_start = ceil_boundary(s, s.len().saturating_sub(limit / 2));
 
     format!(
         "{}\n... [truncated {} bytes] ...\n{}",
@@ -176,4 +159,3 @@ fn ceil_boundary(s: &str, at: usize) -> usize {
 
     i
 }
-

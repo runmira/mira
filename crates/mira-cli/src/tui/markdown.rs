@@ -130,7 +130,9 @@ fn header_split(line: &str) -> Option<(usize, &str)> {
 
 fn header_line(hashes: usize, body: &str) -> Line<'static> {
     let style = match hashes {
-        1 => Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        1 => Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
         2 => Style::default()
             .fg(Color::White)
             .add_modifier(Modifier::BOLD),
@@ -265,8 +267,7 @@ fn emit_code_block(out: &mut Vec<Line<'static>>, lang: &str, code: &str) {
         let ranges: Vec<(SynStyle, &str)> = h
             .highlight_line(raw_line, &SYNTAX_SET)
             .unwrap_or_else(|_| vec![(SynStyle::default(), raw_line)]);
-        let mut spans: Vec<Span<'static>> =
-            vec![Span::styled("▎ ", gutter_style)];
+        let mut spans: Vec<Span<'static>> = vec![Span::styled("▎ ", gutter_style)];
         for (style, chunk) in ranges {
             // Trim only the trailing newline so per-line layout stays
             // one Line per source line.
@@ -309,13 +310,10 @@ fn is_separator_row(line: &str) -> bool {
     if !trimmed.starts_with('|') {
         return false;
     }
-    trimmed
-        .trim_matches('|')
-        .split('|')
-        .all(|cell| {
-            let c = cell.trim();
-            !c.is_empty() && c.chars().all(|ch| matches!(ch, '-' | ':' | ' '))
-        })
+    trimmed.trim_matches('|').split('|').all(|cell| {
+        let c = cell.trim();
+        !c.is_empty() && c.chars().all(|ch| matches!(ch, '-' | ':' | ' '))
+    })
 }
 
 /// A header row triggers a table only when the very next line is a
@@ -334,7 +332,9 @@ fn parse_row(line: &str) -> Vec<String> {
 }
 
 fn emit_table(out: &mut Vec<Line<'static>>, header: Vec<String>, rows: Vec<Vec<String>>) {
-    let n_cols = header.len().max(rows.iter().map(|r| r.len()).max().unwrap_or(0));
+    let n_cols = header
+        .len()
+        .max(rows.iter().map(|r| r.len()).max().unwrap_or(0));
     if n_cols == 0 {
         return;
     }
@@ -584,10 +584,7 @@ mod tests {
         let lines = render("before\n```rust\nfn main() {}\n```\nafter");
         // before, ` rust`, `▎ fn main() {}` styled, after
         assert!(lines.len() >= 4);
-        assert!(lines[1]
-            .spans
-            .iter()
-            .any(|s| s.content.contains("rust")));
+        assert!(lines[1].spans.iter().any(|s| s.content.contains("rust")));
         // No closing "end" marker should ever land in the transcript —
         // it used to render as bleed-through text when the box chars
         // rendered narrow.
@@ -703,9 +700,6 @@ mod tests {
         let lines = render(md);
         assert_eq!(lines.len(), 1);
         // Should render as plain text, not table rows.
-        assert!(!lines[0]
-            .spans
-            .iter()
-            .any(|s| s.content.contains('┌')));
+        assert!(!lines[0].spans.iter().any(|s| s.content.contains('┌')));
     }
 }

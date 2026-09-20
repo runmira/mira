@@ -1,18 +1,17 @@
-
 //! Git tools.
 //!
 //! Structured Git operations execute through Mira's sandbox using argv
 //! directly. No shell interpolation is used.
 
-mod status;
-mod log;
-mod diff;
 mod commit;
+mod diff;
+mod log;
+mod status;
 
-pub use status::GitStatus;
-pub use log::GitLog;
-pub use diff::GitDiff;
 pub use commit::GitCommit;
+pub use diff::GitDiff;
+pub use log::GitLog;
+pub use status::GitStatus;
 
 use crate::context::ToolContext;
 use crate::tool::ToolError;
@@ -59,4 +58,3 @@ pub(crate) fn truncate(s: &str, max_bytes: usize) -> String {
     out.push_str("\n… [output truncated]");
     out
 }
-

@@ -1,4 +1,3 @@
-
 //! Find call sites and other usages of a symbol across the repo.
 //!
 //! Companion to `find_symbol`. Where `find_symbol` targets definitions,
@@ -95,19 +94,13 @@ impl Tool for FindReferences {
         Action::Read
     }
 
-    async fn invoke(
-        &self,
-        call: &ToolCall,
-        ctx: &ToolContext,
-    ) -> Result<ToolResult, ToolError> {
+    async fn invoke(&self, call: &ToolCall, ctx: &ToolContext) -> Result<ToolResult, ToolError> {
         let args: Args = call.parse_arguments()?;
 
         let name = args.name.trim();
 
         if name.is_empty() {
-            return Err(ToolError::InvalidArgs(
-                "name is empty".into(),
-            ));
+            return Err(ToolError::InvalidArgs("name is empty".into()));
         }
 
         if !name
@@ -157,38 +150,25 @@ impl Tool for FindReferences {
         command_args.push(pattern);
 
         if let Some(path) = &args.path {
-            let resolved = ctx.resolve(path).ok_or_else(|| {
-                ToolError::Failed(format!(
-                    "path escapes repository: {path}"
-                ))
-            })?;
+            let resolved = ctx
+                .resolve(path)
+                .ok_or_else(|| ToolError::Failed(format!("path escapes repository: {path}")))?;
 
-            command_args.push(
-                resolved.to_string_lossy().into_owned()
-            );
+            command_args.push(resolved.to_string_lossy().into_owned());
         } else {
-            command_args.push(
-                ctx.cwd.to_string_lossy().into_owned()
-            );
+            command_args.push(ctx.cwd.to_string_lossy().into_owned());
         }
 
         let outcome = ctx
             .sandbox
-            .run_with_timeout(
-                "rg",
-                &command_args,
-                &ctx.cwd,
-                30,
-            )
+            .run_with_timeout("rg", &command_args, &ctx.cwd, 30)
             .await
             .map_err(|e| ToolError::Failed(e.to_string()))?;
 
         if outcome.timed_out {
             return Ok(ToolResult::ok(
                 call.id.clone(),
-                format!(
-                    "find_references timed out after 30 seconds for `{name}`"
-                ),
+                format!("find_references timed out after 30 seconds for `{name}`"),
             ));
         }
 
@@ -215,9 +195,7 @@ impl Tool for FindReferences {
             )),
 
             Some(code) => {
-                let mut body = format!(
-                    "ripgrep failed with exit code {code}"
-                );
+                let mut body = format!("ripgrep failed with exit code {code}");
 
                 if !outcome.stderr.is_empty() {
                     body.push('\n');
@@ -245,14 +223,7 @@ fn globs_for(lang: Option<&str>) -> &'static [&'static str] {
     match lang {
         Some("rust") => &["*.rs"],
 
-        Some("ts") | Some("js") => &[
-            "*.ts",
-            "*.tsx",
-            "*.js",
-            "*.jsx",
-            "*.mts",
-            "*.mjs",
-        ],
+        Some("ts") | Some("js") => &["*.ts", "*.tsx", "*.js", "*.jsx", "*.mts", "*.mjs"],
 
         Some("python") => &["*.py"],
 
@@ -277,4 +248,3 @@ fn regex_escape(s: &str) -> String {
 
     out
 }
-

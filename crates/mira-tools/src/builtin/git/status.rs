@@ -1,4 +1,3 @@
-
 //! `git_status` — current branch, ahead/behind, and per-file status.
 
 use async_trait::async_trait;
@@ -32,11 +31,7 @@ impl Tool for GitStatus {
         Action::Read
     }
 
-    async fn invoke(
-        &self,
-        call: &ToolCall,
-        ctx: &ToolContext,
-    ) -> Result<ToolResult, ToolError> {
+    async fn invoke(&self, call: &ToolCall, ctx: &ToolContext) -> Result<ToolResult, ToolError> {
         let args = vec![
             "status".to_owned(),
             "--porcelain=v1".to_owned(),
@@ -47,10 +42,7 @@ impl Tool for GitStatus {
 
         let output = out.combined_output();
 
-        Ok(ToolResult::ok(
-            call.id.clone(),
-            format_status(&output),
-        ))
+        Ok(ToolResult::ok(call.id.clone(), format_status(&output)))
     }
 }
 

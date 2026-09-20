@@ -482,24 +482,21 @@ mod tests {
 
     #[test]
     fn slash_alias_wins() {
-        let raw =
-            "---\nname: code-review\ndescription: review\nslash: review\n---\nBody.\n";
+        let raw = "---\nname: code-review\ndescription: review\nslash: review\n---\nBody.\n";
         let s = parse_skill_md(raw).unwrap();
         assert_eq!(s.slash.as_deref(), Some("review"));
     }
 
     #[test]
     fn slash_alias_strips_leading_slash() {
-        let raw =
-            "---\nname: code-review\ndescription: review\nslash: /review\n---\nBody.\n";
+        let raw = "---\nname: code-review\ndescription: review\nslash: /review\n---\nBody.\n";
         let s = parse_skill_md(raw).unwrap();
         assert_eq!(s.slash.as_deref(), Some("review"));
     }
 
     #[test]
     fn slash_false_opts_out() {
-        let raw =
-            "---\nname: internal-helper\ndescription: internal\nslash: false\n---\nBody.\n";
+        let raw = "---\nname: internal-helper\ndescription: internal\nslash: false\n---\nBody.\n";
         let s = parse_skill_md(raw).unwrap();
         assert!(s.slash.is_none());
     }
@@ -598,7 +595,7 @@ mod tests {
                 icon: None,
                 color: None,
                 slash: None,
-                body:"old body".into(),
+                body: "old body".into(),
                 source: None,
                 source_dir: None,
             },
@@ -613,7 +610,7 @@ mod tests {
                 icon: None,
                 color: None,
                 slash: None,
-                body:"new body".into(),
+                body: "new body".into(),
                 source: None,
                 source_dir: None,
             },

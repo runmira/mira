@@ -1,4 +1,3 @@
-
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -79,11 +78,7 @@ impl SandboxConfig {
         }
     }
 
-    pub fn env(
-        mut self,
-        key: impl Into<String>,
-        value: impl Into<String>,
-    ) -> Self {
+    pub fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.env.push((key.into(), value.into()));
         self
     }
@@ -116,12 +111,7 @@ impl CommandOutput {
             (true, false) => self.stderr.clone(),
 
             (false, false) => {
-                let mut output =
-                    String::with_capacity(
-                        self.stdout.len()
-                            + self.stderr.len()
-                            + 1,
-                    );
+                let mut output = String::with_capacity(self.stdout.len() + self.stderr.len() + 1);
 
                 output.push_str(&self.stdout);
                 output.push('\n');
@@ -166,11 +156,9 @@ const INHERITED_ENV: &[&str] = &[
     "TERM",
     "TMPDIR",
     "PWD",
-
     // macOS.
     "TMP",
     "TEMP",
-
     // Windows compatibility for callers that may use this crate elsewhere.
     "SystemRoot",
     "SystemDrive",
@@ -196,14 +184,7 @@ pub async fn run_command(
         "executing sandbox command"
     );
 
-    run_with_backend(
-        backend,
-        config,
-        binary,
-        args,
-        cwd,
-    )
-    .await
+    run_with_backend(backend, config, binary, args, cwd).await
 }
 
 async fn run_with_backend(
@@ -213,38 +194,19 @@ async fn run_with_backend(
     args: &[String],
     cwd: &Path,
 ) -> Result<CommandOutput> {
-    let timeout = Duration::from_secs(
-        config.profile.timeout_secs,
-    );
+    let timeout = Duration::from_secs(config.profile.timeout_secs);
 
     let mut command = match backend {
         #[cfg(target_os = "macos")]
-        SandboxBackend::Seatbelt => {
-            build_seatbelt_command(
-                config,
-                binary,
-                args,
-            )?
-        }
+        SandboxBackend::Seatbelt => build_seatbelt_command(config, binary, args)?,
 
         #[cfg(target_os = "linux")]
-        SandboxBackend::Bubblewrap => {
-            build_bwrap_command(
-                config,
-                binary,
-                args,
-            )?
-        }
+        SandboxBackend::Bubblewrap => build_bwrap_command(config, binary, args)?,
 
         SandboxBackend::ProcessLevel => {
-            tracing::warn!(
-                "no OS sandbox available; running with process-level isolation only"
-            );
+            tracing::warn!("no OS sandbox available; running with process-level isolation only");
 
-            build_process_command(
-                binary,
-                args,
-            )
+            build_process_command(binary, args)
         }
 
         #[cfg(target_os = "macos")]
@@ -253,22 +215,14 @@ async fn run_with_backend(
                 "bubblewrap requested on macOS; falling back to process-level execution"
             );
 
-            build_process_command(
-                binary,
-                args,
-            )
+            build_process_command(binary, args)
         }
 
         #[cfg(target_os = "linux")]
         SandboxBackend::Seatbelt => {
-            tracing::warn!(
-                "Seatbelt requested on Linux; falling back to process-level execution"
-            );
+            tracing::warn!("Seatbelt requested on Linux; falling back to process-level execution");
 
-            build_process_command(
-                binary,
-                args,
-            )
+            build_process_command(binary, args)
         }
     };
 
@@ -278,11 +232,7 @@ async fn run_with_backend(
     // validating that cwd is inside the repository before reaching here.
     command.current_dir(cwd);
 
-    configure_environment(
-        &mut command,
-        config,
-        backend,
-    );
+    configure_environment(&mut command, config, backend);
 
     command
         .stdin(std::process::Stdio::null())
@@ -293,35 +243,18 @@ async fn run_with_backend(
     #[cfg(unix)]
     command.process_group(0);
 
-    let mut child = command
-        .spawn()
-        .context("spawning sandboxed command")?;
+    let mut child = command.spawn().context("spawning sandboxed command")?;
 
-    let mut process_group =
-        ProcessGroupKill(child.id());
+    let mut process_group = ProcessGroupKill(child.id());
 
     let stdout_buffer = captured();
     let stderr_buffer = captured();
 
-    let stdout_task = tokio::spawn(
-        read_capped(
-            child.stdout.take(),
-            stdout_buffer.clone(),
-        ),
-    );
+    let stdout_task = tokio::spawn(read_capped(child.stdout.take(), stdout_buffer.clone()));
 
-    let stderr_task = tokio::spawn(
-        read_capped(
-            child.stderr.take(),
-            stderr_buffer.clone(),
-        ),
-    );
+    let stderr_task = tokio::spawn(read_capped(child.stderr.take(), stderr_buffer.clone()));
 
-    let wait_result = tokio::time::timeout(
-        timeout,
-        child.wait(),
-    )
-    .await;
+    let wait_result = tokio::time::timeout(timeout, child.wait()).await;
 
     let timed_out = wait_result.is_err();
 
@@ -332,25 +265,14 @@ async fn run_with_backend(
     }
 
     let readers = async {
-        let _ = tokio::join!(
-            stdout_task,
-            stderr_task,
-        );
+        let _ = tokio::join!(stdout_task, stderr_task,);
     };
 
-    let _ = tokio::time::timeout(
-        READER_GRACE,
-        readers,
-    )
-    .await;
+    let _ = tokio::time::timeout(READER_GRACE, readers).await;
 
-    let stdout = snapshot(
-        &stdout_buffer,
-    );
+    let stdout = snapshot(&stdout_buffer);
 
-    let stderr = snapshot(
-        &stderr_buffer,
-    );
+    let stderr = snapshot(&stderr_buffer);
 
     if timed_out {
         return Ok(CommandOutput {
@@ -383,8 +305,7 @@ pub async fn run_unsandboxed(
     args: &[String],
     timeout_secs: u64,
 ) -> Result<CommandOutput> {
-    let profile = SandboxProfile::new(repo_root)
-        .timeout(timeout_secs);
+    let profile = SandboxProfile::new(repo_root).timeout(timeout_secs);
 
     let config = SandboxConfig::new(profile);
 
@@ -437,10 +358,7 @@ fn configure_environment(
     //
     // and therefore tools such as rg, brew-installed binaries, etc. appear
     // to be "missing" from Mira.
-    command.env(
-        "PATH",
-        sandbox_path(),
-    );
+    command.env("PATH", sandbox_path());
 
     // ------------------------------------------------------------------
     // Safe inherited environment
@@ -463,28 +381,16 @@ fn configure_environment(
 
     // If a sandbox-specific HOME exists, use it.
     if let Some(home) = &config.profile.home_dir {
-        command.env(
-            "HOME",
-            home.display().to_string(),
-        );
+        command.env("HOME", home.display().to_string());
     }
 
     // If a sandbox-specific temporary directory exists, use it.
     if let Some(temp) = &config.profile.temp_dir {
-        command.env(
-            "TMPDIR",
-            temp.display().to_string(),
-        );
+        command.env("TMPDIR", temp.display().to_string());
 
-        command.env(
-            "TMP",
-            temp.display().to_string(),
-        );
+        command.env("TMP", temp.display().to_string());
 
-        command.env(
-            "TEMP",
-            temp.display().to_string(),
-        );
+        command.env("TEMP", temp.display().to_string());
     }
 
     // Explicit caller-provided environment overrides defaults.
@@ -511,15 +417,9 @@ fn build_seatbelt_command(
 ) -> Result<TokioCommand> {
     let profile = config.profile.seatbelt_profile();
 
-    let mut command = TokioCommand::new(
-        "sandbox-exec",
-    );
+    let mut command = TokioCommand::new("sandbox-exec");
 
-    command
-        .arg("-p")
-        .arg(profile)
-        .arg("--")
-        .arg(binary);
+    command.arg("-p").arg(profile).arg("--").arg(binary);
 
     for arg in args {
         command.arg(arg);
@@ -536,17 +436,13 @@ fn build_bwrap_command(
 ) -> Result<TokioCommand> {
     let bwrap_args = config.profile.bwrap_args();
 
-    let mut command = TokioCommand::new(
-        "bwrap",
-    );
+    let mut command = TokioCommand::new("bwrap");
 
     for arg in &bwrap_args {
         command.arg(arg);
     }
 
-    command
-        .arg("--")
-        .arg(binary);
+    command.arg("--").arg(binary);
 
     for arg in args {
         command.arg(arg);
@@ -555,13 +451,8 @@ fn build_bwrap_command(
     Ok(command)
 }
 
-fn build_process_command(
-    binary: &str,
-    args: &[String],
-) -> TokioCommand {
-    let mut command = TokioCommand::new(
-        binary,
-    );
+fn build_process_command(binary: &str, args: &[String]) -> TokioCommand {
+    let mut command = TokioCommand::new(binary);
 
     for arg in args {
         command.arg(arg);
@@ -573,18 +464,10 @@ fn build_process_command(
 type Captured = Arc<Mutex<(Vec<u8>, bool)>>;
 
 fn captured() -> Captured {
-    Arc::new(
-        Mutex::new((
-            Vec::with_capacity(8192),
-            false,
-        )),
-    )
+    Arc::new(Mutex::new((Vec::with_capacity(8192), false)))
 }
 
-async fn read_capped<R>(
-    stream: Option<R>,
-    buffer: Captured,
-)
+async fn read_capped<R>(stream: Option<R>, buffer: Captured)
 where
     R: AsyncRead + Unpin,
 {
@@ -610,14 +493,11 @@ where
             continue;
         }
 
-        let remaining =
-            MAX_CAPTURE_BYTES - state.0.len();
+        let remaining = MAX_CAPTURE_BYTES - state.0.len();
 
         let amount = read.min(remaining);
 
-        state.0.extend_from_slice(
-            &chunk[..amount],
-        );
+        state.0.extend_from_slice(&chunk[..amount]);
 
         if amount < read {
             state.1 = true;
@@ -630,8 +510,7 @@ fn snapshot(buffer: &Captured) -> String {
         return String::new();
     };
 
-    String::from_utf8_lossy(&state.0)
-        .into_owned()
+    String::from_utf8_lossy(&state.0).into_owned()
 }
 
 struct ProcessGroupKill(Option<u32>);
@@ -641,15 +520,9 @@ impl ProcessGroupKill {
         #[cfg(unix)]
         {
             if let Some(pid) = self.0.take() {
-                let process_group =
-                    nix::unistd::Pid::from_raw(
-                        -(pid as i32),
-                    );
+                let process_group = nix::unistd::Pid::from_raw(-(pid as i32));
 
-                let _ = nix::sys::signal::kill(
-                    process_group,
-                    nix::sys::signal::Signal::SIGKILL,
-                );
+                let _ = nix::sys::signal::kill(process_group, nix::sys::signal::Signal::SIGKILL);
             }
         }
 
@@ -671,4 +544,3 @@ impl Drop for ProcessGroupKill {
         }
     }
 }
-

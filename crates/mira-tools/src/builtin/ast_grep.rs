@@ -1,4 +1,3 @@
-
 //! Structural code search via the `ast-grep` CLI.
 //!
 //! Where `grep` matches lines and `find_symbol` matches definition
@@ -82,17 +81,11 @@ impl Tool for AstGrep {
         Action::Read
     }
 
-    async fn invoke(
-        &self,
-        call: &ToolCall,
-        ctx: &ToolContext,
-    ) -> Result<ToolResult, ToolError> {
+    async fn invoke(&self, call: &ToolCall, ctx: &ToolContext) -> Result<ToolResult, ToolError> {
         let args: Args = call.parse_arguments()?;
 
         if args.pattern.trim().is_empty() {
-            return Err(ToolError::InvalidArgs(
-                "pattern is empty".into(),
-            ));
+            return Err(ToolError::InvalidArgs("pattern is empty".into()));
         }
 
         if args.max_results == 0 {
@@ -101,12 +94,7 @@ impl Tool for AstGrep {
             ));
         }
 
-       
-
-        let mut command_args = vec![
-            "run".to_owned(),
-            "--json=stream".to_owned(),
-        ];
+        let mut command_args = vec!["run".to_owned(), "--json=stream".to_owned()];
 
         if let Some(language) = &args.language {
             command_args.push("--lang".to_owned());
@@ -117,29 +105,18 @@ impl Tool for AstGrep {
         command_args.push(args.pattern.clone());
 
         if let Some(path) = &args.path {
-            let resolved = ctx.resolve(path).ok_or_else(|| {
-                ToolError::Failed(format!(
-                    "path escapes repository: {path}"
-                ))
-            })?;
+            let resolved = ctx
+                .resolve(path)
+                .ok_or_else(|| ToolError::Failed(format!("path escapes repository: {path}")))?;
 
-            command_args.push(
-                resolved.to_string_lossy().into_owned()
-            );
+            command_args.push(resolved.to_string_lossy().into_owned());
         } else {
-            command_args.push(
-                ctx.cwd.to_string_lossy().into_owned()
-            );
+            command_args.push(ctx.cwd.to_string_lossy().into_owned());
         }
 
         let outcome = ctx
             .sandbox
-            .run_with_timeout(
-                "ast-grep",
-                &command_args,
-                &ctx.cwd,
-                45,
-            )
+            .run_with_timeout("ast-grep", &command_args, &ctx.cwd, 45)
             .await
             .map_err(|e| ToolError::Failed(e.to_string()))?;
 
@@ -153,10 +130,7 @@ impl Tool for AstGrep {
             ));
         }
 
-        let matches = parse_stream(
-            &outcome.stdout,
-            args.max_results.min(500),
-        );
+        let matches = parse_stream(&outcome.stdout, args.max_results.min(500));
 
         if outcome.exit_code.is_none() {
             return Err(ToolError::Failed(
@@ -166,11 +140,7 @@ impl Tool for AstGrep {
 
         let exit_code = outcome.exit_code.unwrap_or(1);
 
-        let body = render_matches(
-            &args.pattern,
-            &matches,
-            exit_code,
-        );
+        let body = render_matches(&args.pattern, &matches, exit_code);
 
         let data = json!({
             "pattern": args.pattern,
@@ -189,8 +159,6 @@ impl Tool for AstGrep {
     }
 }
 
-
-
 #[derive(serde::Serialize, Debug, Clone)]
 struct AstMatch {
     file: String,
@@ -199,10 +167,7 @@ struct AstMatch {
     text: String,
 }
 
-fn parse_stream(
-    output: &str,
-    max_results: usize,
-) -> Vec<AstMatch> {
+fn parse_stream(output: &str, max_results: usize) -> Vec<AstMatch> {
     let mut out = Vec::new();
 
     for line in output.lines() {
@@ -212,9 +177,7 @@ fn parse_stream(
             continue;
         }
 
-        let Ok(v): Result<Value, _> =
-            serde_json::from_str(line)
-        else {
+        let Ok(v): Result<Value, _> = serde_json::from_str(line) else {
             continue;
         };
 
@@ -243,10 +206,7 @@ fn parse_stream(
         let text = v
             .get("text")
             .and_then(Value::as_str)
-            .or_else(|| {
-                v.get("lines")
-                    .and_then(Value::as_str)
-            })
+            .or_else(|| v.get("lines").and_then(Value::as_str))
             .unwrap_or_default()
             .to_owned();
 
@@ -265,16 +225,10 @@ fn parse_stream(
     out
 }
 
-fn render_matches(
-    pattern: &str,
-    matches: &[AstMatch],
-    exit_code: i32,
-) -> String {
+fn render_matches(pattern: &str, matches: &[AstMatch], exit_code: i32) -> String {
     if matches.is_empty() {
         return if exit_code == 0 || exit_code == 1 {
-            format!(
-                "no matches for pattern `{pattern}`"
-            )
+            format!("no matches for pattern `{pattern}`")
         } else {
             format!(
                 "ast-grep exited with code {exit_code} while \
@@ -287,14 +241,11 @@ fn render_matches(
     let mut output = String::new();
 
     for m in matches {
-        let snippet =
-            m.text.replace('\n', " \u{21b5} ");
+        let snippet = m.text.replace('\n', " \u{21b5} ");
 
         output.push_str(&format!(
             "{}:{}-{}\t{snippet}\n",
-            m.file,
-            m.start_line,
-            m.end_line
+            m.file, m.start_line, m.end_line
         ));
     }
 
@@ -347,30 +298,19 @@ mod tests {
             out.push('\n');
         }
 
-        assert_eq!(
-            parse_stream(&out, 10).len(),
-            10
-        );
+        assert_eq!(parse_stream(&out, 10).len(), 10);
     }
 
     #[test]
     fn render_no_matches_normal_exit() {
-        let s = render_matches(
-            "foo()",
-            &[],
-            1,
-        );
+        let s = render_matches("foo()", &[], 1);
 
         assert!(s.contains("no matches"));
     }
 
     #[test]
     fn render_no_matches_error_exit_hints_at_bad_pattern() {
-        let s = render_matches(
-            "$$$bad",
-            &[],
-            2,
-        );
+        let s = render_matches("$$$bad", &[], 2);
 
         assert!(s.contains("check pattern syntax"));
     }

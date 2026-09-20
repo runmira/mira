@@ -1,4 +1,3 @@
-
 use async_trait::async_trait;
 use mira_ai::ToolSpec;
 use mira_core::{ToolCall, ToolResult};
@@ -64,23 +63,14 @@ impl Tool for RustFmt {
         build_display_command(&args)
     }
 
-    async fn invoke(
-        &self,
-        call: &ToolCall,
-        ctx: &ToolContext,
-    ) -> Result<ToolResult, ToolError> {
+    async fn invoke(&self, call: &ToolCall, ctx: &ToolContext) -> Result<ToolResult, ToolError> {
         let args: Args = call.parse_arguments()?;
 
         let (binary, command_args) = build_command(&args, ctx)?;
 
         let outcome = ctx
             .sandbox
-            .run_with_timeout(
-                binary,
-                &command_args,
-                &ctx.cwd,
-                120,
-            )
+            .run_with_timeout(binary, &command_args, &ctx.cwd, 120)
             .await
             .map_err(|e| ToolError::Failed(e.to_string()))?;
 
@@ -114,17 +104,12 @@ impl Tool for RustFmt {
     }
 }
 
-fn build_command(
-    args: &Args,
-    ctx: &ToolContext,
-) -> Result<(&'static str, Vec<String>), ToolError> {
+fn build_command(args: &Args, ctx: &ToolContext) -> Result<(&'static str, Vec<String>), ToolError> {
     match &args.path {
         Some(path) => {
-            let resolved = ctx.resolve(path).ok_or_else(|| {
-                ToolError::Failed(format!(
-                    "path escapes repository: {path}"
-                ))
-            })?;
+            let resolved = ctx
+                .resolve(path)
+                .ok_or_else(|| ToolError::Failed(format!("path escapes repository: {path}")))?;
 
             let mut command_args = Vec::new();
 
@@ -138,10 +123,7 @@ fn build_command(
         }
 
         None => {
-            let mut command_args = vec![
-                "fmt".to_owned(),
-                "--all".to_owned(),
-            ];
+            let mut command_args = vec!["fmt".to_owned(), "--all".to_owned()];
 
             if args.check {
                 command_args.push("--".to_owned());
@@ -163,13 +145,9 @@ fn build_display_command(args: &Args) -> String {
             format!("rustfmt {}", display_quote(path))
         }
 
-        (None, true) => {
-            "cargo fmt --all -- --check".to_owned()
-        }
+        (None, true) => "cargo fmt --all -- --check".to_owned(),
 
-        (None, false) => {
-            "cargo fmt --all".to_owned()
-        }
+        (None, false) => "cargo fmt --all".to_owned(),
     }
 }
 

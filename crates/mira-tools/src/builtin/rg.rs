@@ -44,7 +44,3 @@ fn which_binary(name: &str) -> bool {
     }
     false
 }
-
-
-
-

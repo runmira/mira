@@ -1,4 +1,3 @@
-
 //! Find call sites of a function, method, or constructor.
 //!
 //! Narrower than `find_references`: instead of every occurrence of the
@@ -9,8 +8,8 @@
 //! match, macros with `!` in the name (Rust) won't, and the definition-line
 //! filter is best-effort per-language.
 
-use std::path::Path;
 use std::collections::HashMap;
+use std::path::Path;
 
 use async_trait::async_trait;
 use mira_ai::ToolSpec;
@@ -98,19 +97,13 @@ impl Tool for FindCallers {
         Action::Read
     }
 
-    async fn invoke(
-        &self,
-        call: &ToolCall,
-        ctx: &ToolContext,
-    ) -> Result<ToolResult, ToolError> {
+    async fn invoke(&self, call: &ToolCall, ctx: &ToolContext) -> Result<ToolResult, ToolError> {
         let args: Args = call.parse_arguments()?;
 
         let name = args.name.trim();
 
         if name.is_empty() {
-            return Err(ToolError::InvalidArgs(
-                "name is empty".into(),
-            ));
+            return Err(ToolError::InvalidArgs("name is empty".into()));
         }
 
         if !name
@@ -137,16 +130,10 @@ impl Tool for FindCallers {
             ));
         }
 
-        let pattern = format!(
-            r"\b{}\s*\(",
-            regex_escape(name)
-        );
+        let pattern = format!(r"\b{}\s*\(", regex_escape(name));
 
         // Over-fetch because definition filtering happens after rg.
-        let raw_cap = args
-            .max_results
-            .saturating_mul(2)
-            .clamp(50, 4000);
+        let raw_cap = args.max_results.saturating_mul(2).clamp(50, 4000);
 
         let mut command_args = vec![
             "--line-number".to_owned(),
@@ -168,48 +155,32 @@ impl Tool for FindCallers {
         command_args.push(pattern);
 
         if let Some(path) = &args.path {
-            let resolved = ctx.resolve(path).ok_or_else(|| {
-                ToolError::Failed(format!(
-                    "path escapes repository: {path}"
-                ))
-            })?;
+            let resolved = ctx
+                .resolve(path)
+                .ok_or_else(|| ToolError::Failed(format!("path escapes repository: {path}")))?;
 
-            command_args.push(
-                resolved.to_string_lossy().into_owned()
-            );
+            command_args.push(resolved.to_string_lossy().into_owned());
         } else {
-            command_args.push(
-                ctx.cwd.to_string_lossy().into_owned()
-            );
+            command_args.push(ctx.cwd.to_string_lossy().into_owned());
         }
 
         let outcome = ctx
             .sandbox
-            .run_with_timeout(
-                "rg",
-                &command_args,
-                &ctx.cwd,
-                30,
-            )
+            .run_with_timeout("rg", &command_args, &ctx.cwd, 30)
             .await
             .map_err(|e| ToolError::Failed(e.to_string()))?;
 
         if outcome.timed_out {
             return Ok(ToolResult::ok(
                 call.id.clone(),
-                format!(
-                    "find_callers timed out after 30 seconds for `{name}`"
-                ),
+                format!("find_callers timed out after 30 seconds for `{name}`"),
             ));
         }
 
         match outcome.exit_code {
             Some(0) => {
-                let filtered = drop_definition_lines(
-                    &outcome.stdout,
-                    name,
-                    args.max_results.min(2000),
-                );
+                let filtered =
+                    drop_definition_lines(&outcome.stdout, name, args.max_results.min(2000));
 
                 let body = if filtered.trim().is_empty() {
                     format!("no callers of `{name}`")
@@ -227,9 +198,7 @@ impl Tool for FindCallers {
             )),
 
             Some(code) => {
-                let mut body = format!(
-                    "ripgrep failed with exit code {code}"
-                );
+                let mut body = format!("ripgrep failed with exit code {code}");
 
                 if !outcome.stderr.is_empty() {
                     body.push('\n');
@@ -251,14 +220,7 @@ fn globs_for(lang: Option<&str>) -> &'static [&'static str] {
     match lang {
         Some("rust") => &["*.rs"],
 
-        Some("ts") | Some("js") => &[
-            "*.ts",
-            "*.tsx",
-            "*.js",
-            "*.jsx",
-            "*.mts",
-            "*.mjs",
-        ],
+        Some("ts") | Some("js") => &["*.ts", "*.tsx", "*.js", "*.jsx", "*.mts", "*.mjs"],
 
         Some("python") => &["*.py"],
         Some("go") => &["*.go"],
@@ -270,11 +232,7 @@ fn globs_for(lang: Option<&str>) -> &'static [&'static str] {
 
 /// Walk ripgrep's `path:lineno:content` output, drop lines that look
 /// like the definition of `name`, and truncate at `max`.
-fn drop_definition_lines(
-    rg_out: &str,
-    name: &str,
-    max: usize,
-) -> String {
+fn drop_definition_lines(rg_out: &str, name: &str, max: usize) -> String {
     let defs = definition_regexes(name);
     let mut out = String::new();
     let mut kept = 0usize;
@@ -309,50 +267,28 @@ fn drop_definition_lines(
 }
 
 /// Best-effort definition regexes by language.
-fn definition_regexes(
-    name: &str,
-) -> HashMap<&'static str, Regex> {
+fn definition_regexes(name: &str) -> HashMap<&'static str, Regex> {
     let n = regex_escape(name);
 
-    let mk = |pattern: String| {
-        Regex::new(&pattern).expect("valid definition regex")
-    };
+    let mk = |pattern: String| Regex::new(&pattern).expect("valid definition regex");
 
     let mut map = HashMap::new();
 
-    map.insert(
-        "rust",
-        mk(format!(r"\bfn\s+{n}\s*[(<]")),
-    );
+    map.insert("rust", mk(format!(r"\bfn\s+{n}\s*[(<]")));
 
-    map.insert(
-        "python",
-        mk(format!(r"\bdef\s+{n}\s*\(")),
-    );
+    map.insert("python", mk(format!(r"\bdef\s+{n}\s*\(")));
 
-    map.insert(
-        "go",
-        mk(format!(r"\bfunc\s+{n}\s*\(")),
-    );
+    map.insert("go", mk(format!(r"\bfunc\s+{n}\s*\(")));
 
-    map.insert(
-        "ts",
-        mk(format!(r"\bfunction\s+{n}\s*[(<]")),
-    );
+    map.insert("ts", mk(format!(r"\bfunction\s+{n}\s*[(<]")));
 
-    map.insert(
-        "js",
-        mk(format!(r"\bfunction\s+{n}\s*\(")),
-    );
+    map.insert("js", mk(format!(r"\bfunction\s+{n}\s*\(")));
 
     map
 }
 
 fn lang_of(path: &str) -> &'static str {
-    match Path::new(path)
-        .extension()
-        .and_then(|s| s.to_str())
-    {
+    match Path::new(path).extension().and_then(|s| s.to_str()) {
         Some("rs") => "rust",
         Some("py") => "python",
         Some("go") => "go",
@@ -404,8 +340,7 @@ mod tests {
 
     #[test]
     fn drops_generic_rust_definition() {
-        let input =
-            call("src/lib.rs", 3, "pub fn foo<T: Clone>(x: T) -> T {");
+        let input = call("src/lib.rs", 3, "pub fn foo<T: Clone>(x: T) -> T {");
 
         let out = drop_definition_lines(&input, "foo", 100);
 
@@ -448,15 +383,10 @@ mod tests {
 
     #[test]
     fn unknown_language_passes_through() {
-        let input = call(
-            "A.java",
-            1,
-            "public void foo() {",
-        );
+        let input = call("A.java", 1, "public void foo() {");
 
         let out = drop_definition_lines(&input, "foo", 100);
 
         assert!(out.contains("public void foo"));
     }
 }
-

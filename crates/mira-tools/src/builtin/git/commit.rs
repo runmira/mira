@@ -1,4 +1,3 @@
-
 //! `git_commit` — create a commit. Never passes `--no-verify` — hooks are the
 //! user's safety net and this tool refuses to bypass them.
 
@@ -71,11 +70,7 @@ impl Tool for GitCommit {
         build_commit_display(&args)
     }
 
-    async fn invoke(
-        &self,
-        call: &ToolCall,
-        ctx: &ToolContext,
-    ) -> Result<ToolResult, ToolError> {
+    async fn invoke(&self, call: &ToolCall, ctx: &ToolContext) -> Result<ToolResult, ToolError> {
         let args: CommitArgs = call.parse_arguments()?;
 
         if args.message.trim().is_empty() {
