@@ -9,7 +9,7 @@
 class Mira < Formula
   desc "Open-source coding agent you run yourself, with the model you choose"
   homepage "https://github.com/runmira/mira"
-  version "0.3.4"
+  version "0.3.6"
   license "Apache-2.0"
 
   on_macos do
