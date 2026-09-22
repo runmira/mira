@@ -297,9 +297,7 @@ pub(crate) fn highlight_code_line(line: &str, path: &str) -> Option<Vec<Span<'st
     let mut h = HighlightLines::new(syntax, &THEME);
     // syntect wants the trailing newline for its line-ending handling.
     let with_nl = format!("{line}\n");
-    let ranges = h
-        .highlight_line(&with_nl, &SYNTAX_SET)
-        .ok()?;
+    let ranges = h.highlight_line(&with_nl, &SYNTAX_SET).ok()?;
     let mut spans: Vec<Span<'static>> = Vec::new();
     for (style, chunk) in ranges {
         let content = chunk.trim_end_matches('\n').to_owned();

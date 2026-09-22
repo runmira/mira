@@ -5,10 +5,10 @@
 //! plan-mode gutter, and the streaming cursor. Nothing here knows where
 //! the lines land on screen.
 
-use ratatui::style::{Stylize, Color, Modifier, Style};
+use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 
-use super::{CREAM, MUTED, SALMON, highlight_line, line_is_empty};
+use super::{highlight_line, line_is_empty, CREAM, MUTED, SALMON};
 use crate::tui::markdown;
 
 /// Structured startup banner — the first transcript entry on a fresh
@@ -214,7 +214,10 @@ fn try_parse_plan(s: &str) -> Option<Plan> {
                 break;
             }
             let after = &line[digits.len()..];
-            if let Some(rest) = after.strip_prefix(". ").or_else(|| after.strip_prefix(") ")) {
+            if let Some(rest) = after
+                .strip_prefix(". ")
+                .or_else(|| after.strip_prefix(") "))
+            {
                 rest.to_owned()
             } else {
                 break;

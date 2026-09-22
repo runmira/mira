@@ -11,9 +11,8 @@ use crate::tui::state::TuiState;
 pub(crate) fn handle_paste(s: &str, state: &mut TuiState) {
     let line_count = s.matches('\n').count() + 1;
     let char_count = s.chars().count();
-    let big =
-        line_count >= crate::tui::state::PASTE_COLLAPSE_LINES
-            || char_count >= crate::tui::state::PASTE_COLLAPSE_CHARS;
+    let big = line_count >= crate::tui::state::PASTE_COLLAPSE_LINES
+        || char_count >= crate::tui::state::PASTE_COLLAPSE_CHARS;
     if !big {
         state.input_push_str(s);
         return;

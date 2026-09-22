@@ -58,12 +58,12 @@ pub(crate) fn draw(f: &mut Frame, state: &mut TuiState) {
     let root = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),      // header
-            Constraint::Length(1),      // deliberate breathing row under the header
+            Constraint::Length(1),           // header
+            Constraint::Length(1),           // deliberate breathing row under the header
             Constraint::Length(goal_height), // persistent goal panel (0 when unset)
-            Constraint::Min(1),         // transcript
+            Constraint::Min(1),              // transcript
             Constraint::Length(input_height),
-            Constraint::Length(1),      // single unified footer
+            Constraint::Length(1), // single unified footer
         ])
         .split(area);
 
@@ -135,8 +135,14 @@ mod tests {
         assert!(screen.contains("auto"), "mode chip missing");
         // transcript content
         assert!(screen.contains(">"), "user prompt marker missing");
-        assert!(screen.contains("what changed in render?"), "user text missing");
-        assert!(screen.contains("I refactored the renderer"), "assistant missing");
+        assert!(
+            screen.contains("what changed in render?"),
+            "user text missing"
+        );
+        assert!(
+            screen.contains("I refactored the renderer"),
+            "assistant missing"
+        );
         // turn-end full stop
         assert!(screen.contains("for 4.2s"), "turn-end marker missing");
         // footer
@@ -167,7 +173,10 @@ mod tests {
         let _ = Instant::now();
         draw_once(&mut terminal, &mut st);
         let screen = screen_text(&terminal);
-        assert!(screen.contains("Read src/main.rs"), "tool header missing: {screen}");
+        assert!(
+            screen.contains("Read src/main.rs"),
+            "tool header missing: {screen}"
+        );
         assert!(screen.contains("fn main() {}"), "tool snippet missing");
     }
 
@@ -179,8 +188,11 @@ mod tests {
         draw_once(&mut terminal, &mut st);
         let screen = screen_text(&terminal);
         assert!(screen.contains("GOAL"), "goal panel header missing");
-        assert!(screen.contains("Implement authentication"), "condition missing");
-            // and disappears again when cleared
+        assert!(
+            screen.contains("Implement authentication"),
+            "condition missing"
+        );
+        // and disappears again when cleared
         st.goal = None;
         draw_once(&mut terminal, &mut st);
         let screen = screen_text(&terminal);
@@ -238,7 +250,10 @@ mod tests {
         assert!(st.active_hit().is_some(), "search must find a hit");
         draw_once(&mut terminal, &mut st);
         let screen = screen_text(&terminal);
-        assert!(screen.contains("the special token"), "hit not scrolled into view");
+        assert!(
+            screen.contains("the special token"),
+            "hit not scrolled into view"
+        );
     }
 
     #[test]
@@ -295,5 +310,4 @@ mod tests {
         assert!(joined.contains("2 earlier entries truncated"));
         assert!(joined.contains("kept"));
     }
-
 }

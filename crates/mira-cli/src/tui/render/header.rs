@@ -7,16 +7,19 @@
 //! progress, and the evaluator's reason.
 
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::{Stylize, Style};
+use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::Frame;
 
-use crate::tui::components::{CREAM, DIM, LOGO, MUTED, SALMON, mode_style};
+use crate::tui::components::{mode_style, CREAM, DIM, LOGO, MUTED, SALMON};
 use crate::tui::state::TuiState;
 
 pub(crate) fn header(f: &mut Frame, area: Rect, state: &TuiState) {
     let mut spans = vec![
-        Span::styled(format!("{LOGO} mira "), Style::default().fg(SALMON()).bold()),
+        Span::styled(
+            format!("{LOGO} mira "),
+            Style::default().fg(SALMON()).bold(),
+        ),
         Span::styled("· ", Style::default().fg(DIM())),
         Span::styled(state.model.as_str(), Style::default().fg(CREAM())),
         Span::styled(" · ", Style::default().fg(DIM())),
@@ -97,7 +100,9 @@ fn format_usage_spans(state: &TuiState) -> Vec<Span<'static>> {
         spans.push(Span::styled(" · ".to_owned(), muted));
         let over = state.budget_usd.map(|cap| dollars >= cap).unwrap_or(false);
         let dollar_style = if over {
-            Style::default().fg(ratatui::style::Color::Red).add_modifier(ratatui::style::Modifier::BOLD)
+            Style::default()
+                .fg(ratatui::style::Color::Red)
+                .add_modifier(ratatui::style::Modifier::BOLD)
         } else {
             muted
         };
@@ -161,8 +166,14 @@ mod tests {
     #[test]
     fn context_len_matches_common_ids() {
         assert_eq!(model_context_len("gpt-5"), Some(1_000_000));
-        assert_eq!(model_context_len("openrouter/anthropic/claude-sonnet-4"), Some(200_000));
-        assert_eq!(model_context_len("google/gemini-2.5-flash"), Some(1_000_000));
+        assert_eq!(
+            model_context_len("openrouter/anthropic/claude-sonnet-4"),
+            Some(200_000)
+        );
+        assert_eq!(
+            model_context_len("google/gemini-2.5-flash"),
+            Some(1_000_000)
+        );
         assert_eq!(model_context_len("mystery-model"), None);
     }
 

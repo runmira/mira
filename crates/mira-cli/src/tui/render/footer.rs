@@ -9,12 +9,12 @@
 //! solid red so a provider 401/429 is impossible to scroll past.
 
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::{Stylize, Color, Modifier, Style};
+use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use crate::tui::components::{MUTED, SALMON, mode_style};
+use crate::tui::components::{mode_style, MUTED, SALMON};
 use crate::tui::state::TuiState;
 
 pub(crate) fn footer(f: &mut Frame, area: Rect, state: &TuiState) {

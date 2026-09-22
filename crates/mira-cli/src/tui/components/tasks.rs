@@ -7,7 +7,7 @@
 //! Like Claude Code's todo list, it turns a long tool-calling turn into
 //! a legible "here's the plan, here's where we are" readout.
 
-use ratatui::style::{Modifier, Stylize, Style};
+use ratatui::style::{Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 
 use super::{CREAM, DIM, MUTED, SALMON};
@@ -61,18 +61,13 @@ fn task_line(item: &TaskItem) -> Line<'static> {
         ]),
         TaskStatus::InProgress => Line::from(vec![
             Span::styled("  ◐ ", Style::default().fg(SALMON()).bold()),
-            Span::styled(
-                label.to_owned(),
-                Style::default().fg(CREAM()).bold(),
-            ),
+            Span::styled(label.to_owned(), Style::default().fg(CREAM()).bold()),
         ]),
         TaskStatus::Completed => Line::from(vec![
             Span::styled("  ✓ ", Style::default().fg(ratatui::style::Color::Green)),
             Span::styled(
                 item.subject.clone(),
-                Style::default()
-                    .fg(MUTED())
-                    .add_modifier(Modifier::DIM),
+                Style::default().fg(MUTED()).add_modifier(Modifier::DIM),
             ),
         ]),
         // Deleted tasks are filtered at hydration; render defensively.

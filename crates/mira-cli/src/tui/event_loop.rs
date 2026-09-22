@@ -21,8 +21,8 @@ use mira_core::Role;
 use mira_harness::{GoalStatus, HarnessEvent, Session};
 use ratatui::Terminal;
 
-use crate::tui::components::tool_call::summarize_tool;
 use crate::tui::components::status::format_turn_elapsed;
+use crate::tui::components::tool_call::summarize_tool;
 use crate::tui::input::{keyboard, paste};
 use crate::tui::render;
 use crate::tui::state::{PendingApproval, TuiState};
@@ -91,6 +91,23 @@ pub(super) async fn event_loop(
                 state.pending_approval = Some(PendingApproval { request: req, preview });
                 // Snap to tail so the inline prompt is visible even if
                 // the user had scrolled up mid-turn to read history.
+                state.follow_tail = true;
+            }
+            Some(prompt) = cfg.prompt_rx.recv() => {
+                // plan / ask_user tools parked on the UI — pop the card
+                // and snap to tail so it's visible immediately.
+                match prompt.request {
+                    mira_tools::prompt::PromptRequest::Plan(proposal) => {
+                        terminal_notify("mira · plan review needed");
+                        state.pending_plan =
+                            Some(crate::tui::state::PendingPlan::new(prompt.prompt_id, proposal, prompt.reply));
+                    }
+                    mira_tools::prompt::PromptRequest::AskUser(proposal) => {
+                        terminal_notify("mira · mira has a question");
+                        state.pending_ask =
+                            Some(crate::tui::state::PendingAsk::new(prompt.prompt_id, proposal, prompt.reply));
+                    }
+                }
                 state.follow_tail = true;
             }
             // Redraw tick while the stream is running so the "3.2s"
@@ -290,12 +307,16 @@ async fn next_agent_event(
 /// Invoked from both Ctrl+C and (single-press) Esc during a turn, so
 /// the two shortcuts stay in sync — no risk of one leaving the state
 /// half-torn-down.
+///
+/// Returns the next queued prompt (if any) so the caller can start
+/// the follow-up turn immediately. Without this the FIFO stalls
+/// because `HarnessEvent::Done` only fires on natural completion.
 pub(crate) fn interrupt_stream(
     state: &mut TuiState,
     agent_stream: &mut Option<BoxStream<'static, HarnessEvent>>,
-) {
+) -> Option<String> {
     if agent_stream.is_none() {
-        return;
+        return None;
     }
     let msg = match state.in_flight_tool() {
         Some((name, args)) => {
@@ -309,6 +330,9 @@ pub(crate) fn interrupt_stream(
     state.stream_started_at = None;
     state.clear_tool_tail();
     state.push_warning(msg);
+    // Advance the FIFO so the next queued message doesn't wait
+    // forever for a Done event that never arrives.
+    state.take_next_queued()
 }
 
 async fn handle_harness_event(
@@ -445,14 +469,26 @@ async fn handle_harness_event(
                 let cost = mira_ai::cost_usd(
                     &state.model,
                     mira_ai::TokenUsage {
-                        prompt_tokens: usage.prompt_tokens.saturating_sub(base.prompt_tokens).min(u32::MAX as u64) as u32,
-                        completion_tokens: usage.completion_tokens.saturating_sub(base.completion_tokens).min(u32::MAX as u64) as u32,
-                        cached_input_tokens: usage.cached_input_tokens.saturating_sub(base.cached_input_tokens).min(u32::MAX as u64) as u32,
+                        prompt_tokens: usage
+                            .prompt_tokens
+                            .saturating_sub(base.prompt_tokens)
+                            .min(u32::MAX as u64) as u32,
+                        completion_tokens: usage
+                            .completion_tokens
+                            .saturating_sub(base.completion_tokens)
+                            .min(u32::MAX as u64) as u32,
+                        cached_input_tokens: usage
+                            .cached_input_tokens
+                            .saturating_sub(base.cached_input_tokens)
+                            .min(u32::MAX as u64)
+                            as u32,
                     },
                 );
                 state.push_turn_end(
                     elapsed_ms,
-                    usage.completion_tokens.saturating_sub(base.completion_tokens),
+                    usage
+                        .completion_tokens
+                        .saturating_sub(base.completion_tokens),
                     cost,
                 );
             }

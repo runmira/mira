@@ -5,11 +5,11 @@
 //! (in-flight / ok / failed), so new tool UI states attach here rather
 //! than in the transcript layer.
 
-use ratatui::style::{Stylize, Color, Style};
+use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
 
-use super::{CREAM, MUTED, SALMON, highlight_line, truncate};
 use super::tool_result;
+use super::{highlight_line, truncate, CREAM, MUTED, SALMON};
 
 /// One tool call (optionally paired with its result) as the renderer
 /// sees it. Borrows from the state entries.
@@ -243,6 +243,17 @@ pub(crate) fn summarize_tool(name: &str, args: &str) -> (String, String) {
         ),
         "web_fetch" | "fetch" => ("Fetch".to_owned(), get("url").unwrap_or_default()),
         "web_search" => ("Search".to_owned(), get("query").unwrap_or_default()),
+        "plan" => ("Plan".to_owned(), get("title").unwrap_or_default()),
+        "ask_user" => ("Ask".to_owned(), {
+            // First question text as the summary — that's the thing
+            // the user is being asked about.
+            v.get("questions")
+                .and_then(|qs| qs.get(0))
+                .and_then(|q| q.get("question"))
+                .and_then(|x| x.as_str())
+                .unwrap_or_default()
+                .to_owned()
+        }),
         "task_create" => ("Task".to_owned(), get("subject").unwrap_or_default()),
         "task_get" => (
             "Task".to_owned(),

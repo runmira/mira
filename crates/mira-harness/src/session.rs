@@ -2271,12 +2271,9 @@ pub fn profile_for_mode(mode: Mode, repo_root: &std::path::Path) -> SandboxProfi
 /// pure function over the history vec. Finds the last non-empty user
 /// message and truncates the history to just before it.
 fn rewind_last_turn_in_history(history: &mut Vec<Message>) -> Option<String> {
-    let idx = history
-        .iter()
-        .rposition(|m| {
-            m.role == Role::User
-                && m.content.as_deref().is_some_and(|c| !c.trim().is_empty())
-        })?;
+    let idx = history.iter().rposition(|m| {
+        m.role == Role::User && m.content.as_deref().is_some_and(|c| !c.trim().is_empty())
+    })?;
     let text = history[idx].content.clone().unwrap_or_default();
     history.truncate(idx);
     Some(text)
@@ -2446,10 +2443,7 @@ mod rewind_tests {
             Message::user("first"),
             Message::assistant("reply"),
         ];
-        assert_eq!(
-            rewind_last_turn_in_history(&mut hist).unwrap(),
-            "first"
-        );
+        assert_eq!(rewind_last_turn_in_history(&mut hist).unwrap(), "first");
         assert_eq!(hist.len(), 1);
         // Only the system prompt left — nothing to rewind to.
         assert!(rewind_last_turn_in_history(&mut hist).is_none());
@@ -2463,10 +2457,7 @@ mod rewind_tests {
             Message::assistant("ok"),
             Message::user("   "),
         ];
-        assert_eq!(
-            rewind_last_turn_in_history(&mut hist).unwrap(),
-            "real"
-        );
+        assert_eq!(rewind_last_turn_in_history(&mut hist).unwrap(), "real");
         // Truncates AT `real` — the empty user message and the reply
         // after it are gone too.
         assert_eq!(hist.len(), 1);

@@ -243,13 +243,16 @@ pub async fn build_slot(
 
     let prompt_channel = PromptChannel::new(events_tx.clone());
     let prompt_pending = prompt_channel.pending();
+    // Shared-trait view of the same channel for the moved tools.
+    let prompt_shared: std::sync::Arc<dyn mira_tools::prompt::PromptChannel> =
+        std::sync::Arc::new(prompt_channel.clone());
 
     // Slot-specific registry: base + interactive tools wired to this slot's
     // prompt channel + a fresh AgentTool sharing the process-wide scratchpad
     // map (keyed inside by parent session id — see AgentTool).
     let mut registry_owned: Registry = (*deps.base_registry).clone();
-    registry_owned.register(PlanTool::new(prompt_channel.clone()));
-    registry_owned.register(AskUserTool::new(prompt_channel.clone()));
+    registry_owned.register(PlanTool::new(prompt_shared.clone()));
+    registry_owned.register(AskUserTool::new(prompt_shared.clone()));
     let mut agent_tool = AgentTool::new(
         deps.harness_provider.clone(),
         deps.base_registry.clone(),

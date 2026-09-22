@@ -22,12 +22,13 @@
 
 pub mod approval;
 pub mod message;
+pub mod prompt;
 pub mod status;
 pub mod tasks;
 pub mod tool_call;
 pub mod tool_result;
 
-use ratatui::style::{Stylize, Color, Modifier, Style};
+use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 
 use crate::tui::state::LogEntry;
@@ -108,6 +109,10 @@ pub enum TranscriptBlock<'a> {
     Approval(approval::ApprovalView<'a>),
     /// The agent's live task list (checkbox panel).
     Tasks(tasks::TaskListView<'a>),
+    /// Interactive `plan` tool card (ephemeral, keys stolen while up).
+    PlanCard(&'a crate::tui::state::PendingPlan),
+    /// Interactive `ask_user` tool card.
+    AskCard(&'a crate::tui::state::PendingAsk),
     /// A tool group deliberately kept out of the transcript — task
     /// bookkeeping (`task_create` / `task_update` / …) whose feedback
     /// lives in the [`TranscriptBlock::Tasks`] panel instead. Renders
@@ -169,8 +174,12 @@ pub fn build_blocks<'a>(entries: &'a [LogEntry], ctx: &BuildCtx) -> Vec<Block<'a
                 let (family, _) = tool_call::summarize_tool(name, args);
                 let mut batch_end = i;
                 let mut summaries = Vec::new();
-                while let Some(LogEntry::ToolCall { name, args, preview, .. }) =
-                    entries.get(batch_end)
+                while let Some(LogEntry::ToolCall {
+                    name,
+                    args,
+                    preview,
+                    ..
+                }) = entries.get(batch_end)
                 {
                     let (f, s) = tool_call::summarize_tool(name, args);
                     if *f != family || preview.is_some() {
@@ -197,9 +206,7 @@ pub fn build_blocks<'a>(entries: &'a [LogEntry], ctx: &BuildCtx) -> Vec<Block<'a
                         kind: TranscriptBlock::ToolBatch(tool_call::BatchView {
                             family,
                             summaries,
-                            collapsed: ctx
-                                .current_turn_start
-                                .is_some_and(|start| i < start),
+                            collapsed: ctx.current_turn_start.is_some_and(|start| i < start),
                         }),
                         first_entry: i,
                         consumed: batch_end - i,
@@ -425,6 +432,8 @@ pub fn render_block(
         TranscriptBlock::Info(s) => message::info_lines(s),
         TranscriptBlock::Approval(v) => approval::render(v, width),
         TranscriptBlock::Tasks(v) => tasks::render(v),
+        TranscriptBlock::PlanCard(p) => prompt::plan_card(p),
+        TranscriptBlock::AskCard(a) => prompt::ask_card(a),
         TranscriptBlock::Suppressed => Vec::new(),
         TranscriptBlock::Working(v) => vec![status::working_line(v)],
     }

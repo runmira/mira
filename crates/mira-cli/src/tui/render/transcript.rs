@@ -14,13 +14,13 @@
 //! `render::layout`.
 
 use ratatui::layout::{Alignment, Rect};
-use ratatui::style::{Stylize, Style};
+use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::tui::components::{self, BuildCtx, SALMON, trim_empty};
-use crate::tui::render::layout::{TranscriptLayout, resolve_scroll};
+use crate::tui::components::{self, trim_empty, BuildCtx, SALMON};
+use crate::tui::render::layout::{resolve_scroll, TranscriptLayout};
 use crate::tui::state::{LogEntry, TuiState};
 
 /// Lines built for one frame plus the entry→row mapping the layout
@@ -151,31 +151,14 @@ pub(crate) fn build_lines(state: &TuiState, width: u16) -> Built {
             .usage
             .completion_tokens
             .saturating_sub(state.turn_usage_baseline.completion_tokens);
-        // Name the actual work: a trailing ToolCall with no result yet
-        // is the tool in flight. Task bookkeeping stays invisible —
-        // it's already suppressed from the stream and instant anyway.
-        let tool = state.entries().iter().rev().find_map(|e| match e {
-            LogEntry::ToolResult { .. } => None,
-            LogEntry::ToolCall { name, args, started_at, .. } => {
-                if components::is_task_tool(name) {
-                    return None;
-                }
-                let (label, summary) = components::tool_call::summarize_tool(name, args);
-                Some(components::status::InFlightTool {
-                    label,
-                    summary,
-                    elapsed_secs: started_at.elapsed().as_secs_f32(),
-                })
-            }
-            // Info/warning entries can interleave without changing
-            // what's in flight.
-            _ => None,
-        });
+        // Use the generic streaming indicator (wrangling, e.t.c.) instead
+        // of naming the last in-flight tool call — the tool's own
+        // transcript entry already shows what's happening.
         blocks.push(components::Block {
             kind: components::TranscriptBlock::Working(components::status::StatusView {
                 elapsed_secs,
                 tokens,
-                tool,
+                tool: None,
             }),
             first_entry: 0,
             consumed: 0,
@@ -197,6 +180,22 @@ pub(crate) fn build_lines(state: &TuiState, width: u16) -> Built {
                 args: pending.request.call.function.arguments.as_str(),
                 preview: pending.preview.as_ref(),
             }),
+            first_entry: 0,
+            consumed: 0,
+        });
+    }
+    // Interactive tool cards — plan (coral) then ask (cyan), below the
+    // approval prompt so the highest-stakes gate reads first.
+    if let Some(plan) = state.pending_plan.as_ref() {
+        blocks.push(components::Block {
+            kind: components::TranscriptBlock::PlanCard(plan),
+            first_entry: 0,
+            consumed: 0,
+        });
+    }
+    if let Some(ask) = state.pending_ask.as_ref() {
+        blocks.push(components::Block {
+            kind: components::TranscriptBlock::AskCard(ask),
             first_entry: 0,
             consumed: 0,
         });
@@ -253,10 +252,7 @@ fn is_suppressed(block: &components::Block<'_>) -> bool {
 }
 
 fn next_is_suppressed(blocks: &[components::Block<'_>], idx: usize) -> bool {
-    blocks
-        .get(idx + 1)
-        .map(is_suppressed)
-        .unwrap_or(false)
+    blocks.get(idx + 1).map(is_suppressed).unwrap_or(false)
 }
 
 fn next_is_user(blocks: &[components::Block<'_>], idx: usize) -> bool {
@@ -290,7 +286,10 @@ fn append_onboarding(lines: &mut Vec<Line<'static>>) {
         Span::styled("shift+tab ", Style::default().fg(SALMON()).bold()),
         Span::styled("cycle modes  ·  ", Style::default().fg(components::MUTED())),
         Span::styled("/help ", Style::default().fg(SALMON()).bold()),
-        Span::styled("for everything else", Style::default().fg(components::MUTED())),
+        Span::styled(
+            "for everything else",
+            Style::default().fg(components::MUTED()),
+        ),
     ]));
 }
 
@@ -393,7 +392,10 @@ mod tests {
     fn task_tool_groups_are_suppressed_without_gaps() {
         let mut st = TuiState::new("m".into(), mira_policy::Mode::Manual);
         st.push_user("go".into());
-        st.push_tool_call_raw("task_create".into(), r#"{"subject":"Choose a file"}"#.into());
+        st.push_tool_call_raw(
+            "task_create".into(),
+            r#"{"subject":"Choose a file"}"#.into(),
+        );
         st.push_tool_result_replay("created task #1: Choose a file");
         st.push_tool_call_raw("read_file".into(), r#"{"path":"README.md"}"#.into());
         st.push_tool_result_replay("hi");
@@ -413,9 +415,8 @@ mod tests {
         let gaps = rows
             .windows(2)
             .filter(|w| {
-                w.iter().all(|l| {
-                    l.spans.iter().all(|s| s.content.trim().is_empty())
-                })
+                w.iter()
+                    .all(|l| l.spans.iter().all(|s| s.content.trim().is_empty()))
             })
             .count();
         assert_eq!(gaps, 0, "no consecutive blank rows: {rows:?}");
@@ -445,7 +446,10 @@ mod tests {
             }})),
         });
         assert_eq!(st.tasks.len(), 1);
-        assert_eq!(st.tasks[0].status, crate::tui::state::TaskStatus::InProgress);
+        assert_eq!(
+            st.tasks[0].status,
+            crate::tui::state::TaskStatus::InProgress
+        );
         // Deletion drops it from the panel.
         st.apply_task_payload(&mira_core::ToolResult {
             call_id: "3".into(),

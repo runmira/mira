@@ -12,7 +12,7 @@
 //! - **Boxed key badges**: `[ y ] approve` reads faster than
 //!   `y allow · a always · n deny` and looks like buttons.
 
-use ratatui::style::{Stylize, Color, Modifier, Style};
+use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 
 use super::tool_call::summarize_tool;
@@ -37,10 +37,7 @@ pub(crate) fn render(v: &ApprovalView<'_>, width: u16) -> Vec<Line<'static>> {
     let mut header: Vec<Span<'static>> = vec![
         Span::styled("  ⚠  ", Style::default().fg(Color::Yellow).bold()),
         Span::styled(friendly, Style::default().fg(SALMON()).bold()),
-        Span::styled(
-            "  ·  approval required",
-            Style::default().fg(CREAM()),
-        ),
+        Span::styled("  ·  approval required", Style::default().fg(CREAM())),
     ];
     if let Some(preview) = v.preview {
         let kind_label = match preview.kind {

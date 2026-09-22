@@ -298,7 +298,9 @@ mod tests {
     async fn modification_carries_old_and_new_numbers() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("foo.txt");
-        tokio::fs::write(&path, "a\nb\nc\nd\ne\nf\ng\nh\n").await.unwrap();
+        tokio::fs::write(&path, "a\nb\nc\nd\ne\nf\ng\nh\n")
+            .await
+            .unwrap();
 
         let c = call(
             "edit_file",
@@ -397,10 +399,7 @@ mod tests {
         let h = &preview.hunks[0];
         assert_eq!(h.old_start, 0);
         assert_eq!(h.new_start, 1);
-        assert!(h
-            .rows
-            .iter()
-            .all(|r| matches!(r, DiffRow::Add { .. })));
+        assert!(h.rows.iter().all(|r| matches!(r, DiffRow::Add { .. })));
     }
 
     #[tokio::test]

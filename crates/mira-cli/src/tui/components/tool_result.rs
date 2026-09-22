@@ -16,7 +16,7 @@
 //! - Whitespace is preserved exactly; long lines are clipped (never
 //!   wrapped) so column alignment survives at any terminal width.
 
-use ratatui::style::{Color, Stylize, Style};
+use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -196,10 +196,7 @@ fn row_line(row: &DiffRow, path: &str, num_w: usize, width: u16) -> Line<'static
     let available = (width as usize).saturating_sub(prefix_cols);
     match row {
         DiffRow::Ctx { new, text, .. } => {
-            let mut spans = vec![
-                num_span(*new, num_w, NUM_FG),
-                Span::raw("  "),
-            ];
+            let mut spans = vec![num_span(*new, num_w, NUM_FG), Span::raw("  ")];
             spans.extend(code_spans(
                 text,
                 path,

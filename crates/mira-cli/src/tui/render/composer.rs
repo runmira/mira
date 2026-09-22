@@ -13,7 +13,7 @@
 //! lines below it always stay visible.
 
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Stylize, Style};
+use ratatui::style::{Modifier, Style, Stylize};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
@@ -501,8 +501,6 @@ mod tests {
         let s = st("a [[paste:xx]] b", 16);
         let lay = layout(&s, 80);
         let rows = row_text(&lay);
-        assert!(rows
-            .iter()
-            .any(|r| r.contains("[pasted ?]")),);
+        assert!(rows.iter().any(|r| r.contains("[pasted ?]")),);
     }
 }

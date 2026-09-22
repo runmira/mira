@@ -5,6 +5,8 @@ use mira_harness::{Goal, UsageTotals};
 use mira_policy::Mode;
 use mira_tools::DiffPreview;
 
+use mira_tools::prompt::{PlanProposal, AskUserProposal, PromptResponse};
+
 use crate::tui::approver::ApprovalRequest;
 use crate::tui::render::layout::TranscriptLayout;
 
@@ -41,6 +43,77 @@ pub enum TaskStatus {
     Completed,
     /// Soft-deleted on the wire — dropped from the panel on upsert.
     Deleted,
+}
+
+/// Interactive `plan` card — the proposal plus the user's live
+/// toggles and cursor. Renderer and key handler both read this.
+pub struct PendingPlan {
+    pub prompt_id: String,
+    /// Completes the round-trip to the waiting tool.
+    pub reply: tokio::sync::oneshot::Sender<PromptResponse>,
+    pub proposal: PlanProposal,
+    /// Per-step checkbox, default all checked (approve as-is).
+    pub checked: Vec<bool>,
+    pub focus: usize,
+}
+
+impl PendingPlan {
+    pub fn new(
+        prompt_id: String,
+        proposal: PlanProposal,
+        reply: tokio::sync::oneshot::Sender<PromptResponse>,
+    ) -> Self {
+        let checked = vec![true; proposal.steps.len()];
+        Self {
+            prompt_id,
+            proposal,
+            reply,
+            checked,
+            focus: 0,
+        }
+    }
+}
+
+/// Interactive `ask_user` card — answers accumulate per question;
+/// digits pick, `t` types, Enter submits, Esc cancels.
+pub struct PendingAsk {
+    pub prompt_id: String,
+    /// Completes the round-trip to the waiting tool.
+    pub reply: tokio::sync::oneshot::Sender<PromptResponse>,
+    pub proposal: AskUserProposal,
+    /// Focused question index.
+    pub question: usize,
+    /// Focused option within the current question.
+    pub option: usize,
+    /// Picked labels per question.
+    pub picked: Vec<Vec<String>>,
+    /// Free-text answers per question.
+    pub custom: Vec<Option<String>>,
+    /// Typing free text for the focused question.
+    pub text_mode: bool,
+    /// Live free-text buffer.
+    pub text: String,
+}
+
+impl PendingAsk {
+    pub fn new(
+        prompt_id: String,
+        proposal: AskUserProposal,
+        reply: tokio::sync::oneshot::Sender<PromptResponse>,
+    ) -> Self {
+        let n = proposal.questions.len();
+        Self {
+            prompt_id,
+            proposal,
+            reply,
+            picked: vec![Vec::new(); n],
+            custom: vec![None; n],
+            question: 0,
+            option: 0,
+            text_mode: false,
+            text: String::new(),
+        }
+    }
 }
 
 /// Full tool result content is capped at this many bytes so a runaway
@@ -219,6 +292,11 @@ pub struct TuiState {
     pub tool_tail: Option<(String, String)>,
     pub streaming: bool,
     pub pending_approval: Option<PendingApproval>,
+    /// Interactive `plan` card state — toggles + focus live here so
+    /// the renderer stays pure.
+    pub pending_plan: Option<PendingPlan>,
+    /// Interactive `ask_user` card state.
+    pub pending_ask: Option<PendingAsk>,
     pub esc_pending: bool,
     pub scroll: u16,
     /// Height of the transcript viewport, kept in sync from both the
@@ -382,6 +460,8 @@ impl TuiState {
             tool_tail: None,
             streaming: false,
             pending_approval: None,
+            pending_plan: None,
+            pending_ask: None,
             esc_pending: false,
             scroll: 0,
             viewport_height: 0,
@@ -854,8 +934,7 @@ impl TuiState {
             };
             let auto_collapsed = current_turn_start.is_some_and(|start| i < start);
             if let LogEntry::ToolResult {
-                collapsed_override,
-                ..
+                collapsed_override, ..
             } = &mut self.entries[result_idx]
             {
                 *collapsed_override = Some(!collapsed_override.unwrap_or(auto_collapsed));
@@ -958,12 +1037,208 @@ impl TuiState {
                 LogEntry::Info(s) => {
                     out.push_str(&format!("[info] {s}\n"));
                 }
-                LogEntry::Welcome { model, cwd, tip, .. } => {
+                LogEntry::Welcome {
+                    model, cwd, tip, ..
+                } => {
                     out.push_str(&format!("mira · {model} · {cwd}\n> {tip}\n\n"));
                 }
             }
         }
         out
+    }
+
+    // ---- interactive plan / ask cards ----
+
+    /// Toggle the focused plan step's checkbox. Returns the new value.
+    pub fn plan_toggle_focused(&mut self) -> Option<bool> {
+        let p = self.pending_plan.as_mut()?;
+        p.checked[p.focus] = !p.checked[p.focus];
+        Some(p.checked[p.focus])
+    }
+
+    /// Move the plan-card cursor; `true` when the focus changed.
+    pub fn plan_move(&mut self, delta: isize) -> bool {
+        let Some(p) = self.pending_plan.as_mut() else {
+            return false;
+        };
+        let next = p.focus as isize + delta;
+        if next < 0 || next as usize >= p.checked.len() {
+            return false;
+        }
+        p.focus = next as usize;
+        true
+    }
+
+    /// Accept the plan: checked steps become the agreed set. Sends the
+    /// response to the waiting tool; `true` when a card was answered.
+    pub fn plan_accept(&mut self) -> bool {
+        let Some(p) = self.pending_plan.take() else {
+            return false;
+        };
+        let steps = p
+            .proposal
+            .steps
+            .into_iter()
+            .zip(&p.checked)
+            .filter_map(|(s, on)| on.then_some(s))
+            .collect::<Vec<_>>();
+        let _ = p.reply.send(PromptResponse::Plan(mira_tools::prompt::PlanResponse {
+            approved: true,
+            steps: Some(steps),
+            note: None,
+        }));
+        true
+    }
+
+    /// Cancel the plan (Esc).
+    pub fn plan_cancel(&mut self) -> bool {
+        let Some(p) = self.pending_plan.take() else {
+            return false;
+        };
+        let _ = p.reply.send(PromptResponse::Plan(mira_tools::prompt::PlanResponse {
+            approved: false,
+            steps: None,
+            note: None,
+        }));
+        true
+    }
+
+    /// Pick (single-select) or toggle (multi-select) option `idx` on
+    /// the focused ask question, then advance to the next question.
+    pub fn ask_pick(&mut self, idx: usize) -> bool {
+        let Some(a) = self.pending_ask.as_mut() else {
+            return false;
+        };
+        let Some(q) = a.proposal.questions.get(a.question) else {
+            return false;
+        };
+        if idx >= q.options.len() {
+            return false;
+        }
+        let label = q.options[idx].label.clone();
+        let picked = &mut a.picked[a.question];
+        if q.multi_select {
+            match picked.iter().position(|l| *l == label) {
+                Some(i) => {
+                    picked.remove(i);
+                }
+                None => picked.push(label),
+            }
+        } else {
+            *picked = vec![label];
+            a.question = (a.question + 1).min(a.proposal.questions.len() - 1);
+            a.option = 0;
+        }
+        true
+    }
+
+    /// Move the ask option cursor within the focused question.
+    pub fn ask_move_option(&mut self, delta: isize) -> bool {
+        let Some(a) = self.pending_ask.as_mut() else {
+            return false;
+        };
+        let Some(q) = a.proposal.questions.get(a.question) else {
+            return false;
+        };
+        let next = a.option as isize + delta;
+        if next < 0 || next as usize >= q.options.len() {
+            return false;
+        }
+        a.option = next as usize;
+        true
+    }
+
+    /// Move between questions (Tab / BackTab).
+    pub fn ask_move_question(&mut self, delta: isize) -> bool {
+        let Some(a) = self.pending_ask.as_mut() else {
+            return false;
+        };
+        let next = a.question as isize + delta;
+        if next < 0 || next as usize >= a.proposal.questions.len() {
+            return false;
+        }
+        a.question = next as usize;
+        a.option = 0;
+        true
+    }
+
+    /// Enter the free-text mode for the focused question.
+    pub fn ask_start_text(&mut self) -> bool {
+        let Some(a) = self.pending_ask.as_mut() else {
+            return false;
+        };
+        a.text_mode = true;
+        a.text.clear();
+        true
+    }
+
+    pub fn ask_text_push(&mut self, c: char) {
+        if let Some(a) = self.pending_ask.as_mut() {
+            if a.text_mode {
+                a.text.push(c);
+            }
+        }
+    }
+
+    pub fn ask_text_backspace(&mut self) {
+        if let Some(a) = self.pending_ask.as_mut() {
+            if a.text_mode {
+                a.text.pop();
+            }
+        }
+    }
+
+    /// Finish the free-text entry for the focused question and advance.
+    pub fn ask_commit_text(&mut self) -> bool {
+        let Some(a) = self.pending_ask.as_mut() else {
+            return false;
+        };
+        if !a.text_mode {
+            return false;
+        }
+        a.text_mode = false;
+        let text = std::mem::take(&mut a.text);
+        if !text.trim().is_empty() {
+            a.custom[a.question] = Some(text);
+        }
+        a.question = (a.question + 1).min(a.proposal.questions.len() - 1);
+        a.option = 0;
+        true
+    }
+
+    /// Submit all collected answers (Enter on the card). Sends the
+    /// response to the waiting tool; `true` when a card was answered.
+    pub fn ask_submit(&mut self) -> bool {
+        let Some(a) = self.pending_ask.take() else {
+            return false;
+        };
+        let answers = a
+            .proposal
+            .questions
+            .iter()
+            .enumerate()
+            .map(|(i, _)| mira_tools::prompt::AskUserAnswer {
+                picked: a.picked[i].clone(),
+                custom: a.custom[i].clone(),
+            })
+            .collect();
+        let _ = a.reply.send(PromptResponse::AskUser(mira_tools::prompt::AskUserResponse {
+            answers,
+            cancelled: false,
+        }));
+        true
+    }
+
+    /// Dismiss the whole card (Esc).
+    pub fn ask_cancel(&mut self) -> bool {
+        let Some(a) = self.pending_ask.take() else {
+            return false;
+        };
+        let _ = a.reply.send(PromptResponse::AskUser(mira_tools::prompt::AskUserResponse {
+            answers: Vec::new(),
+            cancelled: true,
+        }));
+        true
     }
 
     // ---- live tool tail ----
@@ -1432,7 +1707,9 @@ fn entry_text(e: &LogEntry) -> String {
         LogEntry::TurnEnd { elapsed_ms, .. } => {
             format!("baked for {}ms", elapsed_ms)
         }
-        LogEntry::Welcome { model, cwd, tip, .. } => {
+        LogEntry::Welcome {
+            model, cwd, tip, ..
+        } => {
             format!("mira {model} {cwd} {tip}")
         }
         LogEntry::ToolCall { name, args, .. } => format!("{name} {args}"),
@@ -1648,15 +1925,18 @@ mod tests {
     #[test]
     fn tool_tail_keeps_last_real_line() {
         let mut st = TuiState::new("m".into(), Mode::Manual);
-        st.set_tool_tail("c1", "compiling foo
-");
-        st.set_tool_tail("c1", "   
-");
+        st.set_tool_tail(
+            "c1",
+            "compiling foo
+",
+        );
+        st.set_tool_tail(
+            "c1", "   
+",
+        );
         st.set_tool_tail("c1", "3 tests passed");
         assert_eq!(
-            st.tool_tail
-                .as_ref()
-                .map(|(a, b)| (a.as_str(), b.as_str())),
+            st.tool_tail.as_ref().map(|(a, b)| (a.as_str(), b.as_str())),
             Some(("c1", "3 tests passed"))
         );
         st.clear_tool_tail();
@@ -1695,9 +1975,11 @@ mod tests {
         let idx = st
             .entries()
             .iter()
-            .position(|e| matches!(e, LogEntry::ToolCall { name, .. } if name == "read_file") )
+            .position(|e| matches!(e, LogEntry::ToolCall { name, .. } if name == "read_file"))
             .and_then(|i| match st.entries().get(i + 1) {
-                Some(LogEntry::ToolResult { collapsed_override, .. }) => Some(*collapsed_override),
+                Some(LogEntry::ToolResult {
+                    collapsed_override, ..
+                }) => Some(*collapsed_override),
                 _ => None,
             });
         assert_eq!(idx, Some(Some(false)));
@@ -1709,7 +1991,9 @@ mod tests {
             .iter()
             .position(|e| matches!(e, LogEntry::ToolCall { name, .. } if name == "read_file"))
             .and_then(|i| match st.entries().get(i + 1) {
-                Some(LogEntry::ToolResult { collapsed_override, .. }) => Some(*collapsed_override),
+                Some(LogEntry::ToolResult {
+                    collapsed_override, ..
+                }) => Some(*collapsed_override),
                 _ => None,
             });
         assert_eq!(idx, Some(Some(true)));

@@ -7,7 +7,7 @@
 //! condition, loop progress, and the evaluator's latest reason — and
 //! flips to a terminal state the moment the goal is met (or blocked).
 
-use ratatui::style::{Stylize, Color, Modifier, Style};
+use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 
 use mira_harness::{Goal, GoalStatus};
@@ -94,7 +94,10 @@ pub(crate) fn working_line(v: &StatusView) -> Line<'static> {
                 "◐ ",
                 Style::default().fg(pulsed_logo(secs)).bold(),
             ));
-            spans.push(Span::styled(t.label.clone(), Style::default().fg(SALMON()).bold()));
+            spans.push(Span::styled(
+                t.label.clone(),
+                Style::default().fg(SALMON()).bold(),
+            ));
             if !t.summary.is_empty() {
                 spans.push(Span::raw(" "));
                 spans.push(Span::styled(
@@ -183,11 +186,7 @@ pub(crate) fn turn_end_lines(v: &TurnEndView) -> Vec<Line<'static>> {
     ];
     if v.files > 0 {
         spans.push(Span::styled(
-            format!(
-                " · {} file{}",
-                v.files,
-                if v.files == 1 { "" } else { "s" }
-            ),
+            format!(" · {} file{}", v.files, if v.files == 1 { "" } else { "s" }),
             Style::default().fg(CREAM()),
         ));
         if v.adds > 0 || v.dels > 0 {
@@ -203,11 +202,7 @@ pub(crate) fn turn_end_lines(v: &TurnEndView) -> Vec<Line<'static>> {
     }
     if v.tools > 0 {
         spans.push(Span::styled(
-            format!(
-                " · {} tool{}",
-                v.tools,
-                if v.tools == 1 { "" } else { "s" }
-            ),
+            format!(" · {} tool{}", v.tools, if v.tools == 1 { "" } else { "s" }),
             Style::default().fg(MUTED()),
         ));
     }
@@ -357,7 +352,11 @@ pub(crate) fn short_num(n: u64) -> String {
 /// condition + status, plus one spacer row so the transcript below
 /// keeps its breathing room.
 pub(crate) fn goal_rows(goal: Option<&Goal>) -> u16 {
-    if goal.is_some() { 4 } else { 0 }
+    if goal.is_some() {
+        4
+    } else {
+        0
+    }
 }
 
 /// Chip label + style for a given goal status. Active runs get a
@@ -416,7 +415,10 @@ pub(crate) fn goal_panel_lines(goal: &Goal, pulse_secs: f32) -> Vec<Line<'static
     let mut out = vec![
         Line::from(vec![
             Span::styled(" GOAL ", Style::default().fg(SALMON()).bold()),
-            Span::styled("─────────────────────────────────────────────────────", rule_style),
+            Span::styled(
+                "─────────────────────────────────────────────────────",
+                rule_style,
+            ),
         ]),
         Line::from(Span::styled(
             format!(" {}", super::truncate(&goal.condition, 120)),
@@ -496,19 +498,29 @@ mod tests {
             elapsed_secs: 12.0,
             tokens: 1_900,
             tool: Some(InFlightTool {
-                label: "Read".into(),
+                label: "Wrangling".into(),
                 summary: "src/main.rs".into(),
                 elapsed_secs: 3.2,
             }),
         };
         let line = working_line(&v);
         let text: String = line.spans.iter().map(|s| s.content.clone()).collect();
-        assert!(text.contains("◐ Read src/main.rs"), "{text}");
+        assert!(
+            text.contains("◐ Wrangling"),
+            "Expected '◐ Wrangling' in: {text}"
+        );
         assert!(text.contains("3.2s"), "tool's own clock: {text}");
-        assert!(!text.contains("12s"), "turn clock must not shadow tool: {text}");
+        assert!(
+            !text.contains("12s"),
+            "turn clock must not shadow tool: {text}"
+        );
         assert!(text.contains("↓1.9k tokens"));
         assert!(text.contains("esc to interrupt"));
         assert!(!text.contains("… ("), "no heartbeat form while a tool runs");
+        assert!(
+            !text.contains("· "),
+            "no generic streaming label when tool present: {text}"
+        );
     }
 
     #[test]
@@ -536,7 +548,11 @@ mod tests {
                 elapsed_secs: 0.2,
             }),
         };
-        let text: String = working_line(&v).spans.iter().map(|s| s.content.clone()).collect();
+        let text: String = working_line(&v)
+            .spans
+            .iter()
+            .map(|s| s.content.clone())
+            .collect();
         assert!(text.contains("◐ Bash ls"), "{text}");
         assert!(!text.contains("0.2s"), "{text}");
     }

@@ -233,7 +233,15 @@ async fn main() -> Result<()> {
             }
         }
     }
-    let registry = Arc::new(registry);
+    // Interactive prompt tools (`plan`, `ask_user`) ride an mpsc pair
+    // into the TUI event loop — same wire pattern as the approver. The
+    // receiver travels to `tui::run` via TuiConfig; without a TUI
+    // (--simple / non-terminal stdin) the channel just has no reader,
+    // and any tool call degrades to a graceful "cancelled" result.
+    let (prompt_channel, prompt_rx) = tui::TuiPromptChannel::new();
+    registry.register(mira_tools::prompt::PlanTool::new(prompt_channel.clone()));
+    registry.register(mira_tools::prompt::AskUserTool::new(prompt_channel));
+
     // Shared memory + episodic stores. `memory_remember` writes episodic
     // entries here, and the memory snapshot below reads from the same
     // instance so the writer and the snapshot renderer share a mutex.
@@ -308,7 +316,7 @@ async fn main() -> Result<()> {
         Some(record) => Session::resume_from(
             record,
             provider.clone(),
-            registry,
+            Arc::new(registry),
             policy.clone(),
             approver,
             tool_ctx,
@@ -317,7 +325,7 @@ async fn main() -> Result<()> {
             sess_cfg,
             system_prompt(&cwd, &registry),
             provider.clone(),
-            registry,
+            Arc::new(registry),
             policy.clone(),
             approver,
             tool_ctx,
@@ -380,6 +388,7 @@ async fn main() -> Result<()> {
                 mode: settings.mode,
                 policy,
                 approval_rx: approval_rx.expect("tui branch created a receiver"),
+                prompt_rx,
                 cwd: cwd.clone(),
                 skills: skills_handle,
                 store: store.clone(),

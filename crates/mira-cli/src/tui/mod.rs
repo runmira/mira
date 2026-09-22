@@ -19,11 +19,13 @@ mod components;
 pub(crate) mod event_loop;
 mod input;
 mod markdown;
+pub mod prompts;
 pub(crate) mod render;
 mod state;
 mod theme;
 
 pub use approver::TuiApprover;
+pub use prompts::TuiPromptChannel;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -51,6 +53,9 @@ pub struct TuiConfig {
     pub policy: Arc<Mutex<Policy>>,
     /// Receiver paired with the [`TuiApprover`] handed to `Session`.
     pub approval_rx: mpsc::UnboundedReceiver<approver::ApprovalRequest>,
+    /// Receiver for `plan` / `ask_user` tool prompts (paired with the
+    /// [`TuiPromptChannel`] the tools were registered with).
+    pub prompt_rx: mpsc::UnboundedReceiver<prompts::TuiPrompt>,
     /// Repo root — used to resolve relative paths in edit/write diff previews.
     pub cwd: std::path::PathBuf,
     /// Loaded skill registry — the same handle the `Skill` tool consults.
@@ -130,7 +135,10 @@ fn leave(
 ) -> Result<()> {
     disable_raw_mode()?;
     if mouse_capture {
-        let _ = execute!(terminal.backend_mut(), crossterm::event::DisableMouseCapture);
+        let _ = execute!(
+            terminal.backend_mut(),
+            crossterm::event::DisableMouseCapture
+        );
     }
     execute!(
         terminal.backend_mut(),
@@ -447,10 +455,7 @@ async fn run_goal_slash(rest: &str, state: &mut state::TuiState, session: &Sessi
 /// `/skills` — one line per loaded skill (bundled + user + project
 /// merged, same view the composer palette in `mira serve` sees). Fires
 /// as info entries so scroll-back keeps them.
-async fn run_skills_slash(
-    state: &mut state::TuiState,
-    skills: &SkillHandle,
-) {
+async fn run_skills_slash(state: &mut state::TuiState, skills: &SkillHandle) {
     let reg = skills.read().await.clone();
     if reg.skills.is_empty() {
         state.push_info(
@@ -623,10 +628,10 @@ fn run_save_slash(rest: &str, state: &mut state::TuiState, cwd: &std::path::Path
             state::LogEntry::Info(s) => {
                 out.push_str(&format!("_{s}_\n\n"));
             }
-            state::LogEntry::Welcome { model, cwd, tip, .. } => {
-                out.push_str(&format!(
-                    "_mira · {model} · {cwd}_\n\n> {tip}\n\n"
-                ));
+            state::LogEntry::Welcome {
+                model, cwd, tip, ..
+            } => {
+                out.push_str(&format!("_mira · {model} · {cwd}_\n\n> {tip}\n\n"));
             }
         }
     }

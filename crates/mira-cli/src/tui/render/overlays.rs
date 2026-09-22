@@ -3,7 +3,7 @@
 //! over the transcript's last rows and never take over the screen.
 
 use ratatui::layout::Rect;
-use ratatui::style::{Stylize, Color, Modifier, Style};
+use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;

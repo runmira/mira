@@ -56,4 +56,3 @@ string_id!(ToolCallId, "call");
 
 // Keep ID construction centralized so callers cannot accidentally change the
 // provider-neutral format used by the harness.
-

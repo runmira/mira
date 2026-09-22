@@ -178,6 +178,57 @@ pub(crate) async fn handle_key(
         return;
     }
 
+    // Interactive plan card steals the keys — scroll keys stay live
+    // (same deal as the approval card).
+    if state.pending_plan.is_some() {
+        match (key.code, key.modifiers) {
+            (KeyCode::Up, KeyModifiers::ALT) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                scroll_up(state, 3);
+                return;
+            }
+            (KeyCode::Down, KeyModifiers::ALT) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                scroll_down(state, 3);
+                return;
+            }
+            (KeyCode::PageUp, _) => {
+                scroll_up(state, page_step(state));
+                return;
+            }
+            (KeyCode::PageDown, _) => {
+                scroll_down(state, page_step(state));
+                return;
+            }
+            (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::SHIFT) => {
+                state.plan_move(-1);
+                return;
+            }
+            (KeyCode::Down, _) => {
+                state.plan_move(1);
+                return;
+            }
+            (KeyCode::Char(' '), _) => {
+                state.plan_toggle_focused();
+                return;
+            }
+            (KeyCode::Enter, _) => {
+                state.plan_accept();
+                return;
+            }
+            (KeyCode::Esc, _) => {
+                state.plan_cancel();
+                return;
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    // Interactive ask_user card: digits pick, `t` types, Enter submits.
+    if state.pending_ask.is_some() {
+        handle_ask_key(key, state).await;
+        return;
+    }
+
     // Search overlay steals the keys (typing goes to the query, not the
     // composer). Esc / Enter close it.
     if state.search.is_some() {
@@ -194,7 +245,10 @@ pub(crate) async fn handle_key(
 
     match (key.code, key.modifiers) {
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-            interrupt_stream(state, agent_stream);
+            let next = interrupt_stream(state, agent_stream);
+            if let Some(n) = next {
+                submit_composed(state, session, agent_stream, cfg, n).await;
+            }
         }
         (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
             if state.is_input_empty() {
@@ -222,8 +276,11 @@ pub(crate) async fn handle_key(
             // string tells the user what the *next* Esc will do so they
             // don't guess.
             if agent_stream.is_some() {
-                interrupt_stream(state, agent_stream);
+                let next = interrupt_stream(state, agent_stream);
                 state.esc_pending = true;
+                if let Some(n) = next {
+                    submit_composed(state, session, agent_stream, cfg, n).await;
+                }
                 return;
             }
             if state.esc_pending {
@@ -345,8 +402,7 @@ pub(crate) async fn handle_key(
                     session.rewind_last_turn().await;
                     state.input_replace(&text);
                     state.follow_tail = true;
-                    state.flash =
-                        Some("rewound — edit the prompt, enter re-sends it".into());
+                    state.flash = Some("rewound — edit the prompt, enter re-sends it".into());
                     state.esc_pending = false;
                     return;
                 }
@@ -980,4 +1036,66 @@ fn copy_to_clipboard(text: &str) {
     let mut out = std::io::stdout();
     let _ = out.write_all(seq.as_bytes());
     let _ = out.flush();
+}
+
+/// Keys for the interactive ask_user card. Digits `1..=4` pick/toggle
+/// options on the focused question; `t` opens the free-text row
+/// (typing lands there, Enter commits it); Tab moves between
+/// questions; Enter submits everything; Esc cancels the whole card.
+async fn handle_ask_key(key: KeyEvent, state: &mut TuiState) {
+    if state.pending_ask.as_ref().is_some_and(|a| a.text_mode) {
+        match (key.code, key.modifiers) {
+            (KeyCode::Esc, _) => {
+                if let Some(a) = state.pending_ask.as_mut() {
+                    a.text_mode = false;
+                    a.text.clear();
+                }
+            }
+            (KeyCode::Enter, _) => {
+                state.ask_commit_text();
+            }
+            (KeyCode::Backspace, _) => state.ask_text_backspace(),
+            (KeyCode::Char(c), m) if !m.contains(KeyModifiers::CONTROL) => {
+                state.ask_text_push(c);
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    match (key.code, key.modifiers) {
+        (KeyCode::Up, KeyModifiers::ALT) | (KeyCode::Char('k'), KeyModifiers::SHIFT) => {
+            state.ask_move_option(-1);
+        }
+        (KeyCode::Down, KeyModifiers::ALT) => {
+            state.ask_move_option(1);
+        }
+        (KeyCode::PageUp, _) => scroll_up(state, page_step(state)),
+        (KeyCode::PageDown, _) => scroll_down(state, page_step(state)),
+        (KeyCode::Tab, KeyModifiers::SHIFT) => {
+            state.ask_move_question(-1);
+        }
+        (KeyCode::Tab, _) => {
+            state.ask_move_question(1);
+        }
+        (KeyCode::Up, _) => {
+            state.ask_move_option(-1);
+        }
+        (KeyCode::Down, _) => {
+            state.ask_move_option(1);
+        }
+        (KeyCode::Char(c), KeyModifiers::NONE) if c.is_ascii_digit() => {
+            state.ask_pick(c.to_digit(10).unwrap_or(0) as usize - 1);
+        }
+        (KeyCode::Char('t'), KeyModifiers::NONE) | (KeyCode::Char('T'), KeyModifiers::NONE) => {
+            state.ask_start_text();
+        }
+        (KeyCode::Enter, _) => {
+            state.ask_submit();
+        }
+        (KeyCode::Esc, _) => {
+            state.ask_cancel();
+        }
+        _ => {}
+    }
 }
