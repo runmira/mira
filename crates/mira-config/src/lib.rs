@@ -55,6 +55,82 @@ pub struct MiraConfig {
     /// Sensible defaults, so users get the feature without editing yaml.
     #[serde(default)]
     pub memory: MemoryRuntimeConfig,
+    /// Desktop control (the `computer` tool). Off unless enabled here or
+    /// with `--computer`.
+    #[serde(default, skip_serializing_if = "ComputerUseConfig::is_empty")]
+    pub computer: ComputerUseConfig,
+    /// Browser automation (the `browser` tool). Off unless enabled here
+    /// or with `--browser`.
+    #[serde(default, skip_serializing_if = "BrowserConfig::is_empty")]
+    pub browser: BrowserConfig,
+}
+
+/// `computer:` block. Every field is optional so a per-repo file can
+/// tune one knob; `enabled` itself is only honored from the global file
+/// (see [`MiraConfig::merge`]).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ComputerUseConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// Screenshot after every mouse/keyboard action. Default on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub screenshot_after_action: Option<bool>,
+    /// Longest screenshot edge sent to the model, in pixels. Default
+    /// 1568. Lower it (e.g. 1280) to cut image-token cost.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_long_edge: Option<u32>,
+    /// Pause before the follow-up screenshot, in ms. Default 600.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settle_ms: Option<u64>,
+}
+
+impl ComputerUseConfig {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled.unwrap_or(false)
+    }
+}
+
+/// `browser:` block. Same global-only rule for `enabled`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct BrowserConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// Browser binary. Unset auto-detects Chrome, Chromium, Edge, Brave.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub executable: Option<String>,
+    /// Run without a window. Default: headed when a display exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub headless: Option<bool>,
+    /// Profile directory (cookies, logins). Default
+    /// `~/.mira/browser/profile` — never the user's everyday profile.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile_dir: Option<String>,
+}
+
+impl BrowserConfig {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// `executable` with a leading `~` expanded.
+    pub fn executable_path(&self) -> Option<PathBuf> {
+        self.executable.as_deref().map(expand_tilde)
+    }
+
+    /// `profile_dir` with a leading `~` expanded.
+    pub fn profile_dir_path(&self) -> Option<PathBuf> {
+        self.profile_dir.as_deref().map(expand_tilde)
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled.unwrap_or(false)
+    }
 }
 
 /// Runtime knobs for the auto-extractor (post-round background pass that
@@ -319,6 +395,17 @@ impl MiraConfig {
             .memory
             .retrieval_token_budget
             .or(self.memory.retrieval_token_budget);
+        // Computer / browser: per-repo files may tune knobs but never
+        // switch the tools on — a cloned repo must not be able to grant
+        // itself control of the user's desktop or browser.
+        let c = other.computer;
+        self.computer.screenshot_after_action = c
+            .screenshot_after_action
+            .or(self.computer.screenshot_after_action);
+        self.computer.max_long_edge = c.max_long_edge.or(self.computer.max_long_edge);
+        self.computer.settle_ms = c.settle_ms.or(self.computer.settle_ms);
+        let b = other.browser;
+        self.browser.headless = b.headless.or(self.browser.headless);
         self
     }
 }
@@ -378,6 +465,19 @@ pub fn state_path() -> PathBuf {
         .unwrap_or_default()
         .join(".mira")
         .join("state.yaml")
+}
+
+/// Expand a leading `~` / `~/` to `$HOME`.
+fn expand_tilde(p: &str) -> PathBuf {
+    match p.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => {
+            let home = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_default();
+            home.join(rest.trim_start_matches('/'))
+        }
+        _ => PathBuf::from(p),
+    }
 }
 
 /// `~/.mira/MIRA.md` — user-global memory file path. Kept here (config
@@ -562,6 +662,28 @@ mod tests {
         let c = MiraConfig::default();
         assert!(c.default_model.is_none());
         assert!(c.providers.is_empty());
+    }
+
+    #[test]
+    fn per_repo_config_cannot_enable_computer_or_browser() {
+        let global = MiraConfig::default();
+        let local: MiraConfig = serde_yaml::from_str(
+            "computer:\n  enabled: true\n  max_long_edge: 1024\n\
+             browser:\n  enabled: true\n  executable: /tmp/evil\n  headless: true\n",
+        )
+        .unwrap();
+        let merged = global.merge(local);
+        assert!(!merged.computer.enabled());
+        assert_eq!(merged.computer.max_long_edge, Some(1024));
+        assert!(!merged.browser.enabled());
+        assert!(merged.browser.executable.is_none());
+        assert_eq!(merged.browser.headless, Some(true));
+
+        let global: MiraConfig =
+            serde_yaml::from_str("computer:\n  enabled: true\nbrowser:\n  enabled: true\n")
+                .unwrap();
+        let merged = global.merge(MiraConfig::default());
+        assert!(merged.computer.enabled() && merged.browser.enabled());
     }
 
     #[test]

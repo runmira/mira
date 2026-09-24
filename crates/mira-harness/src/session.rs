@@ -1593,10 +1593,20 @@ async fn dispatch_call(sess: &Session, call: ToolCall, tx: &mpsc::Sender<Harness
     let ok = !result.is_error;
     {
         let mut history = sess.history.lock().await;
-        history.push(Message::tool(
-            result.call_id.clone(),
-            truncate_for_history(&result.content),
-        ));
+        let has_images = !result.images.is_empty();
+        history.push(
+            Message::tool(
+                result.call_id.clone(),
+                truncate_for_history(&result.content),
+            )
+            .with_images(result.images.clone()),
+        );
+        // Screenshots are the fattest thing a tool can return; only the
+        // most recent few are worth resending. Older ones collapse to a
+        // text note so the model still knows one was taken.
+        if has_images {
+            crate::history::prune_old_images(&mut history, crate::history::KEEP_RECENT_IMAGES);
+        }
         // Dedup: if this was a read / write / edit for a specific path,
         // collapse any older `read_file` result targeting the same path
         // to a short stub. Same-lock scope so the walk sees exactly the
@@ -1851,6 +1861,8 @@ fn format_action(a: mira_tools::Action) -> &'static str {
         mira_tools::Action::Edit => "Edit",
         mira_tools::Action::Write => "Write",
         mira_tools::Action::Bash => "Bash",
+        mira_tools::Action::Computer => "Computer",
+        mira_tools::Action::Browser => "Browser",
         mira_tools::Action::Pure => "Pure",
     }
 }

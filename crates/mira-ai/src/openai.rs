@@ -280,15 +280,33 @@ impl<'a> WireRequest<'a> {
         // block); leaving it unmarked keeps it out of the cached prefix so
         // mid-session edits don't invalidate what's cached upstream.
         let mut first_system_seen = false;
-        let messages = req
-            .messages
-            .iter()
-            .map(|m| {
-                let is_first_system = matches!(m.role, mira_core::Role::System)
-                    && !std::mem::replace(&mut first_system_seen, true);
-                WireMessage::from_message(m, prompt_caching, is_first_system)
-            })
-            .collect();
+        let mut messages = Vec::with_capacity(req.messages.len());
+        // Chat Completions tool messages are text-only. Images a tool
+        // returned (screenshots) ride in a synthetic user message placed
+        // right after the run of tool messages. It can't go any earlier:
+        // every tool message has to follow its assistant turn directly.
+        let mut pending_images: Vec<&mira_core::ImageData> = Vec::new();
+        for (i, m) in req.messages.iter().enumerate() {
+            let is_first_system = matches!(m.role, mira_core::Role::System)
+                && !std::mem::replace(&mut first_system_seen, true);
+            messages.push(WireMessage::from_message(
+                m,
+                prompt_caching,
+                is_first_system,
+            ));
+            if matches!(m.role, mira_core::Role::Tool) {
+                pending_images.extend(m.images.iter());
+                let next_is_tool = req
+                    .messages
+                    .get(i + 1)
+                    .is_some_and(|n| matches!(n.role, mira_core::Role::Tool));
+                if !next_is_tool && !pending_images.is_empty() {
+                    messages.push(WireMessage::tool_images(std::mem::take(
+                        &mut pending_images,
+                    )));
+                }
+            }
+        }
         let response_format = req.response_format.as_ref().map(|fmt| match fmt {
             crate::ResponseFormat::JsonObject => WireResponseFormat::JsonObject,
             crate::ResponseFormat::JsonSchema {
@@ -342,6 +360,21 @@ struct WireMessage<'a> {
 enum WireContent<'a> {
     Text(&'a str),
     Blocks(Vec<WireContentBlock<'a>>),
+    Parts(Vec<WirePart>),
+}
+
+/// Multimodal user-content part (text or image). Owned because image
+/// parts carry a freshly built `data:` URL.
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum WirePart {
+    Text { text: String },
+    ImageUrl { image_url: WireImageUrl },
+}
+
+#[derive(Serialize)]
+struct WireImageUrl {
+    url: String,
 }
 
 #[derive(Serialize)]
@@ -366,6 +399,26 @@ impl CacheControl {
 }
 
 impl<'a> WireMessage<'a> {
+    /// Synthetic user turn carrying the images from the preceding tool
+    /// results.
+    fn tool_images(images: Vec<&mira_core::ImageData>) -> Self {
+        let mut parts = vec![WirePart::Text {
+            text: "Images returned by the tool call(s) above:".to_owned(),
+        }];
+        parts.extend(images.into_iter().map(|img| WirePart::ImageUrl {
+            image_url: WireImageUrl {
+                url: img.data_url(),
+            },
+        }));
+        Self {
+            role: "user",
+            content: Some(WireContent::Parts(parts)),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            name: None,
+        }
+    }
+
     fn from_message(m: &'a Message, prompt_caching: bool, is_first_system: bool) -> Self {
         // Mark the (first) system prompt with cache_control when caching is on.
         // Anthropic caches the prefix up to (and including) this breakpoint —
@@ -562,6 +615,41 @@ mod tests {
             reasoning_effort: None,
             response_format: None,
         }
+    }
+
+    #[test]
+    fn tool_images_follow_the_whole_tool_run_as_a_user_message() {
+        use mira_core::message::{ToolCallFunction, ToolCallKind};
+        use mira_core::{ImageData, ToolCall, ToolCallId};
+        let call = |id: &str| ToolCall {
+            id: ToolCallId::from(id.to_owned()),
+            kind: ToolCallKind::Function,
+            function: ToolCallFunction {
+                name: "computer".into(),
+                arguments: "{}".into(),
+            },
+        };
+        let mut req = base_req();
+        req.messages
+            .push(Message::assistant_calls(vec![call("a"), call("b")]));
+        req.messages.push(
+            Message::tool(ToolCallId::from("a".to_owned()), "shot")
+                .with_images(vec![ImageData::png("QUJD")]),
+        );
+        req.messages
+            .push(Message::tool(ToolCallId::from("b".to_owned()), "ok"));
+        let wire = WireRequest::from_request(&req, false);
+        let json = serde_json::to_value(&wire).unwrap();
+        let msgs = json["messages"].as_array().unwrap();
+        let roles: Vec<&str> = msgs.iter().map(|m| m["role"].as_str().unwrap()).collect();
+        assert_eq!(
+            roles,
+            ["system", "user", "assistant", "tool", "tool", "user"]
+        );
+        assert_eq!(
+            msgs[5]["content"][1]["image_url"]["url"],
+            "data:image/png;base64,QUJD"
+        );
     }
 
     #[test]

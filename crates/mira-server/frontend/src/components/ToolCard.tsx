@@ -349,6 +349,15 @@ function CompactToolRow({
             !(call.function.name in RESULT_SUPPRESSED) && (
               <ResultBlock content={result.content} isError={result.is_error ?? false} />
             )}
+          {result?.images?.map((img, i) => (
+            <img
+              key={i}
+              className="tool-screenshot"
+              src={`data:${img.media_type};base64,${img.data}`}
+              alt="Screenshot returned by the tool"
+              style={{ maxWidth: '100%', borderRadius: 6, marginTop: 8, display: 'block' }}
+            />
+          ))}
         </div>
       )}
     </div>

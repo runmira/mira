@@ -114,6 +114,38 @@ pub async fn run(cli: &crate::Cli, args: DoctorArgs) -> Result<()> {
         }
     }
 
+    // ---- computer use / browser ----
+    let computer_on = cli.computer || cfg.computer.enabled();
+    if computer_on {
+        for c in mira_computer::preflight().await {
+            let label = format!("computer · {}", c.label);
+            if c.ok {
+                report.pass(label, c.detail);
+            } else {
+                report.fail(label, c.detail);
+            }
+        }
+    } else {
+        report.info(
+            "computer use",
+            "off (enable with --computer or `computer.enabled: true`)",
+        );
+    }
+    let browser_on = cli.browser || cfg.browser.enabled();
+    let explicit = cfg.browser.executable_path();
+    match (
+        browser_on,
+        mira_browser::launch::find_executable(explicit.as_deref()),
+    ) {
+        (true, Ok(p)) => report.pass("browser", p.display().to_string()),
+        (true, Err(e)) => report.fail("browser", e.to_string()),
+        (false, Ok(p)) => report.info(
+            "browser",
+            format!("off (enable with --browser) · would use {}", p.display()),
+        ),
+        (false, Err(_)) => report.info("browser", "off (enable with --browser)"),
+    }
+
     // ---- optional network probe ----
     if args.ping {
         if let Some(s) = &settings {

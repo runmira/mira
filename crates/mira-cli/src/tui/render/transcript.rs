@@ -733,6 +733,7 @@ mod tests {
                 "id": 1, "subject": "Choose a file to edit",
                 "status": "pending", "created_at": 0, "updated_at": 0
             }})),
+            images: Vec::new(),
         });
         st.apply_task_payload(&mira_core::ToolResult {
             call_id: "2".into(),
@@ -742,6 +743,7 @@ mod tests {
                 "id": 1, "subject": "Choose a file to edit",
                 "status": "in_progress", "created_at": 0, "updated_at": 1
             }})),
+            images: Vec::new(),
         });
         assert_eq!(st.tasks.len(), 1);
         assert_eq!(
@@ -757,6 +759,7 @@ mod tests {
                 "id": 1, "subject": "x", "status": "deleted",
                 "created_at": 0, "updated_at": 2
             }})),
+            images: Vec::new(),
         });
         assert!(st.tasks.is_empty());
     }

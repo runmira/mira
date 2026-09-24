@@ -302,6 +302,7 @@ mod tests {
             content: "fn main() {}".into(),
             is_error: false,
             data: None,
+            images: Vec::new(),
         });
         let lines = super::transcript::settled_lines(&st, 100, st.entries().len());
         let joined: String = lines

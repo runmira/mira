@@ -28,9 +28,31 @@ pub enum Mode {
 
 impl Mode {
     pub fn default_for(self, action: Action) -> Decision {
+        self.default_for_target(action, "")
+    }
+
+    /// Mode default for a specific target. Only `Computer` and `Browser`
+    /// look at the target: their observation verbs (screenshot,
+    /// snapshot, …) are split from the verbs that change something
+    /// (click, type, navigate, …).
+    ///
+    /// Desktop control is the one family that never auto-approves a
+    /// mutating action, not even in `Yolo`: a stray click can land on
+    /// anything on the user's screen. Opting in takes an explicit
+    /// `Computer(...)` allow rule.
+    pub fn default_for_target(self, action: Action, target: &str) -> Decision {
         use Action::*;
         use Decision::*;
+        let observe = is_observation(target);
         match (self, action) {
+            (Mode::Plan | Mode::Manual, Computer) => Ask,
+            (_, Computer) if observe => Allow,
+            (_, Computer) => Ask,
+
+            (_, Browser) if observe => Allow,
+            (Mode::Plan | Mode::Manual | Mode::Auto, Browser) => Ask,
+            (Mode::Edit | Mode::Yolo, Browser) => Allow,
+
             // Plan mode used to be "reads only" — that blocked execution of
             // any user-approved plan. Now it defers to the manual defaults
             // and relies on the system prompt to steer the model into calling
@@ -82,5 +104,62 @@ impl Mode {
             Mode::Edit => "accept edits on",
             Mode::Yolo => "yolo · no gating",
         }
+    }
+}
+
+/// Verbs of the `computer` / `browser` tools that only look at the
+/// screen or page. The target's verb is everything before the first `:`.
+const OBSERVATION_VERBS: &[&str] = &[
+    "screenshot",
+    "cursor_position",
+    "zoom",
+    "wait",
+    "snapshot",
+    "get_text",
+    "list_tabs",
+];
+
+fn is_observation(target: &str) -> bool {
+    let verb = target.split_once(':').map_or(target, |(v, _)| v);
+    OBSERVATION_VERBS.contains(&verb)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn computer_actions_prompt_even_in_yolo() {
+        for mode in [Mode::Manual, Mode::Auto, Mode::Edit, Mode::Yolo] {
+            assert_eq!(
+                mode.default_for_target(Action::Computer, "left_click:10,10"),
+                Decision::Ask,
+                "{mode:?}"
+            );
+        }
+        assert_eq!(
+            Mode::Manual.default_for_target(Action::Computer, "screenshot"),
+            Decision::Ask
+        );
+        assert_eq!(
+            Mode::Auto.default_for_target(Action::Computer, "screenshot"),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn browser_observation_is_free_but_actions_gate_below_edit() {
+        assert_eq!(
+            Mode::Manual.default_for_target(Action::Browser, "snapshot"),
+            Decision::Allow
+        );
+        assert_eq!(
+            Mode::Auto.default_for_target(Action::Browser, "navigate:https://x.dev"),
+            Decision::Ask
+        );
+        assert_eq!(
+            Mode::Edit.default_for_target(Action::Browser, "click:e3"),
+            Decision::Allow
+        );
     }
 }

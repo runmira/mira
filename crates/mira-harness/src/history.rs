@@ -65,6 +65,40 @@ const STUBBABLE_TOOL: &str = "read_file";
 /// older one; a write/edit invalidates all older reads.
 const SUPERSEDING_TOOLS: &[&str] = &["read_file", "write_file", "edit_file"];
 
+/// How many image-bearing tool results stay intact in history. Older
+/// ones lose their images (see [`prune_old_images`]). Three matches
+/// Anthropic's computer-use reference loop: enough for the model to
+/// compare "before" and "after" an action without paying for a whole
+/// session of screenshots on every request.
+pub const KEEP_RECENT_IMAGES: usize = 3;
+
+/// Note appended to a tool result whose images were pruned.
+const IMAGE_PRUNED_NOTE: &str = "[screenshot omitted from history — a newer one supersedes it]";
+
+/// Drop the images from every image-bearing message except the `keep`
+/// most recent. The message itself stays (tool_call_id pairing must
+/// survive); its text gains a short note so the transcript still reads
+/// coherently. Idempotent: already-pruned messages have no images left
+/// and are skipped.
+pub fn prune_old_images(history: &mut [Message], keep: usize) {
+    let mut seen = 0usize;
+    for msg in history.iter_mut().rev() {
+        if msg.images.is_empty() {
+            continue;
+        }
+        seen += 1;
+        if seen <= keep {
+            continue;
+        }
+        msg.images.clear();
+        let text = msg.content.get_or_insert_with(String::new);
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(IMAGE_PRUNED_NOTE);
+    }
+}
+
 /// Walk back through `history` and stub any prior `read_file` results
 /// whose call targeted the same `path`. No-op when `tool_name` isn't
 /// in `SUPERSEDING_TOOLS` or `path` is empty.
@@ -365,6 +399,7 @@ mod tests {
             }],
             tool_call_id: None,
             name: None,
+            images: Vec::new(),
         }
     }
 
@@ -382,11 +417,37 @@ mod tests {
             }],
             tool_call_id: None,
             name: None,
+            images: Vec::new(),
         }
     }
 
     fn tool_result(id: &str, content: &str) -> Message {
         Message::tool(cid(id), content)
+    }
+
+    #[test]
+    fn prune_old_images_keeps_only_the_most_recent() {
+        let img = || vec![mira_core::ImageData::png("AAAA")];
+        let mut h = vec![
+            tool_result("a", "shot a").with_images(img()),
+            tool_result("b", "shot b").with_images(img()),
+            tool_result("c", "no image"),
+            tool_result("d", "shot d").with_images(img()),
+        ];
+        prune_old_images(&mut h, 2);
+        assert!(h[0].images.is_empty());
+        assert!(h[0]
+            .content
+            .as_deref()
+            .unwrap()
+            .contains("screenshot omitted"));
+        assert_eq!(h[1].images.len(), 1);
+        assert_eq!(h[2].content.as_deref(), Some("no image"));
+        assert_eq!(h[3].images.len(), 1);
+        // Idempotent.
+        let before = h[0].content.clone();
+        prune_old_images(&mut h, 2);
+        assert_eq!(h[0].content, before);
     }
 
     #[test]

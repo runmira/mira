@@ -491,10 +491,55 @@ enum WireContentBlock<'a> {
     },
     ToolResult {
         tool_use_id: &'a str,
-        content: &'a str,
+        content: WireToolResultContent<'a>,
         #[serde(skip_serializing_if = "std::ops::Not::not")]
         is_error: bool,
     },
+}
+
+/// `tool_result.content`: a bare string for text-only results, or a
+/// block array when the tool returned images (screenshots).
+#[derive(Serialize)]
+#[serde(untagged)]
+enum WireToolResultContent<'a> {
+    Text(&'a str),
+    Blocks(Vec<WireToolResultBlock<'a>>),
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum WireToolResultBlock<'a> {
+    Text { text: &'a str },
+    Image { source: WireImageSource<'a> },
+}
+
+#[derive(Serialize)]
+struct WireImageSource<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    media_type: &'a str,
+    data: &'a str,
+}
+
+fn tool_result_content(msg: &Message) -> WireToolResultContent<'_> {
+    let text = msg.content.as_deref().unwrap_or("");
+    if msg.images.is_empty() {
+        return WireToolResultContent::Text(text);
+    }
+    let mut blocks = Vec::with_capacity(msg.images.len() + 1);
+    if !text.is_empty() {
+        blocks.push(WireToolResultBlock::Text { text });
+    }
+    for img in &msg.images {
+        blocks.push(WireToolResultBlock::Image {
+            source: WireImageSource {
+                kind: "base64",
+                media_type: &img.media_type,
+                data: &img.data,
+            },
+        });
+    }
+    WireToolResultContent::Blocks(blocks)
 }
 
 #[derive(Serialize)]
@@ -586,7 +631,7 @@ fn build_messages(messages: &[Message]) -> Result<Vec<WireMessage<'_>>, Provider
                 })?;
                 pending_tool_results.push(WireContentBlock::ToolResult {
                     tool_use_id: call_id.as_str(),
-                    content: msg.content.as_deref().unwrap_or(""),
+                    content: tool_result_content(msg),
                     is_error: false,
                 });
             }
@@ -825,6 +870,35 @@ mod tests {
             reasoning_effort: None,
             response_format: None,
         }
+    }
+
+    #[test]
+    fn tool_result_with_images_becomes_block_array() {
+        let req = req_with(vec![
+            Message::user("look"),
+            Message::assistant_calls(vec![tool_call(
+                "c1",
+                "computer",
+                r#"{"action":"screenshot"}"#,
+            )]),
+            Message::tool(ToolCallId::from("c1".to_owned()), "1280x800")
+                .with_images(vec![mira_core::ImageData::png("QUJD")]),
+        ]);
+        let body = WireRequest::build(&req, false).unwrap();
+        let json = serde_json::to_value(&body).unwrap();
+        let result = &json["messages"][2]["content"][0];
+        assert_eq!(result["type"], "tool_result");
+        let blocks = result["content"].as_array().unwrap();
+        assert_eq!(
+            blocks[0],
+            serde_json::json!({"type": "text", "text": "1280x800"})
+        );
+        assert_eq!(
+            blocks[1],
+            serde_json::json!({"type": "image", "source": {
+                "type": "base64", "media_type": "image/png", "data": "QUJD"
+            }})
+        );
     }
 
     #[test]

@@ -90,6 +90,18 @@ pub(crate) struct Cli {
     #[arg(long)]
     no_persist: bool,
 
+    /// Enable the `computer` tool for this run: screenshots plus mouse and
+    /// keyboard control of your desktop. Every action asks first unless
+    /// a `Computer(...)` allow rule covers it. Same as `computer.enabled`
+    /// in ~/.mira/mira.yaml.
+    #[arg(long, global = true)]
+    computer: bool,
+
+    /// Enable the `browser` tool for this run: drive Chrome/Chromium in
+    /// a separate Mira profile. Same as `browser.enabled` in mira.yaml.
+    #[arg(long, global = true)]
+    browser: bool,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -233,6 +245,7 @@ async fn main() -> Result<()> {
             }
         }
     }
+    register_computer_use(&mut registry, &cli, &cfg).await;
     // Snapshot the base registry BEFORE the interactive/agent tools
     // land — this is what child sessions inherit when the `agent` tool
     // spawns a subagent. Keeping `agent` OUT of the base prevents an
@@ -713,4 +726,28 @@ fn system_prompt(cwd: &std::path::Path, registry: &Registry) -> String {
         "You are Mira, an interactive coding agent running in a terminal.",
         1,
     )
+}
+
+/// Register `computer` / `browser` when enabled by flag or global config,
+/// printing what happened. Shared by the TUI/REPL and `mira serve` boots.
+pub(crate) async fn register_computer_use(registry: &mut Registry, cli: &Cli, cfg: &MiraConfig) {
+    let enable_computer = cli.computer || cfg.computer.enabled();
+    let enable_browser = cli.browser || cfg.browser.enabled();
+    if !enable_computer && !enable_browser {
+        return;
+    }
+    let report = builtin::register_computer_use(
+        registry,
+        enable_computer,
+        &cfg.computer,
+        enable_browser,
+        &cfg.browser,
+    )
+    .await;
+    for w in &report.warnings {
+        eprintln!("warning: {w}");
+    }
+    if let Some(backend) = report.computer {
+        eprintln!("computer use enabled ({backend}); every desktop action asks for approval");
+    }
 }
