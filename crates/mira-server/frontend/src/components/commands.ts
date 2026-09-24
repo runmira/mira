@@ -12,6 +12,8 @@ import {
   Sparkle,
   SlidersHorizontal,
   Target,
+  Lightning,
+  TerminalWindow,
 } from '@phosphor-icons/react';
 import type { Mode } from '../types';
 
@@ -85,8 +87,29 @@ export type SlashCommand = {
    *  "control" commands (`/new`, `/mode plan`, `/settings`, …) whose
    *  `run` fires a side effect and returns `undefined`. */
   isSkill?: boolean;
+  /** Custom command (user, project or plugin) or MCP prompt. The
+   *  composer sends `/name args` as the message and the server expands
+   *  it; `run` is never called. */
+  isCustom?: boolean;
+  /** Where a custom command comes from, e.g. `plugin:commit-commands`. */
+  source?: string;
   run: (args: string, ctx: SlashCtx) => string | undefined;
 };
+
+/** A custom command or MCP prompt from `/api/commands` as a palette
+ *  entry. */
+export function customToCommand(c: { name: string; description: string; argument_hint: string | null; source: string }): SlashCommand {
+  return {
+    name: c.name,
+    description: c.description || c.source,
+    usage: `/${c.name}${c.argument_hint ? ` ${c.argument_hint}` : ''}`,
+    icon: c.source.startsWith('mcp:') ? Lightning : TerminalWindow,
+    takesArgs: !!c.argument_hint,
+    isCustom: true,
+    source: c.source,
+    run: () => undefined,
+  };
+}
 
 const MODE_VALUES: Mode[] = ['plan', 'manual', 'auto', 'edit', 'yolo'];
 
@@ -315,6 +338,7 @@ export const COMMANDS: SlashCommand[] = [
  *  mid-sentence). */
 export function slashState(
   text: string,
+  custom: SlashCommand[] = [],
 ):
   | { mode: 'palette'; query: string; trigger: '/' | '@'; triggerStart: number }
   | { mode: 'args'; command: SlashCommand; args: string; trigger: '/' | '@'; triggerStart: number }
@@ -327,8 +351,9 @@ export function slashState(
     if (spaceIdx < 0) {
       return { mode: 'palette', query: body, trigger, triggerStart: 0 };
     }
-    const name = body.slice(0, spaceIdx).toLowerCase();
-    const command = findCommand(name);
+    const rawName = body.slice(0, spaceIdx);
+    const name = rawName.toLowerCase();
+    const command = custom.find((c) => c.name === rawName) ?? findCommand(name);
     if (!command) {
       return { mode: 'palette', query: name, trigger, triggerStart: 0 };
     }
@@ -394,9 +419,12 @@ export function filterCommands(
   query: string,
   trigger: '/' | '@' = '/',
   skills: PaletteSkill[] = [],
+  custom: SlashCommand[] = [],
 ): SlashCommand[] {
   const q = query.toLowerCase().trim();
-  const skillCmds = skills.map(skillToCommand);
+  // Custom commands (project/user/plugin) and MCP prompts ride with the
+  // skills: they win a name clash with a built-in.
+  const skillCmds = [...custom, ...skills.map(skillToCommand)];
   // Dedupe by name — when a skill collides with a built-in (e.g. a user
   // drops `~/.mira/skills/commit/` that shadows the built-in `commit`
   // template), the skill wins. Otherwise the palette would show two
