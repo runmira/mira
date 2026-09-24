@@ -85,6 +85,12 @@ pub struct CloudConfig {
     /// `preinstalled` (the template has it), `upload`, or `release`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub install: Option<String>,
+    /// Linux x86_64 `mira` binary to upload into the sandbox (used by
+    /// `install: auto` and `upload`). Lets macOS / Windows launch tasks
+    /// before a release ships the cloud worker; build one with
+    /// `cargo zigbuild --release -p mira-cli --target x86_64-unknown-linux-gnu`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binary: Option<String>,
     /// Wall-clock budget per task. Match your E2B plan's session limit.
     /// Default 3600.
     #[serde(skip_serializing_if = "Option::is_none")]

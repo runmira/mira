@@ -60,6 +60,7 @@ cloud:
   budget_usd: 5             # when the model's pricing is known
   evaluator_model: claude-haiku-4-5   # cheaper judge for the goal loop
   install: auto             # auto | preinstalled | upload | release
+  binary: ~/code/mira/target/x86_64-unknown-linux-gnu/release/mira   # Linux build to upload
   auto_shutdown: true       # sandbox deletes itself when done (needs the E2B key inside)
 
 compute:
@@ -78,12 +79,26 @@ sandbox limit.
 
 ## Getting Mira into the sandbox
 
-`install: auto` (the default) uploads the `mira` you're running when
-you're on Linux x86_64. Otherwise it installs the matching release in
-the sandbox with `install.sh`, so that release has to be published.
+E2B sandboxes are Linux x86_64, so they need a Linux `mira` that includes
+the cloud worker. `install: auto` (the default) picks, in order:
 
-It's fastest to bake Mira and your toolchain into an E2B template and set
-`install: preinstalled`:
+1. **`cloud.binary`** (or `MIRA_CLOUD_BINARY`): a Linux x86_64 build you
+   point at, which is uploaded.
+2. **The running `mira`**, when you launch from Linux x86_64. It's
+   uploaded as is.
+3. **The matching release**, installed in the sandbox with `install.sh`.
+   Only works once a release that includes the cloud worker is published.
+
+**From macOS**, build a Linux binary once and point at it:
+
+```sh
+brew install zig
+scripts/build-linux-mira.sh             # → target/x86_64-unknown-linux-gnu/release/mira
+export MIRA_CLOUD_BINARY=$PWD/target/x86_64-unknown-linux-gnu/release/mira
+```
+
+**Fastest option:** bake Mira and your toolchain into an E2B template
+and set `install: preinstalled`:
 
 ```dockerfile
 # e2b.Dockerfile — start from E2B's base image (see their template docs

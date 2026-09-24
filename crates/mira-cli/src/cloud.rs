@@ -148,17 +148,36 @@ fn environment(cfg: &MiraConfig, flag: Option<&str>) -> Result<EnvironmentSpec> 
 
 fn install_mode(cfg: &MiraConfig) -> Result<MiraInstall> {
     let release = || MiraInstall::Release(format!("v{}", env!("CARGO_PKG_VERSION")));
+    // An explicit Linux build (`cloud.binary`, or MIRA_CLOUD_BINARY) wins;
+    // otherwise the running binary when it can run in the sandbox.
+    let linux_binary = || -> Result<Option<std::path::PathBuf>> {
+        let explicit = std::env::var("MIRA_CLOUD_BINARY")
+            .ok()
+            .or_else(|| cfg.cloud.binary.clone());
+        if let Some(p) = explicit {
+            let p = std::path::PathBuf::from(shellexpand::tilde(&p).as_ref());
+            if !p.is_file() {
+                bail!("cloud.binary `{}` doesn't exist", p.display());
+            }
+            return Ok(Some(p));
+        }
+        Ok(cfg!(all(target_os = "linux", target_arch = "x86_64"))
+            .then(std::env::current_exe)
+            .transpose()?)
+    };
     Ok(match cfg.cloud.install.as_deref().unwrap_or("auto") {
         "preinstalled" => MiraInstall::Preinstalled,
         "release" => release(),
-        "upload" => MiraInstall::Upload(std::env::current_exe()?),
-        "auto" => {
-            if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
-                MiraInstall::Upload(std::env::current_exe()?)
-            } else {
-                release()
-            }
-        }
+        "upload" => MiraInstall::Upload(linux_binary()?.ok_or_else(|| {
+            anyhow!(
+                "`install: upload` from this OS needs a Linux x86_64 build: set cloud.binary \
+                 (see docs/cloud-tasks.md)"
+            )
+        })?),
+        "auto" => match linux_binary()? {
+            Some(p) => MiraInstall::Upload(p),
+            None => release(),
+        },
         other => bail!("cloud.install: unknown value `{other}` (auto|preinstalled|upload|release)"),
     })
 }

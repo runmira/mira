@@ -21,6 +21,7 @@ mira-policy   = { workspace = true }
 mira-computer = { workspace = true }
 mira-compute  = { workspace = true }
 mira-cloud    = { workspace = true }
+shellexpand   = { workspace = true }
 mira-browser  = { workspace = true }
 mira-sandbox  = { workspace = true }
 mira-harness  = { workspace = true }
