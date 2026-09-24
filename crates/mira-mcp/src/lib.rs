@@ -10,6 +10,8 @@
 //!   reconnect with backoff, live config changes, OAuth sign-in, status
 //!   events, and the tools handed to sessions.
 //!
+//! - [`vars`]: saved values for `${VAR}`s (tokens pasted in the UI).
+//!
 //! Transports: stdio, streamable HTTP and the older HTTP+SSE.
 
 pub mod auth;
@@ -20,6 +22,7 @@ pub mod spec;
 pub mod sse;
 pub mod state;
 mod tool;
+pub mod vars;
 
 pub use manager::{
     McpEvent, McpManager, McpOptions, PromptArgView, PromptView, ResourceView, ServerView, Status,

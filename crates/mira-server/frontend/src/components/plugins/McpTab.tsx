@@ -46,6 +46,8 @@ export function statusText(s: McpServerView): string {
       return 'Rejected';
     case 'disabled':
       return 'Disabled';
+    case 'needs_setup':
+      return `Needs ${s.status.variables.join(', ')} (set it in your environment and restart Mira)`;
     case 'failed':
       return `Failed: ${s.status.message}`;
   }
@@ -59,6 +61,7 @@ export function StatusDot({ status }: { status: McpStatus }) {
     needs_approval:  'bg-amber-400',
     rejected:        'bg-white/20',
     disabled:        'bg-white/20',
+    needs_setup:     'bg-amber-400',
     failed:          'bg-destructive',
   }[status.state];
   return <span className={cn('mt-[7px] size-2 shrink-0 rounded-full', cls)} />;

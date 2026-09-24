@@ -35,6 +35,9 @@ struct Fake {
     /// code → PKCE challenge, to check the verifier at /token.
     codes: Arc<Mutex<HashMap<String, String>>>,
     tokens_issued: Arc<Mutex<u32>>,
+    /// How `/register` behaves: `ok`, `none` (not advertised) or
+    /// `forbidden` (only approved apps, like Figma's).
+    registration: Arc<Mutex<&'static str>>,
     /// For SSE: messages to push down the open stream.
     sse_tx: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<String>>>>,
 }
@@ -108,7 +111,7 @@ async fn auth_server(State(f): State<Fake>) -> Json<Value> {
         "issuer": b,
         "authorization_endpoint": format!("{b}/authorize"),
         "token_endpoint": format!("{b}/token"),
-        "registration_endpoint": format!("{b}/register"),
+        "registration_endpoint": (*f.registration.lock().unwrap() != "none").then(|| format!("{b}/register")),
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code", "refresh_token"],
         "code_challenge_methods_supported": ["S256"],
@@ -116,7 +119,10 @@ async fn auth_server(State(f): State<Fake>) -> Json<Value> {
     }))
 }
 
-async fn register(Json(body): Json<Value>) -> (StatusCode, Json<Value>) {
+async fn register(State(f): State<Fake>, Json(body): Json<Value>) -> (StatusCode, Json<Value>) {
+    if *f.registration.lock().unwrap() == "forbidden" {
+        return (StatusCode::FORBIDDEN, Json(json!({"error": "forbidden"})));
+    }
     (
         StatusCode::CREATED,
         Json(json!({
@@ -235,6 +241,7 @@ async fn sse_post(State(f): State<Fake>, Json(msg): Json<Value>) -> StatusCode {
 
 async fn start() -> (Fake, String) {
     let fake = Fake::default();
+    *fake.registration.lock().unwrap() = "ok";
     let app = Router::new()
         .route(
             "/mcp",
@@ -404,5 +411,58 @@ async fn static_headers_and_sse() {
     );
     let out = mgr.call_tool("legacy", "whoami", None).await.unwrap();
     assert!(!out.content.is_empty());
+    mgr.shutdown();
+}
+
+/// A plugin header like `Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN}` with the
+/// variable unset: the header is left out, the server asks for sign-in,
+/// and when sign-in isn't possible the message says to add the token.
+#[tokio::test]
+async fn unset_token_header_falls_back_to_sign_in() {
+    let (fake, base) = start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = McpManager::new(options(dir.path()));
+    let headers: BTreeMap<String, String> = [(
+        "Authorization".to_owned(),
+        "Bearer ${MIRA_TEST_GH_TOKEN_UNSET}".to_owned(),
+    )]
+    .into();
+    mgr.apply(
+        vec![remote(
+            "gh",
+            Transport::Http {
+                url: format!("{base}/mcp"),
+                headers,
+                oauth: None,
+            },
+        )],
+        None,
+    );
+    wait_for(&mgr, "gh", Status::NeedsAuth).await;
+    assert_eq!(
+        mgr.server("gh").unwrap().missing_vars,
+        ["MIRA_TEST_GH_TOKEN_UNSET"]
+    );
+
+    *fake.registration.lock().unwrap() = "none";
+    let err = mgr
+        .begin_sign_in("gh", "http://127.0.0.1:1/callback")
+        .await
+        .unwrap_err();
+    assert!(err.contains("doesn't let apps register"), "{err}");
+    assert!(err.contains("MIRA_TEST_GH_TOKEN_UNSET"), "{err}");
+
+    *fake.registration.lock().unwrap() = "forbidden";
+    let err = mgr
+        .begin_sign_in("gh", "http://127.0.0.1:1/callback")
+        .await
+        .unwrap_err();
+    assert!(err.contains("only lets apps it has approved"), "{err}");
+
+    // Pasting the token (the server accepts any `Bearer tok-…`) connects.
+    mgr.set_variable("MIRA_TEST_GH_TOKEN_UNSET", Some("tok-pasted"))
+        .unwrap();
+    wait_for(&mgr, "gh", Status::Connected).await;
+    assert!(mgr.server("gh").unwrap().missing_vars.is_empty());
     mgr.shutdown();
 }

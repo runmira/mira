@@ -23,6 +23,7 @@ import {
   type PluginsOverview,
 } from '../api';
 import { cn } from '@/lib/utils';
+import { isDesktop, openExternal } from '../lib/desktop';
 import { DiscoverTab } from './plugins/DiscoverTab';
 import { InstalledTab } from './plugins/InstalledTab';
 import { MarketplacesTab } from './plugins/MarketplacesTab';
@@ -52,6 +53,8 @@ export function PluginsPanel({ version = 0 }: { version?: number }) {
   const [editor, setEditor] = useState<{ editing: McpServerView | null } | null>(null);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
   const [localVersion, setLocalVersion] = useState(0);
+  // The sign-in in progress, with its link in case the tab didn't open.
+  const [signIn, setSignIn] = useState<{ name: string; url: string } | null>(null);
   const { busy, error, setError, run } = useActions();
 
   const refresh = useCallback(async () => {
@@ -120,11 +123,26 @@ export function PluginsPanel({ version = 0 }: { version?: number }) {
     onReconnect: (name: string) => run(`mcp:${name}`, () => reconnectMcp(name)).then(afterMcp),
     onToggle: (name: string, enabled: boolean) => run(`mcp:${name}`, () => setMcpEnabled(name, enabled)).then(afterMcp),
     onApprove: (name: string, approve: boolean) => run(`mcp:${name}`, () => setMcpApproval(name, approve)).then(afterMcp),
-    onSignIn: (name: string) =>
-      run(`mcp:${name}`, async () => {
-        const { url } = await signInMcp(name);
-        window.open(url, '_blank', 'noopener,noreferrer');
-      }),
+    onSignIn: (name: string) => {
+      // Open the tab now, while this is still the user's click: a tab
+      // opened after the request returns gets silently pop-up blocked.
+      const tab = isDesktop() ? null : window.open('about:blank', '_blank');
+      return run(`mcp:${name}`, async () => {
+        try {
+          const { url } = await signInMcp(name);
+          if (isDesktop()) {
+            await openExternal(url);
+          } else if (tab && !tab.closed) {
+            tab.opener = null;
+            tab.location.href = url;
+          }
+          setSignIn({ name, url });
+        } catch (e) {
+          tab?.close();
+          throw e;
+        }
+      });
+    },
     onSignOut: (name: string) => run(`mcp:${name}`, () => signOutMcp(name)).then(afterMcp),
   };
 
@@ -239,6 +257,30 @@ export function PluginsPanel({ version = 0 }: { version?: number }) {
 
       {loadError && <ErrorBanner message={loadError} />}
       {error && <ErrorBanner message={error} onDismiss={() => setError(null)} />}
+      {signIn && mcp?.servers.find((s) => s.name === signIn.name)?.status.state !== 'connected' && (
+        <div className="flex items-center gap-3 rounded-lg border border-mira-blue/30 bg-mira-blue/[0.06] px-3 py-2 text-[13px]">
+          <span className="min-w-0 flex-1">
+            Finish signing in to <b>{signIn.name}</b> in your browser. This page updates when you’re done.
+          </span>
+          <a
+            href={signIn.url}
+            target="_blank"
+            rel="noreferrer"
+            className="shrink-0 text-mira-blue underline-offset-2 hover:underline"
+            onClick={(e) => {
+              if (isDesktop()) {
+                e.preventDefault();
+                openExternal(signIn.url);
+              }
+            }}
+          >
+            Open sign-in page
+          </a>
+          <button type="button" onClick={() => setSignIn(null)} className="shrink-0 text-muted-foreground hover:text-foreground">
+            Dismiss
+          </button>
+        </div>
+      )}
 
       {!plugins || !mcp ? (
         !loadError && <div className="py-10 text-center text-[13px] text-muted-foreground">Loading…</div>

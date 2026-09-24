@@ -286,12 +286,30 @@ async fn clear_failures_for_bad_definitions() {
         other => panic!("{n}: {other:?}"),
     };
     assert!(msg("hang").contains("MCP_TIMEOUT"), "{}", msg("hang"));
-    assert!(
-        msg("needs-token").contains("MIRA_TEST_SURELY_UNSET"),
-        "{}",
-        msg("needs-token")
-    );
     assert!(msg("nope").contains("couldn't start"), "{}", msg("nope"));
+
+    // An unset variable isn't a failure: the server waits for it, and
+    // saving a value (as the Plugins page does) connects it.
+    let view = mgr.server("needs-token").unwrap();
+    assert_eq!(
+        view.status,
+        Status::NeedsSetup {
+            variables: vec!["MIRA_TEST_SURELY_UNSET".into()]
+        }
+    );
+    assert_eq!(view.missing_vars, ["MIRA_TEST_SURELY_UNSET"]);
+    mgr.set_variable("MIRA_TEST_SURELY_UNSET", Some("tok"))
+        .unwrap();
+    for _ in 0..200 {
+        if mgr.server("needs-token").unwrap().status == Status::Connected {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let view = mgr.server("needs-token").unwrap();
+    assert_eq!(view.status, Status::Connected);
+    assert!(view.missing_vars.is_empty());
+    assert_eq!(mgr.saved_variables(), ["MIRA_TEST_SURELY_UNSET"]);
     let _: PathBuf = dir.path().into();
     mgr.shutdown();
 }
