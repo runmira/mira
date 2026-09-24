@@ -20,6 +20,12 @@
 
 use crate::tui::state::TuiState;
 
+/// Sentinel row for entries that live in the terminal's real
+/// scrollback (mirrored via `insert_before`), not in the viewport.
+/// Layout keeps one slot per entry so indices stay global — anything
+/// reading the table must skip this value instead of scrolling to it.
+pub(crate) const SCROLLBACK_ROW: usize = usize::MAX;
+
 /// Derived geometry of the transcript for one (width, content) pair.
 #[derive(Clone, Debug, Default)]
 pub struct TranscriptLayout {
@@ -32,6 +38,8 @@ pub struct TranscriptLayout {
     /// `entry_row_starts[i]` = first rendered row of log entry `i`.
     /// Batched tool groups map every covered entry to the same start
     /// so search hits and turn-nav jumps still land correctly.
+    /// Entries already mirrored into real scrollback map to
+    /// [`SCROLLBACK_ROW`] — callers must not scroll to it.
     pub entry_row_starts: Vec<usize>,
 }
 
@@ -47,6 +55,7 @@ impl TranscriptLayout {
 ///
 /// Precedence: turn-nav jump > active search hit > follow-tail >
 /// wherever the user last scrolled to.
+#[allow(dead_code)]
 pub(crate) fn resolve_scroll(
     state: &TuiState,
     layout: &TranscriptLayout,
@@ -54,13 +63,25 @@ pub(crate) fn resolve_scroll(
 ) -> u16 {
     let tail = layout.tail();
     if let Some(idx) = state.turn_scroll_target {
-        let start = layout.entry_row_starts.get(idx).copied().unwrap_or(0) as u16;
+        let start = layout.entry_row_starts.get(idx).copied().unwrap_or(0);
+        if start == SCROLLBACK_ROW {
+            // Target already scrolled into real scrollback — hold
+            // position; the key handler flashes where to look.
+            return state.scroll.min(tail);
+        }
         // Anchor the user prompt line near the top so what comes after
         // (assistant reply, tool group) fills the viewport.
-        start.saturating_sub(1).min(tail)
+        (start as u16).saturating_sub(1).min(tail)
     } else if let Some((entry_idx, _)) = state.active_hit() {
-        let start = layout.entry_row_starts.get(entry_idx).copied().unwrap_or(0) as u16;
-        start.saturating_sub(viewport_height / 3).min(tail)
+        let start = layout
+            .entry_row_starts
+            .get(entry_idx)
+            .copied()
+            .unwrap_or(0);
+        if start == SCROLLBACK_ROW {
+            return state.scroll.min(tail);
+        }
+        (start as u16).saturating_sub(viewport_height / 3).min(tail)
     } else if state.follow_tail {
         tail
     } else {

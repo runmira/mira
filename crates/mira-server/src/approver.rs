@@ -53,6 +53,7 @@ pub type PendingMap = Arc<Mutex<HashMap<String, PendingEntry>>>;
 /// answering would otherwise hold the shell mutex + the approval oneshot
 /// forever; 10 minutes leaves the user plenty of time to read a diff and
 /// still guarantees eventual forward progress.
+/// This bound applies even when no client ever answers.
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(600);
 
 pub struct WsApprover {

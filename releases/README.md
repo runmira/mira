@@ -95,4 +95,4 @@ formula patch → tap sync → landing-site update.
 
 ## Past releases
 
-Notes live in this folder: [`v0.3.8.md`](./v0.3.8.md).
+Notes live in this folder: [`v0.3.9.md`](./v0.3.9.md), [`v0.3.8.md`](./v0.3.8.md).

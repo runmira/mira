@@ -233,6 +233,14 @@ async fn main() -> Result<()> {
             }
         }
     }
+    // Snapshot the base registry BEFORE the interactive/agent tools
+    // land — this is what child sessions inherit when the `agent` tool
+    // spawns a subagent. Keeping `agent` OUT of the base prevents an
+    // unbounded recursion of "agent spawns agent spawns agent"; the
+    // AgentTool re-adds itself into child registries with proper depth
+    // controls when it wants nested spawning.
+    let base_registry_for_subagents = Arc::new(registry.clone());
+
     // Interactive prompt tools (`plan`, `ask_user`) ride an mpsc pair
     // into the TUI event loop — same wire pattern as the approver. The
     // receiver travels to `tui::run` via TuiConfig; without a TUI
@@ -241,6 +249,31 @@ async fn main() -> Result<()> {
     let (prompt_channel, prompt_rx) = tui::TuiPromptChannel::new();
     registry.register(mira_tools::prompt::PlanTool::new(prompt_channel.clone()));
     registry.register(mira_tools::prompt::AskUserTool::new(prompt_channel));
+
+    // Agent tool + subagent event broadcast. AgentTool reuses the
+    // server crate's implementation (it's mature and already wires
+    // ScratchpadTool, worktrees, and reviewer flow); we drive its
+    // `Subagent*` frames into the TUI via a broadcast channel so the
+    // nested cell can render each child's live tool uses. The receiver
+    // travels to `tui::run` via TuiConfig; no TUI means no subscriber,
+    // and AgentTool silently drops the events (never blocks).
+    let (subagent_events_tx, subagent_events_rx) =
+        tokio::sync::broadcast::channel::<mira_server::protocol::ServerMsg>(256);
+    let agents_registry = Arc::new(mira_agents::load(&cwd));
+    tracing::info!(
+        count = agents_registry.names().len(),
+        types = ?agents_registry.names(),
+        "mira-cli: loaded agent types"
+    );
+    // agent_tool registration is deferred until after `store` is
+    // created (below) so we can wire .with_store() in one step.
+    let agent_tool_builder = mira_server::interactive::AgentTool::new(
+        provider.clone(),
+        base_registry_for_subagents.clone(),
+        settings.model.clone(),
+    )
+    .with_agents(agents_registry.clone())
+    .with_events_tx(subagent_events_tx.clone());
 
     // Shared memory + episodic stores. `memory_remember` writes episodic
     // entries here, and the memory snapshot below reads from the same
@@ -290,6 +323,13 @@ async fn main() -> Result<()> {
             }
         }
     };
+
+    // Register the agent tool now that `store` is available.
+    let mut agent_tool = agent_tool_builder;
+    if let Some(s) = &store {
+        agent_tool = agent_tool.with_store(s.clone());
+    }
+    registry.register(agent_tool);
 
     // --- session (fresh or resumed)
     let mut sess_cfg = SessionConfig::new(settings.model.clone());
@@ -385,10 +425,12 @@ async fn main() -> Result<()> {
             session,
             tui::TuiConfig {
                 model: settings.model,
+                provider: settings.provider_name.clone(),
                 mode: settings.mode,
                 policy,
                 approval_rx: approval_rx.expect("tui branch created a receiver"),
                 prompt_rx,
+                subagent_events_rx,
                 cwd: cwd.clone(),
                 skills: skills_handle,
                 store: store.clone(),

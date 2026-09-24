@@ -16,10 +16,10 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style, Stylize};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph};
-use ratatui::Frame;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::tui::components::{CREAM, DIM, HAIRLINE, MUTED, SALMON};
+use crate::tui::inline_term::Frame;
 use crate::tui::state::{PasteChunk, TuiState};
 
 /// Prompt prefix rendered inline on the first input line. `▸` is
@@ -323,15 +323,12 @@ fn render_atom(a: &Atom) -> Span<'static> {
 }
 
 pub(crate) fn composer(f: &mut Frame, area: Rect, state: &TuiState) {
-    // Composer top border is a full-width coral hairline — no title
-    // interrupting it. While a stream is running the hairline goes
-    // muted: the "live" accent belongs to the transcript.
-    let hairline_color = if state.streaming { MUTED() } else { HAIRLINE() };
+    let border_color = if state.streaming { MUTED() } else { HAIRLINE() };
     let block = Block::default()
-        .borders(Borders::TOP)
-        .border_style(Style::default().fg(hairline_color));
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color));
 
-    let lay = layout(state, area.width);
+    let lay = layout(state, area.width.saturating_sub(2));
 
     // Queued messages render under the input as dim `+ queued:` lines.
     let mut body: Vec<Line<'static>> = lay.rows.into_iter().map(Line::from).collect();
@@ -354,17 +351,17 @@ pub(crate) fn composer(f: &mut Frame, area: Rect, state: &TuiState) {
 
     // Bottom-anchor: when the body exceeds the capped area, scroll so
     // the caret (and the queued lines below it) stay visible.
-    let visible = area.height.saturating_sub(1); // minus top hairline
+    let visible = area.height.saturating_sub(2); // minus top + bottom border
     let scroll = (body.len() as u16).saturating_sub(visible);
 
     let text = Text::from(body);
     f.render_widget(Paragraph::new(text).block(block).scroll((scroll, 0)), area);
 
-    // Position the terminal caret. Body starts +1 row below the top
-    // hairline; every row carries the 3-col prefix.
+    // Position the terminal caret. Body starts at +1 row (top border)
+    // and +1 col (left border); every row carries the 3-col prefix.
     let (row, col) = lay.caret;
     f.set_cursor_position((
-        area.x + PROMPT_COLS + col,
+        area.x + 1 + PROMPT_COLS + col,
         area.y + 1 + row.saturating_sub(scroll),
     ));
 }

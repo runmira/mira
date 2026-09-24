@@ -1,4 +1,9 @@
-//! Full-screen ratatui frontend for the Mira harness.
+//! Inline-viewport ratatui frontend for the Mira harness.
+//!
+//! The TUI renders into an inline viewport pinned to the bottom of the
+//! screen while settled transcript entries are mirrored into the
+//! terminal's real scrollback (`insert_before`) — so the conversation
+//! survives exit and scrolls, selects, and copies natively.
 //!
 //! Module layout — three layers with one job each:
 //!
@@ -17,11 +22,13 @@
 pub mod approver;
 mod components;
 pub(crate) mod event_loop;
+pub(crate) mod inline_term;
 mod input;
 mod markdown;
 pub mod prompts;
 pub(crate) mod render;
 mod state;
+mod syntax;
 mod theme;
 
 pub use approver::TuiApprover;
@@ -33,21 +40,23 @@ use std::sync::Arc;
 use anyhow::Result;
 use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
 use crossterm::execute;
-use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
-};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType};
 use mira_harness::{Goal, GoalStatus, Session, SessionStore};
 use mira_policy::{Mode, Policy};
 use mira_tools::builtin::skill::SkillHandle;
-use ratatui::backend::CrosstermBackend;
-use ratatui::Terminal;
 use tokio::sync::{mpsc, Mutex};
+
+use inline_term::InlineTerm;
 
 use event_loop::{current_cost_usd, event_loop, format_dollars_short};
 
 /// Everything the TUI needs beyond what `Session` already owns.
 pub struct TuiConfig {
     pub model: String,
+    /// Provider key from config (`openrouter`, …) — shown in the
+    /// session banner. Not derived from the model id so custom
+    /// endpoints keep their configured name.
+    pub provider: String,
     pub mode: Mode,
     /// Handle to the shared policy so `/mode` can update it live.
     pub policy: Arc<Mutex<Policy>>,
@@ -56,6 +65,14 @@ pub struct TuiConfig {
     /// Receiver for `plan` / `ask_user` tool prompts (paired with the
     /// [`TuiPromptChannel`] the tools were registered with).
     pub prompt_rx: mpsc::UnboundedReceiver<prompts::TuiPrompt>,
+    /// Broadcast subscription to the parent-session ServerMsg stream —
+    /// the source AgentTool writes its subagent events onto. Only the
+    /// `Subagent*` variants are consumed; everything else is silently
+    /// discarded in the event loop. Broadcast (not mpsc) because the
+    /// AgentTool needs the same channel shape whether the frontend is
+    /// the TUI or the web UI, and rebuilding that pipe here would
+    /// duplicate a lot of the server plumbing.
+    pub subagent_events_rx: tokio::sync::broadcast::Receiver<mira_server::protocol::ServerMsg>,
     /// Repo root — used to resolve relative paths in edit/write diff previews.
     pub cwd: std::path::PathBuf,
     /// Loaded skill registry — the same handle the `Skill` tool consults.
@@ -106,46 +123,142 @@ pub(crate) const SLASH_COMMANDS: &[(&str, &str)] = &[
 ];
 
 pub async fn run(session: Session, cfg: TuiConfig) -> Result<()> {
-    let mut terminal = enter()?;
-    // Track the terminating state's mouse-capture flag so `leave`
-    // can pair a matching Disable with any Enable the event loop
-    // toggled on. Starts `false` because text selection works by
-    // default; Alt+M enables capture for scroll-wheel driving.
+    let mut term = enter()?;
+    // Panic-safe terminal restore: a `TuiGuard` in scope for the
+    // event-loop future runs its Drop (and a matching `panic::set_hook`)
+    // on any exit path — panic in `event_loop`, panic in a background
+    // task that gets .awaited, or a plain error return. Without this
+    // the user's shell inherits raw mode + bracketed paste and needs
+    // `stty sane` to type again.
+    let _guard = TuiGuard::install();
+
     let mut mouse_capture_on = false;
-    let outcome = event_loop(&mut terminal, session, cfg, &mut mouse_capture_on).await;
-    leave(&mut terminal, mouse_capture_on)?;
+    let mut viewport_height = 0u16;
+    let mut exit_summary: Option<String> = None;
+    let outcome = event_loop(
+        &mut term,
+        session,
+        cfg,
+        &mut mouse_capture_on,
+        &mut viewport_height,
+        &mut exit_summary,
+    )
+    .await;
+    // Happy path: wipe the pane cleanly. The guard still runs its own
+    // (idempotent) restore in Drop just in case `leave` errored.
+    leave(&mut term, mouse_capture_on)?;
+    let _ = viewport_height;
+
+    // Post-TUI recap — echoed after the terminal is back in cooked
+    // mode so it lands in the shell's real scrollback next to the
+    // conversation the user just had. Silent when the session was
+    // one-and-done with no turns (nothing worth summarising).
+    if let Some(line) = exit_summary.filter(|s| !s.is_empty()) {
+        use std::io::Write;
+        let mut out = std::io::stdout();
+        let _ = writeln!(out, "{line}");
+        let _ = out.flush();
+    }
     outcome
+}
+
+/// Panic-safe terminal restore.
+///
+/// On construction, installs a `panic::set_hook` that runs the minimal
+/// restore (raw mode off, bracketed paste off, mouse capture off,
+/// cursor shown) BEFORE the default panic printer runs — otherwise the
+/// backtrace lands on a raw-mode terminal that eats every keystroke.
+///
+/// On drop, runs the same restore. Both hook and drop are idempotent
+/// so the happy-path `leave()` can also run first without conflict.
+struct TuiGuard;
+
+impl TuiGuard {
+    fn install() -> Self {
+        // Chain onto any pre-existing hook (test runner, catch_unwind
+        // wrappers, etc.) so downstream still sees the panic info.
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let _ = restore_stdio_minimal();
+            previous(info);
+        }));
+        Self
+    }
+}
+
+impl Drop for TuiGuard {
+    fn drop(&mut self) {
+        let _ = restore_stdio_minimal();
+    }
+}
+
+/// The bare minimum needed to hand the shell back to the user — no
+/// pane bookkeeping, no viewport math, just "make the terminal usable
+/// again." Safe to call multiple times. Ignores errors (nothing useful
+/// to do with them from inside a panic hook or a drop).
+fn restore_stdio_minimal() -> Result<()> {
+    let _ = disable_raw_mode();
+    let mut out = std::io::stdout();
+    let _ = execute!(
+        out,
+        DisableBracketedPaste,
+        crossterm::event::DisableMouseCapture,
+        crossterm::cursor::Show,
+    );
+    // Nudge onto a fresh line so the panic message or shell prompt
+    // doesn't overwrite the last row of the pane.
+    let _ = execute!(out, crossterm::style::Print("\n"));
+    Ok(())
 }
 
 // ---- terminal lifecycle ----
 
-fn enter() -> Result<Terminal<CrosstermBackend<std::io::Stdout>>> {
+/// Enter the inline viewport: raw mode + bracketed paste, but no
+/// alternate screen — the viewport pins to the bottom of the visible
+/// terminal and settled output flows into real scrollback above it.
+///
+/// `InlineTerm::new` queries the cursor exactly once here, before the
+/// event loop creates a `crossterm::EventStream`. That's the whole
+/// reason we don't use ratatui's own `Viewport::Inline` — its `resize`
+/// path calls `get_cursor_position` on every terminal resize, which
+/// races the event-stream background reader for the internal-event
+/// mutex and times out with "cursor position could not be read within a
+/// normal duration". Our `InlineTerm` tracks the viewport rectangle in
+/// Rust state and never re-queries the cursor.
+fn enter() -> Result<InlineTerm> {
     enable_raw_mode()?;
     let mut out = std::io::stdout();
     // Text selection works by default. Users who want native
     // text selection can toggle with Alt+M — most terminals also honour
     // Option/Shift+drag as a "bypass capture" selection modifier.
-    execute!(out, EnterAlternateScreen, EnableBracketedPaste)?;
-    Ok(Terminal::new(CrosstermBackend::new(out))?)
+    execute!(out, EnableBracketedPaste)?;
+    // Match the empty-state desired height (padding + composer + footer)
+    // so the first frame doesn't shrink the pane — a shrink at boot
+    // would leave the freed rows blank below the composer, opening a
+    // visible gap between the pane and the terminal bottom that only
+    // closes once the composer grows.
+    Ok(InlineTerm::new(5)?)
 }
 
-fn leave(
-    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
-    mouse_capture: bool,
-) -> Result<()> {
+/// Leave the inline viewport. Blanks the live chrome, parks the cursor
+/// below it, and restores the terminal state.
+fn leave(term: &mut InlineTerm, mouse_capture: bool) -> Result<()> {
     disable_raw_mode()?;
+    let mut out = std::io::stdout();
     if mouse_capture {
-        let _ = execute!(
-            terminal.backend_mut(),
-            crossterm::event::DisableMouseCapture
-        );
+        let _ = execute!(out, crossterm::event::DisableMouseCapture);
     }
+    execute!(out, DisableBracketedPaste)?;
+    // Cursor is parked at the viewport top; wipe from there to the end
+    // of the screen so the composer/footer don't linger, then feed one
+    // newline so the shell prompt returns cleanly below.
     execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableBracketedPaste
+        out,
+        crossterm::cursor::MoveTo(0, term.viewport_top()),
+        Clear(ClearType::FromCursorDown),
+        crossterm::cursor::Show,
     )?;
-    terminal.show_cursor()?;
+    execute!(out, crossterm::style::Print("\n"))?;
     Ok(())
 }
 
@@ -632,6 +745,9 @@ fn run_save_slash(rest: &str, state: &mut state::TuiState, cwd: &std::path::Path
                 model, cwd, tip, ..
             } => {
                 out.push_str(&format!("_mira · {model} · {cwd}_\n\n> {tip}\n\n"));
+            }
+            state::LogEntry::Compacted { messages_removed } => {
+                out.push_str(&format!("_↺ context compacted · {messages_removed} messages summarized_\n\n"));
             }
         }
     }

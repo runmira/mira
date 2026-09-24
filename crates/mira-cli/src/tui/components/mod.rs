@@ -31,7 +31,7 @@ pub mod tool_result;
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 
-use crate::tui::state::LogEntry;
+use crate::tui::state::{AgentCell, LogEntry};
 use crate::tui::theme;
 
 use status::StatusView;
@@ -73,6 +73,21 @@ pub(crate) fn DIM() -> Color {
 #[inline]
 pub(crate) fn HAIRLINE() -> Color {
     theme::current().hairline
+}
+/// A very subtle wash over `DIM` for user-message backgrounds — barely
+/// distinguishable from separators, just enough to read as a paragraph
+/// break rather than a highlight bar.
+#[allow(non_snake_case)]
+#[inline]
+pub(crate) fn USER_WASH() -> Color {
+    match theme::current().dim {
+        Color::Rgb(r, g, b) => Color::Rgb(
+            r.saturating_add(6),
+            g.saturating_add(5),
+            b.saturating_add(4),
+        ),
+        c => c,
+    }
 }
 
 /// Mira's brand mark — the script-M is the closest Unicode analogue
@@ -119,8 +134,13 @@ pub enum TranscriptBlock<'a> {
     /// zero lines but still consumes its entries so the entry→row
     /// table stays aligned for search and turn navigation.
     Suppressed,
+    /// Context compaction receipt — N messages were summarised away.
+    Compacted(usize),
     /// "✻ Wrangling… (12s · ↓ 1.2k tokens)" working indicator.
     Working(StatusView),
+    /// "✦ Plan on the table · review below to proceed" — replaces the
+    /// working indicator while a plan/ask card holds the keys.
+    Waiting(status::WaitingView),
 }
 
 /// A block plus the slice of `LogEntry`s it was built from. `consumed`
@@ -137,7 +157,7 @@ pub struct Block<'a> {
 /// newest undoable write, and where the current turn begins (the last
 /// user prompt) — tool groups from earlier turns auto-collapse to
 /// their header so long sessions stay readable.
-pub struct BuildCtx {
+pub struct BuildCtx<'a> {
     pub streaming: bool,
     pub plan_mode: bool,
     pub streaming_tail_idx: Option<usize>,
@@ -145,6 +165,17 @@ pub struct BuildCtx {
     pub current_turn_start: Option<usize>,
     /// Live tail `(call_id, line)` of the in-flight tool.
     pub tool_tail: Option<(String, String)>,
+    /// Indices of assistant entries whose text was already streamed to
+    /// real scrollback line-by-line; those blocks are elided so the
+    /// pane render doesn't paint them twice. Borrowed from
+    /// `TuiState::streamed_assistant_idx` — empty in tests and on the
+    /// pre-emit render pass where nothing has been streamed yet.
+    pub skip_assistant_idx: &'a std::collections::HashSet<usize>,
+    /// Live subagent cell data, keyed by the parent tool-call id.
+    /// Populated from broadcast subagent events; `build_blocks` passes
+    /// it through to `ToolView` so the renderer can show nested tool
+    /// uses under `● Agent(...)` headers. Empty map in tests.
+    pub agent_cells: &'a std::collections::HashMap<String, AgentCell>,
 }
 
 /// Group the entry log into presentation blocks. Pure — borrows the
@@ -158,7 +189,7 @@ pub struct BuildCtx {
 ///   in the collapsed form;
 /// - an orphan `ToolResult` (its call scrolled off under the entry
 ///   cap) still renders as a stand-alone block.
-pub fn build_blocks<'a>(entries: &'a [LogEntry], ctx: &BuildCtx) -> Vec<Block<'a>> {
+pub fn build_blocks<'a>(entries: &'a [LogEntry], ctx: &BuildCtx<'a>) -> Vec<Block<'a>> {
     let mut out: Vec<Block<'_>> = Vec::new();
     let mut i = 0;
     while i < entries.len() {
@@ -182,7 +213,7 @@ pub fn build_blocks<'a>(entries: &'a [LogEntry], ctx: &BuildCtx) -> Vec<Block<'a
                 }) = entries.get(batch_end)
                 {
                     let (f, s) = tool_call::summarize_tool(name, args);
-                    if *f != family || preview.is_some() {
+                    if *f != family || preview.is_some() || name == "agent" {
                         break;
                     }
                     // Must be followed by an untouched collapsed result
@@ -252,6 +283,15 @@ pub fn build_blocks<'a>(entries: &'a [LogEntry], ctx: &BuildCtx) -> Vec<Block<'a
                     .as_ref()
                     .filter(|(id, _)| *id == call_id)
                     .map(|(_, line)| line.clone());
+                let agent_cell = if name == "agent" {
+                    let call_id = match &entries[i] {
+                        LogEntry::ToolCall { call_id, .. } => call_id.as_str(),
+                        _ => "",
+                    };
+                    ctx.agent_cells.get(call_id)
+                } else {
+                    None
+                };
                 out.push(Block {
                     kind: TranscriptBlock::Tool(tool_call::ToolView {
                         name,
@@ -262,6 +302,7 @@ pub fn build_blocks<'a>(entries: &'a [LogEntry], ctx: &BuildCtx) -> Vec<Block<'a
                         undoable: ctx.undoable_idx == Some(i),
                         collapsed: result.as_ref().is_some_and(|r| r.collapsed),
                         tail,
+                        agent_cell,
                     }),
                     first_entry: i,
                     consumed,
@@ -293,6 +334,7 @@ pub fn build_blocks<'a>(entries: &'a [LogEntry], ctx: &BuildCtx) -> Vec<Block<'a
                         undoable: false,
                         collapsed: collapsed_override.unwrap_or(false),
                         tail: None,
+                        agent_cell: None,
                     }),
                     first_entry: i,
                     consumed: 1,
@@ -308,6 +350,16 @@ pub fn build_blocks<'a>(entries: &'a [LogEntry], ctx: &BuildCtx) -> Vec<Block<'a
                 i += 1;
             }
             LogEntry::Assistant(s) => {
+                // Text streamed line-by-line into real scrollback is
+                // NOT re-blocked here — re-emitting through the block
+                // pipeline would print the same reply twice (once from
+                // scrollback, once from the pane render). We still bump
+                // `i` so downstream index math (turn nav, search hit
+                // mapping) matches the entry list one-to-one.
+                if ctx.skip_assistant_idx.contains(&i) {
+                    i += 1;
+                    continue;
+                }
                 // Only the entry receiving live tokens is "streaming"; a
                 // completed reply that happens to sit at the tail is not.
                 let streaming = ctx.streaming && ctx.streaming_tail_idx == Some(i);
@@ -346,15 +398,21 @@ pub fn build_blocks<'a>(entries: &'a [LogEntry], ctx: &BuildCtx) -> Vec<Block<'a
             }
             LogEntry::Welcome {
                 model,
+                provider,
                 mode,
                 cwd,
+                branch,
+                skills,
                 tip,
             } => {
                 out.push(Block {
                     kind: TranscriptBlock::Welcome(message::WelcomeView {
                         model,
+                        provider,
                         mode: *mode,
                         cwd,
+                        branch: branch.as_deref(),
+                        skills,
                         version: env!("CARGO_PKG_VERSION"),
                         tip,
                     }),
@@ -395,6 +453,14 @@ pub fn build_blocks<'a>(entries: &'a [LogEntry], ctx: &BuildCtx) -> Vec<Block<'a
                 });
                 i += 1;
             }
+            LogEntry::Compacted { messages_removed } => {
+                out.push(Block {
+                    kind: TranscriptBlock::Compacted(*messages_removed),
+                    first_entry: i,
+                    consumed: 1,
+                });
+                i += 1;
+            }
         }
     }
     out
@@ -418,34 +484,51 @@ pub fn render_block(
             ),
             Style::default().fg(MUTED()).italic(),
         ))],
-        TranscriptBlock::User(s) => message::user_lines(s),
+        TranscriptBlock::User(s) => message::user_lines(s, width),
         TranscriptBlock::Assistant {
             text,
             streaming,
             plan,
         } => message::assistant_lines(text, *streaming, *plan, query, focused),
-        TranscriptBlock::TurnEnd(v) => status::turn_end_lines(v),
+        TranscriptBlock::TurnEnd(v) => status::turn_end_lines(v, width),
         TranscriptBlock::Welcome(w) => message::welcome_lines(w),
         TranscriptBlock::Tool(v) => tool_call::render(v, query, focused, width),
         TranscriptBlock::ToolBatch(v) => tool_call::render_batch(v),
         TranscriptBlock::Warning(s) => message::warning_lines(s),
         TranscriptBlock::Info(s) => message::info_lines(s),
+        TranscriptBlock::Compacted(n) => {
+            let msg = if *n == 1 {
+                "↺ Context compacted · 1 message summarized".to_owned()
+            } else {
+                format!("↺ Context compacted · {n} messages summarized")
+            };
+            vec![Line::from(Span::styled(
+                format!("  {msg}"),
+                Style::default()
+                    .fg(Color::Rgb(180, 130, 60))
+                    .add_modifier(Modifier::ITALIC),
+            ))]
+        }
         TranscriptBlock::Approval(v) => approval::render(v, width),
         TranscriptBlock::Tasks(v) => tasks::render(v),
-        TranscriptBlock::PlanCard(p) => prompt::plan_card(p),
-        TranscriptBlock::AskCard(a) => prompt::ask_card(a),
+        TranscriptBlock::PlanCard(p) => prompt::plan_card(p, width),
+        TranscriptBlock::AskCard(a) => prompt::ask_card(a, width),
         TranscriptBlock::Suppressed => Vec::new(),
-        TranscriptBlock::Working(v) => vec![status::working_line(v)],
+        TranscriptBlock::Working(v) => {
+            vec![status::working_line(v), status::working_tip_line(v.elapsed_secs)]
+        }
+        TranscriptBlock::Waiting(v) => vec![status::waiting_line(v)],
     }
 }
 
-/// Task-bookkeeping tools: their tool groups are suppressed from the
-/// transcript (the Tasks panel is the feedback surface).
+/// Task-bookkeeping and memory-plumbing tools: their tool groups are
+/// suppressed from the transcript. Tasks live in their own panel; memory
+/// operations are background bookkeeping the user doesn't need to see.
 pub(crate) fn is_task_tool(name: &str) -> bool {
     matches!(
         name,
         "task_create" | "task_update" | "task_list" | "task_get"
-    )
+    ) || name.starts_with("memory")
 }
 
 /// True when `idx` is the entry a search hit currently points at —
@@ -535,7 +618,16 @@ mod tests {
     use super::*;
     use crate::tui::state::LogEntry;
 
-    fn ctx() -> BuildCtx {
+    fn empty_skip_set() -> &'static std::collections::HashSet<usize> {
+        static EMPTY: std::sync::OnceLock<std::collections::HashSet<usize>> =
+            std::sync::OnceLock::new();
+        EMPTY.get_or_init(std::collections::HashSet::new)
+    }
+
+    fn ctx() -> BuildCtx<'static> {
+        static EMPTY_CELLS: std::sync::OnceLock<
+            std::collections::HashMap<String, crate::tui::state::AgentCell>,
+        > = std::sync::OnceLock::new();
         BuildCtx {
             streaming: false,
             plan_mode: false,
@@ -543,6 +635,8 @@ mod tests {
             undoable_idx: None,
             current_turn_start: None,
             tool_tail: None,
+            skip_assistant_idx: empty_skip_set(),
+            agent_cells: EMPTY_CELLS.get_or_init(std::collections::HashMap::new),
         }
     }
 
@@ -662,6 +756,8 @@ mod tests {
             undoable_idx: None,
             current_turn_start: Some(3),
             tool_tail: None,
+            skip_assistant_idx: empty_skip_set(),
+            agent_cells: ctx().agent_cells,
         };
         let blocks = build_blocks(&entries, &c);
         assert_eq!(blocks.len(), 3); // user, old pair, new pair
@@ -696,6 +792,8 @@ mod tests {
             undoable_idx: None,
             current_turn_start: Some(3),
             tool_tail: None,
+            skip_assistant_idx: empty_skip_set(),
+            agent_cells: ctx().agent_cells,
         };
         let blocks = build_blocks(&entries, &c);
         let TranscriptBlock::Tool(v) = &blocks[1].kind else {
@@ -736,6 +834,8 @@ mod tests {
             undoable_idx: None,
             current_turn_start: None,
             tool_tail: None,
+            skip_assistant_idx: empty_skip_set(),
+            agent_cells: ctx().agent_cells,
         };
         let blocks = build_blocks(&entries, &c);
         let TranscriptBlock::Assistant { streaming, .. } = &blocks[0].kind else {

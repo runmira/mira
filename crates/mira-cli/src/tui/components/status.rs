@@ -12,7 +12,7 @@ use ratatui::text::{Line, Span};
 
 use mira_harness::{Goal, GoalStatus};
 
-use super::{CREAM, LOGO, MUTED, SALMON};
+use super::{CREAM, DIM, LOGO, MUTED, SALMON};
 
 /// The tool call currently executing, resolved at block-build time —
 /// the working indicator names the actual work instead of a generic
@@ -56,6 +56,25 @@ pub(crate) fn pulsed_logo(secs: f32) -> Color {
         (104.0 * scale) as u8,
     )
 }
+
+/// Tips shown below the working indicator while the agent is running —
+/// rotate every 15 s so a long turn cycles through several. Actionable
+/// and short enough to read at a glance without competing with the main
+/// status line above.
+const WORKING_TIPS: &[&str] = &[
+    "type now — enter queues your next message",
+    "ctrl+r searches the full transcript",
+    "1–9 expands or collapses recent tool groups",
+    "ctrl+e expands the last tool result in place",
+    "esc interrupts this turn · esc esc quits",
+    "@ mentions a file by path without typing it out",
+    "/mode plan turns on step-by-step approval",
+    "ctrl+z undoes the last file write",
+    "ctrl+p rewinds and re-edits the last prompt",
+    "shift+tab cycles permission modes from the composer",
+    "ctrl+y copies the last reply to the clipboard",
+    "/budget $X caps session spend · /cost shows where it went",
+];
 
 /// Rotate through a small vocabulary of streaming verbs based on
 /// elapsed-time buckets. Keeps the status line feeling alive during
@@ -143,6 +162,58 @@ pub(crate) fn working_line(v: &StatusView) -> Line<'static> {
     Line::from(spans)
 }
 
+/// Tip line shown below the working indicator — rotates every 15 s so
+/// a long turn cycles through several tips.
+pub(crate) fn working_tip_line(elapsed_secs: f32) -> Line<'static> {
+    let idx = ((elapsed_secs / 15.0) as usize) % WORKING_TIPS.len();
+    Line::from(vec![
+        Span::styled("  └ ", Style::default().fg(DIM())),
+        Span::styled("Tip: ", Style::default().fg(MUTED())),
+        Span::styled(WORKING_TIPS[idx], Style::default().fg(DIM()).italic()),
+    ])
+}
+
+/// Which interactive card the agent is blocked on. The wording is
+/// deliberately neither "waiting for user" nor "asking user" — it
+/// names what's on the table and where to look, so the line reads as
+/// an invitation rather than a stall.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum WaitingKind {
+    Plan,
+    Ask,
+}
+
+/// Data for the "blocked on user input" indicator, shown instead of
+/// the generic streaming line while a `plan` / `ask_user` card is up.
+/// No token counts, no `esc to interrupt` — the card below owns the
+/// keys, so the line just points at it.
+#[derive(Clone)]
+pub struct WaitingView {
+    pub kind: WaitingKind,
+    /// Seconds since the turn started (drives the breathing pulse).
+    pub elapsed_secs: f32,
+}
+
+/// Single-line pointer at the interactive card below:
+///
+///     ✦ Plan on the table · review below to proceed
+///     ? Quick question · answer below to proceed
+///
+pub(crate) fn waiting_line(v: &WaitingView) -> Line<'static> {
+    let (icon, accent, label, detail) = match v.kind {
+        WaitingKind::Plan => ("✦", SALMON(), "Plan on the table", " · review below to proceed"),
+        WaitingKind::Ask => ("?", Color::Cyan, "Quick question", " · answer below to proceed"),
+    };
+    Line::from(vec![
+        Span::styled(
+            format!("{icon} "),
+            Style::default().fg(pulsed_logo(v.elapsed_secs)).bold(),
+        ),
+        Span::styled(label, Style::default().fg(accent).bold()),
+        Span::styled(detail, Style::default().fg(MUTED())),
+    ])
+}
+
 /// `12s`, `1m 7s` — mirrors Claude's status format so long runs read
 /// naturally instead of `67.4s`.
 fn fmt_secs(secs: f32) -> String {
@@ -167,16 +238,17 @@ pub struct TurnEndView {
     pub cost: Option<f64>,
 }
 
-/// Turn-end marker rendered under the assistant reply — a quiet
-/// full-stop that doubles as the turn's receipt:
+/// Turn-end marker rendered under the assistant reply — a chapter
+/// break that doubles as the turn's receipt:
 ///
-///     ✳ Baked for 12.4s
-///     ✳ Baked for 34.1s · 3 files +18 −4 · 7 tools · $0.021
+///     ✳ Baked for 12.4s ────────────────────────────────
+///     ✳ Baked for 34.1s · 3 files +18 −4 · 7 tools · $0.021 ──────
 ///
-/// Muted italic so it reads as a full stop, not a headline. Verb is
+/// The `─` rule fills to the terminal edge so the eye lands on it as
+/// a natural stopping point between turns (aster-style). Verb is
 /// picked from [`turn_verb_past`] against the millisecond bucket so
 /// the same duration always reads the same word.
-pub(crate) fn turn_end_lines(v: &TurnEndView) -> Vec<Line<'static>> {
+pub(crate) fn turn_end_lines(v: &TurnEndView, width: u16) -> Vec<Line<'static>> {
     let mut spans: Vec<Span<'static>> = vec![
         Span::styled("✳ ", Style::default().fg(SALMON())),
         Span::styled(
@@ -215,6 +287,22 @@ pub(crate) fn turn_end_lines(v: &TurnEndView) -> Vec<Line<'static>> {
         spans.push(Span::styled(
             format!(" · {label}"),
             Style::default().fg(MUTED()).italic(),
+        ));
+    }
+    // Trailing rule filler — one blank column, then `─` to the edge.
+    // Skip when the receipt already fills the width (never wraps this
+    // way — the eye reads a full-bleed line as the break itself).
+    use unicode_width::UnicodeWidthStr;
+    let used: usize = spans
+        .iter()
+        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+        .sum();
+    let remaining = (width as usize).saturating_sub(used).saturating_sub(1);
+    if remaining >= 3 {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            "─".repeat(remaining),
+            Style::default().fg(DIM()),
         ));
     }
     vec![Line::from(spans)]
@@ -555,6 +643,29 @@ mod tests {
             .collect();
         assert!(text.contains("◐ Bash ls"), "{text}");
         assert!(!text.contains("0.2s"), "{text}");
+    }
+
+    #[test]
+    fn waiting_line_points_at_card_without_streaming_chrome() {
+        for (kind, headline, tail) in [
+            (WaitingKind::Plan, "Plan on the table", "review below to proceed"),
+            (WaitingKind::Ask, "Quick question", "answer below to proceed"),
+        ] {
+            let text: String = waiting_line(&WaitingView {
+                kind,
+                elapsed_secs: 3.0,
+            })
+            .spans
+            .iter()
+            .map(|s| s.content.clone())
+            .collect();
+            assert!(text.contains(headline), "{text}");
+            assert!(text.contains(tail), "{text}");
+            assert!(!text.contains("esc to interrupt"), "{text}");
+            assert!(!text.contains("tokens"), "{text}");
+            assert!(!text.contains("Waiting for user"), "{text}");
+            assert!(!text.contains("Asking user"), "{text}");
+        }
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::time::Instant;
 
 use mira_core::{ToolCall, ToolResult};
@@ -48,6 +49,7 @@ pub enum TaskStatus {
 /// Interactive `plan` card — the proposal plus the user's live
 /// toggles and cursor. Renderer and key handler both read this.
 pub struct PendingPlan {
+    #[allow(dead_code)]
     pub prompt_id: String,
     /// Completes the round-trip to the waiting tool.
     pub reply: tokio::sync::oneshot::Sender<PromptResponse>,
@@ -75,8 +77,10 @@ impl PendingPlan {
 }
 
 /// Interactive `ask_user` card — answers accumulate per question;
-/// digits pick, `t` types, Enter submits, Esc cancels.
+/// digits pick, arrows move, `t` types, Enter picks the focused option
+/// and advances (submits on the last question), Esc cancels.
 pub struct PendingAsk {
+    #[allow(dead_code)]
     pub prompt_id: String,
     /// Completes the round-trip to the waiting tool.
     pub reply: tokio::sync::oneshot::Sender<PromptResponse>,
@@ -126,6 +130,7 @@ const TOOL_RESULT_MAX_BYTES: usize = 8 * 1024;
 /// "… N earlier entries truncated" at the top. Mirrors the harness's
 /// own history-compaction model rather than growing memory forever.
 const MAX_ENTRIES: usize = 500;
+
 
 /// One row in the visible transcript.
 ///
@@ -189,14 +194,30 @@ pub enum LogEntry {
     },
     Warning(String),
     Info(String),
-    /// First-run startup banner — structured so the component renders
+    /// Context-compaction receipt: N messages were summarised away by the
+    /// harness to reclaim context window space.
+    Compacted { messages_removed: usize },
+    /// First-run session banner — structured so the component renders
     /// it with brand colors (info lines are muted-italic by design).
+    /// Shown once, before the message stream; the viewport carries no
+    /// persistent header, so this is the session's identity record.
     Welcome {
         model: String,
+        provider: String,
         mode: Mode,
         cwd: String,
+        branch: Option<String>,
+        skills: Vec<String>,
         tip: &'static str,
     },
+}
+
+/// Session banner data — snapshot at boot for the one-time banner.
+/// Skills are names only (sorted); the component caps the display.
+pub struct SessionMeta {
+    pub provider: String,
+    pub branch: Option<String>,
+    pub skills: Vec<String>,
 }
 
 /// Which overlay list is open above the composer, if any.
@@ -220,6 +241,19 @@ pub enum Palette {
     /// come from the file index (same rg output the `@file` picker
     /// uses) plus a handful of sensible defaults.
     SavePath,
+    /// Fires when the composer starts with `<command> ` for a slash
+    /// command that takes a closed set of arguments (`/mode `,
+    /// `/goal `, `/budget `, …). Holds the command so the overlay can
+    /// title itself and accept can rewrite the whole line. Stays `Copy`
+    /// by borrowing the command name statically — the set of
+    /// completable commands is fixed in `keyboard::slash_arg_matches`.
+    SlashArg(&'static str),
+    /// Ctrl+O launched selector that groups every session knob
+    /// (mode / model / theme) into one searchable overlay with
+    /// section tags. Filter typing goes to
+    /// [`PaletteState::filter`], not the composer input, so opening
+    /// this overlay never scribbles on whatever the user was drafting.
+    Unified,
 }
 
 pub struct PaletteState {
@@ -229,6 +263,11 @@ pub struct PaletteState {
     /// The last-computed filtered results (indices into the source list).
     /// Rebuilt whenever the composer or `kind` changes.
     pub matches: Vec<PaletteItem>,
+    /// Standalone filter string for palettes whose typing shouldn't
+    /// flow through the composer input — currently just
+    /// [`Palette::Unified`]. Empty for every other kind (they filter
+    /// off the composer's contents directly).
+    pub filter: String,
 }
 
 impl PaletteState {
@@ -237,6 +276,7 @@ impl PaletteState {
             kind: Palette::None,
             cursor: 0,
             matches: Vec::new(),
+            filter: String::new(),
         }
     }
 }
@@ -251,6 +291,48 @@ pub struct PaletteItem {
     pub insert: String,
     pub title: String,
     pub detail: String,
+}
+
+/// Which modal — if any — owns the inline pane right now.
+///
+/// The pane is a stack of "views" and this enum names the top of that
+/// stack. `Approval` outranks `Plan`, which outranks `Ask` (highest-
+/// stakes decision wins). When nothing is up, `Composer` is the
+/// fallback and the composer takes keys directly.
+///
+/// Key routing (`input/keyboard.rs`) matches on this to decide who
+/// handles the incoming keystroke — modal views intercept before the
+/// composer sees anything, matching the reference bottom-pane stack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneView {
+    Approval,
+    Plan,
+    Ask,
+    Composer,
+}
+
+impl PaneView {
+    /// Which view currently owns the pane. Priority: approval → plan →
+    /// ask → composer. Matches the render-side ordering in
+    /// `render::transcript::pane_cards`.
+    pub fn active(state: &TuiState) -> Self {
+        if !state.pending_approvals.is_empty() {
+            Self::Approval
+        } else if state.pending_plan.is_some() {
+            Self::Plan
+        } else if state.pending_ask.is_some() {
+            Self::Ask
+        } else {
+            Self::Composer
+        }
+    }
+
+    /// True when a modal view is up — i.e. anything but the plain
+    /// composer. Handy shorthand for "should the composer accept keys."
+    #[allow(dead_code)]
+    pub fn is_modal(self) -> bool {
+        !matches!(self, Self::Composer)
+    }
 }
 
 /// All state the render loop reads.
@@ -278,20 +360,31 @@ pub struct TuiState {
 
     pub mode: Mode,
     pub model: String,
-    /// Cached `git rev-parse --abbrev-ref HEAD` — refreshed at
-    /// startup and after every turn, shown as a `⎇ <branch>` chip in
-    /// the header. `None` when the cwd isn't a git repo.
+    /// Cached `git rev-parse --abbrev-ref HEAD` at startup — shown
+    /// beside the cwd in the session banner. `None` when the cwd
+    /// isn't a git repo.
     pub git_branch: Option<String>,
-    /// Uncommitted-change count from `git status --porcelain`,
-    /// refreshed with the branch. `Some(0)` = clean worktree; `None`
-    /// outside a repo or when git failed.
-    pub git_dirty: Option<u32>,
     /// Last output line of the in-flight tool `(call_id, line)` — the
     /// live tail under the `◐` header so a 90-second command doesn't
     /// look hung. Cleared on ToolEnd / interrupt.
     pub tool_tail: Option<(String, String)>,
     pub streaming: bool,
-    pub pending_approval: Option<PendingApproval>,
+    /// Indices of `LogEntry::Assistant` entries whose text was streamed
+    /// line-by-line into real terminal scrollback via `MarkdownStream`
+    /// while it was being produced. Those blocks are skipped when
+    /// `emit_settled` runs — the content is already in scrollback and
+    /// re-emitting through the block pipeline would print it twice.
+    /// Populated by the event loop on token arrival; shrunk when
+    /// `enforce_cap` prunes leading entries.
+    pub streamed_assistant_idx: std::collections::HashSet<usize>,
+    /// Approval queue — tool calls gated on a decision, oldest first.
+    /// Bursty turns can stack several; the card shows the head and a
+    /// `+N more` count. Resolving pops the head (focus resets).
+    pub pending_approvals: VecDeque<PendingApproval>,
+    /// Focus within the approval card options: 0 = allow once,
+    /// 1 = always this session, 2 = deny. Driven by ↑↓, picked with
+    /// Enter or digits 1–3 (`y`/`a`/`n` shortcuts bypass it).
+    pub approval_focus: usize,
     /// Interactive `plan` card state — toggles + focus live here so
     /// the renderer stays pure.
     pub pending_plan: Option<PendingPlan>,
@@ -358,6 +451,13 @@ pub struct TuiState {
     /// prepends "… N earlier entries truncated" whenever this is
     /// non-zero.
     pub dropped_entries: usize,
+    /// How many leading entries have been mirrored into the terminal's
+    /// real scrollback via `insert_before` (inline-viewport mode). The
+    /// live viewport renders only `entries[emitted_entries..]` plus
+    /// ephemeral blocks; everything before it scrolls, selects, and
+    /// copies natively. Adjusted when [`Self::enforce_cap`] prunes the
+    /// front; reset by [`Self::clear_entries`].
+    pub emitted_entries: usize,
     /// Ctrl+R search mode. `None` when off; when set, the overlay is
     /// active and typing goes to the query instead of the composer.
     pub search: Option<SearchState>,
@@ -399,6 +499,35 @@ pub struct TuiState {
     /// Process start instant — drives the goal panel's breathing
     /// animation phase so the pulse doesn't need its own timer.
     pub booted_at: Instant,
+    /// Viewport height the render pass wants after the current frame.
+    /// Set each draw; the event loop calls `resize_viewport` when this
+    /// differs from the terminal's actual inline-viewport height so blank
+    /// rows above live content collapse into real scrollback instead.
+    pub desired_viewport_height: u16,
+    /// Model catalog snapshot taken when the Ctrl+O unified selector
+    /// opens — reused across subsequent keystrokes (which run
+    /// synchronously in the palette key handler and can't await the
+    /// `cfg.models` `RwLock` themselves). Cleared when the selector
+    /// closes so stale entries don't leak into later opens.
+    pub unified_models_cache: Vec<String>,
+    /// Live per-agent-call nested cell state, keyed by the parent's
+    /// `agent` tool-call id. Populated from the broadcast subagent
+    /// stream; read by the tool_call renderer to draw child tool uses
+    /// under the `● Agent(...)` header. Not persisted — a resume
+    /// starts with an empty map because subagent broadcasts don't
+    /// replay.
+    pub agent_cells: std::collections::HashMap<String, AgentCell>,
+    /// Running character tally from `SubagentToken` events this turn.
+    /// Used as a rough token-count proxy (÷4) in the working indicator
+    /// so the `↓N tokens` counter increments during subagent execution
+    /// even though the parent session generates no completion tokens then.
+    /// Reset to zero at the start of each turn.
+    pub turn_subagent_chars: u64,
+    /// Whether to show the ephemeral "context filling up" warning card in
+    /// the pane. Set when context fill crosses 80 %; cleared when the
+    /// harness emits a `Compacted` event (compaction already fired) or on
+    /// session clear.
+    pub context_warn_shown: bool,
 }
 
 /// Placeholder token that stands in for a stashed paste inside
@@ -407,6 +536,61 @@ pub struct TuiState {
 /// `[pasted N lines]`, done at draw time.
 pub fn paste_placeholder(id: u32) -> String {
     format!("[[paste:{id}]]")
+}
+
+/// Live nested-cell payload for one `agent` tool call. Populated as
+/// `SubagentStarted`/`SubagentToolStart`/`SubagentToolEnd`/
+/// `SubagentDone` frames arrive on the broadcast; the tool_call
+/// renderer looks it up by the parent call id to draw the tree of
+/// child tool uses under the `● Agent(...)` header.
+#[derive(Clone, Debug, Default)]
+pub struct AgentCell {
+    /// Child session id (from `SubagentStarted`). Not surfaced in the
+    /// UI today; retained so a future "open subagent transcript" cmd
+    /// has the key it needs.
+    pub agent_id: Option<String>,
+    /// Model the child is running under — shown as a caption below
+    /// the Agent header.
+    pub model: Option<String>,
+    /// One row per child tool use, in arrival order. Each row is
+    /// summarised via [`crate::tui::components::tool_call::summarize_tool`]
+    /// at insert time so the render pass stays cheap.
+    pub tool_uses: Vec<AgentToolUse>,
+    /// True once `SubagentDone` lands. Renderer flips the working
+    /// `◐` dot to a settled `●`.
+    pub done: bool,
+    /// Number of warnings the child emitted. Surfaced as a small
+    /// `!N` chip so the user notices a broken subagent without
+    /// having to open its transcript.
+    pub warnings: u16,
+    /// Intermediate progress updates from `progress` tool calls.
+    /// Stored so the last note remains visible under the agent header
+    /// even between renders.
+    pub progress: Vec<String>,
+    /// Tail of the subagent's live text stream (SubagentToken events).
+    /// Capped at 200 chars; cleared when a child tool starts so the
+    /// "thinking" text doesn't linger while a bash command runs.
+    pub streaming_text: String,
+}
+
+/// One row inside an [`AgentCell`] — a child's tool call, ok/fail
+/// state, and the first line of its result snippet. Kept small so a
+/// long agent run doesn't balloon TUI memory (the full result body
+/// is not stored — the child sub-session persists it if it needs to).
+#[derive(Clone, Debug)]
+pub struct AgentToolUse {
+    /// Friendly family label (`"Read"`, `"Bash"`, …) from
+    /// `summarize_tool`.
+    pub label: String,
+    /// First-line summary (path, command, pattern…).
+    pub summary: String,
+    /// `None` while the child call is in flight; `Some(true)` on
+    /// success, `Some(false)` on error.
+    pub ok: Option<bool>,
+    /// Correlates a `SubagentToolStart` with its later
+    /// `SubagentToolEnd` — needed because a child may fire multiple
+    /// tools before any completes.
+    pub call_id: String,
 }
 
 /// A collapsed paste, stashed out of the composer buffer. See
@@ -456,10 +640,11 @@ impl TuiState {
             mode,
             model,
             git_branch: None,
-            git_dirty: None,
             tool_tail: None,
             streaming: false,
-            pending_approval: None,
+            streamed_assistant_idx: std::collections::HashSet::new(),
+            pending_approvals: VecDeque::new(),
+            approval_focus: 0,
             pending_plan: None,
             pending_ask: None,
             esc_pending: false,
@@ -479,6 +664,7 @@ impl TuiState {
             stream_started_at: None,
             mouse_capture: false,
             dropped_entries: 0,
+            emitted_entries: 0,
             search: None,
             pastes: Vec::new(),
             next_paste_id: 1,
@@ -488,6 +674,111 @@ impl TuiState {
             turn_scroll_target: None,
             layout_cache: None,
             booted_at: Instant::now(),
+            desired_viewport_height: 0,
+            unified_models_cache: Vec::new(),
+            agent_cells: std::collections::HashMap::new(),
+            turn_subagent_chars: 0,
+            context_warn_shown: false,
+        }
+    }
+
+    // ---- agent cells (subagent nested rendering) ----
+
+    /// First `SubagentStarted` for a call id — seeds the cell with
+    /// the child's model. Idempotent so a replayed frame after a
+    /// resubscription doesn't wipe the running tool_uses list.
+    pub fn agent_started(&mut self, parent_call_id: &str, agent_id: String, model: String) {
+        let cell = self.agent_cells.entry(parent_call_id.to_owned()).or_default();
+        cell.agent_id = Some(agent_id);
+        cell.model = Some(model);
+        cell.done = false;
+    }
+
+    /// Push an in-flight child tool row. `ok = None` marks it as
+    /// running; `agent_tool_ended` flips that when the paired
+    /// SubagentToolEnd arrives.
+    pub fn agent_tool_started(
+        &mut self,
+        parent_call_id: &str,
+        call_id: String,
+        label: String,
+        summary: String,
+    ) {
+        let cell = self.agent_cells.entry(parent_call_id.to_owned()).or_default();
+        cell.tool_uses.push(AgentToolUse {
+            label,
+            summary,
+            ok: None,
+            call_id,
+        });
+    }
+
+    /// Correlate a SubagentToolEnd back to its earlier ToolStart by
+    /// `call_id` and mark it done. If the pair never landed
+    /// (out-of-order delivery on a hot channel), we still record the
+    /// end as a new row so it isn't silently lost.
+    pub fn agent_tool_ended(
+        &mut self,
+        parent_call_id: &str,
+        call_id: &str,
+        ok: bool,
+    ) {
+        let cell = self.agent_cells.entry(parent_call_id.to_owned()).or_default();
+        if let Some(row) = cell.tool_uses.iter_mut().find(|r| r.call_id == call_id) {
+            row.ok = Some(ok);
+        } else {
+            cell.tool_uses.push(AgentToolUse {
+                label: String::from("Tool"),
+                summary: String::new(),
+                ok: Some(ok),
+                call_id: call_id.to_owned(),
+            });
+        }
+    }
+
+    /// Bump the warning counter for a live cell — surfaced as a
+    /// small `!N` chip so a broken subagent is visible without
+    /// popping open its transcript.
+    pub fn agent_warning(&mut self, parent_call_id: &str) {
+        let cell = self.agent_cells.entry(parent_call_id.to_owned()).or_default();
+        cell.warnings = cell.warnings.saturating_add(1);
+    }
+
+    /// Final `SubagentDone` — flip the header dot from `◐` to `●`
+    /// on the next render.
+    pub fn agent_done(&mut self, parent_call_id: &str) {
+        let cell = self.agent_cells.entry(parent_call_id.to_owned()).or_default();
+        cell.done = true;
+    }
+
+    /// Append a progress note from a `SubagentProgress` event.
+    pub fn agent_progress(&mut self, parent_call_id: &str, text: String) {
+        let cell = self.agent_cells.entry(parent_call_id.to_owned()).or_default();
+        cell.progress.push(text);
+    }
+
+    /// Accumulate a token fragment into the cell's live streaming tail.
+    /// Keeps only the last 200 chars so long reasoning blocks don't
+    /// grow the cell unboundedly.
+    pub fn agent_token(&mut self, parent_call_id: &str, text: &str) {
+        let cell = self.agent_cells.entry(parent_call_id.to_owned()).or_default();
+        cell.streaming_text.push_str(text);
+        const CAP: usize = 200;
+        if cell.streaming_text.len() > CAP {
+            let raw = cell.streaming_text.len() - CAP;
+            // Scan forward to the next valid char boundary.
+            let start = (raw..=cell.streaming_text.len())
+                .find(|&i| cell.streaming_text.is_char_boundary(i))
+                .unwrap_or(cell.streaming_text.len());
+            cell.streaming_text = cell.streaming_text[start..].to_owned();
+        }
+    }
+
+    /// Clear the live streaming tail when a child tool starts — the
+    /// model has stopped thinking and is now executing.
+    pub fn agent_clear_streaming_text(&mut self, parent_call_id: &str) {
+        if let Some(cell) = self.agent_cells.get_mut(parent_call_id) {
+            cell.streaming_text.clear();
         }
     }
 
@@ -697,6 +988,8 @@ impl TuiState {
     pub fn clear_entries(&mut self) {
         self.entries.clear();
         self.dropped_entries = 0;
+        self.emitted_entries = 0;
+        self.streamed_assistant_idx.clear();
         self.scroll = 0;
         self.follow_tail = true;
     }
@@ -705,10 +998,109 @@ impl TuiState {
     /// bumping `dropped_entries` so the render layer can show the
     /// truncation notice. Called from every push helper.
     fn enforce_cap(&mut self) {
+        let mut dropped = 0;
         while self.entries.len() > MAX_ENTRIES {
             self.entries.remove(0);
             self.dropped_entries = self.dropped_entries.saturating_add(1);
+            dropped += 1;
         }
+        // Pruned entries were emitted to scrollback long ago (only the
+        // oldest entries are ever pruned) — shift the frontier so it
+        // keeps pointing at the same logical entry.
+        self.emitted_entries = self.emitted_entries.saturating_sub(dropped);
+        if dropped > 0 && !self.streamed_assistant_idx.is_empty() {
+            // Streamed-assistant indices are absolute positions in
+            // `entries`; shift them the same way, dropping any that fell
+            // off the front so the set doesn't grow forever.
+            let shifted: std::collections::HashSet<usize> = self
+                .streamed_assistant_idx
+                .iter()
+                .filter_map(|&i| i.checked_sub(dropped))
+                .collect();
+            self.streamed_assistant_idx = shifted;
+        }
+    }
+
+    /// How many leading entries are safe to mirror into real
+    /// scrollback: everything except a possibly-live tail. While
+    /// streaming the last entry is still receiving tokens (or is an
+    /// in-flight tool call), so it stays viewport-only; once the turn
+    /// settles, every entry is emittable.
+    #[allow(dead_code)]
+    pub fn settled_count(&self) -> usize {
+        if self.streaming {
+            self.entries.len().saturating_sub(1)
+        } else {
+            self.entries.len()
+        }
+    }
+
+    /// Where the scrollback frontier stops: everything except the
+    /// currently-live tail flows into real terminal scrollback via
+    /// `insert_history`. Held-back shapes:
+    ///
+    /// 1. A currently-streaming assistant entry — its text is being
+    ///    pushed line-by-line by `MarkdownStream`.
+    /// 2. A trailing tool run (any `ToolCall`/`ToolResult` sequence,
+    ///    complete or in-flight). Held for two reasons:
+    ///    - Pairing: if a lone in-flight `ToolCall` emitted alone,
+    ///      when the result arrived the paired block would be
+    ///      filtered out (its `first_entry` falls behind
+    ///      `emitted_entries`) and the result body would silently
+    ///      vanish. Holding the call keeps the pair together.
+    ///    - Batching: consecutive same-family completed pairs collapse
+    ///      into one "Reading N files" cell. That only works if
+    ///      `build_blocks` sees the whole run at once, which requires
+    ///      holding the earliest pair until we know whether more are
+    ///      coming. We flush the run the moment a non-tool entry
+    ///      (Assistant token, User, Info, Warning) lands — the model
+    ///      moving on is the "group is closed" signal.
+    ///
+    /// A user prompt at the tail is NOT held back — it emits
+    /// immediately so users see what they just typed.
+    pub fn emission_frontier(&self) -> usize {
+        let n = self.entries.len();
+        if !self.streaming || n == 0 {
+            return n;
+        }
+        let tail_idx = n - 1;
+        // Case 1: streaming assistant tail.
+        if matches!(self.entries.last(), Some(LogEntry::Assistant(_)))
+            && self.streamed_assistant_idx.contains(&tail_idx)
+        {
+            return tail_idx;
+        }
+        // Case 2: trailing tool run — hold from the first ToolCall in
+        // the current group so pairing and batching both work. See
+        // [`Self::trailing_tool_run_start`].
+        if let Some(start) = self.trailing_tool_run_start() {
+            return start;
+        }
+        n
+    }
+
+    /// Walk backwards from the tail, staying inside `ToolCall` /
+    /// `ToolResult` entries. Returns the index of the first tool
+    /// entry in the trailing run — everything from there is held so
+    /// the batcher can see the full group at once and pair blocks
+    /// don't get sliced by an earlier emission. Returns `None` when
+    /// the tail isn't tool-related.
+    fn trailing_tool_run_start(&self) -> Option<usize> {
+        let n = self.entries.len();
+        if n == 0 {
+            return None;
+        }
+        let is_tool = |e: &LogEntry| {
+            matches!(e, LogEntry::ToolCall { .. } | LogEntry::ToolResult { .. })
+        };
+        if !is_tool(&self.entries[n - 1]) {
+            return None;
+        }
+        let mut start = n - 1;
+        while start > 0 && is_tool(&self.entries[start - 1]) {
+            start -= 1;
+        }
+        Some(start)
     }
 
     pub fn push_user(&mut self, s: String) {
@@ -762,13 +1154,23 @@ impl TuiState {
         self.enforce_cap();
     }
 
-    /// Push the startup banner. One structured entry (not a pile of
+    /// Push the session banner. One structured entry (not a pile of
     /// info lines) so the component can render it with brand colors.
-    pub fn push_welcome(&mut self, model: String, mode: Mode, cwd: String, tip: &'static str) {
+    pub fn push_welcome(
+        &mut self,
+        model: String,
+        mode: Mode,
+        cwd: String,
+        meta: SessionMeta,
+        tip: &'static str,
+    ) {
         self.entries.push(LogEntry::Welcome {
             model,
+            provider: meta.provider,
             mode,
             cwd,
+            branch: meta.branch,
+            skills: meta.skills,
             tip,
         });
         self.enforce_cap();
@@ -782,6 +1184,20 @@ impl TuiState {
     pub fn push_warning(&mut self, s: String) {
         self.entries.push(LogEntry::Warning(s));
         self.enforce_cap();
+    }
+
+    pub fn push_compacted(&mut self, messages_removed: usize) {
+        self.entries.push(LogEntry::Compacted { messages_removed });
+        self.context_warn_shown = false;
+        self.enforce_cap();
+    }
+
+    /// Context fill [0.0, 100.0] for the current model, or `None` if the
+    /// model's context window size is unknown. Mirrors the logic in `footer.rs`
+    /// so both surfaces agree without a shared dep.
+    pub fn context_fill_pct(&self) -> Option<f64> {
+        let ctx = model_context_len(&self.model)?;
+        Some((self.usage.prompt_tokens as f64 / ctx as f64 * 100.0).min(100.0))
     }
 
     /// Append a streamed assistant token onto the tail assistant entry —
@@ -1042,6 +1458,9 @@ impl TuiState {
                 } => {
                     out.push_str(&format!("mira · {model} · {cwd}\n> {tip}\n\n"));
                 }
+                LogEntry::Compacted { messages_removed } => {
+                    out.push_str(&format!("[compacted {messages_removed} messages]\n\n"));
+                }
             }
         }
         out
@@ -1082,11 +1501,20 @@ impl TuiState {
             .zip(&p.checked)
             .filter_map(|(s, on)| on.then_some(s))
             .collect::<Vec<_>>();
+        let n = steps.len();
         let _ = p.reply.send(PromptResponse::Plan(mira_tools::prompt::PlanResponse {
             approved: true,
             steps: Some(steps),
             note: None,
         }));
+        // The card itself is ephemeral and never reaches scrollback —
+        // leave a one-line trace so the settled transcript still reads
+        // as a story.
+        self.push_info(format!(
+            "plan approved · {} step{}",
+            n,
+            if n == 1 { "" } else { "s" }
+        ));
         true
     }
 
@@ -1100,6 +1528,7 @@ impl TuiState {
             steps: None,
             note: None,
         }));
+        self.push_info("plan dismissed — continuing without it".to_owned());
         true
     }
 
@@ -1206,7 +1635,53 @@ impl TuiState {
         true
     }
 
-    /// Submit all collected answers (Enter on the card). Sends the
+    /// Enter on the card: pick the focused option, then advance to the
+    /// next question — or submit when already on the last question.
+    ///
+    /// Single-select questions record the focused option (so arrow keys
+    /// + Enter selects it and moves on). Multi-select questions keep
+    /// their current toggles and just advance/submit, so Enter never
+    /// clobbers a multi-pick — use digits to toggle those.
+    /// Returns `true` when the card advanced or was answered.
+    pub fn ask_enter(&mut self) -> bool {
+        let last = match self.pending_ask.as_ref() {
+            Some(a) => a.question + 1 >= a.proposal.questions.len(),
+            None => return false,
+        };
+        // Snapshot focus + label without holding the borrow across
+        // `ask_submit` (which takes the card).
+        let (question, multi, label) = match self.pending_ask.as_ref() {
+            Some(a) => match a.proposal.questions.get(a.question) {
+                Some(q) => match q.options.get(a.option) {
+                    Some(opt) => (a.question, q.multi_select, opt.label.clone()),
+                    None => return false,
+                },
+                None => return false,
+            },
+            None => return false,
+        };
+        if !multi {
+            if let Some(a) = self.pending_ask.as_mut() {
+                a.picked[question] = vec![label];
+            }
+            if last {
+                return self.ask_submit();
+            }
+            if let Some(a) = self.pending_ask.as_mut() {
+                a.question = (question + 1).min(a.proposal.questions.len() - 1);
+                a.option = 0;
+            }
+            return true;
+        }
+        // Multi-select: Enter advances without toggling; on the last
+        // question it submits whatever is toggled so far.
+        if last {
+            return self.ask_submit();
+        }
+        self.ask_move_question(1)
+    }
+
+    /// Submit all collected answers. Sends the
     /// response to the waiting tool; `true` when a card was answered.
     pub fn ask_submit(&mut self) -> bool {
         let Some(a) = self.pending_ask.take() else {
@@ -1226,6 +1701,11 @@ impl TuiState {
             answers,
             cancelled: false,
         }));
+        // Don't push an Info trace here — the ToolEnd event that follows
+        // will pair with the in-flight ToolCall entry, producing a clean
+        // tool group. An Info inserted now lands between ToolCall and
+        // ToolResult, breaking the pairing and causing duplicate-looking
+        // blocks in the transcript.
         true
     }
 
@@ -1363,6 +1843,7 @@ impl TuiState {
                 s.cursor = (s.cursor + 1) % s.hits.len();
             }
         }
+        self.flag_scrollback_hit();
     }
 
     pub fn search_prev(&mut self) {
@@ -1374,6 +1855,19 @@ impl TuiState {
                     s.cursor - 1
                 };
             }
+        }
+        self.flag_scrollback_hit();
+    }
+
+    /// Flash a pointer when the active search hit already scrolled
+    /// into the terminal's real scrollback — the viewport holds
+    /// position instead of jumping.
+    fn flag_scrollback_hit(&mut self) {
+        let in_scrollback = self
+            .active_hit()
+            .is_some_and(|(idx, _)| idx < self.emitted_entries);
+        if in_scrollback {
+            self.flash = Some("match is in scrollback above — scroll your terminal".into());
         }
     }
 
@@ -1402,6 +1896,31 @@ impl TuiState {
                 start += off + needle.len();
             }
         }
+    }
+
+    /// Queue an approval request behind any already waiting. The card
+    /// shows the head of the queue with a `+N more` count.
+    pub fn push_approval(&mut self, pending: PendingApproval) {
+        self.pending_approvals.push_back(pending);
+    }
+
+    /// Pop the head of the approval queue after a decision, resetting
+    /// the option focus for whatever is next.
+    pub fn approval_resolve(&mut self) -> Option<PendingApproval> {
+        let top = self.pending_approvals.pop_front();
+        self.approval_focus = 0;
+        top
+    }
+
+    /// Move the approval option focus (0 = allow once, 1 = always,
+    /// 2 = deny), clamped — the option list is fixed length.
+    pub fn approval_move(&mut self, delta: isize) -> bool {
+        let next = self.approval_focus as isize + delta;
+        if next < 0 || next > 2 {
+            return false;
+        }
+        self.approval_focus = next as usize;
+        true
     }
 
     /// Session-scoped allow-rule string for a specific tool call, or
@@ -1696,6 +2215,35 @@ fn line_end(s: &str, byte: usize) -> usize {
     }
 }
 
+/// Maps model identifiers to their context window size in tokens.
+/// Mirrors the table in `render/footer.rs` — keep both in sync.
+fn model_context_len(model: &str) -> Option<u64> {
+    let m = model.to_ascii_lowercase();
+    if m.contains("gpt-4.1") || m.contains("gpt-5") {
+        Some(1_000_000)
+    } else if m.contains("claude-3-5-sonnet")
+        || m.contains("claude-sonnet-4")
+        || m.contains("claude-3-5-haiku")
+        || m.contains("claude-haiku-4")
+        || m.contains("claude-3-opus")
+        || m.contains("claude-opus-4")
+    {
+        Some(200_000)
+    } else if m.contains("gemini-2.5") || m.contains("gemini-1.5") {
+        Some(1_000_000)
+    } else if m.contains("gpt-4o")
+        || m.contains("llama-3.3")
+        || m.contains("llama-3.1")
+        || m.contains("grok")
+    {
+        Some(128_000)
+    } else if m.contains("deepseek") {
+        Some(64_000)
+    } else {
+        None
+    }
+}
+
 /// Flatten one entry to plain text for search matching. Preserves
 /// content — assistant paragraphs, user messages, tool args, tool
 /// results.
@@ -1719,6 +2267,9 @@ fn entry_text(e: &LogEntry) -> String {
             } else {
                 full.clone()
             }
+        }
+        LogEntry::Compacted { messages_removed } => {
+            format!("context compacted {messages_removed} messages")
         }
     }
 }
@@ -1750,6 +2301,181 @@ fn truncate_bytes(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settled_count_holds_back_streaming_tail() {
+        let mut st = TuiState::new("m".into(), Mode::Manual);
+        assert_eq!(st.settled_count(), 0);
+        st.push_info("a");
+        st.push_assistant("b".to_string());
+        assert_eq!(st.settled_count(), 2);
+        st.streaming = true;
+        assert_eq!(st.settled_count(), 1);
+        st.streaming = false;
+        assert_eq!(st.settled_count(), 2);
+    }
+
+    #[test]
+    fn prune_shifts_emission_frontier() {
+        let mut st = TuiState::new("m".into(), Mode::Manual);
+        for i in 0..510 {
+            st.push_info(format!("line {i}"));
+        }
+        assert_eq!(st.entries().len(), 500);
+        assert_eq!(st.dropped_entries, 10);
+        assert_eq!(st.emitted_entries, 0);
+        // Simulate a frontier mid-log, then prune again.
+        st.emitted_entries = 490;
+        for i in 0..20 {
+            st.push_info(format!("more {i}"));
+        }
+        assert_eq!(st.entries().len(), 500);
+        assert_eq!(st.emitted_entries, 470);
+    }
+
+    #[test]
+    fn clear_resets_emission_frontier() {
+        let mut st = TuiState::new("m".into(), Mode::Manual);
+        st.push_info("a");
+        st.emitted_entries = 1;
+        st.clear_entries();
+        assert_eq!(st.emitted_entries, 0);
+        assert!(st.entries().is_empty());
+    }
+
+    fn mk_approval(id: &str) -> PendingApproval {
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        PendingApproval {
+            request: crate::tui::approver::ApprovalRequest {
+                call: mira_core::ToolCall {
+                    id: id.into(),
+                    kind: mira_core::message::ToolCallKind::Function,
+                    function: mira_core::message::ToolCallFunction {
+                        name: "shell".into(),
+                        arguments: "{}".into(),
+                    },
+                },
+                reply: tx,
+            },
+            preview: None,
+        }
+    }
+
+    #[test]
+    fn approval_queue_stacks_and_resolves_in_order() {
+        let mut st = TuiState::new("m".into(), Mode::Manual);
+        assert!(st.pending_approvals.is_empty());
+        st.push_approval(mk_approval("1"));
+        st.push_approval(mk_approval("2"));
+        assert_eq!(st.pending_approvals.len(), 2);
+        // Head of queue renders first.
+        assert_eq!(st.pending_approvals.front().unwrap().request.call.id, "1".into());
+        st.approval_focus = 2;
+        let top = st.approval_resolve().expect("head");
+        assert_eq!(top.request.call.id, "1".into());
+        // Focus resets for whatever is next.
+        assert_eq!(st.approval_focus, 0);
+        assert_eq!(st.pending_approvals.len(), 1);
+    }
+
+    #[test]
+    fn approval_focus_clamps_to_options() {
+        let mut st = TuiState::new("m".into(), Mode::Manual);
+        assert!(st.approval_move(1));
+        assert!(st.approval_move(1));
+        assert_eq!(st.approval_focus, 2);
+        assert!(!st.approval_move(1));
+        assert!(st.approval_move(-2));
+        assert_eq!(st.approval_focus, 0);
+        assert!(!st.approval_move(-1));
+    }
+
+    fn dummy_reply() -> tokio::sync::oneshot::Sender<PromptResponse> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        drop(rx);
+        tx
+    }
+
+    #[test]
+    fn ask_submit_clears_pending_and_sends_response() {
+        let mut st = TuiState::new("m".into(), Mode::Manual);
+        let mut ask = PendingAsk::new(
+            "c".into(),
+            AskUserProposal {
+                questions: vec![mira_tools::prompt::AskUserQuestion {
+                    question: "Q?".into(),
+                    header: None,
+                    options: vec![mira_tools::prompt::AskUserOption {
+                        label: "SQLite".into(),
+                        description: None,
+                        recommended: false,
+                    }],
+                    multi_select: false,
+                }],
+            },
+            dummy_reply(),
+        );
+        ask.picked[0] = vec!["SQLite".into()];
+        let entry_count_before = st.entries().len();
+        st.pending_ask = Some(ask);
+        assert!(st.ask_submit());
+        assert!(st.pending_ask.is_none());
+        // No Info trace: inserting one between ToolCall and ToolResult
+        // breaks their pairing in build_blocks.
+        assert_eq!(st.entries().len(), entry_count_before);
+    }
+
+    #[test]
+    fn ask_cancel_clears_pending() {
+        let mut st = TuiState::new("m".into(), Mode::Manual);
+        let entry_count_before = st.entries().len();
+        st.pending_ask = Some(PendingAsk::new(
+            "c".into(),
+            AskUserProposal {
+                questions: vec![],
+            },
+            dummy_reply(),
+        ));
+        assert!(st.ask_cancel());
+        assert!(st.pending_ask.is_none());
+        assert_eq!(st.entries().len(), entry_count_before);
+    }
+
+    #[test]
+    fn plan_resolve_leaves_trace() {
+        use mira_tools::prompt::PlanStep;
+        let mut st = TuiState::new("m".into(), Mode::Manual);
+        st.pending_plan = Some(PendingPlan::new(
+            "c".into(),
+            PlanProposal {
+                title: "t".into(),
+                steps: vec![PlanStep {
+                    description: "s".into(),
+                    why: None,
+                }],
+            },
+            dummy_reply(),
+        ));
+        assert!(st.plan_accept());
+        match st.entries().last().expect("trace entry") {
+            LogEntry::Info(s) => assert!(s.contains("1 step"), "{s}"),
+            other => panic!("expected info trace, got {other:?}"),
+        }
+
+        st.pending_plan = Some(PendingPlan::new(
+            "c".into(),
+            PlanProposal {
+                title: "t".into(),
+                steps: vec![],
+            },
+            dummy_reply(),
+        ));
+        assert!(st.plan_cancel());
+        match st.entries().last().expect("trace entry") {
+            LogEntry::Info(s) => assert!(s.contains("dismissed"), "{s}"),
+            other => panic!("expected info trace, got {other:?}"),
+        }
+    }
 
     #[test]
     fn cursor_left_right_ascii() {

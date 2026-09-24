@@ -19,13 +19,17 @@ use futures::stream::BoxStream;
 use futures::StreamExt;
 use mira_core::Role;
 use mira_harness::{GoalStatus, HarnessEvent, Session};
-use ratatui::Terminal;
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::text::Line;
+use ratatui::widgets::{Paragraph, Widget, Wrap};
 
 use crate::tui::components::status::format_turn_elapsed;
 use crate::tui::components::tool_call::summarize_tool;
+use crate::tui::inline_term::InlineTerm;
 use crate::tui::input::{keyboard, paste};
 use crate::tui::render;
-use crate::tui::state::{PendingApproval, TuiState};
+use crate::tui::state::{LogEntry, PendingApproval, TuiState};
 
 use super::{run_slash, TuiConfig};
 
@@ -34,6 +38,12 @@ use super::{run_slash, TuiConfig};
 /// look hung.
 const STREAM_TICK: Duration = Duration::from_millis(100);
 
+/// Minimum wall-clock gap between two consecutive draws. Frame requests
+/// are debounced to this — a burst of harness Token events at 50/sec
+/// won't drive 50 redraws/sec, they'll coalesce into ~60fps at most.
+/// Matches the deadline scheduler pattern the aster reference uses.
+const MIN_FRAME_INTERVAL: Duration = Duration::from_millis(16);
+
 /// Duration a provider-error flash stays visible on the status row.
 /// One second lands as "a beat you can't miss" without wasting screen
 /// space on a persistent banner — the yellow warning line is still
@@ -41,17 +51,23 @@ const STREAM_TICK: Duration = Duration::from_millis(100);
 const ERROR_FLASH_DURATION: Duration = Duration::from_millis(1000);
 
 pub(super) async fn event_loop(
-    terminal: &mut Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
+    term: &mut InlineTerm,
     session: Session,
     mut cfg: TuiConfig,
     mouse_capture_out: &mut bool,
+    viewport_height_out: &mut u16,
+    summary_out: &mut Option<String>,
 ) -> Result<()> {
     let mut state = TuiState::new(cfg.model.clone(), cfg.mode);
+    let session_started_at = std::time::Instant::now();
     // Start with mouse capture off so text selection works by default.
     // Alt+M will toggle it on for scroll-wheel driving.
     state.mouse_capture = false;
+    // Paint immediately — history hydration below can take seconds
+    // (session store I/O) and startup must never look hung.
+    draw_frame(term, &mut state)?;
     state.git_branch = detect_git_branch(&cfg.cwd).await;
-    hydrate_from_history(&session, &mut state).await;
+    hydrate_from_history(&session, &mut state, &cfg).await;
 
     // File index for `@` completion — a one-shot `rg --files` in the cwd,
     // shared between palette openings so we don't reshell for every '@'.
@@ -60,19 +76,56 @@ pub(super) async fn event_loop(
 
     let mut input_events = EventStream::new();
     let mut agent_stream: Option<BoxStream<'static, HarnessEvent>> = None;
+    // Streaming markdown parser — assistant tokens feed this and every
+    // completed line is pushed into real terminal scrollback so long
+    // replies never clip against the small inline pane.
+    let mut md_stream = crate::tui::markdown::MarkdownStream::new();
+    // Whether the `●` assistant dot has been emitted for the reply
+    // currently streaming. Reset on `Done`; guarded so a burst of
+    // deltas doesn't emit the dot more than once per reply.
+    let mut md_dot_emitted = false;
+
+    // Coalesced frame scheduling: rather than drawing on every event,
+    // we hold a `next_frame` deadline and let the tokio select's sleep
+    // arm trigger the actual draw when it fires. Every event handler
+    // just calls `schedule_frame` — bursts of harness Token events
+    // collapse into a single ~16ms-later draw instead of 50/sec.
+    let start = std::time::Instant::now();
+    let mut last_draw = start - MIN_FRAME_INTERVAL;
+    let mut next_frame: Option<std::time::Instant> = Some(start);
 
     loop {
-        terminal.draw(|f| render::draw(f, &mut state))?;
+        // Settle newly-arrived entries into real terminal scrollback
+        // eagerly, on every iteration. `insert_history` isn't gated by
+        // the frame scheduler — visibility of what the user just typed
+        // shouldn't wait for the animation loop. Emit is a no-op when
+        // nothing new has arrived, so this is cheap.
+        let _ = emit_settled(term, &mut state);
 
+        // Draws are debounced. Fire only when the deadline has arrived.
+        if next_frame
+            .map(|dl| std::time::Instant::now() >= dl)
+            .unwrap_or(false)
+        {
+            draw_frame(term, &mut state)?;
+            last_draw = std::time::Instant::now();
+            next_frame = None;
+        }
+
+        let deadline = next_frame;
         tokio::select! {
             evt = input_events.next() => {
                 match evt {
-                    Some(Ok(e)) => handle_terminal_event(e, &mut state, &session, &mut agent_stream, &mut cfg, &mut file_index).await,
+                    Some(Ok(e)) => {
+                        handle_terminal_event(e, term, &mut state, &session, &mut agent_stream, &mut cfg, &mut file_index).await;
+                        schedule_frame(&mut next_frame, last_draw);
+                    }
                     Some(Err(_)) | None => break,
                 }
             }
             Some(evt) = next_agent_event(&mut agent_stream) => {
-                handle_harness_event(evt, &mut state, &mut agent_stream, &session, &mut cfg).await;
+                handle_harness_event(evt, term, &mut state, &mut agent_stream, &session, &mut cfg, &mut md_stream, &mut md_dot_emitted).await;
+                schedule_frame(&mut next_frame, last_draw);
             }
             Some(req) = cfg.approval_rx.recv() => {
                 let (friendly, _) = summarize_tool(
@@ -81,21 +134,14 @@ pub(super) async fn event_loop(
                 );
                 terminal_notify(&format!("mira · approval needed: {friendly}"));
                 let preview = mira_tools::compute_preview(&cfg.cwd, &req.call).await;
-                // Stash the diff on the matching ToolCall entry so
-                // the completed tool group can render it once the
-                // ToolResult lands (closes the "approve → what
-                // actually changed?" feedback loop).
                 if let Some(p) = preview.as_ref() {
                     state.attach_preview(&req.call.id.to_string(), p.clone());
                 }
-                state.pending_approval = Some(PendingApproval { request: req, preview });
-                // Snap to tail so the inline prompt is visible even if
-                // the user had scrolled up mid-turn to read history.
+                state.push_approval(PendingApproval { request: req, preview });
                 state.follow_tail = true;
+                schedule_frame(&mut next_frame, last_draw);
             }
             Some(prompt) = cfg.prompt_rx.recv() => {
-                // plan / ask_user tools parked on the UI — pop the card
-                // and snap to tail so it's visible immediately.
                 match prompt.request {
                     mira_tools::prompt::PromptRequest::Plan(proposal) => {
                         terminal_notify("mira · plan review needed");
@@ -109,16 +155,23 @@ pub(super) async fn event_loop(
                     }
                 }
                 state.follow_tail = true;
+                schedule_frame(&mut next_frame, last_draw);
             }
-            // Redraw tick while the stream is running so the "3.2s"
-            // elapsed counter advances even during silent gaps. Guard
-            // with `state.streaming` so we don't burn CPU when idle.
-            _ = tokio::time::sleep(STREAM_TICK), if state.streaming => {}
-            // Redraw tick during an error flash so the red bar clears
-            // itself once the deadline passes without the user having
-            // to press a key. Cheap — fires at most a handful of
-            // times per flash.
-            _ = tokio::time::sleep(STREAM_TICK), if state.error_flash_active() => {}
+            Ok(msg) = cfg.subagent_events_rx.recv() => {
+                handle_subagent_event(msg, &mut state);
+                schedule_frame(&mut next_frame, last_draw);
+            }
+            _ = sleep_until(deadline), if deadline.is_some() => {
+                // Deadline fired — next loop iteration will draw. No
+                // additional bookkeeping needed here; the top-of-loop
+                // check handles it.
+            }
+            // Heartbeat: while a turn is streaming, request a frame every
+            // STREAM_TICK so the "3.2s" elapsed counter advances even
+            // during silent provider pauses. Same for error-flash decay.
+            _ = tokio::time::sleep(STREAM_TICK), if state.streaming || state.error_flash_active() => {
+                schedule_frame(&mut next_frame, last_draw);
+            }
         }
 
         if state.should_quit {
@@ -126,14 +179,234 @@ pub(super) async fn event_loop(
         }
     }
 
+    // Final emission: everything (drop the streaming cursor) so
+    // scrollback ends with the complete transcript, then report the
+    // viewport height for the exit cleanup in `leave`.
+    state.streaming = false;
+    let end = state.entries().len();
+    let _ = emit_upto(term, &mut state, end);
+    *viewport_height_out = state.viewport_height.max(1);
     *mouse_capture_out = state.mouse_capture;
+    *summary_out = Some(build_exit_summary(&state, session_started_at.elapsed()));
     Ok(())
+}
+
+/// One-line session recap printed to stdout after the TUI drops.
+/// Survives in shell scrollback so the user can glance back at what
+/// the session cost, how long it ran, and whether the goal landed.
+///
+/// Silent (returns "") for a session that never sent a turn — nothing
+/// to report.
+fn build_exit_summary(state: &TuiState, elapsed: Duration) -> String {
+    let tool_calls = state
+        .entries()
+        .iter()
+        .filter(|e| matches!(e, LogEntry::ToolCall { .. }))
+        .count();
+    let turns = state
+        .entries()
+        .iter()
+        .filter(|e| matches!(e, LogEntry::TurnEnd { .. }))
+        .count();
+    if turns == 0 && tool_calls == 0 {
+        return String::new();
+    }
+
+    let dur = format_session_duration(elapsed);
+    let mut parts: Vec<String> = vec![
+        format!("mira · {}", state.model),
+        dur,
+        format!("{turns} turn{}", if turns == 1 { "" } else { "s" }),
+        format!("{tool_calls} tool{}", if tool_calls == 1 { "" } else { "s" }),
+    ];
+
+    let u = &state.usage;
+    if !u.is_zero() {
+        parts.push(format!(
+            "↑{} ↓{}",
+            crate::tui::components::status::short_num(u.prompt_tokens),
+            crate::tui::components::status::short_num(u.completion_tokens),
+        ));
+    }
+    if let Some(cost) = current_cost_usd(state) {
+        parts.push(format_dollars_short(cost));
+    }
+    if let Some(goal) = state.goal.as_ref() {
+        let word = match goal.status {
+            GoalStatus::Met => "goal met",
+            GoalStatus::Impossible => "goal impossible",
+            GoalStatus::NeedsUser => "goal needs input",
+            GoalStatus::Exhausted => "goal exhausted",
+            GoalStatus::Cleared => "goal cleared",
+            GoalStatus::Active => "goal active",
+        };
+        parts.push(word.to_owned());
+    }
+    parts.join(" · ")
+}
+
+/// Human-readable session duration for the exit summary. Round to the
+/// nearest second under a minute, then minutes+seconds, then hours+minutes.
+fn format_session_duration(d: Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
+/// Minimum inline viewport height — enough for the footer plus a
+/// one-line composer body without hiding the composer chrome.
+const MIN_INLINE_HEIGHT: u16 = 4;
+
+/// Merge a new frame-request deadline into `next` — earliest wins, and
+/// the earliest is floored at `last_draw + MIN_FRAME_INTERVAL` so a
+/// burst of events can't drive the draw rate over ~60fps.
+fn schedule_frame(
+    next: &mut Option<std::time::Instant>,
+    last_draw: std::time::Instant,
+) {
+    let now = std::time::Instant::now();
+    let earliest = last_draw + MIN_FRAME_INTERVAL;
+    let dl = now.max(earliest);
+    *next = Some(next.map_or(dl, |cur| cur.min(dl)));
+}
+
+/// tokio `sleep_until` that treats `None` as "never" — pairs with a
+/// `select!` `if deadline.is_some()` guard so a missing deadline is
+/// simply a disabled branch.
+async fn sleep_until(deadline: Option<std::time::Instant>) {
+    match deadline {
+        Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Resize the inline viewport to fit `desired_viewport_height`, then
+/// render one frame into it. Wrapping these two into a single call is
+/// what gives the zero-gap look: no spacer row between the last settled
+/// entry (in real scrollback) and the composer, because the viewport is
+/// exactly as tall as the live content it holds.
+///
+/// `InlineTerm::set_height` moves the viewport boundary using its own
+/// tracked state — no `get_cursor_position` call — so this is safe to
+/// run alongside `EventStream`.
+fn draw_frame(term: &mut InlineTerm, state: &mut TuiState) -> Result<()> {
+    // Size the pane BEFORE handing the buffer to `render::draw`.
+    // Overlays (palette, search) write at absolute Y coordinates inside
+    // the pane's buffer, so if the pane is still at its old (small)
+    // size when the closure runs, the overlay writes past the buffer's
+    // bottom edge and ratatui panics with `index outside of buffer`.
+    let width = term.width().max(1);
+    let target = render::desired_pane_height(state, width).max(MIN_INLINE_HEIGHT);
+    term.set_height(target)?;
+    term.draw(|f| render::draw(f, state))?;
+    Ok(())
+}
+
+/// Mirror newly-settled entries into real scrollback, stopping at the
+/// emission frontier so the currently-streaming assistant tail stays
+/// live in the viewport (its content is being pushed line-by-line by
+/// `MarkdownStream`, not via this path). See [`TuiState::emission_frontier`].
+///
+/// The user message pushed at turn start emits immediately — before any
+/// tokens arrive — because `emission_frontier` only holds back the
+/// streaming assistant entry, not the "last entry" as a category.
+fn emit_settled(term: &mut InlineTerm, state: &mut TuiState) -> Result<()> {
+    emit_upto(term, state, state.emission_frontier())
+}
+
+/// Mirror entries in `[emitted_entries, end)` into the terminal's real
+/// scrollback via `InlineTerm::insert_history`, then advance the
+/// frontier.
+fn emit_upto(term: &mut InlineTerm, state: &mut TuiState, end: usize) -> Result<()> {
+    let end = end.min(state.entries().len());
+    if state.emitted_entries >= end {
+        return Ok(());
+    }
+    let width = term.width().max(1);
+    let lines = render::transcript::settled_lines(state, width, end);
+    if lines.is_empty() {
+        state.emitted_entries = end;
+        return Ok(());
+    }
+    render_lines_to_scrollback(term, lines, width)?;
+    state.emitted_entries = end;
+    Ok(())
+}
+
+/// Push a batch of already-rendered lines into real terminal scrollback
+/// as one contiguous history block. Used by the streaming markdown path
+/// (assistant tokens) where the caller owns the styling and doesn't
+/// need to go through the transcript block pipeline.
+fn push_lines_to_scrollback(term: &mut InlineTerm, lines: Vec<Line<'static>>) -> Result<()> {
+    if lines.is_empty() {
+        return Ok(());
+    }
+    let width = term.width().max(1);
+    render_lines_to_scrollback(term, lines, width)
+}
+
+/// Wrap `lines` to `width`, size a buffer to the wrapped height, then
+/// hand it to `InlineTerm::insert_history`. Consolidated helper so the
+/// two callers (settled entries + streaming markdown) can't drift on
+/// wrapping policy — a long assistant sentence that renders as one
+/// visual row here is the same as a long tool-result snippet coming
+/// through the block pipeline.
+fn render_lines_to_scrollback(
+    term: &mut InlineTerm,
+    lines: Vec<Line<'static>>,
+    width: u16,
+) -> Result<()> {
+    // Compute the post-wrap row count ourselves from the input Lines'
+    // span widths. `Paragraph::line_count` (behind
+    // `unstable-rendered-line-info`) under-reports for Vec<Line> input
+    // — a 200-col line on an 80-col terminal returns 1 rather than 3,
+    // so the buffer gets sized to a single row and the tail clips at
+    // the right edge instead of wrapping into scrollback. Direct
+    // display-width math sidesteps the bug and matches the wrapper
+    // ratatui will actually apply (space-boundary greedy).
+    let height = wrapped_row_count(&lines, width).max(1);
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let area = Rect::new(0, 0, width, height);
+    let mut buf = Buffer::empty(area);
+    para.render(area, &mut buf);
+    term.insert_history(&buf)?;
+    Ok(())
+}
+
+/// Row count `lines` would occupy after wrapping to `width` columns.
+/// Uses the same greedy-by-column policy `Wrap { trim: false }` does —
+/// blank lines still cost one row so a `Line::from("")` separator
+/// doesn't collapse.
+fn wrapped_row_count(lines: &[Line<'_>], width: u16) -> u16 {
+    use unicode_width::UnicodeWidthStr;
+    let w = width.max(1) as usize;
+    let mut total: u32 = 0;
+    for line in lines {
+        let display: usize = line
+            .spans
+            .iter()
+            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+            .sum();
+        let rows = if display == 0 {
+            1
+        } else {
+            (display + w - 1) / w
+        };
+        total = total.saturating_add(rows as u32);
+    }
+    total.min(u16::MAX as u32) as u16
 }
 
 /// Route one terminal event. Keys and mouse go to the input layer;
 /// paste goes to its own router; resize is a state transition here.
 async fn handle_terminal_event(
     evt: Event,
+    term: &mut InlineTerm,
     state: &mut TuiState,
     session: &Session,
     agent_stream: &mut Option<BoxStream<'static, HarnessEvent>>,
@@ -142,6 +415,11 @@ async fn handle_terminal_event(
 ) {
     match evt {
         Event::Resize(width, height) => {
+            // Reflow the viewport under the new terminal dimensions
+            // before the next draw. `InlineTerm::resized` computes the
+            // new position from tracked transcript rows — no cursor
+            // query, no race with the event stream.
+            let _ = term.resized();
             state.handle_resize(width, height);
         }
         Event::Paste(s) => {
@@ -188,26 +466,6 @@ async fn detect_git_branch(cwd: &std::path::Path) -> Option<String> {
     .flatten()
 }
 
-/// Count uncommitted changes (`git status --porcelain` lines) — the
-/// header's dirty chip. `None` outside a repo or on any failure.
-async fn count_git_dirty(cwd: &std::path::Path) -> Option<u32> {
-    let cwd = cwd.to_owned();
-    tokio::task::spawn_blocking(move || {
-        let out = std::process::Command::new("git")
-            .args(["status", "--porcelain"])
-            .current_dir(&cwd)
-            .output()
-            .ok()?;
-        if !out.status.success() {
-            return None;
-        }
-        Some(String::from_utf8_lossy(&out.stdout).lines().count() as u32)
-    })
-    .await
-    .ok()
-    .flatten()
-}
-
 /// Startup-banner tips — one shows per launch, deterministic
 /// rotation so the same session picks the same one on resume.
 const TIPS: &[&str] = &[
@@ -217,13 +475,23 @@ const TIPS: &[&str] = &[
     "1-9 expand or collapse recent tool groups",
     "ctrl+r searches the whole transcript",
     "/theme swaps the palette · /theme save keeps it",
+    "scrollback is real — finished output selects and copies natively",
+    "the footer names the keys that work right now — glance down when stuck",
+    "/mode plan · /mode auto · tab completes every slash arg",
+    "@ mentions a file without typing the whole path",
+    "/budget caps session spend · /cost shows where it went",
+    "shift+tab cycles permission modes without opening /mode",
+    "ctrl+e expands the last tool result in place",
+    "ctrl+y copies the last reply · ctrl+shift+c copies the transcript",
+    "/sessions lists recent work · /resume prints the command to reopen one",
+    "esc interrupts a turn · esc esc quits — the transcript stays behind",
 ];
 
 /// Rebuild the visible transcript from a session's history. On a fresh
 /// session (only a system message) we just show the welcome line; on
 /// resume we replay user/assistant/tool entries so it's obvious the
 /// conversation continued rather than starting empty.
-async fn hydrate_from_history(session: &Session, state: &mut TuiState) {
+async fn hydrate_from_history(session: &Session, state: &mut TuiState, cfg: &TuiConfig) {
     // Restore any standing goal so the header chip appears the moment
     // a resumed session opens. Kept before the "resumed" info line so
     // the goal is the first thing on screen when it matters.
@@ -254,7 +522,28 @@ async fn hydrate_from_history(session: &Session, state: &mut TuiState) {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as usize % TIPS.len())
             .unwrap_or(0)];
-        state.push_welcome(state.model.clone(), state.mode, cwd_short, tip);
+        // Skill roster snapshot for the banner — sorted names; the
+        // component caps the display with `+N more`.
+        let mut skills: Vec<String> = cfg
+            .skills
+            .read()
+            .await
+            .skills
+            .values()
+            .map(|s| s.name.clone())
+            .collect();
+        skills.sort();
+        state.push_welcome(
+            state.model.clone(),
+            state.mode,
+            cwd_short,
+            crate::tui::state::SessionMeta {
+                provider: cfg.provider.clone(),
+                branch: state.git_branch.clone(),
+                skills,
+            },
+            tip,
+        );
         return;
     }
 
@@ -337,13 +626,44 @@ pub(crate) fn interrupt_stream(
 
 async fn handle_harness_event(
     evt: HarnessEvent,
+    term: &mut InlineTerm,
     state: &mut TuiState,
     agent_stream: &mut Option<BoxStream<'static, HarnessEvent>>,
     session: &Session,
     cfg: &mut TuiConfig,
+    md_stream: &mut crate::tui::markdown::MarkdownStream,
+    md_dot_emitted: &mut bool,
 ) {
     match evt {
-        HarnessEvent::Token(t) => state.append_token(&t),
+        HarnessEvent::Token(t) => {
+            state.append_token(&t);
+            // Push every line the parser can now finalise straight into
+            // real terminal scrollback. The assistant's log entry still
+            // grows for search / turn-nav / history, but we mark its
+            // index in `streamed_assistant_idx` so `emit_settled` skips
+            // it on the next tick — otherwise the same reply would
+            // print twice (once here, once through the block pipeline).
+            let lines = md_stream.push(&t);
+            if !lines.is_empty() {
+                let out = if !*md_dot_emitted {
+                    // Prefix the very first line of the reply with the
+                    // inline `● ` marker — one row, not two, matching
+                    // the batch-render assistant dot.
+                    *md_dot_emitted = true;
+                    crate::tui::components::message::prefix_assistant_dot(lines)
+                } else {
+                    lines
+                };
+                let _ = push_lines_to_scrollback(term, out);
+            }
+            if let Some(idx) = state
+                .entries()
+                .iter()
+                .rposition(|e| matches!(e, LogEntry::Assistant(_)))
+            {
+                state.streamed_assistant_idx.insert(idx);
+            }
+        }
         HarnessEvent::ToolStart(call) => {
             state.push_tool_call(&call);
             // Compute the diff preview eagerly, not just on
@@ -376,7 +696,19 @@ async fn handle_harness_event(
             state.push_warning(w);
         }
         HarnessEvent::TurnComplete => {}
-        HarnessEvent::Usage { totals, .. } => state.usage = totals,
+        HarnessEvent::Usage { totals, .. } => {
+            state.usage = totals;
+            // Arm the pre-compaction warning card once fill crosses 80 %.
+            // Cleared when compaction fires (push_compacted) so we don't
+            // keep nagging after the harness has already tidied up.
+            if !state.context_warn_shown {
+                if let Some(pct) = state.context_fill_pct() {
+                    if pct >= 80.0 {
+                        state.context_warn_shown = true;
+                    }
+                }
+            }
+        }
         HarnessEvent::MemoryLearned { count } => {
             state.push_warning(format!(
                 "[memory] remembered {count} thing{}",
@@ -384,10 +716,7 @@ async fn handle_harness_event(
             ));
         }
         HarnessEvent::Compacted { messages_removed } => {
-            state.push_warning(format!(
-                "[context] compacted {messages_removed} earlier message{} into a summary",
-                if messages_removed == 1 { "" } else { "s" }
-            ));
+            state.push_compacted(messages_removed);
         }
         HarnessEvent::GoalSet { goal } => {
             state.push_info(format!("[goal] set: {}", goal.condition));
@@ -455,6 +784,24 @@ async fn handle_harness_event(
             // skip the harness-side preview to avoid double rendering.
         }
         HarnessEvent::Done => {
+            // Flush any partial trailing line + open table / unclosed
+            // fence in the streaming parser so the reply ends cleanly
+            // in scrollback before the turn receipt lands.
+            let tail_lines = md_stream.flush();
+            if !tail_lines.is_empty() {
+                let out = if !*md_dot_emitted {
+                    // Edge case: a reply that ends without producing a
+                    // single completed line (no `\n`) still deserves
+                    // the inline `● ` marker so it isn't a naked run
+                    // of text.
+                    crate::tui::components::message::prefix_assistant_dot(tail_lines)
+                } else {
+                    tail_lines
+                };
+                let _ = push_lines_to_scrollback(term, out);
+            }
+            // Reset the dot latch so the next reply gets its own header.
+            *md_dot_emitted = false;
             // Drop a `✳ Baked for 12.4s` marker into the transcript so
             // the reply is visibly bounded — matches Claude Code's
             // full-stop treatment. Cap at u32 max in case a stream
@@ -503,10 +850,10 @@ async fn handle_harness_event(
                 format_turn_elapsed(elapsed_ms)
             ));
             // The agent just (maybe) touched the worktree — refresh the
-            // header's branch + dirty chip so it never goes stale
-            // exactly when it matters.
+            // branch snapshot so a later session starts accurate. The
+            // banner shows the boot-time branch; live dirty tracking
+            // left with the old header.
             state.git_branch = detect_git_branch(&cfg.cwd).await;
-            state.git_dirty = count_git_dirty(&cfg.cwd).await;
             // The user may have typed while the agent was working —
             // tap the queue FIFO so the next turn starts immediately.
             if let Some(next) = state.take_next_queued() {
@@ -580,6 +927,7 @@ pub(crate) async fn start_stream(
     // Snapshot the running session totals so the in-turn indicator can
     // show this turn's delta, not the whole session's total.
     state.turn_usage_baseline = state.usage;
+    state.turn_subagent_chars = 0;
     state.stream_started_at = Some(std::time::Instant::now());
     state.follow_tail = true;
     *agent_stream = Some(session.send(text).await);
@@ -610,6 +958,82 @@ pub(crate) fn format_dollars_short(d: f64) -> String {
         format!("${d:.2}")
     } else {
         format!("${d:.3}")
+    }
+}
+
+/// Route one subagent broadcast event into the TUI state. The events
+/// arrive on `cfg.subagent_events_rx` and update `state.agent_cells`
+/// so the `● Agent(...)` tool-call renderer can show nested progress.
+fn handle_subagent_event(
+    msg: mira_server::protocol::ServerMsg,
+    state: &mut TuiState,
+) {
+    use mira_server::protocol::ServerMsg;
+    match msg {
+        ServerMsg::SubagentStarted {
+            parent_call_id,
+            agent_id,
+            model,
+            ..
+        } => {
+            state.agent_started(&parent_call_id, agent_id, model);
+        }
+        ServerMsg::SubagentToolStart {
+            parent_call_id,
+            call,
+        } => {
+            // Each tool invocation = some model overhead: bump the char
+            // counter so the working-indicator token count advances during
+            // bash-heavy subagent runs, not just during text generation.
+            state.turn_subagent_chars = state.turn_subagent_chars.saturating_add(200);
+            // Model has stopped generating text and is now executing a
+            // tool — clear the streaming tail so stale "thinking" text
+            // doesn't stay frozen under the header while bash runs.
+            state.agent_clear_streaming_text(&parent_call_id);
+            let (label, summary) =
+                summarize_tool(&call.function.name, &call.function.arguments);
+            state.agent_tool_started(
+                &parent_call_id,
+                call.id.to_string(),
+                label,
+                summary,
+            );
+        }
+        ServerMsg::SubagentToolEnd {
+            parent_call_id,
+            result,
+        } => {
+            state.turn_subagent_chars = state.turn_subagent_chars.saturating_add(100);
+            state.agent_tool_ended(&parent_call_id, &result.call_id.to_string(), !result.is_error);
+        }
+        ServerMsg::SubagentWarning { parent_call_id, .. } => {
+            state.agent_warning(&parent_call_id);
+        }
+        ServerMsg::SubagentProgress {
+            parent_call_id,
+            text,
+        } => {
+            // Tool output lines are real agent activity — count them even
+            // though they aren't model tokens. Cap per line so a huge bash
+            // dump doesn't balloon the display counter.
+            state.turn_subagent_chars =
+                state.turn_subagent_chars.saturating_add(text.len().min(80) as u64);
+            state.agent_progress(&parent_call_id, text);
+        }
+        ServerMsg::SubagentDone { parent_call_id } => {
+            state.agent_done(&parent_call_id);
+        }
+        // Count subagent characters as a token proxy — 4 chars ≈ 1 token
+        // (standard heuristic). Also feeds the live streaming tail so
+        // the agent header shows what the subagent is currently thinking.
+        ServerMsg::SubagentToken { parent_call_id, text } => {
+            state.turn_subagent_chars =
+                state.turn_subagent_chars.saturating_add(text.len() as u64);
+            state.agent_token(&parent_call_id, &text);
+        }
+        // Scratchpad note, review request, and all non-subagent variants
+        // are intentionally ignored — the TUI doesn't need them.
+        _ => {}
     }
 }
 

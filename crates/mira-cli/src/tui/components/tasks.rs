@@ -56,18 +56,26 @@ fn task_line(item: &TaskItem) -> Line<'static> {
         .unwrap_or(&item.subject);
     match item.status {
         TaskStatus::Pending => Line::from(vec![
-            Span::styled("  ○ ", Style::default().fg(DIM())),
+            Span::styled("  ◻ ", Style::default().fg(DIM())),
             Span::styled(label.to_owned(), Style::default().fg(MUTED())),
         ]),
         TaskStatus::InProgress => Line::from(vec![
-            Span::styled("  ◐ ", Style::default().fg(SALMON()).bold()),
+            Span::styled("  ◼ ", Style::default().fg(SALMON()).bold()),
             Span::styled(label.to_owned(), Style::default().fg(CREAM()).bold()),
         ]),
+        // Completed rows read as "already handled — don't scan again."
+        // The CROSSED_OUT modifier plus a dimmed check makes the row
+        // recede visually so the eye lands on what's still pending. If
+        // a terminal doesn't render strikethrough, the dim + colour
+        // change still work as fallbacks.
         TaskStatus::Completed => Line::from(vec![
-            Span::styled("  ✓ ", Style::default().fg(ratatui::style::Color::Green)),
+            Span::styled("  ✔ ", Style::default().fg(ratatui::style::Color::Green)),
             Span::styled(
                 item.subject.clone(),
-                Style::default().fg(MUTED()).add_modifier(Modifier::DIM),
+                Style::default()
+                    .fg(MUTED())
+                    .add_modifier(Modifier::DIM)
+                    .add_modifier(Modifier::CROSSED_OUT),
             ),
         ]),
         // Deleted tasks are filtered at hydration; render defensively.
@@ -102,9 +110,9 @@ mod tests {
             .flat_map(|l| l.spans.iter().map(|s| s.content.clone()))
             .collect();
         assert!(joined.contains("tasks 1/3"));
-        assert!(joined.contains("✓"));
-        assert!(joined.contains("◐"));
-        assert!(joined.contains("○"));
+        assert!(joined.contains("✔"));
+        assert!(joined.contains("◼"));
+        assert!(joined.contains("◻"));
     }
 
     #[test]

@@ -8,8 +8,9 @@
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
 
+use crate::tui::state::AgentCell;
 use super::tool_result;
-use super::{highlight_line, truncate, CREAM, MUTED, SALMON};
+use super::{highlight_line, truncate, CREAM, DIM, MUTED, SALMON};
 
 /// One tool call (optionally paired with its result) as the renderer
 /// sees it. Borrows from the state entries.
@@ -36,6 +37,9 @@ pub(crate) struct ToolView<'a> {
     /// tail) — renders dim under the `◐` header so a 90-second
     /// command doesn't look hung. `None` once a result lands.
     pub tail: Option<String>,
+    /// Live cell data for `agent` tool calls — child tool uses,
+    /// progress notes, done status. `None` for all other tools.
+    pub agent_cell: Option<&'a AgentCell>,
 }
 
 /// A batch of same-family call/result pairs, collapsed into one block.
@@ -105,6 +109,15 @@ pub(crate) fn render(
             ));
         }
     }
+    // Model caption inline on the header for agent calls — dim so it
+    // doesn't compete with the prompt text, but saves a whole row vs a
+    // separate line.
+    if let Some(cell) = v.agent_cell {
+        if let Some(model) = &cell.model {
+            header.push(Span::styled("  ·  ", Style::default().fg(DIM())));
+            header.push(Span::styled(model_short(model), Style::default().fg(DIM())));
+        }
+    }
     // Expandability is signaled implicitly by the truncated `└` snippet
     // below the header — no chevron. The previous `⌄` suffix was getting
     // orphaned by `Paragraph::wrap` when the header exceeded terminal
@@ -136,7 +149,88 @@ pub(crate) fn render(
             let p = v.preview.expect("checked above");
             out.extend(tool_result::diff_preview_lines(p, width));
         } else if let Some(r) = v.result.as_ref() {
-            out.extend(tool_result::body_lines(r));
+            // Pass the file path so read_file / view_file results get
+            // language-aware syntax highlighting instead of the generic
+            // heuristic.
+            let file_path = match v.name {
+                "read_file" | "view_file" => Some(summary.as_str()),
+                _ => None,
+            };
+            out.extend(tool_result::body_lines(r, file_path));
+        }
+    }
+
+    // Agent cell: nested child tool uses and progress notes.
+    if let Some(cell) = v.agent_cell {
+        // Live streaming tail — the last line the subagent was generating
+        // before it called a tool or finished. Shows what the model was
+        // "thinking" and clears the moment a tool fires. Never shown once
+        // the agent is done.
+        if !cell.done && !cell.streaming_text.trim().is_empty() {
+            let last = cell
+                .streaming_text
+                .lines()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("")
+                .trim();
+            if !last.is_empty() {
+                out.push(Line::from(vec![
+                    Span::styled("  ↳ ", Style::default().fg(DIM())),
+                    Span::styled(
+                        truncate(last, 90),
+                        Style::default().fg(super::DIM()).italic(),
+                    ),
+                ]));
+            }
+        }
+        // Live progress note — only while the agent is still running.
+        // Cleared visually on completion so it doesn't linger as stale text.
+        if !cell.done {
+            if let Some(note) = cell.progress.last() {
+                out.push(Line::from(vec![
+                    Span::styled("  ↻ ", Style::default().fg(DIM())),
+                    Span::styled(note.clone(), Style::default().fg(MUTED()).italic()),
+                ]));
+            }
+        }
+        // Child tool uses — styled like mini tool calls so they read
+        // consistently with the parent transcript (salmon label, cream
+        // summary, colored status dot).
+        if !cell.tool_uses.is_empty() {
+            let last_idx = cell.tool_uses.len().saturating_sub(1);
+            for (i, tu) in cell.tool_uses.iter().enumerate() {
+                let is_last = i == last_idx && cell.done;
+                let connector = if is_last { "  └  " } else { "  ├  " };
+                let (dot, dot_color) = match tu.ok {
+                    Some(true) => ("● ", Color::Green),
+                    Some(false) => ("● ", Color::Red),
+                    None => ("◐ ", SALMON()),
+                };
+                let mut spans = vec![
+                    Span::styled(connector, Style::default().fg(DIM())),
+                    Span::styled(dot, Style::default().fg(dot_color)),
+                    Span::styled(tu.label.clone(), Style::default().fg(SALMON())),
+                ];
+                if !tu.summary.is_empty() {
+                    spans.push(Span::styled(" ", Style::default()));
+                    spans.push(Span::styled(
+                        truncate(&tu.summary, 80),
+                        Style::default().fg(CREAM()),
+                    ));
+                }
+                out.push(Line::from(spans));
+            }
+        }
+        // Warnings chip.
+        if cell.warnings > 0 {
+            out.push(Line::from(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled(
+                    format!("!{} warning{}", cell.warnings, if cell.warnings == 1 { "" } else { "s" }),
+                    Style::default().fg(Color::Yellow).bold(),
+                ),
+            ]));
         }
     }
 
@@ -182,14 +276,19 @@ pub(crate) fn render_batch(v: &BatchView) -> Vec<Line<'static>> {
     if v.collapsed {
         return out;
     }
-    for summary in &v.summaries {
+    let last_idx = v.summaries.len().saturating_sub(1);
+    for (i, summary) in v.summaries.iter().enumerate() {
         let body = if summary.is_empty() {
             "(no arg)".to_owned()
         } else {
             truncate(summary, 140)
         };
+        // `├` on every row except the last, `└` on the last — a proper
+        // tree so the eye reads the group as one thing rather than
+        // three disconnected `└` corners stacked on top of each other.
+        let connector = if i == last_idx { "  └  " } else { "  ├  " };
         out.push(Line::from(vec![
-            Span::styled("  └  ", Style::default().fg(super::DIM())),
+            Span::styled(connector, Style::default().fg(super::DIM())),
             Span::styled(body, Style::default().fg(MUTED())),
         ]));
     }
@@ -209,6 +308,7 @@ fn batch_verb_noun(family: &str) -> (&'static str, &'static str) {
         "Grep" => ("Grepping", "patterns"),
         "Fetch" => ("Fetching", "URLs"),
         "Search" => ("Searching", "queries"),
+        "Agent" => ("Spawning", "subagents"),
         _ => ("Calling", "tools"),
     }
 }
@@ -243,6 +343,14 @@ pub(crate) fn summarize_tool(name: &str, args: &str) -> (String, String) {
         ),
         "web_fetch" | "fetch" => ("Fetch".to_owned(), get("url").unwrap_or_default()),
         "web_search" => ("Search".to_owned(), get("query").unwrap_or_default()),
+        "agent" => {
+            let type_prefix = get("type")
+                .filter(|t| !t.is_empty())
+                .map(|t| format!("({t}) "))
+                .unwrap_or_default();
+            let prompt = one_line(get("prompt").unwrap_or_default());
+            ("Agent".to_owned(), format!("{type_prefix}{prompt}"))
+        }
         "plan" => ("Plan".to_owned(), get("title").unwrap_or_default()),
         "ask_user" => ("Ask".to_owned(), {
             // First question text as the summary — that's the thing
@@ -325,6 +433,20 @@ pub(crate) fn last_undoable_call_idx(entries: &[crate::tui::state::LogEntry]) ->
         }
     }
     None
+}
+
+/// Strip the `claude-` prefix and trailing date suffix from a model id
+/// for the inline header caption. `claude-haiku-4-5-20251001` → `haiku-4-5`.
+fn model_short(model: &str) -> String {
+    let s = model.strip_prefix("claude-").unwrap_or(model);
+    // Strip trailing `-YYYYMMDD` (8 digits preceded by a dash).
+    if s.len() > 9 {
+        let tail = &s[s.len() - 8..];
+        if tail.chars().all(|c| c.is_ascii_digit()) {
+            return s[..s.len() - 9].to_owned();
+        }
+    }
+    s.to_owned()
 }
 
 /// `1.4s` under 10s, `12s` under a minute, `1m03s` above. Keeps the

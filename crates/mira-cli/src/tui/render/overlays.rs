@@ -6,9 +6,9 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
-use ratatui::Frame;
 
 use crate::tui::components::{CREAM, DIM, MUTED, SALMON};
+use crate::tui::inline_term::Frame;
 use crate::tui::state::{Palette, TuiState};
 
 /// Draw the palette as a floating list *above* the input area. Height
@@ -31,13 +31,24 @@ pub(crate) fn palette(f: &mut Frame, input_area: Rect, state: &TuiState) {
     };
     f.render_widget(Clear, area);
 
-    let title = match state.palette.kind {
-        Palette::Slash => " commands ",
-        Palette::AtFile => " files (rg --files) ",
-        Palette::Model => " models ",
-        Palette::Theme => " themes ",
-        Palette::SavePath => " save transcript to… ",
-        Palette::None => "",
+    let title: String = match state.palette.kind {
+        Palette::Slash => " commands ".into(),
+        Palette::AtFile => " files (rg --files) ".into(),
+        Palette::Model => " models ".into(),
+        Palette::Theme => " themes ".into(),
+        Palette::SavePath => " save transcript to… ".into(),
+        Palette::SlashArg(cmd) => format!(" {cmd} "),
+        Palette::Unified => {
+            // Show the live filter so the user sees what's narrowing the
+            // list — that filter is on `palette.filter`, not the
+            // composer, so it wouldn't be visible elsewhere.
+            if state.palette.filter.is_empty() {
+                " unified · ctrl+o · type to filter ".into()
+            } else {
+                format!(" unified · {}_ ", state.palette.filter)
+            }
+        }
+        Palette::None => String::new(),
     };
 
     let block = Block::default()

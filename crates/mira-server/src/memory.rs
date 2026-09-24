@@ -105,6 +105,10 @@ pub async fn get_memory(State(state): State<AppState>) -> Response {
     .into_response()
 }
 
+/// Returns per-scope memory-file existence and size.
+///
+/// Used by `GET /api/memory` to let the frontend know which memory files
+/// exist and how large they are without exposing their contents.
 fn file_status(p: &PathBuf) -> FileStatus {
     let meta = std::fs::metadata(p).ok();
     FileStatus {

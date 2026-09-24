@@ -8,69 +8,261 @@
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 
-use super::{highlight_line, line_is_empty, CREAM, MUTED, SALMON};
+use super::{highlight_line, line_is_empty, CREAM, MUTED, SALMON, USER_WASH};
 use crate::tui::markdown;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-/// Structured startup banner — the first transcript entry on a fresh
-/// session. Three quiet lines + a tip, Mira-flavored:
+/// Session banner — the first transcript entry on a fresh session,
+/// shown once before the message stream. The viewport carries no
+/// persistent header, so this is the session's identity record:
 ///
 ///     ℳ mira v0.3.6
-///     sonnet-4.5 · auto · ~/Desktop/coding_agent
+///     model     sonnet-4.5
+///     provider  anthropic
+///     cwd       ~/Desktop/coding_agent ⎇ main
+///     mode      auto
+///     skills    review · plan · +2 more
 ///
-///     ✳ type while mira works — enter queues the next turn
+///     /help for commands and keys · shift+tab changes mode · esc esc quits
+///     ✨ Tip: type while mira works — enter queues the next turn
 pub(crate) struct WelcomeView<'a> {
     pub model: &'a str,
+    pub provider: &'a str,
     pub mode: mira_policy::Mode,
     pub cwd: &'a str,
+    pub branch: Option<&'a str>,
+    pub skills: &'a [String],
     pub version: &'static str,
     pub tip: &'a str,
 }
 
-pub(crate) fn welcome_lines(w: &WelcomeView<'_>) -> Vec<Line<'static>> {
-    let dim = Style::default().fg(MUTED());
-    vec![
-        Line::from(vec![
-            Span::styled("ℳ ", Style::default().fg(SALMON()).bold()),
-            Span::styled("mira ", Style::default().fg(CREAM()).bold()),
-            Span::styled(format!("v{}", w.version), dim),
-        ]),
-        Line::from(vec![
-            Span::styled(w.model.to_owned(), Style::default().fg(CREAM())),
-            Span::styled(" · ", dim),
-            Span::styled(w.mode.as_str(), super::mode_style(w.mode)),
-            Span::styled(" · ", dim),
-            Span::styled(w.cwd.to_owned(), Style::default().fg(MUTED())),
-        ]),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("✳ ", Style::default().fg(SALMON())),
-            Span::styled(w.tip.to_owned(), Style::default().fg(CREAM())),
-        ]),
-    ]
+/// Skills shown before the `+N more` cap.
+const BANNER_SKILLS_SHOWN: usize = 8;
+
+/// 9×10 pixel-art ℳ rendered as 5 half-block rows using `▀`/`▄`.
+/// Each pixel pair (top+bottom) is packed into one character cell;
+/// a gradient runs from cream at the top to salmon at the bottom.
+fn mark_lines() -> Vec<Line<'static>> {
+    // Lit columns per pixel row (0-indexed, 9 columns wide).
+    // Bold M: 2-pixel-wide outer strokes, V diagonals in rows 1-3.
+    const ON: [&[usize]; 10] = [
+        &[0, 1, 7, 8],           // top corners
+        &[0, 1, 2, 6, 7, 8],     // diagonals step 1
+        &[0, 1, 3, 5, 7, 8],     // diagonals step 2
+        &[0, 1, 4, 7, 8],        // V base
+        &[0, 1, 7, 8],           // outer legs
+        &[0, 1, 7, 8],
+        &[0, 1, 7, 8],
+        &[0, 1, 7, 8],
+        &[0, 1, 7, 8],
+        &[],                     // row 9 pairs with row 8 above via ▀
+    ];
+    let (sr, sg, sb) = if let Color::Rgb(r, g, b) = SALMON() {
+        (r as i32, g as i32, b as i32)
+    } else {
+        (232, 156, 104)
+    };
+    let (cr, cg, cb) = if let Color::Rgb(r, g, b) = CREAM() {
+        (r as i32, g as i32, b as i32)
+    } else {
+        (240, 235, 226)
+    };
+    let row_color = |row: usize| -> Color {
+        let t = row as i32;
+        Color::Rgb(
+            (cr + (sr - cr) * t / 9).clamp(0, 255) as u8,
+            (cg + (sg - cg) * t / 9).clamp(0, 255) as u8,
+            (cb + (sb - cb) * t / 9).clamp(0, 255) as u8,
+        )
+    };
+    let lit = |row: usize, col: usize| row < 10 && ON[row].contains(&col);
+    (0..10usize)
+        .step_by(2)
+        .map(|top| {
+            let bot = top + 1;
+            let tc = row_color(top);
+            let bc = row_color(bot);
+            let spans: Vec<Span<'static>> = (0..9)
+                .map(|col| match (lit(top, col), lit(bot, col)) {
+                    (true, true) => Span::styled("▀", Style::default().fg(tc).bg(bc)),
+                    (true, false) => Span::styled("▀", Style::default().fg(tc)),
+                    (false, true) => Span::styled("▄", Style::default().fg(bc)),
+                    (false, false) => Span::raw(" "),
+                })
+                .collect();
+            Line::from(spans)
+        })
+        .collect()
 }
 
-/// Claude-style user turn: `> ` prompt in salmon, message in cream on
-/// its own row(s). Multi-line messages (Ctrl+J) get the `> ` marker on
-/// the first row only and a hanging indent on the rest so paragraphs
-/// read cleanly.
-pub(crate) fn user_lines(s: &str) -> Vec<Line<'static>> {
+/// One `label    value…` banner row.
+fn banner_row(label: &str, mut value: Vec<Span<'static>>) -> Line<'static> {
+    let mut spans = vec![
+        Span::styled(
+            format!("{label:<8}"),
+            Style::default().fg(MUTED()),
+        ),
+        Span::styled("  ", Style::default()),
+    ];
+    spans.append(&mut value);
+    Line::from(spans)
+}
+
+pub(crate) fn welcome_lines(w: &WelcomeView<'_>) -> Vec<Line<'static>> {
+    let dim = Style::default().fg(MUTED());
+    let cream = Style::default().fg(CREAM());
+    // Pixel-art ℳ logo (5 half-block rows) + text caption below.
+    let mut out = vec![Line::from("")];
+    for mut logo_line in mark_lines() {
+        logo_line.spans.insert(0, Span::raw("  "));
+        out.push(logo_line);
+    }
+    out.push(Line::from(vec![
+        Span::styled("  ℳ mira", Style::default().fg(SALMON()).bold()),
+        Span::styled(format!("  v{}", w.version), dim),
+    ]));
+    out.push(Line::from(""));
+    // Two-column field list — labels padded so values align.
+    out.push(banner_row("model", vec![Span::styled(
+        w.model.to_owned(),
+        cream,
+    )]));
+    out.push(banner_row("provider", vec![Span::styled(
+        w.provider.to_owned(),
+        cream,
+    )]));
+    if let Some(branch) = w.branch {
+        out.push(banner_row(
+            "cwd",
+            vec![
+                Span::styled(w.cwd.to_owned(), cream),
+                Span::styled(format!("  ⎇ {branch}"), dim),
+            ],
+        ));
+    } else {
+        out.push(banner_row("cwd", vec![Span::styled(
+            w.cwd.to_owned(),
+            cream,
+        )]));
+    }
+    out.push(banner_row("mode", vec![Span::styled(
+        w.mode.as_str(),
+        super::mode_style(w.mode),
+    )]));
+    if w.skills.is_empty() {
+        out.push(banner_row("skills", vec![Span::styled("none", dim)]));
+    } else {
+        let shown: Vec<&str> = w.skills.iter().take(BANNER_SKILLS_SHOWN).map(String::as_str).collect();
+        let mut text = shown.join(" · ");
+        if w.skills.len() > BANNER_SKILLS_SHOWN {
+            text.push_str(&format!("  +{} more", w.skills.len() - BANNER_SKILLS_SHOWN));
+        }
+        out.push(banner_row("skills", vec![Span::styled(text, cream)]));
+    }
+    out.push(Line::from(""));
+    out.push(Line::from(Span::styled(
+        "/help for commands and keys · shift+tab changes mode · esc esc quits",
+        dim,
+    )));
+    out.push(Line::from(""));
+    out.push(Line::from(vec![
+        Span::styled("✨ Tip: ", Style::default().fg(SALMON())),
+        Span::styled(w.tip.to_owned(), cream),
+    ]));
+    out
+}
+
+/// Your submitted turn: `> ` prompt in salmon, message in cream, over
+/// a full-width semi-subtle wash so your words read apart from the
+/// agent's at a glance. Rows pad to `width` (display-width aware) so
+/// the wash spans edge to edge. Long lines are pre-wrapped here so every
+/// visual row gets the wash — without this the ratatui Wrap pass creates
+/// continuation rows that have no background span at all.
+/// Multi-line messages (Ctrl+J) get the `> ` marker on the first row
+/// only and a hanging indent on the rest so paragraphs read cleanly.
+pub(crate) fn user_lines(s: &str, width: u16) -> Vec<Line<'static>> {
+    let width = width.max(1) as usize;
+    // 2 display cols for "  " / "> " prefix; clamp to at least 1 so zero-
+    // width terminals don't loop forever.
+    let content_width = width.saturating_sub(2).max(1);
     let mut out: Vec<Line<'static>> = Vec::new();
-    let mut first = true;
-    for line in s.lines() {
-        let mark = if first { "> " } else { "  " };
-        out.push(Line::from(vec![
-            Span::styled(mark, Style::default().fg(SALMON()).bold()),
-            Span::styled(line.to_owned(), Style::default().fg(CREAM())),
-        ]));
-        first = false;
+    let mut first_logical = true;
+    for logical_line in s.lines() {
+        let segments = wrap_to_width(logical_line, content_width);
+        let mut first_visual = true;
+        for seg in &segments {
+            let mark = if first_logical && first_visual { "> " } else { "  " };
+            out.push(wash_line(
+                vec![
+                    Span::styled(
+                        mark,
+                        Style::default().fg(SALMON()).bold().bg(USER_WASH()),
+                    ),
+                    Span::styled(
+                        seg.clone(),
+                        Style::default().fg(CREAM()).bg(USER_WASH()),
+                    ),
+                ],
+                width,
+            ));
+            first_visual = false;
+        }
+        if segments.is_empty() {
+            let mark = if first_logical { "> " } else { "  " };
+            out.push(wash_line(
+                vec![Span::styled(
+                    mark,
+                    Style::default().fg(SALMON()).bold().bg(USER_WASH()),
+                )],
+                width,
+            ));
+        }
+        first_logical = false;
     }
     if out.is_empty() {
-        out.push(Line::from(Span::styled(
-            "> ",
-            Style::default().fg(SALMON()).bold(),
-        )));
+        out.push(wash_line(
+            vec![Span::styled(
+                "> ",
+                Style::default().fg(SALMON()).bold().bg(USER_WASH()),
+            )],
+            width,
+        ));
     }
     out
+}
+
+/// Split `s` into segments each at most `max_width` display columns wide.
+fn wrap_to_width(s: &str, max_width: usize) -> Vec<String> {
+    let mut rows: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut current_w = 0usize;
+    for ch in s.chars() {
+        let cw = ch.width().unwrap_or(0);
+        if current_w + cw > max_width && !current.is_empty() {
+            rows.push(current.clone());
+            current.clear();
+            current_w = 0;
+        }
+        current.push(ch);
+        current_w += cw;
+    }
+    if !current.is_empty() {
+        rows.push(current);
+    }
+    rows
+}
+
+/// Pad a wash row with trailing spaces to `width` display columns so
+/// the background spans edge to edge.
+fn wash_line(mut spans: Vec<Span<'static>>, width: usize) -> Line<'static> {
+    let used: usize = spans.iter().map(|s| s.content.width()).sum();
+    if used < width {
+        spans.push(Span::styled(
+            " ".repeat(width - used),
+            Style::default().bg(USER_WASH()),
+        ));
+    }
+    Line::from(spans)
 }
 
 /// Assistant reply rendering. Order of concerns:
@@ -91,7 +283,7 @@ pub(crate) fn assistant_lines(
     query: &str,
     focused: bool,
 ) -> Vec<Line<'static>> {
-    let mut out = if streaming {
+    let body = if streaming {
         let mut ls = markdown::render(text);
         append_streaming_cursor(&mut ls);
         ls
@@ -109,10 +301,45 @@ pub(crate) fn assistant_lines(
             .map(|line| highlight_line(line, query, focused))
             .collect()
     };
+    // Prefix the `●` inline on the first non-empty line so the reply
+    // reads as `● Hi! …` on one row, matching the tool-call groups.
+    // A separate header row would waste a scrollback line.
+    let mut out = prefix_assistant_dot(body);
     if plan {
         out = plan_gutter(out);
     }
     out
+}
+
+/// The `● ` marker prepended to the first content line of an assistant
+/// reply. Kept as a public helper so the streaming path in the event
+/// loop can build a one-line block with the marker inline the same way.
+pub(crate) fn assistant_dot_span() -> Span<'static> {
+    Span::styled(
+        "● ",
+        Style::default().fg(SALMON()).add_modifier(Modifier::BOLD),
+    )
+}
+
+/// Inject the `●` marker as the leading span of `lines`'s first
+/// non-empty line. Leading blank lines are dropped — a reply that opens
+/// on a blank shouldn't waste a scrollback row on it.
+pub(crate) fn prefix_assistant_dot(mut lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
+    while lines
+        .first()
+        .map(line_is_empty)
+        .unwrap_or(false)
+    {
+        lines.remove(0);
+    }
+    if let Some(first) = lines.first_mut() {
+        first.spans.insert(0, assistant_dot_span());
+    } else {
+        // Reply with no content yet — emit a lone marker row so the
+        // user sees the dot immediately (streaming placeholder).
+        lines.push(Line::from(assistant_dot_span()));
+    }
+    lines
 }
 
 pub(crate) fn warning_lines(s: &str) -> Vec<Line<'static>> {
@@ -325,9 +552,22 @@ mod tests {
 
     #[test]
     fn user_marker_hangs_indent_on_multiline() {
-        let ls = user_lines("line one\nline two");
+        let ls = user_lines("line one\nline two", 40);
         assert_eq!(ls.len(), 2);
         assert_eq!(ls[0].spans[0].content, "> ");
         assert_eq!(ls[1].spans[0].content, "  ");
+    }
+
+    #[test]
+    fn user_rows_wash_full_width() {
+        let ls = user_lines("hi", 20);
+        assert_eq!(ls.len(), 1);
+        // Every span carries the lighter user-wash background…
+        for sp in &ls[0].spans {
+            assert_eq!(sp.style.bg, Some(USER_WASH()));
+        }
+        // …and the row pads to the full width (display columns).
+        let cols: usize = ls[0].spans.iter().map(|sp| sp.content.width()).sum();
+        assert_eq!(cols, 20, "{:?}", ls[0].spans);
     }
 }

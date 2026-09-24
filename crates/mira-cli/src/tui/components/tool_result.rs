@@ -62,15 +62,54 @@ pub(crate) struct ResultView<'a> {
 /// 3. the one-line `└` snippet — suppressed entirely for a green-dot
 ///    bash success whose only content is `exit=0`, which reads as pure
 ///    noise under an already-green header.
-pub(crate) fn body_lines(result: &ResultView<'_>) -> Vec<Line<'static>> {
+/// Cap on how many lines an expanded tool result renders inline.
+/// Anything over this collapses to a HEAD + gap marker + TAIL view so
+/// a 2000-line `bash` or `read_file` dump doesn't push the composer
+/// off screen. Ctrl+E already gates expansion; this bounds how much
+/// each expansion costs.
+const EXPANDED_HEAD: usize = 8;
+const EXPANDED_TAIL: usize = 6;
+/// Only elide when the elision actually removes rows worth hiding
+/// (otherwise we'd add a `… +2 lines` marker in exchange for hiding
+/// exactly 2 lines, which is a net loss).
+const EXPANDED_ELIDE_MIN: usize = 20;
+
+/// Body rows for one tool result. `path` is the source file path (for
+/// read/edit calls) and enables language-aware syntax highlighting on
+/// the `│` gutter lines; `None` falls back to the generic heuristic.
+pub(crate) fn body_lines(result: &ResultView<'_>, path: Option<&str>) -> Vec<Line<'static>> {
     match (result.expanded, result.full.is_empty()) {
         (true, false) => {
-            let mut out = Vec::new();
-            for line in result.full.lines() {
-                out.push(Line::from(vec![
-                    Span::styled("  │  ", Style::default().fg(DIM())),
-                    Span::styled(line.to_owned(), Style::default().fg(MUTED())),
-                ]));
+            let all: Vec<&str> = result.full.lines().collect();
+            let render_row = |line: &str| -> Line<'static> {
+                let mut spans = vec![Span::styled("  │  ", Style::default().fg(DIM()))];
+                // Use language-specific highlighting when we know the
+                // file extension; fall back to the generic heuristic.
+                let highlighted = path
+                    .and_then(|p| crate::tui::markdown::highlight_code_line(line, p));
+                match highlighted {
+                    Some(h) => spans.extend(h),
+                    None => spans.extend(highlight_body(line)),
+                }
+                Line::from(spans)
+            };
+            if all.len() <= EXPANDED_ELIDE_MIN {
+                return all.iter().map(|l| render_row(l)).collect();
+            }
+            let hidden = all.len() - EXPANDED_HEAD - EXPANDED_TAIL;
+            let mut out: Vec<Line<'static>> = Vec::with_capacity(all.len() + 1);
+            for line in all.iter().take(EXPANDED_HEAD) {
+                out.push(render_row(line));
+            }
+            out.push(Line::from(vec![
+                Span::styled("  │  ", Style::default().fg(DIM())),
+                Span::styled(
+                    format!("… +{hidden} lines"),
+                    Style::default().fg(DIM()).italic(),
+                ),
+            ]));
+            for line in all.iter().skip(all.len() - EXPANDED_TAIL) {
+                out.push(render_row(line));
             }
             out
         }
@@ -95,12 +134,36 @@ pub(crate) fn body_lines(result: &ResultView<'_>) -> Vec<Line<'static>> {
             } else {
                 super::truncate(result.snippet, 200)
             };
-            vec![Line::from(vec![
-                Span::styled("  └  ", Style::default().fg(DIM())),
-                Span::styled(body, Style::default().fg(MUTED())),
-            ])]
+            let mut spans = vec![Span::styled("  └  ", Style::default().fg(DIM()))];
+            let highlighted = path
+                .and_then(|p| crate::tui::markdown::highlight_code_line(&body, p));
+            match highlighted {
+                Some(h) => spans.extend(h),
+                None => spans.extend(highlight_body(&body)),
+            }
+            vec![Line::from(spans)]
         }
     }
+}
+
+/// Route one body row through the generic tokenizer when it looks
+/// code-ish, and fall back to plain muted text otherwise. The
+/// tokenizer never garbles — anything unfamiliar just stays plain —
+/// so the check is a soft one: bail only for lines that are clearly
+/// prose (short, no punctuation, no quotes/braces/semicolons) to
+/// avoid tinting "no output" or "wrote 42 bytes" as if it were code.
+fn highlight_body(text: &str) -> Vec<Span<'static>> {
+    if looks_like_prose(text) {
+        return vec![Span::styled(text.to_owned(), Style::default().fg(MUTED()))];
+    }
+    crate::tui::syntax::highlight_line(text)
+}
+
+fn looks_like_prose(text: &str) -> bool {
+    let has_code_marker = text
+        .chars()
+        .any(|c| matches!(c, '{' | '}' | '(' | ')' | ';' | '=' | '<' | '>' | '"' | '`' | '\''));
+    !has_code_marker && text.len() < 120
 }
 
 /// Count `+`/`-` rows for the header stat chip. Prefers the numbered

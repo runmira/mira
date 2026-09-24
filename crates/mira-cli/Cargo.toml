@@ -24,6 +24,7 @@ mira-review   = { workspace = true }
 mira-skills   = { workspace = true }
 mira-server   = { workspace = true }
 mira-auth     = { workspace = true }
+mira-agents   = { workspace = true }
 
 async-trait        = { workspace = true }
 tokio              = { workspace = true }

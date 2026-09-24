@@ -574,6 +574,223 @@ fn link_style() -> Style {
         .add_modifier(Modifier::UNDERLINED)
 }
 
+// -------------------------- streaming --------------------------
+
+/// Streaming markdown renderer for token-by-token assistant replies.
+///
+/// Feed it deltas as they arrive with [`push`](Self::push); it returns
+/// the display lines that are now final (everything up to the last
+/// newline). Partial trailing text stays buffered until either the next
+/// delta closes the line or [`flush`](Self::flush) is called at
+/// turn-end. Callers push each returned line into real terminal
+/// scrollback via `InlineTerm::insert_history`, so the inline pane
+/// never has to hold assistant text at all — which is what keeps long
+/// replies from clipping against a fixed pane height.
+///
+/// The renderer holds two pieces of cross-line state that ordinary
+/// per-frame markdown rendering doesn't need:
+///
+/// - **Fenced code blocks** must not emit until the closing `` ``` ``
+///   arrives; otherwise the syntax highlighter runs on partial code and
+///   picks the wrong tokens. Lines inside the fence buffer.
+/// - **Tables** buffer until a non-`|` line closes them, so column
+///   widths can be computed from the full body rather than reflowed
+///   mid-stream.
+#[derive(Default)]
+pub(crate) struct MarkdownStream {
+    /// Bytes that haven't ended in `\n` yet.
+    buf: String,
+    /// Inside a fenced code block: lines accumulate in `fence` until
+    /// the closer arrives, then render as one syntax-highlighted block.
+    in_fence: bool,
+    fence_lang: String,
+    fence_body: Vec<String>,
+    /// Inside a pipe table: raw lines buffer here until a non-`|` line
+    /// closes it, then render as one styled table.
+    table: Vec<String>,
+    /// Have we emitted any non-blank line yet? Leading blanks are dropped
+    /// so a reply that opens with a `\n` doesn't waste the first
+    /// scrollback row on nothing.
+    seen_content: bool,
+    /// Trailing blank line held back from the last `push`. A blank at
+    /// the tail is ambiguous during streaming — it could be the start of
+    /// a paragraph break (keep it) or the last line before the reply
+    /// ends (drop it). Emitting it eagerly and then chasing it with more
+    /// blanks stacks flicker; we hold it and re-emit lazily only if the
+    /// next batch has real content.
+    held_blank: bool,
+}
+
+impl MarkdownStream {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Append `delta`, emitting the lines that are now final. Adjacent
+    /// blank lines are collapsed into one and trailing blanks are held
+    /// until the next batch confirms they belong to a paragraph break —
+    /// keeps the scrollback tight while a reply streams in.
+    pub(crate) fn push(&mut self, delta: &str) -> Vec<Line<'static>> {
+        self.buf.push_str(delta);
+        let mut raw = Vec::new();
+        while let Some(end) = self.buf.find('\n') {
+            let s: String = self.buf.drain(..=end).collect();
+            let line = s.trim_end_matches('\n').to_owned();
+            self.consume_line(&line, &mut raw);
+        }
+        self.hold_blank_edges(raw)
+    }
+
+    /// Emit any buffered content — the tail of the buffer (may be a
+    /// partial line), an open table's rows, and an unclosed fence's
+    /// lines. Call this exactly once at turn-end. The held trailing
+    /// blank from the last `push` is dropped intentionally — a reply
+    /// that ends on a blank line would waste a scrollback row.
+    pub(crate) fn flush(&mut self) -> Vec<Line<'static>> {
+        let mut raw = Vec::new();
+        let rest = std::mem::take(&mut self.buf);
+        if !rest.is_empty() {
+            self.consume_line(rest.trim_end_matches('\n'), &mut raw);
+        }
+        if self.in_fence {
+            // Unclosed fence: render what we have as a code block so
+            // the user sees their partial code instead of nothing.
+            let lang = std::mem::take(&mut self.fence_lang);
+            let body = std::mem::take(&mut self.fence_body);
+            emit_code_block(&mut raw, &lang, &body.join("\n"));
+            self.in_fence = false;
+        }
+        self.flush_table(&mut raw);
+        // Deliberately do NOT re-emit the held blank at flush time —
+        // a reply's last line should never be an empty row.
+        self.held_blank = false;
+        // Reset for the next reply so an idle-then-reused stream
+        // doesn't inherit "seen_content" from the previous turn.
+        self.seen_content = false;
+        drop_leading_and_trailing_blanks(raw)
+    }
+
+    fn consume_line(&mut self, line: &str, out: &mut Vec<Line<'static>>) {
+        let trimmed = line.trim_start();
+
+        // Fence toggle. We rely on the same helpers `render` uses so
+        // opener/closer syntax stays consistent between batch and
+        // streaming render paths.
+        if !self.in_fence {
+            if let Some(lang) = fence_open(line) {
+                // Close any open table first — a table+fence sandwich
+                // without a blank between them is rare but should
+                // still render both.
+                self.flush_table(out);
+                self.in_fence = true;
+                self.fence_lang = lang;
+                self.fence_body.clear();
+                return;
+            }
+        } else if is_fence_close(line) {
+            let lang = std::mem::take(&mut self.fence_lang);
+            let body = std::mem::take(&mut self.fence_body);
+            emit_code_block(out, &lang, &body.join("\n"));
+            self.in_fence = false;
+            return;
+        } else {
+            self.fence_body.push(line.to_owned());
+            return;
+        }
+
+        // Table rows buffer until a non-`|` line closes the table.
+        if trimmed.starts_with('|') {
+            self.table.push(line.to_owned());
+            return;
+        }
+        self.flush_table(out);
+
+        // Everything else: render the single line with the batch
+        // renderer. Prose lines don't span, so a per-line call is
+        // correct and matches non-streaming output byte-for-byte.
+        let rendered = render(line);
+        if rendered.is_empty() {
+            out.push(Line::from(""));
+        } else {
+            out.extend(rendered);
+        }
+    }
+
+    fn flush_table(&mut self, out: &mut Vec<Line<'static>>) {
+        if self.table.is_empty() {
+            return;
+        }
+        let joined = self.table.join("\n");
+        self.table.clear();
+        out.extend(render(&joined));
+    }
+
+    /// Filter one push()'s output so scrollback stays tight:
+    ///
+    /// - Drop leading blank lines until we've seen real content in the
+    ///   reply (a stray `\n` before the first prose shouldn't waste the
+    ///   first row).
+    /// - Collapse runs of blank lines to one.
+    /// - Hold the batch's trailing blank line back. Emit the previously
+    ///   held blank at the head of the next batch when that batch has
+    ///   real content — otherwise the reply just gained a hanging empty
+    ///   row that never resolves.
+    fn hold_blank_edges(&mut self, raw: Vec<Line<'static>>) -> Vec<Line<'static>> {
+        let mut out: Vec<Line<'static>> = Vec::with_capacity(raw.len() + 1);
+        let mut trailing_blanks: usize = 0;
+        for line in raw {
+            let blank = super::components::line_is_empty(&line);
+            if blank {
+                trailing_blanks += 1;
+                continue;
+            }
+            // Non-blank: the batch now has real content. Redeem any
+            // previously held blank as a paragraph break, then apply any
+            // in-batch blanks (capped at 1 — collapsing paragraph runs).
+            if !self.seen_content {
+                // Very first content line of the reply — no leading
+                // paragraph break needed.
+                trailing_blanks = 0;
+                self.held_blank = false;
+            }
+            if self.held_blank {
+                out.push(Line::from(""));
+                self.held_blank = false;
+            } else if trailing_blanks > 0 {
+                out.push(Line::from(""));
+            }
+            trailing_blanks = 0;
+            out.push(line);
+            self.seen_content = true;
+        }
+        // Hold at most one trailing blank until the next batch confirms.
+        if trailing_blanks > 0 && self.seen_content {
+            self.held_blank = true;
+        }
+        out
+    }
+}
+
+/// Trim blank rows from both ends of `lines` — used at flush time so
+/// a reply doesn't open or close on an empty row in scrollback.
+fn drop_leading_and_trailing_blanks(mut lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
+    while lines
+        .first()
+        .map(super::components::line_is_empty)
+        .unwrap_or(false)
+    {
+        lines.remove(0);
+    }
+    while lines
+        .last()
+        .map(super::components::line_is_empty)
+        .unwrap_or(false)
+    {
+        lines.pop();
+    }
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

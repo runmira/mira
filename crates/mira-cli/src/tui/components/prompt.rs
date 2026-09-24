@@ -11,37 +11,11 @@
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 
-use super::{CREAM, MUTED, SALMON, truncate};
+use super::{CREAM, DIM, MUTED, SALMON, truncate};
 use crate::tui::state::{PendingAsk, PendingPlan};
+use unicode_width::UnicodeWidthStr;
 
 /* ---------- shared primitives ---------- */
-
-const CARD_WIDTH: usize = 54;
-
-fn top_border(label: &str, accent: Color, icon: &str) -> Line<'static> {
-    let label = format!(" {icon} {label} ");
-    let remaining = CARD_WIDTH.saturating_sub(label.chars().count() + 3);
-    Line::from(vec![
-        Span::styled("╭─", Style::default().fg(accent).bold()),
-        Span::styled(label, Style::default().fg(accent).bold()),
-        Span::styled("─".repeat(remaining), Style::default().fg(accent)),
-        Span::styled("╮", Style::default().fg(accent).bold()),
-    ])
-}
-
-fn bottom_border(accent: Color) -> Line<'static> {
-    Line::from(Span::styled(
-        format!("╰{}╯", "─".repeat(CARD_WIDTH.saturating_sub(2))),
-        Style::default().fg(accent),
-    ))
-}
-
-fn divider(accent: Color) -> Line<'static> {
-    Line::from(Span::styled(
-        format!("  {}", "─".repeat(CARD_WIDTH.saturating_sub(4))),
-        Style::default().fg(MUTED()),
-    ))
-}
 
 fn blank() -> Line<'static> {
     Line::default()
@@ -72,68 +46,60 @@ fn footer_hints(items: &[(&str, &str)]) -> Line<'static> {
     Line::from(spans)
 }
 
-fn detail_line(text: String, accent: Color) -> Line<'static> {
+fn detail_line(text: String, _accent: Color) -> Line<'static> {
     Line::from(vec![
-        Span::styled("     └─ ", Style::default().fg(accent)),
+        Span::styled("     ", Style::default()),
         Span::styled(text, Style::default().fg(MUTED()).italic()),
     ])
 }
 
-fn progress_line(done: usize, total: usize, accent: Color) -> Line<'static> {
-    let mut spans = vec![Span::styled("  ", Style::default())];
-    for i in 0..total {
-        spans.push(Span::styled(
-            if i < done { "●" } else { "○" },
-            Style::default().fg(if i < done { accent } else { MUTED() }),
-        ));
-        if i + 1 < total {
-            spans.push(Span::raw(" "));
-        }
-    }
-    spans.push(Span::styled(
-        format!("   {done} / {total} complete"),
-        Style::default().fg(MUTED()),
-    ));
-    Line::from(spans)
+/// Count line over the rows, e.g. `3 steps · 2 included`.
+fn count_line(head: String, tail: String) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("  ", Style::default()),
+        Span::styled(head, Style::default().fg(CREAM()).bold()),
+        Span::styled(tail, Style::default().fg(MUTED())),
+    ])
 }
 
-/// One friendly option/checklist row.
-///
-/// Focus gets a subtle filled background instead of relying only on a cursor.
-/// This makes keyboard navigation immediately visible in a dense terminal.
-#[allow(clippy::too_many_arguments)]
-fn choice_row(
+/// One picker row in the shared question/picker language: every row is
+/// numbered (`N.` doubles as the digit hotkey), the focused row gets
+/// the `▸` cursor plus a full-width wash (padded to `width` so the
+/// selection spans edge to edge), and a picked row reads green with a
+/// `✓` suffix. Mirrors the generic list-selection look: number,
+/// label, state — nothing else competes for the eye.
+fn picker_row(
     idx: usize,
     label: &str,
     focused: bool,
-    checkbox: Option<bool>,
     picked: bool,
     recommended: bool,
     accent: Color,
+    width: u16,
 ) -> Line<'static> {
-    let marker = match checkbox {
-        Some(true) => "✓",
-        Some(false) => "○",
-        None if picked => "◆",
-        None => "◇",
-    };
-
-    let marker_style = if focused {
-        Style::default().fg(accent).bold()
-    } else if checkbox == Some(true) || picked {
-        Style::default().fg(Color::Green).bold()
-    } else {
-        Style::default().fg(MUTED())
-    };
-
+    let wash = Style::default().bg(DIM());
     let mut spans = vec![
-        Span::styled("  ", Style::default()),
-        Span::styled(marker, marker_style),
         Span::styled(
-            format!("  {label}"),
+            if focused { "▸ " } else { "  " },
             if focused {
-                Style::default().fg(CREAM()).bold().bg(Color::Rgb(35, 35, 43))
-            } else if checkbox == Some(true) || picked {
+                Style::default().fg(accent).bold().bg(DIM())
+            } else {
+                Style::default()
+            },
+        ),
+        Span::styled(
+            format!("{idx}. "),
+            if focused {
+                Style::default().fg(MUTED()).bg(DIM())
+            } else {
+                Style::default().fg(MUTED())
+            },
+        ),
+        Span::styled(
+            label.to_owned(),
+            if focused {
+                Style::default().fg(SALMON()).bold().bg(DIM())
+            } else if picked {
                 Style::default().fg(Color::Green).bold()
             } else {
                 Style::default().fg(CREAM())
@@ -141,23 +107,34 @@ fn choice_row(
         ),
     ];
 
-    if recommended {
+    if picked {
         spans.push(Span::styled(
-            "  ✦ recommended",
-            Style::default().fg(Color::Green).italic(),
+            " ✓",
+            if focused {
+                Style::default().fg(Color::Green).bold().bg(DIM())
+            } else {
+                Style::default().fg(Color::Green).bold()
+            },
         ));
     }
 
-    // Keep the index available as a subtle keyboard affordance without making
-    // every row look like a numbered list.
+    if recommended {
+        spans.push(Span::styled(
+            "  ✦ recommended",
+            if focused {
+                Style::default().fg(Color::Green).italic().bg(DIM())
+            } else {
+                Style::default().fg(Color::Green).italic()
+            },
+        ));
+    }
+
     if focused {
-        spans.insert(
-            1,
-            Span::styled(
-                format!("{idx}. "),
-                Style::default().fg(accent).bold(),
-            ),
-        );
+        let used: usize = spans.iter().map(|s| s.content.width()).sum();
+        let width = width.max(1) as usize;
+        if used < width {
+            spans.push(Span::styled(" ".repeat(width - used), wash));
+        }
     }
 
     Line::from(spans)
@@ -165,9 +142,9 @@ fn choice_row(
 
 /* ---------- plan card ---------- */
 
-pub(crate) fn plan_card(p: &PendingPlan) -> Vec<Line<'static>> {
+pub(crate) fn plan_card(p: &PendingPlan, width: u16) -> Vec<Line<'static>> {
     let accent = SALMON();
-    let mut out = vec![top_border("PLAN", accent, "✦"), blank()];
+    let mut out = vec![];
 
     if !p.proposal.title.is_empty() {
         out.push(Line::from(Span::styled(
@@ -178,19 +155,30 @@ pub(crate) fn plan_card(p: &PendingPlan) -> Vec<Line<'static>> {
     }
 
     let done = p.checked.iter().filter(|checked| **checked).count();
-    out.push(progress_line(done, p.proposal.steps.len(), accent));
+    let total = p.proposal.steps.len();
+    out.push(count_line(
+        format!("{total} step{}", if total == 1 { "" } else { "s" }),
+        format!(
+            " · {done} included{}",
+            if total - done > 0 {
+                format!(", {} excluded", total - done)
+            } else {
+                String::new()
+            }
+        ),
+    ));
     out.push(blank());
 
     for (i, step) in p.proposal.steps.iter().enumerate() {
         let focused = i == p.focus;
-        out.push(choice_row(
+        out.push(picker_row(
             i + 1,
             &step.description,
             focused,
-            Some(p.checked[i]),
-            false,
+            p.checked[i],
             false,
             accent,
+            width,
         ));
 
         if focused {
@@ -203,14 +191,12 @@ pub(crate) fn plan_card(p: &PendingPlan) -> Vec<Line<'static>> {
     }
 
     out.push(blank());
-    out.push(divider(accent));
     out.push(footer_hints(&[
         ("Space", "toggle"),
         ("↑↓", "move"),
-        ("Enter", "approve"),
-        ("Esc", "cancel"),
+        ("Enter", "yes, start editing"),
+        ("Esc", "no, keep planning"),
     ]));
-    out.push(bottom_border(accent));
     out
 }
 
@@ -253,9 +239,9 @@ fn tabs_row(a: &PendingAsk, accent: Color) -> Line<'static> {
     Line::from(spans)
 }
 
-pub(crate) fn ask_card(a: &PendingAsk) -> Vec<Line<'static>> {
+pub(crate) fn ask_card(a: &PendingAsk, width: u16) -> Vec<Line<'static>> {
     let accent = Color::Cyan;
-    let mut out = vec![top_border("ASK MIRA", accent, "?"), blank()];
+    let mut out = vec![];
 
     if a.proposal.questions.len() > 1 {
         out.push(tabs_row(a, accent));
@@ -285,22 +271,21 @@ pub(crate) fn ask_card(a: &PendingAsk) -> Vec<Line<'static>> {
     for (oi, opt) in q.options.iter().enumerate() {
         let focused = oi == a.option;
         let picked = a.picked[qi].iter().any(|l| *l == opt.label);
-        let checkbox = q.multi_select.then_some(picked);
-        out.push(choice_row(
+        out.push(picker_row(
             oi + 1,
             &opt.label,
             focused,
-            checkbox,
-            picked && !q.multi_select,
+            picked,
             opt.recommended,
             accent,
+            width,
         ));
 
-        if focused {
-            if let Some(desc) = &opt.description {
-                if !desc.trim().is_empty() {
-                    out.push(detail_line(truncate(desc, 100), accent));
-                }
+        // Descriptions always shown (not just on focus) so users can
+        // compare options at a glance without navigating to each one.
+        if let Some(desc) = &opt.description {
+            if !desc.trim().is_empty() {
+                out.push(detail_line(truncate(desc, 100), accent));
             }
         }
     }
@@ -319,7 +304,7 @@ pub(crate) fn ask_card(a: &PendingAsk) -> Vec<Line<'static>> {
         out.push(Line::from(vec![
             Span::styled("  t  ", Style::default().fg(accent).bold()),
             Span::styled(
-                "tell Mira what to do differently",
+                "type something",
                 Style::default().fg(MUTED()).italic(),
             ),
         ]));
@@ -337,19 +322,19 @@ pub(crate) fn ask_card(a: &PendingAsk) -> Vec<Line<'static>> {
     }
 
     out.push(blank());
-    out.push(divider(accent));
-    let hint = if a.proposal.questions.len() > 1 {
-        vec![
-            ("1–4", "choose"),
-            ("↑↓", "move"),
-            ("Tab", "next"),
-            ("Enter", "send"),
-        ]
+    out.push(Line::from(Span::styled(
+        "─".repeat((width as usize).saturating_sub(2)),
+        Style::default().fg(DIM()),
+    )));
+    let footer_text = if a.proposal.questions.len() > 1 {
+        "Enter to select  ·  ↑↓ / Tab to navigate  ·  Esc to cancel"
     } else {
-        vec![("1–4", "choose"), ("↑↓", "move"), ("Enter", "send"), ("Esc", "cancel")]
+        "Enter to select  ·  ↑↓ to navigate  ·  Esc to cancel"
     };
-    out.push(footer_hints(&hint));
-    out.push(bottom_border(accent));
+    out.push(Line::from(Span::styled(
+        footer_text,
+        Style::default().fg(MUTED()),
+    )));
     out
 }
 
@@ -424,15 +409,17 @@ mod tests {
     #[test]
     fn plan_card_shows_chip_title_and_focus() {
         let p = plan();
-        let t = text_of(&plan_card(&p));
-        assert!(t.contains("✦ PLAN"), "{t}");
+        let t = text_of(&plan_card(&p, 100));
         assert!(t.contains("Refactor renderer"), "title");
-        assert!(t.contains("✓  Extract layout module"));
-        assert!(t.contains("○  Move scroll into state"));
-        assert!(t.contains("1. ✓"), "focused step marker");
+        assert!(t.contains("2 steps"), "count line: {t}");
+        assert!(t.contains("2 included"), "count line: {t}");
+        assert!(t.contains("▸ 1. Extract layout module ✓"), "focused checked row: {t}");
+        assert!(t.contains("2. Move scroll into state ✓"), "checked row: {t}");
         assert!(t.contains("single source for scroll math"), "focused why");
-        assert!(t.contains("Space  toggle"), "footer hints");
-        assert!(t.contains("Enter  approve"), "footer hints");
+        assert!(t.contains("Space"), "footer hints: {t}");
+        assert!(t.contains("toggle"), "footer hints: {t}");
+        assert!(t.contains("yes, start editing"), "footer hints: {t}");
+        assert!(t.contains("no, keep planning"), "footer hints: {t}");
     }
 
     #[test]
@@ -441,7 +428,7 @@ mod tests {
         // be expected to show anything even when it becomes focused.
         let mut p = plan();
         p.focus = 1;
-        let t = text_of(&plan_card(&p));
+        let t = text_of(&plan_card(&p, 100));
         assert!(!t.contains("single source for scroll math"));
     }
 
@@ -450,37 +437,41 @@ mod tests {
         let mut p = plan();
         p.checked[0] = !p.checked[0];
         p.focus = 1;
-        let t = text_of(&plan_card(&p));
-        assert!(t.contains("○  Extract layout module"));
-        assert!(t.contains("○  Move scroll into state"));
+        let t = text_of(&plan_card(&p, 100));
+        assert!(t.contains("1 included"), "count line: {t}");
+        assert!(t.contains("1 excluded"), "count line: {t}");
+        assert!(!t.contains("1. Extract layout module ✓"), "unchecked: {t}");
+        assert!(t.contains("1. Extract layout module"), "row still listed: {t}");
+        assert!(t.contains("▸ 2. Move scroll into state ✓"), "focused checked: {t}");
     }
 
     #[test]
     fn ask_card_shows_chip_question_and_hotkeys() {
-        let t = text_of(&ask_card(&ask()));
-        assert!(t.contains("? ASK MIRA"), "{t}");
+        let t = text_of(&ask_card(&ask(), 100));
         assert!(t.contains("BACKEND"), "header");
         assert!(t.contains("Which storage backend?"));
         assert!(t.contains("SQLite"), "option 1");
         assert!(t.contains("Postgres"), "option 2");
         assert!(t.contains("✦ recommended"), "badge");
-        assert!(t.contains("t  tell Mira what to do differently"), "free-text affordance");
-        assert!(t.contains("Enter  send"), "hints");
-        assert!(t.contains("Esc  cancel"), "hints");
+        assert!(t.contains("t  type something"), "free-text affordance");
+        assert!(t.contains("Enter to select"), "footer: {t}");
+        assert!(t.contains("Esc"), "hints: {t}");
+        assert!(t.contains("cancel"), "hints: {t}");
     }
 
     #[test]
-    fn ask_card_shows_focused_option_description_only() {
-        let t = text_of(&ask_card(&ask())); // option 0 focused by default
-        assert!(t.contains("zero-config, single file"), "focused desc");
+    fn ask_card_shows_option_descriptions() {
+        let t = text_of(&ask_card(&ask(), 100)); // option 0 focused by default
+        assert!(t.contains("zero-config, single file"), "option 0 desc visible");
     }
 
     #[test]
-    fn ask_card_hides_description_for_unfocused_option() {
+    fn ask_card_shows_unfocused_option_description() {
         let mut a = ask();
-        a.option = 1; // Postgres, which has no description
-        let t = text_of(&ask_card(&a));
-        assert!(!t.contains("zero-config, single file"));
+        a.option = 1; // focus on Postgres
+        let t = text_of(&ask_card(&a, 100));
+        // SQLite's description is always visible even when its row is not focused.
+        assert!(t.contains("zero-config, single file"), "unfocused desc always shown");
     }
 
     #[test]
@@ -488,9 +479,39 @@ mod tests {
         let mut a = ask();
         a.picked[0] = vec!["Postgres".into()];
         a.custom[0] = Some("but keep the file format".into());
-        let t = text_of(&ask_card(&a));
-        assert!(t.contains("◆  Postgres"), "single-select pick: {t}");
+        let t = text_of(&ask_card(&a, 100));
+        assert!(t.contains("2. Postgres ✓"), "single-select pick: {t}");
+        assert!(t.contains("▸ 1. SQLite"), "focus stays put: {t}");
         assert!(t.contains("you said: but keep the file format"));
+    }
+
+    #[test]
+    fn plan_focused_row_washes_full_width() {
+        use unicode_width::UnicodeWidthStr;
+        let ls = plan_card(&plan(), 100);
+        let focused: Vec<_> = ls
+            .iter()
+            .filter(|l| {
+                l.spans
+                    .iter()
+                    .any(|s| s.content.contains('▸'))
+            })
+            .collect();
+        assert_eq!(focused.len(), 1);
+        let cols: usize = focused[0]
+            .spans
+            .iter()
+            .map(|sp| sp.content.width())
+            .sum();
+        assert_eq!(cols, 100, "{:?}", focused[0].spans);
+    }
+
+    #[test]
+    fn ask_card_picker_rows_number_every_option() {
+        // Every row carries its digit hotkey, not just the focused one.
+        let t = text_of(&ask_card(&ask(), 100));
+        assert!(t.contains("▸ 1. SQLite"), "focused row: {t}");
+        assert!(t.contains("2. Postgres"), "unfocused row still numbered: {t}");
     }
 
     #[test]
@@ -519,9 +540,10 @@ mod tests {
             dummy_reply(),
         );
         a.picked[0] = vec!["A".into()];
-        let t = text_of(&ask_card(&a));
-        assert!(t.contains("1. ✓  A"), "{t}");
-        assert!(t.contains("○  B"));
+        let t = text_of(&ask_card(&a, 100));
+        assert!(t.contains("▸ 1. A ✓"), "{t}");
+        assert!(t.contains("2. B"), "{t}");
+        assert!(!t.contains("2. B ✓"), "{t}");
     }
 
     fn multi_question_ask() -> PendingAsk {
@@ -560,7 +582,7 @@ mod tests {
         // Question 0 is active by default: its body renders, question
         // 1's body does not — only its tab chip does.
         let a = multi_question_ask();
-        let t = text_of(&ask_card(&a));
+        let t = text_of(&ask_card(&a, 100));
         assert!(t.contains("Q1?"), "active question body: {t}");
         assert!(!t.contains("Q2?"), "inactive question body must be hidden");
         assert!(t.contains("Display mode"), "active tab chip");
@@ -571,7 +593,7 @@ mod tests {
     fn ask_card_switching_question_swaps_the_visible_body() {
         let mut a = multi_question_ask();
         a.question = 1;
-        let t = text_of(&ask_card(&a));
+        let t = text_of(&ask_card(&a, 100));
         assert!(t.contains("Q2?"), "now-active question body: {t}");
         assert!(!t.contains("Q1?"), "no-longer-active body must be hidden");
     }
@@ -581,7 +603,7 @@ mod tests {
         let mut a = multi_question_ask();
         a.picked[0] = vec!["A".into()];
         a.question = 1; // move off question 0 so its ✓ isn't just "active"
-        let t = text_of(&ask_card(&a));
+        let t = text_of(&ask_card(&a, 100));
         assert!(t.contains('✓'), "answered question gets a check: {t}");
         assert!(t.contains('○'), "unanswered question keeps the circle glyph");
     }
@@ -590,14 +612,15 @@ mod tests {
     fn ask_card_single_question_has_no_tab_strip() {
         // A single-question ask shouldn't grow tab-strip chrome it
         // doesn't need — it falls back to a plain header chip.
-        let t = text_of(&ask_card(&ask()));
+        let t = text_of(&ask_card(&ask(), 100));
         assert!(!t.contains("Display mode"), "no tab strip for a lone question");
     }
 
     #[test]
     fn ask_card_footer_omits_tab_hint_for_single_question() {
-        let t = text_of(&ask_card(&ask()));
-        assert!(!t.contains("Tab"));
+        let t = text_of(&ask_card(&ask(), 100));
+        // Single-question footer: "Enter to select  ·  ↑↓ to navigate  ·  Esc to cancel"
+        assert!(!t.contains("Tab"), "no Tab hint in single-question footer: {t}");
     }
 
     #[test]
@@ -605,7 +628,7 @@ mod tests {
         let mut a = ask();
         a.text_mode = true;
         a.text = "sqlite but embedded".into();
-        let t = text_of(&ask_card(&a));
+        let t = text_of(&ask_card(&a, 100));
         assert!(t.contains("❯ t  sqlite but embedded"));
     }
 }

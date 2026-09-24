@@ -25,6 +25,9 @@
 //! All verbs target the newest session for `cwd`. `status` on a
 //! folder with no sessions yet prints an empty-state message rather
 //! than erroring.
+//!
+//! The command is intentionally read/write friendly for terminal-first
+//! workflows that do not have a running server.
 
 use std::path::PathBuf;
 

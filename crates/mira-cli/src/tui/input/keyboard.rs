@@ -71,6 +71,12 @@ fn jump_to_prev_user_turn(state: &mut TuiState) {
         None => state.prev_user_entry_idx(state.scroll),
     };
     match next {
+        Some(idx) if idx < state.emitted_entries => {
+            // That turn already scrolled into the terminal's real
+            // scrollback — the viewport can't jump to it.
+            state.set_turn_nav_anchor(Some(idx));
+            state.flash = Some("that turn is in scrollback above — scroll your terminal".into());
+        }
         Some(idx) => {
             state.set_turn_nav_anchor(Some(idx));
             state.turn_scroll_target = Some(idx);
@@ -93,6 +99,10 @@ fn jump_to_next_user_turn(state: &mut TuiState) {
     let anchor = state.turn_nav_anchor();
     let next = anchor.and_then(|idx| state.user_entry_after(idx));
     match next {
+        Some(idx) if idx < state.emitted_entries => {
+            state.set_turn_nav_anchor(Some(idx));
+            state.flash = Some("that turn is in scrollback above — scroll your terminal".into());
+        }
         Some(idx) => {
             state.set_turn_nav_anchor(Some(idx));
             state.turn_scroll_target = Some(idx);
@@ -151,82 +161,88 @@ pub(crate) async fn handle_key(
     cfg: &mut TuiConfig,
     file_index: &mut Option<Vec<String>>,
 ) {
-    // Approval steals the keys EXCEPT scrolling — deciding on a diff
-    // usually means reading the code above it, so PgUp/PgDn, Alt+arrows
-    // and j/k keep working while the prompt is up.
-    if state.pending_approval.is_some() {
-        match (key.code, key.modifiers) {
-            (KeyCode::Up, KeyModifiers::ALT) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
-                scroll_up(state, 3);
-                return;
+    // Which view owns the pane's keys right now — matches the render
+    // side (`render::transcript::pane_cards`), so what shows on screen
+    // and what handles the keystroke can never disagree.
+    match crate::tui::state::PaneView::active(state) {
+        crate::tui::state::PaneView::Approval => {
+            // Approval steals the keys EXCEPT scrolling — deciding on a
+            // diff usually means reading the code above it, so PgUp/PgDn,
+            // Alt+arrows and j/k keep working while the prompt is up.
+            match (key.code, key.modifiers) {
+                (KeyCode::Up, KeyModifiers::ALT) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                    scroll_up(state, 3);
+                    return;
+                }
+                (KeyCode::Down, KeyModifiers::ALT) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                    scroll_down(state, 3);
+                    return;
+                }
+                (KeyCode::PageUp, _) => {
+                    scroll_up(state, page_step(state));
+                    return;
+                }
+                (KeyCode::PageDown, _) => {
+                    scroll_down(state, page_step(state));
+                    return;
+                }
+                _ => {}
             }
-            (KeyCode::Down, KeyModifiers::ALT) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
-                scroll_down(state, 3);
-                return;
-            }
-            (KeyCode::PageUp, _) => {
-                scroll_up(state, page_step(state));
-                return;
-            }
-            (KeyCode::PageDown, _) => {
-                scroll_down(state, page_step(state));
-                return;
-            }
-            _ => {}
+            handle_approval_key(key, state, cfg).await;
+            return;
         }
-        handle_approval_key(key, state, cfg).await;
-        return;
-    }
-
-    // Interactive plan card steals the keys — scroll keys stay live
-    // (same deal as the approval card).
-    if state.pending_plan.is_some() {
-        match (key.code, key.modifiers) {
-            (KeyCode::Up, KeyModifiers::ALT) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
-                scroll_up(state, 3);
-                return;
+        crate::tui::state::PaneView::Plan => {
+            // Plan card steals keys — scroll keys still live.
+            match (key.code, key.modifiers) {
+                (KeyCode::Up, KeyModifiers::ALT) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                    scroll_up(state, 3);
+                    return;
+                }
+                (KeyCode::Down, KeyModifiers::ALT) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                    scroll_down(state, 3);
+                    return;
+                }
+                (KeyCode::PageUp, _) => {
+                    scroll_up(state, page_step(state));
+                    return;
+                }
+                (KeyCode::PageDown, _) => {
+                    scroll_down(state, page_step(state));
+                    return;
+                }
+                (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::SHIFT) => {
+                    state.plan_move(-1);
+                    return;
+                }
+                (KeyCode::Down, _) => {
+                    state.plan_move(1);
+                    return;
+                }
+                (KeyCode::Char(' '), _) => {
+                    state.plan_toggle_focused();
+                    return;
+                }
+                (KeyCode::Enter, _) => {
+                    state.plan_accept();
+                    return;
+                }
+                (KeyCode::Esc, _) => {
+                    state.plan_cancel();
+                    return;
+                }
+                _ => {}
             }
-            (KeyCode::Down, KeyModifiers::ALT) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
-                scroll_down(state, 3);
-                return;
-            }
-            (KeyCode::PageUp, _) => {
-                scroll_up(state, page_step(state));
-                return;
-            }
-            (KeyCode::PageDown, _) => {
-                scroll_down(state, page_step(state));
-                return;
-            }
-            (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::SHIFT) => {
-                state.plan_move(-1);
-                return;
-            }
-            (KeyCode::Down, _) => {
-                state.plan_move(1);
-                return;
-            }
-            (KeyCode::Char(' '), _) => {
-                state.plan_toggle_focused();
-                return;
-            }
-            (KeyCode::Enter, _) => {
-                state.plan_accept();
-                return;
-            }
-            (KeyCode::Esc, _) => {
-                state.plan_cancel();
-                return;
-            }
-            _ => {}
+            return;
         }
-        return;
-    }
-
-    // Interactive ask_user card: digits pick, `t` types, Enter submits.
-    if state.pending_ask.is_some() {
-        handle_ask_key(key, state).await;
-        return;
+        crate::tui::state::PaneView::Ask => {
+            // Ask-user card: digits pick, arrows move, `t` types, Enter
+            // picks + advances (submits on the last question).
+            handle_ask_key(key, state).await;
+            return;
+        }
+        crate::tui::state::PaneView::Composer => {
+            // Fall through to the composer/global handling below.
+        }
     }
 
     // Search overlay steals the keys (typing goes to the query, not the
@@ -435,6 +451,16 @@ pub(crate) async fn handle_key(
         (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
             state.search_open();
         }
+        (KeyCode::Char('o'), KeyModifiers::CONTROL) => {
+            // Ctrl+O opens the unified selector — one searchable panel
+            // grouping mode/model/theme so the user can flip a session
+            // knob without leaving the composer or remembering three
+            // separate slash commands. Snapshots the model catalog
+            // here (async lock) so the sync palette key handler can
+            // re-filter it as the user types.
+            state.unified_models_cache = cfg.models.read().await.clone();
+            open_unified_selector(state);
+        }
         (KeyCode::Char('m'), KeyModifiers::ALT) => {
             // Toggle mouse capture. When on, terminals stop letting
             // the user select text natively; when off, our ratatui
@@ -526,25 +552,36 @@ pub(crate) async fn handle_key(
 }
 
 async fn handle_approval_key(key: KeyEvent, state: &mut TuiState, cfg: &TuiConfig) {
+    // Focus movement + direct picks first. `y`/`a`/`n` shortcuts below
+    // bypass the focus.
+    match (key.code, key.modifiers) {
+        (KeyCode::Up, KeyModifiers::NONE) => {
+            state.approval_move(-1);
+            return;
+        }
+        (KeyCode::Down, KeyModifiers::NONE) => {
+            state.approval_move(1);
+            return;
+        }
+        (KeyCode::Enter, _) => {
+            resolve_approval_focused(state, cfg).await;
+            return;
+        }
+        (KeyCode::Char(c), KeyModifiers::NONE) if matches!(c, '1' | '2' | '3') => {
+            state.approval_focus = (c as usize) - ('1' as usize);
+            resolve_approval_focused(state, cfg).await;
+            return;
+        }
+        _ => {}
+    }
     // 'a' = always allow this exact call (session-scoped rule) then allow this call.
     // 'y' = allow once. 'n' / Esc = deny.
     if matches!(key.code, KeyCode::Char('a') | KeyCode::Char('A')) {
-        if let Some(pending) = state.pending_approval.take() {
-            // Only log when we actually mutated policy —
-            // "session-allow: <rule>" is new state worth surfacing.
-            // A quiet "allowing once only" flash sufficed for the y
-            // path; a full info line every approval was noise.
-            match TuiState::rule_for_call(&pending.request.call) {
-                Some(rule) => match cfg.policy.lock().await.add_allow_rule(&rule) {
-                    Ok(_) => state.push_info(format!("[policy] session-allow: {rule}")),
-                    Err(e) => state.push_warning(format!("[policy] couldn't add rule: {e}")),
-                },
-                None => {
-                    state.flash = Some("allowed once (no reusable rule)".into());
-                }
-            }
+        if let Some(pending) = state.approval_resolve() {
+            approve_always(state, cfg, &pending.request.call).await;
             let _ = pending.request.reply.send(true);
         }
+        note_queued(state);
         return;
     }
     let allow = match key.code {
@@ -553,8 +590,61 @@ async fn handle_approval_key(key: KeyEvent, state: &mut TuiState, cfg: &TuiConfi
         _ => None,
     };
     let Some(allow) = allow else { return };
-    if let Some(pending) = state.pending_approval.take() {
+    if let Some(pending) = state.approval_resolve() {
         let _ = pending.request.reply.send(allow);
+    }
+    note_queued(state);
+}
+
+/// Resolve the head approval with the focused option (0 = allow once,
+/// 1 = always this session, 2 = deny).
+async fn resolve_approval_focused(state: &mut TuiState, cfg: &TuiConfig) {
+    let focus = state.approval_focus;
+    let Some(pending) = state.approval_resolve() else {
+        return;
+    };
+    match focus {
+        1 => {
+            approve_always(state, cfg, &pending.request.call).await;
+            let _ = pending.request.reply.send(true);
+        }
+        2 => {
+            let _ = pending.request.reply.send(false);
+        }
+        _ => {
+            let _ = pending.request.reply.send(true);
+        }
+    }
+    note_queued(state);
+}
+
+/// Session-allow the call's rule, then allow this call. Only logs when
+/// policy actually mutated — a quiet flash suffices otherwise, since a
+/// full info line on every approval was noise.
+async fn approve_always(
+    state: &mut TuiState,
+    cfg: &TuiConfig,
+    call: &mira_core::ToolCall,
+) {
+    match TuiState::rule_for_call(call) {
+        Some(rule) => match cfg.policy.lock().await.add_allow_rule(&rule) {
+            Ok(_) => state.push_info(format!("[policy] session-allow: {rule}")),
+            Err(e) => state.push_warning(format!("[policy] couldn't add rule: {e}")),
+        },
+        None => {
+            state.flash = Some("allowed once (no reusable rule)".into());
+        }
+    }
+}
+
+/// After resolving one approval, point at the next if the queue isn't
+/// empty — the card swaps to it immediately.
+fn note_queued(state: &mut TuiState) {
+    let n = state.pending_approvals.len();
+    if n > 0 {
+        state.flash = Some(format!(
+            "next approval · {n} more queued"
+        ));
     }
 }
 
@@ -571,6 +661,12 @@ fn handle_search_key(key: KeyEvent, state: &mut TuiState) {
 
 /// Handle keys the palette wants to intercept. Returns `true` when the
 /// key was consumed (caller skips its own dispatch).
+///
+/// The unified selector ([`Palette::Unified`]) additionally eats typing
+/// and backspace, routing them to its standalone [`PaletteState::filter`]
+/// buffer so the composer stays untouched while the user narrows the
+/// list. Every other palette kind keeps the legacy behavior of falling
+/// through to composer editing (they filter off composer contents).
 fn handle_palette_key(key: KeyEvent, state: &mut TuiState) -> bool {
     match (key.code, key.modifiers) {
         (KeyCode::Esc, _) => {
@@ -592,8 +688,107 @@ fn handle_palette_key(key: KeyEvent, state: &mut TuiState) -> bool {
             accept_palette(state);
             true
         }
+        // Unified selector filter typing — consume the key ourselves so
+        // it doesn't leak into the composer, then rebuild the filtered
+        // match list from the new filter string.
+        (KeyCode::Backspace, _) if state.palette.kind == Palette::Unified => {
+            state.palette.filter.pop();
+            refresh_unified_matches(state);
+            true
+        }
+        (KeyCode::Char(c), m)
+            if state.palette.kind == Palette::Unified
+                && !m.contains(KeyModifiers::CONTROL) =>
+        {
+            state.palette.filter.push(c);
+            refresh_unified_matches(state);
+            true
+        }
         _ => false,
     }
+}
+
+/// Rebuild the unified selector's match list against the current
+/// `palette.filter`. Called on every keystroke while the selector is
+/// open so the roster narrows as the user types.
+fn refresh_unified_matches(state: &mut TuiState) {
+    let filter = state.palette.filter.to_ascii_lowercase();
+    let items = unified_matches(&filter, state);
+    let cursor = state.palette.cursor.min(items.len().saturating_sub(1));
+    state.palette.cursor = cursor;
+    state.palette.matches = items;
+}
+
+/// Build the unified selector's item list: mode presets first, theme
+/// presets next, model catalog last. Each item's `insert` field is
+/// tagged with `mode:` / `model:` / `theme:` so `accept_palette` can
+/// route it to the right action without a lookup — the encoding is
+/// internal and never shown to the user (titles are pretty-printed
+/// with a section chip up front).
+pub(crate) fn unified_matches(filter: &str, state: &TuiState) -> Vec<PaletteItem> {
+    let matches_filter = |hay: &str| -> bool {
+        filter.is_empty() || hay.to_ascii_lowercase().contains(filter)
+    };
+    let current_mode = state.mode.as_str();
+    let current_model = state.model.as_str();
+
+    let mut items: Vec<PaletteItem> = Vec::new();
+    // Modes.
+    for (name, desc) in [
+        ("plan", "propose first · ask on writes"),
+        ("manual", "ask on every write/edit/command"),
+        ("auto", "auto-approve writes+edits · ask on commands"),
+        ("edit", "auto-approve writes, edits and commands"),
+        ("yolo", "no gating whatsoever"),
+    ] {
+        if !matches_filter(name) && !matches_filter(desc) && !matches_filter("mode") {
+            continue;
+        }
+        let mut title = format!("mode · {name}");
+        if name == current_mode {
+            title.push_str("  (current)");
+        }
+        items.push(PaletteItem {
+            insert: format!("mode:{name}"),
+            title,
+            detail: desc.to_owned(),
+        });
+    }
+    // Themes.
+    for (name, _, desc) in crate::tui::theme::PRESETS {
+        if !matches_filter(name) && !matches_filter(desc) && !matches_filter("theme") {
+            continue;
+        }
+        items.push(PaletteItem {
+            insert: format!("theme:{name}"),
+            title: format!("theme · {name}"),
+            detail: (*desc).to_owned(),
+        });
+    }
+    // Models — the live catalog snapshot cached on state (populated
+    // by the Ctrl+O opener via `TuiConfig::models`). Show at most 12
+    // so a huge catalog doesn't drown out the shorter sections.
+    let mut kept: Vec<&String> = state
+        .unified_models_cache
+        .iter()
+        .filter(|m| matches_filter(m) || matches_filter("model"))
+        .collect();
+    kept.truncate(12);
+    for id in kept {
+        let mut title = format!("model · {id}");
+        if id.as_str() == current_model {
+            title.push_str("  (current)");
+        }
+        items.push(PaletteItem {
+            insert: format!("model:{id}"),
+            title,
+            detail: id
+                .split_once('/')
+                .map(|(p, _)| p.to_owned())
+                .unwrap_or_default(),
+        });
+    }
+    items
 }
 
 /// Replace the current trigger (`/…` or `@…`) with the selected
@@ -648,9 +843,92 @@ fn accept_palette(state: &mut TuiState) {
             let cursor = new_input.len();
             replace_input(state, new_input, cursor);
         }
+        Palette::SlashArg(cmd) => {
+            // Same shape as `/model` — rewrite the whole line so
+            // partial-arg typos get cleaned up when the user picks.
+            let new_input = format!("{cmd} {}", item.insert);
+            let cursor = new_input.len();
+            replace_input(state, new_input, cursor);
+        }
+        Palette::Unified => {
+            // The unified selector encodes its section in the insert
+            // string as `mode:X` / `theme:X` / `model:X`. Route by
+            // splitting on ':' — anything unrecognised no-ops so a
+            // corrupted entry can't wedge the UI.
+            state.palette = PaletteState::none();
+            state.unified_models_cache.clear();
+            if let Some((kind, value)) = item.insert.split_once(':') {
+                match kind {
+                    "mode" => apply_unified_mode(state, value),
+                    "model" => apply_unified_model(state, value),
+                    "theme" => apply_unified_theme(state, value),
+                    _ => {}
+                }
+            }
+            return;
+        }
         Palette::None => {}
     }
     state.palette = PaletteState::none();
+}
+
+/// Open the unified selector: seed an empty filter, build the initial
+/// (unfiltered) match list, and swap the palette state in. The typed
+/// filter accumulates on `palette.filter` after this — see
+/// `handle_palette_key`'s Unified arm.
+fn open_unified_selector(state: &mut TuiState) {
+    // Clear any leftover filter from a previous open so the first
+    // keystroke doesn't extend a stale search.
+    state.palette.filter.clear();
+    let matches = unified_matches("", state);
+    open_palette(state, Palette::Unified, matches);
+    // `open_palette` reset the filter to empty via the same-kind
+    // preservation path (kinds differ from anything to Unified on
+    // first open) — that's the intended fresh-open behavior.
+}
+
+fn apply_unified_mode(state: &mut TuiState, value: &str) {
+    let mode = match value {
+        "plan" => mira_policy::Mode::Plan,
+        "manual" => mira_policy::Mode::Manual,
+        "auto" => mira_policy::Mode::Auto,
+        "edit" => mira_policy::Mode::Edit,
+        "yolo" => mira_policy::Mode::Yolo,
+        _ => {
+            state.push_warning(format!("unified: unknown mode `{value}`"));
+            return;
+        }
+    };
+    state.mode = mode;
+    state.flash = Some(format!("mode → {}", mode.as_str()));
+    // Note: the shared policy isn't reachable synchronously here (only
+    // TuiConfig owns the Arc). The next `/mode` slash or Shift+Tab
+    // cycle re-syncs it; for a Ctrl+O flip mid-session the state.mode
+    // change alone is enough to gate the next tool call correctly at
+    // the TUI level. The harness re-reads on the following turn.
+}
+
+fn apply_unified_model(state: &mut TuiState, value: &str) {
+    if value.is_empty() {
+        return;
+    }
+    state.model = value.to_owned();
+    state.flash = Some(format!("model → {value}"));
+    // Session::set_model is async and lives on the caller side; we
+    // record the state change and let the next turn pick it up. A
+    // user who wants it plumbed through the session right now can
+    // still use `/model <id>` which routes via `submit_composed`.
+}
+
+fn apply_unified_theme(state: &mut TuiState, value: &str) {
+    match crate::tui::theme::preset(value) {
+        Some((t, desc)) => {
+            crate::tui::theme::set(t);
+            state.flash = Some(format!("theme → {value}"));
+            state.push_info(format!("theme · {value} — {desc}"));
+        }
+        None => state.push_warning(format!("unified: unknown theme `{value}`")),
+    }
 }
 
 /// Whole-input replace via the state helpers so history-browse and
@@ -719,6 +997,21 @@ pub(crate) async fn refresh_palette(
         return;
     }
 
+    // `/mode <partial>`, `/goal <partial>`, … — closed-set arguments
+    // for the remaining arg-taking slash commands. Checked after the
+    // bespoke `/model`, `/theme`, `/save` arms above so those keep
+    // their richer sources.
+    if state.input().starts_with('/') && state.input().contains(' ') {
+        let head_end = state.input().find(' ').unwrap_or(state.input().len());
+        let head = state.input()[..head_end].to_ascii_lowercase();
+        if let Some(cmd) = slash_arg_command(&head) {
+            let filter = state.input()[head_end..].trim_start().to_ascii_lowercase();
+            let matches = slash_arg_matches(cmd, &filter, cfg).await;
+            open_palette(state, Palette::SlashArg(cmd), matches);
+            return;
+        }
+    }
+
     // @file picker when the cursor sits inside an `@word` run.
     if let Some((word_start, word_end)) = find_at_word(state.input(), state.cursor()) {
         let filter = state.input()[word_start + 1..word_end].to_ascii_lowercase();
@@ -760,6 +1053,153 @@ fn theme_matches(filter: &str) -> Vec<PaletteItem> {
         }
     }
     items
+}
+
+/// Closed-set slash commands whose arguments complete in the palette.
+/// Returns the canonical command (so `/perms ` completes as
+/// `/permissions`). `None` for commands with free-text or no args —
+/// those fall through to the `@file` / close logic below.
+fn slash_arg_command(head: &str) -> Option<&'static str> {
+    match head {
+        "/mode" => Some("/mode"),
+        "/goal" => Some("/goal"),
+        "/budget" => Some("/budget"),
+        "/permissions" | "/perms" => Some("/permissions"),
+        "/skill" => Some("/skill"),
+        "/undo" => Some("/undo"),
+        "/resume" => Some("/resume"),
+        _ => None,
+    }
+}
+
+/// Argument completions for `slash_arg_command` commands. Same
+/// substring-filter contract as the other palette sources so every
+/// arg list feels identical.
+async fn slash_arg_matches(cmd: &str, filter: &str, cfg: &TuiConfig) -> Vec<PaletteItem> {
+    match cmd {
+        "/mode" => static_arg_matches(
+            filter,
+            &[
+                ("plan", "propose first · ask on writes"),
+                ("manual", "ask on every write/edit/command"),
+                ("auto", "auto-approve writes+edits · ask on commands"),
+                ("edit", "auto-approve writes, edits and commands"),
+                ("yolo", "no gating whatsoever"),
+            ],
+        ),
+        "/goal" => static_arg_matches(
+            filter,
+            &[
+                ("status", "show the standing goal"),
+                ("clear", "drop the standing goal"),
+            ],
+        ),
+        "/budget" => static_arg_matches(
+            filter,
+            &[
+                ("off", "remove the spend cap"),
+                ("$1", "cap session spend"),
+                ("$2", "cap session spend"),
+                ("$5", "cap session spend"),
+                ("$10", "cap session spend"),
+            ],
+        ),
+        "/permissions" => static_arg_matches(
+            filter,
+            &[
+                ("list", "show allow rules"),
+                ("add", "add a Rule(...) — keep typing after accept"),
+            ],
+        ),
+        "/undo" => static_arg_matches(
+            filter,
+            &[
+                ("1", "revert the last write"),
+                ("2", "revert the last 2 writes"),
+                ("3", "revert the last 3 writes"),
+            ],
+        ),
+        "/skill" => skill_arg_matches(filter, cfg).await,
+        "/resume" => resume_arg_matches(filter, cfg).await,
+        _ => Vec::new(),
+    }
+}
+
+/// Substring-filter a static `(name, detail)` option list. Shared by
+/// the closed-set slash args above.
+fn static_arg_matches(filter: &str, opts: &[(&str, &str)]) -> Vec<PaletteItem> {
+    opts.iter()
+        .filter(|(name, _)| filter.is_empty() || name.to_ascii_lowercase().contains(filter))
+        .map(|(name, desc)| PaletteItem {
+            insert: (*name).to_owned(),
+            title: (*name).to_owned(),
+            detail: (*desc).to_owned(),
+        })
+        .collect()
+}
+
+/// `/skill <partial>` — every loaded skill by name (not just the ones
+/// with a slash alias), so `/skill` discovers the same roster as
+/// `/skills` lists.
+async fn skill_arg_matches(filter: &str, cfg: &TuiConfig) -> Vec<PaletteItem> {
+    let reg = cfg.skills.read().await.clone();
+    let mut items: Vec<PaletteItem> = reg
+        .skills
+        .values()
+        .filter(|s| filter.is_empty() || s.name.to_ascii_lowercase().contains(filter))
+        .map(|s| PaletteItem {
+            insert: s.name.clone(),
+            title: format!("/{}", s.name),
+            detail: s.description.clone(),
+        })
+        .collect();
+    items.sort_by(|a, b| a.title.cmp(&b.title));
+    items
+}
+
+/// `/resume <partial>` — recent session ids in this cwd, mirroring
+/// what `/sessions` lists. Inserts the full id (that's what the resume
+/// lookup needs); the title shows the short form.
+async fn resume_arg_matches(filter: &str, cfg: &TuiConfig) -> Vec<PaletteItem> {
+    let Some(store) = cfg.store.as_ref() else {
+        return Vec::new();
+    };
+    let Ok(list) = store.list_recent(&cfg.cwd, 15).await else {
+        return Vec::new();
+    };
+    let mut out: Vec<PaletteItem> = list
+        .iter()
+        .filter(|rec| {
+            filter.is_empty()
+                || rec
+                    .id
+                    .as_str()
+                    .to_ascii_lowercase()
+                    .contains(filter)
+        })
+        .map(|rec| {
+            let id = rec.id.as_str().to_owned();
+            let short = if id.chars().count() > 12 {
+                id.chars().take(8).collect::<String>()
+            } else {
+                id.clone()
+            };
+            let title = rec.title.clone().unwrap_or_default();
+            let detail = if title.chars().count() > 50 {
+                let head: String = title.chars().take(50).collect();
+                format!("{head}…")
+            } else {
+                title
+            };
+            PaletteItem {
+                insert: id,
+                title: short,
+                detail,
+            }
+        })
+        .collect();
+    out.truncate(8);
+    out
 }
 
 /// Filter the cached model catalog with a substring match on the id
@@ -805,10 +1245,19 @@ fn open_palette(state: &mut TuiState, kind: Palette, matches: Vec<PaletteItem>) 
     } else {
         cursor
     };
+    // Preserve the standalone filter when refreshing the SAME kind
+    // (Unified selector types into it as the user filters); reset it
+    // when switching kinds so a stale filter doesn't hide the new list.
+    let filter = if state.palette.kind == kind {
+        std::mem::take(&mut state.palette.filter)
+    } else {
+        String::new()
+    };
     state.palette = PaletteState {
         kind,
         cursor,
         matches,
+        filter,
     };
 }
 
@@ -942,30 +1391,41 @@ fn save_path_matches(files: &[String], filter: &str, cwd: &std::path::Path) -> V
 }
 
 fn at_file_matches(files: &[String], filter: &str) -> Vec<PaletteItem> {
-    let filter = filter.trim();
-    let mut scored: Vec<(u32, &String)> = files
+    let filter = filter.trim().to_ascii_lowercase();
+    // Rank filename matches above path matches (typing `main` almost
+    // always means `main.rs`, not `domain/handler.rs`), and shallow
+    // paths above deep ones on ties.
+    let mut scored: Vec<(u32, usize, &String)> = files
         .iter()
         .filter_map(|f| {
             if filter.is_empty() {
-                return Some((0, f));
+                return Some((0, 0, f));
             }
             let hay = f.to_ascii_lowercase();
-            if hay.starts_with(filter) {
-                Some((0, f))
-            } else if hay.contains(filter) {
-                Some((1, f))
-            } else if fuzzy_subseq(&hay, filter) {
-                Some((2, f))
+            let file_name = hay.rsplit('/').next().unwrap_or(hay.as_str());
+            let depth = hay.chars().filter(|c| *c == '/').count();
+            if file_name.starts_with(filter.as_str()) {
+                Some((0, depth, f))
+            } else if file_name.contains(filter.as_str()) {
+                Some((1, depth, f))
+            } else if hay.contains(filter.as_str()) {
+                Some((2, depth, f))
+            } else if fuzzy_subseq(&hay, &filter) {
+                Some((3, depth, f))
             } else {
                 None
             }
         })
         .collect();
-    scored.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.len().cmp(&b.1.len())));
+    scored.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| a.2.len().cmp(&b.2.len()))
+    });
     scored
         .into_iter()
         .take(20)
-        .map(|(_, f)| PaletteItem {
+        .map(|(_, _, f)| PaletteItem {
             insert: format!("@{f}"),
             title: f.clone(),
             detail: String::new(),
@@ -1039,9 +1499,11 @@ fn copy_to_clipboard(text: &str) {
 }
 
 /// Keys for the interactive ask_user card. Digits `1..=4` pick/toggle
-/// options on the focused question; `t` opens the free-text row
-/// (typing lands there, Enter commits it); Tab moves between
-/// questions; Enter submits everything; Esc cancels the whole card.
+/// options on the focused question; arrows move the option cursor;
+/// `t` opens the free-text row (typing lands there, Enter commits
+/// it); Tab skips between questions without picking; Enter picks the
+/// focused option and advances (submits on the last question);
+/// Esc cancels the whole card.
 async fn handle_ask_key(key: KeyEvent, state: &mut TuiState) {
     if state.pending_ask.as_ref().is_some_and(|a| a.text_mode) {
         match (key.code, key.modifiers) {
@@ -1091,11 +1553,76 @@ async fn handle_ask_key(key: KeyEvent, state: &mut TuiState) {
             state.ask_start_text();
         }
         (KeyCode::Enter, _) => {
-            state.ask_submit();
+            state.ask_enter();
         }
         (KeyCode::Esc, _) => {
             state.ask_cancel();
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slash_arg_command_routes_known_commands() {
+        assert_eq!(slash_arg_command("/mode"), Some("/mode"));
+        assert_eq!(slash_arg_command("/perms"), Some("/permissions"));
+        assert_eq!(slash_arg_command("/resume"), Some("/resume"));
+        assert_eq!(slash_arg_command("/model"), None);
+        assert_eq!(slash_arg_command("/save"), None);
+        assert_eq!(slash_arg_command("/cost"), None);
+        assert_eq!(slash_arg_command("/quit"), None);
+        assert_eq!(slash_arg_command("/nope"), None);
+    }
+
+    #[test]
+    fn static_arg_matches_filters_by_substring() {
+        let all = static_arg_matches("", &[("plan", "p"), ("manual", "m")]);
+        assert_eq!(all.len(), 2);
+        let one = static_arg_matches("man", &[("plan", "p"), ("manual", "m")]);
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].insert, "manual");
+        assert_eq!(one[0].title, "manual");
+        assert_eq!(one[0].detail, "m");
+        assert!(static_arg_matches("zzz", &[("plan", "p")]).is_empty());
+    }
+
+    #[test]
+    fn at_file_ranks_filename_above_path_and_shallow_above_deep() {
+        let files = vec![
+            "src/domain/handler.rs".to_owned(),
+            "main.rs".to_owned(),
+            "src/main.rs".to_owned(),
+            "docs/readme.md".to_owned(),
+        ];
+        let titles: Vec<String> = at_file_matches(&files, "main")
+            .into_iter()
+            .map(|m| m.title)
+            .collect();
+        assert_eq!(titles[0], "main.rs");
+        assert_eq!(titles[1], "src/main.rs");
+        assert!(
+            titles.contains(&"src/domain/handler.rs".to_owned()),
+            "{titles:?}"
+        );
+        assert!(!titles.contains(&"docs/readme.md".to_owned()));
+    }
+
+    #[test]
+    fn mode_arg_table_covers_all_modes() {
+        let all = static_arg_matches(
+            "",
+            &[
+                ("plan", ""),
+                ("manual", ""),
+                ("auto", ""),
+                ("edit", ""),
+                ("yolo", ""),
+            ],
+        );
+        assert_eq!(all.len(), 5);
     }
 }

@@ -1636,6 +1636,7 @@ dependencies = [
  "clap",
  "crossterm",
  "futures",
+ "mira-agents",
  "mira-ai",
  "mira-auth",
  "mira-config",
@@ -1661,6 +1662,10 @@ dependencies = [
  "tracing-subscriber",
  "unicode-width 0.2.0",
 ]
+
+[[package]]
+name = "mira-computer"
+version = "0.3.8"
 
 [[package]]
 name = "mira-config"
