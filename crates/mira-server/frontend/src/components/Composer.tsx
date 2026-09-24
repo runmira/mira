@@ -5,6 +5,9 @@ import {
   CaretDown,
   Circle,
   CircleNotch,
+  Cloud,
+  Copy,
+  Desktop,
   File as FileIcon,
   Folder,
   GitBranch,
@@ -18,7 +21,7 @@ import {
   X,
 } from '@phosphor-icons/react';
 import { createWorktree, getGitStatus, listModels, putCwd, readFile, type GitStatusView, type ModelInfo } from '../api';
-import type { DiffPreview, Goal, Mode, ToolCall, UsageTotals } from '../types';
+import type { DiffPreview, EnvironmentInfo, EnvironmentStatus, Goal, Mode, ToolCall, UsageTotals } from '../types';
 import { costUsd, formatDollars, shortNum } from '../lib/usage';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandSeparator } from '@/components/ui/command';
@@ -60,6 +63,12 @@ type Props = {
    *  the fresh slot the server built for the new folder — App attaches
    *  its WS to it so the new Ready lands in the transcript. */
   onCwdSwitched?: (path: string, sessionId?: string) => void;
+  /** Remote environments for this session (null until the server replies). */
+  environment?: EnvironmentStatus | null;
+  environments?: EnvironmentInfo[];
+  /** Latest progress line while a switch runs; null when idle. */
+  envSwitching?: string | null;
+  onSwitchEnvironment?: (target: string) => void;
   onInterrupt: () => void;
   onNewChat: () => void;
   onOpenSettings: () => void;
@@ -99,6 +108,7 @@ const NATIVE_ATTACH_MAX_BYTES = 256 * 1024;
 
 export function Composer({
   disabled, busy, mode, model, providerName, cwd, usage,
+  environment, environments, envSwitching, onSwitchEnvironment,
   onSend, onSetMode, onSetModel, onSetEffort, onOpenPicker, onCwdSwitched, onInterrupt, onNewChat, onOpenSettings, onRunReview, onSetGoal, onClearGoal, goal, onRemember, onUndo,
   skills,
 }: Props) {
@@ -530,6 +540,13 @@ export function Composer({
       <div className="w-full max-w-3xl flex items-center gap-2 px-3">
         <span className="flex-1" />
         <UsageReadout usage={usage} model={model} />
+        <EnvironmentChip
+          status={environment ?? null}
+          environments={environments ?? []}
+          switching={envSwitching ?? null}
+          disabled={busy || disabled}
+          onSwitch={onSwitchEnvironment}
+        />
         <WorktreeChip cwd={cwd} onCwdSwitched={onCwdSwitched} />
       </div>
 
@@ -1667,6 +1684,110 @@ function UsageReadout({ usage, model }: { usage: UsageTotals | null; model: stri
         </>
       )}
     </div>
+  );
+}
+
+/* ---------- environment chip (local ↔ remote environments) ---------- */
+
+/** This machine, a scratch copy on this machine, or a cloud sandbox. */
+function envIcon(backend: string) {
+  if (backend === 'local') return Desktop;
+  if (backend === 'scratch') return Copy;
+  return Cloud;
+}
+
+/** Where the session's tools run. Switching to a remote environment
+ *  uploads the current worktree (uncommitted edits too); switching back
+ *  merges the changes into the same worktree. The worktree stays the
+ *  source of truth, so the worktree chip beside this one is unaffected. */
+function EnvironmentChip({
+  status,
+  environments,
+  switching,
+  disabled,
+  onSwitch,
+}: {
+  status: EnvironmentStatus | null;
+  environments: EnvironmentInfo[];
+  switching: string | null;
+  disabled: boolean;
+  onSwitch?: (target: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  if (!status || !onSwitch) return null;
+  const remote = status.current !== 'local';
+  const Icon = envIcon(status.backend);
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className={cn(
+            'inline-flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-[12.5px] transition-colors max-w-[11rem] min-w-0',
+            remote ? 'text-mira-blue hover:bg-mira-blue/10' : 'text-muted-foreground hover:bg-mira-elev2 hover:text-foreground',
+          )}
+          title={
+            switching
+              ? switching
+              : remote
+                ? `tools run in ${status.current} (${status.backend})${status.workspace ? ` at ${status.workspace}` : ''}`
+                : 'tools run on this machine'
+          }
+        >
+          {switching ? <CircleNotch className="size-3 shrink-0 animate-spin" /> : <Icon className="size-3 shrink-0" />}
+          <span className="truncate">{switching ? 'switching…' : status.current}</span>
+        </button>
+      </PopoverTrigger>
+      <PopoverContent className="w-80 p-1.5" align="start">
+        <div className="px-2 pb-1.5 pt-1 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">
+          Environment
+        </div>
+        {switching && (
+          <div className="px-2.5 pb-2 text-[12px] text-muted-foreground/80 break-words">{switching}</div>
+        )}
+        <div className="flex flex-col">
+          {environments.map((e) => {
+            const current = e.name === status.current;
+            const parked = status.parked.includes(e.name);
+            const EIcon = envIcon(e.backend);
+            return (
+              <button
+                key={e.name}
+                type="button"
+                disabled={disabled || !!switching || current}
+                onClick={() => { setOpen(false); onSwitch(e.name); }}
+                className={cn(
+                  'flex items-start gap-2 rounded-md px-2.5 py-1.5 text-left text-[13px] transition-colors',
+                  current ? 'text-foreground' : 'text-muted-foreground hover:bg-accent/40 hover:text-foreground',
+                  (disabled || switching) && !current && 'opacity-50',
+                )}
+              >
+                <EIcon className="size-3.5 shrink-0 mt-0.5" />
+                <span className="min-w-0 flex-1">
+                  <span className="flex items-center gap-1.5">
+                    <span className="truncate">{e.name}</span>
+                    {e.backend !== 'local' && e.backend !== e.name && (
+                      <span className="rounded-sm bg-secondary px-1 text-[9.5px] uppercase tracking-wider text-muted-foreground">{e.backend}</span>
+                    )}
+                    {parked && (
+                      <span className="rounded-sm bg-mira-blue/15 px-1 text-[9.5px] uppercase tracking-wider text-mira-blue" title="paused — resumes quickly">paused</span>
+                    )}
+                  </span>
+                  {e.description && (
+                    <span className="block truncate text-[11px] text-muted-foreground/70">{e.description}</span>
+                  )}
+                </span>
+                {current && <span className="text-mira-blue text-xs">✓</span>}
+              </button>
+            );
+          })}
+        </div>
+        <div className="px-2.5 pt-1.5 pb-1 text-[11px] text-muted-foreground/70 border-t border-border/50 mt-1">
+          Remote runs use a copy of this worktree; switching back merges the changes in.
+          {disabled && !switching && ' Wait for the current turn to finish to switch.'}
+        </div>
+      </PopoverContent>
+    </Popover>
   );
 }
 

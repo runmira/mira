@@ -146,6 +146,20 @@ pub async fn run(cli: &crate::Cli, args: DoctorArgs) -> Result<()> {
         (false, Err(_)) => report.info("browser", "off (enable with --browser)"),
     }
 
+    // ---- remote environments ----
+    let names: Vec<String> = mira_compute::env::list(&cfg.compute)
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    report.info("environments", names.join(", "));
+    match crate::sandbox::startup_target(cli.sandbox.as_deref(), &cfg.compute) {
+        None => report.info("start in", "local (this worktree)"),
+        Some(name) => match mira_compute::EnvironmentSpec::resolve(&name, &cfg.compute) {
+            Ok(spec) => report.pass("start in", format!("{name} ({})", spec.backend_name())),
+            Err(e) => report.fail("start in", format!("{name}: {e}")),
+        },
+    }
+
     // ---- optional network probe ----
     if args.ping {
         if let Some(s) = &settings {

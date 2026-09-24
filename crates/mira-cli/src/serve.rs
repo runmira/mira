@@ -236,6 +236,8 @@ pub async fn run(cli: &super::Cli, args: ServeArgs) -> Result<()> {
     }
 
     mira_server::run(ServerConfig {
+        compute: cfg.compute.clone(),
+        initial_environment: crate::sandbox::startup_target(cli.sandbox.as_deref(), &cfg.compute),
         cfg: sess_cfg,
         provider,
         registry,

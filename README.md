@@ -234,6 +234,17 @@ keyboard. `mira --browser` lets it drive Chrome in a separate Mira
 profile. Both are off by default, and desktop input asks for approval
 even in `yolo`. See [docs/COMPUTER_USE.md](./docs/COMPUTER_USE.md).
 
+### Remote environments
+
+`/remote-env <name>` in the TUI, or the environment chip in the web UI,
+moves the session's file and shell tools into a remote environment: an
+E2B microVM, or a scratch copy on this machine. The environment gets a
+copy of your worktree, uncommitted edits included. `/remote-env local`
+merges the changes back into the same worktree, three-way, so your own
+edits survive. Named environments, with their own template, env vars and
+setup script, live under `compute:` in `~/.mira/mira.yaml`. See
+[docs/remote-compute.md](./docs/remote-compute.md#implementation-notes).
+
 ## What's inside
 
 Mira is a Cargo workspace. Each crate has one job.
@@ -252,6 +263,7 @@ Mira is a Cargo workspace. Each crate has one job.
 | [`mira-config`](./crates/mira-config) | `mira.yaml` loader — provider, MCP servers, permissions. |
 | [`mira-computer`](./crates/mira-computer) | Desktop control for the `computer` tool — screenshots, mouse, keyboard (macOS, X11). |
 | [`mira-browser`](./crates/mira-browser) | Chrome DevTools driver for the `browser` tool. |
+| [`mira-compute`](./crates/mira-compute) | Where tools execute: the local worktree, or a named remote environment (scratch copy, E2B microVM) you can switch to mid-session. |
 | [`mira-cli`](./crates/mira-cli) | Terminal entrypoint (TUI + `mira review`, `mira serve`, …). |
 | [`mira-server`](./crates/mira-server) | Axum backend + embedded React frontend for the web UI. |
 

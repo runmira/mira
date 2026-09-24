@@ -358,6 +358,11 @@ enum ConsolidateWireScope {
 
 #[async_trait]
 impl Tool for MemoryConsolidate {
+    /// Runs fine in a sandboxed session (see `Tool::remote_capable`).
+    fn remote_capable(&self) -> bool {
+        true
+    }
+
     fn spec(&self) -> ToolSpec {
         spec(
             "memory_consolidate",

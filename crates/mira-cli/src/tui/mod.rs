@@ -52,6 +52,12 @@ use event_loop::{current_cost_usd, event_loop, format_dollars_short};
 
 /// Everything the TUI needs beyond what `Session` already owns.
 pub struct TuiConfig {
+    /// Remote environments for `/remote-env`.
+    pub environments: Arc<mira_compute::EnvironmentManager>,
+    /// Progress from background `/remote-env` switches, drained by the
+    /// event loop into the transcript.
+    pub env_tx: mpsc::UnboundedSender<EnvUpdate>,
+    pub env_rx: mpsc::UnboundedReceiver<EnvUpdate>,
     pub model: String,
     /// Provider key from config (`openrouter`, …) — shown in the
     /// session banner. Not derived from the model id so custom
@@ -124,6 +130,10 @@ pub(crate) const SLASH_COMMANDS: &[(&str, &str)] = &[
         "swap palette (`/theme` · `/theme <name>` · `/theme reload` · `/theme save`)",
     ),
     ("/clear", "clear the visible transcript"),
+    (
+        "/remote-env",
+        "run tools in a remote environment (`/remote-env` · `/remote-env <name>` · `/remote-env local`)",
+    ),
     ("/computer", "enable/disable desktop control (on|off|status)"),
     ("/browser", "enable/disable browser automation (on|off|status)"),
     ("/quit", "exit the TUI"),
@@ -410,6 +420,8 @@ async fn run_slash(
 
         "/theme" => run_theme_slash(rest, state),
 
+        "/remote-env" => run_remote_env_slash(rest, state, cfg, session).await,
+
         "/computer" => run_computer_slash(rest, state, cfg, session).await,
 
         "/browser" => run_browser_slash(rest, state, cfg, session).await,
@@ -501,6 +513,107 @@ fn run_theme_slash(rest: &str, state: &mut state::TuiState) {
             )),
         },
     }
+}
+
+/// A line of `/remote-env` progress for the transcript.
+pub enum EnvUpdate {
+    Info(String),
+    Warning(String),
+}
+
+/// Channel pair for [`TuiConfig::env_tx`] / [`TuiConfig::env_rx`].
+pub fn env_channel() -> (
+    mpsc::UnboundedSender<EnvUpdate>,
+    mpsc::UnboundedReceiver<EnvUpdate>,
+) {
+    mpsc::unbounded_channel()
+}
+
+/// `/remote-env` lists environments; `/remote-env <name>` switches the
+/// session there in the background (upload, setup, merge-back), posting
+/// progress into the transcript as it goes.
+async fn run_remote_env_slash(
+    rest: &str,
+    state: &mut state::TuiState,
+    cfg: &TuiConfig,
+    session: &Session,
+) {
+    let target = rest.trim();
+    let envs = cfg.environments.clone();
+    if target.is_empty() || target == "status" || target == "list" {
+        let status = envs.status().await;
+        let mut lines = vec![format!(
+            "environment: {}{}",
+            status.current,
+            status
+                .workspace
+                .as_deref()
+                .map(|w| format!(" ({} · {w})", status.backend))
+                .unwrap_or_default()
+        )];
+        for e in envs.list() {
+            let mark = if e.name == status.current {
+                "●"
+            } else if status.parked.contains(&e.name) {
+                "◐"
+            } else {
+                " "
+            };
+            lines.push(format!(
+                "  {mark} {:<12} {:<8} {}",
+                e.name, e.backend, e.description
+            ));
+        }
+        lines.push("/remote-env <name> to switch · ◐ = paused, resumes quickly".into());
+        for line in lines {
+            state.push_info(line);
+        }
+        return;
+    }
+    if session.is_busy().await {
+        state.push_warning(
+            "wait for the current turn to finish before switching environments".into(),
+        );
+        return;
+    }
+    if envs.is_switching() {
+        state.push_warning("an environment switch is already in progress".into());
+        return;
+    }
+    state.push_info(format!("switching to `{target}`…"));
+    state.flash = Some(format!("→ {target}"));
+    let tx = cfg.env_tx.clone();
+    let session = session.clone();
+    let target = target.to_owned();
+    tokio::spawn(async move {
+        let ptx = tx.clone();
+        let progress: mira_compute::env::Progress = Arc::new(move |m: String| {
+            let _ = ptx.send(EnvUpdate::Info(m));
+        });
+        match envs.switch(&target, progress).await {
+            Ok(report) => {
+                if !report.model_note.is_empty() {
+                    session.push_note(report.model_note.clone()).await;
+                }
+                for line in crate::sandbox::describe_switch(&report) {
+                    let _ = tx.send(EnvUpdate::Info(line));
+                }
+                if let Some(p) = &report.pulled {
+                    if !p.conflicts.is_empty() {
+                        let _ = tx.send(EnvUpdate::Warning(format!(
+                            "merge conflicts in: {}",
+                            p.conflicts.join(", ")
+                        )));
+                    }
+                }
+            }
+            Err(e) => {
+                let _ = tx.send(EnvUpdate::Warning(format!(
+                    "switch to `{target}` failed: {e}"
+                )));
+            }
+        }
+    });
 }
 
 async fn run_computer_slash(
@@ -856,7 +969,9 @@ fn run_save_slash(rest: &str, state: &mut state::TuiState, cwd: &std::path::Path
                 out.push_str(&format!("_mira · {model} · {cwd}_\n\n> {tip}\n\n"));
             }
             state::LogEntry::Compacted { messages_removed } => {
-                out.push_str(&format!("_↺ context compacted · {messages_removed} messages summarized_\n\n"));
+                out.push_str(&format!(
+                    "_↺ context compacted · {messages_removed} messages summarized_\n\n"
+                ));
             }
         }
     }

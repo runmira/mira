@@ -49,7 +49,15 @@ impl Tool for EditFile {
         Action::Edit
     }
 
+    /// Routed through the session's compute backend when sandboxed.
+    fn remote_capable(&self) -> bool {
+        true
+    }
+
     async fn invoke(&self, call: &ToolCall, ctx: &ToolContext) -> Result<ToolResult, ToolError> {
+        if let Some(backend) = ctx.compute.get() {
+            return crate::remote::edit_file(&backend, call, ctx).await;
+        }
         let args: Args = call.parse_arguments()?;
         let path = ctx
             .resolve(&args.path)

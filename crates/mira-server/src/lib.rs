@@ -105,6 +105,11 @@ pub struct ServerConfig {
     pub mcp_boot: Vec<crate::mcp::McpBootStatus>,
     /// Loaded skill roster (bundled + user + project tiers merged).
     pub skills: mira_tools::builtin::skill::SkillHandle,
+    /// Named remote environments (`compute:` in mira.yaml).
+    pub compute: mira_config::ComputeConfig,
+    /// Environment the first session starts in (`--sandbox` /
+    /// `compute.default`); `None` = this machine.
+    pub initial_environment: Option<String>,
 }
 
 /// Start the server. Blocks until the process is signaled to exit.
@@ -153,10 +158,14 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
         memory_runtime: cfg.memory_runtime.clone(),
         scratchpads: scratchpads.clone(),
         default_model_for_agents: cfg.cfg.model.clone(),
+        compute: cfg.compute.clone(),
     };
     let initial_slot =
         crate::slot::build_slot(cfg.cwd.clone(), cfg.cfg.clone(), cfg.resume, &deps).await;
     let initial_id = initial_slot.id.clone();
+    if let Some(target) = cfg.initial_environment.clone() {
+        crate::slot::spawn_environment_switch(initial_slot.clone(), target);
+    }
 
     let mut slots = HashMap::new();
     slots.insert(initial_id.clone(), initial_slot);
@@ -170,6 +179,7 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
         harness_provider,
         base_registry,
         agents_registry,
+        compute: cfg.compute.clone(),
         store: cfg.store.clone(),
         mcp_boot: Arc::new(cfg.mcp_boot),
         skills: cfg.skills.clone(),

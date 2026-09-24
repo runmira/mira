@@ -19,6 +19,7 @@ mira-tools    = { workspace = true }
 mira-memory   = { workspace = true }
 mira-policy   = { workspace = true }
 mira-computer = { workspace = true }
+mira-compute  = { workspace = true }
 mira-browser  = { workspace = true }
 mira-sandbox  = { workspace = true }
 mira-harness  = { workspace = true }

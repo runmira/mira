@@ -56,6 +56,27 @@ impl Registry {
         self.tools.is_empty()
     }
 
+    /// Specs of the tools usable in a remote environment (see
+    /// [`Tool::remote_capable`]); what the model sees while the session
+    /// is switched to one.
+    pub fn remote_specs(&self) -> Vec<ToolSpec> {
+        self.order
+            .iter()
+            .filter_map(|n| self.tools.get(n))
+            .filter(|t| t.remote_capable())
+            .map(|t| t.spec())
+            .collect()
+    }
+
+    /// Names of registered tools hidden in a remote environment.
+    pub fn local_only(&self) -> Vec<String> {
+        self.order
+            .iter()
+            .filter(|n| self.tools.get(*n).is_some_and(|t| !t.remote_capable()))
+            .cloned()
+            .collect()
+    }
+
     /// Every registered tool, in registration order. Used by callers that
     /// need to build a filtered subset (e.g. the `agent` tool constructing
     /// a child registry).

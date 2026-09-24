@@ -1,0 +1,29 @@
+[package]
+name         = "mira-compute"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+description  = "Execution backends for Mira's tools: local, or a remote sandbox (E2B)."
+
+[dependencies]
+mira-sandbox = { workspace = true }
+mira-config  = { workspace = true }
+async-trait  = { workspace = true }
+base64       = "0.22"
+bytes        = { workspace = true }
+flate2       = "1"
+futures      = { workspace = true }
+reqwest      = { workspace = true, features = ["multipart"] }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+tar          = "0.4"
+thiserror    = { workspace = true }
+tokio        = { workspace = true }
+tracing      = { workspace = true }
+
+[dev-dependencies]
+serde_yaml = { workspace = true }
+axum     = { workspace = true, features = ["multipart"] }
+tempfile = "3"
+tokio    = { workspace = true }

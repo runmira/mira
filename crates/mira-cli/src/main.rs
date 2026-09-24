@@ -12,6 +12,7 @@ mod permissions;
 mod providers;
 mod repl;
 mod review;
+mod sandbox;
 mod serve;
 mod tui;
 
@@ -101,6 +102,13 @@ pub(crate) struct Cli {
     /// a separate Mira profile. Same as `browser.enabled` in mira.yaml.
     #[arg(long, global = true)]
     browser: bool,
+
+    /// Start in a remote environment instead of on your worktree: a name
+    /// from `compute.environments`, or the built-ins `scratch` (a copy on
+    /// this machine) and `e2b` (a cloud sandbox; needs E2B_API_KEY).
+    /// `/remote-env` switches later. Defaults to `compute.default`.
+    #[arg(long, global = true, value_name = "BACKEND")]
+    sandbox: Option<String>,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -246,6 +254,15 @@ async fn main() -> Result<()> {
         }
     }
     register_computer_use(&mut registry, &cli, &cfg).await;
+    // Remote environments: the manager owns the switchable compute slot
+    // the tools read. `--sandbox` / `compute.default` switch it once the
+    // session exists; `/remote-env` switches it later. While remote, the
+    // harness hides tools that would touch this machine.
+    let environments = Arc::new(mira_compute::EnvironmentManager::new(
+        cwd.clone(),
+        mira_compute::EnvironmentManager::default_patch_dir(),
+        cfg.compute.clone(),
+    ));
     // Snapshot the base registry BEFORE the interactive/agent tools
     // land — this is what child sessions inherit when the `agent` tool
     // spawns a subagent. Keeping `agent` OUT of the base prevents an
@@ -302,6 +319,7 @@ async fn main() -> Result<()> {
     let tool_ctx = ToolContext::new(cwd.clone(), sandbox)
         .with_memory(memory_store)
         .with_episodic(episodic_store.clone());
+    let tool_ctx = tool_ctx.with_compute_slot(environments.slot());
 
     // --- policy: rules from config, mode from CLI/config/default
     let policy = Policy::from_config(&PolicyConfig {
@@ -408,54 +426,79 @@ async fn main() -> Result<()> {
     }
     let session = session;
 
-    if use_tui {
-        // (#1) Fire-and-forget model catalog fetch — populates the
-        // `/model <TAB>` autocomplete without blocking startup. A slow
-        // provider (or an offline one) just means the palette shows no
-        // completions until the fetch lands. Uses the same
-        // ChatProvider handle that just built the session.
-        let models = std::sync::Arc::new(tokio::sync::RwLock::new(Vec::<String>::new()));
-        {
-            let models = models.clone();
-            let provider_for_models = provider.clone();
-            tokio::spawn(async move {
-                match provider_for_models.list_models().await {
-                    Ok(list) => {
-                        let mut ids: Vec<String> = list.into_iter().map(|m| m.id).collect();
-                        ids.sort();
-                        ids.dedup();
-                        *models.write().await = ids;
-                    }
-                    Err(e) => tracing::debug!(
-                        %e,
-                        "tui: model list fetch failed; /model autocomplete will stay empty"
-                    ),
-                }
-            });
-        }
-
-        tui::run(
-            session,
-            tui::TuiConfig {
-                model: settings.model,
-                provider: settings.provider_name.clone(),
-                mode: settings.mode,
-                policy,
-                approval_rx: approval_rx.expect("tui branch created a receiver"),
-                prompt_rx,
-                subagent_events_rx,
-                cwd: cwd.clone(),
-                skills: skills_handle,
-                store: store.clone(),
-                models,
-                computer_cfg: cfg.computer.clone(),
-                browser_cfg: cfg.browser.clone(),
-            },
-        )
-        .await
-    } else {
-        repl::run(session, skills_handle).await
+    let (env_tx, env_rx) = tui::env_channel();
+    if let Some(target) = sandbox::startup_target(cli.sandbox.as_deref(), &cfg.compute) {
+        let progress: mira_compute::env::Progress =
+            Arc::new(|m: String| eprintln!("remote environment: {m}"));
+        let report = environments
+            .switch(&target, progress)
+            .await
+            .with_context(|| format!("starting remote environment `{target}`"))?;
+        session.push_note(report.model_note.clone()).await;
+        eprintln!(
+            "remote environment: ready. Tools run in `{target}`; /remote-env local brings the \
+             changes back to your worktree."
+        );
     }
+
+    let result: Result<()> = async {
+        if use_tui {
+            // (#1) Fire-and-forget model catalog fetch — populates the
+            // `/model <TAB>` autocomplete without blocking startup. A slow
+            // provider (or an offline one) just means the palette shows no
+            // completions until the fetch lands. Uses the same
+            // ChatProvider handle that just built the session.
+            let models = std::sync::Arc::new(tokio::sync::RwLock::new(Vec::<String>::new()));
+            {
+                let models = models.clone();
+                let provider_for_models = provider.clone();
+                tokio::spawn(async move {
+                    match provider_for_models.list_models().await {
+                        Ok(list) => {
+                            let mut ids: Vec<String> = list.into_iter().map(|m| m.id).collect();
+                            ids.sort();
+                            ids.dedup();
+                            *models.write().await = ids;
+                        }
+                        Err(e) => tracing::debug!(
+                            %e,
+                            "tui: model list fetch failed; /model autocomplete will stay empty"
+                        ),
+                    }
+                });
+            }
+
+            tui::run(
+                session,
+                tui::TuiConfig {
+                    model: settings.model,
+                    provider: settings.provider_name.clone(),
+                    mode: settings.mode,
+                    policy,
+                    approval_rx: approval_rx.expect("tui branch created a receiver"),
+                    prompt_rx,
+                    subagent_events_rx,
+                    cwd: cwd.clone(),
+                    skills: skills_handle,
+                    store: store.clone(),
+                    models,
+                    computer_cfg: cfg.computer.clone(),
+                    browser_cfg: cfg.browser.clone(),
+                    environments: environments.clone(),
+                    env_tx,
+                    env_rx,
+                },
+            )
+            .await
+        } else {
+            repl::run(session, skills_handle).await
+        }
+    }
+    .await;
+    // Save (never apply) a remote environment's pending changes, even
+    // when the frontend errored, and release every environment.
+    sandbox::print_finish(environments.finish().await, &cwd);
+    result
 }
 
 /// Values that survive the CLI/env/config/default cascade and get passed

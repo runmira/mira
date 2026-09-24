@@ -108,6 +108,10 @@ pub struct SessionSlot {
     /// of unanswered approvals.
     pub attached: Arc<AtomicUsize>,
     pub background_mode: Arc<RwLock<BackgroundMode>>,
+    /// Where this session's tools run. Bound to the slot's worktree:
+    /// switching worktrees makes a new slot, so each worktree keeps its
+    /// own environment.
+    pub environments: Arc<mira_compute::EnvironmentManager>,
 }
 
 impl SessionSlot {
@@ -200,6 +204,8 @@ pub struct SlotDeps {
     /// pin one. Snapshotted at boot; hot-swapping this would require a
     /// slot rebuild.
     pub default_model_for_agents: String,
+    /// `compute:` config: named remote environments.
+    pub compute: mira_config::ComputeConfig,
 }
 
 /// Wire up a session with all its per-slot machinery.
@@ -269,9 +275,15 @@ pub async fn build_slot(
     registry_owned.register(agent_tool);
     let registry = Arc::new(registry_owned);
 
+    let environments = Arc::new(mira_compute::EnvironmentManager::new(
+        cwd.clone(),
+        mira_compute::EnvironmentManager::default_patch_dir(),
+        deps.compute.clone(),
+    ));
     let initial_ctx = ToolContext::new(cwd.clone(), deps.sandbox.clone())
         .with_memory(memory_store.clone())
-        .with_episodic(episodic_store.clone());
+        .with_episodic(episodic_store.clone())
+        .with_compute_slot(environments.slot());
 
     let mut session = match resume {
         Some(record) => Session::resume_from(
@@ -323,5 +335,71 @@ pub async fn build_slot(
         turn: Arc::new(Mutex::new(None)),
         attached,
         background_mode,
+        environments,
     })
+}
+
+/// Switch `slot`'s environment in the background, streaming progress
+/// and the outcome on its event channel. The model gets a note about
+/// the new situation before its next turn.
+pub fn spawn_environment_switch(slot: Arc<SessionSlot>, target: String) {
+    tokio::spawn(async move {
+        let tx = slot.events_tx.clone();
+        let progress: mira_compute::env::Progress = Arc::new(move |text: String| {
+            let _ = tx.send(ServerMsg::EnvironmentProgress { text });
+        });
+        let result = slot.environments.switch(&target, progress).await;
+        let status = slot.environments.status().await;
+        let msg = match result {
+            Ok(report) => {
+                if !report.model_note.is_empty() {
+                    slot.session
+                        .read()
+                        .await
+                        .push_note(report.model_note.clone())
+                        .await;
+                }
+                ServerMsg::EnvironmentSwitched {
+                    lines: switch_lines(&report),
+                    conflicts: report
+                        .pulled
+                        .as_ref()
+                        .map(|p| p.conflicts.clone())
+                        .unwrap_or_default(),
+                    from: report.from,
+                    to: report.to,
+                    error: None,
+                    status,
+                }
+            }
+            Err(e) => ServerMsg::EnvironmentSwitched {
+                from: status.current.clone(),
+                to: target,
+                lines: Vec::new(),
+                conflicts: Vec::new(),
+                error: Some(e.to_string()),
+                status,
+            },
+        };
+        let _ = slot.events_tx.send(msg);
+    });
+}
+
+fn switch_lines(r: &mira_compute::SwitchReport) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(p) = &r.pulled {
+        if p.changed() {
+            lines.push(format!(
+                "Merged changes from `{}` into the worktree:",
+                r.from
+            ));
+            lines.extend(p.stat.lines().map(str::to_owned));
+            if let Some(path) = &p.patch_path {
+                lines.push(format!("Patch kept at {}", path.display()));
+            }
+        } else {
+            lines.push(format!("`{}` had no changes.", r.from));
+        }
+    }
+    lines
 }
