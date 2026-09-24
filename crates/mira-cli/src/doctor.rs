@@ -91,13 +91,38 @@ pub async fn run(cli: &crate::Cli, args: DoctorArgs) -> Result<()> {
         report.warn("skills", "no skills loaded".to_string());
     }
 
-    // ---- mcp servers ----
-    if cfg.mcp_servers.is_empty() {
+    // ---- plugins + mcp servers ----
+    // Actually connect, so a broken server shows up here rather than as a
+    // missing tool mid-session.
+    let ext = mira_server::extensions::Extensions::new(Some(cwd.clone()));
+    ext.reload().await;
+    let plugins = ext.plugins().installed().unwrap_or_default();
+    let on = plugins.iter().filter(|(p, _, _)| p.enabled).count();
+    report.pass(
+        "plugins",
+        format!("{} installed, {on} enabled", plugins.len()),
+    );
+    ext.mcp()
+        .wait_settled(ext.mcp().options().connect_timeout)
+        .await;
+    let servers = ext.mcp().servers();
+    if servers.is_empty() {
         report.pass("mcp servers", "none configured".to_string());
-    } else {
-        let names: Vec<&str> = cfg.mcp_servers.keys().map(String::as_str).collect();
-        report.pass("mcp servers", names.join(", "));
     }
+    for s in servers {
+        let label = format!("mcp · {} ({})", s.name, s.scope.label());
+        match &s.status {
+            mira_mcp::Status::Connected => {
+                report.pass(label, format!("connected · {} tools", s.tools.len()))
+            }
+            mira_mcp::Status::Failed { message } => report.fail(label, message.clone()),
+            other => report.warn(label, other.label()),
+        }
+    }
+    for notice in ext.notices() {
+        report.warn("mcp config", notice);
+    }
+    ext.mcp().shutdown();
 
     // ---- memory files ----
     let user_mem = mira_config::user_memory_path();

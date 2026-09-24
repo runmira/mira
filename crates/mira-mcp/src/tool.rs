@@ -50,7 +50,10 @@ impl McpTool {
             description.push('…');
         }
         let mut parameters = JsonValue::Object(JsonMap::from_iter(
-            remote.input_schema.iter().map(|(k, v)| (k.clone(), v.clone())),
+            remote
+                .input_schema
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone())),
         ));
         if parameters.get("type").is_none() {
             parameters["type"] = json!("object");

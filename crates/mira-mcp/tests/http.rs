@@ -59,7 +59,11 @@ fn handle_rpc(msg: &Value) -> Option<Value> {
         }]}),
         "tools/call" => json!({"content": [{"type": "text", "text": "you are signed in"}]}),
         "ping" => json!({}),
-        _ => return Some(json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "nope"}})),
+        _ => {
+            return Some(
+                json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "nope"}}),
+            )
+        }
     };
     Some(json!({"jsonrpc": "2.0", "id": id, "result": result}))
 }
@@ -83,7 +87,10 @@ async fn mcp_post(State(f): State<Fake>, h: HeaderMap, Json(msg): Json<Value>) -
     }
     match handle_rpc(&msg) {
         Some(reply) => (
-            [("mcp-session-id", "s1"), ("content-type", "application/json")],
+            [
+                ("mcp-session-id", "s1"),
+                ("content-type", "application/json"),
+            ],
             Json(reply),
         )
             .into_response(),
@@ -123,7 +130,10 @@ async fn register(Json(body): Json<Value>) -> (StatusCode, Json<Value>) {
 
 async fn authorize(State(f): State<Fake>, Query(q): Query<HashMap<String, String>>) -> Redirect {
     assert_eq!(q.get("client_id").map(String::as_str), Some("client-1"));
-    assert_eq!(q.get("code_challenge_method").map(String::as_str), Some("S256"));
+    assert_eq!(
+        q.get("code_challenge_method").map(String::as_str),
+        Some("S256")
+    );
     f.codes
         .lock()
         .unwrap()
@@ -140,7 +150,10 @@ async fn token(State(f): State<Fake>, Form(form): Form<HashMap<String, String>>)
         let digest = sha2::Sha256::digest(verifier.as_bytes());
         let computed = base64_url(&digest);
         if challenge.as_deref() != Some(computed.as_str()) {
-            return (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid_grant"})))
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "invalid_grant"})),
+            )
                 .into_response();
         }
     }
@@ -159,7 +172,11 @@ fn base64_url(bytes: &[u8]) -> String {
     const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::new();
     for chunk in bytes.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
         let n = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
         for i in 0..(chunk.len() + 1) {
             out.push(T[(n >> (18 - 6 * i) & 63) as usize] as char);
@@ -178,7 +195,11 @@ async fn sse_open(
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     *f.sse_tx.lock().unwrap() = Some(tx);
     let stream = async_stream(move |yield_| async move {
-        yield_(Event::default().event("endpoint").data("/messages?session=1"));
+        yield_(
+            Event::default()
+                .event("endpoint")
+                .data("/messages?session=1"),
+        );
         while let Some(msg) = rx.recv().await {
             yield_(Event::default().event("message").data(msg));
         }
@@ -197,9 +218,10 @@ where
         let _ = tx.send(e);
     }));
     tokio::spawn(fut);
-    futures::stream::unfold(rx, |mut rx| async move {
-        rx.recv().await.map(|e| (Ok(e), rx))
-    })
+    futures::stream::unfold(
+        rx,
+        |mut rx| async move { rx.recv().await.map(|e| (Ok(e), rx)) },
+    )
 }
 
 async fn sse_post(State(f): State<Fake>, Json(msg): Json<Value>) -> StatusCode {
@@ -214,9 +236,18 @@ async fn sse_post(State(f): State<Fake>, Json(msg): Json<Value>) -> StatusCode {
 async fn start() -> (Fake, String) {
     let fake = Fake::default();
     let app = Router::new()
-        .route("/mcp", post(mcp_post).get(|| async { StatusCode::METHOD_NOT_ALLOWED }))
-        .route("/.well-known/oauth-protected-resource", get(protected_resource))
-        .route("/.well-known/oauth-protected-resource/mcp", get(protected_resource))
+        .route(
+            "/mcp",
+            post(mcp_post).get(|| async { StatusCode::METHOD_NOT_ALLOWED }),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(protected_resource),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource/mcp",
+            get(protected_resource),
+        )
         .route("/.well-known/oauth-authorization-server", get(auth_server))
         .route("/register", post(register))
         .route("/authorize", get(authorize))
@@ -248,7 +279,10 @@ async fn wait_for(mgr: &McpManager, name: &str, want: Status) {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    panic!("{name}: wanted {want:?}, got {:?}", mgr.server(name).map(|s| s.status));
+    panic!(
+        "{name}: wanted {want:?}, got {:?}",
+        mgr.server(name).map(|s| s.status)
+    );
 }
 
 #[tokio::test]
@@ -322,8 +356,11 @@ async fn static_headers_and_sse() {
     let (_fake, base) = start().await;
     let dir = tempfile::tempdir().unwrap();
     let mgr = McpManager::new(options(dir.path()));
-    let key: BTreeMap<String, String> =
-        [("X-Api-Key".to_owned(), "${MIRA_TEST_KEY_UNSET:-secret}".to_owned())].into();
+    let key: BTreeMap<String, String> = [(
+        "X-Api-Key".to_owned(),
+        "${MIRA_TEST_KEY_UNSET:-secret}".to_owned(),
+    )]
+    .into();
     mgr.apply(
         vec![
             remote(
@@ -361,7 +398,10 @@ async fn static_headers_and_sse() {
         "{:?}",
         mgr.server("legacy")
     );
-    assert_eq!(mgr.server("legacy-no-key").unwrap().status, Status::NeedsAuth);
+    assert_eq!(
+        mgr.server("legacy-no-key").unwrap().status,
+        Status::NeedsAuth
+    );
     let out = mgr.call_tool("legacy", "whoami", None).await.unwrap();
     assert!(!out.content.is_empty());
     mgr.shutdown();

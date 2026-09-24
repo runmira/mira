@@ -102,8 +102,14 @@ async fn full_lifecycle_against_a_stdio_server() {
     let view = mgr.server("fake").unwrap();
     assert_eq!(view.status, Status::Connected, "{view:?}");
     assert_eq!(view.server_version.as_deref(), Some("1.2.3"));
-    assert_eq!(view.instructions.as_deref(), Some("Use echo to repeat things."));
-    assert!(view.tools.iter().any(|t| t.name == "mcp__fake__echo" && t.read_only));
+    assert_eq!(
+        view.instructions.as_deref(),
+        Some("Use echo to repeat things.")
+    );
+    assert!(view
+        .tools
+        .iter()
+        .any(|t| t.name == "mcp__fake__echo" && t.read_only));
     assert_eq!(view.resources.len(), 1);
     assert_eq!(view.prompts[0].name, "review");
     assert!(events.try_recv().is_ok(), "status changes are broadcast");
@@ -127,7 +133,10 @@ async fn full_lifecycle_against_a_stdio_server() {
         "fake:echo"
     );
     let out = echo
-        .invoke(&call("mcp__fake__echo", serde_json::json!({"text": "hi"})), &ctx)
+        .invoke(
+            &call("mcp__fake__echo", serde_json::json!({"text": "hi"})),
+            &ctx,
+        )
         .await
         .unwrap();
     assert_eq!(out.content, "hi");

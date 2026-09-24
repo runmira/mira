@@ -534,6 +534,17 @@ async fn spawn_turn(state: AppState, slot: Arc<SessionSlot>, text: String) {
     // Refresh the skill registry from disk before the turn starts.
     crate::skills::reload_registry(&state).await;
 
+    // `/name args` for a custom command or MCP prompt expands here, so a
+    // typed command and a palette pick behave the same.
+    let text = match expand_slash(&state, &text).await {
+        Ok(t) => t,
+        Err(message) => {
+            let _ = slot.events_tx.send(ServerMsg::Warning { text: message });
+            let _ = slot.events_tx.send(ServerMsg::Done);
+            return;
+        }
+    };
+
     // Publish a "running" marker — fanned out so a client watching a
     // different session still sees the sidebar spinner light up.
     state
@@ -594,4 +605,20 @@ where
         }
     };
     sink.send(Message::Text(text)).await.map_err(|_| ())
+}
+
+/// Expand a leading `/command` if it names a custom command or an MCP
+/// prompt; anything else passes through unchanged.
+async fn expand_slash(state: &AppState, text: &str) -> Result<String, String> {
+    let Some(rest) = text.trim_start().strip_prefix('/') else {
+        return Ok(text.to_owned());
+    };
+    let (name, args) = rest
+        .split_once(char::is_whitespace)
+        .map(|(n, a)| (n, a.trim()))
+        .unwrap_or((rest.trim(), ""));
+    match state.extensions.expand(name, args).await {
+        Some(r) => r,
+        None => Ok(text.to_owned()),
+    }
 }

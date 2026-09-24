@@ -19,6 +19,7 @@ pub mod components;
 mod git;
 pub mod manager;
 pub mod manifest;
+pub mod runtime;
 
 pub use commands::{CommandSource, SlashCommand};
 pub use components::Components;

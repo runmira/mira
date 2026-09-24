@@ -1280,6 +1280,17 @@ async fn slash_matches(_state: &TuiState, filter: &str, cfg: &TuiConfig) -> Vec<
         })
         .collect();
 
+    for (insert, detail) in crate::tui::ext_slash::palette_items(filter, cfg) {
+        if is_reserved_slash(&insert) {
+            continue;
+        }
+        items.push(PaletteItem {
+            title: insert.clone(),
+            insert,
+            detail,
+        });
+    }
+
     let reg = cfg.skills.read().await.clone();
     for s in reg.skills.values() {
         let Some(alias) = s.slash.as_deref() else {

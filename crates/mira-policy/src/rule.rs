@@ -45,9 +45,8 @@ impl Rule {
             Matcher::Glob(pat) => pat.matches(req.target),
             Matcher::Verb { verb, detail } => {
                 let (t_verb, t_detail) = req.target.split_once(':').unwrap_or((req.target, ""));
-                let click_family = self.action != Action::Mcp
-                    && verb == "click"
-                    && t_verb.ends_with("click");
+                let click_family =
+                    self.action != Action::Mcp && verb == "click" && t_verb.ends_with("click");
                 let verb_ok = wildcard_match(verb, t_verb) || click_family;
                 verb_ok
                     && detail

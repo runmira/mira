@@ -66,7 +66,10 @@ pub fn split_frontmatter(text: &str) -> (Value, &str) {
     };
     let yaml = &after[..end];
     let body = after[end + 4..].trim_start_matches(['-']);
-    let body = body.strip_prefix("\r\n").or_else(|| body.strip_prefix('\n')).unwrap_or(body);
+    let body = body
+        .strip_prefix("\r\n")
+        .or_else(|| body.strip_prefix('\n'))
+        .unwrap_or(body);
     let meta: Value = serde_yaml::from_str(yaml).unwrap_or(Value::Null);
     (meta, body)
 }
@@ -121,7 +124,9 @@ fn collect_dir(dir: &Path, source: &CommandSource, out: &mut Vec<SlashCommand>) 
 }
 
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     let mut entries: Vec<_> = rd.flatten().map(|e| e.path()).collect();
     entries.sort();
     for p in entries {
@@ -143,8 +148,16 @@ pub fn load(
 ) -> Vec<SlashCommand> {
     let mut out = Vec::new();
     if let Some(p) = project {
-        collect_dir(&p.join(".mira").join("commands"), &CommandSource::Project, &mut out);
-        collect_dir(&p.join(".claude").join("commands"), &CommandSource::Project, &mut out);
+        collect_dir(
+            &p.join(".mira").join("commands"),
+            &CommandSource::Project,
+            &mut out,
+        );
+        collect_dir(
+            &p.join(".claude").join("commands"),
+            &CommandSource::Project,
+            &mut out,
+        );
     }
     if let Some(u) = user_dir {
         collect_dir(u, &CommandSource::User, &mut out);
@@ -278,7 +291,9 @@ mod tests {
 
     #[test]
     fn frontmatter_and_args() {
-        let (meta, body) = split_frontmatter("---\ndescription: Do it\nargument-hint: [x]\n---\nHello $1 and $2 ($ARGUMENTS)\n");
+        let (meta, body) = split_frontmatter(
+            "---\ndescription: Do it\nargument-hint: [x]\n---\nHello $1 and $2 ($ARGUMENTS)\n",
+        );
         assert_eq!(meta["description"], "Do it");
         assert_eq!(body, "Hello $1 and $2 ($ARGUMENTS)\n");
         assert_eq!(
@@ -299,7 +314,10 @@ mod tests {
         for (p, text) in [
             (project.join(".mira/commands/review.md"), "project review"),
             (user.join("review.md"), "user review"),
-            (user.join("hello.md"), "---\ndescription: Say hi\n---\nSay hi to $ARGUMENTS. Dir: !`echo inline-ok`"),
+            (
+                user.join("hello.md"),
+                "---\ndescription: Say hi\n---\nSay hi to $ARGUMENTS. Dir: !`echo inline-ok`",
+            ),
             (plugin.join("commands/review.md"), "plugin review"),
             (plugin.join("commands/commit.md"), "commit it"),
         ] {
@@ -311,13 +329,19 @@ mod tests {
             Some(&project),
             &[(
                 "git-tools".to_owned(),
-                vec![plugin.join("commands/review.md"), plugin.join("commands/commit.md")],
+                vec![
+                    plugin.join("commands/review.md"),
+                    plugin.join("commands/commit.md"),
+                ],
             )],
         );
         let find = |n: &str| cmds.iter().find(|c| c.matches(n)).unwrap();
         assert_eq!(find("review").source, CommandSource::Project);
         assert!(find("git-tools:review").body.contains("plugin"));
-        assert_eq!(find("commit").qualified.as_deref(), Some("git-tools:commit"));
+        assert_eq!(
+            find("commit").qualified.as_deref(),
+            Some("git-tools:commit")
+        );
         assert_eq!(find("git-tools:commit").name, "commit");
         let hello = find("hello");
         assert_eq!(hello.description, "Say hi");

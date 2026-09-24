@@ -28,7 +28,7 @@ use serde::Serialize;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use crate::auth::{self, PendingSignIn};
 use crate::spec::{expand, Scope, ServerSpec, Transport};
@@ -88,7 +88,9 @@ pub enum Status {
     /// A project server the user rejected.
     Rejected,
     Disabled,
-    Failed { message: String },
+    Failed {
+        message: String,
+    },
 }
 
 impl Status {
@@ -421,7 +423,7 @@ impl McpManager {
             error: result.as_ref().err().cloned(),
         });
         result?;
-        info!(server, "mcp: signed in");
+        debug!(server, "mcp: signed in");
         let _ = self.reconnect(&server);
         Ok(server)
     }
@@ -567,11 +569,10 @@ fn prompt_view(p: &Prompt) -> PromptView {
 /// The spec's transport with `${VAR}`s filled in.
 fn expand_transport(spec: &ServerSpec) -> Result<Transport, String> {
     let vars = spec.extra_vars();
-    let ex = |s: &str| expand(s, &vars).map_err(|v| format!("environment variable `{v}` is not set"));
+    let ex =
+        |s: &str| expand(s, &vars).map_err(|v| format!("environment variable `{v}` is not set"));
     let map = |m: &BTreeMap<String, String>| -> Result<BTreeMap<String, String>, String> {
-        m.iter()
-            .map(|(k, v)| Ok((k.clone(), ex(v)?)))
-            .collect()
+        m.iter().map(|(k, v)| Ok((k.clone(), ex(v)?))).collect()
     };
     Ok(match &spec.transport {
         Transport::Stdio {
@@ -741,9 +742,9 @@ impl Inner {
                         Some(f) => builder.stderr(f),
                         None => builder.stderr(std::process::Stdio::null()),
                     };
-                    let (proc, _) = builder
-                        .spawn()
-                        .map_err(|e| OpenError::Failed(format!("couldn't start `{command}`: {e}")))?;
+                    let (proc, _) = builder.spawn().map_err(|e| {
+                        OpenError::Failed(format!("couldn't start `{command}`: {e}"))
+                    })?;
                     handler
                         .serve(proc)
                         .await
@@ -783,7 +784,8 @@ impl Inner {
                                 .map(|s| (s, true))
                         }
                         None => {
-                            let t = rmcp::transport::StreamableHttpClientTransport::from_config(config);
+                            let t =
+                                rmcp::transport::StreamableHttpClientTransport::from_config(config);
                             handler
                                 .serve(t)
                                 .await
@@ -822,9 +824,8 @@ impl Inner {
                 }
             }
         };
-        let (service, signed_in) = tokio::time::timeout(timeout, connect)
-            .await
-            .map_err(|_| {
+        let (service, signed_in) =
+            tokio::time::timeout(timeout, connect).await.map_err(|_| {
                 OpenError::Failed(format!(
                     "didn't finish starting within {}s (MCP_TIMEOUT)",
                     timeout.as_secs()
@@ -899,7 +900,7 @@ impl Inner {
                 entry.status = Status::Connected;
                 let stop = CancellationToken::new();
                 entry.stop = Some(stop.clone());
-                info!(server = name, tools = entry.tools.len(), "mcp: connected");
+                debug!(server = name, tools = entry.tools.len(), "mcp: connected");
                 let inner = self.clone();
                 let name = name.to_owned();
                 let service = opened.service;
@@ -922,7 +923,7 @@ impl Inner {
                 entry.signed_in = false;
             }
             Err(OpenError::Failed(message)) => {
-                warn!(server = name, %message, "mcp: connect failed");
+                debug!(server = name, %message, "mcp: connect failed");
                 entry.status = Status::Failed { message };
             }
         }
@@ -952,7 +953,7 @@ impl Inner {
             entry.status = Status::Failed {
                 message: message.into(),
             };
-            warn!(server = name, drops = entry.drops, "mcp: {message}");
+            debug!(server = name, drops = entry.drops, "mcp: {message}");
             (entry.drops <= MAX_RECONNECTS).then(|| Duration::from_secs(1 << (entry.drops - 1)))
         };
         self.emit(McpEvent::Changed(name.to_owned()));
@@ -963,7 +964,8 @@ impl Inner {
                 tokio::time::sleep(delay).await;
                 let mut servers = inner.servers.write().unwrap();
                 if let Some(entry) = servers.get_mut(&name) {
-                    if entry.generation == generation && matches!(entry.status, Status::Failed { .. })
+                    if entry.generation == generation
+                        && matches!(entry.status, Status::Failed { .. })
                     {
                         inner.start_connect(entry);
                     }
@@ -1040,7 +1042,9 @@ impl Inner {
             let prompts = peer.list_all_prompts().await.ok();
             {
                 let mut servers = inner.servers.write().unwrap();
-                let Some(entry) = servers.get_mut(&name) else { return };
+                let Some(entry) = servers.get_mut(&name) else {
+                    return;
+                };
                 if entry.status != Status::Connected {
                     return;
                 }
@@ -1088,8 +1092,11 @@ impl Inner {
             instructions: e.instructions.clone(),
             can_sign_in: e.spec.is_remote(),
             signed_in: e.signed_in,
-            log_path: (!e.spec.is_remote())
-                .then(|| log_path(&self.opts.log_dir, &e.spec.name).display().to_string()),
+            log_path: (!e.spec.is_remote()).then(|| {
+                log_path(&self.opts.log_dir, &e.spec.name)
+                    .display()
+                    .to_string()
+            }),
             config: e.spec.to_config(),
         }
     }
@@ -1124,7 +1131,8 @@ enum OpenError {
 fn classify(err: impl std::error::Error + 'static, had_token: bool) -> OpenError {
     let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(&err);
     while let Some(e) = cur {
-        if let Some(a) = e.downcast_ref::<rmcp::transport::streamable_http_client::AuthRequiredError>()
+        if let Some(a) =
+            e.downcast_ref::<rmcp::transport::streamable_http_client::AuthRequiredError>()
         {
             let c = a.www_authenticate_header.clone();
             return OpenError::NeedsAuth(Some(c).filter(|c| !c.is_empty()));
@@ -1143,17 +1151,39 @@ fn classify(err: impl std::error::Error + 'static, had_token: bool) -> OpenError
     OpenError::Failed(text)
 }
 
+/// A readable one-liner from an error chain: rmcp's wrappers name
+/// internal types ("Transport [rmcp::…] error"), so keep the causes a
+/// person can act on, root cause last.
 fn full_chain(err: &(dyn std::error::Error + 'static)) -> String {
-    let mut parts = vec![err.to_string()];
-    let mut cur = err.source();
+    let mut parts: Vec<String> = Vec::new();
+    let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(err);
     while let Some(e) = cur {
-        let s = e.to_string();
-        if !parts.iter().any(|p| p.contains(&s)) {
+        let mut s = e.to_string();
+        // "Send message error Transport [rmcp::…] error: Client error: X"
+        // → "X".
+        if let Some(i) = s.rfind("] error: ") {
+            s = s[i + "] error: ".len()..].to_owned();
+        }
+        let s = s
+            .trim_start_matches("Client error: ")
+            .trim_end_matches(", when send initialize request")
+            .to_owned();
+        let internal = s.contains("rmcp::");
+        if !internal && !s.is_empty() && !parts.iter().any(|p| p.contains(&s)) {
             parts.push(s);
         }
         cur = e.source();
     }
-    parts.join(": ")
+    let joined = if parts.is_empty() {
+        err.to_string()
+    } else {
+        parts.join(": ")
+    };
+    if joined.contains("error sending request") || joined.contains("tcp connect error") {
+        let root = parts.last().cloned().unwrap_or_default();
+        return format!("couldn't reach the server: {root}");
+    }
+    joined
 }
 
 fn log_path(dir: &Path, server: &str) -> PathBuf {

@@ -282,7 +282,22 @@ pub fn builtin() -> AgentRegistry {
 
 /// Full resolution: builtins → user → project.
 pub fn load(cwd: &Path) -> AgentRegistry {
+    load_with_plugins(cwd, &[])
+}
+
+/// Builtins → plugin agents → user → project; later tiers win by name.
+/// `plugin_files` are agent files of enabled plugins.
+pub fn load_with_plugins(cwd: &Path, plugin_files: &[PathBuf]) -> AgentRegistry {
     let mut reg = builtin();
+
+    for path in plugin_files {
+        match load_file(path) {
+            Ok(ty) => {
+                reg.types.insert(ty.name.clone(), ty);
+            }
+            Err(e) => warn!(path = %path.display(), %e, "plugin agent failed to parse"),
+        }
+    }
 
     if let Some(user_dir) = user_agents_dir() {
         reg.merge(load_dir(&user_dir, "user"));
@@ -394,8 +409,11 @@ pub fn parse_agent_md(source: &str) -> Result<AgentType> {
         name: fm.name.trim().to_ascii_lowercase(),
         description: fm.description.unwrap_or_default(),
         category: fm.category,
-        tools: fm.tools,
-        model: fm.model,
+        tools: fm
+            .tools
+            .map(|t| normalize_tools(&t))
+            .filter(|t| !t.is_empty()),
+        model: fm.model.filter(|m| !is_claude_model_alias(m)),
         max_rounds: fm.max_rounds,
         system_prompt_addendum,
         response_schema: fm.response_schema,
@@ -416,7 +434,7 @@ struct Frontmatter {
     description: Option<String>,
     #[serde(default)]
     category: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "tools_field")]
     tools: Option<Vec<String>>,
     #[serde(default)]
     model: Option<String>,
@@ -434,6 +452,75 @@ struct Frontmatter {
     extends: Option<String>,
     #[serde(default)]
     review_required: Option<bool>,
+}
+
+/// `tools:` is a YAML list in Mira's format and a comma-separated string
+/// (`Read, Grep, Glob`) in Claude Code's.
+fn tools_field<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Vec<String>>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Repr {
+        List(Vec<String>),
+        Text(String),
+    }
+    Ok(match Option::<Repr>::deserialize(d)? {
+        None => None,
+        Some(Repr::List(l)) => Some(l),
+        Some(Repr::Text(t)) => Some(
+            t.split(',')
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+                .collect(),
+        ),
+    })
+}
+
+/// Claude Code tool names → Mira's, so agents written for Claude Code
+/// (plugins, `.claude/agents`) get the tools they ask for. Mira names and
+/// `mcp__…` names pass through; tools Mira doesn't have are dropped.
+fn normalize_tools(tools: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |n: &str| {
+        if !out.iter().any(|o| o == n) {
+            out.push(n.to_owned());
+        }
+    };
+    for t in tools {
+        // `Bash(git:*)`-style scoped entries name the tool before `(`.
+        let name = t.split('(').next().unwrap_or(t).trim();
+        match name {
+            "Read" | "NotebookRead" => {
+                push("read_file");
+                push("file_outline");
+            }
+            "Write" => push("write_file"),
+            "Edit" | "MultiEdit" => {
+                push("edit_file");
+                push("apply_patch");
+            }
+            "Glob" | "LS" => push("glob"),
+            "Grep" => push("grep"),
+            "Bash" | "BashOutput" | "KillBash" => push("bash"),
+            "WebFetch" => push("web_fetch"),
+            "WebSearch" => push("web_search"),
+            "TodoWrite" | "TodoRead" => {
+                for n in ["task_create", "task_update", "task_list", "task_get"] {
+                    push(n);
+                }
+            }
+            "Task" | "Agent" => push("agent"),
+            "NotebookEdit" | "SlashCommand" | "Skill" | "ExitPlanMode" => {}
+            other if other.chars().next().is_some_and(|c| c.is_ascii_uppercase()) => {}
+            other => push(other),
+        }
+    }
+    out
+}
+
+/// Claude Code's model shorthands (and `inherit`) mean "the session's
+/// model" here: they aren't model ids any provider accepts.
+fn is_claude_model_alias(m: &str) -> bool {
+    matches!(m.trim(), "inherit" | "opus" | "sonnet" | "haiku" | "")
 }
 
 /* ---------- tests ---------- */
@@ -654,5 +741,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).unwrap();
         TmpDir(p)
+    }
+
+    #[test]
+    fn claude_code_agent_files_load() {
+        let src = "---\nname: code-reviewer\ndescription: Reviews\ntools: Glob, Grep, LS, Read, Bash(git diff:*), NotebookRead, mcp__github__get_pr\nmodel: opus\n---\nReview.";
+        let ty = parse_agent_md(src).unwrap();
+        assert_eq!(
+            ty.tools.unwrap(),
+            [
+                "glob",
+                "grep",
+                "read_file",
+                "file_outline",
+                "bash",
+                "mcp__github__get_pr"
+            ]
+        );
+        assert_eq!(ty.model, None);
+        let only_unknown = "---\nname: x\ntools: NotebookEdit\n---\n";
+        assert_eq!(parse_agent_md(only_unknown).unwrap().tools, None);
     }
 }

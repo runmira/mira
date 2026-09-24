@@ -63,7 +63,9 @@ impl Registry {
         if let Some(t) = self.tools.get(name) {
             return Some(t.clone());
         }
-        self.source_tools().into_iter().find(|t| t.spec().name == name)
+        self.source_tools()
+            .into_iter()
+            .find(|t| t.spec().name == name)
     }
 
     /// Current tools from the live sources, minus any shadowed by a

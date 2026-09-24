@@ -235,6 +235,10 @@ pub enum ServerMsg {
     /// this so the composer palette and Settings panel pick up new /
     /// edited skills automatically.
     SkillsReloaded,
+    /// MCP servers or plugins changed (a server connected, a plugin was
+    /// installed, …). The frontend refetches `/api/mcp`, `/api/plugins`
+    /// and `/api/commands`.
+    ExtensionsChanged,
     /// Model changed (echoes SetModel).
     ModelChanged { model: String },
     /// Mode changed (echoes SetMode).

@@ -68,6 +68,9 @@ pub(super) async fn event_loop(
     draw_frame(term, &mut state)?;
     state.git_branch = detect_git_branch(&cfg.cwd).await;
     hydrate_from_history(&session, &mut state, &cfg).await;
+    for notice in cfg.extensions.notices() {
+        state.push_warning(notice);
+    }
 
     // File index for `@` completion — a one-shot `rg --files` in the cwd,
     // shared between palette openings so we don't reshell for every '@'.

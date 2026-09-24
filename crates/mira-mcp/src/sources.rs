@@ -113,8 +113,7 @@ pub fn collect(inputs: SourceInputs<'_>) -> Collected {
                 Ok(only) => {
                     for (name, cfg) in only.mcp_servers {
                         add(
-                            ServerSpec::from_config(&name, Scope::Project, &cfg)
-                                .with_source(&yaml),
+                            ServerSpec::from_config(&name, Scope::Project, &cfg).with_source(&yaml),
                             &mut out,
                         );
                     }

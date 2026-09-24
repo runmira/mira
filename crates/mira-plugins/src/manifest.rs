@@ -304,7 +304,10 @@ impl PluginManifest {
 }
 
 /// Read `<dir>/.claude-plugin/<file>` (or `.mira-plugin`).
-pub fn read_manifest_file(dir: &std::path::Path, file: &str) -> Option<(std::path::PathBuf, String)> {
+pub fn read_manifest_file(
+    dir: &std::path::Path,
+    file: &str,
+) -> Option<(std::path::PathBuf, String)> {
     MANIFEST_DIRS.iter().find_map(|d| {
         let p = dir.join(d).join(file);
         std::fs::read_to_string(&p).ok().map(|t| (p, t))
@@ -331,10 +334,19 @@ mod tests {
         let m: Marketplace = serde_json::from_str(text).unwrap();
         assert_eq!(m.owner.as_ref().unwrap().name, "Someone");
         assert_eq!(m.renames["old"], "new");
-        assert_eq!(m.plugins[0].source, PluginSource::Relative("./plugins/a".into()));
-        assert!(matches!(&m.plugins[1].source, PluginSource::Github { repo, git_ref: Some(r), .. } if repo == "o/r" && r == "v1"));
-        assert!(matches!(&m.plugins[2].source, PluginSource::Git { sha: Some(s), path: None, .. } if s == "abc"));
-        assert!(matches!(&m.plugins[3].source, PluginSource::Git { path: Some(p), .. } if p == "p/d"));
+        assert_eq!(
+            m.plugins[0].source,
+            PluginSource::Relative("./plugins/a".into())
+        );
+        assert!(
+            matches!(&m.plugins[1].source, PluginSource::Github { repo, git_ref: Some(r), .. } if repo == "o/r" && r == "v1")
+        );
+        assert!(
+            matches!(&m.plugins[2].source, PluginSource::Git { sha: Some(s), path: None, .. } if s == "abc")
+        );
+        assert!(
+            matches!(&m.plugins[3].source, PluginSource::Git { path: Some(p), .. } if p == "p/d")
+        );
         assert_eq!(m.plugins[4].source, PluginSource::Unknown);
         // Round-trips.
         let back: Marketplace = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();

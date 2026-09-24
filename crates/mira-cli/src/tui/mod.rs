@@ -22,6 +22,7 @@
 pub mod approver;
 mod components;
 pub(crate) mod event_loop;
+mod ext_slash;
 pub(crate) mod inline_term;
 mod input;
 mod markdown;
@@ -32,6 +33,7 @@ mod syntax;
 mod theme;
 
 pub use approver::TuiApprover;
+pub(crate) use ext_slash::open_browser;
 pub use prompts::TuiPromptChannel;
 
 use std::path::PathBuf;
@@ -102,6 +104,8 @@ pub struct TuiConfig {
     pub computer_cfg: mira_config::ComputerUseConfig,
     /// Browser config from `mira.yaml` — used by `/browser on`.
     pub browser_cfg: mira_config::BrowserConfig,
+    /// MCP servers, plugins, custom commands (`/mcp`, `/plugin`).
+    pub extensions: mira_server::extensions::Extensions,
 }
 
 /// Built-in slash commands the palette suggests. Order is display order.
@@ -133,6 +137,14 @@ pub(crate) const SLASH_COMMANDS: &[(&str, &str)] = &[
     (
         "/remote-env",
         "run tools in a remote environment (`/remote-env` · `/remote-env <name>` · `/remote-env local`)",
+    ),
+    (
+        "/mcp",
+        "MCP servers: status, tools, sign in, reconnect (`/mcp` · `/mcp login <server>`)",
+    ),
+    (
+        "/plugin",
+        "plugins: list, browse, install, marketplaces (`/plugin browse` · `/plugin install <name>`)",
     ),
     ("/computer", "enable/disable desktop control (on|off|status)"),
     ("/browser", "enable/disable browser automation (on|off|status)"),
@@ -422,6 +434,10 @@ async fn run_slash(
 
         "/remote-env" => run_remote_env_slash(rest, state, cfg, session).await,
 
+        "/mcp" => ext_slash::run_mcp_slash(rest, state, cfg).await,
+
+        "/plugin" | "/plugins" => ext_slash::run_plugin_slash(rest, state, cfg).await,
+
         "/computer" => run_computer_slash(rest, state, cfg, session).await,
 
         "/browser" => run_browser_slash(rest, state, cfg, session).await,
@@ -431,6 +447,10 @@ async fn run_slash(
         // mounts as `/X`. Reserved commands above always win.
         other => {
             let alias = other.trim_start_matches('/');
+            // Custom commands (user, project, plugin) and MCP prompts.
+            if let Some(expanded) = ext_slash::custom_command(alias, rest, state, cfg).await {
+                return expanded;
+            }
             if let Some(skill_name) = find_skill_by_slash(alias, &cfg.skills).await {
                 state.flash = Some(format!("skill → {skill_name}"));
                 let arg_line = if rest.is_empty() {
@@ -718,7 +738,8 @@ async fn run_browser_slash(
 /// commands. Built-ins always win over a skill alias — a skill named
 /// `mode.md` can't shadow `/mode`.
 pub(crate) fn is_reserved_slash(head: &str) -> bool {
-    SLASH_COMMANDS.iter().any(|(name, _)| *name == head) || matches!(head, "/q" | "/?" | "/perms")
+    SLASH_COMMANDS.iter().any(|(name, _)| *name == head)
+        || matches!(head, "/q" | "/?" | "/perms" | "/plugins")
 }
 
 /// Look up a skill by its slash alias. Returns the underlying skill

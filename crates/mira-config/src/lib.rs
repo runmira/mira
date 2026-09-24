@@ -441,7 +441,11 @@ pub enum McpRemoteKind {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct McpOAuthConfig {
-    #[serde(rename = "clientId", alias = "client_id", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "clientId",
+        alias = "client_id",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub client_id: Option<String>,
     #[serde(
         rename = "clientSecret",

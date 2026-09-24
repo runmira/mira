@@ -43,7 +43,11 @@ pub async fn clone(url: &str, dest: &Path, git_ref: Option<&str>, sha: Option<&s
     git(None, &args).await?;
     if let Some(sha) = sha {
         if head(dest).await.ok().as_deref() != Some(sha) {
-            git(Some(dest), &["fetch", "--depth", "1", "--quiet", "origin", sha]).await?;
+            git(
+                Some(dest),
+                &["fetch", "--depth", "1", "--quiet", "origin", sha],
+            )
+            .await?;
             git(Some(dest), &["checkout", "--quiet", sha]).await?;
         }
     }

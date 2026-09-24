@@ -186,12 +186,22 @@ mod tests {
         let path = dir.path().join("credentials.json");
         let a = FileCredentialStore::new(&path, "https://a.dev/mcp/");
         let b = FileCredentialStore::new(&path, "https://b.dev/mcp");
-        a.save(StoredCredentials::new("client-a".into(), None, vec![], None))
-            .await
-            .unwrap();
-        b.save(StoredCredentials::new("client-b".into(), None, vec![], None))
-            .await
-            .unwrap();
+        a.save(StoredCredentials::new(
+            "client-a".into(),
+            None,
+            vec![],
+            None,
+        ))
+        .await
+        .unwrap();
+        b.save(StoredCredentials::new(
+            "client-b".into(),
+            None,
+            vec![],
+            None,
+        ))
+        .await
+        .unwrap();
         // Trailing slash doesn't matter.
         let a2 = FileCredentialStore::new(&path, "https://a.dev/mcp");
         assert_eq!(a2.load().await.unwrap().unwrap().client_id, "client-a");

@@ -14,7 +14,11 @@ fn git(dir: &Path, args: &[&str]) {
         .args(args)
         .output()
         .unwrap();
-    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 fn write(p: &Path, text: &str) {
@@ -26,7 +30,15 @@ fn commit_all(dir: &Path, msg: &str) {
     git(dir, &["add", "-A"]);
     git(
         dir,
-        &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", msg],
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            msg,
+        ],
     );
 }
 
@@ -40,7 +52,10 @@ async fn marketplace_and_plugin_lifecycle() {
         &other.join("plugins/remote-one/.claude-plugin/plugin.json"),
         r#"{"name": "remote-one", "version": "2.0.0", "description": "From another repo"}"#,
     );
-    write(&other.join("plugins/remote-one/agents/helper.md"), "---\nname: helper\ndescription: helps\n---\nHelp.");
+    write(
+        &other.join("plugins/remote-one/agents/helper.md"),
+        "---\nname: helper\ndescription: helps\n---\nHelp.",
+    );
     git(&other, &["init", "-q", "-b", "main"]);
     commit_all(&other, "init");
 
@@ -63,10 +78,22 @@ async fn marketplace_and_plugin_lifecycle() {
         ),
     );
     let tools = market.join("plugins/tools");
-    write(&tools.join(".claude-plugin/plugin.json"), r#"{"name": "tools", "version": "1.0.0"}"#);
-    write(&tools.join("commands/greet.md"), "---\ndescription: Greet\n---\nHi $ARGUMENTS");
-    write(&tools.join("skills/notes/SKILL.md"), "---\nname: notes\ndescription: n\n---\nNotes.");
-    write(&tools.join("hooks/hooks.json"), r#"{"hooks": {"PreToolUse": []}}"#);
+    write(
+        &tools.join(".claude-plugin/plugin.json"),
+        r#"{"name": "tools", "version": "1.0.0"}"#,
+    );
+    write(
+        &tools.join("commands/greet.md"),
+        "---\ndescription: Greet\n---\nHi $ARGUMENTS",
+    );
+    write(
+        &tools.join("skills/notes/SKILL.md"),
+        "---\nname: notes\ndescription: n\n---\nNotes.",
+    );
+    write(
+        &tools.join("hooks/hooks.json"),
+        r#"{"hooks": {"PreToolUse": []}}"#,
+    );
     write(
         &tools.join(".mcp.json"),
         r#"{"mcpServers": {"db": {"command": "${CLAUDE_PLUGIN_ROOT}/bin/db", "args": ["--x"]}}}"#,
@@ -91,7 +118,13 @@ async fn marketplace_and_plugin_lifecycle() {
 
     let catalog = mgr.catalog().unwrap();
     assert_eq!(catalog.len(), 3);
-    assert!(!catalog.iter().find(|c| c.name == "from-npm").unwrap().installable);
+    assert!(
+        !catalog
+            .iter()
+            .find(|c| c.name == "from-npm")
+            .unwrap()
+            .installable
+    );
 
     // Detail before installing: read from the marketplace clone.
     let d = mgr.detail("tools").unwrap();
@@ -125,10 +158,20 @@ async fn marketplace_and_plugin_lifecycle() {
 
     mgr.set_enabled("tools", false).await.unwrap();
     assert_eq!(mgr.enabled().plugins.len(), 1);
-    assert!(!mgr.catalog().unwrap().iter().find(|c| c.name == "tools").unwrap().enabled);
+    assert!(
+        !mgr.catalog()
+            .unwrap()
+            .iter()
+            .find(|c| c.name == "tools")
+            .unwrap()
+            .enabled
+    );
 
     // A new plugin lands in the marketplace; updating picks it up.
-    write(&market.join("plugins/late/.claude-plugin/plugin.json"), r#"{"name": "late"}"#);
+    write(
+        &market.join("plugins/late/.claude-plugin/plugin.json"),
+        r#"{"name": "late"}"#,
+    );
     let mut m: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(market.join(".claude-plugin/marketplace.json")).unwrap(),
     )
@@ -137,7 +180,10 @@ async fn marketplace_and_plugin_lifecycle() {
         .as_array_mut()
         .unwrap()
         .push(serde_json::json!({"name": "late", "source": "./plugins/late"}));
-    write(&market.join(".claude-plugin/marketplace.json"), &m.to_string());
+    write(
+        &market.join(".claude-plugin/marketplace.json"),
+        &m.to_string(),
+    );
     commit_all(&market, "add late");
     mgr.update_marketplace("test-market").await.unwrap();
     assert_eq!(mgr.catalog().unwrap().len(), 4);
@@ -166,22 +212,51 @@ async fn official_marketplace() {
     let catalog = mgr.catalog().unwrap();
     eprintln!("{name}: {} plugins", catalog.len());
     assert!(catalog.len() > 50);
-    let uninstallable: Vec<_> = catalog.iter().filter(|c| !c.installable).map(|c| &c.id).collect();
+    let uninstallable: Vec<_> = catalog
+        .iter()
+        .filter(|c| !c.installable)
+        .map(|c| &c.id)
+        .collect();
     eprintln!("not installable: {uninstallable:?}");
 
-    for id in ["commit-commands", "context7", "42crunch-api-security-testing", "agentforce-adlc"] {
-        let p = mgr.install(id).await.unwrap_or_else(|e| panic!("{id}: {e:#}"));
+    for id in [
+        "commit-commands",
+        "context7",
+        "42crunch-api-security-testing",
+        "agentforce-adlc",
+    ] {
+        let p = mgr
+            .install(id)
+            .await
+            .unwrap_or_else(|e| panic!("{id}: {e:#}"));
         eprintln!("installed {} {} at {}", p.id(), p.version, p.path.display());
     }
     let enabled = mgr.enabled();
     let cmds = mira_plugins::commands::load(None, None, &enabled.command_files());
-    eprintln!("commands: {:?}", cmds.iter().map(|c| &c.name).collect::<Vec<_>>());
+    eprintln!(
+        "commands: {:?}",
+        cmds.iter().map(|c| &c.name).collect::<Vec<_>>()
+    );
     assert!(cmds.iter().any(|c| c.name == "commit"));
     let (specs, problems) = enabled.mcp_specs();
-    eprintln!("mcp: {:?} {problems:?}", specs.iter().map(|s| (&s.name, s.transport.summary())).collect::<Vec<_>>());
+    eprintln!(
+        "mcp: {:?} {problems:?}",
+        specs
+            .iter()
+            .map(|s| (&s.name, s.transport.summary()))
+            .collect::<Vec<_>>()
+    );
     assert!(specs.iter().any(|s| s.name == "plugin:context7:context7"));
     for (p, _, c) in mgr.installed().unwrap() {
-        eprintln!("{}: {} cmds, {} agents, skills {:?}, hooks {:?}, mcp {:?}, problems {:?}",
-            p.id(), c.commands.len(), c.agents.len(), c.skills, c.hooks, c.mcp_server_names, c.problems);
+        eprintln!(
+            "{}: {} cmds, {} agents, skills {:?}, hooks {:?}, mcp {:?}, problems {:?}",
+            p.id(),
+            c.commands.len(),
+            c.agents.len(),
+            c.skills,
+            c.hooks,
+            c.mcp_server_names,
+            c.problems
+        );
     }
 }

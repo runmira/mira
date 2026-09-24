@@ -254,7 +254,12 @@ impl Enabled {
     pub fn agent_files(&self) -> Vec<(String, PathBuf)> {
         self.plugins
             .iter()
-            .flat_map(|p| p.components.agents.iter().map(|a| (p.name.clone(), a.clone())))
+            .flat_map(|p| {
+                p.components
+                    .agents
+                    .iter()
+                    .map(|a| (p.name.clone(), a.clone()))
+            })
             .collect()
     }
 
@@ -563,7 +568,10 @@ impl PluginManager {
             1 => Ok(hits.remove(0)),
             _ => bail!(
                 "`{plugin}` is in several marketplaces ({}); use {plugin}@<marketplace>",
-                hits.iter().map(|h| h.0.as_str()).collect::<Vec<_>>().join(", ")
+                hits.iter()
+                    .map(|h| h.0.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
         }
     }
@@ -602,8 +610,14 @@ impl PluginManager {
                 .and_then(|m| m.license.clone())
                 .or(entry.license.clone()),
             repository: entry.repository.clone(),
-            command_names: components.as_ref().map(|c| stems(&c.commands)).unwrap_or_default(),
-            agent_names: components.as_ref().map(|c| stems(&c.agents)).unwrap_or_default(),
+            command_names: components
+                .as_ref()
+                .map(|c| stems(&c.commands))
+                .unwrap_or_default(),
+            agent_names: components
+                .as_ref()
+                .map(|c| stems(&c.agents))
+                .unwrap_or_default(),
             components,
             readme,
             path: local.map(|p| p.display().to_string()),
@@ -650,10 +664,9 @@ impl PluginManager {
                     let head = git::head(&scratch).await.ok();
                     (subdir(&scratch, path.as_deref())?, head)
                 }
-                PluginSource::Unknown => bail!(
-                    "`{}` uses a source Mira can't install yet",
-                    entry.name
-                ),
+                PluginSource::Unknown => {
+                    bail!("`{}` uses a source Mira can't install yet", entry.name)
+                }
             };
             if !src.is_dir() {
                 bail!("plugin directory {} doesn't exist", src.display());
@@ -666,7 +679,13 @@ impl PluginManager {
                 .unwrap_or_else(|| "local".into());
             let safe_version: String = version
                 .chars()
-                .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') { c } else { '_' })
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
                 .collect();
             let plugin_dir = cache.join(&mname).join(&entry.name);
             let dest = plugin_dir.join(&safe_version);
@@ -717,7 +736,11 @@ impl PluginManager {
         write_json(&self.installed_path(), &installed)
     }
 
-    fn installed_key(&self, installed: &BTreeMap<String, InstalledPlugin>, id: &str) -> Result<String> {
+    fn installed_key(
+        &self,
+        installed: &BTreeMap<String, InstalledPlugin>,
+        id: &str,
+    ) -> Result<String> {
         if installed.contains_key(id) {
             return Ok(id.to_owned());
         }
@@ -740,10 +763,7 @@ impl PluginManager {
             .into_values()
             .map(|p| {
                 let manifest = p.path.is_dir().then(|| read_plugin_manifest(&p.path));
-                let entry = self
-                    .find_entry(&p.id())
-                    .ok()
-                    .map(|(_, _, _, e)| e);
+                let entry = self.find_entry(&p.id()).ok().map(|(_, _, _, e)| e);
                 let merged = match (&manifest, &entry) {
                     (Some(m), Some(e)) => Some(m.clone().merge_entry(e)),
                     (m, _) => m.clone(),
@@ -753,7 +773,8 @@ impl PluginManager {
                     .map(|m| components::discover(&p.path, m))
                     .unwrap_or_default();
                 if !p.path.is_dir() {
-                    c.problems.push(format!("files missing at {}; reinstall", p.path.display()));
+                    c.problems
+                        .push(format!("files missing at {}; reinstall", p.path.display()));
                 }
                 (p, merged, c)
             })
@@ -796,7 +817,11 @@ fn split_id(id: &str) -> Result<(&str, Option<&str>)> {
     Ok((p, m))
 }
 
-fn catalog_entry(market: &str, e: &PluginEntry, installed: &BTreeMap<String, InstalledPlugin>) -> CatalogEntry {
+fn catalog_entry(
+    market: &str,
+    e: &PluginEntry,
+    installed: &BTreeMap<String, InstalledPlugin>,
+) -> CatalogEntry {
     let id = format!("{}@{market}", e.name);
     let inst = installed.get(&id);
     CatalogEntry {
@@ -889,19 +914,37 @@ mod tests {
         use MarketplaceSource as S;
         assert_eq!(
             S::parse("anthropics/claude-code").unwrap(),
-            S::Github { repo: "anthropics/claude-code".into(), git_ref: None }
+            S::Github {
+                repo: "anthropics/claude-code".into(),
+                git_ref: None
+            }
         );
         assert_eq!(
             S::parse("https://github.com/o/r.git").unwrap(),
-            S::Github { repo: "o/r".into(), git_ref: None }
+            S::Github {
+                repo: "o/r".into(),
+                git_ref: None
+            }
         );
         assert_eq!(
             S::parse("o/r#v2").unwrap(),
-            S::Github { repo: "o/r".into(), git_ref: Some("v2".into()) }
+            S::Github {
+                repo: "o/r".into(),
+                git_ref: Some("v2".into())
+            }
         );
-        assert!(matches!(S::parse("https://x.dev/marketplace.json").unwrap(), S::Url { .. }));
-        assert!(matches!(S::parse("git@github.com:o/r.git").unwrap(), S::Git { .. }));
-        assert!(matches!(S::parse("https://gitlab.com/o/r").unwrap(), S::Git { .. }));
+        assert!(matches!(
+            S::parse("https://x.dev/marketplace.json").unwrap(),
+            S::Url { .. }
+        ));
+        assert!(matches!(
+            S::parse("git@github.com:o/r.git").unwrap(),
+            S::Git { .. }
+        ));
+        assert!(matches!(
+            S::parse("https://gitlab.com/o/r").unwrap(),
+            S::Git { .. }
+        ));
         let dir = tempfile::tempdir().unwrap();
         assert!(matches!(
             S::parse(&dir.path().display().to_string()).unwrap(),

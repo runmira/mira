@@ -254,7 +254,9 @@ pub fn transport_from_config(cfg: &McpServerConfig) -> Transport {
 /// are ignored, so a file written for another client still loads. Each
 /// entry that can't be understood comes back as an error string instead
 /// of failing the whole file.
-pub fn parse_mcp_json(text: &str) -> Result<Vec<(String, Result<McpServerConfig, String>)>, String> {
+pub fn parse_mcp_json(
+    text: &str,
+) -> Result<Vec<(String, Result<McpServerConfig, String>)>, String> {
     let root: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
     let map = root
         .get("mcpServers")
@@ -448,11 +450,17 @@ mod tests {
         assert_eq!(sanitize("my server.v2"), "my_server_v2");
         assert_eq!(sanitize("a__b"), "a_b");
         assert_eq!(sanitize("..."), "server");
-        assert_eq!(tool_name("github", "create_issue"), "mcp__github__create_issue");
+        assert_eq!(
+            tool_name("github", "create_issue"),
+            "mcp__github__create_issue"
+        );
         let long = tool_name("a-very-long-server-name-indeed", &"x".repeat(60));
         assert_eq!(long.len(), 64);
         assert!(long.starts_with("mcp__a-very-long-server-name-indeed__x"));
-        assert_ne!(long, tool_name("a-very-long-server-name-indeed", &"x".repeat(61)));
+        assert_ne!(
+            long,
+            tool_name("a-very-long-server-name-indeed", &"x".repeat(61))
+        );
     }
 
     #[test]
@@ -471,7 +479,9 @@ mod tests {
         assert!(matches!(gh, Transport::Http { ref headers, .. } if headers["X-Key"] == "${K}"));
         assert_eq!(transport_from_config(&get("legacy").unwrap()).kind(), "sse");
         let fs = transport_from_config(&get("fs").unwrap());
-        assert!(matches!(fs, Transport::Stdio { ref args, .. } if args == &["-y", "server-fs", "3"]));
+        assert!(
+            matches!(fs, Transport::Stdio { ref args, .. } if args == &["-y", "server-fs", "3"])
+        );
         assert!(get("bad").is_err());
     }
 

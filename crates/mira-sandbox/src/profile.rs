@@ -215,6 +215,29 @@ impl SandboxProfile {
         args.push("/dev".into());
 
         // --------------------------------------------------------------
+        // Temporary directory
+        // --------------------------------------------------------------
+
+        //
+        // We only expose an explicit temp directory here. This prevents the
+        // sandbox from automatically gaining write access to the host's
+        // entire /tmp tree.
+        //
+        // If no temp directory was supplied, create a tmpfs.
+        //
+        // This has to come before any bind below: bwrap applies mounts in
+        // order, so a tmpfs mounted after the repository would hide a
+        // repository that lives under /tmp (scratch copies do).
+        if let Some(temp) = &self.temp_dir {
+            if temp.exists() {
+                bind_rw_path(&mut args, temp);
+            }
+        } else {
+            args.push("--tmpfs".into());
+            args.push("/tmp".into());
+        }
+
+        // --------------------------------------------------------------
         // Repository
         // --------------------------------------------------------------
 
@@ -260,25 +283,6 @@ impl SandboxProfile {
             if path.exists() {
                 bind_read_only_path(&mut args, &path);
             }
-        }
-
-        // --------------------------------------------------------------
-        // Temporary directory
-        // --------------------------------------------------------------
-
-        //
-        // We only expose an explicit temp directory here. This prevents the
-        // sandbox from automatically gaining write access to the host's
-        // entire /tmp tree.
-        //
-        // If no temp directory was supplied, create a tmpfs.
-        if let Some(temp) = &self.temp_dir {
-            if temp.exists() {
-                bind_rw_path(&mut args, temp);
-            }
-        } else {
-            args.push("--tmpfs".into());
-            args.push("/tmp".into());
         }
 
         // --------------------------------------------------------------

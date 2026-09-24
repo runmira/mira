@@ -71,7 +71,9 @@ fn paths(v: &Option<Value>) -> Vec<String> {
 }
 
 fn md_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     let mut entries: Vec<_> = rd.flatten().map(|e| e.path()).collect();
     entries.sort();
     for p in entries {
@@ -83,7 +85,13 @@ fn md_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-fn add_md(root: &Path, rel: Option<&str>, default: &str, out: &mut Vec<PathBuf>, problems: &mut Vec<String>) {
+fn add_md(
+    root: &Path,
+    rel: Option<&str>,
+    default: &str,
+    out: &mut Vec<PathBuf>,
+    problems: &mut Vec<String>,
+) {
     let p = match rel {
         Some(r) => match inside(root, r) {
             Ok(p) => p,
@@ -133,7 +141,9 @@ pub fn discover(root: &Path, manifest: &PluginManifest) -> Components {
             }
             continue;
         }
-        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         let mut found = false;
         let mut names: Vec<String> = rd
             .flatten()
@@ -245,7 +255,10 @@ mod tests {
     fn finds_default_and_custom_components() {
         let dir = tempfile::tempdir().unwrap();
         let r = dir.path();
-        write(&r.join("commands/commit.md"), "---\ndescription: c\n---\nbody");
+        write(
+            &r.join("commands/commit.md"),
+            "---\ndescription: c\n---\nbody",
+        );
         write(&r.join("commands/sub/deep.md"), "x");
         write(&r.join("extra/one.md"), "x");
         write(&r.join("agents/reviewer.md"), "x");
