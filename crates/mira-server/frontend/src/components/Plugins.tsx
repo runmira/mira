@@ -28,7 +28,7 @@ import { InstalledTab } from './plugins/InstalledTab';
 import { MarketplacesTab } from './plugins/MarketplacesTab';
 import { McpTab, writeScope } from './plugins/McpTab';
 import { ServerDetailDialog, ServerEditorDialog } from './plugins/McpDialogs';
-import { PluginDetailDialog } from './plugins/PluginDetailDialog';
+import { PluginDetailPage } from './plugins/PluginDetailPage';
 import { ConfirmDialog, ErrorBanner, useActions } from './plugins/shared';
 
 type Tab = 'discover' | 'installed' | 'marketplaces' | 'mcp' | 'errors';
@@ -150,6 +150,39 @@ export function PluginsPanel({ version = 0 }: { version?: number }) {
 
   const openServer = mcp?.servers.find((s) => s.name === serverOpen) ?? null;
 
+  if (detailId) {
+    return (
+      <div className="mx-auto flex w-full max-w-4xl flex-col gap-5 px-6 pb-12 pt-6">
+        <PluginDetailPage
+          id={detailId}
+          version={version + localVersion}
+          busy={busy}
+          onBack={() => setDetailId(null)}
+          onInstall={pluginActions.install}
+          onToggle={pluginActions.toggle}
+          onUninstall={(id) => {
+            const p = plugins?.installed.find((x) => x.id === id);
+            if (p) setConfirm({ kind: 'uninstall', plugin: p });
+          }}
+          actionError={error}
+        />
+        {confirm?.kind === 'uninstall' && (
+          <ConfirmDialog
+            title={`Uninstall ${confirm.plugin.display_name || confirm.plugin.name}?`}
+            body="Its commands, agents, skills and MCP servers are removed. You can install it again from its marketplace."
+            confirmLabel="Uninstall"
+            busy={!!busy}
+            onCancel={() => setConfirm(null)}
+            onConfirm={() => {
+              setDetailId(null);
+              pluginActions.uninstall(confirm.plugin.id);
+            }}
+          />
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="mx-auto flex w-full max-w-4xl flex-col gap-5 px-6 pb-12 pt-6">
       <header className="flex flex-wrap items-center justify-between gap-4">
@@ -175,22 +208,27 @@ export function PluginsPanel({ version = 0 }: { version?: number }) {
         </label>
       </header>
 
-      <nav className="flex gap-0.5 overflow-x-auto border-b border-border/60">
+      <nav className="flex gap-1 overflow-x-auto pb-0.5">
         {tabs.map((t) => (
           <button
             key={t.key}
             type="button"
             onClick={() => setTab(t.key)}
             className={cn(
-              '-mb-px flex shrink-0 items-center gap-1.5 border-b-2 px-3.5 pb-2.5 pt-1.5 text-[13px] font-medium transition-colors',
+              'flex shrink-0 items-center gap-1.5 rounded-full px-4 py-1.5 text-[12.5px] font-medium transition-all',
               tab === t.key
-                ? 'border-mira-purple text-foreground'
-                : 'border-transparent text-muted-foreground hover:text-foreground',
+                ? 'bg-white text-black shadow-sm'
+                : 'text-muted-foreground hover:bg-white/8 hover:text-foreground',
             )}
           >
             {t.label}
             {t.count !== undefined && t.count > 0 && (
-              <span className="rounded-full bg-white/8 px-1.5 text-[11px] text-muted-foreground">{t.count}</span>
+              <span className={cn(
+                'rounded-full px-1.5 text-[11px]',
+                tab === t.key ? 'bg-black/10 text-black/60' : 'bg-white/8 text-muted-foreground',
+              )}>
+                {t.count}
+              </span>
             )}
             {t.dot && (
               <span className={cn('size-1.5 rounded-full', t.dot === 'red' ? 'bg-destructive' : 'bg-amber-400')} />
@@ -255,21 +293,6 @@ export function PluginsPanel({ version = 0 }: { version?: number }) {
             </div>
           )}
         </>
-      )}
-
-      {detailId && (
-        <PluginDetailDialog
-          id={detailId}
-          version={version + localVersion}
-          busy={busy}
-          onClose={() => setDetailId(null)}
-          onInstall={pluginActions.install}
-          onToggle={pluginActions.toggle}
-          onUninstall={(id) => {
-            const p = plugins?.installed.find((x) => x.id === id);
-            if (p) setConfirm({ kind: 'uninstall', plugin: p });
-          }}
-        />
       )}
 
       {openServer && <ServerDetailDialog s={openServer} onClose={() => setServerOpen(null)} />}

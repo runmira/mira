@@ -15,6 +15,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
 import { Markdown } from '../Markdown';
 import { Avatar, ErrorBanner, Pill, Switch } from './shared';
+import { faviconSrc } from './DiscoverTab';
 
 export function PluginDetailDialog({
   id,
@@ -53,7 +54,7 @@ export function PluginDetailDialog({
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-h-[85vh] max-w-2xl gap-0 overflow-hidden p-0">
         <div className="flex items-start gap-4 border-b border-border/60 px-6 pb-5 pt-6">
-          <Avatar name={id} size="lg" src={detail?.icon_url} />
+          <Avatar name={id} size="lg" src={detail?.icon_url ?? faviconSrc(detail?.homepage)} />
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
               <h2 className="text-[18px] font-semibold tracking-tight">{title}</h2>
