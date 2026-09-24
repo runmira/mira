@@ -31,7 +31,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::auth::{self, PendingSignIn};
-use crate::spec::{expand, Scope, ServerSpec, Transport};
+use crate::spec::{expand, missing_vars, Scope, ServerSpec, Transport};
+use crate::vars;
 use crate::state::{Approval, McpState};
 use crate::tool::{self, McpTool};
 
@@ -88,6 +89,11 @@ pub enum Status {
     /// A project server the user rejected.
     Rejected,
     Disabled,
+    /// The definition uses `${VAR}`s that have no value: set them (in
+    /// your environment, or saved with [`McpManager::set_variable`]).
+    NeedsSetup {
+        variables: Vec<String>,
+    },
     Failed {
         message: String,
     },
@@ -102,6 +108,7 @@ impl Status {
             Status::NeedsApproval => "needs approval".into(),
             Status::Rejected => "rejected".into(),
             Status::Disabled => "disabled".into(),
+            Status::NeedsSetup { variables } => format!("needs {}", variables.join(", ")),
             Status::Failed { message } => format!("failed: {message}"),
         }
     }
@@ -158,6 +165,9 @@ pub struct ServerView {
     /// Remote servers can use OAuth.
     pub can_sign_in: bool,
     pub signed_in: bool,
+    /// `${VAR}`s in the definition with no value. For a remote server's
+    /// headers these are optional when OAuth sign-in works.
+    pub missing_vars: Vec<String>,
     pub log_path: Option<String>,
     /// The definition, for editing.
     pub config: McpServerConfig,
@@ -293,6 +303,33 @@ impl McpManager {
         servers.get(name).map(|e| self.inner.view(e))
     }
 
+    /// Save a value for `${name}` (or with `None`, forget it) and
+    /// reconnect the servers that use it.
+    pub fn set_variable(&self, name: &str, value: Option<&str>) -> Result<(), String> {
+        vars::set(&vars::path_for(&self.inner.opts.credentials), name, value)
+            .map_err(|e| format!("{e:#}"))?;
+        let mut servers = self.inner.servers.write().unwrap();
+        for entry in servers.values_mut() {
+            let uses = serde_json::to_string(&entry.spec.transport)
+                .unwrap_or_default()
+                .contains(&format!("${{{name}"));
+            let gated = matches!(
+                entry.status,
+                Status::Disabled | Status::NeedsApproval | Status::Rejected
+            );
+            if uses && !gated {
+                entry.drops = 0;
+                self.inner.start_connect(entry);
+            }
+        }
+        Ok(())
+    }
+
+    /// Names of saved variables (values stay private).
+    pub fn saved_variables(&self) -> Vec<String> {
+        self.inner.vars().into_keys().collect()
+    }
+
     pub fn reconnect(&self, name: &str) -> Result<(), String> {
         let mut servers = self.inner.servers.write().unwrap();
         let entry = servers
@@ -371,7 +408,11 @@ impl McpManager {
                 .ok_or_else(|| format!("no MCP server `{name}`"))?;
             (e.spec.clone(), e.challenge.clone())
         };
-        let transport = expand_transport(&spec)?;
+        let saved = self.inner.vars();
+        let missing = missing_in(&spec, &saved);
+        let transport = expand_transport(&spec, &saved).map_err(|vars| {
+            format!("set {} first", vars.join(", "))
+        })?;
         let pending = auth::begin(
             &self.inner.opts.credentials,
             name,
@@ -380,7 +421,7 @@ impl McpManager {
             redirect_uri,
         )
         .await
-        .map_err(|e| format!("couldn't start sign-in for `{name}`: {e}"))?;
+        .map_err(|e| sign_in_error(name, &e, &missing))?;
         let url = pending.auth_url.clone();
         self.inner
             .pending
@@ -469,7 +510,8 @@ impl McpManager {
     /// Forget a remote server's sign-in and reconnect without it.
     pub async fn sign_out(&self, name: &str) -> Result<(), String> {
         let spec = self.spec(name)?;
-        let transport = expand_transport(&spec)?;
+        let transport = expand_transport(&spec, &self.inner.vars())
+            .map_err(|vars| format!("set {} first", vars.join(", ")))?;
         let url = transport
             .url()
             .ok_or_else(|| format!("`{name}` isn't a remote server"))?;
@@ -566,33 +608,94 @@ fn prompt_view(p: &Prompt) -> PromptView {
     }
 }
 
-/// The spec's transport with `${VAR}`s filled in.
-fn expand_transport(spec: &ServerSpec) -> Result<Transport, String> {
-    let vars = spec.extra_vars();
-    let ex =
-        |s: &str| expand(s, &vars).map_err(|v| format!("environment variable `{v}` is not set"));
-    let map = |m: &BTreeMap<String, String>| -> Result<BTreeMap<String, String>, String> {
-        m.iter().map(|(k, v)| Ok((k.clone(), ex(v)?))).collect()
+/// Variables for `${...}`: saved values, then the plugin's own
+/// (`${CLAUDE_PLUGIN_ROOT}`), which win.
+fn vars_for(spec: &ServerSpec, saved: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    let mut vars = saved.clone();
+    vars.extend(spec.extra_vars());
+    vars
+}
+
+/// Every unset `${VAR}` in a definition.
+fn missing_in(spec: &ServerSpec, saved: &BTreeMap<String, String>) -> Vec<String> {
+    let vars = vars_for(spec, saved);
+    let mut out: Vec<String> = Vec::new();
+    let mut add = |s: &str| {
+        for v in missing_vars(s, &vars) {
+            if !out.contains(&v) {
+                out.push(v);
+            }
+        }
     };
-    Ok(match &spec.transport {
+    match &spec.transport {
+        Transport::Stdio {
+            command,
+            args,
+            env,
+            cwd,
+        } => {
+            add(command);
+            args.iter().for_each(|a| add(a));
+            env.values().for_each(|v| add(v));
+            if let Some(c) = cwd {
+                add(c);
+            }
+        }
+        Transport::Http { url, headers, .. } | Transport::Sse { url, headers, .. } => {
+            add(url);
+            headers.values().for_each(|v| add(v));
+        }
+    }
+    out
+}
+
+/// The spec's transport with `${VAR}`s filled in. A header whose
+/// variable is unset is left out, so the server can still answer 401
+/// and offer OAuth sign-in (this is how plugins like GitHub's, which
+/// send `Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN}`, behave in Claude
+/// Code). Anything else unset is an error listing the variables.
+fn expand_transport(
+    spec: &ServerSpec,
+    saved: &BTreeMap<String, String>,
+) -> Result<Transport, Vec<String>> {
+    let vars = vars_for(spec, saved);
+    let mut missing: Vec<String> = Vec::new();
+    let mut ex = |s: &str| match expand(s, &vars) {
+        Ok(v) => v,
+        Err(_) => {
+            for v in missing_vars(s, &vars) {
+                if !missing.contains(&v) {
+                    missing.push(v);
+                }
+            }
+            String::new()
+        }
+    };
+    let headers_of = |m: &BTreeMap<String, String>| -> BTreeMap<String, String> {
+        m.iter()
+            .filter_map(|(k, v)| expand(v, &vars).ok().map(|v| (k.clone(), v)))
+            .filter(|(_, v)| !v.trim().is_empty() && v.trim() != "Bearer")
+            .collect()
+    };
+    let transport = match &spec.transport {
         Transport::Stdio {
             command,
             args,
             env,
             cwd,
         } => Transport::Stdio {
-            command: ex(command)?,
-            args: args.iter().map(|a| ex(a)).collect::<Result<_, _>>()?,
-            env: map(env)?,
-            cwd: cwd.as_deref().map(ex).transpose()?,
+            command: ex(command),
+            args: args.iter().map(|a| ex(a)).collect(),
+            env: env.iter().map(|(k, v)| (k.clone(), ex(v))).collect(),
+            cwd: cwd.as_deref().map(&mut ex),
         },
         Transport::Http {
             url,
             headers,
             oauth,
         } => Transport::Http {
-            url: ex(url)?,
-            headers: map(headers)?,
+            url: ex(url),
+            headers: headers_of(headers),
             oauth: oauth.clone(),
         },
         Transport::Sse {
@@ -600,16 +703,26 @@ fn expand_transport(spec: &ServerSpec) -> Result<Transport, String> {
             headers,
             oauth,
         } => Transport::Sse {
-            url: ex(url)?,
-            headers: map(headers)?,
+            url: ex(url),
+            headers: headers_of(headers),
             oauth: oauth.clone(),
         },
-    })
+    };
+    if missing.is_empty() {
+        Ok(transport)
+    } else {
+        Err(missing)
+    }
 }
 
 impl Inner {
     pub(crate) fn max_output_chars(&self) -> usize {
         self.opts.max_output_chars
+    }
+
+    /// Saved `${VAR}` values.
+    fn vars(&self) -> BTreeMap<String, String> {
+        vars::load(&vars::path_for(&self.opts.credentials))
     }
 
     fn emit(&self, e: McpEvent) {
@@ -684,7 +797,10 @@ impl Inner {
                 None => {
                     let running = matches!(
                         entry.status,
-                        Status::Connected | Status::Connecting | Status::NeedsAuth
+                        Status::Connected
+                            | Status::Connecting
+                            | Status::NeedsAuth
+                            | Status::NeedsSetup { .. }
                     ) && entry.generation > 0;
                     if changed || !running {
                         self.start_connect(entry);
@@ -713,7 +829,7 @@ impl Inner {
     }
 
     async fn open(&self, spec: &ServerSpec) -> Result<Opened, OpenError> {
-        let transport = expand_transport(spec).map_err(OpenError::Failed)?;
+        let transport = expand_transport(spec, &self.vars()).map_err(OpenError::NeedsSetup)?;
         let handler = Handler {
             server: spec.name.clone(),
             inner: self.me.clone(),
@@ -922,6 +1038,9 @@ impl Inner {
                 entry.challenge = challenge;
                 entry.signed_in = false;
             }
+            Err(OpenError::NeedsSetup(variables)) => {
+                entry.status = Status::NeedsSetup { variables };
+            }
             Err(OpenError::Failed(message)) => {
                 debug!(server = name, %message, "mcp: connect failed");
                 entry.status = Status::Failed { message };
@@ -1092,6 +1211,7 @@ impl Inner {
             instructions: e.instructions.clone(),
             can_sign_in: e.spec.is_remote(),
             signed_in: e.signed_in,
+            missing_vars: missing_in(&e.spec, &self.vars()),
             log_path: (!e.spec.is_remote()).then(|| {
                 log_path(&self.opts.log_dir, &e.spec.name)
                     .display()
@@ -1123,7 +1243,47 @@ struct Opened {
 
 enum OpenError {
     NeedsAuth(Option<String>),
+    NeedsSetup(Vec<String>),
     Failed(String),
+}
+
+/// Explain a failed start of sign-in. The common case: the server's
+/// authorization server doesn't let apps register themselves (GitHub's
+/// doesn't), so there's no OAuth without a client ID of your own.
+fn sign_in_error(name: &str, e: &rmcp::transport::auth::AuthError, missing: &[String]) -> String {
+    use rmcp::transport::auth::AuthError;
+    // A registration endpoint that answers 401/403 only accepts apps it
+    // has approved (Figma's does this).
+    let refused = matches!(e, AuthError::RegistrationFailed(m)
+        if m.contains("403") || m.contains("401") || m.contains("Forbidden"));
+    if refused {
+        return format!(
+            "`{name}` only lets apps it has approved sign in, and it turned Mira away. \
+             Use a token header instead if the service offers one{}",
+            if missing.is_empty() {
+                ".".to_owned()
+            } else {
+                format!(" (set {}).", missing.join(" / "))
+            }
+        );
+    }
+    let no_registration = matches!(e, AuthError::RegistrationFailed(m) if m.contains("not supported"));
+    let no_oauth = matches!(e, AuthError::NoAuthorizationSupport)
+        || matches!(e, AuthError::MetadataError(_));
+    if no_registration || no_oauth {
+        let why = if no_registration {
+            format!("`{name}` doesn't let apps register for sign-in, so Mira can't sign in with OAuth")
+        } else {
+            format!("`{name}` doesn't offer OAuth sign-in")
+        };
+        return match missing {
+            [] => format!(
+                "{why}. Add a token header to the server, or an OAuth app's client ID (`oauth.clientId`)."
+            ),
+            vars => format!("{why}. Add your {} instead.", vars.join(" / ")),
+        };
+    }
+    format!("couldn't start sign-in for `{name}`: {e}")
 }
 
 /// Sort a failed handshake into "sign in" or a plain failure, looking

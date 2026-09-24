@@ -373,6 +373,27 @@ pub fn expand(s: &str, extra: &BTreeMap<String, String>) -> Result<String, Strin
     Ok(out)
 }
 
+/// `${VAR}`s in `s` with no value in `extra` or the environment and no
+/// default.
+pub fn missing_vars(s: &str, extra: &BTreeMap<String, String>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = s;
+    while let Some(start) = rest.find("${") {
+        let after = &rest[start + 2..];
+        let Some(end) = after.find('}') else { break };
+        let inner = &after[..end];
+        if !inner.contains(":-") {
+            let set = extra.contains_key(inner)
+                || std::env::var(inner).is_ok_and(|v| !v.is_empty());
+            if !set && !out.iter().any(|o| o == inner) {
+                out.push(inner.to_owned());
+            }
+        }
+        rest = &after[end + 1..];
+    }
+    out
+}
+
 /// Turn a server or tool name into the character set tool names allow
 /// (`[A-Za-z0-9_-]`). `__` is reserved as the separator in
 /// `mcp__<server>__<tool>`, so runs of underscores collapse to one.
