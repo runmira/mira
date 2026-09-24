@@ -83,8 +83,8 @@ impl Tool for Grep {
     }
 
     async fn invoke(&self, call: &ToolCall, ctx: &ToolContext) -> Result<ToolResult, ToolError> {
-        if let Some(backend) = &ctx.compute {
-            return crate::remote::grep(backend, call, ctx).await;
+        if let Some(backend) = ctx.compute.get() {
+            return crate::remote::grep(&backend, call, ctx).await;
         }
         let args: Args = call.parse_arguments()?;
 

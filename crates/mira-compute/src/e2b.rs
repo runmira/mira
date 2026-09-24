@@ -47,6 +47,8 @@ pub struct E2bOptions {
     pub user: String,
     /// Override the envd URL (tests, self-hosted E2B).
     pub envd_url: Option<String>,
+    /// Environment variables for every process in the sandbox.
+    pub env: std::collections::BTreeMap<String, String>,
 }
 
 impl E2bOptions {
@@ -59,6 +61,7 @@ impl E2bOptions {
             timeout_secs: 3600,
             user: "user".into(),
             envd_url: None,
+            env: Default::default(),
         }
     }
 }
@@ -200,6 +203,7 @@ impl E2bBackend {
                 "templateID": opts.template,
                 "timeout": opts.timeout_secs,
                 "secure": true,
+                "envVars": opts.env,
                 "metadata": { "client": "mira" },
             }))
             .send()
@@ -229,6 +233,21 @@ impl E2bBackend {
             .await
             .map_err(|e| http_err("resume response", e))?;
         Ok(Self::from_response(http, opts, r))
+    }
+
+    /// Kill a sandbox by id (e.g. one left paused).
+    pub async fn kill(opts: &E2bOptions, sandbox_id: &str) -> Result<()> {
+        let http = Self::build_http()?;
+        let resp = http
+            .delete(format!("{}/sandboxes/{sandbox_id}", opts.api_url))
+            .header("X-API-Key", &opts.api_key)
+            .send()
+            .await
+            .map_err(|e| http_err("kill", e))?;
+        if resp.status() != reqwest::StatusCode::NOT_FOUND {
+            check("kill", resp).await?;
+        }
+        Ok(())
     }
 
     pub fn sandbox_id(&self) -> &str {
@@ -333,7 +352,7 @@ impl ComputeBackend for E2bBackend {
             "process": {
                 "cmd": "/bin/bash",
                 "args": ["-l", "-c", req.command],
-                "envs": {},
+                "envs": self.opts.env,
                 "cwd": path::join(WORKSPACE_ROOT, &req.cwd),
             }
         });

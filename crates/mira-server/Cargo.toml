@@ -14,6 +14,7 @@ mira-config  = { workspace = true }
 mira-harness = { workspace = true }
 mira-memory  = { workspace = true }
 mira-policy  = { workspace = true }
+mira-compute = { workspace = true }
 mira-review  = { workspace = true }
 mira-sandbox = { workspace = true }
 mira-skills  = { workspace = true }

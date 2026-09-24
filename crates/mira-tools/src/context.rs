@@ -84,11 +84,11 @@ pub struct ToolContext {
 
     /// Execution backend for sandboxed sessions (`mira --sandbox …`).
     ///
-    /// `None` (the default) means tools work on the local filesystem
-    /// directly. When set, routed tools go through it instead, and
+    /// Empty (the default) means tools work on the local filesystem
+    /// directly. While it holds a backend, routed tools go through it, and
     /// `repo_root` / `cwd` only name the local checkout that paths are
     /// mapped from.
-    pub compute: Option<Arc<dyn mira_compute::ComputeBackend>>,
+    pub compute: mira_compute::ComputeSlot,
 
     /// Cooperative cancellation signal for the current turn.
     ///
@@ -142,14 +142,20 @@ impl ToolContext {
             child_tracker: None,
             tasks: None,
             progress: None,
-            compute: None,
+            compute: mira_compute::ComputeSlot::default(),
             cancel: None,
         }
     }
 
-    /// Route tools through a compute backend (sandboxed session).
+    /// Route tools through a fixed compute backend.
     pub fn with_compute(mut self, backend: Arc<dyn mira_compute::ComputeBackend>) -> Self {
-        self.compute = Some(backend);
+        self.compute = mira_compute::ComputeSlot::new(Some(backend));
+        self
+    }
+
+    /// Share a switchable compute slot (see `EnvironmentManager`).
+    pub fn with_compute_slot(mut self, slot: mira_compute::ComputeSlot) -> Self {
+        self.compute = slot;
         self
     }
 

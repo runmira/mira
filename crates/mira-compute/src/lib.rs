@@ -5,9 +5,9 @@
 //! crate at all. With `--sandbox <backend>` the session instead gets a
 //! [`ComputeBackend`], and the file and command tools route through it:
 //!
-//! - [`LocalBackend`] runs against a directory on this machine. `--sandbox
-//!   local` points it at a scratch copy of the repo, so the agent can't
-//!   touch the real checkout.
+//! - [`LocalBackend`] runs against a directory on this machine. The
+//!   `scratch` environment points it at a copy of the repo, so the agent
+//!   can't touch the real checkout.
 //! - [`E2bBackend`] runs in an E2B Firecracker microVM.
 //!
 //! Either way the lifecycle is the same (see [`workspace`]): pack the
@@ -24,11 +24,13 @@ use thiserror::Error;
 use tokio::sync::mpsc;
 
 pub mod e2b;
+pub mod env;
 pub mod local;
 pub mod path;
 pub mod workspace;
 
 pub use e2b::{E2bBackend, E2bOptions};
+pub use env::{ComputeSlot, EnvironmentManager, EnvironmentSpec, EnvironmentStatus, SwitchReport};
 pub use local::LocalBackend;
 
 #[derive(Debug, Error)]

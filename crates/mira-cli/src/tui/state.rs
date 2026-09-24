@@ -2129,6 +2129,13 @@ impl TuiState {
         self.cursor = self.input.len();
     }
 
+    /// Put text back in the composer (e.g. a message that couldn't be
+    /// sent yet).
+    pub fn restore_input(&mut self, text: String) {
+        self.input = text;
+        self.cursor = self.input.len();
+    }
+
     /// Down-arrow: step forward. Past the newest, restore the stash.
     pub fn history_next(&mut self) {
         let Some(i) = self.history_cursor else { return };

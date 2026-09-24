@@ -234,12 +234,16 @@ keyboard. `mira --browser` lets it drive Chrome in a separate Mira
 profile. Both are off by default, and desktop input asks for approval
 even in `yolo`. See [docs/COMPUTER_USE.md](./docs/COMPUTER_USE.md).
 
-### Sandboxed sessions
+### Remote environments
 
-`mira --sandbox local` or `mira --sandbox e2b` runs the file and shell
-tools in an isolated copy of the project, a scratch directory or an E2B
-microVM. Your checkout isn't touched. At the end you get a patch to
-review and `git apply`. See [docs/remote-compute.md](./docs/remote-compute.md#implementation-notes).
+`/remote-env <name>` in the TUI, or the environment chip in the web UI,
+moves the session's file and shell tools into a remote environment: an
+E2B microVM, or a scratch copy on this machine. The environment gets a
+copy of your worktree, uncommitted edits included. `/remote-env local`
+merges the changes back into the same worktree, three-way, so your own
+edits survive. Named environments, with their own template, env vars and
+setup script, live under `compute:` in `~/.mira/mira.yaml`. See
+[docs/remote-compute.md](./docs/remote-compute.md#implementation-notes).
 
 ## What's inside
 
@@ -259,7 +263,7 @@ Mira is a Cargo workspace. Each crate has one job.
 | [`mira-config`](./crates/mira-config) | `mira.yaml` loader — provider, MCP servers, permissions. |
 | [`mira-computer`](./crates/mira-computer) | Desktop control for the `computer` tool — screenshots, mouse, keyboard (macOS, X11). |
 | [`mira-browser`](./crates/mira-browser) | Chrome DevTools driver for the `browser` tool. |
-| [`mira-compute`](./crates/mira-compute) | Where tools execute: `--sandbox local` (scratch copy) or `--sandbox e2b` (cloud microVM). |
+| [`mira-compute`](./crates/mira-compute) | Where tools execute: the local worktree, or a named remote environment (scratch copy, E2B microVM) you can switch to mid-session. |
 | [`mira-cli`](./crates/mira-cli) | Terminal entrypoint (TUI + `mira review`, `mira serve`, …). |
 | [`mira-server`](./crates/mira-server) | Axum backend + embedded React frontend for the web UI. |
 

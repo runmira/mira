@@ -720,6 +720,28 @@ impl Session {
         self.registry.lock().await.register_arc(tool);
     }
 
+    /// The compute slot the session's tools read (see
+    /// `mira_compute::EnvironmentManager`).
+    pub fn compute_slot(&self) -> mira_compute::ComputeSlot {
+        self.tool_ctx.compute.clone()
+    }
+
+    /// True while a turn is running. Environment switches wait for idle.
+    pub async fn is_busy(&self) -> bool {
+        self.current_turn
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|h| !h.is_finished())
+    }
+
+    /// Append a system note to the conversation (e.g. "the environment
+    /// changed") so the model sees it on its next request, and persist.
+    pub async fn push_note(&self, text: impl Into<String>) {
+        self.history.lock().await.push(Message::system(text));
+        checkpoint(self).await;
+    }
+
     /// True when a tool named `name` is registered in the current registry.
     pub async fn has_tool(&self, name: &str) -> bool {
         self.registry.lock().await.get(name).is_some()
@@ -1011,7 +1033,16 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
             let req = ChatRequest {
                 model: cfg.model.clone(),
                 messages: build_request_messages(&sess).await,
-                tools: sess.registry.lock().await.specs(),
+                tools: {
+                    // In a remote environment the model only sees tools
+                    // that can run there (see `Tool::remote_capable`).
+                    let reg = sess.registry.lock().await;
+                    if sess.tool_ctx.compute.is_remote() {
+                        reg.remote_specs()
+                    } else {
+                        reg.specs()
+                    }
+                },
                 temperature: cfg.temperature,
                 max_tokens: cfg.max_tokens,
                 reasoning_effort: cfg.reasoning_effort.clone(),
@@ -1513,6 +1544,24 @@ async fn dispatch_call(sess: &Session, call: ToolCall, tx: &mpsc::Sender<Harness
         let _ = tx.send(HarnessEvent::ToolEnd(result)).await;
         return false;
     };
+    // The model may still call a tool it saw before a switch to a remote
+    // environment. Refuse instead of letting it touch this machine.
+    if sess.tool_ctx.compute.is_remote() && !tool.remote_capable() {
+        let result = ToolResult::err(
+            call.id.clone(),
+            format!(
+                "`{}` isn't available in the remote environment; use `bash` there, or ask the \
+                 user to switch back to local",
+                call.function.name
+            ),
+        );
+        sess.history.lock().await.push(Message::tool(
+            result.call_id.clone(),
+            truncate_for_history(&result.content),
+        ));
+        let _ = tx.send(HarnessEvent::ToolEnd(result)).await;
+        return false;
+    }
 
     // Every path/target this call would touch. For single-target tools
     // this is a one-element vec matching the old `policy_target()`
@@ -1561,7 +1610,9 @@ async fn dispatch_call(sess: &Session, call: ToolCall, tx: &mpsc::Sender<Harness
     // `checkpoint` and broadcast so both live auto-allow flows and
     // reloaded transcripts render the real diff instead of the arg-only
     // reconstruction fallback.
-    if allowed {
+    // Previews diff against the local file, which isn't what a remote
+    // environment edits; skip them there rather than show a wrong diff.
+    if allowed && !sess.tool_ctx.compute.is_remote() {
         if let Some(preview) = compute_preview(&sess.tool_ctx.cwd, &call).await {
             sess.previews
                 .lock()

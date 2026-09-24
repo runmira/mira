@@ -55,8 +55,8 @@ impl Tool for EditFile {
     }
 
     async fn invoke(&self, call: &ToolCall, ctx: &ToolContext) -> Result<ToolResult, ToolError> {
-        if let Some(backend) = &ctx.compute {
-            return crate::remote::edit_file(backend, call, ctx).await;
+        if let Some(backend) = ctx.compute.get() {
+            return crate::remote::edit_file(&backend, call, ctx).await;
         }
         let args: Args = call.parse_arguments()?;
         let path = ctx

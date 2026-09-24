@@ -157,6 +157,14 @@ pub(super) async fn event_loop(
                 state.follow_tail = true;
                 schedule_frame(&mut next_frame, last_draw);
             }
+            Some(update) = cfg.env_rx.recv() => {
+                match update {
+                    super::EnvUpdate::Info(m) => state.push_info(m),
+                    super::EnvUpdate::Warning(m) => state.push_warning(m),
+                }
+                state.follow_tail = true;
+                schedule_frame(&mut next_frame, last_draw);
+            }
             Ok(msg) = cfg.subagent_events_rx.recv() => {
                 handle_subagent_event(msg, &mut state);
                 schedule_frame(&mut next_frame, last_draw);
@@ -886,6 +894,10 @@ pub(crate) async fn submit_composed(
         if let Some(followup) = run_slash(&text, state, session, cfg).await {
             start_stream(state, session, agent_stream, followup).await;
         }
+    } else if cfg.environments.is_switching() {
+        // Tools would run against a half-moved tree. Hand the message back.
+        state.push_warning("switching environments — send again when it's done".into());
+        state.restore_input(text);
     } else {
         start_stream(state, session, agent_stream, text).await;
     }

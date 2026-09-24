@@ -34,6 +34,8 @@ import { TaskListPanel } from './components/TaskListPanel';
 import { GoalPanel } from './components/GoalPanel';
 import { countsByCategory, countsPhrase, ToolGroup } from './components/ToolGroup';
 import type {
+  EnvironmentInfo,
+  EnvironmentStatus,
   ApprovalScope,
   AskUserProposal,
   DiffPreview,
@@ -391,6 +393,10 @@ export default function App() {
   // open and mutated by `goal_set` / `goal_progress` / `goal_done` /
   // `goal_cleared` server frames. Absent = no autonomous run set.
   const [goal, setGoal] = useState<Goal | null>(null);
+  // Remote environment of the attached session (see EnvironmentChip).
+  const [environment, setEnvironment] = useState<EnvironmentStatus | null>(null);
+  const [environments, setEnvironments] = useState<EnvironmentInfo[]>([]);
+  const [envSwitching, setEnvSwitching] = useState<string | null>(null);
   // Loaded skill roster — powers `/<skill-name>` slash commands in the
   // composer palette. Fetched lazily after the first WS Ready frame
   // (server needs to be up + AppState wired). Empty on error; the
@@ -476,6 +482,9 @@ export default function App() {
         // change the project tier (~/.mira vs. <cwd>/.mira). Silent on
         // failure; the palette just shows built-in commands.
         listSkills().then(setSkills).catch(() => setSkills([]));
+        // Each session (and worktree) has its own environment; ask for it.
+        setEnvSwitching(null);
+        wsRef.current?.send({ type: 'environment' });
         // A Ready frame means the harness swapped session context (new /
         // load / resume / reconnect). If the user was parked on Plugins
         // or another management view, jump back to chat so a fresh
@@ -548,6 +557,29 @@ export default function App() {
         setTurnTimings((prev) => stampLastTurn(prev, Date.now()));
         setSidebarRefresh((n) => n + 1);
         break;
+      case 'environment_status':
+        setEnvironment(msg.status);
+        setEnvironments(msg.environments);
+        break;
+      case 'environment_progress':
+        setEnvSwitching(msg.text);
+        break;
+      case 'environment_switched': {
+        setEnvSwitching(null);
+        setEnvironment(msg.status);
+        const notes: string[] = msg.error
+          ? [`[environment] couldn't switch to ${msg.to}`, msg.error]
+          : msg.from === msg.to
+            ? []
+            : [`[environment] ${msg.from} → ${msg.to}`, ...msg.lines];
+        if (msg.conflicts.length > 0) {
+          notes.push(`Merge conflicts to resolve: ${msg.conflicts.join(', ')}`);
+        }
+        if (notes.length > 0) {
+          setEntries((prev) => [...prev, { kind: 'warning', text: notes.join('\n') }]);
+        }
+        break;
+      }
       case 'warning':
         setEntries((prev) => [...prev, { kind: 'warning', text: msg.text }]);
         break;
@@ -1290,6 +1322,13 @@ export default function App() {
               onSetEffort={onSetEffort}
               onOpenPicker={() => setPickerOpen(true)}
               onCwdSwitched={(_path, id) => { if (id) wsRef.current?.attach(id); }}
+              environment={environment}
+              environments={environments}
+              envSwitching={envSwitching}
+              onSwitchEnvironment={(target) => {
+                setEnvSwitching(`switching to ${target}…`);
+                wsRef.current?.send({ type: 'environment', target });
+              }}
               onInterrupt={() => wsRef.current?.send({ type: 'interrupt' })}
               onNewChat={onNewChat}
               onOpenSettings={() => openSettings()}
@@ -2111,6 +2150,7 @@ function EntryView({
       //                            emit_progress → SubagentPanel stream)
       //   `[memory] ...`        → violet "learned" chip
       //   `[context] ...`       → slate "compacted" chip
+      //   `[environment] ...`   → blue "environment" chip (multi-line)
       // Everything else stays the compact monospace `! …` line.
       const undo = entry.text.match(/^\[undo\]\s*(.*)$/);
       const conflict = entry.text.match(/^\[file-conflict\]\s*(.*)$/);
@@ -2118,6 +2158,20 @@ function EntryView({
       const progress = entry.text.match(/^\[progress\]\s*(.*)$/);
       const memory = entry.text.match(/^\[memory\]\s*(.*)$/);
       const context = entry.text.match(/^\[context\]\s*(.*)$/);
+      const environment = entry.text.match(/^\[environment\]\s*([\s\S]*)$/);
+      if (environment) {
+        const [head, ...rest] = environment[1].split('\n');
+        return (
+          <div className="flex justify-start">
+            <div className="inline-flex max-w-full flex-col gap-0.5 rounded-md border border-mira-blue/25 bg-mira-blue/[0.06] px-3 py-1.5 text-[12.5px] text-mira-blue">
+              <span className="font-semibold">{head}</span>
+              {rest.length > 0 && (
+                <pre className="whitespace-pre-wrap break-words font-mono text-[11.5px] text-foreground/70">{rest.join('\n')}</pre>
+              )}
+            </div>
+          </div>
+        );
+      }
       if (undo) {
         return (
           <div className="flex justify-start">

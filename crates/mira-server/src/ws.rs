@@ -194,6 +194,36 @@ async fn dispatch(
                 warn!(prompt_id, "prompt response for unknown id");
             }
         }
+        ClientMsg::Environment { target: None } => {
+            let _ = slot.events_tx.send(ServerMsg::EnvironmentStatus {
+                status: slot.environments.status().await,
+                environments: slot.environments.list(),
+            });
+        }
+        ClientMsg::Environment {
+            target: Some(target),
+        } => {
+            let busy = slot.session.read().await.is_busy().await;
+            if busy || slot.environments.is_switching() {
+                // Answer with a failed switch (not a bare warning) so the
+                // client's "switching…" state always resolves.
+                let status = slot.environments.status().await;
+                let _ = slot.events_tx.send(ServerMsg::EnvironmentSwitched {
+                    from: status.current.clone(),
+                    to: target,
+                    lines: Vec::new(),
+                    conflicts: Vec::new(),
+                    error: Some(if busy {
+                        "wait for the current turn to finish before switching environments".into()
+                    } else {
+                        "an environment switch is already in progress".into()
+                    }),
+                    status,
+                });
+                return;
+            }
+            crate::slot::spawn_environment_switch(slot.clone(), target);
+        }
         ClientMsg::SetModel { model } => {
             slot.session.read().await.set_model(&model).await;
             let mut s = RuntimeState::load().unwrap_or_default();
@@ -493,6 +523,14 @@ async fn persist_allow_rules(rules: &[String]) -> anyhow::Result<()> {
 /// Interrupt and delete_session can tear it down cleanly. Aborts any
 /// existing turn handle before starting the new one.
 async fn spawn_turn(state: AppState, slot: Arc<SessionSlot>, text: String) {
+    // Tools would run against a half-moved tree mid-switch.
+    if slot.environments.is_switching() {
+        let _ = slot.events_tx.send(ServerMsg::Warning {
+            text: "switching environments — send again when it's done".into(),
+        });
+        let _ = slot.events_tx.send(ServerMsg::Done);
+        return;
+    }
     // Refresh the skill registry from disk before the turn starts.
     crate::skills::reload_registry(&state).await;
 

@@ -69,23 +69,67 @@ pub struct MiraConfig {
     pub compute: ComputeConfig,
 }
 
-/// `compute:` block — the default `--sandbox` backend and its settings.
+/// `compute:` block: named remote environments and their defaults.
+///
+/// ```yaml
+/// compute:
+///   default: dev            # used by `--sandbox` with no name, and at startup
+///   e2b:
+///     api_key_env: E2B_API_KEY
+///   environments:
+///     dev:
+///       backend: e2b
+///       template: base
+///       env: { RUST_LOG: debug }
+///       setup: |
+///         cargo fetch
+/// ```
+///
+/// `scratch` (a copy of the project on this machine) and `e2b` (an E2B
+/// sandbox with default settings) are always available without being
+/// declared here. `local` is reserved for the user's own machine.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ComputeConfig {
-    /// `local` (a scratch copy of the repo on this machine) or `e2b`.
-    /// Unset: tools run directly on the checkout unless `--sandbox` is
-    /// passed.
+    /// Environment to start sessions in. Unset: tools run on this
+    /// machine unless `--sandbox` / `/remote-env` picks one.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub backend: Option<String>,
+    pub default: Option<String>,
+    /// Account-level E2B settings shared by every `e2b` environment.
     #[serde(skip_serializing_if = "E2bConfig::is_empty")]
     pub e2b: E2bConfig,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub environments: BTreeMap<String, EnvironmentConfig>,
 }
 
 impl ComputeConfig {
     pub fn is_empty(&self) -> bool {
         *self == Self::default()
     }
+}
+
+/// One named environment under `compute.environments`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct EnvironmentConfig {
+    /// `e2b` or `scratch`.
+    pub backend: String,
+    /// One line shown in `/remote-env` listings.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// E2B template (image). Overrides `compute.e2b.template`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+    /// Idle lifetime in seconds. Overrides `compute.e2b.timeout_secs`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+    /// Environment variables for every command in the environment.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+    /// Shell script run once after the project is first uploaded
+    /// (install toolchains, fetch dependencies, …).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub setup: Option<String>,
 }
 
 /// `compute.e2b:` settings.
@@ -724,11 +768,22 @@ mod tests {
 
     #[test]
     fn compute_block_is_global_only() {
-        let global: MiraConfig = serde_yaml::from_str("compute:\n  backend: local\n").unwrap();
-        let local: MiraConfig =
-            serde_yaml::from_str("compute:\n  backend: e2b\n  e2b:\n    template: evil\n").unwrap();
+        let global: MiraConfig = serde_yaml::from_str(
+            "compute:\n  default: dev\n  environments:\n    dev:\n      backend: e2b\n      \
+             env: {A: b}\n      setup: make deps\n",
+        )
+        .unwrap();
+        let local: MiraConfig = serde_yaml::from_str(
+            "compute:\n  default: evil\n  e2b:\n    template: evil\n  environments:\n    \
+             evil:\n      backend: e2b\n",
+        )
+        .unwrap();
         let merged = global.merge(local);
-        assert_eq!(merged.compute.backend.as_deref(), Some("local"));
+        assert_eq!(merged.compute.default.as_deref(), Some("dev"));
+        assert!(!merged.compute.environments.contains_key("evil"));
+        let dev = &merged.compute.environments["dev"];
+        assert_eq!(dev.env["A"], "b");
+        assert_eq!(dev.setup.as_deref(), Some("make deps"));
         assert!(merged.compute.e2b.template.is_none());
         assert_eq!(merged.compute.e2b.api_key_env(), "E2B_API_KEY");
     }

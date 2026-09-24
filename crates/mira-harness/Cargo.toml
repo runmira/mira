@@ -13,6 +13,7 @@ mira-memory   = { workspace = true }
 mira-tools    = { workspace = true }
 mira-policy   = { workspace = true }
 mira-sandbox  = { workspace = true }
+mira-compute  = { workspace = true }
 
 async-trait   = { workspace = true }
 futures       = { workspace = true }

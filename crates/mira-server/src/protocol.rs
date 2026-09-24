@@ -59,6 +59,14 @@ pub enum ClientMsg {
     },
     /// Hot-swap the model for the next turn.
     SetModel { model: String },
+    /// Remote environments for the attached session. `target: None`
+    /// asks for the current status (answered with `environment_status`);
+    /// a name (or `local`) switches, reporting `environment_progress`
+    /// lines and then `environment_switched`.
+    Environment {
+        #[serde(default)]
+        target: Option<String>,
+    },
     /// Change the permission mode.
     SetMode { mode: Mode },
     /// Set reasoning effort for the current session. `None` (or the string
@@ -188,6 +196,26 @@ pub enum ServerMsg {
     },
     /// Non-fatal warning surfaced to the UI.
     Warning { text: String },
+    /// Where the session's tools run, and what it could switch to.
+    EnvironmentStatus {
+        status: mira_compute::EnvironmentStatus,
+        environments: Vec<mira_compute::env::EnvironmentInfo>,
+    },
+    /// One line of progress from an environment switch (upload, setup
+    /// script output, merge).
+    EnvironmentProgress { text: String },
+    /// An environment switch finished. On failure `error` is set and the
+    /// session stayed where it was.
+    EnvironmentSwitched {
+        from: String,
+        to: String,
+        /// Human-readable summary (merged files, patch location, …).
+        lines: Vec<String>,
+        conflicts: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+        status: mira_compute::EnvironmentStatus,
+    },
     /// One line of live stdout+stderr from a still-running tool call.
     /// The renderer routes lines by `call_id` under the matching
     /// pending tool card so the user sees progress before the final

@@ -775,7 +775,7 @@ impl Tool for AgentTool {
         // local worktree would isolate nothing: the child shares the
         // sandbox workspace with its parent instead.
         let wants_worktree =
-            ctx.compute.is_none() && type_def.and_then(|t| t.worktree).unwrap_or(false);
+            !ctx.compute.is_remote() && type_def.and_then(|t| t.worktree).unwrap_or(false);
         let child_cwd = if wants_worktree {
             let type_name = type_def.map(|t| t.name.as_str()).unwrap_or("agent");
             match WorktreeSession::try_create(&ctx.cwd, type_name, call.id.as_str()) {
@@ -837,12 +837,10 @@ impl Tool for AgentTool {
         } else {
             child_ctx
         };
-        // Sandboxed parent → sandboxed child. Dropping the backend here
-        // would let the child's file and shell tools run on the host.
-        let child_ctx = match ctx.compute.clone() {
-            Some(backend) => child_ctx.with_compute(backend),
-            None => child_ctx,
-        };
+        // Share the parent's compute slot: a sandboxed parent means a
+        // sandboxed child, and dropping it would let the child's file and
+        // shell tools run on the host.
+        let child_ctx = child_ctx.with_compute_slot(ctx.compute.clone());
 
         // Compose the child session config. Precedence at each field:
         //   explicit arg → type default → tool default → hard fallback.

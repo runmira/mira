@@ -2,7 +2,7 @@
 //!
 //! Commands go through `mira-sandbox`, so they get the same OS isolation
 //! (Seatbelt / Bubblewrap) as the default local path, with the backend's
-//! root as the sandbox boundary. With `--sandbox local` that root is a
+//! root as the sandbox boundary. With `--sandbox scratch` that root is a
 //! scratch copy of the repo, so the user's real checkout stays untouched
 //! until they apply the resulting patch.
 
@@ -17,6 +17,8 @@ use crate::{ComputeBackend, ComputeError, ComputeEvent, ExecOutput, ExecRequest,
 pub struct LocalBackend {
     root: PathBuf,
     sandbox: Sandbox,
+    /// Extra environment for every command (an environment's `env:`).
+    env: Vec<(String, String)>,
     /// Delete `root` on shutdown (scratch copies only).
     owned: bool,
 }
@@ -28,6 +30,7 @@ impl LocalBackend {
         Self {
             sandbox: Sandbox::new(&root),
             root,
+            env: Vec::new(),
             owned: false,
         }
     }
@@ -46,8 +49,15 @@ impl LocalBackend {
         Ok(Self {
             sandbox: Sandbox::new(&root),
             root,
+            env: Vec::new(),
             owned: true,
         })
+    }
+
+    /// Set environment variables for every command.
+    pub fn with_env(mut self, env: impl IntoIterator<Item = (String, String)>) -> Self {
+        self.env = env.into_iter().collect();
+        self
     }
 
     pub fn root(&self) -> &Path {
@@ -66,7 +76,7 @@ impl LocalBackend {
 #[async_trait]
 impl ComputeBackend for LocalBackend {
     fn name(&self) -> &'static str {
-        "local"
+        "scratch"
     }
 
     fn workspace_root(&self) -> String {
@@ -80,9 +90,13 @@ impl ComputeBackend for LocalBackend {
     ) -> Result<ExecOutput> {
         let cwd = self.abs(&req.cwd);
         let args = vec!["-lc".to_owned(), req.command];
-        let out = self
-            .sandbox
-            .run_with_timeout("bash", &args, &cwd, req.timeout.as_secs().max(1))
+        let mut config = mira_sandbox::SandboxConfig::new(
+            self.sandbox.profile().timeout(req.timeout.as_secs().max(1)),
+        );
+        for (k, v) in &self.env {
+            config = config.env(k.clone(), v.clone());
+        }
+        let out = mira_sandbox::run_command(&config, "bash", &args, &cwd)
             .await
             .map_err(|e| ComputeError::Remote(e.to_string()))?;
         // The local runner collects output at exit; replay it so callers

@@ -55,7 +55,12 @@ async fn routed_tools_work_in_the_backend_workspace() {
     let out = run(&read::ReadFile, &ctx, json!({"path": "src/lib.rs"})).await;
     assert!(out.contains("1\tfn a() {}"), "{out}");
     let local_abs = local.path().join("src/lib.rs");
-    let out = run(&read::ReadFile, &ctx, json!({"path": local_abs, "start_line": 2})).await;
+    let out = run(
+        &read::ReadFile,
+        &ctx,
+        json!({"path": local_abs, "start_line": 2}),
+    )
+    .await;
     assert!(out.contains("fn b") && !out.contains("fn a"), "{out}");
 
     run(
@@ -64,7 +69,12 @@ async fn routed_tools_work_in_the_backend_workspace() {
         json!({"path": "src/lib.rs", "old_string": "fn b() {}", "new_string": "fn b() { todo!() }"}),
     )
     .await;
-    run(&write::WriteFile, &ctx, json!({"path": "notes/todo.md", "content": "hi\n"})).await;
+    run(
+        &write::WriteFile,
+        &ctx,
+        json!({"path": "notes/todo.md", "content": "hi\n"}),
+    )
+    .await;
     assert!(std::fs::read_to_string(remote.path().join("src/lib.rs"))
         .unwrap()
         .contains("todo!()"));
@@ -87,16 +97,28 @@ async fn routed_tools_work_in_the_backend_workspace() {
 }
 
 #[test]
-fn sandboxed_registry_keeps_only_remote_capable_tools() {
+fn remote_environments_see_only_remote_capable_tools() {
     let mut reg = Registry::new();
     builtin::register_core(&mut reg);
     builtin::register_memory(&mut reg);
-    let removed = reg.retain_remote_capable();
-    let kept: Vec<String> = reg.specs().into_iter().map(|s| s.name).collect();
-    for t in ["bash", "read_file", "write_file", "edit_file", "grep", "glob", "task_list", "web_fetch"] {
+    let removed = reg.local_only();
+    let kept: Vec<String> = reg.remote_specs().into_iter().map(|s| s.name).collect();
+    for t in [
+        "bash",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "grep",
+        "glob",
+        "task_list",
+        "web_fetch",
+    ] {
         assert!(kept.contains(&t.to_owned()), "{t} should stay: {kept:?}");
     }
     for t in ["apply_patch", "git_status", "find_symbol", "rustfmt"] {
-        assert!(removed.contains(&t.to_owned()), "{t} should be withheld: {removed:?}");
+        assert!(
+            removed.contains(&t.to_owned()),
+            "{t} should be withheld: {removed:?}"
+        );
     }
 }

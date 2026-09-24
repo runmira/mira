@@ -198,6 +198,17 @@ export type UsageTotals = {
  *  authoritative semantics. */
 export type BackgroundMode = 'deny' | 'auto_approve' | 'park';
 
+/** Where the session's tools run (`local` = this machine). */
+export type EnvironmentStatus = {
+  current: string;
+  backend: string;
+  workspace?: string | null;
+  /** Environments left paused/running, quick to switch back to. */
+  parked: string[];
+};
+
+export type EnvironmentInfo = { name: string; backend: string; description: string };
+
 export type ServerMsg =
   | { type: 'ready'; session_id: string; model: string; mode: Mode; cwd: string; history: Message[]; turns?: TurnMeta[]; usage?: UsageTotals; tasks?: TaskItem[]; goal?: Goal | null; previews?: Record<string, DiffPreview> }
   | { type: 'token'; text: string }
@@ -207,6 +218,9 @@ export type ServerMsg =
   | { type: 'done' }
   | { type: 'approval_request'; call: ToolCall; preview?: DiffPreview | null }
   | { type: 'warning'; text: string }
+  | { type: 'environment_status'; status: EnvironmentStatus; environments: EnvironmentInfo[] }
+  | { type: 'environment_progress'; text: string }
+  | { type: 'environment_switched'; from: string; to: string; lines: string[]; conflicts: string[]; error?: string | null; status: EnvironmentStatus }
   | { type: 'tool_progress'; call_id: string; line: string }
   | { type: 'tool_preview'; call_id: string; preview: DiffPreview }
   | { type: 'skills_reloaded' }
@@ -265,6 +279,8 @@ export type ClientMsg =
   | { type: 'approve'; call_id: string; allow: boolean; scope?: ApprovalScope }
   | ({ type: 'prompt_response'; prompt_id: string } & PromptResponse)
   | { type: 'set_model'; model: string }
+  /** No target = ask for `environment_status`; a name (or `local`) switches. */
+  | { type: 'environment'; target?: string | null }
   | { type: 'set_mode'; mode: Mode }
   | { type: 'set_effort'; effort: string | null }
   | { type: 'interrupt' }

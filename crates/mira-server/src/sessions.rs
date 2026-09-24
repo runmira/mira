@@ -348,6 +348,14 @@ pub async fn delete_session(
             h.abort();
         }
         let _ = slot.session.read().await.cancel().await;
+        // Release its remote environments; pending changes are saved as a
+        // patch under ~/.mira/sandbox, never applied.
+        let envs = slot.environments.clone();
+        tokio::spawn(async move {
+            if let Err(e) = envs.finish().await {
+                warn!(%e, "releasing the session's environments failed");
+            }
+        });
     }
 
     // If we just deleted the active session, promote *some* remaining

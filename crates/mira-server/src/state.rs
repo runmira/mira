@@ -52,6 +52,8 @@ pub struct AppState {
     /// PlanTool / AskUserTool / AgentTool on top per session.
     pub base_registry: Arc<Registry>,
     pub agents_registry: Arc<AgentRegistry>,
+    /// `compute:` config handed to every slot's environment manager.
+    pub compute: mira_config::ComputeConfig,
     pub store: Option<Arc<dyn SessionStore>>,
     pub mcp_boot: McpBootSnapshot,
     pub skills: mira_tools::builtin::skill::SkillHandle,
@@ -192,6 +194,7 @@ impl AppState {
             memory_runtime: self.memory_runtime.clone(),
             scratchpads: self.scratchpads.clone(),
             default_model_for_agents: self.default_model_for_agents.clone(),
+            compute: self.compute.clone(),
         }
     }
 

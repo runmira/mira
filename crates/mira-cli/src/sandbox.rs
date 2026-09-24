@@ -1,176 +1,64 @@
-//! `mira --sandbox <backend>`: run the session's tools in an isolated
-//! workspace instead of on the checkout.
-//!
-//! Start: create the backend, upload the project (git-tracked files plus
-//! untracked-but-not-ignored ones). Finish: collect every change as a
-//! patch under `~/.mira/sandbox/` and print how to apply it. The local
-//! checkout is never modified by the session itself.
+//! Remote environments from the terminal: `--sandbox <env>` at startup
+//! and `/remote-env` mid-session both drive the session's
+//! [`EnvironmentManager`]. This module is the CLI-side glue: which
+//! environment to start in, and how switches and the end-of-session
+//! patch are reported.
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::Path;
 
-use anyhow::{anyhow, bail, Context, Result};
-use mira_compute::{workspace, ComputeBackend, E2bBackend, E2bOptions, LocalBackend};
+use mira_compute::workspace::PullReport;
+use mira_compute::SwitchReport;
 use mira_config::ComputeConfig;
 
-pub const BACKENDS: &[&str] = &["local", "e2b"];
-
-/// The backend to use: `--sandbox` wins over `compute.backend`.
-pub fn requested(flag: Option<&str>, cfg: &ComputeConfig) -> Option<String> {
-    flag.map(str::to_owned).or_else(|| cfg.backend.clone())
+/// Environment to start in: `--sandbox` wins over `compute.default`.
+/// `None` (or `local`) means this machine.
+pub fn startup_target(flag: Option<&str>, cfg: &ComputeConfig) -> Option<String> {
+    flag.map(str::to_owned)
+        .or_else(|| cfg.default.clone())
+        .filter(|t| t != mira_compute::env::LOCAL)
 }
 
-pub struct ActiveSandbox {
-    backend: Arc<dyn ComputeBackend>,
-    project: PathBuf,
-    /// E2B sandbox id, for the session banner.
-    label: String,
+/// Human-readable lines describing a finished switch.
+pub fn describe_switch(r: &SwitchReport) -> Vec<String> {
+    if r.from == r.to {
+        return vec![format!("already in `{}`", r.to)];
+    }
+    let mut lines = vec![format!("environment: {} → {}", r.from, r.to)];
+    if let Some(p) = &r.pulled {
+        if p.changed() {
+            lines.push(format!(
+                "merged changes from `{}` into the worktree:",
+                r.from
+            ));
+            lines.extend(p.stat.lines().map(|l| format!("  {l}")));
+            if !p.conflicts.is_empty() {
+                lines.push(format!("conflicts to resolve: {}", p.conflicts.join(", ")));
+            }
+            if let Some(path) = &p.patch_path {
+                lines.push(format!("(patch kept at {})", path.display()));
+            }
+        } else {
+            lines.push(format!("`{}` had no changes", r.from));
+        }
+    }
+    lines
 }
 
-async fn create(name: &str, cfg: &ComputeConfig) -> Result<(Arc<dyn ComputeBackend>, String)> {
-    match name {
-        "local" => {
-            let b = LocalBackend::scratch()?;
-            let label = b.root().display().to_string();
-            Ok((Arc::new(b), label))
+/// Print what happened to the active environment's changes at exit.
+pub fn print_finish(result: mira_compute::Result<Option<PullReport>>, project: &Path) {
+    match result {
+        Ok(Some(p)) if p.changed() => {
+            let path = p.patch_path.expect("saved patch has a path");
+            eprintln!(
+                "\nremote environment: changes saved to {}\n{}\n\nApply them with:\n  git -C {} apply {}",
+                path.display(),
+                p.stat.trim_end(),
+                project.display(),
+                path.display()
+            );
         }
-        "e2b" => {
-            let e = &cfg.e2b;
-            let key_env = e.api_key_env();
-            let key = std::env::var(key_env).map_err(|_| {
-                anyhow!(
-                    "--sandbox e2b needs an API key: set {key_env} (or add it under `keys:` in \
-                     ~/.mira/mira.yaml). Get one at https://e2b.dev"
-                )
-            })?;
-            let mut opts = E2bOptions::new(key);
-            if let Some(t) = &e.template {
-                opts.template = t.clone();
-            }
-            if let Some(t) = e.timeout_secs {
-                opts.timeout_secs = t.clamp(60, 24 * 3600);
-            }
-            if let Some(u) = &e.api_url {
-                opts.api_url = u.trim_end_matches('/').to_owned();
-            }
-            if let Some(d) = &e.domain {
-                opts.domain = d.clone();
-            }
-            let b = E2bBackend::create(opts).await?;
-            let label = format!("sandbox {}", b.sandbox_id());
-            Ok((Arc::new(b), label))
-        }
-        other => bail!(
-            "unknown sandbox backend `{other}` (expected one of: {})",
-            BACKENDS.join(", ")
-        ),
-    }
-}
-
-impl ActiveSandbox {
-    /// Create the backend and upload `project` into it.
-    pub async fn start(name: &str, cfg: &ComputeConfig, project: &Path) -> Result<Self> {
-        let archive = {
-            let project = project.to_path_buf();
-            tokio::task::spawn_blocking(move || workspace::pack(&project))
-                .await
-                .context("packing the project")??
-        };
-        let (backend, label) = create(name, cfg).await?;
-        eprintln!(
-            "sandbox: uploading {:.1} MB to {name} ({label})…",
-            archive.len() as f64 / (1024.0 * 1024.0)
-        );
-        if let Err(e) = workspace::upload(backend.as_ref(), &archive).await {
-            let _ = backend.shutdown().await;
-            return Err(e).context("uploading the project to the sandbox");
-        }
-        eprintln!(
-            "sandbox: ready. Tools run in {name}; your checkout stays untouched until you apply the patch."
-        );
-        Ok(Self {
-            backend,
-            project: project.to_path_buf(),
-            label,
-        })
-    }
-
-    pub fn backend(&self) -> Arc<dyn ComputeBackend> {
-        self.backend.clone()
-    }
-
-    /// Appended to the system prompt so the model knows where it is.
-    pub fn prompt_note(&self) -> String {
-        format!(
-            "\n\nSANDBOX. Your tools run in an isolated `{}` sandbox, not on the user's \
-             machine. The project is uploaded at {} (paths under {} map there too). \
-             It's a fresh git repo whose only commit is the uploaded state, so \
-             `git diff` shows exactly your changes. Nothing reaches the user's \
-             checkout until they apply the patch Mira produces at the end of the \
-             session, so don't tell them a change is \"on their machine\".",
-            self.backend.name(),
-            self.backend.workspace_root(),
-            self.project.display(),
-        )
-    }
-
-    /// Save the session's changes as a patch, print how to apply them,
-    /// and release the backend.
-    pub async fn finish(self) -> Result<()> {
-        let result = self.save_patch().await;
-        if let Err(e) = self.backend.shutdown().await {
-            eprintln!("sandbox: shutdown failed ({e}); it will expire on its own");
-        }
-        match result {
-            Ok(Some(path)) => {
-                eprintln!(
-                    "\nApply them to your checkout with:\n  git -C {} apply {}",
-                    self.project.display(),
-                    path.display()
-                );
-                Ok(())
-            }
-            Ok(None) => {
-                eprintln!("sandbox: no changes.");
-                Ok(())
-            }
-            Err(e) => Err(e.context(format!(
-                "collecting changes from {} failed; the sandbox has been shut down",
-                self.label
-            ))),
-        }
-    }
-
-    async fn save_patch(&self) -> Result<Option<PathBuf>> {
-        let patch = workspace::diff(self.backend.as_ref()).await?;
-        if patch.trim().is_empty() {
-            return Ok(None);
-        }
-        let stat = workspace::diff_stat(self.backend.as_ref())
-            .await
-            .unwrap_or_default();
-        let dir = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_default()
-            .join(".mira")
-            .join("sandbox");
-        std::fs::create_dir_all(&dir)?;
-        let name = self
-            .project
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "project".into());
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or_default();
-        let path = dir.join(format!("{name}-{ts}.patch"));
-        std::fs::write(&path, patch)?;
-        eprintln!(
-            "\nsandbox: changes saved to {}\n{}",
-            path.display(),
-            stat.trim_end()
-        );
-        Ok(Some(path))
+        Ok(Some(_)) => eprintln!("remote environment: no changes."),
+        Ok(None) => {}
+        Err(e) => eprintln!("warning: collecting the remote environment's changes failed: {e}"),
     }
 }

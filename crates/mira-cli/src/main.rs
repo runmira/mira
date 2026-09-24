@@ -103,11 +103,10 @@ pub(crate) struct Cli {
     #[arg(long, global = true)]
     browser: bool,
 
-    /// Run the session's file and shell tools in an isolated sandbox
-    /// instead of on your checkout: `local` (a scratch copy on this
-    /// machine) or `e2b` (a cloud microVM; needs E2B_API_KEY). Changes
-    /// come back as a patch you apply with `git apply`. Defaults to
-    /// `compute.backend` in ~/.mira/mira.yaml.
+    /// Start in a remote environment instead of on your worktree: a name
+    /// from `compute.environments`, or the built-ins `scratch` (a copy on
+    /// this machine) and `e2b` (a cloud sandbox; needs E2B_API_KEY).
+    /// `/remote-env` switches later. Defaults to `compute.default`.
     #[arg(long, global = true, value_name = "BACKEND")]
     sandbox: Option<String>,
 
@@ -255,21 +254,15 @@ async fn main() -> Result<()> {
         }
     }
     register_computer_use(&mut registry, &cli, &cfg).await;
-    // Sandbox: upload the project and withhold every tool that would
-    // touch this machine directly (computer/browser, MCP servers, the
-    // local-only code-intel tools). Done before the subagent snapshot so
-    // children see the same filtered set.
-    let active_sandbox = match sandbox::requested(cli.sandbox.as_deref(), &cfg.compute) {
-        Some(name) => {
-            let sb = sandbox::ActiveSandbox::start(&name, &cfg.compute, &cwd).await?;
-            let withheld = registry.retain_remote_capable();
-            if !withheld.is_empty() {
-                eprintln!("sandbox: not available here: {}", withheld.join(", "));
-            }
-            Some(sb)
-        }
-        None => None,
-    };
+    // Remote environments: the manager owns the switchable compute slot
+    // the tools read. `--sandbox` / `compute.default` switch it once the
+    // session exists; `/remote-env` switches it later. While remote, the
+    // harness hides tools that would touch this machine.
+    let environments = Arc::new(mira_compute::EnvironmentManager::new(
+        cwd.clone(),
+        mira_compute::EnvironmentManager::default_patch_dir(),
+        cfg.compute.clone(),
+    ));
     // Snapshot the base registry BEFORE the interactive/agent tools
     // land — this is what child sessions inherit when the `agent` tool
     // spawns a subagent. Keeping `agent` OUT of the base prevents an
@@ -326,10 +319,7 @@ async fn main() -> Result<()> {
     let tool_ctx = ToolContext::new(cwd.clone(), sandbox)
         .with_memory(memory_store)
         .with_episodic(episodic_store.clone());
-    let tool_ctx = match &active_sandbox {
-        Some(sb) => tool_ctx.with_compute(sb.backend()),
-        None => tool_ctx,
-    };
+    let tool_ctx = tool_ctx.with_compute_slot(environments.slot());
 
     // --- policy: rules from config, mode from CLI/config/default
     let policy = Policy::from_config(&PolicyConfig {
@@ -404,11 +394,7 @@ async fn main() -> Result<()> {
         ),
         None => Session::new(
             sess_cfg,
-            system_prompt(&cwd, &registry)
-                + &active_sandbox
-                    .as_ref()
-                    .map(|sb| sb.prompt_note())
-                    .unwrap_or_default(),
+            system_prompt(&cwd, &registry),
             provider.clone(),
             Arc::new(registry),
             policy.clone(),
@@ -439,6 +425,21 @@ async fn main() -> Result<()> {
         ));
     }
     let session = session;
+
+    let (env_tx, env_rx) = tui::env_channel();
+    if let Some(target) = sandbox::startup_target(cli.sandbox.as_deref(), &cfg.compute) {
+        let progress: mira_compute::env::Progress =
+            Arc::new(|m: String| eprintln!("remote environment: {m}"));
+        let report = environments
+            .switch(&target, progress)
+            .await
+            .with_context(|| format!("starting remote environment `{target}`"))?;
+        session.push_note(report.model_note.clone()).await;
+        eprintln!(
+            "remote environment: ready. Tools run in `{target}`; /remote-env local brings the \
+             changes back to your worktree."
+        );
+    }
 
     let result: Result<()> = async {
         if use_tui {
@@ -483,6 +484,9 @@ async fn main() -> Result<()> {
                     models,
                     computer_cfg: cfg.computer.clone(),
                     browser_cfg: cfg.browser.clone(),
+                    environments: environments.clone(),
+                    env_tx,
+                    env_rx,
                 },
             )
             .await
@@ -491,13 +495,9 @@ async fn main() -> Result<()> {
         }
     }
     .await;
-    // Collect the sandbox's changes even when the frontend errored — the
-    // work done so far shouldn't be lost.
-    if let Some(sb) = active_sandbox {
-        if let Err(e) = sb.finish().await {
-            eprintln!("warning: {e:#}");
-        }
-    }
+    // Save (never apply) a remote environment's pending changes, even
+    // when the frontend errored, and release every environment.
+    sandbox::print_finish(environments.finish().await, &cwd);
     result
 }
 

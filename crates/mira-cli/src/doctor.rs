@@ -146,22 +146,18 @@ pub async fn run(cli: &crate::Cli, args: DoctorArgs) -> Result<()> {
         (false, Err(_)) => report.info("browser", "off (enable with --browser)"),
     }
 
-    // ---- sandbox (compute backend) ----
-    match crate::sandbox::requested(cli.sandbox.as_deref(), &cfg.compute).as_deref() {
-        None => report.info("sandbox", "off (tools run on this checkout; try --sandbox local|e2b)"),
-        Some("local") => report.pass("sandbox", "local (scratch copy of the project)"),
-        Some("e2b") => {
-            let env = cfg.compute.e2b.api_key_env();
-            if std::env::var_os(env).is_some() {
-                report.pass("sandbox", format!("e2b · {env} is set"));
-            } else {
-                report.fail("sandbox", format!("e2b · {env} is not set"));
-            }
-        }
-        Some(other) => report.fail(
-            "sandbox",
-            format!("unknown backend `{other}` (expected local or e2b)"),
-        ),
+    // ---- remote environments ----
+    let names: Vec<String> = mira_compute::env::list(&cfg.compute)
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    report.info("environments", names.join(", "));
+    match crate::sandbox::startup_target(cli.sandbox.as_deref(), &cfg.compute) {
+        None => report.info("start in", "local (this worktree)"),
+        Some(name) => match mira_compute::EnvironmentSpec::resolve(&name, &cfg.compute) {
+            Ok(spec) => report.pass("start in", format!("{name} ({})", spec.backend_name())),
+            Err(e) => report.fail("start in", format!("{name}: {e}")),
+        },
     }
 
     // ---- optional network probe ----

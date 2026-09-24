@@ -4,9 +4,12 @@
 > tool calls to an isolated remote environment instead of the user's local
 > machine.
 
-> **Status (implemented: steps 1–3).** `mira --sandbox local|e2b` works in
-> the terminal. See [Implementation notes](#implementation-notes) at the
-> end for what shipped and where it differs from this design.
+> **Status (implemented: steps 1–3, plus switching).** Sessions can move
+> between the local worktree and named remote environments at any time:
+> `/remote-env` in the TUI, the environment chip in the web UI, or
+> `--sandbox <env>` at startup. See
+> [Implementation notes](#implementation-notes) for what shipped and
+> where it differs from this design.
 
 ---
 
@@ -387,79 +390,112 @@ caching and are already on Vercel infra.
 
 ## Implementation notes
 
-What shipped for steps 1–3, and where it differs from the design above.
+What shipped, and where it differs from the design above.
 
-### Usage
+### Using it
 
-```sh
-mira --sandbox local     # scratch copy of the project on this machine
-mira --sandbox e2b       # E2B microVM; needs E2B_API_KEY
-mira doctor --sandbox e2b
-```
+| Where | How |
+|---|---|
+| TUI | `/remote-env` lists environments; `/remote-env <name>` switches; `/remote-env local` comes back. |
+| Web UI | The environment chip next to the worktree chip in the composer footer. |
+| Startup | `mira --sandbox <name>`, or `compute.default` in config. Works for `mira serve` too. |
+| Check | `mira doctor` lists environments and validates the startup one. |
 
-Default backend, in `~/.mira/mira.yaml` (the per-repo config can't set
-it, because a cloned repo must not decide that its code gets shipped to a
-third party):
+`local` is always the user's own machine, running directly on the
+worktree. Two remote environments exist without any config: `scratch` (a
+copy of the worktree on this machine) and `e2b` (an E2B sandbox with
+default settings). Named environments go in `~/.mira/mira.yaml`:
 
 ```yaml
 compute:
-  backend: e2b            # optional; --sandbox overrides
+  default: dev              # optional: start sessions here
   e2b:
     api_key_env: E2B_API_KEY   # default; the key can also live under `keys:`
-    template: base
-    timeout_secs: 3600
+  environments:
+    dev:
+      backend: e2b          # or scratch
+      description: Rust toolchain + cached deps
+      template: base
+      timeout_secs: 3600
+      env:
+        RUST_LOG: debug
+      setup: |              # runs once, after the first upload
+        curl -sSf https://sh.rustup.rs | sh -s -- -y
+        cargo fetch
 ```
+
+The whole `compute:` block is read only from the global config. A cloned
+repo must not decide that its code gets shipped to a third party, or what
+runs in the setup script.
+
+### How switching works
+
+The **worktree is the anchor**. A remote environment is a copy of it.
+
+- **local → remote.** Pack the worktree's current state, uncommitted
+  edits included: git-tracked plus untracked-but-not-ignored files, so
+  ignored secrets and build output stay put. Upload it, and the tools
+  start running there. The first time, the environment's `setup` script
+  runs, with its output streamed as progress.
+- **remote → local.** Merge the environment's changes into the
+  worktree, file by file. A file the user didn't touch meanwhile is
+  simply updated. A file both sides changed goes through
+  `git merge-file`, which leaves conflict markers where edits overlap.
+  Conflicts are reported in the UI and to the model. The full patch is
+  also saved under `~/.mira/sandbox/`. This works on dirty worktrees and
+  non-git projects, which `git apply --3way` can't handle. If a merge
+  can't be done at all, the switch is refused and the session stays
+  remote.
+- **Parking.** An environment you leave is kept: E2B sandboxes are
+  paused, scratch copies left in place. Switching back resumes it and
+  re-uploads the worktree's tracked files, leaving ignored ones such as
+  `target/` or `node_modules/`. Caches stay warm and setup doesn't
+  rerun.
+- **The model is told.** Each switch appends a system note: where tools
+  run now, what was merged, and any conflicts. While remote, tools that
+  would touch this machine are hidden from the tool list and refused if
+  called anyway: `apply_patch`, git and code-intel tools, `rustfmt`,
+  MCP servers, and `computer`/`browser`. The model uses `bash` in the
+  environment instead.
+- **Timing.** Switches wait for the current turn to finish, and new
+  messages are held while a switch runs, so no tool ever sees a
+  half-moved tree.
+- **Worktrees.** In the web UI each worktree gets its own session, and
+  each session its own environment. Switching worktrees leaves the other
+  one's environment exactly as it was.
+- **End of session.** Pending remote changes are saved as a patch, never
+  applied, and every environment is released.
 
 ### Differences from the design
 
 | Design above | What shipped | Why |
 |---|---|---|
 | Trait in `mira-computer` | New `mira-compute` crate | `mira-computer` became the desktop-control (`computer` tool) crate in #9. |
-| `mira.toml`, `[compute]` | `mira.yaml`, `compute:` | Mira's config is YAML. |
-| `ToolStart` routes to `backend.exec()` in the event loop | Tools route through `ToolContext::compute` | The event loop only renders; tools do the I/O. Routing there covers subagents and the REPL, and needs no TUI changes. |
-| `patch_file` on the trait | Edits are read → modify → write | Keeps every backend to exec + read + write, and edit semantics stay identical to local. |
-| `local.rs` = today's default path | Default path is untouched; `LocalBackend` powers `--sandbox local` (a scratch copy) | "Zero behavior change" for the default comes from not routing at all. `--sandbox local` makes the whole remote path testable without a cloud account. |
-| Snapshot cache in `~/.config/mira/snapshots.toml` | Not yet (step 4) | `ComputeBackend::checkpoint()` / `E2bBackend::resume()` are in place for it. |
-
-### Workspace sync
-
-- **Start.** Pack git-tracked plus untracked-but-not-ignored files; build
-  output and `.gitignore`d secrets never leave the machine. Symlinks are
-  kept as links, not followed. Upload and extract the archive into a
-  fresh git repo in the sandbox, tagged `mira-baseline`.
-- **During.** The sandbox is the source of truth. `bash`, `read_file`,
-  `write_file`, `edit_file`, `grep` and `glob` run there. Local absolute
-  paths are mapped onto the workspace, and anything outside it is
-  refused.
-- **Tools that would touch this machine are withheld:** `apply_patch`,
-  git and code-intel tools, `rustfmt`, MCP servers, and
-  `computer`/`browser`. The model uses `bash` in the sandbox instead.
-  Subagents inherit the sandbox, and skip local git-worktree isolation.
-- **End.** `git diff --binary mira-baseline` is saved to
-  `~/.mira/sandbox/<project>-<ts>.patch`, with a stat and the
-  `git apply` command. The checkout is never written to by the session.
+| `mira.toml`, `[compute]` | `mira.yaml`, `compute:` with named environments | Mira's config is YAML. Named environments carry their own template, env vars and setup script. |
+| `ToolStart` routes to `backend.exec()` in the event loop | Tools read a shared `ComputeSlot` on `ToolContext` | The event loop only renders; tools do the I/O. A shared slot makes a switch take effect on the next tool call, including in subagents, with no TUI changes. |
+| `patch_file` on the trait | Edits are read → modify → write | Keeps every backend to exec + read + write. |
+| `local.rs` = today's default path | Default path is untouched; `LocalBackend` powers `scratch` | "Zero behavior change" for local comes from not routing at all. `scratch` makes the whole remote path testable without a cloud account. |
+| Snapshot cache keyed on lockfile hashes (step 4) | Not yet; parked environments give warm caches within a session | `checkpoint()` / `E2bBackend::resume()` are the hooks for it. |
 
 ### E2B specifics
 
 E2B has no Rust SDK, so `E2bBackend` talks to the control plane (`POST
 /sandboxes`, `/pause`, `/resume`, `/timeout`, `DELETE`). It talks to
 envd for files (`/files`) and commands. Commands use the Connect-RPC
-`process.Process/Start` stream, whose stdout/stderr chunks feed the tool
-tail live. A command that times out is killed with `SendSignal`. The
-sandbox's timeout is refreshed every 5 minutes while in use, and it's
-killed at session end (or on drop).
+`process.Process/Start` stream, whose stdout/stderr chunks feed the
+tool tail and setup progress live. A command that times out is killed
+with `SendSignal`. The sandbox's timeout is refreshed every 5 minutes
+while in use.
 
-Tests run the full upload → edit → exec → diff → `git apply` round trip
-against a local fake of both E2B surfaces. The code has **not yet been
-run against the live E2B service**.
+Tests run the full workflow against a local fake of both E2B surfaces.
+The code has **not yet been run against the live E2B service**.
 
 ### Not yet
 
 - Step 4 (snapshot caching keyed on lockfile hashes) and step 5 (Vercel
   Drives).
-- `mira serve --sandbox` (refused explicitly for now).
-- Resuming a session into the same sandbox (the backend supports
-  `checkpoint`/`resume`; the CLI doesn't wire it yet).
+- Keeping an environment across a restart of Mira. Parked environments
+  are released when the session ends.
 - A sandbox image with `rg`. `grep` falls back to `grep -rn` in images
   without it.
 

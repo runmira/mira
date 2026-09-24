@@ -48,14 +48,6 @@ pub struct ServeArgs {
 }
 
 pub async fn run(cli: &super::Cli, args: ServeArgs) -> Result<()> {
-    // Sandboxed sessions are TUI/REPL-only for now. Refuse rather than
-    // silently serving an unsandboxed session to someone who asked for one.
-    if let Some(backend) = &cli.sandbox {
-        anyhow::bail!(
-            "`mira serve --sandbox {backend}` isn't supported yet; use `mira --sandbox {backend}` \
-             in the terminal"
-        );
-    }
     let launch_cwd = std::env::current_dir().context("failed to read cwd")?;
     // Prefer the folder the user last picked over the process's launch
     // directory — restarting mira shouldn't yank them back to whatever
@@ -69,12 +61,6 @@ pub async fn run(cli: &super::Cli, args: ServeArgs) -> Result<()> {
         .unwrap_or_else(|| launch_cwd.clone());
     let cfg = MiraConfig::load(&cwd).context("load config")?;
     mira_config::export_keys_to_env(&cfg);
-    if let Some(backend) = &cfg.compute.backend {
-        eprintln!(
-            "warning: compute.backend = {backend} is ignored by `mira serve`; \
-             web sessions run tools on this machine"
-        );
-    }
 
     // Reuse the CLI's resolver, but don't hard-fail if the user hasn't set
     // credentials yet — the settings UI is the fix for that.
@@ -250,6 +236,8 @@ pub async fn run(cli: &super::Cli, args: ServeArgs) -> Result<()> {
     }
 
     mira_server::run(ServerConfig {
+        compute: cfg.compute.clone(),
+        initial_environment: crate::sandbox::startup_target(cli.sandbox.as_deref(), &cfg.compute),
         cfg: sess_cfg,
         provider,
         registry,
