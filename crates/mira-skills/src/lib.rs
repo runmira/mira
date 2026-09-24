@@ -191,7 +191,22 @@ impl SkillRegistry {
     /// add …` writes to whichever one already exists; scanning the
     /// whole set means the same install command works everywhere.
     pub fn load_layered(shared_dir: &Path, user_dir: &Path, project_dirs: &[PathBuf]) -> Self {
+        Self::load_layered_with_plugins(shared_dir, user_dir, project_dirs, &[])
+    }
+
+    /// [`Self::load_layered`] with enabled plugins' skill directories as
+    /// a tier between the bundled skills and your own: your skills win
+    /// a name clash with a plugin's.
+    pub fn load_layered_with_plugins(
+        shared_dir: &Path,
+        user_dir: &Path,
+        project_dirs: &[PathBuf],
+        plugin_dirs: &[PathBuf],
+    ) -> Self {
         let mut reg = builtin();
+        for p in plugin_dirs {
+            reg.merge(load_dir(p));
+        }
         reg.merge(load_dir(shared_dir));
         reg.merge(load_dir(user_dir));
         for p in project_dirs {

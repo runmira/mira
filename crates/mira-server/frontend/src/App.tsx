@@ -3,7 +3,7 @@ import { AnimatePresence } from 'framer-motion';
 import { CaretDown, Lightbulb, ShieldWarning, SidebarSimple, Sparkle, Target } from '@phosphor-icons/react';
 import { cn } from './lib/utils';
 import { connect, type WsClient, type WsStatus } from './ws';
-import { appendMemory, applyUndo, getBranchPr, getGitStatus, getSessionDiff, getSessionHistory, getSettings, gitCommit, gitPush, listSkills, newSession, setSessionBackgroundMode, startReview, type BranchPrView, type GitStatusView, type SessionDiffView, type SkillView } from './api';
+import { appendMemory, applyUndo, getBranchPr, getGitStatus, getSessionDiff, getSessionHistory, getSettings, gitCommit, gitPush, listCommands, listSkills, newSession, setSessionBackgroundMode, startReview, type BranchPrView, type GitStatusView, type SessionDiffView, type SkillView, type CommandInfo } from './api';
 import { ContextPanel } from './components/ContextPanel';
 import { extractAgentId } from './components/AgentCard';
 import { SettingsSurface } from './components/Settings';
@@ -451,6 +451,10 @@ export default function App() {
   // (server needs to be up + AppState wired). Empty on error; the
   // palette degrades gracefully to just the built-in commands.
   const [skills, setSkills] = useState<SkillView[]>([]);
+  // Custom commands + MCP prompts for the composer palette, and a
+  // counter the Plugins page watches to refetch on `extensions_changed`.
+  const [commands, setCommands] = useState<CommandInfo[]>([]);
+  const [extensionsVersion, setExtensionsVersion] = useState(0);
   // Bumps each time the backend broadcasts `SkillsReloaded` (filesystem
   // watcher detected a change). Passed to the Settings panel so its
   // Skills tab re-fetches when a `SKILL.md` lands / vanishes / edits
@@ -556,6 +560,7 @@ export default function App() {
         // change the project tier (~/.mira vs. <cwd>/.mira). Silent on
         // failure; the palette just shows built-in commands.
         listSkills().then(setSkills).catch(() => setSkills([]));
+        listCommands().then(setCommands).catch(() => setCommands([]));
         // Each session (and worktree) has its own environment; ask for it.
         setEnvSwitching(null);
         wsRef.current?.send({ type: 'environment' });
@@ -682,6 +687,12 @@ export default function App() {
             return { ...e, preview: msg.preview };
           }),
         );
+        break;
+      case 'extensions_changed':
+        // An MCP server connected/dropped or a plugin changed.
+        listCommands().then(setCommands).catch(() => {});
+        listSkills().then(setSkills).catch(() => {});
+        setExtensionsVersion((n) => n + 1);
         break;
       case 'skills_reloaded':
         // A skill file appeared / changed / vanished. Refetch the
@@ -1557,6 +1568,7 @@ export default function App() {
               onDecide={(callId, allow, scope) => decideApproval(callId, allow, scope)}
               onPlanReply={replyToPlan}
               onAskUserReply={replyToAskUser}
+              commands={commands}
             />
             </div>
           </>
@@ -1564,7 +1576,7 @@ export default function App() {
 
         {mainView === 'plugins' && (
           <div className="flex-1 min-h-0 overflow-y-auto">
-            <PluginsPanel />
+            <PluginsPanel version={extensionsVersion} />
           </div>
         )}
 

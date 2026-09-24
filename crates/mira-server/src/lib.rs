@@ -31,6 +31,7 @@ pub mod approver;
 mod browse;
 mod cwd;
 mod embedded;
+pub mod extensions;
 mod file;
 mod git;
 pub mod interactive;
@@ -38,6 +39,7 @@ pub mod mcp;
 mod memory;
 mod models;
 mod oauth;
+pub mod plugins;
 pub mod protocol;
 pub mod provider;
 mod pull_requests;
@@ -99,10 +101,9 @@ pub struct ServerConfig {
     /// Cross-session memory runtime knobs — controls the post-round
     /// auto-extractor. Defaults to on with no extractor-model override.
     pub memory_runtime: mira_config::MemoryRuntimeConfig,
-    /// Per-MCP-server connect results captured by the caller before it
-    /// registered the tools. Frozen for the process lifetime — the
-    /// Plugins UI diffs yaml against this to decide "restart required."
-    pub mcp_boot: Vec<crate::mcp::McpBootStatus>,
+    /// MCP servers, plugins and custom commands. The caller has already
+    /// added its MCP tool source to `registry`.
+    pub extensions: crate::extensions::Extensions,
     /// Loaded skill roster (bundled + user + project tiers merged).
     pub skills: mira_tools::builtin::skill::SkillHandle,
     /// Named remote environments (`compute:` in mira.yaml).
@@ -120,7 +121,10 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
     let harness_provider: Arc<dyn ChatProvider> = Arc::new(swappable.clone());
 
     // Named subagent types — loaded once at boot.
-    let agents_registry = Arc::new(mira_agents::load(&cfg.cwd));
+    let agents_registry = Arc::new(mira_agents::load_with_plugins(
+        &cfg.cwd,
+        &cfg.extensions.plugin_agent_files(),
+    ));
     tracing::info!(
         count = agents_registry.names().len(),
         types = ?agents_registry.names(),
@@ -181,7 +185,7 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
         agents_registry,
         compute: cfg.compute.clone(),
         store: cfg.store.clone(),
-        mcp_boot: Arc::new(cfg.mcp_boot),
+        extensions: cfg.extensions.clone(),
         skills: cfg.skills.clone(),
         pending_oauth: oauth::new_pending_store(),
         local_port,
@@ -196,6 +200,28 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
     // `SkillsReloaded` on every debounced change so connected clients
     // refetch the roster.
     skills::spawn_skill_watcher(state.clone());
+
+    // MCP status changes (a server connecting, dropping, asking for
+    // sign-in) → `ExtensionsChanged` to every tab, debounced so a burst of
+    // connects at startup is one refresh.
+    {
+        let state = state.clone();
+        let mut rx = state.extensions.mcp().subscribe();
+        tokio::spawn(async move {
+            use tokio::sync::broadcast::error::RecvError;
+            loop {
+                match rx.recv().await {
+                    Ok(_) | Err(RecvError::Lagged(_)) => {}
+                    Err(RecvError::Closed) => break,
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                while rx.try_recv().is_ok() {}
+                state
+                    .broadcast_all(crate::protocol::ServerMsg::ExtensionsChanged)
+                    .await;
+            }
+        });
+    }
 
     // OAuth token refresh: rotate ChatGPT / Codex short-lived API keys
     // before they expire so a signed-in session survives long chats
@@ -285,7 +311,60 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         )
         .route("/api/review", axum::routing::post(review::start_review))
         .route("/api/undo", axum::routing::post(undo::apply_undo))
-        .route("/api/mcp", get(mcp::get_mcp).put(mcp::put_mcp))
+        .route("/api/mcp", get(mcp::get_mcp))
+        .route("/api/mcp/servers", axum::routing::post(mcp::save_server))
+        .route(
+            "/api/mcp/servers/:name",
+            axum::routing::delete(mcp::delete_server),
+        )
+        .route(
+            "/api/mcp/servers/:name/reconnect",
+            axum::routing::post(mcp::reconnect),
+        )
+        .route(
+            "/api/mcp/servers/:name/enabled",
+            axum::routing::post(mcp::set_enabled),
+        )
+        .route(
+            "/api/mcp/servers/:name/approval",
+            axum::routing::post(mcp::set_approval),
+        )
+        .route(
+            "/api/mcp/servers/:name/sign-in",
+            axum::routing::post(mcp::sign_in),
+        )
+        .route(
+            "/api/mcp/servers/:name/sign-out",
+            axum::routing::post(mcp::sign_out),
+        )
+        .route("/api/mcp/oauth/callback", get(mcp::oauth_callback))
+        .route("/api/commands", get(mcp::list_commands))
+        .route("/api/plugins", get(plugins::get_plugins))
+        .route("/api/plugins/detail/:id", get(plugins::get_detail))
+        .route(
+            "/api/plugins/install",
+            axum::routing::post(plugins::install),
+        )
+        .route(
+            "/api/plugins/:id/uninstall",
+            axum::routing::post(plugins::uninstall),
+        )
+        .route(
+            "/api/plugins/:id/enabled",
+            axum::routing::post(plugins::set_enabled),
+        )
+        .route(
+            "/api/plugins/marketplaces",
+            axum::routing::post(plugins::add_marketplace),
+        )
+        .route(
+            "/api/plugins/marketplaces/:name/update",
+            axum::routing::post(plugins::update_marketplace),
+        )
+        .route(
+            "/api/plugins/marketplaces/:name",
+            axum::routing::delete(plugins::remove_marketplace),
+        )
         .route("/api/prs", get(pull_requests::list_pull_requests))
         .route(
             "/api/prs/:owner/:repo/:number",

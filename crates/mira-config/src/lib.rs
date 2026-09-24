@@ -47,9 +47,10 @@ pub struct MiraConfig {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub keys: BTreeMap<String, String>,
     pub permissions: PermissionsConfig,
-    /// Third-party tools exposed via the Model Context Protocol. Each entry
-    /// spawns a subprocess (or opens an HTTP session) at startup, discovers
-    /// its tool list, and registers each tool as `mcp__<name>__<tool>`.
+    /// Model Context Protocol servers (user scope). Each entry spawns a
+    /// subprocess or opens an HTTP session; its tools appear as
+    /// `mcp__<name>__<tool>`. Managed by `mira-mcp`, which also reads
+    /// project servers (`.mcp.json`) and plugin servers.
     pub mcp_servers: BTreeMap<String, McpServerConfig>,
     /// Cross-session memory behavior — the auto-extractor and related knobs.
     /// Sensible defaults, so users get the feature without editing yaml.
@@ -369,8 +370,10 @@ impl MemoryRuntimeConfig {
 }
 
 /// One MCP server entry. `untagged` so the YAML shape is either a stdio
-/// launch (`command` + optional `args`/`env`/`cwd`) or an HTTP endpoint
-/// (`url` + optional `headers`) — no explicit `type:` field needed.
+/// launch (`command` + optional `args`/`env`/`cwd`) or a remote endpoint
+/// (`url` + optional `headers`). The optional `type:` field
+/// (`stdio` / `http` / `sse`) matches Claude Code's `.mcp.json`, so an
+/// entry can be copied between the two unchanged.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum McpServerConfig {
@@ -383,22 +386,75 @@ pub enum McpServerConfig {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct McpStdioConfig {
+    /// Always `stdio` when present.
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub kind: Option<McpStdioKind>,
     pub command: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
-    /// Extra env vars. Values pass through `${VAR}` expansion against the
-    /// parent env, so `${GITHUB_TOKEN}` works without hard-coding secrets.
+    /// Extra env vars. Values pass through `${VAR}` / `${VAR:-default}`
+    /// expansion, so `${GITHUB_TOKEN}` works without hard-coding secrets.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
 }
 
-/// Connect to a remote MCP server via streamable HTTP.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum McpStdioKind {
+    Stdio,
+}
+
+/// Connect to a remote MCP server.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct McpHttpConfig {
+    /// `http` (streamable HTTP, the default) or `sse` (the older
+    /// HTTP+SSE transport).
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub kind: Option<McpRemoteKind>,
     pub url: String,
-    /// Optional value for the `Authorization` header (e.g.
-    /// `"Bearer ${MCP_TOKEN}"`). `${VAR}` is expanded against the parent env.
+    /// Extra request headers; values take `${VAR}` expansion.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
+    /// Shorthand for an `Authorization` header (e.g.
+    /// `"Bearer ${MCP_TOKEN}"`). Servers that support OAuth don't need
+    /// it: sign in from the Plugins page or with `mira mcp login`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub auth: Option<String>,
+    /// A pre-registered OAuth client, for servers without dynamic client
+    /// registration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<McpOAuthConfig>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum McpRemoteKind {
+    #[default]
+    #[serde(alias = "streamable-http", alias = "streamable_http")]
+    Http,
+    Sse,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct McpOAuthConfig {
+    #[serde(
+        rename = "clientId",
+        alias = "client_id",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub client_id: Option<String>,
+    #[serde(
+        rename = "clientSecret",
+        alias = "client_secret",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub client_secret: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
 }
 
 /// One OpenAI-compatible endpoint. `api_key_env` names an env var to
@@ -527,9 +583,9 @@ impl MiraConfig {
         for (name, key) in other.keys {
             self.keys.insert(name, key);
         }
-        for (name, server) in other.mcp_servers {
-            self.mcp_servers.insert(name, server);
-        }
+        // `mcp_servers` from a repo's `.mira/config.yaml` are deliberately
+        // not merged: they would launch commands from a cloned repo without
+        // asking. mira-mcp reads them as project servers that need approval.
         self.permissions.allow.extend(other.permissions.allow);
         self.permissions.ask.extend(other.permissions.ask);
         self.permissions.deny.extend(other.permissions.deny);

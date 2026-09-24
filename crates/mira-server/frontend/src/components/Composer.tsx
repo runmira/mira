@@ -39,7 +39,8 @@ import { costUsd, formatDollars, shortNum } from '../lib/usage';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandSeparator } from '@/components/ui/command';
 import { FilePicker } from './FilePicker';
-import { filterCommands, slashState, type PaletteSkill, type SlashCommand } from './commands';
+import { customToCommand, filterCommands, slashState, type PaletteSkill, type SlashCommand } from './commands';
+import type { CommandInfo } from '../api';
 import { MentionInput, type MentionInputHandle } from './MentionInput';
 import { cn } from '@/lib/utils';
 
@@ -117,6 +118,8 @@ type Props = {
   onPlanReply?: (callId: string, approved: boolean, steps?: PlanStep[], note?: string) => void;
   /** Reply to an ask_user proposal. */
   onAskUserReply?: (callId: string, decision: AskUserDecision) => void;
+  /** Custom commands and MCP prompts (`/api/commands`). */
+  commands?: CommandInfo[];
 };
 
 export type PendingApproval = {
@@ -137,7 +140,7 @@ export function Composer({
   disabled, busy, mode, model, providerName, cwd, usage,
   environment, environments, envSwitching, onSwitchEnvironment,
   onSend, onSetMode, onSetModel, onSetEffort, onOpenPicker, onCwdSwitched, onInterrupt, onNewChat, onOpenSettings, onRunReview, onSetGoal, onClearGoal, goal, onRemember, onUndo,
-  skills,
+  skills, commands,
   pendingApproval, pendingPlan, pendingAskUser, onDecide, onPlanReply, onAskUserReply,
 }: Props) {
   const [text, setText] = useState('');
@@ -195,7 +198,8 @@ export function Composer({
     onSetMode(planActive ? priorMode : 'plan');
   }
 
-  const slash = slashState(text);
+  const customCmds = useMemo(() => (commands ?? []).map(customToCommand), [commands]);
+  const slash = slashState(text, customCmds);
   const paletteVisible = slash.mode === 'palette';
   // Trigger is `/` OR `@` — `@` promotes `files` to the top of the palette
   // so a bare `@` + Enter fires the OS native file picker without any
@@ -208,9 +212,10 @@ export function Composer({
             (slash as { query: string }).query,
             paletteTrigger,
             skills,
+            customCmds,
           )
         : [],
-    [paletteVisible, slash, paletteTrigger, skills],
+    [paletteVisible, slash, paletteTrigger, skills, customCmds],
   );
 
   useEffect(() => { setSlashIdx(0); }, [text]);
@@ -271,6 +276,17 @@ export function Composer({
     const prefix = slash.mode === 'palette' || slash.mode === 'args'
       ? text.slice(0, slash.triggerStart)
       : '';
+    if (cmd.isCustom) {
+      // Custom command / MCP prompt: with arguments to fill in, prefill
+      // `/name `; without, send it now. The server expands it.
+      if (cmd.takesArgs || prefix.trim()) {
+        updateText(`${prefix}/${cmd.name} `);
+      } else {
+        onSend(`/${cmd.name}`);
+        updateText('');
+      }
+      return;
+    }
     if (cmd.isSkill) {
       // Skill pick — splice out the `/query` and drop in a mention
       // token so it renders as an inline chip. `updateText` mutates
@@ -357,7 +373,7 @@ export function Composer({
     // the command instead of sending it as a chat message. Control
     // commands vanish; template commands fill the composer so the user
     // can review — Enter again to actually send.
-    if (slash.mode === 'args') {
+    if (slash.mode === 'args' && !slash.command.isCustom) {
       executeCommand(slash.command, slash.args);
       return;
     }

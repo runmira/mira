@@ -1925,6 +1925,7 @@ fn format_action(a: mira_tools::Action) -> &'static str {
         mira_tools::Action::Bash => "Bash",
         mira_tools::Action::Computer => "Computer",
         mira_tools::Action::Browser => "Browser",
+        mira_tools::Action::Mcp => "Mcp",
         mira_tools::Action::Pure => "Pure",
     }
 }
