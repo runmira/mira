@@ -1739,6 +1739,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "shellexpand",
  "similar",
  "syntect",
  "tempfile",
