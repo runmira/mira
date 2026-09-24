@@ -27,7 +27,6 @@ thiserror     = { workspace = true }
 tracing       = { workspace = true }
 shellexpand   = { workspace = true }
 similar       = { workspace = true }
-rmcp          = { workspace = true }
 glob          = { workspace = true }
 regex         = { workspace = true }
 reqwest       = { workspace = true }

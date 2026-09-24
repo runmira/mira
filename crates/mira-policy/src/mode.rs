@@ -64,7 +64,7 @@ impl Mode {
             (Mode::Manual, _) => Ask,
 
             (Mode::Auto, Read | Pure | Write | Edit) => Allow,
-            (Mode::Auto, Bash) => Ask,
+            (Mode::Auto, Bash | Mcp) => Ask,
 
             (Mode::Edit, _) => Allow,
             (Mode::Yolo, _) => Allow,

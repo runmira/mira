@@ -13,7 +13,6 @@ pub mod builtin;
 pub mod consolidate;
 pub mod context;
 pub mod guard;
-pub mod mcp;
 pub mod preview;
 pub mod prompt;
 pub mod registry;
@@ -24,13 +23,12 @@ pub mod tool;
 pub use builtin::background::BackgroundProcessStore;
 pub use context::ToolContext;
 pub use guard::{AppliedUndo, FileGuard, GuardError, UndoEntry, UndoOp};
-pub use mcp::{connect as connect_mcp, McpConnection, McpTool};
 pub use preview::{compute_preview, DiffHunk, DiffKind, DiffLine, DiffPreview, DiffRow};
 pub use prompt::{
     AskUserAnswer, AskUserOption, AskUserProposal, AskUserQuestion, AskUserResponse, AskUserTool,
     PlanProposal, PlanResponse, PlanStep, PlanTool, PromptChannel, PromptRequest, PromptResponse,
     SubagentReviewResponse,
 };
-pub use registry::Registry;
+pub use registry::{Registry, ToolSource};
 pub use tasks::{TaskItem, TaskStatus, TaskStore, TaskUpdate};
 pub use tool::{Action, Tool, ToolError};

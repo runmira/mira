@@ -16,7 +16,6 @@ use mira_ai::{build_chat_provider, ChatProvider, NullProvider};
 use mira_harness::{FileStore, SessionConfig, SessionStore};
 use mira_policy::{Policy, PolicyConfig};
 use mira_sandbox::Sandbox;
-use mira_server::mcp::{McpBootStatus, McpToolInfo};
 use mira_server::ServerConfig;
 use mira_tools::{builtin, Registry};
 use tokio::sync::Mutex;
@@ -78,15 +77,18 @@ pub async fn run(cli: &super::Cli, args: ServeArgs) -> Result<()> {
     // tiers overriding by name. The RwLock lets the server hot-swap the
     // project tier on cwd change (see the `put_cwd` handler) without
     // re-registering the tool.
-    let skills_registry = mira_skills::SkillRegistry::load_layered(
-        &mira_config::shared_skills_dir(),
-        &mira_config::user_skills_dir(),
-        &mira_config::well_known_project_skills_dirs(&cwd),
-    );
+    let extensions = mira_server::extensions::Extensions::new(Some(cwd.clone()));
+    let skills_registry =
+        mira_server::extensions::load_skills(Some(&cwd), &extensions.plugin_skill_dirs());
     let skills_handle: mira_tools::builtin::skill::SkillHandle = std::sync::Arc::new(
         tokio::sync::RwLock::new(std::sync::Arc::new(skills_registry)),
     );
     builtin::register_skills(&mut registry, skills_handle.clone());
+    extensions.attach_skills(skills_handle.clone());
+    extensions.reload().await;
+    for notice in extensions.notices() {
+        eprintln!("mcp: {notice}");
+    }
     // `memory_consolidate` — dedup/merge a MIRA.md via a cheap model.
     // Uses the extractor-model config knob (same fallback path as the
     // background auto-extractor), or the initial session model when no
@@ -104,60 +106,11 @@ pub async fn run(cli: &super::Cli, args: ServeArgs) -> Result<()> {
             .unwrap_or(fallback);
         builtin::register_consolidate(&mut registry, provider.clone(), consolidate_model);
     }
-    // Same MCP wiring as the CLI entrypoint (see main.rs): one broken
-    // server must not stop `mira serve` from booting — the user needs the
-    // Settings UI reachable to fix it.
-    //
-    // In addition to registering tools we capture per-server outcome into
-    // `mcp_boot` so the Plugins UI (`GET /api/mcp`) can render live status
-    // (connected + tool list, or the connect error) without re-attempting
-    // to connect on every request.
-    let mut mcp_boot: Vec<McpBootStatus> = Vec::with_capacity(cfg.mcp_servers.len());
-    for (name, server_cfg) in &cfg.mcp_servers {
-        match mira_tools::connect_mcp(name, server_cfg).await {
-            Ok(conn) => {
-                let count = conn.tools.len();
-                // Snapshot each tool's spec BEFORE moving the Arc into the
-                // registry — the spec pass is cheap and gives the UI the
-                // namespaced name + description without touching the live
-                // MCP service.
-                let infos: Vec<McpToolInfo> = conn
-                    .tools
-                    .iter()
-                    .map(|t| {
-                        let spec = t.spec();
-                        McpToolInfo {
-                            name: spec.name,
-                            description: spec.description,
-                        }
-                    })
-                    .collect();
-                for tool in conn.tools {
-                    registry.register_arc(tool);
-                }
-                mcp_boot.push(McpBootStatus {
-                    name: name.clone(),
-                    config: server_cfg.clone(),
-                    tools: infos,
-                    error: None,
-                });
-                eprintln!(
-                    "mcp `{name}`: {count} tool{} registered",
-                    if count == 1 { "" } else { "s" }
-                );
-            }
-            Err(e) => {
-                let msg = format!("{e:#}");
-                eprintln!("warning: mcp `{name}` disabled ({msg})");
-                mcp_boot.push(McpBootStatus {
-                    name: name.clone(),
-                    config: server_cfg.clone(),
-                    tools: Vec::new(),
-                    error: Some(msg),
-                });
-            }
-        }
-    }
+    // MCP servers connect in the background (in parallel, with timeouts)
+    // and their tools appear in every session as they come up; a broken
+    // one never blocks the server. Plugins, commands and MCP status are
+    // managed live from the Plugins page.
+    registry.add_source(extensions.mcp().tool_source());
     super::register_computer_use(&mut registry, cli, &cfg).await;
     let registry = Arc::new(registry);
 
@@ -249,7 +202,7 @@ pub async fn run(cli: &super::Cli, args: ServeArgs) -> Result<()> {
         bind,
         static_dir: args.static_dir,
         memory_runtime: cfg.memory.clone(),
-        mcp_boot,
+        extensions,
         skills: skills_handle,
     })
     .await

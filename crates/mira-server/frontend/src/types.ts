@@ -224,6 +224,7 @@ export type ServerMsg =
   | { type: 'tool_progress'; call_id: string; line: string }
   | { type: 'tool_preview'; call_id: string; preview: DiffPreview }
   | { type: 'skills_reloaded' }
+  | { type: 'extensions_changed' }
   | { type: 'model_changed'; model: string }
   | { type: 'mode_changed'; mode: Mode }
   | { type: 'error'; text: string }

@@ -15,7 +15,7 @@ use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use mira_skills::{Skill, SkillRegistry};
+use mira_skills::Skill;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
 use tokio::sync::broadcast;
@@ -143,11 +143,7 @@ pub async fn list_skills(State(state): State<AppState>) -> Json<SkillsResponse> 
 /// becomes invocable on the next user message without a restart.
 pub async fn reload_registry(state: &AppState) {
     let cwd = state.current_cwd().await;
-    let fresh = SkillRegistry::load_layered(
-        &mira_config::shared_skills_dir(),
-        &mira_config::user_skills_dir(),
-        &mira_config::well_known_project_skills_dirs(&cwd),
-    );
+    let fresh = crate::extensions::load_skills(Some(&cwd), &state.extensions.plugin_skill_dirs());
     let mut w = state.skills.write().await;
     *w = Arc::new(fresh);
 }

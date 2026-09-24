@@ -15,7 +15,6 @@ use tokio::sync::{broadcast, Mutex, RwLock};
 
 use crate::approver::PendingMap;
 use crate::interactive::{PendingPromptMap, ScratchpadEntry};
-use crate::mcp::McpBootSnapshot;
 use crate::oauth::PendingFlowStore;
 use crate::protocol::ServerMsg;
 use crate::provider::SwappableProvider;
@@ -55,7 +54,8 @@ pub struct AppState {
     /// `compute:` config handed to every slot's environment manager.
     pub compute: mira_config::ComputeConfig,
     pub store: Option<Arc<dyn SessionStore>>,
-    pub mcp_boot: McpBootSnapshot,
+    /// MCP servers, plugins, custom commands.
+    pub extensions: crate::extensions::Extensions,
     pub skills: mira_tools::builtin::skill::SkillHandle,
     pub pending_oauth: PendingFlowStore,
     pub local_port: u16,
