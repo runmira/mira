@@ -448,6 +448,8 @@ async fn main() -> Result<()> {
                 skills: skills_handle,
                 store: store.clone(),
                 models,
+                computer_cfg: cfg.computer.clone(),
+                browser_cfg: cfg.browser.clone(),
             },
         )
         .await

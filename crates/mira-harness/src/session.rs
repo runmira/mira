@@ -286,7 +286,7 @@ pub struct Session {
     created_at: u64,
 
     provider: Arc<dyn ChatProvider>,
-    registry: Arc<Registry>,
+    registry: Arc<Mutex<Registry>>,
     policy: Arc<Mutex<Policy>>,
     approver: Arc<dyn Approver>,
     tool_ctx: ToolContext,
@@ -440,7 +440,7 @@ impl Session {
             usage: Arc::new(Mutex::new(UsageTotals::default())),
             created_at: now_secs(),
             provider,
-            registry,
+            registry: Arc::new(Mutex::new((*registry).clone())),
             policy,
             approver,
             tool_ctx,
@@ -512,7 +512,7 @@ impl Session {
             usage: Arc::new(Mutex::new(record.usage)),
             created_at: record.created_at,
             provider,
-            registry,
+            registry: Arc::new(Mutex::new((*registry).clone())),
             policy,
             approver,
             tool_ctx,
@@ -712,6 +712,17 @@ impl Session {
     /// its own sandboxed process, so nothing needs respawning.
     pub async fn set_sandbox_profile(&self, profile: SandboxProfile) {
         self.tool_ctx.sandbox.set_profile(profile);
+    }
+
+    /// Register a tool at runtime — takes effect on the next turn.
+    /// If a tool with the same name is already registered it is replaced.
+    pub async fn add_tool_arc(&self, tool: Arc<dyn mira_tools::tool::Tool>) {
+        self.registry.lock().await.register_arc(tool);
+    }
+
+    /// True when a tool named `name` is registered in the current registry.
+    pub async fn has_tool(&self, name: &str) -> bool {
+        self.registry.lock().await.get(name).is_some()
     }
 
     /// Run one user turn to completion.
@@ -1000,7 +1011,7 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
             let req = ChatRequest {
                 model: cfg.model.clone(),
                 messages: build_request_messages(&sess).await,
-                tools: sess.registry.specs(),
+                tools: sess.registry.lock().await.specs(),
                 temperature: cfg.temperature,
                 max_tokens: cfg.max_tokens,
                 reasoning_effort: cfg.reasoning_effort.clone(),
@@ -1451,7 +1462,7 @@ async fn plan_dispatch_batches(sess: &Session, calls: Vec<ToolCall>) -> Vec<Disp
     let mut current: Vec<ToolCall> = Vec::new();
 
     for call in calls {
-        let is_safe = match sess.registry.get(&call.function.name) {
+        let is_safe = match sess.registry.lock().await.get(&call.function.name) {
             Some(tool) => tool.parallel_safe(&call),
             None => false,
         };
@@ -1491,7 +1502,7 @@ async fn plan_dispatch_batches(sess: &Session, calls: Vec<ToolCall>) -> Vec<Disp
 /// is shared by design. Concurrent history pushes serialize on the
 /// history mutex, which keeps the recorded transcript coherent.
 async fn dispatch_call(sess: &Session, call: ToolCall, tx: &mpsc::Sender<HarnessEvent>) -> bool {
-    let Some(tool) = sess.registry.get(&call.function.name) else {
+    let Some(tool) = sess.registry.lock().await.get(&call.function.name) else {
         let msg = format!("no such tool: {}", call.function.name);
         warn!(tool = %call.function.name, "unknown tool call");
         let result = ToolResult::err(call.id.clone(), msg);

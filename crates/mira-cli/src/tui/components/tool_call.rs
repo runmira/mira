@@ -309,6 +309,8 @@ fn batch_verb_noun(family: &str) -> (&'static str, &'static str) {
         "Fetch" => ("Fetching", "URLs"),
         "Search" => ("Searching", "queries"),
         "Agent" => ("Spawning", "subagents"),
+        "Computer" => ("Running", "actions"),
+        "Browser" => ("Browsing", "pages"),
         _ => ("Calling", "tools"),
     }
 }
@@ -350,6 +352,16 @@ pub(crate) fn summarize_tool(name: &str, args: &str) -> (String, String) {
                 .unwrap_or_default();
             let prompt = one_line(get("prompt").unwrap_or_default());
             ("Agent".to_owned(), format!("{type_prefix}{prompt}"))
+        }
+        "computer" => {
+            let action = get("action").unwrap_or_default();
+            let detail = computer_summary_detail(&action, &v);
+            ("Computer".to_owned(), detail)
+        }
+        "browser" => {
+            let action = get("action").unwrap_or_default();
+            let detail = browser_summary_detail(&action, &v);
+            ("Browser".to_owned(), detail)
         }
         "plan" => ("Plan".to_owned(), get("title").unwrap_or_default()),
         "ask_user" => ("Ask".to_owned(), {
@@ -449,6 +461,154 @@ fn model_short(model: &str) -> String {
     s.to_owned()
 }
 
+/// One-line summary for a `computer` tool action — shown after the
+/// `● Computer` label in the transcript header.
+fn computer_summary_detail(action: &str, v: &serde_json::Value) -> String {
+    let text = || {
+        v.get("text")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let coord = || {
+        v.get("coordinate")
+            .and_then(|c| c.as_array())
+            .and_then(|a| {
+                Some(format!(
+                    "({}, {})",
+                    a.first()?.as_i64()?,
+                    a.get(1)?.as_i64()?
+                ))
+            })
+            .unwrap_or_default()
+    };
+    match action {
+        "screenshot" => "Screenshot".to_owned(),
+        "cursor_position" => "Cursor position".to_owned(),
+        "zoom" => "Zoom".to_owned(),
+        "wait" => format!(
+            "Wait {}s",
+            v.get("duration")
+                .and_then(|x| x.as_f64())
+                .unwrap_or(1.0)
+        ),
+        "left_click" => format!("Click {}", coord()),
+        "right_click" => format!("Right-click {}", coord()),
+        "middle_click" => format!("Middle-click {}", coord()),
+        "double_click" => format!("Double-click {}", coord()),
+        "triple_click" => format!("Triple-click {}", coord()),
+        "mouse_move" => format!("Move {}", coord()),
+        "left_click_drag" => {
+            let from = v
+                .get("start_coordinate")
+                .and_then(|c| c.as_array())
+                .and_then(|a| {
+                    Some(format!(
+                        "({}, {})",
+                        a.first()?.as_i64()?,
+                        a.get(1)?.as_i64()?
+                    ))
+                })
+                .unwrap_or_default();
+            format!("Drag {} → {}", from, coord())
+        }
+        "left_mouse_down" => "Mouse down".to_owned(),
+        "left_mouse_up" => "Mouse up".to_owned(),
+        "type" => format!("Type \"{}\"", truncate(&text(), 40)),
+        "key" | "hold_key" => format!("Key {}", text()),
+        "scroll" => format!(
+            "Scroll {}",
+            v.get("scroll_direction")
+                .and_then(|x| x.as_str())
+                .unwrap_or("down")
+        ),
+        _ => action.replace('_', " "),
+    }
+}
+
+/// One-line summary for a `browser` tool action.
+fn browser_summary_detail(action: &str, v: &serde_json::Value) -> String {
+    let get = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_owned);
+    match action {
+        "navigate" => get("url")
+            .map(browser_url_label)
+            .unwrap_or_default(),
+        "new_tab" => get("url")
+            .map(browser_url_label)
+            .unwrap_or_else(|| "new tab".to_owned()),
+        "back" => "Back".to_owned(),
+        "forward" => "Forward".to_owned(),
+        "reload" => "Reload".to_owned(),
+        "snapshot" => "Snapshot".to_owned(),
+        "screenshot" => "Screenshot".to_owned(),
+        "list_tabs" => "List tabs".to_owned(),
+        "close" => "Close".to_owned(),
+        "click" => {
+            let target = get("ref")
+                .or_else(|| get("selector"))
+                .or_else(|| {
+                    v.get("coordinate")
+                        .and_then(|c| c.as_array())
+                        .and_then(|a| {
+                            let x = a.first()?.as_f64()?;
+                            let y = a.get(1)?.as_f64()?;
+                            Some(format!("({:.0}, {:.0})", x, y))
+                        })
+                })
+                .unwrap_or_default();
+            if target.is_empty() {
+                "Click".to_owned()
+            } else {
+                format!("Click {target}")
+            }
+        }
+        "type" => format!(
+            "Type \"{}\"",
+            truncate(&get("text").unwrap_or_default(), 40)
+        ),
+        "key" => get("key")
+            .map(|k| format!("Key {k}"))
+            .unwrap_or_else(|| "Key".to_owned()),
+        "scroll" => format!(
+            "Scroll {}",
+            get("direction").unwrap_or_else(|| "down".to_owned())
+        ),
+        "evaluate" => format!(
+            "Eval {}",
+            truncate(&get("expression").unwrap_or_default(), 40)
+        ),
+        "switch_tab" => v
+            .get("index")
+            .and_then(|x| x.as_u64())
+            .map(|i| format!("Tab [{i}]"))
+            .unwrap_or_else(|| "Switch tab".to_owned()),
+        "close_tab" => v
+            .get("index")
+            .and_then(|x| x.as_u64())
+            .map(|i| format!("Close tab [{i}]"))
+            .unwrap_or_else(|| "Close tab".to_owned()),
+        "wait" => format!(
+            "Wait {}s",
+            v.get("duration")
+                .and_then(|x| x.as_f64())
+                .unwrap_or(1.0)
+        ),
+        _ => action.replace('_', " "),
+    }
+}
+
+/// Prepend `https://` to scheme-less URLs for display labels. Mirrors
+/// the logic in `mira_browser::normalize_url` without pulling in the dep.
+fn browser_url_label(url: String) -> String {
+    if url.contains("://") || url.starts_with("about:") || url.starts_with("data:") {
+        url
+    } else if url.starts_with("localhost") || url.starts_with("127.0.0.1") {
+        format!("http://{url}")
+    } else {
+        format!("https://{url}")
+    }
+}
+
 /// `1.4s` under 10s, `12s` under a minute, `1m03s` above. Keeps the
 /// in-flight tool ticker compact whether the call takes a beat or
 /// half a minute (rare — usually a Bash that hasn't crashed yet).
@@ -481,6 +641,69 @@ mod tests {
         assert_eq!(
             summarize_tool("edit_file", r#"{"target":"x.rs"}"#),
             ("Edit".to_owned(), "x.rs".to_owned())
+        );
+    }
+
+    #[test]
+    fn summarize_computer_actions() {
+        assert_eq!(
+            summarize_tool("computer", r#"{"action":"screenshot"}"#),
+            ("Computer".to_owned(), "Screenshot".to_owned())
+        );
+        assert_eq!(
+            summarize_tool("computer", r#"{"action":"left_click","coordinate":[512,300]}"#),
+            ("Computer".to_owned(), "Click (512, 300)".to_owned())
+        );
+        assert_eq!(
+            summarize_tool("computer", r#"{"action":"type","text":"hello world"}"#),
+            ("Computer".to_owned(), "Type \"hello world\"".to_owned())
+        );
+        assert_eq!(
+            summarize_tool("computer", r#"{"action":"key","text":"ctrl+s"}"#),
+            ("Computer".to_owned(), "Key ctrl+s".to_owned())
+        );
+        assert_eq!(
+            summarize_tool("computer", r#"{"action":"scroll","scroll_direction":"down"}"#),
+            ("Computer".to_owned(), "Scroll down".to_owned())
+        );
+        assert_eq!(
+            summarize_tool(
+                "computer",
+                r#"{"action":"left_click_drag","start_coordinate":[10,20],"coordinate":[100,200]}"#
+            ),
+            ("Computer".to_owned(), "Drag (10, 20) → (100, 200)".to_owned())
+        );
+    }
+
+    #[test]
+    fn summarize_browser_actions() {
+        assert_eq!(
+            summarize_tool("browser", r#"{"action":"navigate","url":"github.com/x"}"#),
+            ("Browser".to_owned(), "https://github.com/x".to_owned())
+        );
+        assert_eq!(
+            summarize_tool("browser", r#"{"action":"navigate","url":"localhost:3000"}"#),
+            ("Browser".to_owned(), "http://localhost:3000".to_owned())
+        );
+        assert_eq!(
+            summarize_tool("browser", r#"{"action":"snapshot"}"#),
+            ("Browser".to_owned(), "Snapshot".to_owned())
+        );
+        assert_eq!(
+            summarize_tool("browser", r#"{"action":"click","ref":"e12"}"#),
+            ("Browser".to_owned(), "Click e12".to_owned())
+        );
+        assert_eq!(
+            summarize_tool("browser", r#"{"action":"type","text":"hello"}"#),
+            ("Browser".to_owned(), "Type \"hello\"".to_owned())
+        );
+        assert_eq!(
+            summarize_tool("browser", r#"{"action":"key","key":"Enter"}"#),
+            ("Browser".to_owned(), "Key Enter".to_owned())
+        );
+        assert_eq!(
+            summarize_tool("browser", r#"{"action":"switch_tab","index":2}"#),
+            ("Browser".to_owned(), "Tab [2]".to_owned())
         );
     }
 

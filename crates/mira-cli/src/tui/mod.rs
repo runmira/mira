@@ -91,6 +91,11 @@ pub struct TuiConfig {
     /// fetch is in flight or the provider doesn't expose a catalog;
     /// the palette handles both by silently showing no completions.
     pub models: Arc<tokio::sync::RwLock<Vec<String>>>,
+    /// Computer-use config from `mira.yaml` — used by `/computer on` to
+    /// register the backend with its configured options.
+    pub computer_cfg: mira_config::ComputerUseConfig,
+    /// Browser config from `mira.yaml` — used by `/browser on`.
+    pub browser_cfg: mira_config::BrowserConfig,
 }
 
 /// Built-in slash commands the palette suggests. Order is display order.
@@ -119,6 +124,8 @@ pub(crate) const SLASH_COMMANDS: &[(&str, &str)] = &[
         "swap palette (`/theme` · `/theme <name>` · `/theme reload` · `/theme save`)",
     ),
     ("/clear", "clear the visible transcript"),
+    ("/computer", "enable/disable desktop control (on|off|status)"),
+    ("/browser", "enable/disable browser automation (on|off|status)"),
     ("/quit", "exit the TUI"),
 ];
 
@@ -403,6 +410,10 @@ async fn run_slash(
 
         "/theme" => run_theme_slash(rest, state),
 
+        "/computer" => run_computer_slash(rest, state, cfg, session).await,
+
+        "/browser" => run_browser_slash(rest, state, cfg, session).await,
+
         // Fall through to the skill registry: any skill whose
         // frontmatter declares `slash: X` (default `X = skill.name`)
         // mounts as `/X`. Reserved commands above always win.
@@ -489,6 +500,104 @@ fn run_theme_slash(rest: &str, state: &mut state::TuiState) {
                 "unknown theme `{name}` — try /theme to list presets"
             )),
         },
+    }
+}
+
+async fn run_computer_slash(
+    rest: &str,
+    state: &mut state::TuiState,
+    cfg: &TuiConfig,
+    session: &Session,
+) {
+    match rest.trim() {
+        "on" => {
+            if session.has_tool("computer").await {
+                state.push_info("computer use is already enabled");
+                return;
+            }
+            let mut tmp = mira_tools::Registry::new();
+            let report = mira_tools::builtin::register_computer_use(
+                &mut tmp,
+                true,
+                &cfg.computer_cfg,
+                false,
+                &mira_config::BrowserConfig::default(),
+            )
+            .await;
+            for w in &report.warnings {
+                state.push_warning(w.clone());
+            }
+            if let Some(backend) = report.computer {
+                for tool in tmp.tools() {
+                    session.add_tool_arc(tool).await;
+                }
+                state.push_info(format!(
+                    "computer use enabled ({backend}); every desktop action asks for approval"
+                ));
+                state.flash = Some("computer on".to_owned());
+            }
+        }
+        "off" => state.push_warning(
+            "disabling a tool mid-session is not supported; restart without --computer".to_owned(),
+        ),
+        "" | "status" => {
+            if session.has_tool("computer").await {
+                state.push_info("computer use is enabled");
+            } else {
+                state.push_info("computer use is disabled · /computer on to enable");
+            }
+        }
+        other => state.push_warning(format!(
+            "usage: /computer · /computer on · /computer off  (got `{other}`)"
+        )),
+    }
+}
+
+async fn run_browser_slash(
+    rest: &str,
+    state: &mut state::TuiState,
+    cfg: &TuiConfig,
+    session: &Session,
+) {
+    match rest.trim() {
+        "on" => {
+            if session.has_tool("browser").await {
+                state.push_info("browser is already enabled");
+                return;
+            }
+            let mut tmp = mira_tools::Registry::new();
+            let report = mira_tools::builtin::register_computer_use(
+                &mut tmp,
+                false,
+                &mira_config::ComputerUseConfig::default(),
+                true,
+                &cfg.browser_cfg,
+            )
+            .await;
+            for w in &report.warnings {
+                state.push_warning(w.clone());
+            }
+            if report.browser {
+                for tool in tmp.tools() {
+                    session.add_tool_arc(tool).await;
+                }
+                state.push_info("browser enabled; Mira will use its own browser profile");
+                state.flash = Some("browser on".to_owned());
+            }
+        }
+        "off" => state.push_warning(
+            "disabling a tool mid-session is not supported; restart without --browser".to_owned(),
+        ),
+        "" | "status" => {
+            if session.has_tool("browser").await {
+                state.push_info("browser is enabled");
+            } else {
+                state.push_info("browser is disabled · /browser on to enable");
+            }
+        }
+        other => state.push_warning(format!(
+            "usage: /browser · /browser on · /browser off  (got `{other}`)"
+        )),
     }
 }
 
