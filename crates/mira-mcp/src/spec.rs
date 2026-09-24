@@ -383,8 +383,8 @@ pub fn missing_vars(s: &str, extra: &BTreeMap<String, String>) -> Vec<String> {
         let Some(end) = after.find('}') else { break };
         let inner = &after[..end];
         if !inner.contains(":-") {
-            let set = extra.contains_key(inner)
-                || std::env::var(inner).is_ok_and(|v| !v.is_empty());
+            let set =
+                extra.contains_key(inner) || std::env::var(inner).is_ok_and(|v| !v.is_empty());
             if !set && !out.iter().any(|o| o == inner) {
                 out.push(inner.to_owned());
             }

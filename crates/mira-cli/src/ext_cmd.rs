@@ -183,7 +183,7 @@ fn marker(s: &Status) -> &'static str {
     match s {
         Status::Connected => "✓",
         Status::Connecting => "…",
-        Status::NeedsAuth | Status::NeedsApproval => "!",
+        Status::NeedsAuth | Status::NeedsApproval | Status::NeedsSetup { .. } => "!",
         Status::Disabled | Status::Rejected => "-",
         Status::Failed { .. } => "✗",
     }

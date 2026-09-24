@@ -32,9 +32,9 @@ use tracing::{debug, warn};
 
 use crate::auth::{self, PendingSignIn};
 use crate::spec::{expand, missing_vars, Scope, ServerSpec, Transport};
-use crate::vars;
 use crate::state::{Approval, McpState};
 use crate::tool::{self, McpTool};
+use crate::vars;
 
 /// Tunables. [`McpOptions::from_env`] reads the same variables Claude
 /// Code does.
@@ -145,6 +145,9 @@ pub struct ResourceView {
     pub description: Option<String>,
     pub mime_type: Option<String>,
 }
+
+/// How long starting a sign-in (discovery + registration) may take.
+const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Everything a UI shows about one server.
 #[derive(Clone, Debug, Serialize)]
@@ -410,17 +413,28 @@ impl McpManager {
         };
         let saved = self.inner.vars();
         let missing = missing_in(&spec, &saved);
-        let transport = expand_transport(&spec, &saved).map_err(|vars| {
-            format!("set {} first", vars.join(", "))
-        })?;
-        let pending = auth::begin(
-            &self.inner.opts.credentials,
-            name,
-            &transport,
-            challenge.as_deref(),
-            redirect_uri,
+        let transport = expand_transport(&spec, &saved)
+            .map_err(|vars| format!("set {} first", vars.join(", ")))?;
+        // Discovery and registration are plain HTTP calls with no timeout
+        // of their own: a provider that never answers mustn't leave the
+        // Sign in button spinning.
+        let pending = tokio::time::timeout(
+            SIGN_IN_TIMEOUT,
+            auth::begin(
+                &self.inner.opts.credentials,
+                name,
+                &transport,
+                challenge.as_deref(),
+                redirect_uri,
+            ),
         )
         .await
+        .map_err(|_| {
+            format!(
+                "`{name}`'s sign-in server didn't answer within {}s; try again",
+                SIGN_IN_TIMEOUT.as_secs()
+            )
+        })?
         .map_err(|e| sign_in_error(name, &e, &missing))?;
         let url = pending.auth_url.clone();
         self.inner
@@ -1267,12 +1281,15 @@ fn sign_in_error(name: &str, e: &rmcp::transport::auth::AuthError, missing: &[St
             }
         );
     }
-    let no_registration = matches!(e, AuthError::RegistrationFailed(m) if m.contains("not supported"));
-    let no_oauth = matches!(e, AuthError::NoAuthorizationSupport)
-        || matches!(e, AuthError::MetadataError(_));
+    let no_registration =
+        matches!(e, AuthError::RegistrationFailed(m) if m.contains("not supported"));
+    let no_oauth =
+        matches!(e, AuthError::NoAuthorizationSupport) || matches!(e, AuthError::MetadataError(_));
     if no_registration || no_oauth {
         let why = if no_registration {
-            format!("`{name}` doesn't let apps register for sign-in, so Mira can't sign in with OAuth")
+            format!(
+                "`{name}` doesn't let apps register for sign-in, so Mira can't sign in with OAuth"
+            )
         } else {
             format!("`{name}` doesn't offer OAuth sign-in")
         };

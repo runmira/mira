@@ -531,6 +531,7 @@ export type McpStatus =
   | { state: 'needs_approval' }
   | { state: 'rejected' }
   | { state: 'disabled' }
+  | { state: 'needs_setup'; variables: string[] }
   | { state: 'failed'; message: string };
 
 export type McpToolView = { name: string; remote_name: string; description: string; read_only: boolean };
@@ -556,6 +557,8 @@ export type McpServerView = {
   instructions: string | null;
   can_sign_in: boolean;
   signed_in: boolean;
+  /** `${VAR}`s in the definition with no value. */
+  missing_vars: string[];
   log_path: string | null;
   config: McpServerConfig;
 };

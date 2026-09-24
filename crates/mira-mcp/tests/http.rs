@@ -439,7 +439,10 @@ async fn unset_token_header_falls_back_to_sign_in() {
         None,
     );
     wait_for(&mgr, "gh", Status::NeedsAuth).await;
-    assert_eq!(mgr.server("gh").unwrap().missing_vars, ["MIRA_TEST_GH_TOKEN_UNSET"]);
+    assert_eq!(
+        mgr.server("gh").unwrap().missing_vars,
+        ["MIRA_TEST_GH_TOKEN_UNSET"]
+    );
 
     *fake.registration.lock().unwrap() = "none";
     let err = mgr
