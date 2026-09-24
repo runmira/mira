@@ -88,6 +88,9 @@ mira --mode manual
 mira serve --open
 ```
 
+**Desktop app:** the same UI in a native window, built from
+[`apps/desktop`](./apps/desktop). See [docs/desktop.md](./docs/desktop.md).
+
 Then talk to it:
 
 ```text

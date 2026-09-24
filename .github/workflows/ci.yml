@@ -36,3 +36,39 @@ jobs:
 
       - name: test
         run: cargo test --workspace --all-targets
+
+  desktop:
+    name: desktop app (fmt · clippy)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install WebKitGTK
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop
+
+      # The bundler checks the sidecar exists; the real one is staged by
+      # scripts/build-desktop.sh.
+      - name: Stub the sidecar
+        run: |
+          touch "binaries/mira-$(rustc -vV | sed -n 's/^host: //p')"
+
+      - name: rustfmt
+        run: cargo fmt -- --check
+
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings

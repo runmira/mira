@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { DESKTOP_AUTH_REDIRECT, isDesktop, onAuthCallback, openExternal } from '../lib/desktop';
 import { getSupabase } from '../lib/supabase';
 
 type Provider = 'google' | 'github';
@@ -7,12 +8,66 @@ export function Login() {
   const [pending, setPending] = useState<Provider | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Desktop app: the provider sends the system browser back to
+  // `mira://auth-callback?code=…`, which the app forwards here. The PKCE
+  // verifier was stored by this page, so the exchange happens here too;
+  // AuthGate picks up the new session.
+  useEffect(() => {
+    if (!isDesktop()) return;
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    onAuthCallback(async (url) => {
+      const supabase = getSupabase();
+      if (!supabase) return;
+      const failure = url.searchParams.get('error_description') ?? url.searchParams.get('error');
+      const code = url.searchParams.get('code');
+      if (failure || !code) {
+        setPending(null);
+        setError(failure ?? 'Sign-in did not return a code.');
+        return;
+      }
+      const { error } = await supabase.auth.exchangeCodeForSession(code);
+      if (error) {
+        setPending(null);
+        setError(error.message);
+      }
+    }).then((u) => {
+      if (cancelled) u();
+      else unlisten = u;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
   async function signIn(provider: Provider) {
     const supabase = getSupabase();
     if (!supabase) return;
 
     setPending(provider);
     setError(null);
+
+    if (isDesktop()) {
+      // Providers (Google especially) refuse sign-in inside embedded
+      // webviews, so it happens in the system browser.
+      const { data, error } = await supabase.auth.signInWithOAuth({
+        provider,
+        options: { redirectTo: DESKTOP_AUTH_REDIRECT, skipBrowserRedirect: true },
+      });
+      if (error || !data.url) {
+        setPending(null);
+        setError(error?.message ?? 'Could not start sign-in.');
+        return;
+      }
+      try {
+        await openExternal(data.url);
+      } catch (e) {
+        setPending(null);
+        setError(`Could not open the browser: ${String(e)}`);
+      }
+      return;
+    }
 
     const { error } = await supabase.auth.signInWithOAuth({
       provider,
@@ -28,6 +83,8 @@ export function Login() {
     // On success the browser is redirected to the provider — no cleanup needed.
   }
 
+  const pendingLabel = isDesktop() ? 'Finish in your browser…' : 'Redirecting…';
+
   return (
     <div className="mx-auto flex min-h-screen max-w-sm flex-col items-center justify-center gap-8 px-6 py-12">
       <div className="flex flex-col items-center gap-2 text-center">
@@ -42,7 +99,7 @@ export function Login() {
           className="flex w-full items-center justify-center gap-3 rounded-md border border-neutral-300 bg-white px-4 py-2.5 text-sm font-medium text-neutral-900 shadow-sm transition hover:bg-neutral-50 disabled:opacity-60 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100 dark:hover:bg-neutral-800"
         >
           <GoogleGlyph />
-          {pending === 'google' ? 'Redirecting…' : 'Continue with Google'}
+          {pending === 'google' ? pendingLabel : 'Continue with Google'}
         </button>
         <button
           type="button"
@@ -51,7 +108,7 @@ export function Login() {
           className="flex w-full items-center justify-center gap-3 rounded-md bg-neutral-900 px-4 py-2.5 text-sm font-medium text-white shadow-sm transition hover:bg-neutral-800 disabled:opacity-60 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-white"
         >
           <GitHubGlyph />
-          {pending === 'github' ? 'Redirecting…' : 'Continue with GitHub'}
+          {pending === 'github' ? pendingLabel : 'Continue with GitHub'}
         </button>
         {error ? <p className="text-sm text-red-500">{error}</p> : null}
       </div>

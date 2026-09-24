@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Mira</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #fafafa;
+        --fg: #171717;
+        --muted: #737373;
+        --border: #e5e5e5;
+        --error: #b91c1c;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0a0a0a;
+          --fg: #f5f5f5;
+          --muted: #a3a3a3;
+          --border: #262626;
+          --error: #f87171;
+        }
+      }
+      html, body { height: 100%; margin: 0; }
+      body {
+        background: var(--bg);
+        color: var(--fg);
+        font: 14px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      main { max-width: 560px; padding: 24px; text-align: center; }
+      h1 { font-size: 20px; font-weight: 600; margin: 0 0 8px; letter-spacing: -0.01em; }
+      p { color: var(--muted); margin: 0; }
+      .spinner {
+        width: 22px; height: 22px; margin: 0 auto 16px;
+        border: 2px solid var(--border); border-top-color: var(--fg);
+        border-radius: 50%; animation: spin 0.8s linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      pre {
+        display: none; text-align: left; white-space: pre-wrap; word-break: break-word;
+        margin: 16px 0 0; padding: 12px; border: 1px solid var(--border); border-radius: 8px;
+        font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--error);
+        max-height: 50vh; overflow: auto; -webkit-user-select: text; user-select: text;
+      }
+      body.failed .spinner { display: none; }
+      body.failed pre { display: block; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="spinner"></div>
+      <h1 id="title">Starting Mira…</h1>
+      <p id="detail">Launching the local server.</p>
+      <pre id="error"></pre>
+    </main>
+    <script>
+      window.miraStartupFailed = function (message) {
+        document.body.classList.add('failed');
+        document.getElementById('title').textContent = 'Mira couldn’t start';
+        document.getElementById('detail').textContent =
+          'Quit and reopen the app to try again. Details:';
+        document.getElementById('error').textContent = message;
+      };
+    </script>
+  </body>
+</html>
