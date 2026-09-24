@@ -31,6 +31,6 @@ pub use prompt::{
     PlanProposal, PlanResponse, PlanStep, PlanTool, PromptChannel, PromptRequest, PromptResponse,
     SubagentReviewResponse,
 };
-pub use registry::Registry;
+pub use registry::{Registry, ToolSource};
 pub use tasks::{TaskItem, TaskStatus, TaskStore, TaskUpdate};
 pub use tool::{Action, Tool, ToolError};

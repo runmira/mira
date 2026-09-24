@@ -5,14 +5,25 @@ use mira_ai::ToolSpec;
 
 use crate::tool::Tool;
 
-/// Ordered map of tool name → tool.
+/// Tools whose set changes while Mira runs — the tools of connected MCP
+/// servers, for example. A [`Registry`] asks each source for its current
+/// tools on every lookup, so a server that connects, reconnects or goes
+/// away is reflected in every session holding a clone of the registry.
+pub trait ToolSource: Send + Sync {
+    fn tools(&self) -> Vec<Arc<dyn Tool>>;
+}
+
+/// Ordered map of tool name → tool, plus any live [`ToolSource`]s.
 ///
 /// Insertion order is preserved so tools appear to the model in the order
 /// they were registered — useful when demonstrating a preferred toolset.
+/// Source tools follow the registered ones; a registered tool wins a name
+/// clash.
 #[derive(Default, Clone)]
 pub struct Registry {
     order: Vec<String>,
     tools: HashMap<String, Arc<dyn Tool>>,
+    sources: Vec<Arc<dyn ToolSource>>,
 }
 
 impl Registry {
@@ -36,33 +47,59 @@ impl Registry {
         self
     }
 
+    /// Add a live tool source (see [`ToolSource`]).
+    pub fn add_source(&mut self, source: Arc<dyn ToolSource>) -> &mut Self {
+        self.sources.push(source);
+        self
+    }
+
+    /// The live sources, so a derived registry (a subagent's) can keep
+    /// them.
+    pub fn sources(&self) -> &[Arc<dyn ToolSource>] {
+        &self.sources
+    }
+
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
-        self.tools.get(name).cloned()
+        if let Some(t) = self.tools.get(name) {
+            return Some(t.clone());
+        }
+        self.source_tools().into_iter().find(|t| t.spec().name == name)
+    }
+
+    /// Current tools from the live sources, minus any shadowed by a
+    /// registered tool or an earlier source.
+    fn source_tools(&self) -> Vec<Arc<dyn Tool>> {
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for source in &self.sources {
+            for tool in source.tools() {
+                let name = tool.spec().name;
+                if !self.tools.contains_key(&name) && seen.insert(name) {
+                    out.push(tool);
+                }
+            }
+        }
+        out
     }
 
     pub fn specs(&self) -> Vec<ToolSpec> {
-        self.order
-            .iter()
-            .filter_map(|n| self.tools.get(n))
-            .map(|t| t.spec())
-            .collect()
+        self.tools().iter().map(|t| t.spec()).collect()
     }
 
     pub fn len(&self) -> usize {
-        self.tools.len()
+        self.tools.len() + self.source_tools().len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.tools.is_empty()
+        self.len() == 0
     }
 
     /// Specs of the tools usable in a remote environment (see
     /// [`Tool::remote_capable`]); what the model sees while the session
     /// is switched to one.
     pub fn remote_specs(&self) -> Vec<ToolSpec> {
-        self.order
+        self.tools()
             .iter()
-            .filter_map(|n| self.tools.get(n))
             .filter(|t| t.remote_capable())
             .map(|t| t.spec())
             .collect()
@@ -70,20 +107,24 @@ impl Registry {
 
     /// Names of registered tools hidden in a remote environment.
     pub fn local_only(&self) -> Vec<String> {
-        self.order
+        self.tools()
             .iter()
-            .filter(|n| self.tools.get(*n).is_some_and(|t| !t.remote_capable()))
-            .cloned()
+            .filter(|t| !t.remote_capable())
+            .map(|t| t.spec().name)
             .collect()
     }
 
-    /// Every registered tool, in registration order. Used by callers that
-    /// need to build a filtered subset (e.g. the `agent` tool constructing
-    /// a child registry).
+    /// Every tool, registered ones in registration order and then the
+    /// live sources' current tools. Used by callers that need to build a
+    /// filtered subset (e.g. the `agent` tool constructing a child
+    /// registry).
     pub fn tools(&self) -> Vec<Arc<dyn Tool>> {
-        self.order
+        let mut out: Vec<Arc<dyn Tool>> = self
+            .order
             .iter()
             .filter_map(|n| self.tools.get(n).cloned())
-            .collect()
+            .collect();
+        out.extend(self.source_tools());
+        out
     }
 }

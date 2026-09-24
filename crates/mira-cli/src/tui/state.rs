@@ -1980,6 +1980,11 @@ impl TuiState {
                 };
                 mira_policy::session_rule_for(action, &format!("{verb}:{url}"))
             }
+            // `mcp__<server>__<tool>` → `Mcp(<server>:<tool>)`.
+            _ if name.starts_with("mcp__") => {
+                let (server, tool) = name["mcp__".len()..].split_once("__")?;
+                mira_policy::session_rule_for(mira_tools::Action::Mcp, &format!("{server}:{tool}"))
+            }
             _ => None,
         }
     }

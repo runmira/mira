@@ -491,7 +491,7 @@ fn rule_string_for(action: mira_tools::Action, target: &str) -> String {
         mira_tools::Action::Read => format!("Read({target})"),
         mira_tools::Action::Edit => format!("Edit({target})"),
         mira_tools::Action::Write => format!("Write({target})"),
-        mira_tools::Action::Computer | mira_tools::Action::Browser => {
+        mira_tools::Action::Computer | mira_tools::Action::Browser | mira_tools::Action::Mcp => {
             mira_policy::session_rule_for(action, target).unwrap_or_default()
         }
         // Pure never gates; if we somehow got here just synthesize
