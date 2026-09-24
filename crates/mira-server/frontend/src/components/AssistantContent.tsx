@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { CaretDown } from '@phosphor-icons/react';
 import { Markdown } from './Markdown';
 import { cn } from '@/lib/utils';
+import type { DiffPreview } from '../types';
 
 /**
  * Renders assistant text, teasing apart `<think>…</think>` blocks that
@@ -13,7 +14,7 @@ import { cn } from '@/lib/utils';
  * arriving renders as an open "Thinking…" block that morphs into the
  * final collapsed section once the closing tag lands.
  */
-export function AssistantContent({ text }: { text: string }) {
+export function AssistantContent({ text, onOpenFile }: { text: string; onOpenFile?: (path: string, diff: DiffPreview | null) => void }) {
   const segments = parseSegments(text);
   return (
     <>
@@ -21,7 +22,7 @@ export function AssistantContent({ text }: { text: string }) {
         s.kind === 'think' ? (
           <ReasoningBlock key={i} content={s.content} open={s.streaming} />
         ) : (
-          <Markdown key={i} text={s.content} />
+          <Markdown key={i} text={s.content} onOpenFile={onOpenFile} />
         ),
       )}
     </>

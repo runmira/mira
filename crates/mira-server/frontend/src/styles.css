@@ -52,7 +52,7 @@
   html, body, #root { height: 100%; }
   body {
     @apply bg-background text-foreground antialiased;
-    font-family: 'Roboto', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
     font-weight: 400;
     letter-spacing: -0.011em;
   }
@@ -230,8 +230,8 @@
 }
 
 .md-code {
-  background: #1a1b26;
-  border: 1px solid #24283b;
+  background: #282c34;
+  border: 1px solid #3e4452;
   border-radius: 10px;
   margin: 0.8rem 0 1rem;
   overflow: hidden;
@@ -242,20 +242,20 @@
   align-items: center;
   gap: 0.5rem;
   padding: 0.45rem 0.85rem;
-  border-bottom: 1px solid #24283b;
-  background: linear-gradient(180deg, #1f2335 0%, #1a1b26 100%);
+  border-bottom: 1px solid #3e4452;
+  background: linear-gradient(180deg, #21252b 0%, #282c34 100%);
 }
 .md-code-head::before {
   content: '';
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #f7768e;
-  box-shadow: 14px 0 0 #e0af68, 28px 0 0 #9ece6a;
+  background: #e06c75;
+  box-shadow: 14px 0 0 #e5c07b, 28px 0 0 #98c379;
   margin-right: 30px;
 }
 .md-code-lang {
-  color: #7aa2f7;
+  color: #61afef;
   font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
   font-size: 11px;
   text-transform: lowercase;
@@ -274,9 +274,9 @@
   transition: all 0.1s ease;
 }
 .md-code-copy:hover {
-  background: rgba(122, 162, 247, 0.12);
-  border-color: rgba(122, 162, 247, 0.3);
-  color: #c0caf5;
+  background: rgba(97, 175, 239, 0.12);
+  border-color: rgba(97, 175, 239, 0.3);
+  color: #abb2bf;
 }
 .md-code pre {
   margin: 0;

@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { CaretDown, Target } from '@phosphor-icons/react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { AnimatePresence } from 'framer-motion';
+import { CaretDown, SidebarSimple, Target } from '@phosphor-icons/react';
 import { cn } from './lib/utils';
 import { connect, type WsClient, type WsStatus } from './ws';
-import { appendMemory, applyUndo, getSessionHistory, getSettings, listSkills, newSession, setSessionBackgroundMode, startReview, type SkillView } from './api';
+import { appendMemory, applyUndo, getBranchPr, getGitStatus, getSessionDiff, getSessionHistory, getSettings, gitCommit, gitPush, listSkills, newSession, setSessionBackgroundMode, startReview, type BranchPrView, type GitStatusView, type SessionDiffView, type SkillView } from './api';
+import { ContextPanel } from './components/ContextPanel';
 import { extractAgentId } from './components/AgentCard';
 import { SettingsSurface } from './components/Settings';
 import { PluginsPanel } from './components/Plugins';
@@ -29,7 +31,7 @@ import { PlanCard } from './components/PlanCard';
 import { AskUserCard, type AskUserDecision } from './components/AskUserCard';
 import { AgentCard, AgentGroup } from './components/AgentCard';
 import miraLogo from './assets/mira-logo.png';
-import { SubagentPanel, type SubagentTab } from './components/SubagentPanel';
+import { SubagentPanel, type SubagentTab, type FilePanelTab } from './components/SubagentPanel';
 import { TaskListPanel } from './components/TaskListPanel';
 import { GoalPanel } from './components/GoalPanel';
 import { countsByCategory, countsPhrase, ToolGroup } from './components/ToolGroup';
@@ -62,6 +64,10 @@ export type SubagentStreamState = {
   agentId?: string;
   model?: string;
   prompt?: string;
+  /** Human-readable name from the agent type frontmatter (e.g. "leo"). */
+  agentName?: string | null;
+  /** Category from the agent type frontmatter (e.g. "review", "recon"). */
+  agentCategory?: string | null;
   entries: Entry[];
   done: boolean;
   /** When set, the child produced a summary that requires human review
@@ -93,6 +99,10 @@ type ToolEntry = {
     proposal: AskUserProposal;
     decision: AskUserDecision | null;
   };
+  /** Live output lines streamed via `tool_progress` frames. Populated for
+   *  `run_background` and any other long-running tool that emits progress.
+   *  Lines accumulate even after the tool result has landed. */
+  progressLines?: string[];
 };
 type WarningEntry = { kind: 'warning'; text: string };
 type ErrorEntry = { kind: 'error'; text: string };
@@ -307,6 +317,37 @@ function parseAskUserResultText(text: string, expectedQuestions: number): AskUse
 }
 
 export default function App() {
+  const pingPrimedRef = useRef(false);
+
+  // Preload the file into browser cache on mount, and unlock audio playback
+  // on the first user gesture so subsequent play() calls are never blocked.
+  useEffect(() => {
+    const a = new Audio('/ping.mp3');
+    a.preload = 'auto';
+
+    function prime() {
+      if (pingPrimedRef.current) return;
+      pingPrimedRef.current = true;
+      a.volume = 0;
+      void a.play().then(() => { a.pause(); a.currentTime = 0; }).catch(() => {});
+    }
+
+    window.addEventListener('pointerdown', prime, { once: true });
+    window.addEventListener('keydown', prime, { once: true });
+    return () => {
+      window.removeEventListener('pointerdown', prime);
+      window.removeEventListener('keydown', prime);
+    };
+  }, []);
+
+  const playPing = useCallback(() => {
+    try {
+      const audio = new Audio('/ping.mp3');
+      audio.volume = 0.7;
+      void audio.play();
+    } catch { /* audio unavailable */ }
+  }, []);
+
   const [status, setStatus] = useState<WsStatus>('connecting');
   const [sessionId, setSessionId] = useState<string>('');
   const [model, setModel] = useState<string>('');
@@ -368,12 +409,17 @@ export default function App() {
   function exitSettings() {
     setMainView(settingsReturnTo === 'settings' ? 'chat' : settingsReturnTo);
   }
-  // Right-side subagent panel: `agentTabs` is the ordered list of open
-  // agent call_ids; `activeAgentTab` is the visible one. Panel is open
-  // iff `agentTabs.length > 0`. Tab bodies are derived from `entries`
-  // in a useMemo so status/result updates flow through automatically.
+  // Left sidebar visibility — collapses the 300px column to 0.
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  // Right-side panel: `agentTabs` is the ordered list of open agent call_ids;
+  // `fileTabs` is the ordered list of open file viewer tabs; `activeAgentTab`
+  // is the visible panel's id (either a callId or a file path). Panel is open
+  // iff either list is non-empty.
   const [agentTabs, setAgentTabs] = useState<string[]>([]);
+  const [fileTabs, setFileTabs] = useState<FilePanelTab[]>([]);
   const [activeAgentTab, setActiveAgentTab] = useState<string | null>(null);
+  // Right panel pixel width — user-draggable via the resize handle.
+  const [rightPanelWidth, setRightPanelWidth] = useState(390);
   // Live subagent transcripts keyed by parent tool-call id. Same Entry
   // shape as the parent transcript so the panel body can reuse the same
   // grouping and rendering helpers. Populated by the `subagent_*` WS
@@ -385,6 +431,9 @@ export default function App() {
   const [reviewPanelOpen, setReviewPanelOpen] = useState(false);
   const [reviewState, setReviewState] = useState<ReviewState | null>(null);
   const [usage, setUsage] = useState<UsageTotals | null>(null);
+  const [gitStatus, setGitStatus] = useState<GitStatusView | null>(null);
+  const [sessionDiff, setSessionDiff] = useState<SessionDiffView>({ added: 0, removed: 0, files: [] });
+  const [branchPr, setBranchPr] = useState<BranchPrView | null>(null);
   // Live task list — hydrated from `ready.tasks` on socket open and
   // upserted whenever a `task_*` tool result lands. Rendered as a
   // persistent "Plan" card near the top of the transcript.
@@ -460,12 +509,35 @@ export default function App() {
 
   function onMessage(msg: ServerMsg) {
     switch (msg.type) {
-      case 'ready':
+      case 'ready': {
+        setGitStatus(null);
+        setSessionDiff({ added: 0, removed: 0, files: [] });
+        setBranchPr(null);
         setSessionId(msg.session_id);
         setModel(msg.model);
         setMode(msg.mode);
         setCwd(msg.cwd);
-        setEntries(historyToEntries(msg.history, msg.previews));
+        const readyEntries = historyToEntries(msg.history, msg.previews);
+        setEntries(readyEntries);
+        // Seed subagent state from history so the ContextPanel shows agents
+        // on session reload (live subagent_started frames don't replay).
+        setSubagentState(() => {
+          const seeded = new Map<string, SubagentStreamState>();
+          for (const e of readyEntries) {
+            if (e.kind !== 'tool' || e.call.function.name !== 'agent') continue;
+            try {
+              const args = JSON.parse(e.call.function.arguments) as { prompt?: string };
+              seeded.set(e.call.id, {
+                parentCallId: e.call.id,
+                prompt: args.prompt ?? '',
+                entries: [],
+                done: true,
+                pendingReview: null,
+              });
+            } catch { /* skip malformed args */ }
+          }
+          return seeded;
+        });
         // Server-persisted turn timing is aligned with user-message order
         // (turn 0 = first user msg). Rebuild the local Map so "Worked for"
         // chips render on reloaded transcripts.
@@ -485,12 +557,16 @@ export default function App() {
         // Each session (and worktree) has its own environment; ask for it.
         setEnvSwitching(null);
         wsRef.current?.send({ type: 'environment' });
+        // Fetch git status, session diff, and branch PR for the new cwd.
+        getGitStatus().then((s) => { setGitStatus(s); getBranchPr().then(setBranchPr).catch(() => setBranchPr(null)); }).catch(() => {});
+        getSessionDiff().then(setSessionDiff).catch(() => {});
         // A Ready frame means the harness swapped session context (new /
         // load / resume / reconnect). If the user was parked on Plugins
         // or another management view, jump back to chat so a fresh
         // transcript actually shows.
         setMainView('chat');
         break;
+      }
       case 'token':
         setThinking(false);
         // Text is streaming — hide the indicator, but arm a short idle
@@ -503,6 +579,7 @@ export default function App() {
       case 'approval_request':
         setThinking(false);
         clearThinkingIdle();
+        playPing();
         setEntries((prev) => [
           ...prev,
           { kind: 'tool', call: msg.call, preview: msg.preview ?? null, status: 'pending', result: null },
@@ -553,6 +630,11 @@ export default function App() {
         setBusy(false);
         setThinking(false);
         clearThinkingIdle();
+        playPing();
+        // Refresh git status, session diff, and branch PR after each turn.
+        getGitStatus().then(setGitStatus).catch(() => {});
+        getSessionDiff().then(setSessionDiff).catch(() => {});
+        getBranchPr().then(setBranchPr).catch(() => setBranchPr(null));
         // Close out the most recent turn's timing.
         setTurnTimings((prev) => stampLastTurn(prev, Date.now()));
         setSidebarRefresh((n) => n + 1);
@@ -584,12 +666,7 @@ export default function App() {
         setEntries((prev) => [...prev, { kind: 'warning', text: msg.text }]);
         break;
       case 'tool_progress':
-        // Live output streaming is intentionally not rendered in the
-        // UI — the completed `tool_end` frame carries the full
-        // transcript for the model, and users don't want a
-        // scrolling terminal panel for every bash call. The backend
-        // still emits these frames so future features (verbose
-        // debugging, live-follow toggle) can opt back in.
+        setEntries((prev) => appendProgressLine(prev, msg.call_id, msg.line));
         break;
       case 'tool_preview':
         // The harness computes a diff preview for edit/write calls
@@ -767,6 +844,8 @@ export default function App() {
             agentId: msg.agent_id,
             model: msg.model,
             prompt: msg.prompt,
+            agentName: msg.agent_name ?? null,
+            agentCategory: msg.agent_category ?? null,
             entries: existing?.entries ?? [],
             done: false,
             pendingReview: existing?.pendingReview ?? null,
@@ -847,6 +926,7 @@ export default function App() {
         // Server reuses the tool call id as the prompt id. Attach immediately
         // if the tool_start already arrived; otherwise stash the proposal so
         // tool_start can pick it up when it lands (see the tool_start case).
+        playPing();
         setEntries((prev) => {
           const hit = prev.some((e) => e.kind === 'tool' && e.call.id === msg.prompt_id);
           if (!hit) {
@@ -859,6 +939,7 @@ export default function App() {
       case 'ask_user_request':
         // Same race-guard pattern as plan_request — attach immediately when
         // the tool_start already landed; stash otherwise.
+        playPing();
         setEntries((prev) => {
           const hit = prev.some((e) => e.kind === 'tool' && e.call.id === msg.prompt_id);
           if (!hit) {
@@ -1167,10 +1248,13 @@ export default function App() {
   function closeAgentTab(callId: string) {
     setAgentTabs((prev) => {
       const next = prev.filter((id) => id !== callId);
-      // If we just closed the active tab, jump to whatever's still open
-      // (or clear when empty).
       if (activeAgentTab === callId) {
-        setActiveAgentTab(next.length > 0 ? next[next.length - 1] : null);
+        // Fall through to remaining agent tabs, then file tabs, then null.
+        const remaining = [
+          ...next,
+          ...fileTabs.map((t) => t.id),
+        ];
+        setActiveAgentTab(remaining.length > 0 ? remaining[remaining.length - 1] : null);
       }
       return next;
     });
@@ -1178,10 +1262,55 @@ export default function App() {
 
   function closeSubagentPanel() {
     setAgentTabs([]);
+    setFileTabs([]);
     setActiveAgentTab(null);
   }
 
-  const panelOpen = subagentTabs.length > 0;
+  function openFileTab(path: string, diff: DiffPreview | null) {
+    setFileTabs((prev) => {
+      // If already open, update the diff (re-opening after a new write).
+      if (prev.some((t) => t.id === path)) {
+        return prev.map((t) => t.id === path ? { ...t, diff } : t);
+      }
+      return [...prev, { id: path, path, diff }];
+    });
+    setActiveAgentTab(path);
+  }
+
+  function closeFileTab(tabId: string) {
+    setFileTabs((prev) => {
+      const next = prev.filter((t) => t.id !== tabId);
+      if (activeAgentTab === tabId) {
+        const remaining = [...agentTabs, ...next.map((t) => t.id)];
+        setActiveAgentTab(remaining.length > 0 ? remaining[remaining.length - 1] : null);
+      }
+      return next;
+    });
+  }
+
+  function closeAnyTab(id: string) {
+    if (agentTabs.includes(id)) closeAgentTab(id);
+    else closeFileTab(id);
+  }
+
+  function handlePanelResizeStart(e: React.MouseEvent) {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = rightPanelWidth;
+    function onMove(ev: MouseEvent) {
+      // Dragging left increases panel width (panel is on the right side).
+      const next = Math.max(280, Math.min(800, startWidth + (startX - ev.clientX)));
+      setRightPanelWidth(next);
+    }
+    function onUp() {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    }
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  }
+
+  const panelOpen = subagentTabs.length > 0 || fileTabs.length > 0;
 
   function toggleTurn(idx: number) {
     setExpandedTurns((prev) => {
@@ -1191,48 +1320,59 @@ export default function App() {
     });
   }
 
+  const sidebarCol = sidebarOpen ? '300px' : '0px';
+  const rightCol = panelOpen ? `${rightPanelWidth}px` : '0px';
+
   return (
     <div
-      className={cn(
-        // grid-rows-1 forces the single row to `minmax(0, 1fr)` — without
-        // it, tall cell content (the SubagentPanel's markdown body) would
-        // grow the row past 100vh and push the composer inside <main>
-        // below the viewport fold.
-        'grid h-screen grid-rows-1 bg-background transition-[grid-template-columns] duration-150',
-        panelOpen
-          ? 'grid-cols-[300px_minmax(0,1fr)_minmax(340px,440px)]'
-          : 'grid-cols-[300px_minmax(0,1fr)]',
-      )}
+      className="grid h-screen grid-rows-1 bg-background transition-[grid-template-columns] duration-150"
+      style={{ gridTemplateColumns: `${sidebarCol} minmax(0,1fr) ${rightCol}` }}
     >
-      <Sidebar
-        status={status}
-        cwd={cwd}
-        activeSessionId={sessionId}
-        activeBusy={busy}
-        refreshKey={sidebarRefresh}
-        activeView={mainView}
-        onNavigate={setMainView}
-        onNewChat={async () => {
-          setMainView('chat');
-          await onNewChat();
-        }}
-        onOpenSettings={() => openSettings()}
-        onOpenPicker={() => setPickerOpen(true)}
-        onSessionLoaded={() => { /* Ready broadcast refreshes + jumps to chat */ }}
-        onAttachSession={(id) => wsRef.current?.attach(id)}
-        onSetBackgroundMode={async (id, mode) => {
-          await setSessionBackgroundMode(id, mode);
-          setSidebarRefresh((n) => n + 1);
-        }}
-        settingsSection={settingsSection}
-        onSettingsSectionChange={setSettingsSection}
-        onExitSettings={exitSettings}
-      />
+      {/* overflow-hidden clips sidebar content when the grid column animates to 0 */}
+      <div className="overflow-hidden">
+        <Sidebar
+          status={status}
+          cwd={cwd}
+          activeSessionId={sessionId}
+          activeBusy={busy}
+          refreshKey={sidebarRefresh}
+          activeView={mainView}
+          onNavigate={setMainView}
+          onNewChat={async () => {
+            setMainView('chat');
+            await onNewChat();
+          }}
+          onOpenSettings={() => openSettings()}
+          onOpenPicker={() => setPickerOpen(true)}
+          onSessionLoaded={() => { /* Ready broadcast refreshes + jumps to chat */ }}
+          onAttachSession={(id) => wsRef.current?.attach(id)}
+          onSetBackgroundMode={async (id, mode) => {
+            await setSessionBackgroundMode(id, mode);
+            setSidebarRefresh((n) => n + 1);
+          }}
+          settingsSection={settingsSection}
+          onSettingsSectionChange={setSettingsSection}
+          onExitSettings={exitSettings}
+        />
+      </div>
 
       <main className="flex min-w-0 min-h-0 flex-col">
         {mainView === 'chat' && (
           <>
             <div className="flex h-11 shrink-0 items-center gap-3 border-b border-border/60 px-4">
+              <button
+                type="button"
+                onClick={() => setSidebarOpen((v) => !v)}
+                title={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
+                className={cn(
+                  'shrink-0 rounded p-1.5 transition-colors',
+                  sidebarOpen
+                    ? 'text-foreground/70 hover:bg-accent hover:text-foreground'
+                    : 'text-muted-foreground/50 hover:bg-accent hover:text-foreground',
+                )}
+              >
+                <SidebarSimple className="size-4" />
+              </button>
               <span className="min-w-0 flex-1 truncate text-[13.5px] text-foreground">
                 {titleFromEntries(entries)}
               </span>
@@ -1254,60 +1394,95 @@ export default function App() {
               </div>
             </div>
 
-            <div className="flex-1 overflow-y-auto px-5 pb-5 pt-4" ref={paneRef}>
-              {configured === false && (
-                <div className="mx-auto mb-4 max-w-3xl rounded-lg border border-amber-500/30 bg-amber-500/[0.08] px-3 py-2 text-[13px] text-amber-200">
-                  No provider configured —{' '}
-                  <button
-                    className="underline underline-offset-2 hover:text-amber-100"
-                    onClick={() => openSettings()}
-                  >
-                    open Settings
-                  </button>{' '}
-                  to add one.
-                </div>
-              )}
+            {/* Transcript — full width, panel floats above it */}
+            <div className="relative flex-1 min-h-0">
+              <div
+                className="absolute inset-0 overflow-y-auto px-5 pb-5 pt-4 transition-[padding-right] duration-200"
+                style={{ paddingRight: (tasks.length > 0 || !!gitStatus?.in_repo || subagentState.size > 0) ? 308 : 20 }}
+                ref={paneRef}
+              >
+                {configured === false && (
+                  <div className="mx-auto mb-4 max-w-3xl rounded-lg border border-amber-500/30 bg-amber-500/[0.08] px-3 py-2 text-[13px] text-amber-200">
+                    No provider configured —{' '}
+                    <button
+                      className="underline underline-offset-2 hover:text-amber-100"
+                      onClick={() => openSettings()}
+                    >
+                      open Settings
+                    </button>{' '}
+                    to add one.
+                  </div>
+                )}
 
-              {isEmpty ? (
-                <EmptyState />
-              ) : (
-                <div className="mx-auto flex max-w-3xl flex-col gap-2">
-                  {goal && (
-                    <GoalPanel
-                      goal={goal}
-                      busy={busy}
-                      activity={goalActivity(entries)}
-                      onClear={onClearGoal}
-                      onRestart={(condition, maxIter) => onSetGoal(condition, maxIter)}
-                    />
-                  )}
-                  {tasks.length > 0 && <TaskListPanel tasks={tasks} />}
-                  {turns.map((turn, i) => (
-                    <TurnView
-                      key={`turn-${i}`}
-                      turn={turn}
-                      timing={turnTimings.get(i) ?? null}
-                      expanded={expandedTurns.has(i)}
-                      onToggle={() => toggleTurn(i)}
-                      onDecide={decideApproval}
-                      onPlanReply={replyToPlan}
-                      onAskUserReply={replyToAskUser}
-                      onOpenAgent={openAgentTab}
-                      isActive={busy && i === turns.length - 1}
-                      skills={skills}
-                      mode={mode}
-                      onSetMode={onSetMode}
-                    />
-                  ))}
-                  {thinking && (
-                    <div className="flex justify-start">
-                      <Thinking />
-                    </div>
-                  )}
-                </div>
-              )}
+                {isEmpty ? (
+                  <EmptyState />
+                ) : (
+                  <div className="mx-auto flex max-w-3xl flex-col gap-2">
+                    {goal && (
+                      <GoalPanel
+                        goal={goal}
+                        busy={busy}
+                        activity={goalActivity(entries)}
+                        onClear={onClearGoal}
+                        onRestart={(condition, maxIter) => onSetGoal(condition, maxIter)}
+                      />
+                    )}
+                    {tasks.length > 0 && <TaskListPanel tasks={tasks} />}
+                    {turns.map((turn, i) => (
+                      <TurnView
+                        key={`turn-${i}`}
+                        turn={turn}
+                        timing={turnTimings.get(i) ?? null}
+                        expanded={expandedTurns.has(i)}
+                        onToggle={() => toggleTurn(i)}
+                        onDecide={decideApproval}
+                        onPlanReply={replyToPlan}
+                        onAskUserReply={replyToAskUser}
+                        onOpenAgent={openAgentTab}
+                        onOpenFile={openFileTab}
+                        isActive={busy && i === turns.length - 1}
+                        skills={skills}
+                        mode={mode}
+                        onSetMode={onSetMode}
+                      />
+                    ))}
+                    {thinking && (
+                      <div className="flex justify-start">
+                        <Thinking />
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Floating context panel — absolutely anchored to top-right */}
+              <AnimatePresence>
+                <ContextPanel
+                  key="ctx"
+                  sessionTitle={titleFromEntries(entries)}
+                  tasks={tasks}
+                  subagentState={subagentState}
+                  entries={entries}
+                  gitStatus={gitStatus}
+                  sessionDiff={sessionDiff}
+                  branchPr={branchPr}
+                  environmentName={environment?.current ?? 'Local'}
+                  onOpenAgent={openAgentTab}
+                  onPush={async () => { await gitPush(); getGitStatus().then(setGitStatus).catch(() => {}); getBranchPr().then(setBranchPr).catch(() => {}); }}
+                  onCommit={async (message, includeUnstaged, pushAfter) => {
+                    await gitCommit({ message, include_unstaged: includeUnstaged, push_after: pushAfter });
+                    getGitStatus().then(setGitStatus).catch(() => {});
+                    getSessionDiff().then(setSessionDiff).catch(() => {});
+                    getBranchPr().then(setBranchPr).catch(() => setBranchPr(null));
+                  }}
+                />
+              </AnimatePresence>
             </div>
 
+            <div
+              className="shrink-0 transition-[padding-right] duration-200"
+              style={{ paddingRight: (tasks.length > 0 || !!gitStatus?.in_repo || subagentState.size > 0) ? 296 : 0 }}
+            >
             <Composer
               disabled={status !== 'open'}
               busy={busy}
@@ -1347,6 +1522,7 @@ export default function App() {
               }}
               skills={skills}
             />
+            </div>
           </>
         )}
 
@@ -1377,11 +1553,15 @@ export default function App() {
       {panelOpen && (
         <SubagentPanel
           tabs={subagentTabs}
+          fileTabs={fileTabs}
           activeCallId={activeAgentTab}
+          cwd={cwd ?? ''}
           onSelectTab={setActiveAgentTab}
-          onCloseTab={closeAgentTab}
+          onCloseTab={closeAnyTab}
           onClose={closeSubagentPanel}
           onReview={replyToSubagentReview}
+          onResizeStart={handlePanelResizeStart}
+          onOpenFile={openFileTab}
         />
       )}
 
@@ -1485,10 +1665,19 @@ function updateTool(prev: Entry[], callId: string, f: (t: ToolEntry) => ToolEntr
   return prev;
 }
 
-// `appendProgress` was removed with the Live Output panel — the
-// `tool_progress` handler now no-ops in `onMessage`. Backend keeps
-// emitting the frames so a future opt-in "watch stream" toggle can
-// wire back in without another round of plumbing.
+function appendProgressLine(prev: Entry[], callId: string, line: string): Entry[] {
+  for (let i = prev.length - 1; i >= 0; i--) {
+    const e = prev[i];
+    if (e.kind === 'tool' && e.call.id === callId) {
+      const updated: ToolEntry = {
+        ...e,
+        progressLines: [...(e.progressLines ?? []), line],
+      };
+      return [...prev.slice(0, i), updated, ...prev.slice(i + 1)];
+    }
+  }
+  return prev;
+}
 
 function attachPlanProposal(prev: Entry[], callId: string, proposal: PlanProposal): Entry[] {
   return updateTool(prev, callId, (t) => ({
@@ -1632,7 +1821,7 @@ function groupByTurn(entries: Entry[]): Turn[] {
 /* ---------- turn renderer ---------- */
 
 function TurnView({
-  turn, timing, expanded, isActive, onToggle, onDecide, onPlanReply, onAskUserReply, onOpenAgent, skills, mode, onSetMode,
+  turn, timing, expanded, isActive, onToggle, onDecide, onPlanReply, onAskUserReply, onOpenAgent, onOpenFile, skills, mode, onSetMode,
 }: {
   turn: Turn;
   timing: TurnTiming | null;
@@ -1646,6 +1835,8 @@ function TurnView({
   /** Opens (or focuses) the right-side SubagentPanel tab for the given
    *  agent call. Wired from App.tsx via `openAgentTab`. */
   onOpenAgent: (callId: string) => void;
+  /** Opens (or focuses) a file viewer tab in the right-side panel. */
+  onOpenFile: (path: string, diff: DiffPreview | null) => void;
   /** Loaded skill roster — passed through so the user bubble can render
    *  `@skill:<name>` mentions as pretty chips (icon + display label +
    *  hash-derived color) rather than raw tokens. */
@@ -1736,7 +1927,7 @@ function TurnView({
 
   return (
     <>
-      {turn.user && <EntryView entry={turn.user} onDecide={onDecide} onPlanReply={onPlanReply} onAskUserReply={onAskUserReply} onOpenAgent={onOpenAgent} skills={skills} mode={mode} onSetMode={onSetMode} />}
+      {turn.user && <EntryView entry={turn.user} onDecide={onDecide} onPlanReply={onPlanReply} onAskUserReply={onAskUserReply} onOpenAgent={onOpenAgent} onOpenFile={onOpenFile} skills={skills} mode={mode} onSetMode={onSetMode} />}
 
       {showWorkedChip && (
         <WorkedForChip
@@ -1774,19 +1965,21 @@ function TurnView({
                   preview: e.preview,
                   status: e.status,
                   result: e.result,
+                  progressLines: e.progressLines,
                 }))}
+                onOpenFile={onOpenFile}
               />
             </div>
           );
         }
         return (
-          <EntryView key={`t-i-${i}`} entry={item.entry} onDecide={onDecide} onPlanReply={onPlanReply} onAskUserReply={onAskUserReply} onOpenAgent={onOpenAgent} skills={skills} mode={mode} onSetMode={onSetMode} />
+          <EntryView key={`t-i-${i}`} entry={item.entry} onDecide={onDecide} onPlanReply={onPlanReply} onAskUserReply={onAskUserReply} onOpenAgent={onOpenAgent} onOpenFile={onOpenFile} skills={skills} mode={mode} onSetMode={onSetMode} />
         );
       })}
 
-      {finalEntry && <EntryView entry={finalEntry} onDecide={onDecide} onPlanReply={onPlanReply} onAskUserReply={onAskUserReply} onOpenAgent={onOpenAgent} skills={skills} mode={mode} onSetMode={onSetMode} />}
+      {finalEntry && <EntryView entry={finalEntry} onDecide={onDecide} onPlanReply={onPlanReply} onAskUserReply={onAskUserReply} onOpenAgent={onOpenAgent} onOpenFile={onOpenFile} skills={skills} mode={mode} onSetMode={onSetMode} />}
       {trailing.map((e, i) => (
-        <EntryView key={`t-t-${i}`} entry={e} onDecide={onDecide} onPlanReply={onPlanReply} onAskUserReply={onAskUserReply} onOpenAgent={onOpenAgent} skills={skills} mode={mode} onSetMode={onSetMode} />
+        <EntryView key={`t-t-${i}`} entry={e} onDecide={onDecide} onPlanReply={onPlanReply} onAskUserReply={onAskUserReply} onOpenAgent={onOpenAgent} onOpenFile={onOpenFile} skills={skills} mode={mode} onSetMode={onSetMode} />
       ))}
     </>
   );
@@ -2020,6 +2213,7 @@ function EntryView({
   onDecide,
   onPlanReply,
   onOpenAgent,
+  onOpenFile,
   skills,
   mode,
   onSetMode,
@@ -2029,6 +2223,8 @@ function EntryView({
   onDecide: (callId: string, allow: boolean, scope?: ApprovalScope) => void;
   onPlanReply: (callId: string, approved: boolean, steps?: PlanStep[], note?: string) => void;
   onOpenAgent: (callId: string) => void;
+  /** Opens a file viewer tab in the right-side panel. */
+  onOpenFile?: (path: string, diff: DiffPreview | null) => void;
   /** Answer callback for the `ask_user` tool card. Fires when the user
    *  submits picks (or dismisses); flips the card into its resolved
    *  state locally and posts back to the server. */
@@ -2075,7 +2271,7 @@ function EntryView({
       return (
         <div className="flex justify-start">
           <div className="max-w-[90%]">
-            <AssistantContent text={content ?? ''} />
+            <AssistantContent text={content ?? ''} onOpenFile={onOpenFile} />
           </div>
         </div>
       );
@@ -2133,9 +2329,11 @@ function EntryView({
             preview={entry.preview}
             status={entry.status}
             result={entry.result}
+            progressLines={entry.progressLines}
             onDecide={(allow, scope) => onDecide(entry.call.id, allow, scope)}
             mode={mode}
             onSetMode={onSetMode}
+            onOpenFile={onOpenFile}
           />
         </div>
       );

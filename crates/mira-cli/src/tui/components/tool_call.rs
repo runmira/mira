@@ -37,6 +37,10 @@ pub(crate) struct ToolView<'a> {
     /// tail) — renders dim under the `◐` header so a 90-second
     /// command doesn't look hung. `None` once a result lands.
     pub tail: Option<String>,
+    /// Full buffered output lines for background-process tools
+    /// (`run_background`, etc.). Shown in expanded view (Ctrl+E) as a
+    /// scrollback-style block instead of the generic result snippet.
+    pub bg_lines: Option<Vec<String>>,
     /// Live cell data for `agent` tool calls — child tool uses,
     /// progress notes, done status. `None` for all other tools.
     pub agent_cell: Option<&'a AgentCell>,
@@ -148,6 +152,24 @@ pub(crate) fn render(
         if show_diff {
             let p = v.preview.expect("checked above");
             out.extend(tool_result::diff_preview_lines(p, width));
+        } else if let Some(bg) = v.bg_lines.as_ref() {
+            // Background process: show buffered output lines instead of
+            // the generic result snippet (which just echoes the id/pid).
+            let show_lines = bg.len().min(40);
+            let start = bg.len().saturating_sub(show_lines);
+            for line in &bg[start..] {
+                let trimmed: String = line.chars().take((width as usize).saturating_sub(6)).collect();
+                out.push(Line::from(vec![
+                    Span::styled("  │ ", Style::default().fg(super::DIM())),
+                    Span::styled(trimmed, Style::default().fg(MUTED())),
+                ]));
+            }
+            if bg.len() > show_lines {
+                out.push(Line::from(vec![Span::styled(
+                    format!("  … {} earlier lines", bg.len() - show_lines),
+                    Style::default().fg(super::DIM()).italic(),
+                )]));
+            }
         } else if let Some(r) = v.result.as_ref() {
             // Pass the file path so read_file / view_file results get
             // language-aware syntax highlighting instead of the generic

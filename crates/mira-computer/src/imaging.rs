@@ -127,6 +127,8 @@ pub fn decode(bytes: &[u8]) -> Result<RgbaImage, ComputerError> {
 }
 
 /// Resize to exactly `w × h` (no-op when already that size).
+///
+/// Uses triangle filtering.
 pub fn resize(img: RgbaImage, w: u32, h: u32) -> RgbaImage {
     if img.width() == w && img.height() == h {
         return img;

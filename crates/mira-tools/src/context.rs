@@ -6,6 +6,7 @@ use mira_memory::{EpisodicStore, MemoryStore};
 use mira_sandbox::Sandbox;
 use tokio_util::sync::CancellationToken;
 
+use crate::builtin::background::BackgroundProcessStore;
 use crate::guard::FileGuard;
 use crate::tasks::TaskStore;
 
@@ -95,6 +96,16 @@ pub struct ToolContext {
     /// The harness installs a fresh token at the beginning of every
     /// turn and fires it before aborting the turn's Tokio task.
     pub cancel: Option<CancellationToken>,
+
+    /// Session-lifetime progress sink — persists across turns so background
+    /// process drain tasks can keep emitting `ToolProgress` frames even after
+    /// `invoke` returns. Distinct from `progress`, which is turn-scoped.
+    pub bg_progress: Option<Arc<dyn ToolProgressSink>>,
+
+    /// Registry of background processes spawned by `run_background`. Shared
+    /// across all tools in the session so `read_output` / `kill_background`
+    /// can look up processes by id.
+    pub bg_processes: Option<Arc<BackgroundProcessStore>>,
 }
 
 /// Contract the harness's `Session` fulfills to let the `agent` tool
@@ -144,6 +155,8 @@ impl ToolContext {
             progress: None,
             compute: mira_compute::ComputeSlot::default(),
             cancel: None,
+            bg_progress: None,
+            bg_processes: None,
         }
     }
 
@@ -210,6 +223,18 @@ impl ToolContext {
     /// Attach the parent session's child tracker.
     pub fn with_child_tracker(mut self, tracker: Arc<dyn ChildTracker>) -> Self {
         self.child_tracker = Some(tracker);
+        self
+    }
+
+    /// Attach the session-lifetime progress sink for background processes.
+    pub fn with_bg_progress(mut self, sink: Arc<dyn ToolProgressSink>) -> Self {
+        self.bg_progress = Some(sink);
+        self
+    }
+
+    /// Attach the background process registry.
+    pub fn with_bg_processes(mut self, store: Arc<BackgroundProcessStore>) -> Self {
+        self.bg_processes = Some(store);
         self
     }
 

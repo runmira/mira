@@ -176,6 +176,10 @@ pub struct BuildCtx<'a> {
     /// it through to `ToolView` so the renderer can show nested tool
     /// uses under `● Agent(...)` headers. Empty map in tests.
     pub agent_cells: &'a std::collections::HashMap<String, AgentCell>,
+    /// Buffered output lines for background processes, keyed by call_id.
+    /// `build_blocks` passes the relevant slice to `ToolView.bg_lines`
+    /// so the renderer can show live output for `run_background` cards.
+    pub bg_output_lines: &'a std::collections::HashMap<String, Vec<String>>,
 }
 
 /// Group the entry log into presentation blocks. Pure — borrows the
@@ -292,6 +296,7 @@ pub fn build_blocks<'a>(entries: &'a [LogEntry], ctx: &BuildCtx<'a>) -> Vec<Bloc
                 } else {
                     None
                 };
+                let bg_lines = ctx.bg_output_lines.get(&call_id).cloned();
                 out.push(Block {
                     kind: TranscriptBlock::Tool(tool_call::ToolView {
                         name,
@@ -302,6 +307,7 @@ pub fn build_blocks<'a>(entries: &'a [LogEntry], ctx: &BuildCtx<'a>) -> Vec<Bloc
                         undoable: ctx.undoable_idx == Some(i),
                         collapsed: result.as_ref().is_some_and(|r| r.collapsed),
                         tail,
+                        bg_lines,
                         agent_cell,
                     }),
                     first_entry: i,
@@ -334,6 +340,7 @@ pub fn build_blocks<'a>(entries: &'a [LogEntry], ctx: &BuildCtx<'a>) -> Vec<Bloc
                         undoable: false,
                         collapsed: collapsed_override.unwrap_or(false),
                         tail: None,
+                        bg_lines: None,
                         agent_cell: None,
                     }),
                     first_entry: i,
@@ -628,6 +635,9 @@ mod tests {
         static EMPTY_CELLS: std::sync::OnceLock<
             std::collections::HashMap<String, crate::tui::state::AgentCell>,
         > = std::sync::OnceLock::new();
+        static EMPTY_BG: std::sync::OnceLock<
+            std::collections::HashMap<String, Vec<String>>,
+        > = std::sync::OnceLock::new();
         BuildCtx {
             streaming: false,
             plan_mode: false,
@@ -637,6 +647,7 @@ mod tests {
             tool_tail: None,
             skip_assistant_idx: empty_skip_set(),
             agent_cells: EMPTY_CELLS.get_or_init(std::collections::HashMap::new),
+            bg_output_lines: EMPTY_BG.get_or_init(std::collections::HashMap::new),
         }
     }
 
@@ -758,6 +769,7 @@ mod tests {
             tool_tail: None,
             skip_assistant_idx: empty_skip_set(),
             agent_cells: ctx().agent_cells,
+            bg_output_lines: ctx().bg_output_lines,
         };
         let blocks = build_blocks(&entries, &c);
         assert_eq!(blocks.len(), 3); // user, old pair, new pair
@@ -794,6 +806,7 @@ mod tests {
             tool_tail: None,
             skip_assistant_idx: empty_skip_set(),
             agent_cells: ctx().agent_cells,
+            bg_output_lines: ctx().bg_output_lines,
         };
         let blocks = build_blocks(&entries, &c);
         let TranscriptBlock::Tool(v) = &blocks[1].kind else {
@@ -836,6 +849,7 @@ mod tests {
             tool_tail: None,
             skip_assistant_idx: empty_skip_set(),
             agent_cells: ctx().agent_cells,
+            bg_output_lines: ctx().bg_output_lines,
         };
         let blocks = build_blocks(&entries, &c);
         let TranscriptBlock::Assistant { streaming, .. } = &blocks[0].kind else {

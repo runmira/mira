@@ -17,6 +17,8 @@ fn bad(msg: impl Into<String>) -> ComputerError {
     ComputerError::Image(format!("xwd: {}", msg.into()))
 }
 
+/// Decode an XWD buffer (ZPixmap, 24/32 bpp) into an `RgbaImage`,
+/// normalising each channel through its visual mask.
 pub fn decode(buf: &[u8]) -> Result<RgbaImage, ComputerError> {
     if buf.len() < HEADER_LEN {
         return Err(bad("truncated header"));

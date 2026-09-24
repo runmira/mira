@@ -47,7 +47,8 @@ use mira_harness::{Approver, Session, SessionConfig, SessionRecord, SessionStore
 use mira_memory::{EpisodicStore, FileEpisodicStore, FileMemoryStore, MemoryStore};
 use mira_policy::Policy;
 use mira_sandbox::Sandbox;
-use mira_tools::{Registry, ToolContext};
+use mira_tools::context::ToolProgressSink;
+use mira_tools::{BackgroundProcessStore, Registry, ToolContext};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio::task::JoinHandle;
@@ -57,6 +58,23 @@ use crate::interactive::{
     AgentTool, AskUserTool, PendingPromptMap, PlanTool, PromptChannel, ScratchpadEntry,
 };
 use crate::protocol::ServerMsg;
+
+/// Session-lifetime `ToolProgressSink` that writes directly to the slot's
+/// broadcast channel. Unlike the harness `TurnProgress`, this is never
+/// cleared between turns, so background process drain tasks can keep emitting
+/// `ToolProgress` frames even after `invoke` has returned.
+struct SessionProgress {
+    tx: broadcast::Sender<ServerMsg>,
+}
+
+impl ToolProgressSink for SessionProgress {
+    fn emit(&self, call_id: &str, line: &str) {
+        let _ = self.tx.send(ServerMsg::ToolProgress {
+            call_id: call_id.to_owned(),
+            line: line.to_owned(),
+        });
+    }
+}
 
 /// How the slot's approver answers `Ask` decisions when no WS client is
 /// currently attached. Serialised over the wire so the frontend can show
@@ -273,6 +291,9 @@ pub async fn build_slot(
         agent_tool = agent_tool.with_store(store.clone());
     }
     registry_owned.register(agent_tool);
+    // Background process tools — registered last so they share the session's
+    // bg_store that's also wired into the ToolContext below.
+    mira_tools::builtin::register_background(&mut registry_owned);
     let registry = Arc::new(registry_owned);
 
     let environments = Arc::new(mira_compute::EnvironmentManager::new(
@@ -280,10 +301,18 @@ pub async fn build_slot(
         mira_compute::EnvironmentManager::default_patch_dir(),
         deps.compute.clone(),
     ));
+    // Session-lifetime progress sink — never cleared between turns so
+    // background process drain tasks can keep emitting ToolProgress frames.
+    let bg_progress: Arc<dyn ToolProgressSink> =
+        Arc::new(SessionProgress { tx: events_tx.clone() });
+    let bg_store = BackgroundProcessStore::new();
+
     let initial_ctx = ToolContext::new(cwd.clone(), deps.sandbox.clone())
         .with_memory(memory_store.clone())
         .with_episodic(episodic_store.clone())
-        .with_compute_slot(environments.slot());
+        .with_compute_slot(environments.slot())
+        .with_bg_progress(bg_progress)
+        .with_bg_processes(bg_store);
 
     let mut session = match resume {
         Some(record) => Session::resume_from(

@@ -17,6 +17,7 @@ pub struct NullProvider {
 }
 
 impl NullProvider {
+    /// Build a provider whose every stream call fails with `reason`.
     pub fn new(reason: impl Into<String>) -> Self {
         Self {
             reason: reason.into(),

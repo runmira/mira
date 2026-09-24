@@ -52,6 +52,7 @@ pub trait ComputerBackend: Send + Sync {
     /// larger than [`Self::screen_size`] on HiDPI displays.
     async fn capture(&self) -> Result<RgbaImage, ComputerError>;
 
+    /// Move the pointer to `p` in input-space coordinates.
     async fn mouse_move(&self, p: Point) -> Result<(), ComputerError>;
     async fn button(&self, button: MouseButton, action: ButtonAction) -> Result<(), ComputerError>;
     /// Scroll at the current pointer position by `amount` wheel clicks.

@@ -43,13 +43,16 @@ import { cn } from '@/lib/utils';
  *  so the y/n prompt is unmissable. */
 export function ToolGroup({
   entries,
+  onOpenFile,
 }: {
   entries: {
     call: ToolCall;
     preview: DiffPreview | null;
     status: ToolStatus;
     result: ToolResult | null;
+    progressLines?: string[];
   }[];
+  onOpenFile?: (path: string, diff: DiffPreview | null) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
 
@@ -91,7 +94,7 @@ export function ToolGroup({
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
-        className="group flex w-full min-w-0 items-center gap-1.5 rounded-md px-1 py-0.5 text-left text-[13px] transition-colors hover:bg-accent/40"
+        className="group flex w-full min-w-0 items-center gap-1.5 rounded-md px-2 py-1 text-left text-[13px] transition-colors hover:bg-accent/40"
       >
         <span className="shrink-0 text-muted-foreground">{header.verb}</span>
         {homogeneous && <CountBadge n={entries.length} />}
@@ -129,10 +132,9 @@ export function ToolGroup({
               preview={e.preview}
               status={e.status}
               result={e.result}
-              // Grouped entries can't be pending (App.tsx filters those out),
-              // so this handler will never fire. Keep the signature to
-              // satisfy the type; no-op is fine.
+              progressLines={e.progressLines}
               onDecide={() => {}}
+              onOpenFile={onOpenFile}
             />
           ))}
         </div>
@@ -311,7 +313,11 @@ export function categoryFor(name: string): ToolCategory {
       return 'edit';
     case 'bash':
     case 'rustfmt':
+    case 'run_background':
+    case 'kill_background':
       return 'run';
+    case 'read_output':
+      return 'read';
     case 'web_fetch':
       return 'fetch';
     case 'skill':
@@ -380,7 +386,10 @@ export function infoFor(name: string): ToolInfo {
     case 'task_update':     return { verbPast: 'Updated task', verbCont: 'Updating task', Icon: NotePencil };
     case 'task_list':       return { verbPast: 'Listed tasks', verbCont: 'Listing tasks', Icon: FileText };
     case 'task_get':        return { verbPast: 'Read task',   verbCont: 'Reading task',  Icon: FileText };
-    case 'bash':            return { verbPast: 'Ran',        verbCont: 'Running',       Icon: Terminal };
+    case 'bash':            return { verbPast: 'Ran',          verbCont: 'Running',          Icon: Terminal };
+    case 'run_background':  return { verbPast: 'Spawned',      verbCont: 'Spawning',         Icon: Terminal };
+    case 'read_output':     return { verbPast: 'Read output',  verbCont: 'Reading output',   Icon: Terminal };
+    case 'kill_background': return { verbPast: 'Stopped',      verbCont: 'Stopping',         Icon: Terminal };
     case 'rustfmt':         return { verbPast: 'Formatted',  verbCont: 'Formatting',    Icon: Sparkle };
     case 'web_fetch':       return { verbPast: 'Fetched',    verbCont: 'Fetching',      Icon: Globe };
     case 'web_search':      return { verbPast: 'Searched the web', verbCont: 'Searching the web', Icon: Globe };

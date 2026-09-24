@@ -368,6 +368,11 @@ pub struct TuiState {
     /// live tail under the `◐` header so a 90-second command doesn't
     /// look hung. Cleared on ToolEnd / interrupt.
     pub tool_tail: Option<(String, String)>,
+    /// Buffered output lines per tool call_id, keyed by call_id.
+    /// Populated by ToolProgress events from background processes and
+    /// long bash calls. Used to render expanded output when Ctrl+E is
+    /// held on a background process card.
+    pub bg_output_lines: std::collections::HashMap<String, Vec<String>>,
     pub streaming: bool,
     /// Indices of `LogEntry::Assistant` entries whose text was streamed
     /// line-by-line into real terminal scrollback via `MarkdownStream`
@@ -641,6 +646,7 @@ impl TuiState {
             model,
             git_branch: None,
             tool_tail: None,
+            bg_output_lines: std::collections::HashMap::new(),
             streaming: false,
             streamed_assistant_idx: std::collections::HashSet::new(),
             pending_approvals: VecDeque::new(),
@@ -1723,9 +1729,22 @@ impl TuiState {
 
     // ---- live tool tail ----
 
-    /// Record the newest output line of the in-flight tool. Blank
-    /// lines are skipped so a silent stretch keeps the last real one.
+    /// Record the newest output line of the in-flight tool. Blank lines are
+    /// skipped for the tail indicator, but all lines are buffered for
+    /// background processes so the full output is available on Ctrl+E.
     pub fn set_tool_tail(&mut self, call_id: &str, line: &str) {
+        // Accumulate for the background output buffer (all lines, including blank).
+        self.bg_output_lines
+            .entry(call_id.to_owned())
+            .or_default()
+            .push(line.to_owned());
+        // Keep only the last 500 lines to avoid unbounded growth.
+        let v = self.bg_output_lines.get_mut(call_id).unwrap();
+        if v.len() > 500 {
+            let drain_count = v.len() - 500;
+            v.drain(..drain_count);
+        }
+
         let trimmed = line.trim_end();
         if trimmed.trim().is_empty() {
             return;

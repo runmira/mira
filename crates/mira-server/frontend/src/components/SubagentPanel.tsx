@@ -1,15 +1,18 @@
 import { useMemo, useState } from 'react';
-import { CaretRight, CircleNotch, Info, WarningCircle, X } from '@phosphor-icons/react';
+import { CaretRight, CircleNotch, File as FileIcon, Info, WarningCircle, X } from '@phosphor-icons/react';
 import type { Entry } from '../App';
 import { groupAgentRuns } from '../App';
-import type { ToolCall, ToolResult } from '../types';
+import type { DiffPreview, ToolCall, ToolResult } from '../types';
 import type { ToolStatus } from './ToolCard';
 import { AssistantContent } from './AssistantContent';
 import { Markdown } from './Markdown';
 import { identityFor, extractPrompt, stripAgentIdMarker } from './AgentCard';
 import { ToolCard } from './ToolCard';
 import { ToolGroup } from './ToolGroup';
+import { FilePanelBody, type FilePanelTab } from './FilePanel';
 import { cn } from '@/lib/utils';
+
+export type { FilePanelTab };
 
 /** Right-side pane that shows one or more subagents in detail. Opens
  *  when the user clicks an AgentCard row in the transcript and adds a
@@ -39,22 +42,46 @@ export type SubagentTab = {
 
 type Props = {
   tabs: SubagentTab[];
+  /** File viewer tabs — live alongside agent tabs in the same strip. */
+  fileTabs: FilePanelTab[];
+  /** Active panel id — either a subagent callId or a file tab id (= path). */
   activeCallId: string | null;
-  onSelectTab: (callId: string) => void;
-  onCloseTab: (callId: string) => void;
+  /** Current working directory — passed through to the file panel for
+   *  breadcrumb rendering and the file-tree root. */
+  cwd: string;
+  onSelectTab: (id: string) => void;
+  onCloseTab: (id: string) => void;
   onClose: () => void;
+  /** Called on mousedown on the left resize handle. The parent (App)
+   *  owns the panel width state and wires up the drag listeners. */
+  onResizeStart: (e: React.MouseEvent) => void;
   /** Fired when the user answers a review-required prompt. `note` is
    *  optional and, on approval, gets prepended to the child's summary;
    *  on denial it becomes the tool-error body. */
   onReview: (parentCallId: string, promptId: string, approved: boolean, note?: string) => void;
+  /** Open or refresh a file tab. Used by the file panel's explorer so
+   *  clicking a file there opens a new tab rather than replacing the view. */
+  onOpenFile?: (path: string, diff: DiffPreview | null) => void;
 };
 
-export function SubagentPanel({ tabs, activeCallId, onSelectTab, onCloseTab, onClose, onReview }: Props) {
-  const active = tabs.find((t) => t.callId === activeCallId) ?? tabs[0];
-  if (!active) return null;
+export function SubagentPanel({ tabs, fileTabs, activeCallId, cwd, onSelectTab, onCloseTab, onClose, onReview, onResizeStart, onOpenFile }: Props) {
+  if (tabs.length === 0 && fileTabs.length === 0) return null;
+
+  // Fall back to first available tab when nothing is explicitly active.
+  const effectiveActiveId =
+    activeCallId ??
+    (tabs.length > 0 ? tabs[0].callId : fileTabs[0]?.id ?? null);
+  const effectiveAgent = tabs.find((t) => t.callId === effectiveActiveId);
+  const effectiveFile = fileTabs.find((t) => t.id === effectiveActiveId);
 
   return (
-    <aside className="flex h-full min-w-0 flex-col overflow-hidden border-l border-border bg-background">
+    <aside className="relative flex h-full min-w-0 flex-col overflow-hidden border-l border-border bg-background">
+      {/* Left-edge drag handle — 5px wide, invisible until hovered */}
+      <div
+        className="absolute left-0 top-0 z-20 h-full w-[5px] cursor-col-resize transition-colors hover:bg-mira-blue/30 active:bg-mira-blue/50"
+        onMouseDown={onResizeStart}
+        title="Drag to resize panel"
+      />
       {/* tab strip — h-11 matches the main pane's header so the two
           dividers line up exactly across the vertical border. */}
       <div className="flex h-11 shrink-0 items-center gap-1 border-b border-border/60 pl-2 pr-1.5">
@@ -63,9 +90,18 @@ export function SubagentPanel({ tabs, activeCallId, onSelectTab, onCloseTab, onC
             <TabCapsule
               key={t.callId}
               tab={t}
-              active={t.callId === active.callId}
+              active={t.callId === effectiveActiveId}
               onSelect={() => onSelectTab(t.callId)}
               onClose={() => onCloseTab(t.callId)}
+            />
+          ))}
+          {fileTabs.map((t) => (
+            <FileTabCapsule
+              key={t.id}
+              tab={t}
+              active={t.id === effectiveActiveId}
+              onSelect={() => onSelectTab(t.id)}
+              onClose={() => onCloseTab(t.id)}
             />
           ))}
         </div>
@@ -80,14 +116,20 @@ export function SubagentPanel({ tabs, activeCallId, onSelectTab, onCloseTab, onC
       </div>
 
       {/* active tab body */}
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        <TabBody tab={active} onReview={onReview} />
+      <div className="min-h-0 flex-1 overflow-hidden">
+        {effectiveFile ? (
+          <FilePanelBody tab={effectiveFile} cwd={cwd} onOpenFile={onOpenFile} />
+        ) : effectiveAgent ? (
+          <div className="h-full overflow-y-auto">
+            <TabBody tab={effectiveAgent} onReview={onReview} />
+          </div>
+        ) : null}
       </div>
     </aside>
   );
 }
 
-/** Rounded-full "capsule" tab. Active gets a grey `bg-secondary` fill;
+/** Rectangular tab. Active gets a grey `bg-secondary` fill;
  *  inactive is transparent with hover feedback. Icon + color come from
  *  the agent's identity so tabs are visually distinct at a glance. */
 function TabCapsule({
@@ -105,7 +147,7 @@ function TabCapsule({
       aria-selected={active}
       onClick={onSelect}
       className={cn(
-        'group inline-flex cursor-pointer items-center gap-1.5 rounded-full px-3 py-1 text-[12.5px] transition-colors',
+        'group inline-flex cursor-pointer items-center gap-1.5 rounded px-2.5 py-1 text-[12.5px] transition-colors',
         active
           ? 'bg-secondary text-foreground'
           : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground',
@@ -123,7 +165,52 @@ function TabCapsule({
           onClose();
         }}
         className={cn(
-          'ml-0.5 rounded-full p-0.5 text-muted-foreground/60 transition-opacity hover:bg-background/60 hover:text-foreground',
+          'ml-0.5 rounded p-0.5 text-muted-foreground/60 transition-opacity hover:bg-background/60 hover:text-foreground',
+          active ? 'opacity-100' : 'opacity-0 group-hover:opacity-100',
+        )}
+      >
+        <X className="size-3" />
+      </button>
+    </div>
+  );
+}
+
+/** Rectangular tab for a file viewer window. Shows the short filename + close
+ *  button. Breadcrumb detail lives inside the `FilePanelBody` header. */
+function FileTabCapsule({
+  tab, active, onSelect, onClose,
+}: {
+  tab: FilePanelTab;
+  active: boolean;
+  onSelect: () => void;
+  onClose: () => void;
+}) {
+  const shortName = tab.path.split('/').pop() ?? tab.path;
+  return (
+    <div
+      role="tab"
+      aria-selected={active}
+      onClick={onSelect}
+      className={cn(
+        'group inline-flex cursor-pointer items-center gap-1.5 rounded px-2.5 py-1 text-[12.5px] transition-colors',
+        active
+          ? 'bg-secondary text-foreground'
+          : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground',
+      )}
+    >
+      <FileIcon className="size-3.5 shrink-0 text-muted-foreground/70" />
+      <span className={cn('font-medium font-mono', active && 'text-foreground')}>
+        {shortName}
+      </span>
+      <button
+        type="button"
+        aria-label="Close tab"
+        onClick={(e) => {
+          e.stopPropagation();
+          onClose();
+        }}
+        className={cn(
+          'ml-0.5 rounded p-0.5 text-muted-foreground/60 transition-opacity hover:bg-background/60 hover:text-foreground',
           active ? 'opacity-100' : 'opacity-0 group-hover:opacity-100',
         )}
       >

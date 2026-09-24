@@ -2,24 +2,23 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowUp,
   Camera,
-  CaretDown,
+  ChevronDown,
   Circle,
-  CircleNotch,
   Cloud,
   Copy,
-  Desktop,
   File as FileIcon,
   Folder,
   GitBranch,
-  IconContext,
   Lightbulb,
   Link,
+  Loader,
+  Monitor,
   Paperclip,
   Plus,
   Square,
   Target,
   X,
-} from '@phosphor-icons/react';
+} from 'lucide-react';
 import { createWorktree, getGitStatus, listModels, putCwd, readFile, type GitStatusView, type ModelInfo } from '../api';
 import type { DiffPreview, EnvironmentInfo, EnvironmentStatus, Goal, Mode, ToolCall, UsageTotals } from '../types';
 import { costUsd, formatDollars, shortNum } from '../lib/usage';
@@ -356,10 +355,6 @@ export function Composer({
   const modeLabel = MODES.find((m) => m.value === mode)?.label ?? mode;
 
   return (
-    // Nested IconContext: icons rendered inside the composer bar use the
-    // `fill` weight for a chunkier, more Codex-like look. Rest of the app
-    // stays on the root duotone default.
-    <IconContext.Provider value={{ weight: 'fill', size: '1em', mirrored: false }}>
     <div className="flex flex-col items-center gap-1.5 px-4 pb-4 pt-2">
       <form
         className="w-full max-w-3xl flex flex-col gap-1.5 rounded-[22px] border border-border bg-secondary/60 p-2.5"
@@ -516,7 +511,7 @@ export function Composer({
               title="Stop"
               aria-label="Stop"
             >
-              <Square className="size-3.5 fill-current" />
+              <Square className="size-3.5" style={{ fill: 'currentColor' }} />
             </button>
           ) : (
             <button
@@ -538,8 +533,6 @@ export function Composer({
        *  diff/args they act on and don't jump around as the transcript
        *  grows. Global Y/N shortcut is bound at the App level. */}
       <div className="w-full max-w-3xl flex items-center gap-2 px-3">
-        <span className="flex-1" />
-        <UsageReadout usage={usage} model={model} />
         <EnvironmentChip
           status={environment ?? null}
           environments={environments ?? []}
@@ -547,6 +540,8 @@ export function Composer({
           disabled={busy || disabled}
           onSwitch={onSwitchEnvironment}
         />
+        <span className="flex-1" />
+        <UsageReadout usage={usage} model={model} />
         <WorktreeChip cwd={cwd} onCwdSwitched={onCwdSwitched} />
       </div>
 
@@ -573,7 +568,6 @@ export function Composer({
         }}
       />
     </div>
-    </IconContext.Provider>
   );
 }
 
@@ -720,7 +714,7 @@ function AttachMenu({
           {/* Override the composer's `fill` default — a fill-weight Plus is chunky
            *  and stands out too much next to the softer / model / mode chips.
            *  Regular weight reads as a clean, standard `+`. */}
-          {loading ? <CircleNotch className="size-3.5 animate-spin" /> : <Plus weight="regular" className="size-4" />}
+          {loading ? <Loader className="size-3.5 animate-spin" /> : <Plus className="size-4" />}
         </button>
       </PopoverTrigger>
       <PopoverContent className="w-60 p-1.5" align="start">
@@ -810,7 +804,7 @@ function AttachmentChip({
       title={`${attachment.path} · ${formatBytes(attachment.bytes)}`}
     >
       <span className="inline-flex size-8 shrink-0 items-center justify-center rounded-md border border-border/70 bg-secondary/70 text-muted-foreground">
-        <FileIcon className="size-4" weight="duotone" />
+        <FileIcon className="size-4" />
       </span>
       <span className="flex min-w-0 flex-col">
         <span className="max-w-[18rem] truncate text-[13px] font-semibold text-foreground">
@@ -826,7 +820,7 @@ function AttachmentChip({
         className="absolute right-1.5 top-1.5 inline-flex size-4 items-center justify-center rounded-full bg-secondary/90 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
         aria-label={`Remove ${label}`}
       >
-        <X className="size-2.5" weight="bold" />
+        <X className="size-2.5" />
       </button>
     </span>
   );
@@ -948,7 +942,7 @@ export function SentAttachmentChip({
       title={filename}
     >
       <span className="inline-flex size-8 shrink-0 items-center justify-center rounded-md border border-border/70 bg-secondary/70 text-muted-foreground">
-        <FileIcon className="size-4" weight="duotone" />
+        <FileIcon className="size-4" />
       </span>
       <span className="flex min-w-0 flex-col">
         <span className="max-w-[18rem] truncate text-[13px] font-semibold text-foreground">
@@ -1211,12 +1205,7 @@ function ModelPicker({
           <span className="shrink-0 text-[11.5px] font-medium leading-none text-muted-foreground/80">
             {prettyEffort(effort)}
           </span>
-          {/* Same CaretDown as ToolGroup's expand handle — signals
-           *  "this opens" without stealing focus from the label. */}
-          <CaretDown
-            weight="bold"
-            className="size-3 shrink-0 text-muted-foreground/60"
-          />
+          <ChevronDown className="size-3 shrink-0 text-muted-foreground/60" />
         </button>
       </PopoverTrigger>
       <PopoverContent
@@ -1560,7 +1549,7 @@ function PlanChip({ onExit }: { onExit: () => void }) {
       title="Plan mode on — click to exit"
       className="inline-flex items-center gap-1.5 rounded-full bg-mira-blue/15 px-2.5 py-1.5 text-[12.5px] text-mira-blue transition-colors hover:bg-mira-blue/25"
     >
-      <Lightbulb className="size-3 shrink-0" weight="fill" />
+      <Lightbulb className="size-3 shrink-0" />
       <span>Plan</span>
       <span className="text-mira-blue/70">·</span>
     </button>
@@ -1581,7 +1570,7 @@ function GoalComposeChip({ onCancel }: { onCancel: () => void }) {
       title="Composing a goal — press Enter to set, or click to cancel"
       className="inline-flex items-center gap-1.5 rounded-full border border-dashed border-mira-purple/50 bg-mira-purple/10 px-2.5 py-1.5 text-[12.5px] text-mira-purple transition-colors hover:bg-mira-purple/20"
     >
-      <Target className="size-3 shrink-0" weight="fill" />
+      <Target className="size-3 shrink-0" />
       <span className="font-medium">Goal</span>
       <span className="text-mira-purple/70">·</span>
       <span className="opacity-90">describe the condition ↵</span>
@@ -1627,7 +1616,7 @@ function GoalChip({ goal, onClear }: { goal: Goal; onClear: () => void }) {
         tone,
       )}
     >
-      <Target className="size-3 shrink-0" weight="fill" />
+      <Target className="size-3 shrink-0" />
       <span className="font-medium">Goal</span>
       <span className="opacity-70">·</span>
       <span className="tabular-nums opacity-90">
@@ -1691,7 +1680,7 @@ function UsageReadout({ usage, model }: { usage: UsageTotals | null; model: stri
 
 /** This machine, a scratch copy on this machine, or a cloud sandbox. */
 function envIcon(backend: string) {
-  if (backend === 'local') return Desktop;
+  if (backend === 'local') return Monitor;
   if (backend === 'scratch') return Copy;
   return Cloud;
 }
@@ -1734,7 +1723,7 @@ function EnvironmentChip({
                 : 'tools run on this machine'
           }
         >
-          {switching ? <CircleNotch className="size-3 shrink-0 animate-spin" /> : <Icon className="size-3 shrink-0" />}
+          {switching ? <Loader className="size-3 shrink-0 animate-spin" /> : <Icon className="size-3 shrink-0" />}
           <span className="truncate">{switching ? 'switching…' : status.current}</span>
         </button>
       </PopoverTrigger>

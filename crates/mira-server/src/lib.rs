@@ -264,6 +264,10 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/api/file", get(file::read_file))
         .route("/api/models", get(models::list_models))
         .route("/api/git/status", get(git::get_status))
+        .route("/api/git/session-diff", get(git::session_diff))
+        .route("/api/git/push", axum::routing::post(git::push))
+        .route("/api/git/branch-pr", get(git::branch_pr))
+        .route("/api/git/commit", axum::routing::post(git::commit))
         .route(
             "/api/git/worktree",
             axum::routing::post(git::create_worktree),

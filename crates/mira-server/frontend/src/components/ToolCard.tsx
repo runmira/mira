@@ -90,6 +90,12 @@ type Props = {
    *  replay) that already pass it. */
   mode?: Mode;
   onSetMode?: (m: Mode) => void;
+  /** Open the file in the side-panel file viewer. When present, file
+   *  names in write/edit tool rows become clickable links. */
+  onOpenFile?: (path: string, diff: DiffPreview | null) => void;
+  /** Live output lines streamed via `tool_progress` frames, used by
+   *  `run_background` and other long-running tools. */
+  progressLines?: string[];
 };
 
 /** Two shapes:
@@ -98,27 +104,29 @@ type Props = {
  *                  shortcut is bound at the App level so it fires no
  *                  matter which card is on screen.
  *  - anything else → compact row, click to expand args + result. */
-export function ToolCard({ call, preview, status, result, onDecide, mode: _mode, onSetMode: _onSetMode }: Props) {
+export function ToolCard({ call, preview, status, result, onDecide, mode: _mode, onSetMode: _onSetMode, onOpenFile, progressLines }: Props) {
   if (status === 'pending') {
     return (
       <PendingApprovalCard
         call={call}
         preview={preview}
         onDecide={onDecide}
+        onOpenFile={onOpenFile}
       />
     );
   }
-  return <CompactToolRow call={call} status={status} result={result} preview={preview} />;
+  return <CompactToolRow call={call} status={status} result={result} preview={preview} onOpenFile={onOpenFile} progressLines={progressLines} />;
 }
 
 /* ---------- pending approval ---------- */
 
 function PendingApprovalCard({
-  call, preview, onDecide,
+  call, preview, onDecide, onOpenFile,
 }: {
   call: ToolCall;
   preview: DiffPreview | null;
   onDecide: (allow: boolean, scope?: ApprovalScope) => void;
+  onOpenFile?: (path: string, diff: DiffPreview | null) => void;
 }) {
   // Pending = about to run → use the present-continuous verb ("Reading",
   // "Running", "Editing") so the header reads as a proposal, not a receipt.
@@ -126,13 +134,25 @@ function PendingApprovalCard({
   const prettyArgs = useMemo(() => prettyPrint(call.function.arguments), [call.function.arguments]);
   const kindLabel = preview ? labelFor(preview.kind) : null;
   const [scopeMenuOpen, setScopeMenuOpen] = useState(false);
+  const isDiffTool = call.function.name in DIFF_CARD_TOOLS;
 
   return (
-    <div className="flex w-full max-w-[78%] flex-col gap-2 overflow-hidden rounded-2xl border border-border/40 bg-card/80 p-3.5 backdrop-blur">
+    <div className="flex w-full max-w-[78%] flex-col gap-2 rounded-2xl border border-border/40 bg-card/80 p-3.5 backdrop-blur">
       <div className="flex items-center gap-2 font-mono text-[12.5px]">
         <span className="text-mira-tool">{summary.icon}</span>
         <span className="font-medium text-foreground">
-          {summary.verb} <span className="font-normal text-muted-foreground">{summary.target}</span>
+          {summary.verb}{' '}
+          {isDiffTool && onOpenFile && preview?.path ? (
+            <button
+              type="button"
+              onClick={() => onOpenFile(preview.path, null)}
+              className="font-normal text-muted-foreground underline-offset-2 transition-colors hover:text-mira-blue hover:underline"
+            >
+              {summary.target}
+            </button>
+          ) : (
+            <span className="font-normal text-muted-foreground">{summary.target}</span>
+          )}
         </span>
         {kindLabel && <Pill>{kindLabel}</Pill>}
         <span className="ml-auto rounded-full bg-secondary px-2 py-0.5 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">
@@ -233,12 +253,14 @@ function ScopeMenuItem({
 /* ---------- compact row (running / complete / denied) ---------- */
 
 function CompactToolRow({
-  call, status, result, preview,
+  call, status, result, preview, onOpenFile, progressLines,
 }: {
   call: ToolCall;
   status: ToolStatus;
   result: ToolResult | null;
   preview: DiffPreview | null;
+  onOpenFile?: (path: string, diff: DiffPreview | null) => void;
+  progressLines?: string[];
 }) {
   const [expanded, setExpanded] = useState(false);
   const summary = useMemo(() => summarize(call, status), [call, status]);
@@ -274,19 +296,30 @@ function CompactToolRow({
 
   return (
     <div className="w-full max-w-[78%]">
-      <button
+      {/* Use div+role instead of <button> so the filename chip (also a
+          button) doesn't trigger the "nested interactive content" HTML
+          violation that causes browsers to hoist or swallow the inner click. */}
+      <div
+        role="button"
+        tabIndex={0}
         onClick={() => setExpanded((v) => !v)}
-        // Codex-look: no leading caret, no leading icon. Verb + target
-        // as flowing text, trailing chevron that only appears on hover
-        // or when expanded (same rule as the "Worked for" header). The
-        // row remains fully clickable — the chevron is a visual hint,
-        // not the click target.
-        className="group flex w-full min-w-0 items-center gap-1.5 rounded-md px-1 py-0.5 text-left text-[13px] transition-colors hover:bg-accent/40"
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setExpanded((v) => !v); }}
+        className="group flex w-full min-w-0 cursor-pointer items-center gap-1.5 rounded-md px-1 py-0.5 text-left text-[13px] transition-colors hover:bg-accent/40"
       >
         <span className="min-w-0 flex-1 truncate">
           <span className="text-muted-foreground">{summary.verb}</span>
           {summary.target && (
-            targetIsPath ? (
+            isDiffCardTool && onOpenFile ? (
+              // Filename chip: click opens the file panel (with diff if available).
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); onOpenFile(filePath, preview ?? null); }}
+                className="ml-1.5 rounded bg-mira-elev1/70 px-1.5 py-0.5 font-mono text-[12px] text-foreground transition-colors hover:bg-mira-blue/15 hover:text-mira-blue"
+                title="Open in file viewer"
+              >
+                {summary.target}
+              </button>
+            ) : targetIsPath ? (
               <span className="ml-1.5 rounded bg-mira-elev1/70 px-1.5 py-0.5 font-mono text-[12px] text-foreground">
                 {summary.target}
               </span>
@@ -297,10 +330,6 @@ function CompactToolRow({
             )
           )}
           {stats && (
-            // Always show both counts side by side ("+291 -0" reads
-            // consistently with "+3 -2") — a fresh write with zero
-            // deletions still gets a rose "-0" so the format doesn't
-            // shift shape between rows.
             <span className="ml-2 font-mono text-[12px]">
               <span className="text-emerald-400">+{stats.adds}</span>
               {' '}
@@ -313,14 +342,22 @@ function CompactToolRow({
           className={cn(
             'size-3 shrink-0 text-foreground/70 transition-all',
             !expanded && '-rotate-90',
-            // Hide when collapsed AND not hovered — mirrors the
-            // "Worked for" header so the disclosure language is
-            // consistent across the transcript.
             !expanded && 'opacity-0 group-hover:opacity-100',
           )}
         />
         <StatusMark status={status} />
-      </button>
+      </div>
+
+      {/* Live output panel — visible whenever the tool has streamed lines,
+          even before or after the result lands. Shows a compact tail by
+          default; expands to the full buffer when the row is open. */}
+      {progressLines && progressLines.length > 0 && (
+        <LiveOutputPanel
+          lines={progressLines}
+          running={status === 'running'}
+          expanded={expanded}
+        />
+      )}
 
       {expanded && (
         <div className="ml-6 mb-1.5 mt-1 flex animate-fade-in flex-col gap-1.5">
@@ -330,6 +367,8 @@ function CompactToolRow({
               tool={call.function.name}
               lines={effectiveDiff}
               stats={stats}
+              diffPreview={preview ?? null}
+              onOpenFile={onOpenFile}
             />
           )}
           {!isDiffCardTool && preview && (
@@ -377,12 +416,14 @@ function CompactToolRow({
  * the real numbers.
  */
 function DiffCard({
-  filePath, tool, lines, stats,
+  filePath, tool, lines, stats, diffPreview, onOpenFile,
 }: {
   filePath: string;
   tool: string;
   lines: DiffLine[];
   stats: { adds: number; dels: number } | null;
+  diffPreview: DiffPreview | null;
+  onOpenFile?: (path: string, diff: DiffPreview | null) => void;
 }) {
   const shortName = filePath ? filePath.split('/').pop() ?? filePath : tool;
   const dir = filePath && filePath.includes('/')
@@ -393,7 +434,18 @@ function DiffCard({
     <div className="overflow-hidden rounded-lg border border-border/50 bg-mira-elev1/60">
       <div className="flex items-center gap-2 border-b border-border/40 bg-mira-elev1/80 px-3 py-2 text-[12px]">
         <FileText className="size-3.5 shrink-0 text-muted-foreground" weight="regular" />
-        <span className="shrink-0 font-medium text-foreground">{shortName}</span>
+        {onOpenFile && filePath ? (
+          <button
+            type="button"
+            onClick={() => onOpenFile(filePath, diffPreview)}
+            className="shrink-0 font-medium text-foreground transition-colors hover:text-mira-blue hover:underline underline-offset-2"
+            title="Open in file viewer"
+          >
+            {shortName}
+          </button>
+        ) : (
+          <span className="shrink-0 font-medium text-foreground">{shortName}</span>
+        )}
         {dir && (
           <span className="min-w-0 flex-1 truncate text-muted-foreground/70">
             {dir}
@@ -841,4 +893,70 @@ function labelFor(k: DiffPreview['kind']): string {
 function prettyPrint(json: string): string {
   try { return JSON.stringify(JSON.parse(json), null, 2); }
   catch { return json; }
+}
+
+/** Scrollable terminal-style panel for live process output.
+ *
+ * Compact mode (row collapsed): shows the last 5 lines with a subtle
+ * dark terminal background so a running process doesn't look hung.
+ * Expanded mode (row open): full buffer in a taller scrollable block.
+ *
+ * A pulsing green dot indicates the process is still running; a static
+ * grey dot means it has exited. */
+function LiveOutputPanel({
+  lines,
+  running,
+  expanded,
+}: {
+  lines: string[];
+  running: boolean;
+  expanded: boolean;
+}) {
+  const visibleLines = expanded ? lines : lines.slice(-5);
+  const totalLines = lines.length;
+
+  return (
+    <div
+      className={cn(
+        'ml-6 mt-0.5 rounded-md border font-mono text-[11.5px] leading-[1.55]',
+        'border-border/30 bg-[#1a1b1e]',
+        expanded ? 'max-h-[40vh]' : 'max-h-[8rem]',
+        'overflow-auto',
+      )}
+    >
+      {/* Header strip */}
+      <div className="sticky top-0 flex items-center gap-2 border-b border-border/20 bg-[#141416] px-3 py-1">
+        <span
+          className={cn(
+            'size-1.5 rounded-full',
+            running ? 'animate-pulse bg-emerald-400' : 'bg-muted-foreground/40',
+          )}
+        />
+        <span className="text-[10.5px] text-muted-foreground/60">
+          {running ? 'running' : 'exited'}
+        </span>
+        {!expanded && totalLines > 5 && (
+          <span className="ml-auto text-[10px] text-muted-foreground/40">
+            {totalLines} lines · showing last 5
+          </span>
+        )}
+        {expanded && (
+          <span className="ml-auto text-[10px] text-muted-foreground/40">
+            {totalLines} lines
+          </span>
+        )}
+      </div>
+      {/* Output lines */}
+      <div className="px-3 py-1.5">
+        {visibleLines.map((line, i) => (
+          <div
+            key={i}
+            className="whitespace-pre-wrap break-all text-[#abb2bf]"
+          >
+            {line || <span className="text-transparent">{'.'}</span>}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }

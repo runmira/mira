@@ -367,6 +367,15 @@ pub enum ServerMsg {
         /// Full prompt the child received. Small ceiling upstream via
         /// `truncate_for_history`, so this can safely include the raw text.
         prompt: String,
+        /// Human-readable name from the agent type's frontmatter
+        /// (e.g. `"leo"`, `"reviewer"`). `None` when spawned without a
+        /// named type.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        agent_name: Option<String>,
+        /// Category from the agent type's frontmatter (e.g. `"recon"`,
+        /// `"review"`). `None` when not set or no named type.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        agent_category: Option<String>,
     },
     /// Fragment of the child's assistant text.
     SubagentToken {

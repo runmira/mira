@@ -263,6 +263,7 @@ fn assemble_blocks(state: &TuiState) -> Vec<components::Block<'_>> {
         tool_tail: state.tool_tail.clone(),
         skip_assistant_idx: &state.streamed_assistant_idx,
         agent_cells: &state.agent_cells,
+        bg_output_lines: &state.bg_output_lines,
     };
     let mut blocks = components::build_blocks(state.entries(), &ctx);
 

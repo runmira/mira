@@ -51,7 +51,7 @@ const NAMED: &[(&[&str], &str)] = &[
     (&["end"], "End"),
     (&["pageup", "page_up", "prior"], "Page_Up"),
     (&["pagedown", "page_down", "next"], "Page_Down"),
-    (&["capslock", "caps_lock"], "Caps_Lock"),
+    (&["capslock", "caps_lock", "caps"], "Caps_Lock"),
     (&["f1"], "F1"),
     (&["f2"], "F2"),
     (&["f3"], "F3"),

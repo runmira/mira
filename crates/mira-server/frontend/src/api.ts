@@ -191,10 +191,11 @@ export type BrowseView = {
   truncated: boolean;
 };
 
-export async function browse(path?: string, showHidden = false): Promise<BrowseView> {
+export async function browse(path?: string, showHidden = false, includeFiles = false): Promise<BrowseView> {
   const params = new URLSearchParams();
   if (path) params.set('path', path);
   if (showHidden) params.set('show_hidden', 'true');
+  if (includeFiles) params.set('include_files', 'true');
   const r = await fetch(`/api/browse?${params.toString()}`);
   if (!r.ok) {
     let msg = `browse ${r.status}`;
@@ -355,12 +356,69 @@ export type GitStatusView = {
   /** All branches (local + remote), deduped on short name. Present
    *  in-repo, absent when `in_repo` is false. */
   branches?: BranchEntry[];
+  /** Total lines added in uncommitted changes vs HEAD. */
+  diff_added: number;
+  /** Total lines removed in uncommitted changes vs HEAD. */
+  diff_removed: number;
+  /** Subject line of the most recent commit. */
+  last_commit?: string | null;
 };
 
 export async function getGitStatus(): Promise<GitStatusView> {
   const r = await fetch('/api/git/status');
   if (!r.ok) throw new Error(`git status ${r.status}`);
   return (await r.json()) as GitStatusView;
+}
+
+export type SessionDiffView = { added: number; removed: number; files: string[] };
+
+export async function getSessionDiff(): Promise<SessionDiffView> {
+  const r = await fetch('/api/git/session-diff');
+  if (!r.ok) return { added: 0, removed: 0, files: [] };
+  return (await r.json()) as SessionDiffView;
+}
+
+export async function gitPush(): Promise<void> {
+  const r = await fetch('/api/git/push', { method: 'POST' });
+  if (!r.ok) {
+    let msg = `git push ${r.status}`;
+    try { const j = await r.json(); if (j.error) msg += `: ${j.error}`; } catch { /* ignore */ }
+    throw new Error(msg);
+  }
+}
+
+export type BranchPrView = {
+  number: number;
+  title: string;
+  state: string;
+  url: string;
+  isDraft: boolean;
+  reviewDecision: string | null;
+};
+
+export async function getBranchPr(): Promise<BranchPrView | null> {
+  const r = await fetch('/api/git/branch-pr');
+  if (!r.ok) return null;
+  return (await r.json()) as BranchPrView;
+}
+
+export type CommitRequest = {
+  message: string;
+  include_unstaged: boolean;
+  push_after: boolean;
+};
+
+export async function gitCommit(req: CommitRequest): Promise<void> {
+  const r = await fetch('/api/git/commit', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(req),
+  });
+  if (!r.ok) {
+    let msg = `git commit ${r.status}`;
+    try { const j = await r.json(); if (j.error) msg += `: ${j.error}`; } catch { /* ignore */ }
+    throw new Error(msg);
+  }
 }
 
 export type UndoOp = 'overwrite' | 'create';

@@ -21,6 +21,7 @@ pub mod remote;
 pub mod tasks;
 pub mod tool;
 
+pub use builtin::background::BackgroundProcessStore;
 pub use context::ToolContext;
 pub use guard::{AppliedUndo, FileGuard, GuardError, UndoEntry, UndoOp};
 pub use mcp::{connect as connect_mcp, McpConnection, McpTool};

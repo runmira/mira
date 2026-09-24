@@ -1,22 +1,22 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  CaretDown,
-  CaretRight,
-  CheckCircle,
+  ArrowLeft,
+  ChevronDown,
+  ChevronRight,
+  CircleCheck,
   Circle,
-  CircleNotch,
-  DotsThree,
+  Ellipsis,
   Folder,
   GitBranch,
   GitMerge,
-  IconContext,
-  NotePencil,
-  PencilSimple,
-  PuzzlePiece,
-  Sparkle,
+  Loader,
+  Pencil,
+  PenLine,
+  Puzzle,
+  Sparkles,
   Timer,
-  Trash,
-} from '@phosphor-icons/react';
+  Trash2,
+} from 'lucide-react';
 import {
   deleteSession,
   listSessions,
@@ -31,7 +31,6 @@ import { costUsd, formatDollars } from '../lib/usage';
 import miraLogo from '../assets/mira-logo.png';
 import { SETTINGS_SECTIONS, type SettingsSectionId } from './Settings';
 import { UserCard } from './UserCard';
-import { ArrowLeft } from '@phosphor-icons/react';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -102,7 +101,7 @@ const PER_GROUP_LIMIT = 5;
 
 export function Sidebar({
   status, cwd, activeSessionId, activeBusy, refreshKey, activeView, onNavigate,
-  onNewChat, onOpenSettings, onOpenPicker, onSessionLoaded, onAttachSession,
+  onNewChat, onOpenSettings, onSessionLoaded, onAttachSession,
   onSetBackgroundMode,
   settingsSection = 'provider',
   onSettingsSectionChange,
@@ -209,10 +208,7 @@ export function Sidebar({
   }
 
   return (
-    // Match the composer: every icon in the sidebar renders in Phosphor's
-    // `fill` weight for a chunkier, more Codex-like look. Nested contexts
-    // don't leak out — the root of the app stays on its own default.
-    <IconContext.Provider value={{ weight: 'fill', size: '1em', mirrored: false }}>
+    <>
     <aside className="flex h-full min-w-0 flex-col border-r border-border bg-card">
       <div className="flex items-center justify-between px-3 pt-3.5 pb-2">
         <div className="flex items-center gap-1.5">
@@ -270,7 +266,7 @@ export function Sidebar({
       ) : (
       <div className="flex-1 overflow-y-auto px-1.5 pb-2">
         <nav className="flex flex-col gap-0.5 px-0.5">
-          <NavItem icon={<NotePencil className="size-3.5" />} onClick={onNewChat}>
+          <NavItem icon={<PenLine className="size-3.5" />} onClick={onNewChat}>
             New thread
           </NavItem>
           <NavItem
@@ -281,7 +277,7 @@ export function Sidebar({
             Pull request
           </NavItem>
           <NavItem
-            icon={<PuzzlePiece className="size-3.5" />}
+            icon={<Puzzle className="size-3.5" />}
             active={activeView === 'plugins'}
             onClick={() => onNavigate('plugins')}
           >
@@ -321,9 +317,9 @@ export function Sidebar({
                     className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
                   >
                     {isCollapsed ? (
-                      <CaretRight className="size-3 shrink-0 text-muted-foreground/60" />
+                      <ChevronRight className="size-3 shrink-0 text-muted-foreground/60" />
                     ) : (
-                      <CaretDown className="size-3 shrink-0 text-muted-foreground/60" />
+                      <ChevronDown className="size-3 shrink-0 text-muted-foreground/60" />
                     )}
                     <Folder className={cn('size-3.5 shrink-0', g.isCurrent ? 'text-mira-blue' : 'text-muted-foreground/70')} />
                     <span className={cn('truncate', g.isCurrent && 'text-foreground')}>{g.label}</span>
@@ -345,7 +341,7 @@ export function Sidebar({
                         label: 'Delete all sessions',
                         danger: true,
                         confirm: `Delete all ${g.sessions.length} session${g.sessions.length === 1 ? '' : 's'} in ${g.label}?`,
-                        icon: <Trash className="size-3.5" />,
+                        icon: <Trash2 className="size-3.5" />,
                         onSelect: () => removeAllInProject(g.cwd),
                       },
                     ]}
@@ -393,22 +389,6 @@ export function Sidebar({
           })}
         </div>
 
-        <div className="mt-3 flex flex-col gap-0.5 px-0.5">
-          <div className="px-2.5 py-1 text-[11.5px] font-semibold uppercase tracking-wider text-muted-foreground/80">
-            Folder
-          </div>
-          <button
-            onClick={onOpenPicker}
-            title={cwd || 'Choose a folder'}
-            className="group grid w-full grid-cols-[1fr_auto] items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[14px] text-foreground/90 transition-colors hover:bg-accent hover:text-foreground"
-          >
-            <span className="flex min-w-0 items-center gap-2">
-              <Folder className="size-3.5 shrink-0 text-muted-foreground/70" />
-              <span className="truncate">{shortenPath(cwd) || 'Choose folder…'}</span>
-            </span>
-            <span className="text-[12px] text-muted-foreground/70 group-hover:text-muted-foreground">change</span>
-          </button>
-        </div>
       </div>
       )}
 
@@ -420,7 +400,7 @@ export function Sidebar({
       onManual={applyManualRename}
       onAi={applyAiRename}
     />
-    </IconContext.Provider>
+    </>
   );
 }
 
@@ -628,7 +608,7 @@ function SessionStatus({ running, merged }: { running: boolean; merged: boolean 
         title="Streaming"
         aria-label="working"
       >
-        <CircleNotch className="size-3 shrink-0 animate-spin text-mira-blue" />
+        <Loader className="size-3 shrink-0 animate-spin text-mira-blue" />
       </span>
     );
   }
@@ -639,7 +619,7 @@ function SessionStatus({ running, merged }: { running: boolean; merged: boolean 
         title="Merged"
         aria-label="merged"
       >
-        <CheckCircle className="size-4" weight="fill" />
+        <CircleCheck className="size-4" />
       </span>
     );
   }
@@ -648,7 +628,7 @@ function SessionStatus({ running, merged }: { running: boolean; merged: boolean 
       className="inline-flex size-4 items-center justify-center text-muted-foreground/40"
       aria-label="idle"
     >
-      <Circle className="size-3.5" weight="regular" />
+      <Circle className="size-3.5" />
     </span>
   );
 }
@@ -668,7 +648,7 @@ function InlineBranchBadge({
   const short = branch.length > 20 ? branch.slice(0, 18) + '…' : branch;
   return (
     <span className={cn('inline-flex items-center gap-0.5', merged ? 'text-mira-purple' : 'text-muted-foreground/80')}>
-      <Icon className="size-3" weight={merged ? 'fill' : 'regular'} />
+      <Icon className="size-3" />
       <span className="font-mono">{short}</span>
     </span>
   );
@@ -816,7 +796,7 @@ function RenameDialog({
               disabled={saveBusy || aiBusy}
               className="gap-1.5"
             >
-              <Sparkle className="size-3.5" />
+              <Sparkles className="size-3.5" />
               {aiBusy ? 'Generating…' : aiApplied ? 'Regenerate' : 'Rename with AI'}
             </Button>
             <div className="flex items-center gap-2">
@@ -993,12 +973,6 @@ function timeAgo(unixSecs: number): string {
   return `${Math.floor(days / 7)}w`;
 }
 
-function shortenPath(p: string): string {
-  if (!p) return '';
-  const parts = p.split('/');
-  if (parts.length <= 3) return p;
-  return '…/' + parts.slice(-2).join('/');
-}
 
 /* ---------- provider family (dot color) ---------- */
 
@@ -1056,7 +1030,7 @@ function backgroundMenuItems(args: {
   const items: RowMenuItem[] = [
     {
       label: 'Rename session',
-      icon: <PencilSimple className="size-3.5" />,
+      icon: <Pencil className="size-3.5" />,
       onSelect: args.onRename,
     },
   ];
@@ -1079,7 +1053,7 @@ function backgroundMenuItems(args: {
     label: 'Delete session',
     danger: true,
     confirm: 'Delete this session? This cannot be undone.',
-    icon: <Trash className="size-3.5" />,
+    icon: <Trash2 className="size-3.5" />,
     onSelect: args.onDelete,
   });
   return items;
@@ -1116,7 +1090,7 @@ function RowMenu({ items }: { items: RowMenuItem[] }) {
             open ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus:opacity-100',
           )}
         >
-          <DotsThree className="size-3.5" />
+          <Ellipsis className="size-3.5" />
         </button>
       </PopoverTrigger>
       <PopoverContent
@@ -1173,8 +1147,7 @@ function RowMenu({ items }: { items: RowMenuItem[] }) {
                 {it.icon && <span className="shrink-0 text-muted-foreground">{it.icon}</span>}
                 <span className="flex-1">{it.label}</span>
                 {it.checked && (
-                  <CheckCircle
-                    weight="fill"
+                  <CircleCheck
                     className="size-3.5 shrink-0 text-emerald-500"
                   />
                 )}

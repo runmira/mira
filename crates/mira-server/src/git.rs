@@ -77,6 +77,15 @@ pub struct GitStatusView {
     /// Empty when not in a repo.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub branches: Vec<BranchEntry>,
+    /// Total lines added across all uncommitted changes (staged + unstaged vs HEAD).
+    #[serde(default)]
+    pub diff_added: u64,
+    /// Total lines removed across all uncommitted changes (staged + unstaged vs HEAD).
+    #[serde(default)]
+    pub diff_removed: u64,
+    /// Short subject of the most recent commit (`git log -1 --pretty=%s`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_commit: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -109,6 +118,9 @@ pub async fn get_status(State(state): State<AppState>) -> Response {
             primary_project: None,
             worktrees: vec![],
             branches: vec![],
+            diff_added: 0,
+            diff_removed: 0,
+            last_commit: None,
         })
         .into_response();
     }
@@ -127,6 +139,8 @@ pub async fn get_status(State(state): State<AppState>) -> Response {
     let primary_project = primary_worktree(&cwd)
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
     let branches = list_branches(&cwd, &worktrees);
+    let (diff_added, diff_removed) = diff_stats(&cwd);
+    let last_commit = last_commit_subject(&cwd);
 
     Json(GitStatusView {
         in_repo: true,
@@ -138,8 +152,191 @@ pub async fn get_status(State(state): State<AppState>) -> Response {
         primary_project,
         worktrees,
         branches,
+        diff_added,
+        diff_removed,
+        last_commit,
     })
     .into_response()
+}
+
+/// Diff stats scoped to only the files this session has written.
+/// Returns zeroes when the session has no file guard or hasn't touched anything.
+pub async fn session_diff(State(state): State<AppState>) -> Response {
+    let cwd = state.current_cwd().await;
+    let session = state.current_session().await;
+
+    let written = match session.file_guard() {
+        Some(g) => g.written_snapshot().await,
+        None => {
+            return Json(serde_json::json!({ "added": 0, "removed": 0, "files": [] }))
+                .into_response()
+        }
+    };
+
+    if written.is_empty() {
+        return Json(serde_json::json!({ "added": 0, "removed": 0, "files": [] }))
+            .into_response();
+    }
+
+    // Collect relative paths (git diff requires paths relative to repo root).
+    let file_args: Vec<String> = written
+        .iter()
+        .filter_map(|p| {
+            p.strip_prefix(&cwd)
+                .ok()
+                .map(|r| r.to_string_lossy().into_owned())
+        })
+        .collect();
+
+    if file_args.is_empty() {
+        return Json(serde_json::json!({ "added": 0, "removed": 0, "files": [] }))
+            .into_response();
+    }
+
+    // `git diff HEAD --numstat -- file1 file2 …`
+    let mut args = vec!["diff", "HEAD", "--numstat", "--"];
+    let file_strs: Vec<&str> = file_args.iter().map(|s| s.as_str()).collect();
+    args.extend_from_slice(&file_strs);
+
+    let (added, removed) = match run(&cwd, &args) {
+        Ok(out) => {
+            let mut a = 0u64;
+            let mut r = 0u64;
+            for line in out.lines() {
+                let mut parts = line.split('\t');
+                if let (Some(ad), Some(rm)) = (parts.next(), parts.next()) {
+                    a += ad.parse::<u64>().unwrap_or(0);
+                    r += rm.parse::<u64>().unwrap_or(0);
+                }
+            }
+            (a, r)
+        }
+        Err(_) => (0, 0),
+    };
+
+    let file_names: Vec<String> = written
+        .iter()
+        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .collect();
+
+    Json(serde_json::json!({
+        "added": added,
+        "removed": removed,
+        "files": file_names,
+    }))
+    .into_response()
+}
+
+/// GET /api/git/branch-pr
+/// Returns the PR for the current branch using `gh pr view`.
+/// Returns 404 when no PR exists for the branch.
+pub async fn branch_pr(State(state): State<AppState>) -> Response {
+    let cwd = state.current_cwd().await;
+    if !is_git_repo(&cwd) {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "not a git repo"}))).into_response();
+    }
+    let out = Command::new("gh")
+        .current_dir(&cwd)
+        .args(["pr", "view", "--json", "number,title,state,url,isDraft,reviewDecision"])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            let text = String::from_utf8_lossy(&o.stdout);
+            match serde_json::from_str::<serde_json::Value>(text.trim()) {
+                Ok(v) => Json(v).into_response(),
+                Err(_) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "no pr"}))).into_response(),
+            }
+        }
+        _ => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "no pr"}))).into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CommitRequest {
+    pub message: String,
+    #[serde(default)]
+    pub include_unstaged: bool,
+    #[serde(default)]
+    pub push_after: bool,
+}
+
+/// POST /api/git/commit
+/// Commits staged (+ optionally all) changes. If message is blank, generates
+/// one from the list of changed files.
+pub async fn commit(State(state): State<AppState>, Json(req): Json<CommitRequest>) -> Response {
+    let cwd = state.current_cwd().await;
+    if !is_git_repo(&cwd) {
+        return err(StatusCode::BAD_REQUEST, "not a git repo".into());
+    }
+
+    // Always stage modifications to tracked files; with the toggle also
+    // stage new/untracked files (-A vs -u).
+    Command::new("git")
+        .current_dir(&cwd)
+        .args(["add", if req.include_unstaged { "-A" } else { "-u" }])
+        .output()
+        .ok();
+
+    let message = if req.message.trim().is_empty() {
+        // Auto-generate from staged files
+        let files = run(&cwd, &["diff", "--staged", "--name-only"]).unwrap_or_default();
+        let names: Vec<&str> = files
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty())
+            .take(3)
+            .collect();
+        if names.is_empty() {
+            "chore: session changes".to_string()
+        } else {
+            format!("update {}", names.join(", "))
+        }
+    } else {
+        req.message.trim().to_string()
+    };
+
+    let commit_out = Command::new("git")
+        .current_dir(&cwd)
+        .args(["commit", "-m", &message])
+        .output();
+
+    match commit_out {
+        Ok(o) if o.status.success() => {
+            if req.push_after {
+                let push_out = Command::new("git")
+                    .current_dir(&cwd)
+                    .args(["push", "--set-upstream", "origin", "HEAD"])
+                    .output();
+                match push_out {
+                    Ok(po) if po.status.success() => {
+                        Json(serde_json::json!({"ok": true, "pushed": true})).into_response()
+                    }
+                    Ok(po) => err(StatusCode::BAD_REQUEST, String::from_utf8_lossy(&po.stderr).to_string()),
+                    Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+                }
+            } else {
+                Json(serde_json::json!({"ok": true, "pushed": false})).into_response()
+            }
+        }
+        Ok(o) => err(StatusCode::BAD_REQUEST, String::from_utf8_lossy(&o.stderr).to_string()),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+pub async fn push(State(state): State<AppState>) -> Response {
+    let cwd = state.current_cwd().await;
+    if !is_git_repo(&cwd) {
+        return err(StatusCode::BAD_REQUEST, "not a git repo".into());
+    }
+    let out = Command::new("git")
+        .current_dir(&cwd)
+        .args(["push", "--set-upstream", "origin", "HEAD"])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => Json(serde_json::json!({ "ok": true })).into_response(),
+        Ok(o) => err(StatusCode::BAD_REQUEST, String::from_utf8_lossy(&o.stderr).to_string()),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
 }
 
 pub async fn create_worktree(
@@ -512,6 +709,29 @@ fn push_worktree(
         branch,
         is_current,
     });
+}
+
+fn diff_stats(cwd: &Path) -> (u64, u64) {
+    let Ok(out) = run(cwd, &["diff", "HEAD", "--numstat"]) else {
+        return (0, 0);
+    };
+    let mut added = 0u64;
+    let mut removed = 0u64;
+    for line in out.lines() {
+        let mut parts = line.split('\t');
+        if let (Some(a), Some(r)) = (parts.next(), parts.next()) {
+            added += a.parse::<u64>().unwrap_or(0);
+            removed += r.parse::<u64>().unwrap_or(0);
+        }
+    }
+    (added, removed)
+}
+
+fn last_commit_subject(cwd: &Path) -> Option<String> {
+    run(cwd, &["log", "-1", "--pretty=format:%s"])
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
 }
 
 fn run(cwd: &Path, args: &[&str]) -> Result<String, std::io::Error> {

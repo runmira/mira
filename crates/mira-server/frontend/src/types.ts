@@ -246,7 +246,7 @@ export type ServerMsg =
   | { type: 'ask_user_request'; prompt_id: string; proposal: AskUserProposal }
   // Subagent live-stream frames. Every subagent-related event carries the
   // parent's tool_call id so the frontend routes it to the right panel tab.
-  | { type: 'subagent_started'; parent_call_id: string; agent_id: string; model: string; prompt: string }
+  | { type: 'subagent_started'; parent_call_id: string; agent_id: string; model: string; prompt: string; agent_name?: string | null; agent_category?: string | null }
   | { type: 'subagent_token'; parent_call_id: string; text: string }
   | { type: 'subagent_tool_start'; parent_call_id: string; call: ToolCall }
   | { type: 'subagent_tool_end'; parent_call_id: string; result: ToolResult }

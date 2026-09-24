@@ -924,6 +924,8 @@ impl Tool for AgentTool {
                 agent_id: child_id.clone(),
                 model: model.clone(),
                 prompt: args.prompt.clone(),
+                agent_name: type_def.map(|t| t.name.clone()),
+                agent_category: type_def.and_then(|t| t.category.clone()),
             });
         }
 

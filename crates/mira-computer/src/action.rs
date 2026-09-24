@@ -68,7 +68,8 @@ pub enum ComputerAction {
     Wait {
         seconds: f64,
     },
-    /// Return a full-resolution crop of `[x0, y0, x1, y1]` (model space).
+    /// Return a full-resolution crop of `[x0, y0, x1, y1]` in model space
+    /// (pixel coords of the most recent screenshot, not physical pixels).
     Zoom {
         region: [i32; 4],
     },

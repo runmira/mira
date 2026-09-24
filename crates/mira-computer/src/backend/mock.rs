@@ -1,5 +1,5 @@
 //! In-memory backend for tests and evals: records every input event and
-//! serves a solid-color "screen".
+//! serves a solid-color "screen" on screenshot.
 
 use std::sync::Mutex;
 
@@ -42,6 +42,12 @@ impl MockBackend {
 
     pub fn events(&self) -> Vec<Event> {
         self.events.lock().unwrap().clone()
+    }
+
+    /// Clear the recorded event log so a later assertion isn't polluted by
+    /// earlier calls in the same test.
+    pub fn reset(&self) {
+        self.events.lock().unwrap().clear();
     }
 
     fn push(&self, e: Event) {

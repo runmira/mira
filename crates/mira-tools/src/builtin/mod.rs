@@ -6,6 +6,7 @@
 
 pub mod apply_patch;
 pub mod ast_grep;
+pub mod background;
 pub mod bash;
 pub mod browser;
 pub mod computer;
@@ -83,6 +84,15 @@ pub fn register_memory(reg: &mut Registry) {
 /// registry is loaded from `~/.mira/skills` + `<cwd>/.mira/skills`.
 pub fn register_skills(reg: &mut Registry, skills: skill::SkillHandle) {
     reg.register(skill::SkillTool::new(skills));
+}
+
+/// Register the background-process tools (`run_background`, `read_output`,
+/// `kill_background`). Callers wire this separately so the store can be
+/// shared with the session's `ToolContext` before any tool calls fire.
+pub fn register_background(reg: &mut Registry) {
+    reg.register(background::RunBackground);
+    reg.register(background::ReadOutput);
+    reg.register(background::KillBackground);
 }
 
 /// Register the `memory_consolidate` tool. Constructed with a

@@ -2,16 +2,23 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
 import { useState } from 'react';
-import 'highlight.js/styles/tokyo-night-dark.css';
+import 'highlight.js/styles/atom-one-dark.css';
+import type { DiffPreview } from '../types';
 
-type Props = { text: string };
+type Props = { text: string; onOpenFile?: (path: string, diff: DiffPreview | null) => void };
+
+function looksLikeFilePath(s: string): boolean {
+  if (/^https?:\/\//.test(s)) return false;
+  if (!s.includes('/')) return false;
+  return /\.\w{1,6}$/.test(s);
+}
 
 // How short a block has to be to be treated as a "one-liner" (path, filename,
 // short command) instead of a full code block. Models routinely wrap single
 // values in ``` fences where inline `` would have been the right call.
 const ONE_LINER_MAX = 80;
 
-export function Markdown({ text }: Props) {
+export function Markdown({ text, onOpenFile }: Props) {
   return (
     <div className="md">
       <ReactMarkdown
@@ -46,11 +53,20 @@ export function Markdown({ text }: Props) {
               raw.length <= ONE_LINER_MAX;
 
             if (looksInline) {
-              // Extra cyan-tinted variant when the source used ``` fences
-              // (has a className) so it visually reads as "this is a value",
-              // vs mid-sentence `` which stays the default rose tone.
               const isFenced = /\blanguage-/.test(className ?? '');
               const cls = isFenced ? 'md-inline md-inline-fenced' : 'md-inline';
+              if (onOpenFile && looksLikeFilePath(raw)) {
+                return (
+                  <button
+                    type="button"
+                    onClick={() => onOpenFile(raw, null)}
+                    className={`${cls} ${className ?? ''} cursor-pointer underline decoration-dotted underline-offset-2 hover:opacity-80`}
+                    title="Open in file viewer"
+                  >
+                    {children}
+                  </button>
+                );
+              }
               return (
                 <code className={`${cls} ${className ?? ''}`} {...rest}>
                   {children}
