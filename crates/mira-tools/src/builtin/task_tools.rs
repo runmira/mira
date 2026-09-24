@@ -96,6 +96,7 @@ impl Tool for TaskCreate {
             content,
             is_error: false,
             data: Some(data),
+            images: Vec::new(),
         })
     }
 }
@@ -137,6 +138,7 @@ impl Tool for TaskList {
             content,
             is_error: false,
             data: Some(data),
+            images: Vec::new(),
         })
     }
 }
@@ -188,6 +190,7 @@ impl Tool for TaskGet {
                     content,
                     is_error: false,
                     data: Some(data),
+                    images: Vec::new(),
                 })
             }
             None => Err(ToolError::Failed(format!(
@@ -280,6 +283,7 @@ impl Tool for TaskUpdateTool {
                     content,
                     is_error: false,
                     data: Some(data),
+                    images: Vec::new(),
                 })
             }
             None => Err(ToolError::Failed(format!(

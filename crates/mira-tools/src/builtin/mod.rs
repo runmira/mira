@@ -7,6 +7,8 @@
 pub mod apply_patch;
 pub mod ast_grep;
 pub mod bash;
+pub mod browser;
+pub mod computer;
 pub mod edit;
 pub mod file_outline;
 pub mod find_callers;
@@ -94,4 +96,90 @@ pub fn register_consolidate(
     model: String,
 ) {
     reg.register(memory::MemoryConsolidate::new(provider, model));
+}
+
+/// What [`register_computer_use`] did, for the caller to surface.
+#[derive(Debug, Default)]
+pub struct ComputerUseReport {
+    /// `computer` registered, with the backend name (`x11`, `macos`).
+    pub computer: Option<&'static str>,
+    pub browser: bool,
+    /// Why a requested tool was skipped (unsupported platform, …).
+    pub warnings: Vec<String>,
+}
+
+/// Register the `computer` and/or `browser` tools, per `enable_*`.
+///
+/// Callers register these *after* snapshotting the registry subagents
+/// inherit: desktop and browser control stay with the top-level session,
+/// where the user is watching and approving.
+///
+/// Never fails: an unavailable backend becomes a warning in the report,
+/// so a missing `xdotool` can't stop Mira from starting.
+pub async fn register_computer_use(
+    reg: &mut Registry,
+    enable_computer: bool,
+    computer_cfg: &mira_config::ComputerUseConfig,
+    enable_browser: bool,
+    browser_cfg: &mira_config::BrowserConfig,
+) -> ComputerUseReport {
+    use std::sync::Arc;
+    let mut report = ComputerUseReport::default();
+
+    if enable_computer {
+        match mira_computer::detect() {
+            Ok(backend) => {
+                let mut opts = mira_computer::ComputerOptions::default();
+                if let Some(v) = computer_cfg.screenshot_after_action {
+                    opts.screenshot_after_action = v;
+                }
+                if let Some(edge) = computer_cfg.max_long_edge {
+                    opts.limits.max_long_edge = edge.clamp(256, 4096);
+                }
+                if let Some(ms) = computer_cfg.settle_ms {
+                    opts.settle = std::time::Duration::from_millis(ms.min(10_000));
+                }
+                let name = backend.name();
+                let computer = Arc::new(mira_computer::Computer::new(Arc::from(backend), opts));
+                // Best effort: the size only improves the description.
+                let display = match computer.display_size().await {
+                    Ok(d) => Some(d),
+                    Err(e) => {
+                        report
+                            .warnings
+                            .push(format!("computer: couldn't read the display size ({e})"));
+                        None
+                    }
+                };
+                reg.register(computer::ComputerTool::new(computer, display));
+                report.computer = Some(name);
+            }
+            Err(e) => report.warnings.push(format!("computer use disabled: {e}")),
+        }
+    }
+
+    if enable_browser {
+        let mut opts = mira_browser::BrowserOptions::default();
+        if let Some(exe) = browser_cfg.executable_path() {
+            opts.executable = Some(exe);
+        }
+        if let Some(h) = browser_cfg.headless {
+            opts.headless = h;
+        }
+        if let Some(dir) = browser_cfg.profile_dir_path() {
+            opts.profile_dir = dir;
+        }
+        // Resolve the executable now so a missing browser is reported at
+        // startup rather than on the model's first call.
+        match mira_browser::launch::find_executable(opts.executable.as_deref()) {
+            Ok(_) => {
+                reg.register(browser::BrowserTool::new(Arc::new(
+                    mira_browser::Browser::new(opts),
+                )));
+                report.browser = true;
+            }
+            Err(e) => report.warnings.push(format!("browser tool disabled: {e}")),
+        }
+    }
+    report
 }

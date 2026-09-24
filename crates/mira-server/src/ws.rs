@@ -404,6 +404,9 @@ async fn apply_scope_widening(
         .into_iter()
         .filter(|t| !t.is_empty())
         .map(|t| rule_string_for(tool.action(), &t))
+        .filter(|r| !r.is_empty())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
         .collect();
 
     if rule_strings.is_empty() {
@@ -458,6 +461,9 @@ fn rule_string_for(action: mira_tools::Action, target: &str) -> String {
         mira_tools::Action::Read => format!("Read({target})"),
         mira_tools::Action::Edit => format!("Edit({target})"),
         mira_tools::Action::Write => format!("Write({target})"),
+        mira_tools::Action::Computer | mira_tools::Action::Browser => {
+            mira_policy::session_rule_for(action, target).unwrap_or_default()
+        }
         // Pure never gates; if we somehow got here just synthesize
         // something the parser will reject so the caller logs + skips.
         mira_tools::Action::Pure => String::new(),

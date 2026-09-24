@@ -10,4 +10,4 @@ pub mod message;
 
 pub use error::{Error, Result};
 pub use id::{MessageId, SessionId, ToolCallId};
-pub use message::{Message, Role, ToolCall, ToolResult};
+pub use message::{ImageData, Message, Role, ToolCall, ToolResult};

@@ -636,6 +636,15 @@ impl Tool for AgentTool {
                 .collect::<std::collections::HashSet<_>>()
         });
         for tool in self.base_registry.tools() {
+            // Desktop and browser control stay with the top-level session,
+            // where the user is watching and approving each step. A
+            // subagent runs on its own policy and must not inherit them.
+            if matches!(
+                tool.action(),
+                mira_tools::Action::Computer | mira_tools::Action::Browser
+            ) {
+                continue;
+            }
             let name = tool.spec().name;
             if allow.as_ref().map(|s| s.contains(&name)).unwrap_or(true) {
                 child_registry.register_arc(tool);

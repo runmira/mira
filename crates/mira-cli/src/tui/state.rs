@@ -1949,6 +1949,18 @@ impl TuiState {
                 let path = args.get("path").and_then(|v| v.as_str())?;
                 Some(format!("Read({path})"))
             }
+            // Desktop / browser control widen to the action verb (and
+            // the URL origin for navigation) — see `session_rule_for`.
+            "computer" | "browser" => {
+                let verb = args.get("action").and_then(|v| v.as_str())?;
+                let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("");
+                let action = if name == "computer" {
+                    mira_tools::Action::Computer
+                } else {
+                    mira_tools::Action::Browser
+                };
+                mira_policy::session_rule_for(action, &format!("{verb}:{url}"))
+            }
             _ => None,
         }
     }

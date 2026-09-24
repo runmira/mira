@@ -39,6 +39,14 @@ pub struct Message {
     /// OpenAI schema. Unused by the harness today but kept for provider parity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+
+    /// Images attached to this message — today only tool results carry
+    /// them (screenshots from the `computer` / `browser` tools). Providers
+    /// map them to their native image blocks; ones without vision support
+    /// drop them. Empty for every text-only message, and skipped on the
+    /// wire so older persisted sessions round-trip unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageData>,
 }
 
 impl Message {
@@ -62,6 +70,7 @@ impl Message {
             tool_calls: calls,
             tool_call_id: None,
             name: None,
+            images: Vec::new(),
         }
     }
 
@@ -73,7 +82,15 @@ impl Message {
             tool_calls: Vec::new(),
             tool_call_id: Some(call_id),
             name: None,
+            images: Vec::new(),
         }
+    }
+
+    /// Attach images (builder-style). Used for tool results that carry
+    /// screenshots.
+    pub fn with_images(mut self, images: Vec<ImageData>) -> Self {
+        self.images = images;
+        self
     }
 
     fn text(role: Role, content: impl Into<String>) -> Self {
@@ -83,7 +100,33 @@ impl Message {
             tool_calls: Vec::new(),
             tool_call_id: None,
             name: None,
+            images: Vec::new(),
         }
+    }
+}
+
+/// A base64-encoded image attached to a message.
+///
+/// `media_type` is a MIME type (`image/png`, `image/jpeg`, …); `data` is
+/// the standard-alphabet base64 payload with no `data:` prefix — the shape
+/// both Anthropic's `image` block and OpenAI's data-URL `image_url` want.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageData {
+    pub media_type: String,
+    pub data: String,
+}
+
+impl ImageData {
+    pub fn png(base64: impl Into<String>) -> Self {
+        Self {
+            media_type: "image/png".to_owned(),
+            data: base64.into(),
+        }
+    }
+
+    /// `data:<mime>;base64,<payload>` — the OpenAI `image_url` form.
+    pub fn data_url(&self) -> String {
+        format!("data:{};base64,{}", self.media_type, self.data)
     }
 }
 
@@ -135,6 +178,10 @@ pub struct ToolResult {
     pub is_error: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<Value>,
+    /// Images the model should see alongside `content` (screenshots).
+    /// The harness copies them onto the tool `Message` it records.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageData>,
 }
 
 impl ToolResult {
@@ -144,6 +191,7 @@ impl ToolResult {
             content: content.into(),
             is_error: false,
             data: None,
+            images: Vec::new(),
         }
     }
 
@@ -153,6 +201,13 @@ impl ToolResult {
             content: content.into(),
             is_error: true,
             data: None,
+            images: Vec::new(),
         }
+    }
+
+    /// Attach images (builder-style).
+    pub fn with_images(mut self, images: Vec<ImageData>) -> Self {
+        self.images = images;
+        self
     }
 }

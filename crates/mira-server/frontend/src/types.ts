@@ -16,6 +16,8 @@ export type ToolResult = {
   // `content`. task_* tools use it to publish current state to the UI without
   // asking the client to re-parse `content`.
   data?: unknown;
+  // Screenshots from the `computer` / `browser` tools (base64, no prefix).
+  images?: { media_type: string; data: string }[];
 };
 
 export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'deleted';

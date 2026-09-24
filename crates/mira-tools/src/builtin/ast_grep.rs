@@ -155,6 +155,7 @@ impl Tool for AstGrep {
             content: body,
             is_error: false,
             data: Some(data),
+            images: Vec::new(),
         })
     }
 }

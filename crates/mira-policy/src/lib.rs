@@ -10,6 +10,8 @@
 //! Bash(cargo test:*)   — allow any `cargo test ...`
 //! Edit(src/**)         — file globs match against paths inside cwd
 //! Read(.env*)          — always evaluated; deny wins over allow
+//! Computer(screenshot) — desktop control, `verb` or `verb:detail`
+//! Browser(navigate:https://github.com/*)
 //! ```
 //!
 //! Modes (`plan`, `manual`, `auto`, `edit`, `yolo`) are just presets over the
@@ -23,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 pub use mode::Mode;
-pub use rule::{Rule, RuleParseError};
+pub use rule::{session_rule_for, Rule, RuleParseError};
 
 /// What the policy engine decides about a specific invocation.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -147,7 +149,7 @@ impl Policy {
             debug!(?req, "policy: allow (explicit)");
             return Decision::Allow;
         }
-        let d = self.mode.default_for(req.action);
+        let d = self.mode.default_for_target(req.action, req.target);
         debug!(?req, ?d, mode = ?self.mode, "policy: mode default");
         d
     }

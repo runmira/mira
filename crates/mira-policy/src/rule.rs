@@ -26,6 +26,14 @@ enum Matcher {
     Glob(Pattern),
     /// Bash prefix (exact match or `prefix:*` wildcard).
     BashPrefix { prefix: String, wildcard: bool },
+    /// `verb` or `verb:detail` for the computer / browser tools. Both
+    /// halves take `*` / `?` wildcards that, unlike path globs, cross
+    /// `/` — typed text and URLs are not paths. A bare verb covers every
+    /// detail; the verb `click` is shorthand for every `*click` verb.
+    Verb {
+        verb: String,
+        detail: Option<String>,
+    },
 }
 
 impl Rule {
@@ -35,6 +43,15 @@ impl Rule {
         }
         match &self.matcher {
             Matcher::Glob(pat) => pat.matches(req.target),
+            Matcher::Verb { verb, detail } => {
+                let (t_verb, t_detail) = req.target.split_once(':').unwrap_or((req.target, ""));
+                let verb_ok =
+                    wildcard_match(verb, t_verb) || (verb == "click" && t_verb.ends_with("click"));
+                verb_ok
+                    && detail
+                        .as_deref()
+                        .is_none_or(|d| wildcard_match(d, t_detail))
+            }
             Matcher::BashPrefix { prefix, wildcard } => {
                 if *wildcard {
                     // Exact-match always allowed; wildcard tail must be a
@@ -74,11 +91,73 @@ fn contains_compound_shell_syntax(s: &str) -> bool {
         .any(|c| matches!(c, ';' | '&' | '|' | '<' | '>' | '$' | '`' | '(' | ')'))
 }
 
+/// Allow rule to add when the user approves a `Computer` / `Browser`
+/// call "for the session". Exact targets would be useless here (a click
+/// never lands on the same pixel twice), so the rule widens to the
+/// action's verb — and, for navigation, to the URL's origin:
+///
+/// - `left_click:512,300` → `Computer(left_click)`
+/// - `navigate:https://github.com/a/b` → `Browser(navigate:https://github.com/*)`
+///
+/// Returns `None` for other actions; callers keep their exact-target
+/// rules for those.
+pub fn session_rule_for(action: Action, target: &str) -> Option<String> {
+    let family = match action {
+        Action::Computer => "Computer",
+        Action::Browser => "Browser",
+        _ => return None,
+    };
+    let (verb, detail) = target.split_once(':').unwrap_or((target, ""));
+    if verb.is_empty() {
+        return None;
+    }
+    if action == Action::Browser && verb == "navigate" {
+        if let Some(origin) = url_origin(detail) {
+            return Some(format!("{family}(navigate:{origin}/*)"));
+        }
+    }
+    Some(format!("{family}({verb})"))
+}
+
+/// `scheme://host[:port]` of a URL, or `None` when it has no scheme.
+fn url_origin(url: &str) -> Option<&str> {
+    let after_scheme = url.find("://")? + 3;
+    let end = url[after_scheme..]
+        .find(['/', '?', '#'])
+        .map_or(url.len(), |i| after_scheme + i);
+    Some(&url[..end])
+}
+
+/// Shell-style wildcard match: `*` is any run of characters (including
+/// `/`), `?` is exactly one. Everything else is literal.
+fn wildcard_match(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    let (mut pi, mut ti) = (0, 0);
+    let mut star: Option<(usize, usize)> = None;
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some((pi, ti));
+            pi += 1;
+        } else if let Some((sp, st)) = star {
+            pi = sp + 1;
+            ti = st + 1;
+            star = Some((sp, st + 1));
+        } else {
+            return false;
+        }
+    }
+    p[pi..].iter().all(|c| *c == '*')
+}
+
 #[derive(Debug, Error)]
 pub enum RuleParseError {
     #[error("rule `{0}` must look like `Action(pattern)`")]
     Shape(String),
-    #[error("unknown action `{0}`; expected Read/Edit/Write/Bash")]
+    #[error("unknown action `{0}`; expected Read/Edit/Write/Bash/Computer/Browser")]
     UnknownAction(String),
     #[error("bad glob in `{rule}`: {source}")]
     BadGlob {
@@ -105,6 +184,8 @@ impl FromStr for Rule {
             "Edit" => Action::Edit,
             "Write" => Action::Write,
             "Bash" => Action::Bash,
+            "Computer" => Action::Computer,
+            "Browser" => Action::Browser,
             other => return Err(RuleParseError::UnknownAction(other.to_owned())),
         };
 
@@ -122,6 +203,14 @@ impl FromStr for Rule {
                             wildcard: false,
                         }
                     }
+                }
+                Action::Computer | Action::Browser => {
+                    let pattern = pattern.trim();
+                    let (verb, detail) = match pattern.split_once(':') {
+                        Some((v, d)) => (v.trim().to_owned(), Some(d.to_owned())),
+                        None => (pattern.to_owned(), None),
+                    };
+                    Matcher::Verb { verb, detail }
                 }
                 _ => Matcher::Glob(Pattern::new(pattern).map_err(|source| {
                     RuleParseError::BadGlob {
@@ -181,6 +270,67 @@ mod tests {
         let r: Rule = "Bash(cargo fmt)".parse().unwrap();
         assert!(r.matches(&req(Action::Bash, "cargo fmt")));
         assert!(!r.matches(&req(Action::Bash, "cargo fmt --check")));
+    }
+
+    #[test]
+    fn computer_verb_rules() {
+        let shot: Rule = "Computer(screenshot)".parse().unwrap();
+        assert!(shot.matches(&req(Action::Computer, "screenshot")));
+        assert!(!shot.matches(&req(Action::Computer, "left_click:1,2")));
+        assert!(!shot.matches(&req(Action::Browser, "screenshot")));
+
+        let clicks: Rule = "Computer(click:*)".parse().unwrap();
+        for t in ["left_click:1,2", "double_click:5,5", "right_click:0,0"] {
+            assert!(clicks.matches(&req(Action::Computer, t)), "{t}");
+        }
+        assert!(!clicks.matches(&req(Action::Computer, "type:hi")));
+
+        let ctrl: Rule = "Computer(key:ctrl+*)".parse().unwrap();
+        assert!(ctrl.matches(&req(Action::Computer, "key:ctrl+s")));
+        assert!(!ctrl.matches(&req(Action::Computer, "key:alt+f4")));
+
+        let pw: Rule = "Computer(type:*password*)".parse().unwrap();
+        assert!(pw.matches(&req(Action::Computer, "type:my password is x")));
+        assert!(!pw.matches(&req(Action::Computer, "type:hello")));
+
+        let all: Rule = "Computer(*)".parse().unwrap();
+        assert!(all.matches(&req(Action::Computer, "mouse_move:3,4")));
+    }
+
+    #[test]
+    fn session_rules_widen_to_the_verb_or_origin() {
+        assert_eq!(
+            session_rule_for(Action::Computer, "left_click:5,6").as_deref(),
+            Some("Computer(left_click)")
+        );
+        assert_eq!(
+            session_rule_for(Action::Browser, "navigate:https://github.com/a?b=1").as_deref(),
+            Some("Browser(navigate:https://github.com/*)")
+        );
+        assert_eq!(
+            session_rule_for(Action::Browser, "snapshot").as_deref(),
+            Some("Browser(snapshot)")
+        );
+        assert!(session_rule_for(Action::Bash, "ls").is_none());
+        // The widened rule really does cover the next call.
+        let r: Rule = session_rule_for(Action::Computer, "type:abc")
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(r.matches(&req(Action::Computer, "type:something else")));
+    }
+
+    #[test]
+    fn browser_url_rules_cross_slashes() {
+        let gh: Rule = "Browser(navigate:https://github.com/*)".parse().unwrap();
+        assert!(gh.matches(&req(
+            Action::Browser,
+            "navigate:https://github.com/runmira/mira"
+        )));
+        assert!(!gh.matches(&req(
+            Action::Browser,
+            "navigate:https://evil.dev/github.com/"
+        )));
     }
 
     #[test]

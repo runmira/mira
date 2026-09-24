@@ -17,6 +17,14 @@ pub enum Action {
     Edit,
     Write,
     Bash,
+    /// Desktop control: screenshots, mouse, keyboard (the `computer`
+    /// tool). Target is `<action>` or `<action>:<detail>`, e.g.
+    /// `left_click:512,300`, `type:hello`, `key:ctrl+s`.
+    Computer,
+    /// Browser automation in Mira's own browser profile (the `browser`
+    /// tool). Target shape matches `Computer`, e.g.
+    /// `navigate:https://example.com`, `click:e12`.
+    Browser,
     /// Anything that doesn't need gating — a pure computation.
     Pure,
 }

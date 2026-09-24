@@ -158,6 +158,7 @@ pub async fn run(cli: &super::Cli, args: ServeArgs) -> Result<()> {
             }
         }
     }
+    super::register_computer_use(&mut registry, cli, &cfg).await;
     let registry = Arc::new(registry);
 
     let mode = resolved.as_ref().map(|s| s.mode).unwrap_or_default();
