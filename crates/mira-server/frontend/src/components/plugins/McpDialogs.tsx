@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { BookOpen, Lock, TerminalWindow, Wrench } from '@phosphor-icons/react';
+import { BookOpen, Lock, Terminal, Wrench } from 'lucide-react';
 import type { McpServerConfig, McpServerView, WriteScope } from '../../api';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
@@ -67,7 +67,7 @@ export function ServerDetailDialog({ s, onClose }: { s: McpServerView; onClose: 
             </section>
             {s.prompts.length > 0 && (
               <section>
-                <H icon={<TerminalWindow />}>Prompts · run as slash commands</H>
+                <H icon={<Terminal />}>Prompts · run as slash commands</H>
                 <ul className="flex flex-col gap-1">
                   {s.prompts.map((p) => (
                     <li key={p.name} className="text-[12.5px]">

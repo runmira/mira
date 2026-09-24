@@ -103,6 +103,7 @@ impl From<PersonRepr> for Person {
 pub struct PluginEntry {
     pub name: String,
     pub display_name: Option<String>,
+    pub icon_url: Option<String>,
     pub source: PluginSource,
     pub description: Option<String>,
     pub version: Option<String>,

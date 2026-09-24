@@ -627,6 +627,7 @@ export type CatalogEntry = {
   id: string;
   name: string;
   display_name: string | null;
+  icon_url: string | null;
   marketplace: string;
   description: string | null;
   version: string | null;

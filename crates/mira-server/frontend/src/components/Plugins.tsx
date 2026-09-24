@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { MagnifyingGlass, PuzzlePiece, WarningCircle } from '@phosphor-icons/react';
+import { AlertCircle, Puzzle, Search } from 'lucide-react';
 import {
   addMarketplace,
   deleteMcpServer,
@@ -152,43 +152,45 @@ export function PluginsPanel({ version = 0 }: { version?: number }) {
 
   return (
     <div className="mx-auto flex w-full max-w-4xl flex-col gap-5 px-6 pb-12 pt-6">
-      <header className="flex flex-wrap items-end justify-between gap-4">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <PuzzlePiece className="size-5 text-mira-purple" weight="fill" />
-            <h1 className="text-[20px] font-semibold tracking-tight">Plugins</h1>
+      <header className="flex flex-wrap items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <div className="flex size-9 items-center justify-center rounded-xl bg-mira-purple/15">
+            <Puzzle className="size-4.5 text-mira-purple" />
           </div>
-          <p className="mt-1 text-[13px] text-muted-foreground">
-            Add commands, agents, skills and MCP servers. Works with Claude Code plugins and marketplaces.
-          </p>
+          <div>
+            <h1 className="text-[18px] font-semibold tracking-tight">Plugins</h1>
+            <p className="text-[12px] text-muted-foreground">
+              Commands, agents, skills and MCP servers.
+            </p>
+          </div>
         </div>
-        <label className="relative w-full sm:w-64">
-          <MagnifyingGlass className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+        <label className="relative w-full sm:w-60">
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground/60" />
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder={tab === 'mcp' ? 'Search servers' : 'Search plugins'}
-            className="h-8 w-full rounded-full border border-border/70 bg-transparent pl-8 pr-3 text-[12.5px] outline-none placeholder:text-muted-foreground/70 focus:border-border"
+            placeholder={tab === 'mcp' ? 'Search servers…' : 'Search plugins…'}
+            className="h-8 w-full rounded-full border border-border/60 bg-white/[0.03] pl-8 pr-3 text-[12.5px] outline-none placeholder:text-muted-foreground/50 focus:border-border focus:bg-white/[0.05]"
           />
         </label>
       </header>
 
-      <nav className="flex gap-1 overflow-x-auto border-b border-border/70">
+      <nav className="flex gap-0.5 overflow-x-auto border-b border-border/60">
         {tabs.map((t) => (
           <button
             key={t.key}
             type="button"
             onClick={() => setTab(t.key)}
             className={cn(
-              '-mb-px flex shrink-0 items-center gap-1.5 border-b-2 px-3 pb-2.5 pt-1 text-[13px] transition-colors',
+              '-mb-px flex shrink-0 items-center gap-1.5 border-b-2 px-3.5 pb-2.5 pt-1.5 text-[13px] font-medium transition-colors',
               tab === t.key
-                ? 'border-foreground text-foreground'
+                ? 'border-mira-purple text-foreground'
                 : 'border-transparent text-muted-foreground hover:text-foreground',
             )}
           >
             {t.label}
             {t.count !== undefined && t.count > 0 && (
-              <span className="rounded-full bg-secondary px-1.5 text-[11px] text-muted-foreground">{t.count}</span>
+              <span className="rounded-full bg-white/8 px-1.5 text-[11px] text-muted-foreground">{t.count}</span>
             )}
             {t.dot && (
               <span className={cn('size-1.5 rounded-full', t.dot === 'red' ? 'bg-destructive' : 'bg-amber-400')} />
@@ -344,12 +346,12 @@ function ErrorRow({ title, message, onClick }: { title: string; message: string;
       type="button"
       onClick={onClick}
       disabled={!onClick}
-      className="flex items-start gap-3 rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-left enabled:hover:bg-destructive/10"
+      className="flex items-start gap-3 rounded-xl border border-destructive/25 bg-destructive/5 px-4 py-3 text-left enabled:hover:bg-destructive/10"
     >
-      <WarningCircle className="mt-0.5 size-4 shrink-0 text-destructive" weight="fill" />
+      <AlertCircle className="mt-0.5 size-4 shrink-0 text-destructive" />
       <div className="min-w-0">
         <div className="text-[13px] font-medium">{title}</div>
-        <div className="break-words text-[12.5px] text-destructive/90">{message}</div>
+        <div className="break-words text-[12.5px] text-destructive/80">{message}</div>
       </div>
     </button>
   );

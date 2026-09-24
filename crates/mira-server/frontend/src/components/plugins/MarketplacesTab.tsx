@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ArrowClockwise, GitBranch, Globe, FolderSimple, Plus, Trash, WarningCircle } from '@phosphor-icons/react';
+import { AlertCircle, Folder, GitBranch, Globe, Plus, RotateCcw, Trash2 } from 'lucide-react';
 import type { MarketplaceView, PluginsOverview } from '../../api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -45,20 +45,20 @@ export function MarketplacesTab({
           disabled={adding}
         />
         <Button type="submit" size="sm" className="h-9 gap-1.5" disabled={!source.trim() || !!busy}>
-          <Plus className="size-3.5" weight="bold" />
+          <Plus className="size-3.5" />
           {adding ? 'Adding…' : 'Add marketplace'}
         </Button>
       </form>
 
       {data.marketplaces.length > 0 && (
-        <ul className="flex flex-col divide-y divide-border/60 overflow-hidden rounded-xl border border-border/70 bg-card/40">
+        <ul className="flex flex-col divide-y divide-border/50 overflow-hidden rounded-2xl border border-border/60 bg-white/[0.02]">
           {data.marketplaces.map((m) => (
-            <li key={m.name} className="flex items-center gap-3 px-4 py-3.5">
+            <li key={m.name} className="flex items-center gap-3.5 px-4 py-4">
               <Avatar name={m.name} />
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-[14px] font-medium">{m.name}</span>
-                  <span className="text-[11.5px] text-muted-foreground">
+                  <span className="text-[13.5px] font-semibold">{m.name}</span>
+                  <span className="text-[11.5px] text-muted-foreground/70">
                     {plural(m.plugin_count, 'plugin')}
                     {m.owner ? ` · ${m.owner}` : ''}
                   </span>
@@ -69,11 +69,11 @@ export function MarketplacesTab({
                   {m.updated_at > 0 && <span className="shrink-0">· updated {relativeTime(m.updated_at)}</span>}
                 </div>
                 {m.description && (
-                  <p className="mt-1 line-clamp-2 text-[12.5px] text-muted-foreground">{m.description}</p>
+                  <p className="mt-1 line-clamp-2 text-[12px] text-muted-foreground">{m.description}</p>
                 )}
                 {m.error && (
                   <div className="mt-1 flex items-center gap-1 text-[12px] text-destructive">
-                    <WarningCircle className="size-3.5" weight="fill" />
+                    <AlertCircle className="size-3.5" />
                     {m.error}
                   </div>
                 )}
@@ -81,16 +81,16 @@ export function MarketplacesTab({
               <Button
                 variant="outline"
                 size="sm"
-                className="h-7 gap-1.5"
+                className="h-7 gap-1.5 rounded-lg"
                 disabled={!!busy}
                 onClick={() => onUpdate(m.name)}
               >
-                <ArrowClockwise className="size-3.5" />
+                <RotateCcw className="size-3.5" />
                 {busy === `market-update:${m.name}` ? 'Updating…' : 'Update'}
               </Button>
               <RowMenu
                 items={[
-                  { label: 'Remove', icon: <Trash />, danger: true, onSelect: () => onRemove(m) },
+                  { label: 'Remove', icon: <Trash2 />, danger: true, onSelect: () => onRemove(m) },
                 ]}
               />
             </li>
@@ -100,15 +100,26 @@ export function MarketplacesTab({
 
       {suggestions.length > 0 && (
         <div className="flex flex-col gap-2">
-          <div className="text-[12px] font-medium uppercase tracking-wider text-muted-foreground">Suggested</div>
+          <div className="text-[11.5px] font-semibold uppercase tracking-wider text-muted-foreground/60">
+            Suggested
+          </div>
           {suggestions.map((s) => (
-            <div key={s.source} className="flex items-center gap-3 rounded-xl border border-border/70 bg-card/40 px-4 py-3">
+            <div
+              key={s.source}
+              className="flex items-center gap-3.5 rounded-xl border border-border/50 bg-white/[0.02] px-4 py-3"
+            >
               <Avatar name={s.name} size="sm" />
               <div className="min-w-0 flex-1">
                 <div className="font-mono text-[12.5px]">{s.source}</div>
                 <div className="text-[12px] text-muted-foreground">{s.description}</div>
               </div>
-              <Button size="sm" variant="outline" className="h-7" disabled={!!busy} onClick={() => submit(s.source)}>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 rounded-lg"
+                disabled={!!busy}
+                onClick={() => submit(s.source)}
+              >
                 {busy === `market-add:${s.source}` ? 'Adding…' : 'Add'}
               </Button>
             </div>
@@ -121,7 +132,7 @@ export function MarketplacesTab({
 
 function SourceIcon({ kind }: { kind: MarketplaceView['kind'] }) {
   const cls = 'size-3.5 shrink-0';
-  if (kind === 'directory') return <FolderSimple className={cls} />;
+  if (kind === 'directory') return <Folder className={cls} />;
   if (kind === 'url') return <Globe className={cls} />;
   return <GitBranch className={cls} />;
 }

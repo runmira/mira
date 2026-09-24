@@ -198,6 +198,7 @@ pub struct CatalogEntry {
     pub id: String,
     pub name: String,
     pub display_name: Option<String>,
+    pub icon_url: Option<String>,
     pub marketplace: String,
     pub description: Option<String>,
     pub version: Option<String>,
@@ -827,6 +828,7 @@ fn catalog_entry(
     CatalogEntry {
         name: e.name.clone(),
         display_name: e.display_name.clone(),
+        icon_url: e.icon_url.clone(),
         marketplace: market.to_owned(),
         description: e.description.clone(),
         version: e.version.clone(),
