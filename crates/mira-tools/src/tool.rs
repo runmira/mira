@@ -112,6 +112,19 @@ pub trait Tool: Send + Sync {
         matches!(self.action(), Action::Read | Action::Pure)
     }
 
+    /// Whether this tool may be offered in a sandboxed session
+    /// (`mira --sandbox …`), where the project lives in a
+    /// [`mira_compute::ComputeBackend`] instead of on this machine.
+    ///
+    /// The default admits only `Action::Pure` tools. Anything that would
+    /// touch the local filesystem or run a local process must either
+    /// route through `ToolContext::compute` and return `true`, or stay
+    /// out, so a sandboxed session never quietly falls back to the
+    /// user's machine.
+    fn remote_capable(&self) -> bool {
+        matches!(self.action(), Action::Pure)
+    }
+
     async fn invoke(&self, call: &ToolCall, ctx: &ToolContext) -> Result<ToolResult, ToolError>;
 }
 

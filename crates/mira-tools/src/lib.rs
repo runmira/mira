@@ -17,6 +17,7 @@ pub mod mcp;
 pub mod preview;
 pub mod prompt;
 pub mod registry;
+pub mod remote;
 pub mod tasks;
 pub mod tool;
 

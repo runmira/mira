@@ -63,6 +63,62 @@ pub struct MiraConfig {
     /// or with `--browser`.
     #[serde(default, skip_serializing_if = "BrowserConfig::is_empty")]
     pub browser: BrowserConfig,
+    /// Where tools execute: the local machine (default) or a sandbox.
+    /// Only read from the global file.
+    #[serde(default, skip_serializing_if = "ComputeConfig::is_empty")]
+    pub compute: ComputeConfig,
+}
+
+/// `compute:` block — the default `--sandbox` backend and its settings.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ComputeConfig {
+    /// `local` (a scratch copy of the repo on this machine) or `e2b`.
+    /// Unset: tools run directly on the checkout unless `--sandbox` is
+    /// passed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    #[serde(skip_serializing_if = "E2bConfig::is_empty")]
+    pub e2b: E2bConfig,
+}
+
+impl ComputeConfig {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// `compute.e2b:` settings.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct E2bConfig {
+    /// Env var holding the API key. Default `E2B_API_KEY` (which can
+    /// also live under `keys:`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
+    /// Sandbox template. Default `base`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+    /// Idle lifetime in seconds, refreshed while in use. Default 3600.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+    /// Control-plane URL. Default `https://api.e2b.app`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_url: Option<String>,
+    /// Sandbox domain. Default `e2b.app`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
+}
+
+impl E2bConfig {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Name of the env var the API key is read from.
+    pub fn api_key_env(&self) -> &str {
+        self.api_key_env.as_deref().unwrap_or("E2B_API_KEY")
+    }
 }
 
 /// `computer:` block. Every field is optional so a per-repo file can
@@ -406,6 +462,8 @@ impl MiraConfig {
         self.computer.settle_ms = c.settle_ms.or(self.computer.settle_ms);
         let b = other.browser;
         self.browser.headless = b.headless.or(self.browser.headless);
+        // `compute` is global-only: a repo must not be able to decide that
+        // its code gets shipped to a third-party sandbox.
         self
     }
 }
@@ -662,6 +720,17 @@ mod tests {
         let c = MiraConfig::default();
         assert!(c.default_model.is_none());
         assert!(c.providers.is_empty());
+    }
+
+    #[test]
+    fn compute_block_is_global_only() {
+        let global: MiraConfig = serde_yaml::from_str("compute:\n  backend: local\n").unwrap();
+        let local: MiraConfig =
+            serde_yaml::from_str("compute:\n  backend: e2b\n  e2b:\n    template: evil\n").unwrap();
+        let merged = global.merge(local);
+        assert_eq!(merged.compute.backend.as_deref(), Some("local"));
+        assert!(merged.compute.e2b.template.is_none());
+        assert_eq!(merged.compute.e2b.api_key_env(), "E2B_API_KEY");
     }
 
     #[test]

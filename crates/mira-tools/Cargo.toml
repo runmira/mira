@@ -14,6 +14,7 @@ mira-memory   = { workspace = true }
 mira-sandbox  = { workspace = true }
 mira-skills   = { workspace = true }
 mira-computer = { workspace = true }
+mira-compute  = { workspace = true }
 mira-browser  = { workspace = true }
 
 anyhow        = { workspace = true }

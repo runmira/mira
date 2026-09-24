@@ -771,7 +771,12 @@ impl Tool for AgentTool {
         // parent isn't a git repo or the worktree creation errors, so a
         // misconfigured type never blocks the spawn entirely.
         let mut worktree: Option<WorktreeSession> = None;
-        let child_cwd = if type_def.and_then(|t| t.worktree).unwrap_or(false) {
+        // In a sandboxed session the project isn't on this disk, so a
+        // local worktree would isolate nothing: the child shares the
+        // sandbox workspace with its parent instead.
+        let wants_worktree =
+            ctx.compute.is_none() && type_def.and_then(|t| t.worktree).unwrap_or(false);
+        let child_cwd = if wants_worktree {
             let type_name = type_def.map(|t| t.name.as_str()).unwrap_or("agent");
             match WorktreeSession::try_create(&ctx.cwd, type_name, call.id.as_str()) {
                 Ok(Some(w)) => {
@@ -831,6 +836,12 @@ impl Tool for AgentTool {
             child_ctx.with_episodic(epi)
         } else {
             child_ctx
+        };
+        // Sandboxed parent → sandboxed child. Dropping the backend here
+        // would let the child's file and shell tools run on the host.
+        let child_ctx = match ctx.compute.clone() {
+            Some(backend) => child_ctx.with_compute(backend),
+            None => child_ctx,
         };
 
         // Compose the child session config. Precedence at each field:
@@ -1643,6 +1654,11 @@ impl ScratchpadReadTool {
 
 #[async_trait]
 impl Tool for ScratchpadReadTool {
+    /// Runs fine in a sandboxed session (see `Tool::remote_capable`).
+    fn remote_capable(&self) -> bool {
+        true
+    }
+
     fn spec(&self) -> ToolSpec {
         spec(
             "scratchpad_read",

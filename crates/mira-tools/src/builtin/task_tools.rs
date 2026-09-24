@@ -107,6 +107,11 @@ pub struct TaskList;
 
 #[async_trait]
 impl Tool for TaskList {
+    /// Runs fine in a sandboxed session (see `Tool::remote_capable`).
+    fn remote_capable(&self) -> bool {
+        true
+    }
+
     fn spec(&self) -> ToolSpec {
         spec(
             "task_list",
@@ -155,6 +160,11 @@ struct GetArgs {
 
 #[async_trait]
 impl Tool for TaskGet {
+    /// Runs fine in a sandboxed session (see `Tool::remote_capable`).
+    fn remote_capable(&self) -> bool {
+        true
+    }
+
     fn spec(&self) -> ToolSpec {
         spec(
             "task_get",

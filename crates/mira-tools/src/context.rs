@@ -82,6 +82,14 @@ pub struct ToolContext {
     /// sink so the UI can render them while the command is executing.
     pub progress: Option<Arc<dyn ToolProgressSink>>,
 
+    /// Execution backend for sandboxed sessions (`mira --sandbox …`).
+    ///
+    /// `None` (the default) means tools work on the local filesystem
+    /// directly. When set, routed tools go through it instead, and
+    /// `repo_root` / `cwd` only name the local checkout that paths are
+    /// mapped from.
+    pub compute: Option<Arc<dyn mira_compute::ComputeBackend>>,
+
     /// Cooperative cancellation signal for the current turn.
     ///
     /// The harness installs a fresh token at the beginning of every
@@ -134,8 +142,15 @@ impl ToolContext {
             child_tracker: None,
             tasks: None,
             progress: None,
+            compute: None,
             cancel: None,
         }
+    }
+
+    /// Route tools through a compute backend (sandboxed session).
+    pub fn with_compute(mut self, backend: Arc<dyn mira_compute::ComputeBackend>) -> Self {
+        self.compute = Some(backend);
+        self
     }
 
     /// Attach a cooperative cancellation token.

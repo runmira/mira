@@ -4,6 +4,10 @@
 > tool calls to an isolated remote environment instead of the user's local
 > machine.
 
+> **Status (implemented: steps 1–3).** `mira --sandbox local|e2b` works in
+> the terminal. See [Implementation notes](#implementation-notes) at the
+> end for what shipped and where it differs from this design.
+
 ---
 
 ## The Problem
@@ -380,6 +384,84 @@ for long-lived persistent workspaces. Vercel if you want Drives for dep
 caching and are already on Vercel infra.
 
 ---
+
+## Implementation notes
+
+What shipped for steps 1–3, and where it differs from the design above.
+
+### Usage
+
+```sh
+mira --sandbox local     # scratch copy of the project on this machine
+mira --sandbox e2b       # E2B microVM; needs E2B_API_KEY
+mira doctor --sandbox e2b
+```
+
+Default backend, in `~/.mira/mira.yaml` (the per-repo config can't set
+it, because a cloned repo must not decide that its code gets shipped to a
+third party):
+
+```yaml
+compute:
+  backend: e2b            # optional; --sandbox overrides
+  e2b:
+    api_key_env: E2B_API_KEY   # default; the key can also live under `keys:`
+    template: base
+    timeout_secs: 3600
+```
+
+### Differences from the design
+
+| Design above | What shipped | Why |
+|---|---|---|
+| Trait in `mira-computer` | New `mira-compute` crate | `mira-computer` became the desktop-control (`computer` tool) crate in #9. |
+| `mira.toml`, `[compute]` | `mira.yaml`, `compute:` | Mira's config is YAML. |
+| `ToolStart` routes to `backend.exec()` in the event loop | Tools route through `ToolContext::compute` | The event loop only renders; tools do the I/O. Routing there covers subagents and the REPL, and needs no TUI changes. |
+| `patch_file` on the trait | Edits are read → modify → write | Keeps every backend to exec + read + write, and edit semantics stay identical to local. |
+| `local.rs` = today's default path | Default path is untouched; `LocalBackend` powers `--sandbox local` (a scratch copy) | "Zero behavior change" for the default comes from not routing at all. `--sandbox local` makes the whole remote path testable without a cloud account. |
+| Snapshot cache in `~/.config/mira/snapshots.toml` | Not yet (step 4) | `ComputeBackend::checkpoint()` / `E2bBackend::resume()` are in place for it. |
+
+### Workspace sync
+
+- **Start.** Pack git-tracked plus untracked-but-not-ignored files; build
+  output and `.gitignore`d secrets never leave the machine. Symlinks are
+  kept as links, not followed. Upload and extract the archive into a
+  fresh git repo in the sandbox, tagged `mira-baseline`.
+- **During.** The sandbox is the source of truth. `bash`, `read_file`,
+  `write_file`, `edit_file`, `grep` and `glob` run there. Local absolute
+  paths are mapped onto the workspace, and anything outside it is
+  refused.
+- **Tools that would touch this machine are withheld:** `apply_patch`,
+  git and code-intel tools, `rustfmt`, MCP servers, and
+  `computer`/`browser`. The model uses `bash` in the sandbox instead.
+  Subagents inherit the sandbox, and skip local git-worktree isolation.
+- **End.** `git diff --binary mira-baseline` is saved to
+  `~/.mira/sandbox/<project>-<ts>.patch`, with a stat and the
+  `git apply` command. The checkout is never written to by the session.
+
+### E2B specifics
+
+E2B has no Rust SDK, so `E2bBackend` talks to the control plane (`POST
+/sandboxes`, `/pause`, `/resume`, `/timeout`, `DELETE`). It talks to
+envd for files (`/files`) and commands. Commands use the Connect-RPC
+`process.Process/Start` stream, whose stdout/stderr chunks feed the tool
+tail live. A command that times out is killed with `SendSignal`. The
+sandbox's timeout is refreshed every 5 minutes while in use, and it's
+killed at session end (or on drop).
+
+Tests run the full upload → edit → exec → diff → `git apply` round trip
+against a local fake of both E2B surfaces. The code has **not yet been
+run against the live E2B service**.
+
+### Not yet
+
+- Step 4 (snapshot caching keyed on lockfile hashes) and step 5 (Vercel
+  Drives).
+- `mira serve --sandbox` (refused explicitly for now).
+- Resuming a session into the same sandbox (the backend supports
+  `checkpoint`/`resume`; the CLI doesn't wire it yet).
+- A sandbox image with `rg`. `grep` falls back to `grep -rn` in images
+  without it.
 
 ## Sources
 

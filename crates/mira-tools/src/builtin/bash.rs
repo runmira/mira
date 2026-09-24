@@ -58,7 +58,15 @@ impl Tool for Bash {
         Action::Bash
     }
 
+    /// Routed through the session's compute backend when sandboxed.
+    fn remote_capable(&self) -> bool {
+        true
+    }
+
     async fn invoke(&self, call: &ToolCall, ctx: &ToolContext) -> Result<ToolResult, ToolError> {
+        if let Some(backend) = &ctx.compute {
+            return crate::remote::bash(backend, call, ctx).await;
+        }
         let args: Args = call.parse_arguments()?;
 
         let timeout_ms = args.timeout_ms.min(600_000);

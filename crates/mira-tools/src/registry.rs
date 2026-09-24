@@ -56,6 +56,22 @@ impl Registry {
         self.tools.is_empty()
     }
 
+    /// Drop every tool that can't run in a sandboxed session (see
+    /// [`Tool::remote_capable`]) and return their names, in order.
+    pub fn retain_remote_capable(&mut self) -> Vec<String> {
+        let removed: Vec<String> = self
+            .order
+            .iter()
+            .filter(|n| self.tools.get(*n).is_some_and(|t| !t.remote_capable()))
+            .cloned()
+            .collect();
+        for n in &removed {
+            self.tools.remove(n);
+        }
+        self.order.retain(|n| !removed.contains(n));
+        removed
+    }
+
     /// Every registered tool, in registration order. Used by callers that
     /// need to build a filtered subset (e.g. the `agent` tool constructing
     /// a child registry).

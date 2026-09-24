@@ -12,6 +12,7 @@ mod permissions;
 mod providers;
 mod repl;
 mod review;
+mod sandbox;
 mod serve;
 mod tui;
 
@@ -101,6 +102,14 @@ pub(crate) struct Cli {
     /// a separate Mira profile. Same as `browser.enabled` in mira.yaml.
     #[arg(long, global = true)]
     browser: bool,
+
+    /// Run the session's file and shell tools in an isolated sandbox
+    /// instead of on your checkout: `local` (a scratch copy on this
+    /// machine) or `e2b` (a cloud microVM; needs E2B_API_KEY). Changes
+    /// come back as a patch you apply with `git apply`. Defaults to
+    /// `compute.backend` in ~/.mira/mira.yaml.
+    #[arg(long, global = true, value_name = "BACKEND")]
+    sandbox: Option<String>,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -246,6 +255,21 @@ async fn main() -> Result<()> {
         }
     }
     register_computer_use(&mut registry, &cli, &cfg).await;
+    // Sandbox: upload the project and withhold every tool that would
+    // touch this machine directly (computer/browser, MCP servers, the
+    // local-only code-intel tools). Done before the subagent snapshot so
+    // children see the same filtered set.
+    let active_sandbox = match sandbox::requested(cli.sandbox.as_deref(), &cfg.compute) {
+        Some(name) => {
+            let sb = sandbox::ActiveSandbox::start(&name, &cfg.compute, &cwd).await?;
+            let withheld = registry.retain_remote_capable();
+            if !withheld.is_empty() {
+                eprintln!("sandbox: not available here: {}", withheld.join(", "));
+            }
+            Some(sb)
+        }
+        None => None,
+    };
     // Snapshot the base registry BEFORE the interactive/agent tools
     // land — this is what child sessions inherit when the `agent` tool
     // spawns a subagent. Keeping `agent` OUT of the base prevents an
@@ -302,6 +326,10 @@ async fn main() -> Result<()> {
     let tool_ctx = ToolContext::new(cwd.clone(), sandbox)
         .with_memory(memory_store)
         .with_episodic(episodic_store.clone());
+    let tool_ctx = match &active_sandbox {
+        Some(sb) => tool_ctx.with_compute(sb.backend()),
+        None => tool_ctx,
+    };
 
     // --- policy: rules from config, mode from CLI/config/default
     let policy = Policy::from_config(&PolicyConfig {
@@ -376,7 +404,11 @@ async fn main() -> Result<()> {
         ),
         None => Session::new(
             sess_cfg,
-            system_prompt(&cwd, &registry),
+            system_prompt(&cwd, &registry)
+                + &active_sandbox
+                    .as_ref()
+                    .map(|sb| sb.prompt_note())
+                    .unwrap_or_default(),
             provider.clone(),
             Arc::new(registry),
             policy.clone(),
@@ -408,54 +440,65 @@ async fn main() -> Result<()> {
     }
     let session = session;
 
-    if use_tui {
-        // (#1) Fire-and-forget model catalog fetch — populates the
-        // `/model <TAB>` autocomplete without blocking startup. A slow
-        // provider (or an offline one) just means the palette shows no
-        // completions until the fetch lands. Uses the same
-        // ChatProvider handle that just built the session.
-        let models = std::sync::Arc::new(tokio::sync::RwLock::new(Vec::<String>::new()));
-        {
-            let models = models.clone();
-            let provider_for_models = provider.clone();
-            tokio::spawn(async move {
-                match provider_for_models.list_models().await {
-                    Ok(list) => {
-                        let mut ids: Vec<String> = list.into_iter().map(|m| m.id).collect();
-                        ids.sort();
-                        ids.dedup();
-                        *models.write().await = ids;
+    let result: Result<()> = async {
+        if use_tui {
+            // (#1) Fire-and-forget model catalog fetch — populates the
+            // `/model <TAB>` autocomplete without blocking startup. A slow
+            // provider (or an offline one) just means the palette shows no
+            // completions until the fetch lands. Uses the same
+            // ChatProvider handle that just built the session.
+            let models = std::sync::Arc::new(tokio::sync::RwLock::new(Vec::<String>::new()));
+            {
+                let models = models.clone();
+                let provider_for_models = provider.clone();
+                tokio::spawn(async move {
+                    match provider_for_models.list_models().await {
+                        Ok(list) => {
+                            let mut ids: Vec<String> = list.into_iter().map(|m| m.id).collect();
+                            ids.sort();
+                            ids.dedup();
+                            *models.write().await = ids;
+                        }
+                        Err(e) => tracing::debug!(
+                            %e,
+                            "tui: model list fetch failed; /model autocomplete will stay empty"
+                        ),
                     }
-                    Err(e) => tracing::debug!(
-                        %e,
-                        "tui: model list fetch failed; /model autocomplete will stay empty"
-                    ),
-                }
-            });
-        }
+                });
+            }
 
-        tui::run(
-            session,
-            tui::TuiConfig {
-                model: settings.model,
-                provider: settings.provider_name.clone(),
-                mode: settings.mode,
-                policy,
-                approval_rx: approval_rx.expect("tui branch created a receiver"),
-                prompt_rx,
-                subagent_events_rx,
-                cwd: cwd.clone(),
-                skills: skills_handle,
-                store: store.clone(),
-                models,
-                computer_cfg: cfg.computer.clone(),
-                browser_cfg: cfg.browser.clone(),
-            },
-        )
-        .await
-    } else {
-        repl::run(session, skills_handle).await
+            tui::run(
+                session,
+                tui::TuiConfig {
+                    model: settings.model,
+                    provider: settings.provider_name.clone(),
+                    mode: settings.mode,
+                    policy,
+                    approval_rx: approval_rx.expect("tui branch created a receiver"),
+                    prompt_rx,
+                    subagent_events_rx,
+                    cwd: cwd.clone(),
+                    skills: skills_handle,
+                    store: store.clone(),
+                    models,
+                    computer_cfg: cfg.computer.clone(),
+                    browser_cfg: cfg.browser.clone(),
+                },
+            )
+            .await
+        } else {
+            repl::run(session, skills_handle).await
+        }
     }
+    .await;
+    // Collect the sandbox's changes even when the frontend errored — the
+    // work done so far shouldn't be lost.
+    if let Some(sb) = active_sandbox {
+        if let Err(e) = sb.finish().await {
+            eprintln!("warning: {e:#}");
+        }
+    }
+    result
 }
 
 /// Values that survive the CLI/env/config/default cascade and get passed

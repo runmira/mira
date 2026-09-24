@@ -146,6 +146,24 @@ pub async fn run(cli: &crate::Cli, args: DoctorArgs) -> Result<()> {
         (false, Err(_)) => report.info("browser", "off (enable with --browser)"),
     }
 
+    // ---- sandbox (compute backend) ----
+    match crate::sandbox::requested(cli.sandbox.as_deref(), &cfg.compute).as_deref() {
+        None => report.info("sandbox", "off (tools run on this checkout; try --sandbox local|e2b)"),
+        Some("local") => report.pass("sandbox", "local (scratch copy of the project)"),
+        Some("e2b") => {
+            let env = cfg.compute.e2b.api_key_env();
+            if std::env::var_os(env).is_some() {
+                report.pass("sandbox", format!("e2b · {env} is set"));
+            } else {
+                report.fail("sandbox", format!("e2b · {env} is not set"));
+            }
+        }
+        Some(other) => report.fail(
+            "sandbox",
+            format!("unknown backend `{other}` (expected local or e2b)"),
+        ),
+    }
+
     // ---- optional network probe ----
     if args.ping {
         if let Some(s) = &settings {
