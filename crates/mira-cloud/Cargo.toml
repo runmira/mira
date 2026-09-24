@@ -1,0 +1,32 @@
+[package]
+name         = "mira-cloud"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+description  = "Cloud tasks for Mira: run a session headless in a sandbox and deliver a pull request."
+
+[dependencies]
+mira-ai      = { workspace = true }
+mira-compute = { workspace = true }
+mira-config  = { workspace = true }
+mira-core    = { workspace = true }
+mira-harness = { workspace = true }
+mira-policy  = { workspace = true }
+mira-sandbox = { workspace = true }
+mira-tools   = { workspace = true }
+async-trait  = { workspace = true }
+base64       = "0.22"
+futures      = { workspace = true }
+reqwest      = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+thiserror    = { workspace = true }
+tokio        = { workspace = true }
+tracing      = { workspace = true }
+uuid         = { workspace = true }
+
+[dev-dependencies]
+axum     = { workspace = true, features = ["multipart"] }
+tempfile = "3"
+tokio    = { workspace = true }

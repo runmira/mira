@@ -234,6 +234,12 @@ keyboard. `mira --browser` lets it drive Chrome in a separate Mira
 profile. Both are off by default, and desktop input asks for approval
 even in `yolo`. See [docs/COMPUTER_USE.md](./docs/COMPUTER_USE.md).
 
+### Cloud tasks
+
+`mira cloud run "<task>"` runs the whole session in an E2B sandbox: clone,
+work, verify, push. You come back to a pull request, and can close your
+laptop once the command returns. See [docs/cloud-tasks.md](./docs/cloud-tasks.md).
+
 ### Remote environments
 
 `/remote-env <name>` in the TUI, or the environment chip in the web UI,
@@ -263,6 +269,7 @@ Mira is a Cargo workspace. Each crate has one job.
 | [`mira-config`](./crates/mira-config) | `mira.yaml` loader — provider, MCP servers, permissions. |
 | [`mira-computer`](./crates/mira-computer) | Desktop control for the `computer` tool — screenshots, mouse, keyboard (macOS, X11). |
 | [`mira-browser`](./crates/mira-browser) | Chrome DevTools driver for the `browser` tool. |
+| [`mira-cloud`](./crates/mira-cloud) | Cloud tasks: headless worker in a sandbox that delivers a pull request. |
 | [`mira-compute`](./crates/mira-compute) | Where tools execute: the local worktree, or a named remote environment (scratch copy, E2B microVM) you can switch to mid-session. |
 | [`mira-cli`](./crates/mira-cli) | Terminal entrypoint (TUI + `mira review`, `mira serve`, …). |
 | [`mira-server`](./crates/mira-server) | Axum backend + embedded React frontend for the web UI. |

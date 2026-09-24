@@ -144,6 +144,13 @@ const DROPPED_ENV: &[&str] = &[
     "OPEN_ROUTER_API_KEY",
     "ASTER_API_KEY",
     "ASTER_SESSION",
+    "MIRA_API_KEY",
+    "E2B_API_KEY",
+    // Cloud-task secrets (see mira-cloud). The worker reads them from a
+    // file, but never let a tool inherit them if they're ever exported.
+    "MIRA_CLOUD_MODEL_KEY",
+    "MIRA_CLOUD_GITHUB_TOKEN",
+    "MIRA_CLOUD_E2B_KEY",
 ];
 
 const INHERITED_ENV: &[&str] = &[
