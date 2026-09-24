@@ -1721,6 +1721,7 @@ dependencies = [
  "mira-ai",
  "mira-auth",
  "mira-browser",
+ "mira-cloud",
  "mira-compute",
  "mira-computer",
  "mira-config",
@@ -1745,6 +1746,32 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "unicode-width 0.2.0",
+]
+
+[[package]]
+name = "mira-cloud"
+version = "0.3.9"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "futures",
+ "mira-ai",
+ "mira-compute",
+ "mira-config",
+ "mira-core",
+ "mira-harness",
+ "mira-policy",
+ "mira-sandbox",
+ "mira-tools",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

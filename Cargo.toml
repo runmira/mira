@@ -27,6 +27,7 @@ mira-auth     = { path = "crates/mira-auth",    version = "0.3.9" }
 mira-computer = { path = "crates/mira-computer", version = "0.3.9" }
 mira-browser  = { path = "crates/mira-browser",  version = "0.3.9" }
 mira-compute  = { path = "crates/mira-compute",  version = "0.3.9" }
+mira-cloud    = { path = "crates/mira-cloud",    version = "0.3.9" }
 
 # Async runtime
 tokio           = { version = "1.40", features = ["macros", "rt-multi-thread", "process", "fs", "io-util", "io-std", "sync", "signal", "time"] }

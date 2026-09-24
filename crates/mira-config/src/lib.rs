@@ -67,6 +67,52 @@ pub struct MiraConfig {
     /// Only read from the global file.
     #[serde(default, skip_serializing_if = "ComputeConfig::is_empty")]
     pub compute: ComputeConfig,
+    /// Cloud tasks (`mira cloud run`). Only read from the global file.
+    #[serde(default, skip_serializing_if = "CloudConfig::is_empty")]
+    pub cloud: CloudConfig,
+}
+
+/// `cloud:` block: defaults for `mira cloud run`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct CloudConfig {
+    /// Environment from `compute.environments` (must use the `e2b`
+    /// backend). Default: the built-in `e2b`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
+    /// How Mira gets into the sandbox: `auto` (default: upload this binary
+    /// when on Linux x86_64, else install the matching release),
+    /// `preinstalled` (the template has it), `upload`, or `release`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub install: Option<String>,
+    /// Wall-clock budget per task. Match your E2B plan's session limit.
+    /// Default 3600.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_runtime_secs: Option<u64>,
+    /// Goal-loop iterations per task. Default 20.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_iterations: Option<usize>,
+    /// Spend cap per task in USD (when the model's pricing is known).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget_usd: Option<f64>,
+    /// Cheaper model for the goal evaluator.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evaluator_model: Option<String>,
+    /// Env var holding the GitHub token. Default: `GITHUB_TOKEN`, then
+    /// `GH_TOKEN`, then `gh auth token`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub github_token_env: Option<String>,
+    /// Let the sandbox delete itself when the task is delivered (the E2B
+    /// key goes into the sandbox for that). Default true; without it the
+    /// sandbox idles until its timeout.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_shutdown: Option<bool>,
+}
+
+impl CloudConfig {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// `compute:` block: named remote environments and their defaults.
@@ -506,8 +552,8 @@ impl MiraConfig {
         self.computer.settle_ms = c.settle_ms.or(self.computer.settle_ms);
         let b = other.browser;
         self.browser.headless = b.headless.or(self.browser.headless);
-        // `compute` is global-only: a repo must not be able to decide that
-        // its code gets shipped to a third-party sandbox.
+        // `compute` and `cloud` are global-only: a repo must not be able to
+        // decide that its code gets shipped to a third-party sandbox.
         self
     }
 }

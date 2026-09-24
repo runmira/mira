@@ -1,4 +1,5 @@
 mod approver;
+mod cloud;
 mod config;
 mod config_cmd;
 mod doctor;
@@ -143,6 +144,9 @@ enum Command {
     /// Set, clear, inspect, or resume the standing `/goal` on the
     /// most recent session for the current folder.
     Goal(goal::GoalArgs),
+    /// Run a task in a cloud sandbox and get a pull request back. You can
+    /// close your laptop once it's started.
+    Cloud(cloud::CloudArgs),
     /// Sign in with a provider via browser OAuth (openrouter, openai).
     Login(login::LoginArgs),
     /// Forget a provider's credentials from mira.yaml + auth store.
@@ -171,6 +175,7 @@ async fn main() -> Result<()> {
             Command::Eval(args) => eval::run(&cli, args).await,
             Command::Memory(args) => memory::run(&cli, args).await,
             Command::Goal(args) => goal::run(&cli, args).await,
+            Command::Cloud(args) => cloud::run(&cli, args).await,
             Command::Login(args) => login::run_login(args).await,
             Command::Logout(args) => login::run_logout(args).await,
             Command::Auth(args) => login::run_auth(args).await,

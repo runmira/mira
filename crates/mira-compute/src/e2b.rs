@@ -85,6 +85,10 @@ pub struct E2bBackend {
     access_token: Option<String>,
     last_keepalive: Mutex<Instant>,
     closed: AtomicBool,
+    /// Kill the sandbox when this handle drops without `shutdown`. Off for
+    /// handles that only look at a sandbox someone else owns (`attach`)
+    /// or that deliberately leave it running (`detach`).
+    kill_on_drop: AtomicBool,
 }
 
 fn http_err(what: &str, e: reqwest::Error) -> ComputeError {
@@ -186,8 +190,58 @@ impl E2bBackend {
             access_token: r.envd_access_token,
             last_keepalive: Mutex::new(Instant::now()),
             closed: AtomicBool::new(false),
+            kill_on_drop: AtomicBool::new(true),
             opts,
         }
+    }
+
+    /// Talk to an already-running sandbox (e.g. to read a cloud task's
+    /// log) without taking ownership: dropping the handle leaves it be.
+    pub fn attach(
+        opts: E2bOptions,
+        sandbox_id: &str,
+        envd_access_token: Option<String>,
+    ) -> Result<Self> {
+        let http = Self::build_http()?;
+        let b = Self::from_response(
+            http,
+            opts,
+            CreateResponse {
+                sandbox_id: sandbox_id.to_owned(),
+                envd_access_token,
+                domain: None,
+            },
+        );
+        b.kill_on_drop.store(false, Ordering::Relaxed);
+        Ok(b)
+    }
+
+    /// Let the sandbox keep running after this handle drops (it still
+    /// ends at its timeout). Used when handing a sandbox to a detached
+    /// cloud task.
+    pub fn detach(&self) {
+        self.kill_on_drop.store(false, Ordering::Relaxed);
+    }
+
+    /// The token for envd, to store alongside a detached sandbox's id.
+    pub fn envd_access_token(&self) -> Option<&str> {
+        self.access_token.as_deref()
+    }
+
+    /// Whether the sandbox still exists (running or paused).
+    pub async fn exists(opts: &E2bOptions, sandbox_id: &str) -> Result<bool> {
+        let http = Self::build_http()?;
+        let resp = http
+            .get(format!("{}/sandboxes/{sandbox_id}", opts.api_url))
+            .header("X-API-Key", &opts.api_key)
+            .send()
+            .await
+            .map_err(|e| http_err("status", e))?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(false);
+        }
+        check("status", resp).await?;
+        Ok(true)
     }
 
     /// Start a fresh sandbox from `opts.template`.
@@ -316,7 +370,7 @@ impl Drop for E2bBackend {
     /// it doesn't bill until its timeout. E2B reaps it at the timeout
     /// regardless.
     fn drop(&mut self) {
-        if self.closed.swap(true, Ordering::Relaxed) {
+        if self.closed.swap(true, Ordering::Relaxed) || !self.kill_on_drop.load(Ordering::Relaxed) {
             return;
         }
         let Ok(rt) = tokio::runtime::Handle::try_current() else {
