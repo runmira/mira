@@ -25,6 +25,9 @@ pub enum Action {
     /// tool). Target shape matches `Computer`, e.g.
     /// `navigate:https://example.com`, `click:e12`.
     Browser,
+    /// A tool from an MCP server. Target is `<server>:<tool>`, using the
+    /// same sanitized names as the tool's `mcp__<server>__<tool>` name.
+    Mcp,
     /// Anything that doesn't need gating — a pure computation.
     Pure,
 }

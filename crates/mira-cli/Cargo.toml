@@ -28,6 +28,8 @@ mira-harness  = { workspace = true }
 mira-review   = { workspace = true }
 mira-skills   = { workspace = true }
 mira-server   = { workspace = true }
+mira-mcp     = { workspace = true }
+mira-plugins = { workspace = true }
 mira-auth     = { workspace = true }
 mira-agents   = { workspace = true }
 

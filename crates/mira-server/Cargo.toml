@@ -20,6 +20,8 @@ mira-sandbox = { workspace = true }
 mira-skills  = { workspace = true }
 mira-tools   = { workspace = true }
 mira-auth    = { workspace = true }
+mira-mcp     = { workspace = true }
+mira-plugins = { workspace = true }
 
 shellexpand  = { workspace = true }
 once_cell    = "1"

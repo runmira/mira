@@ -349,8 +349,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "iana-time-zone",
+ "js-sys",
  "num-traits",
  "serde",
+ "wasm-bindgen",
  "windows-link",
 ]
 
@@ -1727,7 +1729,9 @@ dependencies = [
  "mira-config",
  "mira-core",
  "mira-harness",
+ "mira-mcp",
  "mira-memory",
+ "mira-plugins",
  "mira-policy",
  "mira-review",
  "mira-sandbox",
@@ -1858,12 +1862,59 @@ dependencies = [
 ]
 
 [[package]]
+name = "mira-mcp"
+version = "0.3.9"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "eventsource-stream",
+ "futures",
+ "mira-ai",
+ "mira-auth",
+ "mira-config",
+ "mira-core",
+ "mira-sandbox",
+ "mira-tools",
+ "reqwest 0.12.28",
+ "reqwest 0.13.4",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "mira-memory"
 version = "0.3.9"
 dependencies = [
  "async-trait",
  "serde",
  "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "mira-plugins"
+version = "0.3.9"
+dependencies = [
+ "anyhow",
+ "mira-config",
+ "mira-mcp",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "serde_yaml",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -1930,7 +1981,9 @@ dependencies = [
  "mira-config",
  "mira-core",
  "mira-harness",
+ "mira-mcp",
  "mira-memory",
+ "mira-plugins",
  "mira-policy",
  "mira-review",
  "mira-sandbox",
@@ -1983,7 +2036,6 @@ dependencies = [
  "mira-skills",
  "regex",
  "reqwest 0.12.28",
- "rmcp",
  "serde",
  "serde_json",
  "shellexpand",
@@ -2144,6 +2196,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "oauth2"
+version = "5.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "51e219e79014df21a225b1860a479e2dcd7cbd9130f4defd4bd0e191ea31d67d"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "getrandom 0.2.17",
+ "http",
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "serde_path_to_error",
+ "sha2",
+ "thiserror 1.0.69",
+ "url",
 ]
 
 [[package]]
@@ -2687,12 +2758,14 @@ version = "3.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42b6914fac0be956fe704a38239c3f44a9f841d1b06a5713d2f638065593f5b5"
 dependencies = [
+ "async-trait",
  "base64 0.23.1",
  "bytes",
  "chrono",
  "futures",
  "http",
  "indexmap",
+ "oauth2",
  "pin-project-lite",
  "process-wrap",
  "reqwest 0.13.4",
@@ -2704,6 +2777,7 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -3750,6 +3824,7 @@ dependencies = [
  "idna",
  "percent-encoding",
  "serde",
+ "serde_derive",
 ]
 
 [[package]]

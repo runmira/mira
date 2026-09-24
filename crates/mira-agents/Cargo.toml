@@ -4,11 +4,13 @@ version      = { workspace = true }
 edition      = { workspace = true }
 rust-version = { workspace = true }
 license      = { workspace = true }
+repository   = { workspace = true }
+homepage     = "https://github.com/runmira/mira"
 description  = "Named subagent types (explore/reviewer/…) + AGENTS.md registry loader."
 
 [dependencies]
 anyhow      = { workspace = true }
-serde       = { workspace = true }
+serde       = { workspace = true, features = ["derive"] }
 serde_json  = { workspace = true }
 serde_yaml  = { workspace = true }
 tracing     = { workspace = true }

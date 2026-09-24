@@ -63,6 +63,11 @@ pub async fn put_cwd(State(state): State<AppState>, Json(u): Json<CwdUpdate>) ->
     }
 
     persist_cwd(&path);
+    // Project MCP servers, commands and skills follow the folder.
+    state.extensions.set_project(Some(path.clone())).await;
+    state
+        .broadcast_all(crate::protocol::ServerMsg::ExtensionsChanged)
+        .await;
 
     // Spin up a fresh slot bound to the new folder. The previously-active
     // slot is left in the map — it may still have a background turn in

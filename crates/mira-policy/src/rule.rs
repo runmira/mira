@@ -45,8 +45,9 @@ impl Rule {
             Matcher::Glob(pat) => pat.matches(req.target),
             Matcher::Verb { verb, detail } => {
                 let (t_verb, t_detail) = req.target.split_once(':').unwrap_or((req.target, ""));
-                let verb_ok =
-                    wildcard_match(verb, t_verb) || (verb == "click" && t_verb.ends_with("click"));
+                let click_family =
+                    self.action != Action::Mcp && verb == "click" && t_verb.ends_with("click");
+                let verb_ok = wildcard_match(verb, t_verb) || click_family;
                 verb_ok
                     && detail
                         .as_deref()
@@ -105,6 +106,9 @@ pub fn session_rule_for(action: Action, target: &str) -> Option<String> {
     let family = match action {
         Action::Computer => "Computer",
         Action::Browser => "Browser",
+        // One MCP tool at a time: approving `create_issue` shouldn't
+        // quietly approve `delete_repo` on the same server.
+        Action::Mcp => return (!target.is_empty()).then(|| format!("Mcp({target})")),
         _ => return None,
     };
     let (verb, detail) = target.split_once(':').unwrap_or((target, ""));
@@ -172,6 +176,21 @@ impl FromStr for Rule {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let s = s.trim();
+        // Claude Code's MCP rule form: `mcp__server` (every tool on the
+        // server) or `mcp__server__tool`.
+        if let Some(rest) = s.strip_prefix("mcp__").filter(|_| !s.contains('(')) {
+            let (server, tool) = rest.split_once("__").unwrap_or((rest, "*"));
+            if server.is_empty() {
+                return Err(RuleParseError::Shape(s.to_owned()));
+            }
+            return Ok(Self {
+                action: Action::Mcp,
+                matcher: Matcher::Verb {
+                    verb: server.to_owned(),
+                    detail: Some(if tool.is_empty() { "*" } else { tool }.to_owned()),
+                },
+            });
+        }
         let (head, tail) = s
             .split_once('(')
             .ok_or_else(|| RuleParseError::Shape(s.to_owned()))?;
@@ -186,7 +205,14 @@ impl FromStr for Rule {
             "Bash" => Action::Bash,
             "Computer" => Action::Computer,
             "Browser" => Action::Browser,
+            "Mcp" => Action::Mcp,
             other => return Err(RuleParseError::UnknownAction(other.to_owned())),
+        };
+
+        // Older configs gated MCP tools as `Bash(mcp:<server>:<tool>)`.
+        let (action, pattern) = match (action, pattern.trim().strip_prefix("mcp:")) {
+            (Action::Bash, Some(rest)) => (Action::Mcp, rest),
+            _ => (action, pattern),
         };
 
         let matcher =
@@ -204,7 +230,7 @@ impl FromStr for Rule {
                         }
                     }
                 }
-                Action::Computer | Action::Browser => {
+                Action::Computer | Action::Browser | Action::Mcp => {
                     let pattern = pattern.trim();
                     let (verb, detail) = match pattern.split_once(':') {
                         Some((v, d)) => (v.trim().to_owned(), Some(d.to_owned())),
@@ -339,5 +365,32 @@ mod tests {
         assert!(r.matches(&req(Action::Edit, "src/main.rs")));
         assert!(r.matches(&req(Action::Edit, "src/lib/foo.rs")));
         assert!(!r.matches(&req(Action::Edit, "tests/foo.rs")));
+    }
+
+    #[test]
+    fn mcp_rules_in_both_spellings() {
+        let server: Rule = "mcp__github".parse().unwrap();
+        let tool: Rule = "mcp__github__create_issue".parse().unwrap();
+        let explicit: Rule = "Mcp(github:list_*)".parse().unwrap();
+        let legacy: Rule = "Bash(mcp:github:*)".parse().unwrap();
+        let hit = req(Action::Mcp, "github:create_issue");
+        let other = req(Action::Mcp, "linear:create_issue");
+        assert!(server.matches(&hit) && !server.matches(&other));
+        assert!(tool.matches(&hit));
+        assert!(!tool.matches(&req(Action::Mcp, "github:delete_repo")));
+        assert!(explicit.matches(&req(Action::Mcp, "github:list_prs")));
+        assert!(!explicit.matches(&hit));
+        assert!(legacy.matches(&hit));
+        // An MCP rule never covers a shell command, or the reverse.
+        assert!(!server.matches(&req(Action::Bash, "github:create_issue")));
+        let bash: Rule = "Bash(github:*)".parse().unwrap();
+        assert!(!bash.matches(&hit));
+        // No `click` shorthand for MCP servers.
+        let click: Rule = "Mcp(click)".parse().unwrap();
+        assert!(!click.matches(&req(Action::Mcp, "doubleclick:x")));
+        assert_eq!(
+            session_rule_for(Action::Mcp, "github:create_issue").as_deref(),
+            Some("Mcp(github:create_issue)")
+        );
     }
 }

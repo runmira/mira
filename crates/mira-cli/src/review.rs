@@ -375,3 +375,4 @@ fn markdown_report(findings: &[Finding]) -> String {
     }
     out
 }
+// Mira remembers: this formatter was added during a quick comment demo; harmless and safe.

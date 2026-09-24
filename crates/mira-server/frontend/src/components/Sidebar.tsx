@@ -8,7 +8,6 @@ import {
   Ellipsis,
   Folder,
   GitBranch,
-  GitMerge,
   Loader,
   Pencil,
   PenLine,
@@ -24,7 +23,7 @@ import {
   regenerateSessionTitle,
   renameSession,
 } from '../api';
-import type { BackgroundMode, SessionSummary, WorktreeMergeStatus } from '../types';
+import type { BackgroundMode, SessionSummary } from '../types';
 import type { WsStatus } from '../ws';
 import { parseSentAttachments } from './Composer';
 import { costUsd, formatDollars } from '../lib/usage';
@@ -431,7 +430,6 @@ function SessionRow({
    *  have no runtime; the endpoint 404s until the session is loaded). */
   onSetBackgroundMode?: (mode: BackgroundMode) => void;
 }) {
-  const providerDot = providerFamilyDot(session.model);
   // A session is "running" from the sidebar's POV either because it's the
   // active session with a live in-flight turn (activeBusy), OR because the
   // server reports its slot has a background turn still going. The second
@@ -454,17 +452,19 @@ function SessionRow({
       <button
         type="button"
         onClick={onPick}
-        className="flex min-w-0 flex-col items-start gap-0.5 text-left"
+        className="flex min-w-0 items-baseline gap-1.5 text-left"
       >
         <span
           className={cn(
-            'w-full truncate text-[14px] leading-tight',
+            'min-w-0 flex-1 truncate text-[13.5px] leading-tight',
             active ? 'font-semibold text-foreground' : 'font-medium text-foreground/90',
           )}
         >
           {sessionLabel(session)}
         </span>
-        <SublineMarquee session={session} providerDot={providerDot} />
+        <span className="shrink-0 text-[10.5px] text-muted-foreground/50">
+          {timeAgo(session.updated_at)}
+        </span>
       </button>
       {/* Single far-right slot. Status circle sits underneath the row
        *  menu — both share the same absolute box so the layout never
@@ -495,101 +495,6 @@ function SessionRow({
           />
         </span>
       </div>
-    </div>
-  );
-}
-
-/** Hover-triggered marquee for the subline. At rest no animation is
- *  applied, so the track sits at `translateX(0)` and the row reads as a
- *  normal truncated subline. On row hover the animation kicks in,
- *  translating the track leftward by exactly 50% — which equals the
- *  width of the FIRST copy, so the SECOND copy scrolls in seamlessly
- *  for a continuous loop with no visible seam. When the cursor leaves
- *  the animation is removed entirely and the track snaps back to 0
- *  (rather than pausing mid-scroll, which felt jerky on re-hover).
- *
- *  The 22px pad between copies acts as a visual gap so the loop reads
- *  as "and here it comes again" rather than one long banner. */
-function SublineMarquee({
-  session,
-  providerDot,
-}: {
-  session: SessionSummary;
-  providerDot: { family: string; color: string } | null;
-}) {
-  return (
-    <div className="w-full overflow-hidden">
-      <div
-        className={cn(
-          'inline-flex items-center whitespace-nowrap will-change-transform',
-          'group-hover:[animation:marquee_10s_linear_infinite]',
-        )}
-      >
-        <SublineContent session={session} providerDot={providerDot} />
-        {/* Second copy is hidden at rest so a subline that fits the row
-         *  doesn't visibly repeat ("Qwen3.8-27b … Qwen3.8-27b"). It flips
-         *  to visible on hover, right as the animation begins translating
-         *  the track — the copy slides in from the right instead of
-         *  popping up in place. */}
-        <SublineContent
-          session={session}
-          providerDot={providerDot}
-          ariaHidden
-          className="invisible group-hover:visible"
-        />
-      </div>
-    </div>
-  );
-}
-
-function SublineContent({
-  session,
-  providerDot,
-  ariaHidden,
-  className,
-}: {
-  session: SessionSummary;
-  providerDot: { family: string; color: string } | null;
-  ariaHidden?: boolean;
-  className?: string;
-}) {
-  return (
-    <div
-      className={cn(
-        'flex shrink-0 items-center gap-1.5 pr-[22px] text-[11.5px] leading-tight text-muted-foreground/80',
-        className,
-      )}
-      aria-hidden={ariaHidden ? true : undefined}
-    >
-      <span className="font-mono tracking-tight">{shortModelLabel(session.model)}</span>
-      <span className="text-muted-foreground/50">·</span>
-      <span>{timeAgo(session.updated_at)}</span>
-      {(() => {
-        const c = sessionCost(session);
-        return c != null ? (
-          <>
-            <span className="text-muted-foreground/50">·</span>
-            <span
-              className="font-mono tracking-tight text-emerald-400/80"
-              title={usageBreakdown(session)}
-            >
-              {formatDollars(c)}
-            </span>
-          </>
-        ) : null;
-      })()}
-      {session.worktree_branch && (
-        <>
-          <span className="text-muted-foreground/50">·</span>
-          <InlineBranchBadge status={session.worktree_status} branch={session.worktree_branch} />
-        </>
-      )}
-      {providerDot && (
-        <span
-          className={cn('ml-1 inline-block size-1.5 shrink-0 rounded-full', providerDot.color)}
-          title={providerDot.family}
-        />
-      )}
     </div>
   );
 }
@@ -631,54 +536,6 @@ function SessionStatus({ running, merged }: { running: boolean; merged: boolean 
       <Circle className="size-3.5" />
     </span>
   );
-}
-
-/** Inline branch chip for the subline. Just a git-branch icon (or
- *  git-merge when merged) followed by the short branch name. No border,
- *  no chip — it reads as a metadata pair, not a badge. */
-function InlineBranchBadge({
-  status,
-  branch,
-}: {
-  status: WorktreeMergeStatus | null | undefined;
-  branch: string;
-}) {
-  const merged = status === 'merged';
-  const Icon = merged ? GitMerge : GitBranch;
-  const short = branch.length > 20 ? branch.slice(0, 18) + '…' : branch;
-  return (
-    <span className={cn('inline-flex items-center gap-0.5', merged ? 'text-mira-purple' : 'text-muted-foreground/80')}>
-      <Icon className="size-3" />
-      <span className="font-mono">{short}</span>
-    </span>
-  );
-}
-
-/** Provider-family dot only (no name). Reused inline in the subline so
- *  the dot cluster with `time · branch · dot` reads as one metadata row. */
-function providerFamilyDot(model: string): { family: string; color: string } | null {
-  if (!model) return null;
-  return providerFamily(model);
-}
-
-/** Short, Title-cased model label for the subline. Drops any provider
- *  prefix (`openrouter/anthropic/…`), strips date/`latest` suffixes, and
- *  capitalises the first letter so `qwen3.8-27b` reads as `Qwen3.8-27b`.
- *  Falls back to a neutral placeholder when the session has no model
- *  recorded (very old sessions, freshly-created rows). */
-function shortModelLabel(model: string | null | undefined): string {
-  if (!model) return 'Model';
-  let m = model;
-  const lastSlash = m.lastIndexOf('/');
-  if (lastSlash >= 0) m = m.slice(lastSlash + 1);
-  m = m.replace(/-\d{4}-\d{2}-\d{2}$/, '');
-  m = m.replace(/-latest$/, '');
-  // Titlecase the first char without touching casing anywhere else — model
-  // ids like `gpt-4o` and `qwen3.8-27b` have meaningful mixed case beyond
-  // the first character (the `o` in `4o` is intentional).
-  if (m.length > 0) m = m[0].toUpperCase() + m.slice(1);
-  if (m.length > 20) m = m.slice(0, 19) + '…';
-  return m;
 }
 
 /* ---------- rename dialog ---------- */
@@ -948,19 +805,6 @@ function groupCost(sessions: SessionSummary[]): number | null {
   return any ? total : null;
 }
 
-function usageBreakdown(s: SessionSummary): string {
-  const u = s.usage;
-  if (!u) return '';
-  const parts: string[] = [
-    `↑${u.prompt_tokens.toLocaleString()} prompt`,
-    `↓${u.completion_tokens.toLocaleString()} completion`,
-  ];
-  if (u.cached_input_tokens > 0) {
-    parts.push(`${u.cached_input_tokens.toLocaleString()} cached`);
-  }
-  parts.push(`${u.rounds} round${u.rounds === 1 ? '' : 's'}`);
-  return parts.join(' · ');
-}
 
 function timeAgo(unixSecs: number): string {
   const now = Math.floor(Date.now() / 1000);
@@ -973,33 +817,6 @@ function timeAgo(unixSecs: number): string {
   return `${Math.floor(days / 7)}w`;
 }
 
-
-/* ---------- provider family (dot color) ---------- */
-
-/** Prefix-match model id → provider family. Longer prefixes first so
- *  `gpt-4o-mini` doesn't collide with `gpt-4o`. Colors picked to be
- *  distinguishable on a dark background without shouting. */
-function providerFamily(model: string): { family: string; color: string } {
-  const m = model.toLowerCase();
-  const table: [RegExp, string, string][] = [
-    [/(^|\/)o1(-|$)/,           'openai',    'bg-emerald-500'],
-    [/(^|\/)o3(-|$)/,           'openai',    'bg-emerald-500'],
-    [/(^|\/)gpt-/,              'openai',    'bg-emerald-500'],
-    [/claude/,                  'anthropic', 'bg-orange-500'],
-    [/gemini/,                  'google',    'bg-amber-400'],
-    [/deepseek/,                'deepseek',  'bg-mira-blue'],
-    [/llama/,                   'meta',      'bg-mira-purple'],
-    [/qwen/,                    'alibaba',   'bg-pink-500'],
-    [/mistral|mixtral/,         'mistral',   'bg-orange-400'],
-    [/grok|xai/,                'xai',       'bg-slate-300'],
-    [/moonshot|kimi/,           'moonshot',  'bg-fuchsia-400'],
-    [/phi/,                     'microsoft', 'bg-cyan-400'],
-  ];
-  for (const [rx, family, color] of table) {
-    if (rx.test(m)) return { family, color };
-  }
-  return { family: 'other', color: 'bg-muted-foreground/60' };
-}
 
 /* ---------- row overflow menu (extensible) ---------- */
 

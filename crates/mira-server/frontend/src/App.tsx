@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence } from 'framer-motion';
-import { CaretDown, SidebarSimple, Target } from '@phosphor-icons/react';
+import { CaretDown, Lightbulb, ShieldWarning, SidebarSimple, Sparkle, Target } from '@phosphor-icons/react';
 import { cn } from './lib/utils';
 import { connect, type WsClient, type WsStatus } from './ws';
-import { appendMemory, applyUndo, getBranchPr, getGitStatus, getSessionDiff, getSessionHistory, getSettings, gitCommit, gitPush, listSkills, newSession, setSessionBackgroundMode, startReview, type BranchPrView, type GitStatusView, type SessionDiffView, type SkillView } from './api';
+import { appendMemory, applyUndo, getBranchPr, getGitStatus, getSessionDiff, getSessionHistory, getSettings, gitCommit, gitPush, listCommands, listSkills, newSession, setSessionBackgroundMode, startReview, type BranchPrView, type GitStatusView, type SessionDiffView, type SkillView, type CommandInfo } from './api';
 import { ContextPanel } from './components/ContextPanel';
 import { extractAgentId } from './components/AgentCard';
 import { SettingsSurface } from './components/Settings';
@@ -451,6 +451,10 @@ export default function App() {
   // (server needs to be up + AppState wired). Empty on error; the
   // palette degrades gracefully to just the built-in commands.
   const [skills, setSkills] = useState<SkillView[]>([]);
+  // Custom commands + MCP prompts for the composer palette, and a
+  // counter the Plugins page watches to refetch on `extensions_changed`.
+  const [commands, setCommands] = useState<CommandInfo[]>([]);
+  const [extensionsVersion, setExtensionsVersion] = useState(0);
   // Bumps each time the backend broadcasts `SkillsReloaded` (filesystem
   // watcher detected a change). Passed to the Settings panel so its
   // Skills tab re-fetches when a `SKILL.md` lands / vanishes / edits
@@ -526,10 +530,12 @@ export default function App() {
           for (const e of readyEntries) {
             if (e.kind !== 'tool' || e.call.function.name !== 'agent') continue;
             try {
-              const args = JSON.parse(e.call.function.arguments) as { prompt?: string };
+              const args = JSON.parse(e.call.function.arguments) as { prompt?: string; type?: string };
               seeded.set(e.call.id, {
                 parentCallId: e.call.id,
                 prompt: args.prompt ?? '',
+                agentName: args.type ?? null,
+                agentCategory: null,
                 entries: [],
                 done: true,
                 pendingReview: null,
@@ -554,6 +560,7 @@ export default function App() {
         // change the project tier (~/.mira vs. <cwd>/.mira). Silent on
         // failure; the palette just shows built-in commands.
         listSkills().then(setSkills).catch(() => setSkills([]));
+        listCommands().then(setCommands).catch(() => setCommands([]));
         // Each session (and worktree) has its own environment; ask for it.
         setEnvSwitching(null);
         wsRef.current?.send({ type: 'environment' });
@@ -680,6 +687,12 @@ export default function App() {
             return { ...e, preview: msg.preview };
           }),
         );
+        break;
+      case 'extensions_changed':
+        // An MCP server connected/dropped or a plugin changed.
+        listCommands().then(setCommands).catch(() => {});
+        listSkills().then(setSkills).catch(() => {});
+        setExtensionsVersion((n) => n + 1);
         break;
       case 'skills_reloaded':
         // A skill file appeared / changed / vanished. Refetch the
@@ -1075,6 +1088,26 @@ export default function App() {
     [entries],
   );
 
+  // Plan proposal waiting for the user to approve/cancel. Rendered in
+  // the Composer rather than inline so the interactive card doesn't
+  // scroll away in a long transcript.
+  const pendingPlan = useMemo(() => {
+    const e = entries.find(
+      (e): e is Extract<Entry, { kind: 'tool' }> =>
+        e.kind === 'tool' && !!e.plan && e.plan.decision === null,
+    );
+    return e ? { callId: e.call.id, proposal: e.plan!.proposal } : null;
+  }, [entries]);
+
+  // ask_user proposal waiting for answers. Same pattern as pendingPlan.
+  const pendingAskUser = useMemo(() => {
+    const e = entries.find(
+      (e): e is Extract<Entry, { kind: 'tool' }> =>
+        e.kind === 'tool' && !!e.askUser && e.askUser.decision === null,
+    );
+    return e ? { callId: e.call.id, proposal: e.askUser!.proposal } : null;
+  }, [entries]);
+
   // Global Y/N shortcut for the first pending approval. Rebinds when
   // the head-of-queue call changes so back-to-back approvals each
   // pick up their own listener. Skipped while the user is typing so
@@ -1467,6 +1500,14 @@ export default function App() {
                   sessionDiff={sessionDiff}
                   branchPr={branchPr}
                   environmentName={environment?.current ?? 'Local'}
+                  environment={environment}
+                  environments={environments}
+                  envSwitching={envSwitching}
+                  onSwitchEnvironment={(target) => {
+                    setEnvSwitching(`switching to ${target}…`);
+                    wsRef.current?.send({ type: 'environment', target });
+                  }}
+                  onSwitchWorktree={(_path, id) => { if (id) wsRef.current?.attach(id); }}
                   onOpenAgent={openAgentTab}
                   onPush={async () => { await gitPush(); getGitStatus().then(setGitStatus).catch(() => {}); getBranchPr().then(setBranchPr).catch(() => {}); }}
                   onCommit={async (message, includeUnstaged, pushAfter) => {
@@ -1521,6 +1562,13 @@ export default function App() {
                 return `reverted ${r.applied.length} write${r.applied.length === 1 ? '' : 's'}`;
               }}
               skills={skills}
+              pendingApproval={pendingApprovals[0] ?? null}
+              pendingPlan={pendingPlan}
+              pendingAskUser={pendingAskUser}
+              onDecide={(callId, allow, scope) => decideApproval(callId, allow, scope)}
+              onPlanReply={replyToPlan}
+              onAskUserReply={replyToAskUser}
+              commands={commands}
             />
             </div>
           </>
@@ -1528,7 +1576,7 @@ export default function App() {
 
         {mainView === 'plugins' && (
           <div className="flex-1 min-h-0 overflow-y-auto">
-            <PluginsPanel />
+            <PluginsPanel version={extensionsVersion} />
           </div>
         )}
 
@@ -2282,7 +2330,25 @@ function EntryView({
       // `agent` tool gets a compact per-agent card so parallel spawns
       // don't dominate the transcript. Everything else falls through to
       // the generic tool row.
+      //
+      // While a plan / ask_user is still pending (no decision yet), we show
+      // a compact chip in the transcript — the interactive version lives in
+      // the Composer so it stays anchored at the bottom even in long chats.
       if (entry.plan) {
+        if (!entry.plan.decision) {
+          return (
+            <div className="flex justify-start">
+              <div className="inline-flex items-center gap-2 rounded-xl border border-mira-blue/20 bg-mira-blue/[0.05] px-3 py-1.5 text-[12.5px]">
+                <Lightbulb weight="fill" className="size-3.5 shrink-0 text-mira-blue/70" />
+                <span className="font-medium text-mira-blue/80">Plan</span>
+                <span className="text-muted-foreground/40">·</span>
+                <span className="text-muted-foreground/80 truncate max-w-[40ch]">{entry.plan.proposal.title}</span>
+                <span className="text-muted-foreground/40">·</span>
+                <span className="text-[11px] text-muted-foreground/60">review below ↓</span>
+              </div>
+            </div>
+          );
+        }
         return (
           <div className="flex justify-start">
             <PlanCard
@@ -2295,6 +2361,18 @@ function EntryView({
         );
       }
       if (entry.askUser) {
+        if (!entry.askUser.decision) {
+          return (
+            <div className="flex justify-start">
+              <div className="inline-flex items-center gap-2 rounded-xl border border-mira-blue/20 bg-mira-blue/[0.05] px-3 py-1.5 text-[12.5px]">
+                <Sparkle weight="fill" className="size-3.5 shrink-0 text-mira-blue/70" />
+                <span className="font-medium text-mira-blue/80">Question</span>
+                <span className="text-muted-foreground/40">·</span>
+                <span className="text-[11px] text-muted-foreground/60">answer below ↓</span>
+              </div>
+            </div>
+          );
+        }
         return (
           <div className="flex justify-start">
             <AskUserCard
@@ -2319,6 +2397,24 @@ function EntryView({
               result={entry.result}
               onOpen={onOpenAgent}
             />
+          </div>
+        );
+      }
+      // Pending approval: show a compact chip in transcript since the
+      // interactive card is now anchored in the Composer.
+      if (entry.status === 'pending') {
+        return (
+          <div className="flex justify-start">
+            <div className="inline-flex items-center gap-2 rounded-xl border border-amber-500/20 bg-amber-500/[0.05] px-3 py-1.5 text-[12.5px]">
+              <ShieldWarning weight="fill" className="size-3.5 shrink-0 text-amber-400/80" />
+              <span className="font-medium text-amber-400/80">Approval</span>
+              <span className="text-muted-foreground/40">·</span>
+              <span className="text-muted-foreground/80 truncate max-w-[40ch] font-mono text-[11.5px]">
+                {entry.call.function.name}
+              </span>
+              <span className="text-muted-foreground/40">·</span>
+              <span className="text-[11px] text-muted-foreground/60">review below ↓</span>
+            </div>
           </div>
         );
       }

@@ -4,6 +4,7 @@ mod config;
 mod config_cmd;
 mod doctor;
 mod eval;
+mod ext_cmd;
 mod goal;
 mod init;
 mod login;
@@ -147,6 +148,10 @@ enum Command {
     /// Run a task in a cloud sandbox and get a pull request back. You can
     /// close your laptop once it's started.
     Cloud(cloud::CloudArgs),
+    /// Manage MCP servers: add, list, sign in, enable/disable, approve.
+    Mcp(ext_cmd::McpArgs),
+    /// Manage plugins and plugin marketplaces (Claude Code format).
+    Plugin(ext_cmd::PluginArgs),
     /// Sign in with a provider via browser OAuth (openrouter, openai).
     Login(login::LoginArgs),
     /// Forget a provider's credentials from mira.yaml + auth store.
@@ -176,6 +181,8 @@ async fn main() -> Result<()> {
             Command::Memory(args) => memory::run(&cli, args).await,
             Command::Goal(args) => goal::run(&cli, args).await,
             Command::Cloud(args) => cloud::run(&cli, args).await,
+            Command::Mcp(args) => ext_cmd::run_mcp(args).await,
+            Command::Plugin(args) => ext_cmd::run_plugin(args).await,
             Command::Login(args) => login::run_login(args).await,
             Command::Logout(args) => login::run_logout(args).await,
             Command::Auth(args) => login::run_auth(args).await,
@@ -223,15 +230,17 @@ async fn main() -> Result<()> {
     // Wrap in the RwLock-Arc shape the SkillTool expects — no cwd swap in
     // the CLI path, so the lock is effectively read-only, but the shape
     // stays consistent with `mira serve`.
-    let skills_registry = mira_skills::SkillRegistry::load_layered(
-        &mira_config::shared_skills_dir(),
-        &mira_config::user_skills_dir(),
-        &mira_config::well_known_project_skills_dirs(&cwd),
-    );
+    // MCP servers, plugins and custom commands. Plugin skills join the
+    // skill registry; MCP servers connect in the background.
+    let extensions = mira_server::extensions::Extensions::new(Some(cwd.clone()));
+    let skills_registry =
+        mira_server::extensions::load_skills(Some(&cwd), &extensions.plugin_skill_dirs());
     let skills_handle: mira_tools::builtin::skill::SkillHandle = std::sync::Arc::new(
         tokio::sync::RwLock::new(std::sync::Arc::new(skills_registry)),
     );
     builtin::register_skills(&mut registry, skills_handle.clone());
+    extensions.attach_skills(skills_handle.clone());
+    extensions.reload().await;
     // `memory_consolidate` — dedup/merge a MIRA.md via a cheap model.
     // Gated behind the same `memory.tools_enabled` switch as the other
     // memory tools: consolidation isn't useful without them.
@@ -243,21 +252,9 @@ async fn main() -> Result<()> {
             .unwrap_or_else(|| settings.model.clone());
         builtin::register_consolidate(&mut registry, provider.clone(), consolidate_model);
     }
-    // Configured MCP servers layer on top of the built-ins. A single broken
-    // entry mustn't stop Mira from starting, so failures degrade to a
-    // warning and we move on.
-    for (name, server_cfg) in &cfg.mcp_servers {
-        match mira_tools::connect_mcp(name, server_cfg).await {
-            Ok(conn) => {
-                for tool in conn.tools {
-                    registry.register_arc(tool);
-                }
-            }
-            Err(e) => {
-                eprintln!("warning: mcp `{name}` disabled ({e:#})");
-            }
-        }
-    }
+    // MCP tools appear live as their servers connect (and leave if one
+    // drops). A broken server never stops Mira from starting.
+    registry.add_source(extensions.mcp().tool_source());
     register_computer_use(&mut registry, &cli, &cfg).await;
     // Remote environments: the manager owns the switchable compute slot
     // the tools read. `--sandbox` / `compute.default` switch it once the
@@ -294,7 +291,10 @@ async fn main() -> Result<()> {
     // and AgentTool silently drops the events (never blocks).
     let (subagent_events_tx, subagent_events_rx) =
         tokio::sync::broadcast::channel::<mira_server::protocol::ServerMsg>(256);
-    let agents_registry = Arc::new(mira_agents::load(&cwd));
+    let agents_registry = Arc::new(mira_agents::load_with_plugins(
+        &cwd,
+        &extensions.plugin_agent_files(),
+    ));
     tracing::info!(
         count = agents_registry.names().len(),
         types = ?agents_registry.names(),
@@ -492,10 +492,19 @@ async fn main() -> Result<()> {
                     environments: environments.clone(),
                     env_tx,
                     env_rx,
+                    extensions: extensions.clone(),
                 },
             )
             .await
         } else {
+            // No live UI to show tools arriving: wait for the servers.
+            extensions
+                .mcp()
+                .wait_settled(extensions.mcp().options().connect_timeout)
+                .await;
+            for notice in extensions.notices() {
+                eprintln!("mcp: {notice}");
+            }
             repl::run(session, skills_handle).await
         }
     }
@@ -503,6 +512,7 @@ async fn main() -> Result<()> {
     // Save (never apply) a remote environment's pending changes, even
     // when the frontend errored, and release every environment.
     sandbox::print_finish(environments.finish().await, &cwd);
+    extensions.mcp().shutdown();
     result
 }
 
