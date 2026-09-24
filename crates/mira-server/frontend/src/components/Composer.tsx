@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { AnimatePresence, motion } from 'framer-motion';
 import {
   ArrowUp,
   Camera,
@@ -19,8 +20,21 @@ import {
   Target,
   X,
 } from 'lucide-react';
+import {
+  ArrowDown as PhArrowDown,
+  ArrowLeft as PhArrowLeft,
+  ArrowRight as PhArrowRight,
+  ArrowUp as PhArrowUp,
+  Check as PhCheck,
+  Lightbulb as PhLightbulb,
+  PencilSimpleLine,
+  Sparkle,
+  Trash,
+} from '@phosphor-icons/react';
 import { createWorktree, getGitStatus, listModels, putCwd, readFile, type GitStatusView, type ModelInfo } from '../api';
-import type { DiffPreview, EnvironmentInfo, EnvironmentStatus, Goal, Mode, ToolCall, UsageTotals } from '../types';
+import type { ApprovalScope, AskUserAnswer, AskUserProposal, DiffLine, DiffPreview, EnvironmentInfo, EnvironmentStatus, Goal, Mode, PlanProposal, PlanStep, ToolCall, UsageTotals } from '../types';
+import type { AskUserDecision } from './AskUserCard';
+import { infoFor } from './ToolGroup';
 import { costUsd, formatDollars, shortNum } from '../lib/usage';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandSeparator } from '@/components/ui/command';
@@ -89,6 +103,20 @@ type Props = {
    *  model turns into a `Skill` tool call. Empty array = no skills or
    *  the roster hasn't loaded yet — palette still works. */
   skills: PaletteSkill[];
+  /** Active approval waiting for the user's Y/N decision. When set,
+   *  the Composer grows upward to show the approval UI instead of the
+   *  text input. */
+  pendingApproval?: PendingApproval | null;
+  /** Active plan proposal waiting for the user to approve/cancel. */
+  pendingPlan?: { callId: string; proposal: PlanProposal } | null;
+  /** Active ask_user proposal waiting for answers. */
+  pendingAskUser?: { callId: string; proposal: AskUserProposal } | null;
+  /** Approve/deny a pending tool call. */
+  onDecide?: (callId: string, allow: boolean, scope?: ApprovalScope) => void;
+  /** Reply to a plan proposal. */
+  onPlanReply?: (callId: string, approved: boolean, steps?: PlanStep[], note?: string) => void;
+  /** Reply to an ask_user proposal. */
+  onAskUserReply?: (callId: string, decision: AskUserDecision) => void;
 };
 
 export type PendingApproval = {
@@ -110,6 +138,7 @@ export function Composer({
   environment, environments, envSwitching, onSwitchEnvironment,
   onSend, onSetMode, onSetModel, onSetEffort, onOpenPicker, onCwdSwitched, onInterrupt, onNewChat, onOpenSettings, onRunReview, onSetGoal, onClearGoal, goal, onRemember, onUndo,
   skills,
+  pendingApproval, pendingPlan, pendingAskUser, onDecide, onPlanReply, onAskUserReply,
 }: Props) {
   const [text, setText] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -354,6 +383,14 @@ export function Composer({
 
   const modeLabel = MODES.find((m) => m.value === mode)?.label ?? mode;
 
+  // Which interactive prompt (if any) is currently waiting for the user.
+  // ask_user takes priority (most interactive), then plan, then approval.
+  const activePromptKind: 'ask_user' | 'plan' | 'approval' | null =
+    pendingAskUser ? 'ask_user'
+    : pendingPlan ? 'plan'
+    : pendingApproval ? 'approval'
+    : null;
+
   return (
     <div className="flex flex-col items-center gap-1.5 px-4 pb-4 pt-2">
       <form
@@ -370,7 +407,7 @@ export function Composer({
           </div>
         )}
 
-        {(attachments.length > 0 || attachError) && (
+        {!activePromptKind && (attachments.length > 0 || attachError) && (
           <div className="flex flex-wrap gap-1.5 px-1.5">
             {attachments.map((a) => (
               <AttachmentChip key={a.path} attachment={a} onRemove={() => removeAttachment(a.path)} cwd={cwd} />
@@ -383,148 +420,188 @@ export function Composer({
           </div>
         )}
 
-        <div className="relative">
-          <MentionInput
-            handleRef={mentionRef}
-            value={text}
-            onChange={(next) => { setText(next); setSlashFeedback(null); }}
-            onKeyDown={(e) => {
-              // Palette is open → arrows navigate, Enter picks, Esc closes.
-              if (paletteVisible && paletteMatches.length > 0) {
-                if (e.key === 'ArrowDown') {
-                  e.preventDefault();
-                  setSlashIdx((i) => Math.min(i + 1, paletteMatches.length - 1));
-                  return;
-                }
-                if (e.key === 'ArrowUp') {
-                  e.preventDefault();
-                  setSlashIdx((i) => Math.max(i - 1, 0));
-                  return;
-                }
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault();
-                  const cmd = paletteMatches[slashIdx];
-                  if (cmd) commitPaletteChoice(cmd);
-                  return;
-                }
-                if (e.key === 'Tab') {
-                  e.preventDefault();
-                  const cmd = paletteMatches[slashIdx];
-                  if (cmd) {
-                    const prefix = slash.mode === 'palette' ? text.slice(0, slash.triggerStart) : '';
-                    updateText(`${prefix}${paletteTrigger}${cmd.name}${cmd.takesArgs ? ' ' : ''}`);
+        {/* Interactive prompt panel (plan / ask_user / approval) — replaces the
+            text input with the relevant dialog, animated from height 0. */}
+        <AnimatePresence initial={false}>
+          {activePromptKind && (
+            <motion.div
+              key={activePromptKind}
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
+              style={{ overflow: 'hidden' }}
+            >
+              {activePromptKind === 'plan' && pendingPlan && onPlanReply && (
+                <EmbeddedPlanCard
+                  proposal={pendingPlan.proposal}
+                  onApprove={(steps) => onPlanReply(pendingPlan.callId, true, steps)}
+                  onCancel={(note) => onPlanReply(pendingPlan.callId, false, undefined, note || undefined)}
+                />
+              )}
+              {activePromptKind === 'ask_user' && pendingAskUser && onAskUserReply && (
+                <EmbeddedAskUserCard
+                  proposal={pendingAskUser.proposal}
+                  onSubmit={(answers) => onAskUserReply(pendingAskUser.callId, { cancelled: false, answers })}
+                  onCancel={() => onAskUserReply(pendingAskUser.callId, { cancelled: true })}
+                />
+              )}
+              {activePromptKind === 'approval' && pendingApproval && onDecide && (
+                <EmbeddedApprovalCard
+                  approval={pendingApproval}
+                  onDecide={(allow, scope) => onDecide(pendingApproval.callId, allow, scope)}
+                />
+              )}
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {!activePromptKind && (
+          <div className="relative">
+            <MentionInput
+              handleRef={mentionRef}
+              value={text}
+              onChange={(next) => { setText(next); setSlashFeedback(null); }}
+              onKeyDown={(e) => {
+                // Palette is open → arrows navigate, Enter picks, Esc closes.
+                if (paletteVisible && paletteMatches.length > 0) {
+                  if (e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    setSlashIdx((i) => Math.min(i + 1, paletteMatches.length - 1));
+                    return;
                   }
-                  return;
+                  if (e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    setSlashIdx((i) => Math.max(i - 1, 0));
+                    return;
+                  }
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    const cmd = paletteMatches[slashIdx];
+                    if (cmd) commitPaletteChoice(cmd);
+                    return;
+                  }
+                  if (e.key === 'Tab') {
+                    e.preventDefault();
+                    const cmd = paletteMatches[slashIdx];
+                    if (cmd) {
+                      const prefix = slash.mode === 'palette' ? text.slice(0, slash.triggerStart) : '';
+                      updateText(`${prefix}${paletteTrigger}${cmd.name}${cmd.takesArgs ? ' ' : ''}`);
+                    }
+                    return;
+                  }
+                  if (e.key === 'Escape') {
+                    e.preventDefault();
+                    // Escape only clears the trigger span, not the whole
+                    // composer — mid-message prefix survives.
+                    const prefix = slash.mode === 'palette' ? text.slice(0, slash.triggerStart) : '';
+                    updateText(prefix);
+                    return;
+                  }
                 }
-                if (e.key === 'Escape') {
+                // Escape while goal-composing → abort the compose flow
+                // without sending anything, matching how Esc dismisses
+                // the slash palette above.
+                if (goalComposing && e.key === 'Escape') {
                   e.preventDefault();
-                  // Escape only clears the trigger span, not the whole
-                  // composer — mid-message prefix survives.
-                  const prefix = slash.mode === 'palette' ? text.slice(0, slash.triggerStart) : '';
-                  updateText(prefix);
+                  setGoalComposing(false);
+                  updateText('');
                   return;
                 }
+                // Shift+Enter inserts a literal newline. Contenteditable
+                // doesn't have a built-in Shift+Enter handler that plays
+                // nicely with our `\n`-based canonical text — `insertText`
+                // with a `\n` is the least-surprise path.
+                if (e.key === 'Enter' && e.shiftKey) {
+                  e.preventDefault();
+                  document.execCommand('insertText', false, '\n');
+                  return;
+                }
+                if (e.key === 'Enter') { e.preventDefault(); submit(); }
+              }}
+              placeholder={
+                disabled
+                  ? 'Waiting for connection…'
+                  : goalComposing
+                    ? "Describe what 'done' looks like — mira will loop until it's met."
+                    : planActive
+                      ? 'Describe your task to generate a plan…'
+                      : 'Ask mira anything · @ for files · / for commands'
               }
-              // Escape while goal-composing → abort the compose flow
-              // without sending anything, matching how Esc dismisses
-              // the slash palette above.
-              if (goalComposing && e.key === 'Escape') {
-                e.preventDefault();
-                setGoalComposing(false);
-                updateText('');
-                return;
-              }
-              // Shift+Enter inserts a literal newline. Contenteditable
-              // doesn't have a built-in Shift+Enter handler that plays
-              // nicely with our `\n`-based canonical text — `insertText`
-              // with a `\n` is the least-surprise path.
-              if (e.key === 'Enter' && e.shiftKey) {
-                e.preventDefault();
-                document.execCommand('insertText', false, '\n');
-                return;
-              }
-              if (e.key === 'Enter') { e.preventDefault(); submit(); }
-            }}
-            placeholder={
-              disabled
-                ? 'Waiting for connection…'
-                : goalComposing
-                  ? "Describe what 'done' looks like — mira will loop until it's met."
-                  : planActive
-                    ? 'Describe your task to generate a plan…'
-                    : 'Ask mira anything · @ for files · / for commands'
-            }
-            disabled={disabled}
-            roster={skills}
-            ariaLabel="Message composer"
-          />
-
-          {paletteVisible && paletteMatches.length > 0 && (
-            <SlashPalette
-              matches={paletteMatches}
-              activeIdx={slashIdx}
-              onHover={setSlashIdx}
-              onPick={commitPaletteChoice}
-              preserveOrder={paletteTrigger === '@'}
+              disabled={disabled}
+              roster={skills}
+              ariaLabel="Message composer"
             />
-          )}
 
-          {slash.mode === 'args' && (
-            <div className="pointer-events-none absolute -top-6 left-0 rounded-md border border-border/60 bg-popover px-2 py-0.5 text-[11px] text-muted-foreground shadow-lg">
-              <span className="font-mono text-foreground">{slash.trigger}{slash.command.name}</span>{' '}
-              <span>{slash.command.usage.replace(`/${slash.command.name}`, '').trim()}</span>
-            </div>
-          )}
-        </div>
+            {paletteVisible && paletteMatches.length > 0 && (
+              <SlashPalette
+                matches={paletteMatches}
+                activeIdx={slashIdx}
+                onHover={setSlashIdx}
+                onPick={commitPaletteChoice}
+                preserveOrder={paletteTrigger === '@'}
+              />
+            )}
 
-        {slashFeedback && (
+            {slash.mode === 'args' && (
+              <div className="pointer-events-none absolute -top-6 left-0 rounded-md border border-border/60 bg-popover px-2 py-0.5 text-[11px] text-muted-foreground shadow-lg">
+                <span className="font-mono text-foreground">{slash.trigger}{slash.command.name}</span>{' '}
+                <span>{slash.command.usage.replace(`/${slash.command.name}`, '').trim()}</span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {!activePromptKind && slashFeedback && (
           <div className="mx-1 mb-1 rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11.5px] text-amber-200">
             {slashFeedback}
           </div>
         )}
 
-        <div className="flex items-center gap-1.5 px-1">
-          <AttachMenu onAttachFile={openNativeFiles} loading={attachLoading} />
+        {!activePromptKind && (
+          <div className="flex items-center gap-1.5 px-1">
+            <AttachMenu onAttachFile={openNativeFiles} loading={attachLoading} />
 
-          <SlashButton onClick={() => updateText(text.startsWith('/') || text.startsWith('@') ? text : '/' + text)} />
+            <SlashButton onClick={() => updateText(text.startsWith('/') || text.startsWith('@') ? text : '/' + text)} />
 
-          <ModelPicker
-            current={model}
-            providerName={providerName ?? null}
-            onPick={onSetModel}
-            onSetEffort={onSetEffort}
-            open={modelPopOpen}
-            onOpenChange={setModelPopOpen}
-          />
+            <ModelPicker
+              current={model}
+              providerName={providerName ?? null}
+              onPick={onSetModel}
+              onSetEffort={onSetEffort}
+              open={modelPopOpen}
+              onOpenChange={setModelPopOpen}
+            />
 
-          <ProjectChip cwd={cwd} onClick={onOpenPicker} />
+            <ProjectChip cwd={cwd} onClick={onOpenPicker} />
 
-          <span className="flex-1" />
+            <span className="flex-1" />
 
-          <ModePicker mode={mode} label={modeLabel} onPick={onSetMode} />
+            <ModePicker mode={mode} label={modeLabel} onPick={onSetMode} />
 
-          {busy ? (
-            <button
-              type="button"
-              onClick={onInterrupt}
-              className="flex size-8 items-center justify-center rounded-full bg-mira-error text-[#0e1013] transition-colors hover:brightness-110"
-              title="Stop"
-              aria-label="Stop"
-            >
-              <Square className="size-3.5" style={{ fill: 'currentColor' }} />
-            </button>
-          ) : (
-            <button
-              type="submit"
-              disabled={disabled || (!text.trim() && attachments.length === 0)}
-              className="flex size-8 items-center justify-center rounded-full bg-foreground text-background transition-opacity hover:opacity-90 disabled:opacity-35"
-              title="Send"
-              aria-label="Send"
-            >
-              <ArrowUp className="size-4" />
-            </button>
-          )}
-        </div>
+            {busy ? (
+              <button
+                type="button"
+                onClick={onInterrupt}
+                className="flex size-8 items-center justify-center rounded-full bg-mira-error text-[#0e1013] transition-colors hover:brightness-110"
+                title="Stop"
+                aria-label="Stop"
+              >
+                <Square className="size-3.5" style={{ fill: 'currentColor' }} />
+              </button>
+            ) : (
+              <button
+                type="submit"
+                disabled={disabled || (!text.trim() && attachments.length === 0)}
+                className="flex size-8 items-center justify-center rounded-full bg-foreground text-background transition-opacity hover:opacity-90 disabled:opacity-35"
+                title="Send"
+                aria-label="Send"
+              >
+                <ArrowUp className="size-4" />
+              </button>
+            )}
+          </div>
+        )}
       </form>
 
       {/* Footer strip under the composer — usage + worktree only. The
@@ -1724,7 +1801,7 @@ function EnvironmentChip({
           }
         >
           {switching ? <Loader className="size-3 shrink-0 animate-spin" /> : <Icon className="size-3 shrink-0" />}
-          <span className="truncate">{switching ? 'switching…' : status.current}</span>
+          <span className="truncate">{switching ? 'switching…' : (status.current === 'e2b' ? 'Code Sandbox' : status.current)}</span>
         </button>
       </PopoverTrigger>
       <PopoverContent className="w-80 p-1.5" align="start">
@@ -1754,16 +1831,16 @@ function EnvironmentChip({
                 <EIcon className="size-3.5 shrink-0 mt-0.5" />
                 <span className="min-w-0 flex-1">
                   <span className="flex items-center gap-1.5">
-                    <span className="truncate">{e.name}</span>
+                    <span className="truncate">{e.name === 'e2b' ? 'Code Sandbox' : e.name}</span>
                     {e.backend !== 'local' && e.backend !== e.name && (
-                      <span className="rounded-sm bg-secondary px-1 text-[9.5px] uppercase tracking-wider text-muted-foreground">{e.backend}</span>
+                      <span className="rounded-sm bg-secondary px-1 text-[9.5px] uppercase tracking-wider text-muted-foreground">{e.backend === 'e2b' ? 'Code Sandbox' : e.backend}</span>
                     )}
                     {parked && (
                       <span className="rounded-sm bg-mira-blue/15 px-1 text-[9.5px] uppercase tracking-wider text-mira-blue" title="paused — resumes quickly">paused</span>
                     )}
                   </span>
                   {e.description && (
-                    <span className="block truncate text-[11px] text-muted-foreground/70">{e.description}</span>
+                    <span className="block truncate text-[11px] text-muted-foreground/70">{e.description.replace(/\bE2B\b/g, 'Code Sandbox')}</span>
                   )}
                 </span>
                 {current && <span className="text-mira-blue text-xs">✓</span>}
@@ -1993,6 +2070,535 @@ function WorktreeChip({
  *  enough for display sorting; the backend already tags `is_current`. */
 function isLinkedWorktree(path: string, all: { path: string }[]): boolean {
   return all.some((o) => o.path !== path && path.startsWith(o.path + '/'));
+}
+
+/* ---------- embedded prompt components (plan / ask_user / approval) ---------- */
+
+/** Plan proposal rendered directly inside the Composer (no outer card
+ *  border — the Composer form provides the container). */
+function EmbeddedPlanCard({
+  proposal,
+  onApprove,
+  onCancel,
+}: {
+  proposal: PlanProposal;
+  onApprove: (steps: PlanStep[]) => void;
+  onCancel: (note: string) => void;
+}) {
+  const [steps, setSteps] = useState<PlanStep[]>(() =>
+    proposal.steps.map((s) => ({ description: s.description, why: s.why ?? undefined })),
+  );
+  const [note, setNote] = useState('');
+  const [dirty, setDirty] = useState(false);
+
+  useEffect(() => {
+    setSteps(proposal.steps.map((s) => ({ description: s.description, why: s.why ?? undefined })));
+    setDirty(false);
+  }, [proposal]);
+
+  function updateStep(i: number, patch: Partial<PlanStep>) {
+    setSteps((prev) => prev.map((s, idx) => (idx === i ? { ...s, ...patch } : s)));
+    setDirty(true);
+  }
+  function move(i: number, dir: -1 | 1) {
+    const j = i + dir;
+    if (j < 0 || j >= steps.length) return;
+    setSteps((prev) => {
+      const next = [...prev];
+      [next[i], next[j]] = [next[j], next[i]];
+      return next;
+    });
+    setDirty(true);
+  }
+  function remove(i: number) {
+    setSteps((prev) => prev.filter((_, idx) => idx !== i));
+    setDirty(true);
+  }
+  function add() {
+    setSteps((prev) => [...prev, { description: '' }]);
+    setDirty(true);
+  }
+
+  const canApprove = steps.length > 0 && steps.every((s) => s.description.trim().length > 0);
+
+  return (
+    <div className="flex flex-col">
+      <div className="flex items-center gap-2.5 px-1.5 pt-1 pb-2">
+        <PhLightbulb weight="fill" className="size-3.5 shrink-0 text-mira-blue" />
+        <div className="min-w-0 flex-1">
+          <div className="text-[10px] font-semibold uppercase tracking-[0.11em] text-muted-foreground/80">
+            Proposed plan
+          </div>
+          <div className="truncate text-[13.5px] font-semibold text-foreground">
+            {proposal.title}
+          </div>
+        </div>
+        <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+          {steps.length} step{steps.length === 1 ? '' : 's'}
+        </span>
+      </div>
+
+      <div className="border-t border-border/30" />
+
+      <div className="max-h-[38vh] overflow-y-auto py-2">
+        <div className="flex flex-col gap-1 px-1.5">
+          {steps.map((s, i) => (
+            <EmbeddedStepRow
+              key={i}
+              index={i}
+              step={s}
+              onChange={(patch) => updateStep(i, patch)}
+              onMoveUp={i === 0 ? undefined : () => move(i, -1)}
+              onMoveDown={i === steps.length - 1 ? undefined : () => move(i, 1)}
+              onRemove={steps.length === 1 ? undefined : () => remove(i)}
+            />
+          ))}
+        </div>
+        <button
+          type="button"
+          onClick={add}
+          className="mx-1.5 mt-1.5 inline-flex items-center gap-1.5 rounded-md px-2 py-1.5 text-[11.5px] text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
+        >
+          <Plus className="size-3" /> Add step
+        </button>
+      </div>
+
+      <div className="border-t border-border/30" />
+
+      <div className="flex flex-col gap-2 px-1.5 py-2.5">
+        <input
+          type="text"
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+          placeholder="Optional note (shown if you cancel)"
+          className="w-full rounded-md bg-secondary/50 px-2.5 py-1.5 text-[12px] outline-none placeholder:text-muted-foreground/50 focus:bg-secondary/70"
+        />
+        <div className="flex items-center justify-end gap-1.5">
+          <span className="mr-auto text-[11px] text-muted-foreground/80">
+            {dirty ? 'Approve will run the edited plan' : '⌘↵ to approve'}
+          </span>
+          <button
+            type="button"
+            onClick={() => onCancel(note)}
+            className="rounded-md px-2.5 py-1.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={() => onApprove(steps)}
+            disabled={!canApprove}
+            className={cn(
+              'inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-[11.5px] font-semibold transition-all',
+              canApprove
+                ? 'bg-foreground text-background hover:brightness-95'
+                : 'cursor-not-allowed bg-secondary/60 text-muted-foreground',
+            )}
+          >
+            {dirty ? 'Approve with edits' : 'Approve'}
+            <PhArrowRight className="size-3" weight="bold" />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EmbeddedStepRow({
+  index, step, onChange, onMoveUp, onMoveDown, onRemove,
+}: {
+  index: number;
+  step: PlanStep;
+  onChange: (patch: Partial<PlanStep>) => void;
+  onMoveUp?: () => void;
+  onMoveDown?: () => void;
+  onRemove?: () => void;
+}) {
+  return (
+    <div className="group flex items-start gap-2.5 rounded-xl bg-secondary/40 px-3 py-2 transition-colors hover:bg-secondary/60">
+      <span className="mt-[3px] inline-flex size-5 shrink-0 items-center justify-center rounded-full bg-background/60 text-[10.5px] font-semibold text-muted-foreground ring-1 ring-inset ring-border">
+        {index + 1}
+      </span>
+      <div className="min-w-0 flex-1">
+        <input
+          type="text"
+          value={step.description}
+          onChange={(e) => onChange({ description: e.target.value })}
+          placeholder="What this step does"
+          className="w-full bg-transparent text-[13px] outline-none placeholder:text-muted-foreground/50"
+        />
+        {(step.why != null || step.description) && (
+          <input
+            type="text"
+            value={step.why ?? ''}
+            onChange={(e) => onChange({ why: e.target.value || undefined })}
+            placeholder="Why (optional)"
+            className="mt-0.5 w-full bg-transparent text-[11.5px] text-muted-foreground outline-none placeholder:text-muted-foreground/40"
+          />
+        )}
+      </div>
+      <div className="flex items-center opacity-0 transition-opacity group-hover:opacity-100">
+        <EmbeddedIconBtn onClick={onMoveUp} disabled={!onMoveUp} title="Move up">
+          <PhArrowUp className="size-3" />
+        </EmbeddedIconBtn>
+        <EmbeddedIconBtn onClick={onMoveDown} disabled={!onMoveDown} title="Move down">
+          <PhArrowDown className="size-3" />
+        </EmbeddedIconBtn>
+        <EmbeddedIconBtn onClick={onRemove} disabled={!onRemove} title="Remove">
+          <Trash className="size-3" />
+        </EmbeddedIconBtn>
+      </div>
+    </div>
+  );
+}
+
+function EmbeddedIconBtn({
+  onClick, disabled, title, children,
+}: {
+  onClick?: () => void;
+  disabled?: boolean;
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      className="rounded p-1 text-muted-foreground/70 transition-colors hover:bg-background/60 hover:text-foreground disabled:opacity-30 disabled:hover:bg-transparent"
+    >
+      {children}
+    </button>
+  );
+}
+
+/** ask_user proposal rendered directly inside the Composer. */
+function EmbeddedAskUserCard({
+  proposal,
+  onSubmit,
+  onCancel,
+}: {
+  proposal: AskUserProposal;
+  onSubmit: (answers: AskUserAnswer[]) => void;
+  onCancel: () => void;
+}) {
+  type Draft = { picked: string[]; custom: string | undefined };
+  function emptyDraft(): Draft { return { picked: [], custom: undefined }; }
+
+  const [drafts, setDrafts] = useState<Draft[]>(() => proposal.questions.map(emptyDraft));
+  const [idx, setIdx] = useState(0);
+  const [dir, setDir] = useState<1 | -1>(1);
+  const customRef = useRef<HTMLTextAreaElement | null>(null);
+
+  useEffect(() => {
+    setDrafts(proposal.questions.map(emptyDraft));
+    setIdx(0);
+    setDir(1);
+  }, [proposal]);
+
+  const total = proposal.questions.length;
+  const clampedIdx = Math.min(idx, total - 1);
+  const isLast = clampedIdx === total - 1;
+  const currentDraft = drafts[clampedIdx] ?? emptyDraft();
+  const currentReady =
+    currentDraft.picked.length > 0 ||
+    (currentDraft.custom ?? '').trim().length > 0;
+
+  function updateDraft(i: number, patch: (d: Draft) => Draft) {
+    setDrafts((prev) => prev.map((d, j) => (j === i ? patch(d) : d)));
+  }
+
+  function advance() {
+    if (!currentReady) return;
+    if (!isLast) {
+      setDir(1);
+      setIdx((i) => Math.min(i + 1, total - 1));
+      return;
+    }
+    const answers: AskUserAnswer[] = drafts.map((d) => ({
+      picked: d.picked,
+      custom: (d.custom ?? '').trim() ? d.custom!.trim() : null,
+    }));
+    onSubmit(answers);
+  }
+
+  const q = proposal.questions[clampedIdx];
+  const multi = q.multi_select === true;
+  const customOpen = currentDraft.custom !== undefined;
+
+  function toggleOption(label: string) {
+    updateDraft(clampedIdx, (d) => {
+      const next: Draft = { ...d, custom: undefined };
+      if (multi) {
+        next.picked = d.picked.includes(label)
+          ? d.picked.filter((l) => l !== label)
+          : [...d.picked, label];
+      } else {
+        next.picked = d.picked.includes(label) ? [] : [label];
+      }
+      return next;
+    });
+  }
+
+  function openCustom() {
+    updateDraft(clampedIdx, (d) => ({ picked: [], custom: d?.custom ?? '' }));
+    requestAnimationFrame(() => customRef.current?.focus());
+  }
+  function closeCustom() {
+    updateDraft(clampedIdx, (d) => ({ ...d, custom: undefined }));
+  }
+
+  return (
+    <div className="flex flex-col">
+      <div className="flex items-center gap-2.5 px-1.5 pt-1 pb-2">
+        <Sparkle weight="fill" className="size-3.5 text-mira-blue" />
+        <span className="text-[12.5px] font-semibold tracking-tight text-foreground">
+          Mira needs your input
+        </span>
+        <span className="ml-auto text-[11px] tabular-nums text-muted-foreground">
+          {clampedIdx + 1} of {total}
+        </span>
+      </div>
+
+      <div className="border-t border-border/30" />
+
+      <AnimatePresence initial={false} mode="wait">
+      <motion.div
+        key={clampedIdx}
+        initial={{ opacity: 0, x: dir * 24 }}
+        animate={{ opacity: 1, x: 0 }}
+        exit={{ opacity: 0, x: dir * -24 }}
+        transition={{ duration: 0.18, ease: [0.4, 0, 0.2, 1] }}
+        className="flex flex-col gap-2.5 px-1.5 py-3 max-h-[45vh] overflow-y-auto"
+      >
+        {q.header && (
+          <div className="text-[10px] font-semibold uppercase tracking-[0.11em] text-muted-foreground/80">
+            {q.header}
+          </div>
+        )}
+        <div className="text-[13.5px] font-medium leading-snug text-foreground">
+          {q.question}
+        </div>
+        <div className="flex flex-col gap-1.5">
+          {q.options.map((opt) => {
+            const active = currentDraft.picked.includes(opt.label);
+            return (
+              <button
+                key={opt.label}
+                type="button"
+                onClick={() => toggleOption(opt.label)}
+                className={cn(
+                  'group flex items-start gap-3 rounded-xl px-3 py-2.5 text-left transition-colors',
+                  active ? 'bg-white text-black' : 'bg-secondary/40 hover:bg-secondary/60',
+                )}
+              >
+                <span
+                  className={cn(
+                    'mt-[3px] flex size-[14px] shrink-0 items-center justify-center transition-colors',
+                    multi ? 'rounded-[5px]' : 'rounded-full',
+                    active ? 'bg-black' : 'bg-background/60 ring-1 ring-inset ring-border',
+                  )}
+                >
+                  {active && multi && <PhCheck className="size-2.5 text-white" weight="bold" />}
+                  {active && !multi && <span className="size-1.5 rounded-full bg-white" />}
+                </span>
+                <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                  <div className="flex items-center gap-1.5">
+                    <span className={cn('text-[13px] font-medium', active ? 'text-black' : 'text-foreground')}>
+                      {opt.label}
+                    </span>
+                    {opt.recommended && (
+                      <span className={cn('text-[10px] font-medium uppercase tracking-wider', active ? 'text-black/60' : 'text-muted-foreground/80')}>
+                        · Recommended
+                      </span>
+                    )}
+                  </div>
+                  {opt.description && (
+                    <span className={cn('text-[11.5px] leading-snug', active ? 'text-black/70' : 'text-muted-foreground')}>
+                      {opt.description}
+                    </span>
+                  )}
+                </div>
+              </button>
+            );
+          })}
+          {!customOpen && (
+            <button
+              type="button"
+              onClick={openCustom}
+              className="group flex items-center gap-2.5 rounded-xl px-3 py-2 text-left text-[12px] text-muted-foreground transition-colors hover:bg-secondary/40 hover:text-foreground"
+            >
+              <PencilSimpleLine className="size-3.5" />
+              <span>Something else</span>
+            </button>
+          )}
+          {customOpen && (
+            <div className="rounded-xl bg-secondary/60 p-2.5">
+              <div className="flex items-center gap-1.5 pb-1.5 text-[10px] font-semibold uppercase tracking-[0.11em] text-muted-foreground">
+                <PencilSimpleLine className="size-3" />
+                <span>Free response</span>
+                <button
+                  type="button"
+                  onClick={closeCustom}
+                  className="ml-auto rounded p-0.5 text-muted-foreground/70 transition-colors hover:bg-secondary hover:text-foreground"
+                  aria-label="Close free-text"
+                >
+                  <X className="size-3" />
+                </button>
+              </div>
+              <textarea
+                ref={customRef}
+                value={currentDraft.custom ?? ''}
+                onChange={(e) =>
+                  updateDraft(clampedIdx, () => ({ picked: [], custom: e.target.value }))
+                }
+                rows={2}
+                placeholder="Do it a different way — describe what you want instead"
+                className="min-h-[3rem] w-full resize-y border-0 bg-transparent p-0 text-[12.5px] leading-snug text-foreground outline-none placeholder:text-muted-foreground/50"
+              />
+            </div>
+          )}
+        </div>
+      </motion.div>
+      </AnimatePresence>
+
+      <div className="border-t border-border/30" />
+
+      <div className="flex items-center gap-1.5 px-1.5 py-2.5">
+        {clampedIdx > 0 ? (
+          <button
+            type="button"
+            onClick={() => { setDir(-1); setIdx((i) => Math.max(0, i - 1)); }}
+            className="inline-flex items-center gap-1 rounded-md px-2.5 py-1.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
+          >
+            <PhArrowLeft className="size-3" weight="bold" />
+            Back
+          </button>
+        ) : (
+          <span />
+        )}
+        <button
+          type="button"
+          onClick={onCancel}
+          className="ml-auto rounded-md px-2.5 py-1.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
+        >
+          Skip
+        </button>
+        <button
+          type="button"
+          onClick={advance}
+          disabled={!currentReady}
+          className={cn(
+            'inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-[11.5px] font-semibold transition-all',
+            currentReady
+              ? 'bg-foreground text-background hover:brightness-95'
+              : 'cursor-not-allowed bg-secondary/60 text-muted-foreground',
+          )}
+        >
+          {isLast ? 'Send answers' : 'Next'}
+          <PhArrowRight className="size-3" weight="bold" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** Tool approval rendered directly inside the Composer. */
+function EmbeddedApprovalCard({
+  approval,
+  onDecide,
+}: {
+  approval: PendingApproval;
+  onDecide: (allow: boolean, scope?: ApprovalScope) => void;
+}) {
+  const { call, preview } = approval;
+  const info = infoFor(call.function.name);
+  const Icon = info.Icon;
+  const isDiffTool = call.function.name === 'write_file' || call.function.name === 'edit_file';
+  const prettyArgs = useMemo(() => {
+    try { return JSON.stringify(JSON.parse(call.function.arguments), null, 2); }
+    catch { return call.function.arguments; }
+  }, [call.function.arguments]);
+
+  return (
+    <div className="flex flex-col">
+      <div className="flex items-center gap-2 px-1.5 pt-1 pb-2 font-mono text-[12.5px]">
+        <span className="shrink-0 text-mira-tool"><Icon className="size-3.5" /></span>
+        <span className="font-medium text-foreground truncate min-w-0">
+          {info.verbCont}{' '}
+          <span className="font-normal text-muted-foreground">
+            {isDiffTool && preview?.path
+              ? preview.path.split('/').slice(-2).join('/')
+              : ''}
+          </span>
+        </span>
+        {preview && (
+          <span className="rounded-full border border-border bg-background px-1.5 py-0.5 text-[10.5px] uppercase tracking-wider text-muted-foreground shrink-0">
+            {preview.kind}
+          </span>
+        )}
+        <span className="ml-auto shrink-0 rounded-full bg-secondary px-2 py-0.5 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">
+          awaiting approval
+        </span>
+      </div>
+
+      <div className="max-h-[35vh] overflow-auto">
+        {preview ? (
+          <div className="diff">
+            {preview.lines.map((line: DiffLine, i: number) => {
+              if (line.tag === 'hunkgap') return <div key={i} className="diff-line hunk">···</div>;
+              const cls = line.tag === 'add' ? 'add' : line.tag === 'del' ? 'del' : 'ctx';
+              const prefix = line.tag === 'add' ? '+' : line.tag === 'del' ? '-' : ' ';
+              return (
+                <div key={i} className={`diff-line ${cls}`}>
+                  <span className="prefix">{prefix}</span>
+                  <span className="text">{line.text}</span>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <pre className="m-0 max-h-[22vh] overflow-auto whitespace-pre-wrap rounded-md bg-background/60 px-3 py-2 font-mono text-xs text-muted-foreground">
+            {prettyArgs}
+          </pre>
+        )}
+      </div>
+
+      <div className="border-t border-border/30" />
+
+      <div className="flex items-center justify-end gap-1.5 px-1.5 py-2">
+        <button
+          type="button"
+          onClick={() => onDecide(false)}
+          className="rounded-md px-2.5 py-1.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
+          title="Deny (n)"
+        >
+          Deny
+        </button>
+        <button
+          type="button"
+          onClick={() => onDecide(true, 'always')}
+          className="rounded-md px-2.5 py-1.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
+          title="Never ask again"
+        >
+          Always allow
+        </button>
+        <button
+          type="button"
+          onClick={() => onDecide(true, 'once')}
+          className="inline-flex items-center gap-1.5 rounded-full bg-foreground px-3.5 py-1.5 text-[11.5px] font-semibold text-background transition-all hover:brightness-95"
+          title="Allow this one call (y)"
+        >
+          Allow
+        </button>
+      </div>
+      <div className="px-1.5 pb-1.5 text-right text-[10.5px] text-muted-foreground/60">
+        <kbd className="rounded bg-secondary/70 px-1 py-0.5 font-mono text-[10px]">y</kbd> allow ·{' '}
+        <kbd className="rounded bg-secondary/70 px-1 py-0.5 font-mono text-[10px]">n</kbd> deny
+      </div>
+    </div>
+  );
 }
 
 /* ---------- project chip (opens folder picker) ---------- */
