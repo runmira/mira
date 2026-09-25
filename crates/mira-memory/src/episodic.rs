@@ -141,6 +141,10 @@ impl EpisodicStore for FileEpisodicStore {
             .open(&self.path)
             .await?;
         f.write_all(line.as_bytes()).await?;
+        // Tokio finishes a write on a background thread; without a flush
+        // the next read (the memory snapshot on the next turn, or
+        // `recent` right away) can miss the entry just appended.
+        f.flush().await?;
         Ok(())
     }
 
