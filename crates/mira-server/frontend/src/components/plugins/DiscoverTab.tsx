@@ -177,12 +177,13 @@ function Chip({ active, onClick, children }: { active: boolean; onClick: () => v
       type="button"
       onClick={onClick}
       className={cn(
-        'h-7 rounded-full px-3.5 text-[12px] capitalize transition-all',
+        'inline-flex h-7 items-center gap-1.5 rounded-lg px-3 text-[12px] capitalize transition-all',
         active
-          ? 'bg-white font-medium text-black shadow-sm'
-          : 'text-muted-foreground hover:bg-white/8 hover:text-foreground',
+          ? 'bg-mira-purple/18 font-semibold text-mira-purple ring-2 ring-white/20'
+          : 'bg-white/[0.05] text-muted-foreground/65 hover:bg-white/[0.09] hover:text-foreground',
       )}
     >
+      {active && <span className="size-1.5 shrink-0 rounded-full bg-mira-purple" />}
       {children}
     </button>
   );
@@ -226,7 +227,7 @@ function PluginCard({
       tabIndex={0}
       onClick={onOpen}
       onKeyDown={(e) => (e.key === 'Enter' ? onOpen() : undefined)}
-      className="group flex cursor-pointer gap-3.5 rounded-2xl border border-border/50 bg-white/[0.035] p-4 text-left transition-all hover:border-border/70 hover:bg-white/[0.055]"
+      className="group flex cursor-pointer gap-3.5 rounded-2xl border border-border/60 bg-white/[0.08] p-4 text-left shadow-sm shadow-black/30 transition-all hover:border-border/80 hover:bg-white/[0.11] hover:shadow-md hover:shadow-black/40"
     >
       {/* Icon */}
       <Avatar name={entry.id} src={src} size="md" />
@@ -282,7 +283,7 @@ function PluginCard({
 
         {/* Category tag */}
         {entry.category && (
-          <span className="self-start rounded-full border border-border/40 px-2 py-0.5 text-[10.5px] capitalize text-muted-foreground/60">
+          <span className="self-start rounded-md bg-white/[0.07] px-2 py-0.5 text-[10.5px] capitalize text-muted-foreground/60">
             {entry.category}
           </span>
         )}

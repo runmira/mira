@@ -136,7 +136,11 @@ pub async fn begin(
     let resolution = manager.resolve_metadata_from_challenge(challenge).await?;
     manager.set_metadata(resolution.metadata);
 
-    let mut request = AuthorizationRequest::new(redirect_uri).with_client_name("Mira");
+    let mut request = AuthorizationRequest::new(redirect_uri)
+        .with_client_name("Mira")
+        // SEP-991: servers that advertise client_id_metadata_document_supported use this URL
+        // as the client_id and fetch our branding (logo, client_uri) from the hosted doc.
+        .with_client_metadata_url("https://runmira.com/client-metadata.json");
     if let Some(challenge) = challenge {
         request = request.with_challenge(challenge);
     }

@@ -35,7 +35,7 @@ import { McpTab, writeScope } from './plugins/McpTab';
 import { ServerEditorDialog, TokenDialog } from './plugins/McpDialogs';
 import { McpDetailPage } from './plugins/McpDetailPage';
 import { PluginDetailPage } from './plugins/PluginDetailPage';
-import { ConfirmDialog, ErrorBanner, useActions } from './plugins/shared';
+import { ConfirmDialog, ErrorBanner, PostInstallSignInDialog, useActions } from './plugins/shared';
 
 type Tab = 'discover' | 'installed' | 'marketplaces' | 'mcp' | 'errors';
 
@@ -60,6 +60,13 @@ export function PluginsPanel({ version = 0 }: { version?: number }) {
   const [localVersion, setLocalVersion] = useState(0);
   // The sign-in in progress, with its link in case the tab didn't open.
   const [signIn, setSignIn] = useState<{ name: string; url: string } | null>(null);
+  // Post-install prompt: servers from the just-installed plugin that need OAuth.
+  const [postInstallSignIn, setPostInstallSignIn] = useState<{
+    pluginName: string;
+    servers: { name: string; displayName: string }[];
+  } | null>(null);
+  // Plugin we're watching for MCP servers to reach needs_auth after install.
+  const [watchPlugin, setWatchPlugin] = useState<{ name: string; displayName: string } | null>(null);
   // The server whose missing token(s) are being entered.
   const [tokenFor, setTokenFor] = useState<string | null>(null);
   const { busy, error, setError, run } = useActions();
@@ -94,6 +101,21 @@ export function PluginsPanel({ version = 0 }: { version?: number }) {
     return () => clearTimeout(t);
   }, [mcp, refresh]);
 
+  // When MCP state updates, check if the watched plugin's servers reached needs_auth.
+  useEffect(() => {
+    if (!watchPlugin || !mcp) return;
+    const authServers = mcp.servers.filter(
+      (s) => s.scope.kind === 'plugin' && s.scope.plugin === watchPlugin.name && s.status.state === 'needs_auth',
+    );
+    if (authServers.length === 0) return;
+    const toDisplayName = (s: McpServerView) => s.name.split(':').slice(2).join(':') || s.name;
+    setPostInstallSignIn({
+      pluginName: watchPlugin.displayName,
+      servers: authServers.map((s) => ({ name: s.name, displayName: toDisplayName(s) })),
+    });
+    setWatchPlugin(null);
+  }, [mcp, watchPlugin]);
+
   const afterPlugins = (p: PluginsOverview | undefined) => {
     if (p) {
       setPlugins(p);
@@ -106,7 +128,17 @@ export function PluginsPanel({ version = 0 }: { version?: number }) {
   };
 
   const pluginActions = {
-    install: (id: string) => run(`install:${id}`, () => installPlugin(id)).then(afterPlugins),
+    install: (id: string) =>
+      run(`install:${id}`, () => installPlugin(id)).then((p) => {
+        afterPlugins(p);
+        if (!p) return;
+        const installed = p.installed.find((pl) => pl.id === id);
+        if (!installed || installed.mcp_servers.length === 0) return;
+        // Watch for this plugin's MCP servers to reach needs_auth.
+        // The servers start in `connecting` and the existing polling effect
+        // will refresh mcp state; the watchPlugin effect fires the dialog.
+        setWatchPlugin({ name: installed.name, displayName: installed.display_name || installed.name });
+      }),
     toggle: (id: string, enabled: boolean) => run(`toggle:${id}`, () => setPluginEnabled(id, enabled)).then(afterPlugins),
     uninstall: (id: string) =>
       run(`uninstall:${id}`, () => uninstallPlugin(id)).then((p) => {
@@ -181,13 +213,7 @@ export function PluginsPanel({ version = 0 }: { version?: number }) {
   const tokenServer = mcp?.servers.find((s) => s.name === tokenFor) ?? null;
 
   return (
-    <div
-      className="min-h-full"
-      style={{
-        backgroundImage: 'radial-gradient(circle, rgba(255,255,255,0.045) 1px, transparent 1px)',
-        backgroundSize: '28px 28px',
-      }}
-    >
+    <div className="min-h-full">
     <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 px-6 pb-12 pt-6">
 
     {detailId ? (
@@ -388,6 +414,20 @@ export function PluginsPanel({ version = 0 }: { version?: number }) {
             </div>
           )}
         </>
+      )}
+
+      {postInstallSignIn && (
+        <PostInstallSignInDialog
+          pluginName={postInstallSignIn.pluginName}
+          servers={postInstallSignIn.servers}
+          busy={!!busy}
+          onSignIn={(name) => {
+            setPostInstallSignIn(null);
+            setTab('mcp');
+            mcpActions.onSignIn(name);
+          }}
+          onSkip={() => setPostInstallSignIn(null)}
+        />
       )}
 
       {tokenServer && (

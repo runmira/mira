@@ -273,7 +273,7 @@ function ServerCard({ s, busy, actions }: { s: McpServerView; busy: string | nul
       tabIndex={0}
       onClick={() => actions.onOpen(s)}
       onKeyDown={(e) => e.key === 'Enter' && actions.onOpen(s)}
-      className="group flex cursor-pointer gap-3.5 rounded-2xl border border-border/50 bg-white/[0.035] p-4 text-left transition-all hover:border-border/70 hover:bg-white/[0.055]"
+      className="group flex cursor-pointer gap-3.5 rounded-2xl border border-border/60 bg-white/[0.08] p-4 text-left shadow-sm shadow-black/30 transition-all hover:border-border/80 hover:bg-white/[0.11] hover:shadow-md hover:shadow-black/40"
     >
       <div className="relative shrink-0 self-start">
         <Avatar name={displayName} src={iconSrc} size="md" />

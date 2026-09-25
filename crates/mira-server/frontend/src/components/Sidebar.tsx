@@ -348,7 +348,7 @@ export function Sidebar({
                 </div>
 
                 {!isCollapsed && (
-                  <div className="ml-3.5 flex flex-col gap-0.5 border-l border-border/40 pl-1.5">
+                  <div className="flex flex-col gap-0.5 pl-1">
                     {visible.map((s) => (
                       <SessionRow
                         key={s.id}

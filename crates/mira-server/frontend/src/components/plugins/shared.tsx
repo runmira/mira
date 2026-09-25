@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react';
-import { AlertCircle, Ellipsis } from 'lucide-react';
+import { AlertCircle, Ellipsis, LogIn } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
@@ -106,18 +106,18 @@ export function Pill({
   className?: string;
 }) {
   const tones = {
-    neutral: 'border-border/60 bg-white/5 text-muted-foreground',
-    green:   'border-emerald-500/25 bg-emerald-500/[0.08] text-emerald-300',
-    amber:   'border-amber-500/25 bg-amber-500/[0.08] text-amber-300',
-    red:     'border-destructive/40 bg-destructive/10 text-destructive',
-    purple:  'border-mira-purple/25 bg-mira-purple/[0.08] text-mira-purple',
-    blue:    'border-mira-blue/25 bg-mira-blue/[0.08] text-mira-blue',
+    neutral: 'bg-white/[0.08] text-muted-foreground/80',
+    green:   'bg-emerald-500/15 text-emerald-300',
+    amber:   'bg-amber-500/15 text-amber-300',
+    red:     'bg-destructive/15 text-destructive',
+    purple:  'bg-mira-purple/15 text-mira-purple',
+    blue:    'bg-mira-blue/15 text-mira-blue',
   } as const;
   return (
     <span
       title={title}
       className={cn(
-        'inline-flex items-center gap-1 whitespace-nowrap rounded-full border px-2 py-0.5 text-[11px] leading-4',
+        'inline-flex items-center gap-1 whitespace-nowrap rounded-md px-2 py-0.5 text-[11px] leading-4',
         tones[tone],
         className,
       )}
@@ -209,6 +209,63 @@ export function ConfirmDialog({
           <Button variant="destructive" size="sm" disabled={busy} onClick={onConfirm}>
             {busy ? 'Working…' : confirmLabel}
           </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+export function PostInstallSignInDialog({
+  pluginName,
+  servers,
+  busy,
+  onSignIn,
+  onSkip,
+}: {
+  pluginName: string;
+  servers: { name: string; displayName: string }[];
+  busy: boolean;
+  onSignIn: (name: string) => void;
+  onSkip: () => void;
+}) {
+  return (
+    <Dialog open onOpenChange={(o) => !o && onSkip()}>
+      <DialogContent className="max-w-sm">
+        <div className="flex items-start gap-3">
+          <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-mira-purple/15">
+            <LogIn className="size-4 text-mira-purple" />
+          </div>
+          <div className="min-w-0">
+            <div className="text-[15px] font-semibold leading-snug">Sign in to complete setup</div>
+            <p className="mt-1 text-[13px] leading-relaxed text-muted-foreground">
+              <b className="text-foreground">{pluginName}</b> was installed.{' '}
+              {servers.length === 1
+                ? 'Its MCP server needs sign-in to connect.'
+                : `It includes ${servers.length} MCP servers that need sign-in.`}
+            </p>
+          </div>
+        </div>
+
+        <div className="mt-1 flex flex-col gap-2">
+          {servers.map((s) => (
+            <button
+              key={s.name}
+              type="button"
+              disabled={busy}
+              onClick={() => onSignIn(s.name)}
+              className="flex w-full items-center justify-center gap-2 rounded-xl bg-mira-purple px-4 py-2.5 text-[13px] font-semibold text-white transition-all hover:opacity-90 active:scale-[0.98] disabled:opacity-50"
+            >
+              <LogIn className="size-3.5" />
+              {servers.length > 1 ? `Sign in to ${s.displayName}` : 'Sign in now'}
+            </button>
+          ))}
+          <button
+            type="button"
+            onClick={onSkip}
+            className="w-full rounded-xl py-2 text-[12.5px] text-muted-foreground/70 transition-colors hover:text-muted-foreground"
+          >
+            Do this later
+          </button>
         </div>
       </DialogContent>
     </Dialog>

@@ -2,6 +2,16 @@ import { useState } from 'react';
 import { AlertCircle, Folder, GitBranch, Globe, Plus, RotateCcw, Store, Trash2 } from 'lucide-react';
 import type { MarketplaceView, PluginsOverview } from '../../api';
 import { Button } from '@/components/ui/button';
+import { faviconSrc } from './DiscoverTab';
+
+function marketplaceIconSrc(source: string): string | null {
+  // Full URL → try favicon
+  if (/^https?:\/\//.test(source)) return faviconSrc(source);
+  // GitHub shorthand owner/repo → use owner's GitHub avatar
+  const ghMatch = source.match(/^([A-Za-z0-9_.-]+)\/[A-Za-z0-9_.-]+$/);
+  if (ghMatch) return `https://avatars.githubusercontent.com/${ghMatch[1]}?size=64`;
+  return null;
+}
 import { Avatar, EmptyState, RowMenu, plural, relativeTime } from './shared';
 
 export function MarketplacesTab({
@@ -61,7 +71,7 @@ export function MarketplacesTab({
           <h3 className="mb-2.5 text-[11.5px] font-semibold uppercase tracking-wider text-muted-foreground/60">
             Added
           </h3>
-          <ul className="flex flex-col divide-y divide-border/50 overflow-hidden rounded-2xl border border-border/60 bg-white/[0.035]">
+          <ul className="flex flex-col divide-y divide-border/50 overflow-hidden rounded-2xl border border-border/60 bg-white/[0.08] shadow-sm shadow-black/20">
             {data.marketplaces.map((m) => (
               <MarketplaceRow
                 key={m.name}
@@ -88,12 +98,13 @@ export function MarketplacesTab({
                 type="button"
                 disabled={!!busy}
                 onClick={() => submit(s.source)}
-                className="flex items-center gap-3.5 rounded-xl border border-border/50 bg-white/[0.035] px-4 py-3.5 text-left transition-all hover:border-border/70 hover:bg-white/[0.055] disabled:opacity-60"
+                className="flex items-center gap-3.5 rounded-xl border border-border/60 bg-white/[0.08] px-4 py-3.5 text-left shadow-sm shadow-black/20 transition-all hover:border-border/75 hover:bg-white/[0.11] hover:shadow-md hover:shadow-black/40 disabled:opacity-60"
               >
-                <Avatar name={s.name} size="sm" />
+                <Avatar name={s.name} size="sm" src={marketplaceIconSrc(s.source)} />
                 <div className="min-w-0 flex-1">
-                  <div className="font-mono text-[12.5px] font-medium">{s.source}</div>
-                  <div className="mt-0.5 text-[12px] text-muted-foreground">{s.description}</div>
+                  <div className="text-[13px] font-semibold">{s.name.replace(/^\w/, (c) => c.toUpperCase())}</div>
+                  <div className="mt-0.5 font-mono text-[11.5px] text-muted-foreground/70">{s.source}</div>
+                  {s.description && <div className="mt-0.5 text-[12px] text-muted-foreground">{s.description}</div>}
                 </div>
                 <span className="shrink-0 text-[12px] font-medium text-mira-purple">
                   {busy === `market-add:${s.source}` ? 'Adding…' : '+ Add'}
@@ -128,11 +139,11 @@ function MarketplaceRow({
 }) {
   return (
     <li className="flex items-center gap-3.5 px-4 py-4">
-      <Avatar name={m.name} />
+      <Avatar name={m.name} src={marketplaceIconSrc(m.source)} />
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-[13.5px] font-semibold">{m.name}</span>
-          <span className="rounded-full border border-border/40 px-2 py-0.5 text-[10.5px] text-muted-foreground/60">
+          <span className="text-[13.5px] font-semibold">{m.name.replace(/^\w/, (c) => c.toUpperCase())}</span>
+          <span className="rounded-md bg-white/[0.07] px-2 py-0.5 text-[10.5px] text-muted-foreground/60">
             {plural(m.plugin_count, 'plugin')}
           </span>
         </div>
