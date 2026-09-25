@@ -7,6 +7,7 @@
 pub mod error;
 pub mod id;
 pub mod message;
+pub mod stats;
 
 pub use error::{Error, Result};
 pub use id::{MessageId, SessionId, ToolCallId};
