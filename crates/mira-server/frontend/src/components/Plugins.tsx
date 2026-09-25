@@ -28,7 +28,8 @@ import { DiscoverTab } from './plugins/DiscoverTab';
 import { InstalledTab } from './plugins/InstalledTab';
 import { MarketplacesTab } from './plugins/MarketplacesTab';
 import { McpTab, writeScope } from './plugins/McpTab';
-import { ServerDetailDialog, ServerEditorDialog } from './plugins/McpDialogs';
+import { ServerEditorDialog } from './plugins/McpDialogs';
+import { McpDetailPage } from './plugins/McpDetailPage';
 import { PluginDetailPage } from './plugins/PluginDetailPage';
 import { ConfirmDialog, ErrorBanner, useActions } from './plugins/shared';
 
@@ -168,9 +169,18 @@ export function PluginsPanel({ version = 0 }: { version?: number }) {
 
   const openServer = mcp?.servers.find((s) => s.name === serverOpen) ?? null;
 
-  if (detailId) {
-    return (
-      <div className="mx-auto flex w-full max-w-4xl flex-col gap-5 px-6 pb-12 pt-6">
+  return (
+    <div
+      className="min-h-full"
+      style={{
+        backgroundImage: 'radial-gradient(circle, rgba(255,255,255,0.045) 1px, transparent 1px)',
+        backgroundSize: '28px 28px',
+      }}
+    >
+    <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 px-6 pb-12 pt-6">
+
+    {detailId ? (
+      <>
         <PluginDetailPage
           id={detailId}
           version={version + localVersion}
@@ -197,12 +207,44 @@ export function PluginsPanel({ version = 0 }: { version?: number }) {
             }}
           />
         )}
-      </div>
-    );
-  }
-
-  return (
-    <div className="mx-auto flex w-full max-w-4xl flex-col gap-5 px-6 pb-12 pt-6">
+      </>
+    ) : serverOpen && openServer ? (
+      <>
+        <McpDetailPage
+          server={openServer}
+          busy={busy}
+          onBack={() => setServerOpen(null)}
+          actions={{
+            ...mcpActions,
+            onOpen: (s) => setServerOpen(s.name),
+            onRemove: (s) => { setConfirm({ kind: 'server', server: s }); },
+          }}
+        />
+        {confirm?.kind === 'server' && (
+          <ConfirmDialog
+            title={`Remove ${confirm.server.name}?`}
+            body={
+              confirm.server.scope.kind === 'project'
+                ? "It's removed from the project's .mcp.json, for everyone using the repo."
+                : 'Its tools stop being available right away.'
+            }
+            confirmLabel="Remove"
+            busy={!!busy}
+            onCancel={() => setConfirm(null)}
+            onConfirm={() => {
+              const scope = writeScope(confirm.server);
+              if (!scope) return;
+              run(`mcp:${confirm.server.name}`, () => deleteMcpServer(confirm.server.name, scope)).then((m) => {
+                afterMcp(m);
+                setConfirm(null);
+                setServerOpen(null);
+              });
+            }}
+          />
+        )}
+      </>
+    ) : (
+      <>
       <header className="flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-3">
           <div className="flex size-9 items-center justify-center rounded-xl bg-mira-purple/15">
@@ -226,7 +268,7 @@ export function PluginsPanel({ version = 0 }: { version?: number }) {
         </label>
       </header>
 
-      <nav className="flex gap-1 overflow-x-auto pb-0.5">
+      <nav className="flex gap-1 overflow-x-auto border-b border-border/25 pb-3">
         {tabs.map((t) => (
           <button
             key={t.key}
@@ -337,8 +379,6 @@ export function PluginsPanel({ version = 0 }: { version?: number }) {
         </>
       )}
 
-      {openServer && <ServerDetailDialog s={openServer} onClose={() => setServerOpen(null)} />}
-
       {editor && (
         <ServerEditorDialog
           editing={editor.editing}
@@ -380,27 +420,9 @@ export function PluginsPanel({ version = 0 }: { version?: number }) {
           }
         />
       )}
-      {confirm?.kind === 'server' && (
-        <ConfirmDialog
-          title={`Remove ${confirm.server.name}?`}
-          body={
-            confirm.server.scope.kind === 'project'
-              ? 'It’s removed from the project’s .mcp.json, for everyone using the repo.'
-              : 'Its tools stop being available right away.'
-          }
-          confirmLabel="Remove"
-          busy={!!busy}
-          onCancel={() => setConfirm(null)}
-          onConfirm={() => {
-            const scope = writeScope(confirm.server);
-            if (!scope) return;
-            run(`mcp:${confirm.server.name}`, () => deleteMcpServer(confirm.server.name, scope)).then((m) => {
-              afterMcp(m);
-              setConfirm(null);
-            });
-          }}
-        />
-      )}
+    </> /* end normal panel */
+    )}
+    </div>
     </div>
   );
 }

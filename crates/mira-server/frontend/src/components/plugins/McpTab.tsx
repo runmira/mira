@@ -1,10 +1,8 @@
 import {
-  Eye,
   LogIn,
   LogOut,
   Pencil,
   Plug,
-  Plus,
   Power,
   RotateCcw,
   ShieldAlert,
@@ -13,8 +11,8 @@ import {
 import type { McpListView, McpServerView, McpStatus, WriteScope } from '../../api';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
-import { matchesQuery } from './DiscoverTab';
-import { EmptyState, Pill, RowMenu, plural } from './shared';
+import { faviconSrc, matchesQuery } from './DiscoverTab';
+import { Avatar, EmptyState, Pill, RowMenu, plural } from './shared';
 
 export type McpActions = {
   onAdd: () => void;
@@ -53,18 +51,33 @@ export function statusText(s: McpServerView): string {
   }
 }
 
+const STATUS_CLS: Record<McpStatus['state'], string> = {
+  connected:      'bg-emerald-400 shadow-[0_0_6px_1px_theme(colors.emerald.400/40%)]',
+  connecting:     'bg-mira-blue animate-pulse',
+  needs_auth:     'bg-amber-400',
+  needs_approval: 'bg-amber-400',
+  rejected:       'bg-white/20',
+  disabled:       'bg-white/20',
+  needs_setup:    'bg-amber-400',
+  failed:         'bg-destructive',
+};
+
+/** Inline dot — kept for backward compat in detail page header etc. */
 export function StatusDot({ status }: { status: McpStatus }) {
-  const cls = {
-    connected:       'bg-emerald-400 shadow-[0_0_6px_1px_theme(colors.emerald.400/40%)]',
-    connecting:      'bg-mira-blue animate-pulse',
-    needs_auth:      'bg-amber-400',
-    needs_approval:  'bg-amber-400',
-    rejected:        'bg-white/20',
-    disabled:        'bg-white/20',
-    needs_setup:     'bg-amber-400',
-    failed:          'bg-destructive',
-  }[status.state];
-  return <span className={cn('mt-[7px] size-2 shrink-0 rounded-full', cls)} />;
+  return <span className={cn('mt-[7px] size-2 shrink-0 rounded-full', STATUS_CLS[status.state])} />;
+}
+
+/** Absolute badge overlay — place inside a `relative` wrapper around the Avatar. */
+export function StatusBadge({ status, size = 'md' }: { status: McpStatus; size?: 'md' | 'lg' }) {
+  return (
+    <span
+      className={cn(
+        'absolute rounded-full ring-2 ring-[hsl(var(--background))]',
+        size === 'lg' ? 'bottom-0.5 left-0.5 size-3' : 'bottom-0 left-0 size-2.5',
+        STATUS_CLS[status.state],
+      )}
+    />
+  );
 }
 
 export function writeScope(s: McpServerView): WriteScope | null {
@@ -94,15 +107,17 @@ export function McpTab({
 
   return (
     <div className="flex flex-col gap-5">
-      <div className="flex items-center justify-between gap-3">
-        <p className="text-[13px] text-muted-foreground">
-          Servers connect in the background; their tools reach the agent as{' '}
-          <code className="font-mono text-[12px]">mcp__server__tool</code>. Changes apply right away.
+      <div className="flex items-start justify-between gap-3">
+        <p className="text-[12.5px] leading-relaxed text-muted-foreground/70">
+          Tools appear as <code className="rounded bg-white/5 px-1 font-mono text-[11.5px]">mcp__server__tool</code> — servers connect in the background and changes apply right away.
         </p>
-        <Button size="sm" className="h-8 shrink-0 gap-1.5" onClick={actions.onAdd}>
-          <Plus className="size-3.5" />
-          Add server
-        </Button>
+        <button
+          type="button"
+          onClick={actions.onAdd}
+          className="shrink-0 rounded-full bg-white px-4 py-1.5 text-[12px] font-medium text-black transition-all hover:bg-white/90 active:scale-95"
+        >
+          + Add server
+        </button>
       </div>
 
       {pending.length > 0 && (
@@ -142,26 +157,30 @@ export function McpTab({
           title="No MCP servers"
           body="Connect tools like GitHub, Linear, Sentry or a database. Add a server, or install a plugin that ships one."
           action={
-            <Button size="sm" className="mt-1 gap-1.5" onClick={actions.onAdd}>
-              <Plus className="size-3.5" /> Add server
-            </Button>
+            <button
+              type="button"
+              onClick={actions.onAdd}
+              className="mt-2 rounded-full bg-white px-4 py-1.5 text-[12px] font-medium text-black transition-all hover:bg-white/90 active:scale-95"
+            >
+              + Add server
+            </button>
           }
         />
       ) : (
         GROUPS.map((g) => {
-          const rows = servers.filter((s) => s.scope.kind === g.key);
-          if (rows.length === 0) return null;
+          const cards = servers.filter((s) => s.scope.kind === g.key);
+          if (cards.length === 0) return null;
           return (
             <section key={g.key}>
               <div className="mb-2.5 flex items-baseline gap-2">
                 <h3 className="text-[13px] font-semibold">{g.title}</h3>
                 <span className="text-[12px] text-muted-foreground">{g.hint}</span>
               </div>
-              <ul className="flex flex-col divide-y divide-border/50 overflow-hidden rounded-2xl border border-border/60 bg-white/[0.02]">
-                {rows.map((s) => (
-                  <ServerRow key={s.name} s={s} busy={busy} actions={actions} />
+              <div className="grid gap-2.5 md:grid-cols-2">
+                {cards.map((s) => (
+                  <ServerCard key={s.name} s={s} busy={busy} actions={actions} />
                 ))}
-              </ul>
+              </div>
             </section>
           );
         })
@@ -187,21 +206,26 @@ export function McpTab({
   );
 }
 
-function ServerRow({ s, busy, actions }: { s: McpServerView; busy: string | null; actions: McpActions }) {
+function ServerCard({ s, busy, actions }: { s: McpServerView; busy: string | null; actions: McpActions }) {
   const st = s.status.state;
   const editable = writeScope(s) !== null;
+  const displayName = (s.scope.kind === 'plugin' ? s.name.split(':').slice(2).join(':') || s.name : s.name)
+    .replace(/^\w/, (c) => c.toUpperCase());
+  const iconSrc = (s.transport === 'http' || s.transport === 'sse') ? faviconSrc(s.target) : null;
+  const working = busy === `mcp:${s.name}`;
+
   const primary =
     st === 'needs_auth'
-      ? { label: 'Sign in', icon: <LogIn />, run: () => actions.onSignIn(s.name) }
+      ? { label: 'Sign in', run: () => actions.onSignIn(s.name) }
       : st === 'needs_approval'
-        ? { label: 'Approve', icon: <ShieldAlert />, run: () => actions.onApprove(s.name, true) }
+        ? { label: 'Approve', run: () => actions.onApprove(s.name, true) }
         : st === 'failed'
-          ? { label: 'Retry', icon: <RotateCcw />, run: () => actions.onReconnect(s.name) }
+          ? { label: 'Retry', run: () => actions.onReconnect(s.name) }
           : st === 'disabled'
-            ? { label: 'Enable', icon: <Power />, run: () => actions.onToggle(s.name, true) }
+            ? { label: 'Enable', run: () => actions.onToggle(s.name, true) }
             : null;
+
   const menu = [
-    { label: 'Details', icon: <Eye />, onSelect: () => actions.onOpen(s) },
     ...(st !== 'disabled' && st !== 'needs_approval' && st !== 'rejected'
       ? [{ label: 'Reconnect', icon: <RotateCcw />, onSelect: () => actions.onReconnect(s.name) }]
       : []),
@@ -221,44 +245,67 @@ function ServerRow({ s, busy, actions }: { s: McpServerView; busy: string | null
         ]
       : []),
   ];
+
   return (
-    <li
-      className="flex cursor-pointer items-start gap-3 px-4 py-3.5 transition-colors hover:bg-white/[0.03]"
+    <div
+      role="button"
+      tabIndex={0}
       onClick={() => actions.onOpen(s)}
+      onKeyDown={(e) => e.key === 'Enter' && actions.onOpen(s)}
+      className="group flex cursor-pointer gap-3.5 rounded-2xl border border-border/50 bg-white/[0.035] p-4 text-left transition-all hover:border-border/70 hover:bg-white/[0.055]"
     >
-      <StatusDot status={s.status} />
-      <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-[13.5px] font-semibold">
-            {s.scope.kind === 'plugin' ? s.name.split(':').slice(2).join(':') || s.name : s.name}
-          </span>
-          <Pill className="font-mono uppercase tracking-wider">{s.transport}</Pill>
-          {s.scope.kind === 'plugin' && <Pill tone="purple">{s.scope.plugin}</Pill>}
-          {s.signed_in && <Pill tone="green">signed in</Pill>}
+      <div className="relative shrink-0 self-start">
+        <Avatar name={displayName} src={iconSrc} size="md" />
+        <StatusBadge status={s.status} size="md" />
+      </div>
+
+      <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+        {/* Title row */}
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <span className="truncate text-[13.5px] font-semibold leading-tight">{displayName}</span>
+            </div>
+            <div className="mt-0.5 flex flex-wrap items-center gap-1">
+              <Pill className="font-mono text-[10.5px] uppercase tracking-wider">{s.transport}</Pill>
+              {s.scope.kind === 'plugin' && <Pill tone="purple">{s.scope.plugin}</Pill>}
+              {s.signed_in && <Pill tone="green">signed in</Pill>}
+            </div>
+          </div>
+          <div className="flex shrink-0 items-center gap-1" onClick={(e) => e.stopPropagation()}>
+            <RowMenu items={menu} />
+          </div>
         </div>
-        <div className="mt-0.5 truncate font-mono text-[11.5px] text-muted-foreground/70" title={s.target}>
+
+        {/* Target */}
+        <div className="truncate font-mono text-[11px] text-muted-foreground/55" title={s.target}>
           {s.target}
         </div>
-        <div
-          className={cn(
-            'mt-1 line-clamp-2 text-[12.5px]',
-            st === 'failed'    ? 'text-destructive'      :
-            st === 'connected' ? 'text-muted-foreground' :
-                                 'text-amber-300',
-          )}
-        >
+
+        {/* Status */}
+        <div className={cn(
+          'text-[12px]',
+          st === 'failed'    ? 'text-destructive' :
+          st === 'connected' ? 'text-muted-foreground/70' :
+                               'text-amber-300',
+        )}>
           {statusText(s)}
         </div>
-      </div>
-      <div className="flex shrink-0 items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+
+        {/* Primary action */}
         {primary && (
-          <Button size="sm" variant="outline" className="h-7 gap-1.5 rounded-lg" disabled={!!busy} onClick={primary.run}>
-            <span className="[&_svg]:size-3.5">{primary.icon}</span>
-            {busy === `mcp:${s.name}` ? 'Working…' : primary.label}
-          </Button>
+          <div className="mt-0.5" onClick={(e) => e.stopPropagation()}>
+            <button
+              type="button"
+              disabled={!!busy}
+              onClick={primary.run}
+              className="rounded-full bg-white px-3 py-1 text-[11.5px] font-medium text-black transition-all hover:bg-white/90 active:scale-95 disabled:opacity-40"
+            >
+              {working ? 'Working…' : primary.label}
+            </button>
+          </div>
         )}
-        <RowMenu items={menu} />
       </div>
-    </li>
+    </div>
   );
 }

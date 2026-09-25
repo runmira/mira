@@ -75,7 +75,7 @@ export function PluginDetailPage({
       {detail && (
         <>
           {/* Hero card */}
-          <div className="flex gap-5 rounded-2xl border border-border/60 bg-white/[0.02] p-6">
+          <div className="flex gap-5 rounded-2xl border border-border/60 bg-white/[0.035] p-6">
             <Avatar name={id} size="lg" src={detail.icon_url ?? faviconSrc(detail.homepage)} />
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-start justify-between gap-3">
@@ -151,13 +151,13 @@ export function PluginDetailPage({
                   c.mcp_server_names.length +
                   c.hooks.length +
                   c.lsp_servers.length === 0 && (
-                  <div className="rounded-xl border border-border/50 bg-white/[0.02] px-4 py-3 text-[13px] text-muted-foreground">
+                  <div className="rounded-xl border border-border/50 bg-white/[0.035] px-4 py-3 text-[13px] text-muted-foreground">
                     Nothing Mira can use yet.
                   </div>
                 )}
               </div>
             ) : (
-              <div className="rounded-xl border border-border/50 bg-white/[0.02] px-4 py-3 text-[13px] text-muted-foreground">
+              <div className="rounded-xl border border-border/50 bg-white/[0.035] px-4 py-3 text-[13px] text-muted-foreground">
                 Shown after install: fetched from{' '}
                 <code className="font-mono text-[12px]">{detail.source}</code>.
               </div>
@@ -175,7 +175,7 @@ export function PluginDetailPage({
               <h2 className="mb-3 flex items-center gap-1.5 text-[11.5px] font-semibold uppercase tracking-wider text-muted-foreground/60">
                 <BookOpen className="size-3.5" /> Readme
               </h2>
-              <div className="rounded-xl border border-border/60 bg-white/[0.02] px-5 py-4 text-[13.5px]">
+              <div className="rounded-xl border border-border/60 bg-white/[0.035] px-5 py-4 text-[13.5px]">
                 <Markdown text={detail.readme} />
               </div>
             </section>
@@ -186,7 +186,7 @@ export function PluginDetailPage({
             <h2 className="mb-3 text-[11.5px] font-semibold uppercase tracking-wider text-muted-foreground/60">
               Information
             </h2>
-            <div className="overflow-hidden rounded-xl border border-border/60 bg-white/[0.02]">
+            <div className="overflow-hidden rounded-xl border border-border/60 bg-white/[0.035]">
               <InfoRow label="Source" value={detail.source} mono />
               {detail.license && <InfoRow label="License" value={detail.license} />}
               {detail.marketplace && <InfoRow label="Marketplace" value={detail.marketplace} />}
@@ -232,7 +232,7 @@ function IncludeRow({
 }) {
   if (items.length === 0) return null;
   return (
-    <div className="flex items-start gap-4 rounded-xl border border-border/50 bg-white/[0.02] px-4 py-3">
+    <div className="flex items-start gap-4 rounded-xl border border-border/50 bg-white/[0.035] px-4 py-3">
       <div className="mt-0.5 shrink-0 text-muted-foreground/70 [&_svg]:size-4">{icon}</div>
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2 text-[13px] font-medium">

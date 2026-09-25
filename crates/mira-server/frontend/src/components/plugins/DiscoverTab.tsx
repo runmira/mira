@@ -16,13 +16,17 @@ const GENERIC_HOSTS = new Set([
   'npmjs.com', 'pypi.org', 'crates.io',
 ]);
 
-/** Derive a favicon URL from a homepage, or null if the domain is too generic. */
+/** Derive a favicon URL from a homepage, or null if the domain is too generic.
+ *  Always uses the apex domain (e.g. mcp.figma.com → figma.com) so Google's
+ *  favicon service returns the brand logo instead of a generic globe. */
 export function faviconSrc(homepage: string | null | undefined): string | null {
   if (!homepage) return null;
   try {
     const { hostname } = new URL(homepage);
-    if (GENERIC_HOSTS.has(hostname)) return null;
-    return `https://www.google.com/s2/favicons?domain=${hostname}&sz=64`;
+    const parts = hostname.split('.');
+    const apex = parts.length > 2 ? parts.slice(-2).join('.') : hostname;
+    if (GENERIC_HOSTS.has(apex)) return null;
+    return `https://www.google.com/s2/favicons?domain=${apex}&sz=64`;
   } catch {
     return null;
   }
@@ -222,7 +226,7 @@ function PluginCard({
       tabIndex={0}
       onClick={onOpen}
       onKeyDown={(e) => (e.key === 'Enter' ? onOpen() : undefined)}
-      className="group flex cursor-pointer gap-3.5 rounded-2xl border border-border/50 bg-white/[0.02] p-4 text-left transition-all hover:border-border/70 hover:bg-white/[0.04]"
+      className="group flex cursor-pointer gap-3.5 rounded-2xl border border-border/50 bg-white/[0.035] p-4 text-left transition-all hover:border-border/70 hover:bg-white/[0.055]"
     >
       {/* Icon */}
       <Avatar name={entry.id} src={src} size="md" />
