@@ -126,3 +126,79 @@ jobs:
             dist/mira-*.tar.gz.sha256
           generate_release_notes: true
           fail_on_unmatched_files: true
+
+  update-homebrew-tap:
+    name: update homebrew tap
+    needs: release
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Read checksums
+        id: shas
+        run: |
+          echo "darwin_arm64=$(cat dist/mira-darwin-arm64.tar.gz.sha256 | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "darwin_x86_64=$(cat dist/mira-darwin-x86_64.tar.gz.sha256 | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "linux_arm64=$(cat dist/mira-linux-arm64.tar.gz.sha256 | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "linux_x86_64=$(cat dist/mira-linux-x86_64.tar.gz.sha256 | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Clone homebrew-tap
+        run: |
+          git clone https://x-access-token:${{ secrets.HOMEBREW_TAP_TOKEN }}@github.com/runmira/homebrew-tap.git tap
+
+      - name: Update formula
+        run: |
+          VERSION="${{ steps.shas.outputs.version }}"
+          FORMULA="tap/Formula/mira.rb"
+
+          sed -i "s/version \"[^\"]*\"/version \"${VERSION}\"/" "$FORMULA"
+
+          # Update each sha256 by matching the URL line that precedes it
+          python3 - <<'EOF'
+          import re, os
+
+          version  = os.environ['VERSION']
+          shas = {
+            'mira-darwin-arm64.tar.gz':   os.environ['DARWIN_ARM64'],
+            'mira-darwin-x86_64.tar.gz':  os.environ['DARWIN_X86_64'],
+            'mira-linux-arm64.tar.gz':    os.environ['LINUX_ARM64'],
+            'mira-linux-x86_64.tar.gz':   os.environ['LINUX_X86_64'],
+          }
+
+          with open('tap/Formula/mira.rb') as f:
+            content = f.read()
+
+          for asset, sha in shas.items():
+            # Replace the sha256 line that immediately follows the URL containing this asset
+            content = re.sub(
+              r'(url "[^"]*' + re.escape(asset) + r'[^"]*"\n\s+)sha256 "[a-f0-9]+"',
+              lambda m, s=sha: m.group(1) + f'sha256 "{s}"',
+              content,
+            )
+
+          with open('tap/Formula/mira.rb', 'w') as f:
+            f.write(content)
+          EOF
+        env:
+          VERSION:      ${{ steps.shas.outputs.version }}
+          DARWIN_ARM64: ${{ steps.shas.outputs.darwin_arm64 }}
+          DARWIN_X86_64: ${{ steps.shas.outputs.darwin_x86_64 }}
+          LINUX_ARM64:  ${{ steps.shas.outputs.linux_arm64 }}
+          LINUX_X86_64: ${{ steps.shas.outputs.linux_x86_64 }}
+
+      - name: Commit and push
+        run: |
+          cd tap
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/mira.rb
+          git commit -m "mira ${{ steps.shas.outputs.version }}"
+          git push
