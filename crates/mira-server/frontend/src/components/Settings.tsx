@@ -7,6 +7,7 @@ import {
   Brain,
   Bug,
   Check,
+  ChatCircleDots,
   Code,
   Database,
   Eye,
@@ -15,6 +16,7 @@ import {
   Gear,
   GitBranch,
   GitCommit,
+  GithubLogo,
   GitMerge,
   GitPullRequest,
   Info,
@@ -35,7 +37,19 @@ import {
   Terminal,
   Wrench,
 } from '@phosphor-icons/react';
-import { getSettings, getSkill, listSkills, putSettings, reloadSkills, type SkillDetail, type SkillView } from '../api';
+import {
+  connectGithub,
+  getGithubConnect,
+  getSettings,
+  getSkill,
+  listSkills,
+  putSettings,
+  reloadSkills,
+  type GithubConnectReport,
+  type GithubConnectView,
+  type SkillDetail,
+  type SkillView,
+} from '../api';
 import { Markdown } from './Markdown';
 import type {
   KeyUpdate,
@@ -142,12 +156,22 @@ const KEY_META: Record<string, { label: string; help: string; url?: string }> = 
   },
   GITHUB_TOKEN: {
     label: 'GitHub',
-    help: 'Powers the pull-request panel. The link opens a new-token page with the `repo` scope pre-selected — enough to list, comment on, review, and merge PRs.',
-    url: 'https://github.com/settings/tokens/new?scopes=repo&description=Mira',
+    help: 'Powers the pull-request panel and connecting repositories (Integrations). The link opens a new-token page with the `repo` and `workflow` scopes pre-selected.',
+    url: 'https://github.com/settings/tokens/new?scopes=repo,workflow&description=Mira',
+  },
+  SLACK_BOT_TOKEN: {
+    label: 'Slack bot token',
+    help: 'The xoxb-… token from your Slack app’s OAuth & Permissions page. Used by `mira slack`.',
+    url: 'https://api.slack.com/apps',
+  },
+  SLACK_APP_TOKEN: {
+    label: 'Slack app token',
+    help: 'An app-level xapp-… token with the connections:write scope (Basic Information → App-Level Tokens). Used by `mira slack`.',
+    url: 'https://api.slack.com/apps',
   },
 };
 
-export type SettingsSectionId = 'provider' | 'preferences' | 'memory' | 'skills' | 'search' | 'about';
+export type SettingsSectionId = 'provider' | 'preferences' | 'memory' | 'skills' | 'search' | 'integrations' | 'about';
 
 /** Section metadata exported so the Sidebar can render the same nav in
  *  its "settings mode" (the settings surface is now inline in the main
@@ -162,6 +186,7 @@ export const SETTINGS_SECTIONS: {
   { id: 'memory',      label: 'Memory',      icon: Brain },
   { id: 'skills',      label: 'Skills',      icon: Sparkle },
   { id: 'search',      label: 'Search & keys', icon: MagnifyingGlass },
+  { id: 'integrations', label: 'Integrations', icon: Plug },
   { id: 'about',       label: 'About',       icon: Info },
 ];
 
@@ -220,7 +245,7 @@ const EMPTY_DRAFT: Draft = {
 
 export function SettingsSurface({
   section,
-  onSectionChange: _onSectionChange,
+  onSectionChange,
   onSaved,
   onExit,
   skillsVersion = 0,
@@ -386,6 +411,9 @@ export function SettingsSurface({
           )}
           {view && section === 'search' && (
             <KeysSection view={view} draft={draft} setDraft={setDraft} />
+          )}
+          {view && section === 'integrations' && (
+            <IntegrationsSection onOpenKeys={() => onSectionChange('search')} />
           )}
           {view && section === 'about' && (
             <AboutSection view={view} />
@@ -1497,6 +1525,137 @@ function SectionShell({
         ))}
       </div>
     </div>
+  );
+}
+
+/* ---------- section: integrations ---------- */
+
+/** GitHub: connect a repository in one click (the server stores the
+ *  model key as an Actions secret and adds the workflow). Slack: the
+ *  tokens live under Search & keys; `mira slack` runs the bot. */
+function IntegrationsSection({ onOpenKeys }: { onOpenKeys: () => void }) {
+  const [repo, setRepo] = useState('');
+  const [info, setInfo] = useState<GithubConnectView | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState<GithubConnectReport | null>(null);
+
+  async function load(r?: string) {
+    setError(null);
+    try {
+      const v = await getGithubConnect(r);
+      setInfo(v);
+      if (!r && v.repo) setRepo(v.repo);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+  useEffect(() => { void load(); }, []);
+
+  async function connect() {
+    setBusy(true);
+    setError(null);
+    setDone(null);
+    try {
+      setDone(await connectGithub(repo.trim() || undefined));
+      await load(repo.trim() || undefined);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const connected = !!info?.status?.workflow && !!info?.status?.api_key_secret;
+  return (
+    <SectionShell
+      title="Integrations"
+      subtitle="Use Mira from GitHub and Slack. Nothing to edit by hand."
+    >
+      <div className="flex flex-col gap-4">
+        <div className="rounded-lg border border-border/50 bg-background/40 p-4">
+          <div className="flex items-center gap-2 text-[13.5px] font-medium">
+            <GithubLogo className="size-4" /> GitHub
+            {connected && (
+              <span className="ml-auto flex items-center gap-1 text-[11.5px] font-normal text-emerald-600 dark:text-emerald-400">
+                <Check className="size-3.5" /> Connected
+              </span>
+            )}
+          </div>
+          <p className="mt-1.5 text-[12.5px] text-muted-foreground">
+            Mira reviews every new pull request, and works on requests when someone writes
+            <code className="mx-1">@mira</code>in an issue or pull request comment. It runs in the
+            repository’s GitHub Actions with your {info?.provider ?? 'provider'} key
+            {info?.model ? <> and <code>{info.model}</code></> : null}.
+          </p>
+          <div className="mt-3 flex gap-2">
+            <SectionInput
+              value={repo}
+              onChange={(e) => setRepo(e.target.value)}
+              onBlur={() => void load(repo.trim() || undefined)}
+              placeholder="owner/repository"
+              spellCheck={false}
+            />
+            <Button onClick={() => void connect()} disabled={busy || !!info?.problem || !repo.trim()}>
+              {busy ? 'Connecting…' : connected ? 'Update' : 'Connect'}
+            </Button>
+          </div>
+          {info?.problem && (
+            <div className="mt-2 text-[12px] text-muted-foreground">
+              {info.problem}
+              {!info.has_token && (
+                <button type="button" className="ml-1 text-foreground underline underline-offset-2" onClick={onOpenKeys}>
+                  Add a GitHub token
+                </button>
+              )}
+            </div>
+          )}
+          {error && <div className="mt-2 text-[12px] text-destructive">{error}</div>}
+          {done && (
+            <div className="mt-2 text-[12px] text-muted-foreground">
+              {done.pull_request ? (
+                <>The default branch is protected, so the setup is in a pull request:{' '}
+                  <a className="underline" href={done.pull_request} target="_blank" rel="noreferrer">
+                    merge it
+                  </a> to finish.</>
+              ) : done.workflow_unchanged ? (
+                <>Updated the key and settings for {done.repo}.</>
+              ) : (
+                <>Connected {done.repo}. Open a pull request or mention @mira to try it.</>
+              )}
+            </div>
+          )}
+          <p className="mt-3 text-[11.5px] text-muted-foreground/80">
+            Connecting stores your model key as the encrypted Actions secret
+            <code className="mx-1">MIRA_API_KEY</code>, the provider and model as Actions
+            variables, and adds <code>.github/workflows/mira.yml</code>. Only people with write
+            access can start tasks.
+          </p>
+        </div>
+
+        <div className="rounded-lg border border-border/50 bg-background/40 p-4">
+          <div className="flex items-center gap-2 text-[13.5px] font-medium">
+            <ChatCircleDots className="size-4" /> Slack
+          </div>
+          <ol className="mt-1.5 list-decimal space-y-1 pl-5 text-[12.5px] text-muted-foreground">
+            <li>
+              Create a Slack app from Mira’s manifest (see <code>docs/slack.md</code>) and
+              install it to your workspace.
+            </li>
+            <li>
+              Paste its bot and app tokens under{' '}
+              <button type="button" className="text-foreground underline underline-offset-2" onClick={onOpenKeys}>
+                Search &amp; keys
+              </button>.
+            </li>
+            <li>
+              Run <code>mira slack</code> in the project folder, then mention the bot in a
+              channel or send it a direct message.
+            </li>
+          </ol>
+        </div>
+      </div>
+    </SectionShell>
   );
 }
 

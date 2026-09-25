@@ -28,6 +28,7 @@ pub mod null;
 pub mod openai;
 pub mod pricing;
 pub mod provider;
+pub mod retry;
 pub mod tool_spec;
 pub mod typesafe;
 
@@ -36,4 +37,5 @@ pub use factory::build_chat_provider;
 pub use null::NullProvider;
 pub use pricing::{cost_usd, price_for};
 pub use provider::{ChatProvider, ChatRequest, ModelInfo, ProviderError, ResponseFormat};
+pub use retry::{RetryPolicy, Retrying};
 pub use tool_spec::ToolSpec;

@@ -8,6 +8,7 @@ description  = "HTTP/WebSocket server that fronts a Mira session for browser or 
 
 [dependencies]
 mira-core    = { workspace = true }
+mira-cloud    = { workspace = true }
 mira-ai      = { workspace = true }
 mira-agents  = { workspace = true }
 mira-config  = { workspace = true }

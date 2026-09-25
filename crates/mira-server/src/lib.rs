@@ -34,6 +34,7 @@ mod embedded;
 pub mod extensions;
 mod file;
 mod git;
+mod github_connect;
 pub mod interactive;
 pub mod mcp;
 mod memory;
@@ -374,6 +375,10 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route(
             "/api/plugins/marketplaces/:name",
             axum::routing::delete(plugins::remove_marketplace),
+        )
+        .route(
+            "/api/github/connect",
+            get(github_connect::get_connect).post(github_connect::post_connect),
         )
         .route("/api/prs", get(pull_requests::list_pull_requests))
         .route(

@@ -544,7 +544,7 @@ async fn discover_repos(state: &AppState) -> Result<Vec<RepoSource>, String> {
 /// both `git@github.com:owner/repo(.git)` and `https://github.com/owner/repo(.git)`
 /// forms. Anything else (bitbucket, gitlab, no remote, not a repo) returns
 /// `None`.
-fn parse_github_remote(cwd: &Path) -> Option<(String, String)> {
+pub(crate) fn parse_github_remote(cwd: &Path) -> Option<(String, String)> {
     let out = Command::new("git")
         .current_dir(cwd)
         .args(["remote", "get-url", "origin"])

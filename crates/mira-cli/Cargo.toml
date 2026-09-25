@@ -35,6 +35,9 @@ mira-agents   = { workspace = true }
 
 async-trait        = { workspace = true }
 tokio              = { workspace = true }
+reqwest            = { workspace = true }
+# Slack Socket Mode (wss).
+tokio-tungstenite  = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 futures            = { workspace = true }
 clap               = { workspace = true }
 serde              = { workspace = true }

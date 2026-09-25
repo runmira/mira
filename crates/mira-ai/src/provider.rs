@@ -12,13 +12,30 @@ pub enum ProviderError {
     Http(#[from] reqwest::Error),
 
     #[error("provider returned {status}: {body}")]
-    Status { status: u16, body: String },
+    Status {
+        status: u16,
+        body: String,
+        /// Seconds from a `Retry-After` header, when the provider sent one.
+        retry_after: Option<u64>,
+    },
 
     #[error("stream decode error: {0}")]
     Decode(String),
 
     #[error("bad configuration: {0}")]
     Config(String),
+}
+
+/// Seconds to wait from a `Retry-After` header (the delay form; the
+/// HTTP-date form is rare for APIs and ignored).
+pub fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 impl From<ProviderError> for mira_core::Error {
