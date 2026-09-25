@@ -194,7 +194,7 @@ pub async fn run_command(
     run_with_backend(backend, config, binary, args, cwd).await
 }
 
-async fn run_with_backend(
+pub(crate) async fn run_with_backend(
     backend: SandboxBackend,
     config: &SandboxConfig,
     binary: &str,
@@ -225,6 +225,8 @@ async fn run_with_backend(
             build_process_command(binary, args)
         }
 
+        SandboxBackend::Landlock => build_process_command(binary, args),
+
         #[cfg(target_os = "linux")]
         SandboxBackend::Seatbelt => {
             tracing::warn!("Seatbelt requested on Linux; falling back to process-level execution");
@@ -249,6 +251,21 @@ async fn run_with_backend(
 
     #[cfg(unix)]
     command.process_group(0);
+
+    // Kept alive until the child has applied it.
+    #[cfg(target_os = "linux")]
+    let _ruleset = if backend == SandboxBackend::Landlock {
+        let ruleset = crate::landlock::Ruleset::for_profile(&config.profile)
+            .context("building the Landlock ruleset")?;
+        ruleset.apply_to(&mut command);
+        Some(ruleset)
+    } else {
+        None
+    };
+    #[cfg(not(target_os = "linux"))]
+    if backend == SandboxBackend::Landlock {
+        anyhow::bail!("Landlock is only available on Linux");
+    }
 
     let mut child = command.spawn().context("spawning sandboxed command")?;
 

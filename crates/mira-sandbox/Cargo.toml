@@ -27,3 +27,4 @@ dirs = "5"
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["signal", "process"] }
 
+libc = "0.2"

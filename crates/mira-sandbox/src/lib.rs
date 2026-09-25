@@ -1,7 +1,10 @@
-#![forbid(unsafe_code)]
+// Only the Landlock module needs `unsafe` (raw syscalls).
+#![deny(unsafe_code)]
 
 use std::sync::{Arc, RwLock};
 
+#[cfg(target_os = "linux")]
+mod landlock;
 mod profile;
 mod runner;
 
@@ -13,7 +16,30 @@ pub use runner::{run_command, run_unsandboxed, CommandOutput, SandboxConfig};
 pub enum SandboxBackend {
     Seatbelt,
     Bubblewrap,
+    /// Linux Landlock: used when bubblewrap is missing or can't run.
+    Landlock,
     ProcessLevel,
+}
+
+impl SandboxBackend {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Seatbelt => "sandbox-exec",
+            Self::Bubblewrap => "bubblewrap",
+            Self::Landlock => "landlock",
+            Self::ProcessLevel => "none",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        Some(match s.trim().to_ascii_lowercase().as_str() {
+            "seatbelt" | "sandbox-exec" => Self::Seatbelt,
+            "bwrap" | "bubblewrap" => Self::Bubblewrap,
+            "landlock" => Self::Landlock,
+            "none" | "process" | "off" => Self::ProcessLevel,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -107,7 +133,21 @@ impl Sandbox {
     }
 }
 
+/// The backend commands run under. `MIRA_SANDBOX_BACKEND` (`bwrap`,
+/// `landlock`, `seatbelt` or `none`) overrides the choice; otherwise the
+/// strongest one that works here wins. Probed once per process.
 pub fn detect_backend() -> SandboxBackend {
+    if let Some(forced) = std::env::var("MIRA_SANDBOX_BACKEND")
+        .ok()
+        .and_then(|v| SandboxBackend::parse(&v))
+    {
+        return forced;
+    }
+    static DETECTED: std::sync::OnceLock<SandboxBackend> = std::sync::OnceLock::new();
+    *DETECTED.get_or_init(probe_backend)
+}
+
+fn probe_backend() -> SandboxBackend {
     #[cfg(target_os = "macos")]
     {
         if binary_on_path("sandbox-exec") {
@@ -118,11 +158,37 @@ pub fn detect_backend() -> SandboxBackend {
     #[cfg(target_os = "linux")]
     {
         if binary_on_path("bwrap") {
-            return SandboxBackend::Bubblewrap;
+            if bwrap_works() {
+                return SandboxBackend::Bubblewrap;
+            }
+            tracing::warn!("bubblewrap can't create namespaces here; trying Landlock");
+        }
+        if landlock::available() {
+            return SandboxBackend::Landlock;
         }
     }
 
     SandboxBackend::ProcessLevel
+}
+
+/// bwrap is often installed but unusable: containers without user
+/// namespaces, or AppArmor restricting them (Ubuntu 24.04+).
+#[cfg(target_os = "linux")]
+fn bwrap_works() -> bool {
+    std::process::Command::new("bwrap")
+        .args([
+            "--ro-bind",
+            "/",
+            "/",
+            "--unshare-net",
+            "--die-with-parent",
+            "true",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 pub fn has_os_sandbox() -> bool {
