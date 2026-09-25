@@ -54,7 +54,7 @@ pub async fn run(cli: &crate::Cli, _args: AcpArgs) -> Result<()> {
 
 /// Makes a Mira session for an editor thread.
 #[async_trait]
-pub trait SessionFactory: Send + Sync {
+pub(crate) trait SessionFactory: Send + Sync {
     async fn create(
         &self,
         cwd: PathBuf,
@@ -77,7 +77,7 @@ impl SessionFactory for Broken {
 
 /// The real factory: provider, tools, MCP servers and plugins are built
 /// once; each session gets its own policy, sandbox and memory.
-struct MiraFactory {
+pub(crate) struct MiraFactory {
     cfg: MiraConfig,
     settings: crate::ResolvedSettings,
     provider: Arc<dyn mira_ai::ChatProvider>,
@@ -87,7 +87,7 @@ struct MiraFactory {
 }
 
 impl MiraFactory {
-    async fn build(cli: &crate::Cli) -> Result<Self> {
+    pub(crate) async fn build(cli: &crate::Cli) -> Result<Self> {
         crate::login::auto_refresh_if_needed().await;
         let cwd = std::env::current_dir().context("read cwd")?;
         let cfg = MiraConfig::load(&cwd).context("load config")?;
@@ -283,7 +283,7 @@ struct Agent {
 }
 
 /// Serve ACP on `input`/`output` until the editor closes `input`.
-pub async fn serve<R, W>(input: R, output: W, factory: Arc<dyn SessionFactory>) -> Result<()>
+pub(crate) async fn serve<R, W>(input: R, output: W, factory: Arc<dyn SessionFactory>) -> Result<()>
 where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,

@@ -18,6 +18,7 @@ mod repl;
 mod review;
 mod sandbox;
 mod serve;
+mod slack;
 mod tui;
 
 // Entry point for the mira CLI binary.
@@ -166,6 +167,9 @@ enum Command {
     /// Respond to a GitHub Actions event: review pull requests, and work
     /// on `@mira` requests in issues and PRs. Used by the Mira action.
     Github(github::GithubArgs),
+    /// Run Mira as a Slack bot (Socket Mode): mention it or DM it, and it
+    /// works in this folder, one session per thread.
+    Slack(slack::SlackArgs),
 }
 
 #[tokio::main]
@@ -196,6 +200,7 @@ async fn main() -> Result<()> {
             Command::Auth(args) => login::run_auth(args).await,
             Command::Acp(args) => acp::run(&cli, args).await,
             Command::Github(args) => github::run(&cli, args).await,
+            Command::Slack(args) => slack::run(&cli, args).await,
         };
     }
 
