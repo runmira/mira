@@ -1,5 +1,5 @@
 name: Mira coding agent
-description: Review pull requests, and work on @mira requests in issues and pull requests, with the model you choose.
+description: Review pull requests, and work on @runmira-bot requests in issues and pull requests, with the model you choose.
 author: runmira
 branding:
   icon: cpu
@@ -26,7 +26,7 @@ inputs:
     default: https://jvwezgehvghcqgpjxjct.supabase.co/functions/v1/github-app/actions-token
   trigger:
     description: What people type in a comment to call Mira.
-    default: "@mira"
+    default: "@runmira-bot"
   allow:
     description: Author associations allowed to start tasks, comma-separated.
     default: OWNER,MEMBER,COLLABORATOR

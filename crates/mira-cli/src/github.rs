@@ -4,10 +4,10 @@
 //!
 //! - **Pull request opened / updated / ready:** review the diff and post
 //!   the findings as one review with inline comments.
-//! - **`@mira review` on a pull request:** the same, on demand.
-//! - **`@mira <task>` on an issue:** do the task on a new branch and open
+//! - **`@runmira-bot review` on a pull request:** the same, on demand.
+//! - **`@runmira-bot <task>` on an issue:** do the task on a new branch and open
 //!   a pull request (the cloud-task worker, run on the Actions runner).
-//! - **`@mira <task>` on a pull request:** do it on a branch off the PR's
+//! - **`@runmira-bot <task>` on a pull request:** do it on a branch off the PR's
 //!   branch and open a follow-up PR into it.
 //!
 //! Only people with write access (owners, members, collaborators by
@@ -39,7 +39,7 @@ pub struct GithubArgs {
     #[arg(long)]
     event_name: Option<String>,
     /// What people type to call Mira in a comment.
-    #[arg(long, default_value = "@mira")]
+    #[arg(long, default_value = "@runmira-bot")]
     trigger: String,
     /// Author associations allowed to start tasks, comma-separated.
     #[arg(long, default_value = "OWNER,MEMBER,COLLABORATOR")]
@@ -276,7 +276,7 @@ async fn setup(cli: &crate::Cli, repo: Option<&str>, yes: bool) -> Result<()> {
         println!("Merge it to finish.");
     }
     println!(
-        "Mira now reviews new pull requests. Mention @mira in an issue or PR comment to give it a task."
+        "Mira now reviews new pull requests. Mention @runmira-bot in an issue or PR comment to give it a task."
     );
     Ok(())
 }
@@ -807,11 +807,21 @@ mod tests {
     }
 
     #[test]
+    fn trigger_is_a_whole_word() {
+        let t = "@runmira-bot";
+        assert_eq!(find_trigger("hey @RunMira-Bot, fix it", t), Some(4));
+        assert_eq!(find_trigger("@runmira-bot review", t), Some(0));
+        assert_eq!(find_trigger("@runmira-bots fix", t), None);
+        assert_eq!(find_trigger("@runmira-bot-x fix", t), None);
+        assert_eq!(find_trigger("@mira fix it", t), None);
+    }
+
+    #[test]
     fn comments_become_tasks_or_reviews() {
         match plan(
             "issue_comment",
-            &comment("@mira fix it please", "OWNER", false),
-            "@mira",
+            &comment("@runmira-bot fix it please", "OWNER", false),
+            "@runmira-bot",
             &allow(),
         ) {
             Plan::Task {
@@ -830,8 +840,8 @@ mod tests {
         assert_eq!(
             plan(
                 "issue_comment",
-                &comment("@Mira review", "MEMBER", true),
-                "@mira",
+                &comment("@Runmira-Bot review", "MEMBER", true),
+                "@runmira-bot",
                 &allow()
             ),
             Plan::Review { pr: 7 }
@@ -839,8 +849,8 @@ mod tests {
         assert!(matches!(
             plan(
                 "issue_comment",
-                &comment("@mira add tests", "COLLABORATOR", true),
-                "@mira",
+                &comment("@runmira-bot add tests", "COLLABORATOR", true),
+                "@runmira-bot",
                 &allow()
             ),
             Plan::Task { on_pr: true, .. }
@@ -849,12 +859,20 @@ mod tests {
 
     #[test]
     fn strangers_bots_and_lookalikes_are_ignored() {
-        let ignored =
-            |v: &Value| matches!(plan("issue_comment", v, "@mira", &allow()), Plan::Ignore(_));
-        assert!(ignored(&comment("@mira delete everything", "NONE", false)));
+        let ignored = |v: &Value| {
+            matches!(
+                plan("issue_comment", v, "@runmira-bot", &allow()),
+                Plan::Ignore(_)
+            )
+        };
+        assert!(ignored(&comment(
+            "@runmira-bot delete everything",
+            "NONE",
+            false
+        )));
         assert!(ignored(&comment("hey @miranda", "OWNER", false)));
         assert!(ignored(&comment("no mention here", "OWNER", false)));
-        let mut bot = comment("@mira loop", "OWNER", false);
+        let mut bot = comment("@runmira-bot loop", "OWNER", false);
         bot["comment"]["user"]["type"] = json!("Bot");
         assert!(ignored(&bot));
     }
@@ -863,11 +881,11 @@ mod tests {
     fn pull_requests_are_reviewed_unless_draft() {
         let pr = |draft: bool| json!({"action": "opened", "pull_request": {"number": 3, "draft": draft}});
         assert_eq!(
-            plan("pull_request", &pr(false), "@mira", &allow()),
+            plan("pull_request", &pr(false), "@runmira-bot", &allow()),
             Plan::Review { pr: 3 }
         );
         assert!(matches!(
-            plan("pull_request", &pr(true), "@mira", &allow()),
+            plan("pull_request", &pr(true), "@runmira-bot", &allow()),
             Plan::Ignore(_)
         ));
     }
