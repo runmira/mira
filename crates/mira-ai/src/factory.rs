@@ -9,12 +9,14 @@
 use std::sync::Arc;
 
 use crate::anthropic::{Anthropic, AnthropicConfig};
+use crate::bedrock::{Bedrock, BedrockConfig};
 use crate::openai::{OpenAiCompatible, OpenAiConfig};
 use crate::provider::{ChatProvider, ProviderError};
 
 /// Build the appropriate [`ChatProvider`] for the given provider name.
 ///
 /// * `"anthropic"` (case-insensitive) → native Messages API adapter.
+/// * `"bedrock"` → Amazon Bedrock's Converse API (SigV4 or API key).
 /// * anything else → OpenAI-compatible adapter (OpenRouter, Groq,
 ///   Together, local `/v1` shims, Anthropic's own compat endpoint if
 ///   the user opts in by naming their provider entry something else).
@@ -33,6 +35,9 @@ pub fn build_chat_provider(
             prompt_caching,
         })?;
         return Ok(Arc::new(p));
+    }
+    if name.eq_ignore_ascii_case("bedrock") {
+        return Ok(Arc::new(Bedrock::new(BedrockConfig { base_url, api_key })?));
     }
     let p = OpenAiCompatible::new(OpenAiConfig {
         base_url,

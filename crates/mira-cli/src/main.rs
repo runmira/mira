@@ -569,8 +569,13 @@ pub(crate) fn resolve_settings(cli: &Cli, cfg: &MiraConfig) -> Result<ResolvedSe
         .api_key
         .clone()
         .or_else(|| std::env::var("MIRA_API_KEY").ok())
-        .or_else(|| ProviderConfig::resolved_api_key(&provider))
-        .with_context(|| missing_api_key_hint(&provider_name))?;
+        .or_else(|| ProviderConfig::resolved_api_key(&provider));
+    // Bedrock can sign with AWS credentials instead of an API key.
+    let api_key = if provider_name == "bedrock" {
+        api_key.unwrap_or_default()
+    } else {
+        api_key.with_context(|| missing_api_key_hint(&provider_name))?
+    };
 
     let model = cli
         .model

@@ -787,6 +787,8 @@ pub fn default_base_url_for(name: &str) -> Option<&'static str> {
         // Major hosted
         "openai" => "https://api.openai.com/v1",
         "anthropic" => "https://api.anthropic.com/v1",
+        // No region: the provider takes it from AWS_REGION or ~/.aws/config.
+        "bedrock" => "https://bedrock-runtime.amazonaws.com",
         "google" => "https://generativelanguage.googleapis.com/v1beta/openai",
         // Fast / cheap inference
         "deepseek" => "https://api.deepseek.com/v1",
@@ -818,6 +820,8 @@ pub fn default_api_key_env_for(name: &str) -> Option<&'static str> {
         "openrouter" => "OPENROUTER_API_KEY",
         "openai" => "OPENAI_API_KEY",
         "anthropic" => "ANTHROPIC_API_KEY",
+        // Optional: without it Bedrock signs with AWS credentials.
+        "bedrock" => "AWS_BEARER_TOKEN_BEDROCK",
         // Google's OpenAI-compat endpoint accepts a Gemini API key.
         // GEMINI_API_KEY is the conventional name in google's docs.
         "google" => "GEMINI_API_KEY",
@@ -845,6 +849,7 @@ pub fn pretty_provider_name(name: &str) -> String {
         "openrouter" => "OpenRouter".into(),
         "openai" => "OpenAI".into(),
         "anthropic" => "Anthropic".into(),
+        "bedrock" => "Amazon Bedrock".into(),
         "google" => "Google (Gemini)".into(),
         "groq" => "Groq".into(),
         "cerebras" => "Cerebras".into(),
