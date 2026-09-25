@@ -27,7 +27,10 @@ use serde_json::{json, Value};
 use crate::config::MiraConfig;
 
 #[derive(clap::Args, Debug, Clone)]
+#[command(args_conflicts_with_subcommands = true)]
 pub struct GithubArgs {
+    #[command(subcommand)]
+    command: Option<GithubCmd>,
     /// The event payload. Defaults to `$GITHUB_EVENT_PATH`.
     #[arg(long)]
     event_path: Option<PathBuf>,
@@ -56,6 +59,26 @@ pub struct GithubArgs {
     no_verify: bool,
 }
 
+#[derive(clap::Subcommand, Debug, Clone)]
+enum GithubCmd {
+    /// Connect a repository: store your model key as an Actions secret,
+    /// your provider and model as variables, and add the workflow. No
+    /// files to edit.
+    Setup {
+        /// `owner/name`. Defaults to this folder's GitHub remote.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Don't ask before changing the repository.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+    /// Show whether a repository is connected.
+    Status {
+        #[arg(long)]
+        repo: Option<String>,
+    },
+}
+
 /// What an event asks for.
 #[derive(Debug, PartialEq)]
 enum Plan {
@@ -75,6 +98,11 @@ enum Plan {
 }
 
 pub async fn run(cli: &crate::Cli, args: GithubArgs) -> Result<()> {
+    match &args.command {
+        Some(GithubCmd::Setup { repo, yes }) => return setup(cli, repo.as_deref(), *yes).await,
+        Some(GithubCmd::Status { repo }) => return status(repo.as_deref()).await,
+        None => {}
+    }
     let event_name = args
         .event_name
         .clone()
@@ -183,6 +211,159 @@ pub async fn run(cli: &crate::Cli, args: GithubArgs) -> Result<()> {
         }
         Plan::Ignore(_) => Ok(()),
     }
+}
+
+/* ---------- connecting a repository ---------- */
+
+const TOKEN_URL: &str =
+    "https://github.com/settings/tokens/new?scopes=repo,workflow&description=Mira";
+
+async fn setup(cli: &crate::Cli, repo: Option<&str>, yes: bool) -> Result<()> {
+    use std::io::IsTerminal;
+    let cwd = std::env::current_dir()?;
+    let (owner, name) = pick_repo(repo, &cwd)?;
+    let cfg = MiraConfig::load(&cwd).context("load config")?;
+    mira_config::export_keys_to_env(&cfg);
+    let settings = crate::resolve_settings(cli, &cfg)?;
+    let opts = mira_cloud::setup::ConnectOptions::new(
+        &settings.provider_name,
+        &settings.model,
+        Some(&settings.base_url),
+        &settings.api_key,
+    )
+    .map_err(|e| anyhow!(e))?;
+    let token = github_token(&cfg)?;
+
+    println!("Connecting {owner}/{name} to Mira. This will:");
+    println!(
+        "  - store your {} API key as the Actions secret MIRA_API_KEY",
+        mira_config::pretty_provider_name(&opts.provider)
+    );
+    println!(
+        "  - set Actions variables MIRA_PROVIDER={} and MIRA_MODEL={}{}",
+        opts.provider,
+        opts.model,
+        opts.base_url
+            .as_deref()
+            .map(|u| format!(" and MIRA_BASE_URL={u}"))
+            .unwrap_or_default()
+    );
+    println!("  - add {}", mira_cloud::setup::WORKFLOW_PATH);
+    if !yes {
+        if !std::io::stdin().is_terminal() {
+            bail!("pass --yes to connect without a prompt");
+        }
+        print!("Continue? [y/N] ");
+        use std::io::Write;
+        std::io::stdout().flush()?;
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !matches!(answer.trim(), "y" | "Y" | "yes") {
+            println!("Nothing changed.");
+            return Ok(());
+        }
+    }
+    let gh = GitHub::new(&api_url(), &token).map_err(|e| anyhow!("{e}"))?;
+    let report = mira_cloud::setup::connect(&gh, &owner, &name, &opts)
+        .await
+        .map_err(|e| anyhow!("{e}"))?;
+    if report.workflow_unchanged {
+        println!("Updated the key and settings; the workflow was already there.");
+    } else if let Some(branch) = &report.committed_to {
+        println!("Done: the workflow is on {branch}.");
+    } else if let Some(pr) = &report.pull_request {
+        println!("The default branch is protected, so the workflow is in a pull request: {pr}");
+        println!("Merge it to finish.");
+    }
+    println!(
+        "Mira now reviews new pull requests. Mention @mira in an issue or PR comment to give it a task."
+    );
+    Ok(())
+}
+
+async fn status(repo: Option<&str>) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let (owner, name) = pick_repo(repo, &cwd)?;
+    let cfg = MiraConfig::load(&cwd).context("load config")?;
+    let token = github_token(&cfg)?;
+    let gh = GitHub::new(&api_url(), &token).map_err(|e| anyhow!("{e}"))?;
+    let s = mira_cloud::setup::status(&gh, &owner, &name)
+        .await
+        .map_err(|e| anyhow!("{e}"))?;
+    let yes_no = |b: bool| if b { "yes" } else { "no" };
+    println!("{}", s.repo);
+    println!("  workflow    {}", yes_no(s.workflow));
+    println!("  model key   {}", yes_no(s.api_key_secret));
+    if !(s.workflow && s.api_key_secret) {
+        println!("Run `mira github setup` to connect it.");
+    }
+    Ok(())
+}
+
+fn pick_repo(explicit: Option<&str>, cwd: &std::path::Path) -> Result<(String, String)> {
+    if let Some(r) = explicit {
+        return r
+            .trim()
+            .trim_start_matches("https://github.com/")
+            .trim_end_matches(".git")
+            .split_once('/')
+            .map(|(o, n)| (o.to_owned(), n.trim_end_matches('/').to_owned()))
+            .filter(|(o, n)| !o.is_empty() && !n.is_empty())
+            .context("--repo should look like owner/name");
+    }
+    let url = std::process::Command::new("git")
+        .current_dir(cwd)
+        .args(["remote", "get-url", "origin"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+        .unwrap_or_default();
+    mira_cloud::spec::parse_github_remote(&url)
+        .context("this folder has no GitHub remote; pass --repo owner/name")
+}
+
+/// A token that can manage the repository: the environment, the
+/// `GITHUB_TOKEN` key, the GitHub CLI's login, or one pasted now (and
+/// saved as the key for next time).
+fn github_token(cfg: &MiraConfig) -> Result<String> {
+    for var in ["GITHUB_TOKEN", "GH_TOKEN"] {
+        if let Ok(t) = std::env::var(var) {
+            if !t.trim().is_empty() {
+                return Ok(t);
+            }
+        }
+    }
+    if let Some(t) = cfg.keys.get("GITHUB_TOKEN").filter(|t| !t.is_empty()) {
+        return Ok(t.clone());
+    }
+    if let Ok(out) = std::process::Command::new("gh")
+        .args(["auth", "token"])
+        .output()
+    {
+        let t = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        if out.status.success() && !t.is_empty() {
+            return Ok(t);
+        }
+    }
+    println!("Mira needs a GitHub token with the repo and workflow scopes.");
+    println!("Create one at {TOKEN_URL}");
+    let token = crate::ext_cmd::read_secret("Paste it here: ")?;
+    if token.trim().is_empty() {
+        bail!("no token given");
+    }
+    let mut global = MiraConfig::load_global().unwrap_or_default();
+    global
+        .keys
+        .insert("GITHUB_TOKEN".into(), token.trim().to_owned());
+    if let Ok(path) = global.save_global() {
+        println!("Saved it as the GITHUB_TOKEN key in {}.", path.display());
+    }
+    Ok(token.trim().to_owned())
+}
+
+fn api_url() -> String {
+    std::env::var("GITHUB_API_URL").unwrap_or_else(|_| "https://api.github.com".into())
 }
 
 /* ---------- deciding what to do ---------- */

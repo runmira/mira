@@ -17,6 +17,8 @@ mira-sandbox = { workspace = true }
 mira-tools   = { workspace = true }
 async-trait  = { workspace = true }
 base64       = "0.22"
+# Encrypting Actions secrets (libsodium sealed box).
+crypto_box   = { version = "0.9", features = ["seal"] }
 futures      = { workspace = true }
 reqwest      = { workspace = true }
 serde        = { workspace = true }

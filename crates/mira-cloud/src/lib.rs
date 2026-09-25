@@ -16,6 +16,7 @@ use thiserror::Error;
 pub mod git;
 pub mod github;
 pub mod launcher;
+pub mod setup;
 pub mod spec;
 pub mod store;
 pub mod worker;

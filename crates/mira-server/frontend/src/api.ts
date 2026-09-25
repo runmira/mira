@@ -971,3 +971,39 @@ export async function putCwd(path: string): Promise<{ session_id?: string }> {
   // callers can WS-attach to the freshly-materialized slot.
   return (await r.json()) as { session_id?: string };
 }
+
+/* ---------- GitHub connect ---------- */
+
+export type GithubConnectView = {
+  repo: string | null;
+  has_token: boolean;
+  provider: string | null;
+  model: string | null;
+  /** Why connecting can't work yet. */
+  problem: string | null;
+  status: { repo: string; workflow: boolean; api_key_secret: boolean } | null;
+};
+
+export type GithubConnectReport = {
+  repo: string;
+  committed_to: string | null;
+  pull_request: string | null;
+  workflow_unchanged: boolean;
+};
+
+export async function getGithubConnect(repo?: string): Promise<GithubConnectView> {
+  const q = repo ? `?repo=${encodeURIComponent(repo)}` : '';
+  const r = await fetch(`/api/github/connect${q}`, { cache: 'no-store' });
+  if (!r.ok) throw new Error(await readError(r, 'github connect GET'));
+  return (await r.json()) as GithubConnectView;
+}
+
+export async function connectGithub(repo?: string): Promise<GithubConnectReport> {
+  const r = await fetch('/api/github/connect', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ repo: repo || null }),
+  });
+  if (!r.ok) throw new Error(await readError(r, 'github connect'));
+  return (await r.json()) as GithubConnectReport;
+}

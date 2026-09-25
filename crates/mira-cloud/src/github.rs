@@ -144,6 +144,36 @@ impl GitHub {
         Ok(resp.json().await.unwrap_or(serde_json::Value::Null))
     }
 
+    /// PUT JSON to a REST path.
+    pub async fn put(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value, CloudError> {
+        let resp = self
+            .send(path, self.req(reqwest::Method::PUT, path).json(body))
+            .await?;
+        Ok(resp.json().await.unwrap_or(serde_json::Value::Null))
+    }
+
+    /// PATCH JSON to a REST path.
+    pub async fn patch(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value, CloudError> {
+        let resp = self
+            .send(path, self.req(reqwest::Method::PATCH, path).json(body))
+            .await?;
+        Ok(resp.json().await.unwrap_or(serde_json::Value::Null))
+    }
+
+    pub async fn delete(&self, path: &str) -> Result<(), CloudError> {
+        self.send(path, self.req(reqwest::Method::DELETE, path))
+            .await
+            .map(drop)
+    }
+
     /// A pull request's unified diff.
     pub async fn pr_diff(
         &self,

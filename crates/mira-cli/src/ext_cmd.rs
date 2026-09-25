@@ -738,7 +738,7 @@ pub async fn run_plugin(args: PluginArgs) -> Result<()> {
 
 /// Read a line without echoing it when stdin is a terminal; otherwise
 /// read it from stdin (`echo $TOKEN | mira mcp set-var NAME`).
-fn read_secret(prompt: &str) -> Result<String> {
+pub(crate) fn read_secret(prompt: &str) -> Result<String> {
     use std::io::{BufRead, IsTerminal, Write};
     if !std::io::stdin().is_terminal() {
         let mut line = String::new();
