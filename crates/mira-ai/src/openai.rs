@@ -83,8 +83,13 @@ impl ChatProvider for OpenAiCompatible {
         let resp = self.http.get(&url).headers(self.headers()?).send().await?;
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
+            let retry_after = crate::provider::retry_after(resp.headers());
             let body = resp.text().await.unwrap_or_default();
-            return Err(ProviderError::Status { status, body });
+            return Err(ProviderError::Status {
+                status,
+                body,
+                retry_after,
+            });
         }
         let raw: ModelListResponse = resp
             .json()
@@ -115,8 +120,13 @@ impl ChatProvider for OpenAiCompatible {
 
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
+            let retry_after = crate::provider::retry_after(resp.headers());
             let body = resp.text().await.unwrap_or_default();
-            return Err(ProviderError::Status { status, body });
+            return Err(ProviderError::Status {
+                status,
+                body,
+                retry_after,
+            });
         }
 
         // Bounded channel — backpressure the network reader if the consumer

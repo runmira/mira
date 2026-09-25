@@ -116,8 +116,13 @@ impl ChatProvider for Anthropic {
         }
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
+            let retry_after = crate::provider::retry_after(resp.headers());
             let body = resp.text().await.unwrap_or_default();
-            return Err(ProviderError::Status { status, body });
+            return Err(ProviderError::Status {
+                status,
+                body,
+                retry_after,
+            });
         }
         let raw: ModelListResponse = resp
             .json()
@@ -156,8 +161,13 @@ impl ChatProvider for Anthropic {
 
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
+            let retry_after = crate::provider::retry_after(resp.headers());
             let body = resp.text().await.unwrap_or_default();
-            return Err(ProviderError::Status { status, body });
+            return Err(ProviderError::Status {
+                status,
+                body,
+                retry_after,
+            });
         }
 
         let (tx, rx) = mpsc::channel::<Result<ChatEvent, ProviderError>>(64);
@@ -228,6 +238,7 @@ impl ChatProvider for Anthropic {
                             .send(Err(ProviderError::Status {
                                 status: 200,
                                 body: msg,
+                                retry_after: None,
                             }))
                             .await;
                         return;

@@ -621,9 +621,19 @@ impl ConverseState {
                 .or_else(|| payload.get("Message"))
                 .and_then(Value::as_str)
                 .unwrap_or("stream error");
+            // Give throttling and outages their HTTP status so callers
+            // can tell them from a bad request and retry.
+            let status = match kind {
+                "throttlingException" => 429,
+                "serviceUnavailableException"
+                | "internalServerException"
+                | "modelStreamErrorException" => 503,
+                _ => 400,
+            };
             return Err(ProviderError::Status {
-                status: 400,
+                status,
                 body: format!("{kind}: {msg}"),
+                retry_after: None,
             });
         }
         let mut out = Vec::new();
@@ -725,6 +735,7 @@ impl ChatProvider for Bedrock {
             .await?;
         let status = resp.status();
         if !status.is_success() {
+            let retry_after = crate::provider::retry_after(resp.headers());
             let body = resp.text().await.unwrap_or_default();
             let msg = serde_json::from_str::<Value>(&body)
                 .ok()
@@ -738,6 +749,7 @@ impl ChatProvider for Bedrock {
             return Err(ProviderError::Status {
                 status: status.as_u16(),
                 body: msg,
+                retry_after,
             });
         }
         let bytes = resp.bytes_stream();

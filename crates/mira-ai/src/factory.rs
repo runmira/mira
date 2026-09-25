@@ -12,6 +12,7 @@ use crate::anthropic::{Anthropic, AnthropicConfig};
 use crate::bedrock::{Bedrock, BedrockConfig};
 use crate::openai::{OpenAiCompatible, OpenAiConfig};
 use crate::provider::{ChatProvider, ProviderError};
+use crate::retry::{RetryPolicy, Retrying};
 
 /// Build the appropriate [`ChatProvider`] for the given provider name.
 ///
@@ -21,6 +22,19 @@ use crate::provider::{ChatProvider, ProviderError};
 ///   Together, local `/v1` shims, Anthropic's own compat endpoint if
 ///   the user opts in by naming their provider entry something else).
 pub fn build_chat_provider(
+    name: &str,
+    base_url: String,
+    api_key: String,
+    extra_headers: Vec<(String, String)>,
+    prompt_caching: bool,
+) -> Result<Arc<dyn ChatProvider>, ProviderError> {
+    let inner = build_unretried(name, base_url, api_key, extra_headers, prompt_caching)?;
+    // Rate limits, overloads and dropped connections get retried rather
+    // than ending the turn.
+    Ok(Arc::new(Retrying::new(inner, RetryPolicy::from_env())))
+}
+
+fn build_unretried(
     name: &str,
     base_url: String,
     api_key: String,
