@@ -4,7 +4,7 @@ Once a repository is connected, Mira:
 
 - **reviews every new pull request**, posting its findings as one review
   with comments on the changed lines;
-- **works on requests**: write `@mira` in an issue or pull request comment
+- **works on requests**: write `@runmira-bot` in an issue or pull request comment
   and it does the task and opens a pull request.
 
 It runs in the repository's own GitHub Actions, with your model key.
@@ -84,11 +84,15 @@ short-lived tokens:
 | Where | Write | What happens |
 | --- | --- | --- |
 | New pull request | (nothing) | Mira reviews it. Drafts are skipped until marked ready. |
-| Pull request comment | `@mira review` | Reviews it again. |
-| Issue comment, or a new issue | `@mira fix the crash when the list is empty` | Mira works on a new branch and opens a pull request, then replies with the link. |
-| Pull request comment or review comment | `@mira also handle the null case` | Mira works on a branch off the pull request's branch and opens a pull request into it. |
+| Pull request comment | `@runmira-bot review` | Reviews it again. |
+| Issue comment, or a new issue | `@runmira-bot fix the crash when the list is empty` | Mira works on a new branch and opens a pull request, then replies with the link. |
+| Pull request comment or review comment | `@runmira-bot also handle the null case` | Mira works on a branch off the pull request's branch and opens a pull request into it. |
 
 - Mira reacts 👀 when it picks up a request.
+- The trigger is the app's name, `@runmira-bot`, so GitHub links it to the
+  app. (`@mira` is someone else's GitHub account.) Repositories connected
+  before this change still listen for `@mira`: click **Update** next to
+  the repository in Mira to switch them.
 - Only the repository's owners, members and collaborators can start
   tasks. Other people's comments, and comments from bots, are ignored.
 - Tasks stop after 30 minutes. The pull request says what was done and
@@ -132,7 +136,7 @@ permissions:
 | `base-url` | | Endpoint, for providers Mira doesn't know by name. |
 | `github-token` | `github.token` | Token used when the Runmira-bot app isn't installed. |
 | `app-token-url` | the Mira service | Where the run swaps its OIDC identity for a Runmira-bot app token. Empty turns it off. |
-| `trigger` | `@mira` | What people write to call Mira. |
+| `trigger` | `@runmira-bot` | What people write to call Mira. |
 | `allow` | `OWNER,MEMBER,COLLABORATOR` | Who can start tasks. |
 | `max-runtime-minutes` | `30` | Time limit for a task. |
 | `setup` | | Command to run before a task, e.g. `npm ci`. |

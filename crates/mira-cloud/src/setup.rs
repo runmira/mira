@@ -218,7 +218,7 @@ async fn propose(
                 "head": branch,
                 "base": base,
                 "body": "Adds the workflow that runs Mira: it reviews pull requests, and works \
-                         on `@mira` requests in issues and pull requests. The model key and \
+                         on `@runmira-bot` requests in issues and pull requests. The model key and \
                          settings are already stored as Actions secrets and variables.",
             }),
         )
@@ -329,13 +329,13 @@ concurrency:
 
 jobs:
   mira:
-    # Comments only start a run when they mention @mira. Pull requests
+    # Comments only start a run when they mention @runmira-bot. Pull requests
     # from forks are skipped: they can't read the model key.
     if: >-
       (github.event_name == 'pull_request' &&
        github.event.pull_request.head.repo.full_name == github.repository) ||
-      contains(github.event.comment.body, '@mira') ||
-      contains(github.event.issue.body, '@mira')
+      contains(github.event.comment.body, '@runmira-bot') ||
+      contains(github.event.issue.body, '@runmira-bot')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:

@@ -180,7 +180,7 @@ async function manifest(url: URL) {
   const manifest = {
     name,
     url: "https://github.com/runmira/mira",
-    description: "Mira, the open-source coding agent: reviews pull requests and works on @mira requests.",
+    description: "Mira, the open-source coding agent: reviews pull requests and works on @runmira-bot requests.",
     hook_attributes: { url: `${FN}/webhook`, active: false },
     redirect_url: `${FN}/manifest/callback`,
     callback_urls: [`${FN}/callback`],

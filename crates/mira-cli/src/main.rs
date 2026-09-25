@@ -165,7 +165,7 @@ enum Command {
     /// other ACP editors).
     Acp(acp::AcpArgs),
     /// Respond to a GitHub Actions event: review pull requests, and work
-    /// on `@mira` requests in issues and PRs. Used by the Mira action.
+    /// on `@runmira-bot` requests in issues and PRs. Used by the Mira action.
     Github(github::GithubArgs),
     /// Run Mira as a Slack bot (Socket Mode): mention it or DM it, and it
     /// works in this folder, one session per thread.

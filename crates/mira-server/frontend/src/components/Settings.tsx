@@ -1568,7 +1568,7 @@ function IntegrationsSection({
           </div>
           <p className="mt-1.5 text-[12.5px] text-muted-foreground">
             Mira reviews every new pull request, and works on requests when someone writes
-            <code className="mx-1">@mira</code>in an issue or pull request comment. It runs in
+            <code className="mx-1">@runmira-bot</code>in an issue or pull request comment. It runs in
             each repository’s GitHub Actions with your model key.
           </p>
           {githubReturn && (
@@ -1680,7 +1680,7 @@ function GithubAppConnect() {
         ...n,
         [repo]: report.pull_request
           ? `The default branch is protected: merge ${report.pull_request} to finish.`
-          : 'On. New pull requests get reviewed; mention @mira to give it a task.',
+          : 'On. New pull requests get reviewed; mention @runmira-bot to give it a task.',
       }));
       await load();
     } catch (e) {
@@ -1900,7 +1900,7 @@ function TokenConnect({ onOpenKeys }: { onOpenKeys: () => void }) {
           ) : done.workflow_unchanged ? (
             <>Updated the key and settings for {done.repo}.</>
           ) : (
-            <>Connected {done.repo}. Open a pull request or mention @mira to try it.</>
+            <>Connected {done.repo}. Open a pull request or mention @runmira-bot to try it.</>
           )}
         </div>
       )}

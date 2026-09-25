@@ -288,7 +288,7 @@ even in `yolo`. See [docs/COMPUTER_USE.md](./docs/COMPUTER_USE.md).
 
 ### GitHub and Slack
 
-- **GitHub:** Mira reviews every new pull request and works on `@mira`
+- **GitHub:** Mira reviews every new pull request and works on `@runmira-bot`
   requests in issues and pull requests, running in the repository's
   own Actions. **Settings → Integrations → Connect GitHub** installs the
   Runmira-bot app; then turn Mira on per repository. No workflow file to
@@ -370,7 +370,7 @@ Adding a new subagent type is dropping a markdown file into
 - [x] Remote environments (scratch copy, E2B) and cloud tasks
 - [x] Editors: VS Code extension, Zed via ACP (`mira acp`)
 - [x] Sandboxing: `sandbox-exec` (macOS), bubblewrap and Landlock (Linux)
-- [x] GitHub: PR reviews and `@mira` tasks through Actions, connected without YAML
+- [x] GitHub: PR reviews and `@runmira-bot` tasks through Actions, connected without YAML
 - [x] Slack bot (`mira slack`)
 - [x] Retries for rate limits, overloads and dropped connections
 - [ ] VS Code extension on the Marketplace and Open VSX
