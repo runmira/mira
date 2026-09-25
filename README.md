@@ -6,9 +6,10 @@
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
 
 Mira reads your code, edits files, runs commands, reviews diffs, and
-delegates subtasks — from a terminal or a browser. It talks to any
-OpenAI-compatible provider (OpenRouter, OpenAI, Anthropic-compat, Groq,
-DeepSeek, or a local runtime). Sessions and configuration live as plain
+delegates subtasks — from a terminal, a browser, or your editor. It
+talks to Anthropic and Amazon Bedrock natively, and to any
+OpenAI-compatible provider (OpenRouter, OpenAI, Groq, DeepSeek, or a
+local runtime). Sessions and configuration live as plain
 files on disk. No hosted control plane, no vector database, no telemetry.
 
 Three ideas shape it:
@@ -23,9 +24,9 @@ Three ideas shape it:
   approval, and what's off-limits.
 
 > **Status: alpha, building in the open.** Chat, tool use, permissions,
-> subagents, code review, memory, plan/undo, MCP, and a web UI are
-> working. A pull-request panel and worktree-isolated write agents are
-> the latest additions. Expect the surface to keep moving.
+> subagents, code review, memory, plan/undo, MCP, plugins and hooks, a
+> web UI, a desktop app, and editor support (VS Code, Zed) are working.
+> Expect the surface to keep moving.
 
 ---
 
@@ -91,6 +92,15 @@ mira serve --open
 **Desktop app:** the same UI in a native window, built from
 [`apps/desktop`](./apps/desktop). See [docs/desktop.md](./docs/desktop.md).
 
+**Editors:** the [VS Code extension](./extensions/vscode) adds `@mira`
+to the Chat sidebar. Zed (and other editors that speak the
+[Agent Client Protocol](https://agentclientprotocol.com)) run
+`mira acp`; add this to Zed's `settings.json`:
+
+```json
+{ "agent_servers": { "Mira": { "command": "mira", "args": ["acp"] } } }
+```
+
 Then talk to it:
 
 ```text
@@ -103,6 +113,25 @@ Then talk to it:
 
 ## What Mira can do
 
+### Providers
+
+Any OpenAI-compatible endpoint works; `anthropic` and `bedrock` get
+native adapters (prompt caching, extended thinking, Bedrock's Converse
+API). For Bedrock, Mira signs requests with your usual AWS credentials
+(`AWS_ACCESS_KEY_ID` / `AWS_PROFILE`, `~/.aws/credentials`) or uses a
+Bedrock API key (`AWS_BEARER_TOKEN_BEDROCK`):
+
+```yaml
+default_provider: bedrock
+default_model: us.anthropic.claude-sonnet-4-5-20250929-v1:0
+providers:
+  bedrock:
+    # Region in the URL; without one, AWS_REGION or ~/.aws/config decides.
+    base_url: https://bedrock-runtime.us-west-2.amazonaws.com
+```
+
+`mira models` lists the models and inference profiles your account can use.
+
 ### Tools
 
 Built-in: `read_file`, `write_file`, `edit_file`, `bash`, `grep`, `glob`,
@@ -111,9 +140,11 @@ Built-in: `read_file`, `write_file`, `edit_file`, `bash`, `grep`, `glob`,
 `web_search`, and a set of `memory_*` tools.
 Every call goes through the permission layer.
 
-Extensible: any MCP server (`stdio` or `http`) registers its own tools —
-manage them from the Plugins panel in the web UI or `mcp_servers:` in
-`mira.yaml`.
+Extensible: any MCP server (`stdio`, `http` or `sse`, with OAuth
+sign-in) adds its own tools, and Claude Code plugins install as they
+are: commands, agents, skills, hooks and MCP servers. Manage both from
+the Plugins page in the web UI or with `mira mcp` / `mira plugin`. See
+[docs/mcp-and-plugins.md](./docs/mcp-and-plugins.md).
 
 ### Subagents
 
@@ -230,6 +261,20 @@ permissions:
   deny:  ["Bash(rm:*)"]
 ```
 
+### Command sandbox
+
+Commands the agent runs are confined to the repository: they can write
+only inside it (plus temp and build caches), can't read credentials
+like `~/.ssh` or `~/.aws`, and have no network unless allowed.
+
+| Platform | Sandbox |
+| --- | --- |
+| macOS | `sandbox-exec` (Seatbelt). Keychain access is blocked too. |
+| Linux | bubblewrap when it can run; otherwise Landlock (kernel 5.13+, network blocking from 6.7). |
+
+`mira doctor` shows which one is active. `MIRA_SANDBOX_BACKEND=bwrap|landlock|seatbelt|none`
+overrides the choice.
+
 ### Computer use and browser
 
 `mira --computer` lets the agent see your screen and drive the mouse and
@@ -261,20 +306,24 @@ Mira is a Cargo workspace. Each crate has one job.
 | Crate | Job |
 | --- | --- |
 | [`mira-core`](./crates/mira-core) | Shared vocabulary — messages, tool calls, IDs, errors. |
-| [`mira-ai`](./crates/mira-ai) | `ChatProvider` trait + OpenAI-compatible streaming client. |
+| [`mira-ai`](./crates/mira-ai) | `ChatProvider` trait, OpenAI-compatible client, native Anthropic and Bedrock adapters. |
 | [`mira-tools`](./crates/mira-tools) | `Tool` trait, registry, and built-ins (files, bash, grep, git, memory, web). |
 | [`mira-agents`](./crates/mira-agents) | Subagent type registry (markdown + YAML frontmatter loader). |
 | [`mira-policy`](./crates/mira-policy) | Permission modes + rule DSL. |
-| [`mira-sandbox`](./crates/mira-sandbox) | Command execution wrapper. Landlock/seatbelt slot in here later. |
+| [`mira-sandbox`](./crates/mira-sandbox) | Runs commands in an OS sandbox: Seatbelt (macOS), bubblewrap or Landlock (Linux). |
 | [`mira-harness`](./crates/mira-harness) | The agent loop — turn state, tool dispatch, streaming events, session persistence. |
 | [`mira-memory`](./crates/mira-memory) | `MIRA.md` loader + episodic memory store. |
 | [`mira-review`](./crates/mira-review) | Two-stage code review (generate + hostile re-verify). |
 | [`mira-config`](./crates/mira-config) | `mira.yaml` loader — provider, MCP servers, permissions. |
+| [`mira-mcp`](./crates/mira-mcp) | MCP client: live server connections, OAuth sign-in, tools, prompts. |
+| [`mira-plugins`](./crates/mira-plugins) | Claude Code-compatible plugins and marketplaces, plus hooks. |
+| [`mira-skills`](./crates/mira-skills) | Skills: named instruction bundles loaded from markdown. |
+| [`mira-auth`](./crates/mira-auth) | OAuth sign-in for providers (OpenRouter, ChatGPT). |
 | [`mira-computer`](./crates/mira-computer) | Desktop control for the `computer` tool — screenshots, mouse, keyboard (macOS, X11). |
 | [`mira-browser`](./crates/mira-browser) | Chrome DevTools driver for the `browser` tool. |
 | [`mira-cloud`](./crates/mira-cloud) | Cloud tasks: headless worker in a sandbox that delivers a pull request. |
 | [`mira-compute`](./crates/mira-compute) | Where tools execute: the local worktree, or a named remote environment (scratch copy, E2B microVM) you can switch to mid-session. |
-| [`mira-cli`](./crates/mira-cli) | Terminal entrypoint (TUI + `mira review`, `mira serve`, …). |
+| [`mira-cli`](./crates/mira-cli) | Terminal entrypoint (TUI + `mira review`, `mira serve`, `mira acp`, …). |
 | [`mira-server`](./crates/mira-server) | Axum backend + embedded React frontend for the web UI. |
 
 Adding a new tool is a `Tool` impl and one `registry.register()` line —
@@ -288,20 +337,26 @@ Adding a new subagent type is dropping a markdown file into
 - [x] Streaming chat + tool use
 - [x] Permission modes + rule DSL
 - [x] OpenAI-compatible provider
+- [x] Native Anthropic and Amazon Bedrock providers
 - [x] TUI (ratatui) — approvals, diffs, mode picker
 - [x] Session persistence + `--resume`
 - [x] Web UI (sidebar, chat, subagent panel, review panel, PR panel, plugins)
+- [x] Desktop app
 - [x] `MIRA.md` auto-loaded memory + `/remember`
 - [x] Interactive plan tool + undo + apply-verify loop
-- [x] MCP client (stdio + http)
+- [x] MCP client (stdio, http, sse) with OAuth, per-tool switches and on-demand tool loading
+- [x] Claude Code-compatible plugins, marketplaces and hooks
 - [x] Subagents: named types, parallel dispatch, approval routing, worktree isolation
 - [x] Subagent streaming intermediate summaries + `type: "auto"` router + shared scratchpad
 - [x] Two-stage code review (`mira review` + Review panel)
 - [x] Pull-request panel (browse / review / merge GitHub PRs)
 - [x] Token usage + cost tracking + prompt caching
-- [ ] Native Anthropic + Bedrock adapters
-- [ ] Editor extension (VS Code, then Zed via ACP)
-- [ ] Sandboxing: `landlock` (Linux), `sandbox-exec` (macOS)
+- [x] Remote environments (scratch copy, E2B) and cloud tasks
+- [x] Editors: VS Code extension, Zed via ACP (`mira acp`)
+- [x] Sandboxing: `sandbox-exec` (macOS), bubblewrap and Landlock (Linux)
+- [ ] VS Code extension on the Marketplace and Open VSX
+- [ ] Scheduled prompts (the web UI's Scheduled view)
+- [ ] Command sandbox on Windows
 
 ## Contributing
 

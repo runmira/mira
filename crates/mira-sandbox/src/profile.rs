@@ -175,6 +175,19 @@ impl SandboxProfile {
             profile.push_str(")\n");
         }
 
+        // Keychain files are denied above, but `(allow default)` still
+        // lets a command ask the keychain daemons for secrets, e.g.
+        // `git credential-osxkeychain get` returns the saved GitHub
+        // token. Close that door too. (Code signing needs the keychain,
+        // so signed Xcode builds have to run outside the sandbox.)
+        profile.push_str(
+            "(deny mach-lookup \
+             (global-name \"com.apple.SecurityServer\") \
+             (global-name \"com.apple.securityd\") \
+             (global-name \"com.apple.securityd.xpc\") \
+             (global-name \"com.apple.secd\"))\n",
+        );
+
         // ------------------------------------------------------------------
         // Network
         // ------------------------------------------------------------------

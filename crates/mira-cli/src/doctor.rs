@@ -177,6 +177,15 @@ pub async fn run(cli: &crate::Cli, args: DoctorArgs) -> Result<()> {
         .map(|e| e.name)
         .collect();
     report.info("environments", names.join(", "));
+
+    // ---- command sandbox ----
+    match mira_sandbox::detect_backend() {
+        mira_sandbox::SandboxBackend::ProcessLevel => report.warn(
+            "sandbox",
+            "none: commands run unconfined (install bubblewrap, or use Linux 5.13+ for Landlock)",
+        ),
+        b => report.pass("sandbox", b.name()),
+    }
     match crate::sandbox::startup_target(cli.sandbox.as_deref(), &cfg.compute) {
         None => report.info("start in", "local (this worktree)"),
         Some(name) => match mira_compute::EnvironmentSpec::resolve(&name, &cfg.compute) {

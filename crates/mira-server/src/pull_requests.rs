@@ -555,15 +555,13 @@ fn parse_github_remote(cwd: &Path) -> Option<(String, String)> {
     }
     let url = String::from_utf8(out.stdout).ok()?;
     let url = url.trim();
-    let owner_repo = if let Some(rest) = url.strip_prefix("git@github.com:") {
-        rest
-    } else if let Some(rest) = url.strip_prefix("https://github.com/") {
-        rest
-    } else if let Some(rest) = url.strip_prefix("ssh://git@github.com/") {
-        rest
-    } else {
-        return None;
-    };
+    let owner_repo = [
+        "git@github.com:",
+        "https://github.com/",
+        "ssh://git@github.com/",
+    ]
+    .iter()
+    .find_map(|prefix| url.strip_prefix(prefix))?;
     let owner_repo = owner_repo.strip_suffix(".git").unwrap_or(owner_repo);
     let mut parts = owner_repo.splitn(2, '/');
     let owner = parts.next()?.to_string();

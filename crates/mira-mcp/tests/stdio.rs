@@ -313,3 +313,101 @@ async fn clear_failures_for_bad_definitions() {
     let _: PathBuf = dir.path().into();
     mgr.shutdown();
 }
+
+#[tokio::test]
+async fn per_tool_switches_and_on_demand_loading() {
+    let Some(py) = python() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().to_path_buf();
+    let mgr = McpManager::new(options(dir.path()));
+    mgr.set_tool_loading(mira_mcp::ToolLoading::All).unwrap();
+    mgr.apply(
+        vec![spec("fake", Scope::User, py, &[])],
+        Some(project.clone()),
+    );
+    mgr.wait_settled(Duration::from_secs(10)).await;
+    let mut reg = Registry::new();
+    reg.add_source(mgr.tool_source());
+    let ctx = ToolContext::new(&project, Arc::new(Sandbox::new(&project)));
+
+    // Turning one tool off hides it; the rest stay.
+    mgr.set_tool_enabled("mcp__fake__crash", false).unwrap();
+    assert!(reg.get("mcp__fake__crash").is_none());
+    assert!(reg.get("mcp__fake__echo").is_some());
+    let view = mgr.server("fake").unwrap();
+    assert!(
+        !view
+            .tools
+            .iter()
+            .find(|t| t.name == "mcp__fake__crash")
+            .unwrap()
+            .enabled
+    );
+    // Remembered across managers (state.json).
+    let mgr2 = McpManager::new(options(dir.path()));
+    assert_eq!(mgr2.tool_loading(), mira_mcp::ToolLoading::All);
+    mgr2.apply(vec![], Some(project.clone()));
+    mgr2.shutdown();
+
+    // On demand: two small tools instead of every definition.
+    mgr.set_tool_loading(mira_mcp::ToolLoading::OnDemand)
+        .unwrap();
+    assert!(mgr.tools_on_demand());
+    let names: Vec<String> = reg.specs().into_iter().map(|s| s.name).collect();
+    assert!(names.contains(&"search_mcp_tools".to_owned()), "{names:?}");
+    assert!(names.contains(&"call_mcp_tool".to_owned()));
+    assert!(!names.iter().any(|n| n.starts_with("mcp__")), "{names:?}");
+
+    let found = reg
+        .get("search_mcp_tools")
+        .unwrap()
+        .invoke(
+            &call(
+                "search_mcp_tools",
+                serde_json::json!({"query": "echo text"}),
+            ),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    assert!(
+        found.content.contains("mcp__fake__echo"),
+        "{}",
+        found.content
+    );
+    assert!(found.content.contains("input_schema"));
+    let crash = reg
+        .get("search_mcp_tools")
+        .unwrap()
+        .invoke(
+            &call(
+                "search_mcp_tools",
+                serde_json::json!({"query": "exit crash"}),
+            ),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    assert!(
+        !crash.content.contains("mcp__fake__crash"),
+        "disabled tools stay hidden"
+    );
+
+    let runner = reg.get("call_mcp_tool").unwrap();
+    let c = call(
+        "call_mcp_tool",
+        serde_json::json!({"name": "mcp__fake__echo", "arguments": {"text": "hi"}}),
+    );
+    assert_eq!(runner.policy_target(&c), "fake:echo");
+    assert!(runner.parallel_safe(&c), "echo is read-only");
+    assert_eq!(runner.invoke(&c, &ctx).await.unwrap().content, "hi");
+    let bad = call(
+        "call_mcp_tool",
+        serde_json::json!({"name": "mcp__fake__crash"}),
+    );
+    assert!(
+        runner.invoke(&bad, &ctx).await.is_err(),
+        "disabled tools can't be called"
+    );
+    mgr.shutdown();
+}

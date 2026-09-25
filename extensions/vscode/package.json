@@ -2,7 +2,7 @@
   "name": "mira-vscode",
   "displayName": "Mira Coding Agent",
   "description": "Open-source coding agent — read code, edit files, run commands, and delegate to subagents, all with the model you choose.",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "publisher": "runmira",
   "license": "Apache-2.0",
   "preview": true,
@@ -69,6 +69,16 @@
           "default": "http://127.0.0.1:8787",
           "description": "Base URL of the running `mira serve` instance. Loopback by default; change if you're tunnelling to a remote host."
         },
+        "mira.autoStart": {
+          "type": "boolean",
+          "default": true,
+          "description": "Start `mira serve` automatically when nothing answers at `mira.baseUrl` (loopback URLs only). The server stops when the window closes."
+        },
+        "mira.path": {
+          "type": "string",
+          "default": "mira",
+          "description": "The `mira` binary used by auto-start. Set a full path if `mira` isn't on the PATH VS Code sees."
+        },
         "mira.showToolCalls": {
           "type": "boolean",
           "default": true,
@@ -89,13 +99,19 @@
       {
         "command": "mira.showStatus",
         "title": "Mira: Show Connection Status"
+      },
+      {
+        "command": "mira.startServer",
+        "title": "Mira: Start Server"
       }
     ]
   },
   "scripts": {
     "compile": "tsc -p ./",
     "watch":   "tsc -watch -p ./",
-    "package": "npx --yes @vscode/vsce package"
+    "package": "npx --yes @vscode/vsce package",
+    "publish:vsce": "npx --yes @vscode/vsce publish",
+    "publish:ovsx": "npx --yes ovsx publish"
   },
   "dependencies": {
     "ws": "^8.18.0"

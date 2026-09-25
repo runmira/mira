@@ -83,6 +83,8 @@ const PROVIDER_PRESETS = [
   // Major hosted
   { name: 'openai',     base_url: 'https://api.openai.com/v1',                        suggested_model: 'gpt-4o-mini' },
   { name: 'anthropic',  base_url: 'https://api.anthropic.com/v1',                     suggested_model: 'claude-sonnet-4-5' },
+  // Region comes from AWS_REGION or ~/.aws/config; the key is optional.
+  { name: 'bedrock',    base_url: 'https://bedrock-runtime.amazonaws.com',            suggested_model: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0' },
   { name: 'google',     base_url: 'https://generativelanguage.googleapis.com/v1beta/openai', suggested_model: 'gemini-2.5-flash' },
   // Fast / cheap inference
   { name: 'deepseek',   base_url: 'https://api.deepseek.com/v1',                      suggested_model: 'deepseek-chat' },
@@ -500,6 +502,13 @@ function ProviderSection({
           onReplace={() => setDraft((d) => ({ ...d, showReplaceKey: true, apiKey: '' }))}
           onCancelReplace={() => setDraft((d) => ({ ...d, showReplaceKey: false, apiKey: '' }))}
         />
+      )}
+      {draft.providerName === 'bedrock' && (
+        <p className="text-xs text-muted-foreground">
+          A Bedrock API key is optional. Without one, Mira signs requests with your AWS
+          credentials (AWS_ACCESS_KEY_ID or ~/.aws/credentials). Put the region in the base
+          URL, e.g. https://bedrock-runtime.us-west-2.amazonaws.com, or set AWS_REGION.
+        </p>
       )}
 
       <Field label="Model" hint="The specific model id sent with each request.">

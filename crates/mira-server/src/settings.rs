@@ -357,7 +357,11 @@ fn build_provider(cfg: &MiraConfig) -> Arc<dyn ChatProvider> {
             "provider `{name}` has no base_url"
         )));
     };
-    let Some(api_key) = entry.resolved_api_key() else {
+    // Bedrock can sign with AWS credentials instead of an API key.
+    let Some(api_key) = entry
+        .resolved_api_key()
+        .or_else(|| (name == "bedrock").then(String::new))
+    else {
         return Arc::new(NullProvider::new(format!(
             "provider `{name}` has no api_key"
         )));
@@ -386,7 +390,7 @@ fn is_configured(cfg: &MiraConfig) -> bool {
     };
     let entry = cfg.providers.get(name).cloned().unwrap_or_default();
     let base_url_ok = entry.base_url.is_some() || default_base_url_for(name).is_some();
-    let key_ok = entry.resolved_api_key().is_some();
+    let key_ok = entry.resolved_api_key().is_some() || name == "bedrock";
     base_url_ok && key_ok
 }
 

@@ -195,6 +195,7 @@ impl AppState {
             scratchpads: self.scratchpads.clone(),
             default_model_for_agents: self.default_model_for_agents.clone(),
             compute: self.compute.clone(),
+            hooks: Some(self.extensions.hook_runner()),
         }
     }
 

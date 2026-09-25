@@ -13,6 +13,9 @@ import {
   setMcpEnabled,
   setPluginEnabled,
   signInMcp,
+  setMcpToolEnabled,
+  setMcpToolLoading,
+  setMcpVariable,
   signOutMcp,
   uninstallPlugin,
   updateMarketplace,
@@ -20,6 +23,7 @@ import {
   type MarketplaceView,
   type McpListView,
   type McpServerView,
+  type ToolLoading,
   type PluginsOverview,
 } from '../api';
 import { cn } from '@/lib/utils';
@@ -28,7 +32,7 @@ import { DiscoverTab } from './plugins/DiscoverTab';
 import { InstalledTab } from './plugins/InstalledTab';
 import { MarketplacesTab } from './plugins/MarketplacesTab';
 import { McpTab, writeScope } from './plugins/McpTab';
-import { ServerEditorDialog } from './plugins/McpDialogs';
+import { ServerEditorDialog, TokenDialog } from './plugins/McpDialogs';
 import { McpDetailPage } from './plugins/McpDetailPage';
 import { PluginDetailPage } from './plugins/PluginDetailPage';
 import { ConfirmDialog, ErrorBanner, useActions } from './plugins/shared';
@@ -56,6 +60,8 @@ export function PluginsPanel({ version = 0 }: { version?: number }) {
   const [localVersion, setLocalVersion] = useState(0);
   // The sign-in in progress, with its link in case the tab didn't open.
   const [signIn, setSignIn] = useState<{ name: string; url: string } | null>(null);
+  // The server whose missing token(s) are being entered.
+  const [tokenFor, setTokenFor] = useState<string | null>(null);
   const { busy, error, setError, run } = useActions();
 
   const refresh = useCallback(async () => {
@@ -145,6 +151,10 @@ export function PluginsPanel({ version = 0 }: { version?: number }) {
       });
     },
     onSignOut: (name: string) => run(`mcp:${name}`, () => signOutMcp(name)).then(afterMcp),
+    onAddToken: (s: McpServerView) => setTokenFor(s.name),
+    onToolEnabled: (tool: string, enabled: boolean) =>
+      run(`tool:${tool}`, () => setMcpToolEnabled(tool, enabled)).then(afterMcp),
+    onToolLoading: (mode: ToolLoading) => run('tool-loading', () => setMcpToolLoading(mode)).then(afterMcp),
   };
 
   const failedServers = mcp?.servers.filter((s) => s.status.state === 'failed') ?? [];
@@ -168,6 +178,7 @@ export function PluginsPanel({ version = 0 }: { version?: number }) {
   ];
 
   const openServer = mcp?.servers.find((s) => s.name === serverOpen) ?? null;
+  const tokenServer = mcp?.servers.find((s) => s.name === tokenFor) ?? null;
 
   return (
     <div
@@ -377,6 +388,24 @@ export function PluginsPanel({ version = 0 }: { version?: number }) {
             </div>
           )}
         </>
+      )}
+
+      {tokenServer && (
+        <TokenDialog
+          s={tokenServer}
+          onClose={() => setTokenFor(null)}
+          onSave={async (values) => {
+            const m = await run(`mcp:${tokenServer.name}`, async () => {
+              let last: McpListView | undefined;
+              for (const [name, value] of Object.entries(values)) {
+                if (value.trim()) last = await setMcpVariable(name, value.trim());
+              }
+              return last;
+            });
+            afterMcp(m);
+            return !!m;
+          }}
+        />
       )}
 
       {editor && (

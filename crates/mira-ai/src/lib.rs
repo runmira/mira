@@ -21,6 +21,7 @@
 //! vendor-specific logic so adapters stay isolated.
 
 pub mod anthropic;
+pub mod bedrock;
 pub mod event;
 pub mod factory;
 pub mod null;

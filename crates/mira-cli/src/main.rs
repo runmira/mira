@@ -1,3 +1,4 @@
+mod acp;
 mod approver;
 mod cloud;
 mod config;
@@ -158,6 +159,9 @@ enum Command {
     Logout(login::LogoutArgs),
     /// Inspect sign-in status or force-refresh a token bundle.
     Auth(login::AuthArgs),
+    /// Run as an Agent Client Protocol agent over stdio (for Zed and
+    /// other ACP editors).
+    Acp(acp::AcpArgs),
 }
 
 #[tokio::main]
@@ -186,6 +190,7 @@ async fn main() -> Result<()> {
             Command::Login(args) => login::run_login(args).await,
             Command::Logout(args) => login::run_logout(args).await,
             Command::Auth(args) => login::run_auth(args).await,
+            Command::Acp(args) => acp::run(&cli, args).await,
         };
     }
 
@@ -412,6 +417,8 @@ async fn main() -> Result<()> {
     } else {
         session
     };
+    // Plugins' and the user's hooks (PreToolUse, Stop, …).
+    let session = session.with_hooks(extensions.hook_runner());
     // Live memory: reload user + project MIRA.md on every provider round,
     // plus tail the most-recent episodic entries so cross-session memory
     // is visible immediately after `memory_remember` writes it.
@@ -567,8 +574,13 @@ pub(crate) fn resolve_settings(cli: &Cli, cfg: &MiraConfig) -> Result<ResolvedSe
         .api_key
         .clone()
         .or_else(|| std::env::var("MIRA_API_KEY").ok())
-        .or_else(|| ProviderConfig::resolved_api_key(&provider))
-        .with_context(|| missing_api_key_hint(&provider_name))?;
+        .or_else(|| ProviderConfig::resolved_api_key(&provider));
+    // Bedrock can sign with AWS credentials instead of an API key.
+    let api_key = if provider_name == "bedrock" {
+        api_key.unwrap_or_default()
+    } else {
+        api_key.with_context(|| missing_api_key_hint(&provider_name))?
+    };
 
     let model = cli
         .model
@@ -749,7 +761,7 @@ fn human_ago(secs: u64) -> String {
     }
 }
 
-fn parse_mode(s: &str) -> Result<Mode> {
+pub(crate) fn parse_mode(s: &str) -> Result<Mode> {
     Ok(match s {
         "plan" => Mode::Plan,
         "manual" => Mode::Manual,

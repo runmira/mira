@@ -71,6 +71,12 @@ pub struct MiraConfig {
     /// Cloud tasks (`mira cloud run`). Only read from the global file.
     #[serde(default, skip_serializing_if = "CloudConfig::is_empty")]
     pub cloud: CloudConfig,
+    /// Hooks in Claude Code's format (`PreToolUse`, `PostToolUse`,
+    /// `UserPromptSubmit`, `Stop`, `SessionStart`: lists of
+    /// `{matcher, hooks: [{type: command, command, timeout}]}`). Only read
+    /// from the global file: a cloned repo must not run commands this way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hooks: Option<serde_json::Value>,
 }
 
 /// `cloud:` block: defaults for `mira cloud run`.
@@ -616,6 +622,7 @@ impl MiraConfig {
         self.browser.headless = b.headless.or(self.browser.headless);
         // `compute` and `cloud` are global-only: a repo must not be able to
         // decide that its code gets shipped to a third-party sandbox.
+        // `hooks` are global-only too: they run arbitrary commands.
         self
     }
 }
@@ -780,6 +787,8 @@ pub fn default_base_url_for(name: &str) -> Option<&'static str> {
         // Major hosted
         "openai" => "https://api.openai.com/v1",
         "anthropic" => "https://api.anthropic.com/v1",
+        // No region: the provider takes it from AWS_REGION or ~/.aws/config.
+        "bedrock" => "https://bedrock-runtime.amazonaws.com",
         "google" => "https://generativelanguage.googleapis.com/v1beta/openai",
         // Fast / cheap inference
         "deepseek" => "https://api.deepseek.com/v1",
@@ -811,6 +820,8 @@ pub fn default_api_key_env_for(name: &str) -> Option<&'static str> {
         "openrouter" => "OPENROUTER_API_KEY",
         "openai" => "OPENAI_API_KEY",
         "anthropic" => "ANTHROPIC_API_KEY",
+        // Optional: without it Bedrock signs with AWS credentials.
+        "bedrock" => "AWS_BEARER_TOKEN_BEDROCK",
         // Google's OpenAI-compat endpoint accepts a Gemini API key.
         // GEMINI_API_KEY is the conventional name in google's docs.
         "google" => "GEMINI_API_KEY",
@@ -838,6 +849,7 @@ pub fn pretty_provider_name(name: &str) -> String {
         "openrouter" => "OpenRouter".into(),
         "openai" => "OpenAI".into(),
         "anthropic" => "Anthropic".into(),
+        "bedrock" => "Amazon Bedrock".into(),
         "google" => "Google (Gemini)".into(),
         "groq" => "Groq".into(),
         "cerebras" => "Cerebras".into(),

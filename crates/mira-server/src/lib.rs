@@ -163,6 +163,7 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
         scratchpads: scratchpads.clone(),
         default_model_for_agents: cfg.cfg.model.clone(),
         compute: cfg.compute.clone(),
+        hooks: Some(cfg.extensions.hook_runner()),
     };
     let initial_slot =
         crate::slot::build_slot(cfg.cwd.clone(), cfg.cfg.clone(), cfg.resume, &deps).await;
@@ -313,6 +314,15 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/api/undo", axum::routing::post(undo::apply_undo))
         .route("/api/mcp", get(mcp::get_mcp))
         .route("/api/mcp/servers", axum::routing::post(mcp::save_server))
+        .route("/api/mcp/variables", axum::routing::post(mcp::set_variable))
+        .route(
+            "/api/mcp/tools/enabled",
+            axum::routing::post(mcp::set_tool_enabled),
+        )
+        .route(
+            "/api/mcp/tool-loading",
+            axum::routing::post(mcp::set_tool_loading),
+        )
         .route(
             "/api/mcp/servers/:name",
             axum::routing::delete(mcp::delete_server),

@@ -23,6 +23,13 @@ pub struct McpState {
     /// Keyed by the project's absolute path.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub projects: BTreeMap<String, ProjectState>,
+    /// Individual tools turned off, by the name the model sees
+    /// (`mcp__server__tool`).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub disabled_tools: BTreeSet<String>,
+    /// How tools reach the model; `None` means the default (auto).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_loading: Option<crate::manager::ToolLoading>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

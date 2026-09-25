@@ -4,8 +4,8 @@
 //! git repo, a local folder, or at a URL. A *plugin* bundles any of:
 //! slash commands (`commands/`), subagents (`agents/`), skills
 //! (`skills/`), MCP servers (`.mcp.json`), hooks and LSP servers. Mira
-//! runs commands, agents, skills and MCP servers; hooks and LSP servers
-//! are listed but not run yet.
+//! runs commands, agents, skills, MCP servers and hooks; LSP servers are
+//! listed but not run yet.
 //!
 //! - [`manifest`]: the file formats.
 //! - [`manager::PluginManager`]: add/update/remove marketplaces;
@@ -13,10 +13,12 @@
 //!   contribute.
 //! - [`components`]: find a plugin's parts.
 //! - [`commands`]: custom slash commands (user, project and plugin).
+//! - [`hooks`]: lifecycle hooks (plugins' and `hooks:` in mira.yaml).
 
 pub mod commands;
 pub mod components;
 mod git;
+pub mod hooks;
 pub mod manager;
 pub mod manifest;
 pub mod runtime;

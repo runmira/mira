@@ -1,0 +1,61 @@
+name: VS Code extension
+
+# Build on every change to the extension; publish on a `vscode-v*` tag
+# (e.g. `vscode-v0.2.0`). Publishing needs repository secrets:
+#   VSCE_PAT  - Azure DevOps token for the `runmira` Marketplace publisher
+#   OVSX_PAT  - Open VSX token (Cursor, VSCodium, Windsurf)
+# A store whose secret is missing is skipped.
+
+on:
+  push:
+    tags: ["vscode-v*"]
+    branches: [main]
+  pull_request:
+    paths: ["extensions/vscode/**"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      VSCE_PAT: ${{ secrets.VSCE_PAT }}
+      OVSX_PAT: ${{ secrets.OVSX_PAT }}
+    defaults:
+      run:
+        working-directory: extensions/vscode
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - run: npm ci
+
+      - run: npm run compile
+
+      - name: Check the compiled output is committed
+        run: git diff --exit-code -- out
+
+      - name: Package
+        run: npx --yes @vscode/vsce package
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vsix
+          path: extensions/vscode/*.vsix
+
+      - name: Tag matches package.json
+        if: startsWith(github.ref, 'refs/tags/vscode-v')
+        run: |
+          version=$(node -p "require('./package.json').version")
+          test "vscode-v$version" = "${GITHUB_REF_NAME}" || {
+            echo "tag ${GITHUB_REF_NAME} doesn't match package.json version $version"; exit 1; }
+
+      - name: Publish to the VS Code Marketplace
+        if: startsWith(github.ref, 'refs/tags/vscode-v') && env.VSCE_PAT != ''
+        run: npx --yes @vscode/vsce publish --packagePath *.vsix
+
+      - name: Publish to Open VSX
+        if: startsWith(github.ref, 'refs/tags/vscode-v') && env.OVSX_PAT != ''
+        run: npx --yes ovsx publish *.vsix

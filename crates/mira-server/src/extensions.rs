@@ -31,6 +31,8 @@ struct Inner {
     skills: RwLock<Option<SkillHandle>>,
     /// Display name and icon of each enabled plugin, by plugin name.
     origins: RwLock<BTreeMap<String, Origin>>,
+    /// Hooks from enabled plugins and `hooks:` in `~/.mira/mira.yaml`.
+    hooks: RwLock<Arc<mira_plugins::hooks::HookSet>>,
 }
 
 /// Where a command or skill comes from, for grouping and labelling it
@@ -114,6 +116,7 @@ impl Extensions {
                 problems: RwLock::new(Vec::new()),
                 skills: RwLock::new(None),
                 origins: RwLock::new(BTreeMap::new()),
+                hooks: RwLock::new(Arc::new(mira_plugins::hooks::HookSet::default())),
             }),
         }
     }
@@ -188,6 +191,7 @@ impl Extensions {
             })
             .collect();
         *self.inner.origins.write().unwrap() = origins;
+        *self.inner.hooks.write().unwrap() = Arc::new(build_hooks(&enabled));
         *self.inner.enabled.write().unwrap() = enabled;
         *self.inner.problems.write().unwrap() = problems;
         *self.inner.commands.write().unwrap() = commands;
@@ -244,6 +248,17 @@ impl Extensions {
             icon_url: None,
             homepage: remote,
         }
+    }
+
+    /// A hook runner for sessions. It reads the current hook set on every
+    /// call, so enabling a plugin takes effect in running sessions.
+    pub fn hook_runner(&self) -> Arc<dyn mira_harness::HookRunner> {
+        Arc::new(HookBridge { ext: self.clone() })
+    }
+
+    /// Hooks that couldn't be read, from the last reload.
+    pub fn hook_problems(&self) -> Vec<String> {
+        self.inner.hooks.read().unwrap().problems.clone()
     }
 
     /// Custom commands and MCP prompts, for slash palettes.
@@ -364,6 +379,9 @@ impl Extensions {
                 approval.join(", ")
             ));
         }
+        for p in self.hook_problems() {
+            out.push(format!("Hooks: {p}"));
+        }
         for p in self.problems() {
             if p.message.starts_with("overridden") {
                 continue;
@@ -390,4 +408,61 @@ pub fn load_skills(project: Option<&Path>, plugin_dirs: &[PathBuf]) -> mira_skil
         &project_dirs,
         plugin_dirs,
     )
+}
+
+/// Hooks from enabled plugins, then the user's `mira.yaml`.
+fn build_hooks(enabled: &Enabled) -> mira_plugins::hooks::HookSet {
+    let mut set = mira_plugins::hooks::HookSet::default();
+    for p in &enabled.plugins {
+        if let Some(cfg) = &p.components.hooks_config {
+            set.add(cfg, Some(&p.root), &p.id);
+        }
+    }
+    match mira_config::MiraConfig::load_global() {
+        Ok(c) => {
+            if let Some(cfg) = &c.hooks {
+                set.add(cfg, None, "mira.yaml");
+            }
+        }
+        Err(e) => set.problems.push(format!("mira.yaml: {e:#}")),
+    }
+    set
+}
+
+struct HookBridge {
+    ext: Extensions,
+}
+
+impl HookBridge {
+    fn set(&self) -> Arc<mira_plugins::hooks::HookSet> {
+        self.ext.inner.hooks.read().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl mira_harness::HookRunner for HookBridge {
+    async fn run(
+        &self,
+        event: mira_harness::HookEvent,
+        matcher_target: &str,
+        input: serde_json::Value,
+    ) -> mira_harness::HookOutcome {
+        use mira_plugins::hooks::Permission;
+        let out = self.set().run(event.name(), matcher_target, input).await;
+        mira_harness::HookOutcome {
+            block: out.block,
+            permission: out.permission.map(|p| match p {
+                Permission::Allow => mira_harness::HookPermission::Allow,
+                Permission::Deny(r) => mira_harness::HookPermission::Deny(r),
+                Permission::Ask => mira_harness::HookPermission::Ask,
+            }),
+            updated_input: out.updated_input,
+            context: out.context,
+            messages: out.messages,
+        }
+    }
+
+    fn has(&self, event: mira_harness::HookEvent) -> bool {
+        self.set().has(event.name())
+    }
 }

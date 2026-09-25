@@ -3,28 +3,33 @@
  *
  * Registers `@mira` as a chat participant in VS Code's built-in Chat
  * sidebar (the same surface Copilot Chat / Continue use). Each request
- * is streamed to a user-run `mira serve` over WebSocket; tokens land as
+ * is streamed to `mira serve` over WebSocket; tokens land as
  * `stream.markdown`, tool calls render as fenced code blocks so the
  * user can see what the model actually did.
  *
- * v0.1 explicit non-goals — the extension does NOT:
- *   - spawn `mira serve` itself (the user runs it; a follow-up will
- *     autostart when the binary is on PATH and the port is free)
- *   - own an approval flow (approvals silently error out today; a
- *     follow-up will surface them as `vscode.window.showQuickPick`)
- *   - render the subagent / review / PR / plugins panels (those live
- *     in the browser UI — open with `Mira: Open Web UI in Browser`)
+ * - Starts `mira serve` itself when nothing answers on a loopback URL
+ *   (`mira.autoStart`).
+ * - Approvals in `manual` mode show the diff in the chat and ask with
+ *   Allow / Allow for session / Deny.
+ * - Subagent, review, PR and plugin panels stay in the browser UI
+ *   (`Mira: Open Web UI in Browser`).
  */
 
 import * as vscode from 'vscode';
 import { MiraClient } from './miraClient';
 import type { AbortSignalLike } from './miraClient';
-import type { Mode, ServerMsg, ToolCall } from './types';
+import { ServerLauncher } from './server';
+import type { DiffPreview, Mode, ServerMsg, ToolCall } from './types';
 
 const PARTICIPANT_ID = 'mira.mira';
 
+let launcher: ServerLauncher | null = null;
+
 export function activate(context: vscode.ExtensionContext) {
   const client = new MiraClient(configBaseUrl());
+  const output = vscode.window.createOutputChannel('Mira');
+  launcher = new ServerLauncher(output);
+  context.subscriptions.push(output, launcher);
 
   // Re-read the base URL on config change so the user can point at a
   // different `mira serve` without reloading the window. Any active
@@ -53,15 +58,31 @@ export function activate(context: vscode.ExtensionContext) {
     }),
     vscode.commands.registerCommand('mira.showStatus', async () => {
       const url = configBaseUrl();
-      const connected = client.isConnected();
+      const up = client.isConnected() || await launcher!.isUp(url);
+      const who = launcher!.owned ? ' (started by VS Code)' : '';
       vscode.window.showInformationMessage(
-        `Mira: ${connected ? 'connected' : 'not connected'} — ${url}`,
+        `Mira: ${up ? 'running' : 'not running'} — ${url}${who}`,
       );
+    }),
+    vscode.commands.registerCommand('mira.startServer', async () => {
+      const ok = await launcher!.ensure(configBaseUrl());
+      if (ok) {
+        vscode.window.showInformationMessage('Mira: server is running.');
+      } else {
+        output.show();
+        vscode.window.showErrorMessage(
+          'Mira: couldn\'t start `mira serve`. Is `mira` installed? See the Mira output for details.',
+        );
+      }
     }),
   );
 }
 
-export function deactivate() { /* participant + subscriptions torn down by the framework */ }
+export function deactivate() {
+  // Stop a server this window started; subscriptions are torn down by
+  // the framework.
+  launcher?.dispose();
+}
 
 /* ---------- chat participant handler ---------- */
 
@@ -93,16 +114,23 @@ async function handleRequest(
   const showTools = vscode.workspace.getConfiguration('mira').get<boolean>('showToolCalls', true);
   const abort = fromCancellationToken(token);
 
+  if (!client.isConnected() && !(await launcher!.isUp(configBaseUrl()))) {
+    stream.progress('Starting Mira…');
+    await launcher!.ensure(configBaseUrl());
+    // The folder sync above ran before the server existed.
+    await maybeSyncCwd(client);
+  }
+
   try {
     for await (const msg of client.send(prompt, abort)) {
-      renderFrame(msg, stream, showTools);
+      renderFrame(msg, stream, showTools, client);
       if (msg.type === 'done') break;
     }
   } catch (e) {
     const err = e instanceof Error ? e.message : String(e);
     stream.markdown(`\n\n---\n**Mira: connection error** — \`${escapeInline(err)}\`\n\n` +
       `Is \`mira serve\` running? The extension talks to \`${configBaseUrl()}\` — ` +
-      `change it in Settings under **Mira**.`);
+      `change it in Settings under **Mira**, or install Mira and run **Mira: Start Server**.`);
     return { errorDetails: { message: err } };
   }
 
@@ -163,6 +191,7 @@ function renderFrame(
   msg: ServerMsg,
   stream: vscode.ChatResponseStream,
   showTools: boolean,
+  client: MiraClient,
 ): void {
   switch (msg.type) {
     case 'token':
@@ -189,20 +218,57 @@ function renderFrame(
     case 'error':
       stream.markdown(`\n> ⚠ **error:** ${(msg as { text: string }).text}\n`);
       break;
-    case 'approval_request':
-      // v0.1: surface it as an inline note. A follow-up will use
-      // `vscode.window.showQuickPick` (Allow / Deny) and send
-      // `ClientMsg::Approve` — for now the user can jump to the
-      // browser UI to click the modal.
-      stream.markdown(
-        `\n> Mira is asking to run something in \`manual\` mode. ` +
-        `Open the web UI to approve — or set \`/mode auto\` to skip prompts.\n`,
-      );
+    case 'approval_request': {
+      const { call, preview } = msg as { call: ToolCall; preview?: DiffPreview };
+      const what = `${call.function.name}${summarizeArgs(call.function.arguments) ? ' ' + summarizeArgs(call.function.arguments) : ''}`;
+      stream.markdown(`\n\n**Waiting for your approval:** \`${escapeInline(what)}\`\n`);
+      if (preview) stream.markdown(renderDiff(preview));
+      // Don't block the stream: the turn resumes once the server hears back.
+      void askApproval(client, call, what);
       break;
+    }
     // ready / turn_complete / done / usage / *_progress / *_done → no UI here.
     default:
       break;
   }
+}
+
+/** Ask Allow / Allow for session / Deny and answer the server. Closing
+ *  the prompt counts as Deny, so a turn never hangs on a lost toast. */
+async function askApproval(client: MiraClient, call: ToolCall, what: string): Promise<void> {
+  const pick = await vscode.window.showWarningMessage(
+    `Mira wants to run ${what}`,
+    'Allow',
+    'Allow for session',
+    'Deny',
+  );
+  const allow = pick === 'Allow' || pick === 'Allow for session';
+  try {
+    await client.control({
+      type: 'approve',
+      call_id: call.id,
+      allow,
+      scope: pick === 'Allow for session' ? 'session' : 'once',
+    });
+  } catch {
+    // The socket went away; the server gives up on the call itself.
+  }
+}
+
+/** A diff preview as a fenced `diff` block. */
+function renderDiff(preview: DiffPreview): string {
+  const body = preview.lines
+    .map((l) => {
+      switch (l.tag) {
+        case 'add': return `+${l.text}`;
+        case 'del': return `-${l.text}`;
+        case 'ctx': return ` ${l.text}`;
+        default: return '@@';
+      }
+    })
+    .join('\n');
+  const more = preview.truncated ? '\n… (diff truncated)' : '';
+  return `\n\`${preview.path}\`\n\`\`\`diff\n${body}${more}\n\`\`\`\n`;
 }
 
 /** One-line arg summary for a tool-start card. Truncated; strips

@@ -7,7 +7,7 @@
 //! and nothing needs a restart. Status changes are broadcast so UIs can
 //! refresh, and tools reach sessions through [`McpManager::tool_source`].
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock, Weak};
 use std::time::Duration;
@@ -77,6 +77,51 @@ impl McpOptions {
     }
 }
 
+/// How MCP tools reach the model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolLoading {
+    /// Every tool's definition is sent every turn.
+    All,
+    /// The model gets `search_mcp_tools` and `call_mcp_tool` and looks
+    /// tools up when it needs them: a short, stable tool list however many
+    /// servers are connected.
+    OnDemand,
+    /// On demand once there are more than [`AUTO_ON_DEMAND_ABOVE`] tools.
+    #[default]
+    Auto,
+}
+
+/// With [`ToolLoading::Auto`], the tool count above which tools load on
+/// demand.
+pub const AUTO_ON_DEMAND_ABOVE: usize = 30;
+
+impl ToolLoading {
+    /// `MIRA_MCP_TOOL_LOADING` = `all`, `on_demand` or `auto`, when set.
+    pub fn from_env() -> Option<Self> {
+        match std::env::var("MIRA_MCP_TOOL_LOADING")
+            .ok()?
+            .trim()
+            .to_ascii_lowercase()
+            .replace('-', "_")
+            .as_str()
+        {
+            "all" | "off" => Some(ToolLoading::All),
+            "on_demand" | "on" | "search" => Some(ToolLoading::OnDemand),
+            "auto" => Some(ToolLoading::Auto),
+            _ => None,
+        }
+    }
+
+    fn on_demand(self, tools: usize) -> bool {
+        match self {
+            ToolLoading::All => false,
+            ToolLoading::OnDemand => tools > 0,
+            ToolLoading::Auto => tools > AUTO_ON_DEMAND_ABOVE,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum Status {
@@ -122,6 +167,8 @@ pub struct ToolView {
     pub remote_name: String,
     pub description: String,
     pub read_only: bool,
+    /// False when turned off in the Plugins page / `mira mcp tool`.
+    pub enabled: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -182,6 +229,8 @@ pub enum McpEvent {
     Changed(String),
     /// A server was removed.
     Removed(String),
+    /// A tool was turned on or off, or the loading mode changed.
+    ToolsChanged,
     /// A sign-in finished (successfully or not).
     SignIn {
         server: String,
@@ -251,6 +300,9 @@ pub(crate) struct Inner {
     events: broadcast::Sender<McpEvent>,
     pending: tokio::sync::Mutex<HashMap<String, PendingSignIn>>,
     project: RwLock<Option<PathBuf>>,
+    /// Tools turned off, by local name (cached from `state.json`).
+    disabled_tools: RwLock<BTreeSet<String>>,
+    tool_loading: RwLock<ToolLoading>,
     me: Weak<Inner>,
 }
 
@@ -260,6 +312,13 @@ const MAX_RECONNECTS: u32 = 5;
 impl McpManager {
     pub fn new(opts: McpOptions) -> Self {
         let (events, _) = broadcast::channel(256);
+        let loading = ToolLoading::from_env()
+            .or_else(|| {
+                McpState::load(&opts.state_file)
+                    .ok()
+                    .and_then(|s| s.tool_loading)
+            })
+            .unwrap_or_default();
         Self {
             inner: Arc::new_cyclic(|me| Inner {
                 opts,
@@ -267,6 +326,8 @@ impl McpManager {
                 events,
                 pending: tokio::sync::Mutex::new(HashMap::new()),
                 project: RwLock::new(None),
+                disabled_tools: RwLock::new(BTreeSet::new()),
+                tool_loading: RwLock::new(loading),
                 me: me.clone(),
             }),
         }
@@ -289,6 +350,51 @@ impl McpManager {
 
     pub fn project(&self) -> Option<PathBuf> {
         self.inner.project.read().unwrap().clone()
+    }
+
+    pub fn tool_loading(&self) -> ToolLoading {
+        *self.inner.tool_loading.read().unwrap()
+    }
+
+    /// Set how tools reach the model (remembered in `state.json`).
+    pub fn set_tool_loading(&self, mode: ToolLoading) -> Result<(), String> {
+        self.inner.update_state(|st| st.tool_loading = Some(mode))?;
+        *self.inner.tool_loading.write().unwrap() = mode;
+        self.inner.emit(McpEvent::ToolsChanged);
+        Ok(())
+    }
+
+    /// Whether tools are currently offered through `search_mcp_tools` /
+    /// `call_mcp_tool` instead of one by one.
+    pub fn tools_on_demand(&self) -> bool {
+        self.inner.on_demand_now()
+    }
+
+    /// Turn one tool (by the name the model sees, `mcp__server__tool`) on
+    /// or off. Remembered in `state.json`.
+    pub fn set_tool_enabled(&self, tool: &str, enabled: bool) -> Result<(), String> {
+        if !tool.starts_with("mcp__") {
+            return Err(format!(
+                "`{tool}` isn't an MCP tool name (mcp__server__tool)"
+            ));
+        }
+        self.inner.update_state(|st| {
+            if enabled {
+                st.disabled_tools.remove(tool);
+            } else {
+                st.disabled_tools.insert(tool.to_owned());
+            }
+        })?;
+        {
+            let mut d = self.inner.disabled_tools.write().unwrap();
+            if enabled {
+                d.remove(tool);
+            } else {
+                d.insert(tool.to_owned());
+            }
+        }
+        self.inner.emit(McpEvent::ToolsChanged);
+        Ok(())
     }
 
     /// Make the running set match `specs`, for `project`.
@@ -734,6 +840,28 @@ impl Inner {
         self.opts.max_output_chars
     }
 
+    /// Tools of connected servers that aren't turned off.
+    pub(crate) fn enabled_tools(&self) -> Vec<Arc<McpTool>> {
+        let disabled = self.disabled_tools.read().unwrap();
+        self.servers
+            .read()
+            .unwrap()
+            .values()
+            .filter(|e| e.status == Status::Connected)
+            .flat_map(|e| e.tools.iter())
+            .filter(|t| !disabled.contains(&t.local_name))
+            .cloned()
+            .collect()
+    }
+
+    fn loading_on_demand(&self, tools: usize) -> bool {
+        self.tool_loading.read().unwrap().on_demand(tools)
+    }
+
+    fn on_demand_now(&self) -> bool {
+        self.loading_on_demand(self.enabled_tools().len())
+    }
+
     /// Saved `${VAR}` values.
     fn vars(&self) -> BTreeMap<String, String> {
         vars::load(&vars::path_for(&self.opts.credentials))
@@ -769,6 +897,7 @@ impl Inner {
             McpState::default()
         });
         *self.project.write().unwrap() = project.clone();
+        *self.disabled_tools.write().unwrap() = state.disabled_tools.clone();
         let mut servers = self.servers.write().unwrap();
 
         let wanted: BTreeMap<String, ServerSpec> =
@@ -1216,6 +1345,7 @@ impl Inner {
                     remote_name: t.remote_name.clone(),
                     description: t.description.clone(),
                     read_only: t.read_only,
+                    enabled: !self.disabled_tools.read().unwrap().contains(&t.local_name),
                 })
                 .collect(),
             resources: e.resources.iter().map(resource_view).collect(),
@@ -1452,17 +1582,18 @@ impl ToolSource for Source {
         let Some(inner) = self.inner.upgrade() else {
             return Vec::new();
         };
-        let servers = inner.servers.read().unwrap();
-        let mut out: Vec<Arc<dyn Tool>> = Vec::new();
-        let mut any_resources = false;
-        for e in servers.values() {
-            if e.status != Status::Connected {
-                continue;
-            }
-            any_resources |= !e.resources.is_empty();
-            out.extend(e.tools.iter().map(|t| t.clone() as Arc<dyn Tool>));
-        }
-        drop(servers);
+        let tools = inner.enabled_tools();
+        let any_resources = inner
+            .servers
+            .read()
+            .unwrap()
+            .values()
+            .any(|e| e.status == Status::Connected && !e.resources.is_empty());
+        let mut out: Vec<Arc<dyn Tool>> = if inner.loading_on_demand(tools.len()) {
+            tool::on_demand_tools(&inner)
+        } else {
+            tools.into_iter().map(|t| t as Arc<dyn Tool>).collect()
+        };
         if any_resources {
             out.extend(tool::resource_tools(&inner));
         }
