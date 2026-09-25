@@ -74,6 +74,16 @@ export function McpDetailPage({
 
             {/* Actions */}
             <div className="flex shrink-0 flex-wrap items-center gap-2">
+              {s.missing_vars.length > 0 && st !== 'connected' && (
+                <button
+                  type="button"
+                  disabled={!!busy}
+                  onClick={() => actions.onAddToken(s)}
+                  className="rounded-full border border-border/70 px-3.5 py-1.5 text-[12px] text-foreground/90 transition-colors hover:bg-white/[0.06] disabled:opacity-40"
+                >
+                  Add token
+                </button>
+              )}
               {st === 'needs_auth' && (
                 <button
                   type="button"

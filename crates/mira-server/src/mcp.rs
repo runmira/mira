@@ -28,6 +28,8 @@ pub struct McpListView {
     pub problems: Vec<ConfigProblem>,
     pub user_config_path: String,
     pub project: Option<String>,
+    /// Names of saved `${VAR}` values (never the values).
+    pub saved_variables: Vec<String>,
 }
 
 pub(crate) fn error_json(status: StatusCode, message: impl Into<String>) -> Response {
@@ -43,6 +45,7 @@ fn list_view(state: &AppState) -> McpListView {
     McpListView {
         servers: ext.mcp().servers(),
         problems: ext.problems(),
+        saved_variables: ext.mcp().saved_variables(),
         user_config_path: mira_config::global_path().display().to_string(),
         project: ext.project().map(|p| p.display().to_string()),
     }
@@ -237,6 +240,24 @@ pub async fn set_enabled(
     Json(b): Json<Enabled>,
 ) -> Response {
     let r = state.extensions.mcp().set_enabled(&name, b.enabled);
+    act(&state, r).await
+}
+
+#[derive(Deserialize)]
+pub struct SetVariable {
+    pub name: String,
+    /// `None` or empty removes it.
+    #[serde(default)]
+    pub value: Option<String>,
+}
+
+/// Save a value for a `${VAR}` used by server definitions (a token, say),
+/// in `~/.mira/mcp/variables.json`. Servers using it reconnect.
+pub async fn set_variable(State(state): State<AppState>, Json(b): Json<SetVariable>) -> Response {
+    let r = state
+        .extensions
+        .mcp()
+        .set_variable(b.name.trim(), b.value.as_deref());
     act(&state, r).await
 }
 

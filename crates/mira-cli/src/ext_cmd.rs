@@ -87,6 +87,14 @@ pub enum McpCmd {
     Approve { name: String },
     /// Refuse a project server.
     Reject { name: String },
+    /// Save a value for a `${VAR}` in server definitions (a token a plugin
+    /// needs, say) in ~/.mira/mcp/variables.json. Prompts for the value so
+    /// it stays out of shell history; `--unset` removes it.
+    SetVar {
+        name: String,
+        #[arg(long)]
+        unset: bool,
+    },
 }
 
 fn cwd() -> Result<PathBuf> {
@@ -394,6 +402,23 @@ pub async fn run_mcp(args: McpArgs) -> Result<()> {
         McpCmd::Disable { name } => toggle(&name, "Disabled", |m, n| m.set_enabled(n, false)).await,
         McpCmd::Approve { name } => toggle(&name, "Approved", |m, n| m.set_approved(n, true)).await,
         McpCmd::Reject { name } => toggle(&name, "Rejected", |m, n| m.set_approved(n, false)).await,
+        McpCmd::SetVar { name, unset } => {
+            let value = if unset {
+                None
+            } else {
+                Some(read_secret(&format!("Value for {name}: "))?)
+            };
+            let ext = extensions().await?;
+            let r = ext.mcp().set_variable(&name, value.as_deref());
+            ext.mcp().shutdown();
+            r.map_err(|e| anyhow!(e))?;
+            if unset {
+                println!("Removed `{name}`.");
+            } else {
+                println!("Saved `{name}`. Servers that use it reconnect.");
+            }
+            Ok(())
+        }
     }
 }
 
@@ -662,4 +687,46 @@ pub async fn run_plugin(args: PluginArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Read a line without echoing it when stdin is a terminal; otherwise
+/// read it from stdin (`echo $TOKEN | mira mcp set-var NAME`).
+fn read_secret(prompt: &str) -> Result<String> {
+    use std::io::{BufRead, IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        let mut line = String::new();
+        std::io::stdin().lock().read_line(&mut line)?;
+        return Ok(line.trim().to_owned());
+    }
+    use crossterm::event::{read, Event, KeyCode, KeyEventKind, KeyModifiers};
+    print!("{prompt}");
+    std::io::stdout().flush()?;
+    crossterm::terminal::enable_raw_mode()?;
+    let mut value = String::new();
+    let result = loop {
+        match read() {
+            Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => match k.code {
+                KeyCode::Enter => break Ok(()),
+                KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                    break Err(anyhow!("cancelled"))
+                }
+                KeyCode::Char(c) => value.push(c),
+                KeyCode::Backspace => {
+                    value.pop();
+                }
+                _ => {}
+            },
+            Ok(Event::Paste(p)) => value.push_str(&p),
+            Ok(_) => {}
+            Err(e) => break Err(e.into()),
+        }
+    };
+    crossterm::terminal::disable_raw_mode()?;
+    println!();
+    result?;
+    let value = value.trim().to_owned();
+    if value.is_empty() {
+        bail!("no value entered");
+    }
+    Ok(value)
 }

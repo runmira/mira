@@ -313,6 +313,7 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/api/undo", axum::routing::post(undo::apply_undo))
         .route("/api/mcp", get(mcp::get_mcp))
         .route("/api/mcp/servers", axum::routing::post(mcp::save_server))
+        .route("/api/mcp/variables", axum::routing::post(mcp::set_variable))
         .route(
             "/api/mcp/servers/:name",
             axum::routing::delete(mcp::delete_server),

@@ -1,4 +1,5 @@
 import {
+  KeyRound,
   LogIn,
   LogOut,
   Pencil,
@@ -24,6 +25,8 @@ export type McpActions = {
   onApprove: (name: string, approve: boolean) => void;
   onSignIn: (name: string) => void;
   onSignOut: (name: string) => void;
+  /** Paste values for the server's unset `${VAR}`s (tokens). */
+  onAddToken: (s: McpServerView) => void;
 };
 
 export function statusText(s: McpServerView): string {
@@ -45,7 +48,7 @@ export function statusText(s: McpServerView): string {
     case 'disabled':
       return 'Disabled';
     case 'needs_setup':
-      return `Needs ${s.status.variables.join(', ')} (set it in your environment and restart Mira)`;
+      return `Needs ${s.status.variables.join(', ')}: add it with “Add token”`;
     case 'failed':
       return `Failed: ${s.status.message}`;
   }
@@ -214,8 +217,11 @@ function ServerCard({ s, busy, actions }: { s: McpServerView; busy: string | nul
   const iconSrc = (s.transport === 'http' || s.transport === 'sse') ? faviconSrc(s.target) : null;
   const working = busy === `mcp:${s.name}`;
 
+  const needsToken = s.missing_vars.length > 0 && st !== 'connected';
   const primary =
-    st === 'needs_auth'
+    st === 'needs_setup'
+      ? { label: 'Add token', run: () => actions.onAddToken(s) }
+      : st === 'needs_auth'
       ? { label: 'Sign in', run: () => actions.onSignIn(s.name) }
       : st === 'needs_approval'
         ? { label: 'Approve', run: () => actions.onApprove(s.name, true) }
@@ -237,6 +243,9 @@ function ServerCard({ s, busy, actions }: { s: McpServerView; busy: string | nul
       : []),
     ...(s.can_sign_in && !s.signed_in && st !== 'needs_auth'
       ? [{ label: 'Sign in', icon: <LogIn />, onSelect: () => actions.onSignIn(s.name) }]
+      : []),
+    ...(s.missing_vars.length > 0
+      ? [{ label: 'Add token', icon: <KeyRound />, onSelect: () => actions.onAddToken(s) }]
       : []),
     ...(editable
       ? [
@@ -294,7 +303,7 @@ function ServerCard({ s, busy, actions }: { s: McpServerView; busy: string | nul
 
         {/* Primary action */}
         {primary && (
-          <div className="mt-0.5" onClick={(e) => e.stopPropagation()}>
+          <div className="mt-0.5 flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
             <button
               type="button"
               disabled={!!busy}
@@ -303,6 +312,17 @@ function ServerCard({ s, busy, actions }: { s: McpServerView; busy: string | nul
             >
               {working ? 'Working…' : primary.label}
             </button>
+            {needsToken && st === 'needs_auth' && (
+              <button
+                type="button"
+                disabled={!!busy}
+                onClick={() => actions.onAddToken(s)}
+                title="Use a token instead of signing in"
+                className="rounded-full border border-border/70 px-3 py-1 text-[11.5px] text-foreground/85 transition-colors hover:bg-white/[0.06] disabled:opacity-40"
+              >
+                Add token
+              </button>
+            )}
           </div>
         )}
       </div>

@@ -447,3 +447,86 @@ function Segmented({
     </div>
   );
 }
+
+/* ---------- tokens ---------- */
+
+/** Where to create a token for well-known variables. */
+function tokenHelp(name: string): { label: string; url: string } | null {
+  const n = name.toUpperCase();
+  if (n.includes('GITHUB')) return { label: 'Create a GitHub token', url: 'https://github.com/settings/personal-access-tokens/new' };
+  if (n.includes('FIGMA')) return { label: 'Create a Figma token', url: 'https://www.figma.com/settings' };
+  if (n.includes('CONTEXT7')) return { label: 'Get a Context7 key', url: 'https://context7.com/dashboard' };
+  if (n.includes('LINEAR')) return { label: 'Create a Linear key', url: 'https://linear.app/settings/account/security' };
+  return null;
+}
+
+/** Paste values for a server's unset `${VAR}`s. Saved privately in
+ *  `~/.mira/mcp/variables.json` (readable only by you); servers that use
+ *  them reconnect right away. */
+export function TokenDialog({
+  s,
+  onClose,
+  onSave,
+}: {
+  s: McpServerView;
+  onClose: () => void;
+  onSave: (values: Record<string, string>) => Promise<boolean>;
+}) {
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState(false);
+  const filled = Object.values(values).some((v) => v.trim());
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-md">
+        <div>
+          <div className="text-[16px] font-semibold">Add token for {s.name.split(':').pop()}</div>
+          <div className="mt-0.5 text-[12.5px] text-muted-foreground">
+            This server’s definition uses {s.missing_vars.length === 1 ? 'a value' : 'values'} you
+            haven’t set. It’s saved privately on this computer (~/.mira/mcp/variables.json) and the
+            server reconnects.
+          </div>
+        </div>
+        {s.missing_vars.map((name) => {
+          const help = tokenHelp(name);
+          return (
+            <label key={name} className="flex flex-col gap-1.5">
+              <span className="flex items-center justify-between gap-2 text-[12.5px] font-medium">
+                <code className="font-mono">{name}</code>
+                {help && (
+                  <a href={help.url} target="_blank" rel="noreferrer" className="text-[11.5px] font-normal text-mira-blue hover:underline">
+                    {help.label}
+                  </a>
+                )}
+              </span>
+              <Input
+                type="password"
+                autoComplete="off"
+                spellCheck={false}
+                value={values[name] ?? ''}
+                onChange={(e) => setValues((v) => ({ ...v, [name]: e.target.value }))}
+                className="h-9 font-mono text-[12.5px]"
+              />
+            </label>
+          );
+        })}
+        <div className="flex justify-end gap-2">
+          <Button variant="ghost" size="sm" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button
+            size="sm"
+            disabled={!filled || saving}
+            onClick={async () => {
+              setSaving(true);
+              const ok = await onSave(values);
+              setSaving(false);
+              if (ok) onClose();
+            }}
+          >
+            {saving ? 'Saving…' : 'Save'}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
