@@ -241,6 +241,8 @@ export type SkillView = {
   color?: string;
   tier: 'bundled' | 'shared' | 'user' | 'project';
   has_attachments: boolean;
+  /** The plugin this skill comes from, if any. */
+  origin?: Origin;
 };
 
 export type SkillsResponse = { skills: SkillView[] };
@@ -602,12 +604,26 @@ export const setMcpApproval = (name: string, approve: boolean) =>
 export const signInMcp = (name: string) => post<{ url: string }>(mcpUrl(name, 'sign-in'), {}, 'Starting sign-in');
 export const signOutMcp = (name: string) => post<McpListView>(mcpUrl(name, 'sign-out'), {}, 'Signing out');
 
+/** Where a command or skill comes from, for grouping it in palettes. */
+export type Origin = {
+  kind: 'plugin' | 'mcp' | 'user' | 'project';
+  /** Groups items from the same place (`plugin:notion`, `mcp:linear`). */
+  key: string;
+  /** "Notion", "Commit commands". */
+  label: string;
+  icon_url: string | null;
+  homepage: string | null;
+};
+
 export type CommandInfo = {
   name: string;
   description: string;
   argument_hint: string | null;
   /** `user`, `project`, `plugin:<name>` or `mcp:<server>`. */
   source: string;
+  /** A Markdown command, or an MCP server's prompt. */
+  kind: 'command' | 'prompt';
+  origin: Origin;
 };
 
 export async function listCommands(): Promise<CommandInfo[]> {

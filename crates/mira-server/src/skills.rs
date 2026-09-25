@@ -57,6 +57,9 @@ pub struct SkillView {
     /// end shows a paperclip on directory-shape skills that have
     /// attachments.
     pub has_attachments: bool,
+    /// The plugin this skill comes from, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<crate::extensions::Origin>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -127,6 +130,10 @@ pub async fn list_skills(State(state): State<AppState>) -> Json<SkillsResponse> 
             slash: s.slash.clone(),
             tier: tier_of(s, &shared_dir, &user_dir, &project_dirs),
             has_attachments: !s.attached_files().is_empty(),
+            origin: s
+                .source
+                .as_deref()
+                .and_then(|p| state.extensions.origin_for_path(p)),
         })
         .collect();
 
