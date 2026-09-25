@@ -1,3 +1,4 @@
+mod acp;
 mod approver;
 mod cloud;
 mod config;
@@ -158,6 +159,9 @@ enum Command {
     Logout(login::LogoutArgs),
     /// Inspect sign-in status or force-refresh a token bundle.
     Auth(login::AuthArgs),
+    /// Run as an Agent Client Protocol agent over stdio (for Zed and
+    /// other ACP editors).
+    Acp(acp::AcpArgs),
 }
 
 #[tokio::main]
@@ -186,6 +190,7 @@ async fn main() -> Result<()> {
             Command::Login(args) => login::run_login(args).await,
             Command::Logout(args) => login::run_logout(args).await,
             Command::Auth(args) => login::run_auth(args).await,
+            Command::Acp(args) => acp::run(&cli, args).await,
         };
     }
 
@@ -756,7 +761,7 @@ fn human_ago(secs: u64) -> String {
     }
 }
 
-fn parse_mode(s: &str) -> Result<Mode> {
+pub(crate) fn parse_mode(s: &str) -> Result<Mode> {
     Ok(match s {
         "plan" => Mode::Plan,
         "manual" => Mode::Manual,

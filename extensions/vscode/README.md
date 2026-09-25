@@ -8,8 +8,8 @@ delegates subtasks to specialised subagents. It talks to any
 OpenAI-compatible provider (OpenRouter, OpenAI, Anthropic, Groq, DeepSeek,
 Ollama, LM Studio). Your key, your model, your machine.
 
-> **Preview.** Building in the open. `@mira` chat is stable; approvals
-> in `manual` mode and inline diffs are on the near roadmap.
+> **Preview.** Building in the open. Using Zed? Mira also speaks the
+> Agent Client Protocol: see [Zed](#zed) below.
 
 ## What you get
 
@@ -28,6 +28,10 @@ Ollama, LM Studio). Your key, your model, your machine.
 - **File and selection references** — `#file:foo.ts`, `#selection`, or
   drag-and-drop; the extension flattens VS Code's native chat
   references into the prompt.
+- **Approvals in the chat** — in `manual` mode Mira shows the diff it
+  wants to apply and asks: Allow, Allow for session, or Deny.
+- **Starts the backend for you** — if `mira serve` isn't running, the
+  extension starts it (and stops it when the window closes).
 - **Follow-active-folder** — Mira's working directory tracks the
   VS Code workspace folder, so a fresh chat lands in the repo you're
   looking at.
@@ -35,8 +39,8 @@ Ollama, LM Studio). Your key, your model, your machine.
 ## Requirements
 
 Mira runs as a local backend the extension talks to over WebSocket.
-**Install and start the backend once**, then this extension takes care
-of the rest.
+**Install it once**; the extension starts `mira serve` when you first
+chat.
 
 Install Mira (macOS / Linux):
 
@@ -52,12 +56,6 @@ Configure a provider (either via env vars or by editing `~/.mira/mira.yaml`):
 export MIRA_API_KEY=sk-or-v1-...                 # e.g. an OpenRouter key
 export MIRA_BASE_URL=https://openrouter.ai/api/v1
 export MIRA_MODEL=google/gemini-2.5-flash
-```
-
-Start it:
-
-```bash
-mira serve --port 8787
 ```
 
 Open VS Code's Chat sidebar (⌃⌘I on macOS, Ctrl+Alt+I on Windows/Linux),
@@ -76,6 +74,8 @@ type `@mira`, and go.
 | Setting | Default | What it does |
 | --- | --- | --- |
 | `mira.baseUrl` | `http://127.0.0.1:8787` | Where `mira serve` is listening. Loopback by default. |
+| `mira.autoStart` | `true` | Start `mira serve` when nothing answers at `mira.baseUrl` (loopback only). |
+| `mira.path` | `mira` | The binary auto-start runs. Use a full path if VS Code's PATH doesn't include it. |
 | `mira.showToolCalls` | `true` | Render each tool call the model makes (name + args + result). Turn off for prose-only. |
 | `mira.followActiveFolder` | `true` | Sync the Mira session's cwd to the open workspace folder on each chat send. |
 
@@ -83,14 +83,22 @@ Change any of these in VS Code's Settings under **Mira**.
 
 ## What this extension doesn't do (yet)
 
-- **Doesn't auto-spawn `mira serve`.** Run it yourself; a follow-up
-  release will start it on demand when the binary is on PATH.
-- **Doesn't show approval modals for `manual` mode.** If the model
-  requests permission, open the web UI to approve, or set `/mode auto`
-  to skip. Inline `showQuickPick` approvals are on the near roadmap.
 - **Doesn't render the subagent / review / pull-request / plugins
   panels.** Those live in the browser UI — run the *Mira: Open Web UI
   in Browser* command from the palette to reach them.
+
+## Zed
+
+Zed talks to Mira over the [Agent Client Protocol](https://agentclientprotocol.com).
+Add this to Zed's `settings.json`, then pick **Mira** in the agent panel:
+
+```json
+{
+  "agent_servers": {
+    "Mira": { "command": "mira", "args": ["acp"] }
+  }
+}
+```
 
 ## Related
 
