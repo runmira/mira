@@ -132,6 +132,10 @@ providers:
 
 `mira models` lists the models and inference profiles your account can use.
 
+Rate limits, overloads and dropped connections are retried with backoff
+(honouring `Retry-After`) instead of ending the turn;
+`MIRA_PROVIDER_RETRIES` sets how many times (default 4).
+
 ### Tools
 
 Built-in: `read_file`, `write_file`, `edit_file`, `bash`, `grep`, `glob`,
@@ -282,6 +286,17 @@ keyboard. `mira --browser` lets it drive Chrome in a separate Mira
 profile. Both are off by default, and desktop input asks for approval
 even in `yolo`. See [docs/COMPUTER_USE.md](./docs/COMPUTER_USE.md).
 
+### GitHub and Slack
+
+- **GitHub:** Mira reviews every new pull request and works on `@mira`
+  requests in issues and pull requests, running in the repository's
+  own Actions. Connect a repository from **Settings → Integrations** or
+  with `mira github setup`; there's no workflow file to write. See
+  [docs/github.md](./docs/github.md).
+- **Slack:** `mira slack` runs a bot you can mention in a channel or DM.
+  Each thread is a session, and approvals are buttons. See
+  [docs/slack.md](./docs/slack.md).
+
 ### Cloud tasks
 
 `mira cloud run "<task>"` runs the whole session in an E2B sandbox: clone,
@@ -354,6 +369,9 @@ Adding a new subagent type is dropping a markdown file into
 - [x] Remote environments (scratch copy, E2B) and cloud tasks
 - [x] Editors: VS Code extension, Zed via ACP (`mira acp`)
 - [x] Sandboxing: `sandbox-exec` (macOS), bubblewrap and Landlock (Linux)
+- [x] GitHub: PR reviews and `@mira` tasks through Actions, connected without YAML
+- [x] Slack bot (`mira slack`)
+- [x] Retries for rate limits, overloads and dropped connections
 - [ ] VS Code extension on the Marketplace and Open VSX
 - [ ] Scheduled prompts (the web UI's Scheduled view)
 - [ ] Command sandbox on Windows

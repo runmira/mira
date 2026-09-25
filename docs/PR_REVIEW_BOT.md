@@ -1,5 +1,11 @@
 # Mira for GitHub — auto-review every opened PR
 
+> **Shipped in a simpler form.** Reviews and `@mira` tasks now run as a
+> GitHub Action in each repository, connected with `mira github setup`
+> or Settings → Integrations; see [github.md](./github.md). This
+> document is the plan for a hosted GitHub App, which is still future
+> work.
+
 > A GitHub App that runs `mira review` on every opened / synchronized
 > pull request, posts inline review comments, and can be re-run on
 > demand with a `/mira review` PR comment. Same code path the CLI's

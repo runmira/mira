@@ -528,6 +528,11 @@ async fn review(
         .await
         .map_err(|e| anyhow!("{e}"))?;
     let head_sha = info["head"]["sha"].as_str().unwrap_or_default().to_owned();
+    // A comment-triggered run has the default branch checked out; the
+    // verifying pass reads files, so look at the pull request's code.
+    if std::env::var("GITHUB_EVENT_NAME").as_deref() != Ok("pull_request") {
+        checkout_pr(workspace, pr);
+    }
     let diff = gh
         .pr_diff(owner, repo, pr)
         .await
@@ -601,6 +606,21 @@ async fn review(
     .await
     .map_err(|e| anyhow!("posting the review: {e}"))?;
     Ok(())
+}
+
+/// Best effort: fetch and check out `pull/N/head` in the workspace.
+fn checkout_pr(workspace: &std::path::Path, pr: u64) {
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .current_dir(workspace)
+            .args(args)
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+    let refspec = format!("pull/{pr}/head");
+    if git(&["fetch", "--quiet", "origin", &refspec]) {
+        git(&["checkout", "--quiet", "--detach", "FETCH_HEAD"]);
+    }
 }
 
 fn finding_body(f: &Finding) -> String {

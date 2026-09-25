@@ -268,12 +268,24 @@ impl Bot {
         match envelope["type"].as_str() {
             Some("events_api") => {
                 let event = envelope["payload"]["event"].clone();
-                let direct = event["type"] == "message"
-                    && event["channel_type"] == "im"
+                let plain = event["type"] == "message"
                     && event.get("subtype").is_none()
                     && event.get("bot_id").is_none();
-                if event["type"] == "app_mention" || direct {
+                let direct = plain && event["channel_type"] == "im";
+                // A reply in a channel thread Mira is already in. Replies
+                // that mention the bot also arrive as `app_mention`.
+                let follow_up = plain
+                    && !direct
+                    && event["thread_ts"].is_string()
+                    && !event["text"]
+                        .as_str()
+                        .unwrap_or("")
+                        .contains(&format!("<@{}>", self.bot_user));
+                if event["type"] == "app_mention" || direct || follow_up {
                     tokio::spawn(async move {
+                        if follow_up && !self.knows_thread(&event).await {
+                            return;
+                        }
                         if let Err(e) = self.on_message(&event).await {
                             eprintln!("mira slack: {e:#}");
                         }
@@ -283,6 +295,15 @@ impl Bot {
             Some("interactive") => self.on_click(&envelope["payload"]),
             _ => {}
         }
+    }
+
+    async fn knows_thread(&self, event: &Value) -> bool {
+        let key = format!(
+            "{}/{}",
+            event["channel"].as_str().unwrap_or(""),
+            event["thread_ts"].as_str().unwrap_or("")
+        );
+        self.threads.lock().await.contains_key(&key)
     }
 
     async fn on_message(&self, event: &Value) -> Result<()> {
@@ -796,6 +817,36 @@ mod tests {
             std::fs::read_to_string(dir.path().join("note.txt")).unwrap(),
             "hi"
         );
+        // A plain reply in that thread continues it; one in a thread Mira
+        // isn't in is ignored.
+        let reply = |thread: &str| {
+            json!({"type": "events_api", "payload": {"event": {
+                "type": "message", "channel_type": "channel", "channel": "C1",
+                "user": "UME", "ts": "100.5", "thread_ts": thread, "text": "thanks, now tidy up",
+            }}})
+        };
+        let finals = |s: &FakeSlack| {
+            s.sent
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(k, t, _)| k == "update" && t.contains("Done") && !t.contains("Working"))
+                .count()
+        };
+        bot.clone().handle(reply("999.9"));
+        bot.clone().handle(reply("100.1"));
+        for _ in 0..100 {
+            if finals(&slack) >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            finals(&slack),
+            2,
+            "one more turn, for the known thread only"
+        );
+
         let sent = slack.sent.lock().unwrap();
         assert!(sent
             .iter()

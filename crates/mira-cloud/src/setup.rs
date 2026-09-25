@@ -319,9 +319,11 @@ concurrency:
 
 jobs:
   mira:
-    # Comments only start a run when they mention @mira.
+    # Comments only start a run when they mention @mira. Pull requests
+    # from forks are skipped: they can't read the model key.
     if: >-
-      github.event_name == 'pull_request' ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository) ||
       contains(github.event.comment.body, '@mira') ||
       contains(github.event.issue.body, '@mira')
     runs-on: ubuntu-latest
