@@ -8,6 +8,7 @@ import {
   Bug,
   Check,
   ChatCircleDots,
+  CircleNotch,
   Code,
   Database,
   Eye,
@@ -1625,9 +1626,16 @@ function GithubAppConnect() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [notes, setNotes] = useState<Record<string, string>>({});
+  // True until the first answer (status + repositories) is in; later
+  // reloads keep what's on screen and only show `refreshing`.
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const lastLoad = React.useRef(0);
 
   async function load() {
     setError(null);
+    setRefreshing(true);
+    lastLoad.current = Date.now();
     try {
       const st = await appStatus();
       setStatus(st);
@@ -1635,12 +1643,17 @@ function GithubAppConnect() {
       if (st.configured) setData(await listInstallations());
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
     }
   }
   useEffect(() => { void load(); }, []);
-  // Back from GitHub in another tab: refresh.
+  // Back from GitHub in another tab: refresh (not on every quick focus).
   useEffect(() => {
-    const onFocus = () => { void load(); };
+    const onFocus = () => {
+      if (Date.now() - lastLoad.current > 5_000) void load();
+    };
     window.addEventListener('focus', onFocus);
     return () => window.removeEventListener('focus', onFocus);
   }, []);
@@ -1677,8 +1690,22 @@ function GithubAppConnect() {
     }
   }
 
-  if (!status && !error) {
-    return <div className="mt-3 text-[12px] text-muted-foreground">Loading…</div>;
+  if (loading) {
+    return (
+      <div className="mt-3 flex flex-col gap-2" aria-busy="true">
+        <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
+          <CircleNotch className="size-3.5 animate-spin" /> Checking your GitHub connection…
+        </div>
+        <div className="rounded-md border border-border/50">
+          {[0, 1, 2].map((i) => (
+            <div key={i} className="flex items-center gap-2 border-b border-border/30 px-3 py-2.5 last:border-b-0">
+              <div className="h-3 w-32 animate-pulse rounded bg-muted" />
+              <div className="ml-auto h-6 w-16 animate-pulse rounded bg-muted" />
+            </div>
+          ))}
+        </div>
+      </div>
+    );
   }
   if (status && !status.configured) return <CreateGithubApp />;
 
@@ -1688,13 +1715,21 @@ function GithubAppConnect() {
     <div className="mt-3 flex flex-col gap-3">
       {installs.length === 0 ? (
         <Button className="self-start" onClick={() => void install()} disabled={busy !== null}>
-          <GithubLogo className="size-4" /> {busy === 'install' ? 'Opening GitHub…' : 'Connect GitHub'}
+          {busy === 'install'
+            ? <CircleNotch className="size-4 animate-spin" />
+            : <GithubLogo className="size-4" />}
+          {busy === 'install' ? 'Opening GitHub…' : 'Connect GitHub'}
         </Button>
       ) : (
         installs.map((inst) => (
           <div key={inst.id} className="rounded-md border border-border/50">
-            <div className="border-b border-border/50 px-3 py-2 text-[12px] font-medium">
+            <div className="flex items-center border-b border-border/50 px-3 py-2 text-[12px] font-medium">
               {inst.account}
+              {refreshing && (
+                <span className="ml-auto flex items-center gap-1 text-[11px] font-normal text-muted-foreground">
+                  <CircleNotch className="size-3 animate-spin" /> Refreshing…
+                </span>
+              )}
             </div>
             {inst.repos.length === 0 && (
               <div className="px-3 py-2 text-[12px] text-muted-foreground">No repositories selected.</div>
@@ -1717,6 +1752,7 @@ function GithubAppConnect() {
                         disabled={busy !== null || !!blocked}
                         onClick={() => void enable(inst.id, r.full_name)}
                       >
+                        {busy === r.full_name && <CircleNotch className="size-3.5 animate-spin" />}
                         {busy === r.full_name ? 'Setting up…' : r.enabled ? 'Update' : 'Turn on'}
                       </Button>
                     ) : (
