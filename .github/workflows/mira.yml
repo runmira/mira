@@ -1,0 +1,47 @@
+# Added by Mira. Settings live in this repository's Actions secrets and
+# variables (MIRA_API_KEY, MIRA_PROVIDER, MIRA_MODEL); change them with
+# `mira github setup` or in the Mira app, not here.
+name: Mira
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  issues:
+    types: [opened]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  # Lets the run prove which repository it is, to act as the Runmira-bot app.
+  id-token: write
+
+concurrency:
+  group: mira-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  mira:
+    # Comments only start a run when they mention @mira. Pull requests
+    # from forks are skipped: they can't read the model key.
+    if: >-
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository) ||
+      contains(github.event.comment.body, '@mira') ||
+      contains(github.event.issue.body, '@mira')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: runmira/mira@main
+        with:
+          api-key: ${{ secrets.MIRA_API_KEY }}
+          provider: ${{ vars.MIRA_PROVIDER }}
+          model: ${{ vars.MIRA_MODEL }}
+          base-url: ${{ vars.MIRA_BASE_URL }}
