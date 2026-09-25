@@ -390,12 +390,16 @@ pub(crate) fn palette_items(filter: &str, cfg: &TuiConfig) -> Vec<(String, Strin
     cfg.extensions
         .commands()
         .into_iter()
-        .filter(|c| c.name.to_ascii_lowercase().contains(filter))
+        .filter(|c| {
+            c.name.to_ascii_lowercase().contains(filter)
+                || c.origin.label.to_ascii_lowercase().contains(filter)
+        })
         .map(|c| {
             let hint = c.argument_hint.map(|h| format!(" {h}")).unwrap_or_default();
+            // "Notion prompt <query> · Search the workspace"
             (
                 format!("/{}", c.name),
-                format!("{}{hint} · {}", c.source, c.description),
+                format!("{} {}{hint} · {}", c.origin.label, c.kind, c.description),
             )
         })
         .collect()

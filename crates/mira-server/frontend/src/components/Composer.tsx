@@ -39,8 +39,8 @@ import { costUsd, formatDollars, shortNum } from '../lib/usage';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandSeparator } from '@/components/ui/command';
 import { FilePicker } from './FilePicker';
-import { customToCommand, filterCommands, slashState, type PaletteSkill, type SlashCommand } from './commands';
-import type { CommandInfo } from '../api';
+import { customToCommand, filterCommands, groupCommands, originIconSrc, slashState, type PaletteGroup, type PaletteSkill, type SlashCommand } from './commands';
+import type { CommandInfo, Origin } from '../api';
 import { MentionInput, type MentionInputHandle } from './MentionInput';
 import { cn } from '@/lib/utils';
 
@@ -205,18 +205,18 @@ export function Composer({
   // so a bare `@` + Enter fires the OS native file picker without any
   // additional keystrokes. See `filterCommands` for the promotion rule.
   const paletteTrigger = slash.mode === 'palette' || slash.mode === 'args' ? slash.trigger : '/';
-  const paletteMatches = useMemo(
-    () =>
-      paletteVisible
-        ? filterCommands(
-            (slash as { query: string }).query,
-            paletteTrigger,
-            skills,
-            customCmds,
-          )
-        : [],
-    [paletteVisible, slash, paletteTrigger, skills, customCmds],
-  );
+  // `/` lists items grouped by where they come from (Mira, your skills,
+  // then each plugin and MCP server); `@` keeps its own order so `files`
+  // stays first. `paletteMatches` is in display order, so ↑↓ + Enter
+  // follow what's on screen.
+  const paletteGroups = useMemo(() => {
+    if (!paletteVisible) return [];
+    const found = filterCommands((slash as { query: string }).query, paletteTrigger, skills, customCmds);
+    return paletteTrigger === '@'
+      ? [{ key: 'all', label: '', items: found } as PaletteGroup]
+      : groupCommands(found);
+  }, [paletteVisible, slash, paletteTrigger, skills, customCmds]);
+  const paletteMatches = useMemo(() => paletteGroups.flatMap((g) => g.items), [paletteGroups]);
 
   useEffect(() => { setSlashIdx(0); }, [text]);
 
@@ -551,18 +551,29 @@ export function Composer({
 
             {paletteVisible && paletteMatches.length > 0 && (
               <SlashPalette
-                matches={paletteMatches}
+                groups={paletteGroups}
                 activeIdx={slashIdx}
                 onHover={setSlashIdx}
                 onPick={commitPaletteChoice}
-                preserveOrder={paletteTrigger === '@'}
               />
             )}
 
             {slash.mode === 'args' && (
-              <div className="pointer-events-none absolute -top-6 left-0 rounded-md border border-border/60 bg-popover px-2 py-0.5 text-[11px] text-muted-foreground shadow-lg">
-                <span className="font-mono text-foreground">{slash.trigger}{slash.command.name}</span>{' '}
-                <span>{slash.command.usage.replace(`/${slash.command.name}`, '').trim()}</span>
+              <div className="pointer-events-none absolute -top-7 left-0 flex max-w-full items-center gap-1.5 rounded-md border border-border/60 bg-popover px-2 py-1 text-[11.5px] text-muted-foreground shadow-lg">
+                {slash.command.origin && (
+                  <>
+                    <OriginIcon origin={slash.command.origin} fallback={slash.command.icon} />
+                    <span className="text-foreground/80">{slash.command.origin.label}</span>
+                    <span className="text-muted-foreground/50">·</span>
+                  </>
+                )}
+                <span className="font-mono text-foreground">{slash.trigger}{slash.command.name}</span>
+                <span className="truncate">{slash.command.usage.replace(`/${slash.command.name}`, '').trim()}</span>
+                {slash.command.kindLabel && (
+                  <span className="ml-1 shrink-0 rounded border border-border/60 px-1 text-[10px] uppercase tracking-wide text-muted-foreground/80">
+                    {slash.command.kindLabel}
+                  </span>
+                )}
               </div>
             )}
           </div>
@@ -667,43 +678,26 @@ export function Composer({
 /* ---------- slash palette ---------- */
 
 function SlashPalette({
-  matches, activeIdx, onHover, onPick, preserveOrder = false,
+  groups, activeIdx, onHover, onPick,
 }: {
-  matches: SlashCommand[];
+  /** Sections in display order; `activeIdx` counts across all of them. */
+  groups: PaletteGroup[];
   activeIdx: number;
   onHover: (i: number) => void;
   onPick: (cmd: SlashCommand) => void;
-  /** When true, render matches in the exact order supplied — used by the
-   *  `@` trigger so `files` stays pinned to the top of the list instead
-   *  of getting alphabetized down under `Commit`. `/` still alphabetizes
-   *  so the full catalog reads as a scannable menu. */
-  preserveOrder?: boolean;
 }) {
-  // Alphabetize (unless the caller asked to preserve order) so the
-  // palette reads as an at-a-glance menu (Codex / Claude Code pattern) —
-  // no cognitive hunting for the item you want just because it happened
-  // to be registered late. Sort is stable so aliases don't shuffle
-  // unpredictably run-to-run.
-  const sorted = useMemo(
-    () =>
-      preserveOrder
-        ? [...matches]
-        : [...matches].sort((a, b) => displayName(a).localeCompare(displayName(b))),
-    [matches, preserveOrder],
-  );
-  // Keyboard navigation still targets the caller's `matches` order —
-  // remap the caller's activeIdx onto the sorted index so ↑↓ + Enter
-  // land on the same visual row regardless of registration order.
-  const activeName = matches[activeIdx]?.name;
-  const activeSortedIdx = sorted.findIndex((c) => c.name === activeName);
+  const activeRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    activeRef.current?.scrollIntoView({ block: 'nearest' });
+  }, [activeIdx]);
+  // Headers only help when there's more than one section.
+  const showHeaders = groups.length > 1 || groups.some((g) => g.origin);
+  let index = -1;
 
   return (
     <div
       className={cn(
         'absolute bottom-full left-0 right-0 z-10 mb-2 mx-auto max-w-xl overflow-hidden',
-        // Slightly larger radius + subtle inner ring for the Codex-style
-        // "elevated card" feel. Shadow is soft and blurred so the popover
-        // reads as floating rather than stamped on.
         'rounded-2xl border border-white/[0.07] bg-[#1f2024]/95 backdrop-blur-md',
         'shadow-[0_20px_50px_-16px_rgba(0,0,0,0.85)] ring-1 ring-black/40',
         'animate-fade-in',
@@ -711,62 +705,91 @@ function SlashPalette({
       role="listbox"
     >
       <div className="max-h-[24rem] overflow-y-auto py-1.5">
-        {sorted.map((cmd, i) => {
-          const Icon = cmd.icon;
-          const active = i === activeSortedIdx;
-          return (
-            <button
-              key={cmd.name}
-              type="button"
-              onMouseEnter={() => {
-                // Hover reports back in caller's index space so the
-                // parent's state stays coherent with its `matches`.
-                const idx = matches.findIndex((c) => c.name === cmd.name);
-                if (idx >= 0) onHover(idx);
-              }}
-              onClick={() => onPick(cmd)}
-              role="option"
-              aria-selected={active}
-              className={cn(
-                // Palette rows are borderless with generous horizontal
-                // padding so the highlighted row reads as a soft band
-                // rather than a discrete button. Vertical rhythm is
-                // tight but breathable (py-1.5) — matches the density
-                // in Codex's screenshot.
-                'flex w-full items-baseline gap-3 px-4 py-1.5 text-left transition-colors',
-                active ? 'bg-white/[0.06]' : 'hover:bg-white/[0.035]',
-              )}
-            >
-              <Icon
+        {groups.map((g, gi) => (
+          <div key={g.key} role="group" aria-label={g.label || undefined}>
+            {showHeaders && g.label && (
+              <div
                 className={cn(
-                  // Icons stay muted at rest, brighten a touch on
-                  // hover / active — mirrors the way Codex fades chrome
-                  // into the background until you look at it.
-                  'size-[15px] shrink-0 self-center transition-colors',
-                  active ? 'text-foreground/85' : 'text-foreground/55',
-                )}
-              />
-              <span
-                className={cn(
-                  'shrink-0 text-[13.5px] font-medium tracking-tight',
-                  active ? 'text-foreground' : 'text-foreground/90',
+                  'flex items-center gap-2 px-4 pb-1 pt-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/70',
+                  gi > 0 && 'mt-1 border-t border-white/[0.05]',
                 )}
               >
-                {displayName(cmd)}
-              </span>
-              <span
-                className={cn(
-                  'min-w-0 flex-1 truncate text-[13px]',
-                  active ? 'text-muted-foreground' : 'text-muted-foreground/70',
-                )}
-              >
-                {cmd.description}
-              </span>
-            </button>
-          );
-        })}
+                {g.origin && <OriginIcon origin={g.origin} />}
+                <span className="normal-case tracking-normal text-[12px] text-foreground/80">{g.label}</span>
+                {g.hint && <span className="font-normal normal-case tracking-normal text-muted-foreground/50">{g.hint}</span>}
+              </div>
+            )}
+            {g.items.map((cmd) => {
+              index += 1;
+              const i = index;
+              const Icon = cmd.icon;
+              const active = i === activeIdx;
+              return (
+                <button
+                  key={`${g.key}:${cmd.name}`}
+                  ref={active ? activeRef : undefined}
+                  type="button"
+                  onMouseEnter={() => onHover(i)}
+                  onClick={() => onPick(cmd)}
+                  role="option"
+                  aria-selected={active}
+                  className={cn(
+                    'flex w-full items-baseline gap-3 px-4 py-1.5 text-left transition-colors',
+                    active ? 'bg-white/[0.06]' : 'hover:bg-white/[0.035]',
+                  )}
+                >
+                  <Icon
+                    className={cn(
+                      'size-[15px] shrink-0 self-center transition-colors',
+                      active ? 'text-foreground/85' : 'text-foreground/55',
+                    )}
+                  />
+                  <span
+                    className={cn(
+                      'shrink-0 text-[13.5px] font-medium tracking-tight',
+                      active ? 'text-foreground' : 'text-foreground/90',
+                    )}
+                  >
+                    {displayName(cmd)}
+                  </span>
+                  <span
+                    className={cn(
+                      'min-w-0 flex-1 truncate text-[13px]',
+                      active ? 'text-muted-foreground' : 'text-muted-foreground/70',
+                    )}
+                  >
+                    {cmd.description}
+                  </span>
+                  {cmd.kindLabel && (
+                    <span className="shrink-0 self-center rounded border border-white/[0.08] px-1.5 text-[10px] uppercase tracking-wide text-muted-foreground/70">
+                      {cmd.kindLabel}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        ))}
       </div>
     </div>
+  );
+}
+
+/** A plugin or server's icon, falling back to a letter badge. */
+function OriginIcon({ origin, fallback }: { origin: Origin; fallback?: SlashCommand['icon'] }) {
+  const src = originIconSrc(origin);
+  const [failed, setFailed] = useState(false);
+  if (src && !failed) {
+    return <img src={src} alt="" className="size-3.5 shrink-0 rounded-[3px]" onError={() => setFailed(true)} />;
+  }
+  if (fallback) {
+    const F = fallback;
+    return <F className="size-3.5 shrink-0 text-muted-foreground" />;
+  }
+  return (
+    <span className="flex size-3.5 shrink-0 items-center justify-center rounded-[3px] bg-white/10 text-[9px] font-semibold text-foreground/80">
+      {origin.label.charAt(0).toUpperCase()}
+    </span>
   );
 }
 
@@ -775,7 +798,7 @@ function SlashPalette({
  *  written label, while multi-word commands ("pull-request") can
  *  override with a proper display string ("Pull request"). */
 function displayName(cmd: SlashCommand): string {
-  const n = cmd.name;
+  const n = cmd.label ?? cmd.name;
   if (!n) return n;
   return n.charAt(0).toUpperCase() + n.slice(1).replace(/-/g, ' ');
 }

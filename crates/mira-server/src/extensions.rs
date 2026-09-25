@@ -8,6 +8,7 @@
 //! servers reconnect or disconnect as needed, plugin skills are swapped
 //! into the skill registry, and slash commands are re-read.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
@@ -28,6 +29,50 @@ struct Inner {
     commands: RwLock<Vec<SlashCommand>>,
     problems: RwLock<Vec<ConfigProblem>>,
     skills: RwLock<Option<SkillHandle>>,
+    /// Display name and icon of each enabled plugin, by plugin name.
+    origins: RwLock<BTreeMap<String, Origin>>,
+}
+
+/// Where a command or skill comes from, for grouping and labelling it
+/// in slash palettes.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct Origin {
+    /// `plugin`, `mcp`, `user` or `project`.
+    pub kind: &'static str,
+    /// Groups items from the same place (`plugin:notion`, `mcp:linear`).
+    pub key: String,
+    /// Human name: "Notion", "Commit commands".
+    pub label: String,
+    pub icon_url: Option<String>,
+    /// For a favicon when there's no icon.
+    pub homepage: Option<String>,
+}
+
+impl Origin {
+    fn local(kind: &'static str) -> Self {
+        Origin {
+            kind,
+            key: kind.to_owned(),
+            label: if kind == "user" {
+                "Your commands"
+            } else {
+                "This project"
+            }
+            .to_owned(),
+            icon_url: None,
+            homepage: None,
+        }
+    }
+}
+
+/// `commit-commands` → "Commit commands".
+fn pretty(name: &str) -> String {
+    let s = name.replace(['-', '_'], " ");
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        None => s,
+    }
 }
 
 /// A slash command the palette can offer.
@@ -39,6 +84,9 @@ pub struct CommandInfo {
     pub argument_hint: Option<String>,
     /// `user`, `project`, `plugin:<name>` or `mcp:<server>`.
     pub source: String,
+    /// `command` (a Markdown command) or `prompt` (an MCP server prompt).
+    pub kind: &'static str,
+    pub origin: Origin,
 }
 
 impl Extensions {
@@ -65,6 +113,7 @@ impl Extensions {
                 commands: RwLock::new(Vec::new()),
                 problems: RwLock::new(Vec::new()),
                 skills: RwLock::new(None),
+                origins: RwLock::new(BTreeMap::new()),
             }),
         }
     }
@@ -120,6 +169,25 @@ impl Extensions {
             mira_plugins::runtime::apply_mcp(&self.inner.mcp, project.as_deref(), &enabled);
         let commands = mira_plugins::runtime::slash_commands(project.as_deref(), &enabled);
         let skill_dirs = enabled.skill_dirs();
+        let origins = enabled
+            .plugins
+            .iter()
+            .map(|p| {
+                let detail = self.inner.plugins.detail(&p.id).ok();
+                let origin = Origin {
+                    kind: "plugin",
+                    key: format!("plugin:{}", p.name),
+                    label: detail
+                        .as_ref()
+                        .and_then(|d| d.entry.display_name.clone())
+                        .unwrap_or_else(|| pretty(&p.name)),
+                    icon_url: detail.as_ref().and_then(|d| d.entry.icon_url.clone()),
+                    homepage: detail.as_ref().and_then(|d| d.entry.homepage.clone()),
+                };
+                (p.name.clone(), origin)
+            })
+            .collect();
+        *self.inner.origins.write().unwrap() = origins;
         *self.inner.enabled.write().unwrap() = enabled;
         *self.inner.problems.write().unwrap() = problems;
         *self.inner.commands.write().unwrap() = commands;
@@ -127,6 +195,54 @@ impl Extensions {
         if let Some(handle) = skills {
             let fresh = load_skills(project.as_deref(), &skill_dirs);
             *handle.write().await = Arc::new(fresh);
+        }
+    }
+
+    fn plugin_origin(&self, plugin: &str) -> Origin {
+        self.inner
+            .origins
+            .read()
+            .unwrap()
+            .get(plugin)
+            .cloned()
+            .unwrap_or_else(|| Origin {
+                kind: "plugin",
+                key: format!("plugin:{plugin}"),
+                label: pretty(plugin),
+                icon_url: None,
+                homepage: None,
+            })
+    }
+
+    /// The enabled plugin a file (a skill, say) belongs to.
+    pub fn origin_for_path(&self, path: &Path) -> Option<Origin> {
+        let name = self
+            .inner
+            .enabled
+            .read()
+            .unwrap()
+            .plugins
+            .iter()
+            .find(|p| path.starts_with(&p.root))
+            .map(|p| p.name.clone())?;
+        Some(self.plugin_origin(&name))
+    }
+
+    fn mcp_origin(&self, server: &str) -> Origin {
+        let view = self.inner.mcp.server(server);
+        if let Some(mira_mcp::Scope::Plugin { plugin }) = view.as_ref().map(|v| &v.scope) {
+            return self.plugin_origin(plugin);
+        }
+        let remote = view
+            .as_ref()
+            .filter(|v| v.transport != "stdio")
+            .map(|v| v.target.clone());
+        Origin {
+            kind: "mcp",
+            key: format!("mcp:{server}"),
+            label: pretty(server),
+            icon_url: None,
+            homepage: remote,
         }
     }
 
@@ -147,6 +263,12 @@ impl Extensions {
                     mira_plugins::CommandSource::Project => "project".into(),
                     mira_plugins::CommandSource::Plugin { plugin } => format!("plugin:{plugin}"),
                 },
+                kind: "command",
+                origin: match &c.source {
+                    mira_plugins::CommandSource::User => Origin::local("user"),
+                    mira_plugins::CommandSource::Project => Origin::local("project"),
+                    mira_plugins::CommandSource::Plugin { plugin } => self.plugin_origin(plugin),
+                },
             })
             .collect();
         for (server, p) in self.inner.mcp.prompts() {
@@ -160,6 +282,8 @@ impl Extensions {
                         .collect::<Vec<_>>()
                         .join(" ")
                 }),
+                kind: "prompt",
+                origin: self.mcp_origin(&server),
                 source: format!("mcp:{server}"),
             });
         }

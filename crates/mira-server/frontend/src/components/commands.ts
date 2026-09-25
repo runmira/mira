@@ -16,6 +16,7 @@ import {
   TerminalWindow,
 } from '@phosphor-icons/react';
 import type { Mode } from '../types';
+import type { CommandInfo, Origin } from '../api';
 
 /**
  * Slash-command registry.
@@ -93,22 +94,87 @@ export type SlashCommand = {
   isCustom?: boolean;
   /** Where a custom command comes from, e.g. `plugin:commit-commands`. */
   source?: string;
+  /** The plugin, MCP server or folder it comes from. Built-ins have none. */
+  origin?: Origin;
+  /** What it is, shown on its row: "Command", "Skill", "Prompt". */
+  kindLabel?: string;
+  /** Name to show when it differs from what you type (an MCP prompt's
+   *  own name instead of `mcp__server__prompt`). */
+  label?: string;
   run: (args: string, ctx: SlashCtx) => string | undefined;
 };
 
 /** A custom command or MCP prompt from `/api/commands` as a palette
  *  entry. */
-export function customToCommand(c: { name: string; description: string; argument_hint: string | null; source: string }): SlashCommand {
+export function customToCommand(c: CommandInfo): SlashCommand {
+  const prompt = c.kind === 'prompt';
   return {
     name: c.name,
-    description: c.description || c.source,
+    // `mcp__notion__search` is what you type; `search` is what it is.
+    label: prompt ? c.name.split('__').slice(2).join('__') || c.name : undefined,
+    description: c.description,
     usage: `/${c.name}${c.argument_hint ? ` ${c.argument_hint}` : ''}`,
-    icon: c.source.startsWith('mcp:') ? Lightning : TerminalWindow,
+    icon: prompt ? Lightning : TerminalWindow,
     takesArgs: !!c.argument_hint,
     isCustom: true,
     source: c.source,
+    origin: c.origin,
+    kindLabel: prompt ? 'Prompt' : 'Command',
     run: () => undefined,
   };
+}
+
+/** Icon for an origin: its own, else the site's favicon (for an MCP
+ *  server at `mcp.notion.com`, notion.com's). */
+export function originIconSrc(o: Origin | undefined): string | null {
+  if (!o) return null;
+  if (o.icon_url) return o.icon_url;
+  if (!o.homepage) return null;
+  try {
+    const host = new URL(o.homepage).hostname.replace(/^(mcp|api|www)\./, '');
+    if (['github.com', 'gitlab.com', 'bitbucket.org', 'npmjs.com', 'pypi.org', 'localhost', '127.0.0.1'].includes(host)) {
+      return null;
+    }
+    return `https://www.google.com/s2/favicons?domain=${host}&sz=64`;
+  } catch {
+    return null;
+  }
+}
+
+/** A palette section: Mira's own commands, your skills, then one per
+ *  plugin or MCP server. */
+export type PaletteGroup = { key: string; label: string; hint?: string; origin?: Origin; items: SlashCommand[] };
+
+const ORIGIN_HINT: Record<Origin['kind'], string> = {
+  plugin: 'Plugin',
+  mcp: 'MCP server',
+  user: '~/.mira/commands',
+  project: '.mira/commands',
+};
+
+export function groupCommands(matches: SlashCommand[]): PaletteGroup[] {
+  const groups = new Map<string, PaletteGroup>();
+  const add = (key: string, make: () => Omit<PaletteGroup, 'items'>, cmd: SlashCommand) => {
+    if (!groups.has(key)) groups.set(key, { ...make(), items: [] });
+    groups.get(key)!.items.push(cmd);
+  };
+  for (const c of matches) {
+    if (c.origin) {
+      const o = c.origin;
+      add(o.key, () => ({ key: o.key, label: o.label, hint: ORIGIN_HINT[o.kind], origin: o }), c);
+    } else if (c.isSkill) {
+      add('skills', () => ({ key: 'skills', label: 'Skills' }), c);
+    } else {
+      add('mira', () => ({ key: 'mira', label: 'Commands' }), c);
+    }
+  }
+  const byName = (a: SlashCommand, b: SlashCommand) =>
+    (a.label ?? a.name).localeCompare(b.label ?? b.name);
+  const rank = (g: PaletteGroup) =>
+    g.key === 'mira' ? 0 : g.key === 'skills' ? 1 : g.origin?.kind === 'project' ? 2 : g.origin?.kind === 'user' ? 3 : 4;
+  return [...groups.values()]
+    .map((g) => ({ ...g, items: [...g.items].sort(byName) }))
+    .sort((a, b) => rank(a) - rank(b) || a.label.localeCompare(b.label));
 }
 
 const MODE_VALUES: Mode[] = ['plan', 'manual', 'auto', 'edit', 'yolo'];
@@ -398,6 +464,8 @@ export type PaletteSkill = {
    *  ships with a leading dot), but forwarded so future variants can
    *  swap in a Phosphor icon per skill. */
   icon?: string;
+  /** The plugin it comes from, if any. */
+  origin?: Origin;
 };
 
 /** Palette results.
@@ -439,6 +507,8 @@ export function filterCommands(
         if (c.name.toLowerCase().includes(q)) return true;
         if (c.aliases?.some((a) => a.toLowerCase().includes(q))) return true;
         if (c.description.toLowerCase().includes(q)) return true;
+        // Typing a plugin or server's name lists everything it adds.
+        if (c.origin?.label.toLowerCase().includes(q)) return true;
         return false;
       })
     : pool;
@@ -461,6 +531,8 @@ function skillToCommand(s: PaletteSkill): SlashCommand {
     icon: Sparkle,
     takesArgs: false,
     isSkill: true,
+    origin: s.origin,
+    kindLabel: 'Skill',
     // The Composer handles skill picks directly (see `commitPaletteChoice`),
     // so this `run` is only reached if something bypasses the palette and
     // invokes the command by name — kept as a safe fallback.
