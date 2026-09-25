@@ -95,6 +95,10 @@ impl ProgressSink for NullProgress {
 /* ---------- top-level entry ---------- */
 
 /// Run stage 1 (+ optional stage 2) on a diff. Returns the confirmed findings.
+/// How many findings stage 2 checks at once. Enough to hide latency,
+/// low enough to stay under free-tier rate limits.
+const VERIFY_CONCURRENCY: usize = 4;
+
 pub async fn review(
     provider: &dyn ChatProvider,
     model: &str,
@@ -117,8 +121,10 @@ pub async fn review(
         let total = findings.len();
         progress.emit(Progress::Stage2Started { total }).await;
 
-        let mut kept = Vec::with_capacity(total);
-        for (i, f) in findings.into_iter().enumerate() {
+        // Check findings a few at a time: each is an independent model
+        // call, so the stage takes about as long as the slowest batch
+        // instead of one call per finding. `buffered` keeps their order.
+        let checks = findings.into_iter().enumerate().map(|(i, f)| async move {
             progress
                 .emit(Progress::Stage2Item {
                     index: i + 1,
@@ -127,13 +133,16 @@ pub async fn review(
                     kept: None,
                 })
                 .await;
-
             // 30 lines of context each side — the 12-line default was too narrow
             // to disprove most "missing check" / "null deref" claims because the
             // guard often lives 15+ lines away (top of the function, or after
             // an early return). Wider snippet = better rejection precision.
             let snippet = read_snippet(cwd, &f.file, f.line, 30);
-            let verdict = verify_one(provider, model, &f, snippet.as_deref()).await?;
+            // A check that errors keeps the finding, like an unclear verdict:
+            // a confirmed finding still gets human review, a dropped one is lost.
+            let verdict = verify_one(provider, model, &f, snippet.as_deref())
+                .await
+                .unwrap_or_else(|e| Verdict::Confirm(format!("not verified: {e}")));
             let was_kept = matches!(verdict, Verdict::Confirm(_));
             progress
                 .emit(Progress::Stage2Item {
@@ -143,13 +152,20 @@ pub async fn review(
                     kept: Some(was_kept),
                 })
                 .await;
-
-            if let Verdict::Confirm(reason) = verdict {
-                let mut kf = f;
-                kf.verify_note = Some(reason);
-                kept.push(kf);
+            match verdict {
+                Verdict::Confirm(reason) => {
+                    let mut kf = f;
+                    kf.verify_note = Some(reason);
+                    Some(kf)
+                }
+                Verdict::Reject(_) => None,
             }
-        }
+        });
+        let kept: Vec<Finding> = futures::stream::iter(checks)
+            .buffered(VERIFY_CONCURRENCY)
+            .filter_map(|f| async move { f })
+            .collect()
+            .await;
         let dropped = total - kept.len();
         progress
             .emit(Progress::Completed {
@@ -471,6 +487,77 @@ mod tests {
     const FINDING: &str = r#"```json
 [{"severity":"high","file":"a.rs","line":3,"title":"Panics","explanation":"x"}]
 ```"#;
+
+    /// Answers by what's asked: the finding list for stage 1, and a verdict
+    /// per finding title for stage 2 (`boom` fails the request).
+    struct ByTitle {
+        in_flight: Mutex<(usize, usize)>,
+    }
+
+    #[async_trait::async_trait]
+    impl ChatProvider for ByTitle {
+        async fn stream(
+            &self,
+            r: ChatRequest,
+        ) -> Result<BoxStream<'static, Result<ChatEvent, ProviderError>>, ProviderError> {
+            let user = r
+                .messages
+                .last()
+                .map(|m| format!("{m:?}"))
+                .unwrap_or_default();
+            if !user.contains("Finding to verify") {
+                let list = r#"```json
+[{"severity":"high","file":"a.rs","title":"keep one","explanation":"x"},
+ {"severity":"low","file":"a.rs","title":"drop me","explanation":"x"},
+ {"severity":"medium","file":"a.rs","title":"boom","explanation":"x"},
+ {"severity":"high","file":"a.rs","title":"keep two","explanation":"x"}]
+```"#;
+                return Ok(stream::iter([Ok(ChatEvent::TextDelta(list.into()))]).boxed());
+            }
+            {
+                let mut g = self.in_flight.lock().unwrap();
+                g.0 += 1;
+                g.1 = g.1.max(g.0);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            self.in_flight.lock().unwrap().0 -= 1;
+            if user.contains("boom") {
+                return Err(ProviderError::Status {
+                    status: 503,
+                    body: "down".into(),
+                    retry_after: None,
+                });
+            }
+            let verdict = if user.contains("drop me") {
+                "REJECT: guarded"
+            } else {
+                "CONFIRM: real"
+            };
+            Ok(stream::iter([Ok(ChatEvent::TextDelta(verdict.into()))]).boxed())
+        }
+    }
+
+    #[tokio::test]
+    async fn verification_runs_in_parallel_and_keeps_order() {
+        let p = ByTitle {
+            in_flight: Mutex::new((0, 0)),
+        };
+        let out = review(&p, "m", "+x", Path::new("."), true, &NullProgress)
+            .await
+            .unwrap();
+        let titles: Vec<_> = out.iter().map(|f| f.title.as_str()).collect();
+        // Rejected ones are dropped; a failed check keeps its finding.
+        assert_eq!(titles, ["keep one", "boom", "keep two"]);
+        assert!(out[1]
+            .verify_note
+            .as_deref()
+            .unwrap()
+            .starts_with("not verified"));
+        assert!(
+            p.in_flight.lock().unwrap().1 > 1,
+            "checks ran one at a time"
+        );
+    }
 
     #[tokio::test]
     async fn stage1_asks_again_after_a_reply_without_json() {

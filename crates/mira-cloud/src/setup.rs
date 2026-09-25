@@ -341,7 +341,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          # Reviews get the diff from GitHub, so the latest commit is
+          # enough; tasks make branches and need the history.
+          fetch-depth: ${{{{ github.event_name == 'pull_request' && 1 || 0 }}}}
       - uses: {action_ref}
         with:
           api-key: ${{{{ secrets.MIRA_API_KEY }}}}
@@ -355,6 +357,12 @@ jobs:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn this_repos_workflow_is_the_generated_one() {
+        let ours = include_str!("../../../.github/workflows/mira.yml");
+        assert_eq!(workflow(ACTION_REF), ours);
+    }
 
     #[test]
     fn sealed_secrets_open_with_the_private_key() {

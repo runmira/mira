@@ -512,8 +512,64 @@ fn is_review_request(ask: &str) -> bool {
 
 /* ---------- review ---------- */
 
+/// Review a pull request, with a "Reviewing…" comment while it runs so
+/// people see Mira picked it up. The comment goes once the review is
+/// posted; if the review fails, it says so and links to the run.
 #[allow(clippy::too_many_arguments)]
 async fn review(
+    gh: &GitHub,
+    owner: &str,
+    repo: &str,
+    pr: u64,
+    provider: &dyn mira_ai::ChatProvider,
+    model: &str,
+    workspace: &std::path::Path,
+    args: &GithubArgs,
+) -> Result<()> {
+    let placeholder = gh
+        .post(
+            &format!("/repos/{owner}/{repo}/issues/{pr}/comments"),
+            &json!({"body": "👀 **Mira is reviewing this pull request…** Findings will show up as a review in a few minutes."}),
+        )
+        .await
+        .ok()
+        .and_then(|c| c["id"].as_u64());
+    let result = review_pr(gh, owner, repo, pr, provider, model, workspace, args).await;
+    if let Some(id) = placeholder {
+        let path = format!("/repos/{owner}/{repo}/issues/comments/{id}");
+        let _ = match &result {
+            Ok(()) => gh.delete(&path).await,
+            Err(e) => gh
+                .patch(&path, &json!({"body": failure_note(e, &args.trigger)}))
+                .await
+                .map(drop),
+        };
+    }
+    result
+}
+
+/// What the "Reviewing…" comment becomes when the review fails.
+fn failure_note(e: &anyhow::Error, trigger: &str) -> String {
+    let first = e.to_string();
+    let reason = first.lines().next().unwrap_or("unknown error");
+    let reason: String = reason.chars().take(300).collect();
+    let run = match (
+        std::env::var("GITHUB_SERVER_URL"),
+        std::env::var("GITHUB_REPOSITORY"),
+        std::env::var("GITHUB_RUN_ID"),
+    ) {
+        (Ok(server), Ok(repo), Ok(id)) => {
+            format!(" [See the run]({server}/{repo}/actions/runs/{id}).")
+        }
+        _ => String::new(),
+    };
+    format!(
+        "⚠️ **Mira couldn't finish this review:** {reason}{run}\n\nComment `{trigger} review` to try again."
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn review_pr(
     gh: &GitHub,
     owner: &str,
     repo: &str,
@@ -804,6 +860,15 @@ mod tests {
                         "user": {"login": "dami", "type": "User"}},
             "repository": {"full_name": "o/r", "default_branch": "main"},
         })
+    }
+
+    #[test]
+    fn failure_note_is_short_and_points_at_a_retry() {
+        let e = anyhow!("model returned unparseable JSON: blah\n\nCaused by: x");
+        let note = failure_note(&e, "@runmira-bot");
+        assert!(note.contains("model returned unparseable JSON: blah"));
+        assert!(!note.contains("Caused by"));
+        assert!(note.contains("`@runmira-bot review`"));
     }
 
     #[test]

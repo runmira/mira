@@ -38,7 +38,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          # Reviews get the diff from GitHub, so the latest commit is
+          # enough; tasks make branches and need the history.
+          fetch-depth: ${{ github.event_name == 'pull_request' && 1 || 0 }}
       - uses: runmira/mira@main
         with:
           api-key: ${{ secrets.MIRA_API_KEY }}

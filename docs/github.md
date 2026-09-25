@@ -88,7 +88,12 @@ short-lived tokens:
 | Issue comment, or a new issue | `@runmira-bot fix the crash when the list is empty` | Mira works on a new branch and opens a pull request, then replies with the link. |
 | Pull request comment or review comment | `@runmira-bot also handle the null case` | Mira works on a branch off the pull request's branch and opens a pull request into it. |
 
-- Mira reacts 👀 when it picks up a request.
+- Mira reacts 👀 when it picks up a request. On a review, it posts a
+  "Reviewing…" comment right away and removes it once the review is up;
+  if the review fails, that comment says why and links to the run.
+- Reviews double-check each finding with a second model call (in
+  parallel), which drops most false positives. Set `verify: false` on the
+  action for faster, noisier reviews.
 - The trigger is the app's name, `@runmira-bot`, so GitHub links it to the
   app. (`@mira` is someone else's GitHub account.) Repositories connected
   before this change still listen for `@mira`: click **Update** next to
@@ -120,7 +125,7 @@ permissions:
 # …
 - uses: actions/checkout@v4
   with:
-    fetch-depth: 0
+    fetch-depth: 0   # 1 is enough if you only want reviews
 - uses: runmira/mira@main
   with:
     api-key: ${{ secrets.MIRA_API_KEY }}
