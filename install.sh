@@ -87,7 +87,9 @@ main() {
   fi
 
   tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' EXIT
+  # Expand now: `tmp` is local, so it's gone by the time EXIT fires.
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp'" EXIT
 
   info "downloading ${tarball} (${VERSION})"
   curl -fsSL "$url" -o "$tmp/$tarball" \
