@@ -454,7 +454,9 @@ mod tests {
 
         assert_eq!(ctx.cwd, subdir.canonicalize().unwrap());
 
-        assert_eq!(ctx.repo_root, cwd.path().canonicalize().unwrap());
+        // Moving the cwd leaves the root as given. (Not canonicalized: on
+        // macOS the temp dir sits behind the /var -> /private/var symlink.)
+        assert_eq!(ctx.repo_root, cwd.path());
     }
 
     #[test]
