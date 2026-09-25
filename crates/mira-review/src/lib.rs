@@ -236,7 +236,24 @@ pub async fn stage1_generate(
     );
 
     let reply = complete(provider, model, system, &user).await?;
-    parse_findings(&reply)
+    match parse_findings(&reply) {
+        Ok(findings) => Ok(findings),
+        // Weaker models sometimes answer with pretend tool calls or prose
+        // instead of the JSON. Say so once and ask again before giving up.
+        Err(_) => {
+            let messages = vec![
+                Message::system(system),
+                Message::user(user),
+                Message::assistant(reply),
+                Message::user(
+                    "That reply had no valid JSON array of findings. You can't call \
+                     tools or read files: everything you need is in the diff above. \
+                     Reply with only the ```json fence holding the array.",
+                ),
+            ];
+            parse_findings(&complete_messages(provider, model, messages).await?)
+        }
+    }
 }
 
 /* ---------- stage 2 ---------- */
@@ -337,9 +354,22 @@ async fn complete(
     system: &str,
     user: &str,
 ) -> Result<String> {
+    complete_messages(
+        provider,
+        model,
+        vec![Message::system(system), Message::user(user)],
+    )
+    .await
+}
+
+async fn complete_messages(
+    provider: &dyn ChatProvider,
+    model: &str,
+    messages: Vec<Message>,
+) -> Result<String> {
     let req = ChatRequest {
         model: model.to_owned(),
-        messages: vec![Message::system(system), Message::user(user)],
+        messages,
         tools: Vec::new(),
         // Bumped from 0.1: near-deterministic sampling made the model default
         // to "return []" too often. 0.3 keeps replies grounded but lets it
@@ -397,13 +427,66 @@ fn short(s: &str, n: usize) -> String {
     if s.len() <= n {
         s.to_string()
     } else {
-        format!("{}…", &s[..n])
+        let mut end = n;
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…", &s[..end])
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::stream::{self, BoxStream};
+    use mira_ai::ProviderError;
+    use std::sync::Mutex;
+
+    /// Replies with each scripted text in turn, recording how many
+    /// messages every request carried.
+    struct Script {
+        replies: Mutex<Vec<&'static str>>,
+        sent: Mutex<Vec<usize>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ChatProvider for Script {
+        async fn stream(
+            &self,
+            r: ChatRequest,
+        ) -> Result<BoxStream<'static, Result<ChatEvent, ProviderError>>, ProviderError> {
+            self.sent.lock().unwrap().push(r.messages.len());
+            let text = self.replies.lock().unwrap().remove(0);
+            Ok(stream::iter([Ok(ChatEvent::TextDelta(text.into()))]).boxed())
+        }
+    }
+
+    fn script(replies: Vec<&'static str>) -> Script {
+        Script {
+            replies: Mutex::new(replies),
+            sent: Mutex::new(Vec::new()),
+        }
+    }
+
+    const FINDING: &str = r#"```json
+[{"severity":"high","file":"a.rs","line":3,"title":"Panics","explanation":"x"}]
+```"#;
+
+    #[tokio::test]
+    async fn stage1_asks_again_after_a_reply_without_json() {
+        let p = script(vec!["[read(path='/a.rs', offset=1, limit=5)]", FINDING]);
+        let out = stage1_generate(&p, "m", "+x").await.unwrap();
+        assert_eq!(out.len(), 1);
+        // The retry carries the bad reply and the correction.
+        assert_eq!(*p.sent.lock().unwrap(), vec![2, 4]);
+    }
+
+    #[tokio::test]
+    async fn stage1_gives_up_after_one_retry() {
+        let p = script(vec!["read(path='a')", "still not json ["]);
+        assert!(stage1_generate(&p, "m", "+x").await.is_err());
+        assert_eq!(p.sent.lock().unwrap().len(), 2);
+    }
 
     #[test]
     fn parses_fenced_json_findings() {
@@ -433,6 +516,18 @@ mod tests {
         let out = parse_findings(reply).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].severity, Severity::Low);
+    }
+
+    #[test]
+    fn pretend_tool_calls_are_an_error() {
+        let reply = "[read(path='/src/lib.rs', offset=35, limit=25)]";
+        assert!(parse_findings(reply).is_err());
+    }
+
+    #[test]
+    fn short_cuts_on_a_char_boundary() {
+        assert_eq!(short("aé", 2), "a…");
+        assert_eq!(short("abc", 5), "abc");
     }
 
     #[test]
