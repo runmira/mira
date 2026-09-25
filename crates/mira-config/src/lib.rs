@@ -71,6 +71,12 @@ pub struct MiraConfig {
     /// Cloud tasks (`mira cloud run`). Only read from the global file.
     #[serde(default, skip_serializing_if = "CloudConfig::is_empty")]
     pub cloud: CloudConfig,
+    /// Hooks in Claude Code's format (`PreToolUse`, `PostToolUse`,
+    /// `UserPromptSubmit`, `Stop`, `SessionStart`: lists of
+    /// `{matcher, hooks: [{type: command, command, timeout}]}`). Only read
+    /// from the global file: a cloned repo must not run commands this way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hooks: Option<serde_json::Value>,
 }
 
 /// `cloud:` block: defaults for `mira cloud run`.
@@ -616,6 +622,7 @@ impl MiraConfig {
         self.browser.headless = b.headless.or(self.browser.headless);
         // `compute` and `cloud` are global-only: a repo must not be able to
         // decide that its code gets shipped to a third-party sandbox.
+        // `hooks` are global-only too: they run arbitrary commands.
         self
     }
 }

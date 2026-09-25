@@ -412,6 +412,8 @@ async fn main() -> Result<()> {
     } else {
         session
     };
+    // Plugins' and the user's hooks (PreToolUse, Stop, …).
+    let session = session.with_hooks(extensions.hook_runner());
     // Live memory: reload user + project MIRA.md on every provider round,
     // plus tail the most-recent episodic entries so cross-session memory
     // is visible immediately after `memory_remember` writes it.

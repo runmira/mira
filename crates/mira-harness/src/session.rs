@@ -338,6 +338,8 @@ pub struct Session {
     /// sink reads from this slot so a fresh turn always sees the right
     /// tx and lines from a cancelled turn don't leak into the next.
     progress_slot: ProgressSlot,
+    /// Lifecycle hooks (plugins' and the user's), if any.
+    hooks: Option<Arc<dyn crate::hooks::HookRunner>>,
     /// Diff previews for edit/write calls, keyed by tool call id.
     /// Computed inside `dispatch_call` before the tool runs (so the
     /// "before" file state is still accurate), broadcast live as a
@@ -455,6 +457,7 @@ impl Session {
             next_child_id,
             goal: Arc::new(Mutex::new(None)),
             progress_slot,
+            hooks: None,
             previews: Arc::new(Mutex::new(HashMap::new())),
             current_cancel: Arc::new(Mutex::new(None)),
         }
@@ -527,9 +530,16 @@ impl Session {
             next_child_id,
             goal: Arc::new(Mutex::new(record.goal)),
             progress_slot,
+            hooks: None,
             previews: Arc::new(Mutex::new(record.previews)),
             current_cancel: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Run lifecycle hooks at the points in a turn they name.
+    pub fn with_hooks(mut self, hooks: Arc<dyn crate::hooks::HookRunner>) -> Self {
+        self.hooks = Some(hooks);
+        self
     }
 
     /// Attach a store so the session autosaves after each round.
@@ -771,6 +781,27 @@ impl Session {
                 );
             }
         }
+        let mut user_input: String = user_input.into();
+        let mut hook_notes: Vec<String> = Vec::new();
+        if let Some(hooks) = self.hooks.clone() {
+            let (text, blocked, notes) = self.run_prompt_hooks(hooks.as_ref(), user_input).await;
+            hook_notes = notes;
+            if let Some(reason) = blocked {
+                // The prompt never reaches the model.
+                let (tx, rx) = mpsc::channel::<HarnessEvent>(hook_notes.len() + 2);
+                for n in hook_notes {
+                    let _ = tx.send(HarnessEvent::Warning(format!("[hook] {n}"))).await;
+                }
+                let _ = tx
+                    .send(HarnessEvent::Warning(format!(
+                        "prompt blocked by a hook: {reason}"
+                    )))
+                    .await;
+                let _ = tx.send(HarnessEvent::Done).await;
+                return ReceiverStream::new(rx).boxed();
+            }
+            user_input = text;
+        }
         self.history.lock().await.push(Message::user(user_input));
         // Open a new turn timer; `run_loop` stamps `ended_at` on the way out.
         self.turns.lock().await.push(TurnMeta {
@@ -781,6 +812,9 @@ impl Session {
         let cfg = self.cfg.lock().await.clone();
         let this = self.clone();
         let (tx, rx) = mpsc::channel::<HarnessEvent>(64);
+        for n in hook_notes {
+            let _ = tx.send(HarnessEvent::Warning(format!("[hook] {n}"))).await;
+        }
 
         // If a prior turn is still running (shouldn't happen with a
         // well-behaved UI but easy to hit while debugging), abort it —
@@ -793,6 +827,65 @@ impl Session {
         *slot = Some(handle.abort_handle());
 
         ReceiverStream::new(rx).boxed()
+    }
+
+    /// Fields every hook input carries.
+    async fn hook_input(&self, extra: serde_json::Value) -> serde_json::Value {
+        let mut input = serde_json::json!({
+            "session_id": self.id.to_string(),
+            "cwd": self.tool_ctx.cwd.display().to_string(),
+            "permission_mode": self.policy.lock().await.mode().as_str(),
+        });
+        if let (Some(obj), serde_json::Value::Object(more)) = (input.as_object_mut(), extra) {
+            obj.extend(more);
+        }
+        input
+    }
+
+    /// SessionStart (first message only) and UserPromptSubmit. Returns
+    /// the prompt with any hook context added, or why it was blocked.
+    async fn run_prompt_hooks(
+        &self,
+        hooks: &dyn crate::hooks::HookRunner,
+        prompt: String,
+    ) -> (String, Option<String>, Vec<String>) {
+        use crate::hooks::HookEvent;
+        let mut context: Vec<String> = Vec::new();
+        let first = !self
+            .history
+            .lock()
+            .await
+            .iter()
+            .any(|m| m.role == mira_core::Role::User);
+        let mut notes: Vec<String> = Vec::new();
+        if first && hooks.has(HookEvent::SessionStart) {
+            let input = self
+                .hook_input(serde_json::json!({"source": "startup"}))
+                .await;
+            let out = hooks.run(HookEvent::SessionStart, "startup", input).await;
+            context.extend(out.context);
+            notes.extend(out.messages);
+        }
+        if hooks.has(HookEvent::UserPromptSubmit) {
+            let input = self.hook_input(serde_json::json!({"prompt": prompt})).await;
+            let out = hooks.run(HookEvent::UserPromptSubmit, "", input).await;
+            notes.extend(out.messages);
+            if let Some(reason) = out.block {
+                return (prompt, Some(reason), notes);
+            }
+            context.extend(out.context);
+        }
+        if context.is_empty() {
+            return (prompt, None, notes);
+        }
+        (
+            format!(
+                "{prompt}\n\n<hook-context>\n{}\n</hook-context>",
+                context.join("\n\n")
+            ),
+            None,
+            notes,
+        )
     }
 
     /// Cancel the currently-running turn, if any. Any in-flight tool call
@@ -931,6 +1024,9 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
     // another autonomous turn. Sessions without a goal make exactly
     // one pass through this outer loop — the shape matches the
     // pre-goal behavior exactly.
+    // Times a Stop hook has kept the turn going; capped so a hook that
+    // always blocks can't loop forever.
+    let mut stop_hook_runs = 0u32;
     'goal_loop: loop {
         // Persist the user's turn-opening message right away so the sidebar
         // shows the new thread as soon as they hit send — before the model's
@@ -1297,7 +1393,22 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
         // decide whether to keep going, terminate, or fall through.
         let goal_snapshot = sess.goal.lock().await.clone();
         let Some(mut current_goal) = goal_snapshot else {
-            break 'goal_loop; // no goal → single-pass behaviour
+            // No goal → single pass, unless a Stop hook asks to continue.
+            if round_outcome != RoundOutcome::MaxRounds {
+                if let Some(reason) = run_stop_hooks(&sess, &tx, stop_hook_runs).await {
+                    stop_hook_runs += 1;
+                    sess.history
+                        .lock()
+                        .await
+                        .push(Message::user(format!("[Stop hook] Keep going: {reason}")));
+                    sess.turns.lock().await.push(TurnMeta {
+                        started_at: now_ms(),
+                        ended_at: None,
+                    });
+                    continue 'goal_loop;
+                }
+            }
+            break 'goal_loop;
         };
         if !current_goal.status.is_active() {
             break 'goal_loop; // already terminal
@@ -1532,7 +1643,38 @@ async fn plan_dispatch_batches(sess: &Session, calls: Vec<ToolCall>) -> Vec<Disp
 /// all `Send + Sync` (Arc-behind-Mutex / cloneable), and the tool_ctx
 /// is shared by design. Concurrent history pushes serialize on the
 /// history mutex, which keeps the recorded transcript coherent.
+/// How many times in a row a Stop hook may keep a turn going.
+const MAX_STOP_HOOK_CONTINUATIONS: u32 = 8;
+
+/// Run Stop hooks; `Some(reason)` means a hook wants the agent to keep
+/// working.
+async fn run_stop_hooks(
+    sess: &Session,
+    tx: &mpsc::Sender<HarnessEvent>,
+    runs_so_far: u32,
+) -> Option<String> {
+    use crate::hooks::HookEvent;
+    let hooks = sess.hooks.clone().filter(|h| h.has(HookEvent::Stop))?;
+    if runs_so_far >= MAX_STOP_HOOK_CONTINUATIONS {
+        let _ = tx
+            .send(HarnessEvent::Warning(format!(
+                "a Stop hook kept the turn going {MAX_STOP_HOOK_CONTINUATIONS} times; stopping"
+            )))
+            .await;
+        return None;
+    }
+    let input = sess
+        .hook_input(serde_json::json!({"stop_hook_active": runs_so_far > 0}))
+        .await;
+    let out = hooks.run(HookEvent::Stop, "", input).await;
+    for m in out.messages {
+        let _ = tx.send(HarnessEvent::Warning(format!("[hook] {m}"))).await;
+    }
+    out.block
+}
+
 async fn dispatch_call(sess: &Session, call: ToolCall, tx: &mpsc::Sender<HarnessEvent>) -> bool {
+    let mut call = call;
     let Some(tool) = sess.registry.lock().await.get(&call.function.name) else {
         let msg = format!("no such tool: {}", call.function.name);
         warn!(tool = %call.function.name, "unknown tool call");
@@ -1563,6 +1705,41 @@ async fn dispatch_call(sess: &Session, call: ToolCall, tx: &mpsc::Sender<Harness
         return false;
     }
 
+    // PreToolUse hooks: may rewrite the input, deny, allow or ask.
+    let mut hook_permission: Option<crate::hooks::HookPermission> = None;
+    if let Some(hooks) = sess
+        .hooks
+        .clone()
+        .filter(|h| h.has(crate::hooks::HookEvent::PreToolUse))
+    {
+        let args: serde_json::Value =
+            serde_json::from_str(&call.function.arguments).unwrap_or(serde_json::json!({}));
+        let input = sess
+            .hook_input(serde_json::json!({
+                "tool_name": call.function.name,
+                "tool_input": args,
+                "tool_use_id": call.id.to_string(),
+            }))
+            .await;
+        let out = hooks
+            .run(
+                crate::hooks::HookEvent::PreToolUse,
+                &call.function.name,
+                input,
+            )
+            .await;
+        for m in out.messages {
+            let _ = tx.send(HarnessEvent::Warning(format!("[hook] {m}"))).await;
+        }
+        if let Some(v) = out.updated_input {
+            call.function.arguments = v.to_string();
+        }
+        hook_permission = match (out.block, out.permission) {
+            (Some(reason), _) => Some(crate::hooks::HookPermission::Deny(reason)),
+            (None, p) => p,
+        };
+    }
+
     // Every path/target this call would touch. For single-target tools
     // this is a one-element vec matching the old `policy_target()`
     // return; for multi-target tools (apply_patch) it's every affected
@@ -1588,7 +1765,18 @@ async fn dispatch_call(sess: &Session, call: ToolCall, tx: &mpsc::Sender<Harness
         }
     }
 
-    let allowed = if deny_target.is_some() {
+    // A hook's deny wins; its allow skips the prompt but never a policy
+    // deny; its ask forces one.
+    let hook_denied = match &hook_permission {
+        Some(crate::hooks::HookPermission::Deny(reason)) => Some(reason.clone()),
+        _ => None,
+    };
+    match hook_permission {
+        Some(crate::hooks::HookPermission::Ask) => has_ask = true,
+        Some(crate::hooks::HookPermission::Allow) => has_ask = false,
+        _ => {}
+    }
+    let allowed = if deny_target.is_some() || hook_denied.is_some() {
         false
     } else if has_ask {
         sess.approver.approve(&call, Decision::Ask).await
@@ -1627,7 +1815,9 @@ async fn dispatch_call(sess: &Session, call: ToolCall, tx: &mpsc::Sender<Harness
         }
     }
 
-    let result = if !allowed {
+    let result = if let Some(reason) = &hook_denied {
+        ToolResult::err(call.id.clone(), format!("blocked by a hook: {reason}"))
+    } else if !allowed {
         ToolResult::err(
             call.id.clone(),
             format!(
@@ -1651,6 +1841,49 @@ async fn dispatch_call(sess: &Session, call: ToolCall, tx: &mpsc::Sender<Harness
             }
         }
     };
+
+    // PostToolUse hooks: feedback for the model rides on the result.
+    let mut result = result;
+    if allowed {
+        if let Some(hooks) = sess
+            .hooks
+            .clone()
+            .filter(|h| h.has(crate::hooks::HookEvent::PostToolUse))
+        {
+            let args: serde_json::Value =
+                serde_json::from_str(&call.function.arguments).unwrap_or(serde_json::json!({}));
+            let input = sess
+                .hook_input(serde_json::json!({
+                    "tool_name": call.function.name,
+                    "tool_input": args,
+                    "tool_use_id": call.id.to_string(),
+                    "tool_response": {
+                        "content": result.content,
+                        "is_error": result.is_error,
+                    },
+                }))
+                .await;
+            let out = hooks
+                .run(
+                    crate::hooks::HookEvent::PostToolUse,
+                    &call.function.name,
+                    input,
+                )
+                .await;
+            for m in out.messages {
+                let _ = tx.send(HarnessEvent::Warning(format!("[hook] {m}"))).await;
+            }
+            let mut feedback: Vec<String> = out.block.into_iter().collect();
+            feedback.extend(out.context);
+            if !feedback.is_empty() {
+                result.content = format!(
+                    "{}\n\n[hook feedback]\n{}",
+                    result.content,
+                    feedback.join("\n")
+                );
+            }
+        }
+    }
 
     let ok = !result.is_error;
     {

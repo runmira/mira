@@ -160,7 +160,7 @@ function InstalledCard({
             {p.skills.length > 0 && <Pill tone="purple">{plural(p.skills.length, 'skill')}</Pill>}
             {p.mcp_servers.length > 0 && <Pill tone="green">{plural(p.mcp_servers.length, 'MCP server')}</Pill>}
             {p.hooks.length > 0 && (
-              <Pill title="Mira doesn't run plugin hooks yet">{plural(p.hooks.length, 'hook')}</Pill>
+              <Pill title="Runs at points in each turn (before and after tools, on submit, on stop)">{plural(p.hooks.length, 'hook')}</Pill>
             )}
           </div>
         )}

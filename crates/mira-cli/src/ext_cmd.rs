@@ -591,7 +591,7 @@ pub async fn run_plugin(args: PluginArgs) -> Result<()> {
                     (c.agents.len(), "agents"),
                     (c.skills.len(), "skills"),
                     (c.mcp_servers.len(), "MCP servers"),
-                    (c.hooks.len(), "hooks (not run yet)"),
+                    (c.hooks.len(), "hooks"),
                 ] {
                     if items > 0 {
                         parts.push(format!("{items} {what}"));
@@ -668,7 +668,7 @@ pub async fn run_plugin(args: PluginArgs) -> Result<()> {
                 show("Agents", &d.agent_names);
                 show("Skills", &c.skills);
                 show("MCP servers", &c.mcp_server_names);
-                show("Hooks (not run yet)", &c.hooks);
+                show("Hooks", &c.hooks);
                 show("LSP servers (not run yet)", &c.lsp_servers);
             } else {
                 println!("  Components: known after install");

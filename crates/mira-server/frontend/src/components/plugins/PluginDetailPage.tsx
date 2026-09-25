@@ -143,7 +143,7 @@ export function PluginDetailPage({
                 <IncludeRow icon={<Bot />} label="Agents" items={detail.agent_names} />
                 <IncludeRow icon={<Sparkles />} label="Skills" items={c.skills} />
                 <IncludeRow icon={<Plug />} label="MCP Servers" items={c.mcp_server_names} />
-                <IncludeRow icon={<Zap />} label="Hooks" items={c.hooks} note="not run by Mira yet" />
+                <IncludeRow icon={<Zap />} label="Hooks" items={c.hooks} />
                 <IncludeRow icon={<Cpu />} label="LSP Servers" items={c.lsp_servers} note="not run by Mira yet" />
                 {detail.command_names.length +
                   detail.agent_names.length +

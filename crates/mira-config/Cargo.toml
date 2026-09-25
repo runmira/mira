@@ -9,4 +9,5 @@ description  = "On-disk YAML configuration shared by the Mira CLI and server."
 [dependencies]
 serde      = { workspace = true }
 serde_yaml = { workspace = true }
+serde_json = { workspace = true }
 anyhow     = { workspace = true }

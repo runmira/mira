@@ -163,6 +163,7 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
         scratchpads: scratchpads.clone(),
         default_model_for_agents: cfg.cfg.model.clone(),
         compute: cfg.compute.clone(),
+        hooks: Some(cfg.extensions.hook_runner()),
     };
     let initial_slot =
         crate::slot::build_slot(cfg.cwd.clone(), cfg.cfg.clone(), cfg.resume, &deps).await;

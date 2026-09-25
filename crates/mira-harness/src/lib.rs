@@ -16,6 +16,7 @@ pub mod approver;
 pub mod event;
 pub mod goal;
 pub mod history;
+pub mod hooks;
 pub mod persist;
 pub mod session;
 pub mod verify;
@@ -26,6 +27,7 @@ pub use goal::{
     BudgetCheck, Evaluation, Goal, GoalStatus, GoalVerdict, VerifyCommand, VerifyOutcome,
     DEFAULT_MAX_ITERATIONS,
 };
+pub use hooks::{HookEvent, HookOutcome, HookPermission, HookRunner};
 pub use persist::{FileStore, SessionRecord, SessionStore, StoreError, TurnMeta, UsageTotals};
 pub use session::{
     profile_for_mode, AutoExtractConfig, MemoryRetrievalConfig, Session, SessionConfig,

@@ -220,6 +220,8 @@ pub struct SlotDeps {
     pub default_model_for_agents: String,
     /// `compute:` config: named remote environments.
     pub compute: mira_config::ComputeConfig,
+    /// Lifecycle hooks (plugins' and the user's).
+    pub hooks: Option<Arc<dyn mira_harness::HookRunner>>,
 }
 
 /// Wire up a session with all its per-slot machinery.
@@ -332,6 +334,9 @@ pub async fn build_slot(
     };
     if let Some(store) = deps.store.clone() {
         session = session.with_store(store);
+    }
+    if let Some(hooks) = deps.hooks.clone() {
+        session = session.with_hooks(hooks);
     }
     if deps.memory_runtime.inject_context() {
         session = session.with_memory_snapshot(crate::make_memory_snapshot_with(

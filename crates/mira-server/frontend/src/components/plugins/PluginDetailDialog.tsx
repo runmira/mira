@@ -98,7 +98,7 @@ export function PluginDetailDialog({
                     <Includes icon={<Bot />}        label="Agents"      items={detail.agent_names} />
                     <Includes icon={<Sparkles />}   label="Skills"      items={c.skills} />
                     <Includes icon={<Plug />}        label="MCP servers" items={c.mcp_server_names} />
-                    <Includes icon={<Zap />}         label="Hooks"       items={c.hooks} note="not run by Mira yet" />
+                    <Includes icon={<Zap />}         label="Hooks"       items={c.hooks} />
                     <Includes icon={<Cpu />}         label="LSP servers" items={c.lsp_servers} note="not run by Mira yet" />
                     {detail.command_names.length +
                       detail.agent_names.length +

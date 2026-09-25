@@ -23,6 +23,9 @@ pub struct Components {
     pub skills: Vec<String>,
     /// Hook event names (`PreToolUse`, …). Mira doesn't run hooks yet.
     pub hooks: Vec<String>,
+    /// The hooks definition (`{event: [{matcher, hooks: [...]}]}`).
+    #[serde(skip)]
+    pub hooks_config: Option<Value>,
     /// MCP servers by the plugin's name for them.
     #[serde(skip)]
     pub mcp_servers: Vec<(String, Result<McpServerConfig, String>)>,
@@ -174,6 +177,7 @@ pub fn discover(root: &Path, manifest: &PluginManifest) -> Components {
         if let Some(o) = events.as_object() {
             c.hooks = o.keys().cloned().collect();
         }
+        c.hooks_config = Some(events.clone());
     }
 
     let mcp_text = match &manifest.mcp_servers {
