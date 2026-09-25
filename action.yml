@@ -21,6 +21,9 @@ inputs:
   github-token:
     description: Token used to read the pull request, comment, push branches and open pull requests. Pull requests opened with the default token don't start other workflows; pass a personal or GitHub App token if you want CI to run on them.
     default: ${{ github.token }}
+  app-token-url:
+    description: "Where to swap the workflow's OIDC identity for a Runmira GitHub App token, so comments and pull requests come from the app and start CI. Needs the id-token write permission and the app installed; otherwise github-token is used. Set to an empty string to turn off."
+    default: https://jvwezgehvghcqgpjxjct.supabase.co/functions/v1/github-app/actions-token
   trigger:
     description: What people type in a comment to call Mira.
     default: "@mira"
@@ -53,10 +56,31 @@ runs:
         bash "${{ github.action_path }}/install.sh"
         echo "$MIRA_INSTALL_DIR" >> "$GITHUB_PATH"
 
+    - name: Get a Runmira app token
+      id: app
+      if: inputs.app-token-url != ''
+      shell: bash
+      env:
+        APP_TOKEN_URL: ${{ inputs.app-token-url }}
+      run: |
+        # Only when the workflow may request an OIDC token (id-token: write).
+        [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] || { echo "No OIDC token available; using github-token."; exit 0; }
+        oidc=$(curl -fsS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+          "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=runmira" | jq -r .value) || exit 0
+        resp=$(curl -sS -X POST -H "Authorization: Bearer $oidc" "$APP_TOKEN_URL") || exit 0
+        token=$(echo "$resp" | jq -r '.token // empty')
+        if [ -n "$token" ]; then
+          echo "::add-mask::$token"
+          echo "token=$token" >> "$GITHUB_OUTPUT"
+          echo "Using the Runmira GitHub App."
+        else
+          echo "Runmira app token unavailable ($(echo "$resp" | jq -r '.error // "no token"')); using github-token."
+        fi
+
     - name: Run Mira
       shell: bash
       env:
-        GITHUB_TOKEN: ${{ inputs.github-token }}
+        GITHUB_TOKEN: ${{ steps.app.outputs.token || inputs.github-token }}
         MIRA_API_KEY: ${{ inputs.api-key }}
         IN_PROVIDER: ${{ inputs.provider }}
         IN_MODEL: ${{ inputs.model }}

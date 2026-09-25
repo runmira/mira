@@ -981,6 +981,8 @@ export type GithubConnectView = {
   model: string | null;
   /** Why connecting can't work yet. */
   problem: string | null;
+  /** The part of `problem` about Mira's provider, model or key. */
+  settings_problem: string | null;
   status: { repo: string; workflow: boolean; api_key_secret: boolean } | null;
 };
 
@@ -998,11 +1000,13 @@ export async function getGithubConnect(repo?: string): Promise<GithubConnectView
   return (await r.json()) as GithubConnectView;
 }
 
-export async function connectGithub(repo?: string): Promise<GithubConnectReport> {
+/** Connect `repo`. `token` is a Runmira app token for it; without one
+ *  the server uses the GitHub key from Settings. */
+export async function connectGithub(repo?: string, token?: string): Promise<GithubConnectReport> {
   const r = await fetch('/api/github/connect', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ repo: repo || null }),
+    body: JSON.stringify({ repo: repo || null, token: token || null }),
   });
   if (!r.ok) throw new Error(await readError(r, 'github connect'));
   return (await r.json()) as GithubConnectReport;

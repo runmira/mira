@@ -312,6 +312,8 @@ permissions:
   contents: write
   pull-requests: write
   issues: write
+  # Lets the run prove which repository it is, to act as the Runmira app.
+  id-token: write
 
 concurrency:
   group: mira-${{{{ github.event.pull_request.number || github.event.issue.number }}}}

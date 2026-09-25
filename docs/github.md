@@ -10,18 +10,15 @@ Once a repository is connected, Mira:
 It runs in the repository's own GitHub Actions, with your model key.
 Nothing runs on Mira's side, and there's no file for you to write.
 
-## Connect a repository
+## Connect your repositories
 
-**In the web app:** **Settings → Integrations → GitHub**, check the
-repository name, and click **Connect**.
+In the web app, open **Settings → Integrations → GitHub** and click
+**Connect GitHub**. GitHub asks which repositories to give the
+**Runmira** app access to; pick them and you're sent back to Mira. Then
+click **Turn on** next to each repository Mira should work in.
 
-**Or in the terminal**, from inside the repository:
-
-```bash
-mira github setup
-```
-
-Either way, Mira uses the provider, model and key you already have and:
+Turning a repository on uses the provider, model and key you already
+have in Mira:
 
 1. stores the model key as the encrypted Actions secret `MIRA_API_KEY`;
 2. stores the provider and model as the Actions variables `MIRA_PROVIDER`
@@ -29,12 +26,33 @@ Either way, Mira uses the provider, model and key you already have and:
 3. adds `.github/workflows/mira.yml`. If the default branch is protected,
    it opens a pull request with it instead; merge that to finish.
 
-To change the model or key later, change it in Mira and connect again.
-`mira github status` shows whether a repository is connected.
+To change the model or key later, change it in Mira and click **Update**.
 
-### The GitHub token
+**Organizations:** on GitHub's page, pick your personal account or any
+organization, and choose all or some of its repositories. **Add an
+organization or change repositories** goes back there. If you aren't an
+owner of the organization, GitHub sends the owners a request instead;
+once they approve it, click **Connect GitHub** again. Every installation
+you can see shows up in Mira, but you can only turn Mira on in
+repositories where you're an admin (it stores an Actions secret there,
+which GitHub reserves for admins); the others say **Needs admin**.
 
-Connecting needs a GitHub token that can manage the repository:
+Reviews, comments and pull requests come from the Runmira app, and
+Mira's pull requests start your CI like anyone else's.
+
+### Without the app
+
+If you'd rather not install an app (or run Mira without its hosted
+sign-in), connect a repository with a personal token instead: **Use a
+personal access token instead** under the Connect button, or from inside
+the repository:
+
+```bash
+mira github setup
+```
+
+It does the same three steps. `mira github status` shows whether a
+repository is connected. The token needs:
 
 - **Classic token:** the `repo` and `workflow` scopes.
   [Create one](https://github.com/settings/tokens/new?scopes=repo,workflow&description=Mira).
@@ -44,7 +62,22 @@ Connecting needs a GitHub token that can manage the repository:
 You need admin access to the repository, because Actions secrets need
 it. The CLI also picks up a signed-in GitHub CLI (`gh auth token`), or
 asks for a token and saves it. In the web app it's the **GitHub** key
-under **Settings → Search & keys**.
+under **Settings → Search & keys**. With a token, comments come from
+`github-actions[bot]` and Mira's pull requests don't start other
+workflows.
+
+### How the app works
+
+The work still runs in each repository's own Actions, with the model
+key stored there. The app's private key lives in one Supabase edge
+function (`supabase/functions/github-app`), which only hands out
+short-lived tokens:
+
+- to a signed-in Mira user, for a repository in an installation they
+  linked, to set it up;
+- to a workflow run, which proves which repository it is with GitHub's
+  OIDC identity (`id-token: write`), so no token is stored in the
+  repository.
 
 ## Using it
 
@@ -64,10 +97,10 @@ under **Settings → Search & keys**.
   access to the repository's secrets, so there's no model key. Mira also
   can't push to forks.
 
-**CI on Mira's pull requests:** pull requests opened with the default
-Actions token don't start other workflows. To have your CI run on them,
-use a personal access token or a GitHub App token as the action's
-`github-token` input.
+**CI on Mira's pull requests:** with the Runmira app installed, Mira's
+pull requests start your CI. Without it, pull requests opened with the
+default Actions token don't start other workflows; pass a personal
+access token as the action's `github-token` input if you need that.
 
 ## Using the action directly
 
@@ -75,6 +108,12 @@ The workflow Mira adds uses the `runmira/mira` action. You can also use
 it in your own workflows:
 
 ```yaml
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write   # to act as the Runmira app
+# …
 - uses: actions/checkout@v4
   with:
     fetch-depth: 0
@@ -91,7 +130,8 @@ it in your own workflows:
 | `provider` | `openrouter` | Provider name: `openrouter`, `anthropic`, `openai`, `groq`, … |
 | `model` | (required) | Model id. |
 | `base-url` | | Endpoint, for providers Mira doesn't know by name. |
-| `github-token` | `github.token` | Token used to comment, push and open pull requests. |
+| `github-token` | `github.token` | Token used when the Runmira app isn't installed. |
+| `app-token-url` | the Runmira service | Where the run swaps its OIDC identity for a Runmira app token. Empty turns it off. |
 | `trigger` | `@mira` | What people write to call Mira. |
 | `allow` | `OWNER,MEMBER,COLLABORATOR` | Who can start tasks. |
 | `max-runtime-minutes` | `30` | Time limit for a task. |
@@ -101,3 +141,18 @@ it in your own workflows:
 
 The action runs `mira github`, which reads the Actions event. You can run
 it yourself with `--event-name` and `--event-path` to test a payload.
+
+## Running the Runmira service yourself
+
+The app and its edge function live in this repository. To run your own:
+
+1. Apply the migrations in `supabase/migrations/` and deploy
+   `supabase/functions/github-app` (gateway JWT check off; the function
+   checks callers itself) to your Supabase project.
+2. Insert a one-time setup key:
+   `insert into github_app_setup (key) values ('<random>');`
+3. In a Mira build pointed at that project, open **Settings →
+   Integrations**, enter the key, and click **Create the GitHub App**.
+   GitHub creates the app from Mira's manifest and the function stores
+   its credentials; nothing is copied by hand.
+4. Point the action's `app-token-url` at your function.
