@@ -123,6 +123,50 @@ impl GitHub {
         .map(drop)
     }
 
+    /// GET a REST path as JSON.
+    pub async fn get(&self, path: &str) -> Result<serde_json::Value, CloudError> {
+        self.send(path, self.req(reqwest::Method::GET, path))
+            .await?
+            .json()
+            .await
+            .map_err(|e| CloudError::GitHub(e.to_string()))
+    }
+
+    /// POST JSON to a REST path.
+    pub async fn post(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value, CloudError> {
+        let resp = self
+            .send(path, self.req(reqwest::Method::POST, path).json(body))
+            .await?;
+        Ok(resp.json().await.unwrap_or(serde_json::Value::Null))
+    }
+
+    /// A pull request's unified diff.
+    pub async fn pr_diff(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<String, CloudError> {
+        self.send(
+            "fetching the diff",
+            // Its own Accept: `req` already sets the JSON one, and a second
+            // header would be appended rather than replace it.
+            self.http
+                .get(format!("{}/repos/{owner}/{repo}/pulls/{number}", self.api))
+                .bearer_auth(&self.token)
+                .header("Accept", "application/vnd.github.v3.diff")
+                .header("X-GitHub-Api-Version", "2022-11-28"),
+        )
+        .await?
+        .text()
+        .await
+        .map_err(|e| CloudError::GitHub(e.to_string()))
+    }
+
     /// Draft → ready. REST can't do this; it's a GraphQL mutation.
     pub async fn mark_ready(&self, node_id: &str) -> Result<(), CloudError> {
         let resp = self

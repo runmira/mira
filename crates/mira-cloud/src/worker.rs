@@ -49,7 +49,7 @@ pub enum TaskStatus {
 }
 
 impl TaskStatus {
-    fn label(&self) -> &'static str {
+    pub fn label(&self) -> &'static str {
         match self {
             TaskStatus::Done => "done",
             TaskStatus::NeedsUser(_) => "needs your input",

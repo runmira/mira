@@ -1,0 +1,75 @@
+name: Mira coding agent
+description: Review pull requests, and work on @mira requests in issues and pull requests, with the model you choose.
+author: runmira
+branding:
+  icon: cpu
+  color: purple
+
+inputs:
+  api-key:
+    description: API key for your model provider. Store it as a secret.
+    required: true
+  provider:
+    description: Provider name (openrouter, anthropic, openai, bedrock, groq, …).
+    default: openrouter
+  model:
+    description: Model id, e.g. anthropic/claude-sonnet-4.5 on OpenRouter.
+    required: true
+  base-url:
+    description: Endpoint URL. Only needed for providers Mira doesn't know by name.
+    default: ""
+  github-token:
+    description: Token used to read the pull request, comment, push branches and open pull requests. Pull requests opened with the default token don't start other workflows; pass a personal or GitHub App token if you want CI to run on them.
+    default: ${{ github.token }}
+  trigger:
+    description: What people type in a comment to call Mira.
+    default: "@mira"
+  allow:
+    description: Author associations allowed to start tasks, comma-separated.
+    default: OWNER,MEMBER,COLLABORATOR
+  max-runtime-minutes:
+    description: Time limit for a task.
+    default: "30"
+  setup:
+    description: Shell command to run in the checkout before a task (e.g. `npm ci`).
+    default: ""
+  verify:
+    description: Run the review's second, verifying pass (fewer false positives, slower).
+    default: "true"
+  mira-version:
+    description: Release tag to install, or `latest`.
+    default: latest
+
+runs:
+  using: composite
+  steps:
+    - name: Install Mira
+      shell: bash
+      env:
+        MIRA_VERSION: ${{ inputs.mira-version }}
+        MIRA_INSTALL_DIR: ${{ runner.temp }}/mira-bin
+      run: |
+        mkdir -p "$MIRA_INSTALL_DIR"
+        bash "${{ github.action_path }}/install.sh"
+        echo "$MIRA_INSTALL_DIR" >> "$GITHUB_PATH"
+
+    - name: Run Mira
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        MIRA_API_KEY: ${{ inputs.api-key }}
+        IN_PROVIDER: ${{ inputs.provider }}
+        IN_MODEL: ${{ inputs.model }}
+        IN_BASE_URL: ${{ inputs.base-url }}
+        IN_TRIGGER: ${{ inputs.trigger }}
+        IN_ALLOW: ${{ inputs.allow }}
+        IN_RUNTIME: ${{ inputs.max-runtime-minutes }}
+        IN_SETUP: ${{ inputs.setup }}
+        IN_VERIFY: ${{ inputs.verify }}
+      run: |
+        export MIRA_PROVIDER="$IN_PROVIDER" MIRA_MODEL="$IN_MODEL"
+        [ -n "$IN_BASE_URL" ] && export MIRA_BASE_URL="$IN_BASE_URL"
+        args=(github --trigger "$IN_TRIGGER" --allow "$IN_ALLOW" --max-runtime-minutes "$IN_RUNTIME")
+        [ -n "$IN_SETUP" ] && args+=(--setup "$IN_SETUP")
+        [ "$IN_VERIFY" = "false" ] && args+=(--no-verify)
+        mira "${args[@]}"
