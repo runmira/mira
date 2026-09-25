@@ -113,13 +113,10 @@ pub async fn connect(
     repo: &str,
     opts: &ConnectOptions,
 ) -> Result<ConnectReport, CloudError> {
+    // No up-front permission check: the `permissions` field describes a
+    // person, and reads all-false for a GitHub App token that can manage
+    // secrets. Writing the secret is the real test (see `set_secret`).
     let info = gh.get(&format!("/repos/{owner}/{repo}")).await?;
-    if info["permissions"]["admin"] == false && info["permissions"]["maintain"] == false {
-        // Secrets and variables need admin (or maintain) on the repo.
-        return Err(CloudError::GitHub(format!(
-            "your token can't manage {owner}/{repo}'s secrets; you need admin access to it"
-        )));
-    }
     let branch = info["default_branch"].as_str().unwrap_or("main").to_owned();
 
     set_secret(gh, owner, repo, "MIRA_API_KEY", &opts.api_key).await?;
@@ -237,9 +234,19 @@ pub async fn set_secret(
     name: &str,
     value: &str,
 ) -> Result<(), CloudError> {
+    let refused = |e: CloudError| match e {
+        CloudError::GitHub(m) if m.contains("HTTP 403") || m.contains("HTTP 404") => {
+            CloudError::GitHub(format!(
+                "can't manage {owner}/{repo}'s Actions secrets: that needs admin access to \
+                 the repository (or, for the app, its Secrets permission)"
+            ))
+        }
+        other => other,
+    };
     let key = gh
         .get(&format!("/repos/{owner}/{repo}/actions/secrets/public-key"))
-        .await?;
+        .await
+        .map_err(refused)?;
     let (Some(key_id), Some(public)) = (key["key_id"].as_str(), key["key"].as_str()) else {
         return Err(CloudError::GitHub(
             "no public key for Actions secrets".into(),
@@ -252,6 +259,7 @@ pub async fn set_secret(
     )
     .await
     .map(drop)
+    .map_err(refused)
 }
 
 /// libsodium `crypto_box_seal`, base64 in and out, as GitHub's secrets
@@ -312,6 +320,8 @@ permissions:
   contents: write
   pull-requests: write
   issues: write
+  # Lets the run prove which repository it is, to act as the Runmira-bot app.
+  id-token: write
 
 concurrency:
   group: mira-${{{{ github.event.pull_request.number || github.event.issue.number }}}}

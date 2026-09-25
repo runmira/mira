@@ -22,6 +22,10 @@ pub struct RepoQuery {
     /// `owner/name`; defaults to the current folder's GitHub remote.
     #[serde(default)]
     pub repo: Option<String>,
+    /// A short-lived Runmira-bot GitHub App token for the repository, from
+    /// the connect flow. Without it, the `GITHUB_TOKEN` key is used.
+    #[serde(default)]
+    pub token: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -33,6 +37,9 @@ pub struct ConnectView {
     model: Option<String>,
     /// Why connecting can't work yet (no key, no model, …).
     problem: Option<String>,
+    /// The part of `problem` about Mira's own settings (provider, model,
+    /// key), which matters whichever way GitHub is connected.
+    settings_problem: Option<String>,
     /// Current state on GitHub, when it could be read.
     status: Option<setup::Status>,
 }
@@ -41,6 +48,7 @@ pub async fn get_connect(State(state): State<AppState>, Query(q): Query<RepoQuer
     let repo = repo_for(&state, q.repo).await;
     let cfg = MiraConfig::load(&state.current_cwd().await).unwrap_or_default();
     let token = resolve_github_token();
+    let settings_problem = options(&cfg).err();
     let problem = match options(&cfg) {
         Err(e) => Some(e),
         Ok(_) if token.is_none() => {
@@ -67,6 +75,7 @@ pub async fn get_connect(State(state): State<AppState>, Query(q): Query<RepoQuer
             .map(mira_config::pretty_provider_name),
         model: cfg.default_model.clone(),
         problem,
+        settings_problem,
         status,
     })
     .into_response()
@@ -84,10 +93,16 @@ pub async fn post_connect(State(state): State<AppState>, Json(q): Json<RepoQuery
         Ok(o) => o,
         Err(e) => return err(StatusCode::BAD_REQUEST, e),
     };
-    let Some(token) = resolve_github_token() else {
+    let Some(token) = q
+        .token
+        .clone()
+        .filter(|t| !t.is_empty())
+        .or_else(resolve_github_token)
+    else {
         return err(
             StatusCode::BAD_REQUEST,
-            "add a GitHub token (repo and workflow scopes) under Search & keys".into(),
+            "connect GitHub, or add a GitHub token (repo and workflow scopes) under Search & keys"
+                .into(),
         );
     };
     let gh = match GitHub::new(api(), &token) {

@@ -397,6 +397,30 @@ export default function App() {
   // Enter settings by remembering the current non-settings view, then
   // swapping the main pane to `settings`. Guarded against being called
   // while already in settings (would clobber the return-to).
+  // Back from installing the GitHub App: GitHub (via the github-app edge
+  // function) sends the user here with `?github=…`. Show the result in
+  // Settings → Integrations and drop the query.
+  const [githubReturn] = useState<import('./components/Settings').GithubReturn>(() => {
+    const q = new URLSearchParams(window.location.search);
+    const ok = q.get('github');
+    const bad = q.get('github_error');
+    if (!ok && !bad) return null;
+    q.delete('github');
+    q.delete('github_error');
+    const rest = q.toString();
+    window.history.replaceState({}, '', window.location.pathname + (rest ? `?${rest}` : '') + window.location.hash);
+    if (bad) return { ok: false, message: `GitHub: ${bad}` };
+    return ok === 'requested'
+      ? { ok: true, message: 'Installation requested: an organization owner has to approve it on GitHub.' }
+      : { ok: true, message: 'GitHub connected. Turn Mira on for the repositories you want.' };
+  });
+  useEffect(() => {
+    if (!githubReturn) return;
+    setSettingsSection('integrations');
+    openSettings();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   function openSettings() {
     setMainView((prev) => {
       if (prev !== 'settings') setSettingsReturnTo(prev);
@@ -1594,6 +1618,7 @@ export default function App() {
             onSaved={settingsHandler}
             onExit={exitSettings}
             skillsVersion={skillsVersion}
+            githubReturn={githubReturn}
           />
         )}
       </main>
