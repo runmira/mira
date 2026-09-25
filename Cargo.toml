@@ -6,7 +6,7 @@ members = ["crates/*"]
 exclude = ["evals/tasks/*"]
 
 [workspace.package]
-version = "0.3.9"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.88"
 license = "Apache-2.0"
@@ -14,25 +14,25 @@ repository = "https://github.com/runmira/mira"
 
 [workspace.dependencies]
 # Internal crates — path deps so cargo publish stays honest later.
-mira-core     = { path = "crates/mira-core",    version = "0.3.9" }
-mira-config   = { path = "crates/mira-config",  version = "0.3.9" }
-mira-ai       = { path = "crates/mira-ai",      version = "0.3.9" }
-mira-tools    = { path = "crates/mira-tools",   version = "0.3.9" }
-mira-memory   = { path = "crates/mira-memory",  version = "0.3.9" }
-mira-policy   = { path = "crates/mira-policy",  version = "0.3.9" }
-mira-sandbox  = { path = "crates/mira-sandbox", version = "0.3.9" }
-mira-harness  = { path = "crates/mira-harness", version = "0.3.9" }
-mira-review   = { path = "crates/mira-review",  version = "0.3.9" }
-mira-agents   = { path = "crates/mira-agents",  version = "0.3.9" }
-mira-skills   = { path = "crates/mira-skills",  version = "0.3.9" }
-mira-server   = { path = "crates/mira-server",  version = "0.3.9" }
-mira-auth     = { path = "crates/mira-auth",    version = "0.3.9" }
-mira-computer = { path = "crates/mira-computer", version = "0.3.9" }
-mira-browser  = { path = "crates/mira-browser",  version = "0.3.9" }
-mira-compute  = { path = "crates/mira-compute",  version = "0.3.9" }
-mira-cloud    = { path = "crates/mira-cloud",    version = "0.3.9" }
-mira-mcp      = { path = "crates/mira-mcp",      version = "0.3.9" }
-mira-plugins  = { path = "crates/mira-plugins",  version = "0.3.9" }
+mira-core     = { path = "crates/mira-core",    version = "0.4.0" }
+mira-config   = { path = "crates/mira-config",  version = "0.4.0" }
+mira-ai       = { path = "crates/mira-ai",      version = "0.4.0" }
+mira-tools    = { path = "crates/mira-tools",   version = "0.4.0" }
+mira-memory   = { path = "crates/mira-memory",  version = "0.4.0" }
+mira-policy   = { path = "crates/mira-policy",  version = "0.4.0" }
+mira-sandbox  = { path = "crates/mira-sandbox", version = "0.4.0" }
+mira-harness  = { path = "crates/mira-harness", version = "0.4.0" }
+mira-review   = { path = "crates/mira-review",  version = "0.4.0" }
+mira-agents   = { path = "crates/mira-agents",  version = "0.4.0" }
+mira-skills   = { path = "crates/mira-skills",  version = "0.4.0" }
+mira-server   = { path = "crates/mira-server",  version = "0.4.0" }
+mira-auth     = { path = "crates/mira-auth",    version = "0.4.0" }
+mira-computer = { path = "crates/mira-computer", version = "0.4.0" }
+mira-browser  = { path = "crates/mira-browser",  version = "0.4.0" }
+mira-compute  = { path = "crates/mira-compute",  version = "0.4.0" }
+mira-cloud    = { path = "crates/mira-cloud",    version = "0.4.0" }
+mira-mcp      = { path = "crates/mira-mcp",      version = "0.4.0" }
+mira-plugins  = { path = "crates/mira-plugins",  version = "0.4.0" }
 
 # Async runtime
 tokio           = { version = "1.40", features = ["macros", "rt-multi-thread", "process", "fs", "io-util", "io-std", "sync", "signal", "time"] }
