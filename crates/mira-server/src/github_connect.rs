@@ -22,7 +22,7 @@ pub struct RepoQuery {
     /// `owner/name`; defaults to the current folder's GitHub remote.
     #[serde(default)]
     pub repo: Option<String>,
-    /// A short-lived Runmira GitHub App token for the repository, from
+    /// A short-lived Runmira-bot GitHub App token for the repository, from
     /// the connect flow. Without it, the `GITHUB_TOKEN` key is used.
     #[serde(default)]
     pub token: Option<String>,

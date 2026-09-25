@@ -14,7 +14,7 @@ Nothing runs on Mira's side, and there's no file for you to write.
 
 In the web app, open **Settings → Integrations → GitHub** and click
 **Connect GitHub**. GitHub asks which repositories to give the
-**Runmira** app access to; pick them and you're sent back to Mira. Then
+**Runmira-bot** app access to; pick them and you're sent back to Mira. Then
 click **Turn on** next to each repository Mira should work in.
 
 Turning a repository on uses the provider, model and key you already
@@ -37,7 +37,7 @@ you can see shows up in Mira, but you can only turn Mira on in
 repositories where you're an admin (it stores an Actions secret there,
 which GitHub reserves for admins); the others say **Needs admin**.
 
-Reviews, comments and pull requests come from the Runmira app, and
+Reviews, comments and pull requests come from the Runmira-bot app, and
 Mira's pull requests start your CI like anyone else's.
 
 ### Without the app
@@ -97,7 +97,7 @@ short-lived tokens:
   access to the repository's secrets, so there's no model key. Mira also
   can't push to forks.
 
-**CI on Mira's pull requests:** with the Runmira app installed, Mira's
+**CI on Mira's pull requests:** with the Runmira-bot app installed, Mira's
 pull requests start your CI. Without it, pull requests opened with the
 default Actions token don't start other workflows; pass a personal
 access token as the action's `github-token` input if you need that.
@@ -112,7 +112,7 @@ permissions:
   contents: write
   pull-requests: write
   issues: write
-  id-token: write   # to act as the Runmira app
+  id-token: write   # to act as the Runmira-bot app
 # …
 - uses: actions/checkout@v4
   with:
@@ -130,8 +130,8 @@ permissions:
 | `provider` | `openrouter` | Provider name: `openrouter`, `anthropic`, `openai`, `groq`, … |
 | `model` | (required) | Model id. |
 | `base-url` | | Endpoint, for providers Mira doesn't know by name. |
-| `github-token` | `github.token` | Token used when the Runmira app isn't installed. |
-| `app-token-url` | the Runmira service | Where the run swaps its OIDC identity for a Runmira app token. Empty turns it off. |
+| `github-token` | `github.token` | Token used when the Runmira-bot app isn't installed. |
+| `app-token-url` | the Mira service | Where the run swaps its OIDC identity for a Runmira-bot app token. Empty turns it off. |
 | `trigger` | `@mira` | What people write to call Mira. |
 | `allow` | `OWNER,MEMBER,COLLABORATOR` | Who can start tasks. |
 | `max-runtime-minutes` | `30` | Time limit for a task. |
@@ -142,7 +142,7 @@ permissions:
 The action runs `mira github`, which reads the Actions event. You can run
 it yourself with `--event-name` and `--event-path` to test a payload.
 
-## Running the Runmira service yourself
+## Running the Mira service yourself
 
 The app and its edge function live in this repository. To run your own:
 

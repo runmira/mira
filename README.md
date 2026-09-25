@@ -291,7 +291,7 @@ even in `yolo`. See [docs/COMPUTER_USE.md](./docs/COMPUTER_USE.md).
 - **GitHub:** Mira reviews every new pull request and works on `@mira`
   requests in issues and pull requests, running in the repository's
   own Actions. **Settings → Integrations → Connect GitHub** installs the
-  Runmira app; then turn Mira on per repository. No workflow file to
+  Runmira-bot app; then turn Mira on per repository. No workflow file to
   write (or use `mira github setup` with a token). See
   [docs/github.md](./docs/github.md).
 - **Slack:** `mira slack` runs a bot you can mention in a channel or DM.

@@ -312,7 +312,7 @@ permissions:
   contents: write
   pull-requests: write
   issues: write
-  # Lets the run prove which repository it is, to act as the Runmira app.
+  # Lets the run prove which repository it is, to act as the Runmira-bot app.
   id-token: write
 
 concurrency:

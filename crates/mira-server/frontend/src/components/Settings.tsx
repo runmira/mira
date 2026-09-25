@@ -1546,7 +1546,7 @@ function SectionShell({
 /** Result of coming back from GitHub (`?github=…` on the app URL). */
 export type GithubReturn = { ok: boolean; message: string } | null;
 
-/** GitHub: install the Runmira app and pick repositories, or fall back
+/** GitHub: install the Runmira-bot app and pick repositories, or fall back
  *  to a personal token. Slack: the tokens live under Search & keys;
  *  `mira slack` runs the bot. */
 function IntegrationsSection({
@@ -1617,7 +1617,7 @@ function IntegrationsSection({
   );
 }
 
-/** Install the Runmira GitHub App, then turn Mira on per repository. */
+/** Install the Runmira-bot GitHub App, then turn Mira on per repository. */
 function GithubAppConnect() {
   const [status, setStatus] = useState<AppStatus | null>(null);
   const [data, setData] = useState<AppInstallations | null>(null);
@@ -1752,7 +1752,7 @@ function GithubAppConnect() {
         Turning a repository on stores your model key as the encrypted Actions secret
         <code className="mx-1">MIRA_API_KEY</code>, your provider and model as Actions variables, and
         adds <code>.github/workflows/mira.yml</code>. Comments and pull requests come from the
-        Runmira app. Only people with write access can start tasks.
+        Runmira-bot app. Only people with write access can start tasks.
       </p>
     </div>
   );
@@ -1762,14 +1762,14 @@ function GithubAppConnect() {
 function CreateGithubApp() {
   const [key, setKey] = useState('');
   const [org, setOrg] = useState('runmira');
-  const [name, setName] = useState('Runmira');
+  const [name, setName] = useState('Runmira-bot');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   async function create() {
     setBusy(true);
     setError(null);
     try {
-      await createApp(key.trim(), org, name.trim() || 'Runmira');
+      await createApp(key.trim(), org, name.trim() || 'Runmira-bot');
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setBusy(false);

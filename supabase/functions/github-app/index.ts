@@ -1,4 +1,4 @@
-// The Runmira GitHub App's backend. Holds the app's private key (which
+// The Runmira-bot GitHub App's backend. Holds the app's private key (which
 // can't ship in open-source Mira) and hands out short-lived tokens:
 //
 //   GET  /status                   is the app set up? (its slug)
@@ -176,7 +176,7 @@ async function manifest(url: URL) {
   const { data } = await db.from("github_app_setup").select("key").eq("key", key).maybeSingle();
   if (!data) throw new HttpError(403, "This setup key is invalid or already used.");
   const org = url.searchParams.get("org");
-  const name = url.searchParams.get("name") || "Runmira";
+  const name = url.searchParams.get("name") || "Runmira-bot";
   const manifest = {
     name,
     url: "https://github.com/runmira/mira",

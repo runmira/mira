@@ -1000,7 +1000,7 @@ export async function getGithubConnect(repo?: string): Promise<GithubConnectView
   return (await r.json()) as GithubConnectView;
 }
 
-/** Connect `repo`. `token` is a Runmira app token for it; without one
+/** Connect `repo`. `token` is a Runmira-bot app token for it; without one
  *  the server uses the GitHub key from Settings. */
 export async function connectGithub(repo?: string, token?: string): Promise<GithubConnectReport> {
   const r = await fetch('/api/github/connect', {

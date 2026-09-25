@@ -1,5 +1,5 @@
 /**
- * The Runmira GitHub App, through the `github-app` Supabase edge function
+ * The Runmira-bot GitHub App, through the `github-app` Supabase edge function
  * (see `supabase/functions/github-app`). The function holds the app's
  * private key; Mira only ever gets short-lived tokens for one repository.
  */

@@ -22,7 +22,7 @@ inputs:
     description: Token used to read the pull request, comment, push branches and open pull requests. Pull requests opened with the default token don't start other workflows; pass a personal or GitHub App token if you want CI to run on them.
     default: ${{ github.token }}
   app-token-url:
-    description: "Where to swap the workflow's OIDC identity for a Runmira GitHub App token, so comments and pull requests come from the app and start CI. Needs the id-token write permission and the app installed; otherwise github-token is used. Set to an empty string to turn off."
+    description: "Where to swap the workflow's OIDC identity for a Runmira-bot GitHub App token, so comments and pull requests come from the app and start CI. Needs the id-token write permission and the app installed; otherwise github-token is used. Set to an empty string to turn off."
     default: https://jvwezgehvghcqgpjxjct.supabase.co/functions/v1/github-app/actions-token
   trigger:
     description: What people type in a comment to call Mira.
@@ -56,7 +56,7 @@ runs:
         bash "${{ github.action_path }}/install.sh"
         echo "$MIRA_INSTALL_DIR" >> "$GITHUB_PATH"
 
-    - name: Get a Runmira app token
+    - name: Get a Runmira-bot app token
       id: app
       if: inputs.app-token-url != ''
       shell: bash
@@ -72,9 +72,9 @@ runs:
         if [ -n "$token" ]; then
           echo "::add-mask::$token"
           echo "token=$token" >> "$GITHUB_OUTPUT"
-          echo "Using the Runmira GitHub App."
+          echo "Using the Runmira-bot GitHub App."
         else
-          echo "Runmira app token unavailable ($(echo "$resp" | jq -r '.error // "no token"')); using github-token."
+          echo "Runmira-bot app token unavailable ($(echo "$resp" | jq -r '.error // "no token"')); using github-token."
         fi
 
     - name: Run Mira
