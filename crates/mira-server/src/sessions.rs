@@ -11,16 +11,16 @@
 //!
 //! Endpoints:
 //! - `GET    /api/sessions`                — summary list (live + persisted),
-//!                                            with `running` and `attached`
-//!                                            hints for the sidebar.
+//!   with `running` and `attached`
+//!   hints for the sidebar.
 //! - `GET    /api/sessions/:id/history`    — persisted history for
-//!                                            rehydrating a subagent panel
-//!                                            on reload.
+//!   rehydrating a subagent panel
+//!   on reload.
 //! - `POST   /api/sessions/:id/load`       — ensure a slot exists for `id`
-//!                                            and mark it active.
+//!   and mark it active.
 //! - `POST   /api/sessions/new`            — create a fresh slot.
 //! - `DELETE /api/sessions/:id`            — abort turn, drop slot,
-//!                                            delete record.
+//!   delete record.
 //! - `PATCH  /api/sessions/:id/title`      — manual rename.
 //! - `POST   /api/sessions/:id/title/regenerate` — AI rename.
 //! - `PUT    /api/sessions/:id/background` — swap background mode.

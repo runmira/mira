@@ -41,12 +41,10 @@ pub(crate) fn render(v: &ApprovalView<'_>, width: u16) -> Vec<Line<'static>> {
 
     // Header: clean tool-family label, no warning glyph.
     // Queued count appended when stacked so the user knows what's next.
-    let mut header: Vec<Span<'static>> = vec![
-        Span::styled(
-            format!("{friendly} command"),
-            Style::default().fg(SALMON()).bold(),
-        ),
-    ];
+    let mut header: Vec<Span<'static>> = vec![Span::styled(
+        format!("{friendly} command"),
+        Style::default().fg(SALMON()).bold(),
+    )];
     if let Some(preview) = v.preview {
         let kind_label = match preview.kind {
             mira_tools::DiffKind::Edit => "edit",
@@ -106,11 +104,7 @@ pub(crate) fn render(v: &ApprovalView<'_>, width: u16) -> Vec<Line<'static>> {
     } else {
         "Yes, and don't ask again this session".to_owned()
     };
-    let option_labels = [
-        "Yes".to_owned(),
-        always_label,
-        "No".to_owned(),
-    ];
+    let option_labels = ["Yes".to_owned(), always_label, "No".to_owned()];
 
     for (i, label) in option_labels.iter().enumerate() {
         let focused = i == v.focus;
@@ -253,18 +247,10 @@ mod tests {
         // spans edge to edge instead of hiding behind the text.
         let focused: Vec<_> = ls
             .iter()
-            .filter(|l| {
-                l.spans
-                    .iter()
-                    .any(|s| s.content.contains('▸'))
-            })
+            .filter(|l| l.spans.iter().any(|s| s.content.contains('▸')))
             .collect();
         assert_eq!(focused.len(), 1);
-        let cols: usize = focused[0]
-            .spans
-            .iter()
-            .map(|sp| sp.content.width())
-            .sum();
+        let cols: usize = focused[0].spans.iter().map(|sp| sp.content.width()).sum();
         assert_eq!(cols, 100, "{:?}", focused[0].spans);
         for sp in &focused[0].spans {
             assert_eq!(sp.style.bg, Some(DIM()));

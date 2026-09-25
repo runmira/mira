@@ -621,11 +621,7 @@ async fn resolve_approval_focused(state: &mut TuiState, cfg: &TuiConfig) {
 /// Session-allow the call's rule, then allow this call. Only logs when
 /// policy actually mutated — a quiet flash suffices otherwise, since a
 /// full info line on every approval was noise.
-async fn approve_always(
-    state: &mut TuiState,
-    cfg: &TuiConfig,
-    call: &mira_core::ToolCall,
-) {
+async fn approve_always(state: &mut TuiState, cfg: &TuiConfig, call: &mira_core::ToolCall) {
     match TuiState::rule_for_call(call) {
         Some(rule) => match cfg.policy.lock().await.add_allow_rule(&rule) {
             Ok(_) => state.push_info(format!("[policy] session-allow: {rule}")),
@@ -642,9 +638,7 @@ async fn approve_always(
 fn note_queued(state: &mut TuiState) {
     let n = state.pending_approvals.len();
     if n > 0 {
-        state.flash = Some(format!(
-            "next approval · {n} more queued"
-        ));
+        state.flash = Some(format!("next approval · {n} more queued"));
     }
 }
 
@@ -697,8 +691,7 @@ fn handle_palette_key(key: KeyEvent, state: &mut TuiState) -> bool {
             true
         }
         (KeyCode::Char(c), m)
-            if state.palette.kind == Palette::Unified
-                && !m.contains(KeyModifiers::CONTROL) =>
+            if state.palette.kind == Palette::Unified && !m.contains(KeyModifiers::CONTROL) =>
         {
             state.palette.filter.push(c);
             refresh_unified_matches(state);
@@ -726,9 +719,8 @@ fn refresh_unified_matches(state: &mut TuiState) {
 /// internal and never shown to the user (titles are pretty-printed
 /// with a section chip up front).
 pub(crate) fn unified_matches(filter: &str, state: &TuiState) -> Vec<PaletteItem> {
-    let matches_filter = |hay: &str| -> bool {
-        filter.is_empty() || hay.to_ascii_lowercase().contains(filter)
-    };
+    let matches_filter =
+        |hay: &str| -> bool { filter.is_empty() || hay.to_ascii_lowercase().contains(filter) };
     let current_mode = state.mode.as_str();
     let current_model = state.model.as_str();
 
@@ -1169,14 +1161,7 @@ async fn resume_arg_matches(filter: &str, cfg: &TuiConfig) -> Vec<PaletteItem> {
     };
     let mut out: Vec<PaletteItem> = list
         .iter()
-        .filter(|rec| {
-            filter.is_empty()
-                || rec
-                    .id
-                    .as_str()
-                    .to_ascii_lowercase()
-                    .contains(filter)
-        })
+        .filter(|rec| filter.is_empty() || rec.id.as_str().to_ascii_lowercase().contains(filter))
         .map(|rec| {
             let id = rec.id.as_str().to_owned();
             let short = if id.chars().count() > 12 {

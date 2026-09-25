@@ -538,7 +538,8 @@ mod tests {
         };
         assert!((frust.0 - 1.035).abs() < 1e-9);
         assert_eq!(frust.1["2"], "Very angry, strong language");
-        assert!((frust.2["1"] - 0.0).abs() < 1e9); // just checking it parsed
+        // The sample omits per-level probabilities; they default to empty.
+        assert!(frust.2.is_empty());
         assert!((frust.3 - 0.842).abs() < 1e-9);
 
         let urgent = match r.answers.get("is_urgent").unwrap() {

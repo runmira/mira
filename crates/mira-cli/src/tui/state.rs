@@ -6,7 +6,7 @@ use mira_harness::{Goal, UsageTotals};
 use mira_policy::Mode;
 use mira_tools::DiffPreview;
 
-use mira_tools::prompt::{PlanProposal, AskUserProposal, PromptResponse};
+use mira_tools::prompt::{AskUserProposal, PlanProposal, PromptResponse};
 
 use crate::tui::approver::ApprovalRequest;
 use crate::tui::render::layout::TranscriptLayout;
@@ -131,7 +131,6 @@ const TOOL_RESULT_MAX_BYTES: usize = 8 * 1024;
 /// own history-compaction model rather than growing memory forever.
 const MAX_ENTRIES: usize = 500;
 
-
 /// One row in the visible transcript.
 ///
 /// Assistant tokens accumulate onto the trailing `Assistant` entry so a
@@ -196,7 +195,9 @@ pub enum LogEntry {
     Info(String),
     /// Context-compaction receipt: N messages were summarised away by the
     /// harness to reclaim context window space.
-    Compacted { messages_removed: usize },
+    Compacted {
+        messages_removed: usize,
+    },
     /// First-run session banner — structured so the component renders
     /// it with brand colors (info lines are muted-italic by design).
     /// Shown once, before the message stream; the viewport carries no
@@ -694,7 +695,10 @@ impl TuiState {
     /// the child's model. Idempotent so a replayed frame after a
     /// resubscription doesn't wipe the running tool_uses list.
     pub fn agent_started(&mut self, parent_call_id: &str, agent_id: String, model: String) {
-        let cell = self.agent_cells.entry(parent_call_id.to_owned()).or_default();
+        let cell = self
+            .agent_cells
+            .entry(parent_call_id.to_owned())
+            .or_default();
         cell.agent_id = Some(agent_id);
         cell.model = Some(model);
         cell.done = false;
@@ -710,7 +714,10 @@ impl TuiState {
         label: String,
         summary: String,
     ) {
-        let cell = self.agent_cells.entry(parent_call_id.to_owned()).or_default();
+        let cell = self
+            .agent_cells
+            .entry(parent_call_id.to_owned())
+            .or_default();
         cell.tool_uses.push(AgentToolUse {
             label,
             summary,
@@ -723,13 +730,11 @@ impl TuiState {
     /// `call_id` and mark it done. If the pair never landed
     /// (out-of-order delivery on a hot channel), we still record the
     /// end as a new row so it isn't silently lost.
-    pub fn agent_tool_ended(
-        &mut self,
-        parent_call_id: &str,
-        call_id: &str,
-        ok: bool,
-    ) {
-        let cell = self.agent_cells.entry(parent_call_id.to_owned()).or_default();
+    pub fn agent_tool_ended(&mut self, parent_call_id: &str, call_id: &str, ok: bool) {
+        let cell = self
+            .agent_cells
+            .entry(parent_call_id.to_owned())
+            .or_default();
         if let Some(row) = cell.tool_uses.iter_mut().find(|r| r.call_id == call_id) {
             row.ok = Some(ok);
         } else {
@@ -746,20 +751,29 @@ impl TuiState {
     /// small `!N` chip so a broken subagent is visible without
     /// popping open its transcript.
     pub fn agent_warning(&mut self, parent_call_id: &str) {
-        let cell = self.agent_cells.entry(parent_call_id.to_owned()).or_default();
+        let cell = self
+            .agent_cells
+            .entry(parent_call_id.to_owned())
+            .or_default();
         cell.warnings = cell.warnings.saturating_add(1);
     }
 
     /// Final `SubagentDone` — flip the header dot from `◐` to `●`
     /// on the next render.
     pub fn agent_done(&mut self, parent_call_id: &str) {
-        let cell = self.agent_cells.entry(parent_call_id.to_owned()).or_default();
+        let cell = self
+            .agent_cells
+            .entry(parent_call_id.to_owned())
+            .or_default();
         cell.done = true;
     }
 
     /// Append a progress note from a `SubagentProgress` event.
     pub fn agent_progress(&mut self, parent_call_id: &str, text: String) {
-        let cell = self.agent_cells.entry(parent_call_id.to_owned()).or_default();
+        let cell = self
+            .agent_cells
+            .entry(parent_call_id.to_owned())
+            .or_default();
         cell.progress.push(text);
     }
 
@@ -767,7 +781,10 @@ impl TuiState {
     /// Keeps only the last 200 chars so long reasoning blocks don't
     /// grow the cell unboundedly.
     pub fn agent_token(&mut self, parent_call_id: &str, text: &str) {
-        let cell = self.agent_cells.entry(parent_call_id.to_owned()).or_default();
+        let cell = self
+            .agent_cells
+            .entry(parent_call_id.to_owned())
+            .or_default();
         cell.streaming_text.push_str(text);
         const CAP: usize = 200;
         if cell.streaming_text.len() > CAP {
@@ -838,7 +855,8 @@ impl TuiState {
     /// into the composer in its place. Called from the paste handler
     /// when the incoming text is big enough to warrant collapsing.
     pub fn stash_paste(&mut self, content: String) -> String {
-        let lines = content.matches('\n').count() + 1;
+        // A trailing newline ends the last line; it doesn't start another.
+        let lines = content.lines().count().max(1);
         let id = self.next_paste_id;
         self.next_paste_id += 1;
         self.pastes.push(PasteChunk { id, content, lines });
@@ -1096,9 +1114,8 @@ impl TuiState {
         if n == 0 {
             return None;
         }
-        let is_tool = |e: &LogEntry| {
-            matches!(e, LogEntry::ToolCall { .. } | LogEntry::ToolResult { .. })
-        };
+        let is_tool =
+            |e: &LogEntry| matches!(e, LogEntry::ToolCall { .. } | LogEntry::ToolResult { .. });
         if !is_tool(&self.entries[n - 1]) {
             return None;
         }
@@ -1508,11 +1525,13 @@ impl TuiState {
             .filter_map(|(s, on)| on.then_some(s))
             .collect::<Vec<_>>();
         let n = steps.len();
-        let _ = p.reply.send(PromptResponse::Plan(mira_tools::prompt::PlanResponse {
-            approved: true,
-            steps: Some(steps),
-            note: None,
-        }));
+        let _ = p
+            .reply
+            .send(PromptResponse::Plan(mira_tools::prompt::PlanResponse {
+                approved: true,
+                steps: Some(steps),
+                note: None,
+            }));
         // The card itself is ephemeral and never reaches scrollback —
         // leave a one-line trace so the settled transcript still reads
         // as a story.
@@ -1529,11 +1548,13 @@ impl TuiState {
         let Some(p) = self.pending_plan.take() else {
             return false;
         };
-        let _ = p.reply.send(PromptResponse::Plan(mira_tools::prompt::PlanResponse {
-            approved: false,
-            steps: None,
-            note: None,
-        }));
+        let _ = p
+            .reply
+            .send(PromptResponse::Plan(mira_tools::prompt::PlanResponse {
+                approved: false,
+                steps: None,
+                note: None,
+            }));
         self.push_info("plan dismissed — continuing without it".to_owned());
         true
     }
@@ -1645,7 +1666,7 @@ impl TuiState {
     /// next question — or submit when already on the last question.
     ///
     /// Single-select questions record the focused option (so arrow keys
-    /// + Enter selects it and moves on). Multi-select questions keep
+    /// and Enter select it and move on). Multi-select questions keep
     /// their current toggles and just advance/submit, so Enter never
     /// clobbers a multi-pick — use digits to toggle those.
     /// Returns `true` when the card advanced or was answered.
@@ -1703,10 +1724,12 @@ impl TuiState {
                 custom: a.custom[i].clone(),
             })
             .collect();
-        let _ = a.reply.send(PromptResponse::AskUser(mira_tools::prompt::AskUserResponse {
-            answers,
-            cancelled: false,
-        }));
+        let _ = a.reply.send(PromptResponse::AskUser(
+            mira_tools::prompt::AskUserResponse {
+                answers,
+                cancelled: false,
+            },
+        ));
         // Don't push an Info trace here — the ToolEnd event that follows
         // will pair with the in-flight ToolCall entry, producing a clean
         // tool group. An Info inserted now lands between ToolCall and
@@ -1720,10 +1743,12 @@ impl TuiState {
         let Some(a) = self.pending_ask.take() else {
             return false;
         };
-        let _ = a.reply.send(PromptResponse::AskUser(mira_tools::prompt::AskUserResponse {
-            answers: Vec::new(),
-            cancelled: true,
-        }));
+        let _ = a.reply.send(PromptResponse::AskUser(
+            mira_tools::prompt::AskUserResponse {
+                answers: Vec::new(),
+                cancelled: true,
+            },
+        ));
         true
     }
 
@@ -1935,7 +1960,7 @@ impl TuiState {
     /// 2 = deny), clamped — the option list is fixed length.
     pub fn approval_move(&mut self, delta: isize) -> bool {
         let next = self.approval_focus as isize + delta;
-        if next < 0 || next > 2 {
+        if !(0..=2).contains(&next) {
             return false;
         }
         self.approval_focus = next as usize;
@@ -2412,7 +2437,10 @@ mod tests {
         st.push_approval(mk_approval("2"));
         assert_eq!(st.pending_approvals.len(), 2);
         // Head of queue renders first.
-        assert_eq!(st.pending_approvals.front().unwrap().request.call.id, "1".into());
+        assert_eq!(
+            st.pending_approvals.front().unwrap().request.call.id,
+            "1".into()
+        );
         st.approval_focus = 2;
         let top = st.approval_resolve().expect("head");
         assert_eq!(top.request.call.id, "1".into());
@@ -2474,9 +2502,7 @@ mod tests {
         let entry_count_before = st.entries().len();
         st.pending_ask = Some(PendingAsk::new(
             "c".into(),
-            AskUserProposal {
-                questions: vec![],
-            },
+            AskUserProposal { questions: vec![] },
             dummy_reply(),
         ));
         assert!(st.ask_cancel());

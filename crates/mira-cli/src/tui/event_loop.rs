@@ -228,7 +228,10 @@ fn build_exit_summary(state: &TuiState, elapsed: Duration) -> String {
         format!("mira · {}", state.model),
         dur,
         format!("{turns} turn{}", if turns == 1 { "" } else { "s" }),
-        format!("{tool_calls} tool{}", if tool_calls == 1 { "" } else { "s" }),
+        format!(
+            "{tool_calls} tool{}",
+            if tool_calls == 1 { "" } else { "s" }
+        ),
     ];
 
     let u = &state.usage;
@@ -276,10 +279,7 @@ const MIN_INLINE_HEIGHT: u16 = 4;
 /// Merge a new frame-request deadline into `next` — earliest wins, and
 /// the earliest is floored at `last_draw + MIN_FRAME_INTERVAL` so a
 /// burst of events can't drive the draw rate over ~60fps.
-fn schedule_frame(
-    next: &mut Option<std::time::Instant>,
-    last_draw: std::time::Instant,
-) {
+fn schedule_frame(next: &mut Option<std::time::Instant>, last_draw: std::time::Instant) {
     let now = std::time::Instant::now();
     let earliest = last_draw + MIN_FRAME_INTERVAL;
     let dl = now.max(earliest);
@@ -403,11 +403,7 @@ fn wrapped_row_count(lines: &[Line<'_>], width: u16) -> u16 {
             .iter()
             .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
             .sum();
-        let rows = if display == 0 {
-            1
-        } else {
-            (display + w - 1) / w
-        };
+        let rows = if display == 0 { 1 } else { display.div_ceil(w) };
         total = total.saturating_add(rows as u32);
     }
     total.min(u16::MAX as u32) as u16
@@ -635,6 +631,7 @@ pub(crate) fn interrupt_stream(
     state.take_next_queued()
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_harness_event(
     evt: HarnessEvent,
     term: &mut InlineTerm,
@@ -979,10 +976,7 @@ pub(crate) fn format_dollars_short(d: f64) -> String {
 /// Route one subagent broadcast event into the TUI state. The events
 /// arrive on `cfg.subagent_events_rx` and update `state.agent_cells`
 /// so the `● Agent(...)` tool-call renderer can show nested progress.
-fn handle_subagent_event(
-    msg: mira_server::protocol::ServerMsg,
-    state: &mut TuiState,
-) {
+fn handle_subagent_event(msg: mira_server::protocol::ServerMsg, state: &mut TuiState) {
     use mira_server::protocol::ServerMsg;
     match msg {
         ServerMsg::SubagentStarted {
@@ -1005,21 +999,19 @@ fn handle_subagent_event(
             // tool — clear the streaming tail so stale "thinking" text
             // doesn't stay frozen under the header while bash runs.
             state.agent_clear_streaming_text(&parent_call_id);
-            let (label, summary) =
-                summarize_tool(&call.function.name, &call.function.arguments);
-            state.agent_tool_started(
-                &parent_call_id,
-                call.id.to_string(),
-                label,
-                summary,
-            );
+            let (label, summary) = summarize_tool(&call.function.name, &call.function.arguments);
+            state.agent_tool_started(&parent_call_id, call.id.to_string(), label, summary);
         }
         ServerMsg::SubagentToolEnd {
             parent_call_id,
             result,
         } => {
             state.turn_subagent_chars = state.turn_subagent_chars.saturating_add(100);
-            state.agent_tool_ended(&parent_call_id, &result.call_id.to_string(), !result.is_error);
+            state.agent_tool_ended(
+                &parent_call_id,
+                &result.call_id.to_string(),
+                !result.is_error,
+            );
         }
         ServerMsg::SubagentWarning { parent_call_id, .. } => {
             state.agent_warning(&parent_call_id);
@@ -1031,8 +1023,9 @@ fn handle_subagent_event(
             // Tool output lines are real agent activity — count them even
             // though they aren't model tokens. Cap per line so a huge bash
             // dump doesn't balloon the display counter.
-            state.turn_subagent_chars =
-                state.turn_subagent_chars.saturating_add(text.len().min(80) as u64);
+            state.turn_subagent_chars = state
+                .turn_subagent_chars
+                .saturating_add(text.len().min(80) as u64);
             state.agent_progress(&parent_call_id, text);
         }
         ServerMsg::SubagentDone { parent_call_id } => {
@@ -1041,9 +1034,11 @@ fn handle_subagent_event(
         // Count subagent characters as a token proxy — 4 chars ≈ 1 token
         // (standard heuristic). Also feeds the live streaming tail so
         // the agent header shows what the subagent is currently thinking.
-        ServerMsg::SubagentToken { parent_call_id, text } => {
-            state.turn_subagent_chars =
-                state.turn_subagent_chars.saturating_add(text.len() as u64);
+        ServerMsg::SubagentToken {
+            parent_call_id,
+            text,
+        } => {
+            state.turn_subagent_chars = state.turn_subagent_chars.saturating_add(text.len() as u64);
             state.agent_token(&parent_call_id, &text);
         }
         // Scratchpad note, review request, and all non-subagent variants

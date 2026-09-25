@@ -17,7 +17,7 @@
 //! - `Deny`         — auto-deny, safe default
 //! - `AutoApprove`  — auto-approve, use for trusted read-only runs
 //! - `Park`         — legacy behavior; wait for a client to attach and
-//!                    answer (still bounded by the 10-minute safety timeout)
+//!   answer (still bounded by the 10-minute safety timeout)
 //!
 //! This is what makes "leave the tab, session keeps running" actually
 //! useful: a tool call that would previously have parked forever now

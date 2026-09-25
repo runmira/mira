@@ -266,7 +266,7 @@ fn enter() -> Result<InlineTerm> {
     // would leave the freed rows blank below the composer, opening a
     // visible gap between the pane and the terminal bottom that only
     // closes once the composer grows.
-    Ok(InlineTerm::new(5)?)
+    InlineTerm::new(5)
 }
 
 /// Leave the inline viewport. Blanks the live chrome, parks the cursor

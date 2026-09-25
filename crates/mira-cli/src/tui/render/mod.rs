@@ -57,11 +57,7 @@ pub(crate) fn wrapped_row_count(lines: &[Line<'_>], width: u16) -> u16 {
             .iter()
             .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
             .sum();
-        let rows = if display == 0 {
-            1
-        } else {
-            (display + w - 1) / w
-        };
+        let rows = if display == 0 { 1 } else { display.div_ceil(w) };
         total = total.saturating_add(rows as u32);
     }
     total.min(u16::MAX as u32) as u16
@@ -110,8 +106,7 @@ impl PaneLayout {
 }
 
 fn layout_for(state: &TuiState, width: u16) -> PaneLayout {
-    let input_rows =
-        composer::body_rows(state, width.saturating_sub(2)).min(composer::INPUT_CAP);
+    let input_rows = composer::body_rows(state, width.saturating_sub(2)).min(composer::INPUT_CAP);
     let queued_rows = composer::queued_rows(state);
     let input_height = input_rows + queued_rows + 2;
     let goal_height = status::goal_rows(state.goal.as_ref());
@@ -121,8 +116,7 @@ fn layout_for(state: &TuiState, width: u16) -> PaneLayout {
     // region to the WRAPPED row count so those lines wrap into a new
     // row instead of clipping at the right edge.
     let cards_height = wrapped_row_count(&card_lines, width);
-    let overlay_height = if state.palette.kind != Palette::None
-        && !state.palette.matches.is_empty()
+    let overlay_height = if state.palette.kind != Palette::None && !state.palette.matches.is_empty()
     {
         (state.palette.matches.len() as u16).min(8) + 2
     } else if state.search.is_some() {
@@ -275,9 +269,18 @@ mod tests {
         // No persistent header — the banner scrolled into history.
         assert!(!screen.contains("mira · test-model"), "header must be gone");
         // Transcript belongs to real scrollback now.
-        assert!(!screen.contains("what changed in render?"), "user text leaked into pane");
-        assert!(!screen.contains("I refactored the renderer"), "assistant text leaked into pane");
-        assert!(!screen.contains("for 4.2s"), "turn-end marker leaked into pane");
+        assert!(
+            !screen.contains("what changed in render?"),
+            "user text leaked into pane"
+        );
+        assert!(
+            !screen.contains("I refactored the renderer"),
+            "assistant text leaked into pane"
+        );
+        assert!(
+            !screen.contains("for 4.2s"),
+            "turn-end marker leaked into pane"
+        );
         // Composer + footer are the whole live pane.
         assert!(screen.contains("enter send"), "footer hint missing");
         assert!(screen.contains("message"), "composer placeholder missing");
@@ -309,7 +312,10 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.clone()))
             .collect();
-        assert!(joined.contains("Read src/main.rs"), "tool header missing: {joined}");
+        assert!(
+            joined.contains("Read src/main.rs"),
+            "tool header missing: {joined}"
+        );
         assert!(joined.contains("fn main() {}"), "tool snippet missing");
     }
 

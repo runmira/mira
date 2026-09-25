@@ -135,7 +135,7 @@ fn sanitize(raw: &str) -> String {
         .unwrap_or("");
     let stripped: String = line
         .trim_matches(|c: char| c == '"' || c == '\'' || c == '`' || c == '*' || c == '_')
-        .trim_end_matches(|c: char| c == '.' || c == ',' || c == ':' || c == ';')
+        .trim_end_matches(['.', ',', ':', ';'])
         .trim()
         .to_string();
     if stripped.chars().count() > TITLE_CHAR_CAP {
@@ -156,7 +156,7 @@ pub fn heuristic_from_user_message(user: &str) -> String {
         .unwrap_or("");
     let words: Vec<&str> = first_line.split_whitespace().take(6).collect();
     let joined = words.join(" ");
-    let trimmed = joined.trim_end_matches(|c: char| c == '.' || c == ',' || c == ':' || c == ';');
+    let trimmed = joined.trim_end_matches(['.', ',', ':', ';']);
     let mut chars = trimmed.chars();
     let cased = match chars.next() {
         Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),

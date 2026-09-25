@@ -12,9 +12,9 @@
 //! - `pending` approval map (per-slot oneshots)
 //! - `cwd`, `memory`, `episodic` (per-session project scope)
 //! - `approver` (a WsApprover wired to the slot's channels + background
-//!    mode)
+//!   mode)
 //! - `registry` (base + PlanTool/AskUserTool/AgentTool wired to the
-//!    slot's prompt channel)
+//!   slot's prompt channel)
 //!
 //! A WS connection picks which session it's watching by sending
 //! `Attach { session_id }`. Handlers without a session_id in the URL
@@ -448,8 +448,10 @@ pub fn make_memory_snapshot_with(
 pub fn memory_retrieval_from(
     cfg: &mira_config::MemoryRuntimeConfig,
 ) -> mira_harness::MemoryRetrievalConfig {
-    let mut out = mira_harness::MemoryRetrievalConfig::default();
-    out.enabled = cfg.retrieval_enabled();
+    let mut out = mira_harness::MemoryRetrievalConfig {
+        enabled: cfg.retrieval_enabled(),
+        ..Default::default()
+    };
     if let Some(budget) = cfg.retrieval_token_budget() {
         out.token_budget = budget as usize;
     }
@@ -548,7 +550,7 @@ pub fn system_prompt(cwd: &std::path::Path, registry: &Registry) -> String {
 
 fn first_sentence(s: &str) -> String {
     let s = s.trim();
-    match s.find(|c: char| c == '.' || c == '\n') {
+    match s.find(['.', '\n']) {
         Some(i) => s[..i].trim().to_string(),
         None => s.to_string(),
     }

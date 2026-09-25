@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/*", "evals/tasks/*"]
+members = ["crates/*"]
+# Eval fixtures are broken on purpose (the agent's job is to fix them);
+# the eval runner copies each one to a scratch directory.
+exclude = ["evals/tasks/*"]
 
 [workspace.package]
 version = "0.3.9"

@@ -522,7 +522,10 @@ pub fn render_block(
         TranscriptBlock::AskCard(a) => prompt::ask_card(a, width),
         TranscriptBlock::Suppressed => Vec::new(),
         TranscriptBlock::Working(v) => {
-            vec![status::working_line(v), status::working_tip_line(v.elapsed_secs)]
+            vec![
+                status::working_line(v),
+                status::working_tip_line(v.elapsed_secs),
+            ]
         }
         TranscriptBlock::Waiting(v) => vec![status::waiting_line(v)],
     }
@@ -635,9 +638,8 @@ mod tests {
         static EMPTY_CELLS: std::sync::OnceLock<
             std::collections::HashMap<String, crate::tui::state::AgentCell>,
         > = std::sync::OnceLock::new();
-        static EMPTY_BG: std::sync::OnceLock<
-            std::collections::HashMap<String, Vec<String>>,
-        > = std::sync::OnceLock::new();
+        static EMPTY_BG: std::sync::OnceLock<std::collections::HashMap<String, Vec<String>>> =
+            std::sync::OnceLock::new();
         BuildCtx {
             streaming: false,
             plan_mode: false,
@@ -772,15 +774,17 @@ mod tests {
             bg_output_lines: ctx().bg_output_lines,
         };
         let blocks = build_blocks(&entries, &c);
-        assert_eq!(blocks.len(), 3); // user, old pair, new pair
-        let TranscriptBlock::Tool(old) = &blocks[1].kind else {
-            panic!();
-        };
-        assert!(old.collapsed, "pre-turn group must auto-collapse");
-        let TranscriptBlock::Tool(new) = &blocks[2].kind else {
-            panic!();
-        };
-        assert!(!new.collapsed, "current-turn group stays expanded");
+        // user, old pair, user, new pair
+        let tools: Vec<_> = blocks
+            .iter()
+            .filter_map(|b| match &b.kind {
+                TranscriptBlock::Tool(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tools.len(), 2);
+        assert!(tools[0].collapsed, "pre-turn group must auto-collapse");
+        assert!(!tools[1].collapsed, "current-turn group stays expanded");
     }
 
     #[test]

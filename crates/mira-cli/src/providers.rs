@@ -72,12 +72,11 @@ pub async fn run(_cli: &crate::Cli, args: ProvidersArgs) -> Result<()> {
         .unwrap_or(0);
 
     println!(
-        "  {:<name_w$}  {:<pretty_w$}  {:<40}  {:<20}  {}",
+        "  {:<name_w$}  {:<pretty_w$}  {:<40}  {:<20}  state",
         "name",
         "display",
         "base_url",
         "api_key_env",
-        "state",
         name_w = name_w,
         pretty_w = pretty_w,
     );

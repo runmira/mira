@@ -705,10 +705,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "failing-test-fixture"
-version = "0.1.0"
-
-[[package]]
 name = "fancy-regex"
 version = "0.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2779,10 +2775,6 @@ dependencies = [
  "tracing",
  "url",
 ]
-
-[[package]]
-name = "rust-fix-fixture"
-version = "0.1.0"
 
 [[package]]
 name = "rustc-hash"

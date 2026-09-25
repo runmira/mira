@@ -79,8 +79,7 @@ pub(crate) fn pane_cards(state: &TuiState, width: u16) -> Vec<Line<'static>> {
             continue;
         }
         if let components::TranscriptBlock::Tool(v) = &block.kind {
-            if v.result.is_none() && v.name == "agent"
-                && block.first_entry >= state.emitted_entries
+            if v.result.is_none() && v.name == "agent" && block.first_entry >= state.emitted_entries
             {
                 let rendered = components::render_block(block, "", false, width);
                 let trimmed = trim_empty(rendered);
@@ -409,9 +408,7 @@ fn render_block_list(
     let last_idx = blocks.len().saturating_sub(1);
     for (bi, block) in blocks.iter().enumerate() {
         if !kept[bi] {
-            for _ in 0..block.consumed {
-                entry_row_starts.push(SCROLLBACK_ROW);
-            }
+            entry_row_starts.extend(std::iter::repeat_n(SCROLLBACK_ROW, block.consumed));
             continue;
         }
         let start = lines.len();
@@ -470,7 +467,6 @@ fn is_user(block: &components::Block<'_>) -> bool {
     matches!(block.kind, components::TranscriptBlock::User(_))
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -499,12 +495,12 @@ mod tests {
             LogEntry::User("next".into()),
         ]);
         let built = build_lines(&st, 100);
-        // The assistant reply now carries the `●` header row, and
-        // `next_is_user` inserts three blanks (1 default + 2 extra)
-        // above the user line so the wash reads as a paragraph break:
-        //   info(1) blank assistant-dot(1) assistant(1) blank×3 user(1)
-        assert_eq!(built.lines.len(), 8);
-        assert_eq!(built.entry_row_starts, vec![0, 2, 7]);
+        // The `●` sits inline on the reply's row, and `next_is_user`
+        // inserts three blanks (1 default + 2 extra) above the user line
+        // so the wash reads as a paragraph break:
+        //   info(1) blank assistant(1) blank×3 user(1)
+        assert_eq!(built.lines.len(), 7);
+        assert_eq!(built.entry_row_starts, vec![0, 2, 6]);
     }
 
     #[test]
@@ -519,13 +515,24 @@ mod tests {
     }
 
     #[test]
-    fn empty_state_shows_onboarding() {
-        let st = TuiState::new("m".into(), mira_policy::Mode::Manual);
-        let built = build_lines(&st, 100);
-        assert!(built
-            .lines
-            .iter()
-            .any(|l| l.spans.iter().any(|s| s.content.contains("ask anything"))));
+    fn fresh_session_shows_the_banner() {
+        // v0.3.9 replaced the "ask anything" empty state with a session
+        // banner: the first entry on a fresh session.
+        let mut st = TuiState::new("m".into(), mira_policy::Mode::Manual);
+        st.push_welcome(
+            "sonnet-test".into(),
+            mira_policy::Mode::Manual,
+            "~/proj".into(),
+            crate::tui::state::SessionMeta {
+                provider: "anthropic".into(),
+                branch: Some("main".into()),
+                skills: vec![],
+            },
+            "a tip",
+        );
+        let text = joined(&build_lines(&st, 100).lines);
+        assert!(text.contains("sonnet-test"), "{text}");
+        assert!(text.contains("~/proj"), "{text}");
     }
 
     #[test]
@@ -540,8 +547,18 @@ mod tests {
             .flat_map(|l| l.spans.iter().map(|s| s.content.clone()))
             .collect();
         assert!(joined.contains("esc to interrupt"));
-        // Indicator follows a blank separator like any other block.
-        assert!(built.lines[built.lines.len() - 2].spans.is_empty());
+        // Indicator (with its tip line below) follows a blank separator
+        // like any other block.
+        let at = built
+            .lines
+            .iter()
+            .position(|l| {
+                l.spans
+                    .iter()
+                    .any(|s| s.content.contains("esc to interrupt"))
+            })
+            .unwrap();
+        assert!(at > 0 && built.lines[at - 1].spans.is_empty());
     }
 
     fn joined(lines: &[Line<'static>]) -> String {
@@ -645,21 +662,10 @@ mod tests {
         assert!(!text.contains("reply one"), "old turn scrolls: {text}");
         assert!(!text.contains("reply two"), "settled turn scrolls: {text}");
         assert!(!text.contains("second"), "settled turn scrolls: {text}");
-        assert!(!text.contains("ask anything"), "no onboarding mid-session: {text}");
-    }
-
-    #[test]
-    fn onboarding_only_on_fresh_session() {
-        // Brand-new state still onboards…
-        let st = TuiState::new("m".into(), mira_policy::Mode::Manual);
-        let built = build_lines(&st, 100);
-        assert!(joined(&built.lines).contains("ask anything"));
-
-        // …but an all-emitted log does not re-onboard.
-        let mut st = state_with(vec![LogEntry::Info("old".into())]);
-        st.emitted_entries = 1;
-        let built = build_lines(&st, 100);
-        assert!(!joined(&built.lines).contains("ask anything"));
+        assert!(
+            !text.contains("ask anything"),
+            "no onboarding mid-session: {text}"
+        );
     }
 
     #[test]

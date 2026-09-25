@@ -105,8 +105,13 @@ fn tokenize(line: &str, pastes: &[PasteChunk]) -> Vec<Atom> {
             rest = &rest[token_end..];
             continue;
         }
-        // Plain text run up to the next chip (or end of line).
-        let next = rest.find("[[paste:").unwrap_or(rest.len());
+        // Plain text run up to the next chip (or end of line). An
+        // unclosed `[[paste:` here is plain text: search past it, or this
+        // loop would never advance.
+        let from = usize::from(rest.starts_with("[[paste:"));
+        let next = rest[from..]
+            .find("[[paste:")
+            .map_or(rest.len(), |i| i + from);
         let mut r = &rest[..next];
         while !r.is_empty() {
             let split = if r.starts_with(char::is_whitespace) {
@@ -127,16 +132,17 @@ fn tokenize(line: &str, pastes: &[PasteChunk]) -> Vec<Atom> {
     out
 }
 
-/// `Some(end)` when `s` starts with a well-formed `[[paste:N]]` token.
+/// `Some(end)` when `s` starts with a closed `[[paste:…]]` token. The id
+/// may be malformed; [`chip_display`] shows those as `[pasted ?]`.
 fn paste_token_end(s: &str) -> Option<usize> {
     let after = s.strip_prefix("[[paste:")?;
     let end = after.find("]]")?;
-    after[..end].parse::<u32>().ok()?;
     Some("[[paste:".len() + end + 2)
 }
 
 /// Greedy word wrap over atoms. Rows never exceed `max` display
-/// columns; an unbreakable atom wider than `max` is hard-split. A
+/// columns; an unbreakable text atom wider than `max` is hard-split
+/// (paste chips are never split). A
 /// space run that straddles the boundary is consumed by the wrap but
 /// stays inside the previous row's char range for caret mapping.
 fn wrap_atoms(atoms: Vec<Atom>, max: usize) -> Vec<WrappedRow> {
@@ -175,7 +181,15 @@ fn wrap_atoms(atoms: Vec<Atom>, max: usize) -> Vec<WrappedRow> {
             w = 0;
             cur.start_char = a.start_char + chars;
             cur.end_char = cur.start_char;
-        } else if aw <= max {
+        } else if aw <= max || a.kind == AtomKind::Chip {
+            // Chips never split. One wider than the row keeps its own row
+            // with its padding dropped (the terminal clips any excess).
+            let a = if aw > max {
+                atom(a.text.trim().to_owned(), a.kind, a.start_char)
+            } else {
+                a
+            };
+            let aw = a.width;
             flush!();
             cur.start_char = a.start_char;
             cur.end_char = a.start_char + chars;
@@ -277,12 +291,14 @@ pub(crate) fn layout(state: &TuiState, region_width: u16) -> ComposerLayout {
                 if atom_end <= cursor_char {
                     col += a.width;
                 } else {
-                    for c in a.text.chars() {
-                        if a.start_char >= cursor_char {
-                            break;
-                        }
-                        col += c.width().unwrap_or(0);
-                    }
+                    // Only the part of the atom before the cursor.
+                    let before = cursor_char.saturating_sub(a.start_char);
+                    col += a
+                        .text
+                        .chars()
+                        .take(before)
+                        .map(|c| c.width().unwrap_or(0))
+                        .sum::<usize>();
                     break;
                 }
             }
@@ -373,6 +389,7 @@ mod tests {
     fn st(input: &str, cursor_chars: usize) -> TuiState {
         let mut s = TuiState::new("m".into(), mira_policy::Mode::Manual);
         s.input_replace(input);
+        s.move_line_start(); // input_replace leaves the cursor at the end
         let target = cursor_chars.min(input.chars().count());
         while s.input()[..s.cursor()].chars().count() < target {
             s.move_right();
@@ -416,11 +433,11 @@ mod tests {
 
     #[test]
     fn caret_mid_text_maps_into_wrapped_row() {
-        let s = st("the quick brown fox", 10); // after "the quick "
+        let s = st("the quick brown fox", 6); // "the qu|ick"
         let lay = layout(&s, 12);
         assert!(lay.rows.len() >= 2);
-        assert_eq!(lay.caret.0, 0);
-        assert_eq!(lay.caret.1, 10);
+        // Mid-word: only the part of "quick" before the caret counts.
+        assert_eq!(lay.caret, (0, 6));
     }
 
     #[test]
@@ -434,6 +451,7 @@ mod tests {
     fn multibyte_counts_display_columns() {
         let mut s = TuiState::new("m".into(), mira_policy::Mode::Manual);
         s.input_replace("héllo 好");
+        s.move_line_start();
         while s.input()[..s.cursor()].chars().count() < 6 {
             s.move_right();
         }

@@ -251,8 +251,18 @@ pub struct WaitingView {
 ///
 pub(crate) fn waiting_line(v: &WaitingView) -> Line<'static> {
     let (icon, accent, label, detail) = match v.kind {
-        WaitingKind::Plan => ("✦", SALMON(), "Plan on the table", " · review below to proceed"),
-        WaitingKind::Ask => ("?", Color::Cyan, "Quick question", " · answer below to proceed"),
+        WaitingKind::Plan => (
+            "✦",
+            SALMON(),
+            "Plan on the table",
+            " · review below to proceed",
+        ),
+        WaitingKind::Ask => (
+            "?",
+            Color::Cyan,
+            "Quick question",
+            " · answer below to proceed",
+        ),
     };
     Line::from(vec![
         Span::styled(
@@ -647,7 +657,8 @@ mod tests {
             text.contains("◐ Wrangling"),
             "Expected '◐ Wrangling' in: {text}"
         );
-        assert!(text.contains("3.2s"), "tool's own clock: {text}");
+        // The tool's own clock (whole seconds), not the turn's 12s.
+        assert!(text.contains(" · 3s"), "tool's own clock: {text}");
         assert!(
             !text.contains("12s"),
             "turn clock must not shadow tool: {text}"
@@ -655,10 +666,6 @@ mod tests {
         assert!(text.contains("↓1.9k tokens"));
         assert!(text.contains("esc to interrupt"));
         assert!(!text.contains("… ("), "no heartbeat form while a tool runs");
-        assert!(
-            !text.contains("· "),
-            "no generic streaming label when tool present: {text}"
-        );
     }
 
     #[test]
@@ -698,8 +705,16 @@ mod tests {
     #[test]
     fn waiting_line_points_at_card_without_streaming_chrome() {
         for (kind, headline, tail) in [
-            (WaitingKind::Plan, "Plan on the table", "review below to proceed"),
-            (WaitingKind::Ask, "Quick question", "answer below to proceed"),
+            (
+                WaitingKind::Plan,
+                "Plan on the table",
+                "review below to proceed",
+            ),
+            (
+                WaitingKind::Ask,
+                "Quick question",
+                "answer below to proceed",
+            ),
         ] {
             let text: String = waiting_line(&WaitingView {
                 kind,

@@ -248,12 +248,7 @@ impl Tool for RunBackground {
                 }
             }
 
-            let code = child
-                .wait()
-                .await
-                .ok()
-                .and_then(|s| s.code())
-                .unwrap_or(-1);
+            let code = child.wait().await.ok().and_then(|s| s.code()).unwrap_or(-1);
             *exit_code.lock().await = Some(code);
         });
 
@@ -314,9 +309,10 @@ impl Tool for ReadOutput {
         let args: ReadArgs = call.parse_arguments()?;
         let store = require_store(ctx)?;
 
-        let entry = store.get(args.id).await.ok_or_else(|| {
-            ToolError::Failed(format!("no background process id={}", args.id))
-        })?;
+        let entry = store
+            .get(args.id)
+            .await
+            .ok_or_else(|| ToolError::Failed(format!("no background process id={}", args.id)))?;
 
         let lines = snapshot_lines(&entry.lines, args.tail).await;
         let exit_code = *entry.exit_code.lock().await;
@@ -378,9 +374,10 @@ impl Tool for KillBackground {
         let args: KillArgs = call.parse_arguments()?;
         let store = require_store(ctx)?;
 
-        let entry = store.get(args.id).await.ok_or_else(|| {
-            ToolError::Failed(format!("no background process id={}", args.id))
-        })?;
+        let entry = store
+            .get(args.id)
+            .await
+            .ok_or_else(|| ToolError::Failed(format!("no background process id={}", args.id)))?;
 
         let was_running = entry.exit_code.lock().await.is_none();
         if was_running {

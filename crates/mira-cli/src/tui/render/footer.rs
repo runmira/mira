@@ -198,9 +198,7 @@ fn format_usage_spans(state: &TuiState) -> Vec<Span<'static>> {
         spans.push(Span::styled(" · ".to_owned(), muted));
         let over = state.budget_usd.map(|cap| dollars >= cap).unwrap_or(false);
         let dollar_style = if over {
-            Style::default()
-                .fg(Color::Red)
-                .add_modifier(Modifier::BOLD)
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
         } else {
             muted
         };

@@ -53,15 +53,6 @@ pub(crate) struct ResultView<'a> {
     pub collapsed: bool,
 }
 
-/// Body rows for one tool result, below the call header. Chooses
-/// between three shapes:
-///
-/// 1. diff preview (when the call succeeded and carries one) — the
-///    "what actually changed" view;
-/// 2. expanded full output behind a `│` gutter (Ctrl+E);
-/// 3. the one-line `└` snippet — suppressed entirely for a green-dot
-///    bash success whose only content is `exit=0`, which reads as pure
-///    noise under an already-green header.
 /// Cap on how many lines an expanded tool result renders inline.
 /// Anything over this collapses to a HEAD + gap marker + TAIL view so
 /// a 2000-line `bash` or `read_file` dump doesn't push the composer
@@ -74,9 +65,19 @@ const EXPANDED_TAIL: usize = 6;
 /// exactly 2 lines, which is a net loss).
 const EXPANDED_ELIDE_MIN: usize = 20;
 
-/// Body rows for one tool result. `path` is the source file path (for
-/// read/edit calls) and enables language-aware syntax highlighting on
-/// the `│` gutter lines; `None` falls back to the generic heuristic.
+/// Body rows for one tool result, below the call header. Chooses
+/// between three shapes:
+///
+/// 1. diff preview (when the call succeeded and carries one) — the
+///    "what actually changed" view;
+/// 2. expanded full output behind a `│` gutter (Ctrl+E);
+/// 3. the one-line `└` snippet — suppressed entirely for a green-dot
+///    bash success whose only content is `exit=0`, which reads as pure
+///    noise under an already-green header.
+///
+/// `path` is the source file path (for read/edit calls) and enables
+/// language-aware syntax highlighting on the `│` gutter lines; `None`
+/// falls back to the generic heuristic.
 pub(crate) fn body_lines(result: &ResultView<'_>, path: Option<&str>) -> Vec<Line<'static>> {
     match (result.expanded, result.full.is_empty()) {
         (true, false) => {
@@ -85,8 +86,8 @@ pub(crate) fn body_lines(result: &ResultView<'_>, path: Option<&str>) -> Vec<Lin
                 let mut spans = vec![Span::styled("  │  ", Style::default().fg(DIM()))];
                 // Use language-specific highlighting when we know the
                 // file extension; fall back to the generic heuristic.
-                let highlighted = path
-                    .and_then(|p| crate::tui::markdown::highlight_code_line(line, p));
+                let highlighted =
+                    path.and_then(|p| crate::tui::markdown::highlight_code_line(line, p));
                 match highlighted {
                     Some(h) => spans.extend(h),
                     None => spans.extend(highlight_body(line)),
@@ -135,8 +136,8 @@ pub(crate) fn body_lines(result: &ResultView<'_>, path: Option<&str>) -> Vec<Lin
                 super::truncate(result.snippet, 200)
             };
             let mut spans = vec![Span::styled("  └  ", Style::default().fg(DIM()))];
-            let highlighted = path
-                .and_then(|p| crate::tui::markdown::highlight_code_line(&body, p));
+            let highlighted =
+                path.and_then(|p| crate::tui::markdown::highlight_code_line(&body, p));
             match highlighted {
                 Some(h) => spans.extend(h),
                 None => spans.extend(highlight_body(&body)),
@@ -160,9 +161,12 @@ fn highlight_body(text: &str) -> Vec<Span<'static>> {
 }
 
 fn looks_like_prose(text: &str) -> bool {
-    let has_code_marker = text
-        .chars()
-        .any(|c| matches!(c, '{' | '}' | '(' | ')' | ';' | '=' | '<' | '>' | '"' | '`' | '\''));
+    let has_code_marker = text.chars().any(|c| {
+        matches!(
+            c,
+            '{' | '}' | '(' | ')' | ';' | '=' | '<' | '>' | '"' | '`' | '\''
+        )
+    });
     !has_code_marker && text.len() < 120
 }
 
@@ -271,7 +275,7 @@ fn row_line(row: &DiffRow, path: &str, num_w: usize, width: u16) -> Line<'static
         }
         DiffRow::Del { old, text } => {
             let mut spans = vec![
-                num_span(*old, num_w, NUM_DEL_FG),
+                num_span(*old, num_w, NUM_DEL_FG).bg(DEL_BG),
                 Span::styled("- ", Style::default().fg(Color::Red).bg(DEL_BG).bold()),
             ];
             spans.extend(code_spans(
@@ -285,7 +289,7 @@ fn row_line(row: &DiffRow, path: &str, num_w: usize, width: u16) -> Line<'static
         }
         DiffRow::Add { new, text } => {
             let mut spans = vec![
-                num_span(*new, num_w, NUM_ADD_FG),
+                num_span(*new, num_w, NUM_ADD_FG).bg(ADD_BG),
                 Span::styled("+ ", Style::default().fg(Color::Green).bg(ADD_BG).bold()),
             ];
             spans.extend(code_spans(

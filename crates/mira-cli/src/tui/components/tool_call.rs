@@ -8,9 +8,9 @@
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
 
-use crate::tui::state::AgentCell;
 use super::tool_result;
 use super::{highlight_line, truncate, CREAM, DIM, MUTED, SALMON};
+use crate::tui::state::AgentCell;
 
 /// One tool call (optionally paired with its result) as the renderer
 /// sees it. Borrows from the state entries.
@@ -158,7 +158,10 @@ pub(crate) fn render(
             let show_lines = bg.len().min(40);
             let start = bg.len().saturating_sub(show_lines);
             for line in &bg[start..] {
-                let trimmed: String = line.chars().take((width as usize).saturating_sub(6)).collect();
+                let trimmed: String = line
+                    .chars()
+                    .take((width as usize).saturating_sub(6))
+                    .collect();
                 out.push(Line::from(vec![
                     Span::styled("  │ ", Style::default().fg(super::DIM())),
                     Span::styled(trimmed, Style::default().fg(MUTED())),
@@ -249,7 +252,11 @@ pub(crate) fn render(
             out.push(Line::from(vec![
                 Span::styled("  ", Style::default()),
                 Span::styled(
-                    format!("!{} warning{}", cell.warnings, if cell.warnings == 1 { "" } else { "s" }),
+                    format!(
+                        "!{} warning{}",
+                        cell.warnings,
+                        if cell.warnings == 1 { "" } else { "s" }
+                    ),
                     Style::default().fg(Color::Yellow).bold(),
                 ),
             ]));
@@ -510,9 +517,7 @@ fn computer_summary_detail(action: &str, v: &serde_json::Value) -> String {
         "zoom" => "Zoom".to_owned(),
         "wait" => format!(
             "Wait {}s",
-            v.get("duration")
-                .and_then(|x| x.as_f64())
-                .unwrap_or(1.0)
+            v.get("duration").and_then(|x| x.as_f64()).unwrap_or(1.0)
         ),
         "left_click" => format!("Click {}", coord()),
         "right_click" => format!("Right-click {}", coord()),
@@ -552,9 +557,7 @@ fn computer_summary_detail(action: &str, v: &serde_json::Value) -> String {
 fn browser_summary_detail(action: &str, v: &serde_json::Value) -> String {
     let get = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_owned);
     match action {
-        "navigate" => get("url")
-            .map(browser_url_label)
-            .unwrap_or_default(),
+        "navigate" => get("url").map(browser_url_label).unwrap_or_default(),
         "new_tab" => get("url")
             .map(browser_url_label)
             .unwrap_or_else(|| "new tab".to_owned()),
@@ -611,9 +614,7 @@ fn browser_summary_detail(action: &str, v: &serde_json::Value) -> String {
             .unwrap_or_else(|| "Close tab".to_owned()),
         "wait" => format!(
             "Wait {}s",
-            v.get("duration")
-                .and_then(|x| x.as_f64())
-                .unwrap_or(1.0)
+            v.get("duration").and_then(|x| x.as_f64()).unwrap_or(1.0)
         ),
         _ => action.replace('_', " "),
     }
@@ -673,7 +674,10 @@ mod tests {
             ("Computer".to_owned(), "Screenshot".to_owned())
         );
         assert_eq!(
-            summarize_tool("computer", r#"{"action":"left_click","coordinate":[512,300]}"#),
+            summarize_tool(
+                "computer",
+                r#"{"action":"left_click","coordinate":[512,300]}"#
+            ),
             ("Computer".to_owned(), "Click (512, 300)".to_owned())
         );
         assert_eq!(
@@ -685,7 +689,10 @@ mod tests {
             ("Computer".to_owned(), "Key ctrl+s".to_owned())
         );
         assert_eq!(
-            summarize_tool("computer", r#"{"action":"scroll","scroll_direction":"down"}"#),
+            summarize_tool(
+                "computer",
+                r#"{"action":"scroll","scroll_direction":"down"}"#
+            ),
             ("Computer".to_owned(), "Scroll down".to_owned())
         );
         assert_eq!(
@@ -693,7 +700,10 @@ mod tests {
                 "computer",
                 r#"{"action":"left_click_drag","start_coordinate":[10,20],"coordinate":[100,200]}"#
             ),
-            ("Computer".to_owned(), "Drag (10, 20) → (100, 200)".to_owned())
+            (
+                "Computer".to_owned(),
+                "Drag (10, 20) → (100, 200)".to_owned()
+            )
         );
     }
 

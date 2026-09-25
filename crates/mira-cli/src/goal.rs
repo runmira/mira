@@ -29,7 +29,7 @@
 //! The command is intentionally read/write friendly for terminal-first
 //! workflows that do not have a running server.
 
-use std::path::PathBuf;
+use std::path::Path;
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Subcommand};
@@ -120,7 +120,7 @@ pub async fn run(_cli: &super::Cli, args: GoalArgs) -> Result<()> {
     }
 }
 
-async fn set(store: &FileStore, cwd: &PathBuf, args: SetArgs) -> Result<()> {
+async fn set(store: &FileStore, cwd: &Path, args: SetArgs) -> Result<()> {
     let condition = args.condition.trim().to_owned();
     if condition.is_empty() {
         bail!("goal condition cannot be empty");
@@ -157,7 +157,7 @@ async fn set(store: &FileStore, cwd: &PathBuf, args: SetArgs) -> Result<()> {
     Ok(())
 }
 
-async fn clear(store: &FileStore, cwd: &PathBuf) -> Result<()> {
+async fn clear(store: &FileStore, cwd: &Path) -> Result<()> {
     let mut record = latest_record(store, cwd).await?;
     if record.goal.is_none() {
         println!("no goal on session {} — nothing to clear", record.id);
@@ -169,7 +169,7 @@ async fn clear(store: &FileStore, cwd: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-async fn status(store: &FileStore, cwd: &PathBuf) -> Result<()> {
+async fn status(store: &FileStore, cwd: &Path) -> Result<()> {
     let record = match latest_record_opt(store, cwd).await? {
         Some(r) => r,
         None => {
@@ -187,7 +187,7 @@ async fn status(store: &FileStore, cwd: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-async fn resume(store: &FileStore, cwd: &PathBuf, args: ResumeArgs) -> Result<()> {
+async fn resume(store: &FileStore, cwd: &Path, args: ResumeArgs) -> Result<()> {
     let mut record = latest_record(store, cwd).await?;
     let mut goal = record
         .goal
@@ -227,7 +227,7 @@ async fn resume(store: &FileStore, cwd: &PathBuf, args: ResumeArgs) -> Result<()
     Ok(())
 }
 
-async fn latest_record(store: &FileStore, cwd: &PathBuf) -> Result<mira_harness::SessionRecord> {
+async fn latest_record(store: &FileStore, cwd: &Path) -> Result<mira_harness::SessionRecord> {
     latest_record_opt(store, cwd).await?.ok_or_else(|| {
         anyhow!(
             "no sessions yet in {}. Start one with `mira` or `mira serve` first.",
@@ -238,7 +238,7 @@ async fn latest_record(store: &FileStore, cwd: &PathBuf) -> Result<mira_harness:
 
 async fn latest_record_opt(
     store: &FileStore,
-    cwd: &PathBuf,
+    cwd: &Path,
 ) -> Result<Option<mira_harness::SessionRecord>> {
     // The SessionStore trait's methods are `async fn` — go through the
     // trait to reach them (FileStore itself has no direct copies).

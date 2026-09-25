@@ -73,11 +73,7 @@ pub(crate) fn resolve_scroll(
         // (assistant reply, tool group) fills the viewport.
         (start as u16).saturating_sub(1).min(tail)
     } else if let Some((entry_idx, _)) = state.active_hit() {
-        let start = layout
-            .entry_row_starts
-            .get(entry_idx)
-            .copied()
-            .unwrap_or(0);
+        let start = layout.entry_row_starts.get(entry_idx).copied().unwrap_or(0);
         if start == SCROLLBACK_ROW {
             return state.scroll.min(tail);
         }

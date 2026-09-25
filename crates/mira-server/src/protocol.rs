@@ -138,6 +138,9 @@ pub enum ClientMsg {
 /// Server → client.
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+// `Ready` is much bigger than the other variants, but it's sent once per
+// connection; boxing it would only add churn at every construction site.
+#[allow(clippy::large_enum_variant)]
 pub enum ServerMsg {
     /// Emitted once when the socket opens, with the session's current state.
     Ready {

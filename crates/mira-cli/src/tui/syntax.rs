@@ -31,20 +31,66 @@ const IDENT_FG: Color = Color::Rgb(210, 210, 214); // near-white for identifiers
 /// glance, and nothing else.
 const KEYWORDS: &[&str] = &[
     // Rust / C-like
-    "fn", "let", "mut", "const", "static", "pub", "use", "mod",
-    "struct", "enum", "trait", "impl", "match", "return", "self",
-    "async", "await", "move", "ref", "as", "where",
+    "fn",
+    "let",
+    "mut",
+    "const",
+    "static",
+    "pub",
+    "use",
+    "mod",
+    "struct",
+    "enum",
+    "trait",
+    "impl",
+    "match",
+    "return",
+    "self",
+    "async",
+    "await",
+    "move",
+    "ref",
+    "as",
+    "where",
     // Control flow (shared across many langs)
-    "if", "else", "for", "while", "loop", "break", "continue",
-    "in", "of", "do", "then",
+    "if",
+    "else",
+    "for",
+    "while",
+    "loop",
+    "break",
+    "continue",
+    "in",
+    "of",
+    "do",
+    "then",
     // Python / JS / TS-ish
-    "def", "class", "import", "from", "yield", "lambda",
-    "function", "var", "typeof", "instanceof", "new", "try", "catch",
-    "finally", "throw",
+    "def",
+    "class",
+    "import",
+    "from",
+    "yield",
+    "lambda",
+    "function",
+    "var",
+    "typeof",
+    "instanceof",
+    "new",
+    "try",
+    "catch",
+    "finally",
+    "throw",
     // Truth values
-    "true", "false", "null", "None", "True", "False", "nil",
+    "true",
+    "false",
+    "null",
+    "None",
+    "True",
+    "False",
+    "nil",
     // Common shell
-    "echo", "exit",
+    "echo",
+    "exit",
 ];
 
 /// Tokenize + colour one line. Returns Spans ready to hand to a
@@ -68,7 +114,7 @@ pub(crate) fn highlight_line(text: &str) -> Vec<Span<'static>> {
         }
     };
 
-    while let Some((_i, c)) = chars.next() {
+    while let Some((i, c)) = chars.next() {
         // Line comments: `//` (Rust/C/JS), `#` (shell/Python) at start
         // of a token — treat everything remaining as comment. Skipping
         // when the `#` looks like a colour literal (`#ff8080`) or a
@@ -76,6 +122,7 @@ pub(crate) fn highlight_line(text: &str) -> Vec<Span<'static>> {
         // context makes false positives cheap.
         if c == '/' && matches!(chars.peek(), Some((_, '/'))) {
             flush(&mut out, &mut buf);
+            chars.next(); // the second `/`, already in `rest`
             let mut rest = String::from("//");
             for (_, ch) in chars.by_ref() {
                 rest.push(ch);
@@ -83,7 +130,9 @@ pub(crate) fn highlight_line(text: &str) -> Vec<Span<'static>> {
             out.push(Span::styled(rest, Style::default().fg(DIM()).italic()));
             return out;
         }
-        if c == '#' && buf.trim().is_empty() {
+        // `#` starts a comment only at the start of a token (line start or
+        // after whitespace): `abc#tag` and URL fragments stay plain.
+        if c == '#' && (i == 0 || text[..i].ends_with(char::is_whitespace)) {
             flush(&mut out, &mut buf);
             let mut rest = String::from("#");
             for (_, ch) in chars.by_ref() {
@@ -161,9 +210,7 @@ pub(crate) fn highlight_line(text: &str) -> Vec<Span<'static>> {
             }
             let is_kw = KEYWORDS.iter().any(|k| *k == w);
             let style = if is_kw {
-                Style::default()
-                    .fg(KW_FG)
-                    .add_modifier(Modifier::BOLD)
+                Style::default().fg(KW_FG).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(IDENT_FG)
             };
@@ -266,7 +313,10 @@ mod tests {
     #[test]
     fn escaped_quote_keeps_one_string() {
         let spans = highlight_line("s = \"a \\\" b\";");
-        let strs: Vec<&Span<'_>> = spans.iter().filter(|s| s.style.fg == Some(STR_FG)).collect();
+        let strs: Vec<&Span<'_>> = spans
+            .iter()
+            .filter(|s| s.style.fg == Some(STR_FG))
+            .collect();
         assert_eq!(strs.len(), 1);
         assert!(strs[0].content.contains("\\\""));
     }

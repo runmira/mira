@@ -249,14 +249,16 @@ pub fn transport_from_config(cfg: &McpServerConfig) -> Transport {
     }
 }
 
+/// One entry of an `.mcp.json`: its name, and its definition or why it
+/// couldn't be read.
+pub type ParsedServer = (String, Result<McpServerConfig, String>);
+
 /// Parse Claude Code's `.mcp.json` shape — `{"mcpServers": {name: {...}}}`
 /// — or a bare `{name: {...}}` map. Lenient on purpose: unknown fields
 /// are ignored, so a file written for another client still loads. Each
 /// entry that can't be understood comes back as an error string instead
 /// of failing the whole file.
-pub fn parse_mcp_json(
-    text: &str,
-) -> Result<Vec<(String, Result<McpServerConfig, String>)>, String> {
+pub fn parse_mcp_json(text: &str) -> Result<Vec<ParsedServer>, String> {
     let root: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
     let map = root
         .get("mcpServers")

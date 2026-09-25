@@ -46,16 +46,16 @@ fn mark_lines() -> Vec<Line<'static>> {
     // Lit columns per pixel row (0-indexed, 9 columns wide).
     // Bold M: 2-pixel-wide outer strokes, V diagonals in rows 1-3.
     const ON: [&[usize]; 10] = [
-        &[0, 1, 7, 8],           // top corners
-        &[0, 1, 2, 6, 7, 8],     // diagonals step 1
-        &[0, 1, 3, 5, 7, 8],     // diagonals step 2
-        &[0, 1, 4, 7, 8],        // V base
-        &[0, 1, 7, 8],           // outer legs
+        &[0, 1, 7, 8],       // top corners
+        &[0, 1, 2, 6, 7, 8], // diagonals step 1
+        &[0, 1, 3, 5, 7, 8], // diagonals step 2
+        &[0, 1, 4, 7, 8],    // V base
+        &[0, 1, 7, 8],       // outer legs
         &[0, 1, 7, 8],
         &[0, 1, 7, 8],
         &[0, 1, 7, 8],
         &[0, 1, 7, 8],
-        &[],                     // row 9 pairs with row 8 above via ▀
+        &[], // row 9 pairs with row 8 above via ▀
     ];
     let (sr, sg, sb) = if let Color::Rgb(r, g, b) = SALMON() {
         (r as i32, g as i32, b as i32)
@@ -98,10 +98,7 @@ fn mark_lines() -> Vec<Line<'static>> {
 /// One `label    value…` banner row.
 fn banner_row(label: &str, mut value: Vec<Span<'static>>) -> Line<'static> {
     let mut spans = vec![
-        Span::styled(
-            format!("{label:<8}"),
-            Style::default().fg(MUTED()),
-        ),
+        Span::styled(format!("{label:<8}"), Style::default().fg(MUTED())),
         Span::styled("  ", Style::default()),
     ];
     spans.append(&mut value);
@@ -123,14 +120,14 @@ pub(crate) fn welcome_lines(w: &WelcomeView<'_>) -> Vec<Line<'static>> {
     ]));
     out.push(Line::from(""));
     // Two-column field list — labels padded so values align.
-    out.push(banner_row("model", vec![Span::styled(
-        w.model.to_owned(),
-        cream,
-    )]));
-    out.push(banner_row("provider", vec![Span::styled(
-        w.provider.to_owned(),
-        cream,
-    )]));
+    out.push(banner_row(
+        "model",
+        vec![Span::styled(w.model.to_owned(), cream)],
+    ));
+    out.push(banner_row(
+        "provider",
+        vec![Span::styled(w.provider.to_owned(), cream)],
+    ));
     if let Some(branch) = w.branch {
         out.push(banner_row(
             "cwd",
@@ -140,19 +137,24 @@ pub(crate) fn welcome_lines(w: &WelcomeView<'_>) -> Vec<Line<'static>> {
             ],
         ));
     } else {
-        out.push(banner_row("cwd", vec![Span::styled(
-            w.cwd.to_owned(),
-            cream,
-        )]));
+        out.push(banner_row(
+            "cwd",
+            vec![Span::styled(w.cwd.to_owned(), cream)],
+        ));
     }
-    out.push(banner_row("mode", vec![Span::styled(
-        w.mode.as_str(),
-        super::mode_style(w.mode),
-    )]));
+    out.push(banner_row(
+        "mode",
+        vec![Span::styled(w.mode.as_str(), super::mode_style(w.mode))],
+    ));
     if w.skills.is_empty() {
         out.push(banner_row("skills", vec![Span::styled("none", dim)]));
     } else {
-        let shown: Vec<&str> = w.skills.iter().take(BANNER_SKILLS_SHOWN).map(String::as_str).collect();
+        let shown: Vec<&str> = w
+            .skills
+            .iter()
+            .take(BANNER_SKILLS_SHOWN)
+            .map(String::as_str)
+            .collect();
         let mut text = shown.join(" · ");
         if w.skills.len() > BANNER_SKILLS_SHOWN {
             text.push_str(&format!("  +{} more", w.skills.len() - BANNER_SKILLS_SHOWN));
@@ -191,17 +193,15 @@ pub(crate) fn user_lines(s: &str, width: u16) -> Vec<Line<'static>> {
         let segments = wrap_to_width(logical_line, content_width);
         let mut first_visual = true;
         for seg in &segments {
-            let mark = if first_logical && first_visual { "> " } else { "  " };
+            let mark = if first_logical && first_visual {
+                "> "
+            } else {
+                "  "
+            };
             out.push(wash_line(
                 vec![
-                    Span::styled(
-                        mark,
-                        Style::default().fg(SALMON()).bold().bg(USER_WASH()),
-                    ),
-                    Span::styled(
-                        seg.clone(),
-                        Style::default().fg(CREAM()).bg(USER_WASH()),
-                    ),
+                    Span::styled(mark, Style::default().fg(SALMON()).bold().bg(USER_WASH())),
+                    Span::styled(seg.clone(), Style::default().fg(CREAM()).bg(USER_WASH())),
                 ],
                 width,
             ));
@@ -325,11 +325,7 @@ pub(crate) fn assistant_dot_span() -> Span<'static> {
 /// non-empty line. Leading blank lines are dropped — a reply that opens
 /// on a blank shouldn't waste a scrollback row on it.
 pub(crate) fn prefix_assistant_dot(mut lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
-    while lines
-        .first()
-        .map(line_is_empty)
-        .unwrap_or(false)
-    {
+    while lines.first().map(line_is_empty).unwrap_or(false) {
         lines.remove(0);
     }
     if let Some(first) = lines.first_mut() {

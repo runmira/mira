@@ -8,26 +8,26 @@
 //!
 //! `SessionSlot` fixes that by giving every session its own:
 //! - `events_tx`  — a broadcast::Sender the harness drains into; WS
-//!    clients attached to this session subscribe here so frames never
-//!    leak into another session's transcript.
+//!   clients attached to this session subscribe here so frames never
+//!   leak into another session's transcript.
 //! - `pending`    — approval oneshots keyed by tool call id. Scoped so
-//!    two sessions can independently be waiting on approvals without one
-//!    resolving the other.
+//!   two sessions can independently be waiting on approvals without one
+//!   resolving the other.
 //! - `prompt_pending` — same idea for interactive-tool prompts (plan /
-//!    ask_user / subagent review).
+//!   ask_user / subagent review).
 //! - `cwd` / `memory` / `episodic` — a session in project A doesn't share
-//!    project-scoped memory with a session in project B.
+//!   project-scoped memory with a session in project B.
 //! - `approver`   — a `WsApprover` bound to this slot's channels and
-//!    background-mode setting.
+//!   background-mode setting.
 //! - `registry`   — a slot-specific tool set where PlanTool / AskUserTool /
-//!    AgentTool have been rebuilt against this slot's prompt channel.
+//!   AgentTool have been rebuilt against this slot's prompt channel.
 //! - `turn`       — the JoinHandle of the currently-running turn task, if
-//!    any, so Interrupt can cancel and delete_session can tear it down.
+//!   any, so Interrupt can cancel and delete_session can tear it down.
 //! - `attached`   — a live count of WS forwarders subscribed to this slot.
-//!    Drives background-mode auto-decisions (see [`BackgroundMode`]).
+//!   Drives background-mode auto-decisions (see [`BackgroundMode`]).
 //! - `background_mode` — how the approver should answer `Ask` decisions
-//!    when nobody's watching. Per-session because the user might trust
-//!    Session A to auto-approve while wanting Session B to park.
+//!   when nobody's watching. Per-session because the user might trust
+//!   Session A to auto-approve while wanting Session B to park.
 //!
 //! Slots are built by [`build_slot`], which owns the whole "wire up a
 //! Session with its per-slot channels" recipe. All server bootstraps —
@@ -81,10 +81,12 @@ impl ToolProgressSink for SessionProgress {
 /// a per-session toggle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum BackgroundMode {
     /// Auto-deny `Ask` when no client is attached. Safe default — the tool
     /// call fails, the model sees the error, and the session doesn't burn
     /// tokens on approvals no human will see.
+    #[default]
     Deny,
     /// Auto-approve `Ask` when no client is attached. Use only when the
     /// session's policy is already narrow (read-only exploration, a
@@ -94,12 +96,6 @@ pub enum BackgroundMode {
     /// blocks until the user (re-)attaches and answers, or the
     /// approver's 10-minute safety timeout trips.
     Park,
-}
-
-impl Default for BackgroundMode {
-    fn default() -> Self {
-        Self::Deny
-    }
 }
 
 /// One session's isolated runtime. Clone the `Arc<SessionSlot>` to hand a
@@ -303,8 +299,9 @@ pub async fn build_slot(
     ));
     // Session-lifetime progress sink — never cleared between turns so
     // background process drain tasks can keep emitting ToolProgress frames.
-    let bg_progress: Arc<dyn ToolProgressSink> =
-        Arc::new(SessionProgress { tx: events_tx.clone() });
+    let bg_progress: Arc<dyn ToolProgressSink> = Arc::new(SessionProgress {
+        tx: events_tx.clone(),
+    });
     let bg_store = BackgroundProcessStore::new();
 
     let initial_ctx = ToolContext::new(cwd.clone(), deps.sandbox.clone())

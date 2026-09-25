@@ -174,8 +174,7 @@ pub async fn session_diff(State(state): State<AppState>) -> Response {
     };
 
     if written.is_empty() {
-        return Json(serde_json::json!({ "added": 0, "removed": 0, "files": [] }))
-            .into_response();
+        return Json(serde_json::json!({ "added": 0, "removed": 0, "files": [] })).into_response();
     }
 
     // Collect relative paths (git diff requires paths relative to repo root).
@@ -189,8 +188,7 @@ pub async fn session_diff(State(state): State<AppState>) -> Response {
         .collect();
 
     if file_args.is_empty() {
-        return Json(serde_json::json!({ "added": 0, "removed": 0, "files": [] }))
-            .into_response();
+        return Json(serde_json::json!({ "added": 0, "removed": 0, "files": [] })).into_response();
     }
 
     // `git diff HEAD --numstat -- file1 file2 …`
@@ -233,21 +231,38 @@ pub async fn session_diff(State(state): State<AppState>) -> Response {
 pub async fn branch_pr(State(state): State<AppState>) -> Response {
     let cwd = state.current_cwd().await;
     if !is_git_repo(&cwd) {
-        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "not a git repo"}))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "not a git repo"})),
+        )
+            .into_response();
     }
     let out = Command::new("gh")
         .current_dir(&cwd)
-        .args(["pr", "view", "--json", "number,title,state,url,isDraft,reviewDecision"])
+        .args([
+            "pr",
+            "view",
+            "--json",
+            "number,title,state,url,isDraft,reviewDecision",
+        ])
         .output();
     match out {
         Ok(o) if o.status.success() => {
             let text = String::from_utf8_lossy(&o.stdout);
             match serde_json::from_str::<serde_json::Value>(text.trim()) {
                 Ok(v) => Json(v).into_response(),
-                Err(_) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "no pr"}))).into_response(),
+                Err(_) => (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": "no pr"})),
+                )
+                    .into_response(),
             }
         }
-        _ => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "no pr"}))).into_response(),
+        _ => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "no pr"})),
+        )
+            .into_response(),
     }
 }
 
@@ -311,14 +326,20 @@ pub async fn commit(State(state): State<AppState>, Json(req): Json<CommitRequest
                     Ok(po) if po.status.success() => {
                         Json(serde_json::json!({"ok": true, "pushed": true})).into_response()
                     }
-                    Ok(po) => err(StatusCode::BAD_REQUEST, String::from_utf8_lossy(&po.stderr).to_string()),
+                    Ok(po) => err(
+                        StatusCode::BAD_REQUEST,
+                        String::from_utf8_lossy(&po.stderr).to_string(),
+                    ),
                     Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
                 }
             } else {
                 Json(serde_json::json!({"ok": true, "pushed": false})).into_response()
             }
         }
-        Ok(o) => err(StatusCode::BAD_REQUEST, String::from_utf8_lossy(&o.stderr).to_string()),
+        Ok(o) => err(
+            StatusCode::BAD_REQUEST,
+            String::from_utf8_lossy(&o.stderr).to_string(),
+        ),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
@@ -334,7 +355,10 @@ pub async fn push(State(state): State<AppState>) -> Response {
         .output();
     match out {
         Ok(o) if o.status.success() => Json(serde_json::json!({ "ok": true })).into_response(),
-        Ok(o) => err(StatusCode::BAD_REQUEST, String::from_utf8_lossy(&o.stderr).to_string()),
+        Ok(o) => err(
+            StatusCode::BAD_REQUEST,
+            String::from_utf8_lossy(&o.stderr).to_string(),
+        ),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
