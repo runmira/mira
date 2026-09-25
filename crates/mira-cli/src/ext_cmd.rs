@@ -95,6 +95,32 @@ pub enum McpCmd {
         #[arg(long)]
         unset: bool,
     },
+    /// Turn one tool on or off: `mira mcp tool disable mcp__github__delete_repo`.
+    Tool {
+        #[arg(value_enum)]
+        action: OnOff,
+        /// The name the model sees (`mcp__server__tool`); `mira mcp get` lists them.
+        name: String,
+    },
+    /// How tools reach the model: `all` up front, `on-demand` through
+    /// search_mcp_tools / call_mcp_tool, or `auto` (on demand above 30 tools).
+    ToolLoading {
+        #[arg(value_enum)]
+        mode: LoadingArg,
+    },
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+pub enum OnOff {
+    Enable,
+    Disable,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+pub enum LoadingArg {
+    All,
+    OnDemand,
+    Auto,
 }
 
 fn cwd() -> Result<PathBuf> {
@@ -334,7 +360,8 @@ pub async fn run_mcp(args: McpArgs) -> Result<()> {
                         .chars()
                         .take(80)
                         .collect();
-                    println!("    {}  {d}", t.name);
+                    let off = if t.enabled { "" } else { " (off)" };
+                    println!("    {}{off}  {d}", t.name);
                 }
             }
             if !s.prompts.is_empty() {
@@ -402,6 +429,26 @@ pub async fn run_mcp(args: McpArgs) -> Result<()> {
         McpCmd::Disable { name } => toggle(&name, "Disabled", |m, n| m.set_enabled(n, false)).await,
         McpCmd::Approve { name } => toggle(&name, "Approved", |m, n| m.set_approved(n, true)).await,
         McpCmd::Reject { name } => toggle(&name, "Rejected", |m, n| m.set_approved(n, false)).await,
+        McpCmd::Tool { action, name } => {
+            let on = matches!(action, OnOff::Enable);
+            toggle(&name, if on { "Enabled" } else { "Disabled" }, |m, n| {
+                m.set_tool_enabled(n, on)
+            })
+            .await
+        }
+        McpCmd::ToolLoading { mode } => {
+            let mode = match mode {
+                LoadingArg::All => mira_mcp::ToolLoading::All,
+                LoadingArg::OnDemand => mira_mcp::ToolLoading::OnDemand,
+                LoadingArg::Auto => mira_mcp::ToolLoading::Auto,
+            };
+            let ext = extensions().await?;
+            let r = ext.mcp().set_tool_loading(mode);
+            ext.mcp().shutdown();
+            r.map_err(|e| anyhow!(e))?;
+            println!("Tool loading: {mode:?}.");
+            Ok(())
+        }
         McpCmd::SetVar { name, unset } => {
             let value = if unset {
                 None

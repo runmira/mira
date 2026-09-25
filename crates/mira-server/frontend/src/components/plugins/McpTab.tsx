@@ -9,7 +9,7 @@ import {
   ShieldAlert,
   Trash2,
 } from 'lucide-react';
-import type { McpListView, McpServerView, McpStatus, WriteScope } from '../../api';
+import type { McpListView, McpServerView, McpStatus, ToolLoading, WriteScope } from '../../api';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { faviconSrc, matchesQuery } from './DiscoverTab';
@@ -27,6 +27,8 @@ export type McpActions = {
   onSignOut: (name: string) => void;
   /** Paste values for the server's unset `${VAR}`s (tokens). */
   onAddToken: (s: McpServerView) => void;
+  onToolEnabled: (tool: string, enabled: boolean) => void;
+  onToolLoading: (mode: ToolLoading) => void;
 };
 
 export function statusText(s: McpServerView): string {
@@ -122,6 +124,16 @@ export function McpTab({
           + Add server
         </button>
       </div>
+
+      {data.servers.length > 0 && (
+        <ToolLoadingPicker
+          mode={data.tool_loading}
+          onDemand={data.tools_on_demand}
+          total={data.servers.reduce((n, s) => n + (s.status.state === 'connected' ? s.tools.filter((t) => t.enabled).length : 0), 0)}
+          busy={!!busy}
+          onChange={actions.onToolLoading}
+        />
+      )}
 
       {pending.length > 0 && (
         <div className="rounded-2xl border border-amber-500/25 bg-amber-500/[0.05] p-4">
@@ -325,6 +337,60 @@ function ServerCard({ s, busy, actions }: { s: McpServerView; busy: string | nul
             )}
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+const LOADING: { mode: ToolLoading; label: string }[] = [
+  { mode: 'auto', label: 'Auto' },
+  { mode: 'all', label: 'All up front' },
+  { mode: 'on_demand', label: 'On demand' },
+];
+
+/** How MCP tools reach the model. Every definition costs tokens on every
+ *  turn, and long tool lists confuse smaller models, so past a point the
+ *  model looks tools up instead. */
+function ToolLoadingPicker({
+  mode,
+  onDemand,
+  total,
+  busy,
+  onChange,
+}: {
+  mode: ToolLoading;
+  onDemand: boolean;
+  total: number;
+  busy: boolean;
+  onChange: (m: ToolLoading) => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-border/50 bg-white/[0.035] px-4 py-3">
+      <div className="min-w-0">
+        <div className="text-[13px] font-medium">Tool loading</div>
+        <div className="text-[12px] text-muted-foreground/80">
+          {plural(total, 'tool')} enabled ·{' '}
+          {onDemand
+            ? 'the model finds tools with search_mcp_tools when it needs them'
+            : 'every tool is sent to the model each turn'}
+          {mode === 'auto' && ' · switches to on demand above 30 tools'}
+        </div>
+      </div>
+      <div className="inline-flex shrink-0 rounded-full border border-border/60 bg-black/20 p-0.5">
+        {LOADING.map((o) => (
+          <button
+            key={o.mode}
+            type="button"
+            disabled={busy}
+            onClick={() => o.mode !== mode && onChange(o.mode)}
+            className={cn(
+              'rounded-full px-3 py-1 text-[11.5px] transition-colors disabled:opacity-50',
+              o.mode === mode ? 'bg-white text-black' : 'text-muted-foreground hover:text-foreground',
+            )}
+          >
+            {o.label}
+          </button>
+        ))}
       </div>
     </div>
   );

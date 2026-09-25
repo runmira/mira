@@ -315,6 +315,14 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/api/mcp/servers", axum::routing::post(mcp::save_server))
         .route("/api/mcp/variables", axum::routing::post(mcp::set_variable))
         .route(
+            "/api/mcp/tools/enabled",
+            axum::routing::post(mcp::set_tool_enabled),
+        )
+        .route(
+            "/api/mcp/tool-loading",
+            axum::routing::post(mcp::set_tool_loading),
+        )
+        .route(
             "/api/mcp/servers/:name",
             axum::routing::delete(mcp::delete_server),
         )

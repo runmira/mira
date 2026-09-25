@@ -13,6 +13,8 @@ import {
   setMcpEnabled,
   setPluginEnabled,
   signInMcp,
+  setMcpToolEnabled,
+  setMcpToolLoading,
   setMcpVariable,
   signOutMcp,
   uninstallPlugin,
@@ -21,6 +23,7 @@ import {
   type MarketplaceView,
   type McpListView,
   type McpServerView,
+  type ToolLoading,
   type PluginsOverview,
 } from '../api';
 import { cn } from '@/lib/utils';
@@ -149,6 +152,9 @@ export function PluginsPanel({ version = 0 }: { version?: number }) {
     },
     onSignOut: (name: string) => run(`mcp:${name}`, () => signOutMcp(name)).then(afterMcp),
     onAddToken: (s: McpServerView) => setTokenFor(s.name),
+    onToolEnabled: (tool: string, enabled: boolean) =>
+      run(`tool:${tool}`, () => setMcpToolEnabled(tool, enabled)).then(afterMcp),
+    onToolLoading: (mode: ToolLoading) => run('tool-loading', () => setMcpToolLoading(mode)).then(afterMcp),
   };
 
   const failedServers = mcp?.servers.filter((s) => s.status.state === 'failed') ?? [];

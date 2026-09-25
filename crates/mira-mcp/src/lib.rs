@@ -26,7 +26,7 @@ pub mod vars;
 
 pub use manager::{
     McpEvent, McpManager, McpOptions, PromptArgView, PromptView, ResourceView, ServerView, Status,
-    ToolView,
+    ToolLoading, ToolView,
 };
 pub use sources::{collect, Collected, ConfigProblem, SourceInputs};
 pub use spec::{parse_mcp_json, sanitize, tool_name, Scope, ServerSpec, Transport};

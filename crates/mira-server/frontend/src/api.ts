@@ -536,7 +536,10 @@ export type McpStatus =
   | { state: 'needs_setup'; variables: string[] }
   | { state: 'failed'; message: string };
 
-export type McpToolView = { name: string; remote_name: string; description: string; read_only: boolean };
+export type McpToolView = { name: string; remote_name: string; description: string; read_only: boolean; enabled: boolean };
+
+/** How MCP tools reach the model. */
+export type ToolLoading = 'all' | 'on_demand' | 'auto';
 export type McpPromptView = {
   name: string;
   description: string | null;
@@ -574,6 +577,9 @@ export type McpListView = {
   project: string | null;
   /** Names of saved `${VAR}` values (never the values). */
   saved_variables: string[];
+  tool_loading: ToolLoading;
+  /** Whether tools go through search_mcp_tools / call_mcp_tool right now. */
+  tools_on_demand: boolean;
 };
 
 export type WriteScope = 'user' | 'project' | 'local';
@@ -608,6 +614,10 @@ export const signInMcp = (name: string) => post<{ url: string }>(mcpUrl(name, 's
  *  definitions, like a plugin's `GITHUB_PERSONAL_ACCESS_TOKEN`. */
 export const setMcpVariable = (name: string, value: string | null) =>
   post<McpListView>('/api/mcp/variables', { name, value }, 'Saving the token');
+export const setMcpToolEnabled = (tool: string, enabled: boolean) =>
+  post<McpListView>('/api/mcp/tools/enabled', { tool, enabled }, enabled ? 'Enabling the tool' : 'Disabling the tool');
+export const setMcpToolLoading = (mode: ToolLoading) =>
+  post<McpListView>('/api/mcp/tool-loading', { mode }, 'Changing tool loading');
 export const signOutMcp = (name: string) => post<McpListView>(mcpUrl(name, 'sign-out'), {}, 'Signing out');
 
 /** Where a command or skill comes from, for grouping it in palettes. */

@@ -3,7 +3,7 @@ import type { McpServerView } from '../../api';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { faviconSrc } from './DiscoverTab';
-import { Avatar, Pill } from './shared';
+import { Avatar, Pill, Switch } from './shared';
 import { StatusBadge, statusText, writeScope, type McpActions } from './McpTab';
 
 function mcpIconSrc(s: McpServerView): string | null {
@@ -156,7 +156,10 @@ export function McpDetailPage({
 
       {/* Tools */}
       <section>
-        <SectionH icon={<Wrench />}>Tools · {s.tools.length}</SectionH>
+        <SectionH icon={<Wrench />}>
+          Tools · {s.tools.filter((t) => t.enabled).length}
+          {s.tools.some((t) => !t.enabled) && ` of ${s.tools.length} on`}
+        </SectionH>
         {s.tools.length === 0 ? (
           <div className="rounded-xl border border-border/50 bg-white/[0.035] px-4 py-3 text-[13px] text-muted-foreground">
             {st === 'connected' ? 'This server exposes no tools.' : 'Available once connected.'}
@@ -164,10 +167,18 @@ export function McpDetailPage({
         ) : (
           <div className="overflow-hidden rounded-xl border border-border/60 bg-white/[0.035]">
             {s.tools.map((t, i) => (
-              <div key={t.name} className={cn('px-4 py-3', i > 0 && 'border-t border-border/40')}>
+              <div key={t.name} className={cn('px-4 py-3', i > 0 && 'border-t border-border/40', !t.enabled && 'opacity-60')}>
                 <div className="flex items-center gap-2">
                   <code className="font-mono text-[12.5px] text-foreground/90">{t.remote_name}</code>
                   {t.read_only && <Pill tone="green">read-only</Pill>}
+                  <span className="ml-auto">
+                    <Switch
+                      checked={t.enabled}
+                      disabled={!!busy}
+                      label={t.enabled ? `Turn off ${t.remote_name}` : `Turn on ${t.remote_name}`}
+                      onChange={(v) => actions.onToolEnabled(t.name, v)}
+                    />
+                  </span>
                 </div>
                 {t.description && (
                   <p className="mt-0.5 line-clamp-3 text-[12px] leading-relaxed text-muted-foreground">{t.description}</p>

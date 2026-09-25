@@ -375,6 +375,254 @@ pub(crate) fn resource_tools(inner: &Arc<Inner>) -> Vec<Arc<dyn Tool>> {
     ]
 }
 
+/// `search_mcp_tools`: find MCP tools by keyword, with their input
+/// schemas, when tools load on demand.
+pub struct SearchTools {
+    pub(crate) inner: Weak<Inner>,
+}
+
+/// `call_mcp_tool`: run an MCP tool found with `search_mcp_tools`.
+pub struct CallTool {
+    pub(crate) inner: Weak<Inner>,
+}
+
+pub(crate) fn on_demand_tools(inner: &Arc<Inner>) -> Vec<Arc<dyn Tool>> {
+    vec![
+        Arc::new(SearchTools {
+            inner: Arc::downgrade(inner),
+        }),
+        Arc::new(CallTool {
+            inner: Arc::downgrade(inner),
+        }),
+    ]
+}
+
+/// Score a tool against search words: name hits count more than
+/// description hits. Zero means no match.
+fn score(t: &McpTool, words: &[String]) -> usize {
+    let name = t.local_name.to_lowercase();
+    let desc = t.description.to_lowercase();
+    words
+        .iter()
+        .map(|w| {
+            usize::from(name.contains(w.as_str())) * 3 + usize::from(desc.contains(w.as_str()))
+        })
+        .sum()
+}
+
+#[async_trait]
+impl Tool for SearchTools {
+    fn spec(&self) -> ToolSpec {
+        let servers = self
+            .inner
+            .upgrade()
+            .map(|i| {
+                let mut names: Vec<String> =
+                    i.enabled_tools().iter().map(|t| t.server.clone()).collect();
+                names.sort();
+                names.dedup();
+                names.join(", ")
+            })
+            .unwrap_or_default();
+        ToolSpec {
+            name: "search_mcp_tools".into(),
+            description: format!(
+                "Find tools from connected MCP servers ({servers}). Returns matching tools \
+                 with their input schemas; run one with `call_mcp_tool`. Search by what \
+                 you want to do (\"create issue\", \"query database\"), optionally \
+                 limited to one server. An empty query lists every tool name."
+            ),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Keywords describing the task."},
+                    "server": {"type": "string", "description": "Only this server's tools."},
+                    "limit": {"type": "integer", "description": "Most results to return (default 8)."}
+                }
+            }),
+        }
+    }
+
+    fn action(&self) -> Action {
+        Action::Pure
+    }
+
+    async fn invoke(&self, call: &ToolCall, ctx: &ToolContext) -> Result<ToolResult, ToolError> {
+        let args = parse_arguments(&call.function.arguments)?.unwrap_or_default();
+        let query = args.get("query").and_then(JsonValue::as_str).unwrap_or("");
+        let only = args.get("server").and_then(JsonValue::as_str);
+        let limit = args
+            .get("limit")
+            .and_then(JsonValue::as_u64)
+            .unwrap_or(8)
+            .clamp(1, 50) as usize;
+        let inner = self
+            .inner
+            .upgrade()
+            .ok_or_else(|| ToolError::Failed("MCP is shut down".into()))?;
+        let remote = ctx.compute.is_remote();
+        let tools: Vec<Arc<McpTool>> = inner
+            .enabled_tools()
+            .into_iter()
+            .filter(|t| only.is_none_or(|o| t.server == o || sanitize(&t.server) == o))
+            .filter(|t| !remote || t.remote_server)
+            .collect();
+        let words: Vec<String> = query
+            .split_whitespace()
+            .map(|w| w.to_lowercase())
+            .filter(|w| w.len() > 1)
+            .collect();
+        if words.is_empty() {
+            let listing: Vec<JsonValue> = tools
+                .iter()
+                .map(|t| {
+                    json!({
+                        "name": t.local_name,
+                        "server": t.server,
+                        "description": t.description.lines().next().unwrap_or(""),
+                    })
+                })
+                .collect();
+            let text = serde_json::to_string_pretty(&listing).unwrap_or_default();
+            return Ok(ToolResult::ok(
+                call.id.clone(),
+                format!(
+                    "{} tools. Search with a query to get input schemas.\n{text}",
+                    listing.len()
+                ),
+            ));
+        }
+        let mut ranked: Vec<(usize, &Arc<McpTool>)> = tools
+            .iter()
+            .map(|t| (score(t, &words), t))
+            .filter(|(s, _)| *s > 0)
+            .collect();
+        ranked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.local_name.cmp(&b.1.local_name)));
+        let hits: Vec<JsonValue> = ranked
+            .into_iter()
+            .take(limit)
+            .map(|(_, t)| {
+                json!({
+                    "name": t.local_name,
+                    "server": t.server,
+                    "description": t.description,
+                    "input_schema": t.parameters,
+                    "read_only": t.read_only,
+                })
+            })
+            .collect();
+        let text = if hits.is_empty() {
+            "No matching tools. Try other words, or an empty query to list them all.".to_owned()
+        } else {
+            serde_json::to_string_pretty(&hits).unwrap_or_default()
+        };
+        Ok(ToolResult::ok(call.id.clone(), text))
+    }
+}
+
+impl CallTool {
+    /// The tool a call names, among enabled tools.
+    fn target(&self, call: &ToolCall) -> Option<Arc<McpTool>> {
+        let args = parse_arguments(&call.function.arguments).ok()??;
+        let name = args.get("name")?.as_str()?;
+        self.inner
+            .upgrade()?
+            .enabled_tools()
+            .into_iter()
+            .find(|t| t.local_name == name)
+    }
+}
+
+#[async_trait]
+impl Tool for CallTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "call_mcp_tool".into(),
+            description: "Run an MCP tool found with `search_mcp_tools`. Pass its exact \
+                          `name` and `arguments` matching its input schema."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "The tool's name, e.g. mcp__github__create_issue."},
+                    "arguments": {"type": "object", "description": "Arguments matching the tool's input schema."}
+                },
+                "required": ["name"]
+            }),
+        }
+    }
+
+    fn action(&self) -> Action {
+        Action::Mcp
+    }
+
+    /// The underlying tool's `server:tool`, so `Mcp(...)` rules apply
+    /// exactly as when the tool is offered directly.
+    fn policy_target(&self, call: &ToolCall) -> String {
+        match self.target(call) {
+            Some(t) => {
+                let inner_call = ToolCall {
+                    id: call.id.clone(),
+                    kind: call.kind,
+                    function: mira_core::message::ToolCallFunction {
+                        name: t.local_name.clone(),
+                        arguments: String::new(),
+                    },
+                };
+                t.policy_target(&inner_call)
+            }
+            None => "unknown:unknown".into(),
+        }
+    }
+
+    fn parallel_safe(&self, call: &ToolCall) -> bool {
+        self.target(call).is_some_and(|t| t.read_only)
+    }
+
+    /// Checked per call: only hosted servers' tools run from a remote
+    /// environment.
+    fn remote_capable(&self) -> bool {
+        true
+    }
+
+    async fn invoke(&self, call: &ToolCall, ctx: &ToolContext) -> Result<ToolResult, ToolError> {
+        let args = parse_arguments(&call.function.arguments)?.unwrap_or_default();
+        let name = args
+            .get("name")
+            .and_then(JsonValue::as_str)
+            .ok_or_else(|| ToolError::InvalidArgs("`name` is required".into()))?;
+        let Some(tool) = self.target(call) else {
+            return Err(ToolError::InvalidArgs(format!(
+                "no enabled MCP tool `{name}`; find tools with `search_mcp_tools`"
+            )));
+        };
+        if ctx.compute.is_remote() && !tool.remote_server {
+            return Err(ToolError::Failed(format!(
+                "`{name}` runs on this machine, so it isn't available in a remote environment"
+            )));
+        }
+        let arguments = match args.get("arguments") {
+            None | Some(JsonValue::Null) => String::new(),
+            Some(JsonValue::Object(m)) => JsonValue::Object(m.clone()).to_string(),
+            Some(JsonValue::String(s)) => s.clone(),
+            Some(other) => {
+                return Err(ToolError::InvalidArgs(format!(
+                    "`arguments` must be an object, got {other}"
+                )))
+            }
+        };
+        let inner_call = ToolCall {
+            id: call.id.clone(),
+            kind: call.kind,
+            function: mira_core::message::ToolCallFunction {
+                name: tool.local_name.clone(),
+                arguments,
+            },
+        };
+        tool.invoke(&inner_call, ctx).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
