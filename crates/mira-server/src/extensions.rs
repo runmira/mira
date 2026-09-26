@@ -266,6 +266,21 @@ impl Extensions {
         *self.inner.hook_model.write().unwrap() = Some(Arc::new(HookModel { provider, model }));
     }
 
+    /// Hooks that enabled plugins add, with the plugin's id.
+    pub fn plugin_hook_rules(&self) -> Vec<(String, mira_plugins::hooks::HookRule)> {
+        let enabled = self.inner.enabled.read().unwrap();
+        enabled
+            .plugins
+            .iter()
+            .filter_map(|p| p.components.hooks_config.as_ref().map(|c| (p, c)))
+            .flat_map(|(p, c)| {
+                mira_plugins::hooks::rules_from_config(c)
+                    .into_iter()
+                    .map(|r| (p.id.clone(), r))
+            })
+            .collect()
+    }
+
     /// Hooks that couldn't be read, from the last reload.
     pub fn hook_problems(&self) -> Vec<String> {
         self.inner.hooks.read().unwrap().problems.clone()

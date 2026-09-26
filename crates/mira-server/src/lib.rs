@@ -35,6 +35,7 @@ pub mod extensions;
 mod file;
 mod git;
 mod github_connect;
+pub mod hooks_api;
 pub mod interactive;
 pub mod mcp;
 mod memory;
@@ -320,6 +321,10 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         )
         .route("/api/review", axum::routing::post(review::start_review))
         .route("/api/undo", axum::routing::post(undo::apply_undo))
+        .route(
+            "/api/hooks",
+            get(hooks_api::get_hooks).put(hooks_api::put_hooks),
+        )
         .route("/api/mcp", get(mcp::get_mcp))
         .route("/api/mcp/servers", axum::routing::post(mcp::save_server))
         .route("/api/mcp/variables", axum::routing::post(mcp::set_variable))

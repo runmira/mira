@@ -20,6 +20,7 @@ import {
   Info,
   Key,
   Lightbulb,
+  Lightning,
   MagnifyingGlass,
   NotePencil,
   Package,
@@ -47,6 +48,7 @@ import {
 export type { GithubReturn } from './Integrations';
 import { Markdown } from './Markdown';
 import { IntegrationsSection, type GithubReturn } from './Integrations';
+import { HooksSection } from './Hooks';
 import type {
   KeyUpdate,
   MemoryUpdate,
@@ -167,7 +169,7 @@ const KEY_META: Record<string, { label: string; help: string; url?: string }> = 
   },
 };
 
-export type SettingsSectionId = 'provider' | 'preferences' | 'memory' | 'skills' | 'search' | 'integrations' | 'about';
+export type SettingsSectionId = 'provider' | 'preferences' | 'memory' | 'skills' | 'hooks' | 'search' | 'integrations' | 'about';
 
 /** Section metadata exported so the Sidebar can render the same nav in
  *  its "settings mode" (the settings surface is now inline in the main
@@ -181,6 +183,7 @@ export const SETTINGS_SECTIONS: {
   { id: 'preferences', label: 'Preferences', icon: Sliders },
   { id: 'memory',      label: 'Memory',      icon: Brain },
   { id: 'skills',      label: 'Skills',      icon: Sparkle },
+  { id: 'hooks',       label: 'Hooks',       icon: Lightning },
   { id: 'search',      label: 'Search & keys', icon: MagnifyingGlass },
   { id: 'integrations', label: 'Integrations', icon: Plug },
   { id: 'about',       label: 'About',       icon: Info },
@@ -416,6 +419,7 @@ export function SettingsSurface({
           {view && section === 'search' && (
             <KeysSection view={view} draft={draft} setDraft={setDraft} />
           )}
+          {view && section === 'hooks' && <HooksSection />}
           {view && section === 'integrations' && (
             <IntegrationsSection onOpenKeys={() => onSectionChange('search')} githubReturn={githubReturn} />
           )}
