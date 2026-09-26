@@ -168,13 +168,13 @@ pub async fn session_diff(State(state): State<AppState>) -> Response {
     let written = match session.file_guard() {
         Some(g) => g.written_snapshot().await,
         None => {
-            return Json(serde_json::json!({ "added": 0, "removed": 0, "files": [] }))
+            return Json(serde_json::json!({ "added": 0, "removed": 0, "files": [], "uncommitted": 0, "untracked": 0 }))
                 .into_response()
         }
     };
 
     if written.is_empty() {
-        return Json(serde_json::json!({ "added": 0, "removed": 0, "files": [] })).into_response();
+        return Json(serde_json::json!({ "added": 0, "removed": 0, "files": [], "uncommitted": 0, "untracked": 0 })).into_response();
     }
 
     // Collect relative paths (git diff requires paths relative to repo root).
@@ -188,7 +188,7 @@ pub async fn session_diff(State(state): State<AppState>) -> Response {
         .collect();
 
     if file_args.is_empty() {
-        return Json(serde_json::json!({ "added": 0, "removed": 0, "files": [] })).into_response();
+        return Json(serde_json::json!({ "added": 0, "removed": 0, "files": [], "uncommitted": 0, "untracked": 0 })).into_response();
     }
 
     // `git diff HEAD --numstat -- file1 file2 …`
@@ -212,6 +212,25 @@ pub async fn session_diff(State(state): State<AppState>) -> Response {
         Err(_) => (0, 0),
     };
 
+    // Which of those files still have something to commit. `git diff HEAD`
+    // above can't see brand-new (untracked) files, and `written` never
+    // shrinks, so without this the UI can't tell "this session has work
+    // to commit" from "this session once touched a file".
+    let mut status_args = vec!["status", "--porcelain=v1", "-uall", "--"];
+    status_args.extend_from_slice(&file_strs);
+    let pending = run(&cwd, &status_args)
+        .map(|out| parse_pending(&out))
+        .unwrap_or_default();
+    // New files count as all-added lines, so the +N matches what a
+    // commit would actually carry.
+    let added = added
+        + pending
+            .untracked_paths
+            .iter()
+            .filter_map(|rel| std::fs::read_to_string(cwd.join(rel)).ok())
+            .map(|text| text.lines().count() as u64)
+            .sum::<u64>();
+
     let file_names: Vec<String> = written
         .iter()
         .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
@@ -221,8 +240,30 @@ pub async fn session_diff(State(state): State<AppState>) -> Response {
         "added": added,
         "removed": removed,
         "files": file_names,
+        "uncommitted": pending.uncommitted,
+        "untracked": pending.untracked_paths.len(),
     }))
     .into_response()
+}
+
+/// Uncommitted state of a set of paths, from `git status --porcelain=v1`.
+#[derive(Debug, Default, PartialEq)]
+struct Pending {
+    /// Paths with anything to commit (modified, staged, new, deleted…).
+    uncommitted: usize,
+    /// The subset that git doesn't track yet.
+    untracked_paths: Vec<String>,
+}
+
+fn parse_pending(porcelain: &str) -> Pending {
+    let mut p = Pending::default();
+    for line in porcelain.lines().filter(|l| l.len() > 3) {
+        p.uncommitted += 1;
+        if let Some(path) = line.strip_prefix("?? ") {
+            p.untracked_paths.push(path.trim_matches('"').to_owned());
+        }
+    }
+    p
 }
 
 /// GET /api/git/branch-pr
@@ -770,4 +811,26 @@ fn run(cwd: &Path, args: &[&str]) -> Result<String, std::io::Error> {
 
 fn err(status: StatusCode, msg: String) -> Response {
     (status, Json(serde_json::json!({ "error": msg }))).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_counts_changes_and_new_files() {
+        let out = " M src/a.rs\n?? src/new.rs\nA  src/staged.rs\n";
+        assert_eq!(
+            parse_pending(out),
+            Pending {
+                uncommitted: 3,
+                untracked_paths: vec!["src/new.rs".into()],
+            }
+        );
+    }
+
+    #[test]
+    fn nothing_pending_when_everything_is_committed() {
+        assert_eq!(parse_pending(""), Pending::default());
+    }
 }

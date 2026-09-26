@@ -372,7 +372,16 @@ export async function getGitStatus(): Promise<GitStatusView> {
   return (await r.json()) as GitStatusView;
 }
 
-export type SessionDiffView = { added: number; removed: number; files: string[] };
+export type SessionDiffView = {
+  added: number;
+  removed: number;
+  /** Every file this session has written (never shrinks). */
+  files: string[];
+  /** Of those, how many still have something to commit. */
+  uncommitted?: number;
+  /** Of those, how many git doesn't track yet (new files). */
+  untracked?: number;
+};
 
 export async function getSessionDiff(): Promise<SessionDiffView> {
   const r = await fetch('/api/git/session-diff');

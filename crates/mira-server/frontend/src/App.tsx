@@ -4,7 +4,12 @@ import { CaretDown, Lightbulb, ShieldWarning, SidebarSimple, Sparkle, Target } f
 import { cn } from './lib/utils';
 import { connect, type WsClient, type WsStatus } from './ws';
 import { appendMemory, applyUndo, getBranchPr, getGitStatus, getSessionDiff, getSessionHistory, getSettings, gitCommit, gitPush, listCommands, listSkills, newSession, setSessionBackgroundMode, startReview, type BranchPrView, type GitStatusView, type SessionDiffView, type SkillView, type CommandInfo } from './api';
-import { ContextPanel } from './components/ContextPanel';
+import {
+  ContextPanel,
+  CONTEXT_PANEL_RESERVE,
+  contextPanelHasContent,
+  useContextPanelFits,
+} from './components/ContextPanel';
 import { extractAgentId } from './components/AgentCard';
 import { SettingsSurface } from './components/Settings';
 import { PluginsPanel } from './components/Plugins';
@@ -502,6 +507,19 @@ export default function App() {
   const [rateLimit, setRateLimit] = useState<RateLimitReading | null>(null);
   const [gitStatus, setGitStatus] = useState<GitStatusView | null>(null);
   const [sessionDiff, setSessionDiff] = useState<SessionDiffView>({ added: 0, removed: 0, files: [] });
+  // Context panel: collapsed to a pill by default so it stays out of the
+  // way; the choice is remembered per browser.
+  const [ctxOpen, setCtxOpen] = useState<boolean>(() => {
+    try { return localStorage.getItem('mira.context.open') === '1'; } catch { return false; }
+  });
+  const onCtxOpenChange = (v: boolean) => {
+    setCtxOpen(v);
+    try { localStorage.setItem('mira.context.open', v ? '1' : '0'); } catch { /* private mode */ }
+  };
+  // The session committed through the panel, so any unpushed commits on
+  // the branch are its own to push.
+  const [sessionCommitted, setSessionCommitted] = useState(false);
+  const ctxFits = useContextPanelFits();
   const [branchPr, setBranchPr] = useState<BranchPrView | null>(null);
   // Live task list — hydrated from `ready.tasks` on socket open and
   // upserted whenever a `task_*` tool result lands. Rendered as a
@@ -585,6 +603,7 @@ export default function App() {
       case 'ready': {
         setGitStatus(null);
         setSessionDiff({ added: 0, removed: 0, files: [] });
+        setSessionCommitted(false);
         setBranchPr(null);
         setSessionId(msg.session_id);
         setModel(msg.model);
@@ -1291,6 +1310,23 @@ export default function App() {
   );
 
   const turns = useMemo(() => groupByTurn(entries), [entries]);
+  // Keep the transcript and composer clear of the context card only while
+  // it's open; the collapsed pill floats over the corner.
+  const ctxHasContent =
+    ctxFits &&
+    contextPanelHasContent({
+      tasks,
+      gitStatus,
+      sessionDiff,
+      branchPr,
+      sessionCommitted,
+      subagentState,
+      entries,
+    });
+  const ctxReserve = ctxOpen && ctxHasContent;
+  // The collapsed pill floats over the top-right corner; drop the first
+  // line of the transcript below it rather than under it.
+  const ctxPill = !ctxOpen && ctxHasContent;
 
   /** Look up each open agent tab's tool entry so status/result stay live
    *  as tool_end frames arrive. Tabs whose backing entry has been wiped
@@ -1513,8 +1549,11 @@ export default function App() {
             {/* Transcript — full width, panel floats above it */}
             <div className="relative flex-1 min-h-0">
               <div
-                className="absolute inset-0 overflow-y-auto px-5 pb-5 pt-4 transition-[padding-right] duration-200"
-                style={{ paddingRight: (tasks.length > 0 || !!gitStatus?.in_repo || subagentState.size > 0) ? 308 : 20 }}
+                className="absolute inset-0 overflow-y-auto px-5 pb-5 transition-[padding] duration-200"
+                style={{
+                  paddingRight: ctxReserve ? CONTEXT_PANEL_RESERVE + 12 : 20,
+                  paddingTop: ctxPill ? 52 : 16,
+                }}
                 ref={paneRef}
               >
                 {configured === false && (
@@ -1582,19 +1621,14 @@ export default function App() {
                   gitStatus={gitStatus}
                   sessionDiff={sessionDiff}
                   branchPr={branchPr}
-                  environmentName={environment?.current ?? 'Local'}
-                  environment={environment}
-                  environments={environments}
-                  envSwitching={envSwitching}
-                  onSwitchEnvironment={(target) => {
-                    setEnvSwitching(`switching to ${target}…`);
-                    wsRef.current?.send({ type: 'environment', target });
-                  }}
-                  onSwitchWorktree={(_path, id) => { if (id) wsRef.current?.attach(id); }}
+                  sessionCommitted={sessionCommitted}
+                  open={ctxOpen}
+                  onOpenChange={onCtxOpenChange}
                   onOpenAgent={openAgentTab}
                   onPush={async () => { await gitPush(); getGitStatus().then(setGitStatus).catch(() => {}); getBranchPr().then(setBranchPr).catch(() => {}); }}
                   onCommit={async (message, includeUnstaged, pushAfter) => {
                     await gitCommit({ message, include_unstaged: includeUnstaged, push_after: pushAfter });
+                    setSessionCommitted(true);
                     getGitStatus().then(setGitStatus).catch(() => {});
                     getSessionDiff().then(setSessionDiff).catch(() => {});
                     getBranchPr().then(setBranchPr).catch(() => setBranchPr(null));
@@ -1605,7 +1639,7 @@ export default function App() {
 
             <div
               className="shrink-0 transition-[padding-right] duration-200"
-              style={{ paddingRight: (tasks.length > 0 || !!gitStatus?.in_repo || subagentState.size > 0) ? 296 : 0 }}
+              style={{ paddingRight: ctxReserve ? CONTEXT_PANEL_RESERVE : 0 }}
             >
             <Composer
               disabled={status !== 'open'}
