@@ -569,6 +569,30 @@ impl Session {
     /// serialized on every checkpoint so the sidebar can hide subagents
     /// from the primary chat list and future delete flows can cascade
     /// from the parent.
+    /// A subagent's session: its `Stop` hooks fire as `SubagentStop`, and
+    /// `SessionStart`, `UserPromptSubmit` and `SessionEnd` don't fire.
+    pub fn is_subagent(&self) -> bool {
+        self.parent_id.is_some()
+    }
+
+    /// Run `SessionEnd` hooks (the CLI calls this as it exits). `reason`
+    /// is Claude Code's: `prompt_input_exit`, `clear`, `logout`, `other`.
+    /// Nothing can block it; hook messages are returned for display.
+    pub async fn end(&self, reason: &str) -> Vec<String> {
+        use crate::hooks::HookEvent;
+        let Some(hooks) = self.hooks.clone().filter(|h| h.has(HookEvent::SessionEnd)) else {
+            return Vec::new();
+        };
+        if self.is_subagent() {
+            return Vec::new();
+        }
+        let input = self.hook_input(serde_json::json!({"reason": reason})).await;
+        hooks
+            .run(HookEvent::SessionEnd, reason, input)
+            .await
+            .messages
+    }
+
     pub fn with_parent_id(mut self, parent: SessionId) -> Self {
         self.parent_id = Some(parent);
         self
@@ -881,6 +905,10 @@ impl Session {
             .iter()
             .any(|m| m.role == mira_core::Role::User);
         let mut notes: Vec<String> = Vec::new();
+        // A subagent's task comes from its parent, not from the user.
+        if self.is_subagent() {
+            return (prompt, None, notes);
+        }
         if first && hooks.has(HookEvent::SessionStart) {
             let input = self
                 .hook_input(serde_json::json!({"source": "startup"}))
@@ -1125,6 +1153,31 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
             // logged and swallowed — running with un-compacted history is
             // strictly better than aborting the turn.
             {
+                // PreCompact hooks see it coming (to save the transcript,
+                // say). They can't stop it: the context has to shrink.
+                // Run without holding the history lock; a hook may be slow.
+                if let Some(hooks) = sess
+                    .hooks
+                    .clone()
+                    .filter(|h| h.has(crate::hooks::HookEvent::PreCompact))
+                {
+                    let due =
+                        crate::history::needs_compaction(&sess.history.lock().await, &cfg.model);
+                    if due {
+                        let input = sess
+                            .hook_input(serde_json::json!({
+                                "trigger": "auto",
+                                "custom_instructions": "",
+                            }))
+                            .await;
+                        let out = hooks
+                            .run(crate::hooks::HookEvent::PreCompact, "auto", input)
+                            .await;
+                        for m in out.messages {
+                            let _ = tx.send(HarnessEvent::Warning(format!("[hook] {m}"))).await;
+                        }
+                    }
+                }
                 let mut history = sess.history.lock().await;
                 let summarizer_model = cfg.background_model(cfg.compactor_model.as_deref());
                 // A cheaper summarizer that fails gets one retry on the
@@ -1679,11 +1732,17 @@ async fn run_stop_hooks(
     runs_so_far: u32,
 ) -> Option<String> {
     use crate::hooks::HookEvent;
-    let hooks = sess.hooks.clone().filter(|h| h.has(HookEvent::Stop))?;
+    let event = if sess.is_subagent() {
+        HookEvent::SubagentStop
+    } else {
+        HookEvent::Stop
+    };
+    let hooks = sess.hooks.clone().filter(|h| h.has(event))?;
     if runs_so_far >= MAX_STOP_HOOK_CONTINUATIONS {
         let _ = tx
             .send(HarnessEvent::Warning(format!(
-                "a Stop hook kept the turn going {MAX_STOP_HOOK_CONTINUATIONS} times; stopping"
+                "a {} hook kept the turn going {MAX_STOP_HOOK_CONTINUATIONS} times; stopping",
+                event.name()
             )))
             .await;
         return None;
@@ -1691,11 +1750,41 @@ async fn run_stop_hooks(
     let input = sess
         .hook_input(serde_json::json!({"stop_hook_active": runs_so_far > 0}))
         .await;
-    let out = hooks.run(HookEvent::Stop, "", input).await;
+    let out = hooks.run(event, "", input).await;
     for m in out.messages {
         let _ = tx.send(HarnessEvent::Warning(format!("[hook] {m}"))).await;
     }
     out.block
+}
+
+/// Fire `Notification` hooks for a tool call that's about to wait on the
+/// user (desktop alerts, chat pings). Runs in the background so the
+/// approval prompt isn't held up by a slow hook.
+fn notify_permission_prompt(sess: &Session, call: &ToolCall) {
+    use crate::hooks::HookEvent;
+    let Some(hooks) = sess
+        .hooks
+        .clone()
+        .filter(|h| h.has(HookEvent::Notification))
+    else {
+        return;
+    };
+    let sess = sess.clone();
+    let message = format!("Mira needs your permission to use {}", call.function.name);
+    tokio::spawn(async move {
+        let input = sess
+            .hook_input(serde_json::json!({
+                "message": message,
+                "notification_type": "permission_prompt",
+            }))
+            .await;
+        let out = hooks
+            .run(HookEvent::Notification, "permission_prompt", input)
+            .await;
+        for m in out.messages {
+            warn!(message = %m, "notification hook");
+        }
+    });
 }
 
 async fn dispatch_call(sess: &Session, call: ToolCall, tx: &mpsc::Sender<HarnessEvent>) -> bool {
@@ -1804,6 +1893,7 @@ async fn dispatch_call(sess: &Session, call: ToolCall, tx: &mpsc::Sender<Harness
     let allowed = if deny_target.is_some() || hook_denied.is_some() {
         false
     } else if has_ask {
+        notify_permission_prompt(sess, &call);
         sess.approver.approve(&call, Decision::Ask).await
     } else {
         true

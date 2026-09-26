@@ -315,6 +315,11 @@ pub async fn maybe_compact(
 /// `session_model` if that fails and is a different (cheaper) model:
 /// one unknown to this provider, or rate-limited. History only changes
 /// when a summary comes back, so the retry starts from the same state.
+/// Whether [`maybe_compact`] would summarize anything right now.
+pub fn needs_compaction(history: &[Message], session_model: &str) -> bool {
+    find_compact_range(history, session_model).is_some()
+}
+
 pub async fn compact_with_fallback(
     history: &mut Vec<Message>,
     provider: &dyn ChatProvider,
