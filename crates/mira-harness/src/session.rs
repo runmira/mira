@@ -892,6 +892,34 @@ impl Session {
         self.tool_ctx.compute.clone()
     }
 
+    /// Rewind the conversation to just before a user message, so it can be
+    /// edited and re-sent (or retried). Finds the `occurrence`-th most
+    /// recent user message whose text is exactly `text` (0 = latest) and
+    /// drops it and everything after it. Files the dropped turns edited
+    /// are left as they are. Returns `false` — and changes nothing — while
+    /// a turn is running or when the message isn't in history (e.g. it
+    /// was folded into a compaction summary).
+    pub async fn rewind_to_user(&self, text: &str, occurrence: usize) -> bool {
+        if self.is_busy().await {
+            return false;
+        }
+        {
+            let mut hist = self.history.lock().await;
+            let Some(idx) = rewind_index(&hist, text, occurrence) else {
+                return false;
+            };
+            hist.truncate(idx);
+            // One turn timer per sent prompt; keep those still in history.
+            let prompts = hist
+                .iter()
+                .filter(|m| m.role == mira_core::Role::User && !crate::history::is_summary(m))
+                .count();
+            self.turns.lock().await.truncate(prompts);
+        }
+        checkpoint(self).await;
+        true
+    }
+
     /// True while a turn is running. Environment switches wait for idle.
     pub async fn is_busy(&self) -> bool {
         self.current_turn
@@ -2198,6 +2226,17 @@ fn one_line(s: &str, max: usize) -> String {
 /// Snapshot the session and save through the attached store, if any.
 /// Failures are logged and swallowed — losing a checkpoint shouldn't kill
 /// the running conversation.
+/// Index of the `occurrence`-th most recent user message with exactly
+/// this text.
+fn rewind_index(hist: &[Message], text: &str, occurrence: usize) -> Option<usize> {
+    hist.iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, m)| m.role == mira_core::Role::User && m.content.as_deref() == Some(text))
+        .nth(occurrence)
+        .map(|(i, _)| i)
+}
+
 async fn checkpoint(sess: &Session) {
     let Some(store) = &sess.store else { return };
     let record = SessionRecord {
@@ -3227,5 +3266,19 @@ mod truncate_tests {
         // safety; the assertion just confirms both ends survive.
         assert!(out.starts_with("🚀 launching"), "head start: {out}");
         assert!(out.ends_with("🎉"), "tail end: {out}");
+    }
+
+    #[test]
+    fn rewind_index_counts_from_the_latest_match() {
+        let h = vec![
+            Message::user("fix it"),
+            Message::assistant("done"),
+            Message::user("fix it"),
+            Message::assistant("again"),
+        ];
+        assert_eq!(rewind_index(&h, "fix it", 0), Some(2));
+        assert_eq!(rewind_index(&h, "fix it", 1), Some(0));
+        assert_eq!(rewind_index(&h, "fix it", 2), None);
+        assert_eq!(rewind_index(&h, "nope", 0), None);
     }
 }

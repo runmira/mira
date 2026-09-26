@@ -302,6 +302,7 @@ export type ApprovalScope = 'once' | 'session' | 'always';
 
 export type ClientMsg =
   | { type: 'send'; text: string }
+  | { type: 'resend'; original: string; occurrence: number; text: string }
   | { type: 'approve'; call_id: string; allow: boolean; scope?: ApprovalScope }
   | ({ type: 'prompt_response'; prompt_id: string } & PromptResponse)
   | { type: 'set_model'; model: string }

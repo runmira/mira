@@ -176,6 +176,23 @@ async fn dispatch(
             debug!(len = text.len(), "ws: send");
             spawn_turn(state.clone(), slot, text).await;
         }
+        ClientMsg::Resend {
+            original,
+            occurrence,
+            text,
+        } => {
+            let sess = slot.session.read().await.clone();
+            if sess.rewind_to_user(&original, occurrence).await {
+                spawn_turn(state.clone(), slot, text).await;
+            } else {
+                let _ = slot.events_tx.send(ServerMsg::Warning {
+                    text: "can't edit that message — a turn is running, or it was \
+                           summarized away by compaction"
+                        .into(),
+                });
+                let _ = slot.events_tx.send(ServerMsg::Done);
+            }
+        }
         ClientMsg::Approve {
             call_id,
             allow,
