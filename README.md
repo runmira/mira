@@ -399,6 +399,7 @@ Adding a new subagent type is dropping a markdown file into
 - [x] Slack bot (`mira slack`)
 - [x] Retries for rate limits, overloads and dropped connections
 - [x] Model routing: a `small_model` for titles, summaries, memory and `model: small` agents
+- [x] Hooks: every Claude Code event Mira has a moment for (incl. SubagentStop, Notification, PreCompact, SessionEnd) and `prompt` hooks
 - [x] Headless mode for scripts and CI (`mira -p`, JSON and stream-JSON output)
 - [ ] VS Code extension on the Marketplace and Open VSX
 - [ ] Scheduled prompts (the web UI's Scheduled view)

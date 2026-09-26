@@ -319,6 +319,14 @@ async fn main() -> Result<()> {
     // MCP tools appear live as their servers connect (and leave if one
     // drops). A broken server never stops Mira from starting.
     registry.add_source(extensions.mcp().tool_source());
+    // `prompt` hooks ask the small model (or the main one).
+    extensions.set_hook_model(
+        provider.clone(),
+        settings
+            .small_model
+            .clone()
+            .unwrap_or_else(|| settings.model.clone()),
+    );
     register_computer_use(&mut registry, &cli, &cfg).await;
     // Remote environments: the manager owns the switchable compute slot
     // the tools read. `--sandbox` / `compute.default` switch it once the
@@ -373,6 +381,7 @@ async fn main() -> Result<()> {
     )
     .with_agents(agents_registry.clone())
     .with_small_model(settings.small_model.clone())
+    .with_hooks(Some(extensions.hook_runner()))
     .with_events_tx(subagent_events_tx.clone());
 
     // Shared memory + episodic stores. `memory_remember` writes episodic
@@ -527,6 +536,8 @@ async fn main() -> Result<()> {
         );
     }
 
+    // Kept for SessionEnd hooks once the frontend has exited.
+    let ending = session.clone();
     let mut exit_code = 0;
     let result: Result<()> = async {
         if let Some(prompt) = &headless_prompt {
@@ -611,6 +622,9 @@ async fn main() -> Result<()> {
     .await;
     // Save (never apply) a remote environment's pending changes, even
     // when the frontend errored, and release every environment.
+    for m in ending.end("prompt_input_exit").await {
+        eprintln!("[hook] {m}");
+    }
     sandbox::print_finish(environments.finish().await, &cwd);
     extensions.mcp().shutdown();
     if result.is_ok() && exit_code != 0 {

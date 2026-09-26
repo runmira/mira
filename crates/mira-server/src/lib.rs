@@ -151,6 +151,11 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
         .map(|a| a.port())
         .unwrap_or(cfg.bind.port());
 
+    // `prompt` hooks ask the small model, on the swappable provider so a
+    // settings change reaches them too.
+    cfg.extensions
+        .set_hook_model(harness_provider.clone(), cfg.cfg.background_model(None));
+
     // Build the initial slot. Seeded from the ServerConfig's `resume` (if
     // present) so a `mira serve --resume <id>` picks up where it left off.
     let deps = crate::slot::SlotDeps {

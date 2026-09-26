@@ -135,7 +135,15 @@ impl MiraFactory {
             settings.model.clone(),
         )
         .with_agents(agents)
-        .with_small_model(settings.small_model.clone());
+        .with_small_model(settings.small_model.clone())
+        .with_hooks(Some(extensions.hook_runner()));
+        extensions.set_hook_model(
+            provider.clone(),
+            settings
+                .small_model
+                .clone()
+                .unwrap_or_else(|| settings.model.clone()),
+        );
         if let Some(s) = &store {
             agent_tool = agent_tool.with_store(s.clone());
         }

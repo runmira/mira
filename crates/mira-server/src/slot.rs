@@ -284,6 +284,7 @@ pub async fn build_slot(
     )
     .with_agents(deps.agents_registry.clone())
     .with_small_model(deps.small_model_for_agents.clone())
+    .with_hooks(deps.hooks.clone())
     .with_events_tx(events_tx.clone())
     .with_parent_approver(approver.clone())
     .with_parent_policy(deps.policy.clone())

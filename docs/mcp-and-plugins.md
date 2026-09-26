@@ -160,8 +160,9 @@ Plugins install under `~/.mira/plugins/`. What each part becomes:
 
 ## Hooks
 
-Hooks are shell commands that run at points in a session. They use
-Claude Code's format, so a plugin's `hooks/hooks.json` works unchanged.
+Hooks run at points in a session: shell commands, or prompts a model
+judges. They use Claude Code's format, so a plugin's `hooks/hooks.json`
+works unchanged.
 You can also add your own under `hooks:` in `~/.mira/mira.yaml`:
 
 ```yaml
@@ -188,6 +189,15 @@ cloning a repo can't run commands on your machine.
 | `PreToolUse` | Before a tool runs | Allow, deny or ask; rewrite the input |
 | `PostToolUse` | After a tool runs | Add feedback for the model |
 | `Stop` | When the agent wants to stop | Make it keep going, with a reason |
+| `SubagentStop` | When a subagent wants to stop | Make it keep going, with a reason |
+| `Notification` | A tool call is waiting for your approval (matcher: `permission_prompt`) | Alert you (desktop notification, chat ping) |
+| `PreCompact` | Before older history is summarized to free context (matcher: `auto`) | Save or log the transcript; it can't stop compaction |
+| `SessionEnd` | The CLI is exiting (matcher and `reason`: `prompt_input_exit`) | Clean up or log; it can't block |
+
+Subagents run your hooks too: `PreToolUse` and `PostToolUse` fire for
+their tool calls, so a guard on `Bash` also guards what a subagent runs.
+Their stop fires as `SubagentStop`; `SessionStart`, `UserPromptSubmit`
+and `SessionEnd` only fire for your own session.
 
 A hook gets a JSON object on stdin (`session_id`, `cwd`,
 `permission_mode`, `hook_event_name`, plus `tool_name` / `tool_input` for
@@ -203,6 +213,29 @@ A JSON response can include
 `hookSpecificOutput.permissionDecision` (`allow`, `deny`, `ask`),
 `permissionDecisionReason`, `updatedInput`, `additionalContext`, and
 `decision: "block"` with a `reason`.
+
+### Prompt hooks
+
+A `prompt` hook asks a model instead of running a command. It's for
+checks that are easier to describe than to script:
+
+```yaml
+hooks:
+  Stop:
+    - hooks:
+        - type: prompt
+          prompt: "Did the agent run the tests and see them pass? $ARGUMENTS"
+          timeout: 30
+```
+
+`$ARGUMENTS` is replaced with the event's JSON input (without it, the
+input is added after the prompt). The model answers `{"ok": true}` to
+let things go ahead, or `{"ok": false, "reason": "…"}` to block: the
+agent keeps working (`Stop`, `SubagentStop`), the message is refused
+(`UserPromptSubmit`), or the tool call is denied (`PreToolUse`). Those
+are the four events prompt hooks work on. They use your `small_model`
+(or the main model). If the model call fails or its answer is unclear,
+you get a warning and nothing is blocked.
 
 Tool names use Claude Code's spelling for matchers and input: `Bash`,
 `Read`, `Write`, `Edit`, `MultiEdit`, `Grep`, `Glob`, `WebFetch`,

@@ -33,6 +33,8 @@ struct Inner {
     origins: RwLock<BTreeMap<String, Origin>>,
     /// Hooks from enabled plugins and `hooks:` in `~/.mira/mira.yaml`.
     hooks: RwLock<Arc<mira_plugins::hooks::HookSet>>,
+    /// The model `prompt` hooks ask; unset until a provider is known.
+    hook_model: RwLock<Option<Arc<dyn mira_plugins::hooks::PromptEvaluator>>>,
 }
 
 /// Where a command or skill comes from, for grouping and labelling it
@@ -117,6 +119,7 @@ impl Extensions {
                 skills: RwLock::new(None),
                 origins: RwLock::new(BTreeMap::new()),
                 hooks: RwLock::new(Arc::new(mira_plugins::hooks::HookSet::default())),
+                hook_model: RwLock::new(None),
             }),
         }
     }
@@ -254,6 +257,13 @@ impl Extensions {
     /// call, so enabling a plugin takes effect in running sessions.
     pub fn hook_runner(&self) -> Arc<dyn mira_harness::HookRunner> {
         Arc::new(HookBridge { ext: self.clone() })
+    }
+
+    /// The model `prompt` hooks ask: `model` on `provider`. Pass the
+    /// user's `small_model` when there is one; these are quick yes/no
+    /// checks.
+    pub fn set_hook_model(&self, provider: Arc<dyn mira_ai::ChatProvider>, model: String) {
+        *self.inner.hook_model.write().unwrap() = Some(Arc::new(HookModel { provider, model }));
     }
 
     /// Hooks that couldn't be read, from the last reload.
@@ -437,6 +447,45 @@ impl HookBridge {
     fn set(&self) -> Arc<mira_plugins::hooks::HookSet> {
         self.ext.inner.hooks.read().unwrap().clone()
     }
+
+    fn model(&self) -> Option<Arc<dyn mira_plugins::hooks::PromptEvaluator>> {
+        self.ext.inner.hook_model.read().unwrap().clone()
+    }
+}
+
+/// Answers `prompt` hooks with one short, non-streaming-looking call.
+struct HookModel {
+    provider: Arc<dyn mira_ai::ChatProvider>,
+    model: String,
+}
+
+#[async_trait::async_trait]
+impl mira_plugins::hooks::PromptEvaluator for HookModel {
+    async fn evaluate(&self, system: &str, user: &str) -> Result<String, String> {
+        use futures::StreamExt;
+        let req = mira_ai::ChatRequest {
+            model: self.model.clone(),
+            messages: vec![
+                mira_core::Message::system(system),
+                mira_core::Message::user(user),
+            ],
+            tools: Vec::new(),
+            temperature: Some(0.0),
+            max_tokens: Some(512),
+            reasoning_effort: None,
+            response_format: None,
+        };
+        let mut stream = self.provider.stream(req).await.map_err(|e| e.to_string())?;
+        let mut text = String::new();
+        while let Some(ev) = stream.next().await {
+            match ev.map_err(|e| e.to_string())? {
+                mira_ai::ChatEvent::TextDelta(t) => text.push_str(&t),
+                mira_ai::ChatEvent::Done(_) => break,
+                _ => {}
+            }
+        }
+        Ok(text)
+    }
 }
 
 #[async_trait::async_trait]
@@ -448,7 +497,11 @@ impl mira_harness::HookRunner for HookBridge {
         input: serde_json::Value,
     ) -> mira_harness::HookOutcome {
         use mira_plugins::hooks::Permission;
-        let out = self.set().run(event.name(), matcher_target, input).await;
+        let model = self.model();
+        let out = self
+            .set()
+            .run_with(event.name(), matcher_target, input, model.as_deref())
+            .await;
         mira_harness::HookOutcome {
             block: out.block,
             permission: out.permission.map(|p| match p {

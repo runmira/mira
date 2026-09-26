@@ -178,6 +178,9 @@ pub struct AgentTool {
     default_model: String,
     /// What `model: small` resolves to; `None` means the default model.
     small_model: Option<String>,
+    /// The parent's hooks. Subagents run them too: `PreToolUse` guards
+    /// apply to their tool calls, and their `Stop` fires as `SubagentStop`.
+    hooks: Option<Arc<dyn mira_harness::HookRunner>>,
     /// Same broadcast the harness → WS forwarder pumps into. AgentTool
     /// pushes `Subagent*` frames here so the parent's UI can render a
     /// live child transcript in the right-side panel. `None` means the
@@ -245,6 +248,7 @@ impl AgentTool {
             base_registry,
             default_model,
             small_model: None,
+            hooks: None,
             events_tx: None,
             agents: Arc::new(AgentRegistry::default()),
             store: None,
@@ -277,6 +281,12 @@ impl AgentTool {
     /// child spawns can share the same immutable snapshot cheaply.
     pub fn with_agents(mut self, agents: Arc<AgentRegistry>) -> Self {
         self.agents = agents;
+        self
+    }
+
+    /// The parent session's hooks, for subagents to run.
+    pub fn with_hooks(mut self, hooks: Option<Arc<dyn mira_harness::HookRunner>>) -> Self {
+        self.hooks = hooks;
         self
     }
 
@@ -666,7 +676,8 @@ impl Tool for AgentTool {
                 self.default_model.clone(),
             )
             .with_agents(self.agents.clone())
-            .with_small_model(self.small_model.clone());
+            .with_small_model(self.small_model.clone())
+            .with_hooks(self.hooks.clone());
             if let Some(tx) = &self.events_tx {
                 nested = nested.with_events_tx(tx.clone());
             }
@@ -921,6 +932,9 @@ impl Tool for AgentTool {
         // session (set by Session::new on the parent's ToolContext).
         if let Some(parent_id) = ctx.session_id.clone() {
             child = child.with_parent_id(parent_id);
+        }
+        if let Some(hooks) = &self.hooks {
+            child = child.with_hooks(hooks.clone());
         }
 
         info!(

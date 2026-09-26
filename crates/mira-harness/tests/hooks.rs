@@ -128,11 +128,10 @@ impl HookRunner for TestHooks {
                 out.messages.push("rewrote echo".into());
             }
             HookEvent::PostToolUse => out.context.push("looks fine".into()),
-            HookEvent::Stop => {
-                if input["stop_hook_active"] == false {
-                    out.block = Some("run the tests first".into());
-                }
+            HookEvent::Stop if input["stop_hook_active"] == false => {
+                out.block = Some("run the tests first".into());
             }
+            _ => {}
         }
         out
     }

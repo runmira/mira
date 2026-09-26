@@ -19,6 +19,16 @@ pub enum HookEvent {
     PostToolUse,
     /// The agent is about to stop. Blocking makes it continue.
     Stop,
+    /// A subagent is about to stop. Blocking makes it continue.
+    SubagentStop,
+    /// Mira needs the user: a tool call is waiting for approval. The
+    /// matcher target is the notification type (`permission_prompt`).
+    Notification,
+    /// History is about to be summarized to free context. The matcher
+    /// target is `auto` (or `manual`).
+    PreCompact,
+    /// The session is ending (the CLI is exiting). Can't block.
+    SessionEnd,
 }
 
 impl HookEvent {
@@ -30,6 +40,10 @@ impl HookEvent {
             HookEvent::PreToolUse => "PreToolUse",
             HookEvent::PostToolUse => "PostToolUse",
             HookEvent::Stop => "Stop",
+            HookEvent::SubagentStop => "SubagentStop",
+            HookEvent::Notification => "Notification",
+            HookEvent::PreCompact => "PreCompact",
+            HookEvent::SessionEnd => "SessionEnd",
         }
     }
 }

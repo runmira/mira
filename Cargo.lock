@@ -2014,6 +2014,7 @@ name = "mira-plugins"
 version = "0.5.2"
 dependencies = [
  "anyhow",
+ "async-trait",
  "futures",
  "mira-config",
  "mira-mcp",

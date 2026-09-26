@@ -19,6 +19,12 @@
 //!   prompt, to the user).
 //! - anything else: a non-blocking error, shown to the user.
 //!
+//! `{"type": "prompt", "prompt": "…"}` hooks ask a model instead: it gets
+//! the prompt (with `$ARGUMENTS` replaced by the event's JSON input) and
+//! answers `{"ok": true}` or `{"ok": false, "reason": "…"}`. `ok: false`
+//! blocks, like exit 2. They work on `Stop`, `SubagentStop`,
+//! `UserPromptSubmit` and `PreToolUse`; a model error lets things through.
+//!
 //! Tool events use Claude Code's tool names (`Bash`, `Read`, `Edit`,
 //! `Write`, …) and add `file_path` beside Mira's `path`, so hooks written
 //! for Claude Code work unchanged; matchers match either name.
@@ -32,22 +38,48 @@ use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
 
 /// Events Mira runs. Others in a config are kept but never fire.
-pub const EVENTS: [&str; 5] = [
+pub const EVENTS: [&str; 9] = [
     "SessionStart",
     "UserPromptSubmit",
     "PreToolUse",
     "PostToolUse",
     "Stop",
+    "SubagentStop",
+    "Notification",
+    "PreCompact",
+    "SessionEnd",
 ];
 
+/// Events where a `prompt` hook's yes/no means something.
+pub const PROMPT_EVENTS: [&str; 4] = ["Stop", "SubagentStop", "UserPromptSubmit", "PreToolUse"];
+
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+const DEFAULT_PROMPT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Asks a model for a `prompt` hook's verdict. Mira passes one backed by
+/// the user's provider (and `small_model`); without one, prompt hooks
+/// are skipped with a message.
+#[async_trait::async_trait]
+pub trait PromptEvaluator: Send + Sync {
+    /// The model's reply text to `user`, under `system`.
+    async fn evaluate(&self, system: &str, user: &str) -> Result<String, String>;
+}
+
+/// What a hook does.
+#[derive(Clone, Debug)]
+pub enum HookAction {
+    /// A shell command, given the event as JSON on stdin.
+    Command(String),
+    /// A prompt for a model to judge.
+    Prompt(String),
+}
 
 #[derive(Clone, Debug)]
 pub struct Hook {
     pub event: String,
     /// `None` matches everything.
     pub matcher: Option<Regex>,
-    pub command: String,
+    pub action: HookAction,
     pub timeout: Duration,
     /// Plugin directory, for `${CLAUDE_PLUGIN_ROOT}`.
     pub plugin_root: Option<PathBuf>,
@@ -115,27 +147,55 @@ impl HookSet {
                     .flatten()
                 {
                     let kind = h.get("type").and_then(Value::as_str).unwrap_or("command");
-                    if kind != "command" {
-                        self.problems.push(format!(
-                            "{source}: `{event}` hook type `{kind}` isn't supported (only `command`)"
-                        ));
-                        continue;
-                    }
-                    let Some(command) = h.get("command").and_then(Value::as_str) else {
-                        self.problems
-                            .push(format!("{source}: a `{event}` hook has no `command`"));
-                        continue;
+                    let (action, default_timeout) = match kind {
+                        "command" => {
+                            let Some(command) = h.get("command").and_then(Value::as_str) else {
+                                self.problems
+                                    .push(format!("{source}: a `{event}` hook has no `command`"));
+                                continue;
+                            };
+                            (HookAction::Command(command.to_owned()), DEFAULT_TIMEOUT)
+                        }
+                        "prompt" => {
+                            if !PROMPT_EVENTS.contains(&event.as_str()) {
+                                self.problems.push(format!(
+                                    "{source}: `prompt` hooks work on {}, not `{event}`",
+                                    PROMPT_EVENTS.join(", ")
+                                ));
+                                continue;
+                            }
+                            let Some(prompt) = h
+                                .get("prompt")
+                                .and_then(Value::as_str)
+                                .filter(|p| !p.trim().is_empty())
+                            else {
+                                self.problems.push(format!(
+                                    "{source}: a `{event}` prompt hook has no `prompt`"
+                                ));
+                                continue;
+                            };
+                            (
+                                HookAction::Prompt(prompt.to_owned()),
+                                DEFAULT_PROMPT_TIMEOUT,
+                            )
+                        }
+                        other => {
+                            self.problems.push(format!(
+                                "{source}: `{event}` hook type `{other}` isn't supported (use `command` or `prompt`)"
+                            ));
+                            continue;
+                        }
                     };
                     let timeout = h
                         .get("timeout")
                         .and_then(Value::as_f64)
                         .filter(|t| *t > 0.0)
                         .map(Duration::from_secs_f64)
-                        .unwrap_or(DEFAULT_TIMEOUT);
+                        .unwrap_or(default_timeout);
                     self.hooks.push(Hook {
                         event: event.clone(),
                         matcher: matcher.clone(),
-                        command: command.to_owned(),
+                        action,
                         timeout,
                         plugin_root: plugin_root.map(Path::to_path_buf),
                         source: source.to_owned(),
@@ -150,8 +210,19 @@ impl HookSet {
     }
 
     /// Run `event`'s hooks matching `target` (a tool name or the
-    /// SessionStart source) with `input`.
-    pub async fn run(&self, event: &str, target: &str, mut input: Value) -> Outcome {
+    /// SessionStart source) with `input`. `prompt` hooks are skipped.
+    pub async fn run(&self, event: &str, target: &str, input: Value) -> Outcome {
+        self.run_with(event, target, input, None).await
+    }
+
+    /// [`run`](Self::run), with a model for `prompt` hooks.
+    pub async fn run_with(
+        &self,
+        event: &str,
+        target: &str,
+        mut input: Value,
+        evaluator: Option<&dyn PromptEvaluator>,
+    ) -> Outcome {
         let tool_event = event == "PreToolUse" || event == "PostToolUse";
         let cc_name = if tool_event {
             claude_tool_name(target)
@@ -185,17 +256,102 @@ impl HookSet {
         }
         let cwd = input.get("cwd").and_then(Value::as_str).map(PathBuf::from);
         let stdin = input.to_string();
-        let runs = matching.iter().map(|h| run_one(h, &stdin, cwd.as_deref()));
+        let runs = matching.iter().map(|h| async {
+            match &h.action {
+                HookAction::Command(command) => {
+                    Ran::Command(run_one(h, command, &stdin, cwd.as_deref()).await)
+                }
+                HookAction::Prompt(prompt) => {
+                    Ran::Prompt(ask_model(h, prompt, &stdin, evaluator).await)
+                }
+            }
+        });
         let results = futures::future::join_all(runs).await;
 
         let mut out = Outcome::default();
         for (hook, result) in matching.iter().zip(results) {
-            merge(&mut out, hook, event, result);
+            match result {
+                Ran::Command(r) => merge(&mut out, hook, event, r),
+                Ran::Prompt(v) => merge_verdict(&mut out, hook, event, v),
+            }
         }
         if let (Some(updated), Some(original)) = (out.updated_input.as_mut(), original_input) {
             unalias_paths(updated, &original);
         }
         out
+    }
+}
+
+enum Ran {
+    Command(RunResult),
+    Prompt(Result<Verdict, String>),
+}
+
+/// A prompt hook's answer.
+#[derive(Debug, PartialEq, Eq)]
+struct Verdict {
+    ok: bool,
+    reason: String,
+}
+
+const PROMPT_SYSTEM: &str = "You are a hook in a coding agent. You get a condition to check and the \
+    event it applies to, as JSON. Decide whether the condition is met. Reply with JSON only, no \
+    other text: {\"ok\": true} to let the agent go ahead, or {\"ok\": false, \"reason\": \"...\"} to \
+    stop it, with a short reason the agent will read.";
+
+async fn ask_model(
+    hook: &Hook,
+    prompt: &str,
+    input: &str,
+    evaluator: Option<&dyn PromptEvaluator>,
+) -> Result<Verdict, String> {
+    let evaluator = evaluator.ok_or("skipped: prompt hooks need a model (none is set up)")?;
+    let user = if prompt.contains("$ARGUMENTS") {
+        prompt.replace("$ARGUMENTS", input)
+    } else {
+        format!("{prompt}\n\nEvent input:\n{input}")
+    };
+    let reply = tokio::time::timeout(hook.timeout, evaluator.evaluate(PROMPT_SYSTEM, &user))
+        .await
+        .map_err(|_| format!("timed out after {}s", hook.timeout.as_secs()))??;
+    parse_verdict(&reply).ok_or_else(|| format!("unclear answer: {}", first_lines(&reply)))
+}
+
+/// `{"ok": bool, "reason": …}`, or Claude Code's older `{"decision":
+/// "approve" | "block"}`, anywhere in the reply.
+fn parse_verdict(reply: &str) -> Option<Verdict> {
+    let start = reply.find('{')?;
+    let end = reply.rfind('}')?;
+    let json: Value = serde_json::from_str(reply.get(start..=end)?).ok()?;
+    let ok = match (json.get("ok"), json.get("decision").and_then(Value::as_str)) {
+        (Some(Value::Bool(b)), _) => *b,
+        (_, Some("approve" | "allow")) => true,
+        (_, Some("block" | "deny")) => false,
+        _ => return None,
+    };
+    let reason = json
+        .get("reason")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_owned();
+    Some(Verdict { ok, reason })
+}
+
+fn merge_verdict(out: &mut Outcome, hook: &Hook, event: &str, v: Result<Verdict, String>) {
+    match v {
+        Ok(Verdict { ok: true, .. }) => {}
+        Ok(Verdict { ok: false, reason }) => add_block(
+            out,
+            if reason.is_empty() {
+                "blocked by a prompt hook".into()
+            } else {
+                reason
+            },
+        ),
+        Err(e) => out
+            .messages
+            .push(format!("{event} prompt hook ({}) {e}", hook.source)),
     }
 }
 
@@ -209,14 +365,14 @@ enum RunResult {
     Failed(String),
 }
 
-async fn run_one(hook: &Hook, stdin: &str, cwd: Option<&Path>) -> RunResult {
+async fn run_one(hook: &Hook, command: &str, stdin: &str, cwd: Option<&Path>) -> RunResult {
     let mut cmd = if cfg!(windows) {
         let mut c = tokio::process::Command::new("cmd");
-        c.args(["/C", &hook.command]);
+        c.args(["/C", command]);
         c
     } else {
         let mut c = tokio::process::Command::new("sh");
-        c.args(["-c", &hook.command]);
+        c.args(["-c", command]);
         c
     };
     if let Some(dir) = cwd {
@@ -513,14 +669,105 @@ mod tests {
     fn bad_matchers_and_types_are_reported() {
         let mut s = HookSet::default();
         s.add(
-            &json!({"PreToolUse": [
-                {"matcher": "(", "hooks": [{"type": "command", "command": "true"}]},
-                {"hooks": [{"type": "prompt", "prompt": "x"}]}
-            ]}),
+            &json!({
+                "PreToolUse": [
+                    {"matcher": "(", "hooks": [{"type": "command", "command": "true"}]},
+                    {"hooks": [{"type": "agent", "prompt": "x"}]},
+                    {"hooks": [{"type": "prompt", "prompt": " "}]}
+                ],
+                "PostToolUse": [{"hooks": [{"type": "prompt", "prompt": "x"}]}]
+            }),
             None,
             "p",
         );
         assert!(s.hooks.is_empty());
-        assert_eq!(s.problems.len(), 2);
+        assert_eq!(s.problems.len(), 4, "{:?}", s.problems);
+        assert!(s
+            .problems
+            .iter()
+            .any(|p| p.contains("prompt` hooks work on")));
+    }
+
+    /// Answers with a fixed reply and records what it was asked.
+    struct FakeModel {
+        reply: Result<String, String>,
+        asked: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl PromptEvaluator for FakeModel {
+        async fn evaluate(&self, _system: &str, user: &str) -> Result<String, String> {
+            self.asked.lock().unwrap().push(user.to_owned());
+            self.reply.clone()
+        }
+    }
+
+    fn fake(reply: Result<&str, &str>) -> FakeModel {
+        FakeModel {
+            reply: reply.map(str::to_owned).map_err(str::to_owned),
+            asked: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn prompt_hooks_ask_the_model_and_block_on_no() {
+        let s = set(json!({"Stop": [{"hooks": [
+            {"type": "prompt", "prompt": "Are the tests passing? $ARGUMENTS"}
+        ]}]}));
+        assert!(s.has("Stop"));
+
+        let no = fake(Ok(
+            "Checking… {\"ok\": false, \"reason\": \"tests still fail\"}",
+        ));
+        let out = s
+            .run_with("Stop", "", json!({"stop_hook_active": false}), Some(&no))
+            .await;
+        assert_eq!(out.block.as_deref(), Some("tests still fail"));
+        let asked = no.asked.lock().unwrap()[0].clone();
+        assert!(asked.starts_with("Are the tests passing? {"), "{asked}");
+        assert!(asked.contains("\"hook_event_name\":\"Stop\""));
+
+        let yes = fake(Ok("{\"ok\": true}"));
+        let out = s.run_with("Stop", "", json!({}), Some(&yes)).await;
+        assert!(out.block.is_none() && out.messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn prompt_hook_failures_let_things_through() {
+        let s = set(json!({"PreToolUse": [{"matcher": "Bash", "hooks": [
+            {"type": "prompt", "prompt": "Is this command safe?"}
+        ]}]}));
+        let input = || input("bash", json!({"command": "ls"}));
+
+        let down = fake(Err("provider returned 503"));
+        let out = s.run_with("PreToolUse", "bash", input(), Some(&down)).await;
+        assert!(out.block.is_none());
+        assert!(out.messages[0].contains("503"), "{:?}", out.messages);
+        // No template placeholder: the input is appended.
+        assert!(down.asked.lock().unwrap()[0].contains("Event input:"));
+
+        let rambling = fake(Ok("sure, looks fine"));
+        let out = s
+            .run_with("PreToolUse", "bash", input(), Some(&rambling))
+            .await;
+        assert!(out.block.is_none());
+        assert!(out.messages[0].contains("unclear answer"));
+
+        let out = s.run("PreToolUse", "bash", input()).await;
+        assert!(out.block.is_none());
+        assert!(out.messages[0].contains("need a model"));
+    }
+
+    #[test]
+    fn verdicts_in_both_formats() {
+        let v = |s: &str| parse_verdict(s).map(|v| (v.ok, v.reason));
+        assert_eq!(v("{\"ok\": true}"), Some((true, String::new())));
+        assert_eq!(
+            v("{\"decision\": \"block\", \"reason\": \"no\"}"),
+            Some((false, "no".into()))
+        );
+        assert_eq!(v("{\"decision\": \"approve\"}").map(|x| x.0), Some(true));
+        assert_eq!(v("{\"maybe\": 1}"), None);
+        assert_eq!(v("no json here"), None);
     }
 }
