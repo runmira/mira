@@ -22,7 +22,7 @@ pub mod session;
 pub mod verify;
 
 pub use approver::{Approver, AutoApprover};
-pub use event::HarnessEvent;
+pub use event::{is_fatal_warning, HarnessEvent};
 pub use goal::{
     BudgetCheck, Evaluation, Goal, GoalStatus, GoalVerdict, VerifyCommand, VerifyOutcome,
     DEFAULT_MAX_ITERATIONS,
