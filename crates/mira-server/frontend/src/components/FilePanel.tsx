@@ -49,7 +49,7 @@ const EXT_TO_LANG: Record<string, string> = {
   r: 'r', jl: 'julia', nix: 'nix',
 };
 
-function langFrom(path: string): string {
+export function langFrom(path: string): string {
   const name = path.split('/').pop()?.toLowerCase() ?? '';
   if (name === 'dockerfile') return 'dockerfile';
   if (name === 'makefile' || name === 'gnumakefile') return 'makefile';
@@ -353,7 +353,7 @@ function splitHtmlLines(html: string): string[] {
 }
 
 /** Run hljs on `text` and return one valid HTML string per line. */
-function highlightLines(text: string, lang: string): string[] {
+export function highlightLines(text: string, lang: string): string[] {
   let html: string;
   try {
     if (lang !== 'plaintext' && hljs.getLanguage(lang)) {

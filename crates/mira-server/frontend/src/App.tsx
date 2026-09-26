@@ -38,6 +38,7 @@ import { FolderPicker } from './components/FolderPicker';
 import { AssistantContent } from './components/AssistantContent';
 import { ThoughtBlock } from './components/ThoughtBlock';
 import { ReviewChanges } from './components/ReviewChanges';
+import { ImageLightbox } from './components/ImageLightbox';
 import { ToolCard, type ToolStatus } from './components/ToolCard';
 import { Thinking } from './components/Thinking';
 import {
@@ -533,6 +534,7 @@ export default function App() {
   // the branch are its own to push.
   const [sessionCommitted, setSessionCommitted] = useState(false);
   const [reviewOpen, setReviewOpen] = useState(false);
+  const [lightbox, setLightbox] = useState<string | null>(null);
   const ctxFits = useContextPanelFits();
   const [branchPr, setBranchPr] = useState<BranchPrView | null>(null);
   // Live task list — hydrated from `ready.tasks` on socket open and
@@ -1321,6 +1323,7 @@ export default function App() {
   const messageActions = useMemo<MessageActions>(
     () => ({
       busy,
+      openImage: setLightbox,
       edit: (entry, text) => onResend(entries.indexOf(entry), text),
       retry: (entry) => {
         const at = entries.indexOf(entry);
@@ -1608,6 +1611,18 @@ export default function App() {
               <span className="min-w-0 flex-1 truncate text-[13.5px] text-foreground">
                 {titleFromEntries(entries)}
               </span>
+              {(sessionDiff.uncommitted ?? 0) > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setReviewOpen(true)}
+                  title="Review this session's changes"
+                  className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border px-2.5 py-1 text-[12px] text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                >
+                  <span className="font-mono text-green-400/80">+{sessionDiff.added}</span>
+                  <span className="font-mono text-red-400/80">−{sessionDiff.removed}</span>
+                  <span>Review</span>
+                </button>
+              )}
               <div className="inline-flex rounded-full border border-border bg-secondary/60 p-0.5">
                 <button
                   type="button"
@@ -1693,6 +1708,7 @@ export default function App() {
                 )}
               </div>
 
+              <ImageLightbox src={lightbox} onClose={() => setLightbox(null)} />
               <ReviewChanges
                 open={reviewOpen}
                 onClose={() => setReviewOpen(false)}
@@ -2530,6 +2546,7 @@ function EntryView({
   mode?: Mode;
   onSetMode?: (m: Mode) => void;
 }) {
+  const actions = useContext(MessageActionsContext);
   switch (entry.kind) {
     case 'msg': {
       const { role, content } = entry.msg;
@@ -2558,7 +2575,8 @@ function EntryView({
                     key={i}
                     src={`data:${img.media_type};base64,${img.data}`}
                     alt="attached image"
-                    className="max-h-40 max-w-[240px] rounded-xl border border-border object-cover"
+                    onClick={() => actions?.openImage(`data:${img.media_type};base64,${img.data}`)}
+                    className="max-h-40 max-w-[240px] cursor-zoom-in rounded-xl border border-border object-cover"
                   />
                 ))}
               </div>
@@ -2967,6 +2985,8 @@ type MessageActions = {
   edit: (entry: Entry, text: string) => void;
   /** Re-send the user message that led to this reply. */
   retry: (entry: Entry) => void;
+  /** Show an image full-screen. */
+  openImage: (src: string) => void;
 };
 
 const MessageActionsContext = createContext<MessageActions | null>(null);

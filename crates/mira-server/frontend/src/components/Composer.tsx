@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { ImageLightbox } from './ImageLightbox';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   ArrowUp,
@@ -169,6 +170,8 @@ export function Composer({
   const [text, setText] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [images, setImages] = useState<ImageData[]>([]);
+  const [dragging, setDragging] = useState(false);
+  const [preview, setPreview] = useState<string | null>(null);
 
   async function addImages(files: File[]) {
     setAttachError(null);
@@ -450,17 +453,32 @@ export function Composer({
   return (
     <div className="flex flex-col items-center gap-1.5 px-4 pb-4 pt-2">
       <form
-        className="w-full max-w-3xl flex flex-col gap-1.5 rounded-[22px] border border-border bg-secondary/60 p-2.5"
+        className={cn(
+          'relative w-full max-w-3xl flex flex-col gap-1.5 rounded-[22px] border border-border bg-secondary/60 p-2.5 transition-colors',
+          dragging && 'border-mira-blue/60 bg-mira-blue/[0.06]',
+        )}
         onSubmit={(e) => { e.preventDefault(); submit(); }}
         onDragOver={(e) => {
-          if (e.dataTransfer.types.includes('Files')) e.preventDefault();
+          if (!e.dataTransfer.types.includes('Files')) return;
+          e.preventDefault();
+          setDragging(true);
+        }}
+        onDragLeave={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragging(false);
         }}
         onDrop={(e) => {
+          setDragging(false);
           if (e.dataTransfer.files.length === 0) return;
           e.preventDefault();
           void attachNativeFiles(e.dataTransfer.files);
         }}
       >
+        {dragging && (
+          <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-[22px] text-[13px] font-medium text-mira-blue">
+            Drop files or images to attach
+          </div>
+        )}
+        <ImageLightbox src={preview} onClose={() => setPreview(null)} />
         {(planActive || goal || goalComposing) && (
           <div className="flex flex-wrap items-center gap-1.5 px-1.5 pt-0.5">
             {planActive && <PlanChip onExit={togglePlan} />}
@@ -478,13 +496,14 @@ export function Composer({
                 <img
                   src={`data:${img.media_type};base64,${img.data}`}
                   alt=""
-                  className="size-14 rounded-lg border border-border object-cover"
+                  onClick={() => setPreview(`data:${img.media_type};base64,${img.data}`)}
+                  className="size-14 cursor-zoom-in rounded-lg border border-border object-cover"
                 />
                 <button
                   type="button"
                   aria-label="Remove image"
                   onClick={() => setImages((prev) => prev.filter((_, j) => j !== i))}
-                  className="absolute -right-1.5 -top-1.5 flex size-5 items-center justify-center rounded-full border border-border bg-background text-[11px] leading-none text-muted-foreground opacity-0 transition-opacity hover:text-foreground group-hover:opacity-100"
+                  className="absolute -right-1.5 -top-1.5 flex size-5 items-center justify-center rounded-full border border-border bg-background text-[11px] leading-none text-muted-foreground transition-opacity hover:text-foreground [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100"
                 >
                   ×
                 </button>
