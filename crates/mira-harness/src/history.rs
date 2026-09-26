@@ -109,6 +109,16 @@ const IMAGE_PRUNED_NOTE: &str = "[screenshot omitted from history — a newer on
 /// survive); its text gains a short note so the transcript still reads
 /// coherently. Idempotent: already-pruned messages have no images left
 /// and are skipped.
+/// The prompt as the user typed it: drops the `<hook-context>` block
+/// that prompt hooks append for the model, so UIs (titles, sidebars,
+/// transcripts) and edit-matching see only the user's words.
+pub fn strip_hook_context(text: &str) -> &str {
+    match text.find("<hook-context>") {
+        Some(i) => text[..i].trim_end(),
+        None => text,
+    }
+}
+
 pub fn prune_old_images(history: &mut [Message], keep: usize) {
     let mut seen = 0usize;
     for msg in history.iter_mut().rev() {
@@ -870,5 +880,12 @@ mod tests {
         assert_eq!(model_context_window("gpt-4-0613"), 8_192);
         assert_eq!(model_context_window("gpt-3.5-turbo"), 16_385);
         assert_eq!(model_context_window("some-unknown-model"), 128_000);
+    }
+
+    #[test]
+    fn strip_hook_context_keeps_only_the_prompt() {
+        let stored = "fix it\n\n<hook-context>\nbe educational\n</hook-context>";
+        assert_eq!(strip_hook_context(stored), "fix it");
+        assert_eq!(strip_hook_context("plain"), "plain");
     }
 }

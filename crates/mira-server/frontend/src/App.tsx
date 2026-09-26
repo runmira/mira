@@ -205,6 +205,12 @@ function compactionSummary(content: string | null | undefined): string | null {
   return body.replace(/^\s*This session continues[^\n]*\n+/, '').trim();
 }
 
+/** Drop the `<hook-context>` block prompt hooks append to a message. */
+function stripHookContext(content: string | null | undefined): string | null | undefined {
+  const i = content?.indexOf('<hook-context>') ?? -1;
+  return i >= 0 ? content!.slice(0, i).trimEnd() : content;
+}
+
 export function historyToEntries(
   history: Message[],
   /** Persisted diff previews from `SessionRecord.previews` (Ready
@@ -235,7 +241,9 @@ export function historyToEntries(
       if (summary != null) {
         entries.push({ kind: 'compact', summarized: null, summary });
       } else {
-        entries.push({ kind: 'msg', msg: m });
+        // Prompt hooks append a `<hook-context>` block for the model; show
+        // only what the user typed.
+        entries.push({ kind: 'msg', msg: { ...m, content: stripHookContext(m.content) } });
       }
       continue;
     }
