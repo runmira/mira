@@ -2250,7 +2250,10 @@ fn rewind_index(hist: &[Message], text: &str, occurrence: usize) -> Option<usize
     hist.iter()
         .enumerate()
         .rev()
-        .filter(|(_, m)| m.role == mira_core::Role::User && m.content.as_deref() == Some(text))
+        .filter(|(_, m)| {
+            m.role == mira_core::Role::User
+                && m.content.as_deref().map(crate::history::strip_hook_context) == Some(text)
+        })
         .nth(occurrence)
         .map(|(i, _)| i)
 }

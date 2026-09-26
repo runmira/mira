@@ -105,6 +105,7 @@ impl SessionRecord {
         self.conversation()
             .find(|m| m.role == mira_core::Role::User)
             .and_then(|m| m.content.as_deref())
+            .map(crate::history::strip_hook_context)
     }
 }
 

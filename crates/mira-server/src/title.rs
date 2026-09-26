@@ -42,7 +42,8 @@ pub fn spawn_if_needed(
         let user_msg = history
             .iter()
             .find(|m| m.role == Role::User && !mira_harness::history::is_summary(m))
-            .and_then(|m| m.content.clone());
+            .and_then(|m| m.content.as_deref())
+            .map(|c| mira_harness::history::strip_hook_context(c).to_owned());
         let assistant_msg = history
             .iter()
             .find(|m| {
