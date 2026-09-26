@@ -1315,6 +1315,7 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
 
             let mut assistant_text = String::new();
             let mut pending_calls: Vec<ToolCall> = Vec::new();
+            let mut reasoning_blocks: Vec<mira_core::ReasoningBlock> = Vec::new();
             let mut finish: FinishReason = FinishReason::Other;
             // Tracks whether the stream ended cleanly (Done frame) or
             // via error/timeout. Only a clean Done keeps CleanStop
@@ -1350,6 +1351,14 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
                             if tx.send(HarnessEvent::Token(t)).await.is_err() {
                                 return;
                             }
+                        }
+                        Ok(ChatEvent::ReasoningDelta(t)) => {
+                            if tx.send(HarnessEvent::Reasoning(t)).await.is_err() {
+                                return;
+                            }
+                        }
+                        Ok(ChatEvent::Reasoning(blocks)) => {
+                            reasoning_blocks = blocks;
                         }
                         Ok(ChatEvent::ToolCalls(calls)) => {
                             pending_calls = calls;
@@ -1390,7 +1399,7 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
             }
 
             // Record the assistant turn — may carry text, tool calls, or both.
-            let assistant_msg = if pending_calls.is_empty() {
+            let mut assistant_msg = if pending_calls.is_empty() {
                 Message::assistant(assistant_text.clone())
             } else if assistant_text.is_empty() {
                 Message::assistant_calls(pending_calls.clone())
@@ -1399,6 +1408,7 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
                 m.tool_calls = pending_calls.clone();
                 m
             };
+            assistant_msg.reasoning = std::mem::take(&mut reasoning_blocks);
             sess.history.lock().await.push(assistant_msg);
             checkpoint(&sess).await;
             let _ = tx.send(HarnessEvent::TurnComplete).await;

@@ -19,6 +19,7 @@ import {
 import { SkillMentionText } from './components/SkillMention';
 import { FolderPicker } from './components/FolderPicker';
 import { AssistantContent } from './components/AssistantContent';
+import { ThoughtBlock } from './components/ThoughtBlock';
 import { ToolCard, type ToolStatus } from './components/ToolCard';
 import { Thinking } from './components/Thinking';
 import {
@@ -111,6 +112,17 @@ type WarningEntry = { kind: 'warning'; text: string };
 type CompactEntry = { kind: 'compact'; summarized: number | null; summary: string | null };
 type ErrorEntry = { kind: 'error'; text: string };
 type MsgEntry = { kind: 'msg'; msg: Message };
+/** The model's reasoning before a reply / tool call. `live` while
+ *  `reasoning` frames are still arriving; sealed by the next token,
+ *  tool call or turn end. Times are epoch ms, null when restored from
+ *  history (duration unknown). */
+type ThoughtEntry = {
+  kind: 'thought';
+  text: string;
+  live: boolean;
+  startedAt: number | null;
+  endedAt: number | null;
+};
 /** Structured goal event in the transcript. Rendered as its own
  *  purple-tinted card by [`EntryView`] so goal turns visually anchor
  *  the timeline instead of masquerading as generic warnings.
@@ -127,7 +139,14 @@ type GoalEntry = {
   /** Only set on `variant: 'set'`. */
   condition?: string | null;
 };
-export type Entry = MsgEntry | ToolEntry | WarningEntry | ErrorEntry | GoalEntry | CompactEntry;
+export type Entry =
+  | MsgEntry
+  | ToolEntry
+  | WarningEntry
+  | ErrorEntry
+  | GoalEntry
+  | CompactEntry
+  | ThoughtEntry;
 
 type TurnTiming = {
   startedAt: number;
@@ -198,9 +217,16 @@ export function historyToEntries(
       continue;
     }
 
-    // Assistant: emit any text first, then a ToolEntry per tool_call.
-    // Doing text-then-tools mirrors the live turn flow (`token…` then
+    // Assistant: thinking first, then any text, then a ToolEntry per
+    // tool_call — the live turn order (`reasoning…`, `token…`,
     // `tool_start`) so a resumed transcript reads identically.
+    const thought = (m.reasoning ?? [])
+      .map((b) => (b.text ?? '').trim())
+      .filter(Boolean)
+      .join('\n\n');
+    if (thought) {
+      entries.push({ kind: 'thought', text: thought, live: false, startedAt: null, endedAt: null });
+    }
     if ((m.content ?? '').trim()) {
       entries.push({ kind: 'msg', msg: m });
     }
@@ -618,6 +644,12 @@ export default function App() {
         setMainView('chat');
         break;
       }
+      case 'reasoning':
+        // The live thought block is its own "working" signal.
+        setThinking(false);
+        clearThinkingIdle();
+        setEntries((prev) => appendReasoning(prev, msg.text));
+        break;
       case 'token':
         setThinking(false);
         // Text is streaming — hide the indicator, but arm a short idle
@@ -632,7 +664,7 @@ export default function App() {
         clearThinkingIdle();
         playPing();
         setEntries((prev) => [
-          ...prev,
+          ...sealThought(prev),
           { kind: 'tool', call: msg.call, preview: msg.preview ?? null, status: 'pending', result: null },
         ]);
         break;
@@ -681,6 +713,7 @@ export default function App() {
         setBusy(false);
         setThinking(false);
         clearThinkingIdle();
+        setEntries(sealThought);
         playPing();
         // Refresh git status, session diff, and branch PR after each turn.
         getGitStatus().then(setGitStatus).catch(() => {});
@@ -1707,7 +1740,23 @@ function updateSubagent(
   return next;
 }
 
-function appendToken(prev: Entry[], text: string): Entry[] {
+function appendReasoning(prev: Entry[], text: string): Entry[] {
+  const last = prev[prev.length - 1];
+  if (last && last.kind === 'thought' && last.live) {
+    return [...prev.slice(0, -1), { ...last, text: last.text + text }];
+  }
+  return [...prev, { kind: 'thought', text, live: true, startedAt: Date.now(), endedAt: null }];
+}
+
+/** Close the live thought block, if any — the model moved on. */
+function sealThought(prev: Entry[]): Entry[] {
+  const last = prev[prev.length - 1];
+  if (!last || last.kind !== 'thought' || !last.live) return prev;
+  return [...prev.slice(0, -1), { ...last, live: false, endedAt: Date.now() }];
+}
+
+function appendToken(prevRaw: Entry[], text: string): Entry[] {
+  const prev = sealThought(prevRaw);
   const last = prev[prev.length - 1];
   if (last && last.kind === 'msg' && last.msg.role === 'assistant') {
     const updated: Entry = {
@@ -1722,7 +1771,8 @@ function appendToken(prev: Entry[], text: string): Entry[] {
 // A tool_start arrives after either (a) a user-approved approval_request, in
 // which case an entry already exists — leave it alone, or (b) an auto-approved
 // call the policy let through with no prompt — add a fresh entry.
-function upsertToolStart(prev: Entry[], call: ToolCall): Entry[] {
+function upsertToolStart(prevRaw: Entry[], call: ToolCall): Entry[] {
+  const prev = sealThought(prevRaw);
   const existing = prev.findIndex((e) => e.kind === 'tool' && e.call.id === call.id);
   if (existing >= 0) return prev;
   return [...prev, { kind: 'tool', call, preview: null, status: 'running', result: null }];
@@ -2603,6 +2653,19 @@ function EntryView({
       return <GoalTranscriptChip entry={entry} />;
     case 'compact':
       return <CompactDivider entry={entry} />;
+    case 'thought':
+      return (
+        <div className="flex justify-start">
+          <div className="max-w-[90%]">
+            <ThoughtBlock
+              content={entry.text}
+              live={entry.live}
+              startedAt={entry.startedAt}
+              endedAt={entry.endedAt}
+            />
+          </div>
+        </div>
+      );
   }
 }
 

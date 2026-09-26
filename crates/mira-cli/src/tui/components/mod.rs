@@ -25,6 +25,7 @@ pub mod message;
 pub mod prompt;
 pub mod status;
 pub mod tasks;
+pub mod thinking;
 pub mod tool_call;
 pub mod tool_result;
 
@@ -119,6 +120,9 @@ pub enum TranscriptBlock<'a> {
     ToolBatch(tool_call::BatchView),
     Warning(&'a str),
     Info(&'a str),
+    /// The model's reasoning — live peek in the pane, or a settled
+    /// "✻ Thought for 4s" section (full text when ctrl+t is on).
+    Thinking(thinking::ThinkingView<'a>),
     /// In-flight approval prompt, rendered inline below the tool call
     /// that triggered it.
     Approval(approval::ApprovalView<'a>),
@@ -161,6 +165,8 @@ pub struct BuildCtx<'a> {
     pub streaming: bool,
     pub plan_mode: bool,
     pub streaming_tail_idx: Option<usize>,
+    /// Render thinking sections in full (`TuiState::show_thinking`).
+    pub show_thinking: bool,
     pub undoable_idx: Option<usize>,
     pub current_turn_start: Option<usize>,
     /// Live tail `(call_id, line)` of the in-flight tool.
@@ -460,6 +466,35 @@ pub fn build_blocks<'a>(entries: &'a [LogEntry], ctx: &BuildCtx<'a>) -> Vec<Bloc
                 });
                 i += 1;
             }
+            LogEntry::Thinking {
+                text,
+                started_at,
+                elapsed,
+                live,
+            } => {
+                // An empty section (the provider opened a block but only
+                // sent a signature) is noise: consume it, render nothing.
+                let kind = if text.trim().is_empty() && !*live {
+                    TranscriptBlock::Suppressed
+                } else {
+                    TranscriptBlock::Thinking(thinking::ThinkingView {
+                        text,
+                        elapsed: if *live {
+                            Some(started_at.elapsed())
+                        } else {
+                            *elapsed
+                        },
+                        live: *live && ctx.streaming,
+                        expanded: ctx.show_thinking,
+                    })
+                };
+                out.push(Block {
+                    kind,
+                    first_entry: i,
+                    consumed: 1,
+                });
+                i += 1;
+            }
             LogEntry::Compacted { messages_removed } => {
                 out.push(Block {
                     kind: TranscriptBlock::Compacted(*messages_removed),
@@ -503,6 +538,7 @@ pub fn render_block(
         TranscriptBlock::ToolBatch(v) => tool_call::render_batch(v),
         TranscriptBlock::Warning(s) => message::warning_lines(s),
         TranscriptBlock::Info(s) => message::info_lines(s),
+        TranscriptBlock::Thinking(v) => thinking::render(v, width),
         TranscriptBlock::Compacted(n) => {
             // A rule across the transcript: everything above is still
             // here to read, but the model now works from a summary.
@@ -651,6 +687,7 @@ mod tests {
             streaming: false,
             plan_mode: false,
             streaming_tail_idx: None,
+            show_thinking: false,
             undoable_idx: None,
             current_turn_start: None,
             tool_tail: None,
@@ -773,6 +810,7 @@ mod tests {
             streaming: false,
             plan_mode: false,
             streaming_tail_idx: None,
+            show_thinking: false,
             undoable_idx: None,
             current_turn_start: Some(3),
             tool_tail: None,
@@ -812,6 +850,7 @@ mod tests {
             streaming: false,
             plan_mode: false,
             streaming_tail_idx: None,
+            show_thinking: false,
             undoable_idx: None,
             current_turn_start: Some(3),
             tool_tail: None,
@@ -855,6 +894,7 @@ mod tests {
             streaming: true,
             plan_mode: false,
             streaming_tail_idx: Some(1),
+            show_thinking: false,
             undoable_idx: None,
             current_turn_start: None,
             tool_tail: None,

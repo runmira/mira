@@ -13,6 +13,10 @@ use crate::persist::UsageTotals;
 pub enum HarnessEvent {
     /// A fragment of assistant text.
     Token(String),
+    /// A fragment of the model's reasoning ("thinking"), streamed ahead
+    /// of the text / tool calls it leads to. Display-only — renderers
+    /// that don't show thinking can drop it.
+    Reasoning(String),
     /// The model requested a tool call. Emitted before it runs.
     ToolStart(ToolCall),
     /// A tool call finished.

@@ -102,7 +102,8 @@ impl ChatProvider for OpenAiCompatible {
         &self,
         request: ChatRequest,
     ) -> Result<BoxStream<'static, Result<ChatEvent, ProviderError>>, ProviderError> {
-        let body = WireRequest::from_request(&request, self.cfg.prompt_caching);
+        let google = is_google_endpoint(&self.cfg.base_url);
+        let body = WireRequest::from_request(&request, self.cfg.prompt_caching, google);
         let url = format!(
             "{}/chat/completions",
             self.cfg.base_url.trim_end_matches('/')
@@ -145,6 +146,12 @@ impl ChatProvider for OpenAiCompatible {
             let mut sse = Box::pin(resp.bytes_stream().eventsource());
             let mut buffer = ToolCallBuffer::default();
             let mut finish: Option<FinishReason> = None;
+            // Gemini's OpenAI-compat endpoint returns thought summaries
+            // inline in `content`, wrapped in `<thought>` tags; split them
+            // out. Elsewhere reasoning has its own delta field, and content
+            // is passed through untouched.
+            let mut thoughts = google.then(ThoughtSplitter::default);
+            let mut reasoning = String::new();
 
             while let Some(item) = sse.next().await {
                 let evt = match item {
@@ -207,10 +214,59 @@ impl ChatProvider for OpenAiCompatible {
                     continue;
                 }
 
+                // DeepSeek / vLLM / Qwen use `reasoning_content`;
+                // OpenRouter and Ollama use `reasoning`.
+                let mut parts: Vec<ChatEvent> = Vec::new();
+                if let Some(r) = delta.reasoning_content.or(delta.reasoning) {
+                    parts.push(ChatEvent::ReasoningDelta(r));
+                }
                 if let Some(text) = delta.content {
-                    if !text.is_empty() && tx.send(Ok(ChatEvent::TextDelta(text))).await.is_err() {
+                    match thoughts.as_mut() {
+                        Some(splitter) => parts.extend(splitter.push(&text)),
+                        None => parts.push(ChatEvent::TextDelta(text)),
+                    }
+                }
+                for part in parts {
+                    let (ChatEvent::ReasoningDelta(t) | ChatEvent::TextDelta(t)) = &part else {
+                        continue;
+                    };
+                    if t.is_empty() {
+                        continue;
+                    }
+                    if let ChatEvent::ReasoningDelta(r) = &part {
+                        reasoning.push_str(r);
+                    }
+                    if tx.send(Ok(part)).await.is_err() {
                         return;
                     }
+                }
+            }
+
+            if let Some(splitter) = thoughts.as_mut() {
+                for part in splitter.finish() {
+                    if let ChatEvent::ReasoningDelta(r) = &part {
+                        reasoning.push_str(r);
+                    }
+                    if tx.send(Ok(part)).await.is_err() {
+                        return;
+                    }
+                }
+            }
+
+            // Unsigned, display-only: the harness keeps it on the
+            // assistant message so a resumed transcript can show it, but
+            // it is never sent back to the provider.
+            if !reasoning.trim().is_empty() {
+                let block = mira_core::ReasoningBlock {
+                    text: reasoning,
+                    ..Default::default()
+                };
+                if tx
+                    .send(Ok(ChatEvent::Reasoning(vec![block])))
+                    .await
+                    .is_err()
+                {
+                    return;
                 }
             }
 
@@ -256,6 +312,11 @@ struct WireRequest<'a> {
     /// OpenRouter for structured-output models) or drop it silently.
     #[serde(skip_serializing_if = "Option::is_none")]
     response_format: Option<WireResponseFormat<'a>>,
+    /// Provider-specific extras. Only used for Gemini today: its
+    /// OpenAI-compat endpoint reads `extra_body.google.thinking_config`,
+    /// and without `include_thoughts` it thinks but never shows it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    extra_body: Option<serde_json::Value>,
     stream: bool,
     /// Opt in to the OpenAI usage trailer on streaming responses. Providers
     /// that don't understand this field drop it (Ollama, some OpenRouter
@@ -287,7 +348,7 @@ struct StreamOptions {
 }
 
 impl<'a> WireRequest<'a> {
-    fn from_request(req: &'a ChatRequest, prompt_caching: bool) -> Self {
+    fn from_request(req: &'a ChatRequest, prompt_caching: bool, google: bool) -> Self {
         // Strip `"off"` (Mira UI sentinel) so we send *no* field for it —
         // OpenAI rejects unknown values with a 400 rather than ignoring.
         let effort = req.reasoning_effort.as_deref().filter(|v| *v != "off");
@@ -345,6 +406,11 @@ impl<'a> WireRequest<'a> {
             max_tokens: req.max_tokens,
             reasoning_effort: effort,
             response_format,
+            // Gemini 2.5+ thinks by default, so ask for the summaries
+            // unless the user turned reasoning off.
+            extra_body: (google && req.reasoning_effort.as_deref() != Some("off")).then(|| {
+                serde_json::json!({ "google": { "thinking_config": { "include_thoughts": true } } })
+            }),
             stream: true,
             stream_options: StreamOptions {
                 include_usage: true,
@@ -552,6 +618,72 @@ struct WirePromptDetails {
     cached_tokens: u32,
 }
 
+/// Google's Gemini OpenAI-compat endpoint.
+fn is_google_endpoint(base_url: &str) -> bool {
+    base_url.contains("generativelanguage.googleapis.com")
+}
+
+/// Splits Gemini's inline `<thought>…</thought>` summaries out of a
+/// streamed `content` field. Tags can straddle chunk boundaries, so a
+/// trailing fragment that could still become a tag is held until the
+/// next chunk (or `finish`) decides it.
+#[derive(Default)]
+struct ThoughtSplitter {
+    in_thought: bool,
+    pending: String,
+}
+
+impl ThoughtSplitter {
+    const OPEN: &'static str = "<thought>";
+    const CLOSE: &'static str = "</thought>";
+
+    fn push(&mut self, chunk: &str) -> Vec<ChatEvent> {
+        self.pending.push_str(chunk);
+        let mut out = Vec::new();
+        loop {
+            let tag = if self.in_thought {
+                Self::CLOSE
+            } else {
+                Self::OPEN
+            };
+            if let Some(at) = self.pending.find(tag) {
+                let before: String = self.pending.drain(..at).collect();
+                self.pending.drain(..tag.len());
+                self.emit(&mut out, before);
+                self.in_thought = !self.in_thought;
+                continue;
+            }
+            // Hold back the longest suffix that is a prefix of `tag`.
+            let keep = (1..tag.len())
+                .rev()
+                .find(|&n| self.pending.ends_with(&tag[..n]))
+                .unwrap_or(0);
+            let cut = self.pending.len() - keep;
+            let ready: String = self.pending.drain(..cut).collect();
+            self.emit(&mut out, ready);
+            return out;
+        }
+    }
+
+    fn finish(&mut self) -> Vec<ChatEvent> {
+        let mut out = Vec::new();
+        let rest = std::mem::take(&mut self.pending);
+        self.emit(&mut out, rest);
+        out
+    }
+
+    fn emit(&self, out: &mut Vec<ChatEvent>, text: String) {
+        if text.is_empty() {
+            return;
+        }
+        out.push(if self.in_thought {
+            ChatEvent::ReasoningDelta(text)
+        } else {
+            ChatEvent::TextDelta(text)
+        });
+    }
+}
+
 #[derive(Deserialize)]
 struct WireChoice {
     delta: WireDelta,
@@ -563,6 +695,10 @@ struct WireChoice {
 struct WireDelta {
     #[serde(default)]
     content: Option<String>,
+    #[serde(default)]
+    reasoning_content: Option<String>,
+    #[serde(default)]
+    reasoning: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<WireToolCallDelta>>,
 }
@@ -654,7 +790,7 @@ mod tests {
         );
         req.messages
             .push(Message::tool(ToolCallId::from("b".to_owned()), "ok"));
-        let wire = WireRequest::from_request(&req, false);
+        let wire = WireRequest::from_request(&req, false, false);
         let json = serde_json::to_value(&wire).unwrap();
         let msgs = json["messages"].as_array().unwrap();
         let roles: Vec<&str> = msgs.iter().map(|m| m["role"].as_str().unwrap()).collect();
@@ -671,7 +807,7 @@ mod tests {
     #[test]
     fn prompt_caching_off_serializes_content_as_string() {
         let req = base_req();
-        let wire = WireRequest::from_request(&req, false);
+        let wire = WireRequest::from_request(&req, false, false);
         let json = serde_json::to_string(&wire).unwrap();
         // System content stays a plain string; no cache_control anywhere.
         assert!(json.contains(r#""content":"SYS""#));
@@ -682,7 +818,7 @@ mod tests {
     #[test]
     fn prompt_caching_on_marks_system_with_cache_control() {
         let req = base_req();
-        let wire = WireRequest::from_request(&req, true);
+        let wire = WireRequest::from_request(&req, true, false);
         let json = serde_json::to_string(&wire).unwrap();
         // System becomes a content-block array with cache_control ephemeral.
         assert!(json.contains(r#""text":"SYS""#));
@@ -695,7 +831,7 @@ mod tests {
     fn prompt_caching_skips_empty_system() {
         let mut req = base_req();
         req.messages[0] = Message::system("");
-        let wire = WireRequest::from_request(&req, true);
+        let wire = WireRequest::from_request(&req, true, false);
         let json = serde_json::to_string(&wire).unwrap();
         // Empty system prompt would produce an invalid text block; leave it as
         // a bare "" so the provider handles it uniformly.
@@ -721,7 +857,7 @@ mod tests {
             reasoning_effort: None,
             response_format: None,
         };
-        let wire = WireRequest::from_request(&req, true);
+        let wire = WireRequest::from_request(&req, true, false);
         let json = serde_json::to_string(&wire).unwrap();
         // PREFIX is a content-block array with cache_control.
         assert!(json.contains(r#""text":"PREFIX""#));
@@ -730,5 +866,55 @@ mod tests {
         assert!(json.contains(r#""content":"LIVE_MEMORY""#));
         // Only one cache_control anywhere in the wire body.
         assert_eq!(json.matches("cache_control").count(), 1);
+    }
+
+    fn split_all(chunks: &[&str]) -> (String, String) {
+        let mut sp = ThoughtSplitter::default();
+        let mut events: Vec<ChatEvent> = chunks.iter().flat_map(|c| sp.push(c)).collect();
+        events.extend(sp.finish());
+        let (mut thought, mut text) = (String::new(), String::new());
+        for e in events {
+            match e {
+                ChatEvent::ReasoningDelta(t) => thought.push_str(&t),
+                ChatEvent::TextDelta(t) => text.push_str(&t),
+                _ => {}
+            }
+        }
+        (thought, text)
+    }
+
+    #[test]
+    fn gemini_thought_tags_split_across_chunks() {
+        let (thought, text) = split_all(&[
+            "<thou",
+            "ght>plan it",
+            " out</tho",
+            "ught>Here's",
+            " the answer",
+        ]);
+        assert_eq!(thought, "plan it out");
+        assert_eq!(text, "Here's the answer");
+    }
+
+    #[test]
+    fn plain_content_passes_through_the_splitter() {
+        let (thought, text) = split_all(&["a < b", " and <b>bold</b>"]);
+        assert_eq!(thought, "");
+        assert_eq!(text, "a < b and <b>bold</b>");
+    }
+
+    #[test]
+    fn google_endpoint_asks_for_thoughts_unless_off() {
+        let mut req = base_req();
+        let on = serde_json::to_value(WireRequest::from_request(&req, false, true)).unwrap();
+        assert_eq!(
+            on["extra_body"]["google"]["thinking_config"]["include_thoughts"],
+            true
+        );
+        let other = serde_json::to_value(WireRequest::from_request(&req, false, false)).unwrap();
+        assert!(other.get("extra_body").is_none());
+        req.reasoning_effort = Some("off".into());
+        let off = serde_json::to_value(WireRequest::from_request(&req, false, true)).unwrap();
+        assert!(off.get("extra_body").is_none());
     }
 }

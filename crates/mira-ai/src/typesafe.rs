@@ -38,8 +38,8 @@
 //!     .await?;
 //!
 //! match answers.get("department") {
-//!     Some(mira_ai::typesafe::Answer::Choice(a)) => {
-//!         println!("{} (conf {:.2})", a.choice, a.confidence);
+//!     Some(mira_ai::typesafe::Answer::Choice { choice, confidence, .. }) => {
+//!         println!("{choice} (conf {confidence:.2})");
 //!     }
 //!     _ => unreachable!(),
 //! }

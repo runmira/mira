@@ -78,17 +78,18 @@ pub(crate) fn pane_cards(state: &TuiState, width: u16) -> Vec<Line<'static>> {
         if block.consumed == 0 {
             continue;
         }
-        if let components::TranscriptBlock::Tool(v) = &block.kind {
-            if v.result.is_none() && v.name == "agent" && block.first_entry >= state.emitted_entries
-            {
-                let rendered = components::render_block(block, "", false, width);
-                let trimmed = trim_empty(rendered);
-                if !trimmed.is_empty() {
-                    if !lines.is_empty() {
-                        lines.push(Line::from(""));
-                    }
-                    lines.extend(trimmed);
+        // Live thinking is held back the same way until it seals.
+        let live_thinking =
+            matches!(&block.kind, components::TranscriptBlock::Thinking(v) if v.live);
+        let live_agent = matches!(&block.kind, components::TranscriptBlock::Tool(v) if v.result.is_none() && v.name == "agent");
+        if (live_thinking || live_agent) && block.first_entry >= state.emitted_entries {
+            let rendered = components::render_block(block, "", false, width);
+            let trimmed = trim_empty(rendered);
+            if !trimmed.is_empty() {
+                if !lines.is_empty() {
+                    lines.push(Line::from(""));
                 }
+                lines.extend(trimmed);
             }
         }
     }
@@ -257,6 +258,7 @@ fn assemble_blocks(state: &TuiState) -> Vec<components::Block<'_>> {
         streaming: state.streaming,
         plan_mode: state.mode == mira_policy::Mode::Plan,
         streaming_tail_idx,
+        show_thinking: state.show_thinking,
         undoable_idx,
         current_turn_start,
         tool_tail: state.tool_tail.clone(),
@@ -624,6 +626,40 @@ mod tests {
         assert!(!text.contains("still coming"), "{text}");
         // …and no streaming cursor freezes into scrollback.
         assert!(!text.contains("▍"), "{text}");
+    }
+
+    #[test]
+    fn live_thinking_stays_in_the_pane_until_sealed() {
+        let mut st = state_with(vec![LogEntry::User("hi".into())]);
+        st.streaming = true;
+        st.append_reasoning("weighing ");
+        st.append_reasoning("options");
+        // One entry, held back from scrollback, peeking in the pane.
+        assert_eq!(st.entries().len(), 2);
+        assert_eq!(st.emission_frontier(), 1);
+        let pane = joined(&pane_cards(&st, 100));
+        assert!(pane.contains("Thinking…"), "{pane}");
+        assert!(pane.contains("weighing options"), "{pane}");
+
+        // The reply's first token seals it: it settles, collapsed.
+        st.append_token("Answer");
+        assert!(matches!(
+            st.entries()[1],
+            LogEntry::Thinking {
+                live: false,
+                elapsed: Some(_),
+                ..
+            }
+        ));
+        let text = joined(&settled_lines(&st, 100, 2));
+        assert!(text.contains("Thought for"), "{text}");
+        assert!(!text.contains("weighing options"), "{text}");
+        assert!(!joined(&pane_cards(&st, 100)).contains("Thinking…"));
+
+        // ctrl+t: the full text settles instead.
+        st.show_thinking = true;
+        let text = joined(&settled_lines(&st, 100, 2));
+        assert!(text.contains("weighing options"), "{text}");
     }
 
     #[test]

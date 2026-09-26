@@ -47,6 +47,35 @@ pub struct Message {
     /// wire so older persisted sessions round-trip unchanged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ImageData>,
+
+    /// The model's reasoning ("extended thinking") for an assistant turn,
+    /// in the order the provider streamed it. Kept so providers that
+    /// require it can replay it — Anthropic rejects a tool-use loop whose
+    /// previous assistant turn drops its signed `thinking` block — and so
+    /// a resumed transcript can show what the model was thinking. Empty
+    /// for every other message, and skipped on the wire so older
+    /// persisted sessions round-trip unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasoning: Vec<ReasoningBlock>,
+}
+
+/// One block of model reasoning attached to an assistant [`Message`].
+///
+/// `text` is the human-readable (possibly summarized) thinking. Anthropic
+/// signs each block — `signature` must be sent back verbatim for the
+/// block to be accepted on replay — and may return a `redacted` block
+/// whose content is encrypted: `text` is empty and `redacted` carries the
+/// opaque payload. OpenAI-compatible providers (DeepSeek, OpenRouter, …)
+/// stream unsigned text only; those blocks are display-only and never
+/// replayed.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReasoningBlock {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redacted: Option<String>,
 }
 
 impl Message {
@@ -71,6 +100,7 @@ impl Message {
             tool_call_id: None,
             name: None,
             images: Vec::new(),
+            reasoning: Vec::new(),
         }
     }
 
@@ -83,6 +113,7 @@ impl Message {
             tool_call_id: Some(call_id),
             name: None,
             images: Vec::new(),
+            reasoning: Vec::new(),
         }
     }
 
@@ -101,6 +132,7 @@ impl Message {
             tool_call_id: None,
             name: None,
             images: Vec::new(),
+            reasoning: Vec::new(),
         }
     }
 }

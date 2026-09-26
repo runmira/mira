@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures::{stream::BoxStream, StreamExt};
 use mira_core::message::{ToolCallFunction, ToolCallKind};
-use mira_core::{Message, Role, ToolCall, ToolCallId};
+use mira_core::{Message, ReasoningBlock, Role, ToolCall, ToolCallId};
 use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -258,6 +258,12 @@ impl ChatProvider for Anthropic {
                 }
             }
 
+            let reasoning = state.reasoning_blocks();
+            if !reasoning.is_empty() && tx.send(Ok(ChatEvent::Reasoning(reasoning))).await.is_err()
+            {
+                return;
+            }
+
             let tool_calls = state.take_tool_calls();
             if !tool_calls.is_empty()
                 && tx.send(Ok(ChatEvent::ToolCalls(tool_calls))).await.is_err()
@@ -316,6 +322,17 @@ struct StreamState {
 
 enum StreamBlock {
     Text,
+    /// Extended-thinking block: text streams via `thinking_delta`, the
+    /// signature arrives in one `signature_delta` just before the stop.
+    Thinking {
+        text: String,
+        signature: String,
+    },
+    /// Thinking the safety system encrypted — no readable text, just an
+    /// opaque payload that must be replayed verbatim.
+    RedactedThinking {
+        data: String,
+    },
     ToolUse {
         id: String,
         name: String,
@@ -330,6 +347,16 @@ impl StreamState {
         }
         self.blocks[index] = Some(match block {
             WireContentBlockStart::Text { .. } => StreamBlock::Text,
+            WireContentBlockStart::Thinking {
+                thinking,
+                signature,
+            } => StreamBlock::Thinking {
+                text: thinking,
+                signature,
+            },
+            WireContentBlockStart::RedactedThinking { data } => {
+                StreamBlock::RedactedThinking { data }
+            }
             WireContentBlockStart::ToolUse { id, name, .. } => StreamBlock::ToolUse {
                 id,
                 name,
@@ -349,12 +376,48 @@ impl StreamState {
                     Some(ChatEvent::TextDelta(text))
                 }
             }
+            (StreamBlock::Thinking { text, .. }, WireBlockDelta::Thinking { thinking }) => {
+                if thinking.is_empty() {
+                    None
+                } else {
+                    text.push_str(&thinking);
+                    Some(ChatEvent::ReasoningDelta(thinking))
+                }
+            }
+            (
+                StreamBlock::Thinking { signature, .. },
+                WireBlockDelta::Signature { signature: s },
+            ) => {
+                signature.push_str(&s);
+                None
+            }
             (StreamBlock::ToolUse { input, .. }, WireBlockDelta::InputJson { partial_json }) => {
                 input.push_str(&partial_json);
                 None
             }
             _ => None,
         }
+    }
+
+    /// Every thinking / redacted-thinking block seen this turn, in
+    /// stream order. Non-consuming: `take_tool_calls` drains afterwards.
+    fn reasoning_blocks(&self) -> Vec<ReasoningBlock> {
+        self.blocks
+            .iter()
+            .flatten()
+            .filter_map(|b| match b {
+                StreamBlock::Thinking { text, signature } => Some(ReasoningBlock {
+                    text: text.clone(),
+                    signature: (!signature.is_empty()).then(|| signature.clone()),
+                    redacted: None,
+                }),
+                StreamBlock::RedactedThinking { data } => Some(ReasoningBlock {
+                    redacted: Some(data.clone()),
+                    ..Default::default()
+                }),
+                _ => None,
+            })
+            .collect()
     }
 
     fn record_input_usage(&mut self, u: &WireUsage) {
@@ -393,7 +456,7 @@ impl StreamState {
                         },
                     },
                 }),
-                StreamBlock::Text => None,
+                _ => None,
             })
             .collect()
     }
@@ -501,6 +564,13 @@ enum WireContentBlock<'a> {
     Text {
         text: &'a str,
     },
+    Thinking {
+        thinking: &'a str,
+        signature: &'a str,
+    },
+    RedactedThinking {
+        data: &'a str,
+    },
     ToolUse {
         id: &'a str,
         name: &'a str,
@@ -573,9 +643,9 @@ impl<'a> WireRequest<'a> {
         let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
 
         let system = build_system(&req.messages, prompt_caching);
-        let messages = build_messages(&req.messages)?;
-        let tools = build_tools(&req.tools, prompt_caching);
         let thinking = thinking_from_effort(req.reasoning_effort.as_deref(), max_tokens);
+        let messages = build_messages(&req.messages, thinking.is_some())?;
+        let tools = build_tools(&req.tools, prompt_caching);
 
         Ok(Self {
             model: &req.model,
@@ -631,7 +701,17 @@ fn build_system<'a>(messages: &'a [Message], prompt_caching: bool) -> Option<Wir
 /// results (`Role::Tool`) collapse into a single user message with a
 /// `tool_result` block per call — Anthropic requires them under user, not
 /// their own role.
-fn build_messages(messages: &[Message]) -> Result<Vec<WireMessage<'_>>, ProviderError> {
+///
+/// With `replay_thinking` on (the request enables extended thinking), an
+/// assistant turn's signed thinking blocks go back first in its content:
+/// Anthropic requires the thinking that preceded a `tool_use` to be
+/// returned alongside it while the tool loop runs. Unsigned blocks (from
+/// another provider, or a stream cut short) can't be replayed and are
+/// dropped; with thinking off every block is dropped.
+fn build_messages(
+    messages: &[Message],
+    replay_thinking: bool,
+) -> Result<Vec<WireMessage<'_>>, ProviderError> {
     let mut out: Vec<WireMessage<'_>> = Vec::new();
     // Track pending tool_result blocks that need to attach to the *next*
     // user message we emit. Anthropic requires: assistant(tool_use)
@@ -679,6 +759,18 @@ fn build_messages(messages: &[Message]) -> Result<Vec<WireMessage<'_>>, Provider
                     });
                 }
                 let mut content: Vec<WireContentBlock<'_>> = Vec::new();
+                if replay_thinking {
+                    for block in &msg.reasoning {
+                        if let Some(data) = block.redacted.as_deref() {
+                            content.push(WireContentBlock::RedactedThinking { data });
+                        } else if let Some(signature) = block.signature.as_deref() {
+                            content.push(WireContentBlock::Thinking {
+                                thinking: &block.text,
+                                signature,
+                            });
+                        }
+                    }
+                }
                 if let Some(text) = msg.content.as_deref() {
                     if !text.is_empty() {
                         content.push(WireContentBlock::Text { text });
@@ -770,6 +862,16 @@ enum WireContentBlockStart {
         #[allow(dead_code)]
         text: String,
     },
+    Thinking {
+        #[serde(default)]
+        thinking: String,
+        #[serde(default)]
+        signature: String,
+    },
+    RedactedThinking {
+        #[serde(default)]
+        data: String,
+    },
     ToolUse {
         id: String,
         name: String,
@@ -794,6 +896,10 @@ enum WireBlockDelta {
     Text { text: String },
     #[serde(rename = "input_json_delta")]
     InputJson { partial_json: String },
+    #[serde(rename = "thinking_delta")]
+    Thinking { thinking: String },
+    #[serde(rename = "signature_delta")]
+    Signature { signature: String },
     #[serde(other)]
     Other,
 }
@@ -1112,6 +1218,68 @@ mod tests {
         let json = serde_json::to_value(&body).unwrap();
         let budget = json["thinking"]["budget_tokens"].as_u64().unwrap();
         assert!(budget < 2000);
+    }
+
+    #[test]
+    fn thinking_blocks_stream_as_reasoning_and_keep_signature() {
+        let mut state = StreamState::default();
+        let start: ContentBlockStart = serde_json::from_str(
+            r#"{"index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}"#,
+        )
+        .unwrap();
+        state.begin_block(start.index, start.content_block);
+        let delta = |d: &str| -> ContentBlockDelta {
+            serde_json::from_str(&format!(r#"{{"index":0,"delta":{d}}}"#)).unwrap()
+        };
+        let d = delta(r#"{"type":"thinking_delta","thinking":"Let me check"}"#);
+        assert!(matches!(
+            state.push_delta(d.index, d.delta),
+            Some(ChatEvent::ReasoningDelta(t)) if t == "Let me check"
+        ));
+        let d = delta(r#"{"type":"signature_delta","signature":"sig=="}"#);
+        assert!(state.push_delta(d.index, d.delta).is_none());
+        let redacted: ContentBlockStart = serde_json::from_str(
+            r#"{"index":1,"content_block":{"type":"redacted_thinking","data":"enc"}}"#,
+        )
+        .unwrap();
+        state.begin_block(redacted.index, redacted.content_block);
+
+        let blocks = state.reasoning_blocks();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].text, "Let me check");
+        assert_eq!(blocks[0].signature.as_deref(), Some("sig=="));
+        assert_eq!(blocks[1].redacted.as_deref(), Some("enc"));
+    }
+
+    #[test]
+    fn signed_thinking_replays_first_only_when_thinking_is_on() {
+        let mut asst = Message::assistant("checking");
+        asst.reasoning = vec![
+            ReasoningBlock {
+                text: "think".into(),
+                signature: Some("sig".into()),
+                redacted: None,
+            },
+            // Unsigned (e.g. from another provider): never replayed.
+            ReasoningBlock {
+                text: "gemini thought".into(),
+                ..Default::default()
+            },
+        ];
+        let msgs = vec![Message::user("hi"), asst];
+
+        let on = build_messages(&msgs, true).unwrap();
+        let json = serde_json::to_value(&on[1].content).unwrap();
+        assert_eq!(json[0]["type"], "thinking");
+        assert_eq!(json[0]["thinking"], "think");
+        assert_eq!(json[0]["signature"], "sig");
+        assert_eq!(json[1]["type"], "text");
+        assert_eq!(json.as_array().unwrap().len(), 2);
+
+        let off = build_messages(&msgs, false).unwrap();
+        let json = serde_json::to_value(&off[1].content).unwrap();
+        assert_eq!(json.as_array().unwrap().len(), 1);
+        assert_eq!(json[0]["type"], "text");
     }
 
     // ----- streaming reassembly -----

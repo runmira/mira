@@ -451,6 +451,16 @@ pub(crate) async fn handle_key(
         (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
             state.search_open();
         }
+        (KeyCode::Char('t'), KeyModifiers::CONTROL) => {
+            // Thinking already in scrollback can't be re-rendered, so
+            // this sets how the live section and every later one show.
+            state.show_thinking = !state.show_thinking;
+            state.flash = Some(if state.show_thinking {
+                "thinking: shown in full".into()
+            } else {
+                "thinking: collapsed to one line".into()
+            });
+        }
         (KeyCode::Char('o'), KeyModifiers::CONTROL) => {
             // Ctrl+O opens the unified selector — one searchable panel
             // grouping mode/model/theme so the user can flip a session
@@ -1055,6 +1065,7 @@ fn slash_arg_command(head: &str) -> Option<&'static str> {
     match head {
         "/mode" => Some("/mode"),
         "/goal" => Some("/goal"),
+        "/effort" => Some("/effort"),
         "/budget" => Some("/budget"),
         "/permissions" | "/perms" => Some("/permissions"),
         "/skill" => Some("/skill"),
@@ -1077,6 +1088,16 @@ async fn slash_arg_matches(cmd: &str, filter: &str, cfg: &TuiConfig) -> Vec<Pale
                 ("auto", "auto-approve writes+edits · ask on commands"),
                 ("edit", "auto-approve writes, edits and commands"),
                 ("yolo", "no gating whatsoever"),
+            ],
+        ),
+        "/effort" => static_arg_matches(
+            filter,
+            &[
+                ("off", "no extended reasoning (model default)"),
+                ("minimal", "barely think"),
+                ("low", "quick reasoning"),
+                ("medium", "balanced"),
+                ("high", "think hard — slower, more tokens"),
             ],
         ),
         "/goal" => static_arg_matches(
