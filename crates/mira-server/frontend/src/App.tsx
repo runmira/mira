@@ -5,7 +5,9 @@ import {
   ArrowDown,
   CaretDown,
   Check,
+  CircleNotch,
   Copy,
+  Info,
   Lightbulb,
   PencilSimple,
   ShieldWarning,
@@ -799,7 +801,18 @@ export default function App() {
         break;
       }
       case 'warning':
-        setEntries((prev) => [...prev, { kind: 'warning', text: msg.text }]);
+        setEntries((prev) => {
+          // A verify result replaces its own "running …" line.
+          const last = prev[prev.length - 1];
+          if (
+            /^\[verify\]/.test(msg.text) &&
+            last?.kind === 'warning' &&
+            /^\[verify\]\s*running/i.test(last.text)
+          ) {
+            return [...prev.slice(0, -1), { kind: 'warning', text: msg.text }];
+          }
+          return [...prev, { kind: 'warning', text: msg.text }];
+        });
         break;
       case 'tool_progress':
         setEntries((prev) => appendProgressLine(prev, msg.call_id, msg.line));
@@ -2707,119 +2720,10 @@ function EntryView({
           />
         </div>
       );
-    case 'warning': {
-      // Special channels riding the warning stream get their own chip:
-      //   `[undo] ...`          → green success chip
-      //   `[file-conflict] ...` → amber warning chip
-      //   `[verify] … passed`   → green success chip
-      //   `[verify] … failed`   → amber warning chip
-      //   `[verify] running`    → blue in-flight chip
-      //   `[progress] ...`      → blue "in-flight status" chip (subagent
-      //                            emit_progress → SubagentPanel stream)
-      //   `[memory] ...`        → violet "learned" chip
-      //   `[context] ...`       → slate "compacted" chip
-      //   `[environment] ...`   → blue "environment" chip (multi-line)
-      // Everything else stays the compact monospace `! …` line.
-      const undo = entry.text.match(/^\[undo\]\s*(.*)$/);
-      const conflict = entry.text.match(/^\[file-conflict\]\s*(.*)$/);
-      const verify = entry.text.match(/^\[verify\]\s*(.*)$/);
-      const progress = entry.text.match(/^\[progress\]\s*(.*)$/);
-      const memory = entry.text.match(/^\[memory\]\s*(.*)$/);
-      const context = entry.text.match(/^\[context\]\s*(.*)$/);
-      const environment = entry.text.match(/^\[environment\]\s*([\s\S]*)$/);
-      if (environment) {
-        const [head, ...rest] = environment[1].split('\n');
-        return (
-          <div className="flex justify-start">
-            <div className="inline-flex max-w-full flex-col gap-0.5 rounded-md border border-mira-blue/25 bg-mira-blue/[0.06] px-3 py-1.5 text-[12.5px] text-mira-blue">
-              <span className="font-semibold">{head}</span>
-              {rest.length > 0 && (
-                <pre className="whitespace-pre-wrap break-words font-mono text-[11.5px] text-foreground/70">{rest.join('\n')}</pre>
-              )}
-            </div>
-          </div>
-        );
-      }
-      if (undo) {
-        return (
-          <div className="flex justify-start">
-            <div className="inline-flex items-start gap-2 rounded-md border border-emerald-500/25 bg-emerald-500/[0.06] px-3 py-1.5 text-[12.5px] text-emerald-300">
-              <span className="font-semibold">↩ undo</span>
-              <span className="min-w-0 break-words text-emerald-200/90">{undo[1]}</span>
-            </div>
-          </div>
-        );
-      }
-      if (conflict) {
-        return (
-          <div className="flex justify-start">
-            <div className="inline-flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-[12.5px] text-amber-200">
-              <span className="font-semibold">⚠ file conflict</span>
-              <span className="min-w-0 break-words text-amber-100/90">{conflict[1]}</span>
-            </div>
-          </div>
-        );
-      }
-      if (progress) {
-        return (
-          <div className="flex justify-start">
-            <div className="inline-flex items-start gap-2 rounded-md border border-mira-blue/25 bg-mira-blue/[0.06] px-3 py-1.5 text-[12.5px] text-mira-blue">
-              <span className="font-semibold">… progress</span>
-              <span className="min-w-0 break-words opacity-90">{progress[1]}</span>
-            </div>
-          </div>
-        );
-      }
-      if (verify) {
-        const body = verify[1];
-        const passed = /passed/i.test(body);
-        const running = /running/i.test(body);
-        const cls = passed
-          ? 'border-emerald-500/25 bg-emerald-500/[0.06] text-emerald-300'
-          : running
-            ? 'border-mira-blue/25 bg-mira-blue/[0.06] text-mira-blue'
-            : 'border-amber-500/30 bg-amber-500/10 text-amber-200';
-        return (
-          <div className="flex justify-start">
-            <div className={cn('inline-flex items-start gap-2 rounded-md border px-3 py-1.5 text-[12.5px]', cls)}>
-              <span className="font-semibold">✓ verify</span>
-              <span className="min-w-0 break-words opacity-90">{body}</span>
-            </div>
-          </div>
-        );
-      }
-      if (memory) {
-        return (
-          <div className="flex justify-start">
-            <div className="inline-flex items-start gap-2 rounded-md border border-violet-500/25 bg-violet-500/[0.06] px-3 py-1.5 text-[12.5px] text-violet-300">
-              <span className="font-semibold">✦ memory</span>
-              <span className="min-w-0 break-words text-violet-200/90">{memory[1]}</span>
-            </div>
-          </div>
-        );
-      }
-      if (context) {
-        return (
-          <div className="flex justify-start">
-            <div className="inline-flex items-start gap-2 rounded-md border border-slate-500/25 bg-slate-500/[0.06] px-3 py-1.5 text-[12.5px] text-slate-300">
-              <span className="font-semibold">≡ context</span>
-              <span className="min-w-0 break-words text-slate-200/90">{context[1]}</span>
-            </div>
-          </div>
-        );
-      }
-      return (
-        <div className="flex justify-start">
-          <div className="font-mono text-xs text-mira-tool">! {entry.text}</div>
-        </div>
-      );
-    }
+    case 'warning':
+      return <StatusLine text={entry.text} />;
     case 'error':
-      return (
-        <div className="flex justify-start">
-          <div className="font-mono text-xs text-destructive">error: {entry.text}</div>
-        </div>
-      );
+      return <StatusLine text={entry.text} tone="error" />;
     case 'goal':
       return <GoalTranscriptChip entry={entry} />;
     case 'compact':
@@ -3135,6 +3039,83 @@ function UserMessage({
           </ActionButton>
         )}
       </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Status lines: harness notes riding the warning stream                */
+/* ------------------------------------------------------------------ */
+
+type StatusTone = 'ok' | 'warn' | 'error' | 'busy' | 'info' | 'memory';
+
+/** Classify a `[channel] body` note into an icon tone and display text. */
+function parseStatus(raw: string, forced?: StatusTone): { tone: StatusTone; text: string; detail?: string } {
+  const m = raw.match(/^\[([a-z-]+)\]\s*([\s\S]*)$/);
+  const channel = m?.[1] ?? '';
+  let text = m ? m[2] : raw;
+  let detail: string | undefined;
+  if (channel === 'environment') {
+    const [head, ...rest] = text.split('\n');
+    text = head;
+    detail = rest.join('\n') || undefined;
+  }
+  if (forced) return { tone: forced, text, detail };
+  switch (channel) {
+    case 'verify':
+      if (/running/i.test(text)) return { tone: 'busy', text: text.replace(/^running\s*/i, 'Running '), detail };
+      if (/passed/i.test(text)) return { tone: 'ok', text, detail };
+      return { tone: 'warn', text, detail };
+    case 'undo':
+      return { tone: 'ok', text, detail };
+    case 'progress':
+      return { tone: 'busy', text, detail };
+    case 'memory':
+      return { tone: 'memory', text, detail };
+    case 'context':
+    case 'environment':
+      return { tone: 'info', text, detail };
+    default:
+      return { tone: 'warn', text, detail };
+  }
+}
+
+/** Render `code` spans in a status message. */
+function withCode(text: string): React.ReactNode[] {
+  return text.split(/(`[^`]+`)/g).map((part, i) =>
+    part.startsWith('`') && part.endsWith('`') && part.length > 2 ? (
+      <code key={i} className="rounded bg-white/[0.06] px-1 font-mono text-[11.5px] text-foreground/75">
+        {part.slice(1, -1)}
+      </code>
+    ) : (
+      part
+    ),
+  );
+}
+
+/** One quiet line: a small tone icon and muted text. No box, no border —
+ *  the icon carries the state so notes don't compete with the reply. */
+function StatusLine({ text, tone }: { text: string; tone?: StatusTone }) {
+  const s = parseStatus(text, tone);
+  const icon = {
+    ok: <Check weight="bold" className="size-3 text-emerald-400/80" />,
+    warn: <ShieldWarning className="size-3.5 text-amber-400/80" />,
+    error: <ShieldWarning className="size-3.5 text-destructive" />,
+    busy: <CircleNotch weight="bold" className="size-3 animate-spin text-muted-foreground" />,
+    info: <Info className="size-3.5 text-muted-foreground/70" />,
+    memory: <Sparkle className="size-3.5 text-violet-300/70" />,
+  }[s.tone];
+  return (
+    <div className="flex items-start gap-2 py-0.5 text-[12.5px] leading-5 text-muted-foreground">
+      <span className="flex h-5 shrink-0 items-center">{icon}</span>
+      <span className="min-w-0 break-words">
+        {withCode(s.text)}
+        {s.detail && (
+          <pre className="mt-0.5 whitespace-pre-wrap break-words font-mono text-[11.5px] text-muted-foreground/70">
+            {s.detail}
+          </pre>
+        )}
+      </span>
     </div>
   );
 }
