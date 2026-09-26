@@ -156,12 +156,20 @@ impl UsageTotals {
 
 /// One user→assistant round-trip's wall-clock timing. `ended_at == None`
 /// means the turn is still in flight (or the process died mid-turn).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct TurnMeta {
     /// Milliseconds since Unix epoch.
     pub started_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended_at: Option<u64>,
+    /// Tokens this turn used, summed over its provider rounds. Zero for
+    /// turns recorded before per-turn usage existed.
+    #[serde(default, skip_serializing_if = "UsageTotals::is_zero")]
+    pub usage: UsageTotals,
+    /// Model the turn's first round ran on — per-turn, because the
+    /// session's model can change between turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Error)]

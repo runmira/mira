@@ -22,9 +22,13 @@ pub struct ModelPrice {
 }
 
 /// Look up pricing by model id. Matches on prefix so `gpt-4o-2024-11-20`
-/// resolves to the `gpt-4o` entry.
+/// resolves to the `gpt-4o` entry, and so `openai/gpt-4o` (a gateway id)
+/// resolves the same way.
 pub fn price_for(model: &str) -> Option<ModelPrice> {
+    // Gateways like OpenRouter prefix the vendor (`anthropic/claude-…`);
+    // price on the model part.
     let m = model.to_ascii_lowercase();
+    let m = m.rsplit('/').next().unwrap_or(&m);
     MODEL_PRICES
         .iter()
         .find(|(prefix, _)| m.starts_with(prefix))
@@ -219,5 +223,14 @@ mod tests {
         let a = cost_usd("gpt-4o", usage_no_cache).unwrap();
         let b = cost_usd("gpt-4o", usage_all_cache).unwrap();
         assert!(b < a, "cached tokens should be cheaper");
+    }
+
+    #[test]
+    fn gateway_prefixed_ids_are_priced() {
+        assert!(price_for("anthropic/claude-sonnet-4.5").is_some());
+        assert_eq!(
+            price_for("openai/gpt-4o").map(|p| p.input_per_mtok),
+            price_for("gpt-4o").map(|p| p.input_per_mtok)
+        );
     }
 }

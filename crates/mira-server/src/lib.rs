@@ -54,6 +54,7 @@ mod state;
 mod terminal;
 mod title;
 mod undo;
+mod usage;
 mod ws;
 
 use std::collections::HashMap;
@@ -306,6 +307,7 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/api/models", get(models::list_models))
         .route("/api/git/status", get(git::get_status))
         .route("/api/git/session-diff", get(git::session_diff))
+        .route("/api/usage", get(usage::get_usage))
         .route("/api/git/session-changes", get(git::session_changes))
         .route(
             "/api/git/revert-file",

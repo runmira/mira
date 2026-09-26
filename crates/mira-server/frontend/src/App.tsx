@@ -552,6 +552,17 @@ export default function App() {
   const [sessionCommitted, setSessionCommitted] = useState(false);
   const [reviewOpen, setReviewOpen] = useState(false);
   const [lightbox, setLightbox] = useState<string | null>(null);
+  // "Open session" from the Usage page (Settings) — back to chat on it.
+  useEffect(() => {
+    const onOpen = (e: Event) => {
+      const id = (e as CustomEvent<string>).detail;
+      if (!id) return;
+      wsRef.current?.attach(id);
+      setMainView('chat');
+    };
+    window.addEventListener('mira:open-session', onOpen);
+    return () => window.removeEventListener('mira:open-session', onOpen);
+  }, []);
   // Integrated terminal (bottom panel); open state is remembered.
   const [terminalOpen, setTerminalOpen] = useState<boolean>(() => {
     try { return localStorage.getItem('mira.terminal.open') === '1'; } catch { return false; }
