@@ -451,13 +451,14 @@ function FileDiff({
                     commented.has(i) && 'bg-mira-blue/[0.08]',
                   )}
                 >
-                  <span className="relative w-10 shrink-0 pr-2 text-right text-muted-foreground/40">
+                  <span className="relative w-12 shrink-0 pr-3 text-right text-muted-foreground/40">
                     {commented.has(i) && (
                       <span className="absolute left-1 top-1/2 size-1.5 -translate-y-1/2 rounded-full bg-mira-blue" />
                     )}
-                    {r.oldNo ?? ''}
+                    {/* One gutter: the new line number, or the old one for
+                        a deleted line. */}
+                    {r.newNo ?? r.oldNo}
                   </span>
-                  <span className="w-10 shrink-0 pr-2 text-right text-muted-foreground/40">{r.newNo ?? ''}</span>
                   <span className={cn(
                     'w-4 shrink-0',
                     r.kind === 'add' ? 'text-green-400' : r.kind === 'del' ? 'text-red-400' : 'text-transparent',

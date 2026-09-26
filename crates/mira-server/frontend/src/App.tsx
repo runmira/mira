@@ -5,7 +5,9 @@ import {
   ArrowDown,
   CaretDown,
   Check,
+  CircleNotch,
   Copy,
+  Info,
   Lightbulb,
   PencilSimple,
   ShieldWarning,
@@ -15,7 +17,8 @@ import {
 } from '@phosphor-icons/react';
 import { cn } from './lib/utils';
 import { connect, type WsClient, type WsStatus } from './ws';
-import { appendMemory, applyUndo, getBranchPr, getGitStatus, getSessionDiff, getSessionHistory, getSettings, gitCommit, gitPush, listCommands, listSkills, newSession, setSessionBackgroundMode, startReview, type BranchPrView, type GitStatusView, type SessionDiffView, type SkillView, type CommandInfo } from './api';
+import { costUsd, formatDollars, shortNum } from './lib/usage';
+import { appendMemory, applyUndo, getBranchPr, getGitStatus, getSessionDiff, getSessionHistory, getSettings, gitCommit, gitPush, listCommands, listSessions, listSkills, newSession, setSessionBackgroundMode, startReview, type BranchPrView, type GitStatusView, type SessionDiffView, type SkillView, type CommandInfo } from './api';
 import {
   ContextPanel,
   CONTEXT_PANEL_RESERVE,
@@ -72,6 +75,7 @@ import type {
   ToolCall,
   ToolResult,
   UsageTotals,
+  SessionSummary,
   RateLimitReading,
 } from './types';
 
@@ -631,7 +635,44 @@ export default function App() {
     return () => window.clearInterval(id);
   }, [busy]);
 
+  // Smooth streaming: tokens land in a buffer and are released a few
+  // characters per animation frame (faster when the buffer is deep), so
+  // text flows instead of jumping in network-sized chunks.
+  const tokenBufRef = useRef('');
+  const tokenRafRef = useRef<number | null>(null);
+  function drainTokens() {
+    tokenRafRef.current = null;
+    const buf = tokenBufRef.current;
+    if (!buf) return;
+    const n = Math.max(3, Math.ceil(buf.length / 6));
+    const chunk = buf.slice(0, n);
+    tokenBufRef.current = buf.slice(n);
+    setEntries((prev) => appendToken(prev, chunk));
+    if (tokenBufRef.current) tokenRafRef.current = requestAnimationFrame(drainTokens);
+  }
+  /** Release everything buffered now — before any other frame lands, so
+   *  ordering between text and tool calls is preserved. */
+  function flushTokens() {
+    if (tokenRafRef.current != null) cancelAnimationFrame(tokenRafRef.current);
+    tokenRafRef.current = null;
+    const buf = tokenBufRef.current;
+    tokenBufRef.current = '';
+    if (buf) setEntries((prev) => appendToken(prev, buf));
+  }
+
+  // Per-turn usage: session totals at turn start, diffed at turn end.
+  const usageRef = useRef<UsageTotals | null>(null);
+  const turnBaseRef = useRef<{ turn: number; base: UsageTotals } | null>(null);
+  const [turnUsage, setTurnUsage] = useState<Map<number, UsageTotals>>(new Map());
+  function startTurnUsage(turn: number) {
+    turnBaseRef.current = {
+      turn,
+      base: usageRef.current ?? { prompt_tokens: 0, completion_tokens: 0, cached_input_tokens: 0, rounds: 0 },
+    };
+  }
+
   function onMessage(msg: ServerMsg) {
+    if (msg.type !== 'token') flushTokens();
     switch (msg.type) {
       case 'ready': {
         setGitStatus(null);
@@ -709,7 +750,8 @@ export default function App() {
         // deltas after its assistant text ends) brings the indicator
         // back before `tool_start` finally fires.
         scheduleThinkingIdle();
-        setEntries((prev) => appendToken(prev, msg.text));
+        tokenBufRef.current += msg.text;
+        if (tokenRafRef.current == null) tokenRafRef.current = requestAnimationFrame(drainTokens);
         break;
       case 'approval_request':
         setThinking(false);
@@ -761,7 +803,21 @@ export default function App() {
         // definitively landed on disk.
         setSidebarRefresh((n) => n + 1);
         break;
-      case 'done':
+      case 'done': {
+        const started = turnBaseRef.current;
+        const now = usageRef.current;
+        if (started && now) {
+          const d: UsageTotals = {
+            prompt_tokens: now.prompt_tokens - started.base.prompt_tokens,
+            completion_tokens: now.completion_tokens - started.base.completion_tokens,
+            cached_input_tokens: now.cached_input_tokens - started.base.cached_input_tokens,
+            rounds: now.rounds - started.base.rounds,
+          };
+          if (d.prompt_tokens + d.completion_tokens > 0) {
+            setTurnUsage((prev) => new Map(prev).set(started.turn, d));
+          }
+        }
+        turnBaseRef.current = null;
         setBusy(false);
         setThinking(false);
         clearThinkingIdle();
@@ -775,6 +831,7 @@ export default function App() {
         setTurnTimings((prev) => stampLastTurn(prev, Date.now()));
         setSidebarRefresh((n) => n + 1);
         break;
+      }
       case 'environment_status':
         setEnvironment(msg.status);
         setEnvironments(msg.environments);
@@ -799,7 +856,18 @@ export default function App() {
         break;
       }
       case 'warning':
-        setEntries((prev) => [...prev, { kind: 'warning', text: msg.text }]);
+        setEntries((prev) => {
+          // A verify result replaces its own "running …" line.
+          const last = prev[prev.length - 1];
+          if (
+            /^\[verify\]/.test(msg.text) &&
+            last?.kind === 'warning' &&
+            /^\[verify\]\s*running/i.test(last.text)
+          ) {
+            return [...prev.slice(0, -1), { kind: 'warning', text: msg.text }];
+          }
+          return [...prev, { kind: 'warning', text: msg.text }];
+        });
         break;
       case 'tool_progress':
         setEntries((prev) => appendProgressLine(prev, msg.call_id, msg.line));
@@ -879,6 +947,7 @@ export default function App() {
         break;
       case 'usage':
         setUsage(msg.totals);
+        usageRef.current = msg.totals;
         break;
       case 'rate_limit':
         setRateLimit({ rate_limit: msg.rate_limit, summary: msg.summary, at: Date.now() });
@@ -1280,6 +1349,7 @@ export default function App() {
     setEntries((prev) => {
       const next: Entry[] = [...prev, { kind: 'msg', msg: { role: 'user', content: text, images } }];
       const turnIndex = countUserMessages(next) - 1;
+      startTurnUsage(turnIndex);
       setTurnTimings((tt) => {
         const clone = new Map(tt);
         clone.set(turnIndex, { startedAt: now, endedAt: null });
@@ -1309,6 +1379,8 @@ export default function App() {
       { kind: 'msg', msg: { role: 'user', content: text, images: target.msg.images } },
     ];
     const turnIndex = countUserMessages(next) - 1;
+    startTurnUsage(turnIndex);
+    setTurnUsage((prev) => new Map([...prev].filter(([i]) => i < turnIndex)));
     setEntries(next);
     setTurnTimings((tt) => {
       const clone = new Map([...tt].filter(([i]) => i < turnIndex));
@@ -1666,7 +1738,11 @@ export default function App() {
                 )}
 
                 {isEmpty ? (
-                  <EmptyState />
+                  <EmptyState
+                    cwd={cwd}
+                    onPrompt={(text) => onSend(text)}
+                    onOpenSession={(id) => wsRef.current?.attach(id)}
+                  />
                 ) : (
                   <div className="mx-auto flex max-w-3xl flex-col gap-2">
                     {goal && (
@@ -1685,6 +1761,8 @@ export default function App() {
                         key={`turn-${i}`}
                         turn={turn}
                         timing={turnTimings.get(i) ?? null}
+                        usage={turnUsage.get(i) ?? null}
+                        model={model}
                         expanded={expandedTurns.has(i)}
                         onToggle={() => toggleTurn(i)}
                         onDecide={decideApproval}
@@ -2127,10 +2205,13 @@ function groupByTurn(entries: Entry[]): Turn[] {
 /* ---------- turn renderer ---------- */
 
 function TurnView({
-  turn, timing, expanded, isActive, onToggle, onDecide, onPlanReply, onAskUserReply, onOpenAgent, onOpenFile, skills, mode, onSetMode,
+  turn, timing, usage, model, expanded, isActive, onToggle, onDecide, onPlanReply, onAskUserReply, onOpenAgent, onOpenFile, skills, mode, onSetMode,
 }: {
   turn: Turn;
   timing: TurnTiming | null;
+  /** Tokens this turn used (live turns only; not persisted). */
+  usage: UsageTotals | null;
+  model: string;
   expanded: boolean;
   isActive: boolean;
   onToggle: () => void;
@@ -2283,7 +2364,17 @@ function TurnView({
         );
       })}
 
-      {finalEntry && <EntryView entry={finalEntry} onDecide={onDecide} onPlanReply={onPlanReply} onAskUserReply={onAskUserReply} onOpenAgent={onOpenAgent} onOpenFile={onOpenFile} skills={skills} mode={mode} onSetMode={onSetMode} />}
+      {finalEntry && (
+        <TurnStatsContext.Provider
+          value={
+            timing?.endedAt != null
+              ? { durationMs: durationMs ?? timing.endedAt - timing.startedAt, usage, model }
+              : null
+          }
+        >
+          <EntryView entry={finalEntry} onDecide={onDecide} onPlanReply={onPlanReply} onAskUserReply={onAskUserReply} onOpenAgent={onOpenAgent} onOpenFile={onOpenFile} skills={skills} mode={mode} onSetMode={onSetMode} />
+        </TurnStatsContext.Provider>
+      )}
       {trailing.map((e, i) => (
         <EntryView key={`t-t-${i}`} entry={e} onDecide={onDecide} onPlanReply={onPlanReply} onAskUserReply={onAskUserReply} onOpenAgent={onOpenAgent} onOpenFile={onOpenFile} skills={skills} mode={mode} onSetMode={onSetMode} />
       ))}
@@ -2486,7 +2577,35 @@ function formatDuration(ms: number): string {
   return rem === 0 ? `${m}m` : `${m}m ${rem}s`;
 }
 
-function EmptyState() {
+const STARTER_PROMPTS = [
+  'Give me a tour of this codebase',
+  'Review my uncommitted changes',
+  'Find likely bugs in the recent commits',
+  'Write tests for the least-covered module',
+];
+
+function EmptyState({
+  cwd,
+  onPrompt,
+  onOpenSession,
+}: {
+  cwd: string;
+  onPrompt: (text: string) => void;
+  onOpenSession: (id: string) => void;
+}) {
+  const [recent, setRecent] = useState<SessionSummary[]>([]);
+  useEffect(() => {
+    listSessions()
+      .then((all) =>
+        setRecent(
+          all
+            .filter((s) => s.cwd === cwd && s.message_count > 0 && !s.active)
+            .sort((a, b) => b.updated_at - a.updated_at)
+            .slice(0, 4),
+        ),
+      )
+      .catch(() => setRecent([]));
+  }, [cwd]);
   return (
     <div className="flex min-h-full flex-col items-center justify-center gap-4 text-muted-foreground">
       <img
@@ -2498,8 +2617,51 @@ function EmptyState() {
       <div className="text-[22px] font-normal tracking-tight text-foreground">
         What should we build today?
       </div>
+      <div className="mt-2 grid w-full max-w-xl grid-cols-1 gap-2 sm:grid-cols-2">
+        {STARTER_PROMPTS.map((p) => (
+          <button
+            key={p}
+            type="button"
+            onClick={() => onPrompt(p)}
+            className="rounded-xl border border-border px-3.5 py-2.5 text-left text-[13px] text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
+          >
+            {p}
+          </button>
+        ))}
+      </div>
+      {recent.length > 0 && (
+        <div className="mt-3 w-full max-w-xl">
+          <div className="mb-1.5 px-1 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground/50">
+            Recent in this folder
+          </div>
+          {recent.map((r) => (
+            <button
+              key={r.id}
+              type="button"
+              onClick={() => onOpenSession(r.id)}
+              className="flex w-full items-center gap-3 rounded-lg px-2 py-1.5 text-left text-[13px] transition-colors hover:bg-secondary/60"
+            >
+              <span className="min-w-0 flex-1 truncate text-foreground/80">
+                {r.title || r.first_user_message || 'Untitled'}
+              </span>
+              <span className="shrink-0 text-[11.5px] text-muted-foreground/60">{timeAgo(r.updated_at)}</span>
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
+}
+
+function timeAgo(ts: number): string {
+  // Session timestamps are epoch seconds or ms depending on the store.
+  const ms = ts < 1e12 ? ts * 1000 : ts;
+  const mins = Math.round((Date.now() - ms) / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return `${Math.round(hrs / 24)}d ago`;
 }
 
 /** Placeholder view rendered for sidebar entries that don't have a real
@@ -2707,119 +2869,10 @@ function EntryView({
           />
         </div>
       );
-    case 'warning': {
-      // Special channels riding the warning stream get their own chip:
-      //   `[undo] ...`          → green success chip
-      //   `[file-conflict] ...` → amber warning chip
-      //   `[verify] … passed`   → green success chip
-      //   `[verify] … failed`   → amber warning chip
-      //   `[verify] running`    → blue in-flight chip
-      //   `[progress] ...`      → blue "in-flight status" chip (subagent
-      //                            emit_progress → SubagentPanel stream)
-      //   `[memory] ...`        → violet "learned" chip
-      //   `[context] ...`       → slate "compacted" chip
-      //   `[environment] ...`   → blue "environment" chip (multi-line)
-      // Everything else stays the compact monospace `! …` line.
-      const undo = entry.text.match(/^\[undo\]\s*(.*)$/);
-      const conflict = entry.text.match(/^\[file-conflict\]\s*(.*)$/);
-      const verify = entry.text.match(/^\[verify\]\s*(.*)$/);
-      const progress = entry.text.match(/^\[progress\]\s*(.*)$/);
-      const memory = entry.text.match(/^\[memory\]\s*(.*)$/);
-      const context = entry.text.match(/^\[context\]\s*(.*)$/);
-      const environment = entry.text.match(/^\[environment\]\s*([\s\S]*)$/);
-      if (environment) {
-        const [head, ...rest] = environment[1].split('\n');
-        return (
-          <div className="flex justify-start">
-            <div className="inline-flex max-w-full flex-col gap-0.5 rounded-md border border-mira-blue/25 bg-mira-blue/[0.06] px-3 py-1.5 text-[12.5px] text-mira-blue">
-              <span className="font-semibold">{head}</span>
-              {rest.length > 0 && (
-                <pre className="whitespace-pre-wrap break-words font-mono text-[11.5px] text-foreground/70">{rest.join('\n')}</pre>
-              )}
-            </div>
-          </div>
-        );
-      }
-      if (undo) {
-        return (
-          <div className="flex justify-start">
-            <div className="inline-flex items-start gap-2 rounded-md border border-emerald-500/25 bg-emerald-500/[0.06] px-3 py-1.5 text-[12.5px] text-emerald-300">
-              <span className="font-semibold">↩ undo</span>
-              <span className="min-w-0 break-words text-emerald-200/90">{undo[1]}</span>
-            </div>
-          </div>
-        );
-      }
-      if (conflict) {
-        return (
-          <div className="flex justify-start">
-            <div className="inline-flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-[12.5px] text-amber-200">
-              <span className="font-semibold">⚠ file conflict</span>
-              <span className="min-w-0 break-words text-amber-100/90">{conflict[1]}</span>
-            </div>
-          </div>
-        );
-      }
-      if (progress) {
-        return (
-          <div className="flex justify-start">
-            <div className="inline-flex items-start gap-2 rounded-md border border-mira-blue/25 bg-mira-blue/[0.06] px-3 py-1.5 text-[12.5px] text-mira-blue">
-              <span className="font-semibold">… progress</span>
-              <span className="min-w-0 break-words opacity-90">{progress[1]}</span>
-            </div>
-          </div>
-        );
-      }
-      if (verify) {
-        const body = verify[1];
-        const passed = /passed/i.test(body);
-        const running = /running/i.test(body);
-        const cls = passed
-          ? 'border-emerald-500/25 bg-emerald-500/[0.06] text-emerald-300'
-          : running
-            ? 'border-mira-blue/25 bg-mira-blue/[0.06] text-mira-blue'
-            : 'border-amber-500/30 bg-amber-500/10 text-amber-200';
-        return (
-          <div className="flex justify-start">
-            <div className={cn('inline-flex items-start gap-2 rounded-md border px-3 py-1.5 text-[12.5px]', cls)}>
-              <span className="font-semibold">✓ verify</span>
-              <span className="min-w-0 break-words opacity-90">{body}</span>
-            </div>
-          </div>
-        );
-      }
-      if (memory) {
-        return (
-          <div className="flex justify-start">
-            <div className="inline-flex items-start gap-2 rounded-md border border-violet-500/25 bg-violet-500/[0.06] px-3 py-1.5 text-[12.5px] text-violet-300">
-              <span className="font-semibold">✦ memory</span>
-              <span className="min-w-0 break-words text-violet-200/90">{memory[1]}</span>
-            </div>
-          </div>
-        );
-      }
-      if (context) {
-        return (
-          <div className="flex justify-start">
-            <div className="inline-flex items-start gap-2 rounded-md border border-slate-500/25 bg-slate-500/[0.06] px-3 py-1.5 text-[12.5px] text-slate-300">
-              <span className="font-semibold">≡ context</span>
-              <span className="min-w-0 break-words text-slate-200/90">{context[1]}</span>
-            </div>
-          </div>
-        );
-      }
-      return (
-        <div className="flex justify-start">
-          <div className="font-mono text-xs text-mira-tool">! {entry.text}</div>
-        </div>
-      );
-    }
+    case 'warning':
+      return <StatusLine text={entry.text} />;
     case 'error':
-      return (
-        <div className="flex justify-start">
-          <div className="font-mono text-xs text-destructive">error: {entry.text}</div>
-        </div>
-      );
+      return <StatusLine text={entry.text} tone="error" />;
     case 'goal':
       return <GoalTranscriptChip entry={entry} />;
     case 'compact':
@@ -2991,6 +3044,20 @@ type MessageActions = {
 
 const MessageActionsContext = createContext<MessageActions | null>(null);
 
+/** Stats for the turn a final reply closes — shown in its hover row. */
+type TurnStats = { durationMs: number; usage: UsageTotals | null; model: string };
+const TurnStatsContext = createContext<TurnStats | null>(null);
+
+function turnStatsLabel(t: TurnStats): string {
+  const parts = [formatDuration(t.durationMs)];
+  if (t.usage) {
+    parts.push(`${shortNum(t.usage.prompt_tokens)} in · ${shortNum(t.usage.completion_tokens)} out`);
+    const cost = costUsd(t.model, t.usage);
+    if (cost != null) parts.push(formatDollars(cost));
+  }
+  return parts.join(' · ');
+}
+
 function ActionButton({
   title,
   onClick,
@@ -3035,6 +3102,7 @@ function CopyButton({ text }: { text: string }) {
 
 function AssistantActions({ entry, text }: { entry: Entry; text: string }) {
   const actions = useContext(MessageActionsContext);
+  const stats = useContext(TurnStatsContext);
   if (!text.trim()) return null;
   return (
     <div className="mt-1 flex items-center gap-0.5 opacity-0 transition-opacity group-hover/msg:opacity-100 focus-within:opacity-100">
@@ -3043,6 +3111,9 @@ function AssistantActions({ entry, text }: { entry: Entry; text: string }) {
         <ActionButton title="Retry" disabled={actions.busy} onClick={() => actions.retry(entry)}>
           <ArrowClockwise className="size-3.5" />
         </ActionButton>
+      )}
+      {stats && (
+        <span className="ml-1.5 text-[11.5px] tabular-nums text-muted-foreground/60">{turnStatsLabel(stats)}</span>
       )}
     </div>
   );
@@ -3135,6 +3206,83 @@ function UserMessage({
           </ActionButton>
         )}
       </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Status lines: harness notes riding the warning stream                */
+/* ------------------------------------------------------------------ */
+
+type StatusTone = 'ok' | 'warn' | 'error' | 'busy' | 'info' | 'memory';
+
+/** Classify a `[channel] body` note into an icon tone and display text. */
+function parseStatus(raw: string, forced?: StatusTone): { tone: StatusTone; text: string; detail?: string } {
+  const m = raw.match(/^\[([a-z-]+)\]\s*([\s\S]*)$/);
+  const channel = m?.[1] ?? '';
+  let text = m ? m[2] : raw;
+  let detail: string | undefined;
+  if (channel === 'environment') {
+    const [head, ...rest] = text.split('\n');
+    text = head;
+    detail = rest.join('\n') || undefined;
+  }
+  if (forced) return { tone: forced, text, detail };
+  switch (channel) {
+    case 'verify':
+      if (/running/i.test(text)) return { tone: 'busy', text: text.replace(/^running\s*/i, 'Running '), detail };
+      if (/passed/i.test(text)) return { tone: 'ok', text, detail };
+      return { tone: 'warn', text, detail };
+    case 'undo':
+      return { tone: 'ok', text, detail };
+    case 'progress':
+      return { tone: 'busy', text, detail };
+    case 'memory':
+      return { tone: 'memory', text, detail };
+    case 'context':
+    case 'environment':
+      return { tone: 'info', text, detail };
+    default:
+      return { tone: 'warn', text, detail };
+  }
+}
+
+/** Render `code` spans in a status message. */
+function withCode(text: string): React.ReactNode[] {
+  return text.split(/(`[^`]+`)/g).map((part, i) =>
+    part.startsWith('`') && part.endsWith('`') && part.length > 2 ? (
+      <code key={i} className="rounded bg-white/[0.06] px-1 font-mono text-[11.5px] text-foreground/75">
+        {part.slice(1, -1)}
+      </code>
+    ) : (
+      part
+    ),
+  );
+}
+
+/** One quiet line: a small tone icon and muted text. No box, no border —
+ *  the icon carries the state so notes don't compete with the reply. */
+function StatusLine({ text, tone }: { text: string; tone?: StatusTone }) {
+  const s = parseStatus(text, tone);
+  const icon = {
+    ok: <Check weight="bold" className="size-3 text-emerald-400/80" />,
+    warn: <ShieldWarning className="size-3.5 text-amber-400/80" />,
+    error: <ShieldWarning className="size-3.5 text-destructive" />,
+    busy: <CircleNotch weight="bold" className="size-3 animate-spin text-muted-foreground" />,
+    info: <Info className="size-3.5 text-muted-foreground/70" />,
+    memory: <Sparkle className="size-3.5 text-violet-300/70" />,
+  }[s.tone];
+  return (
+    <div className="flex items-start gap-2 py-0.5 text-[12.5px] leading-5 text-muted-foreground">
+      <span className="flex h-5 shrink-0 items-center">{icon}</span>
+      <span className="min-w-0 break-words">
+        {withCode(s.text)}
+        {s.detail && (
+          <pre className="mt-0.5 whitespace-pre-wrap break-words font-mono text-[11.5px] text-muted-foreground/70">
+            {s.detail}
+          </pre>
+        )}
+      </span>
     </div>
   );
 }

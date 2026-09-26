@@ -87,6 +87,9 @@ export function Markdown({ text, onOpenFile }: Props) {
   );
 }
 
+/** Code blocks longer than this start collapsed. */
+const CODE_COLLAPSE_LINES = 30;
+
 function CodeBlock({
   lang, raw, className, children,
 }: { lang?: string; raw: string; className?: string; children: React.ReactNode }) {
@@ -98,13 +101,34 @@ function CodeBlock({
       setTimeout(() => setCopied(false), 1200);
     } catch { /* ignore */ }
   }
+  const lineCount = raw.replace(/\n$/, '').split('\n').length;
+  const long = lineCount > CODE_COLLAPSE_LINES;
+  const [expanded, setExpanded] = useState(false);
+  const collapsed = long && !expanded;
   return (
     <div className="md-code">
       <div className="md-code-head">
         <span className="md-code-lang">{lang ?? 'text'}</span>
         <button className="md-code-copy" onClick={copy}>{copied ? 'copied' : 'copy'}</button>
       </div>
-      <pre><code className={className}>{children}</code></pre>
+      <div
+        className={collapsed ? 'md-code-body md-code-collapsed' : 'md-code-body'}
+        style={collapsed ? { maxHeight: `calc(${CODE_COLLAPSE_LINES} * 1.6em + 0.9rem)` } : undefined}
+      >
+        {lineCount > 1 && (
+          <div className="md-code-gutter" aria-hidden="true">
+            {Array.from({ length: lineCount }, (_, i) => (
+              <div key={i}>{i + 1}</div>
+            ))}
+          </div>
+        )}
+        <pre><code className={className}>{children}</code></pre>
+      </div>
+      {long && (
+        <button className="md-code-more" onClick={() => setExpanded((v) => !v)}>
+          {expanded ? 'Show less' : `Show all ${lineCount} lines`}
+        </button>
+      )}
     </div>
   );
 }
