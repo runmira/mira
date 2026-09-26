@@ -389,6 +389,34 @@ export async function getSessionDiff(): Promise<SessionDiffView> {
   return (await r.json()) as SessionDiffView;
 }
 
+export type SessionChange = {
+  path: string;
+  status: 'modified' | 'added' | 'deleted';
+  /** Unified diff against HEAD. */
+  diff: string;
+};
+
+/** Full diffs for every file this session changed that differs from HEAD. */
+export async function getSessionChanges(): Promise<SessionChange[]> {
+  const r = await fetch('/api/git/session-changes');
+  if (!r.ok) throw new Error(`session changes ${r.status}`);
+  return ((await r.json()) as { files: SessionChange[] }).files;
+}
+
+/** Discard this session's changes to one file (restore / delete). */
+export async function revertFile(path: string): Promise<void> {
+  const r = await fetch('/api/git/revert-file', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ path }),
+  });
+  if (!r.ok) {
+    let msg = `revert ${r.status}`;
+    try { const j = await r.json(); if (j.error) msg += `: ${j.error}`; } catch { /* ignore */ }
+    throw new Error(msg);
+  }
+}
+
 export async function gitPush(): Promise<void> {
   const r = await fetch('/api/git/push', { method: 'POST' });
   if (!r.ok) {

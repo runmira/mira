@@ -896,18 +896,22 @@ impl Session {
     /// edited and re-sent (or retried). Finds the `occurrence`-th most
     /// recent user message whose text is exactly `text` (0 = latest) and
     /// drops it and everything after it. Files the dropped turns edited
-    /// are left as they are. Returns `false` — and changes nothing — while
+    /// are left as they are. Returns the removed message's images, or
+    /// `None` — changing nothing — while
     /// a turn is running or when the message isn't in history (e.g. it
     /// was folded into a compaction summary).
-    pub async fn rewind_to_user(&self, text: &str, occurrence: usize) -> bool {
+    pub async fn rewind_to_user(
+        &self,
+        text: &str,
+        occurrence: usize,
+    ) -> Option<Vec<mira_core::ImageData>> {
         if self.is_busy().await {
-            return false;
+            return None;
         }
-        {
+        let images = {
             let mut hist = self.history.lock().await;
-            let Some(idx) = rewind_index(&hist, text, occurrence) else {
-                return false;
-            };
+            let idx = rewind_index(&hist, text, occurrence)?;
+            let images = std::mem::take(&mut hist[idx].images);
             hist.truncate(idx);
             // One turn timer per sent prompt; keep those still in history.
             let prompts = hist
@@ -915,9 +919,10 @@ impl Session {
                 .filter(|m| m.role == mira_core::Role::User && !crate::history::is_summary(m))
                 .count();
             self.turns.lock().await.truncate(prompts);
-        }
+            images
+        };
         checkpoint(self).await;
-        true
+        Some(images)
     }
 
     /// True while a turn is running. Environment switches wait for idle.
@@ -947,6 +952,16 @@ impl Session {
     /// drop it early to cancel — the task keeps mutating history until it
     /// hits a checkpoint, then exits when the send channel closes.
     pub async fn send(&self, user_input: impl Into<String>) -> BoxStream<'static, HarnessEvent> {
+        self.send_with_images(user_input, Vec::new()).await
+    }
+
+    /// [`Self::send`] with images (pasted screenshots) attached to the
+    /// user message.
+    pub async fn send_with_images(
+        &self,
+        user_input: impl Into<String>,
+        images: Vec<mira_core::ImageData>,
+    ) -> BoxStream<'static, HarnessEvent> {
         // Repair history before appending the new user turn. A prior
         // interrupt can abort the loop between `history.push(assistant_msg)`
         // (with tool_calls) and the matching `Message::tool(...)` push in
@@ -986,7 +1001,10 @@ impl Session {
             }
             user_input = text;
         }
-        self.history.lock().await.push(Message::user(user_input));
+        self.history
+            .lock()
+            .await
+            .push(Message::user(user_input).with_images(images));
         // Open a new turn timer; `run_loop` stamps `ended_at` on the way out.
         self.turns.lock().await.push(TurnMeta {
             started_at: now_ms(),

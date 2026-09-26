@@ -49,6 +49,8 @@ export type Message = {
   tool_call_id?: string | null;
   name?: string | null;
   reasoning?: ReasoningBlock[];
+  /** Images on a user message (pasted screenshots). */
+  images?: { media_type: string; data: string }[];
 };
 
 export type DiffKind = 'edit' | 'overwrite' | 'create';
@@ -301,7 +303,7 @@ export type ScratchpadEntry = {
 export type ApprovalScope = 'once' | 'session' | 'always';
 
 export type ClientMsg =
-  | { type: 'send'; text: string }
+  | { type: 'send'; text: string; images?: { media_type: string; data: string }[] }
   | { type: 'resend'; original: string; occurrence: number; text: string }
   | { type: 'approve'; call_id: string; allow: boolean; scope?: ApprovalScope }
   | ({ type: 'prompt_response'; prompt_id: string } & PromptResponse)

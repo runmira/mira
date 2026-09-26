@@ -407,11 +407,13 @@ function WorkspaceSection({
   sessionCommitted,
   onPush,
   onCommit,
+  onReview,
 }: {
   gitStatus: GitStatusView;
   sessionDiff: SessionDiffView;
   branchPr: BranchPrView | null;
   sessionCommitted: boolean;
+  onReview: () => void;
   onPush: () => Promise<void>;
   onCommit: (message: string, includeUnstaged: boolean, pushAfter: boolean) => Promise<void>;
 }) {
@@ -448,6 +450,13 @@ function WorkspaceSection({
                       <span className="text-red-400/80">−{fmtNum(sessionDiff.removed)}</span>
                     </span>
                   </span>
+                  <button
+                    type="button"
+                    onClick={onReview}
+                    className="shrink-0 rounded-md px-2 py-1 text-[12px] font-medium text-white/60 transition-colors hover:bg-white/[0.06] hover:text-white/85"
+                  >
+                    Review
+                  </button>
                   <Popover open={commitOpen} onOpenChange={setCommitOpen}>
                     <PopoverTrigger asChild>
                       <button
@@ -699,6 +708,8 @@ export type ContextPanelProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onOpenAgent: (callId: string) => void;
+  /** Open the "Review changes" drawer. */
+  onReview: () => void;
   onPush: () => Promise<void>;
   onCommit: (message: string, includeUnstaged: boolean, pushAfter: boolean) => Promise<void>;
 };
@@ -722,6 +733,7 @@ export function ContextPanel(props: ContextPanelProps) {
     open,
     onOpenChange,
     onOpenAgent,
+    onReview,
     onPush,
     onCommit,
   } = props;
@@ -809,6 +821,7 @@ export function ContextPanel(props: ContextPanelProps) {
                   sessionDiff={sessionDiff}
                   branchPr={branchPr}
                   sessionCommitted={sessionCommitted}
+                  onReview={onReview}
                   onPush={onPush}
                   onCommit={onCommit}
                 />

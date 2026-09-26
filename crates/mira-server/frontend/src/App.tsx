@@ -37,6 +37,8 @@ import { SkillMentionText } from './components/SkillMention';
 import { FolderPicker } from './components/FolderPicker';
 import { AssistantContent } from './components/AssistantContent';
 import { ThoughtBlock } from './components/ThoughtBlock';
+import { ReviewChanges } from './components/ReviewChanges';
+import { ImageLightbox } from './components/ImageLightbox';
 import { ToolCard, type ToolStatus } from './components/ToolCard';
 import { Thinking } from './components/Thinking';
 import {
@@ -531,6 +533,8 @@ export default function App() {
   // The session committed through the panel, so any unpushed commits on
   // the branch are its own to push.
   const [sessionCommitted, setSessionCommitted] = useState(false);
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [lightbox, setLightbox] = useState<string | null>(null);
   const ctxFits = useContextPanelFits();
   const [branchPr, setBranchPr] = useState<BranchPrView | null>(null);
   // Live task list — hydrated from `ready.tasks` on socket open and
@@ -1260,7 +1264,7 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, [firstPendingCallId]);
 
-  function onSend(text: string) {
+  function onSend(text: string, images?: { media_type: string; data: string }[]) {
     // Belt-and-suspenders — the composer isn't visible on non-chat views,
     // but a keyboard-driven send would still land the message and it should
     // pull the user back to the transcript.
@@ -1274,7 +1278,7 @@ export default function App() {
     setShowJump(false);
     const now = Date.now();
     setEntries((prev) => {
-      const next: Entry[] = [...prev, { kind: 'msg', msg: { role: 'user', content: text } }];
+      const next: Entry[] = [...prev, { kind: 'msg', msg: { role: 'user', content: text, images } }];
       const turnIndex = countUserMessages(next) - 1;
       setTurnTimings((tt) => {
         const clone = new Map(tt);
@@ -1285,7 +1289,7 @@ export default function App() {
     });
     setBusy(true);
     setThinking(true);
-    wsRef.current?.send({ type: 'send', text });
+    wsRef.current?.send({ type: 'send', text, images });
   }
 
   /** Edit & resend (or retry, with the same text) the user message at
@@ -1300,7 +1304,10 @@ export default function App() {
       .filter((e) => e.kind === 'msg' && e.msg.role === 'user' && e.msg.content === original).length;
     followRef.current = true;
     setShowJump(false);
-    const next: Entry[] = [...entries.slice(0, userIdx), { kind: 'msg', msg: { role: 'user', content: text } }];
+    const next: Entry[] = [
+      ...entries.slice(0, userIdx),
+      { kind: 'msg', msg: { role: 'user', content: text, images: target.msg.images } },
+    ];
     const turnIndex = countUserMessages(next) - 1;
     setEntries(next);
     setTurnTimings((tt) => {
@@ -1316,6 +1323,7 @@ export default function App() {
   const messageActions = useMemo<MessageActions>(
     () => ({
       busy,
+      openImage: setLightbox,
       edit: (entry, text) => onResend(entries.indexOf(entry), text),
       retry: (entry) => {
         const at = entries.indexOf(entry);
@@ -1603,6 +1611,18 @@ export default function App() {
               <span className="min-w-0 flex-1 truncate text-[13.5px] text-foreground">
                 {titleFromEntries(entries)}
               </span>
+              {(sessionDiff.uncommitted ?? 0) > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setReviewOpen(true)}
+                  title="Review this session's changes"
+                  className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border px-2.5 py-1 text-[12px] text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                >
+                  <span className="font-mono text-green-400/80">+{sessionDiff.added}</span>
+                  <span className="font-mono text-red-400/80">−{sessionDiff.removed}</span>
+                  <span>Review</span>
+                </button>
+              )}
               <div className="inline-flex rounded-full border border-border bg-secondary/60 p-0.5">
                 <button
                   type="button"
@@ -1688,6 +1708,17 @@ export default function App() {
                 )}
               </div>
 
+              <ImageLightbox src={lightbox} onClose={() => setLightbox(null)} />
+              <ReviewChanges
+                open={reviewOpen}
+                onClose={() => setReviewOpen(false)}
+                onSendComments={(text) => onSend(text)}
+                onChanged={() => {
+                  getGitStatus().then(setGitStatus).catch(() => {});
+                  getSessionDiff().then(setSessionDiff).catch(() => {});
+                }}
+              />
+
               {showJump && (
                 <button
                   type="button"
@@ -1714,6 +1745,7 @@ export default function App() {
                   open={ctxOpen}
                   onOpenChange={onCtxOpenChange}
                   onOpenAgent={openAgentTab}
+                  onReview={() => setReviewOpen(true)}
                   onPush={async () => { await gitPush(); getGitStatus().then(setGitStatus).catch(() => {}); getBranchPr().then(setBranchPr).catch(() => {}); }}
                   onCommit={async (message, includeUnstaged, pushAfter) => {
                     await gitCommit({ message, include_unstaged: includeUnstaged, push_after: pushAfter });
@@ -2514,23 +2546,38 @@ function EntryView({
   mode?: Mode;
   onSetMode?: (m: Mode) => void;
 }) {
+  const actions = useContext(MessageActionsContext);
   switch (entry.kind) {
     case 'msg': {
       const { role, content } = entry.msg;
       if (role === 'tool') return null;
       const body = (content ?? '').trim();
-      if (!body) return null;
+      if (!body && !entry.msg.images?.length) return null;
       if (role === 'user') {
         // Attachments live above the bubble as chips (Codex-style). The
         // model still sees the fenced content in the body — we just hide
         // that from the reader so the transcript stays scannable.
         const { attachments, text } = parseSentAttachments(content ?? '');
+        const images = entry.msg.images ?? [];
         return (
           <div className="flex flex-col items-end gap-1.5">
             {attachments.length > 0 && (
               <div className="flex max-w-[78%] flex-wrap justify-end gap-1.5">
                 {attachments.map((a, i) => (
                   <SentAttachmentChip key={`att-${i}-${a.filename}`} filename={a.filename} subtype={a.subtype} />
+                ))}
+              </div>
+            )}
+            {images.length > 0 && (
+              <div className="flex max-w-[78%] flex-wrap justify-end gap-1.5">
+                {images.map((img, i) => (
+                  <img
+                    key={i}
+                    src={`data:${img.media_type};base64,${img.data}`}
+                    alt="attached image"
+                    onClick={() => actions?.openImage(`data:${img.media_type};base64,${img.data}`)}
+                    className="max-h-40 max-w-[240px] cursor-zoom-in rounded-xl border border-border object-cover"
+                  />
                 ))}
               </div>
             )}
@@ -2938,6 +2985,8 @@ type MessageActions = {
   edit: (entry: Entry, text: string) => void;
   /** Re-send the user message that led to this reply. */
   retry: (entry: Entry) => void;
+  /** Show an image full-screen. */
+  openImage: (src: string) => void;
 };
 
 const MessageActionsContext = createContext<MessageActions | null>(null);

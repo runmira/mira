@@ -65,6 +65,9 @@ type Props = {
   onChange: (text: string) => void;
   onKeyDown?: (e: KeyboardEvent<HTMLDivElement>) => void;
   onPaste?: (e: ClipboardEvent<HTMLDivElement>) => void;
+  /** Image files pasted from the clipboard (screenshots). When set, an
+   *  image paste goes here instead of being dropped as plain text. */
+  onPasteImages?: (files: File[]) => void;
   placeholder: string;
   disabled?: boolean;
   /** Skill roster — passed to `renderChip` so newly-inserted chips
@@ -84,6 +87,7 @@ export function MentionInput({
   onChange,
   onKeyDown,
   onPaste,
+  onPasteImages,
   placeholder,
   disabled = false,
   roster,
@@ -147,6 +151,11 @@ export function MentionInput({
     // plaintext insertion so mentions in the pasted text still parse
     // correctly on next serialize.
     e.preventDefault();
+    const images = Array.from(e.clipboardData.files).filter((f) => f.type.startsWith('image/'));
+    if (images.length > 0 && onPasteImages) {
+      onPasteImages(images);
+      return;
+    }
     const text = e.clipboardData.getData('text/plain');
     document.execCommand('insertText', false, text);
     // The insertText hits the DOM synchronously; onInput will fire and
