@@ -416,6 +416,8 @@ pub struct TuiState {
     /// Zeroed for providers that don't report usage — the status bar renders
     /// nothing in that case.
     pub usage: UsageTotals,
+    /// The provider's latest rate-limit reading, when it reports one.
+    pub rate_limit: Option<mira_ai::RateLimit>,
     /// Session token totals captured at the start of the current turn.
     /// The in-turn streaming indicator renders `usage - turn_usage_baseline`
     /// so each turn's counter starts at zero instead of inheriting the
@@ -662,6 +664,7 @@ impl TuiState {
             should_quit: false,
             flash: None,
             usage: UsageTotals::default(),
+            rate_limit: None,
             turn_usage_baseline: UsageTotals::default(),
             budget_usd: None,
             queued: Vec::new(),

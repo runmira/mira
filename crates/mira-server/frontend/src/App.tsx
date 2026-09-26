@@ -52,6 +52,7 @@ import type {
   ToolCall,
   ToolResult,
   UsageTotals,
+  RateLimitReading,
 } from './types';
 
 /** Live per-child state for the subagent panel — mirrors the shape of
@@ -455,6 +456,7 @@ export default function App() {
   const [reviewPanelOpen, setReviewPanelOpen] = useState(false);
   const [reviewState, setReviewState] = useState<ReviewState | null>(null);
   const [usage, setUsage] = useState<UsageTotals | null>(null);
+  const [rateLimit, setRateLimit] = useState<RateLimitReading | null>(null);
   const [gitStatus, setGitStatus] = useState<GitStatusView | null>(null);
   const [sessionDiff, setSessionDiff] = useState<SessionDiffView>({ added: 0, removed: 0, files: [] });
   const [branchPr, setBranchPr] = useState<BranchPrView | null>(null);
@@ -574,6 +576,7 @@ export default function App() {
         setTurnTimings(rebuildTurnTimings(msg.turns ?? []));
         setExpandedTurns(new Set());
         setUsage(msg.usage ?? null);
+        setRateLimit(null);
         setTasks(msg.tasks ?? []);
         setGoal(msg.goal ?? null);
         setBusy(false);
@@ -774,6 +777,9 @@ export default function App() {
         break;
       case 'usage':
         setUsage(msg.totals);
+        break;
+      case 'rate_limit':
+        setRateLimit({ rate_limit: msg.rate_limit, summary: msg.summary, at: Date.now() });
         break;
       case 'memory_learned':
         setEntries((prev) => [
@@ -1556,6 +1562,7 @@ export default function App() {
               providerName={providerName}
               cwd={cwd}
               usage={usage}
+              rateLimit={rateLimit}
               onSend={onSend}
               onSetMode={onSetMode}
               onSetModel={onSetModel}

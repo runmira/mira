@@ -148,6 +148,13 @@ small_model: anthropic/claude-haiku-4.5
 `compactor_model` and `memory.extractor_model` still override it for
 their own job, and `MIRA_SMALL_MODEL` overrides it for one run.
 
+**Rate limits you can see.** When the provider reports its limits in
+response headers (Anthropic, OpenAI, Groq and most OpenAI-compatible
+APIs do), Mira shows how much is left. Once the tightest limit drops
+below half, the TUI footer and the web UI's usage chip show `rate 12%
+↻42s`, turning red under 15%. `/cost` always prints it, and `mira -p`
+includes it in its JSON (see [docs/headless.md](./docs/headless.md)).
+
 Rate limits, overloads and dropped connections are retried with backoff
 (honouring `Retry-After`) instead of ending the turn;
 `MIRA_PROVIDER_RETRIES` sets how many times (default 4).
@@ -398,6 +405,7 @@ Adding a new subagent type is dropping a markdown file into
 - [x] GitHub: PR reviews and `@runmira-bot` tasks through Actions, connected without YAML
 - [x] Slack bot (`mira slack`)
 - [x] Retries for rate limits, overloads and dropped connections
+- [x] Rate-limit readout from provider headers (TUI, web, `-p` JSON)
 - [x] Model routing: a `small_model` for titles, summaries, memory and `model: small` agents
 - [x] Headless mode for scripts and CI (`mira -p`, JSON and stream-JSON output)
 - [ ] VS Code extension on the Marketplace and Open VSX

@@ -32,7 +32,7 @@ import {
   Trash,
 } from '@phosphor-icons/react';
 import { createWorktree, getGitStatus, listModels, putCwd, readFile, type GitStatusView, type ModelInfo } from '../api';
-import type { ApprovalScope, AskUserAnswer, AskUserProposal, DiffLine, DiffPreview, EnvironmentInfo, EnvironmentStatus, Goal, Mode, PlanProposal, PlanStep, ToolCall, UsageTotals } from '../types';
+import type { ApprovalScope, AskUserAnswer, AskUserProposal, DiffLine, DiffPreview, EnvironmentInfo, EnvironmentStatus, Goal, Mode, PlanProposal, PlanStep, RateLimitBucket, RateLimitReading, ToolCall, UsageTotals } from '../types';
 import type { AskUserDecision } from './AskUserCard';
 import { infoFor } from './ToolGroup';
 import { costUsd, formatDollars, shortNum } from '../lib/usage';
@@ -66,6 +66,8 @@ type Props = {
    *  cost is priced against the currently-selected model. Null (or all-zero)
    *  hides the readout entirely — no "$0.00" for a fresh session. */
   usage: UsageTotals | null;
+  /** The provider's latest rate-limit reading, when it reports one. */
+  rateLimit?: RateLimitReading | null;
   onSend: (text: string) => void;
   onSetMode: (m: Mode) => void;
   onSetModel: (m: string) => void;
@@ -137,7 +139,7 @@ type Attachment = { path: string; content: string; bytes: number };
 const NATIVE_ATTACH_MAX_BYTES = 256 * 1024;
 
 export function Composer({
-  disabled, busy, mode, model, providerName, cwd, usage,
+  disabled, busy, mode, model, providerName, cwd, usage, rateLimit,
   environment, environments, envSwitching, onSwitchEnvironment,
   onSend, onSetMode, onSetModel, onSetEffort, onOpenPicker, onCwdSwitched, onInterrupt, onNewChat, onOpenSettings, onRunReview, onSetGoal, onClearGoal, goal, onRemember, onUndo,
   skills, commands,
@@ -645,7 +647,7 @@ export function Composer({
           onSwitch={onSwitchEnvironment}
         />
         <span className="flex-1" />
-        <UsageReadout usage={usage} model={model} />
+        <UsageReadout usage={usage} model={model} rateLimit={rateLimit ?? null} />
         <WorktreeChip cwd={cwd} onCwdSwitched={onCwdSwitched} />
       </div>
 
@@ -1755,17 +1757,49 @@ function GoalChip({ goal, onClear }: { goal: Goal; onClear: () => void }) {
  * Renders nothing at all while the session is empty, so a fresh chat
  * doesn't lie by showing "$0.00" before the first turn.
  */
-function UsageReadout({ usage, model }: { usage: UsageTotals | null; model: string }) {
+/** The limit closest to running out, with the share left (0–1). */
+function tightestLimit(r: RateLimitReading | null): { bucket: RateLimitBucket; left: number } | null {
+  if (!r) return null;
+  let best: { bucket: RateLimitBucket; left: number } | null = null;
+  for (const b of Object.values(r.rate_limit)) {
+    if (!b || b.limit == null || b.remaining == null || b.limit <= 0) continue;
+    const left = Math.min(1, Math.max(0, b.remaining / b.limit));
+    if (!best || left < best.left) best = { bucket: b, left };
+  }
+  return best;
+}
+
+function shortSecs(s: number): string {
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.ceil(s / 60)}m`;
+  return `${Math.ceil(s / 3600)}h`;
+}
+
+function UsageReadout({
+  usage, model, rateLimit,
+}: {
+  usage: UsageTotals | null;
+  model: string;
+  rateLimit: RateLimitReading | null;
+}) {
   if (!usage) return null;
   if (usage.prompt_tokens === 0 && usage.completion_tokens === 0) return null;
   const cost = costUsd(model, usage);
   const cached = usage.cached_input_tokens;
+  const tight = tightestLimit(rateLimit);
+  // Shown once the tightest limit is under half; the reset counts from
+  // when the reading arrived.
+  const showRate = tight != null && tight.left < 0.5;
+  const resetIn = tight?.bucket.reset_secs != null && rateLimit
+    ? Math.max(0, tight.bucket.reset_secs - Math.round((Date.now() - rateLimit.at) / 1000))
+    : null;
   const tooltip = [
     `Prompt tokens: ${usage.prompt_tokens.toLocaleString()}`,
     cached > 0 ? `  of which cached: ${cached.toLocaleString()}` : null,
     `Completion tokens: ${usage.completion_tokens.toLocaleString()}`,
     `Rounds: ${usage.rounds}`,
     cost != null ? `Estimated cost: ${formatDollars(cost)}` : 'Unknown model pricing',
+    rateLimit?.summary ? `Rate limit: ${rateLimit.summary}` : null,
   ]
     .filter(Boolean)
     .join('\n');
@@ -1785,6 +1819,20 @@ function UsageReadout({ usage, model }: { usage: UsageTotals | null; model: stri
           <span className="text-muted-foreground/40">·</span>
           <span className="font-mono tabular-nums font-semibold text-emerald-400">
             {formatDollars(cost)}
+          </span>
+        </>
+      )}
+      {showRate && tight && (
+        <>
+          <span className="text-muted-foreground/40">·</span>
+          <span
+            className={cn(
+              'font-mono tabular-nums',
+              tight.left < 0.15 ? 'text-red-500 dark:text-red-400' : 'text-amber-600 dark:text-amber-400',
+            )}
+          >
+            rate {Math.round(tight.left * 100)}%
+            {resetIn != null && resetIn > 0 ? ` ↻${shortSecs(resetIn)}` : ''}
           </span>
         </>
       )}

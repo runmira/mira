@@ -9,6 +9,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug)]
 pub enum ChatEvent {
     /// A fragment of assistant free-form text.
+    /// The provider's rate limits, from the response headers. Sent
+    /// first, when the provider reports any.
+    RateLimit(crate::RateLimit),
     TextDelta(String),
     /// One or more tool calls have finished streaming and can be dispatched.
     ///

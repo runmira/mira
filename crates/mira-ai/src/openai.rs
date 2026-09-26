@@ -131,9 +131,15 @@ impl ChatProvider for OpenAiCompatible {
 
         // Bounded channel — backpressure the network reader if the consumer
         // (the harness) is slow to drain events.
+        let rate_limit = crate::RateLimit::from_headers(resp.headers());
         let (tx, rx) = mpsc::channel::<Result<ChatEvent, ProviderError>>(64);
 
         tokio::spawn(async move {
+            if let Some(rl) = rate_limit {
+                if tx.send(Ok(ChatEvent::RateLimit(rl))).await.is_err() {
+                    return;
+                }
+            }
             // Pin on the heap so we don't need to reason about whether
             // reqwest's byte stream is Unpin — Pin<Box<_>> always is.
             let mut sse = Box::pin(resp.bytes_stream().eventsource());

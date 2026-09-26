@@ -210,7 +210,40 @@ fn format_usage_spans(state: &TuiState) -> Vec<Span<'static>> {
         }
         spans.push(Span::styled(label, dollar_style));
     }
+    spans.extend(rate_limit_spans(state));
     spans
+}
+
+/// `· rate 12% ↻42s` once the provider's tightest limit is below half:
+/// yellow, then red under 15%. Hidden while there's plenty left.
+fn rate_limit_spans(state: &TuiState) -> Vec<Span<'static>> {
+    let Some((_, bucket)) = state.rate_limit.as_ref().and_then(|r| r.tightest()) else {
+        return Vec::new();
+    };
+    let Some(left) = bucket.fraction_left().filter(|f| *f < 0.5) else {
+        return Vec::new();
+    };
+    let color = if left < 0.15 {
+        Color::Red
+    } else {
+        Color::Yellow
+    };
+    let mut label = format!("rate {:.0}%", left * 100.0);
+    if let Some(s) = bucket.reset_secs.filter(|s| *s > 0) {
+        label.push_str(&format!(" ↻{}", short_secs(s)));
+    }
+    vec![
+        Span::styled(" · ", Style::default().fg(MUTED())),
+        Span::styled(label, Style::default().fg(color)),
+    ]
+}
+
+fn short_secs(s: u64) -> String {
+    match s {
+        0..=59 => format!("{s}s"),
+        60..=3599 => format!("{}m", s.div_ceil(60)),
+        _ => format!("{}h", s.div_ceil(3600)),
+    }
 }
 
 /// Best-effort context window size for common model IDs. Substring

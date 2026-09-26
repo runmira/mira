@@ -105,12 +105,28 @@ impl ChatProvider for Retrying {
         let mut retry = 0;
         loop {
             let err = match self.inner.stream(request.clone()).await {
-                Ok(mut s) => match s.next().await {
-                    // Output is flowing: hand it over, first item included.
-                    Some(Ok(first)) => return Ok(stream::iter([Ok(first)]).chain(s).boxed()),
-                    Some(Err(e)) => e,
-                    None => return Ok(stream::empty().boxed()),
-                },
+                Ok(mut s) => {
+                    // Rate-limit readings come first and aren't output: a
+                    // stream that fails right after one is still retried.
+                    let mut held = Vec::new();
+                    let first = loop {
+                        match s.next().await {
+                            Some(Ok(ChatEvent::RateLimit(rl))) => {
+                                held.push(Ok(ChatEvent::RateLimit(rl)))
+                            }
+                            other => break other,
+                        }
+                    };
+                    match first {
+                        // Output is flowing: hand it over, held items first.
+                        Some(Ok(first)) => {
+                            held.push(Ok(first));
+                            return Ok(stream::iter(held).chain(s).boxed());
+                        }
+                        Some(Err(e)) => e,
+                        None => return Ok(stream::iter(held).boxed()),
+                    }
+                }
                 Err(e) => e,
             };
             if retry >= self.policy.max_retries || !is_transient(&err) {
@@ -172,10 +188,12 @@ mod tests {
         async fn stream(&self, _r: ChatRequest) -> Result<EventStream, ProviderError> {
             *self.made.lock().unwrap() += 1;
             let next = self.calls.lock().unwrap().remove(0);
+            // Real providers now open with their rate-limit headers.
+            let reading = Ok(ChatEvent::RateLimit(crate::RateLimit::default()));
             let items: Vec<Result<ChatEvent, ProviderError>> = match next {
                 Outcome::Fail(code) => return Err(status(code)),
                 Outcome::Drop { after_text } => {
-                    let mut v = Vec::new();
+                    let mut v = vec![reading];
                     if after_text {
                         v.push(Ok(ChatEvent::TextDelta("partial".into())));
                     }
@@ -183,6 +201,7 @@ mod tests {
                     v
                 }
                 Outcome::Ok => vec![
+                    reading,
                     Ok(ChatEvent::TextDelta("hi".into())),
                     Ok(ChatEvent::Done(FinishReason::Stop)),
                 ],
@@ -252,6 +271,17 @@ mod tests {
         let (script, r) = provider((0..5).map(|_| Outcome::Fail(503)).collect());
         assert!(text(&r).await.is_err());
         assert_eq!(*script.made.lock().unwrap(), 4, "first try + 3 retries");
+    }
+
+    #[tokio::test]
+    async fn rate_limit_readings_pass_through_without_counting_as_output() {
+        // A drop right after the reading is still retried (above); on
+        // success the reading reaches the caller, first.
+        let (script, r) = provider(vec![Outcome::Drop { after_text: false }, Outcome::Ok]);
+        let events: Vec<_> = r.stream(request()).await.unwrap().collect().await;
+        assert!(matches!(events[0], Ok(ChatEvent::RateLimit(_))));
+        assert!(matches!(events[1], Ok(ChatEvent::TextDelta(_))));
+        assert_eq!(*script.made.lock().unwrap(), 2);
     }
 
     #[tokio::test]

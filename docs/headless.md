@@ -40,11 +40,19 @@ mira -p "fix the failing test" --allow "Bash(cargo test:*)" --allow "Edit(src/**
   "duration_ms": 18234,
   "usage": { "input_tokens": 51200, "output_tokens": 1830, "cached_input_tokens": 40960 },
   "total_cost_usd": 0.0412,
-  "permission_denials": [{ "tool": "bash", "input": { "command": "rm -rf target" } }]
+  "permission_denials": [{ "tool": "bash", "input": { "command": "rm -rf target" } }],
+  "rate_limit": {
+    "requests": { "limit": 500, "remaining": 40, "reset_secs": 90 },
+    "tokens": { "limit": 30000, "remaining": 29000 }
+  }
 }
 ```
 
 `total_cost_usd` is `null` for models Mira has no price for.
+`rate_limit` is the provider's last reading from its response headers
+(`requests`, `tokens`, `input_tokens`, `output_tokens`, each with
+`limit`, `remaining` and `reset_secs`), or `null` if it sends none. A
+script can use it to slow down before hitting a 429.
 
 `--output-format stream-json` prints one JSON object per line as the task
 runs, then the same result object:
@@ -57,6 +65,7 @@ runs, then the same result object:
 | `tool_result` | `id`, `is_error`, `content` |
 | `warning` | `message` |
 | `compacted` | `messages_removed` |
+| `rate_limit` | `rate_limit` (as in the result), `summary`: e.g. `8% of requests left · resets in 2m` |
 | `result` | as above |
 
 ```bash

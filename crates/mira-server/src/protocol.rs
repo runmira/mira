@@ -297,6 +297,14 @@ pub enum ServerMsg {
         totals: UsageTotals,
     },
 
+    /// The provider's rate limits after the latest request, from its
+    /// response headers. `summary` is the tightest one in words
+    /// (`12% of tokens left · resets in 42s`) for the status bar.
+    RateLimit {
+        rate_limit: mira_ai::RateLimit,
+        summary: Option<String>,
+    },
+
     /// Post-round auto-extractor recorded N durable facts to
     /// `.mira/episodic.jsonl`. Emitted only when `count > 0`; the UI can
     /// render a small "mira remembered N things" chip to make cross-session
@@ -462,6 +470,10 @@ impl ServerMsg {
             HarnessEvent::Done => Self::Done,
             HarnessEvent::Warning(text) => Self::Warning { text },
             HarnessEvent::Usage { round, totals } => Self::Usage { round, totals },
+            HarnessEvent::RateLimit(rate_limit) => Self::RateLimit {
+                summary: rate_limit.summary(),
+                rate_limit,
+            },
             HarnessEvent::MemoryLearned { count } => Self::MemoryLearned { count },
             HarnessEvent::Compacted { messages_removed } => Self::Compacted { messages_removed },
             HarnessEvent::GoalSet { goal } => Self::GoalSet { goal },
@@ -483,5 +495,26 @@ impl ServerMsg {
                 Self::ToolPreview { call_id, preview }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rate_limits_reach_the_web_ui_as_rate_limit_frames() {
+        let rl = mira_ai::RateLimit {
+            tokens: Some(mira_ai::Bucket {
+                limit: Some(1000),
+                remaining: Some(100),
+                reset_secs: Some(30),
+            }),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(ServerMsg::from_harness(HarnessEvent::RateLimit(rl))).unwrap();
+        assert_eq!(v["type"], "rate_limit");
+        assert_eq!(v["rate_limit"]["tokens"]["remaining"], 100);
+        assert_eq!(v["summary"], "10% of tokens left · resets in 30s");
     }
 }

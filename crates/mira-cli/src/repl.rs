@@ -60,6 +60,17 @@ pub async fn run(session: Session, skills: SkillHandle) -> Result<()> {
                     let msg = format!("\n[warn] {w}\n");
                     stdout.write_all(msg.as_bytes()).await?;
                 }
+                HarnessEvent::RateLimit(rl) => {
+                    // Only worth a line when it's getting tight.
+                    let low = rl
+                        .tightest()
+                        .and_then(|(_, b)| b.fraction_left())
+                        .is_some_and(|f| f < 0.2);
+                    if let Some(summary) = rl.summary().filter(|_| low) {
+                        let msg = format!("\n[rate limit] {summary}\n");
+                        stdout.write_all(msg.as_bytes()).await?;
+                    }
+                }
                 HarnessEvent::Usage { .. } => {
                     // repl doesn't render usage inline; totals are visible via
                     // `mira sessions ls`.
