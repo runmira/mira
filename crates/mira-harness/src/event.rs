@@ -85,3 +85,31 @@ pub enum HarnessEvent {
         reason: Option<String>,
     },
 }
+
+/// Warning prefixes for failures that end the turn without an answer.
+pub(crate) const PROVIDER_ERROR: &str = "provider error";
+pub(crate) const STREAM_ERROR: &str = "stream error";
+pub(crate) const STREAM_TIMEOUT: &str = "stream timed out";
+
+/// True for a [`HarnessEvent::Warning`] that means the turn failed (the
+/// provider refused the request, or its stream broke or hung), as
+/// opposed to notes like a denied tool call or a hook message.
+pub fn is_fatal_warning(warning: &str) -> bool {
+    [PROVIDER_ERROR, STREAM_ERROR, STREAM_TIMEOUT]
+        .iter()
+        .any(|p| warning.starts_with(p))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_turn_ending_failures_are_fatal() {
+        assert!(is_fatal_warning(&format!("{PROVIDER_ERROR}: 401")));
+        assert!(is_fatal_warning(&format!("{STREAM_ERROR}: reset")));
+        assert!(is_fatal_warning(&format!("{STREAM_TIMEOUT} after 300s")));
+        assert!(!is_fatal_warning("[hook] blocked"));
+        assert!(!is_fatal_warning("[stuck-loop] same calls"));
+    }
+}
