@@ -312,6 +312,7 @@ async fn main() -> Result<()> {
             .memory
             .extractor_model()
             .map(str::to_owned)
+            .or_else(|| settings.small_model.clone())
             .unwrap_or_else(|| settings.model.clone());
         builtin::register_consolidate(&mut registry, provider.clone(), consolidate_model);
     }
@@ -371,6 +372,7 @@ async fn main() -> Result<()> {
         settings.model.clone(),
     )
     .with_agents(agents_registry.clone())
+    .with_small_model(settings.small_model.clone())
     .with_events_tx(subagent_events_tx.clone());
 
     // Shared memory + episodic stores. `memory_remember` writes episodic
@@ -444,6 +446,7 @@ async fn main() -> Result<()> {
     sess_cfg.max_tokens = settings.max_tokens;
     sess_cfg.temperature = settings.temperature;
     sess_cfg.compactor_model = settings.compactor_model.clone();
+    sess_cfg.small_model = settings.small_model.clone();
     if let Some(n) = cli.max_turns {
         sess_cfg.max_rounds = n.max(1);
     }
@@ -630,6 +633,8 @@ pub(crate) struct ResolvedSettings {
     pub(crate) max_tokens: Option<u32>,
     pub(crate) temperature: Option<f32>,
     pub(crate) compactor_model: Option<String>,
+    /// Cheap model for background work (`small_model` in mira.yaml).
+    pub(crate) small_model: Option<String>,
     pub(crate) extra_headers: Vec<(String, String)>,
     /// Effective prompt-caching flag after applying the config override
     /// and the auto-enable-for-Anthropic rule.
@@ -693,6 +698,10 @@ pub(crate) fn resolve_settings(cli: &Cli, cfg: &MiraConfig) -> Result<ResolvedSe
     let max_tokens = cli.max_tokens.or(cfg.max_tokens);
     let temperature = cli.temperature.or(cfg.temperature);
     let compactor_model = cfg.compactor_model.clone();
+    let small_model = std::env::var("MIRA_SMALL_MODEL")
+        .ok()
+        .or_else(|| cfg.small_model.clone())
+        .filter(|m| !m.trim().is_empty());
 
     let extra_headers = provider
         .extra_headers
@@ -712,6 +721,7 @@ pub(crate) fn resolve_settings(cli: &Cli, cfg: &MiraConfig) -> Result<ResolvedSe
         max_tokens,
         temperature,
         compactor_model,
+        small_model,
         extra_headers,
         prompt_caching,
     })

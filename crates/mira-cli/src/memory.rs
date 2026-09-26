@@ -83,6 +83,7 @@ async fn consolidate(cli: &crate::Cli, args: ConsolidateArgs) -> Result<()> {
         .model
         .clone()
         .or_else(|| cfg.memory.extractor_model().map(str::to_owned))
+        .or_else(|| settings.small_model.clone())
         .unwrap_or_else(|| settings.model.clone());
 
     let provider = build_chat_provider(

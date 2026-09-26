@@ -24,6 +24,8 @@ use crate::state::AppState;
 pub struct SettingsView {
     pub default_provider: Option<String>,
     pub default_model: Option<String>,
+    /// Cheap model for titles, summaries and `model: small` agents.
+    pub small_model: Option<String>,
     pub default_mode: Option<String>,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
@@ -79,6 +81,8 @@ pub struct SettingsUpdate {
     pub default_provider: Option<Option<String>>,
     #[serde(default, deserialize_with = "double_option")]
     pub default_model: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub small_model: Option<Option<String>>,
     #[serde(default, deserialize_with = "double_option")]
     pub default_mode: Option<Option<String>>,
     #[serde(default, deserialize_with = "double_option")]
@@ -191,6 +195,12 @@ pub async fn put_settings(
     // Drop the models cache — the new provider has a different catalog.
     crate::models::invalidate();
 
+    // New sessions read it from the config; the open one updates now.
+    state
+        .current_session()
+        .await
+        .set_small_model(cfg.small_model.clone())
+        .await;
     if let Some(model) = cfg.default_model.clone() {
         state.current_session().await.set_model(&model).await;
         // Mirror the WS SetModel path — persist so restarts remember.
@@ -262,6 +272,7 @@ fn view_from(cfg: &MiraConfig, configured: bool) -> SettingsView {
     SettingsView {
         default_provider: cfg.default_provider.clone(),
         default_model: cfg.default_model.clone(),
+        small_model: cfg.small_model.clone(),
         default_mode: cfg.default_mode.clone(),
         max_tokens: cfg.max_tokens,
         temperature: cfg.temperature,
@@ -284,6 +295,9 @@ fn apply(cfg: &mut MiraConfig, u: SettingsUpdate) {
     }
     if let Some(v) = u.default_model {
         cfg.default_model = v.filter(|s| !s.is_empty());
+    }
+    if let Some(v) = u.small_model {
+        cfg.small_model = v.filter(|s| !s.trim().is_empty());
     }
     if let Some(v) = u.default_mode {
         cfg.default_mode = v.filter(|s| !s.is_empty());

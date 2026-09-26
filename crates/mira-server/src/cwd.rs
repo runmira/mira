@@ -81,6 +81,7 @@ pub async fn put_cwd(State(state): State<AppState>, Json(u): Json<CwdUpdate>) ->
         reasoning_effort: prev_cfg.reasoning_effort.clone(),
         response_format: prev_cfg.response_format.clone(),
         compactor_model: prev_cfg.compactor_model.clone(),
+        small_model: prev_cfg.small_model.clone(),
     };
     let deps = state.slot_deps();
     let slot = crate::slot::build_slot(path.clone(), cfg, None, &deps).await;

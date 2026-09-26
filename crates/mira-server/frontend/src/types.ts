@@ -311,6 +311,7 @@ export type ProviderView = {
 export type SettingsView = {
   default_provider?: string | null;
   default_model?: string | null;
+  small_model?: string | null;
   default_mode?: string | null;
   max_tokens?: number | null;
   temperature?: number | null;
@@ -365,6 +366,7 @@ export type ProviderUpdate = {
 export type SettingsUpdate = {
   default_provider?: string | null;
   default_model?: string | null;
+  small_model?: string | null;
   default_mode?: string | null;
   max_tokens?: number | null;
   temperature?: number | null;

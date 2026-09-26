@@ -278,6 +278,7 @@ async fn run_task_inner(
     sess_cfg.max_tokens = settings.max_tokens;
     sess_cfg.temperature = settings.temperature;
     sess_cfg.compactor_model = settings.compactor_model.clone();
+    sess_cfg.small_model = settings.small_model.clone();
 
     let session = Session::new(
         sess_cfg,

@@ -185,6 +185,7 @@ fn read_key(cfg: &MiraConfig, key: &str) -> Result<Option<String>> {
         "max_tokens" => Ok(cfg.max_tokens.map(|n| n.to_string())),
         "temperature" => Ok(cfg.temperature.map(|n| n.to_string())),
         "compactor_model" => Ok(cfg.compactor_model.clone()),
+        "small_model" => Ok(cfg.small_model.clone()),
         other => {
             let parts: Vec<&str> = other.splitn(3, '.').collect();
             if parts.len() == 3 && parts[0] == "providers" {
@@ -216,6 +217,7 @@ fn write_key(cfg: &mut MiraConfig, key: &str, value: &str) -> Result<()> {
         "max_tokens" => cfg.max_tokens = parse_opt_u32(value)?,
         "temperature" => cfg.temperature = parse_opt_f32(value)?,
         "compactor_model" => cfg.compactor_model = some_or_clear(value),
+        "small_model" => cfg.small_model = some_or_clear(value),
         other => {
             let parts: Vec<&str> = other.splitn(3, '.').collect();
             if parts.len() == 3 && parts[0] == "providers" {

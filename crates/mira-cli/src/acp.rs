@@ -134,7 +134,8 @@ impl MiraFactory {
             base,
             settings.model.clone(),
         )
-        .with_agents(agents);
+        .with_agents(agents)
+        .with_small_model(settings.small_model.clone());
         if let Some(s) = &store {
             agent_tool = agent_tool.with_store(s.clone());
         }
@@ -184,6 +185,7 @@ impl SessionFactory for MiraFactory {
         cfg.max_tokens = self.settings.max_tokens;
         cfg.temperature = self.settings.temperature;
         cfg.compactor_model = self.settings.compactor_model.clone();
+        cfg.small_model = self.settings.small_model.clone();
         let prompt = mira_server::system_prompt(&cwd, &self.registry).replacen(
             "You are Mira, an interactive coding agent.",
             "You are Mira, an interactive coding agent running inside the user's editor.",

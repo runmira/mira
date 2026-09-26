@@ -566,11 +566,14 @@ async fn spawn_turn(state: AppState, slot: Arc<SessionSlot>, text: String) {
         // a short generation call on the same provider + model. Runs on
         // its own task so a slow / failing title call doesn't block the
         // next user turn.
-        let model = sess.config().await.model;
+        let cfg = sess.config().await;
+        let model = cfg.background_model(None);
+        let fallback = (model != cfg.model).then(|| cfg.model.clone());
         title::spawn_if_needed(
             sess,
             state_for_task.harness_provider.clone(),
             model,
+            fallback,
             state_for_task.clone(),
         );
         // Idle marker — same fan-out reasoning as the running marker
