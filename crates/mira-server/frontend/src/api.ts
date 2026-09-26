@@ -1029,6 +1029,8 @@ export type HooksView = {
   rules: HookRule[];
   plugin_rules: (HookRule & { plugin: string })[];
   problems: string[];
+  /** Hooks that failed when they ran (each is announced in chat once). */
+  failing: string[];
   os: string;
 };
 

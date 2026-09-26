@@ -24,6 +24,8 @@ pub struct HooksView {
     plugin_rules: Vec<PluginRule>,
     /// Hooks that couldn't be loaded, with where they came from.
     problems: Vec<String>,
+    /// Hooks that failed when they ran, with the latest error.
+    failing: Vec<String>,
     /// `macos`, `linux` or `windows`, for the notification preset.
     os: &'static str,
 }
@@ -85,6 +87,7 @@ fn view(state: &AppState) -> Result<HooksView, String> {
             .map(|(plugin, rule)| PluginRule { plugin, rule })
             .collect(),
         problems: state.extensions.hook_problems(),
+        failing: state.extensions.failing_hooks(),
         os: std::env::consts::OS,
     })
 }

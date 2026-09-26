@@ -281,6 +281,11 @@ impl Extensions {
             .collect()
     }
 
+    /// Hooks that have failed while running since the last reload.
+    pub fn failing_hooks(&self) -> Vec<String> {
+        self.inner.hooks.read().unwrap().failing()
+    }
+
     /// Hooks that couldn't be read, from the last reload.
     pub fn hook_problems(&self) -> Vec<String> {
         self.inner.hooks.read().unwrap().problems.clone()

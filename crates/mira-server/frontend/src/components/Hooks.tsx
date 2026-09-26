@@ -350,6 +350,25 @@ export function HooksSection() {
         </div>
       )}
 
+      {view.failing.length > 0 && (
+        <div className="overflow-hidden rounded-2xl border border-amber-500/30 bg-amber-500/5">
+          <div className="px-5 py-4">
+            <div className="flex items-center gap-2 text-[14px] font-semibold text-foreground">
+              <Warning weight="fill" className="size-4 text-amber-500" /> Hooks that are failing
+            </div>
+            <div className="mt-0.5 text-[12.5px] text-muted-foreground">
+              They still run each time, but Mira only mentions a failure in chat once. Fix the
+              command, or turn off the plugin it came from.
+            </div>
+          </div>
+          {view.failing.map((f) => (
+            <div key={f} className="break-words border-t border-amber-500/20 px-5 py-2.5 font-mono text-[11.5px] text-muted-foreground">
+              {f}
+            </div>
+          ))}
+        </div>
+      )}
+
       <div className="overflow-hidden rounded-2xl border border-border/50 bg-mira-elev1/60">
         <div className="flex items-center justify-between gap-3 px-5 py-4">
           <div>

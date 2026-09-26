@@ -92,6 +92,10 @@ pub struct Hook {
 pub struct HookSet {
     pub hooks: Vec<Hook>,
     pub problems: Vec<String>,
+    /// Hooks that failed while running, with their latest error. Each is
+    /// reported to the user once; after that it's only listed here, so a
+    /// broken plugin hook doesn't add a warning to every message.
+    failing: std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, String>>>,
 }
 
 /// A permission decision from a PreToolUse hook.
@@ -154,7 +158,19 @@ impl HookSet {
                                     .push(format!("{source}: a `{event}` hook has no `command`"));
                                 continue;
                             };
-                            (HookAction::Command(command.to_owned()), DEFAULT_TIMEOUT)
+                            // Some hooks give the program's arguments
+                            // separately; run them too, not a bare `node`.
+                            let args: Vec<&str> = h
+                                .get("args")
+                                .and_then(Value::as_array)
+                                .into_iter()
+                                .flatten()
+                                .filter_map(Value::as_str)
+                                .collect();
+                            (
+                                HookAction::Command(with_args(command, &args)),
+                                DEFAULT_TIMEOUT,
+                            )
                         }
                         "prompt" => {
                             if !PROMPT_EVENTS.contains(&event.as_str()) {
@@ -207,6 +223,28 @@ impl HookSet {
 
     pub fn has(&self, event: &str) -> bool {
         self.hooks.iter().any(|h| h.event == event)
+    }
+
+    /// Hooks that have failed while running, as "where: error" lines.
+    pub fn failing(&self) -> Vec<String> {
+        self.failing
+            .lock()
+            .map(|f| f.iter().map(|(k, v)| format!("{k}: {v}")).collect())
+            .unwrap_or_default()
+    }
+
+    /// Record a failure; `true` the first time this hook fails.
+    fn first_failure(&self, hook: &Hook, error: &str) -> bool {
+        let what = match &hook.action {
+            HookAction::Command(c) => c,
+            HookAction::Prompt(p) => p,
+        };
+        let what: String = what.chars().take(80).collect();
+        let key = format!("{} hook ({}) `{what}`", hook.event, hook.source);
+        self.failing
+            .lock()
+            .map(|mut f| f.insert(key, error.to_owned()).is_none())
+            .unwrap_or(true)
     }
 
     /// Run `event`'s hooks matching `target` (a tool name or the
@@ -270,9 +308,19 @@ impl HookSet {
 
         let mut out = Outcome::default();
         for (hook, result) in matching.iter().zip(results) {
-            match result {
+            let before = out.messages.len();
+            let failed = match result {
                 Ran::Command(r) => merge(&mut out, hook, event, r),
                 Ran::Prompt(v) => merge_verdict(&mut out, hook, event, v),
+            };
+            // A failure's message: the first time only.
+            if let Some(error) = failed {
+                out.messages.truncate(before);
+                if self.first_failure(hook, &error) {
+                    out.messages.push(format!(
+                        "{error} (it keeps running, but this won't be shown again; see Settings → Hooks)"
+                    ));
+                }
             }
         }
         if let (Some(updated), Some(original)) = (out.updated_input.as_mut(), original_input) {
@@ -338,20 +386,27 @@ fn parse_verdict(reply: &str) -> Option<Verdict> {
     Some(Verdict { ok, reason })
 }
 
-fn merge_verdict(out: &mut Outcome, hook: &Hook, event: &str, v: Result<Verdict, String>) {
+/// Returns the error when the hook failed.
+fn merge_verdict(
+    out: &mut Outcome,
+    hook: &Hook,
+    event: &str,
+    v: Result<Verdict, String>,
+) -> Option<String> {
     match v {
-        Ok(Verdict { ok: true, .. }) => {}
-        Ok(Verdict { ok: false, reason }) => add_block(
-            out,
-            if reason.is_empty() {
-                "blocked by a prompt hook".into()
-            } else {
-                reason
-            },
-        ),
-        Err(e) => out
-            .messages
-            .push(format!("{event} prompt hook ({}) {e}", hook.source)),
+        Ok(Verdict { ok: true, .. }) => None,
+        Ok(Verdict { ok: false, reason }) => {
+            add_block(
+                out,
+                if reason.is_empty() {
+                    "blocked by a prompt hook".into()
+                } else {
+                    reason
+                },
+            );
+            None
+        }
+        Err(e) => Some(format!("{event} prompt hook ({}) {e}", hook.source)),
     }
 }
 
@@ -456,6 +511,52 @@ pub fn config_from_rules(rules: &[HookRule]) -> Option<Value> {
     (!events.is_empty()).then_some(Value::Object(events))
 }
 
+/// `command` followed by `args`, each double-quoted so spaces survive
+/// while `${CLAUDE_PLUGIN_ROOT}`-style variables still expand.
+fn with_args(command: &str, args: &[&str]) -> String {
+    let mut out = command.to_owned();
+    for a in args {
+        let escaped = a
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('`', "\\`");
+        out.push_str(&format!(" \"{escaped}\""));
+    }
+    out
+}
+
+/// The plugin folder as its hooks expect to see it. Installed plugins
+/// live in `…/<plugin>/<version>/`, but some hooks (hookify's) add the
+/// folder's parent to Python's path and `import <plugin>`, which needs
+/// the folder to be named after the plugin. So point them at a link
+/// `…/<plugin>/.linked/<version>/<plugin>` → the real folder. Falls
+/// back to the real folder when the name already fits or linking fails.
+fn named_plugin_root(root: &Path, source: &str) -> PathBuf {
+    let name = source.split('@').next().unwrap_or(source);
+    let Some(version) = root.file_name().and_then(|v| v.to_str()) else {
+        return root.to_path_buf();
+    };
+    if version == name || name.is_empty() || name.contains(['/', '\\']) {
+        return root.to_path_buf();
+    }
+    let Some(plugin_dir) = root.parent() else {
+        return root.to_path_buf();
+    };
+    let link = plugin_dir.join(".linked").join(version).join(name);
+    if link.exists() {
+        return link;
+    }
+    #[cfg(unix)]
+    {
+        let made = std::fs::create_dir_all(link.parent().unwrap_or(plugin_dir))
+            .and_then(|_| std::os::unix::fs::symlink(root, &link));
+        if made.is_ok() || link.exists() {
+            return link;
+        }
+    }
+    root.to_path_buf()
+}
+
 /// What one command did.
 enum RunResult {
     Exited {
@@ -482,8 +583,9 @@ async fn run_one(hook: &Hook, command: &str, stdin: &str, cwd: Option<&Path>) ->
             .env("MIRA_PROJECT_DIR", dir);
     }
     if let Some(root) = &hook.plugin_root {
-        cmd.env("CLAUDE_PLUGIN_ROOT", root)
-            .env("MIRA_PLUGIN_ROOT", root);
+        let root = named_plugin_root(root, &hook.source);
+        cmd.env("CLAUDE_PLUGIN_ROOT", &root)
+            .env("MIRA_PLUGIN_ROOT", &root);
     }
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -509,13 +611,12 @@ async fn run_one(hook: &Hook, command: &str, stdin: &str, cwd: Option<&Path>) ->
     }
 }
 
-fn merge(out: &mut Outcome, hook: &Hook, event: &str, result: RunResult) {
+/// Returns the error when the hook failed (couldn't run, or exited
+/// with a code other than 0 or 2).
+fn merge(out: &mut Outcome, hook: &Hook, event: &str, result: RunResult) -> Option<String> {
     let label = format!("{} hook ({})", event, hook.source);
     let (code, stdout, stderr) = match result {
-        RunResult::Failed(e) => {
-            out.messages.push(format!("{label} {e}"));
-            return;
-        }
+        RunResult::Failed(e) => return Some(format!("{label} {e}")),
         RunResult::Exited {
             code,
             stdout,
@@ -529,15 +630,14 @@ fn merge(out: &mut Outcome, hook: &Hook, event: &str, result: RunResult) {
             stderr
         };
         add_block(out, reason);
-        return;
+        return None;
     }
     if code != 0 {
         let detail = if stderr.is_empty() { stdout } else { stderr };
-        out.messages.push(format!(
+        return Some(format!(
             "{label} failed (exit {code}): {}",
             first_lines(&detail)
         ));
-        return;
     }
     let json: Option<Value> = stdout
         .starts_with('{')
@@ -547,7 +647,7 @@ fn merge(out: &mut Outcome, hook: &Hook, event: &str, result: RunResult) {
         if !stdout.is_empty() && (event == "SessionStart" || event == "UserPromptSubmit") {
             out.context.push(stdout);
         }
-        return;
+        return None;
     };
     if let Some(m) = json.get("systemMessage").and_then(Value::as_str) {
         out.messages.push(m.to_owned());
@@ -607,6 +707,7 @@ fn merge(out: &mut Outcome, hook: &Hook, event: &str, result: RunResult) {
             out.permission = Some(strongest(out.permission.take(), d));
         }
     }
+    None
 }
 
 fn add_block(out: &mut Outcome, reason: String) {
@@ -835,26 +936,31 @@ mod tests {
 
     #[tokio::test]
     async fn prompt_hook_failures_let_things_through() {
-        let s = set(json!({"PreToolUse": [{"matcher": "Bash", "hooks": [
-            {"type": "prompt", "prompt": "Is this command safe?"}
-        ]}]}));
+        // A fresh set per case: a hook's failure is only reported once.
+        let s = || {
+            set(json!({"PreToolUse": [{"matcher": "Bash", "hooks": [
+                {"type": "prompt", "prompt": "Is this command safe?"}
+            ]}]}))
+        };
         let input = || input("bash", json!({"command": "ls"}));
 
         let down = fake(Err("provider returned 503"));
-        let out = s.run_with("PreToolUse", "bash", input(), Some(&down)).await;
+        let out = s()
+            .run_with("PreToolUse", "bash", input(), Some(&down))
+            .await;
         assert!(out.block.is_none());
         assert!(out.messages[0].contains("503"), "{:?}", out.messages);
         // No template placeholder: the input is appended.
         assert!(down.asked.lock().unwrap()[0].contains("Event input:"));
 
         let rambling = fake(Ok("sure, looks fine"));
-        let out = s
+        let out = s()
             .run_with("PreToolUse", "bash", input(), Some(&rambling))
             .await;
         assert!(out.block.is_none());
         assert!(out.messages[0].contains("unclear answer"));
 
-        let out = s.run("PreToolUse", "bash", input()).await;
+        let out = s().run("PreToolUse", "bash", input()).await;
         assert!(out.block.is_none());
         assert!(out.messages[0].contains("need a model"));
     }
@@ -894,6 +1000,80 @@ mod tests {
         assert_eq!(set.hooks.len(), 4);
 
         assert_eq!(config_from_rules(&[]), None);
+    }
+
+    #[tokio::test]
+    async fn plugin_folder_is_named_after_the_plugin_for_imports() {
+        // Installed like the real cache: …/hookify/0.1.0/, with a package
+        // the hook imports the way hookify's own scripts do.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("hookify").join("0.1.0");
+        std::fs::create_dir_all(root.join("core")).unwrap();
+        std::fs::write(
+            root.join("core").join("rules.py"),
+            "GREETING = 'imported'\n",
+        )
+        .unwrap();
+        let script = "import os, sys; p = os.environ['CLAUDE_PLUGIN_ROOT']; \
+                      sys.path.insert(0, os.path.dirname(p)); \
+                      from hookify.core.rules import GREETING; print(GREETING)";
+        let mut s = HookSet::default();
+        s.add(
+            &json!({"SessionStart": [{"hooks": [
+                {"type": "command", "command": "python3 -c \"$HOOK_SCRIPT\""}
+            ]}]}),
+            Some(&root),
+            "hookify@claude-code-plugins",
+        );
+        std::env::set_var("HOOK_SCRIPT", script);
+        let out = s
+            .run(
+                "SessionStart",
+                "startup",
+                json!({"cwd": std::env::temp_dir()}),
+            )
+            .await;
+        assert_eq!(out.context, ["imported"], "{:?}", out.messages);
+        assert!(root
+            .parent()
+            .unwrap()
+            .join(".linked/0.1.0/hookify")
+            .exists());
+    }
+
+    #[tokio::test]
+    async fn args_are_passed_to_the_command() {
+        let s = set(json!({"UserPromptSubmit": [{"hooks": [
+            {"type": "command", "command": "printf '%s|'", "args": ["a b", "c\"d"]}
+        ]}]}));
+        let out = s
+            .run(
+                "UserPromptSubmit",
+                "",
+                json!({"prompt": "hi", "cwd": std::env::temp_dir()}),
+            )
+            .await;
+        assert_eq!(out.context, ["a b|c\"d|"], "{:?}", out.messages);
+    }
+
+    #[tokio::test]
+    async fn a_failing_hook_is_reported_once() {
+        let s = set(json!({"UserPromptSubmit": [{"hooks": [
+            {"type": "command", "command": "echo broken >&2; exit 1"}
+        ]}]}));
+        let input = || json!({"prompt": "hi", "cwd": std::env::temp_dir()});
+        let first = s.run("UserPromptSubmit", "", input()).await;
+        assert_eq!(first.messages.len(), 1);
+        assert!(first.messages[0].contains("broken"));
+        assert!(first.messages[0].contains("won't be shown again"));
+        let second = s.run("UserPromptSubmit", "", input()).await;
+        assert!(second.messages.is_empty(), "{:?}", second.messages);
+        let failing = s.failing();
+        assert_eq!(failing.len(), 1);
+        assert!(
+            failing[0].starts_with("UserPromptSubmit hook (test)"),
+            "{failing:?}"
+        );
     }
 
     #[test]
