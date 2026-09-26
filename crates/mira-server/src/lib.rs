@@ -163,6 +163,7 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
         memory_runtime: cfg.memory_runtime.clone(),
         scratchpads: scratchpads.clone(),
         default_model_for_agents: cfg.cfg.model.clone(),
+        small_model_for_agents: cfg.cfg.small_model.clone(),
         compute: cfg.compute.clone(),
         hooks: Some(cfg.extensions.hook_runner()),
     };
@@ -194,6 +195,7 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
         memory_runtime: cfg.memory_runtime.clone(),
         scratchpads,
         default_model_for_agents: cfg.cfg.model.clone(),
+        small_model_for_agents: cfg.cfg.small_model.clone(),
     };
 
     // Filesystem watcher for skills — picks up `npx skills add`

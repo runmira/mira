@@ -157,6 +157,22 @@ pub struct SessionConfig {
     /// only the summarizer call swaps.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compactor_model: Option<String>,
+    /// A cheap, fast model for background work: compaction summaries
+    /// and memory extraction when they don't name their own model.
+    /// `None` = reuse `model`. A failed call on it retries on `model`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub small_model: Option<String>,
+}
+
+impl SessionConfig {
+    /// The model for a background job: its own setting, else
+    /// `small_model`, else the session's model.
+    pub fn background_model(&self, own: Option<&str>) -> String {
+        own.or(self.small_model.as_deref())
+            .filter(|m| !m.trim().is_empty())
+            .unwrap_or(&self.model)
+            .to_owned()
+    }
 }
 
 /// Ceiling on tool-call rounds within a single user turn. Guards against
@@ -256,6 +272,7 @@ impl SessionConfig {
             reasoning_effort: None,
             response_format: None,
             compactor_model: None,
+            small_model: None,
         }
     }
 }
@@ -701,6 +718,12 @@ impl Session {
         self.cfg.lock().await.model = model.into();
     }
 
+    /// Set the cheap model for background work (see
+    /// [`SessionConfig::small_model`]); `None` falls back to the main one.
+    pub async fn set_small_model(&self, model: Option<String>) {
+        self.cfg.lock().await.small_model = model.filter(|m| !m.trim().is_empty());
+    }
+
     /// Set the reasoning-effort field for future turns. `None` clears it so
     /// non-reasoning models aren't hit with an ignored parameter. Same
     /// snapshot-at-spawn caveat as `set_model` — in-flight turn keeps the
@@ -1103,15 +1126,17 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
             // strictly better than aborting the turn.
             {
                 let mut history = sess.history.lock().await;
-                let summarizer_model = cfg.compactor_model.as_deref().unwrap_or(&cfg.model);
-                match crate::history::maybe_compact(
+                let summarizer_model = cfg.background_model(cfg.compactor_model.as_deref());
+                // A cheaper summarizer that fails gets one retry on the
+                // main model.
+                let compacted = crate::history::compact_with_fallback(
                     &mut history,
                     sess.provider.as_ref(),
                     &cfg.model,
-                    summarizer_model,
+                    &summarizer_model,
                 )
-                .await
-                {
+                .await;
+                match compacted {
                     Ok(Some(n)) => {
                         let _ = tx
                             .send(HarnessEvent::Compacted {
@@ -2250,14 +2275,29 @@ async fn maybe_spawn_extractor(
     }
 
     let provider = sess.provider.clone();
-    let model = auto.model.clone().unwrap_or_else(|| cfg.model.clone());
+    let model = cfg.background_model(auto.model.as_deref());
+    // A cheaper extractor that fails gets one retry on the main model.
+    let fallback = (model != cfg.model).then(|| cfg.model.clone());
     let session_id = sess.id.clone();
 
     tokio::spawn(async move {
-        let result = tokio::time::timeout(
-            EXTRACTION_TIMEOUT,
-            run_extraction(provider, model, round_content, episodic, session_id),
-        )
+        let result = tokio::time::timeout(EXTRACTION_TIMEOUT, async {
+            let first = run_extraction(
+                provider.clone(),
+                model.clone(),
+                round_content.clone(),
+                episodic.clone(),
+                session_id.clone(),
+            )
+            .await;
+            match (first, fallback) {
+                (Err(e), Some(main)) => {
+                    warn!(error = %e, %model, "auto-extract: failed; retrying on the main model");
+                    run_extraction(provider, main, round_content, episodic, session_id).await
+                }
+                (r, _) => r,
+            }
+        })
         .await;
         match result {
             Ok(Ok(count)) if count > 0 => {
@@ -2664,6 +2704,17 @@ mod history_repair_tests {
     use super::*;
     use mira_core::message::{ToolCallFunction, ToolCallKind};
     use mira_core::{ToolCall, ToolCallId};
+
+    #[test]
+    fn background_model_prefers_own_then_small_then_main() {
+        let mut c = SessionConfig::new("big");
+        assert_eq!(c.background_model(None), "big");
+        c.small_model = Some("tiny".into());
+        assert_eq!(c.background_model(None), "tiny");
+        assert_eq!(c.background_model(Some("own")), "own");
+        c.small_model = Some(" ".into());
+        assert_eq!(c.background_model(None), "big");
+    }
 
     fn call(id: &str, name: &str) -> ToolCall {
         ToolCall {

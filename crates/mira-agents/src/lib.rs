@@ -413,7 +413,7 @@ pub fn parse_agent_md(source: &str) -> Result<AgentType> {
             .tools
             .map(|t| normalize_tools(&t))
             .filter(|t| !t.is_empty()),
-        model: fm.model.filter(|m| !is_claude_model_alias(m)),
+        model: fm.model.and_then(|m| agent_model(&m)),
         max_rounds: fm.max_rounds,
         system_prompt_addendum,
         response_schema: fm.response_schema,
@@ -519,8 +519,16 @@ fn normalize_tools(tools: &[String]) -> Vec<String> {
 
 /// Claude Code's model shorthands (and `inherit`) mean "the session's
 /// model" here: they aren't model ids any provider accepts.
-fn is_claude_model_alias(m: &str) -> bool {
-    matches!(m.trim(), "inherit" | "opus" | "sonnet" | "haiku" | "")
+/// An agent file's `model:`. Claude Code's tier names keep their
+/// intent: `haiku` (or `small`/`fast`) becomes `small`, resolved to the
+/// user's `small_model` when the agent starts; `inherit`, `sonnet` and
+/// `opus` mean the parent's model (`None`). Anything else is a model id.
+fn agent_model(m: &str) -> Option<String> {
+    match m.trim().to_ascii_lowercase().as_str() {
+        "" | "inherit" | "main" | "sonnet" | "opus" => None,
+        "haiku" | "small" | "fast" => Some("small".to_owned()),
+        _ => Some(m.trim().to_owned()),
+    }
 }
 
 /* ---------- tests ---------- */
@@ -528,6 +536,15 @@ fn is_claude_model_alias(m: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_tier_names_keep_their_intent() {
+        assert_eq!(agent_model("haiku").as_deref(), Some("small"));
+        assert_eq!(agent_model(" Fast ").as_deref(), Some("small"));
+        assert_eq!(agent_model("sonnet"), None);
+        assert_eq!(agent_model("inherit"), None);
+        assert_eq!(agent_model("gpt-5-mini").as_deref(), Some("gpt-5-mini"));
+    }
 
     #[test]
     fn builtin_registers_expected_types() {

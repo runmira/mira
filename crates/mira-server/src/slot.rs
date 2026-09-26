@@ -218,6 +218,8 @@ pub struct SlotDeps {
     /// pin one. Snapshotted at boot; hot-swapping this would require a
     /// slot rebuild.
     pub default_model_for_agents: String,
+    /// What subagents asking for `model: small` (or `haiku`) run on.
+    pub small_model_for_agents: Option<String>,
     /// `compute:` config: named remote environments.
     pub compute: mira_config::ComputeConfig,
     /// Lifecycle hooks (plugins' and the user's).
@@ -281,6 +283,7 @@ pub async fn build_slot(
         deps.default_model_for_agents.clone(),
     )
     .with_agents(deps.agents_registry.clone())
+    .with_small_model(deps.small_model_for_agents.clone())
     .with_events_tx(events_tx.clone())
     .with_parent_approver(approver.clone())
     .with_parent_policy(deps.policy.clone())

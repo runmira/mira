@@ -214,6 +214,7 @@ type Draft = {
   apiKey: string;
   showReplaceKey: boolean;
   model: string;
+  smallModel: string;
   mode: Mode;
   maxTokens: string;
   keyValues: Record<string, string>; // key name → new pending value
@@ -234,6 +235,7 @@ const EMPTY_DRAFT: Draft = {
   apiKey: '',
   showReplaceKey: false,
   model: '',
+  smallModel: '',
   mode: 'manual',
   maxTokens: '',
   keyValues: {},
@@ -298,6 +300,7 @@ export function SettingsSurface({
       apiKey: '',
       showReplaceKey: !(p?.has_api_key || p?.api_key_env),
       model: v.default_model ?? '',
+      smallModel: v.small_model ?? '',
       mode: (v.default_mode as Mode) ?? 'manual',
       maxTokens: v.max_tokens?.toString() ?? '',
       keyValues: {},
@@ -330,6 +333,7 @@ export function SettingsSurface({
       const v = await putSettings({
         default_provider: draft.providerName || null,
         default_model: draft.model.trim() ? draft.model.trim() : null,
+        small_model: draft.smallModel.trim() ? draft.smallModel.trim() : null,
         default_mode: draft.mode,
         max_tokens: Number.isFinite(parsedMax) ? parsedMax : null,
         providers,
@@ -353,6 +357,7 @@ export function SettingsSurface({
     if (Object.values(draft.keyValues).some((v) => v !== undefined)) return true;
     if (draft.providerName !== (view.default_provider ?? 'openrouter')) return true;
     if (draft.model !== (view.default_model ?? '')) return true;
+    if (draft.smallModel !== (view.small_model ?? '')) return true;
     if (draft.mode !== (view.default_mode ?? 'manual')) return true;
     if (draft.maxTokens !== (view.max_tokens?.toString() ?? '')) return true;
     const p = view.providers.find((x) => x.name === draft.providerName);
@@ -543,6 +548,18 @@ function ProviderSection({
           value={draft.model}
           onChange={(e) => setDraft((d) => ({ ...d, model: e.target.value }))}
           placeholder={preset?.suggested_model}
+          spellCheck={false}
+        />
+      </Field>
+
+      <Field
+        label="Small model"
+        hint="Optional. A cheaper, faster model on the same provider for background work: session titles, context summaries, memory, and helper agents set to model: small (or haiku). Leave empty to use the main model."
+      >
+        <SectionInput
+          value={draft.smallModel}
+          onChange={(e) => setDraft((d) => ({ ...d, smallModel: e.target.value }))}
+          placeholder="e.g. a Haiku, mini or flash model"
           spellCheck={false}
         />
       </Field>

@@ -311,6 +311,25 @@ pub async fn maybe_compact(
     Ok(Some(count))
 }
 
+/// [`maybe_compact`] with `summarizer_model`, retried once on
+/// `session_model` if that fails and is a different (cheaper) model:
+/// one unknown to this provider, or rate-limited. History only changes
+/// when a summary comes back, so the retry starts from the same state.
+pub async fn compact_with_fallback(
+    history: &mut Vec<Message>,
+    provider: &dyn ChatProvider,
+    session_model: &str,
+    summarizer_model: &str,
+) -> Result<Option<usize>> {
+    match maybe_compact(history, provider, session_model, summarizer_model).await {
+        Err(e) if summarizer_model != session_model => {
+            tracing::warn!(error = %e, model = summarizer_model, "compaction failed; retrying on the main model");
+            maybe_compact(history, provider, session_model, session_model).await
+        }
+        r => r,
+    }
+}
+
 /// Render the compaction tail as plain text the summarizer can chew
 /// on. Structured fields (tool_calls, tool_call_ids) are flattened
 /// into readable prose — the summarizer describes what happened, it
@@ -506,6 +525,78 @@ mod tests {
         ];
         dedup_reads_for_path(&mut h, &cid("c2"), "read_file", "src/foo.rs");
         assert_eq!(h[3].content.as_deref().unwrap(), stub_content("src/foo.rs"));
+    }
+
+    /// Fails every request for `tiny`; summarizes for anything else.
+    struct PicksyProvider {
+        asked: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ChatProvider for PicksyProvider {
+        async fn stream(
+            &self,
+            r: mira_ai::ChatRequest,
+        ) -> std::result::Result<
+            futures::stream::BoxStream<
+                'static,
+                std::result::Result<mira_ai::ChatEvent, mira_ai::ProviderError>,
+            >,
+            mira_ai::ProviderError,
+        > {
+            use futures::StreamExt;
+            self.asked.lock().unwrap().push(r.model.clone());
+            if r.model == "tiny" {
+                return Err(mira_ai::ProviderError::Status {
+                    status: 404,
+                    body: "no such model".into(),
+                    retry_after: None,
+                });
+            }
+            let events = vec![
+                Ok(mira_ai::ChatEvent::TextDelta("summary".into())),
+                Ok(mira_ai::ChatEvent::Done(mira_ai::FinishReason::Stop)),
+            ];
+            Ok(futures::stream::iter(events).boxed())
+        }
+    }
+
+    fn long_history() -> Vec<Message> {
+        let mut h = vec![Message::system("s")];
+        for i in 0..(COMPACT_TRIGGER + 5) {
+            h.push(Message::user(format!("u{i}")));
+            h.push(Message::assistant(format!("a{i}")));
+        }
+        h
+    }
+
+    #[tokio::test]
+    async fn failed_small_summarizer_falls_back_to_the_main_model() {
+        let p = PicksyProvider {
+            asked: Default::default(),
+        };
+        let mut h = long_history();
+        let before = h.len();
+        let n = compact_with_fallback(&mut h, &p, "claude-opus-4-7", "tiny")
+            .await
+            .unwrap()
+            .expect("compacted");
+        assert!(n > 0 && h.len() < before);
+        assert_eq!(*p.asked.lock().unwrap(), ["tiny", "claude-opus-4-7"]);
+    }
+
+    #[tokio::test]
+    async fn main_model_failure_is_not_retried() {
+        let p = PicksyProvider {
+            asked: Default::default(),
+        };
+        let mut h = long_history();
+        let before = h.len();
+        assert!(compact_with_fallback(&mut h, &p, "tiny", "tiny")
+            .await
+            .is_err());
+        assert_eq!(h.len(), before, "history untouched on failure");
+        assert_eq!(p.asked.lock().unwrap().len(), 1);
     }
 
     #[test]

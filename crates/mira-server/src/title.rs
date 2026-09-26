@@ -24,10 +24,14 @@ const TITLE_CHAR_CAP: usize = 60;
 /// connected UIs refresh the sidebar row without waiting for the next
 /// `done`. Silent no-op if the session already has a title or lacks
 /// enough context.
+///
+/// `model` is the cheap model to try; `fallback` (the session's main
+/// model, when different) gets one retry if that call fails.
 pub fn spawn_if_needed(
     session: Session,
     provider: Arc<dyn ChatProvider>,
     model: String,
+    fallback: Option<String>,
     state: AppState,
 ) {
     tokio::spawn(async move {
@@ -55,7 +59,12 @@ pub fn spawn_if_needed(
             return;
         };
 
-        match generate(&*provider, &model, &user, &assistant).await {
+        let mut generated = generate(&*provider, &model, &user, &assistant).await;
+        if let (Err(e), Some(main)) = (&generated, &fallback) {
+            warn!(session = %session.id, error = %e, %model, "title: failed; retrying on the main model");
+            generated = generate(&*provider, main, &user, &assistant).await;
+        }
+        match generated {
             Ok(title) if !title.is_empty() => {
                 debug!(session = %session.id, %title, "title generated");
                 session.set_title(&title).await;

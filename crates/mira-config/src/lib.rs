@@ -36,6 +36,13 @@ pub struct MiraConfig {
     /// active model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compactor_model: Option<String>,
+    /// A cheap, fast model on the same provider for background work:
+    /// session titles, compaction summaries, memory extraction, and
+    /// subagents whose type asks for `model: small` (or Claude Code's
+    /// `haiku`). Each job's own setting (`compactor_model`,
+    /// `memory.extractor_model`) still wins. Unset = the main model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub small_model: Option<String>,
     pub providers: BTreeMap<String, ProviderConfig>,
     /// Named third-party API keys (search backends, docs services, …).
     /// Kept separate from `providers` because they aren't LLM providers —
@@ -583,6 +590,7 @@ impl MiraConfig {
         self.max_tokens = other.max_tokens.or(self.max_tokens);
         self.temperature = other.temperature.or(self.temperature);
         self.compactor_model = other.compactor_model.or(self.compactor_model);
+        self.small_model = other.small_model.or(self.small_model);
         for (name, provider) in other.providers {
             self.providers.insert(name, provider);
         }
@@ -1069,6 +1077,44 @@ mod tests {
         assert_eq!(
             pretty_provider_name("moonshotai"),
             pretty_provider_name("moonshot"),
+        );
+    }
+}
+
+/// Resolve a model name that may be a tier alias:
+///
+/// - `small`, `fast`, `haiku` → `small` (the `small_model` setting), or
+///   `main` when none is set;
+/// - `main`, `inherit`, `default`, `sonnet`, `opus` or empty → `main`;
+/// - anything else is a model id and is returned as is.
+///
+/// `haiku`/`sonnet`/`opus`/`inherit` are what Claude Code agent files
+/// use, so plugin agents keep their intent with any provider.
+pub fn resolve_model_alias(requested: &str, main: &str, small: Option<&str>) -> String {
+    let small = small.map(str::trim).filter(|s| !s.is_empty());
+    match requested.trim().to_ascii_lowercase().as_str() {
+        "small" | "fast" | "haiku" => small.unwrap_or(main).to_owned(),
+        "" | "main" | "inherit" | "default" | "sonnet" | "opus" => main.to_owned(),
+        _ => requested.trim().to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod model_alias_tests {
+    use super::resolve_model_alias as r;
+
+    #[test]
+    fn tier_aliases_resolve_to_small_or_main() {
+        assert_eq!(r("small", "big-1", Some("tiny-1")), "tiny-1");
+        assert_eq!(r("Haiku", "big-1", Some("tiny-1")), "tiny-1");
+        assert_eq!(r("fast", "big-1", None), "big-1");
+        assert_eq!(r("fast", "big-1", Some("  ")), "big-1");
+        assert_eq!(r("inherit", "big-1", Some("tiny-1")), "big-1");
+        assert_eq!(r("opus", "big-1", Some("tiny-1")), "big-1");
+        assert_eq!(r("", "big-1", Some("tiny-1")), "big-1");
+        assert_eq!(
+            r("openai/gpt-5-mini", "big-1", Some("tiny-1")),
+            "openai/gpt-5-mini"
         );
     }
 }

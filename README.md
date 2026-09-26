@@ -132,6 +132,22 @@ providers:
 
 `mira models` lists the models and inference profiles your account can use.
 
+**A small model for the small jobs.** Set `small_model` to a cheaper,
+faster model on the same provider, and Mira uses it for background
+work: session titles, context summaries and memory extraction. Agent
+types with `model: small` run on it too. Claude Code agent files that
+say `haiku` count as `small`, while `sonnet`, `opus` and `inherit` use
+your main model. If a call on the small model fails, it's retried once
+on the main one. Set it in **Settings → Provider** or:
+
+```yaml
+default_model: anthropic/claude-sonnet-4.5
+small_model: anthropic/claude-haiku-4.5
+```
+
+`compactor_model` and `memory.extractor_model` still override it for
+their own job, and `MIRA_SMALL_MODEL` overrides it for one run.
+
 Rate limits, overloads and dropped connections are retried with backoff
 (honouring `Retry-After`) instead of ending the turn;
 `MIRA_PROVIDER_RETRIES` sets how many times (default 4).
@@ -373,6 +389,7 @@ Adding a new subagent type is dropping a markdown file into
 - [x] GitHub: PR reviews and `@runmira-bot` tasks through Actions, connected without YAML
 - [x] Slack bot (`mira slack`)
 - [x] Retries for rate limits, overloads and dropped connections
+- [x] Model routing: a `small_model` for titles, summaries, memory and `model: small` agents
 - [ ] VS Code extension on the Marketplace and Open VSX
 - [ ] Scheduled prompts (the web UI's Scheduled view)
 - [ ] Command sandbox on Windows

@@ -176,6 +176,8 @@ pub struct AgentTool {
     /// Usually the parent's model at server-boot time. Overridable per
     /// call via the tool arg.
     default_model: String,
+    /// What `model: small` resolves to; `None` means the default model.
+    small_model: Option<String>,
     /// Same broadcast the harness → WS forwarder pumps into. AgentTool
     /// pushes `Subagent*` frames here so the parent's UI can render a
     /// live child transcript in the right-side panel. `None` means the
@@ -242,6 +244,7 @@ impl AgentTool {
             provider,
             base_registry,
             default_model,
+            small_model: None,
             events_tx: None,
             agents: Arc::new(AgentRegistry::default()),
             store: None,
@@ -274,6 +277,12 @@ impl AgentTool {
     /// child spawns can share the same immutable snapshot cheaply.
     pub fn with_agents(mut self, agents: Arc<AgentRegistry>) -> Self {
         self.agents = agents;
+        self
+    }
+
+    /// The cheap model that `model: small` (or `haiku`) resolves to.
+    pub fn with_small_model(mut self, model: Option<String>) -> Self {
+        self.small_model = model.filter(|m| !m.trim().is_empty());
         self
     }
 
@@ -656,7 +665,8 @@ impl Tool for AgentTool {
                 self.base_registry.clone(),
                 self.default_model.clone(),
             )
-            .with_agents(self.agents.clone());
+            .with_agents(self.agents.clone())
+            .with_small_model(self.small_model.clone());
             if let Some(tx) = &self.events_tx {
                 nested = nested.with_events_tx(tx.clone());
             }
@@ -844,10 +854,19 @@ impl Tool for AgentTool {
 
         // Compose the child session config. Precedence at each field:
         //   explicit arg → type default → tool default → hard fallback.
+        // `small` / `haiku` / `inherit`… become real model ids here, so a
+        // cheap agent type runs on the user's `small_model`.
         let model = args
             .model
             .filter(|s| !s.trim().is_empty())
             .or_else(|| type_def.and_then(|t| t.model.clone()))
+            .map(|m| {
+                mira_config::resolve_model_alias(
+                    &m,
+                    &self.default_model,
+                    self.small_model.as_deref(),
+                )
+            })
             .unwrap_or_else(|| self.default_model.clone());
         let mut cfg = SessionConfig::new(model.clone());
         cfg.max_rounds = args

@@ -69,6 +69,7 @@ pub struct AppState {
     /// Default model handed to AgentTool for subagent spawns when the call
     /// doesn't override it. Snapshotted from the initial session config.
     pub default_model_for_agents: String,
+    pub small_model_for_agents: Option<String>,
 }
 
 impl AppState {
@@ -194,6 +195,7 @@ impl AppState {
             memory_runtime: self.memory_runtime.clone(),
             scratchpads: self.scratchpads.clone(),
             default_model_for_agents: self.default_model_for_agents.clone(),
+            small_model_for_agents: self.small_model_for_agents.clone(),
             compute: self.compute.clone(),
             hooks: Some(self.extensions.hook_runner()),
         }

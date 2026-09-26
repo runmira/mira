@@ -301,6 +301,7 @@ pub async fn new_session(State(state): State<AppState>) -> Response {
         reasoning_effort: prev_cfg.reasoning_effort.clone(),
         response_format: prev_cfg.response_format.clone(),
         compactor_model: prev_cfg.compactor_model.clone(),
+        small_model: prev_cfg.small_model.clone(),
     };
     let deps = state.slot_deps();
     let slot = crate::slot::build_slot(cwd, cfg, None, &deps).await;
@@ -380,6 +381,7 @@ pub async fn delete_session(
                 reasoning_effort: prev_cfg.reasoning_effort.clone(),
                 response_format: prev_cfg.response_format.clone(),
                 compactor_model: prev_cfg.compactor_model.clone(),
+                small_model: prev_cfg.small_model.clone(),
             };
             let deps = state.slot_deps();
             let fresh = crate::slot::build_slot(cwd, cfg, None, &deps).await;
@@ -657,9 +659,13 @@ pub async fn regenerate_session_title(
     };
 
     let provider = state.harness_provider.clone();
-    let model = record.cfg.model.clone();
+    let model = record.cfg.background_model(None);
     info!(session = %id, %model, "regenerate title: calling extractor");
-    let title = match crate::title::generate(&*provider, &model, &user, &assistant).await {
+    let mut generated = crate::title::generate(&*provider, &model, &user, &assistant).await;
+    if generated.is_err() && model != record.cfg.model {
+        generated = crate::title::generate(&*provider, &record.cfg.model, &user, &assistant).await;
+    }
+    let title = match generated {
         Ok(t) if !t.is_empty() => t,
         Ok(_) => {
             let fallback = crate::title::heuristic_from_user_message(&user);

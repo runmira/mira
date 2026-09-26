@@ -103,6 +103,7 @@ pub async fn run(cli: &super::Cli, args: ServeArgs) -> Result<()> {
             .memory
             .extractor_model()
             .map(str::to_owned)
+            .or_else(|| resolved.as_ref().and_then(|s| s.small_model.clone()))
             .unwrap_or(fallback);
         builtin::register_consolidate(&mut registry, provider.clone(), consolidate_model);
     }
@@ -151,6 +152,7 @@ pub async fn run(cli: &super::Cli, args: ServeArgs) -> Result<()> {
     sess_cfg.max_tokens = resolved.as_ref().and_then(|s| s.max_tokens);
     sess_cfg.temperature = resolved.as_ref().and_then(|s| s.temperature);
     sess_cfg.compactor_model = resolved.as_ref().and_then(|s| s.compactor_model.clone());
+    sess_cfg.small_model = resolved.as_ref().and_then(|s| s.small_model.clone());
 
     let host: IpAddr = args
         .host
