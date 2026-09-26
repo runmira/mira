@@ -14,6 +14,7 @@ import {
   SidebarSimple,
   Sparkle,
   Target,
+  TerminalWindow,
 } from '@phosphor-icons/react';
 import { cn } from './lib/utils';
 import { connect, type WsClient, type WsStatus } from './ws';
@@ -42,6 +43,9 @@ import { AssistantContent } from './components/AssistantContent';
 import { ThoughtBlock } from './components/ThoughtBlock';
 import { ReviewChanges } from './components/ReviewChanges';
 import { ImageLightbox } from './components/ImageLightbox';
+import { TerminalPanel } from './components/TerminalPanel';
+
+const IS_MAC = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
 import { ToolCard, type ToolStatus } from './components/ToolCard';
 import { Thinking } from './components/Thinking';
 import {
@@ -547,6 +551,30 @@ export default function App() {
   const [sessionCommitted, setSessionCommitted] = useState(false);
   const [reviewOpen, setReviewOpen] = useState(false);
   const [lightbox, setLightbox] = useState<string | null>(null);
+  // Integrated terminal (bottom panel); open state is remembered.
+  const [terminalOpen, setTerminalOpen] = useState<boolean>(() => {
+    try { return localStorage.getItem('mira.terminal.open') === '1'; } catch { return false; }
+  });
+  const setTerminal = useCallback((v: boolean) => {
+    setTerminalOpen(v);
+    try { localStorage.setItem('mira.terminal.open', v ? '1' : '0'); } catch { /* private mode */ }
+  }, []);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const modJ = (IS_MAC ? e.metaKey : e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'j';
+      const ctrlBacktick = e.ctrlKey && !e.metaKey && !e.altKey && e.key === '`';
+      if (modJ || ctrlBacktick) {
+        e.preventDefault();
+        setTerminalOpen((v) => {
+          try { localStorage.setItem('mira.terminal.open', v ? '0' : '1'); } catch { /* private mode */ }
+          return !v;
+        });
+      }
+    };
+    // Capture phase: the shortcut must work while xterm has focus.
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, []);
   const ctxFits = useContextPanelFits();
   const [branchPr, setBranchPr] = useState<BranchPrView | null>(null);
   // Live task list — hydrated from `ready.tasks` on socket open and
@@ -1719,6 +1747,25 @@ export default function App() {
                   Work
                 </button>
               </div>
+              <div className="group relative">
+                <button
+                  type="button"
+                  onClick={() => setTerminal(!terminalOpen)}
+                  aria-label="Toggle terminal"
+                  aria-pressed={terminalOpen}
+                  className={cn(
+                    'flex size-8 items-center justify-center rounded-lg border transition-colors',
+                    terminalOpen
+                      ? 'border-border bg-secondary text-foreground'
+                      : 'border-transparent text-muted-foreground hover:bg-secondary hover:text-foreground',
+                  )}
+                >
+                  <TerminalWindow className="size-4" />
+                </button>
+                <span className="pointer-events-none absolute right-0 top-full z-30 mt-1.5 whitespace-nowrap rounded-md border border-border bg-popover px-2 py-1 text-[12px] text-foreground opacity-0 shadow-lg transition-opacity delay-300 group-hover:opacity-100">
+                  Toggle terminal <span className="ml-1.5 text-muted-foreground">{IS_MAC ? '⌘J' : 'Ctrl+J'}</span>
+                </span>
+              </div>
             </div>
 
             {/* Transcript — full width, panel floats above it */}
@@ -1897,6 +1944,7 @@ export default function App() {
               commands={commands}
             />
             </div>
+            {terminalOpen && <TerminalPanel onClose={() => setTerminal(false)} />}
           </>
         )}
 

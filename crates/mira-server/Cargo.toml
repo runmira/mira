@@ -44,6 +44,7 @@ anyhow       = { workspace = true }
 thiserror    = { workspace = true }
 tracing      = { workspace = true }
 uuid         = { workspace = true }
+portable-pty = "0.8"
 reqwest      = { workspace = true }
 # Filesystem watcher for skill hot-reload — picks up new / edited
 # SKILL.md files without the user clicking Reload.
