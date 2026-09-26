@@ -51,6 +51,7 @@ mod settings;
 mod skills;
 pub mod slot;
 mod state;
+mod terminal;
 mod title;
 mod undo;
 mod ws;
@@ -144,6 +145,7 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
 
     // Bind the listener up-front so the OAuth callback URL can embed the
     // real port before AppState is finalised.
+    terminal::configure(cfg.bind);
     let listener = TcpListener::bind(cfg.bind)
         .await
         .with_context(|| format!("bind {}", cfg.bind))?;
@@ -249,6 +251,9 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
 fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
     let mut router = Router::new()
         .route("/ws", get(ws::ws_handler))
+        .route("/ws/terminal", get(terminal::terminal_ws))
+        .route("/api/terminals", get(terminal::list))
+        .route("/api/terminals/:id", axum::routing::delete(terminal::kill))
         .route("/api/health", get(health))
         .route(
             "/api/settings",

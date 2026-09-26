@@ -2102,6 +2102,7 @@ dependencies = [
  "mira-tools",
  "notify",
  "once_cell",
+ "portable-pty",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
