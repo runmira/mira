@@ -40,6 +40,9 @@ use crate::config::MiraConfig;
 
 #[derive(Args, Debug, Clone)]
 pub struct EvalArgs {
+    #[command(subcommand)]
+    pub command: Option<EvalCommand>,
+
     /// Directory containing YAML task specs. Defaults to `evals/tasks`
     /// under the current working directory.
     #[arg(long)]
@@ -111,7 +114,17 @@ impl Approver for AutoApprover {
     }
 }
 
+/// Benchmarks beyond the local task files.
+#[derive(clap::Subcommand, Debug, Clone)]
+pub enum EvalCommand {
+    /// Run Mira on SWE-bench (real GitHub issues) and score the patches.
+    Swebench(crate::swebench::SwebenchArgs),
+}
+
 pub async fn run(cli: &crate::Cli, args: EvalArgs) -> Result<()> {
+    if let Some(EvalCommand::Swebench(a)) = args.command.clone() {
+        return crate::swebench::run(cli, a).await;
+    }
     let cwd = std::env::current_dir().context("read cwd")?;
     let cfg = MiraConfig::load(&cwd).context("load config")?;
     let settings = crate::resolve_settings(cli, &cfg)?;
@@ -256,40 +269,7 @@ async fn run_task_inner(
             .with_context(|| format!("copy fixture {}", src.display()))?;
     }
 
-    // Fresh sandbox + registry + policy pointing at the tempdir.
-    let sandbox = Arc::new(Sandbox::default_scrubbed());
-    let mut registry = Registry::new();
-    builtin::register_core(&mut registry);
-    let registry = Arc::new(registry);
-
-    let policy = Policy::from_config(&PolicyConfig {
-        mode: Mode::Yolo,
-        allow: Vec::new(),
-        ask: Vec::new(),
-        deny: Vec::new(),
-    })
-    .context("compile eval policy")?;
-    let policy = Arc::new(Mutex::new(policy));
-
-    let approver: Arc<dyn Approver> = Arc::new(AutoApprover);
-    let tool_ctx = ToolContext::new(work_dir.clone(), sandbox);
-
-    let mut sess_cfg = SessionConfig::new(settings.model.clone());
-    sess_cfg.max_tokens = settings.max_tokens;
-    sess_cfg.temperature = settings.temperature;
-    sess_cfg.compactor_model = settings.compactor_model.clone();
-    sess_cfg.small_model = settings.small_model.clone();
-
-    let session = Session::new(
-        sess_cfg,
-        mira_server::system_prompt(&work_dir, &registry),
-        provider,
-        registry,
-        policy,
-        approver,
-        tool_ctx,
-    );
-
+    let session = unattended_session(&work_dir, provider, settings, None)?;
     let turn = drive_turn(session, &spec.prompt);
     let (final_text, tokens_in, tokens_out) =
         match tokio::time::timeout(Duration::from_secs(timeout_secs), turn).await {
@@ -305,7 +285,54 @@ async fn run_task_inner(
     Ok((final_text, tokens_in, tokens_out, kept))
 }
 
-async fn drive_turn(session: Session, prompt: &str) -> Result<(String, u64, u64)> {
+/// A session working in `work_dir` with nobody to ask: core tools, yolo
+/// policy, every call approved, inside the usual command sandbox.
+pub(crate) fn unattended_session(
+    work_dir: &Path,
+    provider: Arc<dyn mira_ai::ChatProvider>,
+    settings: &crate::ResolvedSettings,
+    max_rounds: Option<usize>,
+) -> Result<Session> {
+    let sandbox = Arc::new(Sandbox::default_scrubbed());
+    let mut registry = Registry::new();
+    builtin::register_core(&mut registry);
+    let registry = Arc::new(registry);
+
+    let policy = Policy::from_config(&PolicyConfig {
+        mode: Mode::Yolo,
+        allow: Vec::new(),
+        ask: Vec::new(),
+        deny: Vec::new(),
+    })
+    .context("compile eval policy")?;
+    let policy = Arc::new(Mutex::new(policy));
+
+    let approver: Arc<dyn Approver> = Arc::new(AutoApprover);
+    let tool_ctx = ToolContext::new(work_dir.to_path_buf(), sandbox);
+
+    let mut sess_cfg = SessionConfig::new(settings.model.clone());
+    sess_cfg.max_tokens = settings.max_tokens;
+    sess_cfg.temperature = settings.temperature;
+    sess_cfg.compactor_model = settings.compactor_model.clone();
+    sess_cfg.small_model = settings.small_model.clone();
+    if let Some(n) = max_rounds {
+        sess_cfg.max_rounds = n.max(1);
+    }
+
+    Ok(Session::new(
+        sess_cfg,
+        mira_server::system_prompt(work_dir, &registry),
+        provider,
+        registry,
+        policy,
+        approver,
+        tool_ctx,
+    ))
+}
+
+/// Send `prompt` and wait for the turn: the last round's text, and
+/// input / output tokens.
+pub(crate) async fn drive_turn(session: Session, prompt: &str) -> Result<(String, u64, u64)> {
     let mut stream = session.send(prompt.to_owned()).await;
     let mut text = String::new();
     let mut tokens_in = 0u64;

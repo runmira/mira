@@ -20,6 +20,7 @@ mod review;
 mod sandbox;
 mod serve;
 mod slack;
+mod swebench;
 mod tui;
 
 // Entry point for the mira CLI binary.
@@ -201,7 +202,8 @@ async fn main() -> Result<()> {
     // Subcommand branch — every non-default command short-circuits
     // before we build the session, provider, and tools.
     if let Some(cmd) = cli.command.clone() {
-        init_tracing(false, false);
+        // Evals run many sessions; keep their per-round logs quiet.
+        init_tracing(false, matches!(cmd, Command::Eval(_)));
         return match cmd {
             Command::Init(args) => init::run(&cli, args).await,
             Command::Doctor(args) => doctor::run(&cli, args).await,
