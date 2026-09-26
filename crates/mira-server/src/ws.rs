@@ -172,9 +172,9 @@ async fn dispatch(
     let slot = attach.read().await.slot.clone();
 
     match cmd {
-        ClientMsg::Send { text } => {
-            debug!(len = text.len(), "ws: send");
-            spawn_turn(state.clone(), slot, text).await;
+        ClientMsg::Send { text, images } => {
+            debug!(len = text.len(), images = images.len(), "ws: send");
+            spawn_turn(state.clone(), slot, text, images).await;
         }
         ClientMsg::Resend {
             original,
@@ -182,8 +182,9 @@ async fn dispatch(
             text,
         } => {
             let sess = slot.session.read().await.clone();
-            if sess.rewind_to_user(&original, occurrence).await {
-                spawn_turn(state.clone(), slot, text).await;
+            if let Some(images) = sess.rewind_to_user(&original, occurrence).await {
+                // Edits keep the original message's images.
+                spawn_turn(state.clone(), slot, text, images).await;
             } else {
                 let _ = slot.events_tx.send(ServerMsg::Warning {
                     text: "can't edit that message — a turn is running, or it was \
@@ -333,7 +334,7 @@ async fn dispatch(
                  I'll keep looping automatically until an evaluator agrees \
                  the goal is met.",
             );
-            spawn_turn(state.clone(), slot.clone(), kickoff).await;
+            spawn_turn(state.clone(), slot.clone(), kickoff, Vec::new()).await;
         }
         ClientMsg::ClearGoal => {
             slot.session.read().await.clear_goal().await;
@@ -556,7 +557,12 @@ async fn persist_allow_rules(rules: &[String]) -> anyhow::Result<()> {
 /// Spawn a turn task on `slot`, storing its JoinHandle on the slot so
 /// Interrupt and delete_session can tear it down cleanly. Aborts any
 /// existing turn handle before starting the new one.
-async fn spawn_turn(state: AppState, slot: Arc<SessionSlot>, text: String) {
+async fn spawn_turn(
+    state: AppState,
+    slot: Arc<SessionSlot>,
+    text: String,
+    images: Vec<mira_core::ImageData>,
+) {
     // Tools would run against a half-moved tree mid-switch.
     if slot.environments.is_switching() {
         let _ = slot.events_tx.send(ServerMsg::Warning {
@@ -591,7 +597,7 @@ async fn spawn_turn(state: AppState, slot: Arc<SessionSlot>, text: String) {
     let state_for_task = state.clone();
     let handle = tokio::spawn(async move {
         let sess = slot_for_task.session.read().await.clone();
-        let mut stream = sess.send(text).await;
+        let mut stream = sess.send_with_images(text, images).await;
         while let Some(evt) = stream.next().await {
             let frame = ServerMsg::from_harness(evt);
             let _ = slot_for_task.events_tx.send(frame);

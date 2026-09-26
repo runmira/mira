@@ -38,7 +38,12 @@ pub enum ApprovalScope {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMsg {
     /// Start a new user turn.
-    Send { text: String },
+    Send {
+        text: String,
+        /// Pasted / dropped images for the model to see.
+        #[serde(default)]
+        images: Vec<mira_core::ImageData>,
+    },
     /// Edit & resend / retry: rewind to just before the `occurrence`-th
     /// most recent user message whose text is `original` (0 = latest),
     /// then start a new turn with `text`.

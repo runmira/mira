@@ -301,6 +301,11 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/api/models", get(models::list_models))
         .route("/api/git/status", get(git::get_status))
         .route("/api/git/session-diff", get(git::session_diff))
+        .route("/api/git/session-changes", get(git::session_changes))
+        .route(
+            "/api/git/revert-file",
+            axum::routing::post(git::revert_file),
+        )
         .route("/api/git/push", axum::routing::post(git::push))
         .route("/api/git/branch-pr", get(git::branch_pr))
         .route("/api/git/commit", axum::routing::post(git::commit))

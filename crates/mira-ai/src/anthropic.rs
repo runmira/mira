@@ -571,6 +571,9 @@ enum WireContentBlock<'a> {
     RedactedThinking {
         data: &'a str,
     },
+    Image {
+        source: WireImageSource<'a>,
+    },
     ToolUse {
         id: &'a str,
         name: &'a str,
@@ -606,6 +609,16 @@ struct WireImageSource<'a> {
     kind: &'static str,
     media_type: &'a str,
     data: &'a str,
+}
+
+impl<'a> WireImageSource<'a> {
+    fn new(img: &'a mira_core::ImageData) -> Self {
+        Self {
+            kind: "base64",
+            media_type: &img.media_type,
+            data: &img.data,
+        }
+    }
 }
 
 fn tool_result_content(msg: &Message) -> WireToolResultContent<'_> {
@@ -739,6 +752,9 @@ fn build_messages(
                         content.push(WireContentBlock::Text { text });
                     }
                 }
+                content.extend(msg.images.iter().map(|img| WireContentBlock::Image {
+                    source: WireImageSource::new(img),
+                }));
                 if content.is_empty() {
                     // Anthropic rejects empty content arrays; skip.
                     continue;
@@ -1280,6 +1296,15 @@ mod tests {
         let json = serde_json::to_value(&off[1].content).unwrap();
         assert_eq!(json.as_array().unwrap().len(), 1);
         assert_eq!(json[0]["type"], "text");
+    }
+
+    #[test]
+    fn user_images_follow_the_text() {
+        let msgs = vec![Message::user("look").with_images(vec![mira_core::ImageData::png("QUJD")])];
+        let json = serde_json::to_value(&build_messages(&msgs, false).unwrap()[0].content).unwrap();
+        assert_eq!(json[0]["type"], "text");
+        assert_eq!(json[1]["type"], "image");
+        assert_eq!(json[1]["source"]["data"], "QUJD");
     }
 
     // ----- streaming reassembly -----

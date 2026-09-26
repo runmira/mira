@@ -507,6 +507,27 @@ impl<'a> WireMessage<'a> {
         // which covers tools + system, the biggest static chunk of every turn.
         // A second system message (the harness's live memory block) is left
         // unmarked so its per-round churn doesn't invalidate the cache.
+        // A user turn with pasted images goes out as text + image parts.
+        if m.role == mira_core::Role::User && !m.images.is_empty() {
+            let mut parts = Vec::new();
+            if let Some(text) = m.content.as_deref().filter(|t| !t.is_empty()) {
+                parts.push(WirePart::Text {
+                    text: text.to_owned(),
+                });
+            }
+            parts.extend(m.images.iter().map(|img| WirePart::ImageUrl {
+                image_url: WireImageUrl {
+                    url: img.data_url(),
+                },
+            }));
+            return Self {
+                role: "user",
+                content: Some(WireContent::Parts(parts)),
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                name: None,
+            };
+        }
         let content = m.content.as_deref().map(|text| {
             if prompt_caching && is_first_system && !text.is_empty() {
                 WireContent::Blocks(vec![WireContentBlock {

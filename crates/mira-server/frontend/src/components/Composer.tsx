@@ -68,7 +68,7 @@ type Props = {
   usage: UsageTotals | null;
   /** The provider's latest rate-limit reading, when it reports one. */
   rateLimit?: RateLimitReading | null;
-  onSend: (text: string) => void;
+  onSend: (text: string, images?: ImageData[]) => void;
   onSetMode: (m: Mode) => void;
   onSetModel: (m: string) => void;
   /** Reasoning-effort setter. Pass `null` (or "off") to disable. */
@@ -133,6 +133,25 @@ export type PendingApproval = {
 };
 
 type Attachment = { path: string; content: string; bytes: number };
+/** An image the model will see: base64 without the `data:` prefix. */
+export type ImageData = { media_type: string; data: string };
+
+/** Longest edge sent to the model. Bigger screenshots are scaled down —
+ *  providers downscale anyway, and it keeps the payload small. */
+const IMAGE_MAX_EDGE = 1568;
+
+/** Read an image file, scaled down to IMAGE_MAX_EDGE, as base64. */
+async function readImage(file: File): Promise<ImageData> {
+  const bitmap = await createImageBitmap(file);
+  const scale = Math.min(1, IMAGE_MAX_EDGE / Math.max(bitmap.width, bitmap.height));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(bitmap.width * scale);
+  canvas.height = Math.round(bitmap.height * scale);
+  canvas.getContext('2d')!.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  const media_type = file.type === 'image/jpeg' ? 'image/jpeg' : 'image/png';
+  const url = canvas.toDataURL(media_type, 0.9);
+  return { media_type, data: url.slice(url.indexOf(',') + 1) };
+}
 
 /** Cap on how many bytes we'll inline from a single OS-picked file. Larger
  *  files still get a chip in the composer, but the inlined body is
@@ -149,6 +168,17 @@ export function Composer({
 }: Props) {
   const [text, setText] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [images, setImages] = useState<ImageData[]>([]);
+
+  async function addImages(files: File[]) {
+    setAttachError(null);
+    try {
+      const read = await Promise.all(files.map(readImage));
+      setImages((prev) => [...prev, ...read]);
+    } catch (e) {
+      setAttachError(`couldn't read image: ${(e as Error).message}`);
+    }
+  }
   const [attachError, setAttachError] = useState<string | null>(null);
   const [attachLoading, setAttachLoading] = useState(false);
   const [filePickerOpen, setFilePickerOpen] = useState(false);
@@ -337,6 +367,10 @@ export function Composer({
     setAttachError(null);
     setAttachLoading(true);
     try {
+      if (/^image\/(png|jpeg|gif|webp)$/.test(file.type)) {
+        await addImages([file]);
+        return;
+      }
       const isBinary = looksBinary(file);
       let content: string;
       if (isBinary || file.size > NATIVE_ATTACH_MAX_BYTES) {
@@ -372,7 +406,7 @@ export function Composer({
 
   function submit() {
     const trimmed = text.trim();
-    if ((!trimmed && attachments.length === 0) || disabled || busy) return;
+    if ((!trimmed && attachments.length === 0 && images.length === 0) || disabled || busy) return;
 
     // If the user typed a full `/foo bar` command and hit Enter, execute
     // the command instead of sending it as a chat message. Control
@@ -395,9 +429,10 @@ export function Composer({
     }
 
     const body = attachments.length > 0 ? renderAttachments(attachments, cwd) + '\n\n' + trimmed : trimmed;
-    onSend(body);
+    onSend(body, images.length > 0 ? images : undefined);
     updateText('');
     setAttachments([]);
+    setImages([]);
     setAttachError(null);
     setSlashFeedback(null);
   }
@@ -417,6 +452,14 @@ export function Composer({
       <form
         className="w-full max-w-3xl flex flex-col gap-1.5 rounded-[22px] border border-border bg-secondary/60 p-2.5"
         onSubmit={(e) => { e.preventDefault(); submit(); }}
+        onDragOver={(e) => {
+          if (e.dataTransfer.types.includes('Files')) e.preventDefault();
+        }}
+        onDrop={(e) => {
+          if (e.dataTransfer.files.length === 0) return;
+          e.preventDefault();
+          void attachNativeFiles(e.dataTransfer.files);
+        }}
       >
         {(planActive || goal || goalComposing) && (
           <div className="flex flex-wrap items-center gap-1.5 px-1.5 pt-0.5">
@@ -425,6 +468,28 @@ export function Composer({
               <GoalComposeChip onCancel={() => setGoalComposing(false)} />
             )}
             {goal && <GoalChip goal={goal} onClear={onClearGoal} />}
+          </div>
+        )}
+
+        {!activePromptKind && images.length > 0 && (
+          <div className="flex flex-wrap gap-2 px-1.5 pt-1">
+            {images.map((img, i) => (
+              <div key={i} className="group relative">
+                <img
+                  src={`data:${img.media_type};base64,${img.data}`}
+                  alt=""
+                  className="size-14 rounded-lg border border-border object-cover"
+                />
+                <button
+                  type="button"
+                  aria-label="Remove image"
+                  onClick={() => setImages((prev) => prev.filter((_, j) => j !== i))}
+                  className="absolute -right-1.5 -top-1.5 flex size-5 items-center justify-center rounded-full border border-border bg-background text-[11px] leading-none text-muted-foreground opacity-0 transition-opacity hover:text-foreground group-hover:opacity-100"
+                >
+                  ×
+                </button>
+              </div>
+            ))}
           </div>
         )}
 
@@ -481,6 +546,7 @@ export function Composer({
           <div className="relative">
             <MentionInput
               handleRef={mentionRef}
+              onPasteImages={(files) => void addImages(files)}
               value={text}
               onChange={(next) => { setText(next); setSlashFeedback(null); }}
               onKeyDown={(e) => {
@@ -624,7 +690,7 @@ export function Composer({
             ) : (
               <button
                 type="submit"
-                disabled={disabled || (!text.trim() && attachments.length === 0)}
+                disabled={disabled || (!text.trim() && attachments.length === 0 && images.length === 0)}
                 className="flex size-8 items-center justify-center rounded-full bg-foreground text-background transition-opacity hover:opacity-90 disabled:opacity-35"
                 title="Send"
                 aria-label="Send"

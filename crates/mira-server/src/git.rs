@@ -246,6 +246,112 @@ pub async fn session_diff(State(state): State<AppState>) -> Response {
     .into_response()
 }
 
+/// Session files that still differ from HEAD, relative to the cwd.
+async fn session_pending_paths(state: &AppState, cwd: &Path) -> Vec<String> {
+    let session = state.current_session().await;
+    let Some(guard) = session.file_guard() else {
+        return Vec::new();
+    };
+    let rel: Vec<String> = guard
+        .written_snapshot()
+        .await
+        .iter()
+        .filter_map(|p| p.strip_prefix(cwd).ok())
+        .map(|r| r.to_string_lossy().into_owned())
+        .collect();
+    if rel.is_empty() {
+        return Vec::new();
+    }
+    let mut args = vec!["status", "--porcelain=v1", "-uall", "--"];
+    args.extend(rel.iter().map(String::as_str));
+    run(cwd, &args)
+        .map(|out| {
+            out.lines()
+                .filter(|l| l.len() > 3)
+                .map(|l| l[3..].trim_matches('"').to_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// GET /api/git/session-changes
+/// Full unified diffs for every file this session changed that still
+/// differs from HEAD — the data behind the "Review changes" panel.
+pub async fn session_changes(State(state): State<AppState>) -> Response {
+    let cwd = state.current_cwd().await;
+    let mut files = Vec::new();
+    for path in session_pending_paths(&state, &cwd).await {
+        let tracked = run(&cwd, &["ls-files", "--error-unmatch", "--", &path]).is_ok();
+        let diff = if tracked {
+            run(&cwd, &["diff", "HEAD", "--", &path]).unwrap_or_default()
+        } else {
+            // `--no-index` exits 1 when the files differ, so read stdout
+            // directly instead of going through `run`.
+            Command::new("git")
+                .current_dir(&cwd)
+                .args(["diff", "--no-index", "--", "/dev/null", &path])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default()
+        };
+        let status = if !tracked {
+            "added"
+        } else if !cwd.join(&path).exists() {
+            "deleted"
+        } else {
+            "modified"
+        };
+        files.push(serde_json::json!({ "path": path, "status": status, "diff": diff }));
+    }
+    Json(serde_json::json!({ "files": files })).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct RevertFileRequest {
+    pub path: String,
+}
+
+/// POST /api/git/revert-file { path }
+/// Throw away this session's changes to one file: restore it from HEAD,
+/// or delete it if the session created it. Only files the session wrote
+/// are accepted.
+pub async fn revert_file(
+    State(state): State<AppState>,
+    Json(req): Json<RevertFileRequest>,
+) -> Response {
+    let cwd = state.current_cwd().await;
+    if !session_pending_paths(&state, &cwd)
+        .await
+        .contains(&req.path)
+    {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "not a file this session changed".into(),
+        );
+    }
+    let tracked = run(&cwd, &["ls-files", "--error-unmatch", "--", &req.path]).is_ok();
+    let result = if tracked {
+        run(
+            &cwd,
+            &[
+                "restore",
+                "--source=HEAD",
+                "--staged",
+                "--worktree",
+                "--",
+                &req.path,
+            ],
+        )
+        .map(|_| ())
+    } else {
+        std::fs::remove_file(cwd.join(&req.path))
+    };
+    match result {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
 /// Uncommitted state of a set of paths, from `git status --porcelain=v1`.
 #[derive(Debug, Default, PartialEq)]
 struct Pending {

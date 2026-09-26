@@ -37,6 +37,7 @@ import { SkillMentionText } from './components/SkillMention';
 import { FolderPicker } from './components/FolderPicker';
 import { AssistantContent } from './components/AssistantContent';
 import { ThoughtBlock } from './components/ThoughtBlock';
+import { ReviewChanges } from './components/ReviewChanges';
 import { ToolCard, type ToolStatus } from './components/ToolCard';
 import { Thinking } from './components/Thinking';
 import {
@@ -531,6 +532,7 @@ export default function App() {
   // The session committed through the panel, so any unpushed commits on
   // the branch are its own to push.
   const [sessionCommitted, setSessionCommitted] = useState(false);
+  const [reviewOpen, setReviewOpen] = useState(false);
   const ctxFits = useContextPanelFits();
   const [branchPr, setBranchPr] = useState<BranchPrView | null>(null);
   // Live task list — hydrated from `ready.tasks` on socket open and
@@ -1260,7 +1262,7 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, [firstPendingCallId]);
 
-  function onSend(text: string) {
+  function onSend(text: string, images?: { media_type: string; data: string }[]) {
     // Belt-and-suspenders — the composer isn't visible on non-chat views,
     // but a keyboard-driven send would still land the message and it should
     // pull the user back to the transcript.
@@ -1274,7 +1276,7 @@ export default function App() {
     setShowJump(false);
     const now = Date.now();
     setEntries((prev) => {
-      const next: Entry[] = [...prev, { kind: 'msg', msg: { role: 'user', content: text } }];
+      const next: Entry[] = [...prev, { kind: 'msg', msg: { role: 'user', content: text, images } }];
       const turnIndex = countUserMessages(next) - 1;
       setTurnTimings((tt) => {
         const clone = new Map(tt);
@@ -1285,7 +1287,7 @@ export default function App() {
     });
     setBusy(true);
     setThinking(true);
-    wsRef.current?.send({ type: 'send', text });
+    wsRef.current?.send({ type: 'send', text, images });
   }
 
   /** Edit & resend (or retry, with the same text) the user message at
@@ -1300,7 +1302,10 @@ export default function App() {
       .filter((e) => e.kind === 'msg' && e.msg.role === 'user' && e.msg.content === original).length;
     followRef.current = true;
     setShowJump(false);
-    const next: Entry[] = [...entries.slice(0, userIdx), { kind: 'msg', msg: { role: 'user', content: text } }];
+    const next: Entry[] = [
+      ...entries.slice(0, userIdx),
+      { kind: 'msg', msg: { role: 'user', content: text, images: target.msg.images } },
+    ];
     const turnIndex = countUserMessages(next) - 1;
     setEntries(next);
     setTurnTimings((tt) => {
@@ -1688,6 +1693,16 @@ export default function App() {
                 )}
               </div>
 
+              <ReviewChanges
+                open={reviewOpen}
+                onClose={() => setReviewOpen(false)}
+                onSendComments={(text) => onSend(text)}
+                onChanged={() => {
+                  getGitStatus().then(setGitStatus).catch(() => {});
+                  getSessionDiff().then(setSessionDiff).catch(() => {});
+                }}
+              />
+
               {showJump && (
                 <button
                   type="button"
@@ -1714,6 +1729,7 @@ export default function App() {
                   open={ctxOpen}
                   onOpenChange={onCtxOpenChange}
                   onOpenAgent={openAgentTab}
+                  onReview={() => setReviewOpen(true)}
                   onPush={async () => { await gitPush(); getGitStatus().then(setGitStatus).catch(() => {}); getBranchPr().then(setBranchPr).catch(() => {}); }}
                   onCommit={async (message, includeUnstaged, pushAfter) => {
                     await gitCommit({ message, include_unstaged: includeUnstaged, push_after: pushAfter });
@@ -2519,18 +2535,31 @@ function EntryView({
       const { role, content } = entry.msg;
       if (role === 'tool') return null;
       const body = (content ?? '').trim();
-      if (!body) return null;
+      if (!body && !entry.msg.images?.length) return null;
       if (role === 'user') {
         // Attachments live above the bubble as chips (Codex-style). The
         // model still sees the fenced content in the body — we just hide
         // that from the reader so the transcript stays scannable.
         const { attachments, text } = parseSentAttachments(content ?? '');
+        const images = entry.msg.images ?? [];
         return (
           <div className="flex flex-col items-end gap-1.5">
             {attachments.length > 0 && (
               <div className="flex max-w-[78%] flex-wrap justify-end gap-1.5">
                 {attachments.map((a, i) => (
                   <SentAttachmentChip key={`att-${i}-${a.filename}`} filename={a.filename} subtype={a.subtype} />
+                ))}
+              </div>
+            )}
+            {images.length > 0 && (
+              <div className="flex max-w-[78%] flex-wrap justify-end gap-1.5">
+                {images.map((img, i) => (
+                  <img
+                    key={i}
+                    src={`data:${img.media_type};base64,${img.data}`}
+                    alt="attached image"
+                    className="max-h-40 max-w-[240px] rounded-xl border border-border object-cover"
+                  />
                 ))}
               </div>
             )}
