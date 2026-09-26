@@ -704,6 +704,7 @@ async fn handle_harness_event(
             state.push_warning(w);
         }
         HarnessEvent::TurnComplete => {}
+        HarnessEvent::RateLimit(rl) => state.rate_limit = Some(rl),
         HarnessEvent::Usage { totals, .. } => {
             state.usage = totals;
             // Arm the pre-compaction warning card once fill crosses 80 %.

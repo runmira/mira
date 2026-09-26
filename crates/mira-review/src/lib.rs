@@ -403,7 +403,7 @@ async fn complete_messages(
         match ev.context("stream error")? {
             ChatEvent::TextDelta(t) => out.push_str(&t),
             ChatEvent::ToolCalls(_) => { /* review prompt has no tools */ }
-            ChatEvent::Usage(_) => { /* review has its own accounting; ignore */ }
+            ChatEvent::Usage(_) | ChatEvent::RateLimit(_) => {}
             ChatEvent::Done(_) => break,
         }
     }

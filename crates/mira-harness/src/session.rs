@@ -300,6 +300,9 @@ pub struct Session {
     /// Aggregate token usage. Folded in whenever the provider emits a usage
     /// trailer; persisted alongside the session.
     usage: Arc<Mutex<UsageTotals>>,
+    /// The provider's latest rate-limit reading (not persisted: it's
+    /// only true for a moment).
+    rate_limit: Arc<Mutex<Option<mira_ai::RateLimit>>>,
     created_at: u64,
 
     provider: Arc<dyn ChatProvider>,
@@ -457,6 +460,7 @@ impl Session {
             title: Arc::new(Mutex::new(None)),
             turns: Arc::new(Mutex::new(Vec::new())),
             usage: Arc::new(Mutex::new(UsageTotals::default())),
+            rate_limit: Arc::new(Mutex::new(None)),
             created_at: now_secs(),
             provider,
             registry: Arc::new(Mutex::new((*registry).clone())),
@@ -530,6 +534,7 @@ impl Session {
             title: Arc::new(Mutex::new(record.title)),
             turns: Arc::new(Mutex::new(record.turns)),
             usage: Arc::new(Mutex::new(record.usage)),
+            rate_limit: Arc::new(Mutex::new(None)),
             created_at: record.created_at,
             provider,
             registry: Arc::new(Mutex::new((*registry).clone())),
@@ -659,6 +664,12 @@ impl Session {
     /// this session so far.
     pub async fn usage(&self) -> UsageTotals {
         *self.usage.lock().await
+    }
+
+    /// The provider's rate limits as of the last response, if it reports
+    /// them.
+    pub async fn rate_limit(&self) -> Option<mira_ai::RateLimit> {
+        *self.rate_limit.lock().await
     }
 
     /// Non-deleted tasks in the session's todo list. UI reads this to
@@ -1274,6 +1285,10 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
                         }
                         Ok(ChatEvent::ToolCalls(calls)) => {
                             pending_calls = calls;
+                        }
+                        Ok(ChatEvent::RateLimit(rl)) => {
+                            *sess.rate_limit.lock().await = Some(rl);
+                            let _ = tx.send(HarnessEvent::RateLimit(rl)).await;
                         }
                         Ok(ChatEvent::Usage(round)) => {
                             let totals = {

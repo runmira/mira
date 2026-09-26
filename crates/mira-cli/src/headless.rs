@@ -135,6 +135,7 @@ pub async fn run(r: Run<'_>, prompt: &str) -> anyhow::Result<i32> {
     let mut turns = 0u32;
     let mut failure: Option<String> = None;
     let mut totals = UsageTotals::default();
+    let mut rate_limit: Option<mira_ai::RateLimit> = None;
 
     let mut events = r.session.send(prompt).await;
     while let Some(evt) = events.next().await {
@@ -175,6 +176,10 @@ pub async fn run(r: Run<'_>, prompt: &str) -> anyhow::Result<i32> {
                 out.warn(&w);
             }
             HarnessEvent::Usage { totals: t, .. } => totals = t,
+            HarnessEvent::RateLimit(rl) => {
+                out.event(json!({"type": "rate_limit", "rate_limit": rl, "summary": rl.summary()}));
+                rate_limit = Some(rl);
+            }
             HarnessEvent::Compacted { messages_removed } => {
                 out.event(json!({"type": "compacted", "messages_removed": messages_removed}));
             }
@@ -203,6 +208,7 @@ pub async fn run(r: Run<'_>, prompt: &str) -> anyhow::Result<i32> {
         },
         "total_cost_usd": mira_ai::cost_usd(r.model, totals.as_token_usage()),
         "permission_denials": denials,
+        "rate_limit": rate_limit,
     });
     out.finish(result, last_round.trim());
     Ok(if is_error { 1 } else { 0 })

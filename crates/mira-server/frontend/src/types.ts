@@ -193,6 +193,20 @@ export type UsageTotals = {
   rounds: number;
 };
 
+/** One provider limit: how much is left of how much, and when it refills. */
+export type RateLimitBucket = { limit?: number; remaining?: number; reset_secs?: number };
+
+/** The provider's rate limits after the latest request (from its headers). */
+export type RateLimit = {
+  requests?: RateLimitBucket;
+  tokens?: RateLimitBucket;
+  input_tokens?: RateLimitBucket;
+  output_tokens?: RateLimitBucket;
+};
+
+/** A reading plus the server's one-line summary, and when it arrived. */
+export type RateLimitReading = { rate_limit: RateLimit; summary: string | null; at: number };
+
 /** Per-session policy for how the approver answers `Ask` decisions when
  *  no client is currently attached. See slot.rs BackgroundMode for
  *  authoritative semantics. */
@@ -237,6 +251,7 @@ export type ServerMsg =
   | { type: 'session_background_idle'; session_id: string }
   | { type: 'session_background_running'; session_id: string }
   | { type: 'usage'; round: TokenUsage; totals: UsageTotals }
+  | { type: 'rate_limit'; rate_limit: RateLimit; summary: string | null }
   | { type: 'memory_learned'; count: number }
   | { type: 'compacted'; messages_removed: number }
   | { type: 'goal_set'; goal: Goal }

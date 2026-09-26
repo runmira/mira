@@ -170,9 +170,15 @@ impl ChatProvider for Anthropic {
             });
         }
 
+        let rate_limit = crate::RateLimit::from_headers(resp.headers());
         let (tx, rx) = mpsc::channel::<Result<ChatEvent, ProviderError>>(64);
 
         tokio::spawn(async move {
+            if let Some(rl) = rate_limit {
+                if tx.send(Ok(ChatEvent::RateLimit(rl))).await.is_err() {
+                    return;
+                }
+            }
             let mut sse = Box::pin(resp.bytes_stream().eventsource());
             let mut state = StreamState::default();
 

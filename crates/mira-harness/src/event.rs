@@ -50,6 +50,9 @@ pub enum HarnessEvent {
         /// Aggregate session totals (including `round`).
         totals: UsageTotals,
     },
+    /// The provider's rate limits after this round's request, from its
+    /// response headers. Only sent by providers that report them.
+    RateLimit(mira_ai::RateLimit),
     /// Post-round auto-extractor added N durable facts to the episodic
     /// store. Emitted as its own frame (rather than a `Warning`) so a UI
     /// can render it distinctly — a subtle "mira remembered N things"

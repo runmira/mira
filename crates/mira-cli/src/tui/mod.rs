@@ -428,6 +428,9 @@ async fn run_slash(
                 }
                 state.push_info(line);
             }
+            if let Some(summary) = state.rate_limit.as_ref().and_then(|r| r.summary()) {
+                state.push_info(format!("rate limit · {summary}"));
+            }
         }
 
         "/theme" => run_theme_slash(rest, state),
