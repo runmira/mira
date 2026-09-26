@@ -35,7 +35,9 @@ const MODEL_PRICES: [string, Price][] = [
 ];
 
 export function priceFor(model: string): Price | null {
-  const m = model.toLowerCase();
+  // Gateways like OpenRouter prefix the vendor (`anthropic/claude-…`);
+  // price on the model part, as pricing.rs does.
+  const m = model.toLowerCase().split('/').pop() ?? '';
   const hit = MODEL_PRICES.find(([prefix]) => m.startsWith(prefix));
   return hit ? hit[1] : null;
 }

@@ -48,6 +48,8 @@ import {
 export type { GithubReturn } from './Integrations';
 import { Markdown } from './Markdown';
 import { IntegrationsSection, type GithubReturn } from './Integrations';
+import { UsageSection } from './UsageSection';
+import { ChartColumn } from 'lucide-react';
 import { HooksSection } from './Hooks';
 import type {
   KeyUpdate,
@@ -169,7 +171,7 @@ const KEY_META: Record<string, { label: string; help: string; url?: string }> = 
   },
 };
 
-export type SettingsSectionId = 'provider' | 'preferences' | 'memory' | 'skills' | 'hooks' | 'search' | 'integrations' | 'about';
+export type SettingsSectionId = 'provider' | 'preferences' | 'usage' | 'memory' | 'skills' | 'hooks' | 'search' | 'integrations' | 'about';
 
 /** Section metadata exported so the Sidebar can render the same nav in
  *  its "settings mode" (the settings surface is now inline in the main
@@ -181,6 +183,7 @@ export const SETTINGS_SECTIONS: {
 }[] = [
   { id: 'provider',    label: 'Provider',    icon: Plug },
   { id: 'preferences', label: 'Preferences', icon: Sliders },
+  { id: 'usage',       label: 'Usage',       icon: ChartColumn },
   { id: 'memory',      label: 'Memory',      icon: Brain },
   { id: 'skills',      label: 'Skills',      icon: Sparkle },
   { id: 'hooks',       label: 'Hooks',       icon: Lightning },
@@ -420,6 +423,7 @@ export function SettingsSurface({
             <KeysSection view={view} draft={draft} setDraft={setDraft} />
           )}
           {view && section === 'hooks' && <HooksSection />}
+          {section === 'usage' && <UsageSection />}
           {view && section === 'integrations' && (
             <IntegrationsSection onOpenKeys={() => onSectionChange('search')} githubReturn={githubReturn} />
           )}

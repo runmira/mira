@@ -1008,7 +1008,7 @@ impl Session {
         // Open a new turn timer; `run_loop` stamps `ended_at` on the way out.
         self.turns.lock().await.push(TurnMeta {
             started_at: now_ms(),
-            ended_at: None,
+            ..Default::default()
         });
 
         let cfg = self.cfg.lock().await.clone();
@@ -1419,6 +1419,14 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
                                 u.add_round(round);
                                 *u
                             };
+                            // Per-turn usage, for per-day and per-model
+                            // breakdowns (the session total can't give those).
+                            if let Some(turn) = sess.turns.lock().await.last_mut() {
+                                turn.usage.add_round(round);
+                                if turn.model.is_none() {
+                                    turn.model = Some(cfg.model.clone());
+                                }
+                            }
                             // Ignore send errors — a dropped receiver just means the
                             // UI stopped listening; the totals are still recorded.
                             let _ = tx.send(HarnessEvent::Usage { round, totals }).await;
@@ -1620,7 +1628,7 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
                         .push(Message::user(format!("[Stop hook] Keep going: {reason}")));
                     sess.turns.lock().await.push(TurnMeta {
                         started_at: now_ms(),
-                        ended_at: None,
+                        ..Default::default()
                     });
                     continue 'goal_loop;
                 }
@@ -1794,7 +1802,7 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
         sess.history.lock().await.push(Message::user(synthetic));
         sess.turns.lock().await.push(TurnMeta {
             started_at: now_ms(),
-            ended_at: None,
+            ..Default::default()
         });
         // fall through — 'goal_loop iterates and the next round starts
     }
