@@ -302,6 +302,15 @@ keyboard. `mira --browser` lets it drive Chrome in a separate Mira
 profile. Both are off by default, and desktop input asks for approval
 even in `yolo`. See [docs/COMPUTER_USE.md](./docs/COMPUTER_USE.md).
 
+### Scripts and CI
+
+`mira -p "task"` runs one task without a UI and exits. Output is the
+answer, one JSON result, or a stream of JSON events
+(`--output-format text|json|stream-json`), and the exit code says whether
+it finished. Tools that would ask you are denied unless you allow them
+(`--allow "Bash(cargo test:*)"`, `--mode edit`). See
+[docs/headless.md](./docs/headless.md).
+
 ### GitHub and Slack
 
 - **GitHub:** Mira reviews every new pull request and works on `@runmira-bot`
@@ -390,6 +399,7 @@ Adding a new subagent type is dropping a markdown file into
 - [x] Slack bot (`mira slack`)
 - [x] Retries for rate limits, overloads and dropped connections
 - [x] Model routing: a `small_model` for titles, summaries, memory and `model: small` agents
+- [x] Headless mode for scripts and CI (`mira -p`, JSON and stream-JSON output)
 - [ ] VS Code extension on the Marketplace and Open VSX
 - [ ] Scheduled prompts (the web UI's Scheduled view)
 - [ ] Command sandbox on Windows
