@@ -309,6 +309,14 @@ keyboard. `mira --browser` lets it drive Chrome in a separate Mira
 profile. Both are off by default, and desktop input asks for approval
 even in `yolo`. See [docs/COMPUTER_USE.md](./docs/COMPUTER_USE.md).
 
+### Benchmarks
+
+`mira eval swebench --dataset verified --limit 50` runs Mira on
+SWE-bench, the standard coding-agent benchmark: real GitHub issues,
+checked by each project's hidden tests. `mira eval swebench score`
+scores the patches with the official harness (Python and Docker). See
+[docs/evals.md](./docs/evals.md).
+
 ### Scripts and CI
 
 `mira -p "task"` runs one task without a UI and exits. Output is the
@@ -409,6 +417,7 @@ Adding a new subagent type is dropping a markdown file into
 - [x] Model routing: a `small_model` for titles, summaries, memory and `model: small` agents
 - [x] Hooks: every Claude Code event Mira has a moment for (incl. SubagentStop, Notification, PreCompact, SessionEnd) and `prompt` hooks
 - [x] Headless mode for scripts and CI (`mira -p`, JSON and stream-JSON output)
+- [x] SWE-bench runner and scoring (`mira eval swebench`)
 - [ ] VS Code extension on the Marketplace and Open VSX
 - [ ] Scheduled prompts (the web UI's Scheduled view)
 - [ ] Command sandbox on Windows
