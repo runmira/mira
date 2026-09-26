@@ -1257,6 +1257,7 @@ fn subagent_wire(parent_call_id: &str, evt: &HarnessEvent) -> Option<ServerMsg> 
         }),
         HarnessEvent::Done => None, // Handled explicitly by caller.
         HarnessEvent::TurnComplete
+        | HarnessEvent::Reasoning(_)
         | HarnessEvent::Usage { .. }
         | HarnessEvent::RateLimit(_)
         | HarnessEvent::MemoryLearned { .. }

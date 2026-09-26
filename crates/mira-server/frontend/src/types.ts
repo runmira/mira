@@ -34,12 +34,21 @@ export type TaskItem = {
 
 export type Role = 'system' | 'user' | 'assistant' | 'tool';
 
+/** One block of model reasoning on an assistant message. `signature` /
+ *  `redacted` are provider replay data — only `text` is for display. */
+export type ReasoningBlock = {
+  text?: string;
+  signature?: string;
+  redacted?: string;
+};
+
 export type Message = {
   role: Role;
   content?: string | null;
   tool_calls?: ToolCall[];
   tool_call_id?: string | null;
   name?: string | null;
+  reasoning?: ReasoningBlock[];
 };
 
 export type DiffKind = 'edit' | 'overwrite' | 'create';
@@ -226,6 +235,7 @@ export type EnvironmentInfo = { name: string; backend: string; description: stri
 export type ServerMsg =
   | { type: 'ready'; session_id: string; model: string; mode: Mode; cwd: string; history: Message[]; turns?: TurnMeta[]; usage?: UsageTotals; tasks?: TaskItem[]; goal?: Goal | null; previews?: Record<string, DiffPreview> }
   | { type: 'token'; text: string }
+  | { type: 'reasoning'; text: string }
   | { type: 'tool_start'; call: ToolCall }
   | { type: 'tool_end'; result: ToolResult }
   | { type: 'turn_complete' }

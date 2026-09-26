@@ -948,6 +948,7 @@ mod tests {
             tool_call_id: None,
             name: None,
             images: vec![],
+            reasoning: vec![],
         }
     }
 

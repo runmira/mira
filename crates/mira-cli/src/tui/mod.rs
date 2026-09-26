@@ -116,6 +116,10 @@ pub(crate) const SLASH_COMMANDS: &[(&str, &str)] = &[
         "switch permission mode (plan|manual|auto|edit|yolo)",
     ),
     ("/model", "switch model for this session"),
+    (
+        "/effort",
+        "reasoning effort — how hard the model thinks (off|minimal|low|medium|high)",
+    ),
     ("/goal", "set / inspect / clear the standing goal"),
     ("/skills", "list loaded skills"),
     ("/skill", "show one skill in detail"),
@@ -335,7 +339,8 @@ async fn run_slash(
                  keys: @ file · / cmd · ctrl+r search · \
                  ctrl+y copy last reply · ctrl+e expand last tool · \
                  ctrl+w kill word · ctrl+↑↓ jump turns · ctrl+x drop paste · \
-                 ctrl+z undo write · ctrl+p retry last turn · 1-9 toggle tools",
+                 ctrl+z undo write · ctrl+p retry last turn · 1-9 toggle tools · \
+                 ctrl+t show/hide thinking",
             );
             // Also enumerate the mounted skill slashes — they change
             // per project, so hard-coding them in the line above would
@@ -355,6 +360,25 @@ async fn run_slash(
         }
 
         "/goal" => run_goal_slash(rest, state, session).await,
+
+        "/effort" => match rest.trim() {
+            "" => {
+                let cur = session.config().await.reasoning_effort;
+                state.push_info(format!(
+                    "reasoning effort: {} · /effort <off|minimal|low|medium|high> · \
+                     ctrl+t shows thinking in full",
+                    cur.as_deref().unwrap_or("off (model default)")
+                ));
+            }
+            e @ ("off" | "minimal" | "low" | "medium" | "high") => {
+                let effort = (e != "off").then(|| e.to_owned());
+                session.set_reasoning_effort(effort).await;
+                state.flash = Some(format!("reasoning effort → {e}"));
+            }
+            other => state.push_warning(format!(
+                "unknown effort `{other}` — use off|minimal|low|medium|high"
+            )),
+        },
 
         "/skills" => run_skills_slash(state, &cfg.skills).await,
 
@@ -1016,6 +1040,16 @@ fn run_save_slash(rest: &str, state: &mut state::TuiState, cwd: &std::path::Path
             state::LogEntry::Compacted { messages_removed } => {
                 out.push_str(&format!(
                     "_↺ context compacted · {messages_removed} messages summarized_\n\n"
+                ));
+            }
+            state::LogEntry::Thinking { text, elapsed, .. } => {
+                let summary = match elapsed {
+                    Some(d) => format!("Thought for {}s", d.as_secs()),
+                    None => "Thought".to_owned(),
+                };
+                out.push_str(&format!(
+                    "<details><summary>{summary}</summary>\n\n{}\n\n</details>\n\n",
+                    text.trim()
                 ));
             }
         }

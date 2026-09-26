@@ -125,7 +125,10 @@ pub async fn generate(
         match ev.map_err(|e| e.to_string())? {
             ChatEvent::TextDelta(t) => out.push_str(&t),
             ChatEvent::ToolCalls(_) => {}
-            ChatEvent::Usage(_) | ChatEvent::RateLimit(_) => {}
+            ChatEvent::Usage(_)
+            | ChatEvent::RateLimit(_)
+            | ChatEvent::ReasoningDelta(_)
+            | ChatEvent::Reasoning(_) => {}
             ChatEvent::Done(_) => break,
         }
     }

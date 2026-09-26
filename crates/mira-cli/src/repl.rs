@@ -52,6 +52,10 @@ pub async fn run(session: Session, skills: SkillHandle) -> Result<()> {
                     stdout.write_all(banner.as_bytes()).await?;
                     stdout.flush().await?;
                 }
+                HarnessEvent::Reasoning(_) => {
+                    // Thinking stays out of the plain REPL: its stdout is
+                    // often piped, and only the answer belongs there.
+                }
                 HarnessEvent::TurnComplete => {
                     // Between rounds within a single user turn — nothing to
                     // print, just a natural gap for the model to think.

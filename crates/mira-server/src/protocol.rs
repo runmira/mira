@@ -186,6 +186,11 @@ pub enum ServerMsg {
     },
     /// Fragment of assistant text.
     Token { text: String },
+    /// Fragment of the model's reasoning ("thinking"), streamed before
+    /// the text / tool calls it leads to. Clients render it in a
+    /// collapsible "Thinking" section; the finished blocks also ride on
+    /// the assistant message's `reasoning` field in session snapshots.
+    Reasoning { text: String },
     /// Tool call dispatched (already policy-approved).
     ToolStart { call: ToolCall },
     /// Tool call finished with a result.
@@ -470,6 +475,7 @@ impl ServerMsg {
     pub fn from_harness(evt: HarnessEvent) -> Self {
         match evt {
             HarnessEvent::Token(text) => Self::Token { text },
+            HarnessEvent::Reasoning(text) => Self::Reasoning { text },
             HarnessEvent::ToolStart(call) => Self::ToolStart { call },
             HarnessEvent::ToolEnd(result) => Self::ToolEnd { result },
             HarnessEvent::TurnComplete => Self::TurnComplete,

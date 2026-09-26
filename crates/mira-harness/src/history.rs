@@ -556,6 +556,7 @@ mod tests {
             tool_call_id: None,
             name: None,
             images: Vec::new(),
+            reasoning: Vec::new(),
         }
     }
 
@@ -574,6 +575,7 @@ mod tests {
             tool_call_id: None,
             name: None,
             images: Vec::new(),
+            reasoning: Vec::new(),
         }
     }
 

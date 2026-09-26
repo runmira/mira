@@ -194,6 +194,7 @@ pub(super) async fn event_loop(
     // Final emission: everything (drop the streaming cursor) so
     // scrollback ends with the complete transcript, then report the
     // viewport height for the exit cleanup in `leave`.
+    state.seal_thinking();
     state.streaming = false;
     let end = state.entries().len();
     let _ = emit_upto(term, &mut state, end);
@@ -576,6 +577,15 @@ async fn hydrate_from_history(session: &Session, state: &mut TuiState, cfg: &Tui
                 }
             }
             Role::Assistant => {
+                let thought: Vec<&str> = msg
+                    .reasoning
+                    .iter()
+                    .map(|b| b.text.trim())
+                    .filter(|t| !t.is_empty())
+                    .collect();
+                if !thought.is_empty() {
+                    state.push_thinking_replay(thought.join("\n\n"));
+                }
                 if let Some(c) = msg.content.as_deref() {
                     if !c.is_empty() {
                         state.push_assistant(c.to_owned());
@@ -628,6 +638,7 @@ pub(crate) fn interrupt_stream(
         None => "interrupted".to_owned(),
     };
     *agent_stream = None;
+    state.seal_thinking();
     state.streaming = false;
     state.stream_started_at = None;
     state.clear_tool_tail();
@@ -649,8 +660,33 @@ async fn handle_harness_event(
     md_dot_emitted: &mut bool,
 ) {
     match evt {
+        HarnessEvent::Reasoning(t) => {
+            // Text streamed before this thinking (interleaved thinking)
+            // may still sit half a line deep in the markdown parser —
+            // flush it so it lands in scrollback above the section.
+            if matches!(state.entries().last(), Some(LogEntry::Assistant(_))) {
+                let tail_lines = md_stream.flush();
+                if !tail_lines.is_empty() {
+                    let out = if !*md_dot_emitted {
+                        *md_dot_emitted = true;
+                        crate::tui::components::message::prefix_assistant_dot(tail_lines)
+                    } else {
+                        tail_lines
+                    };
+                    let _ = push_lines_to_scrollback(term, out);
+                }
+            }
+            state.append_reasoning(&t);
+        }
         HarnessEvent::Token(t) => {
             state.append_token(&t);
+            // Settle everything before this reply — the sealed thinking
+            // section, a finished tool run — so it lands in scrollback
+            // above the lines streamed below, not after them.
+            let reply_idx = state.entries().len() - 1;
+            if !state.streamed_assistant_idx.contains(&reply_idx) {
+                let _ = emit_upto(term, state, reply_idx);
+            }
             // Push every line the parser can now finalise straight into
             // real terminal scrollback. The assistant's log entry still
             // grows for search / turn-nav / history, but we mark its
@@ -799,6 +835,7 @@ async fn handle_harness_event(
             // skip the harness-side preview to avoid double rendering.
         }
         HarnessEvent::Done => {
+            state.seal_thinking();
             // Flush any partial trailing line + open table / unclosed
             // fence in the streaming parser so the reply ends cleanly
             // in scrollback before the turn receipt lands.

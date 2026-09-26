@@ -1,4 +1,4 @@
-use mira_core::{ToolCall, ToolCallId};
+use mira_core::{ReasoningBlock, ToolCall, ToolCallId};
 use serde::{Deserialize, Serialize};
 
 /// Provider-agnostic stream event emitted during a single model turn.
@@ -13,6 +13,15 @@ pub enum ChatEvent {
     /// first, when the provider reports any.
     RateLimit(crate::RateLimit),
     TextDelta(String),
+    /// A fragment of the model's reasoning ("extended thinking"), streamed
+    /// before or between text / tool calls. Display-only: a consumer that
+    /// just wants the answer can ignore it.
+    ReasoningDelta(String),
+    /// The turn's complete reasoning blocks, emitted once after the stream
+    /// ends (before `ToolCalls`). Carries what `ReasoningDelta` can't — the
+    /// provider's signatures and redacted payloads — so the harness can
+    /// store them on the assistant message for replay.
+    Reasoning(Vec<ReasoningBlock>),
     /// One or more tool calls have finished streaming and can be dispatched.
     ///
     /// Providers stream tool call arguments token-by-token; the client is

@@ -139,6 +139,17 @@ const MAX_ENTRIES: usize = 500;
 pub enum LogEntry {
     User(String),
     Assistant(String),
+    /// The model's reasoning ahead of a reply or tool call. Held in the
+    /// pane (live peek) while `live`; sealed — and so free to settle into
+    /// scrollback — the moment anything else arrives.
+    Thinking {
+        text: String,
+        started_at: Instant,
+        /// Total thinking time, set when sealed. `None` while live, and
+        /// for thinking replayed from a resumed session.
+        elapsed: Option<std::time::Duration>,
+        live: bool,
+    },
     /// Turn-end marker: rendered under the assistant reply as
     /// `✳ Baked for 12.4s`. Pushed once per `HarnessEvent::Done`, so
     /// the transcript grows a visual full-stop after every reply — a
@@ -375,6 +386,9 @@ pub struct TuiState {
     /// held on a background process card.
     pub bg_output_lines: std::collections::HashMap<String, Vec<String>>,
     pub streaming: bool,
+    /// Render thinking sections in full rather than as a one-line
+    /// "✻ Thought for 4s" header. Toggled with ctrl+t.
+    pub show_thinking: bool,
     /// Indices of `LogEntry::Assistant` entries whose text was streamed
     /// line-by-line into real terminal scrollback via `MarkdownStream`
     /// while it was being produced. Those blocks are skipped when
@@ -651,6 +665,7 @@ impl TuiState {
             tool_tail: None,
             bg_output_lines: std::collections::HashMap::new(),
             streaming: false,
+            show_thinking: false,
             streamed_assistant_idx: std::collections::HashSet::new(),
             pending_approvals: VecDeque::new(),
             approval_focus: 0,
@@ -1091,6 +1106,13 @@ impl TuiState {
             return n;
         }
         let tail_idx = n - 1;
+        // Case 0: live thinking tail — the pane shows it until it seals.
+        if matches!(
+            self.entries.last(),
+            Some(LogEntry::Thinking { live: true, .. })
+        ) {
+            return tail_idx;
+        }
         // Case 1: streaming assistant tail.
         if matches!(self.entries.last(), Some(LogEntry::Assistant(_)))
             && self.streamed_assistant_idx.contains(&tail_idx)
@@ -1228,7 +1250,56 @@ impl TuiState {
 
     /// Append a streamed assistant token onto the tail assistant entry —
     /// or start a new one if the previous entry was something else.
+    /// Append a reasoning fragment to the live thinking entry, opening
+    /// one if the model just started thinking.
+    pub fn append_reasoning(&mut self, t: &str) {
+        if let Some(LogEntry::Thinking {
+            text, live: true, ..
+        }) = self.entries.last_mut()
+        {
+            text.push_str(t);
+        } else {
+            self.entries.push(LogEntry::Thinking {
+                text: t.to_owned(),
+                started_at: Instant::now(),
+                elapsed: None,
+                live: true,
+            });
+            self.enforce_cap();
+        }
+    }
+
+    /// Close the live thinking entry, if any, stamping how long it ran.
+    /// Called whenever the model moves on (text, a tool call, turn end,
+    /// interrupt) so the section can settle into scrollback.
+    pub fn seal_thinking(&mut self) {
+        if let Some(LogEntry::Thinking {
+            started_at,
+            elapsed,
+            live,
+            ..
+        }) = self.entries.last_mut()
+        {
+            if *live {
+                *live = false;
+                *elapsed = Some(started_at.elapsed());
+            }
+        }
+    }
+
+    /// Thinking from a resumed session's history — already settled.
+    pub fn push_thinking_replay(&mut self, text: String) {
+        self.entries.push(LogEntry::Thinking {
+            text,
+            started_at: Instant::now(),
+            elapsed: None,
+            live: false,
+        });
+        self.enforce_cap();
+    }
+
     pub fn append_token(&mut self, t: &str) {
+        self.seal_thinking();
         if let Some(LogEntry::Assistant(buf)) = self.entries.last_mut() {
             buf.push_str(t);
         } else {
@@ -1238,6 +1309,7 @@ impl TuiState {
     }
 
     pub fn push_tool_call(&mut self, call: &ToolCall) {
+        self.seal_thinking();
         self.entries.push(LogEntry::ToolCall {
             name: call.function.name.clone(),
             args: call.function.arguments.clone(),
@@ -1486,6 +1558,9 @@ impl TuiState {
                 }
                 LogEntry::Compacted { messages_removed } => {
                     out.push_str(&format!("[compacted {messages_removed} messages]\n\n"));
+                }
+                LogEntry::Thinking { text, .. } => {
+                    out.push_str(&format!("[thinking] {}\n\n", text.trim()));
                 }
             }
         }
@@ -2342,6 +2417,7 @@ fn entry_text(e: &LogEntry) -> String {
         LogEntry::Compacted { messages_removed } => {
             format!("context compacted {messages_removed} messages")
         }
+        LogEntry::Thinking { text, .. } => text.clone(),
     }
 }
 
