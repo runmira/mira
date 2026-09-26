@@ -310,6 +310,42 @@
   line-height: 1.6;
 }
 .md-code code { background: transparent; color: inherit; padding: 0; }
+/* hljs's `pre code.hljs { padding: 1em }` would push code below the line-number gutter. */
+.md-code pre code.hljs { padding: 0; }
+.md-code-body {
+  position: relative;
+  display: flex;
+  overflow: hidden;
+  font-size: 13px;
+}
+.md-code-body pre { flex: 1; min-width: 0; }
+.md-code-gutter {
+  flex-shrink: 0;
+  padding: 0.9rem 0 0.9rem 0.8rem;
+  text-align: right;
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+  line-height: 1.6;
+  color: hsl(var(--muted-foreground) / 0.45);
+  user-select: none;
+}
+.md-code-gutter + pre { padding-left: 0.9rem; }
+.md-code-collapsed::after {
+  content: '';
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 3rem;
+  background: linear-gradient(to bottom, transparent, #282c34);
+  pointer-events: none;
+}
+.md-code-more {
+  display: block;
+  width: 100%;
+  padding: 0.4rem;
+  font-size: 12px;
+  color: hsl(var(--muted-foreground));
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+.md-code-more:hover { color: hsl(var(--foreground)); }
 
 /* ================================================================
    Diff (used inside tool cards for edit_file / write_file previews)
