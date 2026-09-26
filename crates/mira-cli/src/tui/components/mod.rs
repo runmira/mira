@@ -504,17 +504,24 @@ pub fn render_block(
         TranscriptBlock::Warning(s) => message::warning_lines(s),
         TranscriptBlock::Info(s) => message::info_lines(s),
         TranscriptBlock::Compacted(n) => {
-            let msg = if *n == 1 {
-                "↺ Context compacted · 1 message summarized".to_owned()
-            } else {
-                format!("↺ Context compacted · {n} messages summarized")
+            // A rule across the transcript: everything above is still
+            // here to read, but the model now works from a summary.
+            let label = match *n {
+                0 => " Conversation compacted ".to_owned(),
+                1 => " Conversation compacted · 1 earlier message summarized ".to_owned(),
+                n => format!(" Conversation compacted · {n} earlier messages summarized "),
             };
-            vec![Line::from(Span::styled(
-                format!("  {msg}"),
-                Style::default()
-                    .fg(Color::Rgb(180, 130, 60))
-                    .add_modifier(Modifier::ITALIC),
-            ))]
+            let total = (width as usize).clamp(label.chars().count() + 8, 100);
+            let side = total.saturating_sub(label.chars().count() + 2) / 2;
+            let rule = "─".repeat(side);
+            vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    format!("  {rule}{label}{rule}"),
+                    Style::default().fg(Color::DarkGray),
+                )),
+                Line::from(""),
+            ]
         }
         TranscriptBlock::Approval(v) => approval::render(v, width),
         TranscriptBlock::Tasks(v) => tasks::render(v),

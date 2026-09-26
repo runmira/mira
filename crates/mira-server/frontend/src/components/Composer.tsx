@@ -94,6 +94,8 @@ type Props = {
   onSetGoal: (condition: string, maxIterations?: number) => void;
   /** Drop the standing goal (if any). */
   onClearGoal: () => void;
+  /** `/compact [focus]`: summarize the conversation now. */
+  onCompact: (focus: string) => void;
   /** Session's standing `/goal`, if any. Renders a purple chip at the
    *  top of the composer while active — mirrors the Plan chip pattern
    *  so users know autonomy is on. */
@@ -141,7 +143,7 @@ const NATIVE_ATTACH_MAX_BYTES = 256 * 1024;
 export function Composer({
   disabled, busy, mode, model, providerName, cwd, usage, rateLimit,
   environment, environments, envSwitching, onSwitchEnvironment,
-  onSend, onSetMode, onSetModel, onSetEffort, onOpenPicker, onCwdSwitched, onInterrupt, onNewChat, onOpenSettings, onRunReview, onSetGoal, onClearGoal, goal, onRemember, onUndo,
+  onSend, onSetMode, onSetModel, onSetEffort, onOpenPicker, onCwdSwitched, onInterrupt, onNewChat, onOpenSettings, onRunReview, onSetGoal, onClearGoal, onCompact, goal, onRemember, onUndo,
   skills, commands,
   pendingApproval, pendingPlan, pendingAskUser, onDecide, onPlanReply, onAskUserReply,
 }: Props) {
@@ -234,6 +236,7 @@ export function Composer({
       onRunReview,
       onSetGoal,
       onClearGoal,
+      onCompact,
       onEnterGoalCompose: () => setGoalComposing(true),
       onRemember,
       onUndo,
@@ -249,7 +252,7 @@ export function Composer({
         mentionRef.current?.insertMention(name);
       },
     }),
-    [onNewChat, onSetMode, onSetModel, onOpenPicker, onOpenSettings, onRunReview, onSetGoal, onClearGoal, onRemember, onUndo, onSend],
+    [onNewChat, onSetMode, onSetModel, onOpenPicker, onOpenSettings, onRunReview, onSetGoal, onClearGoal, onCompact, onRemember, onUndo, onSend],
   );
 
   function executeCommand(cmd: SlashCommand, args: string) {

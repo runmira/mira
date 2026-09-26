@@ -138,7 +138,9 @@ async fn build_ready(slot: &SessionSlot, state: &AppState) -> ServerMsg {
     let sess = slot.session.read().await.clone();
     let cfg = sess.config().await;
     let mode = state.policy.lock().await.mode();
-    let history = sess.history().await;
+    // Everything, including what compaction summarized (shown behind a
+    // divider); the model itself only sees `history()`.
+    let history = sess.transcript().await;
     let turns = sess.turns().await;
     let usage = sess.usage().await;
     let tasks = sess.tasks().await;
@@ -319,6 +321,21 @@ async fn dispatch(
         ClientMsg::ClearGoal => {
             slot.session.read().await.clear_goal().await;
             let _ = slot.events_tx.send(ServerMsg::GoalCleared);
+        }
+        ClientMsg::Compact { focus } => {
+            let sess = slot.session.read().await.clone();
+            let tx = slot.events_tx.clone();
+            tokio::spawn(async move {
+                let msg = match sess.compact_now(focus.as_deref()).await {
+                    Ok(n) => ServerMsg::Compacted {
+                        messages_removed: n,
+                    },
+                    Err(e) => ServerMsg::Error {
+                        text: format!("couldn't compact: {e}"),
+                    },
+                };
+                let _ = tx.send(msg);
+            });
         }
         ClientMsg::Sync => {
             let ready = build_ready(&slot, state).await;

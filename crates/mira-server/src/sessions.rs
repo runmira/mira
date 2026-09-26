@@ -403,7 +403,9 @@ async fn build_ready_for_slot(slot: &crate::slot::SessionSlot, state: &AppState)
     let sess = slot.session.read().await.clone();
     let cfg = sess.config().await;
     let mode = state.policy.lock().await.mode();
-    let history = sess.history().await;
+    // Everything, including what compaction summarized (shown behind a
+    // divider); the model itself only sees `history()`.
+    let history = sess.transcript().await;
     let turns = sess.turns().await;
     let usage = sess.usage().await;
     let tasks = sess.tasks().await;
@@ -428,12 +430,7 @@ fn summarize_record(
     active_id: &str,
     live_meta: &std::collections::HashMap<String, LiveMeta>,
 ) -> SessionSummary {
-    let first = r
-        .messages
-        .iter()
-        .find(|m| m.role == Role::User)
-        .and_then(|m| m.content.clone())
-        .map(|s| truncate(&s, FIRST_MSG_TRUNC));
+    let first = r.first_user_message().map(|s| truncate(s, FIRST_MSG_TRUNC));
     let id = r.id.to_string();
     let (worktree_status, worktree_branch) = detect_worktree_status(&r.cwd);
     let live = live_meta.get(&id);
@@ -443,7 +440,7 @@ fn summarize_record(
         cwd: r.cwd.display().to_string(),
         created_at: r.created_at,
         updated_at: r.updated_at,
-        message_count: r.messages.iter().filter(|m| m.role != Role::System).count(),
+        message_count: r.conversation().count(),
         title: r.title.clone(),
         first_user_message: first,
         active: id == active_id,
@@ -634,14 +631,9 @@ pub async fn regenerate_session_title(
         Err(e) => return err(StatusCode::NOT_FOUND, format!("load: {e}")),
     };
 
-    let user_msg = record
-        .messages
-        .iter()
-        .find(|m| m.role == Role::User)
-        .and_then(|m| m.content.clone());
+    let user_msg = record.first_user_message().map(str::to_owned);
     let assistant_msg = record
-        .messages
-        .iter()
+        .conversation()
         .find(|m| {
             m.role == Role::Assistant
                 && m.content

@@ -216,8 +216,9 @@ async fn compaction_fires_pre_compact_first() {
     let hooks = Arc::new(Recorder::default());
     // A resumed session long enough to be compacted on the next turn.
     let mut messages = vec![Message::system("sys")];
+    // ~180k tokens: past 80% of a 200k window.
     for i in 0..70 {
-        messages.push(Message::user(format!("u{i}")));
+        messages.push(Message::user(format!("u{i} {}", "x".repeat(10_000))));
         messages.push(Message::assistant(format!("a{i}")));
     }
     let record: SessionRecord = serde_json::from_value(json!({
@@ -254,6 +255,33 @@ async fn compaction_fires_pre_compact_first() {
     assert!(events
         .iter()
         .any(|e| matches!(e, HarnessEvent::Compacted { .. })));
+    // The model now sees system + summary + the new turn; the transcript
+    // still has every earlier message, then the summary as a divider.
+    let history = sess.history().await;
+    assert!(
+        mira_harness::history::is_summary(&history[1]),
+        "{:?}",
+        history[1].role
+    );
+    let transcript = sess.transcript().await;
+    let summaries: Vec<usize> = transcript
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| mira_harness::history::is_summary(m))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        summaries,
+        [141],
+        "one divider, after the 140 earlier messages"
+    );
+    assert_eq!(
+        transcript[1]
+            .content
+            .as_deref()
+            .map(|c| c.starts_with("u0 ")),
+        Some(true)
+    );
     let (target, input) = hooks.find(HookEvent::PreCompact).expect("PreCompact ran");
     assert_eq!(target, "auto");
     assert_eq!(input["trigger"], "auto");

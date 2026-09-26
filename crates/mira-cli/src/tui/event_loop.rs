@@ -164,6 +164,7 @@ pub(super) async fn event_loop(
                 match update {
                     super::EnvUpdate::Info(m) => state.push_info(m),
                     super::EnvUpdate::Warning(m) => state.push_warning(m),
+                    super::EnvUpdate::Compacted(n) => state.push_compacted(n),
                 }
                 state.follow_tail = true;
                 schedule_frame(&mut next_frame, last_draw);
@@ -504,7 +505,9 @@ async fn hydrate_from_history(session: &Session, state: &mut TuiState, cfg: &Tui
     // the goal is the first thing on screen when it matters.
     state.goal = session.goal().await;
 
-    let history = session.history().await;
+    // Everything, including what compaction summarized; its summary
+    // shows as a divider.
+    let history = session.transcript().await;
     // Only count non-system messages when deciding whether to announce
     // "resumed"; a fresh session has just the system prompt.
     let visible_count = history.iter().filter(|m| m.role != Role::System).count();
@@ -564,6 +567,9 @@ async fn hydrate_from_history(session: &Session, state: &mut TuiState, cfg: &Tui
     for msg in history {
         match msg.role {
             Role::System => {}
+            Role::User if mira_harness::history::is_summary(&msg) => {
+                state.push_compacted(0);
+            }
             Role::User => {
                 if let Some(c) = msg.content {
                     state.push_user(c);

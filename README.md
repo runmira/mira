@@ -234,6 +234,19 @@ comments, submit a review, or merge — through the web UI's Pull Requests
 tab. Powered by the GitHub REST API; token is stored alongside your
 other keys in `mira.yaml`.
 
+### Long sessions
+
+Mira keeps a long conversation inside the model's context window. From
+half full, old tool results (big file reads,
+command output) are cleared from what's sent to the model. Near full
+(80%), the whole conversation is summarized into a structured memory
+(requests, files, errors and fixes, pending and current work), and the
+files it was working on are re-read. Nothing disappears from your
+screen: a "Conversation compacted" line marks where it happened, and the
+web app can show the summary. Run `/compact [what to keep]` yourself at
+a natural break. `MIRA_CONTEXT_WINDOW` sets the window for models Mira
+doesn't know.
+
 ### Plan / Undo / Verify
 
 - `/plan` — model proposes a step list; you edit / reorder / approve /

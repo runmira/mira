@@ -302,6 +302,7 @@ export type ClientMsg =
   | { type: 'interrupt' }
   | { type: 'set_goal'; condition: string; max_iterations?: number | null; evaluator_model?: string | null }
   | { type: 'clear_goal' }
+  | { type: 'compact'; focus?: string | null }
   | { type: 'sync' }
   /** Switch which session this WS is watching. Server updates its
    *  per-connection attached_id, swaps the forwarder's subscription,
