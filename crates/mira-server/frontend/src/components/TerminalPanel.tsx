@@ -1,9 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Plus, TerminalWindow, X } from '@phosphor-icons/react';
+import { Bot, Plus, SquareTerminal, X } from 'lucide-react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { cn } from '@/lib/utils';
+import * as agentTerminal from '../lib/agentTerminal';
+
+/** The pinned, read-only tab that mirrors the agent's shell commands. */
+const AGENT_TAB = 'agent';
 
 /**
  * Bottom terminal panel: real shells (a PTY on the server) in the
@@ -35,6 +39,16 @@ export function TerminalPanel({ onClose }: { onClose: () => void }) {
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [active, setActive] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [agentUnseen, setAgentUnseen] = useState(false);
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  useEffect(
+    () =>
+      agentTerminal.subscribe(() => {
+        if (activeRef.current !== AGENT_TAB) setAgentUnseen(true);
+      }),
+    [],
+  );
   const [height, setHeight] = useState(() => {
     const h = Number(localStorage.getItem(HEIGHT_KEY));
     return Number.isFinite(h) && h >= 120 ? h : 280;
@@ -78,8 +92,7 @@ export function TerminalPanel({ onClose }: { onClose: () => void }) {
     if (tab.id) void fetch(`/api/terminals/${tab.id}`, { method: 'DELETE' });
     setTabs((prev) => {
       const next = prev.filter((t) => t.key !== tab.key);
-      if (active === tab.key) setActive(next[next.length - 1]?.key ?? null);
-      if (next.length === 0) onClose();
+      if (active === tab.key) setActive(next[next.length - 1]?.key ?? AGENT_TAB);
       return next;
     });
   }
@@ -112,7 +125,23 @@ export function TerminalPanel({ onClose }: { onClose: () => void }) {
         title="Drag to resize"
       />
       <div className="flex h-9 shrink-0 items-center gap-1 border-b border-border px-2">
-        <TerminalWindow className="mr-1 size-3.5 text-muted-foreground" />
+        <SquareTerminal className="mr-1 size-3.5 text-muted-foreground" strokeWidth={1.75} />
+        <button
+          type="button"
+          onClick={() => { setActive(AGENT_TAB); setAgentUnseen(false); }}
+          title="Read-only: the agent's shell commands and their output"
+          className={cn(
+            'relative flex items-center gap-1.5 rounded-md px-2 py-1 text-[12px]',
+            active === AGENT_TAB ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:text-foreground',
+          )}
+        >
+          <Bot className="size-3.5" strokeWidth={1.75} />
+          Agent
+          {agentUnseen && active !== AGENT_TAB && (
+            <span className="size-1.5 rounded-full bg-mira-blue" aria-label="new output" />
+          )}
+        </button>
+        <span className="mx-1 h-4 w-px bg-border" />
         {tabs.map((t) => (
           <div
             key={t.key}
@@ -128,7 +157,7 @@ export function TerminalPanel({ onClose }: { onClose: () => void }) {
               onClick={() => closeTab(t)}
               className="rounded p-0.5 opacity-50 hover:bg-accent/60 hover:opacity-100"
             >
-              <X className="size-3" />
+              <X className="size-3" strokeWidth={1.75} />
             </button>
           </div>
         ))}
@@ -139,7 +168,7 @@ export function TerminalPanel({ onClose }: { onClose: () => void }) {
           aria-label="New terminal"
           className="rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-foreground disabled:opacity-30"
         >
-          <Plus className="size-3.5" />
+          <Plus className="size-3.5" strokeWidth={1.75} />
         </button>
         <button
           type="button"
@@ -148,11 +177,14 @@ export function TerminalPanel({ onClose }: { onClose: () => void }) {
           title="Hide terminal (⌘J)"
           className="ml-auto rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-foreground"
         >
-          <X className="size-3.5" />
+          <X className="size-3.5" strokeWidth={1.75} />
         </button>
       </div>
       <div className="relative min-h-0 flex-1">
-        {error && <div className="p-4 text-[12.5px] text-muted-foreground">{error}</div>}
+        <AgentTerminalView visible={active === AGENT_TAB} />
+        {error && active !== AGENT_TAB && (
+          <div className="p-4 text-[12.5px] text-muted-foreground">{error}</div>
+        )}
         {tabs.map((t) => (
           <TerminalView
             key={t.key}
@@ -252,4 +284,52 @@ function TerminalView({
       className={cn('absolute inset-0 px-2 py-1', !visible && 'invisible')}
     />
   );
+}
+
+/** Read-only terminal mirroring the agent's shell commands. */
+function AgentTerminalView({ visible }: { visible: boolean }) {
+  const hostRef = useRef<HTMLDivElement>(null);
+  const fitRef = useRef<FitAddon | null>(null);
+
+  useEffect(() => {
+    const term = new Terminal({
+      fontFamily: "ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace",
+      fontSize: 12.5,
+      disableStdin: true,
+      cursorBlink: false,
+      cursorStyle: 'bar',
+      scrollback: 10000,
+      theme: { background: '#0b0b0d', foreground: '#d4d4d8', cursor: '#0b0b0d', selectionBackground: '#3f3f46' },
+    });
+    const fit = new FitAddon();
+    term.loadAddon(fit);
+    term.open(hostRef.current!);
+    fit.fit();
+    fitRef.current = fit;
+    const past = agentTerminal.snapshot();
+    term.write(past || '\x1b[2mThe agent\'s shell commands will appear here as it runs them.\x1b[0m\r\n');
+    let placeholder = !past;
+    const unsubscribe = agentTerminal.subscribe((chunk) => {
+      if (placeholder) {
+        term.reset();
+        placeholder = false;
+      }
+      term.write(chunk);
+    });
+    const ro = new ResizeObserver(() => {
+      if (hostRef.current?.offsetParent) fit.fit();
+    });
+    ro.observe(hostRef.current!);
+    return () => {
+      unsubscribe();
+      ro.disconnect();
+      term.dispose();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (visible) fitRef.current?.fit();
+  }, [visible]);
+
+  return <div ref={hostRef} className={cn('absolute inset-0 px-2 py-1', !visible && 'invisible')} />;
 }

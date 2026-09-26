@@ -14,7 +14,6 @@ import {
   SidebarSimple,
   Sparkle,
   Target,
-  TerminalWindow,
 } from '@phosphor-icons/react';
 import { cn } from './lib/utils';
 import { connect, type WsClient, type WsStatus } from './ws';
@@ -44,6 +43,8 @@ import { ThoughtBlock } from './components/ThoughtBlock';
 import { ReviewChanges } from './components/ReviewChanges';
 import { ImageLightbox } from './components/ImageLightbox';
 import { TerminalPanel } from './components/TerminalPanel';
+import * as agentTerminal from './lib/agentTerminal';
+import { SquareTerminal } from 'lucide-react';
 
 const IS_MAC = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
 import { ToolCard, type ToolStatus } from './components/ToolCard';
@@ -711,6 +712,7 @@ export default function App() {
     if (msg.type !== 'token') flushTokens();
     switch (msg.type) {
       case 'ready': {
+        agentTerminal.reset();
         setGitStatus(null);
         setSessionDiff({ added: 0, removed: 0, files: [] });
         setSessionCommitted(false);
@@ -801,6 +803,7 @@ export default function App() {
       case 'tool_start':
         setThinking(false);
         clearThinkingIdle();
+        agentTerminal.commandStart(msg.call.id, msg.call.function.name, msg.call.function.arguments);
         setEntries((prev) => {
           let next = upsertToolStart(prev, msg.call);
           // If a plan_request arrived before this tool_start (race between
@@ -824,6 +827,7 @@ export default function App() {
         // back before the next text token arrives.
         setThinking(true);
         setEntries((prev) => attachToolResult(prev, msg.result));
+        agentTerminal.commandEnd(msg.result.call_id, msg.result.content, !!msg.result.is_error);
         // Piggyback: task_* tools ship the current task or full list in
         // `data`. Upsert so the Plan panel stays live without another
         // round-trip.
@@ -907,6 +911,7 @@ export default function App() {
         break;
       case 'tool_progress':
         setEntries((prev) => appendProgressLine(prev, msg.call_id, msg.line));
+        agentTerminal.outputLine(msg.call_id, msg.line);
         break;
       case 'tool_preview':
         // The harness computes a diff preview for edit/write calls
@@ -1760,7 +1765,7 @@ export default function App() {
                       : 'border-transparent text-muted-foreground hover:bg-secondary hover:text-foreground',
                   )}
                 >
-                  <TerminalWindow className="size-4" />
+                  <SquareTerminal className="size-4" strokeWidth={1.75} />
                 </button>
                 <span className="pointer-events-none absolute right-0 top-full z-30 mt-1.5 whitespace-nowrap rounded-md border border-border bg-popover px-2 py-1 text-[12px] text-foreground opacity-0 shadow-lg transition-opacity delay-300 group-hover:opacity-100">
                   Toggle terminal <span className="ml-1.5 text-muted-foreground">{IS_MAC ? '⌘J' : 'Ctrl+J'}</span>
