@@ -8,6 +8,7 @@ mod eval;
 mod ext_cmd;
 mod github;
 mod goal;
+mod headless;
 mod init;
 mod login;
 mod memory;
@@ -50,6 +51,27 @@ pub(crate) struct Cli {
     /// Provider name — a key in `providers` in your `mira.yaml`.
     #[arg(long)]
     provider: Option<String>,
+
+    /// Run one task without a UI and exit: `mira -p "fix the failing
+    /// test"`. Piped stdin is added as context (`cat log | mira -p
+    /// "why?"`), or is the whole prompt when `-p` has no text. Tools that
+    /// would ask you are denied; widen with `--mode` or `--allow`.
+    #[arg(short = 'p', long = "print", value_name = "PROMPT", num_args = 0..=1, default_missing_value = "")]
+    print: Option<String>,
+
+    /// Output for `-p`: `text` (the answer), `json` (one result object)
+    /// or `stream-json` (one JSON event per line).
+    #[arg(long, value_enum, default_value_t = headless::OutputFormat::Text, requires = "print")]
+    output_format: headless::OutputFormat,
+
+    /// Allow a tool without asking, e.g. `--allow "Bash(cargo test*)"`.
+    /// Same rules as `permissions.allow` in mira.yaml. Repeatable.
+    #[arg(long = "allow", value_name = "RULE")]
+    allow: Vec<String>,
+
+    /// Stop after this many model rounds.
+    #[arg(long, value_name = "N")]
+    max_turns: Option<usize>,
 
     /// Base URL of an OpenAI-compatible endpoint. Overrides the provider's
     /// `base_url` from config.
@@ -179,7 +201,7 @@ async fn main() -> Result<()> {
     // Subcommand branch — every non-default command short-circuits
     // before we build the session, provider, and tools.
     if let Some(cmd) = cli.command.clone() {
-        init_tracing(false);
+        init_tracing(false, false);
         return match cmd {
             Command::Init(args) => init::run(&cli, args).await,
             Command::Doctor(args) => doctor::run(&cli, args).await,
@@ -204,9 +226,35 @@ async fn main() -> Result<()> {
         };
     }
 
-    let use_tui = !cli.simple && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    let headless = cli.print.is_some();
+    let use_tui = !headless
+        && !cli.simple
+        && std::io::stdin().is_terminal()
+        && std::io::stdout().is_terminal();
 
-    init_tracing(use_tui);
+    init_tracing(use_tui, headless);
+
+    // `-p`: read the task up front, so a missing one fails fast.
+    let headless_prompt = match &cli.print {
+        None => None,
+        Some(arg) => {
+            let stdin = if std::io::stdin().is_terminal() {
+                None
+            } else {
+                // With `-p` text, piped input is optional context.
+                let grace =
+                    (!arg.trim().is_empty()).then_some(std::time::Duration::from_millis(200));
+                headless::read_stdin(std::io::stdin(), grace)
+            };
+            match headless::prompt(arg, stdin) {
+                Some(p) => Some(p),
+                None => {
+                    eprintln!("mira: -p needs a task, e.g. mira -p \"explain this repo\"");
+                    std::process::exit(2);
+                }
+            }
+        }
+    };
 
     let cwd = std::env::current_dir().context("failed to read cwd")?;
     // If an OAuth-managed provider (openai) is close to expiry, refresh
@@ -344,7 +392,13 @@ async fn main() -> Result<()> {
     // --- policy: rules from config, mode from CLI/config/default
     let policy = Policy::from_config(&PolicyConfig {
         mode: settings.mode,
-        allow: cfg.permissions.allow.clone(),
+        allow: cfg
+            .permissions
+            .allow
+            .iter()
+            .chain(&cli.allow)
+            .cloned()
+            .collect(),
         ask: cfg.permissions.ask.clone(),
         deny: cfg.permissions.deny.clone(),
     })
@@ -352,7 +406,10 @@ async fn main() -> Result<()> {
     let policy = Arc::new(Mutex::new(policy));
 
     // --- approver (branch on frontend)
-    let (approver, approval_rx) = if use_tui {
+    let headless_approver = Arc::new(headless::HeadlessApprover::default());
+    let (approver, approval_rx) = if headless {
+        (headless_approver.clone() as Arc<dyn Approver>, None)
+    } else if use_tui {
         let (a, rx) = tui::TuiApprover::new();
         (a as Arc<dyn Approver>, Some(rx))
     } else {
@@ -387,6 +444,9 @@ async fn main() -> Result<()> {
     sess_cfg.max_tokens = settings.max_tokens;
     sess_cfg.temperature = settings.temperature;
     sess_cfg.compactor_model = settings.compactor_model.clone();
+    if let Some(n) = cli.max_turns {
+        sess_cfg.max_rounds = n.max(1);
+    }
 
     // --pick short-circuits --resume: show a picker, and use the chosen
     // record as the resume target. Cancelling drops through to a fresh
@@ -403,6 +463,7 @@ async fn main() -> Result<()> {
         resume_target(cli.resume.as_deref(), store.as_deref(), &cwd).await?
     };
 
+    let tool_names: Vec<String> = registry.specs().into_iter().map(|t| t.name).collect();
     let session = match picked {
         Some(record) => Session::resume_from(
             record,
@@ -463,8 +524,27 @@ async fn main() -> Result<()> {
         );
     }
 
+    let mut exit_code = 0;
     let result: Result<()> = async {
-        if use_tui {
+        if let Some(prompt) = &headless_prompt {
+            extensions
+                .mcp()
+                .wait_settled(extensions.mcp().options().connect_timeout)
+                .await;
+            exit_code = headless::run(
+                headless::Run {
+                    session,
+                    approver: headless_approver.clone(),
+                    format: cli.output_format,
+                    model: &settings.model,
+                    cwd: &cwd,
+                    tools: tool_names,
+                },
+                prompt,
+            )
+            .await?;
+            Ok(())
+        } else if use_tui {
             // (#1) Fire-and-forget model catalog fetch — populates the
             // `/model <TAB>` autocomplete without blocking startup. A slow
             // provider (or an offline one) just means the palette shows no
@@ -530,6 +610,9 @@ async fn main() -> Result<()> {
     // when the frontend errored, and release every environment.
     sandbox::print_finish(environments.finish().await, &cwd);
     extensions.mcp().shutdown();
+    if result.is_ok() && exit_code != 0 {
+        std::process::exit(exit_code);
+    }
     result
 }
 
@@ -782,11 +865,16 @@ pub(crate) fn parse_mode(s: &str) -> Result<Mode> {
     })
 }
 
-fn init_tracing(use_tui: bool) {
+fn init_tracing(use_tui: bool, quiet: bool) {
     // In TUI mode, stderr would corrupt the alternate screen — sink logs.
-    // Users who need them can pass --simple.
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(if use_tui { "off" } else { "mira=info" }));
+    // Users who need them can pass --simple. `-p` keeps stderr for
+    // warnings only, so scripts see just what matters.
+    let default = match (use_tui, quiet) {
+        (true, _) => "off",
+        (false, true) => "mira=warn",
+        (false, false) => "mira=info",
+    };
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default));
     let builder = tracing_subscriber::fmt().with_env_filter(filter).compact();
     if use_tui {
         builder.with_writer(std::io::sink).init();

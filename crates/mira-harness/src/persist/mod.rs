@@ -106,6 +106,16 @@ impl UsageTotals {
         *self == Self::default()
     }
 
+    /// The totals as one [`TokenUsage`], for pricing (saturates at `u32`).
+    pub fn as_token_usage(&self) -> TokenUsage {
+        let c = |n: u64| n.min(u32::MAX as u64) as u32;
+        TokenUsage {
+            prompt_tokens: c(self.prompt_tokens),
+            completion_tokens: c(self.completion_tokens),
+            cached_input_tokens: c(self.cached_input_tokens),
+        }
+    }
+
     /// Fold one provider-reported round into the running totals.
     pub fn add_round(&mut self, u: TokenUsage) {
         self.prompt_tokens += u.prompt_tokens as u64;

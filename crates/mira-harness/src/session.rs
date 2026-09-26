@@ -34,7 +34,7 @@ const TOOL_RESULT_HISTORY_CAP: usize = 4000;
 const TOOL_RESULT_TAIL_FRACTION: f64 = 0.2;
 
 use crate::approver::Approver;
-use crate::event::HarnessEvent;
+use crate::event::{HarnessEvent, PROVIDER_ERROR, STREAM_ERROR, STREAM_TIMEOUT};
 use crate::goal::{self, Goal, GoalStatus, GoalVerdict};
 
 /// Type alias for the slot the harness parks the current turn's event
@@ -1149,7 +1149,7 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
                 Ok(s) => s,
                 Err(e) => {
                     let _ = tx
-                        .send(HarnessEvent::Warning(format!("provider error: {e}")))
+                        .send(HarnessEvent::Warning(format!("{PROVIDER_ERROR}: {e}")))
                         .await;
                     round_outcome = RoundOutcome::ProviderError;
                     break;
@@ -1181,7 +1181,7 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
                         stream_errored = true;
                         let _ = tx
                             .send(HarnessEvent::Warning(format!(
-                                "stream timed out after {STREAM_TIMEOUT_SECS}s — turn aborted"
+                                "{STREAM_TIMEOUT} after {STREAM_TIMEOUT_SECS}s — turn aborted"
                             )))
                             .await;
                         break;
@@ -1214,7 +1214,7 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
                         Err(e) => {
                             stream_errored = true;
                             let _ = tx
-                                .send(HarnessEvent::Warning(format!("stream error: {e}")))
+                                .send(HarnessEvent::Warning(format!("{STREAM_ERROR}: {e}")))
                                 .await;
                             break;
                         }
