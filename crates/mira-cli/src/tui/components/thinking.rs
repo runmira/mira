@@ -28,6 +28,10 @@ use super::{DIM, HAIRLINE, MUTED, SALMON};
 /// Rows of the live tail the pane shows while collapsed — enough to
 /// see the model's train of thought without pushing the composer away.
 const LIVE_TAIL_ROWS: usize = 4;
+/// With ctrl+t on, the live cell is a taller window — but still a
+/// window: it scrolls as text streams in rather than growing and
+/// shoving the composer down. The full text settles into scrollback.
+const LIVE_EXPANDED_ROWS: usize = 12;
 
 #[derive(Clone, Debug)]
 pub struct ThinkingView<'a> {
@@ -83,8 +87,9 @@ pub fn render(v: &ThinkingView<'_>, width: u16) -> Vec<Line<'static>> {
 
     let body = wrap(v.text.trim(), (width as usize).saturating_sub(8).max(20));
     let shown: &[String] = match (v.live, v.expanded) {
-        (_, true) => &body,
+        (true, true) => &body[body.len().saturating_sub(LIVE_EXPANDED_ROWS)..],
         (true, false) => &body[body.len().saturating_sub(LIVE_TAIL_ROWS)..],
+        (false, true) => &body,
         (false, false) => &[],
     };
     let gutter = Style::default().fg(HAIRLINE());
@@ -181,6 +186,23 @@ mod tests {
         assert_eq!(rows[0], "  ✻ Thinking… 2s");
         assert_eq!(rows.len(), 1 + LIVE_TAIL_ROWS);
         assert_eq!(rows.last().unwrap(), "    ┊ line 10");
+    }
+
+    #[test]
+    fn live_expanded_is_a_scrolling_window_not_a_growing_one() {
+        let text = (1..=40)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let v = ThinkingView {
+            text: &text,
+            elapsed: Some(Duration::from_secs(2)),
+            live: true,
+            expanded: true,
+        };
+        let rows = text_of(&render(&v, 80));
+        assert_eq!(rows.len(), 1 + LIVE_EXPANDED_ROWS);
+        assert_eq!(rows.last().unwrap(), "    ┊ line 40");
     }
 
     #[test]

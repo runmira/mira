@@ -41,11 +41,20 @@ export function ThoughtBlock({
     return () => clearInterval(id);
   }, [live]);
 
-  // Keep the live scroller pinned to the newest line.
+  // While live the cell is a fixed-height window that follows the newest
+  // line as text streams in — like the chat pane — unless the reader has
+  // scrolled up inside it to re-read, in which case it stays put until
+  // they scroll back to the bottom.
   const bodyRef = useRef<HTMLDivElement>(null);
+  const following = useRef(true);
   useEffect(() => {
-    if (live && bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
-  }, [content, live]);
+    const el = bodyRef.current;
+    if (live && el && following.current) el.scrollTop = el.scrollHeight;
+  }, [content, live, open]);
+  const onScroll = () => {
+    const el = bodyRef.current;
+    if (el) following.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+  };
 
   const secs =
     startedAt != null ? Math.max(0, Math.round(((endedAt ?? now) - startedAt) / 1000)) : null;
@@ -85,9 +94,12 @@ export function ThoughtBlock({
       {open && body && (
         <div
           ref={bodyRef}
+          onScroll={live ? onScroll : undefined}
           className={cn(
             'ml-[7px] mt-1 animate-fade-in border-l-2 border-border pl-3 text-[13px] leading-relaxed text-muted-foreground',
-            live && 'max-h-40 overflow-y-auto',
+            // Fade the top edge so older lines read as scrolling away.
+            live &&
+              'max-h-40 overflow-y-auto [mask-image:linear-gradient(to_bottom,transparent,black_2rem)]',
           )}
         >
           <Markdown text={body} />
