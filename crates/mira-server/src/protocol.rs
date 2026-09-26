@@ -39,6 +39,15 @@ pub enum ApprovalScope {
 pub enum ClientMsg {
     /// Start a new user turn.
     Send { text: String },
+    /// Edit & resend / retry: rewind to just before the `occurrence`-th
+    /// most recent user message whose text is `original` (0 = latest),
+    /// then start a new turn with `text`.
+    Resend {
+        original: String,
+        #[serde(default)]
+        occurrence: usize,
+        text: String,
+    },
     /// Answer a pending approval prompt. `scope` says whether the
     /// decision only covers this specific call, or should also add a
     /// rule to the session policy (and optionally persist it) so

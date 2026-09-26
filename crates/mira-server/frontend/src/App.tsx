@@ -1,6 +1,18 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence } from 'framer-motion';
-import { CaretDown, Lightbulb, ShieldWarning, SidebarSimple, Sparkle, Target } from '@phosphor-icons/react';
+import {
+  ArrowClockwise,
+  ArrowDown,
+  CaretDown,
+  Check,
+  Copy,
+  Lightbulb,
+  PencilSimple,
+  ShieldWarning,
+  SidebarSimple,
+  Sparkle,
+  Target,
+} from '@phosphor-icons/react';
 import { cn } from './lib/utils';
 import { connect, type WsClient, type WsStatus } from './ws';
 import { appendMemory, applyUndo, getBranchPr, getGitStatus, getSessionDiff, getSessionHistory, getSettings, gitCommit, gitPush, listCommands, listSkills, newSession, setSessionBackgroundMode, startReview, type BranchPrView, type GitStatusView, type SessionDiffView, type SkillView, type CommandInfo } from './api';
@@ -585,9 +597,26 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Follow new output only while the reader is at the bottom; scrolling
+  // up to read back stops the follow and offers a jump-to-latest button.
+  const followRef = useRef(true);
+  const [showJump, setShowJump] = useState(false);
+  const jumpToLatest = useCallback(() => {
+    followRef.current = true;
+    setShowJump(false);
+    const el = paneRef.current;
+    if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+  }, []);
+  const onPaneScroll = useCallback(() => {
+    const el = paneRef.current;
+    if (!el) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    followRef.current = atBottom;
+    setShowJump(!atBottom);
+  }, []);
   useEffect(() => {
     const el = paneRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (el && followRef.current) el.scrollTop = el.scrollHeight;
   }, [entries, thinking]);
 
   // Tick the live counter while a turn is in flight. Stopping the interval
@@ -1241,6 +1270,8 @@ export default function App() {
     // responding. The harness checkpoints the pushed user message at the
     // top of `run_loop` so this refetch sees the new row.
     setSidebarRefresh((n) => n + 1);
+    followRef.current = true;
+    setShowJump(false);
     const now = Date.now();
     setEntries((prev) => {
       const next: Entry[] = [...prev, { kind: 'msg', msg: { role: 'user', content: text } }];
@@ -1256,6 +1287,50 @@ export default function App() {
     setThinking(true);
     wsRef.current?.send({ type: 'send', text });
   }
+
+  /** Edit & resend (or retry, with the same text) the user message at
+   *  `userIdx`: the server rewinds history to just before it and starts a
+   *  new turn. Later entries are dropped here to match. */
+  function onResend(userIdx: number, text: string) {
+    const target = entries[userIdx];
+    if (busy || !target || target.kind !== 'msg' || target.msg.role !== 'user') return;
+    const original = target.msg.content ?? '';
+    const occurrence = entries
+      .slice(userIdx + 1)
+      .filter((e) => e.kind === 'msg' && e.msg.role === 'user' && e.msg.content === original).length;
+    followRef.current = true;
+    setShowJump(false);
+    const next: Entry[] = [...entries.slice(0, userIdx), { kind: 'msg', msg: { role: 'user', content: text } }];
+    const turnIndex = countUserMessages(next) - 1;
+    setEntries(next);
+    setTurnTimings((tt) => {
+      const clone = new Map([...tt].filter(([i]) => i < turnIndex));
+      clone.set(turnIndex, { startedAt: Date.now(), endedAt: null });
+      return clone;
+    });
+    setBusy(true);
+    setThinking(true);
+    wsRef.current?.send({ type: 'resend', original, occurrence, text });
+  }
+
+  const messageActions = useMemo<MessageActions>(
+    () => ({
+      busy,
+      edit: (entry, text) => onResend(entries.indexOf(entry), text),
+      retry: (entry) => {
+        const at = entries.indexOf(entry);
+        for (let i = at - 1; i >= 0; i--) {
+          const e = entries[i];
+          if (e.kind === 'msg' && e.msg.role === 'user') {
+            onResend(i, e.msg.content ?? '');
+            return;
+          }
+        }
+      },
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [busy, entries],
+  );
 
   function onSetMode(m: Mode) { wsRef.current?.send({ type: 'set_mode', mode: m }); }
   function onSetModel(m: string) { wsRef.current?.send({ type: 'set_model', model: m }); }
@@ -1555,6 +1630,7 @@ export default function App() {
                   paddingTop: ctxPill ? 52 : 16,
                 }}
                 ref={paneRef}
+                onScroll={onPaneScroll}
               >
                 {configured === false && (
                   <div className="mx-auto mb-4 max-w-3xl rounded-lg border border-amber-500/30 bg-amber-500/[0.08] px-3 py-2 text-[13px] text-amber-200">
@@ -1583,6 +1659,7 @@ export default function App() {
                       />
                     )}
                     {tasks.length > 0 && <TaskListPanel tasks={tasks} />}
+                    <MessageActionsContext.Provider value={messageActions}>
                     {turns.map((turn, i) => (
                       <TurnView
                         key={`turn-${i}`}
@@ -1601,6 +1678,7 @@ export default function App() {
                         onSetMode={onSetMode}
                       />
                     ))}
+                    </MessageActionsContext.Provider>
                     {thinking && (
                       <div className="flex justify-start">
                         <Thinking />
@@ -1609,6 +1687,17 @@ export default function App() {
                   </div>
                 )}
               </div>
+
+              {showJump && (
+                <button
+                  type="button"
+                  onClick={jumpToLatest}
+                  className="absolute bottom-3 left-1/2 z-10 inline-flex -translate-x-1/2 animate-fade-in items-center gap-1.5 rounded-full border border-border bg-secondary/95 px-3 py-1.5 text-[12px] text-muted-foreground shadow-lg backdrop-blur transition-colors hover:text-foreground"
+                >
+                  <ArrowDown weight="bold" className="size-3" />
+                  Jump to latest
+                </button>
+              )}
 
               {/* Floating context panel — absolutely anchored to top-right */}
               <AnimatePresence>
@@ -2446,17 +2535,18 @@ function EntryView({
               </div>
             )}
             {text.trim() && (
-              <div className="max-w-[78%] whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-secondary px-4 py-2.5 text-[14.5px]">
+              <UserMessage entry={entry} text={text} raw={content ?? ''}>
                 <SkillMentionText text={text} roster={skills ?? []} />
-              </div>
+              </UserMessage>
             )}
           </div>
         );
       }
       return (
-        <div className="flex justify-start">
+        <div className="group/msg flex justify-start">
           <div className="max-w-[90%]">
             <AssistantContent text={content ?? ''} onOpenFile={onOpenFile} />
+            <AssistantActions entry={entry} text={content ?? ''} />
           </div>
         </div>
       );
@@ -2836,4 +2926,166 @@ function goalChipTint(
     default:
       return { icon: 'text-mira-purple', head: 'text-mira-purple' };
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* Message actions: copy, edit & resend, retry                          */
+/* ------------------------------------------------------------------ */
+
+type MessageActions = {
+  busy: boolean;
+  /** Rewind to this user message and send `text` in its place. */
+  edit: (entry: Entry, text: string) => void;
+  /** Re-send the user message that led to this reply. */
+  retry: (entry: Entry) => void;
+};
+
+const MessageActionsContext = createContext<MessageActions | null>(null);
+
+function ActionButton({
+  title,
+  onClick,
+  disabled,
+  children,
+}: {
+  title: string;
+  onClick: () => void;
+  disabled?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      title={title}
+      aria-label={title}
+      onClick={onClick}
+      disabled={disabled}
+      className="rounded-md p-1 text-muted-foreground/60 transition-colors hover:bg-accent/50 hover:text-foreground disabled:pointer-events-none disabled:opacity-30"
+    >
+      {children}
+    </button>
+  );
+}
+
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <ActionButton
+      title={copied ? 'Copied' : 'Copy'}
+      onClick={() => {
+        void navigator.clipboard.writeText(text).then(() => {
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1200);
+        });
+      }}
+    >
+      {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+    </ActionButton>
+  );
+}
+
+function AssistantActions({ entry, text }: { entry: Entry; text: string }) {
+  const actions = useContext(MessageActionsContext);
+  if (!text.trim()) return null;
+  return (
+    <div className="mt-1 flex items-center gap-0.5 opacity-0 transition-opacity group-hover/msg:opacity-100 focus-within:opacity-100">
+      <CopyButton text={text} />
+      {actions && (
+        <ActionButton title="Retry" disabled={actions.busy} onClick={() => actions.retry(entry)}>
+          <ArrowClockwise className="size-3.5" />
+        </ActionButton>
+      )}
+    </div>
+  );
+}
+
+/** User bubble with hover actions; Edit swaps it for a textarea that
+ *  re-sends from this point (Enter to send, Esc to cancel). */
+function UserMessage({
+  entry,
+  text,
+  raw,
+  children,
+}: {
+  entry: Entry;
+  /** Display text (attachments stripped) — what Copy copies. */
+  text: string;
+  /** Exact sent text — what Edit starts from. */
+  raw: string;
+  children: React.ReactNode;
+}) {
+  const actions = useContext(MessageActionsContext);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(raw);
+  const submit = () => {
+    const t = draft.trim();
+    if (!t || !actions) return;
+    setEditing(false);
+    actions.edit(entry, t);
+  };
+
+  if (editing) {
+    return (
+      <div className="flex w-full max-w-[78%] flex-col gap-2 rounded-2xl border border-border bg-secondary/60 p-2.5">
+        <textarea
+          autoFocus
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault();
+              submit();
+            } else if (e.key === 'Escape') {
+              setEditing(false);
+            }
+          }}
+          rows={Math.min(10, Math.max(2, draft.split('\n').length))}
+          className="w-full resize-none bg-transparent px-1.5 text-[14.5px] outline-none"
+        />
+        <div className="flex items-center justify-end gap-1.5">
+          <span className="mr-auto px-1 text-[11px] text-muted-foreground/60">
+            Later messages are replaced; file edits stay.
+          </span>
+          <button
+            type="button"
+            onClick={() => setEditing(false)}
+            className="rounded-md px-2.5 py-1 text-[12px] text-muted-foreground hover:text-foreground"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={submit}
+            disabled={!draft.trim() || actions?.busy}
+            className="rounded-md bg-foreground px-2.5 py-1 text-[12px] font-medium text-background disabled:opacity-40"
+          >
+            Send
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="group/msg flex max-w-[78%] flex-col items-end">
+      <div className="whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-secondary px-4 py-2.5 text-[14.5px]">
+        {children}
+      </div>
+      <div className="mt-1 flex items-center gap-0.5 opacity-0 transition-opacity group-hover/msg:opacity-100 focus-within:opacity-100">
+        <CopyButton text={text} />
+        {actions && (
+          <ActionButton
+            title="Edit"
+            disabled={actions.busy}
+            onClick={() => {
+              setDraft(raw);
+              setEditing(true);
+            }}
+          >
+            <PencilSimple className="size-3.5" />
+          </ActionButton>
+        )}
+      </div>
+    </div>
+  );
 }
