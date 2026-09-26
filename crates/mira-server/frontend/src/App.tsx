@@ -106,6 +106,9 @@ type ToolEntry = {
   progressLines?: string[];
 };
 type WarningEntry = { kind: 'warning'; text: string };
+/** Where compaction summarized the conversation: a divider, with the
+ *  summary behind a toggle when it's known (after a reload). */
+type CompactEntry = { kind: 'compact'; summarized: number | null; summary: string | null };
 type ErrorEntry = { kind: 'error'; text: string };
 type MsgEntry = { kind: 'msg'; msg: Message };
 /** Structured goal event in the transcript. Rendered as its own
@@ -124,7 +127,7 @@ type GoalEntry = {
   /** Only set on `variant: 'set'`. */
   condition?: string | null;
 };
-export type Entry = MsgEntry | ToolEntry | WarningEntry | ErrorEntry | GoalEntry;
+export type Entry = MsgEntry | ToolEntry | WarningEntry | ErrorEntry | GoalEntry | CompactEntry;
 
 type TurnTiming = {
   startedAt: number;
@@ -151,6 +154,15 @@ type TurnTiming = {
  * the harness writes a "denied by policy: …" content string into the tool
  * message.
  */
+/** The summary text if `content` is a compaction summary message. */
+function compactionSummary(content: string | null | undefined): string | null {
+  const prefix = '<conversation-summary>';
+  if (!content?.startsWith(prefix)) return null;
+  const end = content.indexOf('</conversation-summary>');
+  const body = content.slice(prefix.length, end < 0 ? undefined : end);
+  return body.replace(/^\s*This session continues[^\n]*\n+/, '').trim();
+}
+
 export function historyToEntries(
   history: Message[],
   /** Persisted diff previews from `SessionRecord.previews` (Ready
@@ -177,7 +189,12 @@ export function historyToEntries(
     if (m.role === 'system' || m.role === 'tool') continue;
 
     if (m.role === 'user') {
-      entries.push({ kind: 'msg', msg: m });
+      const summary = compactionSummary(m.content);
+      if (summary != null) {
+        entries.push({ kind: 'compact', summarized: null, summary });
+      } else {
+        entries.push({ kind: 'msg', msg: m });
+      }
       continue;
     }
 
@@ -792,11 +809,9 @@ export default function App() {
         break;
       case 'compacted':
         setEntries((prev) => [
-          ...prev,
-          {
-            kind: 'warning',
-            text: `[context] compacted ${msg.messages_removed} earlier message${msg.messages_removed === 1 ? '' : 's'} into a summary`,
-          },
+          // The "summarizing…" note from /compact is done.
+          ...prev.filter((e) => !(e.kind === 'warning' && e.text === '[context] summarizing the conversation…')),
+          { kind: 'compact', summarized: msg.messages_removed, summary: null },
         ]);
         break;
       case 'goal_set':
@@ -1212,6 +1227,11 @@ export default function App() {
     wsRef.current?.send({ type: 'clear_goal' });
   }
 
+  function onCompact(focus: string) {
+    wsRef.current?.send({ type: 'compact', focus: focus || null });
+    setEntries((prev) => [...prev, { kind: 'warning', text: '[context] summarizing the conversation…' }]);
+  }
+
   async function onNewChat() {
     try {
       const { id } = await newSession();
@@ -1582,6 +1602,7 @@ export default function App() {
               onRunReview={runReview}
               onSetGoal={onSetGoal}
               onClearGoal={onClearGoal}
+              onCompact={onCompact}
               goal={goal}
               onRemember={async (scope, text) => {
                 const r = await appendMemory(scope, text);
@@ -2580,7 +2601,46 @@ function EntryView({
       );
     case 'goal':
       return <GoalTranscriptChip entry={entry} />;
+    case 'compact':
+      return <CompactDivider entry={entry} />;
   }
+}
+
+/** "Conversation compacted" line across the transcript. Everything above
+ *  it is still shown, but the model now has the summary instead. */
+function CompactDivider({ entry }: { entry: CompactEntry }) {
+  const [open, setOpen] = useState(false);
+  const detail = entry.summarized != null
+    ? ` · ${entry.summarized} earlier message${entry.summarized === 1 ? '' : 's'} summarized`
+    : '';
+  return (
+    <div className="flex flex-col gap-2 py-1">
+      <div className="flex items-center gap-3 text-[11.5px] text-muted-foreground">
+        <span className="h-px flex-1 bg-border/70" />
+        <span className="shrink-0">
+          Conversation compacted{detail}
+          {entry.summary && (
+            <>
+              {' · '}
+              <button
+                type="button"
+                onClick={() => setOpen((v) => !v)}
+                className="underline decoration-dotted underline-offset-2 hover:text-foreground"
+              >
+                {open ? 'hide summary' : 'show summary'}
+              </button>
+            </>
+          )}
+        </span>
+        <span className="h-px flex-1 bg-border/70" />
+      </div>
+      {open && entry.summary && (
+        <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-border/60 bg-muted/30 px-3 py-2 font-sans text-[12.5px] leading-relaxed text-foreground/85">
+          {entry.summary}
+        </pre>
+      )}
+    </div>
+  );
 }
 
 /** Goal lifecycle events in the transcript.

@@ -121,6 +121,7 @@ mod tests {
             cwd: PathBuf::from(cwd),
             cfg: crate::SessionConfig::new("test-model"),
             messages: vec![Message::user("hi")],
+            archived: Vec::new(),
             created_at: updated,
             updated_at: updated,
             title: None,

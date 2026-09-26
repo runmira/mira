@@ -1,6 +1,7 @@
 import type { ComponentType } from 'react';
 import {
   ArrowCounterClockwise,
+  ArrowsInLineVertical,
   Brain,
   Eye,
   Folder,
@@ -51,6 +52,8 @@ export type SlashCtx = {
   onSetGoal: (condition: string, maxIterations?: number) => void;
   /** Drop the standing goal (if any). */
   onClearGoal: () => void;
+  /** Summarize the conversation now, keeping `focus` in view. */
+  onCompact: (focus: string) => void;
   /** Flip the composer into "goal compose" mode — the next Enter
    *  fires `onSetGoal(text)` instead of sending as a chat message.
    *  Owned by the Composer; the slash command dispatches into it. */
@@ -263,6 +266,14 @@ export const COMMANDS: SlashCommand[] = [
     // opens the side panel. Returns `undefined` so the composer clears
     // instead of prefilling a text template.
     run: (args, ctx) => { ctx.onRunReview(args.trim()); return undefined; },
+  },
+  {
+    name: 'compact',
+    description: 'Summarize the conversation to free up context',
+    usage: '/compact [what to focus on]',
+    icon: ArrowsInLineVertical,
+    takesArgs: true,
+    run: (args, ctx) => { ctx.onCompact(args.trim()); return undefined; },
   },
   {
     name: 'goal',

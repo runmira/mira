@@ -107,6 +107,12 @@ pub enum ClientMsg {
     /// Drop the session's standing goal. Idempotent — clearing a
     /// session without a goal is a no-op.
     ClearGoal,
+    /// Summarize the conversation now (`/compact`), keeping `focus` in
+    /// view. Answered with `Compacted`, or `Error` when it can't.
+    Compact {
+        #[serde(default)]
+        focus: Option<String>,
+    },
     /// Ask the server to re-emit its current state (used on reconnect).
     Sync,
     /// Watch a specific session on this WS connection. Multi-session

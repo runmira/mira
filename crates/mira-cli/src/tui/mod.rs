@@ -129,6 +129,7 @@ pub(crate) const SLASH_COMMANDS: &[(&str, &str)] = &[
         "cap this session's spend (e.g. /budget $2 · /budget off)",
     ),
     ("/cost", "print token & dollar breakdown for this session"),
+    ("/compact", "summarize the conversation to free up context · /compact <what to keep>"),
     (
         "/theme",
         "swap palette (`/theme` · `/theme <name>` · `/theme reload` · `/theme save`)",
@@ -408,6 +409,24 @@ async fn run_slash(
             Err(msg) => state.push_warning(msg),
         },
 
+        "/compact" => {
+            if state.streaming {
+                state.push_warning("wait for the reply to finish, then /compact".into());
+            } else {
+                state.push_info("summarizing the conversation…");
+                let tx = cfg.env_tx.clone();
+                let session = session.clone();
+                let focus = rest.trim().to_owned();
+                tokio::spawn(async move {
+                    let focus = (!focus.is_empty()).then_some(focus);
+                    let _ = tx.send(match session.compact_now(focus.as_deref()).await {
+                        Ok(n) => EnvUpdate::Compacted(n),
+                        Err(e) => EnvUpdate::Warning(format!("couldn't compact: {e}")),
+                    });
+                });
+            }
+        }
+
         "/cost" => {
             let u = state.usage;
             if u.is_zero() {
@@ -542,6 +561,8 @@ fn run_theme_slash(rest: &str, state: &mut state::TuiState) {
 pub enum EnvUpdate {
     Info(String),
     Warning(String),
+    /// `/compact` finished; this many messages were summarized.
+    Compacted(usize),
 }
 
 /// Channel pair for [`TuiConfig::env_tx`] / [`TuiConfig::env_rx`].
@@ -1100,10 +1121,7 @@ fn short_session_id(id: &str) -> String {
 }
 
 fn first_user_message_from_record(rec: &mira_harness::SessionRecord) -> Option<String> {
-    rec.messages
-        .iter()
-        .find(|m| m.role == mira_core::Role::User)
-        .and_then(|m| m.content.clone())
+    rec.first_user_message().map(str::to_owned)
 }
 
 /// Coarse "5m ago", "2d ago". Only used in `/sessions` so precision

@@ -35,6 +35,11 @@ pub struct SessionRecord {
     pub cwd: PathBuf,
     pub cfg: SessionConfig,
     pub messages: Vec<Message>,
+    /// Messages compaction replaced, kept so the transcript can still
+    /// show them (the model only sees `messages`). Empty for sessions
+    /// never compacted or written before this field existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub archived: Vec<Message>,
     pub created_at: u64,
     pub updated_at: u64,
     /// Human-readable nickname generated after the first assistant reply.
@@ -82,6 +87,25 @@ pub struct SessionRecord {
     /// arg-only `ReconstructedPreview`. Empty for legacy records.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub previews: HashMap<String, DiffPreview>,
+}
+
+impl SessionRecord {
+    /// Every message of the conversation in order, as a person would
+    /// read it: what compaction replaced, then the live history. System
+    /// messages and compaction summaries are left out.
+    pub fn conversation(&self) -> impl Iterator<Item = &Message> {
+        self.archived
+            .iter()
+            .chain(self.messages.iter())
+            .filter(|m| m.role != mira_core::Role::System && !crate::history::is_summary(m))
+    }
+
+    /// The first thing the user said (for titles and session lists).
+    pub fn first_user_message(&self) -> Option<&str> {
+        self.conversation()
+            .find(|m| m.role == mira_core::Role::User)
+            .and_then(|m| m.content.as_deref())
+    }
 }
 
 /// Running token totals for a whole session. Grows monotonically; individual

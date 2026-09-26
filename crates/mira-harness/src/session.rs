@@ -290,6 +290,12 @@ pub struct Session {
     pub id: SessionId,
     cfg: Arc<Mutex<SessionConfig>>,
     history: Arc<Mutex<Vec<Message>>>,
+    /// Messages compaction took out of `history`, kept for display
+    /// ([`Session::transcript`]); the model never sees them again.
+    archived: Arc<Mutex<Vec<Message>>>,
+    /// Tool results before this index in `history` are cleared in what's
+    /// sent to the model (see `history::clear_old_tool_results`).
+    cleared_before: Arc<Mutex<usize>>,
     /// Human-readable nickname. Generated post-hoc by the server after the
     /// first assistant reply; the harness itself only reads + persists it.
     title: Arc<Mutex<Option<String>>>,
@@ -457,6 +463,8 @@ impl Session {
             id,
             cfg: Arc::new(Mutex::new(cfg)),
             history: Arc::new(Mutex::new(vec![Message::system(system_prompt)])),
+            archived: Arc::new(Mutex::new(Vec::new())),
+            cleared_before: Arc::new(Mutex::new(0)),
             title: Arc::new(Mutex::new(None)),
             turns: Arc::new(Mutex::new(Vec::new())),
             usage: Arc::new(Mutex::new(UsageTotals::default())),
@@ -531,6 +539,8 @@ impl Session {
             id: record.id,
             cfg: Arc::new(Mutex::new(record.cfg)),
             history: Arc::new(Mutex::new(record.messages)),
+            archived: Arc::new(Mutex::new(record.archived)),
+            cleared_before: Arc::new(Mutex::new(0)),
             title: Arc::new(Mutex::new(record.title)),
             turns: Arc::new(Mutex::new(record.turns)),
             usage: Arc::new(Mutex::new(record.usage)),
@@ -662,6 +672,94 @@ impl Session {
 
     /// Snapshot the aggregate token usage across every provider round in
     /// this session so far.
+    /// Everything to show for this conversation: messages compaction
+    /// replaced (each run ends with its summary message, which UIs show
+    /// as a divider), then the live history. System messages first.
+    pub async fn transcript(&self) -> Vec<Message> {
+        let history = self.history.lock().await;
+        let archived = self.archived.lock().await;
+        let system_end = history
+            .iter()
+            .take_while(|m| m.role == Role::System)
+            .count();
+        let mut out = history[..system_end].to_vec();
+        out.extend(archived.iter().cloned());
+        out.extend(history[system_end..].iter().cloned());
+        out
+    }
+
+    /// Summarize the conversation now (`/compact`), optionally keeping
+    /// `focus` in view. Returns how many messages were summarized. Not
+    /// while a turn is running.
+    pub async fn compact_now(&self, focus: Option<&str>) -> Result<usize, String> {
+        if self
+            .current_turn
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|h| !h.is_finished())
+        {
+            return Err("wait for the current reply to finish, then compact".into());
+        }
+        let (tx, mut rx) = mpsc::channel(8);
+        let n = self.compact_inner("manual", focus, &tx).await?;
+        drop(tx);
+        while rx.recv().await.is_some() {}
+        checkpoint(self).await;
+        Ok(n)
+    }
+
+    /// PreCompact hooks, then compaction; the replaced messages move to
+    /// `archived`.
+    async fn compact_inner(
+        &self,
+        trigger: &str,
+        focus: Option<&str>,
+        tx: &mpsc::Sender<HarnessEvent>,
+    ) -> Result<usize, String> {
+        // PreCompact hooks see it coming (to save the transcript, say).
+        // They can't stop it. Run without the history lock; a hook may
+        // be slow.
+        if let Some(hooks) = self
+            .hooks
+            .clone()
+            .filter(|h| h.has(crate::hooks::HookEvent::PreCompact))
+        {
+            let input = self
+                .hook_input(serde_json::json!({
+                    "trigger": trigger,
+                    "custom_instructions": focus.unwrap_or(""),
+                }))
+                .await;
+            let out = hooks
+                .run(crate::hooks::HookEvent::PreCompact, trigger, input)
+                .await;
+            for m in out.messages {
+                let _ = tx.send(HarnessEvent::Warning(format!("[hook] {m}"))).await;
+            }
+        }
+        let cfg = self.cfg.lock().await.clone();
+        let summarizer_model = cfg.background_model(cfg.compactor_model.as_deref());
+        let mut history = self.history.lock().await;
+        let removed = crate::history::compact_with_fallback(
+            &mut history,
+            self.provider.as_ref(),
+            &cfg.model,
+            &summarizer_model,
+            &self.tool_ctx.cwd,
+            focus,
+        )
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+        *self.cleared_before.lock().await = 0;
+        let n = removed
+            .iter()
+            .filter(|m| !crate::history::is_summary(m))
+            .count();
+        self.archived.lock().await.extend(removed);
+        Ok(n)
+    }
+
     pub async fn usage(&self) -> UsageTotals {
         *self.usage.lock().await
     }
@@ -1156,61 +1254,31 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
         for round in 0..cfg.max_rounds {
             info!(round, "harness: model turn");
 
-            // Rolling compaction: if history has grown past the trigger,
-            // summarize the older tail via the provider and splice a
-            // single synthetic user message in its place. Kept inside the
-            // round loop so a long turn with many tool calls can also
-            // trigger it (not just the between-turn edge). Failure is
-            // logged and swallowed — running with un-compacted history is
-            // strictly better than aborting the turn.
+            // Keep the conversation inside the context window: first by
+            // clearing old tool results from what's sent, then, once
+            // that isn't enough, by summarizing it (rarely: once per
+            // filled window). Failure is logged; running uncompacted
+            // beats aborting the turn.
             {
-                // PreCompact hooks see it coming (to save the transcript,
-                // say). They can't stop it: the context has to shrink.
-                // Run without holding the history lock; a hook may be slow.
-                if let Some(hooks) = sess
-                    .hooks
-                    .clone()
-                    .filter(|h| h.has(crate::hooks::HookEvent::PreCompact))
-                {
-                    let due =
-                        crate::history::needs_compaction(&sess.history.lock().await, &cfg.model);
-                    if due {
-                        let input = sess
-                            .hook_input(serde_json::json!({
-                                "trigger": "auto",
-                                "custom_instructions": "",
-                            }))
-                            .await;
-                        let out = hooks
-                            .run(crate::hooks::HookEvent::PreCompact, "auto", input)
-                            .await;
-                        for m in out.messages {
-                            let _ = tx.send(HarnessEvent::Warning(format!("[hook] {m}"))).await;
+                let before = {
+                    let history = sess.history.lock().await;
+                    let mut cleared = sess.cleared_before.lock().await;
+                    *cleared =
+                        crate::history::clear_tool_results_before(&history, &cfg.model, *cleared);
+                    crate::history::needs_compaction(&history, &cfg.model, *cleared)
+                };
+                if before {
+                    match sess.compact_inner("auto", None, &tx).await {
+                        Ok(n) => {
+                            let _ = tx
+                                .send(HarnessEvent::Compacted {
+                                    messages_removed: n,
+                                })
+                                .await;
                         }
-                    }
-                }
-                let mut history = sess.history.lock().await;
-                let summarizer_model = cfg.background_model(cfg.compactor_model.as_deref());
-                // A cheaper summarizer that fails gets one retry on the
-                // main model.
-                let compacted = crate::history::compact_with_fallback(
-                    &mut history,
-                    sess.provider.as_ref(),
-                    &cfg.model,
-                    &summarizer_model,
-                )
-                .await;
-                match compacted {
-                    Ok(Some(n)) => {
-                        let _ = tx
-                            .send(HarnessEvent::Compacted {
-                                messages_removed: n,
-                            })
-                            .await;
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        warn!(error = %e, "compaction failed; continuing with full history");
+                        Err(e) => {
+                            warn!(error = %e, "compaction failed; continuing with full history");
+                        }
                     }
                 }
             }
@@ -2127,6 +2195,7 @@ async fn checkpoint(sess: &Session) {
         cwd: sess.tool_ctx.cwd.clone(),
         cfg: sess.cfg.lock().await.clone(),
         messages: sess.history.lock().await.clone(),
+        archived: sess.archived.lock().await.clone(),
         created_at: sess.created_at,
         updated_at: now_secs(),
         title: sess.title.lock().await.clone(),
@@ -2599,7 +2668,11 @@ fn normalize_for_dedup(s: &str) -> String {
 /// hits — see `mira_ai::openai::WireMessage::from_message`, which marks
 /// only the first system message with `cache_control: ephemeral`.
 async fn build_request_messages(sess: &Session) -> Vec<Message> {
-    let mut msgs = sess.history.lock().await.clone();
+    let mut msgs = {
+        let history = sess.history.lock().await;
+        let before = *sess.cleared_before.lock().await;
+        crate::history::clear_old_tool_results(&history, before)
+    };
     let Some(snap) = sess.memory_snapshot.as_ref() else {
         return msgs;
     };

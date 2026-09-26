@@ -14,18 +14,26 @@
 //! stays valid; only their content shrinks. Idempotent: an
 //! already-stubbed message is left alone.
 //!
-//! ## Compaction (expensive, applied when history crosses a
-//! threshold)
+//! ## Clearing old tool results (cheap, no model call)
 //!
-//! Once the non-system history exceeds a message-count trigger, we
-//! replace the older half with a single synthetic "memory of earlier
-//! conversation" user message produced by summarizing the tail with
-//! the same provider. Boundaries land on a `Role::User` edge so we
-//! never sever an assistant→tool_result pairing — both OpenAI and
-//! Anthropic reject a tool message that isn't answering a call in the
-//! immediately-preceding assistant turn.
+//! Once the conversation fills half the model's context window, tool
+//! results older than the last few are replaced with a short note in
+//! what's *sent* to the model ([`clear_old_tool_results`]). Stored
+//! history keeps them, so transcripts stay complete. The cutoff moves
+//! in batches, so the provider's prompt cache is rebuilt rarely.
+//!
+//! ## Compaction (one model call, when that isn't enough)
+//!
+//! At ~80% of the window the whole conversation is summarized into one
+//! structured message (what the user asked, files, errors and fixes,
+//! pending work, current work…),
+//! followed by fresh copies of the files most recently worked on. The
+//! summary replaces the history sent to the model; the replaced
+//! messages are returned so the session can keep them for display.
+//! Compaction therefore happens rarely — once per filled window, not
+//! every few dozen messages.
 
-use std::ops::Range;
+use std::path::Path;
 
 use anyhow::{anyhow, Result};
 use futures::StreamExt;
@@ -33,27 +41,48 @@ use mira_ai::{ChatEvent, ChatProvider, ChatRequest};
 use mira_core::{Message, Role, ToolCallId};
 use serde_json::Value;
 
-/// Non-system message count at which compaction fires unconditionally,
-/// as a belt-and-suspenders ceiling on top of the token-based trigger.
-/// A session that stays under this AND under 60% of the model's context
-/// window never compacts; crossing either fires it.
-const COMPACT_TRIGGER: usize = 60;
+/// Share of the context window at which the conversation is summarized.
+/// Leaves room for the next reply and tool results, and for the 4
+/// chars/token estimate being off.
+const AUTO_COMPACT_FRACTION: f64 = 0.8;
 
-/// Fraction of the model's context window at which compaction becomes
-/// eligible. 0.6 leaves headroom for the pending user turn, tool
-/// results, and the model's own response before the provider starts
-/// rejecting requests for being too long. Tuned conservatively — the
-/// summarizer costs a full provider round-trip.
-const COMPACT_TOKEN_FRACTION: f64 = 0.6;
+/// Share of the window at which old tool results start being cleared.
+const CLEAR_TOOL_RESULTS_FRACTION: f64 = 0.5;
 
-/// Number of most-recent non-system messages compaction keeps raw
-/// after summarizing the older tail.
-const COMPACT_KEEP_RECENT: usize = 30;
+/// Tool results always sent in full: the most recent ones.
+const KEEP_TOOL_RESULTS: usize = 8;
 
-/// Cap on the summarizer's own reply. Enough for a few paragraphs of
-/// memory; short enough that a runaway summarizer can't cost real
-/// money.
-const COMPACT_SUMMARY_TOKENS: u32 = 800;
+/// Tool results shorter than this aren't worth clearing.
+const CLEARABLE_MIN_CHARS: usize = 1_000;
+
+/// What a cleared tool result says instead.
+pub const CLEARED_TOOL_RESULT: &str =
+    "[Old tool result cleared to save context. Run the tool again if you need it.]";
+
+/// Cap on the summary the model writes.
+const SUMMARY_MAX_TOKENS: u32 = 8_000;
+
+/// Each message is cut to this many characters in what the summarizer
+/// reads, so one huge tool result can't crowd out the rest.
+const SUMMARIZER_MESSAGE_CHARS: usize = 4_000;
+
+/// Files re-read into context after compaction.
+const RESTORE_FILES: usize = 5;
+
+/// A restored file larger than this is only named, not included.
+const RESTORE_FILE_MAX_CHARS: usize = 20_000;
+
+/// Starts every compaction summary message. UIs use it to show a
+/// "Conversation compacted" divider instead of a user message.
+pub const SUMMARY_PREFIX: &str = "<conversation-summary>";
+
+/// Whether `m` is a compaction summary.
+pub fn is_summary(m: &Message) -> bool {
+    m.role == Role::User
+        && m.content
+            .as_deref()
+            .is_some_and(|c| c.starts_with(SUMMARY_PREFIX))
+}
 
 /// The one tool whose results are worth stubbing when superseded.
 /// Writes and edits already produce tiny confirmations — nothing to
@@ -179,56 +208,67 @@ fn is_stub(content: &str) -> bool {
     content.starts_with("[superseded")
 }
 
-/// Return the range `[start..end)` of history indices that should be
-/// summarized and replaced by a single synthetic message, or `None`
-/// if compaction isn't needed / can't be done safely.
-///
-/// Two independent triggers, whichever fires first:
-///  - **Token pressure**: estimated tokens exceed
-///    `COMPACT_TOKEN_FRACTION * model_context_window(model)`. This is
-///    the real gate — a session of 40 huge tool results should compact
-///    before it hits the model's context wall, even if message count is
-///    modest. Audit Gap #3.
-///  - **Message count ceiling**: `COMPACT_TRIGGER` non-system messages.
-///    Belt-and-suspenders for models with an oversized window
-///    (Gemini's 1M) where the token trigger would never fire but the
-///    provider round-trips still get slow and expensive.
-///
-/// Rules for the range itself:
-///  - Skip the leading run of system messages (they stay put).
-///  - Preserve the last `COMPACT_KEEP_RECENT` messages raw.
-///  - Walk `end` left until it points at a `Role::User` boundary — the
-///    only place we can split without tearing apart an
-///    assistant/tool_result pair. Both OpenAI and Anthropic reject a
-///    tool message that isn't answering an assistant call in the
-///    immediately-preceding turn.
-pub fn find_compact_range(history: &[Message], model: &str) -> Option<Range<usize>> {
-    let system_end = history
+/// The context window to plan for: `MIRA_CONTEXT_WINDOW` if set, else
+/// [`model_context_window`].
+pub fn context_window(model: &str) -> usize {
+    std::env::var("MIRA_CONTEXT_WINDOW")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n >= 4_096)
+        .unwrap_or_else(|| model_context_window(model))
+}
+
+/// Where tool-result clearing should start from now: the index before
+/// which tool results are cleared in requests. Moves only forward, and
+/// only once `history` (as sent, with `current` applied) passes half
+/// the window; then it jumps to keep just the last
+/// [`KEEP_TOOL_RESULTS`] results, so it changes rarely.
+pub fn clear_tool_results_before(history: &[Message], model: &str, current: usize) -> usize {
+    let budget = (context_window(model) as f64 * CLEAR_TOOL_RESULTS_FRACTION) as usize;
+    if estimated_tokens(&clear_old_tool_results(history, current)) <= budget {
+        return current;
+    }
+    let tool_idx: Vec<usize> = history
         .iter()
-        .take_while(|m| m.role == Role::System)
-        .count();
-    let non_system_len = history.len() - system_end;
+        .enumerate()
+        .filter(|(_, m)| m.role == Role::Tool)
+        .map(|(i, _)| i)
+        .collect();
+    if tool_idx.len() <= KEEP_TOOL_RESULTS {
+        return current;
+    }
+    current.max(tool_idx[tool_idx.len() - KEEP_TOOL_RESULTS])
+}
 
-    let count_trigger = non_system_len > COMPACT_TRIGGER;
-    let token_trigger = {
-        let window = model_context_window(model);
-        let budget = ((window as f64) * COMPACT_TOKEN_FRACTION) as usize;
-        estimated_tokens(&history[system_end..]) > budget
-    };
-    if !count_trigger && !token_trigger {
-        return None;
-    }
+/// `history` as sent to the model: tool results before `before` that
+/// are big enough are replaced by [`CLEARED_TOOL_RESULT`] (their
+/// `tool_call_id` stays, so calls and results still pair up).
+pub fn clear_old_tool_results(history: &[Message], before: usize) -> Vec<Message> {
+    history
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let big = m
+                .content
+                .as_deref()
+                .is_some_and(|c| c.len() >= CLEARABLE_MIN_CHARS);
+            if i < before && m.role == Role::Tool && (big || !m.images.is_empty()) {
+                let mut cleared = m.clone();
+                cleared.content = Some(CLEARED_TOOL_RESULT.to_owned());
+                cleared.images.clear();
+                cleared
+            } else {
+                m.clone()
+            }
+        })
+        .collect()
+}
 
-    let start = system_end;
-    let naive_end = history.len().saturating_sub(COMPACT_KEEP_RECENT);
-    let mut end = naive_end;
-    while end > start && history[end].role != Role::User {
-        end -= 1;
-    }
-    if end <= start {
-        return None;
-    }
-    Some(start..end)
+/// Whether the conversation (as sent: `history` with tool results
+/// before `cleared_before` cleared) is full enough to summarize.
+pub fn needs_compaction(history: &[Message], model: &str, cleared_before: usize) -> bool {
+    let budget = (context_window(model) as f64 * AUTO_COMPACT_FRACTION) as usize;
+    estimated_tokens(&clear_old_tool_results(history, cleared_before)) > budget
 }
 
 /// Rough char-based token estimate. Real tokenization varies by model
@@ -262,11 +302,20 @@ pub fn estimated_tokens(msgs: &[Message]) -> usize {
 /// catalogued yet.
 pub fn model_context_window(model: &str) -> usize {
     let m = model.to_ascii_lowercase();
-    if m.contains("claude") {
-        200_000
-    } else if m.contains("gemini") {
+    if m.contains("[1m]") || m.contains("gemini") || m.contains("gpt-4.1") {
         1_000_000
-    } else if m.contains("gpt-4o") || m.contains("gpt-4-turbo") || m.contains("gpt-4.1") {
+    } else if m.contains("gpt-5") {
+        400_000
+    } else if m.contains("claude")
+        || m.starts_with("o3")
+        || m.starts_with("o4")
+        || m.contains("/o3")
+        || m.contains("/o4")
+    {
+        200_000
+    } else if m.contains("kimi") {
+        256_000
+    } else if m.contains("gpt-4o") || m.contains("gpt-4-turbo") {
         128_000
     } else if m.contains("gpt-4-32k") {
         32_768
@@ -279,84 +328,95 @@ pub fn model_context_window(model: &str) -> usize {
     }
 }
 
-/// If history exceeds the compaction threshold, summarize the older
-/// tail via the provider and splice a single synthetic user message
-/// into its place. Returns `Ok(Some(count))` with the number of
-/// messages replaced when compaction happened, `Ok(None)` when no-op.
+/// Summarize the whole conversation with `summarizer_model` and replace
+/// it with one summary message (plus fresh copies of recently used
+/// files from `cwd`). System messages stay. `focus` is what the user
+/// asked the summary to keep (`/compact <focus>`).
 ///
-/// `session_model` gates the trigger (its context window is what we're
-/// trying not to blow past). `summarizer_model` is the model that
-/// actually writes the summary — usually a cheaper tier than the
-/// session model. Caller resolves the default (e.g. reuse
-/// `session_model`) before calling.
-///
-/// Errors surface provider failures — the caller decides to log and
-/// continue with the uncompacted history.
-pub async fn maybe_compact(
+/// Returns the messages that were replaced, for display; history is
+/// only changed when a summary comes back. Errors leave it untouched.
+pub async fn compact(
     history: &mut Vec<Message>,
     provider: &dyn ChatProvider,
-    session_model: &str,
     summarizer_model: &str,
-) -> Result<Option<usize>> {
-    let Some(range) = find_compact_range(history, session_model) else {
-        return Ok(None);
-    };
-    let count = range.end - range.start;
-    let tail_text = render_tail(&history[range.clone()]);
-    let summary = summarize_tail(provider, summarizer_model, &tail_text).await?;
-    let synthetic = Message::user(format!(
-        "[MEMORY OF EARLIER CONVERSATION — the previous {count} messages were summarized to save context.]\n\n{summary}\n\n[END MEMORY]"
-    ));
-    history.splice(range, std::iter::once(synthetic));
-    Ok(Some(count))
+    cwd: &Path,
+    focus: Option<&str>,
+) -> Result<Vec<Message>> {
+    let system_end = history
+        .iter()
+        .take_while(|m| m.role == Role::System)
+        .count();
+    // A turn that just started keeps its new message after the summary,
+    // word for word, instead of folding it in.
+    let fresh_prompt = history
+        .last()
+        .is_some_and(|m| m.role == Role::User && !is_summary(m));
+    let end = history.len() - usize::from(fresh_prompt);
+    if end.saturating_sub(system_end) < 2 {
+        return Err(anyhow!("not enough conversation to compact"));
+    }
+    let transcript = render_for_summary(&history[system_end..end]);
+    let summary = summarize(provider, summarizer_model, &transcript, focus).await?;
+    let files = restore_files(cwd, &recent_paths(&history[system_end..end]));
+    let mut text = format!(
+        "{SUMMARY_PREFIX}\nThis session continues from an earlier conversation that was summarized \
+         to free up context. The summary:\n\n{}\n</conversation-summary>",
+        summary.trim()
+    );
+    if !files.is_empty() {
+        text.push_str("\n\nCurrent contents of files recently worked on:\n\n");
+        text.push_str(&files);
+    }
+    text.push_str(
+        "\n\nContinue from where things left off without asking the user to repeat \
+         anything. If you were in the middle of a task, carry on with it.",
+    );
+    let removed: Vec<Message> = history.drain(system_end..end).collect();
+    history.insert(system_end, Message::user(text));
+    Ok(removed)
 }
 
-/// [`maybe_compact`] with `summarizer_model`, retried once on
-/// `session_model` if that fails and is a different (cheaper) model:
-/// one unknown to this provider, or rate-limited. History only changes
-/// when a summary comes back, so the retry starts from the same state.
-/// Whether [`maybe_compact`] would summarize anything right now.
-pub fn needs_compaction(history: &[Message], session_model: &str) -> bool {
-    find_compact_range(history, session_model).is_some()
-}
-
+/// [`compact`] with `summarizer_model`, retried once on `session_model`
+/// if that fails and is a different (cheaper) model.
 pub async fn compact_with_fallback(
     history: &mut Vec<Message>,
     provider: &dyn ChatProvider,
     session_model: &str,
     summarizer_model: &str,
-) -> Result<Option<usize>> {
-    match maybe_compact(history, provider, session_model, summarizer_model).await {
+    cwd: &Path,
+    focus: Option<&str>,
+) -> Result<Vec<Message>> {
+    match compact(history, provider, summarizer_model, cwd, focus).await {
         Err(e) if summarizer_model != session_model => {
             tracing::warn!(error = %e, model = summarizer_model, "compaction failed; retrying on the main model");
-            maybe_compact(history, provider, session_model, session_model).await
+            compact(history, provider, session_model, cwd, focus).await
         }
         r => r,
     }
 }
 
-/// Render the compaction tail as plain text the summarizer can chew
-/// on. Structured fields (tool_calls, tool_call_ids) are flattened
-/// into readable prose — the summarizer describes what happened, it
-/// doesn't have to reconstruct the wire shape.
-fn render_tail(msgs: &[Message]) -> String {
+/// The conversation as plain text for the summarizer. Tool calls become
+/// one line each; long messages are cut in the middle.
+fn render_for_summary(msgs: &[Message]) -> String {
     let mut out = String::new();
     for m in msgs {
         let role = match m.role {
             Role::System => "system",
+            Role::User if is_summary(m) => "earlier summary",
             Role::User => "user",
             Role::Assistant => "assistant",
-            Role::Tool => "tool",
+            Role::Tool => "tool result",
         };
         out.push_str(&format!("[{role}]\n"));
         if let Some(c) = &m.content {
-            out.push_str(c);
+            out.push_str(&clip_middle(c, SUMMARIZER_MESSAGE_CHARS));
             out.push('\n');
         }
         for tc in &m.tool_calls {
             out.push_str(&format!(
-                "(tool call: {} {})\n",
-                tc.function.name, tc.function.arguments
+                "(calls {} {})\n",
+                tc.function.name,
+                clip_middle(&tc.function.arguments, 600)
             ));
         }
         out.push('\n');
@@ -364,37 +424,109 @@ fn render_tail(msgs: &[Message]) -> String {
     out
 }
 
-async fn summarize_tail(provider: &dyn ChatProvider, model: &str, tail: &str) -> Result<String> {
-    let system = Message::system(
-        "You are compressing the older portion of a chat between a user and an AI coding assistant so the conversation can continue without exceeding the model's context window. Your output goes back into the assistant's context as a memory of what happened.\n\n\
-         Preserve, concisely:\n\
-         - What the user was ultimately trying to accomplish.\n\
-         - Concrete facts discovered (file paths, function names, line numbers, decisions).\n\
-         - The current state — what's been changed, what's pending, what failed.\n\
-         - Anything the assistant would need to remember in later turns.\n\n\
-         Do NOT include greetings, filler, or verbatim message content. A few short paragraphs at most.",
-    );
-    let user = Message::user(format!(
-        "Compress this conversation tail into a short memory block:\n\n{tail}"
-    ));
+/// `s` with its middle replaced by a marker when longer than `max` chars.
+fn clip_middle(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max {
+        return s.to_owned();
+    }
+    let head: String = s.chars().take(max * 2 / 3).collect();
+    let tail: String = s.chars().skip(n - max / 3).collect();
+    format!("{head}\n[… {} characters cut …]\n{tail}", n - max)
+}
+
+/// Paths the conversation read or changed, most recent first, unique.
+fn recent_paths(msgs: &[Message]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for m in msgs.iter().rev() {
+        for tc in m.tool_calls.iter().rev() {
+            if !SUPERSEDING_TOOLS.contains(&tc.function.name.as_str()) {
+                continue;
+            }
+            if let Some(p) = path_from_args(&tc.function.arguments) {
+                if !out.contains(&p) {
+                    out.push(p);
+                }
+            }
+        }
+        if out.len() >= RESTORE_FILES {
+            break;
+        }
+    }
+    out.truncate(RESTORE_FILES);
+    out
+}
+
+/// Current contents of `paths` (relative to `cwd`), as tagged blocks.
+/// Missing files are skipped; big ones are named without contents.
+fn restore_files(cwd: &Path, paths: &[String]) -> String {
+    let mut out = String::new();
+    for p in paths {
+        let full = cwd.join(p);
+        let Ok(text) = std::fs::read_to_string(&full) else {
+            continue;
+        };
+        if text.len() > RESTORE_FILE_MAX_CHARS {
+            out.push_str(&format!(
+                "<file path=\"{p}\">(large file, {} lines; read it again if you need it)</file>\n",
+                text.lines().count()
+            ));
+        } else {
+            out.push_str(&format!("<file path=\"{p}\">\n{text}\n</file>\n"));
+        }
+    }
+    out
+}
+
+const SUMMARY_INSTRUCTIONS: &str = "Write a detailed summary of the conversation below between a user and \
+an AI coding assistant. It replaces the conversation in the assistant's memory, so the assistant must be \
+able to continue the work from it alone. Pay close attention to the user's explicit requests and to the \
+assistant's most recent work. If an earlier summary appears, fold its content in.
+
+Use these sections:
+
+1. Primary request and intent: everything the user asked for, in detail.
+2. Key technical concepts: technologies, frameworks and conventions involved.
+3. Files and code: files read, changed or created, why each matters, and the important code (short snippets).
+4. Errors and fixes: what went wrong and how it was fixed, including anything the user said about it.
+5. Problem solving: what was solved and what is still being worked out.
+6. All user messages: list every message from the user (not tool results), briefly, in order.
+7. Pending tasks: what was asked for and not done yet.
+8. Current work: exactly what was being done right before this summary, with file names and code.
+9. Next step: the next step, only if it follows directly from the user's latest request, quoting that request.
+
+Be specific (paths, function names, commands, decisions). No preamble.";
+
+async fn summarize(
+    provider: &dyn ChatProvider,
+    model: &str,
+    transcript: &str,
+    focus: Option<&str>,
+) -> Result<String> {
+    let mut ask = format!("{SUMMARY_INSTRUCTIONS}\n\n<conversation>\n{transcript}</conversation>");
+    if let Some(f) = focus.map(str::trim).filter(|f| !f.is_empty()) {
+        ask.push_str(&format!("\n\nThe user asked the summary to focus on: {f}"));
+    }
     let req = ChatRequest {
         model: model.to_owned(),
-        messages: vec![system, user],
+        messages: vec![Message::user(ask)],
         tools: Vec::new(),
         temperature: Some(0.0),
-        max_tokens: Some(COMPACT_SUMMARY_TOKENS),
+        max_tokens: Some(SUMMARY_MAX_TOKENS),
         reasoning_effort: None,
         response_format: None,
     };
     let mut stream = provider.stream(req).await?;
     let mut text = String::new();
     while let Some(evt) = stream.next().await {
-        if let Ok(ChatEvent::TextDelta(t)) = evt {
-            text.push_str(&t);
+        match evt? {
+            ChatEvent::TextDelta(t) => text.push_str(&t),
+            ChatEvent::Done(_) => break,
+            _ => {}
         }
     }
     if text.trim().is_empty() {
-        return Err(anyhow!("summarizer returned empty"));
+        return Err(anyhow!("the summarizer returned nothing"));
     }
     Ok(text)
 }
@@ -568,7 +700,7 @@ mod tests {
 
     fn long_history() -> Vec<Message> {
         let mut h = vec![Message::system("s")];
-        for i in 0..(COMPACT_TRIGGER + 5) {
+        for i in 0..20 {
             h.push(Message::user(format!("u{i}")));
             h.push(Message::assistant(format!("a{i}")));
         }
@@ -581,12 +713,13 @@ mod tests {
             asked: Default::default(),
         };
         let mut h = long_history();
-        let before = h.len();
-        let n = compact_with_fallback(&mut h, &p, "claude-opus-4-7", "tiny")
-            .await
-            .unwrap()
-            .expect("compacted");
-        assert!(n > 0 && h.len() < before);
+        let removed =
+            compact_with_fallback(&mut h, &p, "claude-opus-4-7", "tiny", Path::new("."), None)
+                .await
+                .unwrap();
+        assert_eq!(removed.len(), 40);
+        assert_eq!(h.len(), 2, "system + summary");
+        assert!(is_summary(&h[1]));
         assert_eq!(*p.asked.lock().unwrap(), ["tiny", "claude-opus-4-7"]);
     }
 
@@ -597,75 +730,129 @@ mod tests {
         };
         let mut h = long_history();
         let before = h.len();
-        assert!(compact_with_fallback(&mut h, &p, "tiny", "tiny")
-            .await
-            .is_err());
+        assert!(
+            compact_with_fallback(&mut h, &p, "tiny", "tiny", Path::new("."), None)
+                .await
+                .is_err()
+        );
         assert_eq!(h.len(), before, "history untouched on failure");
         assert_eq!(p.asked.lock().unwrap().len(), 1);
     }
 
-    #[test]
-    fn compact_range_none_below_threshold() {
-        let mut h = vec![Message::system("s")];
-        for i in 0..COMPACT_TRIGGER {
-            h.push(Message::user(format!("u{i}")));
-        }
-        assert_eq!(find_compact_range(&h, "claude-opus-4-7"), None);
+    #[tokio::test]
+    async fn summary_restores_recent_files_and_folds_in_old_summaries() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.rs"), "fn a() {}").unwrap();
+        std::fs::write(tmp.path().join("big.rs"), "x\n".repeat(20_000)).unwrap();
+        let p = PicksyProvider {
+            asked: Default::default(),
+        };
+        let mut h = vec![
+            Message::system("s"),
+            Message::user(format!("{SUMMARY_PREFIX} old")),
+        ];
+        h.push(assistant_reads("c1", "a.rs"));
+        h.push(tool_result("c1", "fn a() {}"));
+        h.push(assistant_writes("c2", "big.rs"));
+        h.push(tool_result("c2", "ok"));
+        h.push(assistant_reads("c3", "gone.rs"));
+        h.push(tool_result("c3", "missing"));
+        let removed = compact(&mut h, &p, "m", tmp.path(), Some("the parser"))
+            .await
+            .unwrap();
+        assert_eq!(removed.len(), 7);
+        let text = h[1].content.as_deref().unwrap();
+        assert!(text.starts_with(SUMMARY_PREFIX));
+        assert!(text.contains("<file path=\"a.rs\">\nfn a() {}"));
+        assert!(text.contains("<file path=\"big.rs\">(large file"));
+        assert!(!text.contains("gone.rs"));
+        assert_eq!(recent_paths(&removed), ["gone.rs", "big.rs", "a.rs"]);
+        let rendered = render_for_summary(&removed);
+        assert!(rendered.starts_with("[earlier summary]"));
     }
 
-    #[test]
-    fn compact_range_lands_on_user_boundary() {
-        let mut h = vec![Message::system("s")];
-        // Pattern: user, assistant, tool — repeat, so the naive
-        // `end` may fall on an assistant or tool message and needs
-        // to walk left to a user.
-        for i in 0..(COMPACT_TRIGGER + 5) {
-            h.push(Message::user(format!("u{i}")));
-            h.push(Message::assistant(format!("a{i}")));
-            h.push(Message::tool(cid(&format!("t{i}")), "tool result"));
-        }
-        let r = find_compact_range(&h, "claude-opus-4-7").expect("should compact");
-        assert!(r.start >= 1);
-        assert_eq!(h[r.end].role, Role::User, "end must sit on user boundary");
+    #[tokio::test]
+    async fn a_new_prompt_stays_after_the_summary() {
+        let p = PicksyProvider {
+            asked: Default::default(),
+        };
+        let mut h = long_history();
+        h.push(Message::user("now do this"));
+        let removed = compact(&mut h, &p, "m", Path::new("."), None)
+            .await
+            .unwrap();
+        assert_eq!(removed.len(), 40);
+        assert_eq!(h.len(), 3);
+        assert!(is_summary(&h[1]));
+        assert_eq!(h[2].content.as_deref(), Some("now do this"));
     }
 
-    #[test]
-    fn compact_fires_on_token_pressure_even_below_message_count() {
-        // Small model window + a handful of fat tool results = token
-        // trigger fires long before message count does. Audit Gap #3
-        // regression: the old count-only trigger let big results blow
-        // past the context wall silently.
+    #[tokio::test]
+    async fn too_little_to_compact() {
+        let p = PicksyProvider {
+            asked: Default::default(),
+        };
+        let mut h = vec![Message::system("s"), Message::user("hi")];
+        assert!(compact(&mut h, &p, "m", Path::new("."), None)
+            .await
+            .is_err());
+        assert!(p.asked.lock().unwrap().is_empty());
+    }
+
+    /// 15 rounds with a 40 KB tool result each: ~150k tokens.
+    fn fat_history() -> Vec<Message> {
         let mut h = vec![Message::system("system prompt")];
-        // 15 rounds × 3 messages = 45 non-system messages (below the
-        // 60-message count trigger) but with fat tool results we clear
-        // 60% of GPT-3.5's 16k window many times over. Need at least
-        // enough total length that KEEP_RECENT still leaves an older
-        // tail to summarise.
         for i in 0..15 {
             h.push(Message::user(format!("u{i}")));
-            h.push(Message::assistant(format!("a{i}")));
-            // ~40KB per tool result → ~10k tokens → 150k tokens total,
-            // vs the ~9.8k trigger for gpt-3.5's 16k window.
+            h.push(assistant_reads(&format!("t{i}"), "f.rs"));
             h.push(Message::tool(cid(&format!("t{i}")), "x".repeat(40_000)));
         }
-        assert!(
-            (h.len() - 1) < COMPACT_TRIGGER,
-            "must stay below count trigger to prove token trigger fired independently"
-        );
-        let r = find_compact_range(&h, "gpt-3.5-turbo").expect("token pressure should fire");
-        assert!(r.start >= 1);
-        assert_eq!(h[r.end].role, Role::User);
+        h
     }
 
     #[test]
-    fn compact_stays_quiet_below_token_and_count_thresholds() {
-        // Small history well under both triggers → no compaction.
-        let mut h = vec![Message::system("s")];
-        for i in 0..8 {
-            h.push(Message::user(format!("u{i}")));
-            h.push(Message::assistant(format!("a{i}")));
+    fn old_tool_results_are_cleared_before_anything_is_summarized() {
+        let h = fat_history();
+        // 150k tokens against a 200k window: past half, not past 80%.
+        let before = clear_tool_results_before(&h, "claude-opus-4-7", 0);
+        assert!(before > 0);
+        let sent = clear_old_tool_results(&h, before);
+        let cleared = sent
+            .iter()
+            .filter(|m| m.content.as_deref() == Some(CLEARED_TOOL_RESULT))
+            .count();
+        assert_eq!(cleared, 15 - KEEP_TOOL_RESULTS);
+        assert_eq!(sent.len(), h.len(), "pairing kept");
+        assert!(!needs_compaction(&h, "claude-opus-4-7", before));
+        // Stable: asking again doesn't move it.
+        assert_eq!(
+            clear_tool_results_before(&h, "claude-opus-4-7", before),
+            before
+        );
+    }
+
+    #[test]
+    fn a_full_window_needs_compaction_and_a_small_chat_never_does() {
+        let h = fat_history();
+        assert!(needs_compaction(&h, "gpt-3.5-turbo", 0));
+        let small = long_history();
+        assert!(!needs_compaction(&small, "claude-opus-4-7", 0));
+        assert_eq!(clear_tool_results_before(&small, "claude-opus-4-7", 0), 0);
+        // Message count alone never triggers it any more.
+        let mut many = vec![Message::system("s")];
+        for i in 0..500 {
+            many.push(Message::user(format!("u{i}")));
         }
-        assert_eq!(find_compact_range(&h, "claude-opus-4-7"), None);
+        assert!(!needs_compaction(&many, "claude-opus-4-7", 0));
+    }
+
+    #[test]
+    fn clipping_keeps_both_ends() {
+        let s = format!("{}{}", "a".repeat(5000), "z".repeat(5000));
+        let c = clip_middle(&s, 3000);
+        assert!(c.starts_with("aaa") && c.ends_with("zzz"));
+        assert!(c.contains("characters cut"));
+        assert_eq!(clip_middle("short", 3000), "short");
     }
 
     #[test]
@@ -674,6 +861,8 @@ mod tests {
         assert_eq!(model_context_window("Claude-3-5-Sonnet"), 200_000);
         assert_eq!(model_context_window("gemini-1.5-pro"), 1_000_000);
         assert_eq!(model_context_window("gpt-4o-mini"), 128_000);
+        assert_eq!(model_context_window("openai/gpt-5-mini"), 400_000);
+        assert_eq!(model_context_window("gpt-4.1"), 1_000_000);
         assert_eq!(model_context_window("gpt-4-turbo-2024-04-09"), 128_000);
         assert_eq!(model_context_window("gpt-4-32k"), 32_768);
         assert_eq!(model_context_window("gpt-4-0613"), 8_192);

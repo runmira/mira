@@ -38,10 +38,10 @@ pub fn spawn_if_needed(
         if session.title().await.is_some() {
             return;
         }
-        let history = session.history().await;
+        let history = session.transcript().await;
         let user_msg = history
             .iter()
-            .find(|m| m.role == Role::User)
+            .find(|m| m.role == Role::User && !mira_harness::history::is_summary(m))
             .and_then(|m| m.content.clone());
         let assistant_msg = history
             .iter()

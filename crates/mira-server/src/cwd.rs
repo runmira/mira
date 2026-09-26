@@ -94,7 +94,9 @@ pub async fn put_cwd(State(state): State<AppState>, Json(u): Json<CwdUpdate>) ->
     let sess = slot.session.read().await.clone();
     let cfg = sess.config().await;
     let mode = state.policy.lock().await.mode();
-    let history = sess.history().await;
+    // Everything, including what compaction summarized (shown behind a
+    // divider); the model itself only sees `history()`.
+    let history = sess.transcript().await;
     let turns = sess.turns().await;
     let usage = sess.usage().await;
     let tasks = sess.tasks().await;
