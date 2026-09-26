@@ -1011,3 +1011,36 @@ export async function connectGithub(repo?: string, token?: string): Promise<Gith
   if (!r.ok) throw new Error(await readError(r, 'github connect'));
   return (await r.json()) as GithubConnectReport;
 }
+
+/* ---------- hooks (Settings → Hooks) ---------- */
+
+/** One hook, flat: when `event` (for tools matching `matcher`), run
+ *  `command` or ask the AI `prompt`. */
+export type HookRule = {
+  event: string;
+  matcher?: string | null;
+  type: 'command' | 'prompt';
+  command?: string | null;
+  prompt?: string | null;
+  timeout?: number | null;
+};
+
+export type HooksView = {
+  rules: HookRule[];
+  plugin_rules: (HookRule & { plugin: string })[];
+  problems: string[];
+  os: string;
+};
+
+export async function getHooks(): Promise<HooksView> {
+  return jsonOrThrow<HooksView>(await fetch('/api/hooks'), 'Loading hooks');
+}
+
+export async function saveHooks(rules: HookRule[]): Promise<HooksView> {
+  const r = await fetch('/api/hooks', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ rules }),
+  });
+  return jsonOrThrow<HooksView>(r, 'Saving hooks');
+}

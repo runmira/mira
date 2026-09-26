@@ -355,6 +355,107 @@ fn merge_verdict(out: &mut Outcome, hook: &Hook, event: &str, v: Result<Verdict,
     }
 }
 
+/// One hook as a flat rule, for editing in a UI: "when `event`
+/// (matching `matcher`), run `command` / ask `prompt`". Converts to and
+/// from Claude Code's nested `{event: [{matcher, hooks: [...]}]}` shape.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct HookRule {
+    pub event: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matcher: Option<String>,
+    /// `command` or `prompt`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    /// Seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<f64>,
+}
+
+/// Every hook in a config (`{event: [...]}` or `{"hooks": {...}}`), in
+/// order. Entries that aren't objects are skipped.
+pub fn rules_from_config(config: &Value) -> Vec<HookRule> {
+    let events = config.get("hooks").unwrap_or(config);
+    let mut out = Vec::new();
+    for (event, groups) in events.as_object().into_iter().flatten() {
+        for group in groups.as_array().into_iter().flatten() {
+            let matcher = group
+                .get("matcher")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|m| !m.is_empty() && *m != "*")
+                .map(str::to_owned);
+            for h in group
+                .get("hooks")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let s = |k: &str| h.get(k).and_then(Value::as_str).map(str::to_owned);
+                out.push(HookRule {
+                    event: event.clone(),
+                    matcher: matcher.clone(),
+                    kind: s("type").unwrap_or_else(|| "command".into()),
+                    command: s("command"),
+                    prompt: s("prompt"),
+                    timeout: h.get("timeout").and_then(Value::as_f64),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// The config for `rules`, grouping rules with the same event and
+/// matcher. `None` when there are none.
+pub fn config_from_rules(rules: &[HookRule]) -> Option<Value> {
+    let mut events = serde_json::Map::new();
+    for r in rules {
+        let groups = events
+            .entry(r.event.clone())
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .expect("groups are arrays");
+        let matcher = r
+            .matcher
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty());
+        let idx = match groups
+            .iter()
+            .position(|g| g.get("matcher").and_then(Value::as_str) == matcher)
+        {
+            Some(i) => i,
+            None => {
+                let mut g = json!({"hooks": []});
+                if let Some(m) = matcher {
+                    g["matcher"] = json!(m);
+                }
+                groups.push(g);
+                groups.len() - 1
+            }
+        };
+        let mut hook = json!({"type": r.kind});
+        if let Some(c) = &r.command {
+            hook["command"] = json!(c);
+        }
+        if let Some(p) = &r.prompt {
+            hook["prompt"] = json!(p);
+        }
+        if let Some(t) = r.timeout {
+            hook["timeout"] = json!(t);
+        }
+        groups[idx]["hooks"]
+            .as_array_mut()
+            .expect("hooks array")
+            .push(hook);
+    }
+    (!events.is_empty()).then_some(Value::Object(events))
+}
+
 /// What one command did.
 enum RunResult {
     Exited {
@@ -756,6 +857,43 @@ mod tests {
         let out = s.run("PreToolUse", "bash", input()).await;
         assert!(out.block.is_none());
         assert!(out.messages[0].contains("need a model"));
+    }
+
+    #[test]
+    fn rules_round_trip_through_the_config_shape() {
+        let config = json!({"hooks": {
+            "PreToolUse": [
+                {"matcher": "Bash", "hooks": [
+                    {"type": "command", "command": "a.sh", "timeout": 10.0},
+                    {"type": "prompt", "prompt": "safe?"}
+                ]},
+                {"matcher": "*", "hooks": [{"type": "command", "command": "any.sh"}]}
+            ],
+            "Stop": [{"hooks": [{"command": "done.sh"}]}]
+        }});
+        let rules = rules_from_config(&config);
+        assert_eq!(rules.len(), 4);
+        assert_eq!(rules[0].matcher.as_deref(), Some("Bash"));
+        assert_eq!(rules[0].timeout, Some(10.0));
+        assert_eq!(rules[1].kind, "prompt");
+        assert_eq!(rules[2].matcher, None, "`*` means any");
+        assert_eq!(rules[3].kind, "command", "type defaults to command");
+
+        let back = config_from_rules(&rules).unwrap();
+        assert_eq!(
+            back["PreToolUse"].as_array().unwrap().len(),
+            2,
+            "grouped by matcher"
+        );
+        assert_eq!(back["PreToolUse"][0]["hooks"].as_array().unwrap().len(), 2);
+        assert_eq!(rules_from_config(&back), rules);
+        // The result loads as a working hook set.
+        let mut set = HookSet::default();
+        set.add(&back, None, "t");
+        assert!(set.problems.is_empty(), "{:?}", set.problems);
+        assert_eq!(set.hooks.len(), 4);
+
+        assert_eq!(config_from_rules(&[]), None);
     }
 
     #[test]

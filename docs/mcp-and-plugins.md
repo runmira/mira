@@ -163,7 +163,12 @@ Plugins install under `~/.mira/plugins/`. What each part becomes:
 Hooks run at points in a session: shell commands, or prompts a model
 judges. They use Claude Code's format, so a plugin's `hooks/hooks.json`
 works unchanged.
-You can also add your own under `hooks:` in `~/.mira/mira.yaml`:
+
+The easiest way to add your own is **Settings → Hooks** in the web app:
+pick when (e.g. "Mira needs your approval", "Before Mira runs a shell
+command") and what to do (show a notification, ask the AI to check, or
+run a command). It also lists the hooks your plugins add. It writes the
+same `hooks:` section you can edit by hand in `~/.mira/mira.yaml`:
 
 ```yaml
 hooks:
