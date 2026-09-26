@@ -96,7 +96,7 @@ export function ThoughtBlock({
           ref={bodyRef}
           onScroll={live ? onScroll : undefined}
           className={cn(
-            'ml-[7px] mt-1 animate-fade-in border-l-2 border-border pl-3 text-[13px] leading-relaxed text-muted-foreground',
+            'thought ml-[7px] mt-1 animate-fade-in border-l-2 border-border pl-3 text-[13px] leading-relaxed text-muted-foreground',
             // Fade the top edge so older lines read as scrolling away.
             live &&
               'max-h-40 overflow-y-auto [mask-image:linear-gradient(to_bottom,transparent,black_2rem)]',

@@ -104,6 +104,29 @@
   letter-spacing: -0.011em;
 }
 
+/* Model thinking: everything reads grey so it's never mistaken for the
+   answer — headings, bold, links and code included. */
+.thought .md,
+.thought .md strong,
+.thought .md h1, .thought .md h2, .thought .md h3, .thought .md h4, .thought .md h5,
+.thought .md th,
+.thought .md a,
+.thought .md blockquote strong,
+.thought .md ol > li::marker {
+  color: hsl(var(--muted-foreground));
+}
+.thought .md { font-size: 13px; }
+/* Headings inside thinking are just emphasis, not document structure. */
+.thought .md h1, .thought .md h2, .thought .md h3, .thought .md h4, .thought .md h5 {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 0.6rem 0 0.3rem;
+  padding: 0;
+  border: 0;
+}
+.thought .md :not(pre) > code { color: hsl(var(--muted-foreground)); background: hsl(0 0% 100% / 0.04); }
+.thought .md-code { opacity: 0.7; }
+
 .md p { margin: 0 0 0.85rem; }
 .md p:last-child { margin-bottom: 0; }
 
