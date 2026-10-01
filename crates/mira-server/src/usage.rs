@@ -42,6 +42,14 @@ pub struct UsageRow {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub cached_input_tokens: u64,
+    /// The external agent that ran these turns (`claude`, `codex`); absent
+    /// for Mira's own turns.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// The agent's own cost estimate, when it reports one. The client
+    /// prices everything else from its table.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
 }
 
 fn day_of(secs: u64) -> String {
@@ -105,6 +113,53 @@ pub fn rows_for(rec: &SessionRecord, since_day: &str) -> Vec<UsageRow> {
             prompt_tokens: u.prompt_tokens,
             completion_tokens: u.completion_tokens,
             cached_input_tokens: u.cached_input_tokens,
+            agent: None,
+            cost_usd: None,
+        })
+        .collect()
+}
+
+/// External agents' spend from the ledger, one row per (session, day,
+/// agent, model), titled from the session it ran in.
+pub fn agent_rows(
+    ledger: &[crate::agent_spend::SpendRow],
+    records: &[SessionRecord],
+    since_day: &str,
+) -> Vec<UsageRow> {
+    let titles: std::collections::HashMap<String, Option<String>> = records
+        .iter()
+        .map(|r| (r.id.to_string(), r.title.clone()))
+        .collect();
+    let mut by_key: BTreeMap<(String, String, String, String), (String, UsageTotals, Option<f64>)> =
+        BTreeMap::new();
+    for r in ledger {
+        let day = day_of(r.ts);
+        if day.as_str() < since_day {
+            continue;
+        }
+        let e = by_key
+            .entry((r.session_id.clone(), day, r.driver.clone(), r.model.clone()))
+            .or_insert_with(|| (r.cwd.clone(), UsageTotals::default(), None));
+        e.1.prompt_tokens += r.input_tokens;
+        e.1.completion_tokens += r.output_tokens;
+        e.1.cached_input_tokens += r.cached_input_tokens;
+        if let Some(c) = r.cost_usd {
+            e.2 = Some(e.2.unwrap_or(0.0) + c);
+        }
+    }
+    by_key
+        .into_iter()
+        .map(|((session_id, day, agent, model), (cwd, u, cost))| UsageRow {
+            title: titles.get(&session_id).cloned().flatten(),
+            session_id,
+            cwd,
+            model,
+            day,
+            prompt_tokens: u.prompt_tokens,
+            completion_tokens: u.completion_tokens,
+            cached_input_tokens: u.cached_input_tokens,
+            agent: Some(agent),
+            cost_usd: cost,
         })
         .collect()
 }
@@ -126,7 +181,19 @@ pub async fn get_usage(State(state): State<AppState>, Query(q): Query<UsageQuery
                 .into_response()
         }
     };
-    let rows: Vec<UsageRow> = records.iter().flat_map(|r| rows_for(r, &since)).collect();
+    let mut rows: Vec<UsageRow> = records.iter().flat_map(|r| rows_for(r, &since)).collect();
+    if let Some(ledger) = crate::agent_spend::SpendLedger::user() {
+        // A day's margin either side of UTC; `agent_rows` filters by day.
+        let since_secs = chrono::NaiveDate::parse_from_str(&since, "%Y-%m-%d")
+            .ok()
+            .and_then(|d| d.and_hms_opt(0, 0, 0))
+            .map(|d| d.and_utc().timestamp().max(0) as u64)
+            .unwrap_or(0);
+        let spent = tokio::task::spawn_blocking(move || ledger.rows_since(since_secs))
+            .await
+            .unwrap_or_default();
+        rows.extend(agent_rows(&spent, &records, &since));
+    }
     Json(serde_json::json!({ "since": since, "rows": rows })).into_response()
 }
 

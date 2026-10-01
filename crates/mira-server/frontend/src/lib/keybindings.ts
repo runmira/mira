@@ -25,6 +25,7 @@ export const MIRA_KEYBINDING_COMMANDS = [
   'review.toggle',
   'sidebar.toggle',
   'settings.toggle',
+  'palette.toggle',
 ] as const;
 export type MiraKeybindingCommand = (typeof MIRA_KEYBINDING_COMMANDS)[number];
 
@@ -340,6 +341,7 @@ export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
   { key: 'mod+d', command: 'review.toggle', when: '!terminalFocus' },
   { key: 'mod+b', command: 'sidebar.toggle', when: '!terminalFocus' },
   { key: 'mod+,', command: 'settings.toggle', when: '!terminalFocus' },
+  { key: 'mod+k', command: 'palette.toggle', when: '!terminalFocus' },
 ];
 
 export const DEFAULT_RESOLVED_KEYBINDINGS =

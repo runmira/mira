@@ -31,6 +31,7 @@ pub mod acp_host;
 pub mod acp_session;
 pub mod session_engine;
 mod subagents_api;
+pub mod agent_spend;
 pub mod approver;
 mod browse;
 mod browser;

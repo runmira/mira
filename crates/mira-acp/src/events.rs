@@ -140,9 +140,29 @@ pub enum MiraEvent {
     /// The account's plan limits (Claude's 5-hour and weekly windows):
     /// how much of each is used, and when it resets.
     Limits { windows: Vec<LimitWindow> },
+    /// What the agent session has spent so far, per model. Running totals,
+    /// not per-turn amounts — agents report it that way, and only the
+    /// recorder knows what it has already counted. `session` is the agent's
+    /// own session id, so a resumed session isn't counted twice.
+    Spend { session: Option<String>, models: Vec<ModelSpend> },
     /// Content we could not model (an image, a resource link). Kept as a
     /// trace rather than dropped.
     Unmodelled { source: EventSource, reason: String },
+}
+
+/// One model's running spend within an agent session.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ModelSpend {
+    /// The model id as the agent names it; empty when the agent doesn't say.
+    pub model: String,
+    /// Fresh input tokens (not cache reads).
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    /// Input served from (or written to) the prompt cache.
+    pub cached_input_tokens: u64,
+    /// The agent's own estimate, when it gives one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

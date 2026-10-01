@@ -298,6 +298,7 @@ const COMMAND_LABELS: Record<MiraKeybindingCommand, string> = {
   'review.toggle': 'Review: Toggle Changes Drawer',
   'sidebar.toggle': 'Sidebar: Toggle',
   'settings.toggle': 'Settings: Toggle',
+  'palette.toggle': 'Command Palette: Toggle',
 };
 
 export function commandLabel(command: MiraKeybindingCommand): string {

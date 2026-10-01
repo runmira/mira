@@ -412,24 +412,34 @@ export function AcpAgentsSection({
 
   if (agents.length === 0) {
     return (
-      <div className="flex items-center gap-2 rounded-xl border border-dashed border-border/70 px-4 py-8 text-[12.5px] text-muted-foreground/70">
+      <div className="flex items-center gap-2 rounded-xl border border-dashed border-border/70 px-4 py-6 text-[12.5px] text-muted-foreground/70">
         {refreshing ? (
           <>
             <Loader2 className="size-3.5 animate-spin" />
             Checking for installed agents…
           </>
         ) : (
-          <>
-            <Terminal className="size-3.5" />
-            No agents reported yet.
+          <div className="space-y-2">
+            <div className="flex items-center gap-2 text-foreground/80">
+              <Terminal className="size-3.5" />
+              No external agents on this computer yet.
+            </div>
+            <p className="max-w-[60ch] leading-relaxed">
+              Mira can hand a chat to a coding agent you already use, signed in with your own
+              account. Install one, then check again:
+            </p>
+            <ul className="space-y-1 font-mono text-[11.5px] text-foreground/75">
+              <li>npm i -g @anthropic-ai/claude-code <span className="font-sans text-muted-foreground/60">— Claude Code</span></li>
+              <li>npm i -g @openai/codex <span className="font-sans text-muted-foreground/60">— Codex</span></li>
+            </ul>
             <button
               type="button"
               onClick={onRefresh}
-              className="ml-1 underline underline-offset-2 hover:text-foreground"
+              className="underline underline-offset-2 hover:text-foreground"
             >
-              Check now
+              Check again
             </button>
-          </>
+          </div>
         )}
       </div>
     );

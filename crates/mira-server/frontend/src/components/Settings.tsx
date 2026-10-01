@@ -914,24 +914,24 @@ function GeneralSection({
         description="System alerts from this browser. Stored in this browser only."
       >
         <TRow
-          title="Notify when a turn finishes"
+          title="Notify when Mira finishes or needs you"
           description={
             notifyState === 'denied'
               ? 'Blocked — allow notifications for this site in your browser settings, then turn this back on.'
               : notifyState === 'unsupported'
                 ? 'This browser does not support desktop notifications.'
-                : 'Ping you when a turn completes while the tab is hidden.'
+                : 'A system alert when a chat finishes, asks for approval, or has a question — only while Mira is in the background.'
           }
           status={
             notifyTurnDone && notifyState === 'granted'
-              ? 'On — you’ll be pinged for turns that finish in a background tab.'
+              ? 'On — you’ll hear from Mira while it’s in the background.'
               : undefined
           }
           control={
             <TSwitch
               checked={notifyTurnDone && notifyState !== 'denied' && notifyState !== 'unsupported'}
               onChange={(v) => void setNotify(v)}
-              label="Notify when a turn finishes"
+              label="Notify when Mira finishes or needs you"
             />
           }
         />

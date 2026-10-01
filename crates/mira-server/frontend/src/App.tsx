@@ -74,7 +74,28 @@ import { TimelineMinimap, type MinimapItem } from './components/TimelineMinimap'
 import { ImageLightbox } from './components/ImageLightbox';
 import { TerminalPanel } from './components/TerminalPanel';
 import * as agentTerminal from './lib/agentTerminal';
-import { SquareTerminal } from 'lucide-react';
+import {
+  Bot,
+  Brain,
+  ChartColumn,
+  Cog,
+  FileDiff,
+  FolderOpen,
+  Globe2,
+  Keyboard,
+  MessageSquarePlus,
+  PanelLeftClose,
+  Plug,
+  ScanSearch,
+  Smile,
+  SquareTerminal,
+  Cpu,
+  Sparkles,
+  Zap,
+} from 'lucide-react';
+import { CommandPalette, type PaletteAction } from './components/CommandPalette';
+import { callForAttention } from './lib/attention';
+import { GetStarted } from './components/onboarding/GetStarted';
 
 const IS_MAC = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
 import { ToolCard, type ToolStatus } from './components/ToolCard';
@@ -98,7 +119,8 @@ import miraLogo from './assets/mira-logo.png';
 import { SubagentPanel, type SubagentTab, type FilePanelTab } from './components/SubagentPanel';
 import { TaskListPanel } from './components/TaskListPanel';
 import { GoalPanel } from './components/GoalPanel';
-import { countsByCategory, countsPhrase, ToolGroup } from './components/ToolGroup';
+import { categoryFor, countsByCategory, countsPhrase, ToolGroup } from './components/ToolGroup';
+import { SecondOpinion } from './components/SecondOpinion';
 import type {
   EnvironmentInfo,
   EnvironmentStatus,
@@ -845,6 +867,7 @@ export default function App() {
     }, 350);
   }
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
   // File picker opened from the right panel's "+" menu — distinct from the
   // folder picker, which switches the session's cwd.
   const [panelFilePickerOpen, setPanelFilePickerOpen] = useState(false);
@@ -1003,6 +1026,22 @@ export default function App() {
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
   }, [keybindings]);
+  // ⌘K opens the command palette from anywhere, the composer included —
+  // it's the one shortcut that has to work mid-sentence.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const command = resolveShortcutCommand(e, keybindings, {
+        context: { ...shortcutContext(), editableFocus: false },
+      });
+      if (command !== 'palette.toggle') return;
+      e.preventDefault();
+      e.stopPropagation();
+      setPaletteOpen((v) => !v);
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [keybindings]);
   const ctxFits = useContextPanelFits();
   const [branchPr, setBranchPr] = useState<BranchPrView | null>(null);
   // Live task list — hydrated from `ready.tasks` on socket open and
@@ -1105,17 +1144,14 @@ export default function App() {
   // (Settings → General → Notifications). Only fires if the user granted
   // permission; requesting happens from the settings row.
   const prevBusyRef = useRef(busy);
+  // Read from WS handlers, which close over the first render.
+  const chatTitleRef = useRef<string | null>(null);
+  chatTitleRef.current = sessionTitle ?? titleFromEntries(entries);
   useEffect(() => {
     const was = prevBusyRef.current;
     prevBusyRef.current = busy;
-    if (!was || busy || !getBoolPref(PREF_KEYS.notifyTurnDone, false)) return;
-    try {
-      if (typeof Notification !== 'undefined' && Notification.permission === 'granted' && document.hidden) {
-        new Notification('Mira', { body: 'Turn finished.' });
-      }
-    } catch {
-      /* notifications unavailable */
-    }
+    if (!was || busy) return;
+    callForAttention('done', chatTitleRef.current);
   }, [busy]);
 
   // Apply the reduce-motion class on boot (Settings → General → Appearance).
@@ -1276,6 +1312,7 @@ export default function App() {
         setThinking(false);
         clearThinkingIdle();
         playPing();
+        callForAttention('approval', chatTitleRef.current);
         setEntries((prev) => [
           ...sealThought(prev),
           { kind: 'tool', call: msg.call, preview: msg.preview ?? null, needs: msg.needs ?? [], status: 'pending', result: null },
@@ -1673,6 +1710,7 @@ export default function App() {
         // if the tool_start already arrived; otherwise stash the proposal so
         // tool_start can pick it up when it lands (see the tool_start case).
         playPing();
+        callForAttention('plan', chatTitleRef.current);
         setEntries((prev) => {
           const hit = prev.some((e) => e.kind === 'tool' && e.call.id === msg.prompt_id);
           if (!hit) {
@@ -1686,6 +1724,7 @@ export default function App() {
         // Same race-guard pattern as plan_request — attach immediately when
         // the tool_start already landed; stash otherwise.
         playPing();
+        callForAttention('question', chatTitleRef.current);
         setEntries((prev) => {
           const hit = prev.some((e) => e.kind === 'tool' && e.call.id === msg.prompt_id);
           if (!hit) {
@@ -2330,6 +2369,38 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [keybindings, mainView]);
 
+  /** Everything ⌘K can do. Each entry runs exactly what its button or
+   *  shortcut does, so the palette never drifts from the rest of the app. */
+  const keyFor = (c: Parameters<typeof shortcutLabelForCommand>[1]) => shortcutLabelForCommand(keybindings, c);
+  const goSettings = (id: import('./components/Settings').SettingsSectionId) => () => {
+    openSettings();
+    setSettingsSection(id);
+  };
+  const paletteActions: PaletteAction[] = [
+    { id: 'new', group: 'Chat', label: 'New chat', icon: MessageSquarePlus, shortcut: keyFor('chat.new'), run: () => void onNewChat() },
+    { id: 'folder', group: 'Chat', label: 'Open folder…', icon: FolderOpen, keywords: ['project', 'cwd', 'directory'], run: () => setPickerOpen(true) },
+    {
+      id: 'model', group: 'Chat', label: acpDriver ? 'Switch model or agent…' : 'Switch model…', icon: Cpu,
+      keywords: ['provider', 'agent', 'claude', 'codex', 'engine'],
+      run: () => { setMainView('chat'); window.dispatchEvent(new Event('mira:open-model-picker')); },
+    },
+    { id: 'changes', group: 'Chat', label: 'Review changes', icon: FileDiff, shortcut: keyFor('review.toggle'), keywords: ['diff', 'git'], run: () => setReviewOpen(true) },
+    { id: 'review', group: 'Chat', label: 'Ask Iris to review the changes', icon: ScanSearch, keywords: ['code review', 'second opinion', 'reviewer'], run: () => void runReview('') },
+    { id: 'sidebar', group: 'View', label: 'Toggle sidebar', icon: PanelLeftClose, shortcut: keyFor('sidebar.toggle'), run: () => setSidebarOpen((v) => !v) },
+    { id: 'terminal', group: 'View', label: 'Toggle terminal', icon: SquareTerminal, shortcut: keyFor('terminal.toggle'), run: () => setTerminal(!terminalOpen) },
+    { id: 'browser', group: 'View', label: 'Open browser', icon: Globe2, keywords: ['chrome', 'web'], run: () => { setMainView('chat'); openToolPane('browser'); } },
+    { id: 'whiteboard', group: 'View', label: 'Open whiteboard', icon: Pencil, keywords: ['sketch', 'draw'], run: () => { setMainView('chat'); openToolPane('whiteboard'); } },
+    { id: 's-general', group: 'Settings', label: 'General settings', icon: Cog, shortcut: keyFor('settings.toggle'), run: goSettings('general') },
+    { id: 's-provider', group: 'Settings', label: 'Providers & API keys', icon: Plug, run: goSettings('provider') },
+    { id: 's-agents', group: 'Settings', label: 'External agents', icon: Bot, keywords: ['claude code', 'codex'], run: goSettings('agents') },
+    { id: 's-subagents', group: 'Settings', label: 'Subagents', icon: Smile, keywords: ['scout', 'iris', 'atlas', 'bolt', 'quill', 'sentry', 'faces'], run: goSettings('subagents') },
+    { id: 's-usage', group: 'Settings', label: 'Usage & cost', icon: ChartColumn, keywords: ['tokens', 'spend', 'limits'], run: goSettings('usage') },
+    { id: 's-memory', group: 'Settings', label: 'Memory', icon: Brain, run: goSettings('memory') },
+    { id: 's-skills', group: 'Settings', label: 'Skills', icon: Sparkles, run: goSettings('skills') },
+    { id: 's-hooks', group: 'Settings', label: 'Hooks', icon: Zap, run: goSettings('hooks') },
+    { id: 's-keys', group: 'Settings', label: 'Keyboard shortcuts', icon: Keyboard, keywords: ['keybindings'], run: goSettings('keybindings') },
+  ];
+
   const settingsHandler = (v: SettingsView) => {
     setConfigured(v.configured);
     setProviderName(v.default_provider ?? null);
@@ -2346,6 +2417,26 @@ export default function App() {
   );
 
   const turns = useMemo(() => groupByTurn(entries), [entries]);
+
+  // Second opinion: after an external agent's turn that changed files,
+  // offer a review by Mira's own reviewer. One offer per turn; dismissing
+  // or accepting it retires it.
+  const [secondOpinionSeen, setSecondOpinionSeen] = useState<Set<string>>(() => new Set());
+  const lastTurnIdx = turns.length - 1;
+  const secondOpinionKey = `${sessionId}:${lastTurnIdx}`;
+  const lastTurnEdited = useMemo(() => {
+    const last = turns[turns.length - 1];
+    return !!last?.body.some((e) => {
+      if (e.kind !== 'tool' || e.status === 'denied') return false;
+      const cat = categoryFor(e.call.function.name);
+      return cat === 'write' || cat === 'edit';
+    });
+  }, [turns]);
+  const showSecondOpinion =
+    !!acpDriver && !busy && lastTurnIdx >= 0 && lastTurnEdited &&
+    sessionDiff.files.length > 0 && !secondOpinionSeen.has(secondOpinionKey);
+  const retireSecondOpinion = () =>
+    setSecondOpinionSeen((prev) => new Set(prev).add(secondOpinionKey));
 
   // Timeline minimap items: one per turn opened by a user message.
   // Assistant excerpt = first assistant text in the turn body.
@@ -2741,7 +2832,21 @@ export default function App() {
                 onScroll={onPaneScroll}
               >
                 {/* Agents bring their own login, so a chat on one needs no provider. */}
-                {configured === false && !acpDriver && (
+                {configured === false && !acpDriver && isEmpty && (
+                  <GetStarted
+                    agents={acpAgents}
+                    onUseAgent={(kind) => {
+                      const cfg = loadInstanceConfigs()[kind] ?? { enabled: true };
+                      startAcpAgent(kind, { ...cfg, launchArgs: cfg.launchArgs ?? '', env: cfg.env ?? '', enabled: true }, null);
+                    }}
+                    onAddProvider={() => {
+                      openSettings();
+                      setSettingsSection('provider');
+                    }}
+                    onSetUpAgents={openAgentSettings}
+                  />
+                )}
+                {configured === false && !acpDriver && !isEmpty && (
                   <div className="mx-auto mb-4 max-w-3xl rounded-lg border border-amber-500/30 bg-amber-500/[0.08] px-3 py-2 text-[13px] text-amber-200">
                     No provider configured —{' '}
                     <button
@@ -2755,7 +2860,7 @@ export default function App() {
                 )}
 
                 {isEmpty ? (
-                  <EmptyState
+                  configured === false && !acpDriver ? null : <EmptyState
                     cwd={cwd}
                     onPrompt={(text) => onSend(text)}
                     onOpenSession={(id) => wsRef.current?.attach(id)}
@@ -2796,6 +2901,22 @@ export default function App() {
                       />
                     ))}
                     </MessageActionsContext.Provider>
+                    {showSecondOpinion && (
+                      <SecondOpinion
+                        agentName={acpDriverName}
+                        files={sessionDiff.files.length}
+                        canReview={configured !== false}
+                        onReview={() => {
+                          retireSecondOpinion();
+                          void runReview('');
+                        }}
+                        onAddProvider={() => {
+                          openSettings();
+                          setSettingsSection('provider');
+                        }}
+                        onDismiss={retireSecondOpinion}
+                      />
+                    )}
                     {thinking && (
                       <div className="flex justify-start">
                         <Thinking />
@@ -3098,6 +3219,15 @@ export default function App() {
         }}
       />
 
+      <CommandPalette
+        open={paletteOpen}
+        onOpenChange={setPaletteOpen}
+        actions={paletteActions}
+        onOpenSession={(id) => {
+          wsRef.current?.attach(id);
+          setMainView('chat');
+        }}
+      />
       <FolderPicker
         open={pickerOpen}
         onClose={() => setPickerOpen(false)}

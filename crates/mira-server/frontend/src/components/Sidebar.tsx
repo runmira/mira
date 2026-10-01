@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Archive,
   ArchiveRestore,
@@ -151,6 +151,39 @@ export function Sidebar({
   }, [showArchived, refreshKey, localVersion]);
 
   const refresh = () => setLocalVersion((n) => n + 1);
+
+  // Background chats only report through this list, so while any of them
+  // is mid-turn, look again every few seconds — that's how a spinner turns
+  // into "finished" without the user having to open the chat.
+  const anyRunning = sessions.some((s) => s.running === true && s.id !== activeSessionId);
+  useEffect(() => {
+    if (!anyRunning) return;
+    const id = window.setInterval(refresh, 4000);
+    return () => window.clearInterval(id);
+  }, [anyRunning]);
+
+  // Chats that finished while you were looking at something else get a
+  // dot until you open them. Remembered across reloads.
+  const [unread, setUnread] = useState<Set<string>>(() => loadUnread());
+  const wasRunning = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const next = new Set(unread);
+    let changed = false;
+    for (const s of sessions) {
+      if (s.running) continue;
+      if (wasRunning.current.has(s.id) && s.id !== activeSessionId && !next.has(s.id)) {
+        next.add(s.id);
+        changed = true;
+      }
+    }
+    wasRunning.current = new Set(sessions.filter((s) => s.running).map((s) => s.id));
+    if (activeSessionId && next.delete(activeSessionId)) changed = true;
+    if (changed) {
+      setUnread(next);
+      saveUnread(next);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessions, activeSessionId]);
 
   /** Flip one session's pin/archive flag and refresh. Errors surface in
    *  the same slot as fetch errors. */
@@ -554,6 +587,7 @@ export function Sidebar({
                         // id server-side, which drops it naturally).
                         active={s.id === activeSessionId && activeView === 'chat'}
                         activeBusy={activeBusy}
+                        unread={unread.has(s.id)}
                         selecting={selecting}
                         checked={selected.has(s.id)}
                         onToggleSelect={() => toggleSelected(s.id)}
@@ -682,6 +716,7 @@ function SessionRow({
   session,
   active,
   activeBusy,
+  unread = false,
   onPick,
   onRename,
   onDelete,
@@ -695,6 +730,8 @@ function SessionRow({
   session: SessionSummary;
   active: boolean;
   activeBusy: boolean;
+  /** Finished in the background since you last looked. */
+  unread?: boolean;
   onPick: () => void;
   onRename: () => void;
   onDelete: () => void;
@@ -783,7 +820,7 @@ function SessionRow({
               'group-hover:opacity-0',
             )}
           >
-            <SessionStatus running={running} merged={session.worktree_status === 'merged'} />
+            <SessionStatus running={running} unread={unread} merged={session.worktree_status === 'merged'} />
           </span>
           <span
             className={cn(
@@ -837,7 +874,18 @@ function agentName(kind: string): string {
 /** The right-side status affordance. Priority: running (spinner) > merged
  *  (green check) > idle (empty circle outline). Matches Codex's row-status
  *  ring — quiet by default, expressive when there's a state worth noting. */
-function SessionStatus({ running, merged }: { running: boolean; merged: boolean }) {
+function SessionStatus({ running, unread, merged }: { running: boolean; unread: boolean; merged: boolean }) {
+  if (unread && !running) {
+    return (
+      <span
+        className="inline-flex size-4 items-center justify-center"
+        title="Finished while you were away"
+        aria-label="finished, unread"
+      >
+        <span className="size-2 rounded-full bg-mira-blue shadow-[0_0_6px_rgba(96,165,250,0.7)]" />
+      </span>
+    );
+  }
   if (running) {
     // Same spinner the transcript uses in <Thinking /> and every
     // ToolGroup / AgentCard while a call is in flight — size-3 mira-blue
@@ -1411,4 +1459,21 @@ function RowMenu({ items }: { items: RowMenuItem[] }) {
       </PopoverContent>
     </Popover>
   );
+}
+
+const UNREAD_KEY = 'mira.sidebar.unread';
+function loadUnread(): Set<string> {
+  try {
+    const v = JSON.parse(localStorage.getItem(UNREAD_KEY) ?? '[]');
+    return new Set(Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
+  } catch {
+    return new Set();
+  }
+}
+function saveUnread(ids: Set<string>) {
+  try {
+    localStorage.setItem(UNREAD_KEY, JSON.stringify([...ids].slice(-200)));
+  } catch {
+    /* private mode */
+  }
 }

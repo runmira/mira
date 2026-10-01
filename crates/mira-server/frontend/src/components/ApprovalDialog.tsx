@@ -17,6 +17,8 @@ export type ApprovalChoice = {
   /** Styles it as the destructive one, for grants of wider authority. */
   destructive?: boolean;
   disabled?: boolean;
+  /** Key that picks this choice (`Y`), shown as a key cap on the button. */
+  kbd?: string | null;
 };
 
 export type ApprovalRequest = {
@@ -83,6 +85,16 @@ export function ApprovalChoices({
             onClick={() => onChoose(c.id)}
           >
             {c.label}
+            {c.kbd && (
+              <kbd
+                className={
+                  'ml-1.5 rounded border px-1 font-sans text-[10px] leading-4 ' +
+                  (c.primary ? 'border-current/30 opacity-70' : 'border-border/70 text-muted-foreground')
+                }
+              >
+                {c.kbd}
+              </kbd>
+            )}
           </Button>
           {c.hint && (
             <span className="max-w-[16rem] text-right text-[10.5px] leading-tight text-muted-foreground/70">

@@ -29,7 +29,18 @@ type Row = {
   prompt_tokens: number;
   completion_tokens: number;
   cached_input_tokens: number;
+  /** The external agent that ran these turns (`claude`, `codex`). */
+  agent?: string | null;
+  /** The agent's own cost estimate, used instead of the price table. */
+  cost_usd?: number | null;
 };
+
+const AGENT_NAMES: Record<string, string> = { claude: 'Claude Code', codex: 'Codex' };
+/** Model label, with the agent that ran it so agent and provider spend
+ *  on the same model stay apart. */
+function modelLabel(r: Row): string {
+  return r.agent ? `${r.model} · ${AGENT_NAMES[r.agent] ?? r.agent}` : r.model;
+}
 
 type Agg = { input: number; output: number; cost: number; unpriced: boolean };
 
@@ -37,6 +48,7 @@ const RANGES = [7, 30, 90] as const;
 const BAR = '#7aa2f7'; // mira-blue — one series, one hue
 
 function rowCost(r: Row): number | null {
+  if (typeof r.cost_usd === 'number') return r.cost_usd;
   return costUsd(r.model, {
     prompt_tokens: r.prompt_tokens,
     completion_tokens: r.completion_tokens,
@@ -155,7 +167,7 @@ export function UsageSection() {
   const rows = data?.rows ?? [];
   const total = useMemo(() => aggregate(rows, () => 'all').get('all'), [rows]);
   const byDay = useMemo(() => aggregate(rows, (r) => r.day), [rows]);
-  const byModel = useMemo(() => [...aggregate(rows, (r) => r.model)].sort((a, b) => b[1].cost - a[1].cost || b[1].input - a[1].input), [rows]);
+  const byModel = useMemo(() => [...aggregate(rows, modelLabel)].sort((a, b) => b[1].cost - a[1].cost || b[1].input - a[1].input), [rows]);
   const byProject = useMemo(() => [...aggregate(rows, (r) => r.cwd)].sort((a, b) => b[1].cost - a[1].cost || b[1].input - a[1].input), [rows]);
   const bySession = useMemo(() => {
     const titles = new Map(rows.map((r) => [r.session_id, { title: r.title, cwd: r.cwd }]));

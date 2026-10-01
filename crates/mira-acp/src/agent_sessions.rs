@@ -1,3 +1,5 @@
+// This module manages agent session persistence, allowing sessions to be resumed after restarts.
+// It also handles importing history from CLI tools like Claude Code.
 //! Agent sessions beyond the current process: resume cursors and history import.
 //!
 //! Two separate needs, one file:

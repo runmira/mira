@@ -819,11 +819,37 @@ mod tests {
 /// reaches the frontend by the same path as Mira's own.
 pub struct AcpEventPort {
     events: tokio::sync::broadcast::Sender<ServerMsg>,
+    /// Where the agent's spend reports are booked, for the Usage page.
+    spend: Option<(crate::agent_spend::SpendLedger, crate::agent_spend::Spender)>,
 }
 
 impl AcpEventPort {
     pub fn new(events: tokio::sync::broadcast::Sender<ServerMsg>) -> Arc<Self> {
-        Arc::new(AcpEventPort { events })
+        Arc::new(AcpEventPort { events, spend: None })
+    }
+
+    /// A port that also books the agent's spend reports to `ledger`.
+    pub fn with_spend(
+        events: tokio::sync::broadcast::Sender<ServerMsg>,
+        ledger: crate::agent_spend::SpendLedger,
+        who: crate::agent_spend::Spender,
+    ) -> Arc<Self> {
+        Arc::new(AcpEventPort { events, spend: Some((ledger, who)) })
+    }
+
+    /// Book a spend report; anything else becomes a frame.
+    fn route(&self, event: NormalizedEvent) {
+        if let mira_acp::events::MiraEvent::Spend { session, models } = &event.event {
+            if let Some((ledger, who)) = &self.spend {
+                let (ledger, who, session, models) = (ledger.clone(), who.clone(), session.clone(), models.clone());
+                // File I/O, off the event loop.
+                tokio::task::spawn_blocking(move || ledger.record(&who, session.as_deref(), &models));
+            }
+            return;
+        }
+        if let Some(msg) = ServerMsg::from_acp(event) {
+            self.push(msg);
+        }
     }
 
     /// Forward a native agent's event onto the wire.
@@ -832,9 +858,7 @@ impl AcpEventPort {
     /// reaches the client, a native agent is indistinguishable from an ACP
     /// one.
     pub async fn emit(&self, event: NormalizedEvent) {
-        if let Some(msg) = ServerMsg::from_acp(event) {
-            self.push(msg);
-        }
+        self.route(event);
     }
 
     /// Push a frame, logging rather than failing on a send error.
@@ -857,9 +881,7 @@ impl EventPort for AcpEventPort {
     async fn emit(&self, event: NormalizedEvent) {
         // Retain provenance for anything unmodelled before it becomes a frame,
         // so a vendor extension is greppable in the logs.
-        if let Some(msg) = ServerMsg::from_acp(event) {
-            self.push(msg);
-        }
+        self.route(event);
     }
 }
 

@@ -200,18 +200,41 @@ pub fn map_notification(method: &str, p: &Value) -> Vec<AppServerAction> {
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
             let window = u.get("modelContextWindow").and_then(Value::as_u64).unwrap_or(0);
-            if last == 0 && window == 0 {
-                vec![]
-            } else {
-                vec![AppServerAction::Event(NormalizedEvent {
+            let mut out = Vec::new();
+            if last != 0 || window != 0 {
+                out.push(AppServerAction::Event(NormalizedEvent {
                     source: variant("usage"),
                     event: MiraEvent::Usage {
                         used: last,
                         size: window,
                         cost: None,
                     },
-                })]
+                }));
             }
+            // The thread's running token totals, for the usage ledger.
+            // OpenAI counts cached input inside `inputTokens`; split it out
+            // so fresh and cached input are priced apart.
+            if let Some(t) = u.get("total") {
+                let n = |k: &str| t.get(k).and_then(Value::as_u64).unwrap_or(0);
+                let cached = n("cachedInputTokens");
+                let spend = crate::events::ModelSpend {
+                    model: String::new(),
+                    input_tokens: n("inputTokens").saturating_sub(cached),
+                    output_tokens: n("outputTokens"),
+                    cached_input_tokens: cached,
+                    cost_usd: None,
+                };
+                if spend.input_tokens + spend.output_tokens + spend.cached_input_tokens > 0 {
+                    out.push(AppServerAction::Event(NormalizedEvent {
+                        source: variant("spend"),
+                        event: MiraEvent::Spend {
+                            session: p.get("threadId").and_then(Value::as_str).map(str::to_string),
+                            models: vec![spend],
+                        },
+                    }));
+                }
+            }
+            out
         }
 
         "account/rateLimits/updated" => vec![AppServerAction::RateLimits(p.clone())],

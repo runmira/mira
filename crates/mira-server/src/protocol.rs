@@ -787,8 +787,8 @@ pub struct AcpCost {
 impl ServerMsg {
     /// Map a normalized ACP event from an external agent into a wire frame.
     ///
-    /// Returns `None` only for a client message; the ACP variants are all
-    /// server-push. Every modelled event maps to a frame, and anything
+    /// Returns `None` for spend, which is bookkeeping for the usage ledger
+    /// (the event port records it) rather than anything a client shows. Every modelled event maps to a frame, and anything
     /// unmodelled becomes `AcpUnmodelled` rather than being dropped — a
     /// silent gap here is indistinguishable from a hung agent in the UI.
     pub fn from_acp(ev: mira_acp::events::NormalizedEvent) -> Option<Self> {
@@ -820,6 +820,7 @@ impl ServerMsg {
             MiraEvent::ConfigOptions { options } => Self::AcpConfigOptions { options },
             MiraEvent::Commands { names } => Self::AcpCommands { names },
             MiraEvent::Limits { windows } => Self::AcpLimits { windows },
+            MiraEvent::Spend { .. } => return None,
             MiraEvent::Usage { used, size, cost } => Self::AcpUsage {
                 used,
                 size,

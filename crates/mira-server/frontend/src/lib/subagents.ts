@@ -118,5 +118,13 @@ export function useSubagent(name: string | null | undefined): Subagent | null {
 
 /** The name to show for a subagent id. */
 export function personaName(s: Subagent | null | undefined, fallback: string): string {
-  return s?.display_name || (fallback ? fallback.charAt(0).toUpperCase() + fallback.slice(1) : 'Subagent');
+  if (s?.display_name) return s.display_name;
+  if (!fallback) return 'Subagent';
+  // `performance-optimizer` → `Performance Optimizer`; short all-letter
+  // words stay upper-case (`ai-architect` → `AI Architect`).
+  return fallback
+    .split(/[-_\s]+/)
+    .filter(Boolean)
+    .map((w) => (w.length <= 2 ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1)))
+    .join(' ');
 }

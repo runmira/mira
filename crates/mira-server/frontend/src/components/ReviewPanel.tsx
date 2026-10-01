@@ -9,6 +9,8 @@ import {
 } from 'lucide-react';
 import type { ReviewFinding, ReviewProgressEvent, ReviewSeverity } from '../types';
 import { cn } from '@/lib/utils';
+import { SubagentFace, type FaceState } from './SubagentFace';
+import { personaName, useSubagent } from '../lib/subagents';
 
 /**
  * Slide-out right-side panel that surfaces a `mira review` run.
@@ -117,10 +119,7 @@ export function ReviewPanel({ open, state, onClose }: Props) {
         aria-hidden={!open}
       >
         <div className="flex items-center justify-between border-b border-border/60 px-4 py-3">
-          <div className="flex items-center gap-2">
-            <Eye className="size-4 text-mira-blue" />
-            <span className="text-[14px] font-semibold tracking-tight">Review</span>
-          </div>
+          <ReviewerTitle state={state} />
           <button
             type="button"
             onClick={onClose}
@@ -273,4 +272,25 @@ function severityClasses(sev: ReviewSeverity) {
     case 'medium':   return { chip: 'bg-mira-blue/20 text-mira-blue' };
     case 'low':      return { chip: 'bg-secondary text-muted-foreground' };
   }
+}
+
+/** The panel's title is the reviewer itself — its face shows the run's
+ *  state (working, done, worried on failure). */
+function ReviewerTitle({ state }: { state: ReviewState | null }) {
+  const reviewer = useSubagent('reviewer');
+  const name = personaName(reviewer, 'reviewer');
+  const face: FaceState = !state
+    ? 'idle'
+    : state.error
+      ? 'error'
+      : state.done
+        ? 'done'
+        : 'working';
+  return (
+    <div className="flex items-center gap-2">
+      <SubagentFace id="reviewer" face={reviewer?.face} size={24} state={face} />
+      <span className="text-[14px] font-semibold tracking-tight">{name}</span>
+      <span className="text-[12px] text-muted-foreground">Code review</span>
+    </div>
+  );
 }

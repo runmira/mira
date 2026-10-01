@@ -484,6 +484,26 @@ pub struct StreamState {
     context: Option<u64>,
 }
 
+/// A result's `modelUsage`, as running spend per model. `None` when the
+/// result carries none (or only zeros, as a crashed session's last result
+/// does — booking those would read as a reset).
+fn model_spend(result: &Value) -> Option<Vec<crate::events::ModelSpend>> {
+    let by_model = result.get("modelUsage")?.as_object()?;
+    let n = |u: &Value, k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
+    let out: Vec<_> = by_model
+        .iter()
+        .map(|(model, u)| crate::events::ModelSpend {
+            model: model.clone(),
+            input_tokens: n(u, "inputTokens"),
+            output_tokens: n(u, "outputTokens"),
+            cached_input_tokens: n(u, "cacheReadInputTokens") + n(u, "cacheCreationInputTokens"),
+            cost_usd: u.get("costUSD").and_then(Value::as_f64),
+        })
+        .filter(|m| m.input_tokens + m.output_tokens + m.cached_input_tokens > 0 || m.cost_usd.unwrap_or(0.0) > 0.0)
+        .collect();
+    (!out.is_empty()).then_some(out)
+}
+
 /// Context tokens a response's `usage` accounts for.
 fn context_tokens(usage: &Value) -> Option<u64> {
     let n = |k: &str| usage.get(k).and_then(Value::as_u64).unwrap_or(0);
@@ -558,6 +578,17 @@ impl StreamState {
                                 .get("total_cost_usd")
                                 .and_then(Value::as_f64)
                                 .map(|c| (c, "USD".to_string())),
+                        },
+                    }));
+                }
+                // What the session has spent so far, per model (running
+                // totals, subagents included), for the usage ledger.
+                if let Some(spend) = model_spend(v) {
+                    out.push(NativeAction::Event(NormalizedEvent {
+                        source: EventSource::Acp { variant: "spend".to_string() },
+                        event: MiraEvent::Spend {
+                            session: v.get("session_id").and_then(Value::as_str).map(str::to_string),
+                            models: spend,
                         },
                     }));
                 }

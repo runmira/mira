@@ -217,7 +217,21 @@ pub async fn start_agent(
         MAX_ACP_READ_BYTES,
     );
     let permissions = AcpPermissions::new(slot.approver.clone());
-    let events = AcpEventPort::new(slot.events_tx.clone());
+    // Spend reports are booked to the user's ledger, against this chat, so
+    // the Usage page counts agent turns next to Mira's own.
+    let events = match crate::agent_spend::SpendLedger::user() {
+        Some(ledger) => AcpEventPort::with_spend(
+            slot.events_tx.clone(),
+            ledger,
+            crate::agent_spend::Spender {
+                session_id: slot.id.to_string(),
+                cwd: repo_root.to_string_lossy().into_owned(),
+                driver: params.driver_kind.clone(),
+                fallback_model: params.model.clone().unwrap_or_else(|| params.driver_kind.clone()),
+            },
+        ),
+        None => AcpEventPort::new(slot.events_tx.clone()),
+    };
 
     // A native agent has no ACP ports to bind — it runs in its own process and
     // asks the host its questions through one gate. Tool permissions answer

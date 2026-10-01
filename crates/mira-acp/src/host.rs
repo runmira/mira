@@ -1,3 +1,5 @@
+// This module defines the ACP host interface, routing tool calls and permission requests.
+// It does not depend on sandbox or approval machinery directly — those live in mira-server.
 //! What an ACP host must provide, and the routing onto it.
 //!
 //! The protocol requires an agent to be able to ask its client for

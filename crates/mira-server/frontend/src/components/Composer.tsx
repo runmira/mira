@@ -51,6 +51,7 @@ import type { CommandInfo, Origin } from '../api';
 import { MentionInput, type MentionInputHandle } from './MentionInput';
 import { cn } from '@/lib/utils';
 import { ATTACH_FILE_EVENT } from '@/lib/attachBridge';
+import { shortcutLabelForCommand, useKeybindings } from '@/lib/keybindings';
 
 const MODES: { value: Mode; label: string; desc: string }[] = [
   { value: 'plan',   label: 'Plan only',       desc: 'Reads and searches. No edits, no commands.' },
@@ -264,6 +265,12 @@ export function Composer({
   const [slashIdx, setSlashIdx] = useState(0);
   const [slashFeedback, setSlashFeedback] = useState<string | null>(null);
   const [modelPopOpen, setModelPopOpen] = useState(false);
+  // The command palette's "Switch model…" opens this same picker.
+  useEffect(() => {
+    const open = () => setModelPopOpen(true);
+    window.addEventListener('mira:open-model-picker', open);
+    return () => window.removeEventListener('mira:open-model-picker', open);
+  }, []);
   // Imperative handle on the contenteditable mention input. Powers
   // caret-aware skill-mention insertion (palette picks land at the
   // cursor), programmatic clears (post-send), and palette prefills
@@ -2316,6 +2323,10 @@ function EmbeddedApprovalCard({
   onAllowAll?: () => void;
 }) {
   const { call, preview } = approval;
+  // The keys App listens for, as the user has them bound.
+  const keybindings = useKeybindings();
+  const allowKey = shortcutLabelForCommand(keybindings, 'approval.accept', { context: { approvalOpen: true } }) ?? 'Y';
+  const denyKey = shortcutLabelForCommand(keybindings, 'approval.reject', { context: { approvalOpen: true } }) ?? 'N';
   // One card for every approval. An external agent's request only differs
   // in how it is described: its own tool name and input, and why it asks.
   const agent = useMemo(() => agentRequestOf(call), [call]);
@@ -2442,10 +2453,10 @@ function EmbeddedApprovalCard({
             ...(queued > 1 && onAllowAll
               ? [{ id: 'all', label: `Allow all ${queued}`, title: 'Allow every waiting request once' }]
               : []),
-            { id: 'deny', label: 'Deny', title: 'Deny (n)' },
+            { id: 'deny', label: 'Deny', title: 'Deny', kbd: denyKey },
             { id: 'always', label: 'Always allow', title: 'Never ask again' },
             { id: 'session', label: 'Allow for this chat', title: 'Stop asking about this until the chat ends' },
-            { id: 'once', label: 'Allow', primary: true, title: 'Allow this one call (y)' },
+            { id: 'once', label: 'Allow', primary: true, title: 'Allow this one call', kbd: allowKey },
           ]}
           onChoose={(id: string) => {
             if (id === 'all') onAllowAll?.();
