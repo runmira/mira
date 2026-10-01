@@ -306,7 +306,9 @@ mod tests {
         );
         // Appears once, not twice.
         assert_eq!(
-            dirs.iter().filter(|d| *d == &PathBuf::from("/usr/bin")).count(),
+            dirs.iter()
+                .filter(|d| *d == &PathBuf::from("/usr/bin"))
+                .count(),
             1
         );
         assert!(dirs.contains(&PathBuf::from("/nvm/v22/bin")));

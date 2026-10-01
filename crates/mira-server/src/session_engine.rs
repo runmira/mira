@@ -110,7 +110,8 @@ pub struct EngineRuntime {
     /// The scope the user picked for each pending approval, by Mira call
     /// id — recorded before the approval resolves, so the agent's gate can
     /// turn "allow for this session" into rules the agent keeps.
-    pub approval_scopes: std::sync::Mutex<std::collections::HashMap<String, crate::protocol::ApprovalScope>>,
+    pub approval_scopes:
+        std::sync::Mutex<std::collections::HashMap<String, crate::protocol::ApprovalScope>>,
     /// Unix seconds of the agent's last sign of life (a prompt or a frame),
     /// for the idle reaper.
     pub last_active: std::sync::atomic::AtomicU64,
@@ -118,7 +119,8 @@ pub struct EngineRuntime {
 
 impl EngineRuntime {
     pub fn touch(&self) {
-        self.last_active.store(now_secs(), std::sync::atomic::Ordering::Relaxed);
+        self.last_active
+            .store(now_secs(), std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -152,7 +154,11 @@ pub fn spawn_reaper(state: AppState) {
                 if slot.acp_agent.read().await.is_none() {
                     continue;
                 }
-                let idle = now.saturating_sub(slot.engine.last_active.load(std::sync::atomic::Ordering::Relaxed));
+                let idle = now.saturating_sub(
+                    slot.engine
+                        .last_active
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                );
                 if idle < REAP_AFTER.as_secs() {
                     continue;
                 }
@@ -229,7 +235,12 @@ pub async fn current(state: &AppState, slot: &SessionSlot) -> SessionEngine {
             AgentPhase::Idle => (EngineStatus::Idle, None),
         }
     };
-    let reported = slot.engine.reported_model.lock().ok().and_then(|m| m.clone());
+    let reported = slot
+        .engine
+        .reported_model
+        .lock()
+        .ok()
+        .and_then(|m| m.clone());
     SessionEngine {
         kind: EngineKind::Agent,
         instance: None,
@@ -265,7 +276,11 @@ pub async fn select_agent(state: &AppState, slot: &Arc<SessionSlot>, params: Acp
         // Mark where the provider's turns stop, so a reload replays the two
         // histories interleaved in the order they happened rather than all
         // provider turns followed by all agent turns.
-        if let Some(path) = state.store.as_ref().and_then(|s| s.agent_log_path(&slot.id)) {
+        if let Some(path) = state
+            .store
+            .as_ref()
+            .and_then(|s| s.agent_log_path(&slot.id))
+        {
             let harness_len = slot.session.read().await.transcript().await.len();
             mira_acp::agent_sessions::append_line_to(
                 &path,
@@ -322,7 +337,9 @@ pub async fn ensure_agent(
         }
     }
     let Some(params) = slot.acp_launch.lock().await.clone() else {
-        return Err("this session is not set up for an agent — pick one in the model picker".into());
+        return Err(
+            "this session is not set up for an agent — pick one in the model picker".into(),
+        );
     };
     *slot.engine.phase.lock().await = AgentPhase::Starting;
     publish(state, slot).await;
@@ -370,8 +387,16 @@ async fn remember_agent(slot: &SessionSlot, params: &AcpLaunchParams, active: bo
 const HANDOFF_MAX_CHARS: usize = 12_000;
 
 /// Agent → provider: the agent's turns the harness has not seen, as a note.
-async fn hand_agent_turns_to_harness(state: &AppState, slot: &SessionSlot, params: &AcpLaunchParams) {
-    let Some(path) = state.store.as_ref().and_then(|s| s.agent_log_path(&slot.id)) else {
+async fn hand_agent_turns_to_harness(
+    state: &AppState,
+    slot: &SessionSlot,
+    params: &AcpLaunchParams,
+) {
+    let Some(path) = state
+        .store
+        .as_ref()
+        .and_then(|s| s.agent_log_path(&slot.id))
+    else {
         return;
     };
     let lines = mira_acp::agent_sessions::read_lines(&path);
@@ -454,12 +479,18 @@ fn agent_lines_to_text(lines: &[serde_json::Value]) -> String {
         reply.clear();
     };
     for line in lines {
-        if let Some(text) = line.get("user").and_then(|u| u.get("text")).and_then(|t| t.as_str()) {
+        if let Some(text) = line
+            .get("user")
+            .and_then(|u| u.get("text"))
+            .and_then(|t| t.as_str())
+        {
             flush(&mut out, &mut reply, &mut tools);
             out.push_str(&format!("User: {}\n\n", text.trim()));
             continue;
         }
-        let Some(frame) = line.get("frame") else { continue };
+        let Some(frame) = line.get("frame") else {
+            continue;
+        };
         match frame.get("type").and_then(|t| t.as_str()) {
             Some("acp_text") => {
                 if let Some(t) = frame.get("text").and_then(|t| t.as_str()) {

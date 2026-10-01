@@ -43,7 +43,10 @@ pub fn missing_piece(cfg: &MiraConfig, name: &str) -> Option<EngineState> {
 /// Build the provider for native instance `name`, or the reason it
 /// can't be built. Cheap: no network, no spawn — `list_models` is the
 /// caller's choice.
-pub fn build_native_provider(cfg: &MiraConfig, name: &str) -> Result<Arc<dyn ChatProvider>, EngineState> {
+pub fn build_native_provider(
+    cfg: &MiraConfig,
+    name: &str,
+) -> Result<Arc<dyn ChatProvider>, EngineState> {
     if let Some(state) = missing_piece(cfg, name) {
         return Err(state);
     }
@@ -53,20 +56,18 @@ pub fn build_native_provider(cfg: &MiraConfig, name: &str) -> Result<Arc<dyn Cha
         .clone()
         .or_else(|| mira_config::default_base_url_for(name).map(str::to_owned))
         .expect("missing_piece checked the base URL");
-    let api_key = entry
-        .resolved_api_key()
-        .unwrap_or_default(); // empty = Bedrock's AWS-credentials path
+    let api_key = entry.resolved_api_key().unwrap_or_default(); // empty = Bedrock's AWS-credentials path
     let extra_headers: Vec<(String, String)> = entry
         .extra_headers
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    let prompt_caching =
-        mira_config::prompt_caching_enabled(name, &base_url, entry.prompt_caching);
-    build_chat_provider(name, base_url, api_key, extra_headers, prompt_caching)
-        .map_err(|e| EngineState::NotConfigured {
+    let prompt_caching = mira_config::prompt_caching_enabled(name, &base_url, entry.prompt_caching);
+    build_chat_provider(name, base_url, api_key, extra_headers, prompt_caching).map_err(|e| {
+        EngineState::NotConfigured {
             reason: format!("provider `{name}` failed to build: {e}"),
-        })
+        }
+    })
 }
 
 /// Providers for every native instance, keyed by instance id. The pool

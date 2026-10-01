@@ -130,36 +130,57 @@ pub fn agent_rows(
         .iter()
         .map(|r| (r.id.to_string(), r.title.clone()))
         .collect();
-    let mut by_key: BTreeMap<(String, String, String, String), (String, UsageTotals, Option<f64>)> =
-        BTreeMap::new();
+    /// One output row's identity, and what it adds up.
+    #[derive(PartialEq, Eq, PartialOrd, Ord)]
+    struct Key {
+        session_id: String,
+        day: String,
+        agent: String,
+        model: String,
+    }
+    #[derive(Default)]
+    struct Sum {
+        cwd: String,
+        totals: UsageTotals,
+        cost: Option<f64>,
+    }
+
+    let mut by_key: BTreeMap<Key, Sum> = BTreeMap::new();
     for r in ledger {
         let day = day_of(r.ts);
         if day.as_str() < since_day {
             continue;
         }
-        let e = by_key
-            .entry((r.session_id.clone(), day, r.driver.clone(), r.model.clone()))
-            .or_insert_with(|| (r.cwd.clone(), UsageTotals::default(), None));
-        e.1.prompt_tokens += r.input_tokens;
-        e.1.completion_tokens += r.output_tokens;
-        e.1.cached_input_tokens += r.cached_input_tokens;
+        let key = Key {
+            session_id: r.session_id.clone(),
+            day,
+            agent: r.driver.clone(),
+            model: r.model.clone(),
+        };
+        let sum = by_key.entry(key).or_insert_with(|| Sum {
+            cwd: r.cwd.clone(),
+            ..Default::default()
+        });
+        sum.totals.prompt_tokens += r.input_tokens;
+        sum.totals.completion_tokens += r.output_tokens;
+        sum.totals.cached_input_tokens += r.cached_input_tokens;
         if let Some(c) = r.cost_usd {
-            e.2 = Some(e.2.unwrap_or(0.0) + c);
+            sum.cost = Some(sum.cost.unwrap_or(0.0) + c);
         }
     }
     by_key
         .into_iter()
-        .map(|((session_id, day, agent, model), (cwd, u, cost))| UsageRow {
-            title: titles.get(&session_id).cloned().flatten(),
-            session_id,
-            cwd,
-            model,
-            day,
-            prompt_tokens: u.prompt_tokens,
-            completion_tokens: u.completion_tokens,
-            cached_input_tokens: u.cached_input_tokens,
-            agent: Some(agent),
-            cost_usd: cost,
+        .map(|(k, sum)| UsageRow {
+            title: titles.get(&k.session_id).cloned().flatten(),
+            session_id: k.session_id,
+            cwd: sum.cwd,
+            model: k.model,
+            day: k.day,
+            prompt_tokens: sum.totals.prompt_tokens,
+            completion_tokens: sum.totals.completion_tokens,
+            cached_input_tokens: sum.totals.cached_input_tokens,
+            agent: Some(k.agent),
+            cost_usd: sum.cost,
         })
         .collect()
 }

@@ -40,16 +40,86 @@ struct KnownEditor {
 }
 
 const KNOWN_EDITORS: &[KnownEditor] = &[
-    KnownEditor { id: "vscode", name: "VS Code", mac_app: Some("Visual Studio Code.app"), bins: &["code"], win_exes: &["code.cmd", "code.exe"], win_dirs: &["Microsoft VS Code\\bin"] },
-    KnownEditor { id: "cursor", name: "Cursor", mac_app: Some("Cursor.app"), bins: &["cursor"], win_exes: &["cursor.exe"], win_dirs: &["Cursor"] },
-    KnownEditor { id: "zed", name: "Zed", mac_app: Some("Zed.app"), bins: &["zed"], win_exes: &["zed.exe"], win_dirs: &["Zed"] },
-    KnownEditor { id: "windsurf", name: "Windsurf", mac_app: Some("Windsurf.app"), bins: &["windsurf"], win_exes: &["windsurf.exe"], win_dirs: &["Windsurf"] },
-    KnownEditor { id: "antigravity", name: "Antigravity", mac_app: Some("Antigravity.app"), bins: &["antigravity"], win_exes: &["antigravity.exe"], win_dirs: &["Antigravity"] },
-    KnownEditor { id: "sublime", name: "Sublime Text", mac_app: Some("Sublime Text.app"), bins: &["subl", "sublime_text"], win_exes: &["subl.exe"], win_dirs: &["Sublime Text"] },
-    KnownEditor { id: "nova", name: "Nova", mac_app: Some("Nova.app"), bins: &[], win_exes: &[], win_dirs: &[] },
-    KnownEditor { id: "textmate", name: "TextMate", mac_app: Some("TextMate.app"), bins: &["mate"], win_exes: &[], win_dirs: &[] },
-    KnownEditor { id: "fleet", name: "Fleet", mac_app: Some("Fleet.app"), bins: &["fleet"], win_exes: &["fleet.exe"], win_dirs: &["Fleet"] },
-    KnownEditor { id: "idea", name: "IntelliJ IDEA", mac_app: Some("IntelliJ IDEA.app"), bins: &["idea"], win_exes: &["idea64.exe"], win_dirs: &["JetBrains\\IntelliJ IDEA"] },
+    KnownEditor {
+        id: "vscode",
+        name: "VS Code",
+        mac_app: Some("Visual Studio Code.app"),
+        bins: &["code"],
+        win_exes: &["code.cmd", "code.exe"],
+        win_dirs: &["Microsoft VS Code\\bin"],
+    },
+    KnownEditor {
+        id: "cursor",
+        name: "Cursor",
+        mac_app: Some("Cursor.app"),
+        bins: &["cursor"],
+        win_exes: &["cursor.exe"],
+        win_dirs: &["Cursor"],
+    },
+    KnownEditor {
+        id: "zed",
+        name: "Zed",
+        mac_app: Some("Zed.app"),
+        bins: &["zed"],
+        win_exes: &["zed.exe"],
+        win_dirs: &["Zed"],
+    },
+    KnownEditor {
+        id: "windsurf",
+        name: "Windsurf",
+        mac_app: Some("Windsurf.app"),
+        bins: &["windsurf"],
+        win_exes: &["windsurf.exe"],
+        win_dirs: &["Windsurf"],
+    },
+    KnownEditor {
+        id: "antigravity",
+        name: "Antigravity",
+        mac_app: Some("Antigravity.app"),
+        bins: &["antigravity"],
+        win_exes: &["antigravity.exe"],
+        win_dirs: &["Antigravity"],
+    },
+    KnownEditor {
+        id: "sublime",
+        name: "Sublime Text",
+        mac_app: Some("Sublime Text.app"),
+        bins: &["subl", "sublime_text"],
+        win_exes: &["subl.exe"],
+        win_dirs: &["Sublime Text"],
+    },
+    KnownEditor {
+        id: "nova",
+        name: "Nova",
+        mac_app: Some("Nova.app"),
+        bins: &[],
+        win_exes: &[],
+        win_dirs: &[],
+    },
+    KnownEditor {
+        id: "textmate",
+        name: "TextMate",
+        mac_app: Some("TextMate.app"),
+        bins: &["mate"],
+        win_exes: &[],
+        win_dirs: &[],
+    },
+    KnownEditor {
+        id: "fleet",
+        name: "Fleet",
+        mac_app: Some("Fleet.app"),
+        bins: &["fleet"],
+        win_exes: &["fleet.exe"],
+        win_dirs: &["Fleet"],
+    },
+    KnownEditor {
+        id: "idea",
+        name: "IntelliJ IDEA",
+        mac_app: Some("IntelliJ IDEA.app"),
+        bins: &["idea"],
+        win_exes: &["idea64.exe"],
+        win_dirs: &["JetBrains\\IntelliJ IDEA"],
+    },
 ];
 
 #[derive(Debug, Clone, Serialize)]
@@ -78,11 +148,15 @@ fn in_path(name: &str) -> bool {
         if lower.ends_with(".exe") || lower.ends_with(".cmd") || lower.ends_with(".bat") {
             vec![name.to_owned()]
         } else {
-            vec![format!("{name}.exe"), format!("{name}.cmd"), format!("{name}.bat")]
+            vec![
+                format!("{name}.exe"),
+                format!("{name}.cmd"),
+                format!("{name}.bat"),
+            ]
         }
     };
     #[cfg(not(windows))]
-    let names = vec![name.to_owned()];
+    let names = [name.to_owned()];
 
     path_dirs().iter().any(|dir| {
         names.iter().any(|n| {
@@ -97,7 +171,10 @@ fn mac_app_path(bundle: &str) -> Option<PathBuf> {
         PathBuf::from("/Applications"),
         dirs_home_join("Applications"),
     ];
-    roots.into_iter().map(|r| r.join(bundle)).find(|p| p.is_dir())
+    roots
+        .into_iter()
+        .map(|r| r.join(bundle))
+        .find(|p| p.is_dir())
 }
 
 fn dirs_home_join(child: &str) -> PathBuf {
@@ -113,7 +190,11 @@ fn windows_known_path(dir: &str, exe: &str) -> Option<PathBuf> {
         std::env::var_os("ProgramFiles").map(PathBuf::from),
         std::env::var_os("ProgramFiles(x86)").map(PathBuf::from),
     ];
-    bases.into_iter().flatten().map(|b| b.join(dir).join(exe)).find(|p| p.is_file())
+    bases
+        .into_iter()
+        .flatten()
+        .map(|b| b.join(dir).join(exe))
+        .find(|p| p.is_file())
 }
 
 fn linux_desktop_present(desktop: &str) -> bool {
@@ -137,7 +218,8 @@ fn detect() -> Vec<EditorEntry> {
                     kind = "app";
                 }
             }
-        }        if !present && os == "windows" {
+        }
+        if !present && os == "windows" {
             for exe in ed.win_exes {
                 if in_path(exe) {
                     present = true;
@@ -195,8 +277,18 @@ fn detect() -> Vec<EditorEntry> {
         "windows" => ("explorer", "File Explorer"),
         _ => ("files", "Files"),
     };
-    out.push(EditorEntry { id: fm_id.to_owned(), name: fm_name.to_owned(), kind: "system".to_owned(), has_icon: os == "macos" && icon_icns_for(fm_id).is_some() });
-    out.push(EditorEntry { id: "terminal".to_owned(), name: "Terminal".to_owned(), kind: "system".to_owned(), has_icon: os == "macos" && icon_icns_for("terminal").is_some() });
+    out.push(EditorEntry {
+        id: fm_id.to_owned(),
+        name: fm_name.to_owned(),
+        kind: "system".to_owned(),
+        has_icon: os == "macos" && icon_icns_for(fm_id).is_some(),
+    });
+    out.push(EditorEntry {
+        id: "terminal".to_owned(),
+        name: "Terminal".to_owned(),
+        kind: "system".to_owned(),
+        has_icon: os == "macos" && icon_icns_for("terminal").is_some(),
+    });
     out
 }
 
@@ -249,8 +341,9 @@ fn icon_icns_for(id: &str) -> Option<PathBuf> {
 
 /// Rendered icon cache (id → PNG bytes).
 fn icon_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>> {
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>> =
-        std::sync::OnceLock::new();
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>,
+    > = std::sync::OnceLock::new();
     CACHE.get_or_init(Default::default)
 }
 
@@ -258,14 +351,13 @@ fn icon_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, V
 /// (converted from its bundle `.icns` via `sips`). macOS only.
 pub async fn editor_icon(axum::extract::Path(id): axum::extract::Path<String>) -> Response {
     if std::env::consts::OS != "macos" {
-        return err(StatusCode::NOT_FOUND, "app icons are only available on macOS".to_owned());
+        return err(
+            StatusCode::NOT_FOUND,
+            "app icons are only available on macOS".to_owned(),
+        );
     }
     if let Some(bytes) = icon_cache().lock().ok().and_then(|c| c.get(&id).cloned()) {
-        return (
-            [(axum::http::header::CONTENT_TYPE, "image/png")],
-            bytes,
-        )
-            .into_response();
+        return ([(axum::http::header::CONTENT_TYPE, "image/png")], bytes).into_response();
     }
     let Some(icns) = icon_icns_for(&id) else {
         return err(StatusCode::NOT_FOUND, format!("no icon for editor: {id}"));
@@ -289,7 +381,10 @@ pub async fn editor_icon(axum::extract::Path(id): axum::extract::Path<String>) -
             }
             ([(axum::http::header::CONTENT_TYPE, "image/png")], b).into_response()
         }
-        None => err(StatusCode::INTERNAL_SERVER_ERROR, "icon conversion failed".to_owned()),
+        None => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "icon conversion failed".to_owned(),
+        ),
     }
 }
 
@@ -320,7 +415,12 @@ pub async fn list_editors(State(_state): State<AppState>) -> Response {
         .iter()
         .find(|e| e.kind == "app" || e.kind == "binary")
         .map(|e| e.id.clone());
-    Json(EditorsListView { editors: detected, default_id, all }).into_response()
+    Json(EditorsListView {
+        editors: detected,
+        default_id,
+        all,
+    })
+    .into_response()
 }
 
 #[derive(Deserialize)]
@@ -334,7 +434,9 @@ fn err(status: StatusCode, msg: String) -> Response {
 }
 
 fn spawn_detached(cmd: &mut Command) -> std::io::Result<()> {
-    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     cmd.spawn().map(|_| ())
 }
 
@@ -352,7 +454,10 @@ pub async fn open_in_editor(
         cwd.join(raw)
     };
     if !path.exists() {
-        return err(StatusCode::NOT_FOUND, format!("no such file: {}", path.display()));
+        return err(
+            StatusCode::NOT_FOUND,
+            format!("no such file: {}", path.display()),
+        );
     }
     let os = std::env::consts::OS;
     let id = req.editor_id.as_deref().unwrap_or("");
@@ -378,10 +483,7 @@ pub async fn open_in_editor(
                 }
                 c
             }
-            _ => {
-                let c = Command::new("xdg-open");
-                c
-            }
+            _ => Command::new("xdg-open"),
         };
         // Directories open as-is; on mac an explicit dir arg is fine too.
         if !(os == "windows" && path.is_file()) {
@@ -394,7 +496,9 @@ pub async fn open_in_editor(
     }
     if id == "terminal" {
         let dir = if path.is_file() {
-            path.parent().map(Path::to_path_buf).unwrap_or_else(|| cwd.clone())
+            path.parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| cwd.clone())
         } else {
             path.clone()
         };
@@ -411,9 +515,17 @@ pub async fn open_in_editor(
             }
             _ => {
                 // First terminal emulator found on PATH wins.
-                let term = ["x-terminal-emulator", "gnome-terminal", "konsole", "alacritty", "kitty", "wezterm", "foot"]
-                    .into_iter()
-                    .find(|t| in_path(t));
+                let term = [
+                    "x-terminal-emulator",
+                    "gnome-terminal",
+                    "konsole",
+                    "alacritty",
+                    "kitty",
+                    "wezterm",
+                    "foot",
+                ]
+                .into_iter()
+                .find(|t| in_path(t));
                 match term {
                     Some(t) => {
                         let mut c = Command::new(t);
@@ -477,7 +589,10 @@ pub async fn open_in_editor(
                 }
             }
         }
-        return err(StatusCode::NOT_FOUND, format!("{} is not installed", ed.name));
+        return err(
+            StatusCode::NOT_FOUND,
+            format!("{} is not installed", ed.name),
+        );
     }
     for bin in ed.bins {
         if in_path(bin) {
@@ -489,5 +604,8 @@ pub async fn open_in_editor(
             };
         }
     }
-    err(StatusCode::NOT_FOUND, format!("{} is not installed", ed.name))
+    err(
+        StatusCode::NOT_FOUND,
+        format!("{} is not installed", ed.name),
+    )
 }

@@ -118,7 +118,9 @@ pub async fn run(cli: &super::Cli, args: ServeArgs) -> Result<()> {
     let browser_cfg = {
         let mut c = cfg.clone();
         c.browser.enabled.get_or_insert(true);
-        c.browser.headless.get_or_insert(std::env::var("MIRA_BROWSER_HEADED").is_err());
+        c.browser
+            .headless
+            .get_or_insert(std::env::var("MIRA_BROWSER_HEADED").is_err());
         c
     };
     super::register_computer_use(&mut registry, cli, &browser_cfg).await;

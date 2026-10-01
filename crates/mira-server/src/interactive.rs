@@ -277,10 +277,7 @@ impl AgentTool {
     /// Follow the server's live engine selection for default models.
     /// When set, the snapshot values from `new`/`with_small_model`
     /// become fallbacks and the shared cell is read at spawn time.
-    pub fn with_shared_selection(
-        mut self,
-        shared: Arc<crate::state::SharedSelection>,
-    ) -> Self {
+    pub fn with_shared_selection(mut self, shared: Arc<crate::state::SharedSelection>) -> Self {
         self.shared_selection = Some(shared);
         self
     }
@@ -331,7 +328,10 @@ impl AgentTool {
     /// The roster as of now.
     fn registry(&self) -> Arc<AgentRegistry> {
         match &self.live_agents {
-            Some(l) => l.read().map(|r| r.clone()).unwrap_or_else(|_| self.agents.clone()),
+            Some(l) => l
+                .read()
+                .map(|r| r.clone())
+                .unwrap_or_else(|_| self.agents.clone()),
             None => self.agents.clone(),
         }
     }
@@ -677,10 +677,7 @@ impl Tool for AgentTool {
         // still win over the type's defaults — the type provides a
         // baseline, the caller picks per-call overrides.
         let roster = self.registry();
-        let type_def = args
-            .r#type
-            .as_deref()
-            .and_then(|name| roster.get(name));
+        let type_def = args.r#type.as_deref().and_then(|name| roster.get(name));
         if let (Some(name), None) = (args.r#type.as_deref(), type_def) {
             // Caller asked for a type we don't have — surface it clearly
             // rather than silently ignoring so bad prompts get flagged.

@@ -18,12 +18,11 @@
 //! at a spinner. [`AcpSession::cancel`] therefore records every permission
 //! request it has in flight and answers all of them on the way out.
 
-use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    ClientCapabilities, ContentBlock, InitializeRequest,
-    InitializeResponse, NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse,
-    StopReason,
+    ClientCapabilities, ContentBlock, InitializeRequest, InitializeResponse, NewSessionRequest,
+    NewSessionResponse, PromptRequest, PromptResponse, StopReason,
 };
+use agent_client_protocol::schema::ProtocolVersion;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use thiserror::Error;
@@ -134,10 +133,7 @@ impl AcpSession {
     /// Best-effort peek. `None` means the lock is held, which in practice
     /// means initialization is in flight.
     pub fn is_initialized(&self) -> Option<bool> {
-        self.state
-            .try_lock()
-            .ok()
-            .map(|guard| guard.initialized)
+        self.state.try_lock().ok().map(|guard| guard.initialized)
     }
 
     pub fn session_id(&self) -> Option<String> {
@@ -207,7 +203,11 @@ impl AcpSession {
             let mut st = self.state.lock().await;
             st.initialized = true;
             st.version = res.agent_info.as_ref().map(|i| i.version.clone());
-            st.auth_method_ids = res.auth_methods.iter().map(|m| m.id().to_string()).collect();
+            st.auth_method_ids = res
+                .auth_methods
+                .iter()
+                .map(|m| m.id().to_string())
+                .collect();
         }
         Ok(res)
     }
@@ -226,14 +226,19 @@ impl AcpSession {
         req.additional_directories = additional_directories;
         let res: NewSessionResponse = self
             .conn
-            .request("session/new", serde_json::to_value(req).unwrap_or(json!({})))
+            .request(
+                "session/new",
+                serde_json::to_value(req).unwrap_or(json!({})),
+            )
             .await?;
         *self.session_id.lock().await = Some(res.session_id.to_string());
         {
             let mut st = self.state.lock().await;
             if let Some(opts) = &res.config_options {
-                st.config_options =
-                    opts.iter().filter_map(|o| serde_json::to_value(o).ok()).collect();
+                st.config_options = opts
+                    .iter()
+                    .filter_map(|o| serde_json::to_value(o).ok())
+                    .collect();
             }
             if let Some(modes) = &res.modes {
                 st.modes = modes
@@ -260,7 +265,10 @@ impl AcpSession {
         let req = PromptRequest::new(session_id.to_string(), blocks);
         Ok(self
             .conn
-            .request("session/prompt", serde_json::to_value(req).unwrap_or(json!({})))
+            .request(
+                "session/prompt",
+                serde_json::to_value(req).unwrap_or(json!({})),
+            )
             .await?)
     }
 
@@ -271,10 +279,7 @@ impl AcpSession {
     /// turn is unwinding, then unblock it.
     pub async fn cancel(&self, session_id: &str) -> Result<(), SessionError> {
         self.conn
-            .notify(
-                "session/cancel",
-                json!({ "sessionId": session_id }),
-            )
+            .notify("session/cancel", json!({ "sessionId": session_id }))
             .await?;
 
         for id in self.pending_permissions.take_all().await {
@@ -282,10 +287,7 @@ impl AcpSession {
             // either would make the agent treat an explicit user cancel as a
             // protocol failure and possibly retry.
             self.conn
-                .respond_ok(
-                    &id,
-                    json!({ "outcome": { "outcome": "cancelled" } }),
-                )
+                .respond_ok(&id, json!({ "outcome": { "outcome": "cancelled" } }))
                 .await?;
         }
         Ok(())
@@ -335,8 +337,10 @@ impl AcpSession {
             .map(crate::events::SessionConfigView::from)
             .collect();
         // Keep our copy current so a later read does not report the old value.
-        self.state.lock().await.config_options =
-            options.iter().filter_map(|o| serde_json::to_value(o).ok()).collect();
+        self.state.lock().await.config_options = options
+            .iter()
+            .filter_map(|o| serde_json::to_value(o).ok())
+            .collect();
         Ok(SetConfigOptionOutcome { options })
     }
 
@@ -403,8 +407,8 @@ pub fn was_cancelled(stop: &PromptResponse) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::Value;
     use crate::conn::AgentCallback;
+    use serde_json::Value;
     use std::sync::Mutex as StdMutex;
     use tokio::io::AsyncBufReadExt;
 
@@ -479,10 +483,13 @@ mod tests {
     impl Rig {
         async fn next_frame(&mut self) -> Value {
             let mut line = String::new();
-            tokio::time::timeout(std::time::Duration::from_secs(5), self.to_agent.read_line(&mut line))
-                .await
-                .expect("agent never received a frame")
-                .expect("read");
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                self.to_agent.read_line(&mut line),
+            )
+            .await
+            .expect("agent never received a frame")
+            .expect("read");
             serde_json::from_str(line.trim()).expect("non-JSON frame")
         }
 
@@ -549,7 +556,10 @@ mod tests {
         res["protocolVersion"] = json!(2);
         r.reply(frame["id"].clone(), res).await;
         let err = waiter.await.unwrap().expect_err("should refuse");
-        assert!(matches!(err, SessionError::VersionMismatch { got: 2, .. }), "got {err:?}");
+        assert!(
+            matches!(err, SessionError::VersionMismatch { got: 2, .. }),
+            "got {err:?}"
+        );
     }
 
     #[tokio::test]
@@ -586,7 +596,10 @@ mod tests {
     async fn new_session_records_the_agents_session_id_and_options() {
         let mut r = rig(ClientCaps::default()).await;
         // initialize
-        let w = tokio::spawn({ let s = r.sess.clone(); async move { s.initialize().await } });
+        let w = tokio::spawn({
+            let s = r.sess.clone();
+            async move { s.initialize().await }
+        });
         let f = r.next_frame().await;
         r.reply(f["id"].clone(), init_ok()).await;
         w.await.unwrap().expect("init");
@@ -637,7 +650,13 @@ mod tests {
         assert_eq!(r.sess.config_options()[0]["category"], "model");
         assert_eq!(r.sess.config_options()[0]["currentValue"], "grok-code");
         assert_eq!(r.sess.config_options()[0]["type"], "select");
-        assert_eq!(r.sess.config_options()[0]["options"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            r.sess.config_options()[0]["options"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
 
         // Modes arrive with `session/new`, not `initialize`.
         let (current, available) = r.sess.modes();
@@ -648,24 +667,22 @@ mod tests {
     #[tokio::test]
     async fn a_prompt_returns_the_agents_stop_reason() {
         let mut r = rig(ClientCaps::default()).await;
-        let w = tokio::spawn({ let s = r.sess.clone(); async move { s.initialize().await } });
+        let w = tokio::spawn({
+            let s = r.sess.clone();
+            async move { s.initialize().await }
+        });
         let f = r.next_frame().await;
         r.reply(f["id"].clone(), init_ok()).await;
         w.await.unwrap().expect("init");
 
         let w = tokio::spawn({
             let s = r.sess.clone();
-            async move {
-                s.prompt(
-                    "agent_sess_7",
-                    vec![text("hi")],
-                )
-                .await
-            }
+            async move { s.prompt("agent_sess_7", vec![text("hi")]).await }
         });
         let f = r.next_frame().await;
         assert_eq!(f["method"], "session/prompt");
-        r.reply(f["id"].clone(), json!({ "stopReason": "end_turn" })).await;
+        r.reply(f["id"].clone(), json!({ "stopReason": "end_turn" }))
+            .await;
         let res = w.await.unwrap().expect("prompt");
         assert_eq!(res.stop_reason, StopReason::EndTurn);
         assert!(ended_normally(&res));
@@ -683,7 +700,10 @@ mod tests {
         pending.track(json!(12)).await;
         assert_eq!(r.sess.pending_permission_count().await, 2);
 
-        let w = tokio::spawn({ let s = r.sess.clone(); async move { s.cancel("s1").await } });
+        let w = tokio::spawn({
+            let s = r.sess.clone();
+            async move { s.cancel("s1").await }
+        });
 
         // The cancel notification comes first.
         let first = r.next_frame().await;
@@ -712,7 +732,10 @@ mod tests {
         pending.settle(&json!(11)).await;
         pending.track(json!(12)).await;
 
-        let w = tokio::spawn({ let s = r.sess.clone(); async move { s.cancel("s1").await } });
+        let w = tokio::spawn({
+            let s = r.sess.clone();
+            async move { s.cancel("s1").await }
+        });
         let _ = r.next_frame().await;
         let only = r.next_frame().await;
         assert_eq!(only["id"], 12);
@@ -724,7 +747,10 @@ mod tests {
         // The prompt call blocks until the turn ends, so updates have to
         // reach the callback concurrently for the UI to stream at all.
         let mut r = rig(ClientCaps::default()).await;
-        let w = tokio::spawn({ let s = r.sess.clone(); async move { s.initialize().await } });
+        let w = tokio::spawn({
+            let s = r.sess.clone();
+            async move { s.initialize().await }
+        });
         let f = r.next_frame().await;
         r.reply(f["id"].clone(), init_ok()).await;
         w.await.unwrap().expect("init");
@@ -749,14 +775,18 @@ mod tests {
         .await;
         let got = r.events.events.lock().unwrap().clone();
         assert_eq!(got[0], "text:working".to_string());
-        r.reply(f["id"].clone(), json!({ "stopReason": "end_turn" })).await;
+        r.reply(f["id"].clone(), json!({ "stopReason": "end_turn" }))
+            .await;
         w.await.unwrap().expect("prompt");
     }
 
     #[tokio::test]
     async fn cancelling_with_nothing_pending_sends_only_the_notification() {
         let mut r = rig(ClientCaps::default()).await;
-        let w = tokio::spawn({ let s = r.sess.clone(); async move { s.cancel("s1").await } });
+        let w = tokio::spawn({
+            let s = r.sess.clone();
+            async move { s.cancel("s1").await }
+        });
         let f = r.next_frame().await;
         assert_eq!(f["method"], "session/cancel");
         w.await.unwrap().expect("cancel");

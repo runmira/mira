@@ -42,8 +42,8 @@ pub mod snapshot;
 
 pub use external::driver_config_for;
 pub use id::{DriverKind, EngineId};
-pub use pool::SwappableProvider;
 pub use instance::{instances_from_config, EngineInstance, NATIVE_DRIVER};
+pub use pool::SwappableProvider;
 pub use posture::{map_postures, Posture, PostureMapping};
 pub use registry::EngineRegistry;
 pub use selection::ModelSelection;

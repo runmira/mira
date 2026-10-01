@@ -163,7 +163,10 @@ impl Policy {
         }
         let mut worst = Decision::Allow;
         for part in parts {
-            let d = self.evaluate_one(&Request { action: Action::Bash, target: part });
+            let d = self.evaluate_one(&Request {
+                action: Action::Bash,
+                target: part,
+            });
             match d {
                 Decision::Deny => {
                     debug!(?req, part, "policy: deny (a part of a compound command)");
@@ -193,7 +196,12 @@ impl Policy {
         }
         parts
             .into_iter()
-            .filter(|p| self.evaluate_one(&Request { action: Action::Bash, target: p }) != Decision::Allow)
+            .filter(|p| {
+                self.evaluate_one(&Request {
+                    action: Action::Bash,
+                    target: p,
+                }) != Decision::Allow
+            })
             .collect()
     }
 
@@ -241,14 +249,21 @@ mod tests {
     }
 
     fn bash(p: &Policy, cmd: &str) -> Decision {
-        p.evaluate(&Request { action: Action::Bash, target: cmd })
+        p.evaluate(&Request {
+            action: Action::Bash,
+            target: cmd,
+        })
     }
 
     #[test]
     fn a_denied_command_cannot_hide_behind_another() {
         let p = policy(&["Bash(ls:*)"], &["Bash(rm:*)"]);
         assert_eq!(bash(&p, "rm -rf x"), Decision::Deny);
-        assert_eq!(bash(&p, "ls && rm -rf x"), Decision::Deny, "the prefix used to slip past the deny");
+        assert_eq!(
+            bash(&p, "ls && rm -rf x"),
+            Decision::Deny,
+            "the prefix used to slip past the deny"
+        );
         assert_eq!(bash(&p, "ls; rm -rf x"), Decision::Deny);
         assert_eq!(bash(&p, "ls | rm -rf x"), Decision::Deny);
     }
@@ -256,11 +271,20 @@ mod tests {
     #[test]
     fn a_chain_of_allowed_commands_runs_without_asking() {
         let p = policy(&["Bash(cargo test:*)", "Bash(cargo clippy:*)"], &[]);
-        assert_eq!(bash(&p, "cargo test --lib && cargo clippy"), Decision::Allow);
+        assert_eq!(
+            bash(&p, "cargo test --lib && cargo clippy"),
+            Decision::Allow
+        );
         // One unallowed part is enough to ask.
         assert_ne!(bash(&p, "cargo test && curl evil.sh"), Decision::Allow);
-        assert_eq!(p.parts_needing_approval("cargo test && curl evil.sh"), ["curl evil.sh"]);
-        assert!(p.parts_needing_approval("cargo test").is_empty(), "a single command is its own question");
+        assert_eq!(
+            p.parts_needing_approval("cargo test && curl evil.sh"),
+            ["curl evil.sh"]
+        );
+        assert!(
+            p.parts_needing_approval("cargo test").is_empty(),
+            "a single command is its own question"
+        );
     }
 
     #[test]

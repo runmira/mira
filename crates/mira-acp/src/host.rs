@@ -1,5 +1,3 @@
-// This module defines the ACP host interface, routing tool calls and permission requests.
-// It does not depend on sandbox or approval machinery directly — those live in mira-server.
 //! What an ACP host must provide, and the routing onto it.
 //!
 //! The protocol requires an agent to be able to ask its client for
@@ -153,10 +151,14 @@ pub struct DenyAll;
 #[async_trait::async_trait]
 impl FilePort for DenyAll {
     async fn read_text(&self, path: &str) -> Result<String, HostError> {
-        Err(HostError::Denied(format!("filesystem access is off: {path}")))
+        Err(HostError::Denied(format!(
+            "filesystem access is off: {path}"
+        )))
     }
     async fn write_text(&self, path: &str, _c: &str) -> Result<(), HostError> {
-        Err(HostError::Denied(format!("filesystem access is off: {path}")))
+        Err(HostError::Denied(format!(
+            "filesystem access is off: {path}"
+        )))
     }
 }
 
@@ -181,7 +183,10 @@ impl TerminalPort for DenyAll {
 
 #[async_trait::async_trait]
 impl PermissionPort for DenyAll {
-    async fn request_permission(&self, _r: &PermissionRequest) -> Result<Option<String>, HostError> {
+    async fn request_permission(
+        &self,
+        _r: &PermissionRequest,
+    ) -> Result<Option<String>, HostError> {
         // Not an error: "cancelled" is how ACP says "not now", and it lets
         // the agent unwind cleanly instead of treating it as a failure.
         Ok(None)
@@ -434,7 +439,9 @@ fn parse<T: DeserializeOwned>(params: Value) -> Result<T, ConnError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::events::{AcpPermissionOptionKind as PermissionOptionKind, MiraEvent, PermissionChoice};
+    use crate::events::{
+        AcpPermissionOptionKind as PermissionOptionKind, MiraEvent, PermissionChoice,
+    };
     use std::sync::Mutex as StdMutex;
 
     #[derive(Default)]
@@ -454,7 +461,10 @@ mod tests {
             Ok(format!("contents of {path}"))
         }
         async fn write_text(&self, path: &str, c: &str) -> Result<(), HostError> {
-            self.writes.lock().unwrap().push((path.to_string(), c.to_string()));
+            self.writes
+                .lock()
+                .unwrap()
+                .push((path.to_string(), c.to_string()));
             Ok(())
         }
     }
@@ -468,7 +478,12 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TerminalPort for FakeTerms {
-        async fn create(&self, c: &str, _a: &[String], _d: Option<&str>) -> Result<String, HostError> {
+        async fn create(
+            &self,
+            c: &str,
+            _a: &[String],
+            _d: Option<&str>,
+        ) -> Result<String, HostError> {
             self.created.lock().unwrap().push(c.to_string());
             Ok("term-1".to_string())
         }
@@ -515,7 +530,10 @@ mod tests {
                 MiraEvent::ToolCallUpdate(s) => format!("update:{}", s.id),
                 MiraEvent::AssistantText { text, .. } => format!("text:{text}"),
                 MiraEvent::Unmodelled { reason, .. } => format!("unmodelled:{reason}"),
-                other => format!("other:{other:?}").split_whitespace().take(1).collect(),
+                other => format!("other:{other:?}")
+                    .split_whitespace()
+                    .take(1)
+                    .collect(),
             };
             self.got.lock().unwrap().push(tag);
         }
@@ -718,12 +736,20 @@ mod tests {
         assert_eq!(out["output"], "hello");
         assert_eq!(out["exitStatus"], Value::Null);
 
-        h.on_request(&json!(1), "terminal/release", json!({ "sessionId": "s", "terminalId": "term-1" }))
-            .await
-            .unwrap();
-        h.on_request(&json!(1), "terminal/kill", json!({ "sessionId": "s", "terminalId": "term-1" }))
-            .await
-            .unwrap();
+        h.on_request(
+            &json!(1),
+            "terminal/release",
+            json!({ "sessionId": "s", "terminalId": "term-1" }),
+        )
+        .await
+        .unwrap();
+        h.on_request(
+            &json!(1),
+            "terminal/kill",
+            json!({ "sessionId": "s", "terminalId": "term-1" }),
+        )
+        .await
+        .unwrap();
         assert_eq!(terms.released.lock().unwrap().clone(), vec!["term-1"]);
         assert_eq!(terms.killed.lock().unwrap().clone(), vec!["term-1"]);
     }
@@ -746,7 +772,10 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(events.got.lock().unwrap().clone(), vec!["text:hi".to_string()]);
+        assert_eq!(
+            events.got.lock().unwrap().clone(),
+            vec!["text:hi".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -847,7 +876,10 @@ mod tests {
     #[tokio::test]
     async fn an_unknown_agent_request_is_reported_as_unhandled() {
         let h = AcpHost::inert();
-        let err = h.on_request(&json!(1), "fs/rm_rf", json!({})).await.unwrap_err();
+        let err = h
+            .on_request(&json!(1), "fs/rm_rf", json!({}))
+            .await
+            .unwrap_err();
         assert!(
             matches!(err, ConnError::Unhandled { ref method } if method == "fs/rm_rf"),
             "got {err:?}"
@@ -859,9 +891,20 @@ mod tests {
         // A read-only or pre-negotiation session still has to answer
         // requests; refusing cleanly keeps the agent from hanging.
         let h = AcpHost::inert();
-        assert!(h.on_request(&json!(1), "fs/read_text_file", json!({"sessionId":"s","path":"/x"})).await.is_err());
         assert!(h
-            .on_request(&json!(1), "terminal/create", json!({"sessionId":"s","command":"sh"}))
+            .on_request(
+                &json!(1),
+                "fs/read_text_file",
+                json!({"sessionId":"s","path":"/x"})
+            )
+            .await
+            .is_err());
+        assert!(h
+            .on_request(
+                &json!(1),
+                "terminal/create",
+                json!({"sessionId":"s","command":"sh"})
+            )
             .await
             .is_err());
         let out = h
@@ -894,7 +937,6 @@ mod tests {
             kind: PermissionOptionKind::RejectOnce,
         };
         assert!(!reject.is_allow());
-
     }
 }
 

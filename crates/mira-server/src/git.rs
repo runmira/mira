@@ -186,7 +186,10 @@ pub async fn session_diff(State(state): State<AppState>) -> Response {
     let (_, files) = session_files(&state).await;
     let added: u64 = files.iter().map(|f| f.added).sum();
     let removed: u64 = files.iter().map(|f| f.removed).sum();
-    let untracked = files.iter().filter(|f| f.status == FileStatus::Added).count();
+    let untracked = files
+        .iter()
+        .filter(|f| f.status == FileStatus::Added)
+        .count();
     Json(serde_json::json!({
         "added": added,
         "removed": removed,
@@ -258,7 +261,14 @@ pub async fn revert_file(
     } else {
         run(
             &cwd,
-            &["restore", "--source=HEAD", "--staged", "--worktree", "--", &file.path],
+            &[
+                "restore",
+                "--source=HEAD",
+                "--staged",
+                "--worktree",
+                "--",
+                &file.path,
+            ],
         )
         .map(|_| ())
     };
@@ -337,7 +347,10 @@ pub async fn commit(State(state): State<AppState>, Json(req): Json<CommitRequest
         .map(|f| f.path.as_str())
         .collect();
     if paths.is_empty() {
-        return err(StatusCode::BAD_REQUEST, "nothing from this session to commit".into());
+        return err(
+            StatusCode::BAD_REQUEST,
+            "nothing from this session to commit".into(),
+        );
     }
     let mut add = vec!["add", "-A", "--"];
     add.extend(&paths);

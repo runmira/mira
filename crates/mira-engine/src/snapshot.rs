@@ -102,6 +102,11 @@ mod tests {
             serde_json::json!({ "state": "not_configured", "reason": "no api_key" })
         );
         let back: EngineState = serde_json::from_value(v).unwrap();
-        assert_eq!(back, EngineState::NotConfigured { reason: "no api_key".into() });
+        assert_eq!(
+            back,
+            EngineState::NotConfigured {
+                reason: "no api_key".into()
+            }
+        );
     }
 }

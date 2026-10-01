@@ -106,8 +106,21 @@ fn is_substantive(text: &str) -> bool {
     }
     let lower = t.to_lowercase();
     const SMALLTALK: &[&str] = &[
-        "hi", "hey", "hello", "yo", "huh", "thanks", "thank you", "thx", "ok",
-        "okay", "yes", "no", "sure", "please", "sorry",
+        "hi",
+        "hey",
+        "hello",
+        "yo",
+        "huh",
+        "thanks",
+        "thank you",
+        "thx",
+        "ok",
+        "okay",
+        "yes",
+        "no",
+        "sure",
+        "please",
+        "sorry",
     ];
     let bare: String = lower
         .trim_end_matches(['!', '.', '?', '…'])
@@ -121,7 +134,12 @@ fn is_substantive(text: &str) -> bool {
 fn strip_attachments(text: &str) -> &str {
     // Attachment dumps are appended after a recognizable marker; the
     // human-written part comes first.
-    for marker in ["## Attached files", "## attached files", "<attachments>", "[attachments]"] {
+    for marker in [
+        "## Attached files",
+        "## attached files",
+        "<attachments>",
+        "[attachments]",
+    ] {
         if let Some(idx) = text.find(marker) {
             return text[..idx].trim_end();
         }
@@ -193,9 +211,7 @@ fn sanitize(raw: &str) -> String {
         .map(str::trim)
         .find(|l| !l.is_empty())
         .unwrap_or("");
-    let line = line
-        .trim_start_matches(['#'])
-        .trim();
+    let line = line.trim_start_matches(['#']).trim();
     let line = line
         .strip_prefix("Title:")
         .or_else(|| line.strip_prefix("title:"))
@@ -204,7 +220,6 @@ fn sanitize(raw: &str) -> String {
     let stripped: String = line
         .trim_matches(|c: char| c == '"' || c == '\'' || c == '`' || c == '*' || c == '_')
         .trim_end_matches(['.', ',', ':', ';'])
-        .trim()
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
@@ -227,12 +242,16 @@ pub fn heuristic_from_user_message(user: &str) -> String {
         .unwrap_or("");
     let without_slash = first_line
         .strip_prefix('/')
-        .and_then(|rest| {
+        .map(|rest| {
             let mut words = rest.split_whitespace();
             let cmd = words.next().unwrap_or("").replace(['-', '_'], " ");
             let rest = words.collect::<Vec<_>>().join(" ");
-            let verbal = if rest.is_empty() { cmd } else { format!("{cmd} {rest}") };
-            Some(verbal)
+            let verbal = if rest.is_empty() {
+                cmd
+            } else {
+                format!("{cmd} {rest}")
+            };
+            verbal
         })
         .unwrap_or_else(|| first_line.to_owned());
     let words: Vec<&str> = without_slash.split_whitespace().take(6).collect();
@@ -273,13 +292,22 @@ mod tests {
             sanitize("**Fix video aspect ratios**"),
             "Fix video aspect ratios"
         );
-        assert_eq!(sanitize("Fix login redirect loop"), "Fix login redirect loop");
+        assert_eq!(
+            sanitize("Fix login redirect loop"),
+            "Fix login redirect loop"
+        );
     }
 
     #[test]
     fn sanitize_strips_heading_and_title_prefix() {
-        assert_eq!(sanitize("## Fix login redirect loop"), "Fix login redirect loop");
-        assert_eq!(sanitize("Title: Fix login redirect loop"), "Fix login redirect loop");
+        assert_eq!(
+            sanitize("## Fix login redirect loop"),
+            "Fix login redirect loop"
+        );
+        assert_eq!(
+            sanitize("Title: Fix login redirect loop"),
+            "Fix login redirect loop"
+        );
     }
 
     #[test]

@@ -273,14 +273,16 @@ pub async fn build_slot(
     let memory = Arc::new(RwLock::new(memory_store.clone()));
     let episodic = Arc::new(RwLock::new(episodic_store.clone()));
 
-    let approver: Arc<dyn Approver> = Arc::new(WsApprover::new(
-        events_tx.clone(),
-        pending.clone(),
-        cwd_lock.clone(),
-        attached.clone(),
-        background_mode.clone(),
-    )
-    .with_policy(deps.policy.clone()));
+    let approver: Arc<dyn Approver> = Arc::new(
+        WsApprover::new(
+            events_tx.clone(),
+            pending.clone(),
+            cwd_lock.clone(),
+            attached.clone(),
+            background_mode.clone(),
+        )
+        .with_policy(deps.policy.clone()),
+    );
 
     let prompt_channel = PromptChannel::new(events_tx.clone());
     let prompt_pending = prompt_channel.pending();

@@ -69,7 +69,6 @@ pub struct AgentStatus {
     // presence made a user with Claude Code installed see "Not installed"
     // for Claude Code — true, and useless. These fields let the UI say
     // "2.1.283, signed in — install the adapter to use it here".
-
     /// Whether the agent's own CLI is present, when it is a separate program
     /// from the adapter. `None` for agents that speak ACP natively.
     pub cli_installed: Option<bool>,
@@ -91,12 +90,9 @@ pub async fn probe(
     cfg: &DriverConfig,
     mode: PermissionMode,
 ) -> AgentStatus {
-    let program = cfg
-        .binary_path
-        .clone()
-        .unwrap_or_else(|| {
-            std::path::PathBuf::from(driver.binary_names().first().copied().unwrap_or(""))
-        });
+    let program = cfg.binary_path.clone().unwrap_or_else(|| {
+        std::path::PathBuf::from(driver.binary_names().first().copied().unwrap_or(""))
+    });
     let launch: LaunchConfig = driver.resolve(cfg, mode, program);
 
     let mut status = AgentStatus {
@@ -133,14 +129,26 @@ pub async fn probe(
     // the fix is to ask the agent itself.
     if driver.native_flavor().is_some() && cli_present(driver).await {
         {
-            if let Some(v) = run_cli(driver.underlying_cli_names().first().copied().unwrap_or(""), driver.cli_version_args()).await {
+            if let Some(v) = run_cli(
+                driver.underlying_cli_names().first().copied().unwrap_or(""),
+                driver.cli_version_args(),
+            )
+            .await
+            {
                 status.cli_version = v.split_whitespace().next().map(str::to_string);
             }
             status.cli_installed = Some(true);
-            status.install_hint = (!driver.install_hint().is_empty())
-                .then(|| driver.install_hint().to_string());
-            if let Some(auth_args) = (!driver.cli_auth_args().is_empty()).then(|| driver.cli_auth_args()) {
-                if let Some(raw) = run_cli(driver.underlying_cli_names().first().copied().unwrap_or(""), auth_args).await {
+            status.install_hint =
+                (!driver.install_hint().is_empty()).then(|| driver.install_hint().to_string());
+            if let Some(auth_args) =
+                (!driver.cli_auth_args().is_empty()).then(|| driver.cli_auth_args())
+            {
+                if let Some(raw) = run_cli(
+                    driver.underlying_cli_names().first().copied().unwrap_or(""),
+                    auth_args,
+                )
+                .await
+                {
                     if let Some(label) = summarize_cli_auth(&raw) {
                         status.auth = Some(label);
                     }
@@ -379,13 +387,10 @@ async fn run_cli(bin: &str, args: &[&str]) -> Option<String> {
         }
     }
 
-    let out = tokio::time::timeout(
-        Duration::from_secs(8),
-        cmd.output(),
-    )
-    .await
-    .ok()?
-    .ok()?;
+    let out = tokio::time::timeout(Duration::from_secs(8), cmd.output())
+        .await
+        .ok()?
+        .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -457,7 +462,10 @@ fn summarize_auth(ids: &[String]) -> Option<String> {
     }
     Some(format!(
         "{} options",
-        ids.iter().map(|i| friendly_auth_id(i)).collect::<Vec<_>>().join(", ")
+        ids.iter()
+            .map(|i| friendly_auth_id(i))
+            .collect::<Vec<_>>()
+            .join(", ")
     ))
 }
 
@@ -480,10 +488,16 @@ mod tests {
     fn cli_auth_json_becomes_a_summary() {
         // The shape `claude auth status` prints.
         let raw = r#"{"loggedIn":true,"authMethod":"claude.ai","email":"a@b.com"}"#;
-        assert_eq!(summarize_cli_auth(raw).as_deref(), Some("Claude subscription · a@b.com"));
+        assert_eq!(
+            summarize_cli_auth(raw).as_deref(),
+            Some("Claude subscription · a@b.com")
+        );
 
         // Signed out must not be dressed up as a provider.
-        assert_eq!(summarize_cli_auth(r#"{"loggedIn":false}"#).as_deref(), Some("Not signed in"));
+        assert_eq!(
+            summarize_cli_auth(r#"{"loggedIn":false}"#).as_deref(),
+            Some("Not signed in")
+        );
 
         // Nothing recognisable: say nothing rather than guess.
         assert!(summarize_cli_auth("not json").is_none());
@@ -514,7 +528,10 @@ mod tests {
         assert!(matches!(s.state, AgentState::Ready), "{s:?}");
         assert_eq!(s.transport, crate::driver::Transport::Native, "{s:?}");
         assert_eq!(s.cli_installed, Some(true), "{s:?}");
-        assert!(s.cli_version.is_some(), "expected the agent's own version: {s:?}");
+        assert!(
+            s.cli_version.is_some(),
+            "expected the agent's own version: {s:?}"
+        );
     }
 
     use super::*;
@@ -634,14 +651,20 @@ mod tests {
             return;
         }
         let status = probe(&crate::drivers::ClaudeCodeDriver, &cfg, PermissionMode::Ask).await;
-        assert!(matches!(status.state, AgentState::NotFound { .. }), "{status:?}");
+        assert!(
+            matches!(status.state, AgentState::NotFound { .. }),
+            "{status:?}"
+        );
     }
 
     #[tokio::test]
     async fn opencode_and_codex_probe_independently() {
         for d in [&OpenCodeDriver as &dyn AcpDriver, &CodexDriver] {
             let status = probe(d, &never_installed(), PermissionMode::Ask).await;
-            assert!(matches!(status.state, AgentState::NotFound { .. }), "{status:?}");
+            assert!(
+                matches!(status.state, AgentState::NotFound { .. }),
+                "{status:?}"
+            );
         }
     }
 }

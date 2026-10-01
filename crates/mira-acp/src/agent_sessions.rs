@@ -1,5 +1,3 @@
-// This module manages agent session persistence, allowing sessions to be resumed after restarts.
-// It also handles importing history from CLI tools like Claude Code.
 //! Agent sessions beyond the current process: resume cursors and history import.
 //!
 //! Two separate needs, one file:
@@ -16,9 +14,9 @@
 //! is its only writer. Paths take an explicit base dir so tests never touch
 //! the real home.
 
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use serde::{Deserialize, Serialize};
 
 /// Where an agent session left off.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -55,12 +53,7 @@ fn read_all(home: &Path) -> BTreeMap<String, AgentCursor> {
 
 /// Record where an agent session left off. Overwrites any previous cursor
 /// for the Mira session: there is exactly one agent per slot.
-pub fn record_in(
-    home: &Path,
-    mira_session: &str,
-    driver_kind: &str,
-    agent_session_id: &str,
-) {
+pub fn record_in(home: &Path, mira_session: &str, driver_kind: &str, agent_session_id: &str) {
     let mut all = read_all(home);
     all.insert(
         key(mira_session, driver_kind),
@@ -223,7 +216,11 @@ fn summarize_file(path: &Path, id: &str, cwd: &str) -> Option<ExternalSession> {
             }
             Some("assistant") => {
                 messages += 1;
-                if let Some(m) = v.get("message").and_then(|m| m.get("model")).and_then(|m| m.as_str()) {
+                if let Some(m) = v
+                    .get("message")
+                    .and_then(|m| m.get("model"))
+                    .and_then(|m| m.as_str())
+                {
                     // `<synthetic>` marks machine-generated entries, not the
                     // model that did the work — never let it win.
                     if !m.starts_with('<') {
@@ -270,7 +267,11 @@ pub fn append_line_to(path: &Path, line: &serde_json::Value) {
         let _ = std::fs::create_dir_all(parent);
     }
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let _ = writeln!(f, "{}", line);
     }
 }
@@ -291,8 +292,16 @@ mod tests {
         record_in(&home, "s1", "claude-code", "abc");
         record_in(&home, "s1", "codex", "th-9");
         // Same session, different drivers: neither clobbers the other.
-        assert_eq!(read_in(&home, "s1", "claude-code").unwrap().agent_session_id, "abc");
-        assert_eq!(read_in(&home, "s1", "codex").unwrap().agent_session_id, "th-9");
+        assert_eq!(
+            read_in(&home, "s1", "claude-code")
+                .unwrap()
+                .agent_session_id,
+            "abc"
+        );
+        assert_eq!(
+            read_in(&home, "s1", "codex").unwrap().agent_session_id,
+            "th-9"
+        );
         assert!(read_in(&home, "s1", "grok").is_none());
         assert!(read_in(&home, "s2", "claude-code").is_none());
     }
@@ -307,7 +316,12 @@ mod tests {
         assert_eq!(c.driver_kind, "claude-code");
         // Re-recording replaces: one cursor per (session, driver).
         record_in(&home, "s1", "claude-code", "def");
-        assert_eq!(read_in(&home, "s1", "claude-code").unwrap().agent_session_id, "def");
+        assert_eq!(
+            read_in(&home, "s1", "claude-code")
+                .unwrap()
+                .agent_session_id,
+            "def"
+        );
     }
 
     fn write_jsonl(dir: &Path, project: &str, name: &str, lines: &[&str]) {
@@ -331,9 +345,12 @@ mod tests {
             ],
         );
         // Empty sessions are skipped.
-        write_jsonl(&projects, "-Users-test-proj", "empty.jsonl", &[
-            r#"{"type":"queue-operation","timestamp":"2026-01-01T00:00:00Z"}"#,
-        ]);
+        write_jsonl(
+            &projects,
+            "-Users-test-proj",
+            "empty.jsonl",
+            &[r#"{"type":"queue-operation","timestamp":"2026-01-01T00:00:00Z"}"#],
+        );
 
         let found = list_claude_sessions_in(&projects);
         assert_eq!(found.len(), 1);
@@ -353,7 +370,11 @@ mod tests {
         let line = serde_json::json!({"t": 1, "driver": "claude-code", "frame": {"type": "acp_text", "text": "hi"}});
         append_line_to(&path, &line);
         // Garbage appended by hand must not break the read.
-        std::fs::write(&path, "not json\n".to_string() + &std::fs::read_to_string(&path).unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "not json\n".to_string() + &std::fs::read_to_string(&path).unwrap(),
+        )
+        .unwrap();
         let back = read_lines(&path);
         assert_eq!(back.len(), 1);
         assert_eq!(back[0]["frame"]["text"], "hi");

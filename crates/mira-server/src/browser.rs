@@ -81,9 +81,9 @@ pub async fn action(State(state): State<AppState>, Json(req): Json<ActionReq>) -
     // Accept a bare host in the URL bar the same way the agent's tool does,
     // so "example.com" and "localhost:3000" both do the obvious thing.
     let action = match &parsed {
-        BrowserAction::Navigate { url } => {
-            BrowserAction::Navigate { url: normalize_url(url) }
-        }
+        BrowserAction::Navigate { url } => BrowserAction::Navigate {
+            url: normalize_url(url),
+        },
         other => other.clone(),
     };
 
@@ -165,7 +165,9 @@ pub async fn embeddable(Query(q): Query<EmbeddableQuery>) -> Response {
         // always frames from a different origin, so any value means no.
         return Json(EmbeddableOut {
             embeddable: false,
-            reason: format!("This site sends X-Frame-Options: {xfo}, so it refuses to load in a frame."),
+            reason: format!(
+                "This site sends X-Frame-Options: {xfo}, so it refuses to load in a frame."
+            ),
             final_url,
         })
         .into_response();
@@ -230,7 +232,8 @@ pub async fn live(State(state): State<AppState>) -> Response {
         });
     }
     let first = futures::stream::iter(last);
-    let rest = tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(|r| async move { r.ok() });
+    let rest =
+        tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(|r| async move { r.ok() });
     let stream = first.chain(rest).map(|ev| {
         Ok::<_, std::convert::Infallible>(
             Event::default().data(serde_json::to_string(&ev).unwrap_or_default()),
@@ -331,12 +334,12 @@ async fn mcp_one(state: &AppState, req: Value) -> Option<Value> {
     let id = req.get("id").cloned()?; // a notification gets no reply
     let method = req.get("method").and_then(Value::as_str).unwrap_or("");
     let ok = |result: Value| json!({ "jsonrpc": "2.0", "id": id.clone(), "result": result });
-    let err = |code: i64, message: String| {
-        json!({ "jsonrpc": "2.0", "id": id.clone(), "error": { "code": code, "message": message } })
-    };
+    let err = |code: i64, message: String| json!({ "jsonrpc": "2.0", "id": id.clone(), "error": { "code": code, "message": message } });
     Some(match method {
         "initialize" => {
-            let version = req["params"]["protocolVersion"].as_str().unwrap_or("2025-06-18");
+            let version = req["params"]["protocolVersion"]
+                .as_str()
+                .unwrap_or("2025-06-18");
             ok(json!({
                 "protocolVersion": version,
                 "capabilities": { "tools": {} },

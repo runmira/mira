@@ -47,9 +47,9 @@ use tokio::sync::{mpsc, Mutex};
 
 use crate::driver::{LaunchConfig, PermissionMode, Transport};
 use crate::events::{
-    LimitWindow,
     AcpToolCallStatus as ToolCallStatus, AcpToolKind as ToolKind, ConfigValueView, EventSource,
-    MiraEvent, NormalizedEvent, SessionConfigView, SessionModeView, ToolCallState, ToolContent,
+    LimitWindow, MiraEvent, NormalizedEvent, SessionConfigView, SessionModeView, ToolCallState,
+    ToolContent,
 };
 
 /// How long to wait for a line before assuming the CLI has gone quiet.
@@ -108,7 +108,10 @@ pub struct PermissionDecision {
 
 impl From<bool> for PermissionDecision {
     fn from(allow: bool) -> Self {
-        PermissionDecision { allow, ..Default::default() }
+        PermissionDecision {
+            allow,
+            ..Default::default()
+        }
     }
 }
 
@@ -153,7 +156,10 @@ pub fn map_line(v: &Value) -> Vec<NativeAction> {
 /// The model option event, with the running model first and marked current.
 /// `current` is `None` before the first turn — the CLI has said nothing yet —
 /// in which case the list is unmarked rather than guessed.
-fn model_config_event(current: Option<&str>, known: Option<&[NativeModel]>) -> Option<NormalizedEvent> {
+fn model_config_event(
+    current: Option<&str>,
+    known: Option<&[NativeModel]>,
+) -> Option<NormalizedEvent> {
     let mut values = match current {
         Some(model) => vec![ConfigValueView {
             value: model.to_string(),
@@ -164,9 +170,7 @@ fn model_config_event(current: Option<&str>, known: Option<&[NativeModel]>) -> O
     };
     if let Some(known) = known {
         for m in known {
-            if Some(m.value.as_str()) != current
-                && !values.iter().any(|e| e.value == m.value)
-            {
+            if Some(m.value.as_str()) != current && !values.iter().any(|e| e.value == m.value) {
                 values.push(ConfigValueView {
                     value: m.value.clone(),
                     name: m.label.clone(),
@@ -209,14 +213,11 @@ fn modes_event(current: &str) -> NormalizedEvent {
 
 pub fn map_line_with(v: &Value, models: Option<&[NativeModel]>) -> Vec<NativeAction> {
     let kind = v.get("type").and_then(Value::as_str);
-    match kind {
-        Some("error") => {
-            return vec![NativeAction::TurnEnded {
-                stop_reason: "error".to_string(),
-                is_error: true,
-            }];
-        }
-        _ => {}
+    if let Some("error") = kind {
+        return vec![NativeAction::TurnEnded {
+            stop_reason: "error".to_string(),
+            is_error: true,
+        }];
     }
     match v.get("type").and_then(Value::as_str) {
         Some("system") if v.get("subtype").and_then(Value::as_str) == Some("init") => {
@@ -297,18 +298,13 @@ pub fn map_line_with(v: &Value, models: Option<&[NativeModel]>) -> Vec<NativeAct
                 .unwrap_or_default();
             blocks
                 .iter()
-                .filter(|b| {
-                    b.get("type").and_then(Value::as_str) == Some("tool_result")
-                })
+                .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_result"))
                 .filter_map(|b| {
                     let id = b
                         .get("tool_use_id")
                         .and_then(Value::as_str)
                         .map(str::to_string)?;
-                    let text = b
-                        .get("content")
-                        .map(flatten_content)
-                        .unwrap_or_default();
+                    let text = b.get("content").map(flatten_content).unwrap_or_default();
                     Some(NativeAction::Event(NormalizedEvent {
                         source: EventSource::Acp {
                             variant: "tool_call_update".to_string(),
@@ -363,7 +359,10 @@ pub fn map_line_with(v: &Value, models: Option<&[NativeModel]>) -> Vec<NativeAct
                 request_id,
                 tool_name,
                 input: req.get("input").cloned().unwrap_or_else(|| req.clone()),
-                tool_use_id: req.get("tool_use_id").and_then(Value::as_str).map(str::to_string),
+                tool_use_id: req
+                    .get("tool_use_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
                 reason: req
                     .get("decision_reason")
                     .and_then(Value::as_str)
@@ -418,15 +417,23 @@ pub fn map_line_with(v: &Value, models: Option<&[NativeModel]>) -> Vec<NativeAct
                     .collect();
                 if !windows.is_empty() {
                     out.push(NativeAction::Event(NormalizedEvent {
-                        source: EventSource::Acp { variant: "limits".to_string() },
+                        source: EventSource::Acp {
+                            variant: "limits".to_string(),
+                        },
                         event: MiraEvent::Limits { windows },
                     }));
                 }
             }
-            let status = info.get("status").and_then(Value::as_str).unwrap_or("allowed");
+            let status = info
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("allowed");
             if status != "allowed" && status != "allowed_warning" {
                 out.push(NativeAction::RateLimited {
-                    resets_at: info.get("resetsAt").and_then(Value::as_i64).map(describe_reset),
+                    resets_at: info
+                        .get("resetsAt")
+                        .and_then(Value::as_i64)
+                        .map(describe_reset),
                 });
             }
             out
@@ -499,7 +506,10 @@ fn model_spend(result: &Value) -> Option<Vec<crate::events::ModelSpend>> {
             cached_input_tokens: n(u, "cacheReadInputTokens") + n(u, "cacheCreationInputTokens"),
             cost_usd: u.get("costUSD").and_then(Value::as_f64),
         })
-        .filter(|m| m.input_tokens + m.output_tokens + m.cached_input_tokens > 0 || m.cost_usd.unwrap_or(0.0) > 0.0)
+        .filter(|m| {
+            m.input_tokens + m.output_tokens + m.cached_input_tokens > 0
+                || m.cost_usd.unwrap_or(0.0) > 0.0
+        })
         .collect();
     (!out.is_empty()).then_some(out)
 }
@@ -516,9 +526,7 @@ fn context_tokens(usage: &Value) -> Option<u64> {
 
 impl StreamState {
     pub fn map(&mut self, v: &Value, models: Option<&[NativeModel]>) -> Vec<NativeAction> {
-        let sub = v
-            .get("parent_tool_use_id")
-            .is_some_and(|p| !p.is_null());
+        let sub = v.get("parent_tool_use_id").is_some_and(|p| !p.is_null());
         match v.get("type").and_then(Value::as_str) {
             Some("stream_event") => {
                 if sub {
@@ -529,7 +537,11 @@ impl StreamState {
             Some("assistant") => {
                 // Subagent traffic has its own context, not the session's.
                 if !sub {
-                    if let Some(t) = v.get("message").and_then(|m| m.get("usage")).and_then(context_tokens) {
+                    if let Some(t) = v
+                        .get("message")
+                        .and_then(|m| m.get("usage"))
+                        .and_then(context_tokens)
+                    {
                         self.context = Some(t);
                     }
                 }
@@ -552,8 +564,7 @@ impl StreamState {
                         if sub {
                             return false;
                         }
-                        !mid
-                            .as_ref()
+                        !mid.as_ref()
                             .is_some_and(|m| self.streamed.contains(&(m.clone(), kind)))
                     })
                     .collect()
@@ -567,10 +578,16 @@ impl StreamState {
                 let window = v
                     .get("modelUsage")
                     .and_then(Value::as_object)
-                    .and_then(|m| m.values().filter_map(|u| u.get("contextWindow")?.as_u64()).max());
+                    .and_then(|m| {
+                        m.values()
+                            .filter_map(|u| u.get("contextWindow")?.as_u64())
+                            .max()
+                    });
                 if let (Some(used), Some(size)) = (self.context, window) {
                     out.push(NativeAction::Event(NormalizedEvent {
-                        source: EventSource::Acp { variant: "usage_update".to_string() },
+                        source: EventSource::Acp {
+                            variant: "usage_update".to_string(),
+                        },
                         event: MiraEvent::Usage {
                             used,
                             size,
@@ -585,9 +602,14 @@ impl StreamState {
                 // totals, subagents included), for the usage ledger.
                 if let Some(spend) = model_spend(v) {
                     out.push(NativeAction::Event(NormalizedEvent {
-                        source: EventSource::Acp { variant: "spend".to_string() },
+                        source: EventSource::Acp {
+                            variant: "spend".to_string(),
+                        },
                         event: MiraEvent::Spend {
-                            session: v.get("session_id").and_then(Value::as_str).map(str::to_string),
+                            session: v
+                                .get("session_id")
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
                             models: spend,
                         },
                     }));
@@ -631,7 +653,9 @@ impl StreamState {
                 let message_id = self.current.clone();
                 let text = text.to_string();
                 vec![NativeAction::Event(NormalizedEvent {
-                    source: EventSource::Acp { variant: event.to_string() },
+                    source: EventSource::Acp {
+                        variant: event.to_string(),
+                    },
                     event: if kind == "text" {
                         MiraEvent::AssistantText { message_id, text }
                     } else {
@@ -652,7 +676,11 @@ fn map_assistant_block(b: &Value, mid: Option<String>) -> Option<NormalizedEvent
             },
             event: MiraEvent::AssistantText {
                 message_id: mid,
-                text: b.get("text").and_then(Value::as_str).unwrap_or("").to_string(),
+                text: b
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
             },
         }),
         // A thinking block whose text was withheld carries nothing to show.
@@ -677,7 +705,11 @@ fn map_assistant_block(b: &Value, mid: Option<String>) -> Option<NormalizedEvent
             },
             event: MiraEvent::ToolCall(ToolCallState {
                 id: b.get("id").and_then(Value::as_str)?.to_string(),
-                title: b.get("name").and_then(Value::as_str).unwrap_or("tool").to_string(),
+                title: b
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("tool")
+                    .to_string(),
                 name: b.get("name").and_then(Value::as_str).map(str::to_string),
                 kind: b.get("name").and_then(Value::as_str).map(tool_kind),
                 status: ToolCallStatus::Pending,
@@ -763,8 +795,7 @@ fn claude_models_from(data: Option<&Value>) -> Vec<NativeModel> {
             description: None,
         })
         .collect();
-    let mut seen: std::collections::HashSet<String> =
-        out.iter().map(|m| m.value.clone()).collect();
+    let mut seen: std::collections::HashSet<String> = out.iter().map(|m| m.value.clone()).collect();
     let mut push = |value: &str, label: Option<&str>, description: Option<&str>| {
         if value.is_empty() || !seen.insert(value.to_string()) {
             return;
@@ -778,7 +809,10 @@ fn claude_models_from(data: Option<&Value>) -> Vec<NativeModel> {
 
     let Some(data) = data else { return out };
     // The CLI's own model menu.
-    if let Some(cache) = data.get("additionalModelOptionsCache").and_then(Value::as_array) {
+    if let Some(cache) = data
+        .get("additionalModelOptionsCache")
+        .and_then(Value::as_array)
+    {
         for o in cache {
             push(
                 o.get("value").and_then(Value::as_str).unwrap_or(""),
@@ -821,7 +855,10 @@ fn claude_models_from(data: Option<&Value>) -> Vec<NativeModel> {
 pub fn mode_views() -> Vec<SessionModeView> {
     [
         ("default", "Ask before running commands or editing files"),
-        ("acceptEdits", "Auto-accept file edits, still ask for commands"),
+        (
+            "acceptEdits",
+            "Auto-accept file edits, still ask for commands",
+        ),
         ("plan", "Plan only, make no changes"),
         ("dontAsk", "Never ask; refuse anything needing approval"),
         ("auto", "Let the agent decide"),
@@ -1046,10 +1083,18 @@ impl AgentHandle {
     pub async fn set_mode(&self, mode_id: &str) -> Result<(), String> {
         match self {
             AgentHandle::Acp(a) => {
-                let sid = a.session_id().ok_or_else(|| "no agent session yet".to_string())?;
-                a.session().set_mode(&sid, mode_id).await.map_err(|e| e.to_string())
+                let sid = a
+                    .session_id()
+                    .ok_or_else(|| "no agent session yet".to_string())?;
+                a.session()
+                    .set_mode(&sid, mode_id)
+                    .await
+                    .map_err(|e| e.to_string())
             }
-            AgentHandle::Native(n) => n.set_permission_mode(mode_id).await.map_err(|e| e.to_string()),
+            AgentHandle::Native(n) => n
+                .set_permission_mode(mode_id)
+                .await
+                .map_err(|e| e.to_string()),
             AgentHandle::AppServer(_) => Err(format!(
                 "{mode_id} applies to the next run of this agent — restart it to change the mode"
             )),
@@ -1082,7 +1127,9 @@ impl AgentHandle {
     ) -> Result<Vec<crate::events::SessionConfigView>, String> {
         match self {
             AgentHandle::Acp(a) => {
-                let sid = a.session_id().ok_or_else(|| "no agent session yet".to_string())?;
+                let sid = a
+                    .session_id()
+                    .ok_or_else(|| "no agent session yet".to_string())?;
                 let out = a
                     .session()
                     .set_config_option(&sid, option_id, value)
@@ -1125,10 +1172,7 @@ impl AgentHandle {
     /// is live.
     pub fn take_event_channels(
         &self,
-    ) -> Option<(
-        mpsc::Receiver<NormalizedEvent>,
-        mpsc::Receiver<TurnEnd>,
-    )> {
+    ) -> Option<(mpsc::Receiver<NormalizedEvent>, mpsc::Receiver<TurnEnd>)> {
         match self {
             AgentHandle::Acp(_) => None,
             AgentHandle::Native(n) => Some((
@@ -1176,7 +1220,11 @@ pub struct NativeAgent {
 /// An allow must echo the tool input back as `updatedInput`: the CLI runs
 /// the tool with whatever the host returns, and an allow without it is
 /// treated as malformed by current builds.
-pub fn permission_response(request_id: &str, decision: &PermissionDecision, input: &Value) -> Value {
+pub fn permission_response(
+    request_id: &str,
+    decision: &PermissionDecision,
+    input: &Value,
+) -> Value {
     let body = if decision.allow {
         let mut b = json!({
             "behavior": "allow",
@@ -1211,7 +1259,11 @@ pub fn permission_response(request_id: &str, decision: &PermissionDecision, inpu
 /// a whole-tool session rule, so the choice sticks instead of degrading
 /// into a one-off allow. `persist` keeps the suggestions' own destination —
 /// that is the "always" answer.
-pub fn session_permission_updates(tool_name: &str, suggestions: &[Value], persist: bool) -> Vec<Value> {
+pub fn session_permission_updates(
+    tool_name: &str,
+    suggestions: &[Value],
+    persist: bool,
+) -> Vec<Value> {
     let scoped: Vec<Value> = suggestions
         .iter()
         .filter(|s| s.is_object())
@@ -1320,13 +1372,16 @@ impl NativeAgent {
             program: launch_cfg.program.display().to_string(),
             source,
         })?;
-        let stdin = Arc::new(Mutex::new(child.stdin.take().ok_or(NativeError::StdinClosed)?));
+        let stdin = Arc::new(Mutex::new(
+            child.stdin.take().ok_or(NativeError::StdinClosed)?,
+        ));
         let stdout = child.stdout.take().ok_or(NativeError::Ended)?;
         let stderr = child.stderr.take();
 
         let session_id = Arc::new(Mutex::new(None));
-        let replies: Arc<Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<Value>>>> =
-            Arc::default();
+        let replies: Arc<
+            Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<Value>>>,
+        > = Arc::default();
         let rate_limit: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         // The CLI's own known models, read once.
         let models: Option<Vec<NativeModel>> = Some(claude_models());
@@ -1395,8 +1450,7 @@ impl NativeAgent {
                 let mut lines = BufReader::new(stdout).lines();
                 let mut stream = StreamState::default();
                 loop {
-                    let line = match tokio::time::timeout(idle_timeout, lines.next_line()).await
-                    {
+                    let line = match tokio::time::timeout(idle_timeout, lines.next_line()).await {
                         Ok(Ok(Some(l))) => l,
                         // stdout closed or the read failed: the agent is gone.
                         Ok(_) | Err(_) if !is_alive(&watcher).await => break,
@@ -1418,7 +1472,10 @@ impl NativeAgent {
                     };
                     // An answer to a control request we are waiting on.
                     if v.get("type").and_then(Value::as_str) == Some("control_response") {
-                        let id = v["response"]["request_id"].as_str().unwrap_or_default().to_string();
+                        let id = v["response"]["request_id"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_string();
                         if let Some(tx) = replies.lock().await.remove(&id) {
                             let _ = tx.send(v["response"].clone());
                             continue;
@@ -1432,7 +1489,10 @@ impl NativeAgent {
                             NativeAction::Event(e) => {
                                 let _ = tx.send(e).await;
                             }
-                            NativeAction::TurnEnded { stop_reason, is_error } => {
+                            NativeAction::TurnEnded {
+                                stop_reason,
+                                is_error,
+                            } => {
                                 let was_limited = rate_limit.lock().await.take();
                                 let _ = end_tx
                                     .send(TurnEnd {
@@ -1447,9 +1507,8 @@ impl NativeAgent {
                                     .await;
                             }
                             NativeAction::RateLimited { resets_at } => {
-                                *rate_limit.lock().await = Some(
-                                    resets_at.unwrap_or_else(|| "shortly".to_string()),
-                                );
+                                *rate_limit.lock().await =
+                                    Some(resets_at.unwrap_or_else(|| "shortly".to_string()));
                             }
                             NativeAction::Permission(p) => {
                                 // Decided on its own task. Awaiting the user
@@ -1520,7 +1579,9 @@ impl NativeAgent {
         w.write_all(line.to_string().as_bytes())
             .await
             .map_err(|_| NativeError::StdinClosed)?;
-        w.write_all(b"\n").await.map_err(|_| NativeError::StdinClosed)?;
+        w.write_all(b"\n")
+            .await
+            .map_err(|_| NativeError::StdinClosed)?;
         w.flush().await.map_err(|_| NativeError::StdinClosed)
     }
 
@@ -1540,7 +1601,9 @@ impl NativeAgent {
         w.write_all(v.to_string().as_bytes())
             .await
             .map_err(|_| NativeError::StdinClosed)?;
-        w.write_all(b"\n").await.map_err(|_| NativeError::StdinClosed)?;
+        w.write_all(b"\n")
+            .await
+            .map_err(|_| NativeError::StdinClosed)?;
         w.flush().await.map_err(|_| NativeError::StdinClosed)
     }
 
@@ -1560,17 +1623,23 @@ impl NativeAgent {
         let id = format!("mira-{}", uuid::Uuid::new_v4());
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.replies.lock().await.insert(id.clone(), tx);
-        self.write_line(&json!({ "type": "control_request", "request_id": id, "request": request }))
-            .await?;
+        self.write_line(
+            &json!({ "type": "control_request", "request_id": id, "request": request }),
+        )
+        .await?;
         let reply = match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(v)) => v,
             _ => {
                 self.replies.lock().await.remove(&id);
-                return Err(NativeError::Other("no answer to the control request".into()));
+                return Err(NativeError::Other(
+                    "no answer to the control request".into(),
+                ));
             }
         };
         if reply["subtype"] == "error" {
-            return Err(NativeError::Other(reply["error"].as_str().unwrap_or("refused").to_string()));
+            return Err(NativeError::Other(
+                reply["error"].as_str().unwrap_or("refused").to_string(),
+            ));
         }
         Ok(reply["response"].clone())
     }
@@ -1597,7 +1666,8 @@ impl NativeAgent {
     /// resume, nothing lost. (Verified against Claude Code 2.1: the next
     /// `init` reports the new model.)
     pub async fn set_model(&self, model: &str) -> Result<(), NativeError> {
-        self.control(json!({ "subtype": "set_model", "model": model })).await?;
+        self.control(json!({ "subtype": "set_model", "model": model }))
+            .await?;
         if let Some(ev) = model_config_event(Some(model), self.models.as_deref()) {
             let _ = self.notify.send(ev).await;
         }
@@ -1606,7 +1676,8 @@ impl NativeAgent {
 
     /// Switch the running agent's permission mode, live.
     pub async fn set_permission_mode(&self, mode: &str) -> Result<(), NativeError> {
-        self.control(json!({ "subtype": "set_permission_mode", "mode": mode })).await?;
+        self.control(json!({ "subtype": "set_permission_mode", "mode": mode }))
+            .await?;
         let _ = self.notify.send(modes_event(mode)).await;
         Ok(())
     }
@@ -1657,7 +1728,10 @@ mod tests {
             if let Some(v) = pred().await {
                 return v;
             }
-            assert!(tokio::time::Instant::now() < deadline, "timed out waiting for {what}");
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for {what}"
+            );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
@@ -1681,23 +1755,37 @@ mod tests {
             }) => Some(names.clone()),
             _ => None,
         });
-        assert_eq!(cmds.as_deref(), Some(&["clear".to_string(), "compact".to_string()][..]));
+        assert_eq!(
+            cmds.as_deref(),
+            Some(&["clear".to_string(), "compact".to_string()][..])
+        );
         assert!(acts.iter().any(|a| matches!(
             a,
-            NativeAction::Event(NormalizedEvent { event: MiraEvent::Modes { .. }, .. })
+            NativeAction::Event(NormalizedEvent {
+                event: MiraEvent::Modes { .. },
+                ..
+            })
         )));
     }
 
     #[test]
     fn assistant_text_thought_and_tool_use_all_map() {
-        let acts = map_line(&serde_json::from_str(
-            r#"{"type":"assistant","message":{"id":"m1","content":[
+        let acts = map_line(
+            &serde_json::from_str(
+                r#"{"type":"assistant","message":{"id":"m1","content":[
                 {"type":"thinking","thinking":"hmm"},
                 {"type":"text","text":"hi"},
                 {"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}"#,
-        ).unwrap());
-        assert!(acts.iter().any(|a| matches!(a,
-            NativeAction::Event(NormalizedEvent { event: MiraEvent::AgentThought { .. }, .. }))));
+            )
+            .unwrap(),
+        );
+        assert!(acts.iter().any(|a| matches!(
+            a,
+            NativeAction::Event(NormalizedEvent {
+                event: MiraEvent::AgentThought { .. },
+                ..
+            })
+        )));
         assert!(acts.iter().any(|a| matches!(a,
             NativeAction::Event(NormalizedEvent { event: MiraEvent::AssistantText { text, .. }, .. }) if text == "hi")));
         assert!(acts.iter().any(|a| matches!(a,
@@ -1706,10 +1794,13 @@ mod tests {
 
     #[test]
     fn tool_result_arrives_on_a_user_envelope() {
-        let acts = map_line(&serde_json::from_str(
-            r#"{"type":"user","message":{"content":[
+        let acts = map_line(
+            &serde_json::from_str(
+                r#"{"type":"user","message":{"content":[
                 {"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}"#,
-        ).unwrap());
+            )
+            .unwrap(),
+        );
         assert!(acts.iter().any(|a| matches!(a,
             NativeAction::Event(NormalizedEvent { event: MiraEvent::ToolCallUpdate(c), .. })
             if c.id == "t1" && c.status == ToolCallStatus::Completed)));
@@ -1719,10 +1810,13 @@ mod tests {
     fn non_tool_control_requests_keep_their_subtype() {
         // AskUserQuestion carries questions, not a tool name. The subtype
         // must survive as the name or the approval dialog reads "tool".
-        let acts = map_line(&serde_json::from_str(
-            r#"{"type":"control_request","request_id":"q1","request":
+        let acts = map_line(
+            &serde_json::from_str(
+                r#"{"type":"control_request","request_id":"q1","request":
                 {"subtype":"AskUserQuestion","questions":[{"question":"Proceed?"}]}}"#,
-        ).unwrap());
+            )
+            .unwrap(),
+        );
         let p = acts.iter().find_map(|a| match a {
             NativeAction::Permission(p) => Some(p.clone()),
             _ => None,
@@ -1734,10 +1828,13 @@ mod tests {
 
     #[test]
     fn control_request_becomes_a_permission() {
-        let acts = map_line(&serde_json::from_str(
-            r#"{"type":"control_request","request_id":"c1","request":
+        let acts = map_line(
+            &serde_json::from_str(
+                r#"{"type":"control_request","request_id":"c1","request":
                 {"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"rm -rf /"}}}"#,
-        ).unwrap());
+            )
+            .unwrap(),
+        );
         let p = acts.iter().find_map(|a| match a {
             NativeAction::Permission(p) => Some(p.clone()),
             _ => None,
@@ -1748,15 +1845,21 @@ mod tests {
     #[test]
     fn unknown_envelopes_are_surfaced_not_dropped() {
         let acts = map_line(&serde_json::from_str(r#"{"type":"brand_new_thing"}"#).unwrap());
-        assert!(acts.iter().any(|a| matches!(a,
-            NativeAction::Event(NormalizedEvent { event: MiraEvent::Unmodelled { .. }, .. }))));
+        assert!(acts.iter().any(|a| matches!(
+            a,
+            NativeAction::Event(NormalizedEvent {
+                event: MiraEvent::Unmodelled { .. },
+                ..
+            })
+        )));
     }
 
     #[test]
     fn result_ends_the_turn_with_the_clis_own_label() {
-        let acts = map_line(&serde_json::from_str(
-            r#"{"type":"result","subtype":"success","is_error":false}"#,
-        ).unwrap());
+        let acts = map_line(
+            &serde_json::from_str(r#"{"type":"result","subtype":"success","is_error":false}"#)
+                .unwrap(),
+        );
         assert!(acts.contains(&NativeAction::TurnEnded {
             stop_reason: "success".into(),
             is_error: false
@@ -1808,7 +1911,7 @@ done
             args: Vec::new(),
             env: Default::default(),
             secret_env: Vec::new(),
-        env_deny: Vec::new(),
+            env_deny: Vec::new(),
         };
         (cfg, dir)
     }
@@ -1829,19 +1932,13 @@ done
             })
         });
 
-        let agent = NativeAgent::start(&cfg, gate, None)
-            .await
-            .expect("spawn");
+        let agent = NativeAgent::start(&cfg, gate, None).await.expect("spawn");
         let evs_rx = agent.events.lock().unwrap().take().expect("events");
         let mut ends_rx = agent.turn_end.lock().unwrap().take().expect("turn end");
         let _ = &evs_rx;
 
         // The init line must have been read for the session id to exist.
-        let sid = wait_for(
-            || async { agent.session_id().await.or_else(|| None) },
-            "session id",
-        )
-        .await;
+        let sid = wait_for(|| async { agent.session_id().await.or(None) }, "session id").await;
         assert_eq!(sid, "fake-1");
 
         agent.prompt("hello").await.unwrap();
@@ -1856,7 +1953,7 @@ done
         let mut evs = evs_rx;
         let end = tokio::time::timeout(Duration::from_secs(20), async {
             loop {
-                let Some(e) = evs.recv().await else { return None };
+                let e = evs.recv().await?;
                 match &e.event {
                     MiraEvent::ToolCall(c) if c.id == "t1" => saw_tool = true,
                     MiraEvent::ToolCallUpdate(c) if c.id == "t1" => saw_result_update = true,
@@ -1935,9 +2032,19 @@ done
         ] {
             out.extend(st.map(&line(l), None));
         }
-        assert_eq!(texts(&out), vec!["Hi, ", "there"], "deltas once, whole block dropped");
+        assert_eq!(
+            texts(&out),
+            vec!["Hi, ", "there"],
+            "deltas once, whole block dropped"
+        );
         assert!(
-            out.iter().any(|a| matches!(a, NativeAction::Event(NormalizedEvent { event: MiraEvent::ToolCall(_), .. }))),
+            out.iter().any(|a| matches!(
+                a,
+                NativeAction::Event(NormalizedEvent {
+                    event: MiraEvent::ToolCall(_),
+                    ..
+                })
+            )),
             "a tool call in a streamed message still arrives"
         );
     }
@@ -1972,7 +2079,10 @@ done
             "behavior":"allow","destination":"localSettings"});
         let session = session_permission_updates("Bash", std::slice::from_ref(&suggestion), false);
         assert_eq!(session[0]["destination"], "session");
-        assert_eq!(session[0]["rules"][0]["ruleContent"], "git log:*", "the CLI's own scope is kept");
+        assert_eq!(
+            session[0]["rules"][0]["ruleContent"], "git log:*",
+            "the CLI's own scope is kept"
+        );
         // "Always" keeps where the CLI wanted to write it.
         let always = session_permission_updates("Bash", &[suggestion], true);
         assert_eq!(always[0]["destination"], "localSettings");
@@ -1991,10 +2101,23 @@ done
             message: None,
         };
         let r = permission_response("c3", &d, &json!({"questions": []}));
-        assert_eq!(r["response"]["response"]["updatedInput"]["answers"]["Proceed?"], "Yes");
-        assert_eq!(r["response"]["response"]["updatedPermissions"][0]["type"], "addRules");
-        let deny = PermissionDecision { allow: false, message: Some("plan rejected".into()), ..Default::default() };
-        assert_eq!(permission_response("c4", &deny, &Value::Null)["response"]["response"]["message"], "plan rejected");
+        assert_eq!(
+            r["response"]["response"]["updatedInput"]["answers"]["Proceed?"],
+            "Yes"
+        );
+        assert_eq!(
+            r["response"]["response"]["updatedPermissions"][0]["type"],
+            "addRules"
+        );
+        let deny = PermissionDecision {
+            allow: false,
+            message: Some("plan rejected".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            permission_response("c4", &deny, &Value::Null)["response"]["response"]["message"],
+            "plan rejected"
+        );
     }
 
     #[test]
@@ -2004,7 +2127,9 @@ done
                 "input":{"command":"ls"},"tool_use_id":"toolu_1","decision_reason":"Contains simple_expansion",
                 "permission_suggestions":[{"type":"addRules"}]}}"#,
         ).unwrap());
-        let Some(NativeAction::Permission(p)) = acts.into_iter().next() else { panic!("no permission") };
+        let Some(NativeAction::Permission(p)) = acts.into_iter().next() else {
+            panic!("no permission")
+        };
         assert_eq!(p.tool_use_id.as_deref(), Some("toolu_1"));
         assert_eq!(p.reason.as_deref(), Some("Contains simple_expansion"));
         assert_eq!(p.suggestions.len(), 1);
@@ -2013,12 +2138,18 @@ done
     #[test]
     fn thinking_text_is_requested_and_empty_thinking_is_dropped() {
         let l = launch("claude".into(), PermissionMode::Ask, None, None);
-        assert!(l.args.windows(2).any(|w| w[0] == "--settings" && w[1].contains("showThinkingSummaries")));
+        assert!(l
+            .args
+            .windows(2)
+            .any(|w| w[0] == "--settings" && w[1].contains("showThinkingSummaries")));
         let v: Value = serde_json::from_str(
             r#"{"type":"assistant","message":{"id":"m","content":[{"type":"thinking","thinking":"","signature":"x"}]}}"#,
         )
         .unwrap();
-        assert!(map_line(&v).is_empty(), "a withheld thought is not an empty Thought row");
+        assert!(
+            map_line(&v).is_empty(),
+            "a withheld thought is not an empty Thought row"
+        );
     }
 
     #[test]
@@ -2026,13 +2157,24 @@ done
         let mut st = StreamState::default();
         let line = |s: &str| serde_json::from_str::<Value>(s).unwrap();
         st.map(&line(r#"{"type":"assistant","message":{"id":"m","content":[],"usage":{"input_tokens":10,"cache_read_input_tokens":20886,"cache_creation_input_tokens":8429,"output_tokens":3}},"parent_tool_use_id":null}"#), None);
-        let acts = st.map(&line(r#"{"type":"result","subtype":"success","is_error":false,"total_cost_usd":0.0193,
-            "modelUsage":{"claude-haiku-4-5":{"contextWindow":200000}}}"#), None);
+        let acts = st.map(
+            &line(
+                r#"{"type":"result","subtype":"success","is_error":false,"total_cost_usd":0.0193,
+            "modelUsage":{"claude-haiku-4-5":{"contextWindow":200000}}}"#,
+            ),
+            None,
+        );
         let usage = acts.iter().find_map(|a| match a {
-            NativeAction::Event(NormalizedEvent { event: MiraEvent::Usage { used, size, cost }, .. }) => Some((*used, *size, cost.clone())),
+            NativeAction::Event(NormalizedEvent {
+                event: MiraEvent::Usage { used, size, cost },
+                ..
+            }) => Some((*used, *size, cost.clone())),
             _ => None,
         });
-        assert_eq!(usage, Some((29328, 200000, Some((0.0193, "USD".to_string())))));
+        assert_eq!(
+            usage,
+            Some((29328, 200000, Some((0.0193, "USD".to_string()))))
+        );
     }
 
     #[test]
@@ -2041,13 +2183,25 @@ done
             r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1790850000,
                "unifiedWindows":{"five_hour":{"utilization":0.39,"resetsAt":1790850000},"seven_day":{"utilization":0.18,"resetsAt":1791414000}}}}"#,
         ).unwrap());
-        assert!(!ok.iter().any(|a| matches!(a, NativeAction::RateLimited { .. })), "allowed is not a limit");
-        let windows = ok.iter().find_map(|a| match a {
-            NativeAction::Event(NormalizedEvent { event: MiraEvent::Limits { windows }, .. }) => Some(windows.clone()),
-            _ => None,
-        }).expect("limits");
+        assert!(
+            !ok.iter()
+                .any(|a| matches!(a, NativeAction::RateLimited { .. })),
+            "allowed is not a limit"
+        );
+        let windows = ok
+            .iter()
+            .find_map(|a| match a {
+                NativeAction::Event(NormalizedEvent {
+                    event: MiraEvent::Limits { windows },
+                    ..
+                }) => Some(windows.clone()),
+                _ => None,
+            })
+            .expect("limits");
         assert_eq!(windows.len(), 2);
-        assert!(windows.iter().any(|w| w.name == "five_hour" && (w.utilization - 0.39).abs() < 1e-9));
+        assert!(windows
+            .iter()
+            .any(|w| w.name == "five_hour" && (w.utilization - 0.39).abs() < 1e-9));
 
         let hit = map_line(&serde_json::from_str(
             r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":4102444800}}"#,
@@ -2060,8 +2214,14 @@ done
         // Without `--permission-prompt-tool stdio` the CLI has no channel to
         // us and auto-denies every command that would prompt.
         let l = launch("claude".into(), PermissionMode::Ask, None, None);
-        assert!(l.args.windows(2).any(|w| w == ["--permission-prompt-tool", "stdio"]));
-        assert!(l.args.windows(2).any(|w| w == ["--permission-prompts", "host"]));
+        assert!(l
+            .args
+            .windows(2)
+            .any(|w| w == ["--permission-prompt-tool", "stdio"]));
+        assert!(l
+            .args
+            .windows(2)
+            .any(|w| w == ["--permission-prompts", "host"]));
     }
 
     #[test]
@@ -2090,8 +2250,17 @@ done
         assert_eq!(&values[..4], ["opus", "sonnet", "haiku", "fable"]);
         // Then the CLI's own menu entry, with its own label, exactly once.
         assert!(values.contains(&"claude-fable-5-1[1m]"));
-        assert_eq!(values.iter().filter(|v| v.to_string() == "claude-fable-5-1[1m]").count(), 1);
-        let fable = models.iter().find(|m| m.value == "claude-fable-5-1[1m]").unwrap();
+        assert_eq!(
+            values
+                .iter()
+                .filter(|v| v.to_string() == "claude-fable-5-1[1m]")
+                .count(),
+            1
+        );
+        let fable = models
+            .iter()
+            .find(|m| m.value == "claude-fable-5-1[1m]")
+            .unwrap();
         assert_eq!(fable.label, "Fable");
         // Then usage history.
         assert!(values.contains(&"claude-opus-4-7"));
@@ -2100,7 +2269,11 @@ done
     #[test]
     fn init_carries_the_full_model_list_with_current_first() {
         let models = vec![
-            NativeModel { value: "opus".into(), label: "Opus — latest".into(), description: None },
+            NativeModel {
+                value: "opus".into(),
+                label: "Opus — latest".into(),
+                description: None,
+            },
             NativeModel {
                 value: "claude-opus-4-7".into(),
                 label: "claude-opus-4-7".into(),
@@ -2115,9 +2288,10 @@ done
             Some(&models),
         );
         let opts = acts.iter().find_map(|a| match a {
-            NativeAction::Event(NormalizedEvent { event: MiraEvent::ConfigOptions { options }, .. }) => {
-                Some(options.clone())
-            }
+            NativeAction::Event(NormalizedEvent {
+                event: MiraEvent::ConfigOptions { options },
+                ..
+            }) => Some(options.clone()),
             _ => None,
         });
         let model = opts.unwrap().into_iter().find(|o| o.id == "model").unwrap();
@@ -2134,20 +2308,36 @@ done
         let mut l = launch(p.clone(), PermissionMode::Ask, None, None);
         // Fork without a session to fork from is silently meaningless, so it
         // must not reach argv at all.
-        apply_overrides(&mut l, &NativeOverrides { fork: true, ..Default::default() });
+        apply_overrides(
+            &mut l,
+            &NativeOverrides {
+                fork: true,
+                ..Default::default()
+            },
+        );
         assert!(!l.args.iter().any(|a| a == "--fork-session"));
         apply_overrides(
             &mut l,
-            &NativeOverrides { resume: Some("s1".into()), fork: true, ..Default::default() },
+            &NativeOverrides {
+                resume: Some("s1".into()),
+                fork: true,
+                ..Default::default()
+            },
         );
-        assert!(l.args.windows(3).any(|w| w == ["--resume", "s1", "--fork-session"]));
+        assert!(l
+            .args
+            .windows(3)
+            .any(|w| w == ["--resume", "s1", "--fork-session"]));
     }
 
     #[test]
     fn overrides_replace_mode_and_add_model_and_resume() {
         let p = std::path::PathBuf::from("claude");
         let mut l = launch(p, PermissionMode::Ask, None, None);
-        assert!(l.args.windows(2).any(|w| w == ["--permission-mode", "default"]));
+        assert!(l
+            .args
+            .windows(2)
+            .any(|w| w == ["--permission-mode", "default"]));
         apply_overrides(
             &mut l,
             &NativeOverrides {
@@ -2158,8 +2348,14 @@ done
             },
         );
         // Replaced in place, not appended a second flag.
-        assert_eq!(l.args.iter().filter(|a| *a == "--permission-mode").count(), 1);
-        assert!(l.args.windows(2).any(|w| w == ["--permission-mode", "acceptEdits"]));
+        assert_eq!(
+            l.args.iter().filter(|a| *a == "--permission-mode").count(),
+            1
+        );
+        assert!(l
+            .args
+            .windows(2)
+            .any(|w| w == ["--permission-mode", "acceptEdits"]));
         assert!(l.args.windows(2).any(|w| w == ["--model", "opus"]));
         assert!(l.args.windows(2).any(|w| w == ["--resume", "sid-9"]));
     }
@@ -2199,7 +2395,8 @@ done
     #[tokio::test]
     async fn a_quiet_but_live_agent_survives_its_idle_timeout() {
         let (cfg, _dir) = quiet_cli();
-        let gate: PermissionGate = Arc::new(|_p| Box::pin(async { PermissionDecision::from(true) }));
+        let gate: PermissionGate =
+            Arc::new(|_p| Box::pin(async { PermissionDecision::from(true) }));
         let agent = NativeAgent::start_with_idle(&cfg, gate, Duration::from_secs(1), None)
             .await
             .expect("spawn");
@@ -2244,7 +2441,7 @@ done
                 args: vec!["--permission-mode".to_string(), "acceptEdits".to_string()],
                 env: Default::default(),
                 secret_env: Vec::new(),
-        env_deny: Vec::new(),
+                env_deny: Vec::new(),
             },
             dir,
         )
@@ -2257,10 +2454,9 @@ done
     #[tokio::test]
     async fn startup_announces_models_and_modes_before_any_prompt() {
         let (cfg, _dir) = silent_cli();
-        let gate: PermissionGate = Arc::new(|_p| Box::pin(async { PermissionDecision::from(true) }));
-        let agent = NativeAgent::start(&cfg, gate, None)
-            .await
-            .expect("spawn");
+        let gate: PermissionGate =
+            Arc::new(|_p| Box::pin(async { PermissionDecision::from(true) }));
+        let agent = NativeAgent::start(&cfg, gate, None).await.expect("spawn");
 
         let mut events = agent.events.lock().unwrap().take().expect("events rx");
         let mut saw_models = false;
@@ -2270,13 +2466,13 @@ done
             let Some(e) = events.recv().await else { break };
             match &e.event {
                 MiraEvent::ConfigOptions { options }
-                    if options.iter().any(|o| o.id == "model" && !o.values.is_empty()) =>
+                    if options
+                        .iter()
+                        .any(|o| o.id == "model" && !o.values.is_empty()) =>
                 {
                     saw_models = true
                 }
-                MiraEvent::Modes { current, .. } if current == "acceptEdits" => {
-                    saw_modes = true
-                }
+                MiraEvent::Modes { current, .. } if current == "acceptEdits" => saw_modes = true,
                 _ => {}
             }
         }
@@ -2293,7 +2489,10 @@ done
     #[test]
     fn permission_posture_maps_to_a_cli_mode() {
         assert_eq!(permission_mode_arg(PermissionMode::Ask), "default");
-        assert_eq!(permission_mode_arg(PermissionMode::AcceptEdits), "acceptEdits");
+        assert_eq!(
+            permission_mode_arg(PermissionMode::AcceptEdits),
+            "acceptEdits"
+        );
         assert_eq!(permission_mode_arg(PermissionMode::Auto), "default");
     }
 }

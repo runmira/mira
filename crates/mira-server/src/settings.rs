@@ -278,18 +278,15 @@ pub async fn put_settings(
             if let Err(e) = s.save() {
                 warn!(%e, "state.yaml: save failed after settings change");
             }
-            let _ = state
-                .events_tx()
-                .await
-                .send(ServerMsg::ModelChanged {
-                    model: model.to_owned(),
-                    instance: state
-                        .selection
-                        .instance
-                        .read()
-                        .expect("selection lock poisoned")
-                        .clone(),
-                });
+            let _ = state.events_tx().await.send(ServerMsg::ModelChanged {
+                model: model.to_owned(),
+                instance: state
+                    .selection
+                    .instance
+                    .read()
+                    .expect("selection lock poisoned")
+                    .clone(),
+            });
         }
     }
 
@@ -453,7 +450,9 @@ fn build_provider(cfg: &MiraConfig) -> Arc<dyn ChatProvider> {
         }
         Err(other) => {
             warn!(state = ?other, "settings: provider build failed, falling back to null");
-            Arc::new(NullProvider::new(format!("provider build failed: {other:?}")))
+            Arc::new(NullProvider::new(format!(
+                "provider build failed: {other:?}"
+            )))
         }
     }
 }

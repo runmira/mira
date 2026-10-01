@@ -119,7 +119,12 @@ fn view(state: &AppState) -> SubagentsView {
             }
         })
         .collect();
-    let mut tools: Vec<String> = state.base_registry.specs().into_iter().map(|s| s.name).collect();
+    let mut tools: Vec<String> = state
+        .base_registry
+        .specs()
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
     tools.sort();
     tools.dedup();
     SubagentsView { subagents, tools }
@@ -139,7 +144,11 @@ async fn reload(state: &AppState) {
 async fn file_for(state: &AppState, t: &AgentType) -> Option<PathBuf> {
     if t.source.as_deref() == Some("project") {
         let cwd = state.current_cwd().await;
-        return Some(cwd.join(".mira").join("agents").join(format!("{}.md", t.name)));
+        return Some(
+            cwd.join(".mira")
+                .join("agents")
+                .join(format!("{}.md", t.name)),
+        );
     }
     mira_agents::user_agents_dir().map(|d| d.join(format!("{}.md", t.name)))
 }
@@ -187,21 +196,28 @@ fn apply(t: &mut AgentType, e: SubagentEdit) {
     }
 }
 
-async fn write(state: &AppState, t: &AgentType) -> Result<(), Response> {
-    let Some(path) = file_for(state, t).await else {
-        return Err(err(StatusCode::INTERNAL_SERVER_ERROR, "no home directory to save into"));
-    };
+/// Why a save failed: the status to answer with and what to say.
+type SaveError = (StatusCode, String);
+
+async fn write(state: &AppState, t: &AgentType) -> Result<(), SaveError> {
+    let internal = |msg: String| (StatusCode::INTERNAL_SERVER_ERROR, msg);
+    let path = file_for(state, t)
+        .await
+        .ok_or_else(|| internal("no home directory to save into".into()))?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)
-            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("create {}: {e}", dir.display())))?;
+            .map_err(|e| internal(format!("create {}: {e}", dir.display())))?;
     }
     // Validate by parsing what is about to be written: a file the loader
     // would reject must never reach disk, or the subagent silently vanishes.
     let md = t.to_markdown();
-    mira_agents::parse_agent_md(&md)
-        .map_err(|e| err(StatusCode::BAD_REQUEST, format!("that would not load: {e:#}")))?;
-    std::fs::write(&path, md)
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("write {}: {e}", path.display())))?;
+    mira_agents::parse_agent_md(&md).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("that would not load: {e:#}"),
+        )
+    })?;
+    std::fs::write(&path, md).map_err(|e| internal(format!("write {}: {e}", path.display())))?;
     reload(state).await;
     Ok(())
 }
@@ -219,14 +235,19 @@ pub async fn update(
         return err(StatusCode::NOT_FOUND, format!("no subagent named `{name}`"));
     };
     apply(&mut t, edit);
-    if let Err(r) = write(&state, &t).await {
-        return r;
+    if let Err((status, msg)) = write(&state, &t).await {
+        return err(status, msg);
     }
     Json(view(&state)).into_response()
 }
 
 pub async fn create(State(state): State<AppState>, Json(edit): Json<SubagentEdit>) -> Response {
-    let name = edit.name.clone().unwrap_or_default().trim().to_ascii_lowercase();
+    let name = edit
+        .name
+        .clone()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
     if !valid_name(&name) {
         return err(
             StatusCode::BAD_REQUEST,
@@ -244,10 +265,13 @@ pub async fn create(State(state): State<AppState>, Json(edit): Json<SubagentEdit
     };
     apply(&mut t, edit);
     if t.description.is_empty() {
-        return err(StatusCode::BAD_REQUEST, "say what it's for — the model picks subagents by their description");
+        return err(
+            StatusCode::BAD_REQUEST,
+            "say what it's for — the model picks subagents by their description",
+        );
     }
-    if let Err(r) = write(&state, &t).await {
-        return r;
+    if let Err((status, msg)) = write(&state, &t).await {
+        return err(status, msg);
     }
     Json(view(&state)).into_response()
 }
@@ -257,15 +281,28 @@ pub async fn remove(State(state): State<AppState>, AxumPath(name): AxumPath<Stri
         return err(StatusCode::NOT_FOUND, format!("no subagent named `{name}`"));
     };
     match t.source.as_deref() {
-        Some("builtin") => return err(StatusCode::BAD_REQUEST, "built-in subagents can be turned off, not deleted"),
-        Some("plugin") => return err(StatusCode::BAD_REQUEST, "this one comes from a plugin — disable the plugin instead"),
+        Some("builtin") => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "built-in subagents can be turned off, not deleted",
+            )
+        }
+        Some("plugin") => {
+            return err(
+                StatusCode::BAD_REQUEST,
+                "this one comes from a plugin — disable the plugin instead",
+            )
+        }
         _ => {}
     }
     let Some(path) = file_for(&state, &t).await else {
         return err(StatusCode::INTERNAL_SERVER_ERROR, "no home directory");
     };
     if let Err(e) = std::fs::remove_file(&path) {
-        return err(StatusCode::INTERNAL_SERVER_ERROR, format!("remove {}: {e}", path.display()));
+        return err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("remove {}: {e}", path.display()),
+        );
     }
     reload(&state).await;
     Json(view(&state)).into_response()
@@ -295,7 +332,10 @@ mod tests {
         assert_eq!(t.enabled, Some(false));
         assert_eq!(t.tools, before_tools, "unsent fields keep their value");
         // An empty tool list means "no restriction", not "no tools".
-        apply(&mut t, serde_json::from_value(json!({ "tools": [] })).unwrap());
+        apply(
+            &mut t,
+            serde_json::from_value(json!({ "tools": [] })).unwrap(),
+        );
         assert!(t.tools.is_none());
     }
 }

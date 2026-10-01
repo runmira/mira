@@ -160,7 +160,11 @@ pub(crate) async fn build_ready(slot: &SessionSlot, state: &AppState) -> ServerM
     // chat or retained while running — when none is live. The client
     // shows the setup and the first prompt boots it.
     let agent_configured = if slot.acp_agent.read().await.is_none() {
-        slot.acp_launch.lock().await.as_ref().map(|p| p.driver_kind.clone())
+        slot.acp_launch
+            .lock()
+            .await
+            .as_ref()
+            .map(|p| p.driver_kind.clone())
     } else {
         None
     };
@@ -254,18 +258,18 @@ async fn dispatch(
                 }
             }
             match approver::resolve(&slot.pending, &call_id, allow).await {
-            Some(call) => {
-                if allow && !matches!(scope, crate::protocol::ApprovalScope::Once) {
-                    apply_scope_widening(state, &slot, &call, scope).await;
+                Some(call) => {
+                    if allow && !matches!(scope, crate::protocol::ApprovalScope::Once) {
+                        apply_scope_widening(state, &slot, &call, scope).await;
+                    }
+                }
+                None => {
+                    if let Ok(mut m) = slot.engine.approval_scopes.lock() {
+                        m.remove(&call_id);
+                    }
+                    warn!(call_id, "approval for unknown call")
                 }
             }
-            None => {
-                if let Ok(mut m) = slot.engine.approval_scopes.lock() {
-                    m.remove(&call_id);
-                }
-                warn!(call_id, "approval for unknown call")
-            }
-        }
         }
         ClientMsg::PromptResponse {
             prompt_id,
@@ -439,7 +443,9 @@ async fn dispatch(
                 }
                 return;
             };
-            let Some(agent) = handle.agent().await else { return };
+            let Some(agent) = handle.agent().await else {
+                return;
+            };
 
             // A mode that grants more than Mira's own approval pipeline
             // would is a standing change to the agent's authority, so it
@@ -448,20 +454,20 @@ async fn dispatch(
             // agreed" rather than "is this a privileged mode" — but it
             // cannot grant the authority without a round trip that showed
             // the consequence.
-            let privileged = handle
-                .privileged_mode_reason(&mode_id)
-                .is_some();
+            let privileged = handle.privileged_mode_reason(&mode_id).is_some();
             if privileged && !acknowledge_privileged {
-                let _ = slot.events_tx.send(ServerMsg::AcpPrivilegedModeConfirmation {
-                    kind: handle.driver_kind.clone(),
-                    display_name: handle.display_name.clone(),
-                    mode_id: mode_id.clone(),
-                    mode_name: mode_id.clone(),
-                    reason: handle
-                        .privileged_mode_reason(&mode_id)
-                        .unwrap_or_default()
-                        .to_string(),
-                });
+                let _ = slot
+                    .events_tx
+                    .send(ServerMsg::AcpPrivilegedModeConfirmation {
+                        kind: handle.driver_kind.clone(),
+                        display_name: handle.display_name.clone(),
+                        mode_id: mode_id.clone(),
+                        mode_name: mode_id.clone(),
+                        reason: handle
+                            .privileged_mode_reason(&mode_id)
+                            .unwrap_or_default()
+                            .to_string(),
+                    });
                 return;
             }
 
@@ -557,7 +563,9 @@ async fn dispatch(
                 }
                 return;
             };
-            let Some(agent) = handle.agent().await else { return };
+            let Some(agent) = handle.agent().await else {
+                return;
+            };
             // Same relaunch treatment for the model: a native agent takes
             // `--model` at spawn, and only the model option is relaunchable —
             // anything else keeps the honest error rather than pretending.
@@ -603,9 +611,9 @@ async fn dispatch(
                         // keeps the picker's selected value honest instead of
                         // leaving it showing the pre-change model.
                         if !outcome.is_empty() {
-                            let _ = slot.events_tx.send(ServerMsg::AcpConfigOptions {
-                                options: outcome,
-                            });
+                            let _ = slot
+                                .events_tx
+                                .send(ServerMsg::AcpConfigOptions { options: outcome });
                         }
                     }
                     Err(e) => {
@@ -721,20 +729,18 @@ async fn dispatch(
                             }
                         }
                     }
-                    mira_acp::native::AgentHandle::AppServer(a) => {
-                        match a.compact().await {
-                            Ok(()) => {
-                                let _ = events.send(ServerMsg::Warning {
-                                    text: "Codex is compacting its thread".into(),
-                                });
-                            }
-                            Err(e) => {
-                                let _ = events.send(ServerMsg::Error {
-                                    text: format!("compaction failed: {e}"),
-                                });
-                            }
+                    mira_acp::native::AgentHandle::AppServer(a) => match a.compact().await {
+                        Ok(()) => {
+                            let _ = events.send(ServerMsg::Warning {
+                                text: "Codex is compacting its thread".into(),
+                            });
                         }
-                    }
+                        Err(e) => {
+                            let _ = events.send(ServerMsg::Error {
+                                text: format!("compaction failed: {e}"),
+                            });
+                        }
+                    },
                     _ => {
                         let _ = events.send(ServerMsg::Error {
                             text: "this agent has no compaction operation".into(),
@@ -798,9 +804,7 @@ async fn dispatch(
                 "service_tier" => session.set_service_tier(normalize(&value)).await,
                 // Unknown id: log and drop. Accepting arbitrary ids here
                 // would let a client write to any config field by name.
-                other => debug!(
-                    "ws: ignoring unknown model option id {other:?} (value {value:?})"
-                ),
+                other => debug!("ws: ignoring unknown model option id {other:?} (value {value:?})"),
             }
         }
         ClientMsg::SetModel { model, instance } => {
@@ -1090,7 +1094,9 @@ async fn apply_model_selection(
             return;
         };
         let mut params = crate::acp_session::AcpLaunchParams::new(i.driver.to_string(), cfg);
-        params.model = model.filter(|m| !m.trim().is_empty()).or_else(|| i.model.clone());
+        params.model = model
+            .filter(|m| !m.trim().is_empty())
+            .or_else(|| i.model.clone());
         crate::session_engine::select_agent(&state, &slot, params).await;
         return;
     }
@@ -1301,7 +1307,9 @@ async fn prompt_agent(
             },
             None => {
                 let _ = slot.events_tx.send(ServerMsg::Error {
-                    text: "this agent was started without an attachments dir, so images were not sent".into(),
+                    text:
+                        "this agent was started without an attachments dir, so images were not sent"
+                            .into(),
                 });
                 crate::acp_host::AcpEventPort::new(slot.events_tx.clone())
                     .turn_ended("attachments_failed");
@@ -1602,6 +1610,17 @@ fn stage_agent_images(
     Ok(names)
 }
 
+/// Before a chat's first prompt runs, snapshot the working tree so its
+/// changes can later be told apart from what was already there — however
+/// they're made (see `session_changes`). A no-op once taken, or outside a
+/// repo.
+async fn mark_baseline(slot: &SessionSlot) {
+    let cwd = slot.cwd.read().await.clone();
+    let id = slot.id.to_string();
+    let _ = tokio::task::spawn_blocking(move || crate::session_changes::ensure_baseline(&cwd, &id))
+        .await;
+}
+
 #[cfg(test)]
 mod attachment_tests {
     use super::*;
@@ -1616,8 +1635,14 @@ mod attachment_tests {
         let dir = std::env::temp_dir().join(format!("mira-agent-files-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let imgs = vec![
-            mira_core::ImageData { media_type: "image/png".into(), data: png_data() },
-            mira_core::ImageData { media_type: "image/jpeg".into(), data: png_data() },
+            mira_core::ImageData {
+                media_type: "image/png".into(),
+                data: png_data(),
+            },
+            mira_core::ImageData {
+                media_type: "image/jpeg".into(),
+                data: png_data(),
+            },
         ];
         let names = stage_agent_images(&dir, &imgs).unwrap();
         assert_eq!(names, vec!["img-0.png", "img-1.jpeg"]);
@@ -1639,14 +1664,4 @@ mod attachment_tests {
         }];
         assert!(stage_agent_images(&dir, &bad).is_err());
     }
-}
-
-/// Before a chat's first prompt runs, snapshot the working tree so its
-/// changes can later be told apart from what was already there — however
-/// they're made (see `session_changes`). A no-op once taken, or outside a
-/// repo.
-async fn mark_baseline(slot: &SessionSlot) {
-    let cwd = slot.cwd.read().await.clone();
-    let id = slot.id.to_string();
-    let _ = tokio::task::spawn_blocking(move || crate::session_changes::ensure_baseline(&cwd, &id)).await;
 }

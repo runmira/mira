@@ -19,12 +19,10 @@
 //! closed match would break the pane on an agent upgrade.
 
 use agent_client_protocol::schema::v1::{
-    ContentBlock, PermissionOption, PermissionOptionKind, SessionConfigOption,
-    RequestPermissionRequest, SessionConfigKind, SessionConfigSelectOptions,
-    SessionMode, SessionNotification, SessionUpdate, StopReason,
-    ToolCall, ToolCallContent,
-    SessionConfigSelectOption, ToolCallLocation, ToolCallStatus, ToolCallUpdate,
-    ToolCallUpdateFields, ToolKind,
+    ContentBlock, PermissionOption, PermissionOptionKind, RequestPermissionRequest,
+    SessionConfigKind, SessionConfigOption, SessionConfigSelectOption, SessionConfigSelectOptions,
+    SessionMode, SessionNotification, SessionUpdate, StopReason, ToolCall, ToolCallContent,
+    ToolCallLocation, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
 };
 // Three-state container: absent, explicitly null, or a value. Re-exported
 // because it appears in the public `SessionInfo` surface. It lives at the
@@ -119,35 +117,68 @@ pub struct LimitWindow {
 pub enum MiraEvent {
     /// Streamed assistant prose. Chunks sharing a `message_id` belong to one
     /// message; a change of id starts a new one.
-    AssistantText { message_id: Option<String>, text: String },
+    AssistantText {
+        message_id: Option<String>,
+        text: String,
+    },
     /// Streamed user-side prose (the agent echoing input).
-    UserText { message_id: Option<String>, text: String },
+    UserText {
+        message_id: Option<String>,
+        text: String,
+    },
     /// The agent's reasoning, kept separate so the UI can style it apart
     /// from the answer.
-    AgentThought { message_id: Option<String>, text: String },
+    AgentThought {
+        message_id: Option<String>,
+        text: String,
+    },
     ToolCall(ToolCallState),
     ToolCallUpdate(ToolCallState),
-    Plan { entries: Vec<PlanEntry> },
+    Plan {
+        entries: Vec<PlanEntry>,
+    },
     /// Slash commands the agent advertises.
-    Commands { names: Vec<String> },
-    Modes { current: String, available: Vec<SessionModeView> },
+    Commands {
+        names: Vec<String>,
+    },
+    Modes {
+        current: String,
+        available: Vec<SessionModeView>,
+    },
     /// The agent's own view of model / reasoning / permission config. This
     /// is where ACP gets its model selector — there is no set-model method,
     /// it's a `configOptions` entry with `category: "model"`.
-    ConfigOptions { options: Vec<SessionConfigView> },
-    SessionInfo { title: Option<String>, updated_at: Option<String> },
-    Usage { used: u64, size: u64, cost: Option<(f64, String)> },
+    ConfigOptions {
+        options: Vec<SessionConfigView>,
+    },
+    SessionInfo {
+        title: Option<String>,
+        updated_at: Option<String>,
+    },
+    Usage {
+        used: u64,
+        size: u64,
+        cost: Option<(f64, String)>,
+    },
     /// The account's plan limits (Claude's 5-hour and weekly windows):
     /// how much of each is used, and when it resets.
-    Limits { windows: Vec<LimitWindow> },
+    Limits {
+        windows: Vec<LimitWindow>,
+    },
     /// What the agent session has spent so far, per model. Running totals,
     /// not per-turn amounts — agents report it that way, and only the
     /// recorder knows what it has already counted. `session` is the agent's
     /// own session id, so a resumed session isn't counted twice.
-    Spend { session: Option<String>, models: Vec<ModelSpend> },
+    Spend {
+        session: Option<String>,
+        models: Vec<ModelSpend>,
+    },
     /// Content we could not model (an image, a resource link). Kept as a
     /// trace rather than dropped.
-    Unmodelled { source: EventSource, reason: String },
+    Unmodelled {
+        source: EventSource,
+        reason: String,
+    },
 }
 
 /// One model's running spend within an agent session.
@@ -224,8 +255,8 @@ pub fn from_tool_call(call: &ToolCall) -> NormalizedEvent {
             id: call.tool_call_id.to_string(),
             title: call.title.clone(),
             name: call.name.as_ref().map(|n| n.to_string()),
-            kind: Some(call.kind.clone()),
-            status: call.status.clone(),
+            kind: Some(call.kind),
+            status: call.status,
             content: tool_contents(&call.content),
             locations: locations(&call.locations),
             raw_input: call.raw_input.clone(),
@@ -267,10 +298,10 @@ pub fn from_tool_call_update(
     // set at creation and can never be corrected afterwards. Anything else
     // here would be inventing a field.
     if let Some(k) = kind {
-        state.kind = Some(k.clone());
+        state.kind = Some(*k);
     }
     if let Some(s) = status {
-        state.status = s.clone();
+        state.status = *s;
     }
     if let Some(c) = content {
         state.content.extend(tool_contents(c));
@@ -330,7 +361,7 @@ pub fn permission_options(src: &[PermissionOption]) -> Vec<PermissionChoice> {
         .map(|o| PermissionChoice {
             option_id: o.option_id.to_string(),
             name: o.name.clone(),
-            kind: o.kind.clone(),
+            kind: o.kind,
         })
         .collect()
 }
@@ -367,9 +398,10 @@ mod tests {
     fn update(id: &str, f: ToolCallUpdateFields) -> ToolCallUpdate {
         // `ToolCallId` is a newtype over `String`, so the id is owned here
         // rather than borrowed out of `&str`.
-        ToolCallUpdate::new(agent_client_protocol::schema::v1::ToolCallId::new(
-            id.to_string(),
-        ), f)
+        ToolCallUpdate::new(
+            agent_client_protocol::schema::v1::ToolCallId::new(id.to_string()),
+            f,
+        )
     }
 
     fn text_block(s: &str) -> ToolCallContent {
@@ -405,7 +437,7 @@ mod tests {
         // harmless while breaking agents that rely on the initial value.
         let mut acc = state("call_1");
         for status in [ToolCallStatus::InProgress, ToolCallStatus::Completed] {
-            let update = update("call_1", ToolCallUpdateFields::default().status(status.clone()));
+            let update = update("call_1", ToolCallUpdateFields::default().status(status));
             if let MiraEvent::ToolCallUpdate(s) = from_tool_call_update(Some(&acc), &update).event {
                 acc = s;
             }
@@ -433,7 +465,11 @@ mod tests {
         if let MiraEvent::ToolCallUpdate(s) = from_tool_call_update(Some(&acc), &second).event {
             acc = s;
         }
-        assert_eq!(acc.content.len(), 2, "content must accumulate across updates");
+        assert_eq!(
+            acc.content.len(),
+            2,
+            "content must accumulate across updates"
+        );
     }
 
     #[test]
@@ -457,7 +493,10 @@ mod tests {
 
     #[test]
     fn provenance_is_kept_on_every_event() {
-        let ev = from_tool_call_update(Some(&state("x")), &update("x", ToolCallUpdateFields::default()));
+        let ev = from_tool_call_update(
+            Some(&state("x")),
+            &update("x", ToolCallUpdateFields::default()),
+        );
         assert_eq!(
             ev.source,
             EventSource::Acp {
@@ -490,8 +529,14 @@ mod tests {
 
     #[test]
     fn stop_reasons_map_onto_our_turn_end() {
-        assert_eq!(TurnEnd::from_stop_reason(&StopReason::Cancelled), TurnEnd::Cancelled);
-        assert_eq!(TurnEnd::from_stop_reason(&StopReason::EndTurn), TurnEnd::EndTurn);
+        assert_eq!(
+            TurnEnd::from_stop_reason(&StopReason::Cancelled),
+            TurnEnd::Cancelled
+        );
+        assert_eq!(
+            TurnEnd::from_stop_reason(&StopReason::EndTurn),
+            TurnEnd::EndTurn
+        );
     }
 }
 
@@ -613,7 +658,11 @@ pub fn from_session_notification(params: &serde_json::Value) -> Option<Normalize
                 .collect(),
         },
         SessionUpdate::AvailableCommandsUpdate(c) => MiraEvent::Commands {
-            names: c.available_commands.iter().map(|x| x.name.clone()).collect(),
+            names: c
+                .available_commands
+                .iter()
+                .map(|x| x.name.clone())
+                .collect(),
         },
         SessionUpdate::CurrentModeUpdate(m) => MiraEvent::Modes {
             current: m.current_mode_id.to_string(),
@@ -621,7 +670,11 @@ pub fn from_session_notification(params: &serde_json::Value) -> Option<Normalize
             available: Vec::new(),
         },
         SessionUpdate::ConfigOptionUpdate(c) => MiraEvent::ConfigOptions {
-            options: c.config_options.iter().map(SessionConfigView::from).collect(),
+            options: c
+                .config_options
+                .iter()
+                .map(SessionConfigView::from)
+                .collect(),
         },
         SessionUpdate::SessionInfoUpdate(s) => MiraEvent::SessionInfo {
             title: defined(&s.title),
@@ -630,9 +683,7 @@ pub fn from_session_notification(params: &serde_json::Value) -> Option<Normalize
         SessionUpdate::UsageUpdate(u) => MiraEvent::Usage {
             used: u.used,
             size: u.size,
-            cost: u.cost.as_ref().map(|c| {
-                (c.amount, c.currency.clone())
-            }),
+            cost: u.cost.as_ref().map(|c| (c.amount, c.currency.clone())),
         },
         // `SessionUpdate` is `#[non_exhaustive]`, so this arm is required
         // today and is also what keeps a future ACP release from breaking
@@ -692,7 +743,7 @@ pub fn from_permission_request(src: &RequestPermissionRequest) -> PermissionRequ
         session_id: src.session_id.to_string(),
         tool_call_id: src.tool_call.tool_call_id.to_string(),
         title: src.tool_call.fields.title.clone().unwrap_or_default(),
-        kind: src.tool_call.fields.kind.clone(),
+        kind: src.tool_call.fields.kind,
         options: permission_options(&src.options),
     }
 }
@@ -873,7 +924,11 @@ mod unmodelled_tests {
                         "content": { "type": "text", "text": "hi" } }
         }))
         .expect("parses");
-        assert!(matches!(ev.source, EventSource::Acp { .. }), "{:?}", ev.source);
+        assert!(
+            matches!(ev.source, EventSource::Acp { .. }),
+            "{:?}",
+            ev.source
+        );
         assert!(matches!(ev.event, MiraEvent::AssistantText { .. }));
     }
 }

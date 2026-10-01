@@ -186,7 +186,9 @@ pub async fn register_computer_use(
                 // The process-wide browser for this profile: the browser
                 // pane and agents drive the same one, so they can never
                 // fight over Chrome's one-process-per-profile lock.
-                reg.register(browser::BrowserTool::new(mira_browser::Browser::shared(opts)));
+                reg.register(browser::BrowserTool::new(mira_browser::Browser::shared(
+                    opts,
+                )));
                 report.browser = true;
             }
             Err(e) => report.warnings.push(format!("browser tool disabled: {e}")),

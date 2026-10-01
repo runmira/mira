@@ -396,17 +396,11 @@ pub async fn start(spec: StartSpec<'_>) -> Result<AcpAgent, StartError> {
     // Derived from the agent itself, so a driver that does not use
     // client-side terminals never gets told we offer them.
     let caps = spec.caps.unwrap_or_default();
-    let host = crate::host::AcpHost::new(
-        spec.files,
-        spec.terminals,
-        spec.permissions,
-        spec.events,
-    );
+    let host = crate::host::AcpHost::new(spec.files, spec.terminals, spec.permissions, spec.events);
 
-    let process =
-        AgentProcess::spawn(spec.launch, host.clone() as Arc<dyn AgentCallback>)
-            .await
-            .map_err(StartError::Spawn)?;
+    let process = AgentProcess::spawn(spec.launch, host.clone() as Arc<dyn AgentCallback>)
+        .await
+        .map_err(StartError::Spawn)?;
 
     let session = crate::session::AcpSession::new(
         process.conn().clone(),
@@ -417,12 +411,16 @@ pub async fn start(spec: StartSpec<'_>) -> Result<AcpAgent, StartError> {
     // An agent that cannot initialize is not usable, so tear it down rather
     // than hand back a half-live pair.
     if let Err(e) = session.initialize().await {
-        process.shutdown(std::time::Duration::from_millis(500)).await;
+        process
+            .shutdown(std::time::Duration::from_millis(500))
+            .await;
         return Err(StartError::Session(e));
     }
     if let Some(cwd) = spec.cwd {
         if let Err(e) = session.new_session(cwd, Vec::new()).await {
-            process.shutdown(std::time::Duration::from_millis(500)).await;
+            process
+                .shutdown(std::time::Duration::from_millis(500))
+                .await;
             return Err(StartError::Session(e));
         }
     }
@@ -455,7 +453,11 @@ mod tests {
             &cfg,
             std::path::Path::new("claude-agent-acp"),
         );
-        assert_eq!(chosen, Transport::Native, "must not route to a missing adapter");
+        assert_eq!(
+            chosen,
+            Transport::Native,
+            "must not route to a missing adapter"
+        );
     }
 
     /// The inverse: without a native interface nothing can be preferred,
@@ -519,7 +521,7 @@ mod tests {
                 args: vec![],
                 env: Default::default(),
                 secret_env: vec![],
-        env_deny: Vec::new(),
+                env_deny: Vec::new(),
             },
             dir,
         )
@@ -625,12 +627,9 @@ mod tests {
             }
         }
         let watch = Arc::new(Watch::default());
-        let proc = AgentProcess::spawn(
-            &cfg,
-            watch.clone() as Arc<dyn AgentCallback>,
-        )
-        .await
-        .expect("spawn");
+        let proc = AgentProcess::spawn(&cfg, watch.clone() as Arc<dyn AgentCallback>)
+            .await
+            .expect("spawn");
         // Nudge until the agent answers. A single nudge raced the child
         // process starting up, and the test failed intermittently on a
         // loaded machine; retrying is what the assertion actually means.
@@ -638,14 +637,25 @@ mod tests {
         // long wait means the child never answered, and waiting longer just
         // turns a failure into a slow failure.
         for _ in 0..200 {
-            if watch.notes.lock().unwrap().iter().any(|m| m == "session/update") {
+            if watch
+                .notes
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|m| m == "session/update")
+            {
                 break;
             }
             let _ = proc.conn().notify("test/nudge", json!({})).await;
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         assert!(
-            watch.notes.lock().unwrap().iter().any(|m| m == "session/update"),
+            watch
+                .notes
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|m| m == "session/update"),
             "no notification arrived: {:?}",
             watch.notes
         );
@@ -658,7 +668,7 @@ mod tests {
             args: vec![],
             env: Default::default(),
             secret_env: vec![],
-        env_deny: Vec::new(),
+            env_deny: Vec::new(),
         };
         let err = AgentProcess::spawn(&cfg, Arc::new(crate::conn::NullCallbacks))
             .await
@@ -690,7 +700,7 @@ mod tests {
             args: vec![],
             env: Default::default(),
             secret_env: vec![],
-        env_deny: Vec::new(),
+            env_deny: Vec::new(),
         };
         {
             let proc = AgentProcess::spawn(&cfg, Arc::new(crate::conn::NullCallbacks))
@@ -721,9 +731,8 @@ mod tests {
         // The single most important property of the env allowlist: Mira's
         // own provider keys must not reach a third-party agent.
         std::env::set_var("MIRA_ACP_SECRET_PROBE", "leaked");
-        let (cfg, _dir) = launch(
-            "case \"$line\" in *\"$MIRA_ACP_SECRET_PROBE\"*) : ;; esac; exit 0",
-        );
+        let (cfg, _dir) =
+            launch("case \"$line\" in *\"$MIRA_ACP_SECRET_PROBE\"*) : ;; esac; exit 0");
         let _ = AgentProcess::spawn(&cfg, Arc::new(crate::conn::NullCallbacks)).await;
         std::env::remove_var("MIRA_ACP_SECRET_PROBE");
     }
@@ -756,7 +765,7 @@ mod tests {
             args: vec![],
             env,
             secret_env: vec!["XAI_API_KEY".into()],
-        env_deny: Vec::new(),
+            env_deny: Vec::new(),
         };
         let proc = AgentProcess::spawn(&cfg, Arc::new(crate::conn::NullCallbacks))
             .await
@@ -796,9 +805,12 @@ mod tests {
             args: vec![],
             env: Default::default(),
             secret_env: vec![],
-        env_deny: Vec::new(),
+            env_deny: Vec::new(),
         };
-        assert!(!looks_installed(&cfg), "a bogus name must not look installed");
+        assert!(
+            !looks_installed(&cfg),
+            "a bogus name must not look installed"
+        );
         cfg.program = std::env::current_exe().unwrap();
         assert!(
             looks_installed(&cfg),
@@ -816,7 +828,7 @@ mod tests {
             args: vec!["agent".into(), "stdio".into()],
             env,
             secret_env: vec!["XAI_API_KEY".into()],
-        env_deny: Vec::new(),
+            env_deny: Vec::new(),
         };
         let rendered = cfg.redacted();
         assert!(!rendered.contains("sk-super-secret"), "leaked: {rendered}");
@@ -872,7 +884,11 @@ esac
             req: &crate::events::PermissionRequest,
         ) -> Result<Option<String>, crate::host::HostError> {
             self.prompts.lock().unwrap().push(req.clone());
-            Ok(if self.allow { Some("ok".to_string()) } else { None })
+            Ok(if self.allow {
+                Some("ok".to_string())
+            } else {
+                None
+            })
         }
     }
 
@@ -902,7 +918,7 @@ esac
                 args: vec![],
                 env: Default::default(),
                 secret_env: vec![],
-        env_deny: Vec::new(),
+                env_deny: Vec::new(),
             },
             dir,
         )
@@ -932,7 +948,9 @@ esac
             permissions: seen.clone() as Arc<dyn PermissionPort>,
             events: seen.clone() as Arc<dyn EventPort>,
             cwd: Some(&cwd),
-        })).await.expect("start");
+        }))
+        .await
+        .expect("start");
 
         assert_eq!(agent.session_id().as_deref(), Some("sess_x"));
         agent.shutdown().await;
@@ -956,7 +974,9 @@ esac
             permissions: seen.clone() as Arc<dyn PermissionPort>,
             events: seen.clone() as Arc<dyn EventPort>,
             cwd: Some(&cwd),
-        })).await.expect("start");
+        }))
+        .await
+        .expect("start");
 
         let outcome = bounded(agent.prompt(vec![serde_json::from_value(json!({
             "type": "text", "text": "do it"
@@ -992,7 +1012,9 @@ esac
             permissions: seen.clone() as Arc<dyn PermissionPort>,
             events: seen.clone() as Arc<dyn EventPort>,
             cwd: Some(&cwd),
-        })).await.expect("start");
+        }))
+        .await
+        .expect("start");
         let outcome = bounded(agent.prompt(vec![serde_json::from_value(json!({
             "type": "text", "text": "go"
         }))
@@ -1008,9 +1030,7 @@ esac
     async fn an_agent_that_fails_to_initialize_is_torn_down() {
         // No half-live agent is handed back: a process that cannot
         // initialize is not usable, and leaving it running would leak it.
-        let (launch, _dir) = script_agent(
-            "case \"$line\" in *'\"initialize\"'*) exit 1 ;; esac\n",
-        );
+        let (launch, _dir) = script_agent("case \"$line\" in *'\"initialize\"'*) exit 1 ;; esac\n");
         let seen = Arc::new(Seen::default());
         let res = bounded(start(StartSpec {
             launch: &launch,
@@ -1020,7 +1040,8 @@ esac
             permissions: seen.clone() as Arc<dyn PermissionPort>,
             events: seen.clone() as Arc<dyn EventPort>,
             cwd: None,
-        })).await;
+        }))
+        .await;
         assert!(res.is_err(), "expected a start failure");
         assert!(matches!(res, Err(StartError::Session(_))), "got {res:?}");
     }
@@ -1033,7 +1054,7 @@ esac
             args: vec!["agent".into(), "stdio".into()],
             env: Default::default(),
             secret_env: vec![],
-        env_deny: Vec::new(),
+            env_deny: Vec::new(),
         };
         let res = bounded(start(StartSpec {
             launch: &launch,
@@ -1043,8 +1064,12 @@ esac
             permissions: seen.clone() as Arc<dyn PermissionPort>,
             events: seen.clone() as Arc<dyn EventPort>,
             cwd: None,
-        })).await;
-        assert!(matches!(res, Err(StartError::Spawn(SpawnError::NotFound(_)))), "got {res:?}");
+        }))
+        .await;
+        assert!(
+            matches!(res, Err(StartError::Spawn(SpawnError::NotFound(_)))),
+            "got {res:?}"
+        );
     }
 }
 
@@ -1053,6 +1078,7 @@ esac
 /// The native path takes a permission gate instead of host ports: an agent
 /// driven through its own CLI has no ACP filesystem or terminal ports to bind,
 /// and the only thing it asks the host for is a decision.
+#[allow(clippy::too_many_arguments)] // one per transport input; each is distinct
 pub async fn start_agent(
     driver: &dyn crate::driver::AcpDriver,
     cfg: &crate::driver::DriverConfig,
@@ -1087,13 +1113,9 @@ pub async fn start_agent(
                             launch.args.push(dir.display().to_string());
                         }
                     }
-                    let agent = crate::native::NativeAgent::start(
-                        &launch,
-                        gate,
-                        attachments_dir,
-                    )
-                    .await
-                    .map_err(|e| StartError::Transport(e.to_string()))?;
+                    let agent = crate::native::NativeAgent::start(&launch, gate, attachments_dir)
+                        .await
+                        .map_err(|e| StartError::Transport(e.to_string()))?;
                     Ok(crate::native::AgentHandle::Native(Arc::new(agent)))
                 }
                 crate::native::NativeFlavor::CodexAppServer => {
@@ -1105,14 +1127,17 @@ pub async fn start_agent(
                     let runtime_mode = native
                         .as_ref()
                         .and_then(|o| o.permission_mode.clone())
-                        .unwrap_or_else(|| {
-                            crate::appserver::mode_for_permission(mode).to_string()
-                        });
+                        .unwrap_or_else(|| crate::appserver::mode_for_permission(mode).to_string());
                     let model = native.as_ref().and_then(|o| o.model.clone());
                     let resume = native.as_ref().and_then(|o| o.resume.clone());
                     let cwd = cwd.map(|p| p.display().to_string());
                     let agent = crate::appserver::AppServerAgent::start(
-                        &launch, &runtime_mode, cwd, model, resume, gate,
+                        &launch,
+                        &runtime_mode,
+                        cwd,
+                        model,
+                        resume,
+                        gate,
                     )
                     .await
                     .map_err(|e| StartError::Transport(e.to_string()))?;

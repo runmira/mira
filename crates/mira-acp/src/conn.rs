@@ -53,7 +53,10 @@ pub enum ConnError {
 #[derive(Debug)]
 pub enum CallOutcome {
     Result(Value),
-    Error { code: i64, message: String },
+    Error {
+        code: i64,
+        message: String,
+    },
     /// The agent never answered because the connection went away.
     Dropped,
 }
@@ -74,12 +77,8 @@ pub trait AgentCallback: Send + Sync {
     /// the connection does that. It is also the only handle a host has on an
     /// outstanding request, which is what lets `session/cancel` settle
     /// pending permissions later.
-    async fn on_request(
-        &self,
-        id: &Value,
-        method: &str,
-        params: Value,
-    ) -> Result<Value, ConnError>;
+    async fn on_request(&self, id: &Value, method: &str, params: Value)
+        -> Result<Value, ConnError>;
 
     /// An unsolicited notification, normally `session/update`.
     async fn on_notification(&self, method: &str, params: Value);
@@ -95,12 +94,7 @@ pub struct NullCallbacks;
 
 #[async_trait::async_trait]
 impl AgentCallback for NullCallbacks {
-    async fn on_request(
-        &self,
-        _id: &Value,
-        method: &str,
-        _p: Value,
-    ) -> Result<Value, ConnError> {
+    async fn on_request(&self, _id: &Value, method: &str, _p: Value) -> Result<Value, ConnError> {
         Err(ConnError::Unhandled {
             method: method.to_string(),
         })
@@ -134,11 +128,7 @@ struct Inner {
 
 impl Connection {
     /// Wire a connection to an already-split transport and start pumping.
-    pub fn spawn_transport<R, W>(
-        read: R,
-        write: W,
-        callbacks: Arc<dyn AgentCallback>,
-    ) -> Connection
+    pub fn spawn_transport<R, W>(read: R, write: W, callbacks: Arc<dyn AgentCallback>) -> Connection
     where
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
@@ -202,18 +192,10 @@ impl Connection {
             Inbound::Response { id, result } => {
                 self.settle(&id, CallOutcome::Result(result)).await;
             }
-            Inbound::Error {
-                id,
-                code,
-                message,
-            } => {
+            Inbound::Error { id, code, message } => {
                 self.settle(&id, CallOutcome::Error { code, message }).await;
             }
-            Inbound::Request {
-                id,
-                method,
-                params,
-            } => {
+            Inbound::Request { id, method, params } => {
                 // Unknown id + method => the agent is calling us. Always
                 // answer, even on error: an unanswered request wedges the
                 // agent, and a permission request that never gets a reply
@@ -299,11 +281,7 @@ impl Connection {
 
     /// Like [`Self::request`] but hands back the raw outcome, so a caller
     /// that cares whether the agent answered before dying can tell.
-    pub async fn request_raw(
-        &self,
-        method: &str,
-        params: Value,
-    ) -> Result<CallOutcome, ConnError> {
+    pub async fn request_raw(&self, method: &str, params: Value) -> Result<CallOutcome, ConnError> {
         if self.is_closed() {
             return Err(ConnError::Closed);
         }
@@ -366,12 +344,7 @@ impl Connection {
     }
 
     /// Respond with a JSON-RPC error.
-    pub async fn respond_err(
-        &self,
-        id: &Value,
-        code: i64,
-        message: &str,
-    ) -> Result<(), ConnError> {
+    pub async fn respond_err(&self, id: &Value, code: i64, message: &str) -> Result<(), ConnError> {
         let frame = json!({
             "jsonrpc": "2.0", "id": id,
             "error": {"code": code, "message": message}
@@ -384,7 +357,12 @@ impl Connection {
 
 /// Build the params object for a request from key/value pairs.
 pub fn params(entries: impl IntoIterator<Item = (&'static str, Value)>) -> Value {
-    Value::Object(entries.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+    Value::Object(
+        entries
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
+    )
 }
 
 /// Helper for building typed params.
@@ -477,7 +455,10 @@ mod tests {
         let mut h = harness();
         let waiter = tokio::spawn({
             let conn = h.conn.clone();
-            async move { conn.request::<Value>("initialize", json!({"protocolVersion": 1})).await }
+            async move {
+                conn.request::<Value>("initialize", json!({"protocolVersion": 1}))
+                    .await
+            }
         });
 
         let seen = read_agent_line(&mut h).await;
@@ -486,8 +467,16 @@ mod tests {
 
         // The agent answers with a *different* id first. That must not be
         // mistaken for our answer.
-        agent_say(&mut h, json!({"jsonrpc":"2.0","id": 9999, "result": {"wrong": true}})).await;
-        agent_say(&mut h, json!({"jsonrpc":"2.0","id": id, "result": {"ok": true}})).await;
+        agent_say(
+            &mut h,
+            json!({"jsonrpc":"2.0","id": 9999, "result": {"wrong": true}}),
+        )
+        .await;
+        agent_say(
+            &mut h,
+            json!({"jsonrpc":"2.0","id": id, "result": {"ok": true}}),
+        )
+        .await;
 
         let got: Value = waiter.await.unwrap().unwrap();
         assert_eq!(got, json!({"ok": true}));
@@ -524,7 +513,11 @@ mod tests {
         assert_eq!(reply["result"]["handled"], "fs/read_text_file");
 
         // And our own request still resolves from its own response.
-        agent_say(&mut h, json!({"jsonrpc":"2.0","id": our_id, "result": {"ours": true}})).await;
+        agent_say(
+            &mut h,
+            json!({"jsonrpc":"2.0","id": our_id, "result": {"ours": true}}),
+        )
+        .await;
         let got: Value = waiter.await.unwrap().unwrap();
         assert_eq!(got, json!({"ours": true}));
     }
@@ -546,7 +539,10 @@ mod tests {
         )
         .await;
         let err = waiter.await.unwrap().unwrap_err();
-        assert!(matches!(err, ConnError::Remote { code: -32000, .. }), "got {err:?}");
+        assert!(
+            matches!(err, ConnError::Remote { code: -32000, .. }),
+            "got {err:?}"
+        );
     }
 
     #[tokio::test]
@@ -585,7 +581,9 @@ mod tests {
                 _m: &str,
                 _p: Value,
             ) -> Result<Value, ConnError> {
-                Err(ConnError::Unhandled { method: "boom".into() })
+                Err(ConnError::Unhandled {
+                    method: "boom".into(),
+                })
             }
             async fn on_notification(&self, _m: &str, _p: Value) {}
         }
@@ -614,15 +612,21 @@ mod tests {
         .unwrap();
         let reply: Value = serde_json::from_str(line.trim()).unwrap();
         assert_eq!(reply["id"], 7);
-        assert!(reply.get("error").is_some(), "expected an error reply: {reply}");
+        assert!(
+            reply.get("error").is_some(),
+            "expected an error reply: {reply}"
+        );
     }
 
     #[tokio::test]
     async fn pending_requests_fail_when_the_agent_disappears() {
         let (to_agent, agent_in) = tokio::io::duplex(64 * 1024);
         let (agent_out, from_agent) = tokio::io::duplex(64 * 1024);
-        let conn =
-            Connection::spawn_transport(from_agent, to_agent, Arc::new(NullCallbacks) as Arc<dyn AgentCallback>);
+        let conn = Connection::spawn_transport(
+            from_agent,
+            to_agent,
+            Arc::new(NullCallbacks) as Arc<dyn AgentCallback>,
+        );
 
         let waiter = tokio::spawn({
             let conn = conn.clone();
@@ -643,8 +647,11 @@ mod tests {
     async fn a_request_after_close_fails_fast_rather_than_hanging() {
         let (to_agent, agent_in) = tokio::io::duplex(1024);
         let (agent_out, from_agent) = tokio::io::duplex(1024);
-        let conn =
-            Connection::spawn_transport(from_agent, to_agent, Arc::new(NullCallbacks) as Arc<dyn AgentCallback>);
+        let conn = Connection::spawn_transport(
+            from_agent,
+            to_agent,
+            Arc::new(NullCallbacks) as Arc<dyn AgentCallback>,
+        );
         drop(agent_in);
         drop(agent_out);
         for _ in 0..50 {
@@ -693,7 +700,11 @@ mod tests {
         assert_eq!(ids.len(), 4, "ids must not collide: {ids:?}");
 
         for (id, _) in by_id {
-            agent_say(&mut h, json!({"jsonrpc":"2.0","id": id, "result": {"pong": true}})).await;
+            agent_say(
+                &mut h,
+                json!({"jsonrpc":"2.0","id": id, "result": {"pong": true}}),
+            )
+            .await;
         }
         for w in waiters {
             let got: Value = w.await.unwrap().unwrap();

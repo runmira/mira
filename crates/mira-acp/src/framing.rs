@@ -47,9 +47,17 @@ pub enum Inbound {
     /// Has an `id` and a `result`.
     Response { id: Value, result: Value },
     /// Has an `id` and an `error`.
-    Error { id: Value, code: i64, message: String },
+    Error {
+        id: Value,
+        code: i64,
+        message: String,
+    },
     /// Has an `id` and a `method` — the agent is calling *us*.
-    Request { id: Value, method: String, params: Value },
+    Request {
+        id: Value,
+        method: String,
+        params: Value,
+    },
     /// No `id` — an unsolicited update.
     Notification { method: String, params: Value },
 }
@@ -94,9 +102,9 @@ impl Inbound {
 
     pub fn id(&self) -> Option<&Value> {
         match self {
-            Inbound::Response { id, .. } | Inbound::Error { id, .. } | Inbound::Request { id, .. } => {
-                Some(id)
-            }
+            Inbound::Response { id, .. }
+            | Inbound::Error { id, .. }
+            | Inbound::Request { id, .. } => Some(id),
             Inbound::Notification { .. } => None,
         }
     }
@@ -370,7 +378,11 @@ mod tests {
             "params": {"text": "line one\nline two\n"}
         });
         let s = encode_frame(&v).unwrap();
-        assert_eq!(s.matches('\n').count(), 1, "frame broke across lines: {s:?}");
+        assert_eq!(
+            s.matches('\n').count(),
+            1,
+            "frame broke across lines: {s:?}"
+        );
         // And it round-trips.
         let back: Value = serde_json::from_str(s.trim_end()).unwrap();
         assert_eq!(back["params"]["text"], "line one\nline two\n");
@@ -439,6 +451,9 @@ mod tests {
         t.push(&vec![b'x'; STDERR_TAIL_BYTES * 2]);
         let s = t.as_str();
         assert!(s.len() <= STDERR_TAIL_BYTES + 8);
-        assert!(!s.contains("old junk"), "tail should have evicted old output");
+        assert!(
+            !s.contains("old junk"),
+            "tail should have evicted old output"
+        );
     }
 }

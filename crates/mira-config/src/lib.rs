@@ -1156,7 +1156,10 @@ mod tests {
         assert_eq!(e.config_value()["env"]["P"], "q");
         // Round-trip keeps what we don't understand.
         let out = serde_yaml::to_string(&c).unwrap();
-        assert!(out.contains("future_knob"), "unknown keys must survive a save: {out}");
+        assert!(
+            out.contains("future_knob"),
+            "unknown keys must survive a save: {out}"
+        );
     }
 
     #[test]

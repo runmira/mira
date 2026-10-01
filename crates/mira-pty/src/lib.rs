@@ -31,8 +31,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use mira_sandbox::{sandbox_launcher, SandboxConfig};
 use mira_sandbox::SandboxProfile;
+use mira_sandbox::{sandbox_launcher, SandboxConfig};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use thiserror::Error;
 use tokio::sync::broadcast;
@@ -120,7 +120,10 @@ impl PtyHandle {
     /// the agent its view is partial rather than silently reading a prefix
     /// as if it were everything.
     pub fn output_truncated(&self) -> bool {
-        self.scrollback.lock().map(|b| b.len() >= SCROLLBACK_BYTES).unwrap_or(false)
+        self.scrollback
+            .lock()
+            .map(|b| b.len() >= SCROLLBACK_BYTES)
+            .unwrap_or(false)
     }
 
     /// Subscribe to incremental output. Subscribe before spawning anything
@@ -303,7 +306,14 @@ pub fn spawn(spec: PtySpawn) -> Result<Arc<PtyHandle>, PtyError> {
     }
     // `env_clear` dropped TERM even when it was set above, and a PTY with no
     // TERM makes tools disable colour and line editing.
-    cmd.env("TERM", if spec_had_term { "xterm-256color" } else { "dumb" });
+    cmd.env(
+        "TERM",
+        if spec_had_term {
+            "xterm-256color"
+        } else {
+            "dumb"
+        },
+    );
     for (k, v) in &env {
         cmd.env(k, v);
     }
@@ -429,7 +439,10 @@ impl PtyRegistry {
 
     pub fn insert(&self, handle: Arc<PtyHandle>) {
         let key = (handle.session_id.clone(), handle.id().to_string());
-        self.inner.lock().expect("registry poisoned").insert(key, handle);
+        self.inner
+            .lock()
+            .expect("registry poisoned")
+            .insert(key, handle);
     }
 
     pub fn get(&self, session_id: &str, id: &str) -> Option<Arc<PtyHandle>> {
@@ -528,7 +541,10 @@ mod tests {
             "second appeared too early to prove streaming: {early:?}"
         );
         let full = wait_for(&h, |o| o.contains("second"));
-        assert!(full.contains("first") && full.contains("second"), "got {full:?}");
+        assert!(
+            full.contains("first") && full.contains("second"),
+            "got {full:?}"
+        );
     }
 
     #[test]
@@ -538,7 +554,7 @@ mod tests {
         let Some(h) = sh("tty >/dev/null && echo HAS_TTY", Path::new("/tmp")) else {
             return;
         };
-        let out = wait_for(&h, |o| o.contains("HAS_TTY") || o.len() > 0);
+        let out = wait_for(&h, |o| o.contains("HAS_TTY") || !o.is_empty());
         assert!(out.contains("HAS_TTY"), "expected a tty, got {out:?}");
     }
 
@@ -586,8 +602,10 @@ mod tests {
 
     #[test]
     fn scrollback_is_bounded_but_keeps_the_most_recent_output() {
-        let Some(h) = sh("for i in $(seq 1 40000); do echo 0123456789; done", Path::new("/tmp"))
-        else {
+        let Some(h) = sh(
+            "for i in $(seq 1 40000); do echo 0123456789; done",
+            Path::new("/tmp"),
+        ) else {
             return;
         };
         let _ = tokio::runtime::Builder::new_current_thread()
@@ -622,7 +640,10 @@ mod tests {
     fn the_environment_is_not_inherited() {
         // An agent must not inherit Mira's API keys.
         std::env::set_var("MIRA_PTY_SECRET_PROBE", "leaked");
-        let Some(h) = sh("echo VAL=[${MIRA_PTY_SECRET_PROBE:-unset}]", Path::new("/tmp")) else {
+        let Some(h) = sh(
+            "echo VAL=[${MIRA_PTY_SECRET_PROBE:-unset}]",
+            Path::new("/tmp"),
+        ) else {
             return;
         };
         let out = wait_for(&h, |o| o.contains("VAL="));
@@ -692,8 +713,7 @@ mod tests {
             .unwrap();
         let status = rt.block_on(async {
             drop(h);
-            tokio::time::timeout(Duration::from_secs(2), async {})
-                .await
+            tokio::time::timeout(Duration::from_secs(2), async {}).await
         });
         assert!(status.is_ok());
     }

@@ -20,26 +20,24 @@
 //! Nothing here spawns a process yet, and nothing depends on the rest of
 //! Mira, so each layer can be verified on its own.
 
-pub mod driver;
+pub mod agent_sessions;
+pub mod appserver;
 pub mod conn;
+pub mod driver;
 pub mod drivers;
 pub mod events;
 pub mod framing;
 pub mod host;
+pub mod native;
 pub mod process;
 pub mod session;
-pub mod agent_sessions;
-pub mod appserver;
-pub mod native;
-pub mod which;
 pub mod snapshot;
 pub mod status;
+pub mod which;
 
 pub use conn::{AgentCallback, CallOutcome, ConnError, Connection, NullCallbacks};
-pub use process::{AcpAgent, AgentProcess, SpawnError, StartError, StartSpec};
 pub use host::PendingPermissions;
-pub use status::{probe, AgentState, AgentStatus};
+pub use host::{AcpHost, DenyAll, EventPort, FilePort, HostError, PermissionPort, TerminalPort};
+pub use process::{AcpAgent, AgentProcess, SpawnError, StartError, StartSpec};
 pub use session::{AcpSession, ClientCaps, SessionError};
-pub use host::{
-    AcpHost, DenyAll, EventPort, FilePort, HostError, PermissionPort, TerminalPort,
-};
+pub use status::{probe, AgentState, AgentStatus};

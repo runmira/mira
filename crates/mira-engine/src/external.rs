@@ -22,9 +22,8 @@ use crate::instance::EngineInstance;
 /// not hide the other five.
 pub fn driver_config_for(inst: &EngineInstance) -> DriverConfig {
     let cfg = inst.config_object();
-    let str_field = |k: &str| -> Option<String> {
-        cfg.get(k).and_then(Value::as_str).map(str::to_string)
-    };
+    let str_field =
+        |k: &str| -> Option<String> { cfg.get(k).and_then(Value::as_str).map(str::to_string) };
     DriverConfig {
         enabled: inst.enabled,
         display_name: inst.display_name.clone(),
@@ -71,11 +70,9 @@ pub fn api_key_hint(driver_kind: &str) -> Option<String> {
 /// The raw `engines:` entry for an instance, for callers that need the
 /// yaml block verbatim (settings UI round-trip).
 pub fn raw_config_from<'a>(cfg: &'a MiraConfig, instance: &str) -> Option<&'a serde_json::Value> {
-    cfg.engines.get(instance).map(|e| {
-        e.config
-            .as_ref()
-            .unwrap_or(&serde_json::Value::Null)
-    })
+    cfg.engines
+        .get(instance)
+        .map(|e| e.config.as_ref().unwrap_or(&serde_json::Value::Null))
 }
 
 #[cfg(test)]
@@ -99,9 +96,15 @@ mod tests {
             "\n      binary_path: /opt/codex-acp\n      launch_args: [\"-c\", \"x=1\"]\n      env: {CODEX_PROFILE: work}\n      api_key: sk-test\n      effort: high\n      auto_compact_after: 100000\n",
         );
         let dc = driver_config_for(&inst);
-        assert_eq!(dc.binary_path.as_deref(), Some(std::path::Path::new("/opt/codex-acp")));
+        assert_eq!(
+            dc.binary_path.as_deref(),
+            Some(std::path::Path::new("/opt/codex-acp"))
+        );
         assert_eq!(dc.launch_args, vec!["-c".to_string(), "x=1".to_string()]);
-        assert_eq!(dc.env.get("CODEX_PROFILE").map(String::as_str), Some("work"));
+        assert_eq!(
+            dc.env.get("CODEX_PROFILE").map(String::as_str),
+            Some("work")
+        );
         assert_eq!(dc.api_key.as_deref(), Some("sk-test"));
         assert_eq!(dc.effort.as_deref(), Some("high"));
         assert_eq!(dc.auto_compact_after, Some(100_000));

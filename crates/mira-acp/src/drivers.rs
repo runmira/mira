@@ -195,7 +195,9 @@ mod tests {
         };
         let ex = d.cli_extras(&cfg);
         assert!(ex.windows(2).any(|w| w == ["--effort", "high"]));
-        assert!(ex.windows(2).any(|w| w == ["--setting-sources", "project,local"]));
+        assert!(ex
+            .windows(2)
+            .any(|w| w == ["--setting-sources", "project,local"]));
     }
 
     use super::super::driver::{DriverConfig, LaunchConfig};
@@ -210,7 +212,10 @@ mod tests {
         // ACP spells it `accept_edits`; Grok wants `acceptEdits`. Getting this
         // wrong is a silent no-op, so it is pinned by test.
         let args = resolve(&GrokDriver, PermissionMode::AcceptEdits).args;
-        assert_eq!(args, vec!["agent", "stdio", "--permission-mode", "acceptEdits"]);
+        assert_eq!(
+            args,
+            vec!["agent", "stdio", "--permission-mode", "acceptEdits"]
+        );
 
         let auto = resolve(&GrokDriver, PermissionMode::Auto).args;
         assert!(auto.contains(&"auto".to_string()));
@@ -249,13 +254,20 @@ mod tests {
                 "{} has no binary name",
                 d.kind()
             );
-            assert!(!d.display_name().is_empty(), "{} has no display name", d.kind());
+            assert!(
+                !d.display_name().is_empty(),
+                "{} has no display name",
+                d.kind()
+            );
         }
     }
 
     #[test]
     fn by_kind_round_trips_and_rejects_unknown() {
-        assert_eq!(by_kind("grok").map(|d| d.kind().to_string()), Some("grok".into()));
+        assert_eq!(
+            by_kind("grok").map(|d| d.kind().to_string()),
+            Some("grok".into())
+        );
         assert!(by_kind("not-an-agent").is_none());
     }
 
@@ -263,8 +275,10 @@ mod tests {
     fn user_launch_args_never_precede_the_subcommand() {
         // If a user's extra args landed before `agent stdio`, Grok would treat
         // them as unknown subcommands and refuse to start.
-        let mut cfg = DriverConfig::default();
-        cfg.launch_args = vec!["--model".into(), "grok-4".into()];
+        let cfg = DriverConfig {
+            launch_args: vec!["--model".into(), "grok-4".into()],
+            ..Default::default()
+        };
         let out = GrokDriver.resolve(&cfg, PermissionMode::Ask, PathBuf::from("grok"));
         assert_eq!(out.args[0], "agent");
         assert_eq!(out.args[1], "stdio");
@@ -274,10 +288,12 @@ mod tests {
     #[test]
     fn user_env_is_passed_through_verbatim() {
         let mut cfg = DriverConfig::default();
-        cfg.env
-            .insert("CURSOR_AUTH_TOKEN".into(), "tok".into());
+        cfg.env.insert("CURSOR_AUTH_TOKEN".into(), "tok".into());
         let out = CursorDriver.resolve(&cfg, PermissionMode::Ask, PathBuf::from("cursor-agent"));
-        assert_eq!(out.env.get("CURSOR_AUTH_TOKEN").map(String::as_str), Some("tok"));
+        assert_eq!(
+            out.env.get("CURSOR_AUTH_TOKEN").map(String::as_str),
+            Some("tok")
+        );
         // A token-shaped name must be treated as a secret so logs redact it.
         assert!(out.secret_env.contains(&"CURSOR_AUTH_TOKEN".to_string()));
     }
@@ -296,7 +312,14 @@ mod tests {
         let kinds: Vec<&str> = all().iter().map(|d| d.kind()).collect();
         assert_eq!(
             kinds,
-            vec!["claude-code", "opencode", "codex", "grok", "cursor", "antigravity"]
+            vec![
+                "claude-code",
+                "opencode",
+                "codex",
+                "grok",
+                "cursor",
+                "antigravity"
+            ]
         );
     }
 }
@@ -535,8 +558,8 @@ impl AcpDriver for CodexDriver {
 
 #[cfg(test)]
 mod new_driver_tests {
-    use super::*;
     use super::super::driver::{AcpDriver, DriverConfig, LaunchConfig, PermissionMode};
+    use super::*;
     use std::path::PathBuf;
 
     fn resolve(d: &dyn AcpDriver, mode: PermissionMode) -> LaunchConfig {
@@ -579,12 +602,17 @@ mod new_driver_tests {
         assert!(vars.contains(&"ANTHROPIC_API_KEY"), "got {vars:?}");
         assert_eq!(ClaudeCodeDriver.home_env_var(), Some("CLAUDE_CONFIG_DIR"));
 
-        let mut cfg = DriverConfig::default();
-        cfg.api_key = Some("sk-ant-test".into());
+        let cfg = DriverConfig {
+            api_key: Some("sk-ant-test".into()),
+            ..Default::default()
+        };
         let out = ClaudeCodeDriver.resolve(&cfg, PermissionMode::Ask, PathBuf::from("bin"));
         // The key lands in the launch env and is marked secret, so it can
         // never reach a log line.
-        assert_eq!(out.env.get("ANTHROPIC_API_KEY").map(String::as_str), Some("sk-ant-test"));
+        assert_eq!(
+            out.env.get("ANTHROPIC_API_KEY").map(String::as_str),
+            Some("sk-ant-test")
+        );
         assert!(out.secret_env.contains(&"ANTHROPIC_API_KEY".to_string()));
         assert!(!out.redacted().contains("sk-ant-test"), "the key leaked");
     }
@@ -614,8 +642,10 @@ mod new_driver_tests {
 
     #[test]
     fn codex_prefers_its_own_key_over_the_openai_one() {
-        let mut cfg = DriverConfig::default();
-        cfg.api_key = Some("sk-test".into());
+        let cfg = DriverConfig {
+            api_key: Some("sk-test".into()),
+            ..Default::default()
+        };
         let out = CodexDriver.resolve(&cfg, PermissionMode::Ask, PathBuf::from("bin"));
         // Only the *first* listed var is populated: Codex prefers
         // `CODEX_API_KEY` and treats `OPENAI_API_KEY` as the fallback, so
@@ -707,8 +737,10 @@ mod new_driver_tests {
     #[test]
     fn a_user_launch_arg_is_passed_through_verbatim() {
         // The escape hatch for anyone on a nonstandard install path.
-        let mut cfg = DriverConfig::default();
-        cfg.launch_args = vec!["--experimental".into()];
+        let cfg = DriverConfig {
+            launch_args: vec!["--experimental".into()],
+            ..Default::default()
+        };
         let out = ClaudeCodeDriver.resolve(&cfg, PermissionMode::Ask, PathBuf::from("bin"));
         assert_eq!(out.args, vec!["--experimental".to_string()]);
     }
@@ -769,12 +801,16 @@ impl AcpDriver for OpenCodeDriver {
 
 #[cfg(test)]
 mod opencode_tests {
-    use super::*;
     use super::super::driver::{AcpDriver, DriverConfig, LaunchConfig, PermissionMode};
+    use super::*;
     use std::path::PathBuf;
 
     fn resolve(d: &dyn AcpDriver) -> LaunchConfig {
-        d.resolve(&DriverConfig::default(), PermissionMode::Ask, PathBuf::from("bin"))
+        d.resolve(
+            &DriverConfig::default(),
+            PermissionMode::Ask,
+            PathBuf::from("bin"),
+        )
     }
 
     #[test]
@@ -818,8 +854,10 @@ mod opencode_tests {
     fn an_instance_can_override_its_display_name() {
         // Two instances of one agent with different configs need distinct
         // labels in the settings list.
-        let mut cfg = DriverConfig::default();
-        cfg.display_name = Some("Claude (work)".into());
+        let cfg = DriverConfig {
+            display_name: Some("Claude (work)".into()),
+            ..Default::default()
+        };
         assert_eq!(cfg.display_name.as_deref(), Some("Claude (work)"));
     }
 
@@ -849,8 +887,8 @@ mod opencode_tests {
 
 #[cfg(test)]
 mod privileged_mode_tests {
-    use super::*;
     use super::super::driver::AcpDriver;
+    use super::*;
 
     #[test]
     fn codex_flags_the_mode_that_disables_its_own_sandbox() {
@@ -909,8 +947,8 @@ mod privileged_mode_tests {
 
 #[cfg(test)]
 mod binary_name_tests {
-    use super::*;
     use super::super::driver::AcpDriver;
+    use super::*;
 
     #[test]
     fn the_current_claude_binary_is_preferred_over_the_renamed_one() {
@@ -950,8 +988,8 @@ mod binary_name_tests {
 
 #[cfg(test)]
 mod cursor_binary_tests {
-    use super::*;
     use super::super::driver::AcpDriver;
+    use super::*;
 
     #[test]
     fn cursor_prefers_the_current_cli_name() {

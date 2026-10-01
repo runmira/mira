@@ -92,13 +92,18 @@ pub fn snapshot_tree(cwd: &Path) -> Option<String> {
     // Unique per call: the diff and review endpoints often snapshot at once.
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp = git_path(cwd, &format!("mira-snapshot-{}-{n}.index", std::process::id()))?;
+    let tmp = git_path(
+        cwd,
+        &format!("mira-snapshot-{}-{n}.index", std::process::id()),
+    )?;
     if index.exists() {
         std::fs::copy(&index, &tmp).ok()?;
     }
-    let tree = run(git(cwd).env("GIT_INDEX_FILE", &tmp).args(["add", "-A", "--", "."]))
-        .and_then(|_| run(git(cwd).env("GIT_INDEX_FILE", &tmp).arg("write-tree")))
-        .map(|s| s.trim().to_string());
+    let tree = run(git(cwd)
+        .env("GIT_INDEX_FILE", &tmp)
+        .args(["add", "-A", "--", "."]))
+    .and_then(|_| run(git(cwd).env("GIT_INDEX_FILE", &tmp).arg("write-tree")))
+    .map(|s| s.trim().to_string());
     let _ = std::fs::remove_file(&tmp);
     tree.filter(|t| !t.is_empty())
 }
@@ -106,7 +111,11 @@ pub fn snapshot_tree(cwd: &Path) -> Option<String> {
 fn baseline_file(cwd: &Path, session: &str) -> Option<PathBuf> {
     // Session ids are uuids; anything else is refused rather than joined
     // into a path.
-    if session.is_empty() || !session.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+    if session.is_empty()
+        || !session
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
         return None;
     }
     git_path(cwd, &format!("mira/baselines/{session}"))
@@ -115,11 +124,15 @@ fn baseline_file(cwd: &Path, session: &str) -> Option<PathBuf> {
 /// Record the chat's baseline, once. Later calls keep the first one — the
 /// point is "since this chat began".
 pub fn ensure_baseline(cwd: &Path, session: &str) {
-    let Some(file) = baseline_file(cwd, session) else { return };
+    let Some(file) = baseline_file(cwd, session) else {
+        return;
+    };
     if file.exists() || !in_repo(cwd) {
         return;
     }
-    let Some(tree) = snapshot_tree(cwd) else { return };
+    let Some(tree) = snapshot_tree(cwd) else {
+        return;
+    };
     if let Some(dir) = file.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
@@ -142,9 +155,17 @@ fn split_z(s: &str) -> impl Iterator<Item = &str> {
 
 /// Paths under `cwd` that differ between two trees.
 fn tree_diff_paths(cwd: &Path, from: &str, to: &str) -> Vec<String> {
-    run(git(cwd).args(["diff", "--name-only", "-z", "--no-renames", "--relative", from, to]))
-        .map(|out| split_z(&out).map(str::to_string).collect())
-        .unwrap_or_default()
+    run(git(cwd).args([
+        "diff",
+        "--name-only",
+        "-z",
+        "--no-renames",
+        "--relative",
+        from,
+        to,
+    ]))
+    .map(|out| split_z(&out).map(str::to_string).collect())
+    .unwrap_or_default()
 }
 
 /// Everything the chat changed that a commit would still carry, with line
@@ -184,7 +205,15 @@ pub fn stats_against_head(cwd: &Path, paths: &[String]) -> Vec<ChangedFile> {
     let mut out = Vec::new();
     for chunk in paths.chunks(500) {
         let mut tracked = git(cwd);
-        tracked.args(["diff", "--numstat", "-z", "--no-renames", "--relative", &head, "--"]);
+        tracked.args([
+            "diff",
+            "--numstat",
+            "-z",
+            "--no-renames",
+            "--relative",
+            &head,
+            "--",
+        ]);
         tracked.args(chunk);
         if let Some(s) = run(&mut tracked) {
             out.extend(parse_numstat_z(&s));
@@ -247,7 +276,14 @@ mod tests {
     fn sh(dir: &Path, args: &[&str]) {
         let ok = Command::new("git")
             .current_dir(dir)
-            .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
             .args(args)
             .output()
             .unwrap()
@@ -287,7 +323,10 @@ mod tests {
         std::fs::write(p.join("target/out"), "bin").unwrap();
 
         let files = changed_files(p, S, &[]);
-        let got: Vec<_> = files.iter().map(|f| (f.path.as_str(), f.status, f.added, f.removed)).collect();
+        let got: Vec<_> = files
+            .iter()
+            .map(|f| (f.path.as_str(), f.status, f.added, f.removed))
+            .collect();
         assert_eq!(
             got,
             vec![
@@ -303,7 +342,11 @@ mod tests {
         let d = repo();
         let p = d.path();
         std::fs::write(p.join("sub/mod.rs"), "fn b() {}\n").unwrap();
-        let files = changed_files(p, S, &[p.join("sub/mod.rs"), PathBuf::from("/elsewhere/x.rs")]);
+        let files = changed_files(
+            p,
+            S,
+            &[p.join("sub/mod.rs"), PathBuf::from("/elsewhere/x.rs")],
+        );
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, "sub/mod.rs");
     }
@@ -316,7 +359,10 @@ mod tests {
         std::fs::write(sub.join("mod.rs"), "fn c() {}\n").unwrap();
         std::fs::write(d.path().join("a.txt"), "outside the cwd\n").unwrap();
         let files = changed_files(&sub, S, &[]);
-        assert_eq!(files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), vec!["mod.rs"]);
+        assert_eq!(
+            files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
+            vec!["mod.rs"]
+        );
     }
 
     #[test]
@@ -339,8 +385,15 @@ mod tests {
         std::fs::write(p.join("loose.txt"), "untracked\n").unwrap();
         let before = run(git(p).args(["diff", "--cached", "--name-only"])).unwrap();
         ensure_baseline(p, S);
-        assert_eq!(run(git(p).args(["diff", "--cached", "--name-only"])).unwrap(), before);
-        assert!(run(git(p).args(["ls-files", "--others", "--exclude-standard"])).unwrap().contains("loose.txt"));
+        assert_eq!(
+            run(git(p).args(["diff", "--cached", "--name-only"])).unwrap(),
+            before
+        );
+        assert!(
+            run(git(p).args(["ls-files", "--others", "--exclude-standard"]))
+                .unwrap()
+                .contains("loose.txt")
+        );
     }
 
     #[test]

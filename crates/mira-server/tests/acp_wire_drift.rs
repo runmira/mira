@@ -27,10 +27,7 @@ fn rust_acp_arms() -> BTreeSet<String> {
         .split_once("pub enum ServerMsg {")
         .expect("ServerMsg enum")
         .1;
-    let body = after_enum
-        .split_once("\n}\n")
-        .expect("enum body")
-        .0;
+    let body = after_enum.split_once("\n}\n").expect("enum body").0;
 
     let mut out = BTreeSet::new();
     for line in body.lines() {
@@ -148,10 +145,7 @@ fn agent_status_fields_match_across_the_boundary() {
         .split_once("pub struct AgentStatus {")
         .expect("AgentStatus struct")
         .1;
-    let body = after_struct
-        .split_once('}')
-        .expect("AgentStatus body")
-        .0;
+    let body = after_struct.split_once('}').expect("AgentStatus body").0;
     let rust_fields: BTreeSet<String> = body
         .lines()
         .filter_map(|l| {
@@ -167,10 +161,8 @@ fn agent_status_fields_match_across_the_boundary() {
         .collect();
 
     // TypeScript: the same names on `AcpAgentStatus`.
-    let ts = std::fs::read_to_string(src_path(
-        "crates/mira-server/frontend/src/types.ts",
-    ))
-    .expect("read types.ts");
+    let ts = std::fs::read_to_string(src_path("crates/mira-server/frontend/src/types.ts"))
+        .expect("read types.ts");
     let after_type = ts
         .split_once("export type AcpAgentStatus = {")
         .expect("AcpAgentStatus type")
@@ -188,7 +180,7 @@ fn agent_status_fields_match_across_the_boundary() {
                 return None;
             }
             // `name: T;` or `name?: T;`
-            let name = t.split(|c| c == ':' || c == '?').next()?.trim();
+            let name = t.split([':', '?']).next()?.trim();
             (!name.is_empty() && name != "}").then(|| name.to_string())
         })
         .collect();

@@ -839,7 +839,11 @@ async fn run_engine_slash(
         let active = cfg.swappable.active_instance();
         for inst in cfg.engines.instances() {
             let id = inst.id.as_str();
-            let mark = if active.as_deref() == Some(id) { "•" } else { " " };
+            let mark = if active.as_deref() == Some(id) {
+                "•"
+            } else {
+                " "
+            };
             if inst.is_native() {
                 let status = match mira_engine::native::missing_piece(&cfg.engine_cfg, id) {
                     None => "ready".to_owned(),
@@ -899,10 +903,7 @@ async fn run_engine_slash(
     }
     // Instance default model wins when it pins one; otherwise the
     // current model carries over, matching the server's SetModel rule.
-    let new_model = inst
-        .model
-        .clone()
-        .unwrap_or_else(|| state.model.clone());
+    let new_model = inst.model.clone().unwrap_or_else(|| state.model.clone());
     state.model = new_model.clone();
     session.set_model(new_model.clone()).await;
     let mut s = mira_config::RuntimeState::load().unwrap_or_default();

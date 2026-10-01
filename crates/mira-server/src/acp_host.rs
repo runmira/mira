@@ -23,8 +23,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use mira_acp::events::PermissionRequest;
 use mira_acp::events::NormalizedEvent;
+use mira_acp::events::PermissionRequest;
 use mira_acp::host::{EventPort, FilePort, HostError, PermissionPort, TerminalPort};
 use mira_harness::approver::Approver;
 use mira_policy::Decision;
@@ -248,7 +248,9 @@ pub async fn gate_write(
     if approver.approve(synthetic_call, Decision::Ask).await {
         Ok(())
     } else {
-        Err(HostError::Denied(format!("write to {path} was not approved")))
+        Err(HostError::Denied(format!(
+            "write to {path} was not approved"
+        )))
     }
 }
 
@@ -314,9 +316,7 @@ fn choose_option(req: &PermissionRequest, allowed: bool) -> Option<String> {
     };
 
     let chosen = pick(true).or_else(|| pick(false));
-    if chosen.is_none() {
-        return None;
-    }
+    chosen.as_ref()?;
     if allowed {
         // A persistent grant is a materially wider decision than the user may
         // have had in mind, so say which one was chosen.
@@ -325,7 +325,11 @@ fn choose_option(req: &PermissionRequest, allowed: bool) -> Option<String> {
             .iter()
             .find(|o| o.is_allow() && o.is_persistent())
         {
-            if req.options.iter().all(|o| !(o.is_allow() && !o.is_persistent())) {
+            if req
+                .options
+                .iter()
+                .all(|o| !(o.is_allow() && !o.is_persistent()))
+            {
                 tracing::warn!(
                     tool_call_id = %req.tool_call_id,
                     option_id = %o.option_id,
@@ -428,11 +432,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Approver for TestApprover {
-        async fn approve(
-            &self,
-            _call: &mira_core::ToolCall,
-            _decision: Decision,
-        ) -> bool {
+        async fn approve(&self, _call: &mira_core::ToolCall, _decision: Decision) -> bool {
             self.allow
         }
     }
@@ -500,7 +500,10 @@ mod tests {
     #[tokio::test]
     async fn a_cwd_outside_the_root_is_refused() {
         let t = terminals(Arc::new(PtyRegistry::new()), false);
-        let err = t.create("/bin/sh", &[], Some("/etc")).await.expect_err("refuse");
+        let err = t
+            .create("/bin/sh", &[], Some("/etc"))
+            .await
+            .expect_err("refuse");
         assert!(matches!(err, HostError::OutOfBounds(_)), "got {err:?}");
     }
 
@@ -591,7 +594,9 @@ mod tests {
         // handed unrestricted filesystem access.
         let dir = std::env::temp_dir().join("mira-acp-files-test");
         tokio::fs::create_dir_all(&dir).await.unwrap();
-        tokio::fs::write(dir.join("ok.txt"), "inside").await.unwrap();
+        tokio::fs::write(dir.join("ok.txt"), "inside")
+            .await
+            .unwrap();
 
         let (ctx, appr) = files_ctx(&dir);
         let files = AcpFiles::new(ctx, appr, 1024 * 1024);
@@ -727,7 +732,10 @@ mod tests {
             tool_call_id: "c".into(),
             title: "t".into(),
             kind: None,
-            options: vec![mk("no-always", Kind::RejectAlways), mk("no", Kind::RejectOnce)],
+            options: vec![
+                mk("no-always", Kind::RejectAlways),
+                mk("no", Kind::RejectOnce),
+            ],
         };
         assert_eq!(choose_option(&r, false).as_deref(), Some("no"));
     }
@@ -825,7 +833,10 @@ pub struct AcpEventPort {
 
 impl AcpEventPort {
     pub fn new(events: tokio::sync::broadcast::Sender<ServerMsg>) -> Arc<Self> {
-        Arc::new(AcpEventPort { events, spend: None })
+        Arc::new(AcpEventPort {
+            events,
+            spend: None,
+        })
     }
 
     /// A port that also books the agent's spend reports to `ledger`.
@@ -834,16 +845,22 @@ impl AcpEventPort {
         ledger: crate::agent_spend::SpendLedger,
         who: crate::agent_spend::Spender,
     ) -> Arc<Self> {
-        Arc::new(AcpEventPort { events, spend: Some((ledger, who)) })
+        Arc::new(AcpEventPort {
+            events,
+            spend: Some((ledger, who)),
+        })
     }
 
     /// Book a spend report; anything else becomes a frame.
     fn route(&self, event: NormalizedEvent) {
         if let mira_acp::events::MiraEvent::Spend { session, models } = &event.event {
             if let Some((ledger, who)) = &self.spend {
-                let (ledger, who, session, models) = (ledger.clone(), who.clone(), session.clone(), models.clone());
+                let (ledger, who, session, models) =
+                    (ledger.clone(), who.clone(), session.clone(), models.clone());
                 // File I/O, off the event loop.
-                tokio::task::spawn_blocking(move || ledger.record(&who, session.as_deref(), &models));
+                tokio::task::spawn_blocking(move || {
+                    ledger.record(&who, session.as_deref(), &models)
+                });
             }
             return;
         }
@@ -950,24 +967,25 @@ mod event_tests {
             ),
             (MiraEvent::Plan { entries: vec![] }, "acp_plan"),
             (MiraEvent::Commands { names: vec![] }, "acp_commands"),
-            (MiraEvent::Usage {
-                used: 1,
-                size: 2,
-                cost: None,
-            },
-            "acp_usage"),
-            (MiraEvent::SessionInfo {
-                title: None,
-                updated_at: None,
-            },
-            "acp_session_info"),
+            (
+                MiraEvent::Usage {
+                    used: 1,
+                    size: 2,
+                    cost: None,
+                },
+                "acp_usage",
+            ),
+            (
+                MiraEvent::SessionInfo {
+                    title: None,
+                    updated_at: None,
+                },
+                "acp_session_info",
+            ),
         ];
         for (event, expected) in cases {
             let json = serde_json::to_value(frame(event)).expect("serialize");
-            assert_eq!(
-                json["type"], expected,
-                "wrong wire type for {expected}"
-            );
+            assert_eq!(json["type"], expected, "wrong wire type for {expected}");
         }
     }
 

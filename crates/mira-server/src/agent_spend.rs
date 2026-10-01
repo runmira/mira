@@ -64,19 +64,30 @@ impl SpendLedger {
 
     /// Record a running-total report from an agent session. Returns the rows
     /// appended (empty when nothing new was spent).
-    pub fn record(&self, who: &Spender, agent_session: Option<&str>, totals: &[ModelSpend]) -> Vec<SpendRow> {
+    pub fn record(
+        &self,
+        who: &Spender,
+        agent_session: Option<&str>,
+        totals: &[ModelSpend],
+    ) -> Vec<SpendRow> {
         let _guard = WRITE.lock().unwrap_or_else(|p| p.into_inner());
         let key = format!(
             "{}:{}",
             who.driver,
-            agent_session.filter(|s| !s.is_empty()).unwrap_or(&who.session_id)
+            agent_session
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&who.session_id)
         );
         let mut state = read_state(&self.dir.join(STATE));
         let seen = state.entry(key).or_default();
         let ts = now_secs();
         let mut rows = Vec::new();
         for t in totals {
-            let model = if t.model.is_empty() { who.fallback_model.clone() } else { t.model.clone() };
+            let model = if t.model.is_empty() {
+                who.fallback_model.clone()
+            } else {
+                t.model.clone()
+            };
             let prev = seen.get(&model).cloned().unwrap_or_default();
             let d = delta(&prev, t);
             seen.insert(model.clone(), t.clone());
@@ -212,7 +223,11 @@ mod tests {
         assert_eq!((b[0].input_tokens, b[0].output_tokens), (150, 20));
         assert!((b[0].cost_usd.unwrap() - 0.75).abs() < 1e-9);
         // Same totals again (a resumed session after a restart): nothing new.
-        let c = SpendLedger::at(dir.path()).record(&who(), Some("cc-1"), &[spend("opus", 250, 30, 1.25)]);
+        let c = SpendLedger::at(dir.path()).record(
+            &who(),
+            Some("cc-1"),
+            &[spend("opus", 250, 30, 1.25)],
+        );
         assert!(c.is_empty());
         assert_eq!(l.rows_since(0).len(), 2);
     }
@@ -230,7 +245,14 @@ mod tests {
     fn unnamed_models_are_filed_under_the_fallback() {
         let dir = tempfile::tempdir().unwrap();
         let l = SpendLedger::at(dir.path());
-        let r = l.record(&who(), None, &[ModelSpend { input_tokens: 7, ..Default::default() }]);
+        let r = l.record(
+            &who(),
+            None,
+            &[ModelSpend {
+                input_tokens: 7,
+                ..Default::default()
+            }],
+        );
         assert_eq!(r[0].model, "claude");
     }
 }

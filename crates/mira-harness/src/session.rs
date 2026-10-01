@@ -1398,14 +1398,18 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
                 let before = {
                     let history = sess.history.lock().await;
                     let mut cleared = sess.cleared_before.lock().await;
-                    *cleared =
-                        crate::history::clear_tool_results_before(
-                            &history,
-                            &cfg.model,
-                            cfg.context_window,
-                            *cleared,
-                        );
-                    crate::history::needs_compaction(&history, &cfg.model, cfg.context_window, *cleared)
+                    *cleared = crate::history::clear_tool_results_before(
+                        &history,
+                        &cfg.model,
+                        cfg.context_window,
+                        *cleared,
+                    );
+                    crate::history::needs_compaction(
+                        &history,
+                        &cfg.model,
+                        cfg.context_window,
+                        *cleared,
+                    )
                 };
                 if before {
                     match sess.compact_inner("auto", None, &tx).await {
@@ -1439,7 +1443,7 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
                 temperature: cfg.temperature,
                 max_tokens: cfg.max_tokens,
                 reasoning_effort: cfg.reasoning_effort.clone(),
-            service_tier: cfg.service_tier.clone(),
+                service_tier: cfg.service_tier.clone(),
                 response_format: cfg.response_format.clone(),
             };
 
@@ -1525,7 +1529,8 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
                             // Ignore send errors — a dropped receiver just means the
                             // UI stopped listening; the totals are still recorded.
                             let window =
-                                crate::history::context_window_with(&cfg.model, cfg.context_window) as u64;
+                                crate::history::context_window_with(&cfg.model, cfg.context_window)
+                                    as u64;
                             let _ = tx
                                 .send(HarnessEvent::Usage {
                                     round,

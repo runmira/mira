@@ -538,7 +538,10 @@ pub fn parse_agent_md(source: &str) -> Result<AgentType> {
         worktree: fm.worktree,
         extends: fm.extends,
         review_required: fm.review_required,
-        display_name: fm.display_name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()),
+        display_name: fm
+            .display_name
+            .map(|n| n.trim().to_string())
+            .filter(|n| !n.is_empty()),
         face: fm.face,
         enabled: fm.enabled,
         source: None,
@@ -909,10 +912,17 @@ mod tests {
     #[test]
     fn built_ins_have_personas() {
         let reg = builtin();
-        for (name, persona) in [("explore", "Scout"), ("reviewer", "Iris"), ("coder", "Bolt")] {
+        for (name, persona) in [
+            ("explore", "Scout"),
+            ("reviewer", "Iris"),
+            ("coder", "Bolt"),
+        ] {
             let t = reg.get(name).expect(name);
             assert_eq!(t.display_name.as_deref(), Some(persona));
-            assert!(t.face.as_ref().is_some_and(|f| f.color.is_some()), "{name} has a face");
+            assert!(
+                t.face.as_ref().is_some_and(|f| f.color.is_some()),
+                "{name} has a face"
+            );
             assert_eq!(t.source.as_deref(), Some("builtin"));
         }
     }
@@ -923,13 +933,20 @@ mod tests {
         t.display_name = Some("Judge".into());
         t.model = Some("claude-sonnet-5".into());
         t.enabled = Some(false);
-        t.face = Some(Face { color: Some("#123456".into()), shape: Some("drop".into()), ..Default::default() });
+        t.face = Some(Face {
+            color: Some("#123456".into()),
+            shape: Some("drop".into()),
+            ..Default::default()
+        });
         let back = parse_agent_md(&t.to_markdown()).expect("parses");
         assert_eq!(back.name, "reviewer");
         assert_eq!(back.display_name.as_deref(), Some("Judge"));
         assert_eq!(back.model.as_deref(), Some("claude-sonnet-5"));
         assert_eq!(back.enabled, Some(false));
-        assert_eq!(back.face.as_ref().and_then(|f| f.shape.as_deref()), Some("drop"));
+        assert_eq!(
+            back.face.as_ref().and_then(|f| f.shape.as_deref()),
+            Some("drop")
+        );
         assert_eq!(back.tools, t.tools);
         assert_eq!(back.system_prompt_addendum, t.system_prompt_addendum);
         assert!(back.response_schema.is_some(), "the schema survives");
@@ -940,7 +957,9 @@ mod tests {
         let mut reg = builtin();
         reg.types.get_mut("coder").unwrap().enabled = Some(false);
         assert!(!reg.names().contains(&"coder".to_string()));
-        assert!(reg.get("coder").is_some(), "still defined, so Settings can list it");
+        assert!(
+            reg.get("coder").is_some(),
+            "still defined, so Settings can list it"
+        );
     }
-
 }

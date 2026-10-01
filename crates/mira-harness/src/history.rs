@@ -877,7 +877,10 @@ mod tests {
         assert!(needs_compaction(&h, "gpt-3.5-turbo", None, 0));
         let small = long_history();
         assert!(!needs_compaction(&small, "claude-opus-4-7", None, 0));
-        assert_eq!(clear_tool_results_before(&small, "claude-opus-4-7", None, 0), 0);
+        assert_eq!(
+            clear_tool_results_before(&small, "claude-opus-4-7", None, 0),
+            0
+        );
         // Message count alone never triggers it any more.
         let mut many = vec![Message::system("s")];
         for i in 0..500 {

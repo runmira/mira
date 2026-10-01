@@ -221,10 +221,7 @@ pub trait AcpDriver: Send + Sync {
     /// (`--permission-mode`), which Grok honors; drivers whose agent takes it
     /// elsewhere override this.
     fn permission_args(&self, mode: PermissionMode) -> Vec<String> {
-        vec![
-            "--permission-mode".to_string(),
-            mode.as_str().to_string(),
-        ]
+        vec!["--permission-mode".to_string(), mode.as_str().to_string()]
     }
 
     /// Session modes that grant *more* authority than Mira would.
@@ -338,7 +335,6 @@ pub trait AcpDriver: Send + Sync {
         Transport::Auto
     }
 
-
     /// Client capabilities this driver actually needs.
     ///
     /// Derived per driver rather than configured globally, because ACP
@@ -359,17 +355,8 @@ pub trait AcpDriver: Send + Sync {
     }
 
     /// Resolve a user config into a concrete launch.
-    fn resolve(
-        &self,
-        cfg: &DriverConfig,
-        mode: PermissionMode,
-        program: PathBuf,
-    ) -> LaunchConfig {
-        let mut args: Vec<String> = self
-            .base_args()
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect();
+    fn resolve(&self, cfg: &DriverConfig, mode: PermissionMode, program: PathBuf) -> LaunchConfig {
+        let mut args: Vec<String> = self.base_args().iter().map(|s| (*s).to_string()).collect();
         args.extend(self.permission_args(mode));
         args.extend(cfg.launch_args.iter().cloned());
 
@@ -444,7 +431,10 @@ mod tests {
             PermissionMode::AcceptEdits,
             PathBuf::from("/usr/local/bin/fake"),
         );
-        assert_eq!(cfg.args, vec!["agent", "stdio", "--permission-mode", "accept_edits"]);
+        assert_eq!(
+            cfg.args,
+            vec!["agent", "stdio", "--permission-mode", "accept_edits"]
+        );
     }
 
     #[test]
@@ -452,7 +442,17 @@ mod tests {
         let mut c = base_cfg();
         c.launch_args = vec!["--profile".into(), "work".into()];
         let cfg = Fake.resolve(&c, PermissionMode::Ask, PathBuf::from("fake"));
-        assert_eq!(cfg.args, vec!["agent", "stdio", "--permission-mode", "ask", "--profile", "work"]);
+        assert_eq!(
+            cfg.args,
+            vec![
+                "agent",
+                "stdio",
+                "--permission-mode",
+                "ask",
+                "--profile",
+                "work"
+            ]
+        );
     }
 
     #[test]
@@ -460,7 +460,10 @@ mod tests {
         let mut c = base_cfg();
         c.api_key = Some("sk-secret".into());
         let cfg = Fake.resolve(&c, PermissionMode::Ask, PathBuf::from("fake"));
-        assert_eq!(cfg.env.get("FAKE_API_KEY").map(String::as_str), Some("sk-secret"));
+        assert_eq!(
+            cfg.env.get("FAKE_API_KEY").map(String::as_str),
+            Some("sk-secret")
+        );
     }
 
     #[test]
@@ -468,7 +471,10 @@ mod tests {
         let mut c = base_cfg();
         c.home_path = Some(PathBuf::from("/tmp/fake-home"));
         let cfg = Fake.resolve(&c, PermissionMode::Ask, PathBuf::from("fake"));
-        assert_eq!(cfg.env.get("FAKE_HOME").map(String::as_str), Some("/tmp/fake-home"));
+        assert_eq!(
+            cfg.env.get("FAKE_HOME").map(String::as_str),
+            Some("/tmp/fake-home")
+        );
     }
 
     #[test]
@@ -479,7 +485,10 @@ mod tests {
         c.env.insert("FAKE_HOME".into(), "/explicit".into());
         c.home_path = Some(PathBuf::from("/derived"));
         let cfg = Fake.resolve(&c, PermissionMode::Ask, PathBuf::from("fake"));
-        assert_eq!(cfg.env.get("FAKE_HOME").map(String::as_str), Some("/explicit"));
+        assert_eq!(
+            cfg.env.get("FAKE_HOME").map(String::as_str),
+            Some("/explicit")
+        );
     }
 
     #[test]

@@ -142,16 +142,12 @@ pub async fn read_agent_state(
         .unwrap_or_default();
     // In-memory meta wins (just started, not yet checkpointed); the sidecar
     // is the fallback for slots rebuilt from disk.
-    let driver = sess
-        .agent_meta()
-        .await
-        .map(|a| a.driver_kind)
-        .or_else(|| {
-            transcript
-                .iter()
-                .rev()
-                .find_map(|l| l.get("driver").and_then(|d| d.as_str()).map(str::to_string))
-        });
+    let driver = sess.agent_meta().await.map(|a| a.driver_kind).or_else(|| {
+        transcript
+            .iter()
+            .rev()
+            .find_map(|l| l.get("driver").and_then(|d| d.as_str()).map(str::to_string))
+    });
     (transcript, driver)
 }
 

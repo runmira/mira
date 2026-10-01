@@ -26,13 +26,10 @@
 //! [`protocol::ClientMsg::Approve`], which routes back to the awaiting
 //! oneshot via [`approver::resolve`].
 
-mod agent_worktree;
 pub mod acp_host;
 pub mod acp_session;
-pub mod session_engine;
-mod subagents_api;
 pub mod agent_spend;
-pub mod session_changes;
+mod agent_worktree;
 pub mod approver;
 mod browse;
 mod browser;
@@ -55,11 +52,14 @@ pub mod protocol;
 pub mod provider;
 mod pull_requests;
 mod review;
+pub mod session_changes;
+pub mod session_engine;
 mod sessions;
 mod settings;
 mod skills;
 pub mod slot;
 mod state;
+mod subagents_api;
 mod terminal;
 mod title;
 mod undo;
@@ -188,10 +188,7 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
         cfg.cfg.small_model.clone(),
     ));
     {
-        let mut inst = selection
-            .instance
-            .write()
-            .expect("selection lock poisoned");
+        let mut inst = selection.instance.write().expect("selection lock poisoned");
         if let Some(default) = engines.default_native_instance(&engine_cfg) {
             *inst = Some(default.id.to_string());
         }
@@ -234,10 +231,8 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
             tracing::warn!(instance = %id, "persisted engine not buildable; falling back");
             if let Some(default) = &default_instance {
                 swappable.activate(default);
-                *selection
-                    .instance
-                    .write()
-                    .expect("selection lock poisoned") = Some(default.clone());
+                *selection.instance.write().expect("selection lock poisoned") =
+                    Some(default.clone());
             }
         }
     }
@@ -297,7 +292,9 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
         // (same profile → same instance), so the pane shows what the agent
         // is doing instead of racing it for the profile lock.
         browser: {
-            let bcfg = mira_config::MiraConfig::load_global().unwrap_or_default().browser;
+            let bcfg = mira_config::MiraConfig::load_global()
+                .unwrap_or_default()
+                .browser;
             let mut opts = mira_browser::BrowserOptions {
                 headless: bcfg
                     .headless
@@ -429,10 +426,7 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
             axum::routing::post(editors::open_in_editor),
         )
         .route("/api/browse", get(browse::browse))
-        .route(
-            "/api/browser/action",
-            axum::routing::post(browser::action),
-        )
+        .route("/api/browser/action", axum::routing::post(browser::action))
         .route("/api/browser/live", get(browser::live))
         .route("/api/browser/input", axum::routing::post(browser::input))
         .route(
@@ -451,7 +445,10 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
             "/api/subagents/:name",
             axum::routing::put(subagents_api::update).delete(subagents_api::remove),
         )
-        .route("/api/engines/:instance/models", get(engines_api::instance_models))
+        .route(
+            "/api/engines/:instance/models",
+            get(engines_api::instance_models),
+        )
         .route("/api/git/status", get(git::get_status))
         .route("/api/git/session-diff", get(git::session_diff))
         .route("/api/usage", get(usage::get_usage))

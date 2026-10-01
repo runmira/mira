@@ -96,10 +96,10 @@ impl SessionStore for FileStore {
     async fn delete(&self, id: &SessionId) -> Result<(), StoreError> {
         let path = self.path_for(id);
         match fs::remove_file(&path).await {
-            Ok(()) => {},
+            Ok(()) => {}
             // Missing → treat as success. Users clicking "delete" twice on a
             // stale list shouldn't see a 404 spike back at them.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e.into()),
         }
         // The sidecar goes with its session, missing or not.

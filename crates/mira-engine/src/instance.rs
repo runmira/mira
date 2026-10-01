@@ -106,10 +106,8 @@ pub fn instances_from_config(cfg: &MiraConfig) -> BTreeMap<EngineId, EngineInsta
             id,
             // Unknown driver slugs are legal: the snapshot layer will
             // report the instance as unavailable rather than dropping it.
-            driver: DriverKind::new(
-                over.driver.clone().unwrap_or_else(|| "unknown".to_string()),
-            )
-            .unwrap_or_else(|| DriverKind::new("unknown").expect("constant is a valid slug")),
+            driver: DriverKind::new(over.driver.clone().unwrap_or_else(|| "unknown".to_string()))
+                .unwrap_or_else(|| DriverKind::new("unknown").expect("constant is a valid slug")),
             display_name: None,
             enabled: true,
             model: None,
@@ -142,7 +140,9 @@ pub fn instances_from_config(cfg: &MiraConfig) -> BTreeMap<EngineId, EngineInsta
 /// instance is the default provider, else the instance's own override.
 fn default_model_for_native(cfg: &MiraConfig, provider: &str) -> Option<String> {
     if cfg.default_provider.as_deref() == Some(provider) {
-        cfg.default_model.clone().or_else(|| cfg.engines.get(provider).and_then(|e| e.model.clone()))
+        cfg.default_model
+            .clone()
+            .or_else(|| cfg.engines.get(provider).and_then(|e| e.model.clone()))
     } else {
         cfg.engines.get(provider).and_then(|e| e.model.clone())
     }
@@ -170,7 +170,14 @@ mod tests {
     fn every_known_agent_driver_appears() {
         let c = cfg("default_provider: openai\n");
         let instances = instances_from_config(&c);
-        for kind in ["claude-code", "codex", "opencode", "grok", "cursor", "antigravity"] {
+        for kind in [
+            "claude-code",
+            "codex",
+            "opencode",
+            "grok",
+            "cursor",
+            "antigravity",
+        ] {
             assert!(
                 instances.contains_key(&EngineId::new(kind).unwrap()),
                 "missing external instance {kind}"
@@ -180,8 +187,7 @@ mod tests {
 
     #[test]
     fn overrides_merge_and_unknown_drivers_survive() {
-        let c = cfg(
-            "\
+        let c = cfg("\
 default_provider: openai
 engines:
   codex:
@@ -194,8 +200,7 @@ engines:
         CODEX_PROFILE: work
   future-fork:
     driver: myfork
-",
-        );
+");
         let instances = instances_from_config(&c);
         assert!(!instances[&EngineId::new("codex").unwrap()].enabled);
         let work = &instances[&EngineId::new("codex-work").unwrap()];
@@ -208,13 +213,17 @@ engines:
         );
         // An unknown driver stays in the map so the UI can show it as
         // unavailable instead of silently eating the config.
-        assert_eq!(instances[&EngineId::new("future-fork").unwrap()].driver.as_str(), "myfork");
+        assert_eq!(
+            instances[&EngineId::new("future-fork").unwrap()]
+                .driver
+                .as_str(),
+            "myfork"
+        );
     }
 
     #[test]
     fn invalid_slugs_are_skipped_not_fatal() {
-        let c = cfg(
-            "\
+        let c = cfg("\
 default_provider: openai
 providers:
   \"not a slug\":
@@ -222,12 +231,13 @@ providers:
 engines:
   \"\":
     driver: codex
-",
-        );
+");
         // Must not panic; the valid instances still appear. The
         // non-slug provider and the empty slug are skipped.
         let instances = instances_from_config(&c);
         assert!(instances.contains_key(&EngineId::new("openai").unwrap()));
-        assert!(instances.keys().all(|k| crate::id::is_valid_slug(k.as_str())));
+        assert!(instances
+            .keys()
+            .all(|k| crate::id::is_valid_slug(k.as_str())));
     }
 }

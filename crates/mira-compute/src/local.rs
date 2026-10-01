@@ -47,7 +47,8 @@ impl LocalBackend {
         // scratches made at once would share a directory.
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!("mira-sandbox-{}-{n}-{seq}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("mira-sandbox-{}-{n}-{seq}", std::process::id()));
         std::fs::create_dir_all(&root)?;
         let root = std::fs::canonicalize(&root)?;
         Ok(Self {

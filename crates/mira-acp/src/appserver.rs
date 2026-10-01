@@ -8,7 +8,6 @@
 //! server-initiated JSON-RPC requests that must be answered.
 //!
 
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,8 +25,6 @@ use crate::process::AgentProcess;
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Codex's runtime modes, which are approval policy + sandbox, not models.
-
-
 pub const RUNTIME_MODES: &[(&str, &str)] = &[
     ("approval-required", "Ask each time"),
     ("auto-accept-edits", "Auto edits"),
@@ -77,16 +74,26 @@ pub struct CodexModel {
 }
 
 /// What one notification means.
+///
+/// `Event` dwarfs the rest, but each action is mapped and consumed at once
+/// — never stored in bulk — so boxing it would only add an allocation per
+/// event.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, PartialEq)]
 pub enum AppServerAction {
     SessionId(String),
     Event(NormalizedEvent),
-    TurnEnded { stop_reason: String, is_error: bool },
+    TurnEnded {
+        stop_reason: String,
+        is_error: bool,
+    },
     /// Usage state changed; surfaced on request, not as a transcript event.
     RateLimits(Value),
     /// The server moved the thread to another model. Carries the new id so
     /// the picker can mark current — the one piece `thread/start` withholds.
-    ModelRerouted { model: String },
+    ModelRerouted {
+        model: String,
+    },
 }
 
 fn variant(name: &str) -> EventSource {
@@ -199,7 +206,10 @@ pub fn map_notification(method: &str, p: &Value) -> Vec<AppServerAction> {
                 .and_then(|l| l.get("totalTokens"))
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
-            let window = u.get("modelContextWindow").and_then(Value::as_u64).unwrap_or(0);
+            let window = u
+                .get("modelContextWindow")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
             let mut out = Vec::new();
             if last != 0 || window != 0 {
                 out.push(AppServerAction::Event(NormalizedEvent {
@@ -228,7 +238,10 @@ pub fn map_notification(method: &str, p: &Value) -> Vec<AppServerAction> {
                     out.push(AppServerAction::Event(NormalizedEvent {
                         source: variant("spend"),
                         event: MiraEvent::Spend {
-                            session: p.get("threadId").and_then(Value::as_str).map(str::to_string),
+                            session: p
+                                .get("threadId")
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
                             models: vec![spend],
                         },
                     }));
@@ -242,9 +255,14 @@ pub fn map_notification(method: &str, p: &Value) -> Vec<AppServerAction> {
         "model/rerouted" => {
             let model = p
                 .get("model")
-                .and_then(|m| m.as_str().map(str::to_string).or_else(|| {
-                    m.get("id").or_else(|| m.get("name")).and_then(Value::as_str).map(str::to_string)
-                }))
+                .and_then(|m| {
+                    m.as_str().map(str::to_string).or_else(|| {
+                        m.get("id")
+                            .or_else(|| m.get("name"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    })
+                })
                 .unwrap_or_default();
             if model.is_empty() {
                 vec![]
@@ -330,7 +348,10 @@ fn map_item(i: &Value, started: bool) -> Vec<AppServerAction> {
                         status: ToolCallStatus::InProgress,
                         content: Vec::new(),
                         locations: Vec::new(),
-                        raw_input: i.get("command").cloned().or_else(|| i.get("input").cloned()),
+                        raw_input: i
+                            .get("command")
+                            .cloned()
+                            .or_else(|| i.get("input").cloned()),
                         raw_output: None,
                     }),
                 })]
@@ -435,10 +456,7 @@ pub fn approval_response(method: &str, params: &Value, allow: bool) -> Value {
                         .and_then(|o| o.get("label").or_else(|| o.get("id")))
                         .and_then(Value::as_str)
                         .unwrap_or("yes");
-                    answers.insert(
-                        qid.to_string(),
-                        json!({ "answers": [first] }),
-                    );
+                    answers.insert(qid.to_string(), json!({ "answers": [first] }));
                 }
             }
             json!({ "answers": answers })
@@ -475,13 +493,15 @@ pub fn mode_views() -> Vec<SessionModeView> {
         .map(|(id, name)| SessionModeView {
             id: id.to_string(),
             name: name.to_string(),
-            description: Some(match *id {
-                "approval-required" => "Ask before running commands or editing files",
-                "auto-accept-edits" => "Auto-accept file edits, still ask for commands",
-                "auto" => "Let the agent decide within the workspace",
-                _ => "No prompts; everything is allowed",
-            }
-            .to_string()),
+            description: Some(
+                match *id {
+                    "approval-required" => "Ask before running commands or editing files",
+                    "auto-accept-edits" => "Auto-accept file edits, still ask for commands",
+                    "auto" => "Let the agent decide within the workspace",
+                    _ => "No prompts; everything is allowed",
+                }
+                .to_string(),
+            ),
         })
         .collect()
 }
@@ -503,7 +523,9 @@ pub struct AppServerProbe {
 pub async fn probe_handshake(program: &std::path::Path) -> Option<AppServerProbe> {
     use crate::conn::NullCallbacks;
     let launch = launch(program.to_path_buf());
-    let process = AgentProcess::spawn(&launch, Arc::new(NullCallbacks)).await.ok()?;
+    let process = AgentProcess::spawn(&launch, Arc::new(NullCallbacks))
+        .await
+        .ok()?;
     let conn = process.conn();
 
     async fn call(conn: &crate::conn::Connection, method: &str, params: Value) -> Option<Value> {
@@ -513,7 +535,12 @@ pub async fn probe_handshake(program: &std::path::Path) -> Option<AppServerProbe
             .ok()
     }
 
-    let init = call(conn, "initialize", json!({ "clientInfo": { "name": "mira-probe" } })).await?;
+    let init = call(
+        conn,
+        "initialize",
+        json!({ "clientInfo": { "name": "mira-probe" } }),
+    )
+    .await?;
     let _ = conn.notify("initialized", json!({})).await;
     let account = call(conn, "account/read", Value::Null).await;
     process.shutdown(Duration::from_millis(500)).await;
@@ -586,7 +613,10 @@ impl crate::conn::AgentCallback for Callbacks {
         method: &str,
         params: Value,
     ) -> Result<Value, crate::conn::ConnError> {
-        let rid = id.as_str().map(str::to_string).unwrap_or_else(|| id.to_string());
+        let rid = id
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| id.to_string());
         let Some(perm) = permission_from_request(method, &rid, &params) else {
             return Err(crate::conn::ConnError::Unhandled {
                 method: method.to_string(),
@@ -605,8 +635,15 @@ impl crate::conn::AgentCallback for Callbacks {
                 AppServerAction::Event(e) => {
                     let _ = self.tx.send(e).await;
                 }
-                AppServerAction::TurnEnded { stop_reason, is_error } => {
-                    if let Some(tid) = params.get("turn").and_then(|t| t.get("id")).and_then(Value::as_str) {
+                AppServerAction::TurnEnded {
+                    stop_reason,
+                    is_error,
+                } => {
+                    if let Some(tid) = params
+                        .get("turn")
+                        .and_then(|t| t.get("id"))
+                        .and_then(Value::as_str)
+                    {
                         *self.active_turn.lock().await = Some(tid.to_string());
                     }
                     let _ = self
@@ -761,36 +798,44 @@ impl AppServerAgent {
     /// Fetch the advertised catalog, following page cursors. Best-effort:
     /// anything failing yields what arrived so far rather than an error.
     async fn fetch_models(conn: &crate::conn::Connection) -> Vec<CodexModel> {
-    let mut values = Vec::new();
-    let mut cursor: Option<String> = None;
-    loop {
-        let params = match cursor.clone() {
-            Some(c) => json!({ "cursor": c }),
-            None => json!({}),
-        };
-        let page: Value = match tokio::time::timeout(
-            CALL_TIMEOUT,
-            conn.request::<Value>("model/list", params),
-        )
-        .await
-        {
-            Ok(Ok(p)) => p,
-            _ => break,
-        };
-        for e in page.get("data").and_then(Value::as_array).cloned().unwrap_or_default() {
-            if let Some(m) = parse_model_entry(&e) {
-                if !values.iter().any(|v: &CodexModel| v.value == m.value) {
-                    values.push(m);
+        let mut values = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let params = match cursor.clone() {
+                Some(c) => json!({ "cursor": c }),
+                None => json!({}),
+            };
+            let page: Value = match tokio::time::timeout(
+                CALL_TIMEOUT,
+                conn.request::<Value>("model/list", params),
+            )
+            .await
+            {
+                Ok(Ok(p)) => p,
+                _ => break,
+            };
+            for e in page
+                .get("data")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+            {
+                if let Some(m) = parse_model_entry(&e) {
+                    if !values.iter().any(|v: &CodexModel| v.value == m.value) {
+                        values.push(m);
+                    }
                 }
             }
+            cursor = page
+                .get("nextCursor")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            if cursor.is_none() {
+                break;
+            }
         }
-        cursor = page.get("nextCursor").and_then(Value::as_str).map(str::to_string);
-        if cursor.is_none() {
-            break;
-        }
+        values
     }
-    values
-}
 
     pub async fn session_id(&self) -> Option<String> {
         self.thread_id.lock().await.clone()
@@ -799,15 +844,15 @@ impl AppServerAgent {
     /// Send a turn. Returns once the turn is accepted, not when it finishes;
     /// completion arrives as `turn/completed` on the event channel.
     pub async fn prompt(&self, text: &str) -> Result<(), NativeError> {
-        let tid = self.session_id().await.ok_or_else(|| {
-            NativeError::Other("no codex thread yet".to_string())
-        })?;
+        let tid = self
+            .session_id()
+            .await
+            .ok_or_else(|| NativeError::Other("no codex thread yet".to_string()))?;
         let res: Value = tokio::time::timeout(
             CALL_TIMEOUT,
-            self.process.conn().request::<Value>(
-                "turn/start",
-                json!({ "threadId": tid, "prompt": text }),
-            ),
+            self.process
+                .conn()
+                .request::<Value>("turn/start", json!({ "threadId": tid, "prompt": text })),
         )
         .await
         .map_err(|_| NativeError::Other("turn/start timed out".to_string()))?
@@ -830,7 +875,9 @@ impl AppServerAgent {
         }
         let _ = tokio::time::timeout(
             Duration::from_secs(10),
-            self.process.conn().request::<Value>("turn/interrupt", params),
+            self.process
+                .conn()
+                .request::<Value>("turn/interrupt", params),
         )
         .await;
         Ok(())
@@ -879,8 +926,6 @@ impl AppServerAgent {
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -904,8 +949,13 @@ mod tests {
             "item/reasoning/textDelta",
             &v(r#"{"delta":"hmm","itemId":"i1"}"#),
         );
-        assert!(t.iter().any(|x| matches!(x,
-            AppServerAction::Event(NormalizedEvent { event: MiraEvent::AgentThought { .. }, .. }))));
+        assert!(t.iter().any(|x| matches!(
+            x,
+            AppServerAction::Event(NormalizedEvent {
+                event: MiraEvent::AgentThought { .. },
+                ..
+            })
+        )));
     }
 
     #[test]
@@ -920,7 +970,9 @@ mod tests {
 
         let done = map_notification(
             "item/completed",
-            &v(r#"{"item":{"id":"i1","type":"command_execution","aggregated_output":"a","exit_code":0}}"#),
+            &v(
+                r#"{"item":{"id":"i1","type":"command_execution","aggregated_output":"a","exit_code":0}}"#,
+            ),
         );
         assert!(done.iter().any(|x| matches!(x,
             AppServerAction::Event(NormalizedEvent { event: MiraEvent::ToolCallUpdate(c), .. })
@@ -929,12 +981,14 @@ mod tests {
 
     #[test]
     fn turn_endings_map_to_stop_reasons() {
-        assert!(map_notification("turn/completed", &v(r#"{"turn":{"id":"t"}}"#)).contains(
-            &AppServerAction::TurnEnded {
-                stop_reason: "completed".into(),
-                is_error: false
-            }
-        ));
+        assert!(
+            map_notification("turn/completed", &v(r#"{"turn":{"id":"t"}}"#)).contains(
+                &AppServerAction::TurnEnded {
+                    stop_reason: "completed".into(),
+                    is_error: false
+                }
+            )
+        );
         assert!(map_notification("turn/aborted", &v(r#"{}"#)).contains(
             &AppServerAction::TurnEnded {
                 stop_reason: "cancelled".into(),
@@ -947,10 +1001,21 @@ mod tests {
     fn token_usage_becomes_a_usage_event() {
         let a = map_notification(
             "thread/tokenUsage/updated",
-            &v(r#"{"tokenUsage":{"total":{"totalTokens":100},"last":{"totalTokens":20},"modelContextWindow":200000}}"#),
+            &v(
+                r#"{"tokenUsage":{"total":{"totalTokens":100},"last":{"totalTokens":20},"modelContextWindow":200000}}"#,
+            ),
         );
-        assert!(a.iter().any(|x| matches!(x,
-            AppServerAction::Event(NormalizedEvent { event: MiraEvent::Usage { used: 20, size: 200000, .. }, .. }))));
+        assert!(a.iter().any(|x| matches!(
+            x,
+            AppServerAction::Event(NormalizedEvent {
+                event: MiraEvent::Usage {
+                    used: 20,
+                    size: 200000,
+                    ..
+                },
+                ..
+            })
+        )));
     }
 
     #[test]
@@ -984,11 +1049,17 @@ mod tests {
     fn model_entries_parse_defensively() {
         assert_eq!(
             parse_model_entry(&v(r#"{"id":"gpt-5","name":"GPT 5"}"#)),
-            Some(CodexModel { value: "gpt-5".into(), label: "GPT 5".into() })
+            Some(CodexModel {
+                value: "gpt-5".into(),
+                label: "GPT 5".into()
+            })
         );
         assert_eq!(
             parse_model_entry(&v(r#"{"slug":"x-mini"}"#)),
-            Some(CodexModel { value: "x-mini".into(), label: "x-mini".into() })
+            Some(CodexModel {
+                value: "x-mini".into(),
+                label: "x-mini".into()
+            })
         );
         assert!(parse_model_entry(&v(r#"{"nope":1}"#)).is_none());
     }
@@ -996,10 +1067,14 @@ mod tests {
     #[test]
     fn reroute_carries_the_new_model_id() {
         let a = map_notification("model/rerouted", &v(r#"{"model":"gpt-5-mini"}"#));
-        assert!(a.contains(&AppServerAction::ModelRerouted { model: "gpt-5-mini".into() }));
+        assert!(a.contains(&AppServerAction::ModelRerouted {
+            model: "gpt-5-mini".into()
+        }));
         // Nested shape, same outcome.
         let b = map_notification("model/rerouted", &v(r#"{"model":{"id":"gpt-5"}}"#));
-        assert!(b.contains(&AppServerAction::ModelRerouted { model: "gpt-5".into() }));
+        assert!(b.contains(&AppServerAction::ModelRerouted {
+            model: "gpt-5".into()
+        }));
         // Nothing to mark with: silence, not a guess.
         assert!(map_notification("model/rerouted", &v(r#"{}"#)).is_empty());
     }
@@ -1007,8 +1082,14 @@ mod tests {
     #[test]
     fn config_options_event_marks_current_without_reordering() {
         let models = vec![
-            CodexModel { value: "gpt-5".into(), label: "GPT 5".into() },
-            CodexModel { value: "gpt-5-mini".into(), label: "GPT 5 Mini".into() },
+            CodexModel {
+                value: "gpt-5".into(),
+                label: "GPT 5".into(),
+            },
+            CodexModel {
+                value: "gpt-5-mini".into(),
+                label: "GPT 5 Mini".into(),
+            },
         ];
         let unmarked = config_options_event(&models, None);
         let MiraEvent::ConfigOptions { options } = unmarked.event else {
@@ -1028,9 +1109,18 @@ mod tests {
 
     #[test]
     fn runtime_modes_cover_the_postures() {
-        assert_eq!(policy_for_mode("approval-required"), ("untrusted", "read-only"));
-        assert_eq!(policy_for_mode("full-access"), ("never", "danger-full-access"));
-        assert_eq!(mode_for_permission(PermissionMode::Ask), "approval-required");
+        assert_eq!(
+            policy_for_mode("approval-required"),
+            ("untrusted", "read-only")
+        );
+        assert_eq!(
+            policy_for_mode("full-access"),
+            ("never", "danger-full-access")
+        );
+        assert_eq!(
+            mode_for_permission(PermissionMode::Ask),
+            "approval-required"
+        );
         assert_eq!(mode_views().len(), 4);
     }
 
@@ -1088,7 +1178,7 @@ done
                 args: vec!["app-server".to_string()],
                 env: Default::default(),
                 secret_env: Vec::new(),
-        env_deny: Vec::new(),
+                env_deny: Vec::new(),
             },
             dir,
         )
@@ -1123,7 +1213,10 @@ done
             if let MiraEvent::ConfigOptions { options } = &e.event {
                 if let Some(m) = options.iter().find(|o| o.id == "model") {
                     let vs: Vec<_> = m.values.iter().map(|x| x.value.as_str()).collect();
-                    assert!(vs.contains(&"gpt-5") && vs.contains(&"gpt-5-mini"), "{vs:?}");
+                    assert!(
+                        vs.contains(&"gpt-5") && vs.contains(&"gpt-5-mini"),
+                        "{vs:?}"
+                    );
                     saw_models = true;
                 }
             }
@@ -1147,13 +1240,12 @@ done
                     Some(e) = events.recv() => match &e.event {
                         MiraEvent::AssistantText { text, .. } if text == "hello" => saw_text = true,
                         MiraEvent::ToolCallUpdate(c) if c.id == "i1" => saw_update = true,
-                        MiraEvent::ConfigOptions { options } => {
+                        MiraEvent::ConfigOptions { options }
                             if options.iter().any(|o| {
                                 o.id == "model" && o.current.as_deref() == Some("gpt-5-mini")
-                            }) {
+                            }) => {
                                 saw_marked = true;
                             }
-                        }
                         _ => {}
                     },
                     Some(stop) = ends.recv() => return Some(stop),
@@ -1176,7 +1268,10 @@ done
         assert_eq!(asked[0].tool_name, "shell");
 
         agent.compact().await.expect("compact");
-        assert!(agent.query_rate_limits().await.is_some(), "rate limits readable");
+        assert!(
+            agent.query_rate_limits().await.is_some(),
+            "rate limits readable"
+        );
         agent.shutdown().await;
     }
 }

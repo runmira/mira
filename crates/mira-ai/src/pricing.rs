@@ -25,10 +25,6 @@ pub struct ModelPrice {
 /// resolves to the `gpt-4o` entry,
 /// and so `openai/gpt-4o` (a gateway id)
 /// resolves the same way.
-
-// ⚠️ Note: The rsplit('/') approach may fail if the model ID contains
-// multiple slashes (e.g., 'provider/model/submodel'). Consider using a more robust
-// parsing strategy for deeply nested gateway IDs.
 pub fn price_for(model: &str) -> Option<ModelPrice> {
     // Gateways like OpenRouter prefix the vendor (`anthropic/claude-…`);
     // price on the model part. Handle nested gateway IDs like 'provider/model/submodel'

@@ -91,7 +91,15 @@ fn is_google_thinking_model(id: &str) -> bool {
 fn is_router_reasoning_model(id: &str) -> bool {
     let id = id.to_ascii_lowercase();
     [
-        "gpt-5", "o1-", "o3-", "o4-", "claude-", "gpt-oss", "qwen3", "deepseek-r1", "kimi",
+        "gpt-5",
+        "o1-",
+        "o3-",
+        "o4-",
+        "claude-",
+        "gpt-oss",
+        "qwen3",
+        "deepseek-r1",
+        "kimi",
     ]
     .iter()
     .any(|needle| id.contains(needle))
@@ -258,7 +266,10 @@ mod tests {
             vec!["reasoning_effort"]
         );
         assert_eq!(
-            ids(&openai_compatible("deepseek/deepseek-r1", CompatFlavor::Router)),
+            ids(&openai_compatible(
+                "deepseek/deepseek-r1",
+                CompatFlavor::Router
+            )),
             vec!["reasoning_effort"]
         );
     }
@@ -281,9 +292,7 @@ mod tests {
             CompatFlavor::Router
         );
         assert_eq!(
-            CompatFlavor::from_base_url(
-                "https://generativelanguage.googleapis.com/v1beta/openai"
-            ),
+            CompatFlavor::from_base_url("https://generativelanguage.googleapis.com/v1beta/openai"),
             CompatFlavor::Google
         );
         assert_eq!(
@@ -294,7 +303,10 @@ mod tests {
 
     #[test]
     fn anthropic_gets_effort_and_nothing_else() {
-        assert_eq!(ids(&anthropic("claude-sonnet-4-5")), vec!["reasoning_effort"]);
+        assert_eq!(
+            ids(&anthropic("claude-sonnet-4-5")),
+            vec!["reasoning_effort"]
+        );
         assert!(ids(&anthropic("claude-2.1")).is_empty());
     }
 

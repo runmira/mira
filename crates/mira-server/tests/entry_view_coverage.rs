@@ -39,10 +39,7 @@ fn entry_kinds() -> BTreeSet<String> {
         .split_once("export type Entry =")
         .expect("Entry union")
         .1;
-    let body = after
-        .split_once("\ntype ")
-        .map(|(b, _)| b)
-        .unwrap_or(after);
+    let body = after.split_once("\ntype ").map(|(b, _)| b).unwrap_or(after);
 
     // Union members are `| AliasName`.
     let mut aliases: BTreeSet<&str> = BTreeSet::new();
@@ -64,7 +61,9 @@ fn entry_kinds() -> BTreeSet<String> {
             continue;
         };
         let rest = &src[pos..];
-        let Some(k) = rest.find("kind: '") else { continue };
+        let Some(k) = rest.find("kind: '") else {
+            continue;
+        };
         let after_k = &rest[k + "kind: '".len()..];
         let end = after_k.find('\'').unwrap_or(0);
         out.insert(after_k[..end].to_string());
@@ -75,9 +74,7 @@ fn entry_kinds() -> BTreeSet<String> {
 /// Every `kind` `EntryView` handles.
 fn rendered_kinds() -> BTreeSet<String> {
     let src = std::fs::read_to_string(frontend("src/App.tsx")).expect("read App.tsx");
-    let start = src
-        .find("function EntryView")
-        .expect("EntryView");
+    let start = src.find("function EntryView").expect("EntryView");
     // The switch is the first `switch (entry.kind)` in the function.
     let sw = src[start..]
         .find("switch (entry.kind)")

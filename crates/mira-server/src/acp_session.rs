@@ -21,14 +21,12 @@ use mira_acp::process::{start_agent as start_acp_agent, StartError};
 use mira_pty::PtyRegistry;
 use tokio::sync::RwLock;
 
-use mira_policy::Decision;
-use mira_acp::driver::Transport;
-use crate::acp_host::{
-    AcpEventPort, AcpFiles, AcpPermissions, AcpTerminals,
-};
+use crate::acp_host::{AcpEventPort, AcpFiles, AcpPermissions, AcpTerminals};
 use crate::protocol::ServerMsg;
 use crate::slot::SessionSlot;
 use crate::state::AppState;
+use mira_acp::driver::Transport;
+use mira_policy::Decision;
 
 /// How large a single ACP file read may be.
 const MAX_ACP_READ_BYTES: usize = 1024 * 1024;
@@ -67,9 +65,11 @@ impl SlotAgent {
         if !driver.privileged_mode_ids().contains(&mode_id) {
             return None;
         }
-        Some(driver.privileged_mode_reason(mode_id).unwrap_or(
-            "This mode grants the agent more access than Mira would.",
-        ))
+        Some(
+            driver
+                .privileged_mode_reason(mode_id)
+                .unwrap_or("This mode grants the agent more access than Mira would."),
+        )
     }
 
     pub async fn agent(&self) -> Option<AgentHandle> {
@@ -152,9 +152,7 @@ pub async fn start_agent(
         // outlives Mira restarts this way instead of starting blank each
         // time. Explicit overrides (import resume, fork) always win.
         if native.resume.is_none() {
-            if let Some(cur) =
-                mira_acp::agent_sessions::read(&slot.id.to_string(), driver.kind())
-            {
+            if let Some(cur) = mira_acp::agent_sessions::read(&slot.id.to_string(), driver.kind()) {
                 native.resume = Some(cur.agent_session_id);
             }
         }
@@ -171,14 +169,9 @@ pub async fn start_agent(
     }
     let launch: LaunchConfig = match transport {
         Transport::Native => {
-            let mut l = mira_acp::process::build_native_launch(
-                driver,
-                &driver_cfg,
-                mode,
-                &program,
-                None,
-            )
-            .expect("native transport implies a launch");
+            let mut l =
+                mira_acp::process::build_native_launch(driver, &driver_cfg, mode, &program, None)
+                    .expect("native transport implies a launch");
             // Keep the driver's own env and args; only the program differs.
             let acp = driver.resolve(&driver_cfg, mode, program.clone());
             l.env = acp.env;
@@ -211,11 +204,7 @@ pub async fn start_agent(
         registry.clone(),
         /* sandboxed */ true,
     );
-    let files = AcpFiles::new(
-        tool_ctx,
-        slot.approver.clone(),
-        MAX_ACP_READ_BYTES,
-    );
+    let files = AcpFiles::new(tool_ctx, slot.approver.clone(), MAX_ACP_READ_BYTES);
     let permissions = AcpPermissions::new(slot.approver.clone());
     // Spend reports are booked to the user's ledger, against this chat, so
     // the Usage page counts agent turns next to Mira's own.
@@ -227,7 +216,10 @@ pub async fn start_agent(
                 session_id: slot.id.to_string(),
                 cwd: repo_root.to_string_lossy().into_owned(),
                 driver: params.driver_kind.clone(),
-                fallback_model: params.model.clone().unwrap_or_else(|| params.driver_kind.clone()),
+                fallback_model: params
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| params.driver_kind.clone()),
             },
         ),
         None => AcpEventPort::new(slot.events_tx.clone()),
@@ -413,11 +405,16 @@ fn ensure_transcript_logger(state: &AppState, slot: &Arc<SessionSlot>) {
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             };
-            let Some(slot) = weak_slot.upgrade() else { break };
+            let Some(slot) = weak_slot.upgrade() else {
+                break;
+            };
             slot.engine.touch();
             // A title the agent reports for its session becomes the row's
             // name — it knows what the conversation is about.
-            if let ServerMsg::AcpSessionInfo { title: Some(title), .. } = &msg {
+            if let ServerMsg::AcpSessionInfo {
+                title: Some(title), ..
+            } = &msg
+            {
                 let title = title.trim();
                 if !title.is_empty() {
                     let session = slot.session.read().await.clone();
@@ -512,7 +509,11 @@ async fn decide_native_permission(
             }
             let updated_permissions = match scope {
                 Some(crate::protocol::ApprovalScope::Session) => {
-                    mira_acp::native::session_permission_updates(&p.tool_name, &p.suggestions, false)
+                    mira_acp::native::session_permission_updates(
+                        &p.tool_name,
+                        &p.suggestions,
+                        false,
+                    )
                 }
                 Some(crate::protocol::ApprovalScope::Always) => {
                     mira_acp::native::session_permission_updates(&p.tool_name, &p.suggestions, true)
@@ -530,7 +531,12 @@ async fn decide_native_permission(
 
 /// Wrap an interactive prompt in a synthetic tool call, so the client's
 /// existing cards (which attach to a tool entry by id) render it unchanged.
-async fn with_prompt_card<F, Fut, T>(slot: &SessionSlot, name: &str, args: serde_json::Value, ask: F) -> T
+async fn with_prompt_card<F, Fut, T>(
+    slot: &SessionSlot,
+    name: &str,
+    args: serde_json::Value,
+    ask: F,
+) -> T
 where
     F: FnOnce(String) -> Fut,
     Fut: std::future::Future<Output = (T, String)>,
@@ -567,12 +573,23 @@ async fn ask_agent_questions(
     p: &mira_acp::native::NativePermission,
 ) -> mira_acp::native::PermissionDecision {
     use mira_acp::native::PermissionDecision;
-    use mira_tools::prompt::{AskUserOption, AskUserProposal, AskUserQuestion, PromptRequest, PromptResponse};
-    let raw = p.input.get("questions").and_then(|q| q.as_array()).cloned().unwrap_or_default();
+    use mira_tools::prompt::{
+        AskUserOption, AskUserProposal, AskUserQuestion, PromptRequest, PromptResponse,
+    };
+    let raw = p
+        .input
+        .get("questions")
+        .and_then(|q| q.as_array())
+        .cloned()
+        .unwrap_or_default();
     let questions: Vec<AskUserQuestion> = raw
         .iter()
         .map(|q| AskUserQuestion {
-            question: q.get("question").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            question: q
+                .get("question")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
             header: q.get("header").and_then(|v| v.as_str()).map(str::to_string),
             options: q
                 .get("options")
@@ -580,20 +597,32 @@ async fn ask_agent_questions(
                 .map(|opts| {
                     opts.iter()
                         .map(|o| AskUserOption {
-                            label: o.get("label").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                            description: o.get("description").and_then(|v| v.as_str()).map(str::to_string),
+                            label: o
+                                .get("label")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            description: o
+                                .get("description")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string),
                             recommended: false,
                         })
                         .collect()
                 })
                 .unwrap_or_default(),
-            multi_select: q.get("multiSelect").and_then(|v| v.as_bool()).unwrap_or(false),
+            multi_select: q
+                .get("multiSelect")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
         })
         .collect();
     if questions.is_empty() {
         return PermissionDecision::from(true);
     }
-    let proposal = AskUserProposal { questions: questions.clone() };
+    let proposal = AskUserProposal {
+        questions: questions.clone(),
+    };
     let channel = slot.prompt_channel.clone();
     let args = serde_json::json!({ "questions": raw });
     with_prompt_card(slot, "ask_user", args, |id| async move {
@@ -644,7 +673,12 @@ async fn review_agent_plan(
 ) -> mira_acp::native::PermissionDecision {
     use mira_acp::native::PermissionDecision;
     use mira_tools::prompt::{PromptRequest, PromptResponse};
-    let markdown = p.input.get("plan").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let markdown = p
+        .input
+        .get("plan")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let proposal = plan_from_markdown(&markdown);
     let channel = slot.prompt_channel.clone();
     let args = serde_json::json!({ "title": proposal.title, "steps": proposal.steps });
@@ -664,7 +698,11 @@ async fn review_agent_plan(
                     serde_json::json!({ "plan": plan })
                 });
                 (
-                    PermissionDecision { allow: true, updated_input, ..Default::default() },
+                    PermissionDecision {
+                        allow: true,
+                        updated_input,
+                        ..Default::default()
+                    },
                     "approved".to_string(),
                 )
             }
@@ -675,7 +713,10 @@ async fn review_agent_plan(
                         Some(n) if !n.trim().is_empty() => {
                             format!("The user rejected the plan: {n}. Revise it and propose again.")
                         }
-                        _ => "The user rejected the plan. Stay in plan mode and ask what to change.".into(),
+                        _ => {
+                            "The user rejected the plan. Stay in plan mode and ask what to change."
+                                .into()
+                        }
                     }),
                     ..Default::default()
                 },
@@ -717,10 +758,19 @@ pub(crate) fn plan_from_markdown(md: &str) -> mira_tools::prompt::PlanProposal {
             .or_else(|| t.strip_prefix("* "))
             .or_else(|| {
                 let digits = t.chars().take_while(|c| c.is_ascii_digit()).count();
-                (digits > 0).then(|| t[digits..].strip_prefix(". ").or_else(|| t[digits..].strip_prefix(") "))).flatten()
+                (digits > 0)
+                    .then(|| {
+                        t[digits..]
+                            .strip_prefix(". ")
+                            .or_else(|| t[digits..].strip_prefix(") "))
+                    })
+                    .flatten()
             });
         if let Some(item) = item {
-            steps.push(PlanStep { description: item.trim().to_string(), why: None });
+            steps.push(PlanStep {
+                description: item.trim().to_string(),
+                why: None,
+            });
         }
     }
     if steps.is_empty() {
@@ -728,11 +778,16 @@ pub(crate) fn plan_from_markdown(md: &str) -> mira_tools::prompt::PlanProposal {
             .split("\n\n")
             .map(str::trim)
             .filter(|p| !p.is_empty() && !p.starts_with('#'))
-            .map(|p| PlanStep { description: p.to_string(), why: None })
+            .map(|p| PlanStep {
+                description: p.to_string(),
+                why: None,
+            })
             .collect();
     }
     PlanProposal {
-        title: title.filter(|t| !t.is_empty()).unwrap_or_else(|| "Agent plan".to_string()),
+        title: title
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| "Agent plan".to_string()),
         steps,
     }
 }
@@ -868,7 +923,11 @@ impl AcpLaunchParams {
             launch_args: v
                 .get("launch_args")
                 .and_then(|a| a.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(str::to_string))
+                        .collect()
+                })
                 .unwrap_or_default(),
             env: v
                 .get("env")
@@ -938,16 +997,23 @@ pub struct AgentTurnSummary {
 
 /// List recorded turns oldest-first. Snapshot lines precede their turn's
 /// user line in the file, so one pass with a pending flag pairs them.
-pub fn agent_turns(slot_id: &str, store: Option<&std::sync::Arc<dyn mira_harness::SessionStore>>) -> Vec<AgentTurnSummary> {
-    let Some(path) = store.and_then(|s| {
-        s.agent_log_path(&mira_core::SessionId::from(slot_id))
-    }) else {
+pub fn agent_turns(
+    slot_id: &str,
+    store: Option<&std::sync::Arc<dyn mira_harness::SessionStore>>,
+) -> Vec<AgentTurnSummary> {
+    let Some(path) = store.and_then(|s| s.agent_log_path(&mira_core::SessionId::from(slot_id)))
+    else {
         return Vec::new();
     };
     let mut out = Vec::new();
     let mut pending_snapshot = false;
     for line in mira_acp::agent_sessions::read_lines(&path) {
-        if line.get("snapshot").and_then(|s| s.get("hash")).and_then(|h| h.as_str()).is_some() {
+        if line
+            .get("snapshot")
+            .and_then(|s| s.get("hash"))
+            .and_then(|h| h.as_str())
+            .is_some()
+        {
             pending_snapshot = true;
             continue;
         }
@@ -1090,7 +1156,9 @@ pub async fn revert_agent_turn(
             .map_err(|e| format!("could not restore files: {e}"))?;
         notes.push(format!("files restored to before turn {turn}"));
     } else {
-        notes.push(format!("no file snapshot for turn {turn} — transcript only"));
+        notes.push(format!(
+            "no file snapshot for turn {turn} — transcript only"
+        ));
     }
 
     mira_acp::snapshot::truncate_from_turn(&path, turn)
@@ -1108,13 +1176,13 @@ pub async fn revert_agent_turn(
     // longer shows. Restarting is free until the next prompt, and keeps the
     // revert to one user action instead of two.
     stop_agent(slot).await;
-    let handle = restart_native_agent(
-        state,
-        slot,
-        mira_acp::native::NativeOverrides::default(),
-    )
-    .await?;
-    Ok(format!("{}; restarted {}", notes.join("; "), handle.display_name))
+    let handle =
+        restart_native_agent(state, slot, mira_acp::native::NativeOverrides::default()).await?;
+    Ok(format!(
+        "{}; restarted {}",
+        notes.join("; "),
+        handle.display_name
+    ))
 }
 
 /// Stop whatever agent `slot` is running.
@@ -1207,7 +1275,14 @@ mod privilege_tests {
     fn every_gated_mode_explains_itself() {
         // An empty confirmation prompt is worse than none: the user cannot
         // decide, so they either click through or the feature is unusable.
-        for kind in ["claude-code", "opencode", "codex", "grok", "cursor", "antigravity"] {
+        for kind in [
+            "claude-code",
+            "opencode",
+            "codex",
+            "grok",
+            "cursor",
+            "antigravity",
+        ] {
             let a = agent(kind);
             for mode in ["agent-full-access", "code", "ask", "auto"] {
                 if let Some(reason) = a.privileged_mode_reason(mode) {
@@ -1231,7 +1306,9 @@ mod plan_tests {
 
     #[test]
     fn an_agents_markdown_plan_becomes_plan_steps() {
-        let p = plan_from_markdown("# Fix login\n\nContext line.\n\n1. Read auth.rs\n2. Patch the check\n- Run tests\n");
+        let p = plan_from_markdown(
+            "# Fix login\n\nContext line.\n\n1. Read auth.rs\n2. Patch the check\n- Run tests\n",
+        );
         assert_eq!(p.title, "Fix login");
         let steps: Vec<_> = p.steps.iter().map(|s| s.description.as_str()).collect();
         assert_eq!(steps, ["Read auth.rs", "Patch the check", "Run tests"]);
@@ -1282,7 +1359,10 @@ mod resolve_start_tests {
         let persisted = p.to_persisted();
         let text = persisted.to_string();
         assert!(!text.contains("sk-secret"), "the api key is never written");
-        assert!(!text.contains("sk-env"), "credential-named env vars are never written");
+        assert!(
+            !text.contains("sk-env"),
+            "credential-named env vars are never written"
+        );
 
         let back = AcpLaunchParams::from_meta(&mira_harness::persist::AgentSessionMeta {
             driver_kind: "claude-code".into(),
@@ -1292,11 +1372,20 @@ mod resolve_start_tests {
         });
         assert_eq!(back.driver_kind, "claude-code");
         assert_eq!(back.display_name(), "Claude (work)");
-        assert_eq!(back.cfg.binary_path.as_deref(), Some(std::path::Path::new("/opt/claude")));
-        assert_eq!(back.cfg.env.get("CLAUDE_PROFILE").map(String::as_str), Some("work"));
+        assert_eq!(
+            back.cfg.binary_path.as_deref(),
+            Some(std::path::Path::new("/opt/claude"))
+        );
+        assert_eq!(
+            back.cfg.env.get("CLAUDE_PROFILE").map(String::as_str),
+            Some("work")
+        );
         assert_eq!(back.model.as_deref(), Some("opus"));
         assert_eq!(back.mode_id.as_deref(), Some("acceptEdits"));
-        assert!(back.same_agent(&p) || p.cfg.api_key.is_some(), "only the secrets differ");
+        assert!(
+            back.same_agent(&p) || p.cfg.api_key.is_some(),
+            "only the secrets differ"
+        );
     }
 
     #[test]
@@ -1304,7 +1393,10 @@ mod resolve_start_tests {
         let a = recorded("codex");
         let mut b = recorded("codex");
         b.model = Some("gpt-5".into());
-        assert!(a.same_agent(&b), "picking a model must not cost the running process");
+        assert!(
+            a.same_agent(&b),
+            "picking a model must not cost the running process"
+        );
         assert!(!a.same_agent(&recorded("claude-code")));
     }
 
@@ -1312,11 +1404,13 @@ mod resolve_start_tests {
     fn a_new_session_inherits_the_previous_sessions_settings() {
         // No driver, no instance: the bare `AcpStart` the UI sends for a
         // fresh chat resolves to exactly what the last chat ran.
-        let (kind, cfg) =
-            resolve_start_params(Some(recorded("codex")), None, None).unwrap();
+        let (kind, cfg) = resolve_start_params(Some(recorded("codex")), None, None).unwrap();
         assert_eq!(kind, "codex");
         assert_eq!(cfg.display_name.as_deref(), Some("Codex (work)"));
-        assert_eq!(cfg.home_path.as_deref(), Some(std::path::Path::new("/tmp/codex-home")));
+        assert_eq!(
+            cfg.home_path.as_deref(),
+            Some(std::path::Path::new("/tmp/codex-home"))
+        );
     }
 
     #[test]

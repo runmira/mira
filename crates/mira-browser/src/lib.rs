@@ -338,7 +338,8 @@ impl Browser {
     /// profile lock. Everything that wants a browser asks here instead and
     /// gets the same one; the first caller's options win.
     pub fn shared(opts: BrowserOptions) -> std::sync::Arc<Browser> {
-        let key = std::fs::canonicalize(&opts.profile_dir).unwrap_or_else(|_| opts.profile_dir.clone());
+        let key =
+            std::fs::canonicalize(&opts.profile_dir).unwrap_or_else(|_| opts.profile_dir.clone());
         let map = SHARED.get_or_init(Default::default);
         let mut map = map.lock().expect("browser registry poisoned");
         map.entry(key)
@@ -381,9 +382,13 @@ impl Browser {
             *guard = None;
         }
         if guard.is_none() {
-            let mut sess =
-                start(&self.opts, self.live.clone(), self.last_frame.clone(), self.last_url.clone())
-                    .await?;
+            let mut sess = start(
+                &self.opts,
+                self.live.clone(),
+                self.last_frame.clone(),
+                self.last_url.clone(),
+            )
+            .await?;
             sync_screencast(&mut sess).await;
             *guard = Some(sess);
         }
@@ -444,7 +449,9 @@ impl Browser {
             .await
             .map(|_| ()),
             UserInput::Text { text } => {
-                page_call(sess, "Input.insertText", json!({ "text": text })).await.map(|_| ())
+                page_call(sess, "Input.insertText", json!({ "text": text }))
+                    .await
+                    .map(|_| ())
             }
             UserInput::Key { key } => press_key(sess, key).await,
         }
@@ -469,7 +476,10 @@ async fn sync_screencast_inner(sess: &mut Session) {
     }
     if let Some(old) = sess.screencast.take() {
         if let Some(sid) = sess.attached.get(&old).cloned() {
-            let _ = sess.cdp.call(Some(&sid), "Page.stopScreencast", json!({})).await;
+            let _ = sess
+                .cdp
+                .call(Some(&sid), "Page.stopScreencast", json!({}))
+                .await;
         }
     }
     let Ok(sid) = attach(sess).await else { return };
@@ -506,16 +516,24 @@ fn spawn_pump(
             match ev.get("method").and_then(Value::as_str) {
                 Some("Page.screencastFrame") => {
                     let p = &ev["params"];
-                    if let (Some(flat), Some(ack)) = (ev["sessionId"].as_str(), p["sessionId"].as_i64()) {
+                    if let (Some(flat), Some(ack)) =
+                        (ev["sessionId"].as_str(), p["sessionId"].as_i64())
+                    {
                         let cdp = cdp.clone();
                         let flat = flat.to_owned();
                         tokio::spawn(async move {
                             let _ = cdp
-                                .call(Some(&flat), "Page.screencastFrameAck", json!({ "sessionId": ack }))
+                                .call(
+                                    Some(&flat),
+                                    "Page.screencastFrameAck",
+                                    json!({ "sessionId": ack }),
+                                )
                                 .await;
                         });
                     }
-                    let Some(data) = p["data"].as_str() else { continue };
+                    let Some(data) = p["data"].as_str() else {
+                        continue;
+                    };
                     let frame = LiveEvent::Frame {
                         jpeg_base64: data.to_owned(),
                         width: p["metadata"]["deviceWidth"].as_f64().unwrap_or(0.0),
@@ -533,7 +551,9 @@ fn spawn_pump(
                             if let Ok(mut u) = last_url.lock() {
                                 *u = Some(url.to_owned());
                             }
-                            let _ = live.send(LiveEvent::Navigated { url: url.to_owned() });
+                            let _ = live.send(LiveEvent::Navigated {
+                                url: url.to_owned(),
+                            });
                         }
                     }
                 }
@@ -1006,7 +1026,11 @@ async fn run(
             page_call(sess, "Page.reload", json!({})).await?;
             with_snapshot(sess, "Reloaded.".into()).await
         }
-        A::SetViewport { width, height, mobile } => {
+        A::SetViewport {
+            width,
+            height,
+            mobile,
+        } => {
             // `action` is borrowed, so the scalars arrive as references.
             let (w, h) = (*width, *height);
             // Width 0 is CDP's "clear the override" sentinel; passing the

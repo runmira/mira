@@ -156,7 +156,11 @@ mod tests {
     #[test]
     fn activate_switches_and_reports_the_active_instance() {
         let swappable = SwappableProvider::new(provider());
-        assert_eq!(swappable.active_instance(), None, "boot delegate has no id yet");
+        assert_eq!(
+            swappable.active_instance(),
+            None,
+            "boot delegate has no id yet"
+        );
 
         swappable.register("openrouter", provider());
         swappable.register("anthropic", provider());
@@ -164,7 +168,10 @@ mod tests {
         assert_eq!(swappable.active_instance().as_deref(), Some("anthropic"));
         assert!(swappable.activate("openrouter"));
         assert_eq!(swappable.active_instance().as_deref(), Some("openrouter"));
-        assert!(!swappable.activate("nope"), "unknown instance must be refused");
+        assert!(
+            !swappable.activate("nope"),
+            "unknown instance must be refused"
+        );
         // Refused activation keeps the old pointer.
         assert_eq!(swappable.active_instance().as_deref(), Some("openrouter"));
     }

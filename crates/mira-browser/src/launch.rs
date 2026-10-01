@@ -217,10 +217,18 @@ pub async fn clear_stale_lock(profile: &Path) {
         return;
     }
     if process_alive(pid) {
-        tracing::warn!(pid, "stopping an unresponsive Mira browser that holds the profile");
+        tracing::warn!(
+            pid,
+            "stopping an unresponsive Mira browser that holds the profile"
+        );
         terminate(pid).await;
     }
-    for f in ["SingletonLock", "SingletonSocket", "SingletonCookie", "DevToolsActivePort"] {
+    for f in [
+        "SingletonLock",
+        "SingletonSocket",
+        "SingletonCookie",
+        "DevToolsActivePort",
+    ] {
         let _ = std::fs::remove_file(profile.join(f));
     }
 }
@@ -250,14 +258,18 @@ fn process_alive(_pid: u32) -> bool {
 
 #[cfg(unix)]
 async fn terminate(pid: u32) {
-    let _ = std::process::Command::new("kill").arg(pid.to_string()).status();
+    let _ = std::process::Command::new("kill")
+        .arg(pid.to_string())
+        .status();
     for _ in 0..30 {
         if !process_alive(pid) {
             return;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let _ = std::process::Command::new("kill").args(["-9", &pid.to_string()]).status();
+    let _ = std::process::Command::new("kill")
+        .args(["-9", &pid.to_string()])
+        .status();
 }
 
 #[cfg(not(unix))]
@@ -271,7 +283,11 @@ mod tests {
     fn the_devtools_port_file_becomes_a_websocket_url() {
         let dir = std::env::temp_dir().join(format!("mira-devtools-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("DevToolsActivePort"), "52341\n/devtools/browser/abc-123\n").unwrap();
+        std::fs::write(
+            dir.join("DevToolsActivePort"),
+            "52341\n/devtools/browser/abc-123\n",
+        )
+        .unwrap();
         assert_eq!(
             active_devtools_url(&dir).as_deref(),
             Some("ws://127.0.0.1:52341/devtools/browser/abc-123")

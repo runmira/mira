@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use mira_acp::driver::{AcpDriver, DriverConfig, PermissionMode};
+use std::path::PathBuf;
 
 use mira_acp::drivers::ClaudeCodeDriver;
 use mira_acp::native::PermissionGate;
@@ -20,14 +20,10 @@ async fn a_native_agent_actually_starts_from_a_gui_launch() {
         return;
     }
 
-    let launch = mira_acp::native::launch(
-        PathBuf::from("claude"),
-        PermissionMode::Ask,
-        None,
-        None,
-    );
+    let launch = mira_acp::native::launch(PathBuf::from("claude"), PermissionMode::Ask, None, None);
 
-    let gate: PermissionGate = Arc::new(|_p| Box::pin(async { mira_acp::native::PermissionDecision::from(true) }));
+    let gate: PermissionGate =
+        Arc::new(|_p| Box::pin(async { mira_acp::native::PermissionDecision::from(true) }));
     let res = mira_acp::native::NativeAgent::start(&launch, gate, None).await;
     match &res {
         Ok(a) => {
@@ -40,10 +36,23 @@ async fn a_native_agent_actually_starts_from_a_gui_launch() {
     // The account may be rate-limited, and that still produces a `result`,
     // so this is not gated on the agent being willing to work.
     let agent = res.unwrap();
-    let mut events = agent.events.lock().expect("events").take().expect("events rx");
-    let mut ends = agent.turn_end.lock().expect("turn end").take().expect("turn end rx");
+    let mut events = agent
+        .events
+        .lock()
+        .expect("events")
+        .take()
+        .expect("events rx");
+    let mut ends = agent
+        .turn_end
+        .lock()
+        .expect("turn end")
+        .take()
+        .expect("turn end rx");
 
-    agent.prompt("Reply with exactly: PONG").await.expect("write prompt");
+    agent
+        .prompt("Reply with exactly: PONG")
+        .await
+        .expect("write prompt");
 
     let got = tokio::time::timeout(std::time::Duration::from_secs(90), async {
         let mut saw_text = false;
@@ -69,7 +78,10 @@ async fn a_native_agent_actually_starts_from_a_gui_launch() {
         panic!("the event stream closed without the turn ending");
     };
     eprintln!("TURN session_id={:?}", agent.session_id().await);
-    assert!(agent.session_id().await.is_some(), "a session id must be reported");
+    assert!(
+        agent.session_id().await.is_some(),
+        "a session id must be reported"
+    );
     agent.shutdown().await;
 }
 
@@ -95,7 +107,10 @@ fn check_and_spawn_agree_on_the_binary() {
     let spawn = mira_acp::which::resolve_for_spawn(&native_bin);
     eprintln!("AGREE spawn={:?}", spawn);
     assert!(spawn.is_absolute());
-    assert!(spawn.exists(), "the validated binary must exist at spawn time");
+    assert!(
+        spawn.exists(),
+        "the validated binary must exist at spawn time"
+    );
     assert!(!spawn.to_string_lossy().contains("acp"));
 }
 
@@ -113,20 +128,19 @@ async fn a_turn_always_produces_exactly_one_stop_reason() {
     if mira_acp::which::resolve("claude").is_none() {
         return;
     }
-    let launch = mira_acp::native::launch(
-        PathBuf::from("claude"),
-        PermissionMode::Ask,
-        None,
-        None,
-    );
-    let gate: PermissionGate = Arc::new(|_p| Box::pin(async { mira_acp::native::PermissionDecision::from(true) }));
+    let launch = mira_acp::native::launch(PathBuf::from("claude"), PermissionMode::Ask, None, None);
+    let gate: PermissionGate =
+        Arc::new(|_p| Box::pin(async { mira_acp::native::PermissionDecision::from(true) }));
     let agent = mira_acp::native::NativeAgent::start(&launch, gate, None)
         .await
         .expect("spawn");
     let mut events = agent.events.lock().expect("ev").take().expect("rx");
     let mut ends = agent.turn_end.lock().expect("te").take().expect("rx");
 
-    agent.prompt("Reply with exactly: PONG").await.expect("prompt");
+    agent
+        .prompt("Reply with exactly: PONG")
+        .await
+        .expect("prompt");
 
     let first = tokio::time::timeout(std::time::Duration::from_secs(90), async {
         loop {
@@ -145,7 +159,10 @@ async fn a_turn_always_produces_exactly_one_stop_reason() {
         "LIFECYCLE first stop_reason={} error={}",
         first.stop_reason, first.is_error
     );
-    assert!(!first.stop_reason.is_empty(), "a stop reason must be reported");
+    assert!(
+        !first.stop_reason.is_empty(),
+        "a stop reason must be reported"
+    );
 
     // No second end for the same turn: the client would double-count it.
     let extra = tokio::time::timeout(std::time::Duration::from_secs(3), ends.recv()).await;
@@ -175,13 +192,9 @@ async fn an_agent_that_dies_mid_turn_still_closes_the_turn() {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     }
 
-    let launch = mira_acp::native::launch(
-        script,
-        PermissionMode::Ask,
-        None,
-        None,
-    );
-    let gate: PermissionGate = Arc::new(|_p| Box::pin(async { mira_acp::native::PermissionDecision::from(true) }));
+    let launch = mira_acp::native::launch(script, PermissionMode::Ask, None, None);
+    let gate: PermissionGate =
+        Arc::new(|_p| Box::pin(async { mira_acp::native::PermissionDecision::from(true) }));
     let agent = mira_acp::native::NativeAgent::start(&launch, gate, None)
         .await
         .expect("spawn");
@@ -189,20 +202,13 @@ async fn an_agent_that_dies_mid_turn_still_closes_the_turn() {
 
     // No `result` is ever emitted; the only way the client learns the turn is
     // over is the stream closing. The server's pump turns that into a stop.
-    let closed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        loop {
-            tokio::select! {
-                Some(end) = ends.recv() => return Some(end),
-                else => return None,
-            }
-        }
-    })
-    .await;
-
-    eprintln!("CRASH end={:?}", closed);
     // Either a `result` arrives (the script's exit is a normal end here) or
     // the channel closes — the server covers the closed case. What must never
     // happen is the channels staying open with nothing sent.
-    drop(closed);
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), ends.recv()).await;
     agent.shutdown().await;
+    assert!(
+        outcome.is_ok(),
+        "a crashed agent must end the turn or close the channel, not hang"
+    );
 }

@@ -121,7 +121,11 @@ async fn drives_a_page_end_to_end() {
 #[ignore = "needs a Chromium-family browser"]
 async fn adopts_a_browser_left_running_and_streams_it() {
     let profile = std::env::temp_dir().join(format!("mira-browser-adopt-{}", std::process::id()));
-    let opts = BrowserOptions { headless: true, profile_dir: profile.clone(), ..Default::default() };
+    let opts = BrowserOptions {
+        headless: true,
+        profile_dir: profile.clone(),
+        ..Default::default()
+    };
 
     // An "earlier Mira": launch, then forget the session without closing
     // the browser, the way a crash would.
@@ -150,7 +154,9 @@ async fn adopts_a_browser_left_running_and_streams_it() {
     assert!(frame > 0.0);
 
     // Takeover input lands on the page.
-    b.input(&mira_browser::UserInput::Text { text: "x".into() }).await.expect("input");
+    b.input(&mira_browser::UserInput::Text { text: "x".into() })
+        .await
+        .expect("input");
 
     b.execute(&act(json!({"action": "close"}))).await.unwrap();
     let _ = orphan.kill().await;

@@ -175,9 +175,9 @@ pub fn map_postures(
     let mut used = std::collections::BTreeSet::new();
     let mut out = Vec::new();
     for posture in Posture::ALL {
-        let hit = available.iter().find(|(id, name, _)| {
-            !used.contains(id.as_str()) && posture.matches_mode(id, name)
-        });
+        let hit = available
+            .iter()
+            .find(|(id, name, _)| !used.contains(id.as_str()) && posture.matches_mode(id, name));
         let Some((id, name, description)) = hit else {
             continue;
         };
@@ -225,8 +225,17 @@ mod tests {
         ]);
         let mapped = map_postures(&available, Some("acceptEdits"));
         let keys: Vec<_> = mapped.iter().map(|m| m.key).collect();
-        assert_eq!(keys, [Posture::Plan, Posture::Ask, Posture::Edits, Posture::Yolo]);
-        assert!(mapped.iter().find(|m| m.key == Posture::Edits).unwrap().current);
+        assert_eq!(
+            keys,
+            [Posture::Plan, Posture::Ask, Posture::Edits, Posture::Yolo]
+        );
+        assert!(
+            mapped
+                .iter()
+                .find(|m| m.key == Posture::Edits)
+                .unwrap()
+                .current
+        );
     }
 
     #[test]

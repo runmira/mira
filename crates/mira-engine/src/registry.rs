@@ -50,9 +50,7 @@ impl EngineRegistry {
                 }
             }
         }
-        self.instances
-            .values()
-            .find(|i| i.is_native() && i.enabled)
+        self.instances.values().find(|i| i.is_native() && i.enabled)
     }
 
     /// Probe a native instance: configuration checks only, no network.
@@ -87,9 +85,7 @@ impl EngineRegistry {
                 .clone()
                 .unwrap_or_else(|| mira_config::pretty_provider_name(name)),
             enabled: inst.enabled,
-            state: state
-                .err()
-                .unwrap_or(EngineState::Ready),
+            state: state.err().unwrap_or(EngineState::Ready),
             models,
             default_model: default_model_for(cfg, inst),
             auth: None,
@@ -131,8 +127,8 @@ impl EngineRegistry {
             });
         };
         let cfg = driver_config_for(inst);
-        let mut status = mira_acp::probe(d.as_ref(), &cfg, mira_acp::driver::PermissionMode::Ask)
-            .await;
+        let mut status =
+            mira_acp::probe(d.as_ref(), &cfg, mira_acp::driver::PermissionMode::Ask).await;
         // An instance-level display override wins over the driver's own.
         if let Some(name) = &inst.display_name {
             status.display_name = name.clone();
@@ -186,13 +182,11 @@ impl EngineRegistry {
 /// The model an instance starts on: its own override, else the global
 /// default when it's the default native provider.
 pub fn default_model_for(cfg: &MiraConfig, inst: &EngineInstance) -> Option<String> {
-    inst.model
-        .clone()
-        .or_else(|| {
-            (inst.is_native() && cfg.default_provider.as_deref() == Some(inst.id.as_str()))
-                .then_some(cfg.default_model.clone())
-                .flatten()
-        })
+    inst.model.clone().or_else(|| {
+        (inst.is_native() && cfg.default_provider.as_deref() == Some(inst.id.as_str()))
+            .then_some(cfg.default_model.clone())
+            .flatten()
+    })
 }
 
 /// Re-exported so callers reach the conversion without knowing which
@@ -219,10 +213,8 @@ mod tests {
 
     #[test]
     fn snapshots_keep_catalog_models_only_when_usable() {
-        let c = cfg(
-            "default_provider: llamacpp\n\
-             providers:\n  llamacpp:\n    base_url: http://127.0.0.1:9/v1\n    api_key: x\n",
-        );
+        let c = cfg("default_provider: llamacpp\n\
+             providers:\n  llamacpp:\n    base_url: http://127.0.0.1:9/v1\n    api_key: x\n");
         let reg = EngineRegistry::from_config(&c);
         let models = vec![ModelInfo {
             id: "local-model".into(),
@@ -231,16 +223,25 @@ mod tests {
             context_length: Some(8192),
             capabilities: None,
         }];
-        let ready = reg.snapshot_native(&c, "llamacpp", Some(models.clone())).unwrap();
+        let ready = reg
+            .snapshot_native(&c, "llamacpp", Some(models.clone()))
+            .unwrap();
         assert!(ready.state.is_ready());
         assert_eq!(ready.models.len(), 1);
-        assert_eq!(ready.default_model.as_deref(), None, "no default_model configured");
+        assert_eq!(
+            ready.default_model.as_deref(),
+            None,
+            "no default_model configured"
+        );
 
         let broken = cfg("default_provider: groq\n");
         let reg2 = EngineRegistry::from_config(&broken);
         let snap = reg2.snapshot_native(&broken, "groq", Some(models)).unwrap();
         assert!(!snap.state.is_ready());
-        assert!(snap.models.is_empty(), "a broken instance must not show models");
+        assert!(
+            snap.models.is_empty(),
+            "a broken instance must not show models"
+        );
     }
 
     #[test]
@@ -253,10 +254,8 @@ mod tests {
 
     #[test]
     fn unknown_external_driver_is_unavailable_not_missing() {
-        let c = cfg(
-            "default_provider: openai\n\
-             engines:\n  myfork:\n    driver: no-such-driver\n",
-        );
+        let c = cfg("default_provider: openai\n\
+             engines:\n  myfork:\n    driver: no-such-driver\n");
         let reg = EngineRegistry::from_config(&c);
         assert!(reg.get("myfork").is_some());
         // The full probe spawns nothing for an unknown driver; we assert

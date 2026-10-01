@@ -127,7 +127,14 @@ pub fn truncate_from_turn(path: &Path, n: u64) -> std::io::Result<usize> {
         .map(|l| l.to_string())
         .collect::<Vec<_>>()
         .join("\n");
-    std::fs::write(path, if text.is_empty() { String::new() } else { text + "\n" })?;
+    std::fs::write(
+        path,
+        if text.is_empty() {
+            String::new()
+        } else {
+            text + "\n"
+        },
+    )?;
     Ok(kept.len())
 }
 
@@ -145,7 +152,11 @@ mod tests {
                 .args(args)
                 .output()
                 .unwrap();
-            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         };
         git(&["init", "-q"]);
         git(&["config", "user.email", "test@mira"]);

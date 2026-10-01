@@ -978,8 +978,7 @@ impl From<WireModel> for ModelInfo {
             display_name: w.display_name,
             owned_by: Some("anthropic".to_owned()),
             context_length: None,
-            capabilities: (!capabilities.option_descriptors.is_empty())
-                .then_some(capabilities),
+            capabilities: (!capabilities.option_descriptors.is_empty()).then_some(capabilities),
         }
     }
 }

@@ -164,10 +164,7 @@ pub enum ClientMsg {
     ///
     /// ACP has no set-model method — the model selector is a config option
     /// with `category: "model"` — so this is how a model is chosen.
-    AcpSetConfigOption {
-        option_id: String,
-        value: String,
-    },
+    AcpSetConfigOption { option_id: String, value: String },
     /// Send a turn to the running agent.
     AcpPrompt {
         text: String,
@@ -661,13 +658,9 @@ pub enum ServerMsg {
     // point has to know what an ACP session update looks like.
     /// A fragment of the external agent's reply. Chunks arrive as they are
     /// produced, so the UI appends rather than replaces.
-    AcpText {
-        text: String,
-    },
+    AcpText { text: String },
     /// A fragment of the agent's internal reasoning.
-    AcpThought {
-        text: String,
-    },
+    AcpThought { text: String },
     /// The agent started a tool call. The normalized state is forwarded
     /// whole, because it carries diff and terminal content that a bare
     /// `ToolCall` has no place for.
@@ -698,9 +691,7 @@ pub enum ServerMsg {
         options: Vec<mira_acp::events::SessionConfigView>,
     },
     /// Slash commands the agent advertises.
-    AcpCommands {
-        names: Vec<String>,
-    },
+    AcpCommands { names: Vec<String> },
     /// Context-window and cost accounting for the turn so far.
     AcpUsage {
         used: u64,
@@ -731,10 +722,7 @@ pub enum ServerMsg {
     /// Surfaced rather than dropped. ACP's own spec under-documents
     /// `SessionUpdate`, and real agents send vendor extensions, so a silent
     /// gap here is indistinguishable from a hang in the UI.
-    AcpUnmodelled {
-        method: String,
-        reason: String,
-    },
+    AcpUnmodelled { method: String, reason: String },
     /// The agent's session mode changed.
     ///
     /// Emitted for every change, not just privileged ones: a mode change is
@@ -870,7 +858,12 @@ impl ServerMsg {
             HarnessEvent::TurnComplete => Self::TurnComplete,
             HarnessEvent::Done => Self::Done,
             HarnessEvent::Warning(text) => Self::Warning { text },
-            HarnessEvent::Usage { round, totals, context_window, compact_at } => Self::Usage {
+            HarnessEvent::Usage {
+                round,
+                totals,
+                context_window,
+                compact_at,
+            } => Self::Usage {
                 round,
                 totals,
                 context_window: Some(context_window),
