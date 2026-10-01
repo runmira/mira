@@ -110,8 +110,25 @@ pub struct Launched {
     pub ws_url: String,
 }
 
+/// The browser to run: one the user configured (`browser.executable`,
+/// `MIRA_BROWSER`), else Mira's own Chromium (installed on first use), else
+/// an installed Chrome-family browser — so a failed download or an
+/// unsupported platform still leaves the browser tool working.
+pub async fn resolve_executable(explicit: Option<&Path>) -> Result<PathBuf, BrowserError> {
+    if explicit.is_some() || std::env::var_os("MIRA_BROWSER").is_some() {
+        return find_executable(explicit);
+    }
+    match crate::managed::ensure().await {
+        Ok(exe) => Ok(exe),
+        Err(e) => {
+            tracing::warn!(%e, "Mira's own browser is unavailable; using an installed one");
+            find_executable(None)
+        }
+    }
+}
+
 pub async fn launch(opts: &BrowserOptions) -> Result<Launched, BrowserError> {
-    let exe = find_executable(opts.executable.as_deref())?;
+    let exe = resolve_executable(opts.executable.as_deref()).await?;
     std::fs::create_dir_all(&opts.profile_dir).map_err(|e| {
         BrowserError::Launch(format!(
             "create profile dir {}: {e}",

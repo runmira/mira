@@ -16,6 +16,9 @@ thiserror         = { workspace = true }
 tokio             = { workspace = true }
 tracing           = { workspace = true }
 tokio-tungstenite = "0.24"
+reqwest           = { workspace = true }
+zip               = { version = "4", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 tokio = { workspace = true }
+tempfile = "3"

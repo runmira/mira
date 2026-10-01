@@ -26,6 +26,7 @@ use mira_computer::{imaging, ImageLimits, Screenshot};
 
 mod cdp;
 pub mod launch;
+pub mod managed;
 
 use cdp::Cdp;
 
