@@ -1,41 +1,52 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  ArrowClockwise,
+  Bot,
+  Smile,
+  RotateCw,
   Book,
   BookOpen,
-  BracketsCurly,
+  Braces,
   Brain,
   Bug,
+  Bell,
   Check,
+  ChevronRight,
   Code,
   Database,
   Eye,
   FileText,
   FolderOpen,
-  Gear,
+  Cog,
   GitBranch,
+  GitCompare,
   GitCommit,
   GitMerge,
   GitPullRequest,
   Info,
   Key,
+  Keyboard,
   Lightbulb,
-  Lightning,
-  MagnifyingGlass,
-  NotePencil,
+  MessagesSquare,
+  Zap,
+  Search,
+  NotebookPen,
   Package,
+  Palette,
   Paperclip,
+  PenLine,
   Plug,
   Rocket,
-  ScanSmiley,
+  ScanFace,
   Shield,
   ShieldCheck,
-  Sliders,
+  PanelLeft,
   Sparkle,
+  SquareTerminal,
   Target,
   Terminal,
   Wrench,
-} from '@phosphor-icons/react';
+  Globe2,
+} from 'lucide-react';
 import {
   getSettings,
   getSkill,
@@ -51,6 +62,14 @@ import { IntegrationsSection, type GithubReturn } from './Integrations';
 import { UsageSection } from './UsageSection';
 import { ChartColumn } from 'lucide-react';
 import { HooksSection } from './Hooks';
+import { KeybindingsSection } from './settings/KeybindingsSettings';
+import { AcpAgentsSection, type AcpInstanceConfig } from './settings/AcpAgentsSection';
+import { SubagentsSection } from './settings/SubagentsSection';
+import type { AcpAgentStatus } from '../types';
+import { applyReduceMotion, PREF_KEYS, useBoolPref, useStringPref } from '@/lib/prefs';
+import { getPreferredEditorId, listEditors } from '@/lib/editors';
+import { EditorIcon } from './EditorPicker';
+import { isMacPlatform } from '@/lib/keybindings';
 import type {
   KeyUpdate,
   MemoryUpdate,
@@ -130,6 +149,60 @@ const PROVIDER_PRESETS = [
  */
 const OAUTH_PROVIDERS: ReadonlySet<string> = new Set(['openrouter', 'openai']);
 
+/** Provider homepage per preset, for favicons. Local runtimes use their
+ *  public sites (their localhost base URLs have no icon to fetch). */
+const PROVIDER_FAVICON_DOMAIN: Record<string, string> = {
+  openrouter: 'openrouter.ai',
+  openai: 'openai.com',
+  anthropic: 'claude.ai',
+  bedrock: 'aws.amazon.com',
+  google: 'cloud.google.com',
+  deepseek: 'deepseek.com',
+  groq: 'groq.com',
+  cerebras: 'cerebras.ai',
+  xai: 'x.ai',
+  together: 'together.ai',
+  fireworks: 'fireworks.ai',
+  hyperbolic: 'hyperbolic.xyz',
+  novita: 'novita.ai',
+  perplexity: 'perplexity.ai',
+  mistral: 'mistral.ai',
+  moonshot: 'moonshot.ai',
+  ollama: 'ollama.com',
+  lmstudio: 'lmstudio.ai',
+};
+
+/** Brand mark for a provider preset: bundled art for the OAuth providers,
+ *  live site favicon otherwise (hidden if it fails to load, e.g. offline). */
+function ProviderIcon({ name }: { name: string }) {
+  const [failed, setFailed] = useState(false);
+  const bundled =
+    name === 'openrouter' ? openrouterIcon : name === 'openai' ? chatgptIcon : null;
+  if (bundled) {
+    return (
+      <img
+        src={bundled}
+        alt=""
+        aria-hidden="true"
+        draggable={false}
+        className="size-4 shrink-0 rounded-[4px] object-contain"
+      />
+    );
+  }
+  const domain = PROVIDER_FAVICON_DOMAIN[name];
+  if (!domain || failed) return null;
+  return (
+    <img
+      src={`https://www.google.com/s2/favicons?domain=${domain}&sz=64`}
+      alt=""
+      aria-hidden="true"
+      draggable={false}
+      onError={() => setFailed(true)}
+      className="size-4 shrink-0 rounded-[4px] object-contain"
+    />
+  );
+}
+
 const MODES: Mode[] = ['plan', 'manual', 'auto', 'edit', 'yolo'];
 
 const MODE_DESCRIPTIONS: Record<Mode, string> = {
@@ -171,7 +244,7 @@ const KEY_META: Record<string, { label: string; help: string; url?: string }> = 
   },
 };
 
-export type SettingsSectionId = 'provider' | 'preferences' | 'usage' | 'memory' | 'skills' | 'hooks' | 'search' | 'integrations' | 'about';
+export type SettingsSectionId = 'general' | 'provider' | 'agents' | 'subagents' | 'usage' | 'memory' | 'skills' | 'hooks' | 'keybindings' | 'search' | 'integrations' | 'about';
 
 /** Section metadata exported so the Sidebar can render the same nav in
  *  its "settings mode" (the settings surface is now inline in the main
@@ -181,13 +254,20 @@ export const SETTINGS_SECTIONS: {
   label: string;
   icon: React.ComponentType<{ className?: string }>;
 }[] = [
+  { id: 'general',     label: 'General',     icon: Cog },
   { id: 'provider',    label: 'Provider',    icon: Plug },
-  { id: 'preferences', label: 'Preferences', icon: Sliders },
+  // External coding agents. A sibling of Provider, not a child: they
+  // authenticate and bill separately, so a Provider key does not apply.
+  { id: 'agents',      label: 'External agents', icon: Bot },
+  // Mira's own helpers — a different thing from external agents, hence
+  // a different word everywhere.
+  { id: 'subagents',   label: 'Subagents',   icon: Smile },
   { id: 'usage',       label: 'Usage',       icon: ChartColumn },
   { id: 'memory',      label: 'Memory',      icon: Brain },
   { id: 'skills',      label: 'Skills',      icon: Sparkle },
-  { id: 'hooks',       label: 'Hooks',       icon: Lightning },
-  { id: 'search',      label: 'Search & keys', icon: MagnifyingGlass },
+  { id: 'hooks',       label: 'Hooks',       icon: Zap },
+  { id: 'keybindings', label: 'Keybindings', icon: Keyboard },
+  { id: 'search',      label: 'Search & keys', icon: Search },
   { id: 'integrations', label: 'Integrations', icon: Plug },
   { id: 'about',       label: 'About',       icon: Info },
 ];
@@ -212,6 +292,18 @@ type SurfaceProps = {
   skillsVersion?: number;
   /** Set after GitHub sends the user back from installing the app. */
   githubReturn?: GithubReturn;
+
+  // -------- external ACP agents --------
+  //
+  // Kept out of `SettingsView` deliberately: a provider is server-side
+  // configuration, while an agent's binary path and launch args describe how
+  // to run a third-party binary on *this* machine. Persisted client-side.
+  acpAgents?: AcpAgentStatus[];
+  acpRefreshing?: boolean;
+  acpDriver?: string | null;
+  acpError?: string | null;
+  onAcpRefresh?: () => void;
+  onAcpStart?: (kind: string, cfg: AcpInstanceConfig, resume?: string | null) => void;
 };
 
 type Draft = {
@@ -256,6 +348,12 @@ export function SettingsSurface({
   onExit,
   skillsVersion = 0,
   githubReturn = null,
+  acpAgents = [],
+  acpRefreshing = false,
+  acpDriver = null,
+  acpError = null,
+  onAcpRefresh = () => {},
+  onAcpStart = () => {},
 }: SurfaceProps) {
   const [view, setView] = useState<SettingsView | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -376,7 +474,12 @@ export function SettingsSurface({
   const currentLabel = SECTIONS.find((s) => s.id === section)?.label ?? 'Settings';
 
   return (
-    <div className="flex min-w-0 flex-1 flex-col">
+    // min-h-0 + overflow-hidden: without them this flex child's automatic
+    // min-height is its content height, so a long section (usage, skills)
+    // stretches the surface past the viewport and the whole app scrolls
+    // — body scroll moves the sidebar too. With them the surface is
+    // locked to the main pane and only the content area below scrolls.
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       {/* Top bar mirrors the chat/other-view header height so the layout
           doesn't shift when the user enters settings. */}
       <div className="flex h-11 shrink-0 items-center gap-3 border-b border-border/60 px-4">
@@ -396,8 +499,15 @@ export function SettingsSurface({
         )}
       </div>
 
-      <div className="flex-1 overflow-y-auto">
-        <div className="mx-auto w-full max-w-2xl px-6 py-6">
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <div
+          key={section}
+          className={cn(
+            'mx-auto w-full animate-fade-in px-6 py-6',
+          section === 'usage' ? 'max-w-3xl' :
+          section === 'hooks' || section === 'keybindings' || section === 'skills' || section === 'agents' || section === 'subagents' ? 'max-w-5xl' :
+          'max-w-2xl',
+        )}>
           {loadError && (
             <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12.5px] text-destructive">
               error: {loadError}
@@ -408,10 +518,38 @@ export function SettingsSurface({
           )}
 
           {view && section === 'provider' && (
-            <ProviderSection view={view} draft={draft} setDraft={setDraft} refetch={refetch} />
+            <>
+              <div className="mb-4 rounded-lg border border-border/70 bg-muted/30 px-3 py-2.5 text-[11.5px] leading-relaxed text-muted-foreground">
+                These credentials are for models{' '}
+                <span className="text-foreground/85">Mira</span> calls
+                directly. External coding agents — Claude Code, Codex,
+                Cursor and the rest — bring their own login and are configured
+                under{' '}
+                <button
+                  type="button"
+                  onClick={() => onSectionChange('agents')}
+                  className="text-mira-blue/85 underline underline-offset-2 hover:text-mira-blue"
+                >
+                  External agents
+                </button>
+                .
+              </div>
+              <ProviderSection view={view} draft={draft} setDraft={setDraft} refetch={refetch} />
+            </>
           )}
-          {view && section === 'preferences' && (
-            <PreferencesSection draft={draft} setDraft={setDraft} />
+          {section === 'agents' && (
+            <AcpAgentsSection
+              agents={acpAgents}
+              refreshing={acpRefreshing}
+              onRefresh={onAcpRefresh}
+              onStart={onAcpStart}
+              activeKind={acpDriver}
+              error={acpError}
+            />
+          )}
+          {section === 'subagents' && <SubagentsSection />}
+          {view && section === 'general' && (
+            <GeneralSection draft={draft} setDraft={setDraft} />
           )}
           {view && section === 'memory' && (
             <MemorySection draft={draft} setDraft={setDraft} />
@@ -423,6 +561,7 @@ export function SettingsSurface({
             <KeysSection view={view} draft={draft} setDraft={setDraft} />
           )}
           {view && section === 'hooks' && <HooksSection />}
+          {section === 'keybindings' && <KeybindingsSection />}
           {section === 'usage' && <UsageSection />}
           {view && section === 'integrations' && (
             <IntegrationsSection onOpenKeys={() => onSectionChange('search')} githubReturn={githubReturn} />
@@ -434,7 +573,7 @@ export function SettingsSurface({
       </div>
 
       {view && (
-        <div className="flex items-center justify-between border-t border-border/60 px-6 py-3">
+        <div className="flex shrink-0 items-center justify-between border-t border-border/60 px-6 py-3">
           <div className="text-[11.5px] text-muted-foreground">
             {saveError ? <span className="text-destructive">{saveError}</span>
               : dirty ? 'Unsaved changes'
@@ -488,131 +627,378 @@ function ProviderSection({
   })();
 
   return (
-    <SectionShell
+    <TSection
+      icon={<Plug className="size-3.5" />}
       title="Model provider"
-      subtitle="Where Mira sends chat requests. All providers speak the OpenAI-compatible /chat/completions wire."
+      description="Where Mira sends chat requests. All providers speak the OpenAI-compatible /chat/completions wire."
     >
-      <Field label="Provider" hint="Preset endpoints — you can override the base URL below.">
-        <Select
-          value={draft.providerName}
-          onChange={onProviderChange}
-          options={PROVIDER_PRESETS.map((p) => ({
-            value: p.name,
-            label: p.name,
-            hint: p.base_url,
-            // Surface OAuth support up-front so users don't have to
-            // pick each provider one-by-one to discover that
-            // OpenRouter / OpenAI let them skip pasting an API key.
-            badge: OAUTH_PROVIDERS.has(p.name) ? 'Sign in' : undefined,
-          }))}
-        />
-      </Field>
-
-      <Field label="Base URL">
-        <SectionInput
-          value={draft.baseUrl}
-          onChange={(e) => setDraft((d) => ({ ...d, baseUrl: e.target.value }))}
-          placeholder={preset?.base_url}
-          spellCheck={false}
-        />
-      </Field>
-
-      {/* OAuth providers get a sign-in-first flow. When a key is
-       *  already stored (signed in), we show a compact "Signed in"
-       *  badge plus a "Sign in again" affordance — the OAuth path is
-       *  the primary way to authenticate, so we don't clutter the
-       *  panel with the paste-a-key input by default.
-       *
-       *  Non-OAuth providers keep the classic ApiKeyField because
-       *  pasting a key is their only option. */}
-      {OAUTH_PROVIDERS.has(draft.providerName) ? (
-        <Field label="Sign in">
-          <OauthProviderPanel
-            providerName={draft.providerName}
-            keyStatus={keyStatus}
-            onSignedIn={refetch}
+      <TRow
+        title="Provider"
+        description="Preset endpoints — you can override the base URL below."
+        control={
+          <Select
+            value={draft.providerName}
+            onChange={onProviderChange}
+            options={PROVIDER_PRESETS.map((p) => ({
+              value: p.name,
+              label: p.name,
+              hint: p.base_url,
+              icon: <ProviderIcon name={p.name} />,
+              // Surface OAuth support up-front so users don't have to
+              // pick each provider one-by-one to discover that
+              // OpenRouter / OpenAI let them skip pasting an API key.
+              badge: OAUTH_PROVIDERS.has(p.name) ? 'Sign in' : undefined,
+            }))}
+            className="h-8 w-full text-[13px] sm:w-64"
           />
-        </Field>
+        }
+      />
+
+      <TRow
+        title="Base URL"
+        control={
+          <SectionInput
+            value={draft.baseUrl}
+            onChange={(e) => setDraft((d) => ({ ...d, baseUrl: e.target.value }))}
+            placeholder={preset?.base_url}
+            spellCheck={false}
+            className="h-8 text-[13px] sm:w-64"
+          />
+        }
+      />
+
+      {/* OAuth sign-in gets the full row width: the panel carries its
+       *  own status badge, CTA and explanatory copy, which would squeeze
+       *  the title column if crammed into the control slot. Non-OAuth
+       *  providers keep the compact paste-a-key control on the right. */}
+      {OAUTH_PROVIDERS.has(draft.providerName) ? (
+        <TRow title="Sign in">
+          <div className="mt-2.5">
+            <OauthProviderPanel
+              providerName={draft.providerName}
+              keyStatus={keyStatus}
+              onSignedIn={refetch}
+            />
+          </div>
+        </TRow>
       ) : (
-        <ApiKeyField
-          status={keyStatus}
-          showInput={draft.showReplaceKey}
-          value={draft.apiKey}
-          onChange={(v) => setDraft((d) => ({ ...d, apiKey: v }))}
-          onReplace={() => setDraft((d) => ({ ...d, showReplaceKey: true, apiKey: '' }))}
-          onCancelReplace={() => setDraft((d) => ({ ...d, showReplaceKey: false, apiKey: '' }))}
+        <TRow
+          title="API key"
+          description="Stored in your mira.yaml. Never sent to the model."
+          control={
+            <ApiKeyControl
+              status={keyStatus}
+              showInput={draft.showReplaceKey}
+              value={draft.apiKey}
+              onChange={(v) => setDraft((d) => ({ ...d, apiKey: v }))}
+              onReplace={() => setDraft((d) => ({ ...d, showReplaceKey: true, apiKey: '' }))}
+              onCancelReplace={() => setDraft((d) => ({ ...d, showReplaceKey: false, apiKey: '' }))}
+            />
+          }
         />
       )}
       {draft.providerName === 'bedrock' && (
-        <p className="text-xs text-muted-foreground">
-          A Bedrock API key is optional. Without one, Mira signs requests with your AWS
-          credentials (AWS_ACCESS_KEY_ID or ~/.aws/credentials). Put the region in the base
-          URL, e.g. https://bedrock-runtime.us-west-2.amazonaws.com, or set AWS_REGION.
-        </p>
+        <TRow
+          title="AWS credentials"
+          description="A Bedrock API key is optional. Without one, Mira signs requests with your AWS credentials (AWS_ACCESS_KEY_ID or ~/.aws/credentials). Put the region in the base URL, e.g. https://bedrock-runtime.us-west-2.amazonaws.com, or set AWS_REGION."
+        />
       )}
 
-      <Field label="Model" hint="The specific model id sent with each request.">
-        <SectionInput
-          value={draft.model}
-          onChange={(e) => setDraft((d) => ({ ...d, model: e.target.value }))}
-          placeholder={preset?.suggested_model}
-          spellCheck={false}
-        />
-      </Field>
+      <TRow
+        title="Model"
+        description="The specific model id sent with each request."
+        control={
+          <SectionInput
+            value={draft.model}
+            onChange={(e) => setDraft((d) => ({ ...d, model: e.target.value }))}
+            placeholder={preset?.suggested_model}
+            spellCheck={false}
+            className="h-8 text-[13px] sm:w-64"
+          />
+        }
+      />
 
-      <Field
-        label="Small model"
-        hint="Optional. A cheaper, faster model on the same provider for background work: session titles, context summaries, memory, and helper agents set to model: small (or haiku). Leave empty to use the main model."
-      >
-        <SectionInput
-          value={draft.smallModel}
-          onChange={(e) => setDraft((d) => ({ ...d, smallModel: e.target.value }))}
-          placeholder="e.g. a Haiku, mini or flash model"
-          spellCheck={false}
-        />
-      </Field>
-    </SectionShell>
+      <TRow
+        title="Small model"
+        description="Optional. A cheaper, faster model on the same provider for background work: session titles, context summaries, memory, and helper agents set to model: small (or haiku). Leave empty to use the main model."
+        control={
+          <SectionInput
+            value={draft.smallModel}
+            onChange={(e) => setDraft((d) => ({ ...d, smallModel: e.target.value }))}
+            placeholder="e.g. a Haiku, mini or flash model"
+            spellCheck={false}
+            className="h-8 text-[13px] sm:w-64"
+          />
+        }
+      />
+    </TSection>
   );
 }
 
-/* ---------- section: preferences ---------- */
+/* ---------- section: general ---------- */
 
-function PreferencesSection({
+function GeneralSection({
   draft, setDraft,
 }: {
   draft: Draft;
   setDraft: (u: (d: Draft) => Draft) => void;
 }) {
-  return (
-    <SectionShell
-      title="Preferences"
-      subtitle="Defaults new sessions inherit. Override per-session via the composer chips."
-    >
-      <Field label="Default mode" hint={MODE_DESCRIPTIONS[draft.mode]}>
-        <Select<Mode>
-          value={draft.mode}
-          onChange={(v) => setDraft((d) => ({ ...d, mode: v }))}
-          options={MODES.map((m) => ({
-            value: m,
-            label: m,
-            hint: MODE_DESCRIPTIONS[m],
-          }))}
-        />
-      </Field>
+  const [sidebarOpen, setSidebarOpen] = useBoolPref(PREF_KEYS.sidebarOpen, true);
+  const [terminalRestore, setTerminalRestore] = useBoolPref(PREF_KEYS.terminalRestore, true);
+  const [cmdEnterSend, setCmdEnterSend] = useBoolPref(PREF_KEYS.composerCmdEnter, false);
+  const [follow, setFollow] = useBoolPref(PREF_KEYS.transcriptFollow, true);
+  const [turnStats, setTurnStats] = useBoolPref(PREF_KEYS.transcriptTurnStats, true);
+  const [diffLayout, setDiffLayout] = useStringPref(PREF_KEYS.diffLayout, 'unified');
+  const [reduceMotion, setReduceMotionState] = useBoolPref(PREF_KEYS.reduceMotion, false);
+  const [notifyTurnDone, setNotifyTurnDone] = useBoolPref(PREF_KEYS.notifyTurnDone, false);
+  const [browserAutoOpen, setBrowserAutoOpen] = useBoolPref(PREF_KEYS.browserAutoOpen, true);
+  const [preferredEditor, setPreferredEditor] = useStringPref(PREF_KEYS.preferredEditor, '');
+  const [editorOptions, setEditorOptions] = useState<{ value: string; label: string; icon?: React.ReactNode }[]>([]);
+  const [notifyState, setNotifyState] = useState(() =>
+    typeof Notification === 'undefined' ? 'unsupported' : Notification.permission,
+  );
 
-      <Field
-        label="Max tokens"
-        hint="Cap on tokens the model can emit per response. Leave blank for the provider default."
+  useEffect(() => {
+    let cancelled = false;
+    listEditors()
+      .then((v) => {
+        if (cancelled) return;
+        const detected = new Set(v.editors.map((e) => e.id));
+        setEditorOptions(
+          v.all.map((e) => ({
+            value: e.id,
+            label: detected.has(e.id) ? e.name : `${e.name} (not detected)`,
+            icon: <EditorIcon entry={e} />,
+          })),
+        );
+        if (!getPreferredEditorId() && v.default_id) setPreferredEditor(v.default_id);
+      })
+      .catch(() => {
+        /* offline / server down — row keeps its placeholder */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  function setReduceMotion(v: boolean) {
+    setReduceMotionState(v);
+    applyReduceMotion();
+  }
+
+  async function setNotify(v: boolean) {
+    if (v && typeof Notification !== 'undefined' && Notification.permission === 'default') {
+      try {
+        setNotifyState(await Notification.requestPermission());
+      } catch {
+        setNotifyState(Notification.permission);
+      }
+    }
+    setNotifyTurnDone(v);
+    if (typeof Notification !== 'undefined') setNotifyState(Notification.permission);
+  }
+
+  return (
+    <div className="flex flex-col gap-2.5">
+      <TSection
+        icon={<Cog className="size-3.5" />}
+        title="General"
+        description="Defaults new sessions inherit. Override per-session via the composer chips."
       >
-        <SectionInput
-          type="number"
-          value={draft.maxTokens}
-          onChange={(e) => setDraft((d) => ({ ...d, maxTokens: e.target.value }))}
-          min={1}
-          placeholder="(provider default)"
+        <TRow
+          title="Default mode"
+          description={MODE_DESCRIPTIONS[draft.mode]}
+          control={
+            <Select<Mode>
+              value={draft.mode}
+              onChange={(v) => setDraft((d) => ({ ...d, mode: v }))}
+              options={MODES.map((m) => ({
+                value: m,
+                label: m,
+                hint: MODE_DESCRIPTIONS[m],
+              }))}
+              className="h-8 w-full text-[13px] sm:w-64"
+            />
+          }
         />
-      </Field>
-    </SectionShell>
+
+        <TRow
+          title="Max tokens"
+          description="Cap on tokens the model can emit per response. Leave blank for the provider default."
+          control={
+            <SectionInput
+              type="number"
+              value={draft.maxTokens}
+              onChange={(e) => setDraft((d) => ({ ...d, maxTokens: e.target.value }))}
+              min={1}
+              placeholder="(provider default)"
+              className="h-8 text-[13px] sm:w-64"
+            />
+          }
+        />
+      </TSection>
+
+      <TSection
+        icon={<PenLine className="size-3.5" />}
+        title="Composer"
+        description="How the message box sends. Stored in this browser only."
+      >
+        <TRow
+          title="Send with ⌘/Ctrl+Enter"
+          description={isMacPlatform() ? 'Plain Enter inserts a newline; ⌘+Enter sends. Off: Enter sends, Shift+Enter is the newline.' : 'Plain Enter inserts a newline; Ctrl+Enter sends. Off: Enter sends, Shift+Enter is the newline.'}
+          control={
+            <TSwitch checked={cmdEnterSend} onChange={setCmdEnterSend} label="Send with mod+Enter" />
+          }
+        />
+      </TSection>
+
+      <TSection
+        icon={<MessagesSquare className="size-3.5" />}
+        title="Transcript"
+        description="How the conversation reads. Stored in this browser only."
+      >
+        <TRow
+          title="Auto-scroll while streaming"
+          description="Stick to the latest output as it arrives. Scroll up to pause and get a jump-to-latest button."
+          control={
+            <TSwitch checked={follow} onChange={setFollow} label="Auto-scroll while streaming" />
+          }
+        />
+
+        <TRow
+          title="Per-turn timing & cost"
+          description="Show “worked for Xs · N in · M out · $Y” chips on finished turns and hover actions."
+          control={
+            <TSwitch checked={turnStats} onChange={setTurnStats} label="Per-turn timing and cost" />
+          }
+        />
+      </TSection>
+
+      <TSection
+        icon={<GitCompare className="size-3.5" />}
+        title="Diffs"
+        description="How changes render in the file viewer and review drawer. Stored in this browser only."
+      >
+        <TRow
+          title="Diff layout"
+          description="Unified stacks old and new lines; side-by-side puts them in two columns."
+          control={
+            <Select<string>
+              value={diffLayout}
+              onChange={(v) => setDiffLayout(v)}
+              options={[
+                { value: 'unified', label: 'Unified' },
+                { value: 'split', label: 'Side by side' },
+              ]}
+              className="h-8 w-full text-[13px] sm:w-64"
+            />
+          }
+        />
+      </TSection>
+
+      <TSection
+        icon={<Palette className="size-3.5" />}
+        title="Appearance"
+        description="How the app looks and moves. Stored in this browser only."
+      >
+        <TRow
+          title="Reduce motion"
+          description="Turn off shimmer, pulses and transitions across the whole app."
+          control={
+            <TSwitch checked={reduceMotion} onChange={setReduceMotion} label="Reduce motion" />
+          }
+        />
+      </TSection>
+
+      <TSection
+        icon={<Bell className="size-3.5" />}
+        title="Notifications"
+        description="System alerts from this browser. Stored in this browser only."
+      >
+        <TRow
+          title="Notify when Mira finishes or needs you"
+          description={
+            notifyState === 'denied'
+              ? 'Blocked — allow notifications for this site in your browser settings, then turn this back on.'
+              : notifyState === 'unsupported'
+                ? 'This browser does not support desktop notifications.'
+                : 'A system alert when a chat finishes, asks for approval, or has a question — only while Mira is in the background.'
+          }
+          status={
+            notifyTurnDone && notifyState === 'granted'
+              ? 'On — you’ll hear from Mira while it’s in the background.'
+              : undefined
+          }
+          control={
+            <TSwitch
+              checked={notifyTurnDone && notifyState !== 'denied' && notifyState !== 'unsupported'}
+              onChange={(v) => void setNotify(v)}
+              label="Notify when Mira finishes or needs you"
+            />
+          }
+        />
+      </TSection>
+
+      <TSection
+        icon={<Globe2 className="size-3.5" />}
+        title="Browser"
+        description="The browser Mira and its agents share. Stored in this browser only."
+      >
+        <TRow
+          title="Show the browser when it's used"
+          description="Open the browser pane as soon as Mira or an agent starts browsing, so you can watch and take over."
+          control={
+            <TSwitch
+              checked={browserAutoOpen}
+              onChange={setBrowserAutoOpen}
+              label="Show the browser when it's used"
+            />
+          }
+        />
+      </TSection>
+
+      <TSection
+        icon={<SquareTerminal className="size-3.5" />}
+        title="External editor"
+        description="Where files and folders open. The toolbar picker and file viewer use this. Stored in this browser only."
+      >
+        <TRow
+          title="Preferred editor"
+          description="Detected editors are listed first. Anything else is tried anyway — the server reports if it isn't installed."
+          control={
+            <Select<string>
+              value={preferredEditor}
+              onChange={(v) => setPreferredEditor(v)}
+              options={editorOptions}
+              placeholder={editorOptions.length === 0 ? 'Loading…' : 'System default'}
+              className="h-8 w-full text-[13px] sm:w-64"
+            />
+          }
+        />
+      </TSection>
+
+      <TSection
+        icon={<PanelLeft className="size-3.5" />}
+        title="Startup"
+        description="How the app shell looks when you open Mira. Stored in this browser only."
+      >
+        <TRow
+          title="Show sidebar on startup"
+          description="Keep the session list visible. Turn off for a full-width transcript."
+          control={
+            <TSwitch checked={sidebarOpen} onChange={setSidebarOpen} label="Show sidebar on startup" />
+          }
+        />
+
+        <TRow
+          title="Restore terminal on startup"
+          description="Reopen the integrated terminal if it was open last time. Turn off to always start with it closed."
+          control={
+            <TSwitch checked={terminalRestore} onChange={setTerminalRestore} label="Restore terminal on startup" />
+          }
+        />
+      </TSection>
+    </div>
   );
 }
 
@@ -629,49 +1015,59 @@ function MemorySection({
   }
 
   return (
-    <SectionShell
-      title="Memory"
-      subtitle="Cross-session memory: user + project MIRA.md, plus the agent-written episodic stream at .mira/episodic.jsonl. Changes apply to new chats — click New chat after saving to try them."
-    >
-      <ToggleField
-        label="Inject memory into prompt"
-        hint="Add a live 'memory' section to every model request. Turn off to shrink the system prompt back to the pre-memory baseline — useful for isolating whether the injected content is confusing the model."
-        checked={draft.memory.inject_context}
-        onChange={(v) => update('inject_context', v)}
-      />
-
-      <ToggleField
-        label="Enable memory tools"
-        hint="Registers memory_read / memory_search / memory_append / memory_edit / memory_remember. Turn off to remove them from the model's tool list — useful when the extra tools distract simple questions."
-        checked={draft.memory.tools_enabled}
-        onChange={(v) => update('tools_enabled', v)}
-      />
-
-      <ToggleField
-        label="Auto-extract facts after each turn"
-        hint="Background pass that mines each finished turn for durable facts and appends them to .mira/episodic.jsonl. Only fires when at least one tool call succeeded."
-        checked={draft.memory.auto_extract}
-        onChange={(v) => update('auto_extract', v)}
-      />
-
-      <Field
-        label="Extractor model"
-        hint="Model id used for the extraction call. Leave blank to reuse the session's active model (works but is expensive). Point at your provider's cheap tier — e.g. claude-haiku-4-5, gpt-5-nano, deepseek-chat — for negligible per-round cost."
+    <div className="flex flex-col gap-2.5">
+      <TSection
+        icon={<Brain className="size-3.5" />}
+        title="Memory"
+        description="Cross-session memory: user + project MIRA.md, plus the agent-written episodic stream at .mira/episodic.jsonl. Changes apply to new chats — click New chat after saving to try them."
       >
-        <SectionInput
-          value={draft.memory.extractor_model ?? ''}
-          onChange={(e) => update('extractor_model', e.target.value || null)}
-          placeholder="(uses session model)"
-          spellCheck={false}
+        <TRow
+          title="Inject memory into prompt"
+          description="Add a live 'memory' section to every model request. Turn off to shrink the system prompt back to the pre-memory baseline — useful for isolating whether the injected content is confusing the model."
+          control={
+            <TSwitch checked={draft.memory.inject_context} onChange={(v) => update('inject_context', v)} label="Inject memory into prompt" />
+          }
         />
-      </Field>
 
-      <div className="rounded-md border border-amber-500/30 bg-amber-500/[0.06] px-3 py-2 text-[11.5px] text-amber-300/90">
-        Settings are saved to <code className="font-mono">mira.yaml</code>. To
-        apply them to the running server, <b>restart</b> Mira (Ctrl+C then run
-        the command again). Hot-reload without restart is not yet wired.
-      </div>
-    </SectionShell>
+        <TRow
+          title="Enable memory tools"
+          description="Registers memory_read / memory_search / memory_append / memory_edit / memory_remember. Turn off to remove them from the model's tool list — useful when the extra tools distract simple questions."
+          control={
+            <TSwitch checked={draft.memory.tools_enabled} onChange={(v) => update('tools_enabled', v)} label="Enable memory tools" />
+          }
+        />
+
+        <TRow
+          title="Auto-extract facts after each turn"
+          description="Background pass that mines each finished turn for durable facts and appends them to .mira/episodic.jsonl. Only fires when at least one tool call succeeded."
+          control={
+            <TSwitch checked={draft.memory.auto_extract} onChange={(v) => update('auto_extract', v)} label="Auto-extract facts after each turn" />
+          }
+        />
+
+        <TRow
+          title="Extractor model"
+          description="Model id used for the extraction call. Leave blank to reuse the session's active model (works but is expensive). Point at your provider's cheap tier — e.g. claude-haiku-4-5, gpt-5-nano, deepseek-chat — for negligible per-round cost."
+          control={
+            <SectionInput
+              value={draft.memory.extractor_model ?? ''}
+              onChange={(e) => update('extractor_model', e.target.value || null)}
+              placeholder="(uses session model)"
+              spellCheck={false}
+              className="h-8 text-[13px] sm:w-64"
+            />
+          }
+        />
+      </TSection>
+
+      <TNote>
+        <span>
+          Settings are saved to <code className="font-mono">mira.yaml</code>. To apply them to the
+          running server, <b>restart</b> Mira (Ctrl+C then run the command again). Hot-reload
+          without restart is not yet wired.
+        </span>
+      </TNote>
+    </div>
   );
 }
 
@@ -749,89 +1145,78 @@ function SkillsSection({ version = 0 }: { version?: number }) {
   const total = skills?.length ?? 0;
 
   return (
-    <SectionShell
-      title="Skills"
-      subtitle="Reusable instruction bundles the agent invokes to accomplish a specific task. Add your own to ~/.mira/skills/ (user-wide) or <cwd>/.mira/skills/ (per-repo)."
-    >
-      {/* Header strip: reload button + status. Sits above the grid so
-       *  it doesn't consume vertical space when there are many skills. */}
-      <div className="flex items-center justify-between rounded-lg border border-border/50 bg-secondary/30 px-3 py-2">
-        <div className="flex items-center gap-2">
-          <span className="text-[13px] font-medium text-foreground">
-            {loading ? 'Loading…' : `${total} skill${total === 1 ? '' : 's'} loaded`}
-          </span>
-          {lastReload && !loading && (
-            <span className="text-[11.5px] text-muted-foreground">
-              · reloaded {timeAgoSecs(lastReload)}
+    <div className="flex flex-col gap-2.5">
+      <TSection
+        icon={<Sparkle className="size-3.5" />}
+        title="Skills"
+        description="Reusable instruction bundles the agent invokes to accomplish a specific task. Add your own to ~/.mira/skills/ (user-wide) or <cwd>/.mira/skills/ (per-repo)."
+        action={
+          <>
+            <span className="text-[11px] tabular-nums text-muted-foreground">
+              {loading ? 'Loading…' : `${total} skill${total === 1 ? '' : 's'}`}
+              {lastReload && !loading ? ` · reloaded ${timeAgoSecs(lastReload)}` : ''}
             </span>
-          )}
-        </div>
-        <button
-          type="button"
-          onClick={reload}
-          disabled={loading}
-          className={cn(
-            'inline-flex items-center gap-1.5 rounded-md border border-border/70 bg-background/60 px-2.5 py-1 text-[12px] font-medium text-foreground transition-colors',
-            'hover:bg-background hover:border-border disabled:opacity-50 disabled:cursor-not-allowed',
-          )}
-          title="Re-read skill files from disk"
-        >
-          <ArrowClockwise className={cn('size-3.5', loading && 'animate-spin')} weight="bold" />
-          Reload
-        </button>
-      </div>
-
-      {error && (
-        <div className="rounded-md border border-destructive/40 bg-destructive/[0.08] px-3 py-2 text-[12px] text-destructive">
-          {error}
-        </div>
-      )}
-
-      {!error && !loading && skills != null && total === 0 && (
-        <EmptySkillsState />
-      )}
-
-      {(['bundled', 'shared', 'user', 'project'] as const).map((tier) => {
-        const entries = grouped[tier];
-        if (entries.length === 0) return null;
-        return (
-          <div key={tier} className="flex flex-col gap-2.5">
-            <div className="flex items-center gap-2 px-0.5">
-              <span className={cn(
-                'inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[10.5px] font-semibold uppercase tracking-wider',
-                tierChipClass(tier),
-              )}>
-                <span className={cn('size-1.5 rounded-full', tierDotClass(tier))} />
-                {tierLabel(tier)}
-              </span>
-              <span className="text-[11.5px] text-muted-foreground">{entries.length}</span>
-            </div>
-            <div className="flex flex-col gap-2">
-              {entries.map((s) => (
-                <SkillCard
-                  key={`${tier}-${s.name}`}
-                  skill={s}
-                  onOpen={() => setSelected(s.name)}
-                />
-              ))}
-            </div>
+            <button
+              type="button"
+              onClick={reload}
+              disabled={loading}
+              title="Re-read skill files from disk"
+              aria-label="Reload skills from disk"
+              className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-40"
+            >
+              <RotateCw className={cn('size-3.5', loading && 'animate-spin')} strokeWidth={2.5} />
+            </button>
+          </>
+        }
+      >
+        {error && (
+          <div className="border-b border-border/50 px-4 py-2.5 text-[12px] text-destructive">
+            {error}
           </div>
-        );
-      })}
+        )}
+
+        {!error && !loading && skills != null && total === 0 && (
+          <EmptySkillsState />
+        )}
+
+        {(['bundled', 'shared', 'user', 'project'] as const).map((tier) => {
+          const entries = grouped[tier];
+          if (entries.length === 0) return null;
+          return (
+            <div key={tier}>
+              <div className="flex items-center gap-2 border-b border-border/50 px-4 pb-2 pt-3">
+                <span className={cn('size-1.5 rounded-full', tierDotClass(tier))} />
+                <span className="text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  {tierLabel(tier)}
+                </span>
+                <span className="text-[11px] tabular-nums text-muted-foreground/70">{entries.length}</span>
+              </div>
+              <div className="[&>*+*]:border-t [&>*+*]:border-border/50">
+                {entries.map((s) => (
+                  <SkillRow
+                    key={`${tier}-${s.name}`}
+                    skill={s}
+                    onOpen={() => setSelected(s.name)}
+                  />
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </TSection>
 
       <SkillDetailDialog
         name={selected}
         onClose={() => setSelected(null)}
       />
-    </SectionShell>
+    </div>
   );
 }
 
-/** One skill rendered as a clickable card. Colored icon badge on the
- *  left, name/description stacked in the center, category + attachments
- *  chips underneath. Clicking opens the detail dialog with the SKILL.md
- *  body rendered as markdown. */
-function SkillCard({ skill, onOpen }: { skill: SkillView; onOpen: () => void }) {
+/** One skill as a row: icon square, name + description, chevron.
+ *  Colour lives only on the icon square — the visual anchor that lets the
+ *  eye pick a skill out without overwhelming the list. */
+function SkillRow({ skill, onOpen }: { skill: SkillView; onOpen: () => void }) {
   const iconKey = skill.icon ?? defaultIconKey(skill);
   const Icon = iconFor(iconKey);
   const palette = paletteFor(skill.color, skill.name);
@@ -840,47 +1225,42 @@ function SkillCard({ skill, onOpen }: { skill: SkillView; onOpen: () => void }) 
     <button
       type="button"
       onClick={onOpen}
-      // Card frame stays neutral (matches the "X skills loaded" strip
-      // above) so the row list reads calmly. Colour lives only on the
-      // icon square — it's the visual anchor, and lets the eye pick
-      // out a skill by its accent without overwhelming the panel.
-      className="group relative flex gap-3 rounded-lg border border-border/50 bg-secondary/30 p-3 text-left transition-colors hover:border-border hover:bg-secondary/40 focus:outline-none focus-visible:ring-1 focus-visible:ring-mira-blue"
+      className="group flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-accent/40 focus:outline-none"
     >
       <div
         className={cn(
-          'inline-flex size-9 shrink-0 items-center justify-center rounded-lg',
+          'inline-flex size-8 shrink-0 items-center justify-center rounded-lg',
           palette.iconBg,
           palette.iconText,
         )}
       >
-        <Icon weight="duotone" className="size-5" />
+        <Icon className="size-4" />
       </div>
 
-      <div className="flex min-w-0 flex-1 flex-col gap-1">
+      <div className="min-w-0 flex-1">
         <div className="flex items-baseline gap-2">
-          <span className="truncate font-mono text-[13.5px] font-semibold text-foreground">
+          <span className="truncate font-mono text-[13px] font-semibold text-foreground">
             /{skill.name}
           </span>
           {skill.category && (
             <span className={cn(
-              'shrink-0 rounded-sm px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider',
+              'shrink-0 rounded-sm px-1.5 py-px text-[10px] font-medium uppercase tracking-wider',
               palette.chipBg,
               palette.chipText,
             )}>
               {skill.category}
             </span>
           )}
+          {skill.has_attachments && (
+            <Paperclip className="size-3 shrink-0 text-muted-foreground/60" />
+          )}
         </div>
-        <p className="text-[12.5px] leading-snug text-foreground/80">
+        <p className="mt-px truncate text-[12px] text-muted-foreground/85">
           {skill.description}
         </p>
-        {skill.has_attachments && (
-          <div className="mt-0.5 inline-flex items-center gap-1 text-[10.5px] text-muted-foreground/80">
-            <Paperclip className="size-3" />
-            attached resources
-          </div>
-        )}
       </div>
+
+      <ChevronRight className="size-3.5 shrink-0 text-muted-foreground/50 transition-all group-hover:translate-x-px group-hover:text-foreground" />
     </button>
   );
 }
@@ -1029,17 +1409,14 @@ function SkillDetailHeader({ detail }: { detail: SkillDetail }) {
           palette.iconText,
         )}
       >
-        <Icon weight="duotone" className="size-5" />
+        <Icon className="size-5" />
       </div>
       <div className="flex min-w-0 flex-1 flex-col gap-1">
         <div className="flex items-center gap-2">
           <span className="truncate font-mono text-[14px] font-semibold text-foreground">
             /{detail.name}
           </span>
-          <span className={cn(
-            'shrink-0 rounded-full px-2 py-0.5 text-[9.5px] font-semibold uppercase tracking-wider',
-            tierChipClass(detail.tier),
-          )}>
+          <span className="shrink-0 rounded-full border border-border/60 bg-secondary px-2 py-0.5 text-[9.5px] font-semibold uppercase tracking-wider text-muted-foreground">
             {tierLabel(detail.tier)}
           </span>
           {detail.category && (
@@ -1064,7 +1441,7 @@ function EmptySkillsState() {
   return (
     <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-border/50 bg-secondary/20 px-4 py-8 text-center">
       <div className="inline-flex size-10 items-center justify-center rounded-full bg-mira-blue/10 text-mira-blue">
-        <Sparkle weight="duotone" className="size-5" />
+        <Sparkle className="size-5" />
       </div>
       <div>
         <div className="text-[13px] font-semibold text-foreground">No skills loaded</div>
@@ -1080,15 +1457,15 @@ function EmptySkillsState() {
 
 /* ---------- skill icon + color mapping ---------- */
 
-/** Kebab-case icon name → Phosphor component. Curated so a user's
+/** Kebab-case icon name → Lucide component. Curated so a user's
  *  frontmatter `icon: shield-check` picks up a matching component
- *  without every phosphor icon getting bundled. Unknown names fall
+ *  without every lucide icon getting bundled. Unknown names fall
  *  through to Sparkle. */
-function iconFor(name: string): React.ComponentType<{ className?: string; weight?: 'thin' | 'light' | 'regular' | 'bold' | 'fill' | 'duotone' }> {
+function iconFor(name: string): React.ComponentType<{ className?: string }> {
   switch (name) {
     case 'shield-check':      return ShieldCheck;
     case 'shield':            return Shield;
-    case 'magnifying-glass':  return MagnifyingGlass;
+    case 'magnifying-glass':  return Search;
     case 'bug':               return Bug;
     case 'folder-open':       return FolderOpen;
     case 'file-text':
@@ -1100,19 +1477,19 @@ function iconFor(name: string): React.ComponentType<{ className?: string; weight
     case 'lightbulb':         return Lightbulb;
     case 'target':            return Target;
     case 'gear':
-    case 'settings':          return Gear;
+    case 'settings':          return Cog;
     case 'wrench':            return Wrench;
     case 'rocket':            return Rocket;
     case 'package':           return Package;
     case 'database':          return Database;
     case 'terminal':          return Terminal;
     case 'code':              return Code;
-    case 'brackets-curly':    return BracketsCurly;
+    case 'brackets-curly':    return Braces;
     case 'book':              return Book;
     case 'book-open':         return BookOpen;
     case 'eye':               return Eye;
-    case 'scan':              return ScanSmiley;
-    case 'note-pencil':       return NotePencil;
+    case 'scan':              return ScanFace;
+    case 'note-pencil':       return NotebookPen;
     case 'sparkle':
     default:                  return Sparkle;
   }
@@ -1266,15 +1643,6 @@ function tierLabel(t: Tier): string {
   }
 }
 
-function tierChipClass(t: Tier): string {
-  switch (t) {
-    case 'bundled': return 'bg-mira-blue/15 text-mira-blue border border-mira-blue/25';
-    case 'shared':  return 'bg-amber-500/15 text-amber-300 border border-amber-500/25';
-    case 'user':    return 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/25';
-    case 'project': return 'bg-purple-500/15 text-purple-300 border border-purple-500/25';
-  }
-}
-
 function tierDotClass(t: Tier): string {
   switch (t) {
     case 'bundled': return 'bg-mira-blue';
@@ -1290,41 +1658,6 @@ function timeAgoSecs(ts: number): string {
   if (dt < 60) return `${dt}s ago`;
   if (dt < 3600) return `${Math.floor(dt / 60)}m ago`;
   return `${Math.floor(dt / 3600)}h ago`;
-}
-
-function ToggleField({
-  label, hint, checked, onChange,
-}: {
-  label: string;
-  hint?: string;
-  checked: boolean;
-  onChange: (v: boolean) => void;
-}) {
-  return (
-    <div className="flex items-start justify-between gap-3">
-      <div className="min-w-0 flex-1">
-        <div className="text-[12.5px] font-medium text-foreground/85">{label}</div>
-        {hint && <div className="mt-1 text-[11.5px] text-muted-foreground/80">{hint}</div>}
-      </div>
-      <button
-        type="button"
-        role="switch"
-        aria-checked={checked}
-        onClick={() => onChange(!checked)}
-        className={cn(
-          'relative mt-1 inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors',
-          checked ? 'bg-mira-blue' : 'bg-input',
-        )}
-      >
-        <span
-          className={cn(
-            'inline-block size-4 rounded-full bg-white transition-transform',
-            checked ? 'translate-x-4' : 'translate-x-0.5',
-          )}
-        />
-      </button>
-    </div>
-  );
 }
 
 /**
@@ -1385,46 +1718,40 @@ function KeysSection({
   }
 
   return (
-    <SectionShell
+    <TSection
+      icon={<Search className="size-3.5" />}
       title="Search & keys"
-      subtitle="Third-party API keys tools consume. Stored in your mira.yaml and exported to the process env at startup so tools pick them up transparently."
+      description="Third-party API keys tools consume. Stored in your mira.yaml and exported to the process env at startup so tools pick them up transparently."
     >
-      <div className="flex flex-col gap-3">
-        {view.keys.map((k) => {
-          const meta = KEY_META[k.name];
-          const editing = !!draft.keyEditing[k.name];
-          const pending = draft.keyValues[k.name];
-          const hasStored = k.masked.length > 0;
-          return (
-            <div
-              key={k.name}
-              className="rounded-lg border border-border/50 bg-background/40 p-3"
-            >
-              <div className="flex items-baseline justify-between gap-3">
-                <div className="min-w-0 flex-1">
-                  <div className="text-[13.5px] font-semibold text-foreground">
-                    {meta?.label ?? k.name}
-                  </div>
-                  <div className="mt-0.5 font-mono text-[10.5px] text-muted-foreground/70">
-                    {k.name}
-                  </div>
-                </div>
+      {view.keys.map((k) => {
+        const meta = KEY_META[k.name];
+        const editing = !!draft.keyEditing[k.name];
+        const pending = draft.keyValues[k.name];
+        const hasStored = k.masked.length > 0;
+        return (
+          <TRow
+            key={k.name}
+            title={
+              <span className="flex flex-wrap items-baseline gap-x-2">
+                <span>{meta?.label ?? k.name}</span>
+                <code className="font-mono text-[10.5px] font-normal text-muted-foreground/70">
+                  {k.name}
+                </code>
+              </span>
+            }
+            description={meta?.help}
+            control={
+              <span className="flex items-center gap-2">
                 {meta?.url && (
                   <a
                     href={meta.url}
                     target="_blank"
                     rel="noreferrer"
-                    className="text-[11.5px] text-mira-blue hover:underline"
+                    className="shrink-0 text-[11.5px] text-mira-blue hover:underline"
                   >
                     Get key →
                   </a>
                 )}
-              </div>
-              {meta && (
-                <div className="mt-1 text-[12px] text-muted-foreground">{meta.help}</div>
-              )}
-
-              <div className="mt-2.5">
                 {!editing && hasStored && (
                   <SavedBadge
                     tone={k.from_env ? 'blue' : 'green'}
@@ -1446,12 +1773,12 @@ function KeysSection({
                   />
                 )}
                 {!editing && !hasStored && !k.from_env && (
-                  <Button variant="outline" size="sm" onClick={() => beginEdit(k.name)}>
+                  <Button variant="outline" size="sm" className="h-8" onClick={() => beginEdit(k.name)}>
                     Add key
                   </Button>
                 )}
                 {editing && (
-                  <div className="flex gap-2">
+                  <>
                     <SectionInput
                       type="password"
                       value={pending ?? ''}
@@ -1460,18 +1787,19 @@ function KeysSection({
                       autoComplete="off"
                       autoFocus
                       spellCheck={false}
+                      className="h-8 w-44 font-mono text-[12px]"
                     />
-                    <Button variant="outline" size="sm" onClick={() => cancelEdit(k.name)}>
+                    <Button variant="outline" size="sm" className="h-8 shrink-0" onClick={() => cancelEdit(k.name)}>
                       Cancel
                     </Button>
-                  </div>
+                  </>
                 )}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </SectionShell>
+              </span>
+            }
+          />
+        );
+      })}
+    </TSection>
   );
 }
 
@@ -1479,92 +1807,151 @@ function KeysSection({
 
 function AboutSection({ view }: { view: SettingsView }) {
   return (
-    <SectionShell title="About" subtitle="Where Mira reads and writes settings on this machine.">
-      <Field label="Config file">
-        <div className="flex min-w-0 items-center gap-2 rounded-md border border-border/50 bg-background/40 px-2.5 py-1.5 text-[12.5px]">
-          <FolderOpen className="size-3.5 shrink-0 text-muted-foreground" />
-          <code className="min-w-0 truncate font-mono text-foreground/85">{view.config_path}</code>
-        </div>
-      </Field>
-      <Field label="Status">
-        <div
-          className={cn(
-            'inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[12.5px]',
-            view.configured
-              ? 'bg-emerald-500/10 text-emerald-400'
-              : 'bg-amber-500/10 text-amber-300',
-          )}
-        >
-          {view.configured ? <Check className="size-3.5" /> : <ArrowClockwise className="size-3.5" />}
-          {view.configured ? 'Configured — provider ready' : 'Needs API key'}
-        </div>
-      </Field>
-    </SectionShell>
-  );
-}
-
-/* ---------- shared bits ---------- */
-
-/**
- * Section wrapper. Renders a small subgroup header above a soft grey
- * card that contains the section's rows, separated by hairlines —
- * the "Settings app" pattern (ChatGPT/Codex use it too). Every direct
- * child becomes one row; falsy children (from `condition && <Row/>`
- * patterns) are dropped so we don't get empty rows or stray borders.
- *
- * Elevation: `bg-mira-elev1/60` sits one step above the page bg
- * (`mira-bg`), which is what the palette was designed for. The
- * hairline dividers are `border-border/30` — visible enough to
- * separate but quiet enough not to dominate.
- */
-function SectionShell({
-  title, subtitle, children,
-}: {
-  title: string;
-  subtitle?: string;
-  children: React.ReactNode;
-}) {
-  const rows = React.Children.toArray(children).filter(Boolean);
-  return (
-    <div className="flex flex-col gap-3">
-      <div className="px-1">
-        <div className="text-[18px] font-semibold tracking-tight text-foreground">
-          {title}
-        </div>
-        {subtitle && (
-          <div className="mt-1 text-[12.5px] text-muted-foreground/85">{subtitle}</div>
-        )}
-      </div>
-      <div className="overflow-hidden rounded-xl border border-border/50 bg-mira-elev1/60">
-        {rows.map((child, i) => (
+    <TSection
+      icon={<Info className="size-3.5" />}
+      title="About"
+      description="Where Mira reads and writes settings on this machine."
+    >
+      <TRow
+        title="Config file"
+        control={
+          <div className="flex min-w-0 items-center gap-2 rounded-md border border-border/50 bg-background/40 px-2.5 py-1.5 text-[12.5px] sm:w-64">
+            <FolderOpen className="size-3.5 shrink-0 text-muted-foreground" />
+            <code className="min-w-0 truncate font-mono text-foreground/85">{view.config_path}</code>
+          </div>
+        }
+      />
+      <TRow
+        title="Status"
+        control={
           <div
-            key={i}
             className={cn(
-              'px-4 py-3.5',
-              i < rows.length - 1 && 'border-b border-border/30',
+              'inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[12.5px]',
+              view.configured
+                ? 'bg-emerald-500/10 text-emerald-400'
+                : 'bg-amber-500/10 text-amber-300',
             )}
           >
-            {child}
+            {view.configured ? <Check className="size-3.5" /> : <RotateCw className="size-3.5" />}
+            {view.configured ? 'Configured — provider ready' : 'Needs API key'}
           </div>
-        ))}
+        }
+      />
+    </TSection>
+  );
+}
+
+/* ---------- shared bits: settings layout ---------- */
+
+/**
+ * Settings design philosophy, in Mira tokens:
+ * - Sections are headed by a quiet muted label row — never a big card
+ *   title. Explanatory copy lives on individual rows, not the header.
+ * - Rows are title + one-line description on the left, a compact control
+ *   flush right. They stack on narrow screens, snap to a two-column grid
+ *   past `sm:`.
+ * - Rows live in a flat grouped card with hairline dividers; controls
+ *   share sizing (inputs/selects h-8, text-[13px]) so every row baselines.
+ */
+function TSection({
+  icon, title, description, action, children,
+}: {
+  icon?: React.ReactNode;
+  title: string;
+  description?: string;
+  action?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="flex flex-col gap-2.5">
+      <div className="flex min-h-7 items-start justify-between gap-4 px-1">
+        <div className="min-w-0">
+          <h2 className="flex min-h-7 items-center gap-2 text-[13px] font-medium text-muted-foreground">
+            {icon}
+            {title}
+          </h2>
+          {description && (
+            <p className="mt-1 max-w-xl text-[12px] leading-relaxed text-muted-foreground/75">
+              {description}
+            </p>
+          )}
+        </div>
+        {action && <div className="flex min-h-7 shrink-0 items-center gap-1.5">{action}</div>}
       </div>
+      <div
+        className={cn(
+          'overflow-hidden rounded-xl border border-border/60 bg-card/40',
+          '[&>*+*]:border-t [&>*+*]:border-border/50',
+        )}
+      >
+        {children}
+      </div>
+    </section>
+  );
+}
+
+/** One setting: title + description left, compact control right. */
+function TRow({
+  title, description, status, control, children,
+}: {
+  title: React.ReactNode;
+  description?: React.ReactNode;
+  status?: React.ReactNode;
+  control?: React.ReactNode;
+  children?: React.ReactNode;
+}) {
+  return (
+    <div className="px-4 py-3">
+      <div className="flex flex-col gap-3 sm:grid sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center sm:gap-6">
+        <div className="min-w-0">
+          <div className="text-[13.5px] font-medium text-foreground">{title}</div>
+          {description && (
+            <div className="mt-0.5 max-w-xl text-[12px] leading-relaxed text-muted-foreground/80">
+              {description}
+            </div>
+          )}
+          {status && <div className="mt-1 text-[12px] text-muted-foreground">{status}</div>}
+        </div>
+        {control && (
+          <div className="flex min-w-0 shrink-0 items-center gap-2 sm:justify-end">
+            {control}
+          </div>
+        )}
+      </div>
+      {children}
     </div>
   );
 }
 
-function Field({
-  label, hint, children,
-}: {
-  label: string;
-  hint?: string;
-  children: React.ReactNode;
-}) {
+/** Muted footnote under a section (global caveats, file paths). */
+function TNote({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex flex-col gap-1.5">
-      <label className="text-[12.5px] font-medium text-foreground/85">{label}</label>
+    <p className="flex items-start gap-1.5 px-1 text-[11.5px] leading-relaxed text-muted-foreground/75">
       {children}
-      {hint && <div className="text-[11.5px] text-muted-foreground/80">{hint}</div>}
-    </div>
+    </p>
+  );
+}
+
+function TSwitch({ checked, onChange, label }: { checked: boolean; onChange: (v: boolean) => void; label: string }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      onClick={() => onChange(!checked)}
+      className={cn(
+        'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors',
+        checked ? 'bg-mira-blue' : 'bg-input',
+      )}
+    >
+      <span
+        className={cn(
+          'inline-block size-4 rounded-full bg-white shadow transition-transform',
+          checked ? 'translate-x-4' : 'translate-x-0.5',
+        )}
+      />
+    </button>
   );
 }
 
@@ -1573,7 +1960,9 @@ type KeyStatus =
   | { kind: 'literal'; masked: string }
   | { kind: 'env'; name: string };
 
-function ApiKeyField({
+/** Compact API-key control for a row's right column: saved badge, or
+ *  an inline paste input. The row itself carries the label + hint. */
+function ApiKeyControl({
   status, showInput, value, onChange, onReplace, onCancelReplace,
 }: {
   status: KeyStatus;
@@ -1583,31 +1972,32 @@ function ApiKeyField({
   onReplace: () => void;
   onCancelReplace: () => void;
 }) {
+  if (status.kind === 'literal' && !showInput) {
+    return (
+      <SavedBadge tone="green" icon={<Check className="size-3.5" />} label="Key saved" masked={status.masked} onClick={onReplace} action="Replace" />
+    );
+  }
+  if (status.kind === 'env' && !showInput) {
+    return (
+      <SavedBadge tone="blue" icon={<Key className="size-3.5" />} label="From env" masked={`$${status.name}`} onClick={onReplace} action="Override" />
+    );
+  }
   return (
-    <Field label="API key" hint="Stored in your mira.yaml. Never sent to the model.">
-      {status.kind === 'literal' && !showInput && (
-        <SavedBadge tone="green" icon={<Check className="size-3.5" />} label="Key saved" masked={status.masked} onClick={onReplace} action="Replace" />
+    <div className="flex w-full gap-2 sm:w-64">
+      <SectionInput
+        type="password"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={status.kind === 'literal' ? `replaces ${status.masked}` : 'sk-…'}
+        autoComplete="off"
+        spellCheck={false}
+        autoFocus={showInput}
+        className="h-8 text-[13px]"
+      />
+      {status.kind !== 'none' && (
+        <Button variant="outline" size="sm" onClick={onCancelReplace} type="button" className="h-8 shrink-0">Cancel</Button>
       )}
-      {status.kind === 'env' && !showInput && (
-        <SavedBadge tone="blue" icon={<Key className="size-3.5" />} label="From env" masked={`$${status.name}`} onClick={onReplace} action="Override" />
-      )}
-      {(status.kind === 'none' || showInput) && (
-        <div className="flex gap-2">
-          <SectionInput
-            type="password"
-            value={value}
-            onChange={(e) => onChange(e.target.value)}
-            placeholder={status.kind === 'literal' ? `replaces ${status.masked}` : 'sk-…'}
-            autoComplete="off"
-            spellCheck={false}
-            autoFocus={showInput}
-          />
-          {status.kind !== 'none' && (
-            <Button variant="outline" size="sm" onClick={onCancelReplace} type="button">Cancel</Button>
-          )}
-        </div>
-      )}
-    </Field>
+    </div>
   );
 }
 
@@ -1731,7 +2121,7 @@ function OauthProviderPanel({
     <div className="flex flex-col gap-2">
       {alreadySignedIn ? (
         <div className="flex items-center gap-3 rounded-md border border-emerald-500/40 bg-emerald-500/[0.06] px-3 py-2 text-[12.5px]">
-          <Check weight="bold" className="size-4 shrink-0 text-emerald-400" />
+          <Check strokeWidth={2.5} className="size-4 shrink-0 text-emerald-400" />
           <div className="flex-1 min-w-0">
             <div className="text-foreground">Signed in</div>
             <div className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">

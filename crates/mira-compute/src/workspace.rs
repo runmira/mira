@@ -133,6 +133,13 @@ async fn run_checked(backend: &dyn ComputeBackend, what: &str, command: &str) ->
 /// resumed sandbox): tracked files are removed first, so deletions made
 /// locally since take effect, while ignored files such as `target/` or
 /// `node_modules/` stay.
+///
+/// The `git init` step is `--template=` on purpose. It is a baseline repo we
+/// fully control, committed with an explicit `git add -A`, so inheriting the
+/// host's `init.templateDir` buys nothing and costs two things: the template
+/// copy can fail outright ("cannot copy .../info/exclude: File exists"), and
+/// an `info/exclude` full of patterns would silently drop files from the
+/// baseline — a project would look like it had no changes at all.
 pub async fn upload(backend: &dyn ComputeBackend, archive: &[u8]) -> Result<()> {
     backend.write_file(ARCHIVE_NAME, archive).await?;
     let script = format!(
@@ -140,7 +147,10 @@ pub async fn upload(backend: &dyn ComputeBackend, archive: &[u8]) -> Result<()> 
          if [ -d .git ]; then git ls-files -z | xargs -0 -r rm -f --; fi\n\
          tar -xzf {ARCHIVE_NAME}\n\
          rm -f {ARCHIVE_NAME}\n\
-         [ -d .git ] || git init -q\n\
+         # `-e`, not `-d`: a `.git` *file* (worktree or submodule) is a
+         # valid repo pointer, and `-d` would be false for it, sending us
+         # into `git init` on top of a working repo.
+         [ -e .git ] || git init -q --template=\n\
          {REBASELINE}"
     );
     run_checked(backend, "workspace setup", &script).await?;

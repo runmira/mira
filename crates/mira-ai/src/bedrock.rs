@@ -827,6 +827,11 @@ impl ChatProvider for Bedrock {
                                 .map(str::to_owned),
                             owned_by: None,
                             context_length: None,
+                            // Bedrock forwards neither `reasoning_effort`
+                            // nor `service_tier` generically, so we
+                            // advertise nothing rather than offer a control
+                            // that would be dropped.
+                            capabilities: None,
                         });
                     }
                 }
@@ -857,6 +862,7 @@ impl ChatProvider for Bedrock {
                         .and_then(Value::as_str)
                         .map(str::to_owned),
                     context_length: None,
+                    capabilities: None,
                 });
             }
         }
@@ -986,6 +992,7 @@ mod tests {
             temperature: Some(0.2),
             max_tokens: Some(100),
             reasoning_effort: None,
+            service_tier: None,
             response_format: None,
         };
         let b = build_body(&req);

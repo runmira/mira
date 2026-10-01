@@ -1,4 +1,4 @@
-import type { BackgroundMode, SessionSummary, SettingsUpdate, SettingsView } from './types';
+import type { BackgroundMode, ExternalAgentSession, SessionSummary, SettingsUpdate, SettingsView } from './types';
 
 export async function getSettings(): Promise<SettingsView> {
   const r = await fetch('/api/settings');
@@ -23,17 +23,41 @@ export async function putSettings(update: SettingsUpdate): Promise<SettingsView>
   return (await r.json()) as SettingsView;
 }
 
-export async function listSessions(opts: { all?: boolean } = {}): Promise<SessionSummary[]> {
+export async function listSessions(
+  opts: { all?: boolean; archived?: boolean } = {},
+): Promise<SessionSummary[]> {
   // axum's Query bool deserializer expects the literal string `true`, not `1`.
   // `no-store` + a cache-busting param defeat any browser/HTTP caching so
   // fetches triggered by session_title_updated actually see fresh titles
   // rather than a stale cached list.
   const params = new URLSearchParams();
   if (opts.all) params.set('all', 'true');
+  if (opts.archived) params.set('archived', 'true');
   params.set('_ts', String(Date.now()));
   const r = await fetch(`/api/sessions?${params.toString()}`, { cache: 'no-store' });
   if (!r.ok) throw new Error(`sessions GET ${r.status}`);
   return (await r.json()) as SessionSummary[];
+}
+
+/** Pin / archive / restore a session. Omitted fields are left untouched;
+ *  both flags persist on the server record and survive restarts. */
+export async function setSessionFlags(
+  id: string,
+  flags: { pinned?: boolean; archived?: boolean },
+): Promise<void> {
+  const r = await fetch(`/api/sessions/${encodeURIComponent(id)}/flags`, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(flags),
+  });
+  if (!r.ok) {
+    let msg = `session flags ${r.status}`;
+    try {
+      const j = await r.json();
+      if (j.error) msg += `: ${j.error}`;
+    } catch { /* ignore */ }
+    throw new Error(msg);
+  }
 }
 
 export type SessionHistoryView = {
@@ -45,6 +69,8 @@ export type SessionHistoryView = {
   updated_at: number;
   messages: import('./types').Message[];
   previews?: Record<string, import('./types').DiffPreview>;
+  agent_transcript?: import('./types').AgentTranscriptLine[];
+  agent_driver?: string | null;
 };
 
 /** Read-only lookup — returns messages without swapping the active
@@ -208,11 +234,34 @@ export async function browse(path?: string, showHidden = false, includeFiles = f
   return (await r.json()) as BrowseView;
 }
 
+/** One value a model offers for a `select` descriptor. */
+export type OptionChoice = {
+  value: string;
+  label: string;
+  hint?: string | null;
+};
+
+/**
+ * A single adjustable knob on a model, as advertised by the server.
+ *
+ * "Fast" is not one thing: OpenAI has a service tier, Anthropic's API has
+ * no equivalent, and many models expose neither. Rather than a hardcoded
+ * button that silently does nothing on most of the catalog, each model
+ * advertises the knobs it genuinely accepts and the composer renders exactly
+ * those. Nothing is drawn for a model with no descriptors.
+ */
+export type OptionDescriptor =
+  | { type: 'select'; id: string; label: string; options: OptionChoice[] }
+  | { type: 'boolean'; id: string; label: string; on_value?: string | null };
+
+export type ModelCapabilities = { option_descriptors?: OptionDescriptor[] };
+
 export type ModelInfo = {
   id: string;
   display_name?: string | null;
   owned_by?: string | null;
   context_length?: number | null;
+  capabilities?: ModelCapabilities | null;
 };
 
 export type ModelListView = { models: ModelInfo[]; cached: boolean };
@@ -225,6 +274,60 @@ export async function listModels(): Promise<ModelListView> {
     return { models: [], cached: false };
   }
   return (await r.json()) as ModelListView;
+}
+
+// ---- engines (unified backend list: native providers + external agents) ----
+
+export type EngineState =
+  | { state: 'ready' }
+  | { state: 'not_configured'; reason: string }
+  | { state: 'not_found'; looked_for: string }
+  | { state: 'failed'; reason: string }
+  | { state: 'unavailable'; reason: string };
+
+export type EngineFlavor = 'native' | 'external';
+
+/** One backend row from `GET /api/engines` — health, auth summary, and
+ *  (when known) the model catalog, in the same shape for every flavor. */
+export type EngineSnapshot = {
+  instance: string;
+  driver: string;
+  flavor: EngineFlavor;
+  display_name: string;
+  enabled: boolean;
+  state: EngineState;
+  models?: ModelInfo[];
+  default_model?: string | null;
+  auth?: string | null;
+  install_hint?: string | null;
+  launch?: string | null;
+};
+
+export type EngineListView = {
+  engines: EngineSnapshot[];
+  active_instance?: string | null;
+  active_model?: string | null;
+  /** False on the first hit after boot: external rows are presence-only
+   *  placeholders until the background probe lands. */
+  fresh: boolean;
+};
+
+/** One provider instance's own model catalog (not the active one's). */
+export async function listInstanceModels(instance: string): Promise<ModelInfo[]> {
+  const r = await fetch(`/api/engines/${encodeURIComponent(instance)}/models`);
+  const body = (await r.json().catch(() => ({}))) as { models?: ModelInfo[]; error?: string };
+  if (!r.ok) throw new Error(body.error ?? `models for ${instance}: ${r.status}`);
+  return body.models ?? [];
+}
+
+export async function listEngines(refresh = false): Promise<EngineListView> {
+  const r = await fetch(`/api/engines${refresh ? '?refresh=1' : ''}`);
+  if (!r.ok) {
+    // No engines info is a degraded picker, not a broken app: native
+    // model picking still works through /api/models.
+    return { engines: [], fresh: false };
+  }
+  return (await r.json()) as EngineListView;
 }
 
 export type SkillView = {
@@ -251,6 +354,37 @@ export type SkillsResponse = { skills: SkillView[] };
  *  (<cwd>/.mira/skills) merged. Powers dynamic `/<skill-name>` slash
  *  commands in the composer palette. Returns an empty list on error
  *  (skills are additive; a missing roster shouldn't break the palette). */
+export type AgentTurn = { turn: number; t: number; first_text: string; snapshot: boolean };
+
+export async function listAgentTurns(sessionId: string): Promise<AgentTurn[]> {
+  const r = await fetch(`/api/acp/turns?session=${encodeURIComponent(sessionId)}`, { cache: 'no-store' });
+  if (!r.ok) throw new Error(`turns GET ${r.status}`);
+  return (await r.json()) as AgentTurn[];
+}
+
+export async function revertAgentTurn(sessionId: string, turn: number): Promise<{ note: string }> {
+  const r = await fetch('/api/acp/revert', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId, turn }),
+  });
+  if (!r.ok) {
+    let msg = `revert POST ${r.status}`;
+    try {
+      const j = await r.json();
+      if (j.error) msg += `: ${j.error}`;
+    } catch { /* ignore */ }
+    throw new Error(msg);
+  }
+  return (await r.json()) as { note: string };
+}
+
+export async function listExternalAgentSessions(): Promise<ExternalAgentSession[]> {
+  const r = await fetch('/api/acp/external-sessions', { cache: 'no-store' });
+  if (!r.ok) throw new Error(`external-sessions GET ${r.status}`);
+  return (await r.json()) as ExternalAgentSession[];
+}
+
 export async function listSkills(): Promise<SkillView[]> {
   try {
     const r = await fetch('/api/skills');
@@ -372,12 +506,23 @@ export async function getGitStatus(): Promise<GitStatusView> {
   return (await r.json()) as GitStatusView;
 }
 
+/** One file the chat changed, as a commit of it would carry it. */
+export type SessionFile = {
+  /** Relative to the session's folder. */
+  path: string;
+  status: 'added' | 'modified' | 'deleted';
+  added: number;
+  removed: number;
+  binary: boolean;
+};
+
 export type SessionDiffView = {
   added: number;
   removed: number;
-  /** Every file this session has written (never shrinks). */
-  files: string[];
-  /** Of those, how many still have something to commit. */
+  /** What the chat changed that still differs from HEAD — by its tools, an
+   *  external agent or a shell command alike. */
+  files: SessionFile[];
+  /** `files.length`. */
   uncommitted?: number;
   /** Of those, how many git doesn't track yet (new files). */
   untracked?: number;
@@ -392,6 +537,8 @@ export async function getSessionDiff(): Promise<SessionDiffView> {
 export type SessionChange = {
   path: string;
   status: 'modified' | 'added' | 'deleted';
+  added: number;
+  removed: number;
   /** Unified diff against HEAD. */
   diff: string;
 };
@@ -401,6 +548,97 @@ export async function getSessionChanges(): Promise<SessionChange[]> {
   const r = await fetch('/api/git/session-changes');
   if (!r.ok) throw new Error(`session changes ${r.status}`);
   return ((await r.json()) as { files: SessionChange[] }).files;
+}
+
+export type ContextPart = {
+  /** `system`, `tools`, `memory`, `conversation`, `tool_results` for Mira;
+   *  a slug of the agent's own category name otherwise. */
+  id: string;
+  label: string;
+  tokens: number;
+};
+
+export type ContextView = {
+  /** `mira`: sized by Mira from the request it sends. `agent`: the
+   *  external agent's own count. */
+  source: 'mira' | 'agent';
+  /** The agent's name, for `agent`. */
+  agent?: string;
+  /** Results can be taken out (only Mira's own history). */
+  droppable: boolean;
+  window: number;
+  compact_at: number | null;
+  /** Extra itemised groups an agent reports (memory files, skills, MCP tools). */
+  details: { title: string; items: { label: string; tokens: number }[] }[];
+  breakdown: {
+    parts: ContextPart[];
+    total: number;
+    /** Scaled to the provider's own count for the last request. */
+    calibrated: boolean;
+    last_reported: number | null;
+    largest_results: { call_id: string; tool: string; label: string; tokens: number }[];
+  };
+};
+
+export type DroppedResult = { tool: string; label: string; tokens: number };
+
+/** What fills the active chat's context window. */
+export async function getContextBreakdown(): Promise<ContextView> {
+  const r = await fetch('/api/context');
+  const json = (await r.json().catch(() => ({}))) as ContextView & { error?: string };
+  if (!r.ok) throw new Error(json.error ?? `HTTP ${r.status}`);
+  return json;
+}
+
+/** Take one tool result out of the context (replaced with a stub). */
+export async function dropContextResult(callId: string): Promise<DroppedResult> {
+  const r = await fetch('/api/context/drop', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ call_id: callId }),
+  });
+  const json = (await r.json().catch(() => ({}))) as DroppedResult & { error?: string };
+  if (!r.ok) throw new Error(json.error ?? `HTTP ${r.status}`);
+  return json;
+}
+
+/** What restoring a checkpoint would do to one file. */
+export type RestoreChange = {
+  path: string;
+  /** `revert`: content goes back; `remove`: created since; `recreate`: deleted since. */
+  action: 'revert' | 'remove' | 'recreate';
+};
+
+export type Restored = { changes: RestoreChange[]; undo: string };
+
+async function checkpointCall<T>(path: string, body: unknown): Promise<T> {
+  const r = await fetch(path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const json = (await r.json().catch(() => ({}))) as T & { error?: string };
+  if (!r.ok) throw new Error(json.error ?? `HTTP ${r.status}`);
+  return json;
+}
+
+/** A user message, as checkpoints identify it: its text, and which match
+ *  of that text counting from the latest (the same key editing uses). */
+export type MessageRef = { text: string; occurrence: number };
+
+/** What restoring the files to before a message would change. */
+export async function previewCheckpoint(ref: MessageRef): Promise<RestoreChange[]> {
+  return (await checkpointCall<{ changes: RestoreChange[] }>('/api/checkpoints/preview', ref)).changes;
+}
+
+/** Put the files back the way they were before a message. */
+export function restoreCheckpoint(ref: MessageRef): Promise<Restored> {
+  return checkpointCall<Restored>('/api/checkpoints/restore', ref);
+}
+
+/** Undo a restore. */
+export function undoRestore(undo: string): Promise<Restored> {
+  return checkpointCall<Restored>('/api/checkpoints/undo', { undo });
 }
 
 /** Discard this session's changes to one file (restore / delete). */

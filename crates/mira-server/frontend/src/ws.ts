@@ -11,6 +11,11 @@ export interface WsClient {
   attach(sessionId: string): void;
   /** Set the currently-attached session's background mode. */
   setBackgroundMode(mode: BackgroundMode): void;
+  /** The session the UI is showing (from its Ready frame). A reconnect
+   *  re-attaches to it: a restarted server would otherwise put this socket
+   *  on its own default session, and the user would silently land in a
+   *  different chat. */
+  setSession(sessionId: string): void;
   close(): void;
 }
 
@@ -26,6 +31,11 @@ export function connect(
   let ws: WebSocket | null = null;
   let stopped = false;
   let attempt = 0;
+  let opened = false;
+  let session: string | null = null;
+  /** Re-attaching after a reconnect: until this session's Ready arrives,
+   *  frames are the server's default session's, not the user's chat. */
+  let reattaching: string | null = null;
   const queue: ClientMsg[] = [];
 
   function schedule() {
@@ -43,13 +53,21 @@ export function connect(
     socket.onopen = () => {
       attempt = 0;
       onStatus('open');
-      // Drain anything queued while disconnected.
+      // On reconnect, get back onto the chat the user is looking at first —
+      // attaching replays its Ready — so nothing below lands elsewhere.
+      // Otherwise ask for the current state, in case a frame was missed.
+      const reattach = opened && session;
+      opened = true;
+      reattaching = reattach ? session : null;
+      socket.send(
+        JSON.stringify(
+          (reattach ? { type: 'attach', session_id: session } : { type: 'sync' }) as ClientMsg,
+        ),
+      );
+      // Then what was sent while disconnected, in order.
       while (queue.length > 0 && socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify(queue.shift()!));
       }
-      // On reconnect, ask the server to re-broadcast current state so the
-      // UI stays consistent if we missed a Ready/model_changed/etc.
-      socket.send(JSON.stringify({ type: 'sync' } as ClientMsg));
     };
     ws.onclose = () => {
       onStatus('closed');
@@ -60,11 +78,20 @@ export function connect(
       // onclose fires next; let it drive the reconnect.
     };
     ws.onmessage = (ev) => {
+      let msg: ServerMsg;
       try {
-        onMsg(JSON.parse(ev.data) as ServerMsg);
+        msg = JSON.parse(ev.data) as ServerMsg;
       } catch (e) {
         console.error('bad frame', ev.data, e);
+        return;
       }
+      if (reattaching) {
+        // A restarted server greets the socket with its own default
+        // session; showing that, even briefly, flashes another chat.
+        if (msg.type !== 'ready' || msg.session_id !== reattaching) return;
+        reattaching = null;
+      }
+      onMsg(msg);
     };
   }
 
@@ -86,6 +113,9 @@ export function connect(
     },
     setBackgroundMode(mode) {
       sendMsg({ type: 'set_background_mode', mode });
+    },
+    setSession(sessionId) {
+      session = sessionId || null;
     },
     close() {
       stopped = true;

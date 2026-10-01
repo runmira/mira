@@ -43,8 +43,9 @@ impl Tool for BrowserTool {
              text. Target elements by `ref` (e.g. \"e12\") from the latest snapshot — refs can \
              change after the page updates. Actions that change the page return a fresh \
              snapshot. Use `screenshot` only when layout or visuals matter; `click` with \
-             `coordinate` uses that screenshot's pixels. Never enter passwords or payment \
-             details yourself — ask the user to do it in the browser window.",
+             `coordinate` uses that screenshot's pixels. The user watches this browser live in \
+             Mira's browser pane and can take over there. Never enter passwords or payment \
+             details yourself — ask the user to do it in the browser pane.",
             json!({
                 "type": "object",
                 "properties": {

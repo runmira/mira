@@ -175,3 +175,141 @@ pub async fn launch(opts: &BrowserOptions) -> Result<Launched, BrowserError> {
 
     Ok(Launched { child, ws_url })
 }
+
+/// The DevTools endpoint of a browser already running on `profile`, from
+/// the `DevToolsActivePort` file Chrome writes when started with
+/// `--remote-debugging-port`.
+///
+/// This is how Mira gets its browser back after Mira itself exits without
+/// closing it (a crash, a force quit, a dev restart): the Chrome it
+/// launched keeps running and keeps the profile locked, and before this
+/// every later launch failed on that lock until a reboot. Reconnecting
+/// keeps its tabs and logins too.
+pub fn active_devtools_url(profile: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(profile.join("DevToolsActivePort")).ok()?;
+    let mut lines = text.lines();
+    let port: u16 = lines.next()?.trim().parse().ok()?;
+    let path = lines.next()?.trim();
+    path.starts_with("/devtools/browser/")
+        .then(|| format!("ws://127.0.0.1:{port}{path}"))
+}
+
+/// Clear what a browser left behind on `profile` so a fresh one can start.
+///
+/// Chrome's profile lock (`SingletonLock`) is a symlink to `host-pid`.
+/// A lock whose process is gone is stale and is simply removed. A lock
+/// whose process is alive but unreachable over DevTools is a Mira browser
+/// that has stopped answering; the profile is Mira's own (never the
+/// user's), so that process is asked to quit, then removed. Locks held by
+/// another host (a shared home directory) are left alone.
+pub async fn clear_stale_lock(profile: &Path) {
+    let lock = profile.join("SingletonLock");
+    let Ok(target) = std::fs::read_link(&lock) else {
+        return;
+    };
+    let target = target.to_string_lossy().to_string();
+    let Some((host, pid)) = target.rsplit_once('-') else {
+        return;
+    };
+    let Ok(pid) = pid.parse::<u32>() else { return };
+    if !is_this_host(host) {
+        tracing::warn!(lock = %target, "browser profile is locked by another host; leaving it");
+        return;
+    }
+    if process_alive(pid) {
+        tracing::warn!(
+            pid,
+            "stopping an unresponsive Mira browser that holds the profile"
+        );
+        terminate(pid).await;
+    }
+    for f in [
+        "SingletonLock",
+        "SingletonSocket",
+        "SingletonCookie",
+        "DevToolsActivePort",
+    ] {
+        let _ = std::fs::remove_file(profile.join(f));
+    }
+}
+
+fn is_this_host(host: &str) -> bool {
+    let ours = std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    ours.is_empty() || ours == host || ours.split('.').next() == host.split('.').next()
+}
+
+#[cfg(unix)]
+fn process_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+#[cfg(not(unix))]
+fn process_alive(_pid: u32) -> bool {
+    false
+}
+
+#[cfg(unix)]
+async fn terminate(pid: u32) {
+    let _ = std::process::Command::new("kill")
+        .arg(pid.to_string())
+        .status();
+    for _ in 0..30 {
+        if !process_alive(pid) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let _ = std::process::Command::new("kill")
+        .args(["-9", &pid.to_string()])
+        .status();
+}
+
+#[cfg(not(unix))]
+async fn terminate(_pid: u32) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_devtools_port_file_becomes_a_websocket_url() {
+        let dir = std::env::temp_dir().join(format!("mira-devtools-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("DevToolsActivePort"),
+            "52341\n/devtools/browser/abc-123\n",
+        )
+        .unwrap();
+        assert_eq!(
+            active_devtools_url(&dir).as_deref(),
+            Some("ws://127.0.0.1:52341/devtools/browser/abc-123")
+        );
+        std::fs::write(dir.join("DevToolsActivePort"), "garbage").unwrap();
+        assert_eq!(active_devtools_url(&dir), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_lock_left_by_a_dead_process_is_cleared() {
+        let dir = std::env::temp_dir().join(format!("mira-lock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let host = std::process::Command::new("hostname").output().unwrap();
+        let host = String::from_utf8_lossy(&host.stdout).trim().to_string();
+        // pid 1 is alive; use an absurd pid that cannot be.
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(format!("{host}-999999"), dir.join("SingletonLock")).unwrap();
+        std::fs::write(dir.join("DevToolsActivePort"), "1\n/devtools/browser/x\n").unwrap();
+        clear_stale_lock(&dir).await;
+        assert!(std::fs::symlink_metadata(dir.join("SingletonLock")).is_err());
+        assert!(!dir.join("DevToolsActivePort").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

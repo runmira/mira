@@ -66,9 +66,17 @@ pub struct WsApprover {
     /// applies instead of prompting.
     attached: Arc<AtomicUsize>,
     background_mode: Arc<RwLock<BackgroundMode>>,
+    /// The session policy, to name which parts of a compound command are
+    /// the reason for asking.
+    policy: Option<Arc<tokio::sync::Mutex<mira_policy::Policy>>>,
 }
 
 impl WsApprover {
+    pub fn with_policy(mut self, policy: Arc<tokio::sync::Mutex<mira_policy::Policy>>) -> Self {
+        self.policy = Some(policy);
+        self
+    }
+
     pub fn new(
         event_tx: broadcast::Sender<ServerMsg>,
         pending: PendingMap,
@@ -82,6 +90,7 @@ impl WsApprover {
             cwd,
             attached,
             background_mode,
+            policy: None,
         }
     }
 }
@@ -140,9 +149,14 @@ impl Approver for WsApprover {
         // subscribe fresh; the timeout below caps the wait either way.
         // Under Deny/AutoApprove with a client attached, this is the
         // normal path.
+        let needs = match (&self.policy, bash_command(call)) {
+            (Some(policy), Some(cmd)) => policy.lock().await.parts_needing_approval(&cmd),
+            _ => Vec::new(),
+        };
         let _ = self.event_tx.send(ServerMsg::ApprovalRequest {
             call: call.clone(),
             preview,
+            needs,
         });
 
         // Bounded wait — an unanswered oneshot used to hang the whole
@@ -205,4 +219,16 @@ pub async fn resolve(pending: &PendingMap, call_id: &str, allow: bool) -> Option
         warn!(call_id, "approval channel closed before resolve");
     }
     Some(call)
+}
+
+/// The command a `bash` call would run, if this is one.
+pub(crate) fn bash_command(call: &ToolCall) -> Option<String> {
+    if call.function.name != "bash" {
+        return None;
+    }
+    serde_json::from_str::<serde_json::Value>(&call.function.arguments)
+        .ok()?
+        .get("command")?
+        .as_str()
+        .map(str::to_string)
 }

@@ -1,5 +1,11 @@
 ---
 name: coder
+display_name: Bolt
+face:
+  color: "#a78bfa"
+  shape: squircle
+  eyes: happy
+  cheeks: false
 description: Implements a small, well-scoped change. Use when the task is concrete ("wire up X to Y", "add function foo") and the reviewer/explorer work is already done. Returns a summary of the edits made.
 category: codegen
 tools: [read_file, write_file, edit_file, grep, glob, find_symbol, find_references, find_callers, task_create, task_list, task_update, task_get, bash]

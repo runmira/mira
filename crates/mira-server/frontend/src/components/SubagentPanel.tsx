@@ -1,15 +1,23 @@
 import { useMemo, useState } from 'react';
-import { CaretRight, CircleNotch, File as FileIcon, Info, WarningCircle, X } from '@phosphor-icons/react';
+import { ChevronRight, CircleAlert, File as FileIcon, Info, LoaderCircle, X } from 'lucide-react';
 import type { Entry } from '../App';
 import { groupAgentRuns } from '../App';
 import type { DiffPreview, ToolCall, ToolResult } from '../types';
 import type { ToolStatus } from './ToolCard';
 import { AssistantContent } from './AssistantContent';
 import { Markdown } from './Markdown';
-import { identityFor, extractPrompt, stripAgentIdMarker } from './AgentCard';
+import { extractPrompt, faceStateFor, stripAgentIdMarker, useSubagentIdentity } from './AgentCard';
+import { SubagentFace } from './SubagentFace';
 import { ToolCard } from './ToolCard';
 import { ToolGroup } from './ToolGroup';
 import { FilePanelBody, type FilePanelTab } from './FilePanel';
+import { PanelNewTabButton } from './RightPanelButton';
+import { useFileIcons } from '@/lib/fileIcons';
+import { PanelLauncher } from './PanelLauncher';
+import { BrowserPane } from './panes/BrowserPane';
+import { DevToolsPane } from './panes/DevToolsPane';
+import { WhiteboardPane } from './panes/WhiteboardPane';
+import { TOOL_PANE_DEFS, type ToolPaneTab } from './panes/toolPanes';
 import { cn } from '@/lib/utils';
 
 export type { FilePanelTab };
@@ -44,6 +52,16 @@ type Props = {
   tabs: SubagentTab[];
   /** File viewer tabs — live alongside agent tabs in the same strip. */
   fileTabs: FilePanelTab[];
+  /** Utility panes (browser / whiteboard / devtools). Singletons by kind. */
+  toolTabs: ToolPaneTab[];
+  /** Whiteboard "Send" — the panel hands a PNG data URL up so the parent
+   *  can turn it into a composer attachment. */
+  onWhiteboardSend?: (pngDataUrl: string) => void;
+  /** "+" menu actions. `onOpenPane` mirrors the toolbar's so both entry
+   *  points land in the same place. */
+  onOpenPane?: (kind: import('./panes/toolPanes').ToolPaneKind) => void;
+  /** Opens the project file picker, for the "File…" row. */
+  onBrowseFile?: () => void;
   /** Active panel id — either a subagent callId or a file tab id (= path). */
   activeCallId: string | null;
   /** Current working directory — passed through to the file panel for
@@ -64,18 +82,21 @@ type Props = {
   onOpenFile?: (path: string, diff: DiffPreview | null) => void;
 };
 
-export function SubagentPanel({ tabs, fileTabs, activeCallId, cwd, onSelectTab, onCloseTab, onClose, onReview, onResizeStart, onOpenFile }: Props) {
-  if (tabs.length === 0 && fileTabs.length === 0) return null;
+export function SubagentPanel({ tabs, fileTabs, toolTabs, onWhiteboardSend, onOpenPane, onBrowseFile, activeCallId, cwd, onSelectTab, onCloseTab, onClose, onReview, onResizeStart, onOpenFile }: Props) {
+  if (tabs.length === 0 && fileTabs.length === 0 && toolTabs.length === 0) return null;
 
   // Fall back to first available tab when nothing is explicitly active.
   const effectiveActiveId =
     activeCallId ??
-    (tabs.length > 0 ? tabs[0].callId : fileTabs[0]?.id ?? null);
+    (tabs.length > 0
+      ? tabs[0].callId
+      : (fileTabs[0]?.id ?? toolTabs[0]?.id ?? null));
   const effectiveAgent = tabs.find((t) => t.callId === effectiveActiveId);
   const effectiveFile = fileTabs.find((t) => t.id === effectiveActiveId);
+  const effectiveTool = toolTabs.find((t) => t.id === effectiveActiveId);
 
   return (
-    <aside className="relative flex h-full min-w-0 flex-col overflow-hidden border-l border-border bg-background">
+    <aside className="relative flex h-full min-w-0 flex-col overflow-hidden bg-transparent">
       {/* Left-edge drag handle — 5px wide, invisible until hovered */}
       <div
         className="absolute left-0 top-0 z-20 h-full w-[5px] cursor-col-resize transition-colors hover:bg-mira-blue/30 active:bg-mira-blue/50"
@@ -104,6 +125,25 @@ export function SubagentPanel({ tabs, fileTabs, activeCallId, cwd, onSelectTab, 
               onClose={() => onCloseTab(t.id)}
             />
           ))}
+          {toolTabs.map((t) => (
+            <ToolTabCapsule
+              key={t.id}
+              tab={t}
+              active={t.id === effectiveActiveId}
+              onSelect={() => onSelectTab(t.id)}
+              onClose={() => onCloseTab(t.id)}
+            />
+          ))}
+          {onOpenPane && (
+            <PanelNewTabButton
+              toolTabs={toolTabs}
+              activeId={effectiveActiveId}
+              onOpenPane={onOpenPane}
+              onOpenFile={() => {
+                onBrowseFile?.();
+              }}
+            />
+          )}
         </div>
         <button
           type="button"
@@ -117,7 +157,27 @@ export function SubagentPanel({ tabs, fileTabs, activeCallId, cwd, onSelectTab, 
 
       {/* active tab body */}
       <div className="min-h-0 flex-1 overflow-hidden">
-        {effectiveFile ? (
+        {effectiveTool ? (
+          effectiveTool.kind === 'new' ? (
+            <PanelLauncher
+              onOpenPane={onOpenPane ?? (() => {})}
+              onOpenFile={() => onBrowseFile?.()}
+              openFiles={fileTabs.map((t) => ({
+                id: t.id,
+                label: t.path.split('/').pop() ?? t.path,
+              }))}
+              onOpenFileTab={(id) => onSelectTab(id)}
+            />
+          ) : effectiveTool.kind === 'browser' ? (
+            <BrowserPane />
+          ) : effectiveTool.kind === 'whiteboard' ? (
+            <WhiteboardPane
+              onSendToChat={(png) => onWhiteboardSend?.(png)}
+            />
+          ) : (
+            <DevToolsPane />
+          )
+        ) : effectiveFile ? (
           <FilePanelBody tab={effectiveFile} cwd={cwd} onOpenFile={onOpenFile} />
         ) : effectiveAgent ? (
           <div className="h-full overflow-y-auto">
@@ -140,7 +200,7 @@ function TabCapsule({
   onSelect: () => void;
   onClose: () => void;
 }) {
-  const identity = identityFor(tab.callId);
+  const identity = useSubagentIdentity(tab.call);
   return (
     <div
       role="tab"
@@ -153,8 +213,14 @@ function TabCapsule({
           : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground',
       )}
     >
-      <identity.Icon className={cn('size-3.5', identity.textClass)} weight="fill" />
-      <span className={cn('font-medium', active && identity.textClass)}>
+      <SubagentFace
+        id={identity.seed}
+        face={identity.face}
+        size={16}
+        animate={false}
+        state={faceStateFor(tab.status, tab.result?.is_error === true)}
+      />
+      <span className="font-medium" style={active ? { color: identity.color } : undefined}>
         {identity.name}
       </span>
       <button
@@ -198,13 +264,86 @@ function FileTabCapsule({
           : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground',
       )}
     >
-      <FileIcon className="size-3.5 shrink-0 text-muted-foreground/70" />
+      {/* The tab showed one generic document glyph for every file. It now
+          resolves the same themed icon the explorer uses, so a `.tsx` tab
+          and a `.md` tab are distinguishable at a glance. Falls back to the
+          old glyph while the icon chunk loads. */}
+      <TabFileIcon name={shortName} className="size-3.5" />
       <span className={cn('font-medium font-mono', active && 'text-foreground')}>
         {shortName}
       </span>
       <button
         type="button"
         aria-label="Close tab"
+        onClick={(e) => {
+          e.stopPropagation();
+          onClose();
+        }}
+        className={cn(
+          'ml-0.5 rounded p-0.5 text-muted-foreground/60 transition-opacity hover:bg-background/60 hover:text-foreground',
+          active ? 'opacity-100' : 'opacity-0 group-hover:opacity-100',
+        )}
+      >
+        <X className="size-3" />
+      </button>
+    </div>
+  );
+}
+
+/** Themed file icon for a tab, falling back to a plain glyph while the icon
+ *  set is still loading. */
+function TabFileIcon({ name, className }: { name: string; className?: string }) {
+  const { fileIcon } = useFileIcons();
+  const dataUri = fileIcon(name);
+  if (dataUri) {
+    return (
+      <img
+        src={dataUri}
+        alt=""
+        className={cn('shrink-0', className)}
+        draggable={false}
+      />
+    );
+  }
+  return <FileIcon className={cn('shrink-0 text-muted-foreground/70', className)} />;
+}
+
+/** Utility-pane tab. Same capsule geometry as the file tab but carries a
+ *  kind icon instead of a file glyph. */
+function ToolTabCapsule({
+  tab, active, onSelect, onClose,
+}: {
+  tab: ToolPaneTab;
+  active: boolean;
+  onSelect: () => void;
+  onClose: () => void;
+}) {
+  const def = TOOL_PANE_DEFS[tab.kind];
+  return (
+    <div
+      role="tab"
+      aria-selected={active}
+      onClick={onSelect}
+      title={def.blurb}
+      className={cn(
+        'group inline-flex cursor-pointer items-center gap-1.5 rounded px-2.5 py-1 text-[12.5px] transition-colors',
+        active
+          ? 'bg-white/[0.1] text-foreground'
+          : 'text-muted-foreground hover:bg-white/[0.05] hover:text-foreground',
+      )}
+    >
+      <span
+        className={cn(
+          'shrink-0',
+          active ? 'text-foreground/90' : 'text-muted-foreground/70',
+        )}
+      >
+        {def.icon}
+      </span>
+      <span className="font-medium">{tab.title}</span>
+      <button
+        type="button"
+        aria-label={`Close ${def.title}`}
         onClick={(e) => {
           e.stopPropagation();
           onClose();
@@ -232,7 +371,7 @@ function TabBody({
   tab: SubagentTab;
   onReview: (parentCallId: string, promptId: string, approved: boolean, note?: string) => void;
 }) {
-  const identity = identityFor(tab.callId);
+  const identity = useSubagentIdentity(tab.call);
   const prompt = extractPrompt(tab.call.function.arguments);
   // Strip the `[mira-agent-id:X]\n` marker before displaying — it's an
   // internal handle for reload hydration, not user-facing text.
@@ -246,12 +385,19 @@ function TabBody({
   return (
     <div className="mx-auto flex max-w-2xl flex-col gap-4 px-5 pb-8 pt-5">
       <header className="flex items-center gap-2.5">
-        <identity.Icon className={cn('size-5', identity.textClass)} weight="fill" />
+        <SubagentFace
+          id={identity.seed}
+          face={identity.face}
+          size={40}
+          state={faceStateFor(tab.status, tab.result?.is_error === true)}
+        />
         <div className="flex min-w-0 flex-col leading-tight">
-          <span className={cn('text-[15px] font-semibold', identity.textClass)}>
+          <span className="text-[15px] font-semibold" style={{ color: identity.color }}>
             {identity.name}
           </span>
-          <span className="text-[11px] text-muted-foreground">Subagent</span>
+          <span className="text-[11px] text-muted-foreground">
+            Subagent{identity.type ? ` · ${identity.type}` : ''}
+          </span>
         </div>
         <button
           type="button"
@@ -264,7 +410,7 @@ function TabBody({
               : 'text-muted-foreground hover:bg-accent hover:text-foreground',
           )}
         >
-          <Info className="size-4" weight={infoOpen ? 'fill' : 'regular'} />
+          <Info className="size-4" fill={infoOpen ? "currentColor" : "none"} />
         </button>
         <div className="ml-auto">
           <StatusPill status={tab.status} isError={isError} />
@@ -274,7 +420,7 @@ function TabBody({
       {infoOpen && (
         <div className="rounded-lg border border-border/60 bg-card/40 p-4">
           <div className="mb-2 flex items-center gap-2">
-            <Info className={cn('size-4', identity.textClass)} weight="fill" />
+            <Info className="size-4" style={{ color: identity.color }} fill="currentColor" />
             <span className="text-[13px] font-medium text-foreground">
               About {identity.name}
             </span>
@@ -295,7 +441,7 @@ function TabBody({
       {tab.pendingReview && (
         <ReviewCard
           review={tab.pendingReview}
-          identityTextClass={identity.textClass}
+          identityTextClass="text-foreground"
           onApprove={(note) =>
             onReview(tab.callId, tab.pendingReview!.promptId, true, note)
           }
@@ -321,7 +467,7 @@ function TabBody({
         <>
           {isRunning && !summary && (
             <div className="flex items-center gap-2 text-[13px] text-muted-foreground">
-              <CircleNotch className="size-3.5 animate-spin text-mira-blue" />
+              <LoaderCircle className="size-3.5 animate-spin text-mira-blue" />
               <span>Working…</span>
             </div>
           )}
@@ -391,7 +537,7 @@ function StreamedEntries({
       })}
       {isRunning && !streamDone && (
         <div className="mt-1 flex items-center gap-2 text-[12px] text-muted-foreground">
-          <CircleNotch className="size-3 animate-spin text-mira-blue" />
+          <LoaderCircle className="size-3 animate-spin text-mira-blue" />
           <span>Working…</span>
         </div>
       )}
@@ -465,7 +611,7 @@ function StatusPill({ status, isError }: { status: ToolStatus; isError: boolean 
   if (isError) {
     return (
       <span className={cn(base, 'text-destructive')}>
-        <WarningCircle className="size-3" weight="fill" />
+        <CircleAlert className="size-3" fill="currentColor" />
         error
       </span>
     );
@@ -476,7 +622,7 @@ function StatusPill({ status, isError }: { status: ToolStatus; isError: boolean 
     case 'running':
       return (
         <span className={cn(base, 'text-mira-blue')}>
-          <CircleNotch className="size-3 animate-spin" />
+          <LoaderCircle className="size-3 animate-spin" />
           working
         </span>
       );
@@ -797,7 +943,7 @@ function ItemRow({ item }: { item: StructuredItem }) {
       </div>
       {where && (
         <div className="mt-1 flex items-center gap-1 font-mono text-[11.5px] text-muted-foreground/80">
-          <CaretRight className="size-3" />
+          <ChevronRight className="size-3" />
           <span className="truncate">{where}</span>
         </div>
       )}
@@ -881,7 +1027,7 @@ function ReviewCard({
   return (
     <div className="overflow-hidden rounded-2xl border border-border/40 bg-card/80 backdrop-blur">
       <div className="flex items-center gap-2 px-4 pt-3.5 pb-3">
-        <Info className={cn('size-3.5', identityTextClass)} weight="fill" />
+        <Info className={cn('size-3.5', identityTextClass)} fill="currentColor" />
         <span className="text-[12.5px] font-semibold tracking-tight text-foreground">
           Review required
         </span>

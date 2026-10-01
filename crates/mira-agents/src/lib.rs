@@ -43,10 +43,36 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use tracing::warn;
 
+/// A subagent's face: the little character that stands for it in the UI.
+///
+/// Every field is optional; unset ones are derived from the type's name, so
+/// a subagent nobody customized still gets a stable, distinct face.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Face {
+    /// Body color, `#rrggbb`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// Body shape: `round`, `squircle`, `blob`, `drop`, `ghost`, `star`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<String>,
+    /// Eye style: `dot`, `happy`, `wide`, `sleepy`, `wink`, `visor`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eyes: Option<String>,
+    /// Rosy cheeks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cheeks: Option<bool>,
+}
+
+impl Face {
+    pub fn is_empty(&self) -> bool {
+        *self == Face::default()
+    }
+}
+
 /// One named subagent type. Populated by the frontmatter loader — every
 /// field except `name`/`description` is optional so a minimal file is
 /// still valid.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AgentType {
     /// Machine name — used in `agent { type: "explore" }`. Keep short
     /// and identifier-ish.
@@ -116,6 +142,84 @@ pub struct AgentType {
     /// subagent's word without a human in the loop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_required: Option<bool>,
+    /// The subagent's persona name ("Scout"). Shown everywhere the UI
+    /// names it — the model still addresses it by `name`, which stays a
+    /// stable identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// Its face in the UI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub face: Option<Face>,
+    /// `false` keeps the type defined but out of the model's reach.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// Where this definition came from: `builtin`, `plugin`, `user`,
+    /// `project`. Set by the loader, never read from a file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
+impl AgentType {
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.unwrap_or(true)
+    }
+
+    /// This type as an agent file — frontmatter plus the instructions as
+    /// the body — in the format the loader reads. Used to save edits made
+    /// in the app to `~/.mira/agents/<name>.md`.
+    pub fn to_markdown(&self) -> String {
+        #[derive(Serialize)]
+        struct Out<'a> {
+            name: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            display_name: Option<&'a str>,
+            description: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            category: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            tools: Option<&'a Vec<String>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            model: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            max_rounds: Option<usize>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            parallel_safe: Option<bool>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            route_approvals_to_parent: Option<bool>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            worktree: Option<bool>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            review_required: Option<bool>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            extends: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            enabled: Option<bool>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            face: Option<&'a Face>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            response_schema: Option<&'a JsonValue>,
+        }
+        let fm = Out {
+            name: &self.name,
+            display_name: self.display_name.as_deref(),
+            description: &self.description,
+            category: self.category.as_deref(),
+            tools: self.tools.as_ref(),
+            model: self.model.as_deref(),
+            max_rounds: self.max_rounds,
+            parallel_safe: self.parallel_safe,
+            route_approvals_to_parent: self.route_approvals_to_parent,
+            worktree: self.worktree,
+            review_required: self.review_required,
+            extends: self.extends.as_deref(),
+            enabled: self.enabled,
+            face: self.face.as_ref().filter(|f| !f.is_empty()),
+            response_schema: self.response_schema.as_ref(),
+        };
+        let yaml = serde_yaml::to_string(&fm).unwrap_or_default();
+        let body = self.system_prompt_addendum.as_deref().unwrap_or("").trim();
+        format!("---\n{}---\n{}\n", yaml, body)
+    }
 }
 
 /// Ordered map of type name → definition. `BTreeMap` for stable listing
@@ -142,9 +246,14 @@ impl AgentRegistry {
         self.types.get(name)
     }
 
-    /// All type names in stable order.
+    /// Names of the types the model may use, in stable order. Disabled
+    /// types stay defined (Settings lists them) but are not offered.
     pub fn names(&self) -> Vec<String> {
-        self.types.keys().cloned().collect()
+        self.types
+            .values()
+            .filter(|t| t.is_enabled())
+            .map(|t| t.name.clone())
+            .collect()
     }
 
     /// Walk every type that has `extends` set and fold the parent's
@@ -239,6 +348,9 @@ fn fill_from_parent(child: &mut AgentType, parent: &AgentType) {
     if child.review_required.is_none() {
         child.review_required = parent.review_required;
     }
+    if child.face.is_none() {
+        child.face = parent.face.clone();
+    }
 }
 
 /* ---------- built-ins ---------- */
@@ -260,7 +372,8 @@ pub fn builtin() -> AgentRegistry {
     let mut reg = AgentRegistry::new();
     for (label, src) in BUILTIN_SOURCES {
         match parse_agent_md(src) {
-            Ok(ty) => {
+            Ok(mut ty) => {
+                ty.source = Some("builtin".into());
                 reg.types.insert(ty.name.clone(), ty);
             }
             Err(e) => {
@@ -292,7 +405,8 @@ pub fn load_with_plugins(cwd: &Path, plugin_files: &[PathBuf]) -> AgentRegistry 
 
     for path in plugin_files {
         match load_file(path) {
-            Ok(ty) => {
+            Ok(mut ty) => {
+                ty.source = Some("plugin".into());
                 reg.types.insert(ty.name.clone(), ty);
             }
             Err(e) => warn!(path = %path.display(), %e, "plugin agent failed to parse"),
@@ -310,7 +424,8 @@ pub fn load_with_plugins(cwd: &Path, plugin_files: &[PathBuf]) -> AgentRegistry 
     reg
 }
 
-fn user_agents_dir() -> Option<PathBuf> {
+/// Where edits made in the app are saved: `~/.mira/agents`.
+pub fn user_agents_dir() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
     Some(PathBuf::from(home).join(".mira").join("agents"))
 }
@@ -335,7 +450,8 @@ pub fn load_dir(dir: &Path, scope: &str) -> AgentRegistry {
             continue;
         }
         match load_file(&path) {
-            Ok(ty) => {
+            Ok(mut ty) => {
+                ty.source = Some(scope.to_string());
                 tracing::info!(scope, name = %ty.name, path = %path.display(), "loaded agent");
                 reg.types.insert(ty.name.clone(), ty);
             }
@@ -422,6 +538,13 @@ pub fn parse_agent_md(source: &str) -> Result<AgentType> {
         worktree: fm.worktree,
         extends: fm.extends,
         review_required: fm.review_required,
+        display_name: fm
+            .display_name
+            .map(|n| n.trim().to_string())
+            .filter(|n| !n.is_empty()),
+        face: fm.face,
+        enabled: fm.enabled,
+        source: None,
     })
 }
 
@@ -452,6 +575,12 @@ struct Frontmatter {
     extends: Option<String>,
     #[serde(default)]
     review_required: Option<bool>,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    face: Option<Face>,
+    #[serde(default)]
+    enabled: Option<bool>,
 }
 
 /// `tools:` is a YAML list in Mira's format and a comma-separated string
@@ -778,5 +907,59 @@ mod tests {
         assert_eq!(ty.model, None);
         let only_unknown = "---\nname: x\ntools: NotebookEdit\n---\n";
         assert_eq!(parse_agent_md(only_unknown).unwrap().tools, None);
+    }
+
+    #[test]
+    fn built_ins_have_personas() {
+        let reg = builtin();
+        for (name, persona) in [
+            ("explore", "Scout"),
+            ("reviewer", "Iris"),
+            ("coder", "Bolt"),
+        ] {
+            let t = reg.get(name).expect(name);
+            assert_eq!(t.display_name.as_deref(), Some(persona));
+            assert!(
+                t.face.as_ref().is_some_and(|f| f.color.is_some()),
+                "{name} has a face"
+            );
+            assert_eq!(t.source.as_deref(), Some("builtin"));
+        }
+    }
+
+    #[test]
+    fn an_edited_type_round_trips_through_its_file() {
+        let mut t = builtin().get("reviewer").unwrap().clone();
+        t.display_name = Some("Judge".into());
+        t.model = Some("claude-sonnet-5".into());
+        t.enabled = Some(false);
+        t.face = Some(Face {
+            color: Some("#123456".into()),
+            shape: Some("drop".into()),
+            ..Default::default()
+        });
+        let back = parse_agent_md(&t.to_markdown()).expect("parses");
+        assert_eq!(back.name, "reviewer");
+        assert_eq!(back.display_name.as_deref(), Some("Judge"));
+        assert_eq!(back.model.as_deref(), Some("claude-sonnet-5"));
+        assert_eq!(back.enabled, Some(false));
+        assert_eq!(
+            back.face.as_ref().and_then(|f| f.shape.as_deref()),
+            Some("drop")
+        );
+        assert_eq!(back.tools, t.tools);
+        assert_eq!(back.system_prompt_addendum, t.system_prompt_addendum);
+        assert!(back.response_schema.is_some(), "the schema survives");
+    }
+
+    #[test]
+    fn disabled_types_are_not_offered_to_the_model() {
+        let mut reg = builtin();
+        reg.types.get_mut("coder").unwrap().enabled = Some(false);
+        assert!(!reg.names().contains(&"coder".to_string()));
+        assert!(
+            reg.get("coder").is_some(),
+            "still defined, so Settings can list it"
+        );
     }
 }

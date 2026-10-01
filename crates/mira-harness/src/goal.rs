@@ -480,6 +480,7 @@ pub async fn evaluate(
         temperature: Some(0.0),
         max_tokens: Some(EVAL_MAX_TOKENS),
         reasoning_effort: None,
+        service_tier: None,
         response_format: Some(ResponseFormat::JsonObject),
     };
 

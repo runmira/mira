@@ -43,7 +43,12 @@ impl LocalBackend {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or_default();
-        let root = std::env::temp_dir().join(format!("mira-sandbox-{}-{n}", std::process::id()));
+        // The clock alone isn't unique: macOS reports microseconds, so two
+        // scratches made at once would share a directory.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root =
+            std::env::temp_dir().join(format!("mira-sandbox-{}-{n}-{seq}", std::process::id()));
         std::fs::create_dir_all(&root)?;
         let root = std::fs::canonicalize(&root)?;
         Ok(Self {

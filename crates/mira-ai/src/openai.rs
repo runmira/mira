@@ -95,7 +95,18 @@ impl ChatProvider for OpenAiCompatible {
             .json()
             .await
             .map_err(|e| ProviderError::Decode(e.to_string()))?;
-        Ok(raw.data.into_iter().map(Into::into).collect())
+
+        let flavor = crate::capabilities::CompatFlavor::from_base_url(&self.cfg.base_url);
+        Ok(raw
+            .data
+            .into_iter()
+            .map(Into::into)
+            .map(|mut m: ModelInfo| {
+                let caps = crate::capabilities::openai_compatible(&m.id, flavor);
+                m.capabilities = (!caps.option_descriptors.is_empty()).then_some(caps);
+                m
+            })
+            .collect())
     }
 
     async fn stream(
@@ -304,6 +315,12 @@ struct WireRequest<'a> {
     /// user actually wants reasoning.
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<&'a str>,
+    /// OpenAI's latency/cost dial. Only meaningful on OpenAI's own
+    /// endpoints — Google's compat layer has no such field, and OpenRouter
+    /// and friends ignore it — so the pane only ever offers it for models
+    /// `capabilities::openai_compatible` vouches for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    service_tier: Option<&'a str>,
     /// Structured-output constraint. Serializes to
     /// `{"type": "json_object"}` for `JsonObject`, or
     /// `{"type": "json_schema", "json_schema": {...}}` for the schema
@@ -405,6 +422,11 @@ impl<'a> WireRequest<'a> {
             temperature: req.temperature,
             max_tokens: req.max_tokens,
             reasoning_effort: effort,
+            service_tier: req
+                .service_tier
+                .as_deref()
+                .filter(|v| *v != "off" && *v != "auto")
+                .filter(|_| !google),
             response_format,
             // Gemini 2.5+ thinks by default, so ask for the summaries
             // unless the user turned reasoning off.
@@ -763,11 +785,16 @@ struct WireModel {
 
 impl From<WireModel> for ModelInfo {
     fn from(w: WireModel) -> Self {
+        // Capabilities are attached in `list_models`, which is the only
+        // place that knows which endpoint we're talking to. A bare
+        // `WireModel` can't tell `gpt-5` on OpenAI from the same id on
+        // OpenRouter, and the two have different capabilities.
         ModelInfo {
             id: w.id,
             display_name: w.name,
             owned_by: w.owned_by,
             context_length: w.context_length,
+            capabilities: None,
         }
     }
 }
@@ -786,6 +813,7 @@ mod tests {
             temperature: None,
             max_tokens: None,
             reasoning_effort: None,
+            service_tier: None,
             response_format: None,
         }
     }
@@ -876,6 +904,7 @@ mod tests {
             temperature: None,
             max_tokens: None,
             reasoning_effort: None,
+            service_tier: None,
             response_format: None,
         };
         let wire = WireRequest::from_request(&req, true, false);

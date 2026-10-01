@@ -44,6 +44,14 @@ pub struct MiraConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub small_model: Option<String>,
     pub providers: BTreeMap<String, ProviderConfig>,
+    /// Engine instances: overrides and additions on top of the derived
+    /// set (one native instance per `providers:` entry, one per known
+    /// external agent). Keys are instance slugs used by `SetModel` /
+    /// `GET /api/engines`; see `mira-engine`. Forward-safe by design:
+    /// unknown fields are preserved so config written by a newer build
+    /// or a fork round-trips instead of being rejected.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub engines: BTreeMap<String, EngineInstanceConfig>,
     /// Named third-party API keys (search backends, docs services, …).
     /// Kept separate from `providers` because they aren't LLM providers —
     /// they're keys tools consume via their env-var convention.
@@ -470,6 +478,53 @@ pub struct McpOAuthConfig {
     pub scopes: Vec<String>,
 }
 
+/// One entry under `engines:` — a per-instance override for a backend
+/// that already exists (e.g. `codex:`), or a declaration of a new one
+/// (e.g. `codex-work:` with `driver: codex`, or a fork's custom driver).
+///
+/// Deliberately *not* `deny_unknown_fields`: driver-specific keys this
+/// build doesn't know ride inside `config` and unknown top-level keys
+/// are preserved via `extra`, so config written by a different build
+/// survives a load/save cycle intact. The runtime — not the schema —
+/// decides what it understands.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EngineInstanceConfig {
+    /// Driver slug naming the implementation (`native`, `claude-code`,
+    /// `codex`, a fork's driver). Required only for instances that
+    /// aren't already derivable; overrides of known instances may omit
+    /// it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub driver: Option<String>,
+    /// Display override shown in pickers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// Whether the user opted in. Health probing is never gated on
+    /// this; pickers may filter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// Model to start on when the user picks this instance without
+    /// naming one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Opaque, driver-specific configuration (`binary_path`, `env`,
+    /// `api_key`, `launch_args`, `home_path`, `effort`, … for external
+    /// agents). Interpreted by the driver, carried verbatim here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config: Option<serde_json::Value>,
+    /// Unknown top-level keys, preserved verbatim so a config written
+    /// by a newer build round-trips.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+impl EngineInstanceConfig {
+    /// The opaque `config:` blob, or null.
+    pub fn config_value(&self) -> serde_json::Value {
+        self.config.clone().unwrap_or(serde_json::Value::Null)
+    }
+}
+
 /// One OpenAI-compatible endpoint. `api_key_env` names an env var to
 /// pull the key from; `api_key` is only used for local-only endpoints
 /// (llama.cpp, LM Studio) where the key doesn't need protecting.
@@ -600,6 +655,9 @@ impl MiraConfig {
         // `mcp_servers` from a repo's `.mira/config.yaml` are deliberately
         // not merged: they would launch commands from a cloned repo without
         // asking. mira-mcp reads them as project servers that need approval.
+        // `engines` are global-only for the same reason: an instance can
+        // carry a `binary_path` and env for an external agent, and a cloned
+        // repo must not be able to make Mira spawn one.
         self.permissions.allow.extend(other.permissions.allow);
         self.permissions.ask.extend(other.permissions.ask);
         self.permissions.deny.extend(other.permissions.deny);
@@ -656,6 +714,10 @@ pub struct RuntimeState {
     /// Last model the user picked. Preferred over `default_model` in
     /// `mira.yaml` — the yaml default is a fallback for first-run.
     pub last_model: Option<String>,
+    /// Last engine instance the user picked (a key from the engine
+    /// registry — `anthropic`, `codex`, …). Restores whichever backend
+    /// was serving the session, not just the model id on it.
+    pub last_engine: Option<String>,
 }
 
 impl RuntimeState {
@@ -1078,6 +1140,39 @@ mod tests {
             pretty_provider_name("moonshotai"),
             pretty_provider_name("moonshot"),
         );
+    }
+
+    /* ---- engine instances ---- */
+
+    #[test]
+    fn engine_overrides_parse_with_unknown_keys_preserved() {
+        let c: MiraConfig = serde_yaml::from_str(
+            "engines:\n  codex:\n    driver: codex\n    future_knob: 7\n    config:\n      env: {P: q}\n      also_new: true\n",
+        )
+        .unwrap();
+        let e = &c.engines["codex"];
+        assert_eq!(e.driver.as_deref(), Some("codex"));
+        assert_eq!(e.extra.get("future_knob").and_then(|v| v.as_i64()), Some(7));
+        assert_eq!(e.config_value()["env"]["P"], "q");
+        // Round-trip keeps what we don't understand.
+        let out = serde_yaml::to_string(&c).unwrap();
+        assert!(
+            out.contains("future_knob"),
+            "unknown keys must survive a save: {out}"
+        );
+    }
+
+    #[test]
+    fn engines_are_global_only() {
+        let global: MiraConfig =
+            serde_yaml::from_str("engines:\n  codex:\n    enabled: true\n").unwrap();
+        let local: MiraConfig = serde_yaml::from_str(
+            "engines:\n  evil:\n    driver: codex\n    config:\n      binary_path: /tmp/evil\n",
+        )
+        .unwrap();
+        let merged = global.merge(local);
+        assert!(!merged.engines.contains_key("evil"));
+        assert!(merged.engines.contains_key("codex"));
     }
 }
 

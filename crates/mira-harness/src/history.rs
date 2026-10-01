@@ -219,13 +219,23 @@ fn is_stub(content: &str) -> bool {
 }
 
 /// The context window to plan for: `MIRA_CONTEXT_WINDOW` if set, else
-/// [`model_context_window`].
-pub fn context_window(model: &str) -> usize {
+/// `catalog` (what the provider's catalog reported for this model), else
+/// [`model_context_window`]. Precedence is deliberate — the user's env
+/// override beats everything; a live catalog entry beats the built-in
+/// table, which only knows model *families*.
+pub fn context_window_with(model: &str, catalog: Option<u32>) -> usize {
     std::env::var("MIRA_CONTEXT_WINDOW")
         .ok()
         .and_then(|v| v.trim().parse::<usize>().ok())
         .filter(|n| *n >= 4_096)
+        .or(catalog.map(|n| n as usize).filter(|n| *n >= 4_096))
         .unwrap_or_else(|| model_context_window(model))
+}
+
+/// Same lookup with no catalog knowledge — kept for callers outside the
+/// session loop (tools, review, cloud) that only have a model id.
+pub fn context_window(model: &str) -> usize {
+    context_window_with(model, None)
 }
 
 /// Where tool-result clearing should start from now: the index before
@@ -233,8 +243,14 @@ pub fn context_window(model: &str) -> usize {
 /// only once `history` (as sent, with `current` applied) passes half
 /// the window; then it jumps to keep just the last
 /// [`KEEP_TOOL_RESULTS`] results, so it changes rarely.
-pub fn clear_tool_results_before(history: &[Message], model: &str, current: usize) -> usize {
-    let budget = (context_window(model) as f64 * CLEAR_TOOL_RESULTS_FRACTION) as usize;
+pub fn clear_tool_results_before(
+    history: &[Message],
+    model: &str,
+    catalog_window: Option<u32>,
+    current: usize,
+) -> usize {
+    let budget =
+        (context_window_with(model, catalog_window) as f64 * CLEAR_TOOL_RESULTS_FRACTION) as usize;
     if estimated_tokens(&clear_old_tool_results(history, current)) <= budget {
         return current;
     }
@@ -274,10 +290,21 @@ pub fn clear_old_tool_results(history: &[Message], before: usize) -> Vec<Message
         .collect()
 }
 
+/// The token count at which a conversation with this window is summarized.
+pub fn auto_compact_at(window: u64) -> u64 {
+    (window as f64 * AUTO_COMPACT_FRACTION) as u64
+}
+
 /// Whether the conversation (as sent: `history` with tool results
 /// before `cleared_before` cleared) is full enough to summarize.
-pub fn needs_compaction(history: &[Message], model: &str, cleared_before: usize) -> bool {
-    let budget = (context_window(model) as f64 * AUTO_COMPACT_FRACTION) as usize;
+pub fn needs_compaction(
+    history: &[Message],
+    model: &str,
+    catalog_window: Option<u32>,
+    cleared_before: usize,
+) -> bool {
+    let budget =
+        (context_window_with(model, catalog_window) as f64 * AUTO_COMPACT_FRACTION) as usize;
     estimated_tokens(&clear_old_tool_results(history, cleared_before)) > budget
 }
 
@@ -524,6 +551,7 @@ async fn summarize(
         temperature: Some(0.0),
         max_tokens: Some(SUMMARY_MAX_TOKENS),
         reasoning_effort: None,
+        service_tier: None,
         response_format: None,
     };
     let mut stream = provider.stream(req).await?;
@@ -826,7 +854,7 @@ mod tests {
     fn old_tool_results_are_cleared_before_anything_is_summarized() {
         let h = fat_history();
         // 150k tokens against a 200k window: past half, not past 80%.
-        let before = clear_tool_results_before(&h, "claude-opus-4-7", 0);
+        let before = clear_tool_results_before(&h, "claude-opus-4-7", None, 0);
         assert!(before > 0);
         let sent = clear_old_tool_results(&h, before);
         let cleared = sent
@@ -835,10 +863,10 @@ mod tests {
             .count();
         assert_eq!(cleared, 15 - KEEP_TOOL_RESULTS);
         assert_eq!(sent.len(), h.len(), "pairing kept");
-        assert!(!needs_compaction(&h, "claude-opus-4-7", before));
+        assert!(!needs_compaction(&h, "claude-opus-4-7", None, before));
         // Stable: asking again doesn't move it.
         assert_eq!(
-            clear_tool_results_before(&h, "claude-opus-4-7", before),
+            clear_tool_results_before(&h, "claude-opus-4-7", None, before),
             before
         );
     }
@@ -846,16 +874,19 @@ mod tests {
     #[test]
     fn a_full_window_needs_compaction_and_a_small_chat_never_does() {
         let h = fat_history();
-        assert!(needs_compaction(&h, "gpt-3.5-turbo", 0));
+        assert!(needs_compaction(&h, "gpt-3.5-turbo", None, 0));
         let small = long_history();
-        assert!(!needs_compaction(&small, "claude-opus-4-7", 0));
-        assert_eq!(clear_tool_results_before(&small, "claude-opus-4-7", 0), 0);
+        assert!(!needs_compaction(&small, "claude-opus-4-7", None, 0));
+        assert_eq!(
+            clear_tool_results_before(&small, "claude-opus-4-7", None, 0),
+            0
+        );
         // Message count alone never triggers it any more.
         let mut many = vec![Message::system("s")];
         for i in 0..500 {
             many.push(Message::user(format!("u{i}")));
         }
-        assert!(!needs_compaction(&many, "claude-opus-4-7", 0));
+        assert!(!needs_compaction(&many, "claude-opus-4-7", None, 0));
     }
 
     #[test]

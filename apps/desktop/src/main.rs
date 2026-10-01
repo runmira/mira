@@ -41,6 +41,10 @@ const AUTH_EVENT: &str = "mira-auth-callback";
 const INIT_SCRIPT: &str = r#"
 (function () {
   window.__MIRA_DESKTOP__ = true;
+  // The app draws its own header where macOS's title bar used to be, so the
+  // web UI needs to know to pad itself clear of the floating traffic lights
+  // and to lay its surfaces over the window's vibrancy.
+  window.__MIRA_CHROME__ = { hiddenTitleBar: true, translucent: true };
   function openExternal(url) {
     try {
       var abs = new URL(url, window.location.href).toString();
@@ -129,11 +133,43 @@ fn main() {
 
 fn build_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     let handle = app.clone();
-    WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-        .title("Mira")
+
+    let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+        // No window title: with the title bar hidden as an overlay, macOS
+        // still paints the title next to the traffic lights, so leaving it
+        // set would show "Mira" twice — once as the system title and once in
+        // the app's own sidebar header.
+        .title("")
         .inner_size(1280.0, 840.0)
         .min_inner_size(760.0, 520.0)
-        .initialization_script(INIT_SCRIPT)
+        .initialization_script(INIT_SCRIPT);
+
+    // macOS: the title bar goes away and the app's own header takes its
+    // place, so there's no duplicated title row and no wasted 28px. The
+    // traffic lights float over that header, which is why the web UI adds
+    // `data-tauri-drag-region` there and pads itself clear of them.
+    //
+    // `Overlay` is Tauri's equivalent of Electron's `titleBarStyle:
+    // "hidden"` — the same approach a native Mac app uses, where the content
+    // view extends under the title bar.
+    //
+    // The transparent window plus `UnderWindowBackground` is what lets the
+    // system vibrancy show through the sidebar. Both require the
+    // `macos-private-api` feature on macOS, which rules out Mac App Store
+    // distribution; that's fine for the GitHub-release channel this app
+    // ships on.
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .transparent(true)
+        .effects(tauri::utils::config::WindowEffectsConfig {
+            effects: vec![tauri::utils::WindowEffect::UnderWindowBackground],
+            state: Some(tauri::utils::WindowEffectState::Active),
+            radius: None,
+            color: None,
+        });
+
+    builder
         .on_navigation(move |url| {
             // The window only ever shows the bundled loading page and the
             // local server; anything else goes to the system browser.

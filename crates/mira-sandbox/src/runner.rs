@@ -433,19 +433,74 @@ fn configure_environment(
     }
 }
 
+/// The wrapper program and leading arguments that apply `config`'s sandbox
+/// to `binary`.
+///
+/// Split out from the command builders because the wrapper is a plain argv
+/// prefix. That lets a caller put the *sandbox* under a PTY instead of the
+/// program: the inner process then inherits the terminal as its controlling
+/// tty while remaining confined, which is the only ordering that gives both
+/// an interactive shell and real isolation.
+///
+/// Returns `(program, args_to_prepend)`; the caller appends `args`.
+pub fn sandbox_launcher(
+    config: &SandboxConfig,
+    binary: &str,
+    args: &[String],
+) -> (String, Vec<String>) {
+    let backend = detect_backend();
+
+    let (program, mut lead): (String, Vec<String>) = match backend {
+        #[cfg(target_os = "macos")]
+        SandboxBackend::Seatbelt => {
+            let mut v = vec!["-p".to_string(), config.profile.seatbelt_profile()];
+            v.push("--".to_string());
+            ("sandbox-exec".to_string(), v)
+        }
+
+        #[cfg(target_os = "linux")]
+        SandboxBackend::Bubblewrap => {
+            let mut v = config.profile.bwrap_args();
+            v.push("--".to_string());
+            ("bwrap".to_string(), v)
+        }
+
+        // A backend the current OS can't provide a wrapper for.
+        #[allow(unreachable_patterns)]
+        SandboxBackend::Bubblewrap | SandboxBackend::Seatbelt => {
+            tracing::warn!("sandbox backend unavailable for a PTY; running unwrapped");
+            (binary.to_string(), Vec::new())
+        }
+
+        SandboxBackend::Landlock | SandboxBackend::ProcessLevel => {
+            // Landlock is applied in-process around the spawn rather than by
+            // a wrapper binary, so there is no argv form to hand a PTY. The
+            // PTY path therefore runs process-level isolation only, and says
+            // so rather than implying confinement it does not have.
+            (binary.to_string(), Vec::new())
+        }
+    };
+
+    // Append the program and its args after the wrapper's own flags. When
+    // there is no wrapper, `lead` is empty and this is just the args — the
+    // program is spawned directly either way.
+    if !lead.is_empty() {
+        lead.push(binary.to_string());
+    }
+    lead.extend_from_slice(args);
+    (program, lead)
+}
+
 #[cfg(target_os = "macos")]
 fn build_seatbelt_command(
     config: &SandboxConfig,
     binary: &str,
     args: &[String],
 ) -> Result<TokioCommand> {
-    let profile = config.profile.seatbelt_profile();
+    let (program, lead) = sandbox_launcher(config, binary, args);
 
-    let mut command = TokioCommand::new("sandbox-exec");
-
-    command.arg("-p").arg(profile).arg("--").arg(binary);
-
-    for arg in args {
+    let mut command = TokioCommand::new(program);
+    for arg in lead {
         command.arg(arg);
     }
 
@@ -458,17 +513,10 @@ fn build_bwrap_command(
     binary: &str,
     args: &[String],
 ) -> Result<TokioCommand> {
-    let bwrap_args = config.profile.bwrap_args();
+    let (program, lead) = sandbox_launcher(config, binary, args);
 
-    let mut command = TokioCommand::new("bwrap");
-
-    for arg in &bwrap_args {
-        command.arg(arg);
-    }
-
-    command.arg("--").arg(binary);
-
-    for arg in args {
+    let mut command = TokioCommand::new(program);
+    for arg in lead {
         command.arg(arg);
     }
 

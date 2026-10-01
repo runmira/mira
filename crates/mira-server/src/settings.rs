@@ -3,6 +3,31 @@
 //! `GET /api/settings` returns the current global config with API keys
 //! masked. `PUT /api/settings` accepts a partial update, writes it to
 //! disk, and hot-swaps the running session's provider and model.
+//!
+//! ## Provider lifecycle
+//!
+//! This module is the bridge between the user-facing settings UI and the
+//! AI provider system. When a user changes their provider/model via
+//! `PUT /api/settings`:
+//! 1. The new config is written to `~/.mira/mira.yaml` (persisted).
+//! 2. A new [`ChatProvider`] is built via `build_chat_provider` (from
+//!    `mira-ai::factory`) — this is the factory that dispatches to the
+//!    right adapter based on provider name (`anthropic` → native Messages
+//!    API, `bedrock` → Converse API, everything else → OpenAI-compatible).
+//! 3. The provider is hot-swapped into the running session's
+//!    `current_session()`, so existing conversations continue with the
+//!    new provider without restarting the server.
+//! 4. If the new provider is misconfigured (missing `base_url` or
+//!    `api_key`), `NullProvider` is used as a graceful fallback — the
+//!    server keeps running and the user gets an actionable error message
+//!    instead of a crash.
+//!
+//! ## Key masking
+//!
+//! API keys are masked (`mask_key`) before they ever leave the server, so
+//! the UI can show "a key is set" without ever handling the raw value.
+//! The canonical env-var name for each key is the map key itself
+//! (`BRAVE_SEARCH_API_KEY`, `TAVILY_API_KEY`, …).
 
 use std::sync::Arc;
 
@@ -10,7 +35,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use mira_ai::{build_chat_provider, ChatProvider, NullProvider};
+use mira_ai::{ChatProvider, NullProvider};
 use mira_config::{default_base_url_for, global_path, MiraConfig, RuntimeState};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
@@ -171,6 +196,9 @@ pub async fn put_settings(
             )
         }
     };
+    // First-run needs the explicit `default_model` from this update to
+    // reach the live session; captured before `apply` consumes it.
+    let explicit_model = update.default_model.clone().flatten();
     apply(&mut cfg, update);
 
     if let Err(e) = cfg.save_global() {
@@ -186,33 +214,80 @@ pub async fn put_settings(
     // next call — no restart needed.
     mira_config::export_keys_to_env(&cfg);
 
-    // Rebuild the provider from the fresh config and swap it into the live
-    // session. If the config still isn't complete, fall back to NullProvider
-    // so the next turn produces a helpful warning instead of the last known
-    // (possibly bad) provider silently continuing.
+    // Rebuild the default provider from the fresh config and refresh
+    // the pool row for it. If the config still isn't complete, fall
+    // back to NullProvider so the next turn produces a helpful warning
+    // instead of the last known (possibly bad) provider silently
+    // continuing.
     let provider = build_provider(&cfg);
-    state.provider.set(provider);
-    // Drop the models cache — the new provider has a different catalog.
+    if let Some(name) = cfg.default_provider.clone() {
+        state.provider.register(&name, provider);
+        // Selecting a provider in settings is also a selection of the
+        // engine instance that wraps it.
+        state.provider.activate(&name);
+        {
+            let mut inst = state
+                .selection
+                .instance
+                .write()
+                .expect("selection lock poisoned");
+            *inst = Some(name);
+        }
+    } else {
+        state.provider.set(provider);
+    }
+    // Drop the models cache — the active provider has a different
+    // catalog now.
     crate::models::invalidate();
 
-    // New sessions read it from the config; the open one updates now.
+    // New sessions read it from the config; the shared selection feeds
+    // subagent defaults, so it updates too.
     state
         .current_session()
         .await
         .set_small_model(cfg.small_model.clone())
         .await;
-    if let Some(model) = cfg.default_model.clone() {
-        state.current_session().await.set_model(&model).await;
-        // Mirror the WS SetModel path — persist so restarts remember.
-        let mut s = RuntimeState::load().unwrap_or_default();
-        s.last_model = Some(model.clone());
-        if let Err(e) = s.save() {
-            warn!(%e, "state.yaml: save failed after settings change");
+    {
+        let mut small = state
+            .selection
+            .small_model
+            .write()
+            .expect("selection lock poisoned");
+        *small = cfg.small_model.clone().filter(|m| !m.trim().is_empty());
+    }
+
+    // Deliberately NOT force-resetting the session's model here. This
+    // handler used to set_model(default_model) on every save, clobbering
+    // whatever the user had picked in the picker. The model now changes
+    // through `SetModel` (picker) or when this update explicitly sets
+    // `default_model` — first-run needs the second path.
+    if let Some(model) = explicit_model {
+        let model = model.trim();
+        if !model.is_empty() {
+            state.current_session().await.set_model(model).await;
+            {
+                let mut m = state
+                    .selection
+                    .model
+                    .write()
+                    .expect("selection lock poisoned");
+                *m = Some(model.to_owned());
+            }
+            let mut s = RuntimeState::load().unwrap_or_default();
+            s.last_model = Some(model.to_owned());
+            if let Err(e) = s.save() {
+                warn!(%e, "state.yaml: save failed after settings change");
+            }
+            let _ = state.events_tx().await.send(ServerMsg::ModelChanged {
+                model: model.to_owned(),
+                instance: state
+                    .selection
+                    .instance
+                    .read()
+                    .expect("selection lock poisoned")
+                    .clone(),
+            });
         }
-        let _ = state
-            .events_tx()
-            .await
-            .send(ServerMsg::ModelChanged { model });
     }
 
     let view = view_from(&cfg, is_configured(&cfg));
@@ -360,43 +435,24 @@ pub fn build_provider_from(cfg: &MiraConfig) -> Arc<dyn ChatProvider> {
     build_provider(cfg)
 }
 
-/// Try to build a real provider from `cfg`. On any missing piece, fall back
-/// to `NullProvider` so the server keeps running and the next chat call
-/// produces a clear "configure me" error.
+/// Build a provider for the config's default provider — the shared
+/// recipe from `mira-engine`, with this module's fail-soft policy on
+/// top (`NullProvider` keeps the server usable; the error message
+/// surfaces on the next turn instead of failing the save).
 fn build_provider(cfg: &MiraConfig) -> Arc<dyn ChatProvider> {
     let Some(name) = cfg.default_provider.as_deref() else {
         return Arc::new(NullProvider::default());
     };
-    let entry = cfg.providers.get(name).cloned().unwrap_or_default();
-    let Some(base_url) = entry
-        .base_url
-        .clone()
-        .or_else(|| default_base_url_for(name).map(|s| s.to_owned()))
-    else {
-        return Arc::new(NullProvider::new(format!(
-            "provider `{name}` has no base_url"
-        )));
-    };
-    // Bedrock can sign with AWS credentials instead of an API key.
-    let Some(api_key) = entry
-        .resolved_api_key()
-        .or_else(|| (name == "bedrock").then(String::new))
-    else {
-        return Arc::new(NullProvider::new(format!(
-            "provider `{name}` has no api_key"
-        )));
-    };
-    let extra_headers = entry
-        .extra_headers
-        .iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-    let prompt_caching = mira_config::prompt_caching_enabled(name, &base_url, entry.prompt_caching);
-    match build_chat_provider(name, base_url, api_key, extra_headers, prompt_caching) {
+    match mira_engine::native::build_native_provider(cfg, name) {
         Ok(p) => p,
-        Err(e) => {
-            warn!(%e, "settings: provider build failed, falling back to null");
-            Arc::new(NullProvider::new(format!("provider build failed: {e}")))
+        Err(mira_engine::EngineState::NotConfigured { reason }) => {
+            Arc::new(NullProvider::new(reason))
+        }
+        Err(other) => {
+            warn!(state = ?other, "settings: provider build failed, falling back to null");
+            Arc::new(NullProvider::new(format!(
+                "provider build failed: {other:?}"
+            )))
         }
     }
 }

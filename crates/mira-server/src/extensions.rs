@@ -493,6 +493,7 @@ impl mira_plugins::hooks::PromptEvaluator for HookModel {
             temperature: Some(0.0),
             max_tokens: Some(512),
             reasoning_effort: None,
+            service_tier: None,
             response_format: None,
         };
         let mut stream = self.provider.stream(req).await.map_err(|e| e.to_string())?;

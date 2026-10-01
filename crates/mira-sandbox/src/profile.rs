@@ -387,6 +387,69 @@ fn hard_denied() -> Vec<PathBuf> {
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
+/// Host environment variables a child process may inherit.
+///
+/// # Why this exists
+///
+/// Mira's own process environment holds credentials for providers, and an
+/// agent — or a shell an agent starts — is third-party code that has no
+/// business seeing them. Inheriting wholesale would hand it every key Mira
+/// holds, so both the ACP process spawner and the PTY used for an agent's
+/// terminals build their child environment from this list instead.
+///
+/// Defined once, here, because the two call sites previously carried
+/// separate copies and drifted: the ACP spawner had picked up the Node and
+/// Python variables that agent CLIs need to start, while the PTY had not.
+///
+/// # The rule
+///
+/// Include a variable only if a command genuinely cannot run without it
+/// (`PATH`, `HOME`) or if its absence makes a tool misbehave rather than
+/// merely different (`TERM` on a pty, `NODE_PATH` for a Node CLI).
+///
+/// **Deliberately excluded: anything that carries a capability.** See
+/// [`credential_paths`] — `~/.ssh` and friends are readable only when
+/// `allowed_credentials` says so, and `SSH_AUTH_SOCK` is the same grant by a
+/// different route: a live handle to the user's ssh-agent, which would let a
+/// third-party shell authenticate as the user while the key on disk stays
+/// correctly denied. Keep it out of this list; add it through the profile
+/// when a specific command genuinely needs it.
+///
+/// # Not the same as `env_clear`
+///
+/// Clearing the environment outright also removes `PATH` and `TERM`, which
+/// does not make a child more secure so much as broken: shells fail to find
+/// their own utilities and interactive tools disable line editing. The
+/// allowlist is the part that matters.
+pub fn safe_child_env() -> &'static [&'static str] {
+    &[
+        // Needed for a command to run at all.
+        "PATH",
+        "HOME",
+        "TMPDIR",
+        // Locale and identity; tools format output differently without them.
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "SHELL",
+        "USER",
+        "LOGNAME",
+        "TZ",
+        // Agent CLIs are frequently Node or Python, and without these they
+        // fail to start rather than merely behaving differently.
+        "NODE_PATH",
+        "NODE_OPTIONS",
+        "NVM_DIR",
+        "PYTHONPATH",
+        "VIRTUAL_ENV",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        // Editor-backed agents launch a helper through $EDITOR.
+        "EDITOR",
+        "VISUAL",
+    ]
+}
+
 pub fn credential_paths() -> Vec<PathBuf> {
     let Some(home) = dirs::home_dir() else {
         return Vec::new();
@@ -505,4 +568,59 @@ fn bind_rw(args: &mut Vec<String>, source: &Path, target: &Path) {
 #[cfg(target_os = "linux")]
 fn bind_rw_path(args: &mut Vec<String>, path: &Path) {
     bind_rw(args, path, path);
+}
+
+#[cfg(test)]
+mod safe_child_env_tests {
+    use super::*;
+
+    #[test]
+    fn the_allowlist_carries_nothing_that_authenticates() {
+        // The whole point is that a child cannot use what Mira holds. A
+        // credential-shaped variable here would be a silent bypass of
+        // `allowed_credentials`, which gates the same credentials on disk.
+        for key in safe_child_env() {
+            let l = key.to_ascii_lowercase();
+            assert!(
+                !(l.contains("token")
+                    || l.contains("secret")
+                    || l.contains("password")
+                    || l.contains("api_key")
+                    || l.contains("apikey")),
+                "{key} looks like a credential"
+            );
+        }
+        // `SSH_AUTH_SOCK` is the specific one worth pinning: it grants the
+        // same access as `~/.ssh` while the key itself stays denied.
+        assert!(
+            !safe_child_env().contains(&"SSH_AUTH_SOCK"),
+            "a live ssh-agent handle must not be inherited by default"
+        );
+    }
+
+    #[test]
+    fn the_allowlist_still_contains_what_a_shell_needs() {
+        // Clearing the environment outright is the tempting simplification
+        // and it breaks every command: no PATH, no TERM.
+        for required in ["PATH", "HOME", "TMPDIR", "TERM", "LANG"] {
+            if required == "TERM" {
+                // TERM is not read from the host (a non-tty parent has none);
+                // the PTY spawner sets it explicitly. Everything else is
+                // inherited verbatim.
+                continue;
+            }
+            assert!(
+                safe_child_env().contains(&required),
+                "{required} must be inheritable"
+            );
+        }
+    }
+
+    #[test]
+    fn the_allowlist_has_no_duplicates() {
+        let mut seen = std::collections::BTreeSet::new();
+        for k in safe_child_env() {
+            assert!(seen.insert(*k), "{k} listed twice");
+        }
+    }
 }

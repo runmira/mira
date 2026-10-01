@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   ArrowUp,
@@ -17,11 +17,12 @@ import {
   PanelRightClose,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
-import type { GitStatusView, SessionDiffView, BranchPrView } from '../api';
+import type { GitStatusView, SessionDiffView, SessionFile, BranchPrView } from '../api';
 import type { TaskItem } from '../types';
 import type { SubagentStreamState, Entry } from '../App';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
-import { identityFor } from './AgentCard';
+import { SubagentFace } from './SubagentFace';
+import { personaName, useSubagents, type Subagent } from '../lib/subagents';
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                             */
@@ -41,7 +42,9 @@ function extractSources(entries: Entry[]): string[] {
     if (e.kind !== 'msg' || e.msg.role !== 'assistant') continue;
     const text = e.msg.content ?? '';
     for (const m of text.matchAll(re)) {
-      const url = m[0].replace(/[.,;:!?*`%#]+$/, '');
+      // Trailing sentence punctuation and markdown emphasis aren't part of
+      // the link; `#` and `%` can be (fragments, escapes).
+      const url = m[0].replace(/[.,;:!?*_`'"]+$/, '');
       if (!seen.has(url)) { seen.add(url); urls.push(url); }
     }
   }
@@ -58,11 +61,6 @@ function urlLabel(url: string): string {
   }
 }
 
-function agentColor(s: string): string {
-  const hash = [...s].reduce((h, c) => (h * 31 + c.charCodeAt(0)) | 0, 0);
-  const colors = ['#e06c75', '#e5c07b', '#98c379', '#56b6c2', '#61afef', '#c678dd'];
-  return colors[Math.abs(hash) % colors.length];
-}
 
 function formatAgentName(raw: string): string {
   return raw
@@ -72,15 +70,16 @@ function formatAgentName(raw: string): string {
 }
 
 function agentDisplayInfo(
-  callId: string,
   state: SubagentStreamState,
+  roster: Subagent[] | undefined,
 ): { name: string; badge: string | null; description: string } {
   const rawCat = state.agentCategory ?? null;
   const promptStr = (state.prompt ?? '').trim();
 
-  // Use the same codename as the subagent panel tab so the entry is
-  // immediately recognisable across both surfaces.
-  const name = identityFor(callId).name;
+  // The subagent's own persona, the same name its transcript row and
+  // panel tab show.
+  const type = state.agentName ?? null;
+  const name = type ? personaName(roster?.find((r) => r.name === type), type) : 'Helper';
   const badge = rawCat ? formatAgentName(rawCat) : null;
   const description = promptStr.split('\n')[0].replace(/^#+ /, '');
 
@@ -148,10 +147,16 @@ function SectionHeader({
 /* Progress                                                            */
 /* ------------------------------------------------------------------ */
 
-function ProgressSection({ tasks }: { tasks: TaskItem[] }) {
+/** Tasks still on the list — a deleted task was dropped, not finished. */
+function liveTasks(tasks: TaskItem[]): TaskItem[] {
+  return tasks.filter((t) => t.status !== 'deleted');
+}
+
+function ProgressSection({ tasks: all }: { tasks: TaskItem[] }) {
   const [open, setOpen] = useState(true);
+  const tasks = liveTasks(all);
   const total = tasks.length;
-  const done = tasks.filter((t) => t.status === 'completed' || t.status === 'deleted').length;
+  const done = tasks.filter((t) => t.status === 'completed').length;
   const active = tasks.find((t) => t.status === 'in_progress');
 
   return (
@@ -173,7 +178,7 @@ function ProgressSection({ tasks }: { tasks: TaskItem[] }) {
             <div className="flex flex-col gap-0.5 pb-1">
               <AnimatePresence>
                 {tasks.map((task, i) => {
-                  const isDone = task.status === 'completed' || task.status === 'deleted';
+                  const isDone = task.status === 'completed';
                   const isCurrent = task.status === 'in_progress';
                   return (
                     <motion.div
@@ -394,7 +399,7 @@ function workspaceHasContent(
 ): boolean {
   if (!gitStatus?.in_repo) return false;
   return (
-    (sessionDiff.uncommitted ?? 0) > 0 ||
+    sessionDiff.files.length > 0 ||
     (sessionCommitted && gitStatus.ahead > 0) ||
     !!branchPr
   );
@@ -413,7 +418,7 @@ function WorkspaceSection({
   sessionDiff: SessionDiffView;
   branchPr: BranchPrView | null;
   sessionCommitted: boolean;
-  onReview: () => void;
+  onReview: (path?: string) => void;
   onPush: () => Promise<void>;
   onCommit: (message: string, includeUnstaged: boolean, pushAfter: boolean) => Promise<void>;
 }) {
@@ -423,7 +428,7 @@ function WorkspaceSection({
 
   // Only what this session did: its own uncommitted files, and pushes for
   // commits it made — not whatever else happens to be dirty in the repo.
-  const pending = sessionDiff.uncommitted ?? 0;
+  const pending = sessionDiff.files.length;
   const canPush = sessionCommitted && gitStatus.ahead > 0;
 
   return (
@@ -438,7 +443,7 @@ function WorkspaceSection({
             className="overflow-hidden"
           >
             <div className="flex flex-col gap-1.5 pb-1.5">
-              {pending > 0 && gitStatus.branch && (
+              {pending > 0 && (
                 <div className="flex items-center gap-2 rounded-lg bg-white/[0.035] px-2.5 py-2">
                   <GitMerge className="size-3.5 shrink-0 text-white/35" />
                   <span className="min-w-0 flex-1">
@@ -452,7 +457,7 @@ function WorkspaceSection({
                   </span>
                   <button
                     type="button"
-                    onClick={onReview}
+                    onClick={() => onReview()}
                     className="shrink-0 rounded-md px-2 py-1 text-[12px] font-medium text-white/60 transition-colors hover:bg-white/[0.06] hover:text-white/85"
                   >
                     Review
@@ -473,7 +478,7 @@ function WorkspaceSection({
                       style={{ backgroundColor: '#1c1c1e' }}
                     >
                       <CommitDialog
-                        branch={gitStatus.branch}
+                        branch={gitStatus.branch ?? 'detached HEAD'}
                         gitStatus={gitStatus}
                         sessionDiff={sessionDiff}
                         onCommit={onCommit}
@@ -484,6 +489,7 @@ function WorkspaceSection({
                   </Popover>
                 </div>
               )}
+              {pending > 0 && <ChangedFiles files={sessionDiff.files} onOpen={(p) => onReview(p)} />}
 
               {pending === 0 && canPush && (
                 <button
@@ -527,29 +533,99 @@ function WorkspaceSection({
   );
 }
 
+const FILES_SHOWN = 6;
+
+const STATUS_MARK: Record<SessionFile['status'], { letter: string; className: string; title: string }> = {
+  added: { letter: 'A', className: 'text-green-400/80', title: 'New file' },
+  modified: { letter: 'M', className: 'text-amber-300/80', title: 'Modified' },
+  deleted: { letter: 'D', className: 'text-red-400/80', title: 'Deleted' },
+};
+
+/** The chat's changed files; each opens the review drawer on its diff. */
+function ChangedFiles({ files, onOpen }: { files: SessionFile[]; onOpen: (path: string) => void }) {
+  const [all, setAll] = useState(false);
+  const shown = all ? files : files.slice(0, FILES_SHOWN);
+  return (
+    <div className="flex flex-col">
+      {shown.map((f) => {
+        const slash = f.path.lastIndexOf('/');
+        const dir = slash >= 0 ? f.path.slice(0, slash + 1) : '';
+        const name = f.path.slice(slash + 1);
+        const mark = STATUS_MARK[f.status];
+        return (
+          <button
+            key={f.path}
+            type="button"
+            onClick={() => onOpen(f.path)}
+            title={f.path}
+            className="-mx-2 flex min-w-0 items-center gap-2 rounded px-2 py-[3px] text-left transition-colors hover:bg-white/[0.05]"
+          >
+            <span className={cn('w-3 shrink-0 text-center font-mono text-[10.5px] font-semibold', mark.className)} title={mark.title}>
+              {mark.letter}
+            </span>
+            {/* Name first and never cut; the folder gives way. */}
+            <span className="flex min-w-0 flex-1 items-baseline gap-1.5 text-[12.5px]">
+              <span className={cn('shrink-0 text-white/75', f.status === 'deleted' && 'line-through decoration-white/25')}>
+                {name}
+              </span>
+              {dir && <span className="min-w-0 truncate text-[11px] text-white/30">{dir}</span>}
+            </span>
+            <span className="flex shrink-0 gap-1 font-mono text-[10.5px]">
+              {f.binary ? (
+                <span className="text-white/30">bin</span>
+              ) : (
+                <>
+                  {f.added > 0 && <span className="text-green-400/70">+{fmtNum(f.added)}</span>}
+                  {f.removed > 0 && <span className="text-red-400/70">−{fmtNum(f.removed)}</span>}
+                </>
+              )}
+            </span>
+          </button>
+        );
+      })}
+      {files.length > FILES_SHOWN && (
+        <button
+          type="button"
+          onClick={() => setAll((v) => !v)}
+          className="self-start py-[3px] text-[11.5px] text-white/35 transition-colors hover:text-white/70"
+        >
+          {all ? 'Show fewer' : `Show ${files.length - FILES_SHOWN} more`}
+        </button>
+      )}
+    </div>
+  );
+}
+
 /* ------------------------------------------------------------------ */
 /* Subagents                                                           */
 /* ------------------------------------------------------------------ */
 
+/** This chat's subagents, in transcript order. State for a call that isn't
+ *  in the transcript (another chat's, or one compacted away) is left out,
+ *  so the panel never shows a section with nothing in it. */
+function chatSubagents(
+  subagentState: Map<string, SubagentStreamState>,
+  entries: Entry[],
+): { callId: string; state: SubagentStreamState }[] {
+  const out: { callId: string; state: SubagentStreamState }[] = [];
+  if (subagentState.size === 0) return out;
+  for (const e of entries) {
+    if (e.kind !== 'tool') continue;
+    const s = subagentState.get(e.call.id);
+    if (s) out.push({ callId: e.call.id, state: s });
+  }
+  return out;
+}
+
 function SubagentsSection({
-  subagentState,
-  entries,
+  ordered,
   onOpenAgent,
 }: {
-  subagentState: Map<string, SubagentStreamState>;
-  entries: Entry[];
+  ordered: { callId: string; state: SubagentStreamState }[];
   onOpenAgent: (callId: string) => void;
 }) {
   const [open, setOpen] = useState(true);
-
-  const ordered: { callId: string; state: SubagentStreamState }[] = [];
-  for (const e of entries) {
-    if (e.kind === 'tool') {
-      const s = subagentState.get(e.call.id);
-      if (s) ordered.push({ callId: e.call.id, state: s });
-    }
-  }
-  if (ordered.length === 0) return null;
+  const roster = useSubagents()?.subagents;
 
   return (
     <div>
@@ -565,8 +641,9 @@ function SubagentsSection({
             <div className="flex flex-col gap-0.5 pb-1">
               <AnimatePresence>
                 {ordered.map(({ callId, state }, i) => {
-                  const color = agentColor(callId);
-                  const { name, badge, description } = agentDisplayInfo(callId, state);
+                  const type = state.agentName ?? null;
+                  const persona = type ? roster?.find((r) => r.name === type) : undefined;
+                  const { name, badge, description } = agentDisplayInfo(state, roster);
                   return (
                     <motion.button
                       key={callId}
@@ -578,9 +655,12 @@ function SubagentsSection({
                       onClick={() => onOpenAgent(callId)}
                       className="flex items-start gap-2.5 py-1.5 -mx-2 px-2 rounded text-left hover:bg-white/[0.04] transition-colors w-full"
                     >
-                      <span
-                        className={cn('size-2 rounded-full shrink-0 mt-[5px]', !state.done && 'animate-pulse')}
-                        style={{ backgroundColor: color }}
+                      <SubagentFace
+                        id={type ?? callId}
+                        face={persona?.face}
+                        size={20}
+                        state={state.done ? 'done' : 'working'}
+                        className="mt-px"
                       />
                       <span className="flex-1 min-w-0 flex flex-col gap-0.5">
                         <span className="flex items-baseline gap-1.5 min-w-0">
@@ -608,10 +688,12 @@ function SubagentsSection({
 /* Sources                                                             */
 /* ------------------------------------------------------------------ */
 
-function SourcesSection({ entries }: { entries: Entry[] }) {
+const SOURCES_SHOWN = 8;
+
+function SourcesSection({ sources }: { sources: string[] }) {
   const [open, setOpen] = useState(true);
-  const sources = extractSources(entries);
-  if (sources.length === 0) return null;
+  const [all, setAll] = useState(false);
+  const shown = all ? sources : sources.slice(0, SOURCES_SHOWN);
 
   return (
     <div>
@@ -626,7 +708,7 @@ function SourcesSection({ entries }: { entries: Entry[] }) {
           >
             <div className="flex flex-col gap-0.5 pb-1">
               <AnimatePresence>
-                {sources.slice(0, 8).map((url, i) => (
+                {shown.map((url, i) => (
                   <motion.a
                     key={url}
                     custom={i}
@@ -646,6 +728,15 @@ function SourcesSection({ entries }: { entries: Entry[] }) {
                   </motion.a>
                 ))}
               </AnimatePresence>
+              {sources.length > SOURCES_SHOWN && (
+                <button
+                  type="button"
+                  onClick={() => setAll((v) => !v)}
+                  className="self-start py-[3px] text-[11.5px] text-white/35 transition-colors hover:text-white/70"
+                >
+                  {all ? 'Show fewer' : `Show ${sources.length - SOURCES_SHOWN} more`}
+                </button>
+              )}
             </div>
           </motion.div>
         )}
@@ -686,9 +777,9 @@ export function contextPanelHasContent(p: {
   entries: Entry[];
 }): boolean {
   return (
-    p.tasks.length > 0 ||
+    liveTasks(p.tasks).length > 0 ||
     workspaceHasContent(p.gitStatus, p.sessionDiff, p.branchPr, p.sessionCommitted) ||
-    p.subagentState.size > 0 ||
+    chatSubagents(p.subagentState, p.entries).length > 0 ||
     extractSources(p.entries).length > 0
   );
 }
@@ -708,8 +799,8 @@ export type ContextPanelProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onOpenAgent: (callId: string) => void;
-  /** Open the "Review changes" drawer. */
-  onReview: () => void;
+  /** Open the "Review changes" drawer, on one file when given. */
+  onReview: (path?: string) => void;
   onPush: () => Promise<void>;
   onCommit: (message: string, includeUnstaged: boolean, pushAfter: boolean) => Promise<void>;
 };
@@ -738,13 +829,20 @@ export function ContextPanel(props: ContextPanelProps) {
     onCommit,
   } = props;
   const fits = useContextPanelFits();
-  const sources = extractSources(entries);
+  // Derived once per render and shared by the pill and every section, so
+  // they can't disagree about what there is to show.
+  const sources = useMemo(() => extractSources(entries), [entries]);
+  const subagents = useMemo(() => chatSubagents(subagentState, entries), [subagentState, entries]);
+  const live = liveTasks(tasks);
+  const showWorkspace = workspaceHasContent(gitStatus, sessionDiff, branchPr, sessionCommitted);
 
-  if (!contextPanelHasContent(props) || !fits) return null;
+  if (!fits || (live.length === 0 && !showWorkspace && subagents.length === 0 && sources.length === 0)) {
+    return null;
+  }
 
-  const done = tasks.filter((t) => t.status === 'completed' || t.status === 'deleted').length;
-  const pending = sessionDiff.uncommitted ?? 0;
-  const agentsRunning = [...subagentState.values()].some((s) => !s.done);
+  const done = live.filter((t) => t.status === 'completed').length;
+  const pending = sessionDiff.files.length;
+  const agentsRunning = subagents.some((s) => !s.state.done);
 
   return (
     <AnimatePresence mode="wait" initial={false}>
@@ -769,10 +867,15 @@ export function ContextPanel(props: ContextPanelProps) {
               <span className="text-red-400/80">−{fmtNum(sessionDiff.removed)}</span>
             </span>
           )}
-          {tasks.length > 0 && (
+          {pending > 0 && (
+            <span className="shrink-0 text-white/40">
+              {pending} file{pending === 1 ? '' : 's'}
+            </span>
+          )}
+          {live.length > 0 && (
             <span className="flex shrink-0 items-center gap-1">
               <Check className="size-3 text-green-500/60" strokeWidth={2.5} />
-              {done}/{tasks.length}
+              {done}/{live.length}
             </span>
           )}
           {branchPr && (
@@ -809,12 +912,12 @@ export function ContextPanel(props: ContextPanelProps) {
             </button>
           </div>
           <div className="overflow-y-auto px-4 pb-1.5 flex flex-col divide-y divide-white/[0.07]">
-            {tasks.length > 0 && (
+            {live.length > 0 && (
               <div className="py-2">
                 <ProgressSection tasks={tasks} />
               </div>
             )}
-            {gitStatus && workspaceHasContent(gitStatus, sessionDiff, branchPr, sessionCommitted) && (
+            {gitStatus && showWorkspace && (
               <div className="py-2">
                 <WorkspaceSection
                   gitStatus={gitStatus}
@@ -827,18 +930,14 @@ export function ContextPanel(props: ContextPanelProps) {
                 />
               </div>
             )}
-            {subagentState.size > 0 && (
+            {subagents.length > 0 && (
               <div className="py-2">
-                <SubagentsSection
-                  subagentState={subagentState}
-                  entries={entries}
-                  onOpenAgent={onOpenAgent}
-                />
+                <SubagentsSection ordered={subagents} onOpenAgent={onOpenAgent} />
               </div>
             )}
             {sources.length > 0 && (
               <div className="py-2">
-                <SourcesSection entries={entries} />
+                <SourcesSection sources={sources} />
               </div>
             )}
           </div>

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { CaretUp, SignOut, SlidersHorizontal } from '@phosphor-icons/react';
+import { ChevronUp, LogOut, SlidersHorizontal } from 'lucide-react';
 import { getSupabase } from '../lib/supabase';
 import { avatarUrl, displayName as oauthDisplayName, initials, useCurrentUser } from '../lib/useCurrentUser';
 import { useProfile } from '../lib/useProfile';
@@ -50,13 +50,13 @@ export function UserCard({
       <PopoverTrigger asChild>
         <button
           type="button"
-          className="flex w-full items-center gap-2.5 border-t border-border px-3 py-2.5 text-left transition-colors hover:bg-accent/60"
+          className="flex w-full items-center gap-2.5 px-3 py-2.5 text-left transition-colors hover:bg-white/[0.05]"
         >
           <span className="relative shrink-0">
             <Avatar src={avatar} mono={mono} />
             <span
               className={cn(
-                'absolute -bottom-0.5 -right-0.5 size-2 rounded-full ring-2 ring-card',
+                'absolute -bottom-0.5 -right-0.5 size-2 rounded-full ring-2 ring-panel',
                 dotColor(status),
               )}
               aria-label={status}
@@ -68,9 +68,9 @@ export function UserCard({
               <span className="truncate text-[11.5px] text-muted-foreground/85">{workspace}</span>
             )}
           </span>
-          <CaretUp
+          <ChevronUp
             className="size-3.5 shrink-0 text-muted-foreground/70"
-            weight="bold"
+            strokeWidth={2.5}
             aria-hidden
           />
         </button>
@@ -87,7 +87,7 @@ export function UserCard({
             Settings
           </MenuItem>
           <MenuItem
-            icon={<SignOut className="size-3.5" />}
+            icon={<LogOut className="size-3.5" />}
             onClick={() => void signOut()}
             disabled={signingOut}
             danger
@@ -159,7 +159,7 @@ function MenuItem({
       disabled={disabled}
       className={cn(
         'flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] transition-colors disabled:opacity-60',
-        danger ? 'text-destructive hover:bg-destructive/10' : 'text-foreground hover:bg-accent/60',
+        danger ? 'text-destructive hover:bg-destructive/10' : 'text-foreground hover:bg-white/[0.05]',
       )}
     >
       <span className={cn('shrink-0', danger ? '' : 'text-muted-foreground')}>{icon}</span>

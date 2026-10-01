@@ -53,6 +53,11 @@ pub enum HarnessEvent {
         round: TokenUsage,
         /// Aggregate session totals (including `round`).
         totals: UsageTotals,
+        /// The context window the session plans against for this model,
+        /// in tokens — what the composer's context ring is a fraction of.
+        context_window: u64,
+        /// Where auto-compaction kicks in, in tokens.
+        compact_at: u64,
     },
     /// The provider's rate limits after this round's request, from its
     /// response headers. Only sent by providers that report them.

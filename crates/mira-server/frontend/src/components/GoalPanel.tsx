@@ -2,15 +2,15 @@ import { useState } from 'react';
 import {
   Target,
   Play,
-  CheckCircle,
-  XCircle,
-  WarningCircle,
+  CircleCheck,
+  CircleX,
+  CircleAlert,
   Hourglass,
-  MinusCircle,
-  ArrowClockwise,
+  CircleMinus,
+  RotateCw,
   X,
-  CaretDown,
-} from '@phosphor-icons/react';
+  ChevronDown,
+} from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { Goal, GoalStatus } from '../types';
 
@@ -79,7 +79,7 @@ export function GoalPanel({ goal, busy, activity, onClear, onRestart }: Props) {
         {/* Header: target icon, status pill, iterations counter, collapse toggle */}
         <div className="flex items-center gap-2.5 pl-4 pr-3 pt-3 pb-2">
           <Target
-            weight="fill"
+            fill="currentColor"
             className={cn('size-[15px] shrink-0', meta.iconColor)}
           />
           <span className="text-[13px] font-semibold tracking-tight text-foreground">
@@ -91,7 +91,7 @@ export function GoalPanel({ goal, busy, activity, onClear, onRestart }: Props) {
             meta.pillClass,
           )}>
             <Icon
-              weight={goal.status === 'active' ? 'fill' : 'fill'}
+              fill="currentColor"
               className={cn(
                 'size-3',
                 goal.status === 'active' && 'animate-pulse',
@@ -113,8 +113,8 @@ export function GoalPanel({ goal, busy, activity, onClear, onRestart }: Props) {
               aria-label={expanded ? 'Collapse goal' : 'Expand goal'}
               title={expanded ? 'Collapse' : 'Expand'}
             >
-              <CaretDown
-                weight="bold"
+              <ChevronDown
+                strokeWidth={2.5}
                 className={cn('size-3.5 transition-transform', !expanded && '-rotate-90')}
               />
             </button>
@@ -125,7 +125,7 @@ export function GoalPanel({ goal, busy, activity, onClear, onRestart }: Props) {
               aria-label="Clear goal"
               title="Clear goal"
             >
-              <X weight="bold" className="size-3.5" />
+              <X strokeWidth={2.5} className="size-3.5" />
             </button>
           </div>
         </div>
@@ -231,7 +231,7 @@ export function GoalPanel({ goal, busy, activity, onClear, onRestart }: Props) {
                   onClick={() => onRestart(goal.condition, goal.max_iterations)}
                   className="inline-flex items-center gap-1.5 rounded-md border border-border/60 bg-secondary/60 px-2.5 py-1 text-[12px] font-medium text-foreground hover:bg-secondary"
                 >
-                  <ArrowClockwise weight="bold" className="size-3" />
+                  <RotateCw strokeWidth={2.5} className="size-3" />
                   Restart with same goal
                 </button>
               )}
@@ -269,7 +269,7 @@ function statusMeta(status: GoalStatus) {
       };
     case 'met':
       return {
-        icon: CheckCircle,
+        icon: CircleCheck,
         iconColor: 'text-emerald-400',
         label: 'Met',
         cardBorder: 'border-emerald-500/25',
@@ -282,7 +282,7 @@ function statusMeta(status: GoalStatus) {
       };
     case 'impossible':
       return {
-        icon: XCircle,
+        icon: CircleX,
         iconColor: 'text-red-400',
         label: 'Impossible',
         cardBorder: 'border-red-500/25',
@@ -294,7 +294,7 @@ function statusMeta(status: GoalStatus) {
       };
     case 'needs_user':
       return {
-        icon: WarningCircle,
+        icon: CircleAlert,
         iconColor: 'text-amber-400',
         label: 'Needs you',
         cardBorder: 'border-amber-500/30',
@@ -319,7 +319,7 @@ function statusMeta(status: GoalStatus) {
     case 'cleared':
     default:
       return {
-        icon: MinusCircle,
+        icon: CircleMinus,
         iconColor: 'text-muted-foreground',
         label: 'Cleared',
         cardBorder: 'border-border/40',

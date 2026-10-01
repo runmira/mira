@@ -22,11 +22,13 @@ pub struct ModelPrice {
 }
 
 /// Look up pricing by model id. Matches on prefix so `gpt-4o-2024-11-20`
-/// resolves to the `gpt-4o` entry, and so `openai/gpt-4o` (a gateway id)
+/// resolves to the `gpt-4o` entry,
+/// and so `openai/gpt-4o` (a gateway id)
 /// resolves the same way.
 pub fn price_for(model: &str) -> Option<ModelPrice> {
     // Gateways like OpenRouter prefix the vendor (`anthropic/claude-…`);
-    // price on the model part.
+    // price on the model part. Handle nested gateway IDs like 'provider/model/submodel'
+    // by taking the last segment after the final slash.
     let m = model.to_ascii_lowercase();
     let m = m.rsplit('/').next().unwrap_or(&m);
     MODEL_PRICES
@@ -51,6 +53,22 @@ pub fn cost_usd(model: &str, usage: TokenUsage) -> Option<f64> {
 /// before `gpt-4o`).
 const MODEL_PRICES: &[(&str, ModelPrice)] = &[
     // -- OpenAI --
+    (
+        "gpt-5-mini",
+        ModelPrice {
+            input_per_mtok: 0.25,
+            output_per_mtok: 2.00,
+            cached_input_per_mtok: 0.025,
+        },
+    ),
+    (
+        "gpt-5",
+        ModelPrice {
+            input_per_mtok: 1.25,
+            output_per_mtok: 10.00,
+            cached_input_per_mtok: 0.125,
+        },
+    ),
     (
         "gpt-4o-mini",
         ModelPrice {
@@ -130,6 +148,14 @@ const MODEL_PRICES: &[(&str, ModelPrice)] = &[
             input_per_mtok: 3.00,
             output_per_mtok: 15.00,
             cached_input_per_mtok: 0.30,
+        },
+    ),
+    (
+        "claude-opus-4-5",
+        ModelPrice {
+            input_per_mtok: 5.00,
+            output_per_mtok: 25.00,
+            cached_input_per_mtok: 0.50,
         },
     ),
     (

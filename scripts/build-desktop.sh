@@ -42,7 +42,12 @@ if [ "$MODE" = dev ]; then
 fi
 
 echo "==> mira ($PROFILE)"
-(cd "$ROOT" && cargo build "${CARGO_FLAGS[@]}" -p mira-cli)
+# `${CARGO_FLAGS[@]+"${CARGO_FLAGS[@]}"}` rather than a bare
+# `"${CARGO_FLAGS[@]}"`: dev mode leaves the array empty, and bash 3.2 (what
+# macOS ships) treats expanding an empty array under `set -u` as a fatal
+# "unbound variable" error. The `[@]+` guard makes the expansion conditional
+# on the array being set, which is a no-op on bash 4.4+ and rescues 3.2.
+(cd "$ROOT" && cargo build ${CARGO_FLAGS[@]+"${CARGO_FLAGS[@]}"} -p mira-cli)
 
 TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
 EXT=""

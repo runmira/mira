@@ -2,8 +2,10 @@
 //!
 //! One WebSocket to the browser endpoint, flat sessions
 //! (`Target.attachToTarget { flatten: true }`) for pages. Commands are
-//! matched to replies by `id`; events are ignored — the driver polls page
-//! state instead, which is simpler and robust enough for agent pacing.
+//! matched to replies by `id`. The driver itself polls page state rather
+//! than waiting on events (simpler, and robust enough for agent pacing),
+//! but events are published on [`Cdp::subscribe`] for the live view —
+//! screencast frames and navigations.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -32,6 +34,7 @@ pub struct Cdp {
     pending: Pending,
     next_id: AtomicU64,
     reader: tokio::task::JoinHandle<()>,
+    events: tokio::sync::broadcast::Sender<Value>,
 }
 
 impl Drop for Cdp {
@@ -48,6 +51,8 @@ impl Cdp {
         let (sink, mut stream) = ws.split();
         let pending: Pending = Arc::default();
         let reader_pending = pending.clone();
+        let (events, _) = tokio::sync::broadcast::channel::<Value>(256);
+        let reader_events = events.clone();
         let reader = tokio::spawn(async move {
             while let Some(msg) = stream.next().await {
                 let text = match msg {
@@ -59,7 +64,9 @@ impl Cdp {
                     continue;
                 };
                 let Some(id) = v.get("id").and_then(Value::as_u64) else {
-                    continue; // an event
+                    // An event. Nobody listening is the common case.
+                    let _ = reader_events.send(v);
+                    continue;
                 };
                 if let Some(tx) = reader_pending.lock().await.remove(&id) {
                     let res = match v.get("error") {
@@ -84,7 +91,18 @@ impl Cdp {
             pending,
             next_id: AtomicU64::new(1),
             reader,
+            events,
         })
+    }
+
+    /// Every event the browser sends, from now on.
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<Value> {
+        self.events.subscribe()
+    }
+
+    /// Whether the connection is still up.
+    pub fn is_open(&self) -> bool {
+        !self.reader.is_finished()
     }
 
     /// Send `method` with `params`, on the page `session` when given.

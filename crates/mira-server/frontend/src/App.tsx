@@ -1,24 +1,43 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence } from 'framer-motion';
 import {
-  ArrowClockwise,
+  RotateCw,
   ArrowDown,
-  CaretDown,
+  ChevronDown,
   Check,
-  CircleNotch,
+  LoaderCircle,
   Copy,
   Info,
   Lightbulb,
-  PencilSimple,
-  ShieldWarning,
-  SidebarSimple,
+  Pencil,
+  ShieldAlert,
+  PanelLeft,
   Sparkle,
   Target,
-} from '@phosphor-icons/react';
+  History,
+  X,
+} from 'lucide-react';
 import { cn } from './lib/utils';
+import { acpOptionsToDescriptors } from './lib/acpOptions';
+import { loadAgentCaps, loadInstanceConfigs, parseArgs, parseEnv, saveAgentCaps } from './lib/acpAgents';
+import { EngineMark } from './components/EnginePicker';
+import { prettyModel } from './lib/models';
+import type { UsageRingData } from './components/UsageRing';
+import { isAgentRequest } from './lib/agentRequest';
+import { agentCallToToolCall, agentToolResult, agentToolStatus } from './lib/agentTools';
+import type { AcpInstanceConfig } from './components/settings/AcpAgentsSection';
+import {
+  getCustomKeybindingRules,
+  resolveShortcutCommand,
+  shortcutLabelForCommand,
+  useKeybindings,
+  type ShortcutMatchContext,
+} from './lib/keybindings';
+import { applyReduceMotion, getBoolPref, PREF_KEYS } from './lib/prefs';
 import { connect, type WsClient, type WsStatus } from './ws';
 import { costUsd, formatDollars, shortNum } from './lib/usage';
-import { appendMemory, applyUndo, getBranchPr, getGitStatus, getSessionDiff, getSessionHistory, getSettings, gitCommit, gitPush, listCommands, listSessions, listSkills, newSession, setSessionBackgroundMode, startReview, type BranchPrView, type GitStatusView, type SessionDiffView, type SkillView, type CommandInfo } from './api';
+import { getContextBreakdown, previewCheckpoint, restoreCheckpoint, undoRestore, type MessageRef, type RestoreChange, type Restored } from './api';
+import { appendMemory, applyUndo, getBranchPr, getGitStatus, getSessionDiff, getSessionHistory, getSettings, gitCommit, gitPush, listCommands, listEngines, listSessions, listSkills, newSession, setSessionBackgroundMode, startReview, type BranchPrView, type EngineSnapshot, type GitStatusView, type SessionDiffView, type SkillView, type CommandInfo } from './api';
 import {
   ContextPanel,
   CONTEXT_PANEL_RESERVE,
@@ -30,6 +49,18 @@ import { SettingsSurface } from './components/Settings';
 import { PluginsPanel } from './components/Plugins';
 import { PullRequestPanel } from './components/PullRequestPanel';
 import { Sidebar, type MainView } from './components/Sidebar';
+import { hasHiddenTitleBar } from './lib/desktop';
+import { RightPanelButton } from './components/RightPanelButton';
+import { attachFilesToComposer, dataUrlToFile } from './lib/attachBridge';
+import { FilePicker } from './components/FilePicker';
+import {
+  TOOL_PANE_DEFS,
+  isToolPaneId,
+  toolPaneId,
+  toolPaneKindOf,
+  type ToolPaneKind,
+  type ToolPaneTab,
+} from './components/panes/toolPanes';
 import {
   Composer,
   parseSentAttachments,
@@ -41,10 +72,34 @@ import { FolderPicker } from './components/FolderPicker';
 import { AssistantContent } from './components/AssistantContent';
 import { ThoughtBlock } from './components/ThoughtBlock';
 import { ReviewChanges } from './components/ReviewChanges';
+import { EditorPicker } from './components/EditorPicker';
+import { TimelineMinimap, type MinimapItem } from './components/TimelineMinimap';
 import { ImageLightbox } from './components/ImageLightbox';
 import { TerminalPanel } from './components/TerminalPanel';
 import * as agentTerminal from './lib/agentTerminal';
-import { SquareTerminal } from 'lucide-react';
+import {
+  Bot,
+  Brain,
+  ChartColumn,
+  Cog,
+  FileDiff,
+  FolderOpen,
+  Globe2,
+  Keyboard,
+  MessageSquarePlus,
+  PanelLeftClose,
+  Plug,
+  ScanSearch,
+  Smile,
+  SquareTerminal,
+  Cpu,
+  Sparkles,
+  Zap,
+} from 'lucide-react';
+import { CommandPalette, type PaletteAction } from './components/CommandPalette';
+import { ContextInspector } from './components/ContextInspector';
+import { callForAttention } from './lib/attention';
+import { GetStarted } from './components/onboarding/GetStarted';
 
 const IS_MAC = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
 import { ToolCard, type ToolStatus } from './components/ToolCard';
@@ -57,12 +112,19 @@ import {
 } from './components/ReviewPanel';
 import { PlanCard } from './components/PlanCard';
 import { AskUserCard, type AskUserDecision } from './components/AskUserCard';
+import { ApprovalDialog } from './components/ApprovalDialog';
+import {
+  mapPosturesToModes,
+  MIRA_MODE_TO_POSTURE,
+  POSTURES,
+} from './lib/agentPostures';
 import { AgentCard, AgentGroup } from './components/AgentCard';
 import miraLogo from './assets/mira-logo.png';
 import { SubagentPanel, type SubagentTab, type FilePanelTab } from './components/SubagentPanel';
 import { TaskListPanel } from './components/TaskListPanel';
 import { GoalPanel } from './components/GoalPanel';
-import { countsByCategory, countsPhrase, ToolGroup } from './components/ToolGroup';
+import { categoryFor, countsByCategory, countsPhrase, ToolGroup } from './components/ToolGroup';
+import { SecondOpinion } from './components/SecondOpinion';
 import type {
   EnvironmentInfo,
   EnvironmentStatus,
@@ -82,6 +144,15 @@ import type {
   UsageTotals,
   SessionSummary,
   RateLimitReading,
+  AcpAgentStatus,
+  AcpConfigOption,
+  AgentTranscriptLine,
+  AcpPlanItem,
+  AcpSessionMode,
+  AcpToolCall,
+  AgentPostureMapping,
+  SessionEngine,
+  TurnMeta,
 } from './types';
 
 /** Live per-child state for the subagent panel — mirrors the shape of
@@ -112,6 +183,9 @@ type ToolEntry = {
   kind: 'tool';
   call: ToolCall;
   preview: DiffPreview | null;
+  /** For a compound shell command awaiting approval: the parts that
+   *  need it, as the server's policy judged them. */
+  needs?: string[];
   status: ToolStatus;
   result: ToolResult | null;
   /** Only set for the `plan` tool. `proposal` arrives on `plan_request`;
@@ -133,6 +207,10 @@ type ToolEntry = {
    *  `run_background` and any other long-running tool that emits progress.
    *  Lines accumulate even after the tool result has landed. */
   progressLines?: string[];
+  /** Set when an external agent made this call: its own description of it,
+   *  kept so later updates merge onto it. `call` is its Mira translation,
+   *  which is what renders. */
+  agentCall?: AcpToolCall;
 };
 type WarningEntry = { kind: 'warning'; text: string };
 /** Where compaction summarized the conversation: a divider, with the
@@ -167,6 +245,12 @@ type GoalEntry = {
   /** Only set on `variant: 'set'`. */
   condition?: string | null;
 };
+/** The agent's plan. */
+type AcpPlanEntry = { kind: 'acp_plan'; entries: AcpPlanItem[] };
+/** Where the chat moved to another engine (provider ⇄ agent). A quiet
+ *  divider, so a reader can tell which engine wrote what. */
+type EngineSwitchEntry = { kind: 'engine_switch'; engine: SessionEngine };
+
 export type Entry =
   | MsgEntry
   | ToolEntry
@@ -174,7 +258,9 @@ export type Entry =
   | ErrorEntry
   | GoalEntry
   | CompactEntry
-  | ThoughtEntry;
+  | ThoughtEntry
+  | AcpPlanEntry
+  | EngineSwitchEntry;
 
 type TurnTiming = {
   startedAt: number;
@@ -214,6 +300,182 @@ function compactionSummary(content: string | null | undefined): string | null {
 function stripHookContext(content: string | null | undefined): string | null | undefined {
   const i = content?.indexOf('<hook-context>') ?? -1;
   return i >= 0 ? content!.slice(0, i).trimEnd() : content;
+}
+
+/**
+ * Rebuild transcript entries from an agent sidecar.
+ *
+ * Pure fold over the persisted lines using the same entry builders as live
+ * traffic (`appendAcpText`, `upsertAcpTool`, …), so replayed turns render
+ * exactly like live ones. Deliberately free of side effects: no busy flags,
+ * no pings, no git refreshes, no turn-timing stamps — replay must not
+ * disturb a session that may have a live agent running right now.
+ *
+ * State frames (modes, config, commands, usage) are NOT applied here; the
+ * caller feeds those through the live handler, which owns the picker state.
+ * Only transcript content is returned.
+ */
+/**
+ * Rebuild a reloaded session's transcript with provider and agent turns in
+ * the order they happened.
+ *
+ * The two histories are stored apart (the harness must not read agent
+ * words as its own), so the server writes a `switch` marker into the agent
+ * sidecar at every engine switch, recording how much harness history
+ * preceded it. Between two markers, agent turns come first and provider
+ * turns after — a switch to the provider is followed by provider turns,
+ * and a switch to the agent by agent turns. Sidecars written before the
+ * markers existed keep the old order: harness, then agent.
+ */
+export function interleaveReplay(
+  history: Message[],
+  previews: Record<string, DiffPreview> | undefined,
+  lines: AgentTranscriptLine[],
+): Entry[] {
+  if (!lines.some((l) => l.switch)) {
+    return [...historyToEntries(history, previews), ...replayAgentTranscript(lines)];
+  }
+  const out: Entry[] = [];
+  let from = 0;
+  let segment: AgentTranscriptLine[] = [];
+  for (const line of lines) {
+    if (!line.switch) {
+      segment.push(line);
+      continue;
+    }
+    out.push(...replayAgentTranscript(segment));
+    segment = [];
+    const to = Math.min(Math.max(line.switch.harness_len, from), history.length);
+    out.push(...historyToEntries(history.slice(from, to), previews));
+    from = to;
+    const toAgent = line.switch.to !== 'provider';
+    out.push({
+      kind: 'engine_switch',
+      engine: toAgent
+        ? { kind: 'agent', driver: line.driver, display_name: line.driver, status: 'ready' }
+        : { kind: 'provider', display_name: 'provider', status: 'ready' },
+    });
+  }
+  out.push(...replayAgentTranscript(segment));
+  out.push(...historyToEntries(history.slice(from), previews));
+  return out;
+}
+
+/** The divider an engine switch leaves in the transcript. */
+function EngineSwitchDivider({ engine }: { engine: SessionEngine }) {
+  const provider = engine.display_name && !['Mira', 'provider'].includes(engine.display_name)
+    ? engine.display_name
+    : null;
+  const name =
+    engine.kind === 'agent'
+      ? agentDisplayName(engine.driver ?? '', engine.display_name)
+      : [provider, engine.model ? prettyModel(engine.model) : null].filter(Boolean).join(' · ') ||
+        'your provider';
+  return (
+    <div className="my-1 flex items-center gap-3 text-[11.5px] text-muted-foreground/60" role="separator">
+      <span className="h-px flex-1 bg-border/50" />
+      <span className="inline-flex items-center gap-1.5">
+        <EngineMark engine={engine} model={engine.model} />
+        {engine.kind === 'agent' ? `Switched to ${name}` : `Back on ${name}`}
+      </span>
+      <span className="h-px flex-1 bg-border/50" />
+    </div>
+  );
+}
+
+/** A driver slug as its product name, for places with no health data. */
+function agentDisplayName(driver: string, fallback: string): string {
+  const known: Record<string, string> = {
+    'claude-code': 'Claude Code', codex: 'Codex', cursor: 'Cursor', grok: 'Grok',
+    opencode: 'OpenCode', antigravity: 'Antigravity',
+  };
+  return known[driver] ?? (fallback && fallback !== driver ? fallback : driver);
+}
+
+export function replayAgentTranscript(lines: AgentTranscriptLine[]): Entry[] {
+  let out: Entry[] = [];
+  for (const line of lines) {
+    if (line.user) {
+      out = [
+        ...out,
+        { kind: 'msg', msg: { role: 'user', content: line.user.text } },
+      ];
+      continue;
+    }
+    const f = line.frame as ServerMsg | null | undefined;
+    if (!f || typeof f !== 'object' || !('type' in f)) continue;
+    switch ((f as ServerMsg).type) {
+      case 'acp_text':
+        out = appendAcpText(out, (f as Extract<ServerMsg, { type: 'acp_text' }>).text);
+        break;
+      case 'acp_thought':
+        out = appendAcpThought(out, (f as Extract<ServerMsg, { type: 'acp_thought' }>).text);
+        break;
+      case 'acp_tool_call':
+      case 'acp_tool_call_update':
+        out = upsertAcpTool(
+          out,
+          (f as Extract<ServerMsg, { type: 'acp_tool_call' }>).call,
+        );
+        break;
+      case 'acp_plan': {
+        const sealed = sealAcpThought(out);
+        const msg = f as Extract<ServerMsg, { type: 'acp_plan' }>;
+        const entry: AcpPlanEntry = { kind: 'acp_plan', entries: msg.entries };
+        const idx = sealed.findIndex((e) => e.kind === 'acp_plan');
+        out =
+          idx >= 0
+            ? [...sealed.slice(0, idx), entry, ...sealed.slice(idx + 1)]
+            : [...sealed, entry];
+        break;
+      }
+      case 'acp_turn_end': {
+        const msg = f as Extract<ServerMsg, { type: 'acp_turn_end' }>;
+        const sealed = sealAcpThought(out);
+        if (isSuccessfulAcpStop(msg.stop_reason)) {
+          out = sealed;
+          break;
+        }
+        const detail = msg.detail ? ` ${msg.detail}` : '';
+        out = [
+          ...sealed,
+          { kind: 'error', text: `${describeAcpStop(msg.stop_reason)}${detail}` },
+        ];
+        break;
+      }
+      case 'acp_mode_changed': {
+        const msg = f as Extract<ServerMsg, { type: 'acp_mode_changed' }>;
+        out = [
+          ...out,
+          {
+            kind: 'warning',
+            text: msg.privileged
+              ? `${msg.display_name}: ${msg.mode_name} enabled — ${msg.mode_id} grants more access than Mira would`
+              : `${msg.display_name}: mode set to ${msg.mode_name}`,
+          },
+        ];
+        break;
+      }
+      case 'acp_unmodelled':
+        // Diagnostics, not conversation — see the live handler.
+        break;
+      case 'warning':
+        out = [...out, { kind: 'warning', text: (f as Extract<ServerMsg, { type: 'warning' }>).text }];
+        break;
+      case 'error':
+        out = [...out, { kind: 'error', text: (f as Extract<ServerMsg, { type: 'error' }>).text }];
+        break;
+      default:
+        // State frames and session ephemera are handled by the caller, or
+        // deliberately skipped — never rendered as transcript content.
+        break;
+    }
+  }
+  // Replayed thoughts have no real timing: rebuilding them stamped "now"
+  // on both ends, which read as "Thought for <1s". Unknown is shown as
+  // unknown, the way Mira's own restored history does.
+  out = out.map((e) => (e.kind === 'thought' ? { ...e, live: false, startedAt: null, endedAt: null } : e));
+  return out;
 }
 
 export function historyToEntries(
@@ -396,6 +658,15 @@ function parseAskUserResultText(text: string, expectedQuestions: number): AskUse
   return { cancelled: false, answers };
 }
 
+/** A function whose identity never changes but always runs the latest
+ *  `fn` — so memoized children (each transcript turn) don't re-render just
+ *  because a parent re-created a handler, and never hold a stale one. */
+function useStableCallback<A extends unknown[], R>(fn: (...args: A) => R): (...args: A) => R {
+  const ref = useRef(fn);
+  ref.current = fn;
+  return useCallback((...args: A) => ref.current(...args), []);
+}
+
 export default function App() {
   const pingPrimedRef = useRef(false);
 
@@ -430,10 +701,157 @@ export default function App() {
 
   const [status, setStatus] = useState<WsStatus>('connecting');
   const [sessionId, setSessionId] = useState<string>('');
+  const sessionIdRef = useRef('');
+  /** The session's own title (AI-written, or the agent's), once known; the
+   *  header falls back to the first message until then. */
+  const [sessionTitle, setSessionTitle] = useState<string | null>(null);
   const [model, setModel] = useState<string>('');
   const [mode, setMode] = useState<Mode>('manual');
   const [cwd, setCwd] = useState<string>('');
   const [entries, setEntries] = useState<Entry[]>([]);
+
+  // State an external ACP agent owns. Captured here rather than folded into
+  // the transcript because it is configuration, not conversation — the
+  // model/mode pickers read it. Held in refs so receiving it never triggers a
+  // re-render of the whole transcript.
+  /** The agent's own stop reason for the last finished turn. */
+  // Kept for diagnostics only: the stop reason is written into the
+  // transcript when a turn ends abnormally, and read nowhere else.
+  const acpStopRef = useRef<string | null>(null);
+  const [acpModes, setAcpModes] = useState<{ current: string; available: AcpSessionMode[]; postures?: AgentPostureMapping[] } | null>(null);
+  /** Every backend from `GET /api/engines` — native providers and external
+   *  agents in one list, with health + catalogs. Refetched when extensions
+   *  change (an agent install state can move) and before opening pickers. */
+  const [engines, setEngines] = useState<EngineSnapshot[] | null>(null);
+  const [acpConfig, setAcpConfig] = useState<AcpConfigOption[]>([]);
+  const [acpCommands, setAcpCommands] = useState<string[]>([]);
+  const [acpUsage, setAcpUsage] = useState<{ used: number; size: number; cost: { amount: number; currency: string } | null } | null>(null);
+  /** The agent account's plan limits, as last reported. */
+  const [acpLimits, setAcpLimits] = useState<{ name: string; utilization: number; resets_at?: number | null }[]>([]);
+  /** Context fill for a provider chat: tokens in the last request plus its
+   *  reply, against the window the harness plans for. */
+  const [providerContext, setProviderContext] = useState<{ used: number; window: number; compactAt: number | null } | null>(null);
+  /** What drives this session — a provider or an agent — as the server
+   *  reports it on `ready` and on every `session_engine` transition. The
+   *  one source of truth for "which engine": nothing below re-derives it. */
+  const [engine, setEngine] = useState<SessionEngine | null>(null);
+  /** The agent this session runs on (picked, starting or running), or
+   *  null on a provider. Agent mode starts the moment one is picked. */
+  const acpDriver = engine?.kind === 'agent' ? (engine.driver ?? null) : null;
+  /** Which agent the modes / config / commands state above belongs to. */
+  const capsDriverRef = useRef<string | null>(null);
+  /** The engine as last applied, for handlers that must not see a stale
+   *  render's value. */
+  const engineRef = useRef<SessionEngine | null>(null);
+  /** Adopt a new engine. Switching to a different agent swaps the agent
+   *  state for that agent's last-seen capabilities at once, so the model
+   *  list and the mode control are right before the agent has reported
+   *  anything; its live frames replace them as they arrive. */
+  function applyEngine(next: SessionEngine | null) {
+    engineRef.current = next;
+    setEngine(next);
+    const driver = next?.kind === 'agent' ? (next.driver ?? null) : null;
+    if (driver === capsDriverRef.current) return;
+    capsDriverRef.current = driver;
+    const caps = driver ? loadAgentCaps(driver) : {};
+    setAcpModes(caps.modes ?? null);
+    setAcpConfig(caps.config ?? []);
+    setAcpCommands([]);
+    setAcpUsage(null);
+    setAcpLimits([]);
+  }
+
+  // An agent's config options projected onto Mira's picker shape, so the
+  // Composer needs no knowledge of ACP. Null when no agent is running, which
+  // leaves Mira's own capability-derived options in charge.
+  //
+  // The `model` option is excluded: it is covered by the Model row and its
+  // list, and rendering it as a second select produced two "Model" rows for
+  // the same setting. An empty array (not null) still means "the agent's
+  // list is authoritative", so Mira's own options stay out.
+  const acpModelOption = useMemo(
+    () => (acpDriver ? (acpConfig.find((o) => o.category === 'model') ?? null) : null),
+    [acpDriver, acpConfig],
+  );
+  const acpDescriptors = useMemo(() => {
+    if (!acpDriver) return null;
+    const all = acpOptionsToDescriptors(acpConfig) ?? [];
+    const modelId = acpModelOption?.id;
+    return all.filter((d) => d.id !== modelId);
+  }, [acpDriver, acpConfig, acpModelOption]);
+  /** Health of every known agent, refreshed on request. */
+  const [acpAgents, setAcpAgents] = useState<AcpAgentStatus[]>([]);
+  const [acpStatusPending, setAcpStatusPending] = useState(false);
+  /** A startup failure, surfaced in the Agents panel. */
+  const [acpError, setAcpError] = useState<string | null>(null);
+  /** A mode picked in the picker, awaiting confirmation in the universal
+   *  approval dialog. A mode is a standing grant of authority, so the pick
+   *  alone is never applied — the dialog states the consequence and the user
+   *  confirms. `reason` carries the server's explanation when it refused a
+   *  privileged mode and asked for acknowledgement. */
+  const [pendingAcpMode, setPendingAcpMode] = useState<{ modeId: string; reason?: string } | null>(null);
+  /** Display name of the driving agent, resolved from the last health check
+   *  so dialogs name the agent instead of its slug. */
+  const acpDriverName = useMemo(() => {
+    if (!acpDriver) return 'agent';
+    return acpAgents.find((a) => a.kind === acpDriver)?.display_name ?? acpDriver;
+  }, [acpDriver, acpAgents]);
+
+  /** Probe every agent. Off the render path because it spawns processes. */
+  const requestAcpStatus = useCallback(() => {
+    setAcpStatusPending(true);
+    wsRef.current?.send({ type: 'acp_status' });
+  }, []);
+
+  const startAcpAgent = useCallback((kind: string, cfg: AcpInstanceConfig, resume?: string | null, model?: string | null) => {
+    setAcpError(null);
+    wsRef.current?.send({
+      type: 'acp_start',
+      driver: kind,
+      binary_path: cfg.binaryPath || null,
+      display_name: cfg.displayName || null,
+      launch_args: parseArgs(cfg.launchArgs ?? ''),
+      env: parseEnv(cfg.env ?? ''),
+      api_key: cfg.apiKey || null,
+      home_path: cfg.homePath || null,
+      effort: cfg.effort || null,
+      setting_sources: cfg.settingSources || null,
+      resume: resume || null,
+      model: model || null,
+    });
+  }, []);
+  function forkAcpAgent() {
+    wsRef.current?.send({ type: 'acp_fork' });
+  }
+  function compactAcpAgent(focus?: string) {
+    // A compaction is a turn like any other: busy until its end arrives, or
+    // the composer would take input for a session that is summarizing.
+    setBusy(true);
+    setThinking(true);
+    wsRef.current?.send({ type: 'acp_compact', focus: focus?.trim() || null });
+  }
+
+  // Agent health, usage and the active driver are state rather than refs
+  // because the panel and the picker read them. Logged on change so a broken
+  // agent is visible without waiting on a settings UI to exist.
+  useEffect(() => {
+    if (acpAgents.length > 0) {
+      console.debug(
+        '[acp] agents',
+        acpAgents.map((a) => `${a.display_name}: ${a.state.state}`),
+      );
+    }
+  }, [acpAgents]);
+
+  useEffect(() => {
+    if (acpUsage) {
+      console.debug(
+        `[acp] usage ${acpUsage.used}/${acpUsage.size}` +
+          (acpUsage.cost ? ` $${acpUsage.cost.amount} ${acpUsage.cost.currency}` : ''),
+      );
+    }
+  }, [acpUsage]);
+
   // Per-turn timing. Turn index = 0-based order of user messages in `entries`.
   // Only turns started in *this* session have timing (reloaded transcripts
   // have no wall-clock data, so their turns skip the "Worked for" header).
@@ -463,6 +881,12 @@ export default function App() {
     }, 350);
   }
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  /** The context inspector (issue #70). */
+  const [inspectOpen, setInspectOpen] = useState(false);
+  // File picker opened from the right panel's "+" menu — distinct from the
+  // folder picker, which switches the session's cwd.
+  const [panelFilePickerOpen, setPanelFilePickerOpen] = useState(false);
   // Which primary view fills the main pane. Sidebar nav items switch this;
   // starting a chat / loading a session snaps back to 'chat' so the user
   // isn't stranded on a management screen when the model streams a reply.
@@ -507,6 +931,11 @@ export default function App() {
       return 'settings';
     });
   }
+  /** Jump straight to agent configuration (install hints, advanced setup). */
+  function openAgentSettings() {
+    openSettings();
+    setSettingsSection('agents');
+  }
   // Leave settings — pop back to wherever the user was. Falls back to
   // chat if the remembered view was somehow also settings (shouldn't
   // happen, but a stale value shouldn't strand the user).
@@ -514,13 +943,18 @@ export default function App() {
     setMainView(settingsReturnTo === 'settings' ? 'chat' : settingsReturnTo);
   }
   // Left sidebar visibility — collapses the 300px column to 0.
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  // Startup default comes from Settings → General (localStorage).
+  const [sidebarOpen, setSidebarOpen] = useState(() => {
+    try { return localStorage.getItem('mira.sidebar.open') !== '0'; } catch { return true; }
+  });
   // Right-side panel: `agentTabs` is the ordered list of open agent call_ids;
-  // `fileTabs` is the ordered list of open file viewer tabs; `activeAgentTab`
-  // is the visible panel's id (either a callId or a file path). Panel is open
-  // iff either list is non-empty.
+  // `fileTabs` is the ordered list of open file viewer tabs; `toolTabs` holds
+  // the utility panes (browser / whiteboard / devtools, one of each);
+  // `activeAgentTab` is the visible panel's id — a callId, a file path, or a
+  // `tool:<kind>` id. Panel is open iff any list is non-empty.
   const [agentTabs, setAgentTabs] = useState<string[]>([]);
   const [fileTabs, setFileTabs] = useState<FilePanelTab[]>([]);
+  const [toolTabs, setToolTabs] = useState<ToolPaneTab[]>([]);
   const [activeAgentTab, setActiveAgentTab] = useState<string | null>(null);
   // Right panel pixel width — user-draggable via the resize handle.
   const [rightPanelWidth, setRightPanelWidth] = useState(390);
@@ -551,6 +985,8 @@ export default function App() {
   // the branch are its own to push.
   const [sessionCommitted, setSessionCommitted] = useState(false);
   const [reviewOpen, setReviewOpen] = useState(false);
+  /** File the review drawer should open on, when opened from the file list. */
+  const [reviewFocus, setReviewFocus] = useState<string | null>(null);
   const [lightbox, setLightbox] = useState<string | null>(null);
   // "Open session" from the Usage page (Settings) — back to chat on it.
   useEffect(() => {
@@ -564,31 +1000,82 @@ export default function App() {
     return () => window.removeEventListener('mira:open-session', onOpen);
   }, []);
   // Integrated terminal (bottom panel); open state is remembered.
+  // Settings → General can disable the restore (always start closed).
   const [terminalOpen, setTerminalOpen] = useState<boolean>(() => {
-    try { return localStorage.getItem('mira.terminal.open') === '1'; } catch { return false; }
+    try {
+      if (localStorage.getItem('mira.terminal.restore') === '0') return false;
+      return localStorage.getItem('mira.terminal.open') === '1';
+    } catch { return false; }
   });
   const setTerminal = useCallback((v: boolean) => {
     setTerminalOpen(v);
     try { localStorage.setItem('mira.terminal.open', v ? '1' : '0'); } catch { /* private mode */ }
   }, []);
+  const keybindings = useKeybindings();
+
+  /** Live `when`-clause context for the keybinding engine. */
+  function shortcutContext(): ShortcutMatchContext {
+    const ae = document.activeElement as HTMLElement | null;
+    const tag = ae?.tagName;
+    const editable = !!ae && (tag === 'INPUT' || tag === 'TEXTAREA' || ae.isContentEditable);
+    return {
+      terminalFocus: !!ae?.closest('.xterm'),
+      // `pendingApprovals` is declared below; this only runs on keydown,
+      // long after the whole component body has initialized.
+      approvalOpen: pendingApprovals.length > 0,
+      reviewOpen,
+      settingsOpen: mainView === 'settings',
+      isWeb: true,
+      isDesktop: false,
+      editableFocus: editable,
+    };
+  }
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const modJ = (IS_MAC ? e.metaKey : e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'j';
-      const ctrlBacktick = e.ctrlKey && !e.metaKey && !e.altKey && e.key === '`';
-      if (modJ || ctrlBacktick) {
-        e.preventDefault();
-        setTerminalOpen((v) => {
-          try { localStorage.setItem('mira.terminal.open', v ? '0' : '1'); } catch { /* private mode */ }
-          return !v;
-        });
-      }
+      const command = resolveShortcutCommand(e, keybindings, { context: shortcutContext() });
+      if (command !== 'terminal.toggle') return;
+      e.preventDefault();
+      setTerminalOpen((v) => {
+        try { localStorage.setItem('mira.terminal.open', v ? '0' : '1'); } catch { /* private mode */ }
+        return !v;
+      });
     };
     // Capture phase: the shortcut must work while xterm has focus.
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, []);
+  }, [keybindings]);
+  // ⌘K opens the command palette from anywhere, the composer included —
+  // it's the one shortcut that has to work mid-sentence.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const command = resolveShortcutCommand(e, keybindings, {
+        context: { ...shortcutContext(), editableFocus: false },
+      });
+      if (command !== 'palette.toggle') return;
+      e.preventDefault();
+      e.stopPropagation();
+      setPaletteOpen((v) => !v);
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [keybindings]);
   const ctxFits = useContextPanelFits();
   const [branchPr, setBranchPr] = useState<BranchPrView | null>(null);
+  /** Re-read the repo state the panels show: git status, what this chat
+   *  changed, and the branch's PR. Responses are applied only if no newer
+   *  refresh has started since — after a quick session switch, a slow reply
+   *  for the previous chat must not overwrite the current one. */
+  const repoSeqRef = useRef(0);
+  const refreshRepo = useCallback(() => {
+    const seq = ++repoSeqRef.current;
+    const live = () => seq === repoSeqRef.current;
+    getGitStatus().then((s) => live() && setGitStatus(s)).catch(() => {});
+    getSessionDiff().then((d) => live() && setSessionDiff(d)).catch(() => {});
+    getBranchPr()
+      .then((pr) => live() && setBranchPr(pr))
+      .catch(() => live() && setBranchPr(null));
+  }, []);
   // Live task list — hydrated from `ready.tasks` on socket open and
   // upserted whenever a `task_*` tool result lands. Rendered as a
   // persistent "Plan" card near the top of the transcript.
@@ -667,7 +1154,9 @@ export default function App() {
     const el = paneRef.current;
     if (!el) return;
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-    followRef.current = atBottom;
+    // Settings → General → Transcript can disable auto-follow; the
+    // jump-to-latest button still works (it re-arms follow explicitly).
+    followRef.current = atBottom && getBoolPref(PREF_KEYS.transcriptFollow, true);
     setShowJump(!atBottom);
   }, []);
   useEffect(() => {
@@ -682,6 +1171,25 @@ export default function App() {
     const id = window.setInterval(() => setNowTick((n) => n + 1), 1000);
     return () => window.clearInterval(id);
   }, [busy]);
+
+  // Desktop notification when a turn finishes while the tab is hidden
+  // (Settings → General → Notifications). Only fires if the user granted
+  // permission; requesting happens from the settings row.
+  const prevBusyRef = useRef(busy);
+  // Read from WS handlers, which close over the first render.
+  const chatTitleRef = useRef<string | null>(null);
+  chatTitleRef.current = sessionTitle ?? titleFromEntries(entries);
+  useEffect(() => {
+    const was = prevBusyRef.current;
+    prevBusyRef.current = busy;
+    if (!was || busy) return;
+    callForAttention('done', chatTitleRef.current);
+  }, [busy]);
+
+  // Apply the reduce-motion class on boot (Settings → General → Appearance).
+  useEffect(() => {
+    applyReduceMotion();
+  }, []);
 
   // Smooth streaming: tokens land in a buffer and are released a few
   // characters per animation frame (faster when the buffer is deep), so
@@ -712,6 +1220,9 @@ export default function App() {
   const usageRef = useRef<UsageTotals | null>(null);
   const turnBaseRef = useRef<{ turn: number; base: UsageTotals } | null>(null);
   const [turnUsage, setTurnUsage] = useState<Map<number, UsageTotals>>(new Map());
+  /** The model each reloaded turn ran on, for pricing it. Live turns use
+   *  the current model. */
+  const [turnModels, setTurnModels] = useState<Map<number, string>>(new Map());
   function startTurnUsage(turn: number) {
     turnBaseRef.current = {
       turn,
@@ -729,11 +1240,59 @@ export default function App() {
         setSessionCommitted(false);
         setBranchPr(null);
         setSessionId(msg.session_id);
+        wsRef.current?.setSession(msg.session_id);
+        sessionIdRef.current = msg.session_id;
+        setSessionTitle(msg.title ?? null);
+        // Context is per chat; the agent's plan limits are per account and
+        // stay. The session's own usage frames (replayed below) restore it.
+        setProviderContext(null);
+        // A provider chat's context is otherwise only known once its next
+        // request reports usage, so a reopened chat showed tokens but no
+        // window. Seed it from the breakdown; a live report replaces it.
+        {
+          const opened = msg.session_id;
+          const isAgent = msg.engine ? msg.engine.kind === 'agent' : !!(msg.agent_kind || msg.agent_configured);
+          if (!isAgent) {
+            getContextBreakdown()
+              .then((v) => {
+                if (sessionIdRef.current !== opened || v.source !== 'mira') return;
+                setProviderContext((cur) => cur ?? { used: v.breakdown.total, window: v.window, compactAt: v.compact_at });
+              })
+              .catch(() => {});
+          }
+        }
+        setAcpUsage(null);
+        setRestoreNote(null);
+        setRestoreAsk(null);
         setModel(msg.model);
         setMode(msg.mode);
         setCwd(msg.cwd);
+        // The engine first: it decides whose capabilities the state frames
+        // below belong to. Older servers send no engine — derive one.
+        applyEngine(
+          msg.engine ??
+            (msg.agent_kind || msg.agent_configured
+              ? { kind: 'agent', driver: msg.agent_kind ?? msg.agent_configured, display_name: msg.agent_kind ?? msg.agent_configured ?? 'agent', status: msg.agent_kind ? 'ready' : 'idle' }
+              : { kind: 'provider', instance: msg.instance ?? null, display_name: msg.instance ?? 'Mira', model: msg.model, status: 'ready' }),
+        );
+        // State frames ride the live handler so the pickers reflect the
+        // agent's last-known modes and models before any new turn runs.
+        for (const line of msg.agent_transcript ?? []) {
+          const f = line.frame as ServerMsg | undefined;
+          if (!f || typeof f !== 'object' || !('type' in f)) continue;
+          if (
+            f.type === 'acp_modes' ||
+            f.type === 'acp_config_options' ||
+            f.type === 'acp_commands' ||
+            f.type === 'acp_usage' ||
+            f.type === 'acp_limits'
+          ) {
+            onMessage(f);
+          }
+        }
+        // Provider and agent turns interleave in the order they happened.
         const readyEntries = historyToEntries(msg.history, msg.previews);
-        setEntries(readyEntries);
+        setEntries(interleaveReplay(msg.history, msg.previews, msg.agent_transcript ?? []));
         // Seed subagent state from history so the ContextPanel shows agents
         // on session reload (live subagent_started frames don't replay).
         setSubagentState(() => {
@@ -759,6 +1318,10 @@ export default function App() {
         // (turn 0 = first user msg). Rebuild the local Map so "Worked for"
         // chips render on reloaded transcripts.
         setTurnTimings(rebuildTurnTimings(msg.turns ?? []));
+        // The reply hover row's tokens and cost, for turns from before this
+        // page loaded — the server keeps them per turn.
+        setTurnUsage(rebuildTurnUsage(msg.turns ?? []));
+        setTurnModels(rebuildTurnModels(msg.turns ?? []));
         setExpandedTurns(new Set());
         setUsage(msg.usage ?? null);
         setRateLimit(null);
@@ -777,8 +1340,7 @@ export default function App() {
         setEnvSwitching(null);
         wsRef.current?.send({ type: 'environment' });
         // Fetch git status, session diff, and branch PR for the new cwd.
-        getGitStatus().then((s) => { setGitStatus(s); getBranchPr().then(setBranchPr).catch(() => setBranchPr(null)); }).catch(() => {});
-        getSessionDiff().then(setSessionDiff).catch(() => {});
+        refreshRepo();
         // A Ready frame means the harness swapped session context (new /
         // load / resume / reconnect). If the user was parked on Plugins
         // or another management view, jump back to chat so a fresh
@@ -806,9 +1368,10 @@ export default function App() {
         setThinking(false);
         clearThinkingIdle();
         playPing();
+        callForAttention('approval', chatTitleRef.current);
         setEntries((prev) => [
           ...sealThought(prev),
-          { kind: 'tool', call: msg.call, preview: msg.preview ?? null, status: 'pending', result: null },
+          { kind: 'tool', call: msg.call, preview: msg.preview ?? null, needs: msg.needs ?? [], status: 'pending', result: null },
         ]);
         break;
       case 'tool_start':
@@ -872,12 +1435,10 @@ export default function App() {
         setBusy(false);
         setThinking(false);
         clearThinkingIdle();
-        setEntries(sealThought);
+        setEntries((prev) => settleTools(sealThought(prev)));
         playPing();
         // Refresh git status, session diff, and branch PR after each turn.
-        getGitStatus().then(setGitStatus).catch(() => {});
-        getSessionDiff().then(setSessionDiff).catch(() => {});
-        getBranchPr().then(setBranchPr).catch(() => setBranchPr(null));
+        refreshRepo();
         // Close out the most recent turn's timing.
         setTurnTimings((prev) => stampLastTurn(prev, Date.now()));
         setSidebarRefresh((n) => n + 1);
@@ -942,6 +1503,9 @@ export default function App() {
         listCommands().then(setCommands).catch(() => {});
         listSkills().then(setSkills).catch(() => {});
         setExtensionsVersion((n) => n + 1);
+        // Agent install/auth state can move under us (an adapter was
+        // installed, a CLI signed in) — refresh the engine list.
+        listEngines().then((v) => setEngines(v.engines)).catch(() => {});
         break;
       case 'skills_reloaded':
         // A skill file appeared / changed / vanished. Refetch the
@@ -985,8 +1549,10 @@ export default function App() {
         break;
       case 'session_title_updated':
         // Nickname landed on disk — refresh the sidebar so the row label
-        // switches from the first-user-message fallback to the AI title.
+        // switches from the first-user-message fallback to the AI title,
+        // and retitle the header when it is this chat's.
         setSidebarRefresh((n) => n + 1);
+        if (msg.session_id === sessionIdRef.current) setSessionTitle(msg.title);
         break;
       case 'background_mode_changed':
       case 'session_background_idle':
@@ -1000,6 +1566,13 @@ export default function App() {
       case 'usage':
         setUsage(msg.totals);
         usageRef.current = msg.totals;
+        if (msg.context_window) {
+          setProviderContext({
+            used: msg.round.prompt_tokens + msg.round.completion_tokens,
+            window: msg.context_window,
+            compactAt: msg.compact_at ?? null,
+          });
+        }
         break;
       case 'rate_limit':
         setRateLimit({ rate_limit: msg.rate_limit, summary: msg.summary, at: Date.now() });
@@ -1191,6 +1764,7 @@ export default function App() {
         // if the tool_start already arrived; otherwise stash the proposal so
         // tool_start can pick it up when it lands (see the tool_start case).
         playPing();
+        callForAttention('plan', chatTitleRef.current);
         setEntries((prev) => {
           const hit = prev.some((e) => e.kind === 'tool' && e.call.id === msg.prompt_id);
           if (!hit) {
@@ -1204,6 +1778,7 @@ export default function App() {
         // Same race-guard pattern as plan_request — attach immediately when
         // the tool_start already landed; stash otherwise.
         playPing();
+        callForAttention('question', chatTitleRef.current);
         setEntries((prev) => {
           const hit = prev.some((e) => e.kind === 'tool' && e.call.id === msg.prompt_id);
           if (!hit) {
@@ -1213,6 +1788,174 @@ export default function App() {
           return attachAskUserProposal(prev, msg.prompt_id, msg.proposal);
         });
         break;
+
+      // -------- ACP (external agent) --------
+      case 'acp_text':
+        setEntries((prev) => appendAcpText(prev, msg.text));
+        break;
+      case 'acp_thought':
+        setEntries((prev) => appendAcpThought(prev, msg.text));
+        break;
+      case 'acp_tool_call':
+      case 'acp_tool_call_update':
+        setEntries((prev) => upsertAcpTool(prev, msg.call));
+        break;
+      case 'acp_plan':
+        setEntries((prev) => {
+          const sealed = sealAcpThought(prev);
+          const idx = sealed.findIndex((e) => e.kind === 'acp_plan');
+          const entry: AcpPlanEntry = { kind: 'acp_plan', entries: msg.entries };
+          if (idx >= 0) {
+            return [...sealed.slice(0, idx), entry, ...sealed.slice(idx + 1)];
+          }
+          return [...sealed, entry];
+        });
+        break;
+      case 'acp_turn_end':
+        // End the turn. This is the only place an external agent's turn can
+        // be declared over — the prompt is fire-and-forget, so unlike the
+        // harness there is no surrounding await to imply completion. Without
+        // clearing `busy` here the composer spins forever, which is what a
+        // rate-limited turn looks like: the agent is long finished, the UI
+        // just never hears about it.
+        setBusy(false);
+        setThinking(false);
+        clearThinkingIdle();
+        acpStopRef.current = null;
+        // The agent edits files in its own process; nothing else tells the
+        // panels their counts are stale.
+        refreshRepo();
+        // Close out the turn's timing, or "Worked for" keeps ticking on a
+        // turn that ended minutes ago. The harness path does this on `done`;
+        // the agent path never did, which is why a finished turn still showed
+        // a live duration.
+        setTurnTimings((prev) => stampLastTurn(prev, Date.now()));
+
+        // A turn that did not complete should say why. A usage limit is an
+        // error, not an aside: the agent produced no answer, so presenting it
+        // as a warning styled like a reply made a failed turn look like a
+        // completed one. The server puts the agent's own context (e.g. when
+        // a limit resets) on the frame so this is one message, not two.
+        const stopped = msg.stop_reason;
+        setEntries((prev) => {
+          const sealed = settleTools(sealAcpThought(prev));
+          if (isSuccessfulAcpStop(stopped)) return sealed;
+          const detail = msg.detail ? ` ${msg.detail}` : '';
+          return [
+            ...sealed,
+            {
+              kind: 'error',
+              text: `${describeAcpStop(stopped)}${detail}`,
+            },
+          ];
+        });
+        break;
+      case 'acp_privileged_mode_confirmation':
+        // The server refused without an acknowledgement. Show what the mode
+        // does and let the user decide — the flag alone is not consent,
+        // because the client sets it.
+        // Folded into the same confirm state as a picker pick: one state,
+        // one dialog, whether the mode came from the user or the server.
+        setPendingAcpMode({ modeId: msg.mode_id, reason: msg.reason });
+        break;
+      case 'acp_mode_changed':
+        // A standing change to what the agent may do, recorded in the
+        // transcript so it is visible after the fact and not only in a
+        // dropdown that may have been closed by then.
+        setEntries((prev) => [
+          ...prev,
+          {
+            kind: 'warning',
+            text: msg.privileged
+              ? `${msg.display_name}: ${msg.mode_name} enabled — ${msg.mode_id} grants more access than Mira would`
+              : `${msg.display_name}: mode set to ${msg.mode_name}`,
+          },
+        ]);
+        setPendingAcpMode(null);
+        break;
+      case 'acp_unmodelled':
+        // Logged, not shown. Printing the agent's raw JSON into the chat
+        // buried answers under diagnostics ("ACP system: {…}"), and a
+        // wedged agent is already visible: its turn never ends and the
+        // composer keeps spinning.
+        console.debug(`[acp] unmodelled ${msg.method}:`, msg.reason);
+        break;
+      // State the agent owns rather than transcript content. Captured so it
+      // is available to the model/mode pickers, and logged so none of it is
+      // invisible while that wiring lands.
+      case 'acp_modes':
+        // State, not a ref: these drive the picker and mode row, so the
+        // transcript must re-render when they arrive.
+        setAcpModes({ current: msg.current, available: msg.available, postures: msg.postures });
+        if (capsDriverRef.current) {
+          saveAgentCaps(capsDriverRef.current, { modes: { current: msg.current, available: msg.available } });
+        }
+        break;
+      case 'acp_config_options':
+        setAcpConfig(msg.options);
+        if (capsDriverRef.current) saveAgentCaps(capsDriverRef.current, { config: msg.options });
+        break;
+      case 'acp_commands':
+        setAcpCommands(msg.names);
+        break;
+      case 'acp_usage':
+        setAcpUsage(msg);
+        break;
+      case 'acp_limits':
+        setAcpLimits(msg.windows);
+        break;
+      case 'acp_session_info':
+        // The agent retitled itself; the sidebar reads its own title source,
+        // so just nudge a refresh when one arrived.
+        if (msg.title) setSidebarRefresh((n) => n + 1);
+        break;
+
+      case 'acp_agent_started':
+        // Startup outcome. Surfaced as a warning on failure so a user learns
+        // "grok isn't installed" instead of watching an empty pane.
+        if (msg.error) {
+          setAcpError(`${msg.display_name}: ${msg.error}`);
+          setEntries((prev) => [
+            ...prev,
+            { kind: 'warning', text: `${msg.display_name}: ${msg.error}` },
+          ]);
+        } else {
+          setAcpError(null);
+        }
+        break;
+      case 'session_engine': {
+        // A switch the user made (or an agent exiting) marks the
+        // transcript, so the reader can see where one engine handed off
+        // to the other. Status-only transitions (starting → ready) don't.
+        const prev = engineRef.current;
+        const next = msg.engine;
+        const moved =
+          prev != null &&
+          (prev.kind !== next.kind ||
+            (next.kind === 'agent' ? prev.driver !== next.driver : false));
+        if (moved) {
+          setEntries((es) => [...es, { kind: 'engine_switch', engine: next }]);
+        }
+        // The sidebar badges each chat by its engine.
+        if (moved || prev?.model !== next.model) setSidebarRefresh((n) => n + 1);
+        applyEngine(next);
+        break;
+      }
+      case 'acp_agent_status':
+        setAcpAgents(msg.agents);
+        setAcpStatusPending(false);
+        console.debug('[acp] agent status', msg.agents.map((a) => `${a.display_name}:${a.state.state}`));
+        break;
+
+      default: {
+        // A frame type this build does not know about. Logged rather than
+        // ignored: ACP's spec under-documents `SessionUpdate` and vendors
+        // send extensions, so an unhandled type must be greppable instead of
+        // looking like a hung agent.
+        const unknown = msg as { type?: string };
+        console.warn('[ws] unhandled server message type:', unknown.type);
+        break;
+      }
     }
   }
 
@@ -1321,6 +2064,14 @@ export default function App() {
 
   function decideApproval(callId: string, allow: boolean, scope: ApprovalScope = 'once') {
     wsRef.current?.send({ type: 'approve', call_id: callId, allow, scope });
+    // An agent's request is only the question; the agent's own tool card
+    // shows the call running. Keeping the request would leave a second
+    // card that never finishes.
+    const decided = entries.find((e) => e.kind === 'tool' && e.call.id === callId);
+    if (decided && decided.kind === 'tool' && isAgentRequest(decided.call)) {
+      setEntries((prev) => prev.filter((e) => !(e.kind === 'tool' && e.call.id === callId)));
+      return;
+    }
     setEntries((prev) => updateTool(prev, callId, (t) => ({
       ...t,
       status: allow ? 'running' : 'denied',
@@ -1335,9 +2086,88 @@ export default function App() {
     () =>
       entries
         .filter((e): e is Extract<Entry, { kind: 'tool' }> => e.kind === 'tool' && e.status === 'pending')
-        .map((e) => ({ callId: e.call.id, call: e.call, preview: e.preview })),
+        .map((e) => ({ callId: e.call.id, call: e.call, preview: e.preview, needs: e.needs })),
     [entries],
   );
+
+  /** The canonical postures mapped onto this agent's modes. Empty when the
+   *  agent advertised nothing we recognize — then the dialog offers only
+   *  Deny / Allow once rather than inventing options. */
+  const agentPostures = useMemo(() => {
+    if (!acpModes) return [];
+    // Server-computed mapping wins: the posture vocabulary lives in the
+    // protocol, so the client never pattern-matches agent mode ids. The
+    // local mapping remains as a fallback for older servers.
+    if (acpModes.postures?.length) {
+      return acpModes.postures.flatMap((m) => {
+        const posture = POSTURES.find((p) => p.key === m.key);
+        if (!posture) return [];
+        return [{
+          posture,
+          modeId: m.mode_id,
+          modeName: m.mode_name,
+          modeDescription: m.mode_description ?? null,
+          current: m.current,
+        }];
+      });
+    }
+    return mapPosturesToModes(acpModes.available, acpModes.current);
+  }, [acpModes]);
+  /** The composer's usage ring, for whichever engine drives the chat. An
+   *  agent reports its own context, cost and plan limits; a provider chat
+   *  is measured by Mira (context, auto-compact point, tokens, cost) with
+   *  the provider's rate limits as its limits. */
+  const usageRing = useMemo<UsageRingData>(() => {
+    if (acpDriver) {
+      const LIMIT_NAMES: Record<string, string> = {
+        five_hour: '5-hour limit',
+        seven_day: 'Weekly · all models',
+        seven_day_opus: 'Weekly · Opus',
+        seven_day_sonnet: 'Weekly · Sonnet',
+      };
+      return {
+        used: acpUsage?.used ?? null,
+        window: acpUsage?.size ?? null,
+        compactAt: null,
+        tokens: null,
+        costUsd: acpUsage?.cost && acpUsage.cost.currency === 'USD' ? acpUsage.cost.amount : null,
+        limitsTitle: acpLimits.length ? `Plan usage limits · ${engine?.display_name ?? 'agent'}` : null,
+        limits: acpLimits.map((w) => ({
+          label: LIMIT_NAMES[w.name] ?? w.name.replace(/_/g, ' '),
+          used: w.utilization,
+          resetsAt: w.resets_at ? w.resets_at * 1000 : null,
+        })),
+        onCompact: () => compactAcpAgent(),
+        onInspect: () => setInspectOpen(true),
+      };
+    }
+    const rl = rateLimit?.rate_limit;
+    const limits = rl
+      ? (['requests', 'tokens', 'input_tokens', 'output_tokens'] as const).flatMap((k) => {
+          const b = rl[k];
+          if (!b || b.limit == null || b.remaining == null || b.limit === 0) return [];
+          return [{
+            label: k === 'requests' ? 'Requests' : k === 'tokens' ? 'Tokens' : k === 'input_tokens' ? 'Input tokens' : 'Output tokens',
+            used: 1 - b.remaining / b.limit,
+            resetsAt: b.reset_secs != null ? rateLimit!.at + b.reset_secs * 1000 : null,
+          }];
+        })
+      : [];
+    return {
+      used: providerContext?.used ?? null,
+      window: providerContext?.window ?? null,
+      compactAt: providerContext?.compactAt ?? null,
+      tokens: usage && (usage.prompt_tokens || usage.completion_tokens)
+        ? { prompt: usage.prompt_tokens, completion: usage.completion_tokens, cached: usage.cached_input_tokens }
+        : null,
+      costUsd: usage ? costUsd(model, usage) : null,
+      limitsTitle: limits.length ? 'Provider rate limits' : null,
+      limits,
+      onCompact: () => onCompact(''),
+      onInspect: () => setInspectOpen(true),
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [acpDriver, acpUsage, acpLimits, engine, rateLimit, providerContext, usage, model]);
 
   // Plan proposal waiting for the user to approve/cancel. Rendered in
   // the Composer rather than inline so the interactive card doesn't
@@ -1359,10 +2189,11 @@ export default function App() {
     return e ? { callId: e.call.id, proposal: e.askUser!.proposal } : null;
   }, [entries]);
 
-  // Global Y/N shortcut for the first pending approval. Rebinds when
+  // Global approval shortcuts for the first pending approval, resolved
+  // through the keybinding engine (Settings → Keybindings). Rebinds when
   // the head-of-queue call changes so back-to-back approvals each
   // pick up their own listener. Skipped while the user is typing so
-  // "y" and "n" in the composer/settings don't fire the decision.
+  // approval keys in the composer/settings don't fire the decision.
   const firstPendingCallId = pendingApprovals[0]?.callId ?? null;
   useEffect(() => {
     if (!firstPendingCallId) return;
@@ -1373,17 +2204,35 @@ export default function App() {
         if (tag === 'INPUT' || tag === 'TEXTAREA') return;
         if (t.isContentEditable) return;
       }
-      if (e.key === 'y' || e.key === 'Y') {
+      const command = resolveShortcutCommand(e, keybindings, { context: shortcutContext() });
+      if (command === 'approval.accept') {
         e.preventDefault();
         decideApproval(firstPendingCallId, true);
-      } else if (e.key === 'n' || e.key === 'N') {
+        return;
+      }
+      if (command === 'approval.reject') {
         e.preventDefault();
         decideApproval(firstPendingCallId, false);
+        return;
+      }
+      // Legacy fallback: plain y/n (any case) still decides, unless the
+      // user rebound that command in Settings → Keybindings.
+      if (!e.metaKey && !e.ctrlKey && !e.altKey) {
+        const lower = e.key.toLowerCase();
+        if (lower === 'y' || lower === 'n') {
+          const customized = getCustomKeybindingRules().some(
+            (r) => r.command === (lower === 'y' ? 'approval.accept' : 'approval.reject'),
+          );
+          if (!customized) {
+            e.preventDefault();
+            decideApproval(firstPendingCallId, lower === 'y');
+          }
+        }
       }
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [firstPendingCallId]);
+  }, [firstPendingCallId, keybindings]);
 
   function onSend(text: string, images?: { media_type: string; data: string }[]) {
     // Belt-and-suspenders — the composer isn't visible on non-chat views,
@@ -1411,19 +2260,67 @@ export default function App() {
     });
     setBusy(true);
     setThinking(true);
+    // The server routes by the session's engine: a session on an agent
+    // sends this to the agent (starting it if needed, with the
+    // conversation so far if it just took over), otherwise to the
+    // provider. One message type, so a prompt can never go to the wrong
+    // engine because this client's view lagged the server's.
     wsRef.current?.send({ type: 'send', text, images });
   }
 
   /** Edit & resend (or retry, with the same text) the user message at
    *  `userIdx`: the server rewinds history to just before it and starts a
    *  new turn. Later entries are dropped here to match. */
-  function onResend(userIdx: number, text: string) {
+  /** How the server identifies a user message: its text, and which match
+   *  of it counting from the latest. Shared by edit and restore so they can
+   *  never disagree about which message is meant. */
+  function messageRefAt(userIdx: number): MessageRef | null {
     const target = entries[userIdx];
-    if (busy || !target || target.kind !== 'msg' || target.msg.role !== 'user') return;
-    const original = target.msg.content ?? '';
+    if (!target || target.kind !== 'msg' || target.msg.role !== 'user') return null;
+    const text = target.msg.content ?? '';
     const occurrence = entries
       .slice(userIdx + 1)
-      .filter((e) => e.kind === 'msg' && e.msg.role === 'user' && e.msg.content === original).length;
+      .filter((e) => e.kind === 'msg' && e.msg.role === 'user' && e.msg.content === text).length;
+    return { text, occurrence };
+  }
+
+  // Restore files to before a message: preview → confirm → restore, with an
+  // Undo afterwards.
+  const [restoreAsk, setRestoreAsk] = useState<{ ref: MessageRef; changes: RestoreChange[] } | null>(null);
+  const [restoreNote, setRestoreNote] = useState<
+    { text: string; undo?: string; error?: boolean } | null
+  >(null);
+  async function askRestore(userIdx: number) {
+    const ref = messageRefAt(userIdx);
+    if (!ref || busy) return;
+    try {
+      const changes = await previewCheckpoint(ref);
+      if (changes.length === 0) {
+        setRestoreNote({ text: 'Nothing to restore — the files already match.' });
+        return;
+      }
+      setRestoreAsk({ ref, changes });
+    } catch (e) {
+      setRestoreNote({ text: (e as Error).message, error: true });
+    }
+  }
+  async function doRestore(run: () => Promise<Restored>, verb: string) {
+    try {
+      const r = await run();
+      const n = r.changes.length;
+      setRestoreNote({ text: `${verb} ${n} file${n === 1 ? '' : 's'}.`, undo: verb === 'Restored' ? r.undo : undefined });
+    } catch (e) {
+      setRestoreNote({ text: (e as Error).message, error: true });
+    } finally {
+      refreshRepo();
+    }
+  }
+
+  function onResend(userIdx: number, text: string) {
+    const ref = messageRefAt(userIdx);
+    const target = entries[userIdx];
+    if (busy || !ref || !target || target.kind !== 'msg') return;
+    const { text: original, occurrence } = ref;
     followRef.current = true;
     setShowJump(false);
     const next: Entry[] = [
@@ -1444,29 +2341,65 @@ export default function App() {
     wsRef.current?.send({ type: 'resend', original, occurrence, text });
   }
 
+  // Stable identities for everything handed to the transcript, so a
+  // streamed token re-renders only the turn it lands in.
+  const stableToggleTurn = useStableCallback((idx: number) => toggleTurn(idx));
+  const stableDecide = useStableCallback(decideApproval);
+  const stablePlanReply = useStableCallback(replyToPlan);
+  const stableAskUserReply = useStableCallback(replyToAskUser);
+  const stableOpenAgent = useStableCallback(openAgentTab);
+  const stableOpenFile = useStableCallback(openFileTab);
+  const stableSetMode = useStableCallback(onSetMode);
+  const editMessage = useStableCallback((entry: Entry, text: string) => onResend(entries.indexOf(entry), text));
+  const restoreMessage = useStableCallback((entry: Entry) => void askRestore(entries.indexOf(entry)));
+  const retryMessage = useStableCallback((entry: Entry) => {
+    const at = entries.indexOf(entry);
+    for (let i = at - 1; i >= 0; i--) {
+      const e = entries[i];
+      if (e.kind === 'msg' && e.msg.role === 'user') {
+        onResend(i, e.msg.content ?? '');
+        return;
+      }
+    }
+  });
+  // Changes only with `busy`: every message's action row reads this, and a
+  // value that changed per token would re-render all of them.
   const messageActions = useMemo<MessageActions>(
-    () => ({
-      busy,
-      openImage: setLightbox,
-      edit: (entry, text) => onResend(entries.indexOf(entry), text),
-      retry: (entry) => {
-        const at = entries.indexOf(entry);
-        for (let i = at - 1; i >= 0; i--) {
-          const e = entries[i];
-          if (e.kind === 'msg' && e.msg.role === 'user') {
-            onResend(i, e.msg.content ?? '');
-            return;
-          }
-        }
-      },
-    }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [busy, entries],
+    () => ({ busy, openImage: setLightbox, edit: editMessage, restore: restoreMessage, retry: retryMessage }),
+    [busy, editMessage, restoreMessage, retryMessage],
   );
 
   function onSetMode(m: Mode) { wsRef.current?.send({ type: 'set_mode', mode: m }); }
-  function onSetModel(m: string) { wsRef.current?.send({ type: 'set_model', model: m }); }
-  function onSetEffort(e: string | null) { wsRef.current?.send({ type: 'set_effort', effort: e }); }
+  /** Switch an external agent's own session mode. Separate from Mira's
+   *  `set_mode`: different system, and the ids are the agent's. */
+  function onSetAcpMode(modeId: string, acknowledgePrivileged = false) {
+    wsRef.current?.send({
+      type: 'acp_set_mode',
+      mode_id: modeId,
+      acknowledge_privileged: acknowledgePrivileged,
+    });
+  }
+  function onSetModel(m: string, instance?: string | null) {
+    // With an agent driving, a pick from the list is the *agent's* model, not
+    // Mira's: it goes out as the agent's model config option. Sending
+    // `set_model` here changed Mira's model behind the agent's back while the
+    // agent kept running whatever it was running — the picker lied.
+    if (acpDriver) {
+      // Not yet running: the server remembers the pick and launches with it.
+      wsRef.current?.send({ type: 'acp_set_config_option', option_id: acpModelOption?.id ?? 'model', value: m });
+      return;
+    }
+    wsRef.current?.send({ type: 'set_model', model: m, instance: instance ?? null });
+  }
+  function onSetModelOption(id: string, value: string) {
+    // With an ACP agent driving the session, the option ids are the *agent's*
+    // (`model`, `thought_level`, …) and Mira's server would ignore them.
+    if (acpDriver) {
+      wsRef.current?.send({ type: 'acp_set_config_option', option_id: id, value });
+      return;
+    }
+    wsRef.current?.send({ type: 'set_model_option', id, value });
+  }
 
   /** Kick off (or replace) an autonomous run against a condition. The
    *  server broadcasts `goal_set` so the panel state syncs there — we
@@ -1492,6 +2425,9 @@ export default function App() {
   }
 
   async function onNewChat() {
+    // The new chat inherits this one's engine on the server — provider and
+    // model, or agent and its settings — and its `ready` reports it, so
+    // the composer carries on exactly as it was. Nothing to reset here.
     try {
       const { id } = await newSession();
       // The server just built a fresh slot for `id`, marked it active,
@@ -1504,10 +2440,85 @@ export default function App() {
     }
   }
 
+  // Global app shortcuts, resolved through the keybinding engine
+  // (Settings → Keybindings). Never fires while typing — single-key and
+  // mod bindings alike yield to inputs, textareas and editable regions.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      const t = e.target as HTMLElement | null;
+      if (t) {
+        const tag = t.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || t.isContentEditable) return;
+      }
+      const command = resolveShortcutCommand(e, keybindings, { context: shortcutContext() });
+      if (!command) return;
+      switch (command) {
+        case 'chat.new':
+          e.preventDefault();
+          void onNewChat();
+          break;
+        case 'review.toggle':
+          e.preventDefault();
+          setReviewOpen((v) => !v);
+          break;
+        case 'sidebar.toggle':
+          e.preventDefault();
+          setSidebarOpen((v) => !v);
+          break;
+        case 'settings.toggle':
+          e.preventDefault();
+          if (mainView === 'settings') exitSettings();
+          else openSettings();
+          break;
+        default:
+          break;
+      }
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [keybindings, mainView]);
+
+  /** Everything ⌘K can do. Each entry runs exactly what its button or
+   *  shortcut does, so the palette never drifts from the rest of the app. */
+  const keyFor = (c: Parameters<typeof shortcutLabelForCommand>[1]) => shortcutLabelForCommand(keybindings, c);
+  const goSettings = (id: import('./components/Settings').SettingsSectionId) => () => {
+    openSettings();
+    setSettingsSection(id);
+  };
+  const paletteActions: PaletteAction[] = [
+    { id: 'new', group: 'Chat', label: 'New chat', icon: MessageSquarePlus, shortcut: keyFor('chat.new'), run: () => void onNewChat() },
+    { id: 'folder', group: 'Chat', label: 'Open folder…', icon: FolderOpen, keywords: ['project', 'cwd', 'directory'], run: () => setPickerOpen(true) },
+    {
+      id: 'model', group: 'Chat', label: acpDriver ? 'Switch model or agent…' : 'Switch model…', icon: Cpu,
+      keywords: ['provider', 'agent', 'claude', 'codex', 'engine'],
+      run: () => { setMainView('chat'); window.dispatchEvent(new Event('mira:open-model-picker')); },
+    },
+    { id: 'changes', group: 'Chat', label: 'Review changes', icon: FileDiff, shortcut: keyFor('review.toggle'), keywords: ['diff', 'git'], run: () => setReviewOpen(true) },
+    { id: 'context', group: 'Chat', label: "What's in the context window", icon: Brain, keywords: ['tokens', 'compact', 'inspector'], run: () => setInspectOpen(true) },
+    { id: 'review', group: 'Chat', label: 'Ask Iris to review the changes', icon: ScanSearch, keywords: ['code review', 'second opinion', 'reviewer'], run: () => void runReview('') },
+    { id: 'sidebar', group: 'View', label: 'Toggle sidebar', icon: PanelLeftClose, shortcut: keyFor('sidebar.toggle'), run: () => setSidebarOpen((v) => !v) },
+    { id: 'terminal', group: 'View', label: 'Toggle terminal', icon: SquareTerminal, shortcut: keyFor('terminal.toggle'), run: () => setTerminal(!terminalOpen) },
+    { id: 'browser', group: 'View', label: 'Open browser', icon: Globe2, keywords: ['chrome', 'web'], run: () => { setMainView('chat'); openToolPane('browser'); } },
+    { id: 'whiteboard', group: 'View', label: 'Open whiteboard', icon: Pencil, keywords: ['sketch', 'draw'], run: () => { setMainView('chat'); openToolPane('whiteboard'); } },
+    { id: 's-general', group: 'Settings', label: 'General settings', icon: Cog, shortcut: keyFor('settings.toggle'), run: goSettings('general') },
+    { id: 's-provider', group: 'Settings', label: 'Providers & API keys', icon: Plug, run: goSettings('provider') },
+    { id: 's-agents', group: 'Settings', label: 'External agents', icon: Bot, keywords: ['claude code', 'codex'], run: goSettings('agents') },
+    { id: 's-subagents', group: 'Settings', label: 'Subagents', icon: Smile, keywords: ['scout', 'iris', 'atlas', 'bolt', 'quill', 'sentry', 'faces'], run: goSettings('subagents') },
+    { id: 's-usage', group: 'Settings', label: 'Usage & cost', icon: ChartColumn, keywords: ['tokens', 'spend', 'limits'], run: goSettings('usage') },
+    { id: 's-memory', group: 'Settings', label: 'Memory', icon: Brain, run: goSettings('memory') },
+    { id: 's-skills', group: 'Settings', label: 'Skills', icon: Sparkles, run: goSettings('skills') },
+    { id: 's-hooks', group: 'Settings', label: 'Hooks', icon: Zap, run: goSettings('hooks') },
+    { id: 's-keys', group: 'Settings', label: 'Keyboard shortcuts', icon: Keyboard, keywords: ['keybindings'], run: goSettings('keybindings') },
+  ];
+
   const settingsHandler = (v: SettingsView) => {
     setConfigured(v.configured);
     setProviderName(v.default_provider ?? null);
     if (v.default_model) setModel(v.default_model);
+    // Backend list for the pickers — native providers + external agents
+    // with health + catalogs. Failures degrade to an empty list.
+    listEngines().then((v) => setEngines(v.engines)).catch(() => {});
     if (v.default_mode) setMode(v.default_mode as Mode);
   };
 
@@ -1517,6 +2528,56 @@ export default function App() {
   );
 
   const turns = useMemo(() => groupByTurn(entries), [entries]);
+
+  // Second opinion: after an external agent's turn that changed files,
+  // offer a review by Mira's own reviewer. One offer per turn; dismissing
+  // or accepting it retires it.
+  const [secondOpinionSeen, setSecondOpinionSeen] = useState<Set<string>>(() => new Set());
+  const lastTurnIdx = turns.length - 1;
+  const secondOpinionKey = `${sessionId}:${lastTurnIdx}`;
+  const lastTurnEdited = useMemo(() => {
+    const last = turns[turns.length - 1];
+    return !!last?.body.some((e) => {
+      if (e.kind !== 'tool' || e.status === 'denied') return false;
+      const cat = categoryFor(e.call.function.name);
+      return cat === 'write' || cat === 'edit';
+    });
+  }, [turns]);
+  const showSecondOpinion =
+    !!acpDriver && !busy && lastTurnIdx >= 0 && lastTurnEdited &&
+    sessionDiff.files.length > 0 && !secondOpinionSeen.has(secondOpinionKey);
+  const retireSecondOpinion = () =>
+    setSecondOpinionSeen((prev) => new Set(prev).add(secondOpinionKey));
+
+  // Timeline minimap items: one per turn opened by a user message.
+  // Assistant excerpt = first assistant text in the turn body.
+  const minimapItems = useMemo<MinimapItem[]>(() => {
+    const out: MinimapItem[] = [];
+    turns.forEach((turn, i) => {
+      if (turn.user?.kind !== 'msg' || turn.user.msg.role !== 'user') return;
+      const { text } = parseSentAttachments(turn.user.msg.content ?? '');
+      const assistant = turn.body.find(
+        (e): e is Extract<Entry, { kind: 'msg' }> =>
+          e.kind === 'msg' && e.msg.role === 'assistant' && !!(e.msg.content ?? '').trim(),
+      );
+      out.push({
+        id: `turn-${i}`,
+        userText: text.trim(),
+        assistantText: assistant && assistant.kind === 'msg' ? (assistant.msg.content ?? null) : null,
+      });
+    });
+    return out;
+  }, [turns]);
+
+  // Jump the transcript pane to a minimap turn.
+  const jumpToMinimapTurn = useCallback((id: string) => {
+    const pane = paneRef.current;
+    if (!pane) return;
+    const node = pane.querySelector(`[data-minimap-id="${id}"]`);
+    if (!(node instanceof HTMLElement)) return;
+    const delta = node.getBoundingClientRect().top - pane.getBoundingClientRect().top;
+    pane.scrollTo({ top: pane.scrollTop + delta - 12, behavior: 'smooth' });
+  }, []);
   // Keep the transcript and composer clear of the context card only while
   // it's open; the collapsed pill floats over the corner.
   const ctxHasContent =
@@ -1608,10 +2669,11 @@ export default function App() {
     setAgentTabs((prev) => {
       const next = prev.filter((id) => id !== callId);
       if (activeAgentTab === callId) {
-        // Fall through to remaining agent tabs, then file tabs, then null.
+        // Fall through to remaining agent tabs, then file/tool tabs, then null.
         const remaining = [
           ...next,
           ...fileTabs.map((t) => t.id),
+          ...toolTabs.map((t) => t.id),
         ];
         setActiveAgentTab(remaining.length > 0 ? remaining[remaining.length - 1] : null);
       }
@@ -1622,6 +2684,7 @@ export default function App() {
   function closeSubagentPanel() {
     setAgentTabs([]);
     setFileTabs([]);
+    setToolTabs([]);
     setActiveAgentTab(null);
   }
 
@@ -1640,16 +2703,89 @@ export default function App() {
     setFileTabs((prev) => {
       const next = prev.filter((t) => t.id !== tabId);
       if (activeAgentTab === tabId) {
-        const remaining = [...agentTabs, ...next.map((t) => t.id)];
+        const remaining = [
+          ...agentTabs,
+          ...next.map((t) => t.id),
+          ...toolTabs.map((t) => t.id),
+        ];
         setActiveAgentTab(remaining.length > 0 ? remaining[remaining.length - 1] : null);
       }
       return next;
     });
   }
 
+  function closeToolTab(tabId: string) {
+    setToolTabs((prev) => {
+      const next = prev.filter((t) => t.id !== tabId);
+      if (activeAgentTab === tabId) {
+        const remaining = [
+          ...agentTabs,
+          ...fileTabs.map((t) => t.id),
+          ...next.map((t) => t.id),
+        ];
+        setActiveAgentTab(remaining.length > 0 ? remaining[remaining.length - 1] : null);
+      }
+      return next;
+    });
+  }
+
+  /**
+   * Open (or focus) a utility pane. Singletons by kind, so asking twice just
+   * re-focuses.
+   *
+   * The `new` launcher is a tab like any other, but it's retired the moment
+   * you pick something — otherwise picking a pane leaves a stale "New" tab
+   * sitting in the strip forever.
+   */
+  function openToolPane(kind: ToolPaneKind) {
+    const id = toolPaneId(kind);
+    setToolTabs((prev) => {
+      const withoutLauncher =
+        kind === 'new' ? prev : prev.filter((t) => t.kind !== 'new');
+      return withoutLauncher.some((t) => t.id === id)
+        ? withoutLauncher
+        : [...withoutLauncher, { id, kind, title: TOOL_PANE_DEFS[kind].title }];
+    });
+    setActiveAgentTab(id);
+  }
+
+  // Show the browser when Mira or an agent starts using it (Settings →
+  // General → Browser). Only for a live call — reloading a chat with old
+  // browser calls must not pop the pane — and once per turn, so closing the
+  // pane sticks until the next message.
+  const browserShownFor = useRef<string | null>(null);
+  useEffect(() => {
+    let live = false;
+    let turnStart = -1;
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const e = entries[i];
+      if (e.kind === 'msg' && e.msg.role === 'user') {
+        turnStart = i;
+        break;
+      }
+      if (e.kind === 'tool' && e.call.function.name === 'browser' && (e.status === 'running' || e.status === 'pending')) {
+        live = true;
+      }
+    }
+    if (!live) return;
+    const turn = `${sessionId}:${turnStart}`;
+    if (browserShownFor.current === turn) return;
+    browserShownFor.current = turn;
+    if (getBoolPref(PREF_KEYS.browserAutoOpen, true)) openToolPane('browser');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [entries]);
+
   function closeAnyTab(id: string) {
     if (agentTabs.includes(id)) closeAgentTab(id);
+    else if (isToolPaneId(id)) closeToolTab(id);
     else closeFileTab(id);
+  }
+
+  /** Whiteboard "Send": hand the drawing to the composer as an image
+   *  attachment so the model can actually see it. */
+  async function sendWhiteboardToChat(pngDataUrl: string) {
+    const file = await dataUrlToFile(pngDataUrl, 'whiteboard.png');
+    attachFilesToComposer(file);
   }
 
   function handlePanelResizeStart(e: React.MouseEvent) {
@@ -1669,7 +2805,12 @@ export default function App() {
     document.addEventListener('mouseup', onUp);
   }
 
-  const panelOpen = subagentTabs.length > 0 || fileTabs.length > 0;
+  const panelOpen =
+    subagentTabs.length > 0 || fileTabs.length > 0 || toolTabs.length > 0;
+
+  /** True in the desktop app on macOS, where the native title bar is gone
+   *  and our own header has to stand in for it. */
+  const hiddenTitleBar = hasHiddenTitleBar();
 
   function toggleTurn(idx: number) {
     setExpandedTurns((prev) => {
@@ -1684,7 +2825,18 @@ export default function App() {
 
   return (
     <div
-      className="grid h-screen grid-rows-1 bg-background transition-[grid-template-columns] duration-150"
+      // Window wash ( `--color-sidebar`): the sidebar
+      // sits full-bleed on it; the main + right columns float as inset
+      // rounded cards (`--color-panel`).
+      // With the native title bar hidden, the window is transparent and the
+      // OS paints vibrancy behind it. The grid's own wash has to be
+      // transparent too or it would cover that; the sidebar supplies a
+      // translucent tint over the vibrancy, and the main and right columns
+      // stay opaque panels so body text never sits on wallpaper.
+      className={cn(
+        'grid h-screen grid-rows-1 transition-[grid-template-columns] duration-150',
+        hiddenTitleBar ? 'bg-transparent' : 'bg-panel',
+      )}
       style={{ gridTemplateColumns: `${sidebarCol} minmax(0,1fr) ${rightCol}` }}
     >
       {/* overflow-hidden clips sidebar content when the grid column animates to 0 */}
@@ -1715,11 +2867,25 @@ export default function App() {
         />
       </div>
 
-      <main className="flex min-w-0 min-h-0 flex-col">
+      {/* Gutters are asymmetric: 2px on the sidebar edge vs 8px elsewhere,
+          so the chat column reads as pulled toward the sidebar without
+          touching it. The right panel keeps the full 8px on its outer edge. */}
+      <main className="flex min-h-0 min-w-0 flex-col py-2 pl-0.5 pr-2">
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-border bg-background">
         {mainView === 'chat' && (
           <>
-            <div className="flex h-11 shrink-0 items-center gap-3 border-b border-border/60 px-4">
+            {/* Drag region: with the native title bar hidden this row is
+                the natural place to move the window, and `Overlay` needs at
+                least one or the window can't be dragged at all. */}
+            <div
+              data-tauri-drag-region
+              className="flex h-11 shrink-0 items-center gap-3 border-b border-border/60 px-4"
+            >
+              {/* `data-tauri-drag-region` matches ancestors, so anything
+                  interactive inside the header would drag the window on
+                  mousedown. Opting these out keeps the clicks landing. */}
               <button
+                data-tauri-drag-region="false"
                 type="button"
                 onClick={() => setSidebarOpen((v) => !v)}
                 title={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
@@ -1730,57 +2896,64 @@ export default function App() {
                     : 'text-muted-foreground/50 hover:bg-accent hover:text-foreground',
                 )}
               >
-                <SidebarSimple className="size-4" />
+                <PanelLeft className="size-4" />
               </button>
               <span className="min-w-0 flex-1 truncate text-[13.5px] text-foreground">
-                {titleFromEntries(entries)}
+                {sessionTitle ?? titleFromEntries(entries)}
               </span>
               {(sessionDiff.uncommitted ?? 0) > 0 && (
                 <button
                   type="button"
+                  data-tauri-drag-region="false"
                   onClick={() => setReviewOpen(true)}
                   title="Review this session's changes"
-                  className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border px-2.5 py-1 text-[12px] text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                  // h-8 and rounded-lg to match the icon controls beside it.
+                  // It used to be a `rounded-full` py-1 pill, which read as a
+                  // different kind of control because it was both shorter
+                  // than its neighbours and the only fully-pill shape in the
+                  // row.
+                  className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg border border-border/60 bg-secondary/40 px-2 text-[12.5px] text-muted-foreground transition-colors hover:border-border hover:bg-secondary hover:text-foreground"
                 >
                   <span className="font-mono text-green-400/80">+{sessionDiff.added}</span>
                   <span className="font-mono text-red-400/80">−{sessionDiff.removed}</span>
-                  <span>Review</span>
+                  <span className="hidden lg:inline">Review</span>
                 </button>
               )}
-              <div className="inline-flex rounded-full border border-border bg-secondary/60 p-0.5">
-                <button
-                  type="button"
-                  className="rounded-full bg-secondary px-3.5 py-1 text-[12.5px] font-medium text-foreground"
-                >
-                  Chat
-                </button>
-                <button
-                  type="button"
-                  disabled
-                  title="Not implemented yet"
-                  className="rounded-full px-3.5 py-1 text-[12.5px] text-muted-foreground/40 cursor-not-allowed"
-                >
-                  Work
-                </button>
-              </div>
-              <div className="group relative">
+              <div className="flex items-center gap-0.5" data-tauri-drag-region="false">
+                <RightPanelButton
+                  open={panelOpen}
+                  activeKind={toolPaneKindOf(activeAgentTab ?? '')}
+                  onOpen={() => openToolPane('new')}
+                  onOpenPane={openToolPane}
+                />
+                <EditorPicker
+                  cwd={cwd}
+                  onOpenSettings={() => {
+                    setSettingsSection('general');
+                    openSettings();
+                  }}
+                />
+                <div className="group relative">
                 <button
                   type="button"
                   onClick={() => setTerminal(!terminalOpen)}
                   aria-label="Toggle terminal"
                   aria-pressed={terminalOpen}
                   className={cn(
-                    'flex size-8 items-center justify-center rounded-lg border transition-colors',
+                    'flex h-8 shrink-0 items-center rounded-lg px-1.5 transition-colors',
                     terminalOpen
-                      ? 'border-border bg-secondary text-foreground'
-                      : 'border-transparent text-muted-foreground hover:bg-secondary hover:text-foreground',
+                      ? 'border-mira-blue/50 bg-mira-blue/10 text-foreground'
+                      : 'bg-secondary/40 text-muted-foreground hover:bg-secondary hover:text-foreground',
                   )}
                 >
-                  <SquareTerminal className="size-4" strokeWidth={1.75} />
+                  <span className="inline-flex size-6 items-center justify-center overflow-hidden rounded-md bg-white/[0.04] ring-1 ring-white/10">
+                    <SquareTerminal className="size-3.5" strokeWidth={1.75} />
+                  </span>
                 </button>
-                <span className="pointer-events-none absolute right-0 top-full z-30 mt-1.5 whitespace-nowrap rounded-md border border-border bg-popover px-2 py-1 text-[12px] text-foreground opacity-0 shadow-lg transition-opacity delay-300 group-hover:opacity-100">
-                  Toggle terminal <span className="ml-1.5 text-muted-foreground">{IS_MAC ? '⌘J' : 'Ctrl+J'}</span>
+                <span className="tooltip pointer-events-none absolute right-0 top-full z-30 mt-1.5 opacity-0 transition-opacity delay-300 group-hover:opacity-100">
+                  Toggle terminal <span className="tooltip-tag">{shortcutLabelForCommand(keybindings, 'terminal.toggle') ?? (IS_MAC ? '⌘J' : 'Ctrl+J')}</span>
                 </span>
+                </div>
               </div>
             </div>
 
@@ -1795,7 +2968,22 @@ export default function App() {
                 ref={paneRef}
                 onScroll={onPaneScroll}
               >
-                {configured === false && (
+                {/* Agents bring their own login, so a chat on one needs no provider. */}
+                {configured === false && !acpDriver && isEmpty && (
+                  <GetStarted
+                    agents={acpAgents}
+                    onUseAgent={(kind) => {
+                      const cfg = loadInstanceConfigs()[kind] ?? { enabled: true };
+                      startAcpAgent(kind, { ...cfg, launchArgs: cfg.launchArgs ?? '', env: cfg.env ?? '', enabled: true }, null);
+                    }}
+                    onAddProvider={() => {
+                      openSettings();
+                      setSettingsSection('provider');
+                    }}
+                    onSetUpAgents={openAgentSettings}
+                  />
+                )}
+                {configured === false && !acpDriver && !isEmpty && (
                   <div className="mx-auto mb-4 max-w-3xl rounded-lg border border-amber-500/30 bg-amber-500/[0.08] px-3 py-2 text-[13px] text-amber-200">
                     No provider configured —{' '}
                     <button
@@ -1809,13 +2997,13 @@ export default function App() {
                 )}
 
                 {isEmpty ? (
-                  <EmptyState
+                  configured === false && !acpDriver ? null : <EmptyState
                     cwd={cwd}
                     onPrompt={(text) => onSend(text)}
                     onOpenSession={(id) => wsRef.current?.attach(id)}
                   />
                 ) : (
-                  <div className="mx-auto flex max-w-3xl flex-col gap-2">
+                  <div data-transcript-column className="mx-auto flex max-w-3xl flex-col gap-2">
                     {goal && (
                       <GoalPanel
                         goal={goal}
@@ -1827,27 +3015,47 @@ export default function App() {
                     )}
                     {tasks.length > 0 && <TaskListPanel tasks={tasks} />}
                     <MessageActionsContext.Provider value={messageActions}>
-                    {turns.map((turn, i) => (
+                      {turns.map((turn, i) => (
                       <TurnView
                         key={`turn-${i}`}
+                        minimapId={`turn-${i}`}
                         turn={turn}
                         timing={turnTimings.get(i) ?? null}
                         usage={turnUsage.get(i) ?? null}
-                        model={model}
+                        model={turnModels.get(i) ?? model}
+                        index={i}
                         expanded={expandedTurns.has(i)}
-                        onToggle={() => toggleTurn(i)}
-                        onDecide={decideApproval}
-                        onPlanReply={replyToPlan}
-                        onAskUserReply={replyToAskUser}
-                        onOpenAgent={openAgentTab}
-                        onOpenFile={openFileTab}
+                        onToggle={stableToggleTurn}
+                        onDecide={stableDecide}
+                        onPlanReply={stablePlanReply}
+                        onAskUserReply={stableAskUserReply}
+                        onOpenAgent={stableOpenAgent}
+                        onOpenFile={stableOpenFile}
                         isActive={busy && i === turns.length - 1}
                         skills={skills}
                         mode={mode}
-                        onSetMode={onSetMode}
+                        onSetMode={stableSetMode}
+                        approvalViaDialog={false}
+                        offscreenOk={i < turns.length - 3}
                       />
                     ))}
                     </MessageActionsContext.Provider>
+                    {showSecondOpinion && (
+                      <SecondOpinion
+                        agentName={acpDriverName}
+                        files={sessionDiff.files.length}
+                        canReview={configured !== false}
+                        onReview={() => {
+                          retireSecondOpinion();
+                          void runReview('');
+                        }}
+                        onAddProvider={() => {
+                          openSettings();
+                          setSettingsSection('provider');
+                        }}
+                        onDismiss={retireSecondOpinion}
+                      />
+                    )}
                     {thinking && (
                       <div className="flex justify-start">
                         <Thinking />
@@ -1857,15 +3065,17 @@ export default function App() {
                 )}
               </div>
 
+              <TimelineMinimap items={minimapItems} paneRef={paneRef} onSelect={jumpToMinimapTurn} />
               <ImageLightbox src={lightbox} onClose={() => setLightbox(null)} />
               <ReviewChanges
                 open={reviewOpen}
-                onClose={() => setReviewOpen(false)}
-                onSendComments={(text) => onSend(text)}
-                onChanged={() => {
-                  getGitStatus().then(setGitStatus).catch(() => {});
-                  getSessionDiff().then(setSessionDiff).catch(() => {});
+                onClose={() => {
+                  setReviewOpen(false);
+                  setReviewFocus(null);
                 }}
+                onSendComments={(text) => onSend(text)}
+                onChanged={refreshRepo}
+                focusPath={reviewFocus}
               />
 
               {showJump && (
@@ -1874,7 +3084,7 @@ export default function App() {
                   onClick={jumpToLatest}
                   className="absolute bottom-3 left-1/2 z-10 inline-flex -translate-x-1/2 animate-fade-in items-center gap-1.5 rounded-full border border-border bg-secondary/95 px-3 py-1.5 text-[12px] text-muted-foreground shadow-lg backdrop-blur transition-colors hover:text-foreground"
                 >
-                  <ArrowDown weight="bold" className="size-3" />
+                  <ArrowDown strokeWidth={2.5} className="size-3" />
                   Jump to latest
                 </button>
               )}
@@ -1883,7 +3093,7 @@ export default function App() {
               <AnimatePresence>
                 <ContextPanel
                   key="ctx"
-                  sessionTitle={titleFromEntries(entries)}
+                  sessionTitle={sessionTitle ?? titleFromEntries(entries)}
                   tasks={tasks}
                   subagentState={subagentState}
                   entries={entries}
@@ -1894,14 +3104,18 @@ export default function App() {
                   open={ctxOpen}
                   onOpenChange={onCtxOpenChange}
                   onOpenAgent={openAgentTab}
-                  onReview={() => setReviewOpen(true)}
-                  onPush={async () => { await gitPush(); getGitStatus().then(setGitStatus).catch(() => {}); getBranchPr().then(setBranchPr).catch(() => {}); }}
+                  onReview={(path) => {
+                    setReviewFocus(path ?? null);
+                    setReviewOpen(true);
+                  }}
+                  onPush={async () => {
+                    await gitPush();
+                    refreshRepo();
+                  }}
                   onCommit={async (message, includeUnstaged, pushAfter) => {
                     await gitCommit({ message, include_unstaged: includeUnstaged, push_after: pushAfter });
                     setSessionCommitted(true);
-                    getGitStatus().then(setGitStatus).catch(() => {});
-                    getSessionDiff().then(setSessionDiff).catch(() => {});
-                    getBranchPr().then(setBranchPr).catch(() => setBranchPr(null));
+                    refreshRepo();
                   }}
                 />
               </AnimatePresence>
@@ -1911,6 +3125,35 @@ export default function App() {
               className="shrink-0 transition-[padding-right] duration-200"
               style={{ paddingRight: ctxReserve ? CONTEXT_PANEL_RESERVE : 0 }}
             >
+            {restoreNote && (
+              <div className="mx-auto mb-2 flex w-full max-w-3xl animate-fade-in items-center gap-2 rounded-lg border border-border/60 bg-secondary/70 px-3 py-1.5 text-[12.5px]">
+                <History className={cn('size-3.5 shrink-0', restoreNote.error ? 'text-amber-400' : 'text-muted-foreground')} />
+                <span className={cn('min-w-0 flex-1', restoreNote.error ? 'text-amber-200' : 'text-foreground/85')}>
+                  {restoreNote.text}
+                </span>
+                {restoreNote.undo && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const undo = restoreNote.undo!;
+                      setRestoreNote(null);
+                      void doRestore(() => undoRestore(undo), 'Put back');
+                    }}
+                    className="shrink-0 rounded px-1.5 py-0.5 text-[12px] font-medium text-foreground/80 hover:bg-white/[0.06] hover:text-foreground"
+                  >
+                    Undo
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setRestoreNote(null)}
+                  aria-label="Dismiss"
+                  className="shrink-0 rounded p-0.5 text-muted-foreground/60 hover:text-foreground"
+                >
+                  <X className="size-3.5" />
+                </button>
+              </div>
+            )}
             <Composer
               disabled={status !== 'open'}
               busy={busy}
@@ -1923,7 +3166,46 @@ export default function App() {
               onSend={onSend}
               onSetMode={onSetMode}
               onSetModel={onSetModel}
-              onSetEffort={onSetEffort}
+              engine={engine}
+              engines={engines}
+              agents={acpAgents}
+              agentsChecking={acpStatusPending}
+              onCheckAgents={requestAcpStatus}
+              agentConfig={acpDriver ? acpConfig : null}
+              agentDescriptors={acpDescriptors}
+              onSetModelOption={onSetModelOption}
+              onPickProvider={(instance, m) => {
+                wsRef.current?.send({ type: 'set_model', model: m, instance: instance ?? null });
+              }}
+              onPickAgent={(driver, m) => {
+                // Already this chat's agent: only the model can change, and
+                // that is an option on the running agent, not a restart
+                // with a new setup.
+                if (acpDriver === driver) {
+                  if (m && m !== engine?.model) onSetModel(m);
+                  return;
+                }
+                // The agent's saved setup (Settings → Agents) travels with
+                // the pick, so its paths, env and effort apply.
+                const cfg = loadInstanceConfigs()[driver] ?? { enabled: true };
+                startAcpAgent(driver, { ...cfg, launchArgs: cfg.launchArgs ?? '', env: cfg.env ?? '', enabled: true }, null, m);
+              }}
+              onConfigureAgents={openAgentSettings}
+              sessionId={sessionId}
+              onAgentCompact={compactAcpAgent}
+              onAgentFork={forkAcpAgent}
+              onAgentReverted={() => wsRef.current?.attach(sessionId)}
+              onAcpModes={acpModes?.available ?? null}
+              onAcpCurrentMode={acpModes?.current ?? null}
+              onPickAgentMode={(m) => {
+                if (!acpDriver) return;
+                const key = MIRA_MODE_TO_POSTURE[m];
+                const opt = agentPostures.find((o) => o.posture.key === key);
+                // Unmapped or already active: nothing to confirm.
+                if (!opt || opt.current) return;
+                setPendingAcpMode({ modeId: opt.modeId });
+              }}
+              agentDriving={acpDriver != null}
               onOpenPicker={() => setPickerOpen(true)}
               onCwdSwitched={(_path, id) => { if (id) wsRef.current?.attach(id); }}
               environment={environment}
@@ -1951,13 +3233,38 @@ export default function App() {
                 return `reverted ${r.applied.length} write${r.applied.length === 1 ? '' : 's'}`;
               }}
               skills={skills}
+              usageRing={usageRing}
               pendingApproval={pendingApprovals[0] ?? null}
+              pendingApprovalCount={pendingApprovals.length}
+              onAllowAllPending={() => {
+                for (const a of pendingApprovals) decideApproval(a.callId, true, 'once');
+              }}
               pendingPlan={pendingPlan}
               pendingAskUser={pendingAskUser}
               onDecide={(callId, allow, scope) => decideApproval(callId, allow, scope)}
               onPlanReply={replyToPlan}
               onAskUserReply={replyToAskUser}
-              commands={commands}
+              commands={
+                // An agent's advertised slash commands take over while it is
+                // driving the session — Mira's own command list would offer
+                // prompts the agent has never heard of.
+                acpDriver && acpCommands.length > 0
+                  ? acpCommands.map((name) => ({
+                      name,
+                      description: '',
+                      argument_hint: null,
+                      source: 'acp',
+                      kind: 'command' as const,
+                      origin: {
+                        kind: 'user' as const,
+                        key: 'acp',
+                        label: acpDriver,
+                        icon_url: null,
+                        homepage: null,
+                      },
+                    }))
+                  : commands
+              }
             />
             </div>
             {terminalOpen && <TerminalPanel onClose={() => setTerminal(false)} />}
@@ -1985,14 +3292,83 @@ export default function App() {
             onExit={exitSettings}
             skillsVersion={skillsVersion}
             githubReturn={githubReturn}
+            acpAgents={acpAgents}
+            acpRefreshing={acpStatusPending}
+            acpDriver={acpDriver}
+            acpError={acpError}
+            onAcpRefresh={requestAcpStatus}
+            onAcpStart={startAcpAgent}
           />
         )}
+        </div>
       </main>
 
+      {/* A privileged agent mode is a standing grant of more access than Mira
+          would allow, so it gets an explicit confirmation that says what it
+          does. The server refuses without this acknowledgement; the client
+          setting the flag is not consent on its own. */}
+      {/* Changing the agent's mode from the composer. The mode picker used to
+          live inside the model dialog as a silent dropdown; a permission-mode
+          change is a grant of standing authority, not a preference, so it is
+          confirmed here — one dialog for every decision. */}
+      {pendingAcpMode && (() => {
+        // One confirm dialog for every mode decision: a pick from the picker
+        // and a server-refused privilege converge here. The choice was made
+        // in the picker, so this states the consequence and asks for the nod
+        // — it does not list every posture again.
+        const opt = agentPostures.find((o) => o.modeId === pendingAcpMode.modeId);
+        const label = opt?.posture.label ?? pendingAcpMode.modeId;
+        return (
+          <ApprovalDialog
+            tone="consequential"
+            request={{
+              title: `Switch to ${label}?`,
+              source: { label: acpDriverName, detail: 'agent mode' },
+              body: (
+                <div className="space-y-2">
+                  {pendingAcpMode.reason && <p>{pendingAcpMode.reason}</p>}
+                  <p>
+                    {opt?.modeDescription ?? opt?.posture.blurb ?? 'This changes what the agent may do without asking.'}
+                  </p>
+                  <p className="text-muted-foreground/70">
+                    {acpDriverName} will keep this mode until you change it
+                    back. File, terminal and permission requests still route
+                    through Mira either way.
+                  </p>
+                </div>
+              ),
+              choices: [
+                { id: '__cancel', label: 'Cancel' },
+                {
+                  id: 'confirm',
+                  label: `Switch to ${label}`,
+                  primary: true,
+                  destructive: opt?.posture.key === 'yolo',
+                },
+              ],
+              onDismiss: () => setPendingAcpMode(null),
+              onChoose: (id) => {
+                const modeId = pendingAcpMode.modeId;
+                setPendingAcpMode(null);
+                // Confirmed in this dialog, so the acknowledgement rides
+                // along: the server must not ask again for what was just
+                // agreed.
+                if (id !== '__cancel') onSetAcpMode(modeId, true);
+              },
+            }}
+          />
+        );
+      })()}
       {panelOpen && (
+        <div className="min-h-0 min-w-0 py-2 pr-2">
+          <div className="h-full overflow-hidden rounded-xl border border-border bg-background">
         <SubagentPanel
           tabs={subagentTabs}
           fileTabs={fileTabs}
+          toolTabs={toolTabs}
+          onWhiteboardSend={(png) => void sendWhiteboardToChat(png)}
+          onOpenPane={openToolPane}
+          onBrowseFile={() => setPanelFilePickerOpen(true)}
           activeCallId={activeAgentTab}
           cwd={cwd ?? ''}
           onSelectTab={setActiveAgentTab}
@@ -2002,8 +3378,89 @@ export default function App() {
           onResizeStart={handlePanelResizeStart}
           onOpenFile={openFileTab}
         />
+          </div>
+        </div>
       )}
 
+      <FilePicker
+        open={panelFilePickerOpen}
+        startPath={cwd || undefined}
+        onClose={() => setPanelFilePickerOpen(false)}
+        onPicked={(p) => {
+          setPanelFilePickerOpen(false);
+          openFileTab(p, null);
+        }}
+      />
+
+      <ContextInspector
+        open={inspectOpen}
+        onOpenChange={setInspectOpen}
+        busy={busy}
+        onCompact={(focus) => (acpDriver ? compactAcpAgent(focus) : onCompact(focus))}
+        onDropped={(callId, d) => {
+          // The tool card shows what the model now sees, and a status line
+          // records the drop where it happened.
+          setEntries((prev) => [
+            ...prev.map((e) =>
+              e.kind === 'tool' && e.call.id === callId && e.result
+                ? { ...e, result: { ...e.result, content: `[Removed from context — ~${shortNum(d.tokens)} tokens]`, images: undefined } }
+                : e,
+            ),
+            { kind: 'warning', text: `[context] removed ${d.label || d.tool} from context (~${shortNum(d.tokens)} tokens)` },
+          ]);
+        }}
+      />
+      <CommandPalette
+        open={paletteOpen}
+        onOpenChange={setPaletteOpen}
+        actions={paletteActions}
+        onOpenSession={(id) => {
+          wsRef.current?.attach(id);
+          setMainView('chat');
+        }}
+      />
+      {restoreAsk && (
+        <ApprovalDialog
+          tone="consequential"
+          request={{
+            title: `Restore ${restoreAsk.changes.length} file${restoreAsk.changes.length === 1 ? '' : 's'}?`,
+            source: { label: 'Checkpoint', detail: 'before this message' },
+            body: (
+              <div className="space-y-2">
+                <p>
+                  Every file that changed since this message goes back to how it was — including
+                  changes made after it, by anyone. You can undo this.
+                </p>
+                <ul className="max-h-48 space-y-0.5 overflow-auto rounded-md bg-background/60 px-2.5 py-2 font-mono text-[11.5px]">
+                  {restoreAsk.changes.map((c) => (
+                    <li key={c.path} className="flex gap-2">
+                      <span
+                        className={cn(
+                          'w-14 shrink-0',
+                          c.action === 'remove' ? 'text-red-400/80' : c.action === 'recreate' ? 'text-green-400/80' : 'text-amber-300/80',
+                        )}
+                      >
+                        {c.action === 'remove' ? 'remove' : c.action === 'recreate' ? 'bring back' : 'revert'}
+                      </span>
+                      <span className="min-w-0 break-all text-foreground/80">{c.path}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ),
+            choices: [
+              { id: 'cancel', label: 'Cancel' },
+              { id: 'restore', label: 'Restore files', primary: true },
+            ],
+            onDismiss: () => setRestoreAsk(null),
+            onChoose: (id) => {
+              const ask = restoreAsk;
+              setRestoreAsk(null);
+              if (id === 'restore') void doRestore(() => restoreCheckpoint(ask.ref), 'Restored');
+            },
+          }}
+        />
+      )}
       <FolderPicker
         open={pickerOpen}
         onClose={() => setPickerOpen(false)}
@@ -2053,6 +3510,36 @@ function appendReasoning(prev: Entry[], text: string): Entry[] {
   return [...prev, { kind: 'thought', text, live: true, startedAt: Date.now(), endedAt: null }];
 }
 
+/** A turn is over: nothing in it can still be running or awaiting an
+ *  answer. A crashed agent or an aborted turn otherwise leaves an approval
+ *  card nobody can answer (the server no longer knows the call) and
+ *  spinners that never stop. Subagent calls are left alone — their state is
+ *  tracked separately and can outlive the turn that started them. */
+function settleTools(prev: Entry[]): Entry[] {
+  let changed = false;
+  const next = prev.map((e) => {
+    if (e.kind !== 'tool' || e.call.function.name === 'agent') return e;
+    if (e.status === 'pending') {
+      changed = true;
+      return {
+        ...e,
+        status: 'denied' as const,
+        result: e.result ?? { call_id: e.call.id, content: 'Not run — the turn ended before it was answered.', is_error: true },
+      };
+    }
+    if (e.status === 'running') {
+      changed = true;
+      return {
+        ...e,
+        status: 'complete' as const,
+        result: e.result ?? { call_id: e.call.id, content: 'Interrupted — the turn ended before this finished.', is_error: true },
+      };
+    }
+    return e;
+  });
+  return changed ? next : prev;
+}
+
 /** Close the live thought block, if any — the model moved on. */
 function sealThought(prev: Entry[]): Entry[] {
   const last = prev[prev.length - 1];
@@ -2071,6 +3558,84 @@ function appendToken(prevRaw: Entry[], text: string): Entry[] {
     return [...prev.slice(0, -1), updated];
   }
   return [...prev, { kind: 'msg', msg: { role: 'assistant', content: text } }];
+}
+
+/** An agent's reply text. It is the turn's answer like Mira's own, so it
+ *  becomes the same assistant message — same rendering, same copy action,
+ *  same place in a collapsed turn. */
+function appendAcpText(prev: Entry[], text: string): Entry[] {
+  return appendToken(prev, text);
+}
+
+/** An agent's thinking, as Mira's own thought block. */
+function appendAcpThought(prev: Entry[], text: string): Entry[] {
+  if (!text) return prev;
+  return appendReasoning(prev, text);
+}
+
+/**
+ * Whether a stop reason means the turn actually produced an answer.
+ *
+ * Deliberately a small allowlist rather than a blocklist: an unfamiliar
+ * reason is far more likely to be a failure or a limit than a clean finish,
+ * and saying so beats claiming success.
+ */
+function isSuccessfulAcpStop(stop: string): boolean {
+  return ['end_turn', 'success', 'completed', 'stop_sequence'].includes(stop);
+}
+
+/** A human explanation of why a turn stopped, for the transcript. */
+function describeAcpStop(stop: string): string {
+  if (stop === 'rate_limited') {
+    return 'The agent hit a usage limit, so this turn failed without an answer.';
+  }
+  if (stop === 'cancelled' || stop === 'canceled') {
+    return 'This turn was cancelled.';
+  }
+  if (stop === 'max_tokens' || stop === 'max_turns') {
+    return `The agent stopped early (${stop}).`;
+  }
+  return `The agent stopped: ${stop}.`;
+}
+
+function sealAcpThought(prev: Entry[]): Entry[] {
+  return sealThought(prev);
+}
+
+/** Questions and plans render as Mira's own cards (the server wraps them),
+ *  so the agent's raw call for them would be a duplicate. */
+const AGENT_PROMPT_TOOLS = new Set(['AskUserQuestion', 'ExitPlanMode']);
+
+/** Insert or update an agent's tool call, as a Mira tool entry.
+ *
+ *  An update carries only what changed (no name, an empty title), so it
+ *  merges onto the call already recorded — empty fields never blank what
+ *  is there — and the Mira view is rebuilt from the merged call. */
+function upsertAcpTool(prevRaw: Entry[], call: AcpToolCall): Entry[] {
+  const prev = sealThought(prevRaw);
+  const idx = prev.findIndex((e) => e.kind === 'tool' && e.agentCall?.id === call.id);
+  let merged: AcpToolCall = call;
+  if (idx >= 0) {
+    const existing = prev[idx];
+    if (existing.kind !== 'tool' || !existing.agentCall) return prev;
+    merged = { ...existing.agentCall };
+    for (const [k, v] of Object.entries(call) as [keyof AcpToolCall, unknown][]) {
+      if (v === null || v === undefined || v === '') continue;
+      if (Array.isArray(v) && v.length === 0) continue;
+      (merged as Record<string, unknown>)[k] = v;
+    }
+  }
+  if (AGENT_PROMPT_TOOLS.has(merged.name ?? '')) return idx >= 0 ? prev.filter((_, i) => i !== idx) : prev;
+  const entry: Entry = {
+    kind: 'tool',
+    call: agentCallToToolCall(merged),
+    preview: null,
+    status: agentToolStatus(merged),
+    result: agentToolResult(merged),
+    agentCall: merged,
+  };
+  if (idx >= 0) return [...prev.slice(0, idx), entry, ...prev.slice(idx + 1)];
+  return [...prev, entry];
 }
 
 // A tool_start arrives after either (a) a user-approved approval_request, in
@@ -2190,6 +3755,25 @@ function rebuildTurnTimings(serverTurns: { started_at: number; ended_at?: number
   return out;
 }
 
+/** Per-turn usage from the server's turn records, skipping turns that
+ *  have none (recorded before per-turn usage existed). */
+function rebuildTurnUsage(serverTurns: TurnMeta[]): Map<number, UsageTotals> {
+  const out = new Map<number, UsageTotals>();
+  serverTurns.forEach((t, i) => {
+    const u = t.usage;
+    if (u && u.prompt_tokens + u.completion_tokens > 0) out.set(i, u);
+  });
+  return out;
+}
+
+function rebuildTurnModels(serverTurns: TurnMeta[]): Map<number, string> {
+  const out = new Map<number, string>();
+  serverTurns.forEach((t, i) => {
+    if (t.model) out.set(i, t.model);
+  });
+  return out;
+}
+
 function stampLastTurn(prev: Map<number, TurnTiming>, endedAt: number): Map<number, TurnTiming> {
   // The `done` frame closes out the most recently started turn — find the
   // highest turn index that's still marked "in flight" and stamp it.
@@ -2276,17 +3860,44 @@ function groupByTurn(entries: Entry[]): Turn[] {
 
 /* ---------- turn renderer ---------- */
 
-function TurnView({
-  turn, timing, usage, model, expanded, isActive, onToggle, onDecide, onPlanReply, onAskUserReply, onOpenAgent, onOpenFile, skills, mode, onSetMode,
+/** Same turn content: the same entries, by identity. Entries are replaced,
+ *  never mutated, so an untouched turn compares equal even though
+ *  `groupByTurn` builds a fresh `Turn` object on every update. */
+function sameTurn(a: Turn, b: Turn): boolean {
+  return a.user === b.user && a.body.length === b.body.length && a.body.every((e, i) => e === b.body[i]);
+}
+
+/** Re-render a turn only when something it shows changed. Handlers are
+ *  stable (see `useStableCallback`), so plain identity works for them. */
+const TurnView = memo(TurnViewImpl, (prev, next) => {
+  for (const k of Object.keys(next) as (keyof TurnViewProps)[]) {
+    if (k === 'turn') {
+      if (!sameTurn(prev.turn, next.turn)) return false;
+    } else if (prev[k] !== next[k]) {
+      return false;
+    }
+  }
+  return true;
+});
+
+type TurnViewProps = Parameters<typeof TurnViewImpl>[0];
+
+function TurnViewImpl({
+  turn, timing, usage, model, index, expanded, isActive, onToggle, onDecide, onPlanReply, onAskUserReply, onOpenAgent, onOpenFile, skills, mode, onSetMode, minimapId, approvalViaDialog, offscreenOk = false,
 }: {
   turn: Turn;
+  /** Position in the transcript; what `onToggle` is called with. */
+  index: number;
+  /** Not one of the latest turns: the browser may skip laying it out while
+   *  it's off screen. */
+  offscreenOk?: boolean;
   timing: TurnTiming | null;
   /** Tokens this turn used (live turns only; not persisted). */
   usage: UsageTotals | null;
   model: string;
   expanded: boolean;
   isActive: boolean;
-  onToggle: () => void;
+  onToggle: (index: number) => void;
   onDecide: (callId: string, allow: boolean, scope?: ApprovalScope) => void;
   onPlanReply: (callId: string, approved: boolean, steps?: PlanStep[], note?: string) => void;
   /** Answer callback for the `ask_user` clarification tool. */
@@ -2305,6 +3916,11 @@ function TurnView({
    *  everything unless a rule blocks) for the current session. */
   mode: Mode;
   onSetMode: (m: Mode) => void;
+  /** Stable scroll-target id for the timeline minimap (`turn-${index}`). */
+  minimapId?: string | null;
+  /** Forwarded to entry tool cards: when an agent drives, decisions live in
+   *  the unified dialog, not on the cards. */
+  approvalViaDialog?: boolean;
 }) {
   // Split the body into "intermediate work" and the final assistant text.
   // Rule: the LAST assistant text message with non-empty content is the
@@ -2364,7 +3980,9 @@ function TurnView({
     : null;
   const durationMs =
     rawDurationMs !== null ? Math.max(0, rawDurationMs - totalWaitMs) : null;
-  const showWorkedChip = (intermediate.length > 0 || isActive) && durationMs != null;
+  const showWorkedChip =
+    getBoolPref(PREF_KEYS.transcriptTurnStats, true) &&
+    (intermediate.length > 0 || isActive) && durationMs != null;
 
   const forceOpen = isActive || hasPendingApproval || hasPendingAskUser || hasPendingPlan;
   const effectivelyExpanded = expanded || forceOpen;
@@ -2385,8 +4003,15 @@ function TurnView({
   }, [turn.body]);
 
   return (
-    <>
-      {turn.user && <EntryView entry={turn.user} onDecide={onDecide} onPlanReply={onPlanReply} onAskUserReply={onAskUserReply} onOpenAgent={onOpenAgent} onOpenFile={onOpenFile} skills={skills} mode={mode} onSetMode={onSetMode} />}
+    <div
+      data-minimap-id={minimapId ?? undefined}
+      className="flex min-w-0 flex-col gap-2"
+      // Long chats: skip layout and paint for older turns while they're off
+      // screen. The browser remembers each one's last size, so scrolling and
+      // the minimap's jumps stay accurate.
+      style={offscreenOk ? { contentVisibility: 'auto', containIntrinsicSize: 'auto 480px' } : undefined}
+    >
+      {turn.user && <EntryView entry={turn.user} onDecide={onDecide} onPlanReply={onPlanReply} onAskUserReply={onAskUserReply} onOpenAgent={onOpenAgent} approvalViaDialog={approvalViaDialog} onOpenFile={onOpenFile} skills={skills} mode={mode} onSetMode={onSetMode} />}
 
       {showWorkedChip && (
         <WorkedForChip
@@ -2395,7 +4020,7 @@ function TurnView({
           waitingForUser={waitingForUser}
           expanded={effectivelyExpanded}
           locked={forceOpen}
-          onToggle={onToggle}
+          onToggle={() => onToggle(index)}
           activity={activitySummary}
         />
       )}
@@ -2432,7 +4057,7 @@ function TurnView({
           );
         }
         return (
-          <EntryView key={`t-i-${i}`} entry={item.entry} onDecide={onDecide} onPlanReply={onPlanReply} onAskUserReply={onAskUserReply} onOpenAgent={onOpenAgent} onOpenFile={onOpenFile} skills={skills} mode={mode} onSetMode={onSetMode} />
+          <EntryView key={`t-i-${i}`} entry={item.entry} onDecide={onDecide} onPlanReply={onPlanReply} onAskUserReply={onAskUserReply} onOpenAgent={onOpenAgent} approvalViaDialog={approvalViaDialog} onOpenFile={onOpenFile} skills={skills} mode={mode} onSetMode={onSetMode} />
         );
       })}
 
@@ -2444,13 +4069,13 @@ function TurnView({
               : null
           }
         >
-          <EntryView entry={finalEntry} onDecide={onDecide} onPlanReply={onPlanReply} onAskUserReply={onAskUserReply} onOpenAgent={onOpenAgent} onOpenFile={onOpenFile} skills={skills} mode={mode} onSetMode={onSetMode} />
+          <EntryView entry={finalEntry} onDecide={onDecide} onPlanReply={onPlanReply} onAskUserReply={onAskUserReply} onOpenAgent={onOpenAgent} approvalViaDialog={approvalViaDialog} onOpenFile={onOpenFile} skills={skills} mode={mode} onSetMode={onSetMode} />
         </TurnStatsContext.Provider>
       )}
       {trailing.map((e, i) => (
-        <EntryView key={`t-t-${i}`} entry={e} onDecide={onDecide} onPlanReply={onPlanReply} onAskUserReply={onAskUserReply} onOpenAgent={onOpenAgent} onOpenFile={onOpenFile} skills={skills} mode={mode} onSetMode={onSetMode} />
+        <EntryView key={`t-t-${i}`} entry={e} onDecide={onDecide} onPlanReply={onPlanReply} onAskUserReply={onAskUserReply} onOpenAgent={onOpenAgent} approvalViaDialog={approvalViaDialog} onOpenFile={onOpenFile} skills={skills} mode={mode} onSetMode={onSetMode} />
       ))}
-    </>
+    </div>
   );
 }
 
@@ -2623,8 +4248,8 @@ function WorkedForChip({
         )
       )}
       {dot && <span className={cn('size-1.5 animate-pulse rounded-full', dot)} />}
-      <CaretDown
-        weight="bold"
+      <ChevronDown
+        strokeWidth={2.5}
         className={cn(
           'size-3.5 transition-all',
           // Caret adopts the row's text colour so it fades with the
@@ -2679,46 +4304,59 @@ function EmptyState({
       .catch(() => setRecent([]));
   }, [cwd]);
   return (
-    <div className="flex min-h-full flex-col items-center justify-center gap-4 text-muted-foreground">
+    <div className="flex min-h-full flex-col items-center justify-center px-6 py-10">
       <img
         src={miraLogo}
-        alt="Mira"
-        className="size-20 rounded-full object-contain drop-shadow-[0_0_28px_rgba(88,101,242,0.35)]"
+        alt=""
+        className="size-11 rounded-full object-contain opacity-90"
         draggable={false}
       />
-      <div className="text-[22px] font-normal tracking-tight text-foreground">
+      <h2 className="mt-4 text-[19px] font-medium tracking-tight text-foreground">
         What should we build today?
-      </div>
-      <div className="mt-2 grid w-full max-w-xl grid-cols-1 gap-2 sm:grid-cols-2">
+      </h2>
+      <p className="mt-1.5 max-w-[46ch] text-center text-[13px] leading-relaxed text-muted-foreground">
+        Ask Mira anything, or pick up where you left off in this folder.
+      </p>
+
+      {/* Suggestions as inline chips rather than a grid of bordered boxes.
+          Four identical outlined rectangles read as a form, not as
+          suggestions; chips wrap, scale down to one column on a narrow pane,
+          and don't draw a grid of lines across the middle of the screen. */}
+      <div className="mt-7 flex max-w-2xl flex-wrap items-center justify-center gap-1.5">
         {STARTER_PROMPTS.map((p) => (
           <button
             key={p}
             type="button"
             onClick={() => onPrompt(p)}
-            className="rounded-xl border border-border px-3.5 py-2.5 text-left text-[13px] text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
+            className="rounded-full border border-border/70 bg-white/[0.03] px-3 py-1.5 text-[12.5px] text-muted-foreground backdrop-blur-sm transition-colors hover:border-border hover:bg-white/[0.07] hover:text-foreground"
           >
             {p}
           </button>
         ))}
       </div>
+
       {recent.length > 0 && (
-        <div className="mt-3 w-full max-w-xl">
-          <div className="mb-1.5 px-1 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground/50">
+        <div className="mt-8 w-full max-w-lg">
+          <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground/50">
             Recent in this folder
           </div>
-          {recent.map((r) => (
-            <button
-              key={r.id}
-              type="button"
-              onClick={() => onOpenSession(r.id)}
-              className="flex w-full items-center gap-3 rounded-lg px-2 py-1.5 text-left text-[13px] transition-colors hover:bg-secondary/60"
-            >
-              <span className="min-w-0 flex-1 truncate text-foreground/80">
-                {r.title || r.first_user_message || 'Untitled'}
-              </span>
-              <span className="shrink-0 text-[11.5px] text-muted-foreground/60">{timeAgo(r.updated_at)}</span>
-            </button>
-          ))}
+          <div className="flex flex-col">
+            {recent.map((r) => (
+              <button
+                key={r.id}
+                type="button"
+                onClick={() => onOpenSession(r.id)}
+                className="group flex items-center gap-3 rounded-md px-2 py-1.5 text-left text-[13px] transition-colors hover:bg-white/[0.04]"
+              >
+                <span className="min-w-0 flex-1 truncate text-foreground/75 group-hover:text-foreground">
+                  {r.title || r.first_user_message || 'Untitled'}
+                </span>
+                <span className="shrink-0 text-[11.5px] tabular-nums text-muted-foreground/50">
+                  {timeAgo(r.updated_at)}
+                </span>
+              </button>
+            ))}
+          </div>
         </div>
       )}
     </div>
@@ -2758,6 +4396,7 @@ function EntryView({
   mode,
   onSetMode,
   onAskUserReply,
+  approvalViaDialog,
 }: {
   entry: Entry;
   onDecide: (callId: string, allow: boolean, scope?: ApprovalScope) => void;
@@ -2769,6 +4408,7 @@ function EntryView({
    *  submits picks (or dismisses); flips the card into its resolved
    *  state locally and posts back to the server. */
   onAskUserReply?: (callId: string, decision: AskUserDecision) => void;
+  approvalViaDialog?: boolean;
   /** Roster used by the user bubble to pretty-print `@skill:<name>`
    *  mentions. Defaults to empty when the parent doesn't pass one
    *  (e.g. tool/plan/agent entries never touch it). */
@@ -2833,6 +4473,9 @@ function EntryView({
       );
     }
     case 'tool':
+      // An agent's permission request is answered in the composer card; in
+      // the transcript the agent's own tool card already shows the call.
+      if (entry.status === 'pending' && isAgentRequest(entry.call)) return null;
       // The `plan` tool gets a dedicated inline card with an editable step
       // list; the `ask_user` tool gets a multi-choice question card; the
       // `agent` tool gets a compact per-agent card so parallel spawns
@@ -2847,7 +4490,7 @@ function EntryView({
           return (
             <div className="flex justify-start">
               <div className="inline-flex items-center gap-2 rounded-xl border border-mira-blue/20 bg-mira-blue/[0.05] px-3 py-1.5 text-[12.5px]">
-                <Lightbulb weight="fill" className="size-3.5 shrink-0 text-mira-blue/70" />
+                <Lightbulb fill="currentColor" className="size-3.5 shrink-0 text-mira-blue/70" />
                 <span className="font-medium text-mira-blue/80">Plan</span>
                 <span className="text-muted-foreground/40">·</span>
                 <span className="text-muted-foreground/80 truncate max-w-[40ch]">{entry.plan.proposal.title}</span>
@@ -2873,7 +4516,7 @@ function EntryView({
           return (
             <div className="flex justify-start">
               <div className="inline-flex items-center gap-2 rounded-xl border border-mira-blue/20 bg-mira-blue/[0.05] px-3 py-1.5 text-[12.5px]">
-                <Sparkle weight="fill" className="size-3.5 shrink-0 text-mira-blue/70" />
+                <Sparkle fill="currentColor" className="size-3.5 shrink-0 text-mira-blue/70" />
                 <span className="font-medium text-mira-blue/80">Question</span>
                 <span className="text-muted-foreground/40">·</span>
                 <span className="text-[11px] text-muted-foreground/60">answer below ↓</span>
@@ -2914,7 +4557,7 @@ function EntryView({
         return (
           <div className="flex justify-start">
             <div className="inline-flex items-center gap-2 rounded-xl border border-amber-500/20 bg-amber-500/[0.05] px-3 py-1.5 text-[12.5px]">
-              <ShieldWarning weight="fill" className="size-3.5 shrink-0 text-amber-400/80" />
+              <ShieldAlert fill="currentColor" className="size-3.5 shrink-0 text-amber-400/80" />
               <span className="font-medium text-amber-400/80">Approval</span>
               <span className="text-muted-foreground/40">·</span>
               <span className="text-muted-foreground/80 truncate max-w-[40ch] font-mono text-[11.5px]">
@@ -2938,9 +4581,45 @@ function EntryView({
             mode={mode}
             onSetMode={onSetMode}
             onOpenFile={onOpenFile}
+            decisionsViaDialog={approvalViaDialog}
           />
         </div>
       );
+    case 'acp_plan':
+      // The agent's plan, as a quiet checklist — the same visual weight as
+      // the tool rows around it, not a separately labelled box.
+      return (
+        <div className="flex justify-start">
+          <div className="w-full max-w-[90%] px-1 py-0.5 text-[13px]">
+            <div className="mb-1.5 text-[12px] font-medium text-muted-foreground">Plan</div>
+            <ul className="space-y-1">
+              {entry.entries.map((item, i) => {
+                const done = item.status === 'completed';
+                const active = item.status === 'in_progress';
+                return (
+                  <li key={i} className="flex items-start gap-2">
+                    <span
+                      className={cn(
+                        'mt-[5px] size-2.5 shrink-0 rounded-full border',
+                        done
+                          ? 'border-emerald-500/70 bg-emerald-500/70'
+                          : active
+                            ? 'border-mira-blue bg-mira-blue/30'
+                            : 'border-muted-foreground/40',
+                      )}
+                    />
+                    <span className={cn(done ? 'text-muted-foreground line-through decoration-muted-foreground/40' : 'text-foreground/90')}>
+                      {item.content}
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        </div>
+      );
+    case 'engine_switch':
+      return <EngineSwitchDivider engine={entry.engine} />;
     case 'warning':
       return <StatusLine text={entry.text} />;
     case 'error':
@@ -2962,6 +4641,27 @@ function EntryView({
           </div>
         </div>
       );
+    default: {
+      // A transcript entry kind this build does not know how to render.
+      //
+      // This arm exists because the switch is *not* exhaustiveness-checked,
+      // and that is exactly the trap: adding an `Entry` variant compiles
+      // cleanly, `tsc` passes, and the row silently renders nothing — which
+      // in a transcript is indistinguishable from a wedged agent. Rendering a
+      // visible marker turns that class of mistake into something obvious.
+      // `never` here would make the switch exhaustive and turn a *missing*
+      // case into a compile error. We deliberately do not assert that: the
+      // point of this arm is to survive new variants gracefully, and a
+      // cast keeps the compiler from rejecting the very additions it should
+      // tolerate.
+      const unknown = entry as { kind: string };
+      return (
+        <StatusLine
+          text={`unrendered transcript entry: ${unknown.kind}`}
+          tone="error"
+        />
+      );
+    }
   }
 }
 
@@ -3023,7 +4723,7 @@ function GoalTranscriptChip({ entry }: { entry: GoalEntry }) {
       <div className="w-full max-w-2xl py-1.5">
         <div className="flex items-baseline gap-2">
           <Target
-            weight="fill"
+            fill="currentColor"
             className={cn(
               // Baseline-align the icon with the headline text — the
               // `translate-y-[1px]` nudges it visually onto the x-height
@@ -3110,6 +4810,8 @@ type MessageActions = {
   edit: (entry: Entry, text: string) => void;
   /** Re-send the user message that led to this reply. */
   retry: (entry: Entry) => void;
+  /** Offer to put the files back the way they were before this message. */
+  restore: (entry: Entry) => void;
   /** Show an image full-screen. */
   openImage: (src: string) => void;
 };
@@ -3175,16 +4877,17 @@ function CopyButton({ text }: { text: string }) {
 function AssistantActions({ entry, text }: { entry: Entry; text: string }) {
   const actions = useContext(MessageActionsContext);
   const stats = useContext(TurnStatsContext);
+  const showStats = getBoolPref(PREF_KEYS.transcriptTurnStats, true);
   if (!text.trim()) return null;
   return (
     <div className="mt-1 flex items-center gap-0.5 opacity-0 transition-opacity group-hover/msg:opacity-100 focus-within:opacity-100">
       <CopyButton text={text} />
       {actions && (
         <ActionButton title="Retry" disabled={actions.busy} onClick={() => actions.retry(entry)}>
-          <ArrowClockwise className="size-3.5" />
+          <RotateCw className="size-3.5" />
         </ActionButton>
       )}
-      {stats && (
+      {showStats && stats && (
         <span className="ml-1.5 text-[11.5px] tabular-nums text-muted-foreground/60">{turnStatsLabel(stats)}</span>
       )}
     </div>
@@ -3236,7 +4939,7 @@ function UserMessage({
         />
         <div className="flex items-center justify-end gap-1.5">
           <span className="mr-auto px-1 text-[11px] text-muted-foreground/60">
-            Later messages are replaced; file edits stay.
+            Later messages are replaced; file edits stay (restore them with ↺).
           </span>
           <button
             type="button"
@@ -3274,7 +4977,16 @@ function UserMessage({
               setEditing(true);
             }}
           >
-            <PencilSimple className="size-3.5" />
+            <Pencil className="size-3.5" />
+          </ActionButton>
+        )}
+        {actions && (
+          <ActionButton
+            title="Restore files to before this message"
+            disabled={actions.busy}
+            onClick={() => actions.restore(entry)}
+          >
+            <History className="size-3.5" />
           </ActionButton>
         )}
       </div>
@@ -3337,10 +5049,10 @@ function withCode(text: string): React.ReactNode[] {
 function StatusLine({ text, tone }: { text: string; tone?: StatusTone }) {
   const s = parseStatus(text, tone);
   const icon = {
-    ok: <Check weight="bold" className="size-3 text-emerald-400/80" />,
-    warn: <ShieldWarning className="size-3.5 text-amber-400/80" />,
-    error: <ShieldWarning className="size-3.5 text-destructive" />,
-    busy: <CircleNotch weight="bold" className="size-3 animate-spin text-muted-foreground" />,
+    ok: <Check strokeWidth={2.5} className="size-3 text-emerald-400/80" />,
+    warn: <ShieldAlert className="size-3.5 text-amber-400/80" />,
+    error: <ShieldAlert className="size-3.5 text-destructive" />,
+    busy: <LoaderCircle strokeWidth={2.5} className="size-3 animate-spin text-muted-foreground" />,
     info: <Info className="size-3.5 text-muted-foreground/70" />,
     memory: <Sparkle className="size-3.5 text-violet-300/70" />,
   }[s.tone];

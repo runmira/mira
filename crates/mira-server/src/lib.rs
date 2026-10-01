@@ -26,11 +26,19 @@
 //! [`protocol::ClientMsg::Approve`], which routes back to the awaiting
 //! oneshot via [`approver::resolve`].
 
+pub mod acp_host;
+pub mod acp_session;
+pub mod agent_spend;
 mod agent_worktree;
 pub mod approver;
 mod browse;
+mod browser;
+pub mod checkpoints;
+mod context_api;
 mod cwd;
+mod editors;
 mod embedded;
+pub mod engines_api;
 pub mod extensions;
 mod file;
 mod git;
@@ -46,11 +54,14 @@ pub mod protocol;
 pub mod provider;
 mod pull_requests;
 mod review;
+pub mod session_changes;
+pub mod session_engine;
 mod sessions;
 mod settings;
 mod skills;
 pub mod slot;
 mod state;
+mod subagents_api;
 mod terminal;
 mod title;
 mod undo;
@@ -63,7 +74,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use mira_ai::ChatProvider;
 use mira_harness::{FileStore, SessionConfig, SessionRecord, SessionStore};
@@ -129,6 +140,9 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
         &cfg.cwd,
         &cfg.extensions.plugin_agent_files(),
     ));
+    // The roster Settings → Subagents edits; every chat's delegation tool
+    // reads through this handle, so a saved change applies immediately.
+    let agents_live = Arc::new(std::sync::RwLock::new(agents_registry.clone()));
     tracing::info!(
         count = agents_registry.names().len(),
         types = ?agents_registry.names(),
@@ -160,6 +174,71 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
     cfg.extensions
         .set_hook_model(harness_provider.clone(), cfg.cfg.background_model(None));
 
+    // The engine registry: every backend a turn could run on, derived
+    // from the global config (native providers + known agent drivers +
+    // `engines:` overrides). Errors here leave an empty registry — the
+    // engines API reports "not configured" instead of failing boot.
+    let engine_cfg = mira_config::MiraConfig::load_global().unwrap_or_default();
+    let engines = Arc::new(mira_engine::EngineRegistry::from_config(&engine_cfg));
+
+    // The shared selection: what AgentTool reads for subagent defaults
+    // and what `GET /api/engines` reports as active. Seeded from the
+    // CLI's resolved model, then pointed at the persisted engine
+    // instance (state.yaml's `last_engine`) when that still exists.
+    let selection = Arc::new(crate::state::SharedSelection::new(
+        Some(cfg.cfg.model.clone()),
+        cfg.cfg.small_model.clone(),
+    ));
+    {
+        let mut inst = selection.instance.write().expect("selection lock poisoned");
+        if let Some(default) = engines.default_native_instance(&engine_cfg) {
+            *inst = Some(default.id.to_string());
+        }
+        if let Ok(runtime) = mira_config::RuntimeState::load() {
+            if let Some(last) = runtime.last_engine {
+                if engines.get(&last).is_some() {
+                    *inst = Some(last);
+                }
+            }
+        }
+    }
+    // Fill the provider pool. The CLI-built provider belongs to the
+    // config's DEFAULT provider — registering it anywhere else would
+    // route another instance's models to the wrong endpoint. Every
+    // other native instance builds from config; instances that can't
+    // (missing key) are simply absent, and switching to them later
+    // surfaces the reason. Finally, activate the selection, falling
+    // back to the default when it can't be served.
+    let default_instance = engines
+        .default_native_instance(&engine_cfg)
+        .map(|i| i.id.to_string());
+    for inst in engines.instances().filter(|i| i.is_native()) {
+        let id = inst.id.as_str();
+        if Some(id) == default_instance.as_deref() {
+            swappable.register(id, cfg.provider.clone());
+        } else if let Ok(p) = mira_engine::native::build_native_provider(&engine_cfg, id) {
+            swappable.register(id, p);
+        }
+    }
+    let active = selection
+        .instance
+        .read()
+        .expect("selection lock poisoned")
+        .clone();
+    if let Some(id) = &active {
+        if !swappable.activate(id) {
+            // The persisted selection can't be served (missing key, …).
+            // Fall back to the default instance and say so, rather than
+            // pointing the session at a provider that would 401.
+            tracing::warn!(instance = %id, "persisted engine not buildable; falling back");
+            if let Some(default) = &default_instance {
+                swappable.activate(default);
+                *selection.instance.write().expect("selection lock poisoned") =
+                    Some(default.clone());
+            }
+        }
+    }
+
     // Build the initial slot. Seeded from the ServerConfig's `resume` (if
     // present) so a `mira serve --resume <id>` picks up where it left off.
     let deps = crate::slot::SlotDeps {
@@ -168,11 +247,11 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
         harness_provider: harness_provider.clone(),
         base_registry: base_registry.clone(),
         agents_registry: agents_registry.clone(),
+        agents_live: agents_live.clone(),
         store: cfg.store.clone(),
         memory_runtime: cfg.memory_runtime.clone(),
         scratchpads: scratchpads.clone(),
-        default_model_for_agents: cfg.cfg.model.clone(),
-        small_model_for_agents: cfg.cfg.small_model.clone(),
+        selection: selection.clone(),
         compute: cfg.compute.clone(),
         hooks: Some(cfg.extensions.hook_runner()),
     };
@@ -195,6 +274,7 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
         harness_provider,
         base_registry,
         agents_registry,
+        agents_live,
         compute: cfg.compute.clone(),
         store: cfg.store.clone(),
         extensions: cfg.extensions.clone(),
@@ -203,8 +283,34 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
         local_port,
         memory_runtime: cfg.memory_runtime.clone(),
         scratchpads,
-        default_model_for_agents: cfg.cfg.model.clone(),
-        small_model_for_agents: cfg.cfg.small_model.clone(),
+        selection,
+        engines,
+        // Forced headless: the browser pane renders the page itself, so a
+        // headed Chrome would just pop a second window on the user's desktop
+        // behind the app. `MIRA_BROWSER_HEADED=1` opts back into a visible
+        // window, which is occasionally useful for stepping through a login
+        // or a captcha the agent can't clear.
+        // The same process-wide browser the agent's `browser` tool uses
+        // (same profile → same instance), so the pane shows what the agent
+        // is doing instead of racing it for the profile lock.
+        browser: {
+            let bcfg = mira_config::MiraConfig::load_global()
+                .unwrap_or_default()
+                .browser;
+            let mut opts = mira_browser::BrowserOptions {
+                headless: bcfg
+                    .headless
+                    .unwrap_or_else(|| std::env::var("MIRA_BROWSER_HEADED").is_err()),
+                ..mira_browser::BrowserOptions::default()
+            };
+            if let Some(exe) = bcfg.executable_path() {
+                opts.executable = Some(exe);
+            }
+            if let Some(dir) = bcfg.profile_dir_path() {
+                opts.profile_dir = dir;
+            }
+            mira_browser::Browser::shared(opts)
+        },
     };
 
     // Filesystem watcher for skills — picks up `npx skills add`
@@ -213,6 +319,9 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
     // `SkillsReloaded` on every debounced change so connected clients
     // refetch the roster.
     skills::spawn_skill_watcher(state.clone());
+
+    // Idle external agents are stopped (not forgotten) after a while.
+    session_engine::spawn_reaper(state.clone());
 
     // MCP status changes (a server connecting, dropping, asking for
     // sign-in) → `ExtensionsChanged` to every tab, debounced so a burst of
@@ -274,6 +383,12 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         )
         .route("/api/sessions", get(sessions::list_sessions))
         .route(
+            "/api/acp/external-sessions",
+            get(sessions::list_external_agent_sessions),
+        )
+        .route("/api/acp/turns", get(sessions::list_agent_turns))
+        .route("/api/acp/revert", post(sessions::revert_agent_turn))
+        .route(
             "/api/sessions/:id/history",
             get(sessions::get_session_history),
         )
@@ -301,10 +416,41 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
             "/api/sessions/:id/background",
             axum::routing::put(sessions::set_background_mode_http),
         )
+        .route(
+            "/api/sessions/:id/flags",
+            axum::routing::put(sessions::set_session_flags),
+        )
         .route("/api/cwd", get(cwd::get_cwd).put(cwd::put_cwd))
+        .route("/api/editors", get(editors::list_editors))
+        .route("/api/editors/icon/:id", get(editors::editor_icon))
+        .route(
+            "/api/editors/open",
+            axum::routing::post(editors::open_in_editor),
+        )
         .route("/api/browse", get(browse::browse))
+        .route("/api/browser/action", axum::routing::post(browser::action))
+        .route("/api/browser/live", get(browser::live))
+        .route("/api/browser/input", axum::routing::post(browser::input))
+        .route(
+            "/mcp/:token",
+            axum::routing::post(browser::mcp).get(browser::mcp_get),
+        )
+        .route("/api/browser/embeddable", get(browser::embeddable))
         .route("/api/file", get(file::read_file))
         .route("/api/models", get(models::list_models))
+        .route("/api/engines", get(engines_api::list_engines))
+        .route(
+            "/api/subagents",
+            get(subagents_api::list).post(subagents_api::create),
+        )
+        .route(
+            "/api/subagents/:name",
+            axum::routing::put(subagents_api::update).delete(subagents_api::remove),
+        )
+        .route(
+            "/api/engines/:instance/models",
+            get(engines_api::instance_models),
+        )
         .route("/api/git/status", get(git::get_status))
         .route("/api/git/session-diff", get(git::session_diff))
         .route("/api/usage", get(usage::get_usage))
@@ -312,6 +458,23 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route(
             "/api/git/revert-file",
             axum::routing::post(git::revert_file),
+        )
+        .route("/api/context", get(context_api::breakdown))
+        .route(
+            "/api/context/drop",
+            axum::routing::post(context_api::drop_result),
+        )
+        .route(
+            "/api/checkpoints/preview",
+            axum::routing::post(git::checkpoint_preview),
+        )
+        .route(
+            "/api/checkpoints/restore",
+            axum::routing::post(git::checkpoint_restore),
+        )
+        .route(
+            "/api/checkpoints/undo",
+            axum::routing::post(git::checkpoint_undo),
         )
         .route("/api/git/push", axum::routing::post(git::push))
         .route("/api/git/branch-pr", get(git::branch_pr))

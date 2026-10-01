@@ -42,6 +42,14 @@ pub struct UsageRow {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub cached_input_tokens: u64,
+    /// The external agent that ran these turns (`claude`, `codex`); absent
+    /// for Mira's own turns.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// The agent's own cost estimate, when it reports one. The client
+    /// prices everything else from its table.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
 }
 
 fn day_of(secs: u64) -> String {
@@ -105,6 +113,76 @@ pub fn rows_for(rec: &SessionRecord, since_day: &str) -> Vec<UsageRow> {
             prompt_tokens: u.prompt_tokens,
             completion_tokens: u.completion_tokens,
             cached_input_tokens: u.cached_input_tokens,
+            agent: None,
+            cost_usd: None,
+        })
+        .collect()
+}
+
+/// External agents' spend from the ledger, one row per (session, day,
+/// agent, model), titled from the session it ran in.
+pub fn agent_rows(
+    ledger: &[crate::agent_spend::SpendRow],
+    records: &[SessionRecord],
+    since_day: &str,
+) -> Vec<UsageRow> {
+    let titles: std::collections::HashMap<String, Option<String>> = records
+        .iter()
+        .map(|r| (r.id.to_string(), r.title.clone()))
+        .collect();
+    /// One output row's identity, and what it adds up.
+    #[derive(PartialEq, Eq, PartialOrd, Ord)]
+    struct Key {
+        session_id: String,
+        day: String,
+        agent: String,
+        model: String,
+    }
+    #[derive(Default)]
+    struct Sum {
+        cwd: String,
+        totals: UsageTotals,
+        cost: Option<f64>,
+    }
+
+    let mut by_key: BTreeMap<Key, Sum> = BTreeMap::new();
+    for r in ledger {
+        let day = day_of(r.ts);
+        if day.as_str() < since_day {
+            continue;
+        }
+        let key = Key {
+            session_id: r.session_id.clone(),
+            day,
+            agent: r.driver.clone(),
+            model: r.model.clone(),
+        };
+        let sum = by_key.entry(key).or_insert_with(|| Sum {
+            cwd: r.cwd.clone(),
+            ..Default::default()
+        });
+        // `prompt_tokens` includes cached input, as on Mira's own rows; the
+        // ledger keeps fresh input separate.
+        sum.totals.prompt_tokens += r.input_tokens + r.cached_input_tokens;
+        sum.totals.completion_tokens += r.output_tokens;
+        sum.totals.cached_input_tokens += r.cached_input_tokens;
+        if let Some(c) = r.cost_usd {
+            sum.cost = Some(sum.cost.unwrap_or(0.0) + c);
+        }
+    }
+    by_key
+        .into_iter()
+        .map(|(k, sum)| UsageRow {
+            title: titles.get(&k.session_id).cloned().flatten(),
+            session_id: k.session_id,
+            cwd: sum.cwd,
+            model: k.model,
+            day: k.day,
+            prompt_tokens: sum.totals.prompt_tokens,
+            completion_tokens: sum.totals.completion_tokens,
+            cached_input_tokens: sum.totals.cached_input_tokens,
+            agent: Some(k.agent),
+            cost_usd: sum.cost,
         })
         .collect()
 }
@@ -126,7 +204,19 @@ pub async fn get_usage(State(state): State<AppState>, Query(q): Query<UsageQuery
                 .into_response()
         }
     };
-    let rows: Vec<UsageRow> = records.iter().flat_map(|r| rows_for(r, &since)).collect();
+    let mut rows: Vec<UsageRow> = records.iter().flat_map(|r| rows_for(r, &since)).collect();
+    if let Some(ledger) = crate::agent_spend::SpendLedger::user() {
+        // A day's margin either side of UTC; `agent_rows` filters by day.
+        let since_secs = chrono::NaiveDate::parse_from_str(&since, "%Y-%m-%d")
+            .ok()
+            .and_then(|d| d.and_hms_opt(0, 0, 0))
+            .map(|d| d.and_utc().timestamp().max(0) as u64)
+            .unwrap_or(0);
+        let spent = tokio::task::spawn_blocking(move || ledger.rows_since(since_secs))
+            .await
+            .unwrap_or_default();
+        rows.extend(agent_rows(&spent, &records, &since));
+    }
     Json(serde_json::json!({ "since": since, "rows": rows })).into_response()
 }
 
@@ -176,6 +266,9 @@ mod tests {
             tasks: vec![],
             goal: None,
             previews: Default::default(),
+            archived_at: None,
+            agent: None,
+            pinned: false,
         };
         let rows = rows_for(&rec, "2000-01-01");
         let sum = |f: fn(&UsageRow) -> u64| rows.iter().map(f).sum::<u64>();

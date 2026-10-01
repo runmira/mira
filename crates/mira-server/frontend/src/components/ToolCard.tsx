@@ -1,12 +1,12 @@
 import { useMemo, useState } from 'react';
 import {
-  CaretDown,
+  ChevronDown,
   Check,
-  CircleNotch,
+  LoaderCircle,
   FileText,
   Play,
   X,
-} from '@phosphor-icons/react';
+} from 'lucide-react';
 import type { ApprovalScope, DiffLine, DiffPreview, Mode, ToolCall, ToolResult } from '../types';
 import { cn } from '@/lib/utils';
 import { infoFor } from './ToolGroup';
@@ -96,6 +96,11 @@ type Props = {
   /** Live output lines streamed via `tool_progress` frames, used by
    *  `run_background` and other long-running tools. */
   progressLines?: string[];
+  /** When an external agent drives the session, decisions happen in the
+   *  unified approval dialog — not here. The card keeps its preview and an
+   *  "awaiting approval" state, but renders no buttons, so there is exactly
+   *  one place to answer. */
+  decisionsViaDialog?: boolean;
 };
 
 /** Two shapes:
@@ -104,7 +109,7 @@ type Props = {
  *                  shortcut is bound at the App level so it fires no
  *                  matter which card is on screen.
  *  - anything else → compact row, click to expand args + result. */
-export function ToolCard({ call, preview, status, result, onDecide, mode: _mode, onSetMode: _onSetMode, onOpenFile, progressLines }: Props) {
+export function ToolCard({ call, preview, status, result, onDecide, mode: _mode, onSetMode: _onSetMode, onOpenFile, progressLines, decisionsViaDialog }: Props) {
   if (status === 'pending') {
     return (
       <PendingApprovalCard
@@ -112,6 +117,7 @@ export function ToolCard({ call, preview, status, result, onDecide, mode: _mode,
         preview={preview}
         onDecide={onDecide}
         onOpenFile={onOpenFile}
+        decisionsViaDialog={decisionsViaDialog}
       />
     );
   }
@@ -121,12 +127,13 @@ export function ToolCard({ call, preview, status, result, onDecide, mode: _mode,
 /* ---------- pending approval ---------- */
 
 function PendingApprovalCard({
-  call, preview, onDecide, onOpenFile,
+  call, preview, onDecide, onOpenFile, decisionsViaDialog,
 }: {
   call: ToolCall;
   preview: DiffPreview | null;
   onDecide: (allow: boolean, scope?: ApprovalScope) => void;
   onOpenFile?: (path: string, diff: DiffPreview | null) => void;
+  decisionsViaDialog?: boolean;
 }) {
   // Pending = about to run → use the present-continuous verb ("Reading",
   // "Running", "Editing") so the header reads as a proposal, not a receipt.
@@ -145,7 +152,7 @@ function PendingApprovalCard({
           {isDiffTool && onOpenFile && preview?.path ? (
             <button
               type="button"
-              onClick={() => onOpenFile(preview.path, null)}
+              onClick={() => onOpenFile(preview.path, preview)}
               className="font-normal text-muted-foreground underline-offset-2 transition-colors hover:text-mira-blue hover:underline"
             >
               {summary.target}
@@ -174,7 +181,17 @@ function PendingApprovalCard({
        *  Primary click is `allow: true, scope: once` (same as before).
        *  The caret exposes the widening scopes without cluttering the
        *  default action. Y/N keyboard shortcut still fires the default
-       *  Allow/Deny; scope choice is mouse-only for now. */}
+       *  Allow/Deny; scope choice is mouse-only for now.
+       *
+       *  Suppressed entirely when an agent drives the session: the unified
+       *  approval dialog owns the decision, and a second set of buttons here
+       *  would be a second dialog wearing a card's clothes. */}
+      {decisionsViaDialog ? (
+        <div className="px-1.5 pb-1 pt-0 text-right text-[10.5px] text-muted-foreground/60">
+          Decide in the approval dialog above.
+        </div>
+      ) : (
+      <>
       <div className="flex items-center gap-1.5 pt-1 relative">
         <button
           type="button"
@@ -201,7 +218,7 @@ function PendingApprovalCard({
             className="border-l border-background/25 px-2 text-background transition-all hover:brightness-95"
             title="More scope options"
           >
-            <CaretDown size={12} weight="bold" />
+            <ChevronDown size={12} strokeWidth={2.5} />
           </button>
         </div>
         {scopeMenuOpen && (
@@ -225,6 +242,8 @@ function PendingApprovalCard({
       <div className="text-right text-[10.5px] text-muted-foreground/60">
         <kbd className="rounded bg-secondary/70 px-1 py-0.5 font-mono text-[10px]">y</kbd> allow · <kbd className="rounded bg-secondary/70 px-1 py-0.5 font-mono text-[10px]">n</kbd> deny
       </div>
+      </>
+      )}
     </div>
   );
 }
@@ -286,6 +305,19 @@ function CompactToolRow({
     const args = safeParse(call.function.arguments);
     return typeof args?.path === 'string' ? String(args.path) : '';
   }, [isDiffCardTool, call.function.arguments]);
+  // What opening the file shows. The server's live preview when there is
+  // one; otherwise the diff rebuilt from the call's own arguments. Passing
+  // only the live preview opened agent edits and reloaded sessions with no
+  // diff at all, even though the row itself showed one.
+  const openDiff: DiffPreview | null = useMemo(() => {
+    if (preview) return preview;
+    if (!effectiveDiff || !filePath) return null;
+    return {
+      path: filePath,
+      kind: call.function.name === 'write_file' ? 'create' : 'edit',
+      lines: effectiveDiff,
+    };
+  }, [preview, effectiveDiff, filePath, call.function.name]);
 
   // Filename-ish targets get a subtle inline-code pill so the "verb
   // target" line reads as "prefix + identifier" the way Codex renders
@@ -306,39 +338,43 @@ function CompactToolRow({
         onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setExpanded((v) => !v); }}
         className="group flex w-full min-w-0 cursor-pointer items-center gap-1.5 rounded-md px-1 py-0.5 text-left text-[13px] transition-colors hover:bg-accent/40"
       >
-        <span className="min-w-0 flex-1 truncate">
-          <span className="text-muted-foreground">{summary.verb}</span>
+        {/* The verb and the +/- stats never shrink; the target does. A
+            single truncating span cut the whole line to "Edited…" in a
+            narrow transcript, hiding the file chip but leaving it
+            clickable. */}
+        <span className="flex min-w-0 flex-1 items-center">
+          <span className="shrink-0 text-muted-foreground">{summary.verb}</span>
           {summary.target && (
             isDiffCardTool && onOpenFile ? (
               // Filename chip: click opens the file panel (with diff if available).
               <button
                 type="button"
-                onClick={(e) => { e.stopPropagation(); onOpenFile(filePath, preview ?? null); }}
-                className="ml-1.5 rounded bg-mira-elev1/70 px-1.5 py-0.5 font-mono text-[12px] text-foreground transition-colors hover:bg-mira-blue/15 hover:text-mira-blue"
+                onClick={(e) => { e.stopPropagation(); onOpenFile(filePath, openDiff); }}
+                className="ml-1.5 min-w-0 truncate rounded bg-mira-elev1/70 px-1.5 py-0.5 font-mono text-[12px] text-foreground transition-colors hover:bg-mira-blue/15 hover:text-mira-blue"
                 title="Open in file viewer"
               >
                 {summary.target}
               </button>
             ) : targetIsPath ? (
-              <span className="ml-1.5 rounded bg-mira-elev1/70 px-1.5 py-0.5 font-mono text-[12px] text-foreground">
+              <span className="ml-1.5 min-w-0 truncate rounded bg-mira-elev1/70 px-1.5 py-0.5 font-mono text-[12px] text-foreground">
                 {summary.target}
               </span>
             ) : (
-              <span className="ml-1.5 font-mono text-[12px] text-foreground/85">
+              <span className="ml-1.5 min-w-0 truncate font-mono text-[12px] text-foreground/85">
                 {summary.target}
               </span>
             )
           )}
           {stats && (
-            <span className="ml-2 font-mono text-[12px]">
+            <span className="ml-2 shrink-0 font-mono text-[12px]">
               <span className="text-emerald-400">+{stats.adds}</span>
               {' '}
               <span className="text-rose-400">-{stats.dels}</span>
             </span>
           )}
         </span>
-        <CaretDown
-          weight="bold"
+        <ChevronDown
+          strokeWidth={2.5}
           className={cn(
             'size-3 shrink-0 text-foreground/70 transition-all',
             !expanded && '-rotate-90',
@@ -367,7 +403,7 @@ function CompactToolRow({
               tool={call.function.name}
               lines={effectiveDiff}
               stats={stats}
-              diffPreview={preview ?? null}
+              diffPreview={openDiff}
               onOpenFile={onOpenFile}
             />
           )}
@@ -433,7 +469,7 @@ function DiffCard({
   return (
     <div className="overflow-hidden rounded-lg border border-border/50 bg-mira-elev1/60">
       <div className="flex items-center gap-2 border-b border-border/40 bg-mira-elev1/80 px-3 py-2 text-[12px]">
-        <FileText className="size-3.5 shrink-0 text-muted-foreground" weight="regular" />
+        <FileText className="size-3.5 shrink-0 text-muted-foreground" />
         {onOpenFile && filePath ? (
           <button
             type="button"
@@ -719,7 +755,7 @@ function ResultBlock({ content, isError }: { content: string; isError: boolean }
 
 function StatusMark({ status }: { status: ToolStatus }) {
   switch (status) {
-    case 'running':  return <CircleNotch className="size-3 shrink-0 animate-spin text-mira-blue" />;
+    case 'running':  return <LoaderCircle className="size-3 shrink-0 animate-spin text-mira-blue" />;
     case 'denied':   return <X className="size-3.5 shrink-0 text-destructive" />;
     case 'complete': return <Check className="size-3.5 shrink-0 text-emerald-500" />;
     default:         return null;
@@ -832,6 +868,12 @@ function pickTarget(tool: string, args: any): string {
       return args?.name ? `${args.name} skill` : '';
     case 'agent':
       return args?.prompt ? shortCmd(String(args.prompt)) : '';
+    case 'delegate':
+      return args?.query ? shortCmd(String(args.query)) : '';
+    case 'browser':
+      return args?.url ? String(args.url) : args?.action ? String(args.action) : '';
+    case 'tool_search':
+      return quote(args?.query);
     case 'plan':
     case 'ask_user':
       return '';

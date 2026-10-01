@@ -1,35 +1,71 @@
 import { useMemo } from 'react';
-import {
-  Atom,
-  CircleNotch,
-  Compass,
-  Flower,
-  MoonStars,
-  Planet,
-  Rocket,
-  Sparkle,
-  Star,
-  WarningCircle,
-} from '@phosphor-icons/react';
-import type { Icon as PhosphorIcon } from '@phosphor-icons/react';
+import { LoaderCircle, CircleAlert } from 'lucide-react';
 import type { ToolCall, ToolResult } from '../types';
 import type { ToolStatus } from './ToolCard';
-import { cn } from '@/lib/utils';
+import { SubagentFace, resolveFace, type FaceSpec, type FaceState } from './SubagentFace';
+import { personaName, useSubagents, type Subagent } from '../lib/subagents';
 
-/** Compact inline treatment for a single `agent` tool call — matches
- *  Codex's "👤 Created an agent" pattern. No card chrome, no border, no
- *  background. Just an icon-led line plus a muted "Created X with the
- *  instructions: …" preview below.
+/** Who a delegation went to: the subagent's persona name and face.
  *
- *  Clicking the row invokes `onOpen(call.id)` which the App wires up to
- *  the SubagentPanel — that's where the full prompt, live tools, and
- *  final summary live. Keeping the transcript row tiny is the whole
- *  point: three parallel agents shouldn't dominate the viewport. */
+ *  Taken from the call's own `type` — the subagent Mira actually chose —
+ *  rather than a codename hashed from the call id, which named the same
+ *  helper "Vega" in one turn and "Rigel" in the next and had nothing to do
+ *  with who was working. */
+export type SubagentIdentity = {
+  name: string;
+  /** The subagent id, when the call named one. */
+  type: string | null;
+  /** Seeds the face when the subagent has none configured. */
+  seed: string;
+  face: FaceSpec | null;
+  /** The face's body color, for accents that match it. */
+  color: string;
+};
+
+export function typeOfCall(call: ToolCall): string | null {
+  try {
+    const t = JSON.parse(call.function.arguments)?.type;
+    return typeof t === 'string' && t && t !== 'auto' ? t : null;
+  } catch {
+    return null;
+  }
+}
+
+export function subagentIdentity(call: ToolCall, roster: Subagent[] | null | undefined, typeHint?: string | null): SubagentIdentity {
+  const type = typeHint ?? typeOfCall(call);
+  const s = type ? roster?.find((r) => r.name === type) ?? null : null;
+  const seed = type ?? call.id;
+  const face = s?.face ?? null;
+  return {
+    name: type ? personaName(s, type) : 'Helper',
+    type,
+    seed,
+    face,
+    color: resolveFace(seed, face).color,
+  };
+}
+
+export function useSubagentIdentity(call: ToolCall, typeHint?: string | null): SubagentIdentity {
+  const roster = useSubagents()?.subagents;
+  return useMemo(() => subagentIdentity(call, roster, typeHint), [call, roster, typeHint]);
+}
+
+export function faceStateFor(status: ToolStatus, isError: boolean): FaceState {
+  if (isError) return 'error';
+  if (status === 'running') return 'working';
+  if (status === 'pending') return 'waiting';
+  if (status === 'complete') return 'done';
+  return 'idle';
+}
+
+/** One delegation in the transcript: who took it, and what they were asked.
+ *  Clicking opens the subagent panel with its live work and report. */
 export function AgentCard({
   call,
   status,
   result,
   onOpen,
+  label,
 }: {
   call: ToolCall;
   status: ToolStatus;
@@ -37,43 +73,38 @@ export function AgentCard({
   /** Called when the user clicks the row header — opens the right-side
    *  SubagentPanel with a tab for this agent. */
   onOpen: (callId: string) => void;
+  /** Overrides the shown name (e.g. "Scout 2" in a group of Scouts). */
+  label?: string;
 }) {
-  const identity = useMemo(() => identityFor(call.id), [call.id]);
+  const identity = useSubagentIdentity(call);
   const prompt = useMemo(() => extractPrompt(call.function.arguments), [call.function.arguments]);
   const isError = result?.is_error === true;
+  const name = label ?? identity.name;
 
   return (
     <button
       type="button"
       onClick={() => onOpen(call.id)}
-      title="Open agent details"
-      className="group flex w-full max-w-[78%] items-start gap-2 rounded-md px-1 py-1 text-left text-[13.5px] transition-colors hover:bg-accent/40"
+      title={`Open ${name}'s work`}
+      className="group flex w-full max-w-[78%] items-start gap-2.5 rounded-lg px-1 py-1 text-left text-[13.5px] transition-colors hover:bg-accent/40"
     >
-      <identity.Icon
-        className={cn('mt-0.5 size-3.5 shrink-0', identity.textClass)}
-        weight="fill"
-      />
+      <SubagentFace id={identity.seed} face={identity.face} size={26} state={faceStateFor(status, isError)} className="mt-0.5" />
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5">
-          <span className="font-medium text-foreground group-hover:text-mira-blue">
-            Created an agent
+          <span className="text-muted-foreground">Delegated to</span>
+          <span className="font-semibold group-hover:underline" style={{ color: identity.color }}>
+            {name}
           </span>
           <StatusIndicator status={status} isError={isError} />
         </div>
-        <div className="mt-0.5 truncate text-[12.5px] text-muted-foreground">
-          Created{' '}
-          <span className={cn('font-medium', identity.textClass)}>{identity.name}</span>
-          {' '}with the instructions: {truncate(prompt, 120)}
-        </div>
+        <div className="mt-0.5 truncate text-[12.5px] text-muted-foreground">{truncate(prompt, 140)}</div>
       </div>
     </button>
   );
 }
 
-/** Renders a run of consecutive `agent` tool calls as a stack of inline
- *  rows plus a small colored-dot footer ("Vega and Rigel started
- *  working"). No card border — reads as one paragraph in the transcript,
- *  same as Codex. */
+/** A run of parallel delegations: one row each, and a footer with every
+ *  helper's face ("Scout and Iris are working"). */
 export function AgentGroup({
   entries,
   onOpen,
@@ -81,44 +112,39 @@ export function AgentGroup({
   entries: { call: ToolCall; status: ToolStatus; result: ToolResult | null }[];
   onOpen: (callId: string) => void;
 }) {
-  const identities = useMemo(
-    () => entries.map((e) => identityFor(e.call.id)),
-    [entries],
-  );
+  const roster = useSubagents()?.subagents;
+  const identities = useMemo(() => {
+    const ids = entries.map((e) => subagentIdentity(e.call, roster));
+    // Two of the same helper read as "Scout" and "Scout 2".
+    const seen = new Map<string, number>();
+    return ids.map((id) => {
+      const n = (seen.get(id.name) ?? 0) + 1;
+      seen.set(id.name, n);
+      return n > 1 ? { ...id, name: `${id.name} ${n}` } : id;
+    });
+  }, [entries, roster]);
 
   const running = entries.filter((e) => e.status === 'running' || e.status === 'pending').length;
   const errored = entries.filter((e) => e.result?.is_error === true).length;
   const done = entries.filter((e) => e.status === 'complete' && e.result?.is_error !== true).length;
-  const footerLabel = footerFor(running, done, errored);
+  const footerLabel = footerFor(running, done, errored, identities.length);
 
   return (
     <div className="flex w-full max-w-[78%] flex-col gap-0.5">
-      {entries.map((e) => (
-        <AgentCard
-          key={e.call.id}
-          call={e.call}
-          status={e.status}
-          result={e.result}
-          onOpen={onOpen}
-        />
+      {entries.map((e, i) => (
+        <AgentCard key={e.call.id} call={e.call} status={e.status} result={e.result} onOpen={onOpen} label={identities[i]?.name} />
       ))}
       {footerLabel && (
-        <div className="mt-1 ml-6 flex items-center gap-1.5 text-[12px] text-muted-foreground">
-          <span className="inline-flex items-center gap-1">
+        <div className="ml-1 mt-1 flex items-center gap-2 text-[12px] text-muted-foreground">
+          <span className="flex -space-x-1.5">
             {identities.map((id, i) => (
-              <span
-                key={i}
-                className={cn('size-1.5 rounded-full', id.dotClass)}
-                title={id.name}
-              />
+              <SubagentFace key={i} id={id.seed} face={id.face} size={18} animate={false} />
             ))}
           </span>
           <span>
             {joinNames(identities.map((id) => id.name))} {footerLabel}
           </span>
-          {running > 0 && (
-            <CircleNotch className="ml-0.5 size-3 animate-spin text-mira-blue" />
-          )}
+          {running > 0 && <LoaderCircle className="ml-0.5 size-3 animate-spin text-mira-blue" />}
         </div>
       )}
     </div>
@@ -131,7 +157,7 @@ function StatusIndicator({ status, isError }: { status: ToolStatus; isError: boo
   if (isError) {
     return (
       <span className="inline-flex items-center gap-1 text-[11.5px] text-destructive">
-        <WarningCircle className="size-3" weight="fill" />
+        <CircleAlert className="size-3" fill="currentColor" />
         error
       </span>
     );
@@ -142,7 +168,7 @@ function StatusIndicator({ status, isError }: { status: ToolStatus; isError: boo
     case 'running':
       return (
         <span className="inline-flex items-center gap-1 text-[11.5px] text-mira-blue">
-          <CircleNotch className="size-3 animate-spin" />
+          <LoaderCircle className="size-3 animate-spin" />
           working
         </span>
       );
@@ -154,57 +180,6 @@ function StatusIndicator({ status, isError }: { status: ToolStatus; isError: boo
 }
 
 /* ---------- helpers ---------- */
-
-const CODENAMES = [
-  'Vega', 'Rigel', 'Orion', 'Lyra', 'Nova', 'Sirius', 'Atlas', 'Draco',
-  'Cassia', 'Leo', 'Andro', 'Perseus', 'Halley', 'Kepler', 'Hubble',
-  'Sagan', 'Feynman', 'Gauss', 'Euler', 'Turing',
-];
-
-type AgentIdentity = {
-  name: string;
-  textClass: string;
-  dotClass: string;
-  /** Phosphor icon component — different per identity so parallel agents
-   *  look distinct at a glance, not just differently colored versions
-   *  of the same person shape. */
-  Icon: PhosphorIcon;
-};
-
-/** Paired icon + color palette. Order matches so hash(callId) picks one
- *  slot and both fields come from it — Vega is always the blue star,
- *  Rigel is always the purple planet, etc. */
-const IDENTITIES: { textClass: string; dotClass: string; Icon: PhosphorIcon }[] = [
-  { textClass: 'text-mira-blue',   dotClass: 'bg-mira-blue',   Icon: Star },
-  { textClass: 'text-mira-purple', dotClass: 'bg-mira-purple', Icon: Planet },
-  { textClass: 'text-emerald-400', dotClass: 'bg-emerald-500', Icon: Rocket },
-  { textClass: 'text-amber-400',   dotClass: 'bg-amber-500',   Icon: MoonStars },
-  { textClass: 'text-rose-400',    dotClass: 'bg-rose-500',    Icon: Flower },
-  { textClass: 'text-cyan-400',    dotClass: 'bg-cyan-500',    Icon: Atom },
-  { textClass: 'text-fuchsia-400', dotClass: 'bg-fuchsia-500', Icon: Sparkle },
-  { textClass: 'text-orange-400',  dotClass: 'bg-orange-500',  Icon: Compass },
-];
-
-export function identityFor(callId: string): AgentIdentity {
-  const h = hash(callId);
-  const slot = IDENTITIES[h % IDENTITIES.length];
-  return {
-    name: CODENAMES[h % CODENAMES.length],
-    textClass: slot.textClass,
-    dotClass: slot.dotClass,
-    Icon: slot.Icon,
-  };
-}
-
-/** Cheap deterministic hash so name + color are stable per call_id across
- *  reloads and stream updates. Not cryptographic — just a spread function. */
-function hash(s: string): number {
-  let h = 5381;
-  for (let i = 0; i < s.length; i++) {
-    h = ((h << 5) + h + s.charCodeAt(i)) | 0;
-  }
-  return Math.abs(h);
-}
 
 export function extractPrompt(argsJson: string): string {
   try {
@@ -247,10 +222,11 @@ function joinNames(names: string[]): string {
   return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
 }
 
-function footerFor(running: number, done: number, errored: number): string | null {
-  if (running > 0) return 'started working';
+function footerFor(running: number, done: number, errored: number, count: number): string | null {
+  const plural = count > 1;
+  if (running > 0) return plural ? 'are working' : 'is working';
   if (errored > 0 && done === 0) return 'failed';
   if (errored > 0) return 'finished with errors';
-  if (done > 0) return 'completed';
+  if (done > 0) return 'finished';
   return null;
 }

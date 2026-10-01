@@ -20,6 +20,8 @@ mira-ai       = { path = "crates/mira-ai",      version = "0.5.2" }
 mira-tools    = { path = "crates/mira-tools",   version = "0.5.2" }
 mira-memory   = { path = "crates/mira-memory",  version = "0.5.2" }
 mira-policy   = { path = "crates/mira-policy",  version = "0.5.2" }
+mira-acp      = { path = "crates/mira-acp", version = "0.5.2" }
+mira-pty      = { path = "crates/mira-pty", version = "0.5.2" }
 mira-sandbox  = { path = "crates/mira-sandbox", version = "0.5.2" }
 mira-harness  = { path = "crates/mira-harness", version = "0.5.2" }
 mira-review   = { path = "crates/mira-review",  version = "0.5.2" }
@@ -33,6 +35,7 @@ mira-compute  = { path = "crates/mira-compute",  version = "0.5.2" }
 mira-cloud    = { path = "crates/mira-cloud",    version = "0.5.2" }
 mira-mcp      = { path = "crates/mira-mcp",      version = "0.5.2" }
 mira-plugins  = { path = "crates/mira-plugins",  version = "0.5.2" }
+mira-engine   = { path = "crates/mira-engine",   version = "0.5.2" }
 
 # Async runtime
 tokio           = { version = "1.40", features = ["macros", "rt-multi-thread", "process", "fs", "io-util", "io-std", "sync", "signal", "time"] }

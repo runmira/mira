@@ -62,7 +62,7 @@ impl SessionStore for FileStore {
         limit: usize,
     ) -> Result<Vec<SessionRecord>, StoreError> {
         let mut records = self.scan_all().await?;
-        records.retain(|r| r.cwd == cwd);
+        records.retain(|r| r.cwd == cwd && r.archived_at.is_none());
         records.sort_by_key(|r| std::cmp::Reverse(r.updated_at));
         records.truncate(limit);
         Ok(records)
@@ -70,19 +70,47 @@ impl SessionStore for FileStore {
 
     async fn list_all(&self, limit: usize) -> Result<Vec<SessionRecord>, StoreError> {
         let mut records = self.scan_all().await?;
+        records.retain(|r| r.archived_at.is_none());
         records.sort_by_key(|r| std::cmp::Reverse(r.updated_at));
         records.truncate(limit);
         Ok(records)
     }
 
+    async fn list_archived(&self, limit: usize) -> Result<Vec<SessionRecord>, StoreError> {
+        let mut records = self.scan_all().await?;
+        records.retain(|r| r.archived_at.is_some());
+        records.sort_by_key(|r| std::cmp::Reverse(r.archived_at.unwrap_or(r.updated_at)));
+        records.truncate(limit);
+        Ok(records)
+    }
+
+    /// Sidecar for the agent transcript. MUST live in the trait impl, not
+    /// the inherent one: dynamic dispatch through `dyn SessionStore` only
+    /// sees trait methods, and an inherent method with the same name
+    /// silently shadows the default instead of overriding it. That exact
+    /// mistake shipped once and every probe reported "no sidecar support".
+    fn agent_log_path(&self, id: &SessionId) -> Option<PathBuf> {
+        Some(self.root.join(format!("{id}.agent.jsonl")))
+    }
+
     async fn delete(&self, id: &SessionId) -> Result<(), StoreError> {
         let path = self.path_for(id);
         match fs::remove_file(&path).await {
-            Ok(()) => Ok(()),
+            Ok(()) => {}
             // Missing → treat as success. Users clicking "delete" twice on a
             // stale list shouldn't see a 404 spike back at them.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e.into()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        // The sidecar goes with its session, missing or not.
+        if let Some(sidecar) = self.agent_log_path(id) {
+            match fs::remove_file(&sidecar).await {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(e.into()),
+            }
+        } else {
+            Ok(())
         }
     }
 }
@@ -131,6 +159,9 @@ mod tests {
             tasks: Vec::new(),
             goal: None,
             previews: Default::default(),
+            pinned: false,
+            archived_at: None,
+            agent: None,
         }
     }
 
@@ -159,5 +190,30 @@ mod tests {
         assert_eq!(recent.len(), 2);
         assert_eq!(recent[0].id.as_str(), "s2");
         assert_eq!(recent[1].id.as_str(), "s1");
+    }
+
+    #[tokio::test]
+    async fn archived_sessions_are_hidden_until_asked_for() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FileStore::at(tmp.path()).unwrap();
+        store.save(&record("s1", "/repo/a", 10)).await.unwrap();
+        let mut gone = record("s2", "/repo/a", 20);
+        gone.archived_at = Some(99);
+        store.save(&gone).await.unwrap();
+
+        // Default lists never surface archived sessions…
+        assert_eq!(store.list_all(10).await.unwrap().len(), 1);
+        assert_eq!(
+            store
+                .list_recent(&PathBuf::from("/repo/a"), 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        // …and the archived view returns only them, newest-archive first.
+        let archived = store.list_archived(10).await.unwrap();
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].id.as_str(), "s2");
     }
 }

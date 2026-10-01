@@ -183,8 +183,11 @@ pub async fn register_computer_use(
         // startup rather than on the model's first call.
         match mira_browser::launch::find_executable(opts.executable.as_deref()) {
             Ok(_) => {
-                reg.register(browser::BrowserTool::new(Arc::new(
-                    mira_browser::Browser::new(opts),
+                // The process-wide browser for this profile: the browser
+                // pane and agents drive the same one, so they can never
+                // fight over Chrome's one-process-per-profile lock.
+                reg.register(browser::BrowserTool::new(mira_browser::Browser::shared(
+                    opts,
                 )));
                 report.browser = true;
             }

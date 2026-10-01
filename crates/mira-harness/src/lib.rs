@@ -13,6 +13,7 @@
 //! 4. When the model finishes without tool calls, the turn is done.
 
 pub mod approver;
+pub mod context;
 pub mod event;
 pub mod goal;
 pub mod history;

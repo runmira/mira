@@ -1,24 +1,24 @@
 import { useMemo, useState } from 'react';
 import {
   Brain,
-  CaretDown,
-  ChatCircleDots,
-  CheckCircle,
-  CircleNotch,
-  ClipboardText,
+  ChevronDown,
+  MessageCircleMore,
+  CircleCheck,
+  LoaderCircle,
+  ClipboardList,
   FilePlus,
   FileText,
   GitBranch,
   GitCommit,
-  GitDiff,
+  GitCompare,
   Globe,
-  MagnifyingGlass,
-  NotePencil,
+  Search,
+  NotebookPen,
   Sparkle,
   Terminal,
-  UsersThree,
-  WarningCircle,
-} from '@phosphor-icons/react';
+  Users,
+  CircleAlert,
+} from 'lucide-react';
 import type { DiffPreview, ToolCall, ToolResult } from '../types';
 import { ToolCard, type ToolStatus } from './ToolCard';
 import { cn } from '@/lib/utils';
@@ -112,8 +112,8 @@ export function ToolGroup({
         >
           {trailingText.text}
         </span>
-        <CaretDown
-          weight="bold"
+        <ChevronDown
+          strokeWidth={2.5}
           className={cn(
             'size-3 shrink-0 text-foreground/70 transition-all',
             !expanded && '-rotate-90',
@@ -170,7 +170,7 @@ function StatusCluster({
 }) {
   if (running > 0) {
     return (
-      <CircleNotch className="ml-1 size-3 shrink-0 animate-spin text-mira-blue" />
+      <LoaderCircle className="ml-1 size-3 shrink-0 animate-spin text-mira-blue" />
     );
   }
   if (errored > 0) {
@@ -179,7 +179,7 @@ function StatusCluster({
         className="ml-1 inline-flex shrink-0 items-center gap-0.5 text-[11px] text-destructive"
         title={`${errored} failed`}
       >
-        <WarningCircle className="size-3" weight="fill" />
+        <CircleAlert className="size-3" fill="currentColor" />
         {errored}
       </span>
     );
@@ -187,9 +187,9 @@ function StatusCluster({
   if (done > 0) {
     return (
       <span className="inline-flex" title={`${done} done`}>
-        <CheckCircle
+        <CircleCheck
           className="ml-1 size-3.5 shrink-0 text-emerald-500"
-          weight="fill"
+          fill="currentColor"
         />
       </span>
     );
@@ -319,7 +319,12 @@ export function categoryFor(name: string): ToolCategory {
     case 'read_output':
       return 'read';
     case 'web_fetch':
+    case 'browser':
       return 'fetch';
+    case 'tool_search':
+      return 'search';
+    case 'todo_write':
+      return 'write';
     case 'skill':
       return 'skill';
     default:
@@ -376,14 +381,14 @@ export function infoFor(name: string): ToolInfo {
   switch (name) {
     case 'read_file':       return { verbPast: 'Read',       verbCont: 'Reading',       Icon: FileText };
     case 'write_file':      return { verbPast: 'Wrote',      verbCont: 'Writing',       Icon: FilePlus };
-    case 'edit_file':       return { verbPast: 'Edited',     verbCont: 'Editing',       Icon: NotePencil };
-    case 'grep':            return { verbPast: 'Searched',   verbCont: 'Searching',     Icon: MagnifyingGlass };
-    case 'glob':            return { verbPast: 'Found',      verbCont: 'Finding',       Icon: MagnifyingGlass };
-    case 'find_symbol':     return { verbPast: 'Found',      verbCont: 'Finding',       Icon: MagnifyingGlass };
-    case 'find_references': return { verbPast: 'Found refs',  verbCont: 'Finding refs',  Icon: MagnifyingGlass };
-    case 'find_callers':    return { verbPast: 'Found callers', verbCont: 'Finding callers', Icon: MagnifyingGlass };
-    case 'task_create':     return { verbPast: 'Added task',  verbCont: 'Adding task',   Icon: NotePencil };
-    case 'task_update':     return { verbPast: 'Updated task', verbCont: 'Updating task', Icon: NotePencil };
+    case 'edit_file':       return { verbPast: 'Edited',     verbCont: 'Editing',       Icon: NotebookPen };
+    case 'grep':            return { verbPast: 'Searched',   verbCont: 'Searching',     Icon: Search };
+    case 'glob':            return { verbPast: 'Found',      verbCont: 'Finding',       Icon: Search };
+    case 'find_symbol':     return { verbPast: 'Found',      verbCont: 'Finding',       Icon: Search };
+    case 'find_references': return { verbPast: 'Found refs',  verbCont: 'Finding refs',  Icon: Search };
+    case 'find_callers':    return { verbPast: 'Found callers', verbCont: 'Finding callers', Icon: Search };
+    case 'task_create':     return { verbPast: 'Added task',  verbCont: 'Adding task',   Icon: NotebookPen };
+    case 'task_update':     return { verbPast: 'Updated task', verbCont: 'Updating task', Icon: NotebookPen };
     case 'task_list':       return { verbPast: 'Listed tasks', verbCont: 'Listing tasks', Icon: FileText };
     case 'task_get':        return { verbPast: 'Read task',   verbCont: 'Reading task',  Icon: FileText };
     case 'bash':            return { verbPast: 'Ran',          verbCont: 'Running',          Icon: Terminal };
@@ -393,7 +398,7 @@ export function infoFor(name: string): ToolInfo {
     case 'rustfmt':         return { verbPast: 'Formatted',  verbCont: 'Formatting',    Icon: Sparkle };
     case 'web_fetch':       return { verbPast: 'Fetched',    verbCont: 'Fetching',      Icon: Globe };
     case 'web_search':      return { verbPast: 'Searched the web', verbCont: 'Searching the web', Icon: Globe };
-    case 'git_diff':        return { verbPast: 'Diffed',     verbCont: 'Diffing',       Icon: GitDiff };
+    case 'git_diff':        return { verbPast: 'Diffed',     verbCont: 'Diffing',       Icon: GitCompare };
     case 'git_status':      return { verbPast: 'Checked status', verbCont: 'Checking status', Icon: GitBranch };
     case 'git_log':         return { verbPast: 'Read log',   verbCont: 'Reading log',   Icon: GitCommit };
     case 'git_commit':      return { verbPast: 'Committed',  verbCont: 'Committing',    Icon: GitCommit };
@@ -403,10 +408,23 @@ export function infoFor(name: string): ToolInfo {
     case 'memory_edit':     return { verbPast: 'Remembered', verbCont: 'Remembering',   Icon: Brain };
     case 'memory_remember': return { verbPast: 'Remembered', verbCont: 'Remembering',   Icon: Brain };
     case 'skill':           return { verbPast: 'Used',       verbCont: 'Using',         Icon: Sparkle };
-    case 'ask_user':        return { verbPast: 'Asked you',  verbCont: 'Waiting on you', Icon: ChatCircleDots };
-    case 'plan':            return { verbPast: 'Proposed a plan', verbCont: 'Drafting a plan', Icon: ClipboardText };
-    case 'agent':           return { verbPast: 'Delegated',  verbCont: 'Delegating',    Icon: UsersThree };
-    default:                return { verbPast: name,         verbCont: name,            Icon: FileText };
+    case 'ask_user':        return { verbPast: 'Asked you',  verbCont: 'Waiting on you', Icon: MessageCircleMore };
+    case 'plan':            return { verbPast: 'Proposed a plan', verbCont: 'Drafting a plan', Icon: ClipboardList };
+    case 'agent':           return { verbPast: 'Delegated',  verbCont: 'Delegating',    Icon: Users };
+    // Tools an external agent has that Mira's harness doesn't name.
+    case 'delegate':        return { verbPast: 'Delegated',  verbCont: 'Delegating',    Icon: Users };
+    case 'browser':         return { verbPast: 'Browsed',    verbCont: 'Browsing',      Icon: Globe };
+    case 'todo_write':      return { verbPast: 'Updated todos', verbCont: 'Updating todos', Icon: ClipboardList };
+    case 'tool_search':     return { verbPast: 'Looked up tools', verbCont: 'Looking up tools', Icon: Search };
+    default: {
+      // MCP tools arrive as `mcp__<server>__<tool>`: say which, readably.
+      const mcp = name.match(/^mcp__([^_]+(?:_[^_]+)*)__(.+)$/);
+      if (mcp) {
+        const label = `${mcp[1]} · ${mcp[2].replace(/_/g, ' ')}`;
+        return { verbPast: `Used ${label}`, verbCont: `Using ${label}`, Icon: Sparkle };
+      }
+      return { verbPast: name, verbCont: name, Icon: FileText };
+    }
   }
 }
 

@@ -7,20 +7,25 @@ license      = { workspace = true }
 description  = "HTTP/WebSocket server that fronts a Mira session for browser or desktop UIs."
 
 [dependencies]
+base64       = "0.22"
 mira-core    = { workspace = true }
 mira-cloud    = { workspace = true }
 mira-ai      = { workspace = true }
 mira-agents  = { workspace = true }
 mira-config  = { workspace = true }
+mira-engine  = { workspace = true }
 mira-harness = { workspace = true }
 mira-memory  = { workspace = true }
 mira-policy  = { workspace = true }
 mira-compute = { workspace = true }
 mira-review  = { workspace = true }
+mira-acp = { workspace = true }
+mira-pty = { workspace = true }
 mira-sandbox = { workspace = true }
 mira-skills  = { workspace = true }
 mira-tools   = { workspace = true }
 mira-auth    = { workspace = true }
+mira-browser = { workspace = true }
 mira-mcp     = { workspace = true }
 mira-plugins = { workspace = true }
 

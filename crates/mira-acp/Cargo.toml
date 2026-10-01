@@ -1,0 +1,28 @@
+[package]
+name = "mira-acp"
+version = "0.5.2"
+edition = "2021"
+rust-version = "1.88"
+license = "Apache-2.0"
+description = "Agent Client Protocol runtime: drives external coding agents (Grok, Cursor, Antigravity) over ACP"
+publish = false
+
+[dependencies]
+uuid = { workspace = true }
+mira-sandbox = { workspace = true }
+agent-client-protocol = "2"
+anyhow = "1"
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+# NOTE: `agent-client-protocol-tokio` is deliberately not used. Its newest
+# release is 0.11.1, which depends on `agent-client-protocol` 0.11 — a
+# different major from the 2.x types we use, so pulling it in would give us
+# two incompatible copies of every protocol type. The stdio bridge is a few
+# dozen lines of newline-delimited framing, so we own it instead.
+tokio = { version = "1", features = ["process", "io-util", "sync", "time", "rt", "macros"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tempfile = "3"

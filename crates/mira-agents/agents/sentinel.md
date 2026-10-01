@@ -1,5 +1,11 @@
 ---
 name: sentinel
+display_name: Sentry
+face:
+  color: "#fb7185"
+  shape: star
+  eyes: dot
+  cheeks: false
 description: Diff auditor. Given the parent's original brief and a diff, determines whether the change stays in scope or drifts. Catches mission-creep in delegated work. Read-only. Best used after a coder subagent returns — feed sentinel the brief + the diff.
 category: review
 tools: [read_file, grep, glob, bash]

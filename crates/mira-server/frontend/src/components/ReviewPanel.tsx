@@ -1,14 +1,16 @@
 import { useEffect } from 'react';
 import {
-  CaretRight,
-  CircleNotch,
+  ChevronRight,
+  LoaderCircle,
   Eye,
   ShieldCheck,
-  ShieldWarning,
+  ShieldAlert,
   X,
-} from '@phosphor-icons/react';
+} from 'lucide-react';
 import type { ReviewFinding, ReviewProgressEvent, ReviewSeverity } from '../types';
 import { cn } from '@/lib/utils';
+import { SubagentFace, type FaceState } from './SubagentFace';
+import { personaName, useSubagent } from '../lib/subagents';
 
 /**
  * Slide-out right-side panel that surfaces a `mira review` run.
@@ -117,10 +119,7 @@ export function ReviewPanel({ open, state, onClose }: Props) {
         aria-hidden={!open}
       >
         <div className="flex items-center justify-between border-b border-border/60 px-4 py-3">
-          <div className="flex items-center gap-2">
-            <Eye className="size-4 text-mira-blue" />
-            <span className="text-[14px] font-semibold tracking-tight">Review</span>
-          </div>
+          <ReviewerTitle state={state} />
           <button
             type="button"
             onClick={onClose}
@@ -158,7 +157,7 @@ function ProgressPanel({ state }: { state: ReviewState }) {
   return (
     <div className="flex flex-col gap-3">
       <div className="flex items-center gap-2 text-[13px] text-foreground">
-        <CircleNotch className="size-4 animate-spin text-mira-blue" />
+        <LoaderCircle className="size-4 animate-spin text-mira-blue" />
         <span className="min-w-0 truncate">{state.status}</span>
       </div>
       {state.progressPct != null && (
@@ -184,7 +183,7 @@ function ProgressPanel({ state }: { state: ReviewState }) {
                 )}
               >
                 {v.kept
-                  ? <ShieldWarning className="size-3.5 text-amber-500 shrink-0" />
+                  ? <ShieldAlert className="size-3.5 text-amber-500 shrink-0" />
                   : <ShieldCheck className="size-3.5 text-emerald-500 shrink-0" />}
                 <span className={cn('min-w-0 truncate', !v.kept && 'line-through')}>
                   {v.title}
@@ -246,7 +245,7 @@ function FindingCard({ finding }: { finding: ReviewFinding }) {
         <span className="text-[13.5px] font-semibold text-foreground">{finding.title}</span>
       </div>
       <div className="flex items-center gap-1 text-[11.5px] text-muted-foreground/80 font-mono">
-        <CaretRight className="size-3" />
+        <ChevronRight className="size-3" />
         <span className="truncate">{where}</span>
       </div>
       <div className="mt-2 whitespace-pre-wrap text-[12.5px] text-foreground/85">
@@ -273,4 +272,25 @@ function severityClasses(sev: ReviewSeverity) {
     case 'medium':   return { chip: 'bg-mira-blue/20 text-mira-blue' };
     case 'low':      return { chip: 'bg-secondary text-muted-foreground' };
   }
+}
+
+/** The panel's title is the reviewer itself — its face shows the run's
+ *  state (working, done, worried on failure). */
+function ReviewerTitle({ state }: { state: ReviewState | null }) {
+  const reviewer = useSubagent('reviewer');
+  const name = personaName(reviewer, 'reviewer');
+  const face: FaceState = !state
+    ? 'idle'
+    : state.error
+      ? 'error'
+      : state.done
+        ? 'done'
+        : 'working';
+  return (
+    <div className="flex items-center gap-2">
+      <SubagentFace id="reviewer" face={reviewer?.face} size={24} state={face} />
+      <span className="text-[14px] font-semibold tracking-tight">{name}</span>
+      <span className="text-[12px] text-muted-foreground">Code review</span>
+    </div>
+  );
 }

@@ -250,9 +250,9 @@ function buildChipEl(name: string, roster: PaletteSkill[]): HTMLSpanElement {
   return el;
 }
 
-/** Phosphor-style filled sparkle rendered as inline SVG so we can tint
+/** Filled sparkle rendered as inline SVG so we can tint
  *  it via `color: currentColor` — no mask hackery. Matches the size /
- *  weight of the React `<Sparkle weight="fill">` used in
+ *  fill of the React `<Sparkle fill="currentColor">` used in
  *  SkillMention's `SkillChip`. */
 function buildSparkleSvg(): SVGSVGElement {
   const ns = 'http://www.w3.org/2000/svg';

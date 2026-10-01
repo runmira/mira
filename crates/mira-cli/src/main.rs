@@ -30,7 +30,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use mira_ai::build_chat_provider;
+use mira_ai::{build_chat_provider, ChatProvider};
 use mira_core::SessionId;
 use mira_harness::{Approver, FileStore, Session, SessionConfig, SessionStore};
 use mira_policy::{Mode, Policy, PolicyConfig};
@@ -284,6 +284,38 @@ async fn main() -> Result<()> {
     )
     .context("build provider")?;
 
+    // --- engine registry + instance-routing pool
+    // The boot provider stays active; every other buildable native
+    // instance is pre-registered so `/engine <id>` (TUI) can switch
+    // without a restart. The active instance follows state.yaml's
+    // `last_engine`, mirroring `mira serve`.
+    let engine_cfg = mira_config::MiraConfig::load_global().unwrap_or_default();
+    let engines = Arc::new(mira_engine::EngineRegistry::from_config(&engine_cfg));
+    let swappable = Arc::new(mira_engine::SwappableProvider::new(provider.clone()));
+    for inst in engines.instances().filter(|i| i.is_native()) {
+        let id = inst.id.as_str();
+        if id != settings.provider_name {
+            if let Ok(p) = mira_engine::native::build_native_provider(&engine_cfg, id) {
+                swappable.register(id, p);
+            }
+        }
+    }
+    // The boot provider is registered under its own instance id so
+    // `active_instance()` is honest from the first switch.
+    swappable.register(&settings.provider_name, provider.clone());
+    let mut boot_engine = settings.provider_name.clone();
+    if let Ok(runtime) = mira_config::RuntimeState::load() {
+        if let Some(last) = runtime.last_engine {
+            if engines.get(&last).is_some() && swappable.activate(&last) {
+                boot_engine = last;
+            }
+        }
+    }
+    if swappable.active_instance().is_none() {
+        swappable.activate(&boot_engine);
+    }
+    let provider: Arc<dyn ChatProvider> = swappable.clone();
+
     // --- tools + sandbox
     let sandbox = Arc::new(Sandbox::default_scrubbed());
     let mut registry = Registry::new();
@@ -461,6 +493,16 @@ async fn main() -> Result<()> {
     if let Some(n) = cli.max_turns {
         sess_cfg.max_rounds = n.max(1);
     }
+    // The active engine may differ from the boot provider (state.yaml's
+    // `last_engine` from an earlier `/engine` switch). Adopt its model
+    // override when it pins one, so the session doesn't run a model id
+    // from the old provider. Without an override the current model
+    // carries over — the same fallback the server applies.
+    if boot_engine != settings.provider_name {
+        if let Some(m) = engines.get(&boot_engine).and_then(|i| i.model.clone()) {
+            sess_cfg.model = m;
+        }
+    }
 
     // --pick short-circuits --resume: show a picker, and use the chosen
     // record as the resume target. Cancelling drops through to a fresh
@@ -606,6 +648,9 @@ async fn main() -> Result<()> {
                     env_tx,
                     env_rx,
                     extensions: extensions.clone(),
+                    engines,
+                    engine_cfg,
+                    swappable,
                 },
             )
             .await
@@ -945,5 +990,8 @@ pub(crate) async fn register_computer_use(registry: &mut Registry, cli: &Cli, cf
     }
     if let Some(backend) = report.computer {
         eprintln!("computer use enabled ({backend}); every desktop action asks for approval");
+    }
+    if report.browser {
+        eprintln!("browser enabled: Mira's model and its agents share one browser (watch it in the browser pane)");
     }
 }

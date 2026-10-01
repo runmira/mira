@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { CaretDown, CheckCircle, Circle, CircleNotch } from '@phosphor-icons/react';
+import { ChevronDown, Circle, CircleCheck, LoaderCircle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { TaskItem } from '../types';
 
@@ -38,8 +38,8 @@ export function TaskListPanel({ tasks }: Props) {
           className="flex w-full items-center gap-2 rounded-t-lg px-3 py-2 text-left transition hover:bg-mira-panel"
           aria-expanded={open}
         >
-          <CaretDown
-            weight="bold"
+          <ChevronDown
+            strokeWidth={2.5}
             className={cn(
               'size-3 shrink-0 text-muted-foreground/60 transition-transform',
               !open && '-rotate-90',
@@ -80,9 +80,9 @@ export function TaskListPanel({ tasks }: Props) {
 function StatusIcon({ status }: { status: TaskItem['status'] }) {
   switch (status) {
     case 'completed':
-      return <CheckCircle size={16} weight="fill" className="mt-[2px] shrink-0 text-emerald-400" />;
+      return <CircleCheck size={16} fill="currentColor" className="mt-[2px] shrink-0 text-emerald-400" />;
     case 'in_progress':
-      return <CircleNotch size={16} weight="bold" className="mt-[2px] shrink-0 animate-spin text-mira-blue" />;
+      return <LoaderCircle size={16} strokeWidth={2.5} className="mt-[2px] shrink-0 animate-spin text-mira-blue" />;
     default:
       return <Circle size={16} className="mt-[2px] shrink-0 text-mira-muted" />;
   }

@@ -8,9 +8,11 @@ mod landlock;
 mod profile;
 mod runner;
 
-pub use profile::{command_name, credential_paths, credentials_for, SandboxProfile};
+pub use profile::{
+    command_name, credential_paths, credentials_for, safe_child_env, SandboxProfile,
+};
 
-pub use runner::{run_command, run_unsandboxed, CommandOutput, SandboxConfig};
+pub use runner::{run_command, run_unsandboxed, sandbox_launcher, CommandOutput, SandboxConfig};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SandboxBackend {
