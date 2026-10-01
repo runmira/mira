@@ -74,7 +74,20 @@ pub fn root() -> Option<PathBuf> {
 
 /// The managed browser, if one is installed: its version and binary.
 pub fn installed() -> Option<(String, PathBuf)> {
-    installed_in(&root()?, platform()?)
+    let platform = platform()?;
+    root()
+        .and_then(|r| installed_in(&r, platform))
+        .or_else(|| installed_in(&bundled_root()?, platform))
+}
+
+/// Where the desktop app ships its own copy, so the first run needs no
+/// download (and works offline). The app sets `MIRA_BUNDLED_CHROMIUM` for
+/// its server; the layout is the same as [`root`]'s. Read-only: updates go
+/// to [`root`], and once one lands there it's preferred.
+pub fn bundled_root() -> Option<PathBuf> {
+    std::env::var_os("MIRA_BUNDLED_CHROMIUM")
+        .map(PathBuf::from)
+        .filter(|p| p.is_dir())
 }
 
 fn installed_in(root: &Path, platform: &str) -> Option<(String, PathBuf)> {
@@ -149,6 +162,13 @@ pub async fn ensure() -> Result<PathBuf, BrowserError> {
         spawn_update_check(root, platform);
         return Ok(exe);
     }
+    // The copy the desktop app ships: no wait on first run. A newer Stable
+    // still arrives through the weekly check, into `root`.
+    if let Some((_, exe)) = bundled_root().and_then(|b| installed_in(&b, platform)) {
+        let _ = std::fs::create_dir_all(&root);
+        spawn_update_check(root, platform);
+        return Ok(exe);
+    }
     install(&root, platform).await.map(|(_, exe)| exe)
 }
 
@@ -170,6 +190,13 @@ async fn install(root: &Path, platform: &str) -> Result<(String, PathBuf), Brows
         .map_err(|e| BrowserError::Launch(format!("read manifest: {e}")))?;
     let (version, url) = stable_for(&manifest, platform)?;
     let _ = std::fs::write(root.join("checked"), "");
+    // The app already ships this version: nothing to fetch.
+    if let Some(found) = bundled_root()
+        .and_then(|b| installed_in(&b, platform))
+        .filter(|(v, _)| *v == version)
+    {
+        return Ok(found);
+    }
 
     let dest = root.join(&version);
     let exe = exe_in(&dest, platform);
@@ -377,6 +404,17 @@ mod tests {
             installed_in(r, "linux64").map(|(v, _)| v).as_deref(),
             Some("141.0.1")
         );
+    }
+
+    #[test]
+    fn a_bundled_copy_has_the_same_layout() {
+        let bundle = tempfile::tempdir().unwrap();
+        let b = bundle.path();
+        std::fs::write(b.join("current"), "154.0.1").unwrap();
+        let exe = exe_in(&b.join("154.0.1"), "mac-arm64");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "").unwrap();
+        assert_eq!(installed_in(b, "mac-arm64"), Some(("154.0.1".into(), exe)));
     }
 
     #[test]

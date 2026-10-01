@@ -271,6 +271,14 @@ fn stop_stale_server() {}
 
 /// Start `mira serve` and wait until it accepts connections. Returns the
 /// URL to load.
+/// The Chromium the release ships in its resources (staged by
+/// `scripts/build-desktop.sh`), so the browser works on first run without a
+/// download. Absent in dev builds; the server then downloads its own.
+fn bundled_chromium(app: &AppHandle) -> Option<PathBuf> {
+    let dir = app.path().resource_dir().ok()?.join("chromium");
+    dir.join("current").is_file().then_some(dir)
+}
+
 fn start_server(app: &AppHandle) -> Result<tauri::Url, String> {
     stop_stale_server();
     let port = pick_port().ok_or("no free local port for the Mira server")?;
@@ -291,6 +299,7 @@ fn start_server(app: &AppHandle) -> Result<tauri::Url, String> {
     cmd.args(["serve", "--host", "127.0.0.1", "--port", &port.to_string()])
         .current_dir(home_dir())
         .envs(login_shell_env())
+        .envs(bundled_chromium(app).map(|d| ("MIRA_BUNDLED_CHROMIUM", d)))
         .stdin(Stdio::null())
         .stdout(log)
         .stderr(log_err);
