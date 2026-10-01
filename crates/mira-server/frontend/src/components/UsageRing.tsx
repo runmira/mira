@@ -24,6 +24,8 @@ export type UsageRingData = {
   limitsTitle: string | null;
   limits: UsageLimit[];
   onCompact?: () => void;
+  /** Open the context inspector (what fills the window). */
+  onInspect?: () => void;
 };
 
 /**
@@ -71,6 +73,13 @@ export function UsageRing({ data }: { data: UsageRingData }) {
           onMouseEnter={hoverOpen}
           onMouseLeave={hoverClose}
           onFocus={hoverOpen}
+          onClick={(e) => {
+            if (!data.onInspect) return;
+            // Hover shows the summary; a click goes straight to the detail.
+            e.preventDefault();
+            setOpen(false);
+            data.onInspect();
+          }}
           className="grid size-7 shrink-0 place-items-center rounded-md transition-colors hover:bg-white/[0.05]"
         >
           <Ring frac={frac ?? 0} className={tone} />
@@ -98,12 +107,16 @@ export function UsageRing({ data }: { data: UsageRingData }) {
                 <span className="text-muted-foreground">
                   {used >= compactAt ? 'Compacts on the next turn' : `${shortNum(compactAt - used)} until auto-compact`}
                 </span>
-                {data.onCompact && <SmallButton onClick={data.onCompact}>Compact session</SmallButton>}
+                <span className="flex gap-1">
+                  {data.onInspect && <SmallButton onClick={() => { setOpen(false); data.onInspect!(); }}>What&apos;s in it</SmallButton>}
+                  {data.onCompact && <SmallButton onClick={data.onCompact}>Compact session</SmallButton>}
+                </span>
               </div>
             )}
-            {compactAt == null && data.onCompact && (
-              <div className="mt-2 flex justify-end">
-                <SmallButton onClick={data.onCompact}>Compact session</SmallButton>
+            {compactAt == null && (data.onCompact || data.onInspect) && (
+              <div className="mt-2 flex justify-end gap-1">
+                {data.onInspect && <SmallButton onClick={() => { setOpen(false); data.onInspect!(); }}>What&apos;s in it</SmallButton>}
+                {data.onCompact && <SmallButton onClick={data.onCompact}>Compact session</SmallButton>}
               </div>
             )}
           </Section>

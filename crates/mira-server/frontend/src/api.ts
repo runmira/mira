@@ -550,6 +550,47 @@ export async function getSessionChanges(): Promise<SessionChange[]> {
   return ((await r.json()) as { files: SessionChange[] }).files;
 }
 
+export type ContextPart = {
+  id: 'system' | 'tools' | 'memory' | 'conversation' | 'tool_results';
+  label: string;
+  tokens: number;
+};
+
+export type ContextView = {
+  window: number;
+  compact_at: number | null;
+  breakdown: {
+    parts: ContextPart[];
+    total: number;
+    /** Scaled to the provider's own count for the last request. */
+    calibrated: boolean;
+    last_reported: number | null;
+    largest_results: { call_id: string; tool: string; label: string; tokens: number }[];
+  };
+};
+
+export type DroppedResult = { tool: string; label: string; tokens: number };
+
+/** What fills the active chat's context window. */
+export async function getContextBreakdown(): Promise<ContextView> {
+  const r = await fetch('/api/context');
+  const json = (await r.json().catch(() => ({}))) as ContextView & { error?: string };
+  if (!r.ok) throw new Error(json.error ?? `HTTP ${r.status}`);
+  return json;
+}
+
+/** Take one tool result out of the context (replaced with a stub). */
+export async function dropContextResult(callId: string): Promise<DroppedResult> {
+  const r = await fetch('/api/context/drop', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ call_id: callId }),
+  });
+  const json = (await r.json().catch(() => ({}))) as DroppedResult & { error?: string };
+  if (!r.ok) throw new Error(json.error ?? `HTTP ${r.status}`);
+  return json;
+}
+
 /** What restoring a checkpoint would do to one file. */
 export type RestoreChange = {
   path: string;

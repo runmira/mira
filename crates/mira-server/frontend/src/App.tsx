@@ -97,6 +97,7 @@ import {
   Zap,
 } from 'lucide-react';
 import { CommandPalette, type PaletteAction } from './components/CommandPalette';
+import { ContextInspector } from './components/ContextInspector';
 import { callForAttention } from './lib/attention';
 import { GetStarted } from './components/onboarding/GetStarted';
 
@@ -880,6 +881,8 @@ export default function App() {
   }
   const [pickerOpen, setPickerOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  /** The context inspector (issue #70). */
+  const [inspectOpen, setInspectOpen] = useState(false);
   // File picker opened from the right panel's "+" menu — distinct from the
   // folder picker, which switches the session's cwd.
   const [panelFilePickerOpen, setPanelFilePickerOpen] = useState(false);
@@ -2137,6 +2140,7 @@ export default function App() {
       limitsTitle: limits.length ? 'Provider rate limits' : null,
       limits,
       onCompact: () => onCompact(''),
+      onInspect: () => setInspectOpen(true),
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [acpDriver, acpUsage, acpLimits, engine, rateLimit, providerContext, usage, model]);
@@ -2467,6 +2471,7 @@ export default function App() {
       run: () => { setMainView('chat'); window.dispatchEvent(new Event('mira:open-model-picker')); },
     },
     { id: 'changes', group: 'Chat', label: 'Review changes', icon: FileDiff, shortcut: keyFor('review.toggle'), keywords: ['diff', 'git'], run: () => setReviewOpen(true) },
+    ...(acpDriver ? [] : [{ id: 'context', group: 'Chat', label: "What's in the context window", icon: Brain, keywords: ['tokens', 'compact', 'inspector'], run: () => setInspectOpen(true) }]),
     { id: 'review', group: 'Chat', label: 'Ask Iris to review the changes', icon: ScanSearch, keywords: ['code review', 'second opinion', 'reviewer'], run: () => void runReview('') },
     { id: 'sidebar', group: 'View', label: 'Toggle sidebar', icon: PanelLeftClose, shortcut: keyFor('sidebar.toggle'), run: () => setSidebarOpen((v) => !v) },
     { id: 'terminal', group: 'View', label: 'Toggle terminal', icon: SquareTerminal, shortcut: keyFor('terminal.toggle'), run: () => setTerminal(!terminalOpen) },
@@ -3363,6 +3368,24 @@ export default function App() {
         }}
       />
 
+      <ContextInspector
+        open={inspectOpen}
+        onOpenChange={setInspectOpen}
+        busy={busy}
+        onCompact={onCompact}
+        onDropped={(callId, d) => {
+          // The tool card shows what the model now sees, and a status line
+          // records the drop where it happened.
+          setEntries((prev) => [
+            ...prev.map((e) =>
+              e.kind === 'tool' && e.call.id === callId && e.result
+                ? { ...e, result: { ...e.result, content: `[Removed from context — ~${shortNum(d.tokens)} tokens]`, images: undefined } }
+                : e,
+            ),
+            { kind: 'warning', text: `[context] removed ${d.label || d.tool} from context (~${shortNum(d.tokens)} tokens)` },
+          ]);
+        }}
+      />
       <CommandPalette
         open={paletteOpen}
         onOpenChange={setPaletteOpen}

@@ -5,7 +5,7 @@ use std::sync::Mutex as StdMutex;
 
 use futures::{stream::BoxStream, StreamExt};
 use mira_ai::{ChatEvent, ChatProvider, ChatRequest, FinishReason, ResponseFormat};
-use mira_core::{Message, Role, SessionId, ToolCall, ToolResult};
+use mira_core::{Message, Role, SessionId, ToolCall, ToolCallId, ToolResult};
 use mira_memory::{
     EpisodicEntry, EpisodicSource, EpisodicStore, MemoryQuery, MemorySnapshot, DEFAULT_TOKEN_BUDGET,
 };
@@ -409,6 +409,9 @@ pub struct Session {
     /// clean up native resources (kill child processes, close sockets)
     /// instead of being torn down mid-await.
     current_cancel: Arc<Mutex<Option<CancellationToken>>>,
+    /// The last request's size estimate and the provider's count for it,
+    /// which calibrate the context breakdown (see `crate::context`).
+    calibration: Arc<std::sync::Mutex<crate::context::Calibration>>,
 }
 
 /// Build the sandbox this session starts with, derived from the policy's
@@ -520,6 +523,7 @@ impl Session {
             hooks: None,
             previews: Arc::new(Mutex::new(HashMap::new())),
             current_cancel: Arc::new(Mutex::new(None)),
+            calibration: Arc::default(),
         }
     }
 
@@ -599,6 +603,7 @@ impl Session {
             hooks: None,
             previews: Arc::new(Mutex::new(record.previews)),
             current_cancel: Arc::new(Mutex::new(None)),
+            calibration: Arc::default(),
         }
     }
 
@@ -747,6 +752,72 @@ impl Session {
         out.extend(archived.iter().cloned());
         out.extend(history[system_end..].iter().cloned());
         out
+    }
+
+    /// What would fill the context window if a request went out now,
+    /// calibrated against the provider's count for the last one.
+    pub async fn context_breakdown(&self) -> crate::context::ContextBreakdown {
+        let messages = build_request_messages(self).await;
+        let tools = {
+            let reg = self.registry.lock().await;
+            if self.tool_ctx.compute.is_remote() {
+                reg.remote_specs()
+            } else {
+                reg.specs()
+            }
+        };
+        let cal = *self.calibration.lock().unwrap_or_else(|p| p.into_inner());
+        crate::context::breakdown(&messages, &tools, cal)
+    }
+
+    /// Take one tool result out of the context: its content is replaced
+    /// with a short stub saying what it was, so the next request is smaller
+    /// and the model knows to re-run the tool if it needs it. Returns the
+    /// tool, what it was about, and roughly how many tokens it freed. Not
+    /// while a turn is running.
+    pub async fn drop_tool_result(&self, call_id: &str) -> Result<DroppedResult, String> {
+        if self
+            .current_turn
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|h| !h.is_finished())
+        {
+            return Err("wait for the current reply to finish, then drop it".into());
+        }
+        let freed = {
+            let mut hist = self.history.lock().await;
+            let (tool, args) = hist
+                .iter()
+                .flat_map(|m| m.tool_calls.iter())
+                .find(|c| c.id.as_str() == call_id)
+                .map(|c| (c.function.name.clone(), c.function.arguments.clone()))
+                .unwrap_or_default();
+            let msg = hist
+                .iter_mut()
+                .find(|m| {
+                    m.role == Role::Tool
+                        && m.tool_call_id
+                            .as_ref()
+                            .is_some_and(|i| i.as_str() == call_id)
+                })
+                .ok_or("that result is no longer in the context")?;
+            let before = crate::context::estimate_request(std::slice::from_ref(msg), &[]);
+            let label = crate::context::describe_call(&tool, &args);
+            let tokens = before.saturating_sub(crate::context::estimate_request(
+                &[Message::tool(ToolCallId::from(call_id), "")],
+                &[],
+            ));
+            msg.content = Some(crate::context::dropped_stub(&tool, &label, tokens));
+            msg.images.clear();
+            DroppedResult {
+                tool,
+                label,
+                tokens,
+            }
+        };
+        checkpoint(self).await;
+        Ok(freed)
     }
 
     /// Summarize the conversation now (`/compact`), optionally keeping
@@ -1447,6 +1518,13 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
                 response_format: cfg.response_format.clone(),
             };
 
+            // Kept with the provider's report for it (below), to calibrate
+            // the context inspector.
+            *sess.calibration.lock().unwrap_or_else(|p| p.into_inner()) =
+                crate::context::Calibration {
+                    estimated: crate::context::estimate_request(&req.messages, &req.tools),
+                    reported: None,
+                };
             let mut stream = match sess.provider.stream(req).await {
                 Ok(s) => s,
                 Err(e) => {
@@ -1528,6 +1606,10 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
                             }
                             // Ignore send errors — a dropped receiver just means the
                             // UI stopped listening; the totals are still recorded.
+                            sess.calibration
+                                .lock()
+                                .unwrap_or_else(|p| p.into_inner())
+                                .reported = Some(u64::from(round.prompt_tokens));
                             let window =
                                 crate::history::context_window_with(&cfg.model, cfg.context_window)
                                     as u64;
@@ -2858,6 +2940,16 @@ fn normalize_for_dedup(s: &str) -> String {
 /// The prefix stays as message[0] so the provider's prompt cache still
 /// hits — see `mira_ai::openai::WireMessage::from_message`, which marks
 /// only the first system message with `cache_control: ephemeral`.
+/// What [`Session::drop_tool_result`] took out of the context.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct DroppedResult {
+    pub tool: String,
+    /// What the call was about (a path, a command).
+    pub label: String,
+    /// Roughly how many tokens it freed, before calibration.
+    pub tokens: u64,
+}
+
 async fn build_request_messages(sess: &Session) -> Vec<Message> {
     let mut msgs = {
         let history = sess.history.lock().await;

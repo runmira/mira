@@ -34,6 +34,7 @@ pub mod approver;
 mod browse;
 mod browser;
 pub mod checkpoints;
+mod context_api;
 mod cwd;
 mod editors;
 mod embedded;
@@ -457,6 +458,11 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route(
             "/api/git/revert-file",
             axum::routing::post(git::revert_file),
+        )
+        .route("/api/context", get(context_api::breakdown))
+        .route(
+            "/api/context/drop",
+            axum::routing::post(context_api::drop_result),
         )
         .route(
             "/api/checkpoints/preview",
