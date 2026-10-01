@@ -179,8 +179,12 @@ pub enum ClientMsg {
     /// error, not a silent restart.
     AcpFork,
     /// Ask the agent to compact its context. Native transports only; ACP
-    /// has no such method.
-    AcpCompact,
+    /// has no such method. `focus` is what the summary should keep in view
+    /// (Claude Code's `/compact <instructions>`; Codex has no equivalent).
+    AcpCompact {
+        #[serde(default)]
+        focus: Option<String>,
+    },
     /// Report what each known agent's health is.
     AcpStatus,
     /// Remote environments for the attached session. `target: None`

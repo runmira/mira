@@ -702,7 +702,7 @@ async fn dispatch(
             });
         }
 
-        ClientMsg::AcpCompact => {
+        ClientMsg::AcpCompact { focus } => {
             let Some(handle) = slot.acp_agent.read().await.clone() else {
                 let _ = slot.events_tx.send(ServerMsg::Error {
                     text: "no external agent is running for this session".into(),
@@ -722,7 +722,11 @@ async fn dispatch(
                     mira_acp::native::AgentHandle::Native(n) => {
                         // Compaction is just a prompt: the transcript shows
                         // what happened instead of silence with side effects.
-                        match n.prompt("/compact").await {
+                        let command = match focus.as_deref().map(str::trim) {
+                            Some(f) if !f.is_empty() => format!("/compact {f}"),
+                            _ => "/compact".to_string(),
+                        };
+                        match n.prompt(&command).await {
                             Ok(()) => {}
                             Err(e) => {
                                 let _ = events.send(ServerMsg::Error {

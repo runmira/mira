@@ -11,20 +11,13 @@ import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { shortNum } from '../lib/usage';
+import { partColor } from '../lib/contextParts';
 import {
   dropContextResult,
   getContextBreakdown,
   type ContextView,
   type DroppedResult,
 } from '../api';
-
-const PART_COLORS: Record<string, string> = {
-  system: '#a78bfa',
-  tools: '#60a5fa',
-  memory: '#2dd4bf',
-  conversation: '#f472b6',
-  tool_results: '#f59e0b',
-};
 
 export function ContextInspector({
   open,
@@ -82,7 +75,9 @@ export function ContextInspector({
           {b && (
             <div className="mt-0.5 text-[12px] text-muted-foreground">
               {shortNum(total)} of {shortNum(window)} tokens ({Math.round((total / scale) * 100)}%)
-              {!b.calibrated && ' · estimated until the next reply'}
+              {view?.source === 'agent'
+                ? ` · ${view.agent ?? 'the agent'}'s own count`
+                : !b.calibrated && ' · estimated until the next reply'}
             </div>
           )}
         </div>
@@ -103,12 +98,12 @@ export function ContextInspector({
             {/* One bar: each part's share of the window, with where it compacts. */}
             <div className="px-4">
               <div className="relative flex h-2.5 overflow-hidden rounded-full bg-white/[0.06]">
-                {b.parts.map((p) =>
+                {b.parts.map((p, i) =>
                   p.tokens > 0 ? (
                     <div
                       key={p.id}
                       title={`${p.label}: ${shortNum(p.tokens)}`}
-                      style={{ width: `${(p.tokens / scale) * 100}%`, background: PART_COLORS[p.id] }}
+                      style={{ width: `${(p.tokens / scale) * 100}%`, background: partColor(p.id, i) }}
                     />
                   ) : null,
                 )}
@@ -121,9 +116,9 @@ export function ContextInspector({
                 )}
               </div>
               <div className="mt-3 grid grid-cols-2 gap-x-6 gap-y-1.5">
-                {b.parts.map((p) => (
+                {b.parts.map((p, i) => (
                   <div key={p.id} className="flex items-center gap-2 text-[12.5px]">
-                    <span className="size-2 shrink-0 rounded-full" style={{ background: PART_COLORS[p.id] }} />
+                    <span className="size-2 shrink-0 rounded-full" style={{ background: partColor(p.id, i) }} />
                     <span className="min-w-0 flex-1 truncate text-foreground/80">{p.label}</span>
                     <span className="shrink-0 tabular-nums text-muted-foreground">{shortNum(p.tokens)}</span>
                   </div>
@@ -134,7 +129,7 @@ export function ContextInspector({
             {b.largest_results.length > 0 && (
               <div className="mt-4 border-t border-border/50 px-4 pt-3">
                 <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/70">
-                  Largest tool results
+                  {view?.droppable ? 'Largest tool results' : 'Tool use by type'}
                 </div>
                 <div className="max-h-56 overflow-y-auto">
                   {b.largest_results.map((r) => {
@@ -148,7 +143,7 @@ export function ContextInspector({
                         <span className={cn('shrink-0 tabular-nums', share > 0.15 ? 'text-amber-300' : 'text-muted-foreground')}>
                           {shortNum(r.tokens)}
                         </span>
-                        <button
+                        {view?.droppable && <button
                           type="button"
                           disabled={busy || dropping != null}
                           onClick={() => void drop(r.call_id)}
@@ -156,11 +151,31 @@ export function ContextInspector({
                           className="shrink-0 rounded px-1.5 py-0.5 text-[11.5px] text-muted-foreground transition-colors hover:bg-white/[0.06] hover:text-foreground disabled:opacity-40"
                         >
                           {dropping === r.call_id ? 'Dropping…' : 'Drop'}
-                        </button>
+                        </button>}
                       </div>
                     );
                   })}
                 </div>
+              </div>
+            )}
+
+            {view && view.details.length > 0 && (
+              <div className="mt-4 grid gap-3 border-t border-border/50 px-4 pt-3 sm:grid-cols-2">
+                {view.details.map((g) => (
+                  <div key={g.title} className="min-w-0">
+                    <div className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/70">
+                      {g.title}
+                    </div>
+                    {g.items.map((it) => (
+                      <div key={it.label} className="flex items-center gap-2 py-0.5 text-[12px]">
+                        <span className="min-w-0 flex-1 truncate text-foreground/75" title={it.label}>
+                          {it.label}
+                        </span>
+                        <span className="shrink-0 tabular-nums text-muted-foreground">{shortNum(it.tokens)}</span>
+                      </div>
+                    ))}
+                  </div>
+                ))}
               </div>
             )}
 

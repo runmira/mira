@@ -551,14 +551,25 @@ export async function getSessionChanges(): Promise<SessionChange[]> {
 }
 
 export type ContextPart = {
-  id: 'system' | 'tools' | 'memory' | 'conversation' | 'tool_results';
+  /** `system`, `tools`, `memory`, `conversation`, `tool_results` for Mira;
+   *  a slug of the agent's own category name otherwise. */
+  id: string;
   label: string;
   tokens: number;
 };
 
 export type ContextView = {
+  /** `mira`: sized by Mira from the request it sends. `agent`: the
+   *  external agent's own count. */
+  source: 'mira' | 'agent';
+  /** The agent's name, for `agent`. */
+  agent?: string;
+  /** Results can be taken out (only Mira's own history). */
+  droppable: boolean;
   window: number;
   compact_at: number | null;
+  /** Extra itemised groups an agent reports (memory files, skills, MCP tools). */
+  details: { title: string; items: { label: string; tokens: number }[] }[];
   breakdown: {
     parts: ContextPart[];
     total: number;

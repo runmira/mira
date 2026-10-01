@@ -1109,6 +1109,16 @@ impl AgentHandle {
         }
     }
 
+    /// What fills the agent's context window, when the agent can say.
+    /// Claude Code reports it over its control protocol; ACP and Codex have
+    /// no equivalent.
+    pub async fn context_usage(&self) -> Result<serde_json::Value, String> {
+        match self {
+            AgentHandle::Native(n) => n.context_usage().await.map_err(|e| e.to_string()),
+            _ => Err("This agent doesn't report what's in its context window.".into()),
+        }
+    }
+
     /// Whether mode and model changes apply to the running process, rather
     /// than needing a relaunch.
     pub fn changes_live(&self) -> bool {
@@ -1658,6 +1668,18 @@ impl NativeAgent {
             .map(|t| t.trim().to_string())
             .filter(|t| !t.is_empty())
             .ok_or_else(|| NativeError::Other("empty title".into()))
+    }
+
+    /// What fills the agent's context window, by its own count: categories
+    /// (system prompt, tools, memory files, skills, messages), the window,
+    /// the auto-compact threshold, and per-item detail. `summary` detail
+    /// uses the last response's figures, so it costs no model call.
+    pub async fn context_usage(&self) -> Result<Value, NativeError> {
+        self.ask(
+            json!({ "subtype": "get_context_usage", "detail": "summary" }),
+            Duration::from_secs(20),
+        )
+        .await
     }
 
     /// Switch the running agent's model, live.

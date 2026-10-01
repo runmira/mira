@@ -36,7 +36,7 @@ import {
 import { applyReduceMotion, getBoolPref, PREF_KEYS } from './lib/prefs';
 import { connect, type WsClient, type WsStatus } from './ws';
 import { costUsd, formatDollars, shortNum } from './lib/usage';
-import { previewCheckpoint, restoreCheckpoint, undoRestore, type MessageRef, type RestoreChange, type Restored } from './api';
+import { getContextBreakdown, previewCheckpoint, restoreCheckpoint, undoRestore, type MessageRef, type RestoreChange, type Restored } from './api';
 import { appendMemory, applyUndo, getBranchPr, getGitStatus, getSessionDiff, getSessionHistory, getSettings, gitCommit, gitPush, listCommands, listEngines, listSessions, listSkills, newSession, setSessionBackgroundMode, startReview, type BranchPrView, type EngineSnapshot, type GitStatusView, type SessionDiffView, type SkillView, type CommandInfo } from './api';
 import {
   ContextPanel,
@@ -822,12 +822,12 @@ export default function App() {
   function forkAcpAgent() {
     wsRef.current?.send({ type: 'acp_fork' });
   }
-  function compactAcpAgent() {
+  function compactAcpAgent(focus?: string) {
     // A compaction is a turn like any other: busy until its end arrives, or
     // the composer would take input for a session that is summarizing.
     setBusy(true);
     setThinking(true);
-    wsRef.current?.send({ type: 'acp_compact' });
+    wsRef.current?.send({ type: 'acp_compact', focus: focus?.trim() || null });
   }
 
   // Agent health, usage and the active driver are state rather than refs
@@ -1242,6 +1242,21 @@ export default function App() {
         // Context is per chat; the agent's plan limits are per account and
         // stay. The session's own usage frames (replayed below) restore it.
         setProviderContext(null);
+        // A provider chat's context is otherwise only known once its next
+        // request reports usage, so a reopened chat showed tokens but no
+        // window. Seed it from the breakdown; a live report replaces it.
+        {
+          const opened = msg.session_id;
+          const isAgent = msg.engine ? msg.engine.kind === 'agent' : !!(msg.agent_kind || msg.agent_configured);
+          if (!isAgent) {
+            getContextBreakdown()
+              .then((v) => {
+                if (sessionIdRef.current !== opened || v.source !== 'mira') return;
+                setProviderContext((cur) => cur ?? { used: v.breakdown.total, window: v.window, compactAt: v.compact_at });
+              })
+              .catch(() => {});
+          }
+        }
         setAcpUsage(null);
         setRestoreNote(null);
         setRestoreAsk(null);
@@ -2114,7 +2129,8 @@ export default function App() {
           used: w.utilization,
           resetsAt: w.resets_at ? w.resets_at * 1000 : null,
         })),
-        onCompact: compactAcpAgent,
+        onCompact: () => compactAcpAgent(),
+        onInspect: () => setInspectOpen(true),
       };
     }
     const rl = rateLimit?.rate_limit;
@@ -2471,7 +2487,7 @@ export default function App() {
       run: () => { setMainView('chat'); window.dispatchEvent(new Event('mira:open-model-picker')); },
     },
     { id: 'changes', group: 'Chat', label: 'Review changes', icon: FileDiff, shortcut: keyFor('review.toggle'), keywords: ['diff', 'git'], run: () => setReviewOpen(true) },
-    ...(acpDriver ? [] : [{ id: 'context', group: 'Chat', label: "What's in the context window", icon: Brain, keywords: ['tokens', 'compact', 'inspector'], run: () => setInspectOpen(true) }]),
+    { id: 'context', group: 'Chat', label: "What's in the context window", icon: Brain, keywords: ['tokens', 'compact', 'inspector'], run: () => setInspectOpen(true) },
     { id: 'review', group: 'Chat', label: 'Ask Iris to review the changes', icon: ScanSearch, keywords: ['code review', 'second opinion', 'reviewer'], run: () => void runReview('') },
     { id: 'sidebar', group: 'View', label: 'Toggle sidebar', icon: PanelLeftClose, shortcut: keyFor('sidebar.toggle'), run: () => setSidebarOpen((v) => !v) },
     { id: 'terminal', group: 'View', label: 'Toggle terminal', icon: SquareTerminal, shortcut: keyFor('terminal.toggle'), run: () => setTerminal(!terminalOpen) },
@@ -3372,7 +3388,7 @@ export default function App() {
         open={inspectOpen}
         onOpenChange={setInspectOpen}
         busy={busy}
-        onCompact={onCompact}
+        onCompact={(focus) => (acpDriver ? compactAcpAgent(focus) : onCompact(focus))}
         onDropped={(callId, d) => {
           // The tool card shows what the model now sees, and a status line
           // records the drop where it happened.

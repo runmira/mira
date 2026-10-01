@@ -541,7 +541,7 @@ export type ClientMsg =
   /** Fork the agent session under a new id (Claude Code only). */
   | { type: 'acp_fork' }
   /** Ask the agent to compact its context (native transports only). */
-  | { type: 'acp_compact' }
+  | { type: 'acp_compact'; focus?: string | null }
   /** Send a turn to the running agent. */
   | { type: 'acp_prompt'; text: string; images?: { media_type: string; data: string }[] }
   /** Stop the agent and release its terminals. */

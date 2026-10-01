@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
 import { formatDollars, shortNum } from '../lib/usage';
+import { getContextBreakdown, type ContextPart } from '../api';
+import { partColor } from '../lib/contextParts';
 
 /** One plan or rate-limit window. */
 export type UsageLimit = {
@@ -59,6 +61,21 @@ export function UsageRing({ data }: { data: UsageRingData }) {
     const t = setInterval(() => tick((n) => n + 1), 60_000);
     return () => clearInterval(t);
   }, []);
+  // What the context is made of, fetched as the card opens — the same
+  // breakdown the inspector shows, for providers and agents alike.
+  const [parts, setParts] = useState<ContextPart[] | null>(null);
+  const canBreakDown = !!data.onInspect;
+  useEffect(() => {
+    if (!open || !canBreakDown) return;
+    let live = true;
+    getContextBreakdown()
+      .then((v) => live && setParts(v.breakdown.parts.filter((p) => p.tokens > 0)))
+      .catch(() => live && setParts(null));
+    return () => {
+      live = false;
+    };
+  }, [open, canBreakDown]);
+
   if (!hasAnything) return null;
 
   const pct = frac != null ? Math.round(frac * 100) : null;
@@ -101,21 +118,36 @@ export function UsageRing({ data }: { data: UsageRingData }) {
               label="Context window"
               value={`${shortNum(used)} / ${shortNum(window)} (${pct}%)`}
             />
-            <Bar frac={frac} marker={compactAt && window ? compactAt / window : null} />
-            {compactAt != null && (
-              <div className="mt-2 flex items-center justify-between gap-2 text-[12px]">
-                <span className="text-muted-foreground">
-                  {used >= compactAt ? 'Compacts on the next turn' : `${shortNum(compactAt - used)} until auto-compact`}
-                </span>
-                <span className="flex gap-1">
-                  {data.onInspect && <SmallButton onClick={() => { setOpen(false); data.onInspect!(); }}>What&apos;s in it</SmallButton>}
-                  {data.onCompact && <SmallButton onClick={data.onCompact}>Compact session</SmallButton>}
-                </span>
+            <Bar frac={frac} marker={compactAt && window ? compactAt / window : null} parts={parts} />
+            {parts && parts.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+                {parts.map((p, i) => (
+                  <span key={p.id} className="flex items-center gap-1.5">
+                    <span className="size-1.5 rounded-full" style={{ background: partColor(p.id, i) }} />
+                    {p.label}
+                  </span>
+                ))}
               </div>
             )}
-            {compactAt == null && (data.onCompact || data.onInspect) && (
-              <div className="mt-2 flex justify-end gap-1">
-                {data.onInspect && <SmallButton onClick={() => { setOpen(false); data.onInspect!(); }}>What&apos;s in it</SmallButton>}
+            {compactAt != null && (
+              <div className="mt-2 text-[12px] text-muted-foreground">
+                {used >= compactAt ? 'Compacts on the next turn' : `${shortNum(compactAt - used)} until auto-compact`}
+              </div>
+            )}
+            {(data.onInspect || data.onCompact) && (
+              // Own row, wrapping: beside the status line the two buttons
+              // overflowed the card.
+              <div className="mt-2.5 flex flex-wrap justify-end gap-1.5">
+                {data.onInspect && (
+                  <SmallButton
+                    onClick={() => {
+                      setOpen(false);
+                      data.onInspect!();
+                    }}
+                  >
+                    What&apos;s in it
+                  </SmallButton>
+                )}
                 {data.onCompact && <SmallButton onClick={data.onCompact}>Compact session</SmallButton>}
               </div>
             )}
@@ -181,11 +213,36 @@ function Ring({ frac, className }: { frac: number; className?: string }) {
   );
 }
 
-function Bar({ frac, marker, thin }: { frac: number; marker?: number | null; thin?: boolean }) {
+function Bar({
+  frac,
+  marker,
+  thin,
+  parts,
+}: {
+  frac: number;
+  marker?: number | null;
+  thin?: boolean;
+  /** What the fill is made of: split into colored segments, scaled to
+   *  `frac` so the bar still matches the figure above it. */
+  parts?: ContextPart[] | null;
+}) {
   const tone = frac >= 0.9 ? 'bg-red-400' : frac >= 0.7 ? 'bg-amber-400' : 'bg-mira-blue';
+  const fill = Math.min(1, frac);
+  const sum = parts?.reduce((n, p) => n + p.tokens, 0) ?? 0;
   return (
-    <div className={cn('relative mt-1.5 w-full overflow-hidden rounded-full bg-white/[0.08]', thin ? 'h-1' : 'h-1.5')}>
-      <div className={cn('h-full rounded-full transition-[width] duration-500', tone)} style={{ width: `${Math.round(Math.min(1, frac) * 100)}%` }} />
+    <div className={cn('relative mt-1.5 flex w-full overflow-hidden rounded-full bg-white/[0.08]', thin ? 'h-1' : 'h-1.5')}>
+      {parts && sum > 0 ? (
+        parts.map((p, i) => (
+          <div
+            key={p.id}
+            title={`${p.label}: ${shortNum(p.tokens)}`}
+            className="h-full transition-[width] duration-500"
+            style={{ width: `${(p.tokens / sum) * fill * 100}%`, background: partColor(p.id, i) }}
+          />
+        ))
+      ) : (
+        <div className={cn('h-full rounded-full transition-[width] duration-500', tone)} style={{ width: `${Math.round(fill * 100)}%` }} />
+      )}
       {marker != null && marker > 0 && marker < 1 && (
         <div className="absolute top-0 h-full w-px bg-foreground/50" style={{ left: `${marker * 100}%` }} title="Auto-compact" />
       )}
