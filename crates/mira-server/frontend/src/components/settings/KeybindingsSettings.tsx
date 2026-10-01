@@ -1,0 +1,1409 @@
+/**
+ * Keybindings settings section.
+ *
+ * Search, key pills, click-to-capture, conflict warnings, when-clause
+ * builder, reset/remove, add custom. Edits save to localStorage
+ * synchronously. Export/Import JSON exposes the raw custom config.
+ */
+import {
+  Check,
+  ChevronDown,
+  Download,
+  Ellipsis,
+  Keyboard,
+  Minus,
+  Plus,
+  RotateCcw,
+  Search,
+  TriangleAlert,
+  Upload,
+  X,
+} from 'lucide-react';
+import {
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+  type Ref,
+  useEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from 'react';
+
+import { cn } from '@/lib/utils';
+import {
+  formatShortcutLabel,
+  getCustomKeybindingRules,
+  importCustomKeybindingRules,
+  removeKeybinding,
+  resetKeybindingCommand,
+  upsertKeybinding,
+  useKeybindings,
+  type KeybindingWhenNode,
+  type MiraKeybindingCommand,
+  type UpsertKeybindingInput,
+} from '@/lib/keybindings';
+import { Button } from '../ui/button';
+import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
+import { SectionInput } from '../ui/input';
+import { Select } from '../ui/select';
+import {
+  buildKeybindingCommandOptions,
+  buildKeybindingRows,
+  buildWhenVariableOptions,
+  commandLabel,
+  DEFAULT_WHEN_VARIABLE,
+  isKnownWhenVariable,
+  keybindingConflictLabels,
+  keybindingFromKeyboardEvent,
+  parseWhenExpressionDraft,
+  unknownWhenVariables,
+  whenAstToExpression,
+  whenNodeRemoveLabel,
+  type KeybindingCommandOption,
+  type KeybindingRow,
+  type WhenVariableOption,
+} from './keybindingsLogic';
+
+function KeybindingPill({ value }: { value: string }) {
+  // Keys dedupe repeated parts; a literal "+" in a shortcut splits into empty strings.
+  const isMac = /mac|iphone|ipad/i.test(navigator.platform);
+  const seenParts = new Map<string, number>();
+  const parts = value.split('+').map((part) => {
+    const seen = seenParts.get(part) ?? 0;
+    seenParts.set(part, seen + 1);
+    return { part, key: seen === 0 ? part : `${part}-${seen}` };
+  });
+  return (
+    <span className="inline-flex items-center gap-1">
+      {parts.map(({ part, key }) => (
+        <kbd
+          key={key}
+          className="rounded border border-border/70 bg-background/60 px-1.5 py-0.5 font-mono text-[11px] leading-none text-foreground"
+        >
+          {part === 'mod'
+            ? isMac
+              ? '⌘'
+              : 'Ctrl'
+            : part === 'shift'
+              ? '⇧'
+              : part === 'alt'
+                ? isMac
+                  ? '⌥'
+                  : 'Alt'
+                : part === 'ctrl'
+                  ? '⌃'
+                  : part.length === 1
+                    ? part.toUpperCase()
+                    : part}
+        </kbd>
+      ))}
+    </span>
+  );
+}
+
+function IconButton({
+  title,
+  onClick,
+  disabled,
+  children,
+  className,
+}: {
+  title: string;
+  onClick?: () => void;
+  disabled?: boolean;
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <button
+      type="button"
+      title={title}
+      aria-label={title}
+      disabled={disabled}
+      onClick={onClick}
+      className={cn(
+        'rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-40',
+        className,
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+function ExpandableHeaderSearch({
+  query,
+  onChange,
+  isOpen,
+  onOpenChange,
+  inputRef,
+  collapsedAccessory,
+}: {
+  query: string;
+  onChange: (next: string) => void;
+  isOpen: boolean;
+  onOpenChange: (next: boolean) => void;
+  inputRef?: Ref<HTMLInputElement>;
+  collapsedAccessory?: ReactNode;
+}) {
+  if (!isOpen) {
+    return (
+      <>
+        {collapsedAccessory}
+        <IconButton title="Search keybindings" onClick={() => onOpenChange(true)}>
+          <Search className="size-3.5" />
+        </IconButton>
+      </>
+    );
+  }
+
+  return (
+    <div className="relative w-44">
+      <Search
+        aria-hidden
+        className="pointer-events-none absolute left-2.5 top-1/2 size-3 -translate-y-1/2 text-muted-foreground"
+      />
+      <SectionInput
+        ref={inputRef}
+        autoFocus
+        type="search"
+        value={query}
+        onChange={(event) => onChange(event.currentTarget.value)}
+        onBlur={() => {
+          if (query.length === 0) onOpenChange(false);
+        }}
+        onKeyDown={(event) => {
+          if (event.key === 'Escape') {
+            event.preventDefault();
+            onChange('');
+            onOpenChange(false);
+          }
+        }}
+        placeholder="Search keybindings"
+        aria-label="Search keybindings"
+        className="h-8 pl-8 text-[12.5px]"
+      />
+    </div>
+  );
+}
+
+type BooleanOperator = 'and' | 'or';
+
+function flattenWhenChildren(
+  node: KeybindingWhenNode,
+  operator: BooleanOperator,
+): KeybindingWhenNode[] {
+  if (node.type !== operator) return [node];
+  return [
+    ...flattenWhenChildren(node.left, operator),
+    ...flattenWhenChildren(node.right, operator),
+  ];
+}
+
+function buildWhenExpressionGroup(
+  children: readonly KeybindingWhenNode[],
+  operator: BooleanOperator,
+): KeybindingWhenNode | undefined {
+  const first = children[0];
+  if (!first) return undefined;
+  return children.slice(1).reduce<KeybindingWhenNode>(
+    (left, right) => ({
+      type: operator,
+      left,
+      right,
+    }),
+    first,
+  );
+}
+
+function conditionParts(node: KeybindingWhenNode): { identifier: string; negated: boolean } | null {
+  if (node.type === 'identifier') return { identifier: node.name, negated: false };
+  if (node.type === 'not' && node.node.type === 'identifier') {
+    return { identifier: node.node.name, negated: true };
+  }
+  return null;
+}
+
+function setConditionIdentifier(node: KeybindingWhenNode, identifier: string): KeybindingWhenNode {
+  const parts = conditionParts(node);
+  if (!parts) return node;
+  const next: KeybindingWhenNode = { type: 'identifier', name: identifier };
+  return parts.negated ? { type: 'not', node: next } : next;
+}
+
+function setConditionNegated(node: KeybindingWhenNode, negated: boolean): KeybindingWhenNode {
+  const parts = conditionParts(node);
+  if (!parts) return negated ? { type: 'not', node } : node;
+  const identifier: KeybindingWhenNode = { type: 'identifier', name: parts.identifier };
+  return negated ? { type: 'not', node: identifier } : identifier;
+}
+
+function defaultWhenCondition(): KeybindingWhenNode {
+  return { type: 'identifier', name: DEFAULT_WHEN_VARIABLE };
+}
+
+function defaultWhenGroup(operator: BooleanOperator = 'and'): KeybindingWhenNode {
+  return {
+    type: operator,
+    left: defaultWhenCondition(),
+    right: { type: 'not', node: defaultWhenCondition() },
+  };
+}
+
+function NotToggle({
+  pressed,
+  onChange,
+  label,
+}: {
+  pressed: boolean;
+  onChange: (pressed: boolean) => void;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      aria-pressed={pressed}
+      aria-label={label}
+      onClick={() => onChange(!pressed)}
+      className={cn(
+        'min-w-10 shrink-0 rounded-md border px-2 py-1 text-[12px] font-medium transition-colors',
+        pressed
+          ? 'border-mira-blue/50 bg-mira-blue/15 text-mira-blue'
+          : 'border-border/70 text-muted-foreground hover:bg-accent hover:text-foreground',
+      )}
+    >
+      Not
+    </button>
+  );
+}
+
+/** Warning glyph with a hover explanation; the one owner of that affordance here. */
+function WarningIcon({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <span className="group/warn relative inline-flex shrink-0 items-center justify-center">
+      <span
+        tabIndex={0}
+        aria-label={label}
+        className="inline-flex size-5 items-center justify-center rounded-sm text-amber-400 outline-none transition-colors hover:bg-amber-400/10 focus-visible:ring-2 focus-visible:ring-amber-400/25"
+      >
+        <TriangleAlert className="size-3.5" />
+      </span>
+      <span className="tooltip pointer-events-none absolute bottom-full left-1/2 z-50 mb-1.5 hidden w-56 -translate-x-1/2 group-hover/warn:block">
+        {children}
+      </span>
+    </span>
+  );
+}
+
+function UnknownWhenVariableWarning({ identifiers }: { identifiers: ReadonlyArray<string> }) {
+  if (identifiers.length === 0) return null;
+  const label =
+    identifiers.length === 1
+      ? `Unknown condition: ${identifiers[0]}`
+      : `Unknown conditions: ${identifiers.join(', ')}`;
+
+  return (
+    <WarningIcon label={label}>
+      Mira does not recognize this condition yet. It can still be saved, but it may not match
+      unless the runtime provides it.
+    </WarningIcon>
+  );
+}
+
+function KeybindingConflictWarning({ labels }: { labels: ReadonlyArray<string> }) {
+  if (labels.length === 0) return null;
+  const description =
+    labels.length === 1
+      ? `Conflicts with ${labels[0]}.`
+      : `Conflicts with ${labels.slice(0, 3).join(', ')}${labels.length > 3 ? ', and more' : ''}.`;
+
+  return (
+    <WarningIcon label={description}>
+      {description} The most recent matching binding wins when both conditions can apply.
+    </WarningIcon>
+  );
+}
+
+function WhenVariableSelect({
+  value,
+  variables,
+  unknownIdentifiers,
+  onChange,
+}: {
+  value: string;
+  variables: ReadonlyArray<WhenVariableOption>;
+  unknownIdentifiers?: ReadonlyArray<string>;
+  onChange: (value: string) => void;
+}) {
+  const options =
+    variables.some((option) => option === value)
+      ? variables.map((v) => ({ value: v, label: v }))
+      : [{ value, label: value }, ...variables.map((v) => ({ value: v, label: v }))];
+
+  return (
+    <div className="flex min-w-0 flex-1 items-center gap-1.5">
+      <Select
+        value={value}
+        onChange={(nextValue) => nextValue && onChange(nextValue)}
+        options={options}
+        placeholder="Condition"
+        className="h-8 text-[12.5px]"
+      />
+      {unknownIdentifiers && unknownIdentifiers.length > 0 ? (
+        <UnknownWhenVariableWarning identifiers={unknownIdentifiers} />
+      ) : null}
+    </div>
+  );
+}
+
+function WhenExpressionRemoveButton({
+  label,
+  className,
+  onRemove,
+}: {
+  label: string;
+  className?: string | undefined;
+  onRemove: () => void;
+}) {
+  return (
+    <IconButton title={label} onClick={onRemove} className={cn('size-7', className)}>
+      <Minus aria-hidden className="size-3.5" />
+    </IconButton>
+  );
+}
+
+function WhenExpressionNodeEditor({
+  node,
+  variables,
+  depth = 0,
+  onChange,
+  onRemove,
+}: {
+  node: KeybindingWhenNode;
+  variables: ReadonlyArray<WhenVariableOption>;
+  depth?: number;
+  onChange: (node: KeybindingWhenNode) => void;
+  onRemove?: () => void;
+}) {
+  const condition = conditionParts(node);
+
+  if (condition) {
+    const unknownIdentifiers = isKnownWhenVariable(condition.identifier)
+      ? []
+      : [condition.identifier];
+
+    return (
+      <div className="flex items-center gap-2 rounded-md border border-border/70 bg-background/60 px-2 py-2">
+        <NotToggle
+          pressed={condition.negated}
+          onChange={(pressed) => onChange(setConditionNegated(node, pressed))}
+          label={`Negate ${condition.identifier}`}
+        />
+        <WhenVariableSelect
+          value={condition.identifier}
+          variables={variables}
+          unknownIdentifiers={unknownIdentifiers}
+          onChange={(value) => onChange(setConditionIdentifier(node, value))}
+        />
+        {onRemove ? (
+          <WhenExpressionRemoveButton
+            label={whenNodeRemoveLabel(node, depth)}
+            onRemove={onRemove}
+          />
+        ) : null}
+      </div>
+    );
+  }
+
+  if (node.type === 'not') {
+    return (
+      <div
+        className={cn(
+          'space-y-2 rounded-lg border border-border/70 bg-muted/20 p-2',
+          depth > 0 && 'border-border/50 bg-background/50',
+        )}
+      >
+        <div className="flex items-center gap-2">
+          <NotToggle
+            pressed
+            onChange={(pressed) => onChange(pressed ? node : node.node)}
+            label="Negate group"
+          />
+          {onRemove ? (
+            <WhenExpressionRemoveButton
+              label={whenNodeRemoveLabel(node, depth)}
+              className="ml-auto"
+              onRemove={onRemove}
+            />
+          ) : null}
+        </div>
+        <div className="relative pl-4">
+          <span className="absolute bottom-0 left-1.5 top-0 w-px bg-border/70" aria-hidden />
+          <span className="absolute left-1.5 top-4 h-px w-2.5 bg-border/70" aria-hidden />
+          <WhenExpressionNodeEditor
+            node={node.node}
+            variables={variables}
+            depth={depth + 1}
+            onChange={(next) => onChange({ type: 'not', node: next })}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  const operator: BooleanOperator = node.type === 'or' ? 'or' : 'and';
+  const children = flattenWhenChildren(node, operator);
+  const childKeyCounts = new Map<string, number>();
+  const childEntries = children.map((child) => {
+    const baseKey = `${child.type}-${whenAstToExpression(child)}`;
+    const count = childKeyCounts.get(baseKey) ?? 0;
+    childKeyCounts.set(baseKey, count + 1);
+    return { child, key: count === 0 ? baseKey : `${baseKey}-${count}` };
+  });
+
+  const updateChild = (target: KeybindingWhenNode, next: KeybindingWhenNode) => {
+    let didUpdate = false;
+    const nextChildren = children.map((child) => {
+      if (!didUpdate && child === target) {
+        didUpdate = true;
+        return next;
+      }
+      return child;
+    });
+    const nextNode = buildWhenExpressionGroup(nextChildren, operator);
+    if (nextNode) onChange(nextNode);
+  };
+
+  const removeChild = (target: KeybindingWhenNode) => {
+    let didRemove = false;
+    const nextChildren = children.filter((child) => {
+      if (!didRemove && child === target) {
+        didRemove = true;
+        return false;
+      }
+      return true;
+    });
+    const nextNode = buildWhenExpressionGroup(nextChildren, operator);
+    if (nextNode) {
+      onChange(nextNode);
+    } else {
+      onChange(defaultWhenCondition());
+    }
+  };
+
+  const setOperator = (nextOperator: BooleanOperator) => {
+    if (nextOperator === operator) return;
+    const nextNode = buildWhenExpressionGroup(children, nextOperator);
+    if (nextNode) onChange(nextNode);
+  };
+
+  const addCondition = () => {
+    const nextNode = buildWhenExpressionGroup([...children, defaultWhenCondition()], operator);
+    if (nextNode) onChange(nextNode);
+  };
+
+  const addGroup = () => {
+    const nestedOperator: BooleanOperator = operator === 'and' ? 'or' : 'and';
+    const group: KeybindingWhenNode = {
+      type: nestedOperator,
+      left: defaultWhenCondition(),
+      right: { type: 'not', node: defaultWhenCondition() },
+    };
+    const nextNode = buildWhenExpressionGroup([...children, group], operator);
+    if (nextNode) onChange(nextNode);
+  };
+
+  return (
+    <div
+      className={cn(
+        'space-y-2 rounded-lg border border-border/60 bg-muted/10 p-2',
+        depth > 0 && 'border-border/70 bg-background/55',
+      )}
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <Select
+          value={operator}
+          onChange={(value) => setOperator(value as BooleanOperator)}
+          options={[
+            { value: 'and', label: 'and' },
+            { value: 'or', label: 'or' },
+          ]}
+          className="h-8 w-24 text-[12.5px]"
+        />
+        <Button type="button" variant="outline" size="sm" className="h-8" onClick={addCondition}>
+          <Plus className="size-3.5" />
+          Condition
+        </Button>
+        <Button type="button" variant="outline" size="sm" className="h-8" onClick={addGroup}>
+          <Plus className="size-3.5" />
+          Group
+        </Button>
+        {onRemove ? (
+          <WhenExpressionRemoveButton
+            label={whenNodeRemoveLabel(node, depth)}
+            className="ml-auto"
+            onRemove={onRemove}
+          />
+        ) : null}
+      </div>
+      <div className="space-y-2">
+        {childEntries.map(({ child, key }) => (
+          <div key={key} className="relative pl-4">
+            <span
+              className={cn(
+                'absolute bottom-0 left-1.5 top-0 w-px',
+                depth === 0 ? 'bg-border' : 'bg-border/70',
+              )}
+              aria-hidden
+            />
+            <span
+              className={cn(
+                'absolute left-1.5 top-4 h-px w-2.5',
+                depth === 0 ? 'bg-border' : 'bg-border/70',
+              )}
+              aria-hidden
+            />
+            <WhenExpressionNodeEditor
+              node={child}
+              variables={variables}
+              depth={depth + 1}
+              onChange={(next) => updateChild(child, next)}
+              onRemove={() => removeChild(child)}
+            />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function WhenExpressionBuilder({
+  value,
+  variables,
+  onChange,
+  onValidityChange,
+}: {
+  value: KeybindingWhenNode | undefined;
+  variables: ReadonlyArray<WhenVariableOption>;
+  onChange: (value: KeybindingWhenNode | undefined) => void;
+  onValidityChange?: (valid: boolean) => void;
+}) {
+  const expression = whenAstToExpression(value);
+  const [expressionDraft, setExpressionDraft] = useState(expression);
+  const parseResult = useMemo(() => parseWhenExpressionDraft(expressionDraft), [expressionDraft]);
+  const parseError = parseResult.ok ? null : parseResult.message;
+  const unknownIdentifiers = parseResult.ok ? unknownWhenVariables(parseResult.value) : [];
+
+  const updateExpressionDraft = (nextExpression: string) => {
+    setExpressionDraft(nextExpression);
+    const nextResult = parseWhenExpressionDraft(nextExpression);
+    onValidityChange?.(nextResult.ok);
+    if (nextResult.ok) {
+      onChange(nextResult.value);
+    }
+  };
+
+  const updateExpressionValue = (nextValue: KeybindingWhenNode | undefined) => {
+    setExpressionDraft(whenAstToExpression(nextValue));
+    onValidityChange?.(true);
+    onChange(nextValue);
+  };
+
+  const addRootCondition = () => {
+    if (!value) {
+      updateExpressionValue(defaultWhenCondition());
+      return;
+    }
+    updateExpressionValue({ type: 'and', left: value, right: defaultWhenCondition() });
+  };
+
+  const addRootGroup = () => {
+    const group = defaultWhenGroup('or');
+    if (!value) {
+      updateExpressionValue(group);
+      return;
+    }
+    updateExpressionValue({ type: 'and', left: value, right: group });
+  };
+
+  return (
+    <div className="w-[min(34rem,calc(100vw-2rem))] space-y-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-sm font-medium text-foreground">When</div>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <Button type="button" variant="outline" size="sm" className="h-8" onClick={addRootCondition}>
+            <Plus className="size-3.5" />
+            Condition
+          </Button>
+          <Button type="button" variant="outline" size="sm" className="h-8" onClick={addRootGroup}>
+            <Plus className="size-3.5" />
+            Group
+          </Button>
+        </div>
+      </div>
+
+      <div className="space-y-1.5">
+        <div className="relative">
+          <SectionInput
+            value={expressionDraft}
+            onChange={(event) => updateExpressionDraft(event.currentTarget.value)}
+            placeholder="Always"
+            aria-invalid={Boolean(parseError)}
+            aria-label="When expression"
+            className="h-8 font-mono text-[12.5px]"
+          />
+          {unknownIdentifiers.length > 0 ? (
+            <span className="absolute right-2 top-1/2 -translate-y-1/2">
+              <UnknownWhenVariableWarning identifiers={unknownIdentifiers} />
+            </span>
+          ) : null}
+        </div>
+        {parseError ? (
+          <div className="flex items-center gap-1.5 text-[11px] text-destructive">
+            <X className="size-3.5" />
+            {parseError}
+          </div>
+        ) : null}
+      </div>
+
+      <div className="relative">
+        {value ? (
+          <WhenExpressionNodeEditor
+            node={value}
+            variables={variables}
+            onChange={updateExpressionValue}
+            onRemove={() => updateExpressionValue(undefined)}
+          />
+        ) : (
+          <div className="rounded-md border border-dashed border-border/80 bg-muted/15 p-3">
+            <div className="flex flex-wrap gap-2">
+              <Button type="button" size="sm" className="h-8" onClick={addRootCondition}>
+                <Plus className="size-3.5" />
+                Condition
+              </Button>
+              <Button type="button" variant="outline" size="sm" className="h-8" onClick={addRootGroup}>
+                <Plus className="size-3.5" />
+                Group
+              </Button>
+            </div>
+          </div>
+        )}
+        {parseError ? (
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-lg border border-destructive/30 bg-background/75 p-4 text-center text-xs text-destructive">
+            Fix the expression above to continue editing visually.
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+type KeybindingRowDraftState = {
+  keyDraft: string;
+  whenDraft: KeybindingWhenNode | undefined;
+  isRecording: boolean;
+  isWhenDraftValid: boolean;
+};
+
+function createKeybindingRowDraft(row: KeybindingRow): KeybindingRowDraftState {
+  return {
+    keyDraft: row.key,
+    whenDraft: row.binding.whenAst,
+    isRecording: false,
+    isWhenDraftValid: true,
+  };
+}
+
+function keybindingRowDraftReducer(
+  state: KeybindingRowDraftState,
+  patch: Partial<KeybindingRowDraftState>,
+): KeybindingRowDraftState {
+  return { ...state, ...patch };
+}
+
+function rowKeybindingTarget(row: KeybindingRow): { command: MiraKeybindingCommand; key: string; when?: string } {
+  return {
+    command: row.command,
+    key: row.key,
+    ...(row.when.trim().length > 0 ? { when: row.when } : {}),
+  };
+}
+
+/** Draft state and actions for editing one existing binding; layouts decide how to render it. */
+function useKeybindingRowEditor({
+  row,
+  allRows,
+  onSave,
+}: {
+  row: KeybindingRow;
+  allRows: ReadonlyArray<KeybindingRow>;
+  onSave: (input: UpsertKeybindingInput) => void;
+}) {
+  const [draft, setDraft] = useReducer(keybindingRowDraftReducer, row, createKeybindingRowDraft);
+  const { keyDraft, whenDraft, isRecording, isWhenDraftValid } = draft;
+  const whenDraftExpression = whenAstToExpression(whenDraft);
+  const isDirty = keyDraft !== row.key || whenDraftExpression !== row.when;
+  const conflictLabels = keybindingConflictLabels(allRows, {
+    rowId: row.id,
+    key: keyDraft,
+    when: whenDraftExpression,
+  });
+
+  const save = () => {
+    onSave({
+      command: row.command,
+      key: keyDraft,
+      when: whenDraftExpression.trim().length > 0 ? whenDraftExpression : undefined,
+      replace: rowKeybindingTarget(row),
+    });
+  };
+
+  const captureKeybinding = (event: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'Tab') return;
+    event.preventDefault();
+    if (event.key === 'Escape') {
+      setDraft({ keyDraft: row.key, isRecording: false });
+      return;
+    }
+    const next = keybindingFromKeyboardEvent(event.nativeEvent, navigator.platform);
+    if (!next) return;
+    setDraft({ keyDraft: next, isRecording: false });
+  };
+
+  return {
+    keyDraft,
+    whenDraft,
+    isRecording,
+    isWhenDraftValid,
+    whenDraftExpression,
+    isDirty,
+    conflictLabels,
+    setDraft,
+    save,
+    captureKeybinding,
+  };
+}
+
+type KeybindingRowEditor = ReturnType<typeof useKeybindingRowEditor>;
+
+interface KeybindingRowActions {
+  allRows: ReadonlyArray<KeybindingRow>;
+  variables: ReadonlyArray<WhenVariableOption>;
+  onSave: (input: UpsertKeybindingInput) => void;
+  onReset: (row: KeybindingRow) => void;
+  onRemove: (row: KeybindingRow) => void;
+}
+
+type KeybindingRowProps = KeybindingRowActions & {
+  row: KeybindingRow;
+};
+
+/** Shortcut pill that turns into a capture input when clicked, plus Save once the draft changes. */
+function KeybindingKeyControl({
+  row,
+  editor,
+  pillClassName,
+}: {
+  row: KeybindingRow;
+  editor: KeybindingRowEditor;
+  pillClassName?: string | undefined;
+}) {
+  const { keyDraft, isRecording, isDirty, isWhenDraftValid, setDraft, save, captureKeybinding } =
+    editor;
+  const showPill = !isRecording && keyDraft === row.key && row.key.length > 0 && !isDirty;
+
+  return (
+    <>
+      {isDirty ? (
+        <Button
+          size="sm"
+          disabled={keyDraft.trim().length === 0 || !isWhenDraftValid}
+          onClick={save}
+        >
+          Save
+        </Button>
+      ) : null}
+      {showPill ? (
+        <button
+          type="button"
+          onClick={() => setDraft({ isRecording: true })}
+          aria-label={`Edit shortcut for ${commandLabel(row.command)}: ${formatShortcutLabel(row.binding.shortcut)}`}
+          className={cn(
+            'inline-flex h-8 cursor-pointer items-center rounded-md border border-transparent px-1.5 outline-none transition-colors hover:border-border/70 hover:bg-accent focus-visible:border-ring sm:h-7',
+            pillClassName,
+          )}
+        >
+          <KeybindingPill value={row.key} />
+        </button>
+      ) : (
+        <SectionInput
+          data-keybinding-capture=""
+          autoFocus={isRecording}
+          aria-label={`Keybinding for ${commandLabel(row.command)}`}
+          value={isRecording ? '' : keyDraft}
+          placeholder={isRecording ? 'Press shortcut' : 'Unassigned'}
+          className="h-8 w-44 font-mono text-[12.5px]"
+          onFocus={() => setDraft({ isRecording: true })}
+          onBlur={() => setDraft({ isRecording: false })}
+          onChange={(event) => setDraft({ keyDraft: event.currentTarget.value })}
+          onKeyDown={captureKeybinding}
+        />
+      )}
+    </>
+  );
+}
+
+/** Quiet inline trigger showing the when clause; opens the expression builder. */
+function WhenClauseControl({
+  label,
+  expression,
+  value,
+  variables,
+  onChange,
+  onValidityChange,
+}: {
+  label: string;
+  expression: string;
+  value: KeybindingWhenNode | undefined;
+  variables: ReadonlyArray<WhenVariableOption>;
+  onChange: (value: KeybindingWhenNode | undefined) => void;
+  onValidityChange: (valid: boolean) => void;
+}) {
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          aria-label={`Edit when clause for ${label}`}
+          className="flex min-w-0 shrink items-center gap-1 rounded-md px-1.5 py-1 text-[12px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+        >
+          <span className="truncate font-mono">{expression || 'Always'}</span>
+          <ChevronDown className="size-3.5 shrink-0 opacity-60" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="start" sideOffset={6} className="w-auto p-3">
+        <WhenExpressionBuilder
+          value={value}
+          variables={variables}
+          onChange={onChange}
+          onValidityChange={onValidityChange}
+        />
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+function KeybindingRowMenu({
+  row,
+  onReset,
+  onRemove,
+}: {
+  row: KeybindingRow;
+  onReset: (row: KeybindingRow) => void;
+  onRemove: (row: KeybindingRow) => void;
+}) {
+  const canReset = row.source === 'Custom' && row.defaultKey !== null;
+  const canRemove = row.source !== 'Default';
+  if (!canReset && !canRemove) return null;
+
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          aria-label={`Actions for ${commandLabel(row.command)}`}
+          className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+        >
+          <Ellipsis className="size-3.5" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="end" className="w-44">
+        {canReset ? (
+          <button
+            type="button"
+            onClick={() => onReset(row)}
+            className="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[13px] text-foreground/85 transition-colors hover:bg-accent hover:text-foreground"
+          >
+            Reset to default
+          </button>
+        ) : null}
+        {canRemove ? (
+          <button
+            type="button"
+            onClick={() => onRemove(row)}
+            className="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[13px] text-destructive transition-colors hover:bg-destructive/10"
+          >
+            Remove
+          </button>
+        ) : null}
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+function KeybindingSourceBadge({ source }: { source: KeybindingRow['source'] }) {
+  if (source === 'Default') return null;
+  return (
+    <span className="rounded-full border border-border/70 px-1.5 py-px text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+      {source}
+    </span>
+  );
+}
+
+function KeybindingRowTitle({ row }: { row: KeybindingRow }) {
+  return (
+    <span className="flex items-center gap-2" title={row.command}>
+      {commandLabel(row.command)}
+      <KeybindingSourceBadge source={row.source} />
+    </span>
+  );
+}
+
+function KeybindingRowWhen({
+  row,
+  editor,
+  variables,
+}: {
+  row: KeybindingRow;
+  editor: KeybindingRowEditor;
+  variables: ReadonlyArray<WhenVariableOption>;
+}) {
+  return (
+    <span className="flex h-6 items-center gap-1.5">
+      <span className="text-xs leading-none text-muted-foreground/70">When</span>
+      <WhenClauseControl
+        label={commandLabel(row.command)}
+        expression={editor.whenDraftExpression}
+        value={editor.whenDraft}
+        variables={variables}
+        onChange={(whenDraft) => editor.setDraft({ whenDraft })}
+        onValidityChange={(isWhenDraftValid) => editor.setDraft({ isWhenDraftValid })}
+      />
+    </span>
+  );
+}
+
+/** Row actions that stay hidden until the row is hovered or holds focus. */
+function KeybindingHoverRowMenu(props: {
+  row: KeybindingRow;
+  onReset: (row: KeybindingRow) => void;
+  onRemove: (row: KeybindingRow) => void;
+}) {
+  return (
+    <span className="flex items-center opacity-0 transition-opacity focus-within:opacity-100 hover:opacity-100 group-hover/row:opacity-100 group-focus-within/row:opacity-100 max-sm:opacity-100">
+      <KeybindingRowMenu {...props} />
+    </span>
+  );
+}
+
+/** One binding as a settings row: pills flush right, actions fading in beside them on hover. */
+function KeybindingSettingsRow(props: KeybindingRowProps) {
+  const { row, allRows, variables, onSave, onReset, onRemove } = props;
+  const editor = useKeybindingRowEditor({ row, allRows, onSave });
+
+  return (
+    <div className="group/row flex items-center gap-3 px-4 py-2.5">
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-[13px] font-medium text-foreground">
+          <KeybindingRowTitle row={row} />
+        </div>
+        <div className="mt-0.5">
+          <KeybindingRowWhen row={row} editor={editor} variables={variables} />
+        </div>
+      </div>
+      <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
+        <KeybindingConflictWarning labels={editor.conflictLabels} />
+        <KeybindingHoverRowMenu row={row} onReset={onReset} onRemove={onRemove} />
+        <KeybindingKeyControl row={row} editor={editor} pillClassName="-mr-1.5" />
+      </div>
+    </div>
+  );
+}
+
+/** Draft state for a binding that does not exist yet. */
+function useNewKeybindingDraft({
+  allRows,
+  onSave,
+}: {
+  allRows: ReadonlyArray<KeybindingRow>;
+  onSave: (input: UpsertKeybindingInput) => void;
+}) {
+  const [commandDraft, setCommandDraft] = useState<MiraKeybindingCommand | ''>('');
+  const [draft, setDraft] = useReducer(keybindingRowDraftReducer, {
+    keyDraft: '',
+    whenDraft: undefined,
+    isRecording: false,
+    isWhenDraftValid: true,
+  });
+  const { keyDraft, whenDraft, isRecording, isWhenDraftValid } = draft;
+  const whenDraftExpression = whenAstToExpression(whenDraft);
+  const conflictLabels = keybindingConflictLabels(allRows, {
+    rowId: 'new',
+    key: keyDraft,
+    when: whenDraftExpression,
+  });
+  const commandLabelText = commandDraft ? commandLabel(commandDraft) : 'new keybinding';
+  const canSave = Boolean(commandDraft) && keyDraft.trim().length > 0 && isWhenDraftValid;
+
+  const save = () => {
+    if (!commandDraft) return;
+    onSave({
+      command: commandDraft,
+      key: keyDraft,
+      ...(whenDraftExpression.trim().length > 0 ? { when: whenDraftExpression } : {}),
+    });
+  };
+
+  const captureKeybinding = (event: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'Tab') return;
+    event.preventDefault();
+    if (event.key === 'Escape') {
+      setDraft({ keyDraft: '', isRecording: false });
+      return;
+    }
+    const next = keybindingFromKeyboardEvent(event.nativeEvent, navigator.platform);
+    if (!next) return;
+    setDraft({ keyDraft: next, isRecording: false });
+  };
+
+  return {
+    commandDraft,
+    setCommandDraft,
+    keyDraft,
+    whenDraft,
+    whenDraftExpression,
+    isRecording,
+    conflictLabels,
+    commandLabelText,
+    canSave,
+    setDraft,
+    save,
+    captureKeybinding,
+  };
+}
+
+type NewKeybindingDraft = ReturnType<typeof useNewKeybindingDraft>;
+
+interface NewKeybindingProps {
+  commandOptions: ReadonlyArray<KeybindingCommandOption>;
+  allRows: ReadonlyArray<KeybindingRow>;
+  variables: ReadonlyArray<WhenVariableOption>;
+  onSave: (input: UpsertKeybindingInput) => void;
+  onCancel: () => void;
+}
+
+function NewKeybindingCommandSelect({
+  draft,
+  commandOptions,
+  className,
+}: {
+  draft: NewKeybindingDraft;
+  commandOptions: ReadonlyArray<KeybindingCommandOption>;
+  className?: string | undefined;
+}) {
+  return (
+    <Select
+      value={draft.commandDraft}
+      onChange={(value) => draft.setCommandDraft(value as MiraKeybindingCommand)}
+      options={commandOptions.map((command) => ({ value: command, label: commandLabel(command) }))}
+      placeholder="Command"
+      className={className}
+    />
+  );
+}
+
+function NewKeybindingKeyInput({
+  draft,
+  autoFocus = false,
+  className,
+}: {
+  draft: NewKeybindingDraft;
+  autoFocus?: boolean;
+  className?: string | undefined;
+}) {
+  return (
+    <SectionInput
+      data-keybinding-capture=""
+      autoFocus={autoFocus}
+      aria-label={`Keybinding for ${draft.commandLabelText}`}
+      value={draft.isRecording ? '' : draft.keyDraft}
+      placeholder={draft.isRecording ? 'Press shortcut' : 'Unassigned'}
+      className={cn('font-mono text-[12.5px]', className)}
+      onFocus={() => draft.setDraft({ isRecording: true })}
+      onBlur={() => draft.setDraft({ isRecording: false })}
+      onChange={(event) => draft.setDraft({ keyDraft: event.currentTarget.value })}
+      onKeyDown={draft.captureKeybinding}
+    />
+  );
+}
+
+function NewKeybindingWhen({
+  draft,
+  variables,
+}: {
+  draft: NewKeybindingDraft;
+  variables: ReadonlyArray<WhenVariableOption>;
+}) {
+  return (
+    <WhenClauseControl
+      label={draft.commandLabelText}
+      expression={draft.whenDraftExpression}
+      value={draft.whenDraft}
+      variables={variables}
+      onChange={(whenDraft) => draft.setDraft({ whenDraft })}
+      onValidityChange={(isWhenDraftValid) => draft.setDraft({ isWhenDraftValid })}
+    />
+  );
+}
+
+/** Add-binding form shaped like the binding rows below it. */
+function NewKeybindingSettingsRow(props: NewKeybindingProps) {
+  const { commandOptions, allRows, variables, onSave, onCancel } = props;
+  const draft = useNewKeybindingDraft({ allRows, onSave });
+
+  return (
+    <div className="bg-muted/15 px-4 py-2.5">
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="text-[13px] font-medium text-foreground">New keybinding</div>
+          <span className="mt-0.5 flex h-6 items-center gap-1.5">
+            <span className="text-xs leading-none text-muted-foreground/70">When</span>
+            <NewKeybindingWhen draft={draft} variables={variables} />
+          </span>
+        </div>
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
+          <NewKeybindingCommandSelect
+            draft={draft}
+            commandOptions={commandOptions}
+            className="h-8 w-56 text-[12.5px]"
+          />
+          <KeybindingConflictWarning labels={draft.conflictLabels} />
+          <NewKeybindingKeyInput draft={draft} className="h-8 w-44" />
+          <Button size="sm" disabled={!draft.canSave} onClick={draft.save}>
+            Save
+          </Button>
+          <IconButton title="Cancel new keybinding" onClick={onCancel}>
+            <X className="size-3.5" />
+          </IconButton>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+interface KeybindingsListProps extends KeybindingRowActions {
+  rows: ReadonlyArray<KeybindingRow>;
+  commandOptions: ReadonlyArray<KeybindingCommandOption>;
+  isAddingBinding: boolean;
+  onCancelAdd: () => void;
+}
+
+/** The add-binding row, one settings row per binding, and the empty state. */
+function KeybindingsList(props: KeybindingsListProps) {
+  const { rows, commandOptions, isAddingBinding, onCancelAdd, ...rowActions } = props;
+  const newProps: NewKeybindingProps = {
+    commandOptions,
+    allRows: rows,
+    variables: rowActions.variables,
+    onSave: rowActions.onSave,
+    onCancel: onCancelAdd,
+  };
+  return (
+    <div className="divide-y divide-border/30">
+      {isAddingBinding ? <NewKeybindingSettingsRow {...newProps} /> : null}
+      {rows.map((row) => (
+        <KeybindingSettingsRow key={row.id} row={row} {...rowActions} />
+      ))}
+      {rows.length === 0 && !isAddingBinding ? (
+        <div className="px-4 py-12 text-center text-sm text-muted-foreground">
+          No keybindings match your search.
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+export function KeybindingsSection() {
+  const keybindings = useKeybindings();
+  const [query, setQuery] = useState('');
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const [isAddingBinding, setIsAddingBinding] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const rows = useMemo(() => buildKeybindingRows(keybindings, query), [keybindings, query]);
+  const commandOptions = useMemo(() => buildKeybindingCommandOptions(keybindings), [keybindings]);
+  const whenVariables = useMemo(() => buildWhenVariableOptions(), []);
+
+  useEffect(() => {
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      const isMod = event.metaKey || event.ctrlKey;
+      if (!isMod || event.altKey || event.key.toLowerCase() !== 'f') return;
+
+      const target = event.target;
+      if (
+        target !== searchInputRef.current &&
+        target instanceof HTMLElement &&
+        (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
+      ) {
+        return;
+      }
+
+      event.preventDefault();
+      setIsSearchOpen(true);
+      requestAnimationFrame(() => {
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
+      });
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
+  const saveKeybinding = (input: UpsertKeybindingInput) => {
+    upsertKeybinding({
+      command: input.command,
+      key: input.key.trim(),
+      ...(input.when?.trim() ? { when: input.when.trim() } : {}),
+      ...(input.replace ? { replace: input.replace } : {}),
+    });
+    setIsAddingBinding(false);
+  };
+
+  const removeRow = (row: KeybindingRow) => {
+    removeKeybinding(rowKeybindingTarget(row));
+  };
+
+  const resetRow = (row: KeybindingRow) => {
+    if (!row.defaultKey) return;
+    // Drop the custom override, then restore the default binding.
+    removeKeybinding(rowKeybindingTarget(row));
+    upsertKeybinding({
+      command: row.command,
+      key: row.defaultKey,
+      ...(row.defaultWhen.trim().length > 0 ? { when: row.defaultWhen } : {}),
+    });
+  };
+
+  const resetAll = () => {
+    for (const command of new Set(rows.map((r) => r.command))) {
+      resetKeybindingCommand(command);
+    }
+  };
+
+  const exportJson = () => {
+    const blob = new Blob([JSON.stringify(getCustomKeybindingRules(), null, 2)], {
+      type: 'application/json',
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'mira-keybindings.json';
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const importJson = (file: File | undefined) => {
+    if (!file) return;
+    setImportError(null);
+    void file.text().then((text) => {
+      const err = importCustomKeybindingRules(text);
+      setImportError(err);
+    });
+  };
+
+  const bindingsCount = (
+    <span className="text-[11px] text-muted-foreground">
+      {rows.length + (isAddingBinding ? 1 : 0)}{' '}
+      {rows.length + (isAddingBinding ? 1 : 0) === 1 ? 'binding' : 'bindings'}
+    </span>
+  );
+
+  return (
+    <div className="flex flex-col gap-2.5">
+      <section className="flex flex-col gap-2.5">
+        <div className="flex min-h-7 items-start justify-between gap-4 px-1">
+          <div className="min-w-0">
+            <h2 className="flex min-h-7 items-center gap-2 text-[13px] font-medium text-muted-foreground">
+              <Keyboard className="size-3.5" />
+              Keybindings
+            </h2>
+            <p className="mt-1 max-w-xl text-[12px] leading-relaxed text-muted-foreground/75">
+              Click a shortcut to re-record it. Bindings save to this browser automatically.
+            </p>
+          </div>
+          <div className="flex min-h-7 shrink-0 items-center gap-1">
+            <ExpandableHeaderSearch
+              query={query}
+              onChange={setQuery}
+              isOpen={isSearchOpen}
+              onOpenChange={setIsSearchOpen}
+              inputRef={searchInputRef}
+              collapsedAccessory={bindingsCount}
+            />
+            <IconButton title="Add keybinding" onClick={() => setIsAddingBinding(true)}>
+              <Plus className="size-3.5" />
+            </IconButton>
+            <IconButton title="Reset all to defaults" onClick={resetAll}>
+              <RotateCcw className="size-3.5" />
+            </IconButton>
+            <IconButton title="Export custom bindings (JSON)" onClick={exportJson}>
+              <Download className="size-3.5" />
+            </IconButton>
+            <IconButton title="Import bindings (JSON)" onClick={() => fileInputRef.current?.click()}>
+              <Upload className="size-3.5" />
+            </IconButton>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="application/json,.json"
+              className="hidden"
+              onChange={(e) => {
+                importJson(e.target.files?.[0]);
+                e.target.value = '';
+              }}
+            />
+          </div>
+        </div>
+
+        <div className="overflow-hidden rounded-xl border border-border/60 bg-card/40">
+          <div className="flex items-center gap-2 border-b border-border/50 px-4 py-2 text-xs leading-normal text-muted-foreground">
+            <TriangleAlert className="size-3.5 shrink-0 text-amber-400/80" aria-hidden />
+            <span>
+              Some shortcuts may be claimed by the browser before Mira sees them (new-tab,
+              new-window and devtools chords can&apos;t be overridden).
+            </span>
+          </div>
+          {importError ? (
+            <div className="flex items-center gap-2 border-b border-destructive/30 bg-destructive/10 px-4 py-2 text-xs text-destructive">
+              <X className="size-3.5 shrink-0" aria-hidden />
+              <span>{importError}</span>
+              <button
+                type="button"
+                onClick={() => setImportError(null)}
+                className="ml-auto flex items-center gap-1 rounded px-1.5 py-0.5 hover:bg-destructive/20"
+              >
+                <Check className="size-3" /> Dismiss
+              </button>
+            </div>
+          ) : null}
+
+          <KeybindingsList
+            rows={rows}
+            allRows={rows}
+            commandOptions={commandOptions}
+            variables={whenVariables}
+            isAddingBinding={isAddingBinding}
+            onCancelAdd={() => setIsAddingBinding(false)}
+            onSave={saveKeybinding}
+            onReset={resetRow}
+            onRemove={removeRow}
+          />
+        </div>
+      </section>
+    </div>
+  );
+}

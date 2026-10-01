@@ -14,6 +14,8 @@ path = "src/main.rs"
 [dependencies]
 mira-core     = { workspace = true }
 mira-config   = { workspace = true }
+mira-engine = { workspace = true }
+mira-acp    = { workspace = true }
 mira-ai       = { workspace = true }
 mira-tools    = { workspace = true }
 mira-memory   = { workspace = true }

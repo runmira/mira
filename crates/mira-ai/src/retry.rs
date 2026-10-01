@@ -235,6 +235,7 @@ mod tests {
             temperature: None,
             max_tokens: None,
             reasoning_effort: None,
+            service_tier: None,
             response_format: None,
         }
     }

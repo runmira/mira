@@ -5,6 +5,31 @@
 //! `anthropic` provider name transparently gets the native Messages
 //! adapter — same shape of inputs, different wire protocol under the
 //! hood.
+//!
+//! ## How provider routing works
+//!
+//! This module is the single source of truth for mapping a user-
+//! supplied provider name to a concrete [`ChatProvider`] implementation.
+//! The dispatch logic lives in [`build_unretried`]:
+//! - `"anthropic"` (case-insensitive) → the native Anthropic Messages
+//!   API adapter (`Anthropic`), which speaks the Messages API directly.
+//! - `"bedrock"` → Amazon Bedrock's Converse API (`Bedrock`), which
+//!   handles SigV4 signing and model-id resolution internally.
+//! - **anything else** → the OpenAI-compatible adapter
+//!   (`OpenAiCompatible`). This covers OpenRouter, Groq, Together,
+//!   local `/v1` shims, and Anthropic's own compat endpoint when the
+//!   user opts in by naming their provider entry something else.
+//!
+//! The returned `Arc<dyn ChatProvider>` allows the harness to swap
+//! providers mid-session without changing any call-site code.
+//!
+//! ## Retry policy
+//!
+//! [`build_chat_provider`] wraps the inner adapter in a [`Retrying`]
+//! layer so transient failures (rate limits, overloads, dropped
+//! connections) are retried rather than ending the turn. The retry
+//! configuration is read from the environment via
+//! [`RetryPolicy::from_env`].
 
 use std::sync::Arc;
 

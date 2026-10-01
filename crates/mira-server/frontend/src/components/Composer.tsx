@@ -4,7 +4,6 @@ import { AnimatePresence, motion } from 'framer-motion';
 import {
   ArrowUp,
   Camera,
-  ChevronDown,
   Circle,
   Cloud,
   Copy,
@@ -28,22 +27,30 @@ import {
   ArrowUp as PhArrowUp,
   Check as PhCheck,
   Lightbulb as PhLightbulb,
-  PencilSimpleLine,
+  PenLine,
   Sparkle,
   Trash,
-} from '@phosphor-icons/react';
-import { createWorktree, getGitStatus, listModels, putCwd, readFile, type GitStatusView, type ModelInfo } from '../api';
-import type { ApprovalScope, AskUserAnswer, AskUserProposal, DiffLine, DiffPreview, EnvironmentInfo, EnvironmentStatus, Goal, Mode, PlanProposal, PlanStep, RateLimitBucket, RateLimitReading, ToolCall, UsageTotals } from '../types';
+} from 'lucide-react';
+import { createWorktree, getGitStatus, putCwd, readFile, type EngineSnapshot, type GitStatusView, type OptionDescriptor } from '../api';
+import { PREF_KEYS, useBoolPref } from '../lib/prefs';
+import type { ApprovalScope, AskUserAnswer, AskUserProposal, DiffLine, DiffPreview, EnvironmentInfo, EnvironmentStatus, Goal, Mode, PlanProposal, PlanStep, RateLimitReading, ToolCall, UsageTotals } from '../types';
+import type { AcpConfigOption, AcpSessionMode, SessionEngine } from '../types';
 import type { AskUserDecision } from './AskUserCard';
+import { ApprovalChoices } from './ApprovalDialog';
+import type { AcpAgentStatus } from '../types';
+import { EnginePicker } from './EnginePicker';
+import { UsageRing, type UsageRingData } from './UsageRing';
+import { agentRequestHeadline, agentRequestOf } from '../lib/agentRequest';
+import { partsNeedingApproval, splitShellCommand } from '../lib/shellParts';
+import { mapPosturesToModes, MIRA_MODE_TO_POSTURE } from '../lib/agentPostures';
 import { infoFor } from './ToolGroup';
-import { costUsd, formatDollars, shortNum } from '../lib/usage';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
-import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandSeparator } from '@/components/ui/command';
 import { FilePicker } from './FilePicker';
 import { customToCommand, filterCommands, groupCommands, originIconSrc, slashState, type PaletteGroup, type PaletteSkill, type SlashCommand } from './commands';
 import type { CommandInfo, Origin } from '../api';
 import { MentionInput, type MentionInputHandle } from './MentionInput';
 import { cn } from '@/lib/utils';
+import { ATTACH_FILE_EVENT } from '@/lib/attachBridge';
 
 const MODES: { value: Mode; label: string; desc: string }[] = [
   { value: 'plan',   label: 'Plan only',       desc: 'Reads and searches. No edits, no commands.' },
@@ -71,9 +78,45 @@ type Props = {
   rateLimit?: RateLimitReading | null;
   onSend: (text: string, images?: ImageData[]) => void;
   onSetMode: (m: Mode) => void;
-  onSetModel: (m: string) => void;
-  /** Reasoning-effort setter. Pass `null` (or "off") to disable. */
-  onSetEffort: (e: string | null) => void;
+  onSetModel: (m: string, instance?: string | null) => void;
+  /** What drives this session, from the server. The picker and the mode
+   *  control render from this alone. */
+  engine?: SessionEngine | null;
+  /** Backend list from `GET /api/engines` — native providers + catalogs. */
+  engines?: EngineSnapshot[] | null;
+  /** Health of every agent, for the picker's Agents rail. */
+  agents?: AcpAgentStatus[] | null;
+  agentsChecking?: boolean;
+  onCheckAgents?: () => void;
+  /** The running agent's config options (its model list included). */
+  agentConfig?: AcpConfigOption[] | null;
+  /** The running agent's other options, projected for rendering. */
+  agentDescriptors?: OptionDescriptor[] | null;
+  /** Hand the chat to a provider (instance may be null for the default). */
+  onPickProvider?: (instance: string | null, model: string) => void;
+  /** Hand the chat to an agent, optionally with a model. */
+  onPickAgent?: (driver: string, model: string | null) => void;
+  /** Open Settings → Agents. */
+  onConfigureAgents?: () => void;
+  sessionId?: string | null;
+  onAgentCompact?: () => void;
+  onAgentFork?: () => void;
+  onAgentReverted?: () => void;
+  /** Pick the agent's mode through Mira's own picker. The pick is confirmed
+   *  in the universal approval dialog (a mode is a grant of standing
+   *  authority), then applied to the agent. */
+  onPickAgentMode?: (m: Mode) => void;
+  /** An external agent drives this session. Mira's own mode picker is then
+   *  dead UI — turns go to the agent, not the harness — so the bar shows the
+   *  agent's posture instead. One mode control, never two side by side. */
+  agentDriving?: boolean;
+  /** Session modes an external agent offers, or null. */
+  onAcpModes?: AcpSessionMode[] | null;
+  /** The agent's active mode id. */
+  onAcpCurrentMode?: string | null;
+  /** Apply one advertised model option (e.g. `reasoning_effort`,
+   *  `service_tier`). The server validates the id. */
+  onSetModelOption: (id: string, value: string) => void;
   onOpenPicker: () => void;
   /** Called after a successful in-composer cwd switch (Composer's own
    *  quick-switch dropdown, not the FolderPicker dialog). `sessionId` is
@@ -112,7 +155,13 @@ type Props = {
   /** Active approval waiting for the user's Y/N decision. When set,
    *  the Composer grows upward to show the approval UI instead of the
    *  text input. */
+  /** Context, limits and spend for the usage ring. */
+  usageRing?: UsageRingData | null;
   pendingApproval?: PendingApproval | null;
+  /** How many approvals are waiting, including the one shown. */
+  pendingApprovalCount?: number;
+  /** Allow every waiting request once. */
+  onAllowAllPending?: () => void;
   /** Active plan proposal waiting for the user to approve/cancel. */
   pendingPlan?: { callId: string; proposal: PlanProposal } | null;
   /** Active ask_user proposal waiting for answers. */
@@ -131,6 +180,8 @@ export type PendingApproval = {
   callId: string;
   call: ToolCall;
   preview: DiffPreview | null;
+  /** Parts of a compound command that need approval (Mira's policy). */
+  needs?: string[];
 };
 
 type Attachment = { path: string; content: string; bytes: number };
@@ -160,18 +211,43 @@ async function readImage(file: File): Promise<ImageData> {
  *  context window. Text files usually clock in well under this. */
 const NATIVE_ATTACH_MAX_BYTES = 256 * 1024;
 
+
 export function Composer({
-  disabled, busy, mode, model, providerName, cwd, usage, rateLimit,
+  disabled, busy, mode, model, providerName, cwd,
   environment, environments, envSwitching, onSwitchEnvironment,
-  onSend, onSetMode, onSetModel, onSetEffort, onOpenPicker, onCwdSwitched, onInterrupt, onNewChat, onOpenSettings, onRunReview, onSetGoal, onClearGoal, onCompact, goal, onRemember, onUndo,
+  onSend, onSetMode, onSetModel, onSetModelOption, onAcpModes, onAcpCurrentMode, onPickAgentMode, agentDriving, onOpenPicker, onCwdSwitched, onInterrupt, onNewChat, onOpenSettings, onRunReview, onSetGoal, onClearGoal, onCompact, goal, onRemember, onUndo,
+  engine, engines, agents, agentsChecking, onCheckAgents, agentConfig, agentDescriptors, onPickProvider, onPickAgent, onConfigureAgents, sessionId, onAgentCompact, onAgentFork, onAgentReverted,
   skills, commands,
-  pendingApproval, pendingPlan, pendingAskUser, onDecide, onPlanReply, onAskUserReply,
+  usageRing, pendingApproval, pendingApprovalCount = 0, onAllowAllPending, pendingPlan, pendingAskUser, onDecide, onPlanReply, onAskUserReply,
 }: Props) {
+  const acpModes_modes = onAcpModes ?? null;
+  const acpCurrentMode = onAcpCurrentMode ?? null;
+  // The agent's posture spectrum expressed as Mira modes, so the one picker
+  // drives either system. Only postures the agent actually has are listed —
+  // offering the full five to an agent with three modes would be a lie.
+  const agentPicker = useMemo(() => {
+    if (!agentDriving || !acpModes_modes || !onPickAgentMode) return null;
+    const mapped = mapPosturesToModes(acpModes_modes, acpCurrentMode);
+    if (mapped.length === 0) return null;
+    const byKey = new Map(mapped.map((o) => [o.posture.key, o]));
+    const modes = (Object.keys(MIRA_MODE_TO_POSTURE) as Mode[]).flatMap((m) => {
+      const opt = byKey.get(MIRA_MODE_TO_POSTURE[m]);
+      return opt ? [{ mode: m as Mode, modeId: opt.modeId }] : [];
+    });
+    const current = mapped.find((o) => o.current);
+    return {
+      modes: MODES.filter((d) => modes.some((x) => x.mode === d.value)),
+      current: (current ? (Object.keys(MIRA_MODE_TO_POSTURE) as Mode[]).find((m) => MIRA_MODE_TO_POSTURE[m] === current.posture.key) : null) ?? null,
+    };
+  }, [agentDriving, acpModes_modes, acpCurrentMode, onPickAgentMode]);
   const [text, setText] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [images, setImages] = useState<ImageData[]>([]);
   const [dragging, setDragging] = useState(false);
   const [preview, setPreview] = useState<string | null>(null);
+  // Send mode (Settings → General → Composer). When on, plain Enter
+  // inserts a newline and only Cmd/Ctrl+Enter sends.
+  const [cmdEnterSend] = useBoolPref(PREF_KEYS.composerCmdEnter, false);
 
   async function addImages(files: File[]) {
     setAttachError(null);
@@ -403,6 +479,20 @@ export function Composer({
     }
   }
 
+  // Out-of-band attachment intake. The whiteboard pane's "Send" produces a
+  // PNG in the right panel, far from this component, and threading an
+  // imperative handle through a component this size isn't worth it. One
+  // event keeps the attachment path — including the binary/image detection
+  // and downscaling above — identical to drag-and-drop and paste.
+  useEffect(() => {
+    function onAttach(e: Event) {
+      const file = (e as CustomEvent<File>).detail;
+      if (file instanceof File) void attachNativeFile(file);
+    }
+    window.addEventListener(ATTACH_FILE_EVENT, onAttach);
+    return () => window.removeEventListener(ATTACH_FILE_EVENT, onAttach);
+  }, []);
+
   function removeAttachment(path: string) {
     setAttachments((prev) => prev.filter((a) => a.path !== path));
   }
@@ -546,6 +636,7 @@ export function Composer({
               )}
               {activePromptKind === 'ask_user' && pendingAskUser && onAskUserReply && (
                 <EmbeddedAskUserCard
+                  asker={engine?.kind === 'agent' ? engine.display_name : 'Mira'}
                   proposal={pendingAskUser.proposal}
                   onSubmit={(answers) => onAskUserReply(pendingAskUser.callId, { cancelled: false, answers })}
                   onCancel={() => onAskUserReply(pendingAskUser.callId, { cancelled: true })}
@@ -554,6 +645,8 @@ export function Composer({
               {activePromptKind === 'approval' && pendingApproval && onDecide && (
                 <EmbeddedApprovalCard
                   approval={pendingApproval}
+                  queued={pendingApprovalCount}
+                  onAllowAll={onAllowAllPending}
                   onDecide={(allow, scope) => onDecide(pendingApproval.callId, allow, scope)}
                 />
               )}
@@ -614,16 +707,26 @@ export function Composer({
                   updateText('');
                   return;
                 }
-                // Shift+Enter inserts a literal newline. Contenteditable
-                // doesn't have a built-in Shift+Enter handler that plays
-                // nicely with our `\n`-based canonical text — `insertText`
-                // with a `\n` is the least-surprise path.
+                // Enter behavior depends on the send mode: by default
+                // Enter sends and Shift+Enter inserts a newline; with
+                // "send with Cmd/Ctrl+Enter" on, plain Enter inserts the
+                // newline and only the mod chord sends.
+                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                  e.preventDefault();
+                  submit();
+                  return;
+                }
                 if (e.key === 'Enter' && e.shiftKey) {
                   e.preventDefault();
                   document.execCommand('insertText', false, '\n');
                   return;
                 }
-                if (e.key === 'Enter') { e.preventDefault(); submit(); }
+                if (e.key === 'Enter' && !cmdEnterSend) { e.preventDefault(); submit(); return; }
+                if (e.key === 'Enter' && cmdEnterSend) {
+                  e.preventDefault();
+                  document.execCommand('insertText', false, '\n');
+                  return;
+                }
               }}
               placeholder={
                 disabled
@@ -649,7 +752,7 @@ export function Composer({
             )}
 
             {slash.mode === 'args' && (
-              <div className="pointer-events-none absolute -top-7 left-0 flex max-w-full items-center gap-1.5 rounded-md border border-border/60 bg-popover px-2 py-1 text-[11.5px] text-muted-foreground shadow-lg">
+              <div className="tooltip pointer-events-none absolute -top-7 left-0">
                 {slash.command.origin && (
                   <>
                     <OriginIcon origin={slash.command.origin} fallback={slash.command.icon} />
@@ -681,20 +784,49 @@ export function Composer({
 
             <SlashButton onClick={() => updateText(text.startsWith('/') || text.startsWith('@') ? text : '/' + text)} />
 
-            <ModelPicker
-              current={model}
-              providerName={providerName ?? null}
-              onPick={onSetModel}
-              onSetEffort={onSetEffort}
+            <EnginePicker
               open={modelPopOpen}
               onOpenChange={setModelPopOpen}
+              engine={engine ?? null}
+              fallbackModel={model}
+              providerName={providerName ?? null}
+              engines={engines}
+              agents={agents}
+              agentsChecking={agentsChecking}
+              onCheckAgents={onCheckAgents}
+              agentConfig={agentConfig}
+              agentDescriptors={agentDescriptors}
+              onPickProvider={(instance, m) => (onPickProvider ? onPickProvider(instance, m) : onSetModel(m, instance))}
+              onPickAgent={(driver, m) => onPickAgent?.(driver, m)}
+              onSetModelOption={onSetModelOption}
+              onConfigureAgents={onConfigureAgents}
+              sessionId={sessionId}
+              onAgentCompact={onAgentCompact}
+              onAgentFork={onAgentFork}
+              onAgentReverted={onAgentReverted}
             />
 
             <ProjectChip cwd={cwd} onClick={onOpenPicker} />
 
             <span className="flex-1" />
 
-            <ModePicker mode={mode} label={modeLabel} onPick={onSetMode} />
+            {agentDriving && agentPicker ? (
+              /* One picker for both systems: it lists the agent's postures
+                 under Mira's names and confirms the pick in the universal
+                 approval dialog. */
+              <ModePicker
+                mode={agentPicker.current ?? 'manual'}
+                label={MODES.find((d) => d.value === agentPicker.current)?.label ?? 'Agent mode'}
+                onPick={(m) => onPickAgentMode?.(m)}
+                modes={agentPicker.modes.length > 0 ? agentPicker.modes : undefined}
+              />
+            ) : !agentDriving ? (
+              <ModePicker mode={mode} label={modeLabel} onPick={onSetMode} />
+            ) : null}
+            {/* The agent's own mode lives here, next to Mira's — not inside
+                the model picker. Changing what the agent may do without
+                asking is a decision, so it opens the universal approval
+                dialog rather than switching silently. */}
 
             {busy ? (
               <button
@@ -711,7 +843,7 @@ export function Composer({
                 type="submit"
                 disabled={disabled || (!text.trim() && attachments.length === 0 && images.length === 0)}
                 className="flex size-8 items-center justify-center rounded-full bg-foreground text-background transition-opacity hover:opacity-90 disabled:opacity-35"
-                title="Send"
+                title={cmdEnterSend ? 'Send (⌘/Ctrl+Enter)' : 'Send (Enter)'}
                 aria-label="Send"
               >
                 <ArrowUp className="size-4" />
@@ -735,7 +867,9 @@ export function Composer({
           onSwitch={onSwitchEnvironment}
         />
         <span className="flex-1" />
-        <UsageReadout usage={usage} model={model} rateLimit={rateLimit ?? null} />
+        {/* Below the composer, not in it: the input row has no room to
+            spare in a narrow layout. */}
+        {usageRing && <UsageRing data={usageRing} />}
         <WorktreeChip cwd={cwd} onCwdSwitched={onCwdSwitched} />
       </div>
 
@@ -891,15 +1025,6 @@ function displayName(cmd: SlashCommand): string {
   const n = cmd.label ?? cmd.name;
   if (!n) return n;
   return n.charAt(0).toUpperCase() + n.slice(1).replace(/-/g, ' ');
-}
-
-/** Small keyboard-key badge used inside model-picker meta rows. */
-function Kbd({ children }: { children: React.ReactNode }) {
-  return (
-    <kbd className="rounded border border-white/10 bg-white/5 px-1 py-0.5 font-mono text-[10px] text-mira-cyan/80">
-      {children}
-    </kbd>
-  );
 }
 
 /* ---------- attach menu (+) ---------- */
@@ -1213,20 +1338,26 @@ function extToLang(path: string): string {
 /* ---------- mode picker (popover) ---------- */
 
 function ModePicker({
-  mode, label, onPick,
-}: { mode: Mode; label: string; onPick: (m: Mode) => void }) {
+  mode, label, onPick, modes, disabled, disabledTitle,
+}: { mode: Mode; label: string; onPick: (m: Mode) => void; modes?: { value: Mode; label: string; desc: string }[]; disabled?: boolean; disabledTitle?: string }) {
+  const listed = modes ?? MODES;
   const [open, setOpen] = useState(false);
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <button
           type="button"
+          disabled={disabled}
+          title={disabled ? disabledTitle : undefined}
           // shrink-0 + whitespace-nowrap prevents this chip from being
           // squeezed when a long branch name pushes the row past the
           // composer width — before, the label would wrap onto two
           // lines ("Ask each time" → "Ask each\ntime") and vertically
           // bloat the whole toolbar.
-          className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-1.5 text-[12.5px] text-muted-foreground hover:bg-mira-elev2 hover:text-foreground transition-colors"
+          className={cn(
+            'inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-1.5 text-[12.5px] text-muted-foreground transition-colors',
+            disabled ? 'cursor-default opacity-80' : 'hover:bg-mira-elev2 hover:text-foreground',
+          )}
         >
           <Circle className="size-3 shrink-0" />
           <span>{label}</span>
@@ -1237,7 +1368,7 @@ function ModePicker({
           Approval
         </div>
         <div className="flex flex-col">
-          {MODES.map((m) => (
+          {listed.map((m) => (
             <button
               key={m.value}
               type="button"
@@ -1258,436 +1389,6 @@ function ModePicker({
   );
 }
 
-/* ---------- model picker (split-pane: Model / Provider / Effort + list) ---------- */
-
-/**
- * Reasoning effort levels — matches OpenAI's `reasoning_effort` field
- * (`minimal` | `low` | `medium` | `high`), plus an `off` state for
- * non-reasoning models. Rendered as a 5-dot horizontal selector.
- *
- * Persisted per model in `localStorage` so switching models remembers
- * the last-used effort for each. Backend plumbing (passing this into
- * `ChatRequest`) is a follow-up — for now the value is UI-only.
- */
-const EFFORTS = ['off', 'minimal', 'low', 'medium', 'high'] as const;
-type Effort = typeof EFFORTS[number];
-
-const EFFORT_KEY = 'mira.model-effort';
-function loadEffort(model: string): Effort {
-  try {
-    const raw = localStorage.getItem(EFFORT_KEY);
-    if (!raw) return 'medium';
-    const map = JSON.parse(raw) as Record<string, Effort>;
-    return map[model] ?? 'medium';
-  } catch { return 'medium'; }
-}
-function saveEffort(model: string, effort: Effort) {
-  try {
-    const raw = localStorage.getItem(EFFORT_KEY);
-    const map = raw ? JSON.parse(raw) : {};
-    map[model] = effort;
-    localStorage.setItem(EFFORT_KEY, JSON.stringify(map));
-  } catch { /* private mode etc. */ }
-}
-function prettyEffort(e: Effort): string {
-  return e === 'off' ? 'Off' : e.charAt(0).toUpperCase() + e.slice(1);
-}
-
-/** Curated shortlist for the "Best for coding" section. Matches the id
- *  substring so it works across providers (OpenRouter's `anthropic/…`,
- *  Groq's `llama-3.3-70b-versatile`, etc.). Order = display order. */
-const CODING_MATCHERS: { label: string; match: (id: string) => boolean }[] = [
-  { label: 'Claude Sonnet',      match: (id) => /claude.*sonnet/i.test(id) },
-  { label: 'Claude Opus',        match: (id) => /claude.*opus/i.test(id) },
-  { label: 'GPT-5',              match: (id) => /gpt-5/i.test(id) },
-  { label: 'GPT-4o',             match: (id) => /gpt-4o(?!-mini)/i.test(id) },
-  { label: 'Gemini 2.5 Pro',     match: (id) => /gemini-2\.5-pro/i.test(id) },
-  { label: 'Gemini 2.5 Flash',   match: (id) => /gemini-2\.5-flash/i.test(id) },
-  { label: 'DeepSeek V3',        match: (id) => /deepseek.*v3/i.test(id) },
-  { label: 'Qwen 3 Coder',       match: (id) => /qwen.*coder/i.test(id) },
-  { label: 'Llama 3.3 70B',      match: (id) => /llama-3\.3-70b/i.test(id) },
-];
-
-function ModelPicker({
-  current, providerName, onPick, onSetEffort, open, onOpenChange,
-}: {
-  current: string;
-  providerName: string | null;
-  onPick: (m: string) => void;
-  onSetEffort: (e: string | null) => void;
-  open: boolean;
-  onOpenChange: (o: boolean) => void;
-}) {
-  const setOpen = onOpenChange;
-  const [models, setModels] = useState<ModelInfo[] | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [query, setQuery] = useState('');
-  const [effort, setEffort] = useState<Effort>(() => loadEffort(current));
-  // Inner popover: opens beside the meta card when the "Model" row is
-  // clicked. Kept separate so the meta card stays open while browsing.
-  const [modelListOpen, setModelListOpen] = useState(false);
-
-  useEffect(() => {
-    // Pre-fetch models when the outer popover opens so the inner list
-    // isn't blank on first hover.
-    if (!open || models !== null) return;
-    listModels()
-      .then((v) => { setModels(v.models); setLoadError(null); })
-      .catch((e) => { setModels([]); setLoadError(String((e as Error).message)); });
-  }, [open, models]);
-
-  useEffect(() => { if (modelListOpen) setQuery(''); }, [modelListOpen]);
-  useEffect(() => {
-    // On model swap, load that model's remembered effort and push it up
-    // so the backend applies it on the next turn (rather than carrying
-    // the previous model's setting).
-    const e = loadEffort(current);
-    setEffort(e);
-    onSetEffort(e === 'off' ? null : e);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [current]);
-  // Close the inner list when the outer closes so state doesn't leak
-  // across popover reopens.
-  useEffect(() => { if (!open) setModelListOpen(false); }, [open]);
-
-  function pickEffort(e: Effort) {
-    setEffort(e);
-    saveEffort(current, e);
-    // "off" tells the backend to omit the field entirely so non-reasoning
-    // providers (Groq, OpenRouter for most models, …) aren't hit with an
-    // unrecognised parameter.
-    onSetEffort(e === 'off' ? null : e);
-  }
-
-  function commit(id: string) {
-    if (id.trim()) {
-      onPick(id.trim());
-      setModelListOpen(false);
-      setOpen(false);
-    }
-  }
-
-  const currentInfo = models?.find((m) => m.id === current) ?? null;
-  // Prefer the actually-configured routing provider — that's who's serving
-  // the call (e.g. OpenRouter). Fall back to vendor extracted from the
-  // model id, then to whatever the API reported.
-  const providerLabel = prettyVendor(providerName || vendorOf(current) || currentInfo?.owned_by || 'other');
-
-  const { suggested, groups } = useMemo(() => {
-    if (!models) return { suggested: [] as ModelInfo[], groups: [] as Group[] };
-    const suggestedIds = new Set<string>();
-    const suggested: ModelInfo[] = [];
-    for (const matcher of CODING_MATCHERS) {
-      const hit = models.find((m) => !suggestedIds.has(m.id) && matcher.match(m.id));
-      if (hit) { suggested.push(hit); suggestedIds.add(hit.id); }
-    }
-    return { suggested, groups: groupModels(models) };
-  }, [models]);
-
-  return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
-        <button
-          type="button"
-          className={cn(
-            // Capsule dropped: the button lives on the composer's own
-            // background now, matching the ChatGPT / Codex "text-only
-            // model chip" pattern. Padding stays so the click target is
-            // comfortable; hover is a subtle text-color shift instead
-            // of a chip-fill.
-            'inline-flex items-center gap-2 rounded-md px-2 py-1.5 text-foreground transition-colors',
-            'hover:text-foreground/85 max-w-[20rem]',
-          )}
-        >
-          <span className={cn('size-2 rounded-full shrink-0', vendorDotClass(vendorOf(current)))} />
-          {/* `leading-none` on both spans normalises the visual baseline —
-           *  without it, a smaller effort label sits slightly higher because
-           *  each span's line-box is centred separately. `shrink-0` on the
-           *  effort guarantees it never gets ellipsised when the model name
-           *  is long; `min-w-0` on the model name lets truncate work. */}
-          <span className="min-w-0 truncate text-[14px] font-semibold leading-none">
-            {prettyLabel(current) || 'model'}
-          </span>
-          <span className="shrink-0 text-[11.5px] font-medium leading-none text-muted-foreground/80">
-            {prettyEffort(effort)}
-          </span>
-          <ChevronDown className="size-3 shrink-0 text-muted-foreground/60" />
-        </button>
-      </PopoverTrigger>
-      <PopoverContent
-        className="w-[15rem] p-1.5 rounded-xl border border-border/60 bg-popover/95 backdrop-blur"
-        align="end"
-        sideOffset={8}
-      >
-        {/* Meta card: Model / Provider / Effort. Model row is itself a
-         *  popover trigger for the actual list, which floats out to the
-         *  right so both stay visible side-by-side. */}
-        <Popover open={modelListOpen} onOpenChange={setModelListOpen}>
-          <PopoverTrigger asChild>
-            <button
-              type="button"
-              className={cn(
-                'group flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors',
-                modelListOpen ? 'bg-accent/60' : 'hover:bg-accent/40',
-              )}
-              onMouseEnter={() => setModelListOpen(true)}
-            >
-              {/* Same left column as MetaRow so Model / Provider / Effort
-               *  labels line up perfectly. Vendor dot lives with the value
-               *  on the right instead of before the label. */}
-              <span className="text-[12.5px] text-foreground/80 w-16 shrink-0">Model</span>
-              <span
-                className="ml-auto flex min-w-0 items-center gap-1.5"
-                title={current}
-              >
-                <span className={cn('size-2 rounded-full shrink-0', vendorDotClass(vendorOf(current)))} />
-                <span className="min-w-0 truncate text-[13px] font-semibold text-foreground">
-                  {prettyLabel(current) || '—'}
-                </span>
-              </span>
-            </button>
-          </PopoverTrigger>
-          <PopoverContent
-            className="w-[26rem] p-0"
-            side="left"
-            align="start"
-            sideOffset={12}
-          >
-            <Command shouldFilter>
-              <CommandInput
-                placeholder={models === null ? 'loading models…' : 'Search models, or type an id…'}
-                value={query}
-                onValueChange={setQuery}
-              />
-              <CommandList className="max-h-[26rem]">
-                {loadError && (
-                  <div className="px-3 py-2 text-[11.5px] text-destructive">{loadError}</div>
-                )}
-                {models === null && !loadError && (
-                  <div className="px-3 py-3 text-xs text-muted-foreground">fetching /v1/models…</div>
-                )}
-
-                {!query.trim() && suggested.length > 0 && (
-                  <CommandGroup heading="Best for coding">
-                    {suggested.map((m) => (
-                      <ModelRow key={`sug-${m.id}`} model={m} current={current} onPick={commit} vendor={vendorClass(vendorOf(m.id))} />
-                    ))}
-                  </CommandGroup>
-                )}
-
-                {groups.length > 0 && groups.map((g) => (
-                  <CommandGroup key={g.name} heading={g.name}>
-                    {g.models.map((m) => (
-                      <ModelRow key={m.id} model={m} current={current} onPick={commit} vendor={g.vendor} />
-                    ))}
-                  </CommandGroup>
-                ))}
-
-                {models && models.length > 0 && query.trim() && (
-                  <>
-                    <CommandSeparator />
-                    <CommandGroup heading="Free text">
-                      <CommandItem value={`__use__${query}`} onSelect={() => commit(query)}>
-                        <span className="text-muted-foreground text-[12.5px]">Use</span>
-                        <code className="ml-1 rounded border border-mira-tool/20 bg-mira-tool/[0.12] px-1.5 py-0.5 text-xs font-mono text-mira-tool">
-                          {query.trim()}
-                        </code>
-                      </CommandItem>
-                    </CommandGroup>
-                  </>
-                )}
-
-                <CommandEmpty>no matches</CommandEmpty>
-              </CommandList>
-              <div className="flex gap-3 border-t border-border px-3 py-1.5 text-[11px] text-muted-foreground">
-                <span><Kbd>↑↓</Kbd> nav</span>
-                <span><Kbd>↵</Kbd> pick</span>
-                <span><Kbd>esc</Kbd> close</span>
-              </div>
-            </Command>
-          </PopoverContent>
-        </Popover>
-
-        <MetaRow label="Provider">
-          <span className="text-[13px] text-foreground/80">{providerLabel}</span>
-        </MetaRow>
-        <MetaRow label="Effort">
-          <EffortDots value={effort} onChange={pickEffort} />
-        </MetaRow>
-      </PopoverContent>
-    </Popover>
-  );
-}
-
-function MetaRow({
-  label, children,
-}: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="flex items-center gap-2 rounded-md px-2 py-1.5">
-      {/* Fixed-width label column keeps Model / Provider / Effort in a
-       *  tight left-aligned stack even when the model name is long. */}
-      <span className="text-[12.5px] text-foreground/80 w-16 shrink-0">{label}</span>
-      <span className="ml-auto min-w-0 flex-1 flex justify-end">{children}</span>
-    </div>
-  );
-}
-
-function EffortDots({ value, onChange }: { value: Effort; onChange: (e: Effort) => void }) {
-  const activeIdx = EFFORTS.indexOf(value);
-  const lastIdx = EFFORTS.length - 1;
-  return (
-    <div
-      className="flex items-center gap-1.5"
-      role="radiogroup"
-      aria-label="Reasoning effort"
-    >
-      {EFFORTS.map((e, i) => {
-        const isActive = i === activeIdx;
-        const isMax = i === lastIdx;
-        return (
-          <button
-            key={e}
-            type="button"
-            role="radio"
-            aria-checked={isActive}
-            aria-label={prettyEffort(e)}
-            onClick={() => onChange(e)}
-            title={prettyEffort(e)}
-            className={cn(
-              'rounded-full transition-all shrink-0',
-              // Active dot: much bigger + solid white — matches Codex.
-              // Inactive dots stay tiny; the "max" slot uses a magenta
-              // accent to hint that dialling this all the way up costs.
-              isActive
-                ? 'size-3 bg-white shadow-[0_0_0_1px_rgba(255,255,255,0.15)]'
-                : isMax
-                  ? 'size-1.5 bg-fuchsia-400/70 hover:bg-fuchsia-400'
-                  : 'size-1.5 bg-muted-foreground/40 hover:bg-muted-foreground/70',
-            )}
-          />
-        );
-      })}
-    </div>
-  );
-}
-
-function ModelRow({
-  model, current, onPick, vendor,
-}: { model: ModelInfo; current: string; onPick: (id: string) => void; vendor: string }) {
-  return (
-    <CommandItem
-      value={`${model.id} ${model.display_name ?? ''} ${model.owned_by ?? ''}`}
-      onSelect={() => onPick(model.id)}
-      className="flex items-center gap-2"
-    >
-      <span className={cn('size-2 rounded-full shrink-0', vendorDotClass(vendor))} />
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-1.5 text-[13.5px] truncate">
-          {model.display_name || prettyLabel(model.id)}
-          {model.id === current && <span className="text-mira-blue text-xs">✓</span>}
-        </div>
-        <div className="text-[10.5px] text-muted-foreground/70 font-mono truncate">{model.id}</div>
-      </div>
-      {model.context_length && (
-        <span className="shrink-0 rounded-full border border-mira-blue/25 bg-mira-blue/[0.09] px-1.5 py-0.5 text-[10.5px] text-mira-blue font-mono">
-          {formatCtx(model.context_length)}
-        </span>
-      )}
-    </CommandItem>
-  );
-}
-
-/* ---------- helpers ---------- */
-
-type Group = { name: string; vendor: string; models: ModelInfo[] };
-
-function groupModels(models: ModelInfo[]): Group[] {
-  const byKey = new Map<string, ModelInfo[]>();
-  for (const m of models) {
-    const key = vendorOf(m.id) || (m.owned_by ?? 'other');
-    const bucket = byKey.get(key);
-    if (bucket) bucket.push(m); else byKey.set(key, [m]);
-  }
-  return [...byKey.entries()]
-    .map(([name, list]) => ({ name: prettyVendor(name), vendor: vendorClass(name), models: list }))
-    .sort((a, b) => b.models.length - a.models.length);
-}
-
-const VENDOR_TOKENS: Record<string, string> = {
-  openai: 'openai', anthropic: 'anthropic', google: 'google', 'google-vertex': 'google',
-  meta: 'meta', 'meta-llama': 'meta', mistralai: 'mistral', mistral: 'mistral',
-  deepseek: 'deepseek', xai: 'xai', qwen: 'qwen', 'nousresearch': 'nous',
-  microsoft: 'microsoft', amazon: 'amazon', cohere: 'cohere', groq: 'groq',
-  perplexity: 'perplexity', moonshotai: 'moonshot',
-};
-
-// Tailwind-friendly vendor dot palette — keep colours inline so no
-// dedicated CSS file is needed. Radial gradients would be nicer; solid is
-// good enough at 8px.
-const VENDOR_BG: Record<string, string> = {
-  openai:    'bg-emerald-500',
-  anthropic: 'bg-orange-500',
-  google:    'bg-blue-500',
-  meta:      'bg-blue-600',
-  mistral:   'bg-orange-600',
-  deepseek:  'bg-indigo-500',
-  xai:       'bg-neutral-200',
-  qwen:      'bg-violet-500',
-  microsoft: 'bg-sky-500',
-  amazon:    'bg-amber-500',
-  cohere:    'bg-rose-400',
-  groq:      'bg-red-500',
-  perplexity:'bg-cyan-500',
-  nous:      'bg-purple-500',
-  moonshot:  'bg-yellow-400',
-  other:     'bg-neutral-500',
-};
-
-function vendorOf(id: string): string {
-  if (!id) return '';
-  const slash = id.indexOf('/');
-  if (slash > 0) return id.slice(0, slash).toLowerCase();
-  return id.split('-')[0].toLowerCase();
-}
-
-function vendorClass(key: string): string {
-  return VENDOR_TOKENS[key.toLowerCase()] ?? 'other';
-}
-
-function vendorDotClass(vendorKey: string): string {
-  const bucket = VENDOR_TOKENS[vendorKey.toLowerCase()] ?? 'other';
-  return VENDOR_BG[bucket] ?? VENDOR_BG.other;
-}
-
-function prettyVendor(key: string): string {
-  const overrides: Record<string, string> = {
-    openai: 'OpenAI', anthropic: 'Anthropic', google: 'Google', xai: 'xAI',
-    meta: 'Meta', 'meta-llama': 'Meta', mistralai: 'Mistral', deepseek: 'DeepSeek',
-    qwen: 'Qwen', alibaba: 'Alibaba', amazon: 'Amazon', cohere: 'Cohere', groq: 'Groq',
-    perplexity: 'Perplexity', microsoft: 'Microsoft', moonshotai: 'Moonshot AI',
-    moonshot: 'Moonshot AI', openrouter: 'OpenRouter', 'open-router': 'OpenRouter',
-    huggingface: 'Hugging Face', 'hugging-face': 'Hugging Face',
-    together: 'Together', togetherai: 'Together', 'together-ai': 'Together',
-    fireworks: 'Fireworks', fireworksai: 'Fireworks', 'fireworks-ai': 'Fireworks',
-    databricks: 'Databricks', nvidia: 'NVIDIA', ollama: 'Ollama', lmstudio: 'LM Studio',
-    other: 'Unknown',
-  };
-  return overrides[key.toLowerCase()] ?? key.charAt(0).toUpperCase() + key.slice(1);
-}
-
-function prettyLabel(id: string): string {
-  if (!id) return '';
-  const slash = id.indexOf('/');
-  const raw = slash > 0 ? id.slice(slash + 1) : id;
-  // Capitalise the first letter without touching the rest — model ids like
-  // `gpt-4o` and `qwen3.8-27b` have meaningful mixed case beyond position 0.
-  return raw.length > 0 ? raw[0].toUpperCase() + raw.slice(1) : raw;
-}
-
-function formatCtx(n: number): string {
-  if (n >= 1000) return `${Math.round(n / 1000)}k`;
-  return String(n);
-}
 
 function basename(p: string): string {
   if (!p) return '';
@@ -1846,87 +1547,6 @@ function GoalChip({ goal, onClear }: { goal: Goal; onClear: () => void }) {
  * doesn't lie by showing "$0.00" before the first turn.
  */
 /** The limit closest to running out, with the share left (0–1). */
-function tightestLimit(r: RateLimitReading | null): { bucket: RateLimitBucket; left: number } | null {
-  if (!r) return null;
-  let best: { bucket: RateLimitBucket; left: number } | null = null;
-  for (const b of Object.values(r.rate_limit)) {
-    if (!b || b.limit == null || b.remaining == null || b.limit <= 0) continue;
-    const left = Math.min(1, Math.max(0, b.remaining / b.limit));
-    if (!best || left < best.left) best = { bucket: b, left };
-  }
-  return best;
-}
-
-function shortSecs(s: number): string {
-  if (s < 60) return `${s}s`;
-  if (s < 3600) return `${Math.ceil(s / 60)}m`;
-  return `${Math.ceil(s / 3600)}h`;
-}
-
-function UsageReadout({
-  usage, model, rateLimit,
-}: {
-  usage: UsageTotals | null;
-  model: string;
-  rateLimit: RateLimitReading | null;
-}) {
-  if (!usage) return null;
-  if (usage.prompt_tokens === 0 && usage.completion_tokens === 0) return null;
-  const cost = costUsd(model, usage);
-  const cached = usage.cached_input_tokens;
-  const tight = tightestLimit(rateLimit);
-  // Shown once the tightest limit is under half; the reset counts from
-  // when the reading arrived.
-  const showRate = tight != null && tight.left < 0.5;
-  const resetIn = tight?.bucket.reset_secs != null && rateLimit
-    ? Math.max(0, tight.bucket.reset_secs - Math.round((Date.now() - rateLimit.at) / 1000))
-    : null;
-  const tooltip = [
-    `Prompt tokens: ${usage.prompt_tokens.toLocaleString()}`,
-    cached > 0 ? `  of which cached: ${cached.toLocaleString()}` : null,
-    `Completion tokens: ${usage.completion_tokens.toLocaleString()}`,
-    `Rounds: ${usage.rounds}`,
-    cost != null ? `Estimated cost: ${formatDollars(cost)}` : 'Unknown model pricing',
-    rateLimit?.summary ? `Rate limit: ${rateLimit.summary}` : null,
-  ]
-    .filter(Boolean)
-    .join('\n');
-
-  return (
-    <div
-      className="inline-flex items-center gap-2 rounded-full border border-border/60 bg-secondary/40 px-2.5 py-1 text-[12px] leading-none"
-      title={tooltip}
-    >
-      <span className="font-mono tabular-nums text-muted-foreground/80">
-        ↑{shortNum(usage.prompt_tokens)}
-        {' '}
-        ↓{shortNum(usage.completion_tokens)}
-      </span>
-      {cost != null && (
-        <>
-          <span className="text-muted-foreground/40">·</span>
-          <span className="font-mono tabular-nums font-semibold text-emerald-400">
-            {formatDollars(cost)}
-          </span>
-        </>
-      )}
-      {showRate && tight && (
-        <>
-          <span className="text-muted-foreground/40">·</span>
-          <span
-            className={cn(
-              'font-mono tabular-nums',
-              tight.left < 0.15 ? 'text-red-500 dark:text-red-400' : 'text-amber-600 dark:text-amber-400',
-            )}
-          >
-            rate {Math.round(tight.left * 100)}%
-            {resetIn != null && resetIn > 0 ? ` ↻${shortSecs(resetIn)}` : ''}
-          </span>
-        </>
-      )}
-    </div>
-  );
-}
 
 /* ---------- environment chip (local ↔ remote environments) ---------- */
 
@@ -2299,7 +1919,7 @@ function EmbeddedPlanCard({
   return (
     <div className="flex flex-col">
       <div className="flex items-center gap-2.5 px-1.5 pt-1 pb-2">
-        <PhLightbulb weight="fill" className="size-3.5 shrink-0 text-mira-blue" />
+        <PhLightbulb fill="currentColor" className="size-3.5 shrink-0 text-mira-blue" />
         <div className="min-w-0 flex-1">
           <div className="text-[10px] font-semibold uppercase tracking-[0.11em] text-muted-foreground/80">
             Proposed plan
@@ -2371,7 +1991,7 @@ function EmbeddedPlanCard({
             )}
           >
             {dirty ? 'Approve with edits' : 'Approve'}
-            <PhArrowRight className="size-3" weight="bold" />
+            <PhArrowRight className="size-3" strokeWidth={2.5} />
           </button>
         </div>
       </div>
@@ -2453,8 +2073,11 @@ function EmbeddedAskUserCard({
   proposal,
   onSubmit,
   onCancel,
+  asker = 'Mira',
 }: {
   proposal: AskUserProposal;
+  /** Who is asking — Mira, or the agent driving this chat. */
+  asker?: string;
   onSubmit: (answers: AskUserAnswer[]) => void;
   onCancel: () => void;
 }) {
@@ -2527,9 +2150,9 @@ function EmbeddedAskUserCard({
   return (
     <div className="flex flex-col">
       <div className="flex items-center gap-2.5 px-1.5 pt-1 pb-2">
-        <Sparkle weight="fill" className="size-3.5 text-mira-blue" />
+        <Sparkle fill="currentColor" className="size-3.5 text-mira-blue" />
         <span className="text-[12.5px] font-semibold tracking-tight text-foreground">
-          Mira needs your input
+          {asker} needs your input
         </span>
         <span className="ml-auto text-[11px] tabular-nums text-muted-foreground">
           {clampedIdx + 1} of {total}
@@ -2575,7 +2198,7 @@ function EmbeddedAskUserCard({
                     active ? 'bg-black' : 'bg-background/60 ring-1 ring-inset ring-border',
                   )}
                 >
-                  {active && multi && <PhCheck className="size-2.5 text-white" weight="bold" />}
+                  {active && multi && <PhCheck className="size-2.5 text-white" strokeWidth={2.5} />}
                   {active && !multi && <span className="size-1.5 rounded-full bg-white" />}
                 </span>
                 <div className="flex min-w-0 flex-1 flex-col gap-0.5">
@@ -2604,14 +2227,14 @@ function EmbeddedAskUserCard({
               onClick={openCustom}
               className="group flex items-center gap-2.5 rounded-xl px-3 py-2 text-left text-[12px] text-muted-foreground transition-colors hover:bg-secondary/40 hover:text-foreground"
             >
-              <PencilSimpleLine className="size-3.5" />
+              <PenLine className="size-3.5" />
               <span>Something else</span>
             </button>
           )}
           {customOpen && (
             <div className="rounded-xl bg-secondary/60 p-2.5">
               <div className="flex items-center gap-1.5 pb-1.5 text-[10px] font-semibold uppercase tracking-[0.11em] text-muted-foreground">
-                <PencilSimpleLine className="size-3" />
+                <PenLine className="size-3" />
                 <span>Free response</span>
                 <button
                   type="button"
@@ -2647,7 +2270,7 @@ function EmbeddedAskUserCard({
             onClick={() => { setDir(-1); setIdx((i) => Math.max(0, i - 1)); }}
             className="inline-flex items-center gap-1 rounded-md px-2.5 py-1.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
           >
-            <PhArrowLeft className="size-3" weight="bold" />
+            <PhArrowLeft className="size-3" strokeWidth={2.5} />
             Back
           </button>
         ) : (
@@ -2672,7 +2295,7 @@ function EmbeddedAskUserCard({
           )}
         >
           {isLast ? 'Send answers' : 'Next'}
-          <PhArrowRight className="size-3" weight="bold" />
+          <PhArrowRight className="size-3" strokeWidth={2.5} />
         </button>
       </div>
     </div>
@@ -2683,25 +2306,56 @@ function EmbeddedAskUserCard({
 function EmbeddedApprovalCard({
   approval,
   onDecide,
+  queued = 1,
+  onAllowAll,
 }: {
   approval: PendingApproval;
   onDecide: (allow: boolean, scope?: ApprovalScope) => void;
+  /** Requests waiting, this one included. */
+  queued?: number;
+  onAllowAll?: () => void;
 }) {
   const { call, preview } = approval;
-  const info = infoFor(call.function.name);
+  // One card for every approval. An external agent's request only differs
+  // in how it is described: its own tool name and input, and why it asks.
+  const agent = useMemo(() => agentRequestOf(call), [call]);
+  const info = infoFor(agent ? agentToolAsMira(agent.tool) : call.function.name);
   const Icon = info.Icon;
   const isDiffTool = call.function.name === 'write_file' || call.function.name === 'edit_file';
   const prettyArgs = useMemo(() => {
+    if (agent) {
+      const headline = agentRequestHeadline(agent);
+      return headline ?? JSON.stringify(agent.input, null, 2);
+    }
     try { return JSON.stringify(JSON.parse(call.function.arguments), null, 2); }
     catch { return call.function.arguments; }
-  }, [call.function.arguments]);
+  }, [call.function.arguments, agent]);
+  // A compound shell command, as the operations it is made of — one long
+  // line hides which part is the one worth a second look.
+  const command = useMemo(() => {
+    if (agent) return agent.tool === 'Bash' && typeof agent.input.command === 'string' ? agent.input.command : null;
+    if (call.function.name !== 'bash') return null;
+    try {
+      const c = JSON.parse(call.function.arguments)?.command;
+      return typeof c === 'string' ? c : null;
+    } catch {
+      return null;
+    }
+  }, [agent, call]);
+  const parts = useMemo(() => (command ? splitShellCommand(command) : []), [command]);
+  // Which parts are the reason for asking: the agent says so in its
+  // reason; for Mira's own commands the server's policy names them.
+  const flagged = useMemo(
+    () => (agent ? partsNeedingApproval(agent.reason) : (approval.needs ?? [])),
+    [agent, approval.needs],
+  );
 
   return (
     <div className="flex flex-col">
       <div className="flex items-center gap-2 px-1.5 pt-1 pb-2 font-mono text-[12.5px]">
         <span className="shrink-0 text-mira-tool"><Icon className="size-3.5" /></span>
         <span className="font-medium text-foreground truncate min-w-0">
-          {info.verbCont}{' '}
+          {agent ? agent.tool : info.verbCont}{' '}
           <span className="font-normal text-muted-foreground">
             {isDiffTool && preview?.path
               ? preview.path.split('/').slice(-2).join('/')
@@ -2714,7 +2368,7 @@ function EmbeddedApprovalCard({
           </span>
         )}
         <span className="ml-auto shrink-0 rounded-full bg-secondary px-2 py-0.5 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">
-          awaiting approval
+          {queued > 1 ? `1 of ${queued} awaiting` : 'awaiting approval'}
         </span>
       </div>
 
@@ -2733,6 +2387,22 @@ function EmbeddedApprovalCard({
               );
             })}
           </div>
+        ) : parts.length > 1 ? (
+          <ol className="m-0 max-h-[22vh] list-none space-y-0.5 overflow-auto rounded-md bg-background/60 px-2 py-1.5 font-mono text-xs">
+            {parts.map((p, i) => {
+              const hot = flagged.some((f) => f.includes(p.text) || p.text.includes(f));
+              return (
+                <li key={i} className="flex items-start gap-2">
+                  <span className="w-4 shrink-0 select-none text-right text-muted-foreground/45">{i + 1}</span>
+                  <span className={cn('min-w-0 flex-1 whitespace-pre-wrap break-all', hot ? 'text-foreground' : 'text-muted-foreground')}>
+                    {p.text}
+                    {p.joiner && <span className="ml-1.5 text-muted-foreground/40">{p.joiner}</span>}
+                  </span>
+                  {hot && <span className="mt-1 size-1.5 shrink-0 rounded-full bg-mira-warn" title="Needs approval" />}
+                </li>
+              );
+            })}
+          </ol>
         ) : (
           <pre className="m-0 max-h-[22vh] overflow-auto whitespace-pre-wrap rounded-md bg-background/60 px-3 py-2 font-mono text-xs text-muted-foreground">
             {prettyArgs}
@@ -2740,33 +2410,49 @@ function EmbeddedApprovalCard({
         )}
       </div>
 
+      {flagged.length > 0 ? (
+        <div className="px-1.5 pt-2 text-[11.5px] text-muted-foreground">
+          <div className="text-foreground/75">
+            {flagged.length === 1 ? 'This part needs approval:' : `These ${flagged.length} parts need approval:`}
+          </div>
+          <ul className="mt-1 max-h-24 space-y-0.5 overflow-auto font-mono text-[11px]">
+            {flagged.map((f, i) => (
+              <li key={i} className="flex gap-1.5">
+                <span className="mt-[5px] size-1.5 shrink-0 rounded-full bg-mira-warn" />
+                <span className="min-w-0 break-all">{f}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : agent?.reason ? (
+        <div className="px-1.5 pt-2 text-[11.5px] text-muted-foreground">
+          <span className="text-foreground/75">Why it asks:</span> {agent.reason}
+        </div>
+      ) : null}
+
       <div className="border-t border-border/30" />
 
-      <div className="flex items-center justify-end gap-1.5 px-1.5 py-2">
-        <button
-          type="button"
-          onClick={() => onDecide(false)}
-          className="rounded-md px-2.5 py-1.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
-          title="Deny (n)"
-        >
-          Deny
-        </button>
-        <button
-          type="button"
-          onClick={() => onDecide(true, 'always')}
-          className="rounded-md px-2.5 py-1.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
-          title="Never ask again"
-        >
-          Always allow
-        </button>
-        <button
-          type="button"
-          onClick={() => onDecide(true, 'once')}
-          className="inline-flex items-center gap-1.5 rounded-full bg-foreground px-3.5 py-1.5 text-[11.5px] font-semibold text-background transition-all hover:brightness-95"
-          title="Allow this one call (y)"
-        >
-          Allow
-        </button>
+      {/* One shared row of decisions. The composer's inline card and the
+          approval modal are the same question asked in two places, and they
+          were rendering their own buttons — which is how "Allow" ends up
+          meaning slightly different things depending on which appeared. */}
+      <div className="px-1.5 py-2">
+        <ApprovalChoices
+          choices={[
+            ...(queued > 1 && onAllowAll
+              ? [{ id: 'all', label: `Allow all ${queued}`, title: 'Allow every waiting request once' }]
+              : []),
+            { id: 'deny', label: 'Deny', title: 'Deny (n)' },
+            { id: 'always', label: 'Always allow', title: 'Never ask again' },
+            { id: 'session', label: 'Allow for this chat', title: 'Stop asking about this until the chat ends' },
+            { id: 'once', label: 'Allow', primary: true, title: 'Allow this one call (y)' },
+          ]}
+          onChoose={(id: string) => {
+            if (id === 'all') onAllowAll?.();
+            else if (id === 'deny') onDecide(false);
+            else onDecide(true, id === 'always' ? 'always' : id === 'session' ? 'session' : 'once');
+          }}
+        />
       </div>
       <div className="px-1.5 pb-1.5 text-right text-[10.5px] text-muted-foreground/60">
         <kbd className="rounded bg-secondary/70 px-1 py-0.5 font-mono text-[10px]">y</kbd> allow ·{' '}
@@ -2811,4 +2497,14 @@ function ProjectChip({ cwd, onClick }: { cwd: string; onClick: () => void }) {
       <span className="truncate">{label}</span>
     </button>
   );
+}
+
+/** An agent's tool name as the Mira tool it corresponds to, for the icon
+ *  and verb. Unknown tools keep their own name. */
+function agentToolAsMira(tool: string): string {
+  const map: Record<string, string> = {
+    Bash: 'bash', Read: 'read_file', Write: 'write_file', Edit: 'edit_file', MultiEdit: 'edit_file',
+    Glob: 'glob', Grep: 'grep', WebFetch: 'web_fetch', WebSearch: 'web_search',
+  };
+  return map[tool] ?? tool;
 }

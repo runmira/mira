@@ -33,10 +33,23 @@ export default {
         popover: {
           DEFAULT: 'hsl(var(--popover))',
           foreground: 'hsl(var(--popover-foreground))',
+          border: 'hsl(var(--popover-border))',
         },
         card: {
           DEFAULT: 'hsl(var(--card))',
           foreground: 'hsl(var(--card-foreground))',
+        },
+        panel: 'hsl(var(--panel))',
+        tooltip: {
+          DEFAULT: 'hsl(var(--tooltip))',
+          foreground: 'hsl(var(--tooltip-foreground))',
+          tag: 'hsl(var(--tooltip-tag))',
+          'tag-foreground': 'hsl(var(--tooltip-tag-foreground))',
+        },
+        // Diff stat colors (`DiffStatLabel` uses these).
+        diff: {
+          addition: '#98c379',
+          deletion: '#e06c75',
         },
         // Mira-specific accents kept as flat values — we reach for these
         // for chat bubbles, code, reasoning blocks, syntax highlighting.

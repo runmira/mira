@@ -11,12 +11,18 @@ import {
   Folder,
   FolderOpen,
   Loader,
+  SquareArrowOutUpRight,
 } from 'lucide-react';
 import hljs from 'highlight.js';
+import { parseDiffFromFile } from '@pierre/diffs';
 import type { DiffLine, DiffPreview } from '../types';
 import { browse } from '../api';
 import { readFile } from '../api';
 import { cn } from '@/lib/utils';
+import { PREF_KEYS, useStringPref } from '@/lib/prefs';
+import { openInEditor } from '@/lib/editors';
+import { useFileIcons } from '@/lib/fileIcons';
+import { StyledDiffCodeView } from './diffs/StyledDiffCodeView';
 
 export type FilePanelTab = {
   id: string;
@@ -101,12 +107,62 @@ const LANG_META: Record<string, LangMeta> = {
   hcl:         { color: '#844fba', Icon: FileCode },
 };
 
+/**
+ * Per-file icon from the Material Icon Theme set. Falls back to the
+ * hand-rolled lucide + colour map for anything the collection doesn't carry,
+ * and to a plain glyph if even that is unknown.
+ */
 function FileTypeIcon({ path, className }: { path: string; className?: string }) {
-  const lang = langFrom(path);
-  const meta = LANG_META[lang];
+  const { fileIcon } = useFileIcons();
+  const dataUri = fileIcon(basename(path));
+
+  if (dataUri) {
+    return (
+      <img
+        src={dataUri}
+        alt=""
+        className={cn('shrink-0', className)}
+        draggable={false}
+      />
+    );
+  }
+
+  const meta = LANG_META[langFrom(path)];
   if (!meta) return <File className={cn('shrink-0', className)} style={{ color: '#4a5568' }} />;
   const { Icon, color } = meta;
   return <Icon className={cn('shrink-0', className)} style={{ color }} />;
+}
+
+/** Last path segment, for icon lookup by file/folder name. */
+function basename(p: string): string {
+  return p.split('/').filter(Boolean).pop() ?? p;
+}
+
+/**
+ * Themed folder icon, or the previous lucide glyph while the icon chunk is
+ * still in flight.
+ */
+function folderIconFor(
+  name: string,
+  open: boolean,
+  lookup: (name: string, open?: boolean) => string | null,
+) {
+  const dataUri = lookup(name, open);
+  if (dataUri) {
+    return (
+      <img
+        src={dataUri}
+        alt=""
+        className="size-[14px] shrink-0"
+        draggable={false}
+      />
+    );
+  }
+  return open ? (
+    <FolderOpen className="size-[14px] shrink-0" style={{ color: '#4da6ff' }} />
+  ) : (
+    <Folder className="size-[14px] shrink-0" style={{ color: '#4da6ff', opacity: 0.7 }} />
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -252,6 +308,8 @@ function DirNode({
     return a.name.localeCompare(b.name);
   });
 
+  const { folderIcon } = useFileIcons();
+
   return (
     <>
       {sorted.map((e) => {
@@ -271,9 +329,7 @@ function DirNode({
                     ? <ChevronDown className="size-3" />
                     : <ChevronRight className="size-3" />}
                 </span>
-                {isOpen
-                  ? <FolderOpen className="size-[14px] shrink-0" style={{ color: '#4da6ff' }} />
-                  : <Folder className="size-[14px] shrink-0" style={{ color: '#4da6ff', opacity: 0.7 }} />}
+                {folderIconFor(basename(e.path), isOpen, folderIcon)}
                 <span className="min-w-0 truncate">{e.name}</span>
               </button>
               {isOpen && (
@@ -403,79 +459,47 @@ function CodeViewer({ content, lang }: { content: string; lang: string }) {
 /* Diff viewer — syntax highlighting preserved, indicator bar on left   */
 /* ------------------------------------------------------------------ */
 
-function DiffViewer({ lines, lang }: { lines: DiffLine[]; lang: string }) {
-  /* Highlight add/ctx lines together (new-file view) and del lines
-   * separately (old-file view) so each gets its own syntax pass. */
-  const { ctxHtml, delHtml } = useMemo(() => {
-    const ctxText = lines.map((l) => (l.tag === 'add' || l.tag === 'ctx' ? l.text : '')).join('\n');
-    const delText = lines.map((l) => (l.tag === 'del' ? l.text : '')).join('\n');
-    return {
-      ctxHtml: highlightLines(ctxText, lang),
-      delHtml: highlightLines(delText, lang),
-    };
-  }, [lines, lang]);
+/* ------------------------------------------------------------------ */
+/* Diff viewer — Pierre CodeView surface                                 */
+/* ------------------------------------------------------------------ */
 
-  let ctxIdx = 0;
-  let delIdx = 0;
-  let lineNum = 0;
+function DiffViewer({ path, lines }: { path: string; lines: DiffLine[] }) {
+  // Diff layout follows Settings → General → Diff.
+  const [diffLayout] = useStringPref(PREF_KEYS.diffLayout, 'unified');
+  /* Reconstruct old/new file contents from the preview lines, then let
+   * Pierre diff them — the same FileDiffMetadata the review drawer renders. */
+  const fileDiff = useMemo(() => {
+    const oldText = lines
+      .map((l) => (l.tag === 'ctx' || l.tag === 'del' ? l.text : null))
+      .filter((t): t is string => t !== null)
+      .join('\n');
+    const newText = lines
+      .map((l) => (l.tag === 'ctx' || l.tag === 'add' ? l.text : null))
+      .filter((t): t is string => t !== null)
+      .join('\n');
+    try {
+      return parseDiffFromFile(
+        { name: path, contents: oldText },
+        { name: path, contents: newText },
+        { context: Infinity },
+      );
+    } catch {
+      return null;
+    }
+  }, [path, lines]);
+
+  if (!fileDiff) {
+    return <div className="p-4 font-mono text-[12px] text-muted-foreground">No diff to show.</div>;
+  }
 
   return (
-    <div className="h-full overflow-auto font-mono text-[12.5px] leading-[1.65]" style={{ background: BG }}>
-      <div className="py-4">
-        {lines.map((line, i) => {
-          if (line.tag === 'hunkgap') {
-            ctxIdx++;
-            delIdx++;
-            return (
-              <div key={i} className="flex items-center" style={{ color: TNG + '80' }}>
-                <div style={{ width: 3, flexShrink: 0 }} />
-                <div className="select-none pr-5 text-right" style={{ minWidth: '3.5rem', paddingLeft: '1rem' }}>···</div>
-                <div className="flex-1 text-center">···</div>
-              </div>
-            );
-          }
-
-          const isAdd = line.tag === 'add';
-          const isDel = line.tag === 'del';
-          if (!isDel) lineNum++;
-
-          /* Bg tint sits UNDER the syntax-highlighted text */
-          const bgColor    = isAdd ? 'rgba(152,195,121,0.22)' : isDel ? 'rgba(224,108,117,0.22)' : 'transparent';
-          /* Thin left bar is the only opaque color indicator */
-          const barColor   = isAdd ? '#98c379' : isDel ? '#e06c75' : 'transparent';
-          const numColor   = isAdd ? '#98c37955' : isDel ? '#e06c7555' : TNG;
-
-          const lineHtml   = isDel ? (delHtml[delIdx++] ?? '') : (ctxHtml[ctxIdx++] ?? '');
-
-          return (
-            <div key={i} className="flex" style={{ background: bgColor }}>
-              {/* 3px VS Code–style left indicator strip */}
-              <div style={{ width: 3, flexShrink: 0, background: barColor }} />
-              {/* Line number */}
-              <div
-                className="shrink-0 select-none pr-5 text-right"
-                style={{ minWidth: '3.5rem', paddingLeft: '1rem', color: numColor }}
-                aria-hidden
-              >
-                {isDel ? '' : lineNum}
-              </div>
-              {/* Syntax-highlighted code — diff tint is behind it */}
-              <pre
-                className="min-w-0 flex-1 pr-8"
-                style={{ background: 'transparent', overflow: 'hidden' }}
-              >
-                <code
-                  className={`hljs${lang !== 'plaintext' ? ` language-${lang}` : ''}`}
-                  style={{ background: 'transparent', padding: 0 }}
-                  // eslint-disable-next-line react/no-danger
-                  dangerouslySetInnerHTML={{ __html: lineHtml || line.text }}
-                />
-              </pre>
-            </div>
-          );
-        })}
-      </div>
-    </div>
+    <StyledDiffCodeView
+      className="h-full min-h-0 overflow-auto"
+      items={[{ id: path, type: 'diff', fileDiff, collapsed: false }]}
+      options={{ diffStyle: diffLayout === 'split' ? 'split' : 'unified' }}
+      renderHeaderFilenameSuffix={() => null}
+      renderHeaderPrefix={() => null}
+    />
   );
 }
 
@@ -492,6 +516,7 @@ type Props = {
 };
 
 export function FilePanelBody({ tab, cwd, onOpenFile }: Props) {
+  const { folderIcon } = useFileIcons();
   const [content, setContent] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -500,11 +525,14 @@ export function FilePanelBody({ tab, cwd, onOpenFile }: Props) {
   // Explorer closed by default.
   const [treeVisible, setTreeVisible] = useState(false);
 
+  // Follow the tab, including a diff handed to a tab that is already open:
+  // re-opening a file from an edit (after it was opened from a read) used
+  // to keep the plain file view, because only a new tab id re-synced.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     setViewPath(tab.path);
     setViewDiff(tab.diff);
-  }, [tab.id]);
+  }, [tab.id, tab.diff]);
 
   useEffect(() => {
     if (viewDiff) {
@@ -548,10 +576,7 @@ export function FilePanelBody({ tab, cwd, onOpenFile }: Props) {
           onClick={() => setTreeVisible((v) => !v)}
           className="shrink-0 rounded p-1 transition-colors"
         >
-          <Folder
-            className="size-3.5"
-            style={{ color: treeVisible ? '#4da6ff' : '#4a5568' }}
-          />
+          {folderIconFor('', treeVisible, folderIcon)}
         </button>
 
         <div className="min-w-0 flex-1 overflow-hidden">
@@ -570,6 +595,18 @@ export function FilePanelBody({ tab, cwd, onOpenFile }: Props) {
             {viewDiff.kind}
           </span>
         ) : null}
+        <button
+          type="button"
+          title="Open in preferred editor (Settings → General)"
+          onClick={() => {
+            openInEditor(viewPath).catch(() => {
+              setLoadError('Could not open in editor — pick one in Settings → General.');
+            });
+          }}
+          className="shrink-0 rounded p-1 text-muted-foreground transition-colors hover:bg-white/10 hover:text-foreground"
+        >
+          <SquareArrowOutUpRight className="size-3.5" />
+        </button>
       </div>
 
       {/* Body */}
@@ -591,9 +628,9 @@ export function FilePanelBody({ tab, cwd, onOpenFile }: Props) {
           </div>
         )}
 
-        <div className="min-w-0 flex-1 overflow-hidden">
+        <div className="min-h-0 min-w-0 flex-1">
           {viewDiff ? (
-            <DiffViewer lines={viewDiff.lines} lang={lang} />
+            <DiffViewer path={viewPath} lines={viewDiff.lines} />
           ) : loading ? (
             <div
               className="flex items-center gap-2 p-4 font-mono text-[12px]"

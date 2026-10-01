@@ -1,22 +1,33 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { IconContext } from '@phosphor-icons/react';
 import App from './App';
 import { AuthGate } from './components/AuthGate';
 import { OnboardingGate } from './components/onboarding/OnboardingGate';
+import { install as installNetLog } from './lib/netLog';
+import { hasHiddenTitleBar } from './lib/desktop';
 import './styles.css';
 
-// Global icon defaults: duotone weight for that two-tone dynamic feel, and
-// `size="1em"` so tailwind size-* classes (which set width/height in CSS)
-// still control the icon size — they override the SVG's own width attr.
+// Must run before the first render so the auth and onboarding gates are
+// themselves in the log — otherwise the pane opens showing an empty list
+// and the first few requests are missing.
+installNetLog();
+
+// Tell the stylesheet the native window is transparent and macOS is
+// painting vibrancy behind it, so it can drop the `body` background that
+// would otherwise cover the material. Has to happen before first paint or
+// the window flashes opaque black.
+if (hasHiddenTitleBar()) {
+  document.documentElement.dataset.miraChrome = 'translucent';
+}
+
+// Lucide icons size via `size` prop or tailwind size-* classes (which set
+// width/height in CSS and override the SVG's own width attr).
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <IconContext.Provider value={{ weight: 'duotone', size: '1em', mirrored: false }}>
-      <AuthGate>
-        <OnboardingGate>
-          <App />
-        </OnboardingGate>
-      </AuthGate>
-    </IconContext.Provider>
+    <AuthGate>
+      <OnboardingGate>
+        <App />
+      </OnboardingGate>
+    </AuthGate>
   </StrictMode>,
 );

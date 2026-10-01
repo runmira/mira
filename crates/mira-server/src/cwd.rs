@@ -79,50 +79,33 @@ pub async fn put_cwd(State(state): State<AppState>, Json(u): Json<CwdUpdate>) ->
         temperature: prev_cfg.temperature,
         max_tokens: prev_cfg.max_tokens,
         reasoning_effort: prev_cfg.reasoning_effort.clone(),
+        service_tier: None,
         response_format: prev_cfg.response_format.clone(),
         compactor_model: prev_cfg.compactor_model.clone(),
         small_model: prev_cfg.small_model.clone(),
+        context_window: prev_cfg.context_window,
     };
     let deps = state.slot_deps();
     let slot = crate::slot::build_slot(path.clone(), cfg, None, &deps).await;
+    // Same conversation, new folder — the agent setup moves with it.
+    // The inherited config starts (blank) on this slot's first prompt,
+    // with the agent's own boundary built from the new cwd at spawn.
+    *slot.acp_launch.lock().await = state.active_slot().await.acp_launch.lock().await.clone();
     let slot_id = slot.id.clone();
     state.insert_slot(slot.clone()).await;
     state.set_active(slot_id.clone()).await;
 
+    info!(cwd = %path.display(), session_id = %slot_id, "cwd changed → new slot");
     // Emit Ready on the new slot's channel so whichever WS is attached
     // (or about to Attach) picks up the fresh session immediately.
-    let sess = slot.session.read().await.clone();
-    let cfg = sess.config().await;
-    let mode = state.policy.lock().await.mode();
-    // Everything, including what compaction summarized (shown behind a
-    // divider); the model itself only sees `history()`.
-    let history = sess.transcript().await;
-    let turns = sess.turns().await;
-    let usage = sess.usage().await;
-    let tasks = sess.tasks().await;
-    let goal = sess.goal().await;
-    let previews = sess.previews().await;
-    let session_id = sess.id.to_string();
-
-    info!(cwd = %path.display(), %session_id, "cwd changed → new slot");
-
-    let _ = slot.events_tx.send(crate::protocol::ServerMsg::Ready {
-        session_id: session_id.clone(),
-        model: cfg.model,
-        mode,
-        cwd: path.display().to_string(),
-        history,
-        turns,
-        usage,
-        tasks,
-        goal,
-        previews,
-    });
+    let _ = slot
+        .events_tx
+        .send(crate::ws::build_ready(&slot, &state).await);
 
     Json(CwdView {
         path: path.display().to_string(),
         home: std::env::var("HOME").ok(),
-        session_id: Some(session_id),
+        session_id: Some(slot_id.to_string()),
     })
     .into_response()
 }

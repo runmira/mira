@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ArrowUp, File as FileIcon, Folder, HardDrive, House } from '@phosphor-icons/react';
+import { ArrowUp, File as FileIcon, Folder, HardDrive, House } from 'lucide-react';
 import { type BrowseView } from '../api';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';

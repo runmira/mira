@@ -1,23 +1,23 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  ArrowSquareOut,
+  SquareArrowOutUpRight,
   ArrowUp,
-  ArrowsOutSimple,
-  CaretDown,
-  CheckCircle,
-  ChatCircle,
-  CircleNotch,
+  Expand,
+  ChevronDown,
+  CircleCheck,
+  MessageCircle,
+  LoaderCircle,
   Clock,
   Code as CodeIcon,
   GitBranch,
   GitCommit,
   GitMerge,
-  MagnifyingGlass,
+  Search,
   Sparkle,
-  UsersThree,
-  WarningCircle,
-  XCircle,
-} from '@phosphor-icons/react';
+  Users,
+  CircleAlert,
+  CircleX,
+} from 'lucide-react';
 import {
   getPullRequest,
   getPullRequestFiles,
@@ -114,7 +114,7 @@ export function PullRequestPanel({
     )}>
       {/* left: list */}
       <div className={cn(
-        'flex min-w-0 min-h-0 flex-col border-r border-border bg-card',
+        'flex min-w-0 min-h-0 flex-col border-r border-border bg-white/[0.03]',
         expanded && 'hidden',
       )}>
         <FilterBar filter={filter} onChange={setFilter} />
@@ -212,7 +212,7 @@ function FilterBar({ filter, onChange }: { filter: Filter; onChange: (f: Filter)
 function SearchInput({ value, onChange }: { value: string; onChange: (v: string) => void }) {
   return (
     <div className="flex items-center gap-2 rounded-md border border-border bg-secondary/40 px-2.5 py-1.5">
-      <MagnifyingGlass className="size-3.5 shrink-0 text-muted-foreground" />
+      <Search className="size-3.5 shrink-0 text-muted-foreground" />
       <input
         value={value}
         onChange={(e) => onChange(e.target.value)}
@@ -326,7 +326,7 @@ function PullRequestRow({
         <span>{timeAgo(pr.updated_at)}</span>
         {pr.comment_count > 0 && (
           <span className="inline-flex items-center gap-0.5">
-            <ChatCircle className="size-3" weight="fill" />
+            <MessageCircle className="size-3" fill="currentColor" />
             {pr.comment_count}
           </span>
         )}
@@ -343,7 +343,7 @@ function PrIcon({ pr }: { pr: PullRequestSummary }) {
       : 'text-emerald-500';
   return (
     <span className="mt-0.5 shrink-0" title={pr.draft ? 'Draft' : pr.state}>
-      <GitBranch className={cn('size-3.5', color)} weight="fill" />
+      <GitBranch className={cn('size-3.5', color)} fill="currentColor" />
     </span>
   );
 }
@@ -400,7 +400,7 @@ function PullRequestDetail({
       <div className="flex-1 min-h-0 overflow-y-auto">
         {loading && (
           <div className="flex items-center gap-2 px-6 py-6 text-[13px] text-muted-foreground">
-            <CircleNotch className="size-3.5 animate-spin text-mira-blue" />
+            <LoaderCircle className="size-3.5 animate-spin text-mira-blue" />
             Loading pull request…
           </div>
         )}
@@ -445,7 +445,7 @@ function DetailHeader({
 }) {
   return (
     <div className="flex h-11 shrink-0 items-center gap-2 border-b border-border/60 px-3">
-      <GitBranch className="size-4 text-emerald-500" weight="fill" />
+      <GitBranch className="size-4 text-emerald-500" fill="currentColor" />
       <div className="inline-flex rounded-full border border-border bg-secondary/60 p-0.5">
         {(['summary', 'code'] as const).map((p) => (
           <button
@@ -469,7 +469,7 @@ function DetailHeader({
             title="Run Mira's two-stage review on this PR's diff. Findings appear in the review panel."
             className="inline-flex items-center gap-1.5 rounded-full border border-mira-blue/40 bg-mira-blue/[0.08] px-3.5 py-1 text-[12.5px] font-medium text-mira-blue transition-colors hover:bg-mira-blue/[0.14]"
           >
-            <Sparkle className="size-3.5" weight="fill" />
+            <Sparkle className="size-3.5" fill="currentColor" />
             Review with Mira
           </button>
         )}
@@ -481,7 +481,7 @@ function DetailHeader({
             title="Open on GitHub"
             className="rounded-full p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
           >
-            <ArrowSquareOut className="size-4" />
+            <SquareArrowOutUpRight className="size-4" />
           </a>
         )}
         {detail && (
@@ -502,7 +502,7 @@ function DetailHeader({
           title={expanded ? 'Show list' : 'Expand'}
           className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
         >
-          <ArrowsOutSimple className="size-4" />
+          <Expand className="size-4" />
         </button>
       </div>
     </div>
@@ -564,7 +564,7 @@ function SummaryPane({
                     rel="noreferrer"
                     className="text-muted-foreground hover:text-foreground"
                   >
-                    <ArrowSquareOut className="size-3.5" />
+                    <SquareArrowOutUpRight className="size-3.5" />
                   </a>
                 )}
               </div>
@@ -598,9 +598,9 @@ function MetadataGrid({ detail }: { detail: PullRequestDetailView }) {
           : 'Ready for review';
   return (
     <div className="mt-5 flex flex-col gap-2 text-[12.5px]">
-      <MetaRow icon={<GitBranch className="size-3.5" weight="fill" />} label="Branch">
+      <MetaRow icon={<GitBranch className="size-3.5" fill="currentColor" />} label="Branch">
         <span className="font-mono">{pr.head_ref}</span>
-        <CaretDown className="size-3 rotate-[-90deg] text-muted-foreground/60" />
+        <ChevronDown className="size-3 rotate-[-90deg] text-muted-foreground/60" />
         <span className="font-mono">{pr.base_ref}</span>
         {pr.additions !== null && (
           <>
@@ -609,7 +609,7 @@ function MetadataGrid({ detail }: { detail: PullRequestDetailView }) {
           </>
         )}
       </MetaRow>
-      <MetaRow icon={<UsersThree className="size-3.5" weight="fill" />} label="Reviewers">
+      <MetaRow icon={<Users className="size-3.5" fill="currentColor" />} label="Reviewers">
         {pr.requested_reviewers.length === 0 && detail.reviews.length === 0 ? (
           <span className="text-muted-foreground/70">None requested</span>
         ) : (
@@ -638,13 +638,13 @@ function MetadataGrid({ detail }: { detail: PullRequestDetailView }) {
           </div>
         )}
       </MetaRow>
-      <MetaRow icon={<ChatCircle className="size-3.5" weight="fill" />} label="Comments">
+      <MetaRow icon={<MessageCircle className="size-3.5" fill="currentColor" />} label="Comments">
         {detail.comments.length === 0 ? 'No comments' : `${detail.comments.length}`}
       </MetaRow>
-      <MetaRow icon={<CheckCircle className="size-3.5" weight="fill" />} label="Checks">
+      <MetaRow icon={<CircleCheck className="size-3.5" fill="currentColor" />} label="Checks">
         <ChecksStatus status={detail.check_status} />
       </MetaRow>
-      <MetaRow icon={<GitCommit className="size-3.5" weight="fill" />} label="Status">
+      <MetaRow icon={<GitCommit className="size-3.5" fill="currentColor" />} label="Status">
         <span
           className={cn(
             'rounded-full border px-2 py-0.5 text-[11.5px]',
@@ -720,18 +720,18 @@ function ChecksStatus({ status }: { status: string | null }) {
 
 function CheckIcon({ status, conclusion }: { status: string; conclusion: string | null }) {
   if (status !== 'completed') {
-    return <CircleNotch className="size-3.5 animate-spin text-amber-400" />;
+    return <LoaderCircle className="size-3.5 animate-spin text-amber-400" />;
   }
   switch (conclusion) {
     case 'success':
-      return <CheckCircle className="size-3.5 text-emerald-400" weight="fill" />;
+      return <CircleCheck className="size-3.5 text-emerald-400" fill="currentColor" />;
     case 'failure':
     case 'timed_out':
     case 'cancelled':
     case 'action_required':
-      return <XCircle className="size-3.5 text-destructive" weight="fill" />;
+      return <CircleX className="size-3.5 text-destructive" fill="currentColor" />;
     default:
-      return <WarningCircle className="size-3.5 text-muted-foreground" weight="fill" />;
+      return <CircleAlert className="size-3.5 text-muted-foreground" fill="currentColor" />;
   }
 }
 
@@ -830,17 +830,17 @@ function FeedRow({ item }: { item: FeedItem }) {
 function TimelineIcon({ kind }: { kind: string }) {
   switch (kind) {
     case 'commit':
-      return <GitCommit className="size-3.5 text-muted-foreground/70" weight="fill" />;
+      return <GitCommit className="size-3.5 text-muted-foreground/70" fill="currentColor" />;
     case 'merged':
-      return <GitMerge className="size-3.5 text-mira-purple" weight="fill" />;
+      return <GitMerge className="size-3.5 text-mira-purple" fill="currentColor" />;
     case 'closed':
-      return <XCircle className="size-3.5 text-destructive" weight="fill" />;
+      return <CircleX className="size-3.5 text-destructive" fill="currentColor" />;
     case 'reopened':
-      return <CheckCircle className="size-3.5 text-emerald-400" weight="fill" />;
+      return <CircleCheck className="size-3.5 text-emerald-400" fill="currentColor" />;
     case 'review_requested':
-      return <UsersThree className="size-3.5 text-muted-foreground/70" weight="fill" />;
+      return <Users className="size-3.5 text-muted-foreground/70" fill="currentColor" />;
     default:
-      return <Clock className="size-3.5 text-muted-foreground/60" weight="fill" />;
+      return <Clock className="size-3.5 text-muted-foreground/60" fill="currentColor" />;
   }
 }
 
@@ -914,7 +914,7 @@ function CommentBox({
               : 'bg-mira-blue text-white hover:opacity-90',
           )}
         >
-          {posting ? <CircleNotch className="size-3.5 animate-spin" /> : <ArrowUp className="size-3.5" />}
+          {posting ? <LoaderCircle className="size-3.5 animate-spin" /> : <ArrowUp className="size-3.5" />}
           Comment
         </button>
       </div>
@@ -1003,7 +1003,7 @@ function ReviewMenu({
             disabled={busy}
             className="inline-flex items-center gap-1.5 rounded-full bg-mira-blue px-3 py-1 text-[12.5px] font-medium text-white hover:opacity-90 disabled:opacity-60"
           >
-            {busy && <CircleNotch className="size-3.5 animate-spin" />}
+            {busy && <LoaderCircle className="size-3.5 animate-spin" />}
             Submit
           </button>
         </div>
@@ -1017,21 +1017,21 @@ function ReviewLabel({ event }: { event: ReviewEvent }) {
     case 'APPROVE':
       return (
         <span className="inline-flex items-center gap-1.5 text-emerald-400">
-          <CheckCircle className="size-3.5" weight="fill" />
+          <CircleCheck className="size-3.5" fill="currentColor" />
           Approve
         </span>
       );
     case 'REQUEST_CHANGES':
       return (
         <span className="inline-flex items-center gap-1.5 text-destructive">
-          <XCircle className="size-3.5" weight="fill" />
+          <CircleX className="size-3.5" fill="currentColor" />
           Request changes
         </span>
       );
     case 'COMMENT':
       return (
         <span className="inline-flex items-center gap-1.5 text-mira-blue">
-          <ChatCircle className="size-3.5" weight="fill" />
+          <MessageCircle className="size-3.5" fill="currentColor" />
           Comment
         </span>
       );
@@ -1065,9 +1065,9 @@ function MergeMenu({
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <button className="inline-flex items-center gap-1 rounded-full border border-mira-purple/40 bg-mira-purple/[0.08] px-3.5 py-1 text-[12.5px] font-medium text-mira-purple transition-colors hover:bg-mira-purple/[0.12]">
-          <GitMerge className="size-3.5" weight="fill" />
+          <GitMerge className="size-3.5" fill="currentColor" />
           Merge
-          <CaretDown className="size-3" />
+          <ChevronDown className="size-3" />
         </button>
       </PopoverTrigger>
       <PopoverContent className="w-56 p-1" align="end">
@@ -1078,7 +1078,7 @@ function MergeMenu({
             disabled={busy !== null}
             className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12.5px] transition-colors hover:bg-accent/60 disabled:opacity-60"
           >
-            {busy === m ? <CircleNotch className="size-3.5 animate-spin" /> : <GitMerge className="size-3.5" weight="fill" />}
+            {busy === m ? <LoaderCircle className="size-3.5 animate-spin" /> : <GitMerge className="size-3.5" fill="currentColor" />}
             <span className="capitalize">{m}</span>
             <span className="ml-auto text-muted-foreground">
               {m === 'merge' ? 'commit' : m === 'squash' ? 'squash & merge' : 'rebase & merge'}
@@ -1110,7 +1110,7 @@ function CodePane({ selection }: { selection: Selection }) {
   if (loading) {
     return (
       <div className="flex items-center gap-2 px-6 py-6 text-[13px] text-muted-foreground">
-        <CircleNotch className="size-3.5 animate-spin text-mira-blue" />
+        <LoaderCircle className="size-3.5 animate-spin text-mira-blue" />
         Loading files…
       </div>
     );
@@ -1132,7 +1132,7 @@ function CodePane({ selection }: { selection: Selection }) {
   return (
     <div className="mx-auto max-w-5xl px-4 py-4">
       <div className="mb-3 flex items-center gap-2 text-[12px] text-muted-foreground">
-        <CodeIcon className="size-4" weight="fill" />
+        <CodeIcon className="size-4" fill="currentColor" />
         <span>{files.length} file{files.length === 1 ? '' : 's'} changed</span>
       </div>
       <div className="flex flex-col gap-3">
@@ -1153,7 +1153,7 @@ function FilePatch({ file }: { file: FileChangeView }) {
         onClick={() => setExpanded((v) => !v)}
         className="flex w-full items-center gap-2 border-b border-border/60 bg-secondary/40 px-3 py-1.5 text-left"
       >
-        <CaretDown
+        <ChevronDown
           className={cn(
             'size-3 text-muted-foreground/70 transition-transform',
             !expanded && '-rotate-90',
@@ -1251,11 +1251,11 @@ function AvatarLike({
 function ReviewStateIcon({ state }: { state: string }) {
   switch (state) {
     case 'APPROVED':
-      return <CheckCircle className="size-3 text-emerald-400" weight="fill" />;
+      return <CircleCheck className="size-3 text-emerald-400" fill="currentColor" />;
     case 'CHANGES_REQUESTED':
-      return <XCircle className="size-3 text-destructive" weight="fill" />;
+      return <CircleX className="size-3 text-destructive" fill="currentColor" />;
     case 'COMMENTED':
-      return <ChatCircle className="size-3 text-mira-blue" weight="fill" />;
+      return <MessageCircle className="size-3 text-mira-blue" fill="currentColor" />;
     default:
       return null;
   }

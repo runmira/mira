@@ -6,19 +6,67 @@
 
 type Unlisten = () => void;
 
+/** The slice of Tauri's `webview` module that the browser pane uses. Kept
+ *  structural rather than pulling in `@tauri-apps/api` — the desktop build
+ *  sets `withGlobalTauri`, so `window.__TAURI__.webview` is already here and
+ *  the npm package isn't in the web build's dependency graph. */
+interface TauriWebviewHandle {
+  setPosition: (x: number, y: number) => Promise<void>;
+  setSize: (width: number, height: number) => Promise<void>;
+  setFocus: () => Promise<void>;
+  setZoom: (factor: number) => Promise<void>;
+  close: () => Promise<void>;
+  eval: (code: string) => Promise<unknown>;
+}
+
+interface TauriWebviewCtor {
+  new (
+    parentLabel: string,
+    label: string,
+    options: Record<string, unknown>,
+  ): TauriWebviewHandle;
+  getAll: () => Promise<{ label: string }[]>;
+}
+
 interface TauriGlobal {
   core: { invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown> };
   event: {
     listen: (event: string, cb: (e: { payload: unknown }) => void) => Promise<Unlisten>;
   };
+  window?: {
+    // The global bundle exposes the `Window` *class*, not an instance, so
+    // `.label` is undefined on it. The parent window's label only comes
+    // back from the async `getCurrent()`.
+    getCurrent?: () => Promise<{ label: string }>;
+  };
+  webview?: { Webview: TauriWebviewCtor };
 }
 
 declare global {
   interface Window {
     __MIRA_DESKTOP__?: boolean;
     __TAURI__?: TauriGlobal;
+    /**
+     * Set by the app's init script when the native window has no title bar
+     * of its own — the app draws its own header, with the system traffic
+     * lights floating over it and vibrancy behind the sidebar.
+     */
+    __MIRA_CHROME__?: { hiddenTitleBar: boolean; translucent: boolean };
   }
 }
+
+/** True when the app is drawing its own header in place of the native macOS
+ *  title bar, so the UI has to reserve room for the traffic lights and can
+ *  let the window's vibrancy show through the sidebar. */
+export function hasHiddenTitleBar(): boolean {
+  if (typeof window === 'undefined') return false;
+  return window.__MIRA_DESKTOP__ === true && window.__MIRA_CHROME__?.hiddenTitleBar === true;
+}
+
+/** Padding that clears the macOS traffic lights, in the same shape the
+ *  traffic lights occupy. The header is also a drag region, so the window
+ *  stays movable with no title bar. */
+export const TRAFFIC_LIGHT_INSET = { top: 28, left: 78 } as const;
 
 /** Where the system browser sends the user after sign-in. Must be listed
  *  in the Supabase project's allowed redirect URLs. */

@@ -1,0 +1,25 @@
+[package]
+name         = "mira-engine"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+description  = "Unified backend vocabulary: engine instances, model selection, postures, snapshots."
+
+[dependencies]
+mira-ai     = { workspace = true }
+mira-acp    = { workspace = true }
+mira-config = { workspace = true }
+mira-policy = { workspace = true }
+
+async-trait = { workspace = true }
+futures     = { workspace = true }
+
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+serde_yaml  = { workspace = true }
+tokio       = { workspace = true }
+tracing     = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

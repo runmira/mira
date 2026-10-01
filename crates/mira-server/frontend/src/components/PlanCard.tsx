@@ -8,7 +8,7 @@ import {
   Lightbulb,
   Plus,
   Trash,
-} from '@phosphor-icons/react';
+} from 'lucide-react';
 import type { PlanProposal, PlanStep } from '../types';
 import { cn } from '@/lib/utils';
 
@@ -86,7 +86,7 @@ export function PlanCard({ proposal, decision, onApprove, onCancel }: Props) {
     <div className="w-full max-w-[90%] overflow-hidden rounded-2xl border border-border/40 bg-card/80 backdrop-blur animate-fade-in">
       {/* Header — lightbulb wordmark + plan title + step count. */}
       <div className="flex items-center gap-2.5 px-4 pt-3.5 pb-3">
-        <Lightbulb weight="fill" className="size-3.5 text-mira-blue" />
+        <Lightbulb fill="currentColor" className="size-3.5 text-mira-blue" />
         <div className="min-w-0 flex-1">
           <div className="text-[10px] font-semibold uppercase tracking-[0.11em] text-muted-foreground/80">
             Proposed plan
@@ -159,7 +159,7 @@ export function PlanCard({ proposal, decision, onApprove, onCancel }: Props) {
               )}
             >
               {dirty ? 'Approve with edits' : 'Approve'}
-              <ArrowRight className="size-3" weight="bold" />
+              <ArrowRight className="size-3" strokeWidth={2.5} />
             </button>
           </div>
         </div>
@@ -256,9 +256,9 @@ function ResolvedPlan({ proposal, decision }: { proposal: PlanProposal; decision
     >
       <div className="flex items-center gap-2 border-b border-border/30 px-3.5 py-2 text-[11.5px] text-muted-foreground">
         {approved ? (
-          <Check className="size-3.5 text-foreground/70" weight="bold" />
+          <Check className="size-3.5 text-foreground/70" strokeWidth={2.5} />
         ) : (
-          <Info className="size-3.5 text-muted-foreground" weight="regular" />
+          <Info className="size-3.5 text-muted-foreground" />
         )}
         <span className="font-semibold text-foreground">
           {approved ? 'Plan approved' : 'Plan cancelled'}

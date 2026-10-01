@@ -1,10 +1,18 @@
 //! Post-hoc session-nickname generation.
 //!
-//! After the first assistant reply lands, we spawn a short model call to pick
-//! a 3–6 word nickname for the session (like Codex's "Set up Swift macOS app
-//! project"). The nickname persists via `Session::set_title`; the next
-//! sidebar refresh picks it up. Runs on the same provider the session uses
-//! so it stays consistent with the user's configured backend.
+//! After a turn lands, we spawn a short model call to pick a nickname for
+//! the session.:
+//! - Title from the **user's messages only** — the assistant's opening
+//!   greeting ("No worries! I'm here and ready…") is generic filler that
+//!   drags every title toward "Respond to greeting" blandness.
+//! - Skip insubstantial openers ("huh?", "hi", "thanks") and wait for a
+//!   message with actual content instead of titling trash forever.
+//! - Prompt for specificity (entity + action/goal), same language as the
+//!   user, 15-40 chars.
+//!
+//! The nickname persists via `Session::set_title`; the next sidebar
+//! refresh picks it up. Runs on the cheap background model so it stays
+//! fast regardless of the session's main model.
 
 use std::sync::Arc;
 
@@ -19,11 +27,12 @@ use crate::state::AppState;
 
 const TITLE_CHAR_CAP: usize = 60;
 
-/// Fire-and-forget: if the session lacks a title and has enough context,
-/// ask the model for one. Broadcasts `SessionTitleUpdated` on success so
-/// connected UIs refresh the sidebar row without waiting for the next
-/// `done`. Silent no-op if the session already has a title or lacks
-/// enough context.
+/// Fire-and-forget: if the session lacks a title and has a substantive
+/// user message, ask the model for one. Broadcasts `SessionTitleUpdated`
+/// on success so connected UIs refresh the sidebar row without waiting
+/// for the next `done`. Silent no-op if the session already has a title
+/// or the conversation is still smalltalk — we'll try again after the
+/// next turn.
 ///
 /// `model` is the cheap model to try; `fallback` (the session's main
 /// model, when different) gets one retry if that call fails.
@@ -39,31 +48,28 @@ pub fn spawn_if_needed(
             return;
         }
         let history = session.transcript().await;
-        let user_msg = history
+        let users: Vec<String> = history
             .iter()
-            .find(|m| m.role == Role::User && !mira_harness::history::is_summary(m))
-            .and_then(|m| m.content.as_deref())
-            .map(|c| mira_harness::history::strip_hook_context(c).to_owned());
-        let assistant_msg = history
-            .iter()
-            .find(|m| {
-                m.role == Role::Assistant
-                    && m.content
-                        .as_deref()
-                        .map(|s| !s.trim().is_empty())
-                        .unwrap_or(false)
+            .filter(|m| m.role == Role::User && !mira_harness::history::is_summary(m))
+            .filter_map(|m| m.content.as_deref())
+            .map(|c| {
+                let stripped = mira_harness::history::strip_hook_context(c);
+                strip_attachments(stripped)
             })
-            .and_then(|m| m.content.clone());
-        let (Some(user), Some(assistant)) = (user_msg, assistant_msg) else {
-            // Not enough context — leave title unset. We'll try again after
-            // the next turn.
+            .filter(|c| is_substantive(c))
+            .take(2)
+            .map(str::to_owned)
+            .collect();
+        if users.is_empty() {
+            // Nothing titlable yet (greetings, "huh?", empty). Leave the
+            // title unset — we'll try again after the next turn.
             return;
-        };
+        }
 
-        let mut generated = generate(&*provider, &model, &user, &assistant).await;
+        let mut generated = generate(&*provider, &model, &users).await;
         if let (Err(e), Some(main)) = (&generated, &fallback) {
             warn!(session = %session.id, error = %e, %model, "title: failed; retrying on the main model");
-            generated = generate(&*provider, main, &user, &assistant).await;
+            generated = generate(&*provider, main, &users).await;
         }
         match generated {
             Ok(title) if !title.is_empty() => {
@@ -90,19 +96,59 @@ pub fn spawn_if_needed(
     });
 }
 
+/// True when a user message carries titlable content: long enough to mean
+/// something and not bare smalltalk. Slash commands count ("/review the
+/// diff" is a perfectly good title seed once the slash is stripped).
+fn is_substantive(text: &str) -> bool {
+    let t = text.trim();
+    if t.chars().count() < 12 {
+        return false;
+    }
+    let lower = t.to_lowercase();
+    const SMALLTALK: &[&str] = &[
+        "hi", "hey", "hello", "yo", "huh", "thanks", "thank you", "thx", "ok",
+        "okay", "yes", "no", "sure", "please", "sorry",
+    ];
+    let bare: String = lower
+        .trim_end_matches(['!', '.', '?', '…'])
+        .trim()
+        .to_owned();
+    !SMALLTALK.contains(&bare.as_str())
+}
+
+/// Strip fenced attachment blobs (`## Attached files` sections) and
+/// `@skill:` mention chips down to plain prose for titling.
+fn strip_attachments(text: &str) -> &str {
+    // Attachment dumps are appended after a recognizable marker; the
+    // human-written part comes first.
+    for marker in ["## Attached files", "## attached files", "<attachments>", "[attachments]"] {
+        if let Some(idx) = text.find(marker) {
+            return text[..idx].trim_end();
+        }
+    }
+    text
+}
+
 pub async fn generate(
     provider: &dyn ChatProvider,
     model: &str,
-    user: &str,
-    assistant: &str,
+    users: &[String],
 ) -> Result<String, String> {
-    let system = "You generate short, specific nicknames for chat sessions. You return ONLY the \
-                  nickname — no punctuation, no quotes, no explanation. 3-6 words. Prefer imperative \
-                  or noun-phrase style like a git commit subject.";
+    let system = "You generate short, descriptive titles for chat sessions so the user can \
+                  find them later in a sidebar list. Return ONLY the title text — no quotes, \
+                  no trailing punctuation, no explanation. Use the SAME language as the user's \
+                  messages. Be specific, not vague: name the key entity (file, component, \
+                  feature, error) plus the action or goal. Aim for 15-40 characters, never \
+                  exceed 60.";
+    let numbered: Vec<String> = users
+        .iter()
+        .take(2)
+        .enumerate()
+        .map(|(i, u)| format!("{}. {}", i + 1, truncate(u, 800)))
+        .collect();
     let user_prompt = format!(
-        "First user message:\n\n{}\n\nFirst assistant reply (first 800 chars):\n\n{}\n\nReturn ONLY the nickname.",
-        truncate(user, 800),
-        truncate(assistant, 800),
+        "User messages:\n\n{}\n\nReturn ONLY the title.",
+        numbered.join("\n")
     );
     let req = ChatRequest {
         model: model.to_owned(),
@@ -118,6 +164,7 @@ pub async fn generate(
         // Title-generation is a short, low-signal task — don't burn thinking
         // tokens on it even if the current session has effort dialled up.
         reasoning_effort: None,
+        service_tier: None,
         response_format: None,
     };
     let mut stream = provider.stream(req).await.map_err(|e| e.to_string())?;
@@ -139,18 +186,28 @@ pub async fn generate(
 fn sanitize(raw: &str) -> String {
     // Take the first non-empty line — models sometimes append explanation
     // despite instructions, and some emit a leading blank/newline before the
-    // real title. Strip surrounding quotes, trailing punctuation, and any
-    // wrapping markdown emphasis.
+    // real title. Strip surrounding quotes, markdown emphasis/heading marks,
+    // a "Title:" prefix, and trailing punctuation.
     let line = raw
         .lines()
         .map(str::trim)
         .find(|l| !l.is_empty())
         .unwrap_or("");
+    let line = line
+        .trim_start_matches(['#'])
+        .trim();
+    let line = line
+        .strip_prefix("Title:")
+        .or_else(|| line.strip_prefix("title:"))
+        .map(str::trim)
+        .unwrap_or(line);
     let stripped: String = line
         .trim_matches(|c: char| c == '"' || c == '\'' || c == '`' || c == '*' || c == '_')
         .trim_end_matches(['.', ',', ':', ';'])
         .trim()
-        .to_string();
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     if stripped.chars().count() > TITLE_CHAR_CAP {
         stripped.chars().take(TITLE_CHAR_CAP).collect()
     } else {
@@ -158,16 +215,27 @@ fn sanitize(raw: &str) -> String {
     }
 }
 
-/// Best-effort title derived from the first user message. Used as a fallback
-/// when the model extractor returns an empty string, so the user gets *some*
-/// nickname instead of a 502.
+/// Best-effort title derived from the first substantive user message.
+/// Used as a fallback when the model extractor returns an empty string,
+/// so the user gets *some* nickname instead of nothing. Leading slash
+/// commands are verbalized ("/review the diff" → "Review the diff").
 pub fn heuristic_from_user_message(user: &str) -> String {
     let first_line = user
         .lines()
         .map(str::trim)
         .find(|l| !l.is_empty())
         .unwrap_or("");
-    let words: Vec<&str> = first_line.split_whitespace().take(6).collect();
+    let without_slash = first_line
+        .strip_prefix('/')
+        .and_then(|rest| {
+            let mut words = rest.split_whitespace();
+            let cmd = words.next().unwrap_or("").replace(['-', '_'], " ");
+            let rest = words.collect::<Vec<_>>().join(" ");
+            let verbal = if rest.is_empty() { cmd } else { format!("{cmd} {rest}") };
+            Some(verbal)
+        })
+        .unwrap_or_else(|| first_line.to_owned());
+    let words: Vec<&str> = without_slash.split_whitespace().take(6).collect();
     let joined = words.join(" ");
     let trimmed = joined.trim_end_matches(['.', ',', ':', ';']);
     let mut chars = trimmed.chars();
@@ -205,7 +273,18 @@ mod tests {
             sanitize("**Fix video aspect ratios**"),
             "Fix video aspect ratios"
         );
-        assert_eq!(sanitize("Respond to greeting"), "Respond to greeting");
+        assert_eq!(sanitize("Fix login redirect loop"), "Fix login redirect loop");
+    }
+
+    #[test]
+    fn sanitize_strips_heading_and_title_prefix() {
+        assert_eq!(sanitize("## Fix login redirect loop"), "Fix login redirect loop");
+        assert_eq!(sanitize("Title: Fix login redirect loop"), "Fix login redirect loop");
+    }
+
+    #[test]
+    fn sanitize_collapses_inner_whitespace() {
+        assert_eq!(sanitize("Fix   login\nredirect loop"), "Fix login");
     }
 
     #[test]
@@ -233,5 +312,24 @@ mod tests {
             "Fix bug in login"
         );
         assert_eq!(heuristic_from_user_message(""), "");
+    }
+
+    #[test]
+    fn heuristic_verbalizes_slash_commands() {
+        assert_eq!(
+            heuristic_from_user_message("/review the diff for race conditions now please"),
+            "Review the diff for race conditions"
+        );
+    }
+
+    #[test]
+    fn substantive_rejects_smalltalk_and_shorts() {
+        assert!(!is_substantive("huh?"));
+        assert!(!is_substantive("hi"));
+        assert!(!is_substantive("thanks!"));
+        assert!(!is_substantive("ok"));
+        assert!(!is_substantive("fix it"));
+        assert!(is_substantive("find memory leaks in the map service"));
+        assert!(is_substantive("/review the diff for race conditions"));
     }
 }

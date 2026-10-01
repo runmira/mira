@@ -92,6 +92,7 @@ pub async fn consolidate_bullets(
         temperature: Some(0.0),
         max_tokens: Some(CONSOLIDATE_MAX_TOKENS),
         reasoning_effort: None,
+        service_tier: None,
         response_format: None,
     };
 

@@ -1,5 +1,15 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Download } from 'lucide-react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import {
+  ArrowDownLeft,
+  ArrowUpRight,
+  CalendarDays,
+  ChartColumn,
+  ChevronRight,
+  Coins,
+  Download,
+  Info,
+  MessagesSquare,
+} from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { costUsd, formatDollars, shortNum } from '../lib/usage';
 
@@ -88,6 +98,42 @@ function downloadCsv(rows: Row[]) {
   URL.revokeObjectURL(a.href);
 }
 
+/* ---------- accent wheel ---------- */
+
+/**
+ * Stable accent per breakdown row / session avatar: hash the key into a
+ * Tokyo-night-friendly hue. Every class is a hard-coded literal —
+ * template-interpolated classes never reach Tailwind's JIT scanner, so
+ * `` `bg-${hue}-500/15` `` would silently render unstyled.
+ */
+const ACCENTS = {
+  blue:    { dot: 'bg-blue-400',         bar: 'from-blue-400/90 to-blue-400/25',       chipBg: 'bg-blue-500/15',    chipText: 'text-blue-300' },
+  violet:  { dot: 'bg-violet-400',       bar: 'from-violet-400/90 to-violet-400/25',   chipBg: 'bg-violet-500/15',  chipText: 'text-violet-300' },
+  cyan:    { dot: 'bg-cyan-400',         bar: 'from-cyan-400/90 to-cyan-400/25',       chipBg: 'bg-cyan-500/15',    chipText: 'text-cyan-300' },
+  emerald: { dot: 'bg-emerald-400',      bar: 'from-emerald-400/90 to-emerald-400/25', chipBg: 'bg-emerald-500/15', chipText: 'text-emerald-300' },
+  amber:   { dot: 'bg-amber-400',        bar: 'from-amber-400/90 to-amber-400/25',     chipBg: 'bg-amber-500/15',   chipText: 'text-amber-300' },
+  pink:    { dot: 'bg-pink-400',         bar: 'from-pink-400/90 to-pink-400/25',       chipBg: 'bg-pink-500/15',    chipText: 'text-pink-300' },
+  orange:  { dot: 'bg-orange-400',       bar: 'from-orange-400/90 to-orange-400/25',   chipBg: 'bg-orange-500/15',  chipText: 'text-orange-300' },
+  red:     { dot: 'bg-red-400',          bar: 'from-red-400/90 to-red-400/25',         chipBg: 'bg-red-500/15',     chipText: 'text-red-300' },
+  teal:    { dot: 'bg-teal-400',         bar: 'from-teal-400/90 to-teal-400/25',       chipBg: 'bg-teal-500/15',    chipText: 'text-teal-300' },
+  indigo:  { dot: 'bg-indigo-400',       bar: 'from-indigo-400/90 to-indigo-400/25',   chipBg: 'bg-indigo-500/15',  chipText: 'text-indigo-300' },
+} as const;
+
+const WHEEL = ['blue', 'violet', 'cyan', 'emerald', 'amber', 'pink', 'orange', 'red', 'teal', 'indigo'] as const;
+
+type AccentKey = (typeof WHEEL)[number];
+type Accent = (typeof ACCENTS)[AccentKey];
+
+function accentFor(seed: string): Accent {
+  let h = 5381;
+  for (let i = 0; i < seed.length; i++) {
+    h = (h * 33) ^ seed.charCodeAt(i);
+  }
+  return ACCENTS[WHEEL[Math.abs(h) % WHEEL.length]];
+}
+
+/* ---------- section ---------- */
+
 export function UsageSection() {
   const [days, setDays] = useState<(typeof RANGES)[number]>(30);
   const [data, setData] = useState<{ since: string; rows: Row[] } | null>(null);
@@ -121,13 +167,16 @@ export function UsageSection() {
   const sessions = useMemo(() => new Set(rows.map((r) => r.session_id)).size, [rows]);
   // Tokens-only when nothing in range can be priced.
   const effectiveMetric = total && total.cost === 0 ? 'tokens' : metric;
+  // The hero leads with spend; when nothing in range has a known price,
+  // lead with total tokens instead so the number never reads as "$0".
+  const heroIsCost = !!total && (total.cost > 0 || !total.unpriced);
 
   return (
-    <div className="flex flex-col gap-6">
-      <div className="flex flex-wrap items-center gap-3">
+    <div className="flex flex-col gap-5">
+      <div className="flex flex-wrap items-end gap-3">
         <div>
-          <h2 className="text-[15px] font-semibold">Usage</h2>
-          <p className="text-[12.5px] text-muted-foreground">Tokens and cost across every session. Days are in UTC.</p>
+          <h2 className="text-[18px] font-semibold tracking-tight">Usage</h2>
+          <p className="mt-0.5 text-[12.5px] text-muted-foreground">Tokens and cost across every session. Days are in UTC.</p>
         </div>
         <div className="ml-auto flex items-center gap-2">
           <Segmented
@@ -139,32 +188,88 @@ export function UsageSection() {
             type="button"
             onClick={() => downloadCsv(rows)}
             disabled={rows.length === 0}
-            className="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-[12px] text-muted-foreground hover:text-foreground disabled:opacity-40"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-border/70 bg-background/40 px-2.5 py-1.5 text-[12px] font-medium text-muted-foreground transition-colors hover:bg-secondary/50 hover:text-foreground disabled:opacity-40"
           >
             <Download className="size-3.5" strokeWidth={1.75} /> CSV
           </button>
         </div>
       </div>
 
-      {error && <div className="text-[12.5px] text-destructive">{error}</div>}
-      {!data && !error && <div className="h-40 animate-pulse rounded-lg bg-secondary/40" />}
+      {error && (
+        <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12.5px] text-destructive">
+          {error}
+        </div>
+      )}
+      {!data && !error && (
+        <div className="flex flex-col gap-4">
+          <div className="h-32 animate-pulse rounded-2xl bg-secondary/30" />
+          <div className="h-52 animate-pulse rounded-xl bg-secondary/20" />
+        </div>
+      )}
       {data && rows.length === 0 && (
-        <div className="rounded-lg border border-border py-12 text-center text-[13px] text-muted-foreground">
-          No usage in the last {days} days.
+        <div className="flex flex-col items-center gap-3 rounded-2xl border border-dashed border-border/60 bg-secondary/20 px-4 py-14 text-center">
+          <div className="inline-flex size-11 items-center justify-center rounded-full bg-mira-blue/10 text-mira-blue">
+            <ChartColumn className="size-5" strokeWidth={1.75} />
+          </div>
+          <div>
+            <div className="text-[13.5px] font-semibold text-foreground">No usage yet</div>
+            <div className="mt-1 text-[12.5px] text-muted-foreground">
+              Nothing was spent in the last {days} days. Start a chat and it will show up here.
+            </div>
+          </div>
         </div>
       )}
 
       {data && total && (
         <>
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <Tile label="Cost" value={costLabel(total)} note={total.unpriced ? 'some models unpriced' : undefined} />
-            <Tile label="Input tokens" value={shortNum(total.input)} />
-            <Tile label="Output tokens" value={shortNum(total.output)} />
-            <Tile label="Sessions" value={String(sessions)} />
+          {/* Hero: the one number people open this page for, plus the
+              secondary stats tucked to the right so the tiles don't
+              repeat as four identical grey boxes. */}
+          <div className="relative overflow-hidden rounded-2xl border border-mira-blue/20 bg-mira-elev1/70 px-5 py-5">
+            <div aria-hidden className="pointer-events-none absolute -right-10 -top-16 size-48 rounded-full bg-mira-blue/25 blur-3xl" />
+            <div aria-hidden className="pointer-events-none absolute -bottom-20 left-1/3 size-44 rounded-full bg-mira-purple/15 blur-3xl" />
+            <div className="relative flex flex-wrap items-end justify-between gap-x-8 gap-y-5">
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                  <Coins className="size-3.5 text-mira-blue" strokeWidth={1.75} />
+                  {heroIsCost ? 'Total spend' : 'Total tokens'}
+                  <span className="normal-case tracking-normal text-muted-foreground/60">· last {days} days</span>
+                </div>
+                <div className="mt-2 text-[32px] font-semibold leading-none tracking-tight tabular-nums text-foreground">
+                  {heroIsCost ? costLabel(total) : shortNum(total.input + total.output)}
+                </div>
+                <div className="mt-1.5 text-[11.5px] text-muted-foreground">
+                  {heroIsCost
+                    ? total.unpriced ? 'some models unpriced — see footnote' : 'across all models and projects'
+                    : 'no priced models in this range'}
+                </div>
+              </div>
+              <div className="flex items-stretch">
+                <HeroStat
+                  icon={<ArrowDownLeft className="size-4 text-mira-cyan" strokeWidth={1.75} />}
+                  label="Input"
+                  value={shortNum(total.input)}
+                />
+                <HeroStat
+                  icon={<ArrowUpRight className="size-4 text-mira-user" strokeWidth={1.75} />}
+                  label="Output"
+                  value={shortNum(total.output)}
+                  divider
+                />
+                <HeroStat
+                  icon={<MessagesSquare className="size-4 text-mira-purple" strokeWidth={1.75} />}
+                  label="Sessions"
+                  value={String(sessions)}
+                  divider
+                />
+              </div>
+            </div>
           </div>
 
-          <div className="rounded-lg border border-border p-4">
-            <div className="mb-3 flex items-center">
+          {/* Daily chart */}
+          <Card>
+            <div className="flex flex-wrap items-center gap-2 border-b border-border/50 px-4 py-2.5">
+              <CalendarDays className="size-3.5 text-muted-foreground" strokeWidth={1.75} />
               <span className="text-[12.5px] font-medium">
                 {effectiveMetric === 'cost' ? 'Cost per day' : 'Tokens per day'}
               </span>
@@ -178,60 +283,105 @@ export function UsageSection() {
                 </div>
               )}
             </div>
-            <DailyBars days={daysBetween(data.since, days)} byDay={byDay} metric={effectiveMetric} />
-          </div>
+            <div className="px-3 py-3">
+              <DailyBars days={daysBetween(data.since, days)} byDay={byDay} metric={effectiveMetric} />
+            </div>
+          </Card>
 
-          <div className="grid gap-4 lg:grid-cols-2">
-            <Breakdown
-              title="By model"
-              rows={byModel.map(([m, a]) => ({ key: m, label: m.split('/').pop() || m, title: m, a }))}
-            />
-            <Breakdown
-              title="By project"
-              rows={byProject.map(([p, a]) => ({ key: p, label: basename(p), title: p, a }))}
-            />
-          </div>
+          {/* Breakdowns — full-width bar lists: share bars read better
+              and truncate far less than two side-by-side tables. */}
+          <Breakdown
+            title="By model"
+            rows={byModel.map(([m, a]) => ({ key: m, label: m.split('/').pop() || m, title: m, a }))}
+          />
+          <Breakdown
+            title="By project"
+            rows={byProject.map(([p, a]) => ({ key: p, label: basename(p), title: p, a }))}
+          />
 
-          <div className="rounded-lg border border-border">
-            <div className="border-b border-border px-4 py-2.5 text-[12.5px] font-medium">Top sessions</div>
-            <table className="w-full table-fixed text-[12.5px]">
-              <colgroup>
-                <col />
-                <col className="w-32" />
-                <col className="w-20" />
-                <col className="w-24" />
-              </colgroup>
-              <tbody>
-                {bySession.map((s) => (
-                  <tr key={s.id} className="border-b border-border/60 last:border-0 hover:bg-secondary/40">
-                    <td className="max-w-0 px-4 py-2">
-                      <button
-                        type="button"
-                        onClick={() => window.dispatchEvent(new CustomEvent('mira:open-session', { detail: s.id }))}
-                        className="block w-full truncate text-left hover:underline"
-                        title="Open session"
-                      >
-                        {s.title || 'Untitled'}
-                      </button>
-                    </td>
-                    <td className="px-2 py-2 text-muted-foreground">{basename(s.cwd)}</td>
-                    <td className="px-2 py-2 text-right tabular-nums text-muted-foreground">
-                      {shortNum(s.a.input + s.a.output)}
-                    </td>
-                    <td className="px-4 py-2 text-right tabular-nums">{costLabel(s.a)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          {/* Top sessions */}
+          <Card>
+            <div className="flex items-center gap-2 border-b border-border/50 px-4 py-2.5">
+              <span className="text-[12.5px] font-medium">Top sessions</span>
+              <span className="text-[11px] text-muted-foreground">· click to open</span>
+            </div>
+            <div className="flex flex-col p-1.5">
+              {bySession.map((s) => {
+                const label = s.title || 'Untitled';
+                const accent = accentFor(s.cwd);
+                const initial = (label.match(/[a-zA-Z0-9]/)?.[0] ?? '?').toUpperCase();
+                return (
+                  <button
+                    key={s.id}
+                    type="button"
+                    onClick={() => window.dispatchEvent(new CustomEvent('mira:open-session', { detail: s.id }))}
+                    className="group flex items-center gap-3 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-secondary/40 focus:outline-none focus-visible:ring-1 focus-visible:ring-mira-blue"
+                    title="Open session"
+                  >
+                    <span
+                      className={cn(
+                        'inline-flex size-8 shrink-0 items-center justify-center rounded-lg text-[13px] font-semibold',
+                        accent.chipBg,
+                        accent.chipText,
+                      )}
+                    >
+                      {initial}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[13px] font-medium text-foreground">{label}</span>
+                      <span className="mt-0.5 block truncate text-[11.5px] text-muted-foreground">
+                        {basename(s.cwd)} · {shortNum(s.a.input + s.a.output)} tokens
+                      </span>
+                    </span>
+                    <span className="shrink-0 text-right text-[12.5px] tabular-nums text-foreground">
+                      {costLabel(s.a)}
+                    </span>
+                    <ChevronRight
+                      className="size-3.5 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-70"
+                      strokeWidth={1.75}
+                    />
+                  </button>
+                );
+              })}
+            </div>
+          </Card>
+
           {total.unpriced && (
-            <p className="text-[11.5px] text-muted-foreground">
-              — means a model has no known price: its tokens are counted, but not costed. “+” marks a cost that
-              leaves some unpriced tokens out.
+            <p className="flex items-start gap-1.5 text-[11.5px] text-muted-foreground">
+              <Info className="mt-0.5 size-3.5 shrink-0" strokeWidth={1.75} />
+              <span>
+                — means a model has no known price: its tokens are counted, but not costed. “+” marks a cost that
+                leaves some unpriced tokens out.
+              </span>
             </p>
           )}
         </>
       )}
+    </div>
+  );
+}
+
+/* ---------- pieces ---------- */
+
+function Card({ children }: { children: ReactNode }) {
+  return <div className="overflow-hidden rounded-xl border border-border/60 bg-mira-elev1/50">{children}</div>;
+}
+
+function HeroStat({
+  icon, label, value, divider,
+}: {
+  icon: ReactNode;
+  label: string;
+  value: string;
+  divider?: boolean;
+}) {
+  return (
+    <div className={cn('px-5 first:pl-0', divider && 'border-l border-border/50')}>
+      <div className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+        {icon}
+        {label}
+      </div>
+      <div className="mt-1.5 text-[16px] font-semibold leading-none tabular-nums text-foreground">{value}</div>
     </div>
   );
 }
@@ -246,15 +396,17 @@ function Segmented({
   onChange: (v: string) => void;
 }) {
   return (
-    <div className="inline-flex rounded-md border border-border p-0.5">
+    <div className="inline-flex items-center rounded-full border border-border/70 bg-secondary/40 p-0.5">
       {options.map((o) => (
         <button
           key={o.value}
           type="button"
           onClick={() => onChange(o.value)}
           className={cn(
-            'rounded px-2 py-0.5 text-[12px]',
-            o.value === value ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:text-foreground',
+            'rounded-full px-2.5 py-0.5 text-[12px] font-medium transition-colors',
+            o.value === value
+              ? 'bg-mira-elev2 text-foreground shadow-sm ring-1 ring-white/5'
+              : 'text-muted-foreground hover:text-foreground',
           )}
         >
           {o.label}
@@ -264,16 +416,12 @@ function Segmented({
   );
 }
 
-function Tile({ label, value, note }: { label: string; value: string; note?: string }) {
-  return (
-    <div className="rounded-lg border border-border px-4 py-3">
-      <div className="text-[11.5px] text-muted-foreground">{label}</div>
-      <div className="mt-0.5 text-[20px] font-semibold tabular-nums">{value}</div>
-      {note && <div className="text-[11px] text-muted-foreground">{note}</div>}
-    </div>
-  );
-}
-
+/**
+ * Breakdown as a bar list: one row per model/project, a share bar under
+ * the name, input/output inline and cost right-aligned. Share is by cost
+ * when anything in the card is priced, by total tokens otherwise — a
+ * mixed metric would silently rank unpriced models as zero.
+ */
 function Breakdown({
   title,
   rows,
@@ -281,36 +429,49 @@ function Breakdown({
   title: string;
   rows: { key: string; label: string; title?: string; a: Agg }[];
 }) {
+  const byCost = rows.some((r) => r.a.cost > 0);
+  const share = (a: Agg): number => (byCost ? a.cost : a.input + a.output);
+  const max = Math.max(...rows.map((r) => share(r.a)), 0) || 1;
+
   return (
-    <div className="rounded-lg border border-border">
-      <div className="border-b border-border px-4 py-2.5 text-[12.5px] font-medium">{title}</div>
-      <table className="w-full table-fixed text-[12.5px]">
-        <colgroup>
-          <col />
-          <col className="w-16" />
-          <col className="w-16" />
-          <col className="w-20" />
-        </colgroup>
-        <thead>
-          <tr className="text-[11px] text-muted-foreground">
-            <th className="px-4 py-1.5 text-left font-normal">Name</th>
-            <th className="px-2 py-1.5 text-right font-normal">Input</th>
-            <th className="px-2 py-1.5 text-right font-normal">Output</th>
-            <th className="px-4 py-1.5 text-right font-normal">Cost</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r) => (
-            <tr key={r.key} className="border-t border-border/60">
-              <td className="max-w-0 truncate px-4 py-1.5 font-mono text-[12px]" title={r.title ?? r.label}>{r.label}</td>
-              <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground">{shortNum(r.a.input)}</td>
-              <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground">{shortNum(r.a.output)}</td>
-              <td className="px-4 py-1.5 text-right tabular-nums">{costLabel(r.a)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+    <Card>
+      <div className="flex items-center gap-2 border-b border-border/50 px-4 py-2.5">
+        <span className="text-[12.5px] font-medium">{title}</span>
+        <span className="text-[11px] text-muted-foreground">· by {byCost ? 'cost' : 'tokens'}</span>
+      </div>
+      <div className="flex flex-col divide-y divide-border/30 px-2 py-1.5">
+        {rows.map((r) => {
+          const accent = accentFor(r.key);
+          const s = share(r.a);
+          // 2% floor only for rows that actually have a nonzero share —
+          // zero (unpriced) rows render an empty track instead of a
+          // sliver that would read as a tiny cost.
+          const pct = s > 0 ? Math.max(2, Math.round((s / max) * 100)) : 0;
+          return (
+            <div key={r.key} className="flex items-center gap-3 px-2.5 py-2" title={r.title ?? r.label}>
+              <span className={cn('size-2 shrink-0 rounded-full', accent.dot)} />
+              <div className="min-w-0 flex-1">
+                <div className="flex items-baseline justify-between gap-3">
+                  <span className="truncate font-mono text-[12.5px] text-foreground">{r.label}</span>
+                  <span className="shrink-0 text-[12px] tabular-nums text-muted-foreground">{costLabel(r.a)}</span>
+                </div>
+                <div className="mt-1.5 flex items-center gap-2.5">
+                  <div className="h-1.5 w-full max-w-56 overflow-hidden rounded-full bg-secondary/50">
+                    <div
+                      className={cn('h-full rounded-full bg-gradient-to-r', accent.bar)}
+                      style={{ width: `${pct}%` }}
+                    />
+                  </div>
+                  <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground/80">
+                    {shortNum(r.a.input)} in · {shortNum(r.a.output)} out
+                  </span>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </Card>
   );
 }
 
@@ -346,11 +507,21 @@ function DailyBars({
   return (
     <div className="relative">
       <svg viewBox={`0 0 ${W} ${H}`} className="w-full" role="img" aria-label={`${metric} per day`}>
+        <defs>
+          <linearGradient id="mira-usage-bar" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor={BAR} stopOpacity={0.95} />
+            <stop offset="100%" stopColor={BAR} stopOpacity={0.30} />
+          </linearGradient>
+        </defs>
         {ticks.map((t) => {
           const y = 8 + plotH - (t / max) * plotH;
           return (
             <g key={t}>
-              <line x1={padL} x2={W} y1={y} y2={y} stroke="currentColor" className="text-border" strokeWidth={1} />
+              <line
+                x1={padL} x2={W} y1={y} y2={y}
+                stroke="currentColor" className="text-border" strokeWidth={1}
+                strokeDasharray={t === 0 ? undefined : '3 4'} opacity={t === 0 ? 1 : 0.6}
+              />
               <text x={padL - 6} y={y + 3} textAnchor="end" className="fill-muted-foreground" fontSize={10}>
                 {t === 0 ? '0' : fmt(t)}
               </text>
@@ -369,7 +540,7 @@ function DailyBars({
               {v > 0 && (
                 <path
                   d={`M${x},${8 + plotH} V${y + Math.min(4, h)} Q${x},${y} ${x + Math.min(4, barW / 2)},${y} H${x + barW - Math.min(4, barW / 2)} Q${x + barW},${y} ${x + barW},${y + Math.min(4, h)} V${8 + plotH} Z`}
-                  fill={BAR}
+                  fill="url(#mira-usage-bar)"
                   opacity={hover == null || hover === i ? 1 : 0.45}
                 />
               )}
@@ -388,17 +559,17 @@ function DailyBars({
         const leftPct = ((padL + hover * step + step / 2) / W) * 100;
         return (
           <div
-            className="pointer-events-none absolute top-0 z-10 -translate-x-1/2 whitespace-nowrap rounded-md border border-border bg-popover px-2.5 py-1.5 text-[11.5px] shadow-lg"
+            className="tooltip tooltip-stack pointer-events-none absolute top-0 z-10 -translate-x-1/2"
             style={{ left: `${Math.min(88, Math.max(12, leftPct))}%` }}
           >
             <div className="font-medium">{d}</div>
             {a ? (
               <>
-                <div className="text-muted-foreground">{shortNum(a.input)} in · {shortNum(a.output)} out</div>
-                <div>{costLabel(a)}</div>
+                <div className="mt-0.5 text-muted-foreground">{shortNum(a.input)} in · {shortNum(a.output)} out</div>
+                <div className="mt-0.5">{costLabel(a)}</div>
               </>
             ) : (
-              <div className="text-muted-foreground">No usage</div>
+              <div className="mt-0.5 text-muted-foreground">No usage</div>
             )}
           </div>
         );

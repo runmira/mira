@@ -22,6 +22,7 @@
 
 pub mod anthropic;
 pub mod bedrock;
+pub mod capabilities;
 pub mod event;
 pub mod factory;
 pub mod null;

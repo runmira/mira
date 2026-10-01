@@ -176,6 +176,9 @@ mod tests {
             tasks: vec![],
             goal: None,
             previews: Default::default(),
+            archived_at: None,
+            agent: None,
+            pinned: false,
         };
         let rows = rows_for(&rec, "2000-01-01");
         let sum = |f: fn(&UsageRow) -> u64| rows.iter().map(f).sum::<u64>();

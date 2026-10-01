@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
+  Archive,
+  ArchiveRestore,
   ArrowLeft,
   ChevronDown,
   ChevronRight,
@@ -11,10 +13,13 @@ import {
   Loader,
   Pencil,
   PenLine,
+  Pin,
+  PinOff,
   Puzzle,
   Sparkles,
   Timer,
   Trash2,
+  X,
 } from 'lucide-react';
 import {
   deleteSession,
@@ -22,19 +27,23 @@ import {
   loadSession,
   regenerateSessionTitle,
   renameSession,
+  setSessionFlags,
 } from '../api';
 import type { BackgroundMode, SessionSummary } from '../types';
 import type { WsStatus } from '../ws';
 import { parseSentAttachments } from './Composer';
 import { costUsd, formatDollars } from '../lib/usage';
-import miraLogo from '../assets/mira-logo.png';
 import { SETTINGS_SECTIONS, type SettingsSectionId } from './Settings';
+
 import { UserCard } from './UserCard';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
+import { hasHiddenTitleBar, TRAFFIC_LIGHT_INSET } from '@/lib/desktop';
+import { useFileIcons } from '@/lib/fileIcons';
+import { AgentIcon, ModelIcon } from './AgentIcon';
 
 /** Primary view rendered in the main pane. Sidebar nav items switch the
  *  active view; the App owns the state and hides the chat composer /
@@ -106,18 +115,99 @@ export function Sidebar({
   onSettingsSectionChange,
   onExitSettings,
 }: Props) {
+  const hiddenTitleBar = hasHiddenTitleBar();
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(() => loadCollapsed());
   const [showMore, setShowMore] = useState<Set<string>>(() => new Set());
   const [renaming, setRenaming] = useState<SessionSummary | null>(null);
+  // Pin/archive/bulk actions bump this so the list refetches without
+  // waiting for the App to change `refreshKey`.
+  const [localVersion, setLocalVersion] = useState(0);
+  // Archived view — fetched lazily on first expand, then kept fresh.
+  const [showArchived, setShowArchived] = useState(false);
+  const [archived, setArchived] = useState<SessionSummary[] | null>(null);
+  // Bulk-select mode: clicking rows toggles checkboxes instead of
+  // opening sessions; a floating bar offers archive/delete/cancel.
+  const [selecting, setSelecting] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [confirmBulkDelete, setConfirmBulkDelete] = useState(false);
 
   useEffect(() => {
-    // Fetch all sessions across every folder — grouped in-memory below.
+    // Fetch all non-archived sessions across every folder — grouped
+    // in-memory below. The server excludes archived ones here; they come
+    // through the separate archived fetch when the user opens that view.
     listSessions({ all: true })
       .then((s) => { setSessions(s); setError(null); })
       .catch((e) => setError(String(e.message ?? e)));
-  }, [refreshKey]);
+  }, [refreshKey, localVersion]);
+
+  useEffect(() => {
+    if (!showArchived) return;
+    listSessions({ all: true, archived: true })
+      .then((s) => { setArchived(s); setError(null); })
+      .catch((e) => setError(String(e.message ?? e)));
+  }, [showArchived, refreshKey, localVersion]);
+
+  const refresh = () => setLocalVersion((n) => n + 1);
+
+  /** Flip one session's pin/archive flag and refresh. Errors surface in
+   *  the same slot as fetch errors. */
+  async function flagSession(id: string, flags: { pinned?: boolean; archived?: boolean }) {
+    try {
+      await setSessionFlags(id, flags);
+      setError(null);
+    } catch (e) {
+      setError(String((e as Error).message));
+    }
+    refresh();
+  }
+
+  function toggleSelectMode() {
+    setSelecting((v) => !v);
+    setSelected(new Set());
+  }
+
+  function toggleSelected(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+
+  async function bulkArchive() {
+    setBulkBusy(true);
+    try {
+      await Promise.all([...selected].map((id) => setSessionFlags(id, { archived: true })));
+      setError(null);
+    } catch (e) {
+      setError(String((e as Error).message));
+    }
+    setBulkBusy(false);
+    setSelected(new Set());
+    setSelecting(false);
+    refresh();
+  }
+
+  /** Confirm happens in the dialog (`confirmBulkDelete`) — deleting is
+   *  irreversible, so bulk delete never fires straight from the bar. */
+  async function bulkDelete() {
+    setBulkBusy(true);
+    try {
+      await Promise.all([...selected].map((id) => deleteSession(id)));
+      setError(null);
+      // Optimistic drop, mirroring removeSession.
+      setSessions((prev) => prev.filter((s) => !selected.has(s.id)));
+    } catch (e) {
+      setError(String((e as Error).message));
+    }
+    setBulkBusy(false);
+    setSelected(new Set());
+    setSelecting(false);
+    refresh();
+  }
 
   const groups = useMemo(() => groupByCwd(sessions, cwd), [sessions, cwd]);
 
@@ -208,18 +298,66 @@ export function Sidebar({
 
   return (
     <>
-    <aside className="flex h-full min-w-0 flex-col border-r border-border bg-card">
-      <div className="flex items-center justify-between px-3 pt-3.5 pb-2">
-        <div className="flex items-center gap-1.5">
-          <img
-            src={miraLogo}
-            alt="Mira"
-            className="size-5 rounded-full object-contain"
-            draggable={false}
-          />
-          <span className="text-[15px] font-semibold tracking-tight">Mira</span>
-        </div>
+    <aside
+      className={cn(
+        'flex h-full min-w-0 flex-col',
+        // On the desktop build the window is transparent and macOS paints
+        // vibrancy behind it, so the sidebar contributes *no* fill of its
+        // own — the OS material is the sidebar background. An earlier pass
+        // laid a dark tint over the vibrancy to keep text readable, which
+        // defeated the point: the material got multiplied down to near-black
+        // and read as another flat dark panel. Contrast comes from macOS
+        // darkening the material in dark appearance, not from us.
+        hiddenTitleBar ? 'bg-transparent' : 'bg-panel',
+      )}
+    >
+      {/* When the native title bar is hidden, this row *is* the title bar:
+          it sits in the strip beside the traffic lights, carries the
+          wordmark, and is the window's drag region. Otherwise it's a normal
+          padded header. */}
+      <div
+        data-tauri-drag-region
+        className={cn(
+          'flex items-center justify-between px-3',
+          hiddenTitleBar
+            ? 'shrink-0'
+            : 'pb-2 pt-3.5',
+        )}
+        style={
+          hiddenTitleBar
+            ? {
+                // Beside the traffic lights, not below them.
+                height: TRAFFIC_LIGHT_INSET.top + 8,
+                paddingLeft: TRAFFIC_LIGHT_INSET.left,
+              }
+            : undefined
+        }
+      >
+        {/* No wordmark: the sidebar's own nav labels identify the app, and
+            a title here just crowds the traffic lights. The row stays as
+            the drag region and as the inset that keeps the lights clear. */}
       </div>
+
+      {activeView !== 'settings' && (
+        <div className="px-3 pb-2">
+          {/* A raised control sitting *on* the vibrancy, so it needs enough
+              body to read as a surface: a translucent fill, a backdrop blur
+              to keep the wallpaper from muddying the label, and a hairline.
+              The selected half is near-opaque so the active tab is
+              unambiguous without relying on colour alone. */}
+          <div className="grid grid-cols-2 gap-0.5 rounded-full border border-border/80 bg-black/25 p-0.5 backdrop-blur-md">
+            <span className="rounded-full bg-foreground/90 px-3.5 py-1 text-center text-[12.5px] font-medium text-background">
+              Chat
+            </span>
+            <span
+              title="Not implemented yet"
+              className="cursor-not-allowed rounded-full px-3.5 py-1 text-center text-[12.5px] text-foreground/45"
+            >
+              Work
+            </span>
+          </div>
+        </div>
+      )}
 
       {activeView === 'settings' ? (
         // Settings mode — the sidebar becomes the section picker. The
@@ -227,7 +365,8 @@ export function Sidebar({
         // they were on before entering settings; the rest of the app
         // (projects, folder chip, status footer) is hidden to keep the
         // context single-purpose while they're configuring things.
-        <div className="flex-1 overflow-y-auto px-3 pb-2 pt-1">
+        <div className="min-h-0 flex-1">
+        <div className="h-full overflow-y-auto px-3 pb-2 pt-1">
           <button
             type="button"
             onClick={() => onExitSettings?.()}
@@ -249,10 +388,10 @@ export function Sidebar({
                   type="button"
                   onClick={() => onSettingsSectionChange?.(s.id)}
                   className={cn(
-                    'flex items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-[13.5px] transition-colors',
+                    'flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[13.5px] transition-colors',
                     active
-                      ? 'bg-accent text-foreground'
-                      : 'text-foreground/80 hover:bg-accent/60 hover:text-foreground',
+                      ? 'bg-white/[0.1] text-foreground'
+                      : 'text-foreground/80 hover:bg-white/[0.05] hover:text-foreground',
                   )}
                 >
                   <Icon className={cn('size-4 shrink-0', active ? 'text-mira-blue' : 'text-muted-foreground')} />
@@ -262,8 +401,10 @@ export function Sidebar({
             })}
           </nav>
         </div>
+        </div>
       ) : (
-      <div className="flex-1 overflow-y-auto px-1.5 pb-2">
+      <div className="min-h-0 flex-1">
+      <div className="h-full overflow-y-auto px-1.5 pb-2">
         <nav className="flex flex-col gap-0.5 px-0.5">
           <NavItem icon={<PenLine className="size-3.5" />} onClick={onNewChat}>
             New thread
@@ -291,10 +432,57 @@ export function Sidebar({
           </NavItem>
         </nav>
 
-        <div className="mt-4 flex flex-col gap-0.5 px-0.5">
-          <div className="px-2.5 py-1 text-[11.5px] font-semibold uppercase tracking-wider text-muted-foreground/80">
-            Projects
+        <div className="mt-4 flex flex-col gap-1 px-0.5">
+          <div className="flex items-center justify-between px-2.5 py-1">
+            <div className="text-[11.5px] font-semibold uppercase tracking-wider text-muted-foreground/80">
+              Projects
+            </div>
+            {!selecting && groups.length > 0 && (
+              <button
+                type="button"
+                onClick={toggleSelectMode}
+                className="text-[11.5px] font-medium text-muted-foreground/80 transition-colors hover:text-foreground"
+              >
+                Select
+              </button>
+            )}
           </div>
+
+          {selecting && (
+            <div className="sticky top-0 z-10 flex items-center gap-1 rounded-lg border border-border/70 bg-mira-elev1/95 px-2.5 py-1.5 shadow-sm backdrop-blur">
+              <span className="text-[12px] font-medium text-foreground">
+                {selected.size} selected
+              </span>
+              <div className="ml-auto flex items-center gap-0.5">
+                <button
+                  type="button"
+                  onClick={() => void bulkArchive()}
+                  disabled={bulkBusy || selected.size === 0}
+                  className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[12px] text-foreground/85 transition-colors hover:bg-white/[0.05] hover:text-foreground disabled:opacity-40"
+                >
+                  <Archive className="size-3.5" /> Archive
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setConfirmBulkDelete(true)}
+                  disabled={bulkBusy || selected.size === 0}
+                  className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[12px] text-red-400/90 transition-colors hover:bg-red-500/10 hover:text-red-300 disabled:opacity-40"
+                >
+                  <Trash2 className="size-3.5" /> Delete
+                </button>
+                <button
+                  type="button"
+                  onClick={toggleSelectMode}
+                  disabled={bulkBusy}
+                  title="Cancel selection"
+                  className="inline-flex items-center rounded-md p-1 text-muted-foreground transition-colors hover:bg-white/[0.05] hover:text-foreground disabled:opacity-40"
+                >
+                  <X className="size-3.5" />
+                </button>
+              </div>
+            </div>
+          )}
+
           {error && <Empty>error: {error}</Empty>}
           {!error && groups.length === 0 && <Empty>No saved chats yet</Empty>}
 
@@ -307,7 +495,7 @@ export function Sidebar({
             return (
               <div key={g.cwd} className="flex flex-col">
                 <div
-                  className="group flex items-center gap-1.5 rounded-md px-2 py-1 text-[14.5px] font-semibold text-foreground/90 transition-colors hover:bg-accent/50 hover:text-foreground"
+                  className="group flex items-center gap-1.5 rounded-md px-2 py-1 text-[14.5px] font-semibold text-foreground/90 transition-colors hover:bg-white/[0.05] hover:text-foreground"
                   title={g.cwd}
                 >
                   <button
@@ -320,7 +508,12 @@ export function Sidebar({
                     ) : (
                       <ChevronDown className="size-3 shrink-0 text-muted-foreground/60" />
                     )}
-                    <Folder className={cn('size-3.5 shrink-0', g.isCurrent ? 'text-mira-blue' : 'text-muted-foreground/70')} />
+                    <SidebarFolderIcon
+                      name={g.label}
+                      open={!isCollapsed}
+                      className="size-3.5"
+                      current={g.isCurrent}
+                    />
                     <span className={cn('truncate', g.isCurrent && 'text-foreground')}>{g.label}</span>
                   </button>
                   {(() => {
@@ -353,11 +546,22 @@ export function Sidebar({
                       <SessionRow
                         key={s.id}
                         session={s}
-                        active={s.id === activeSessionId}
+                        // One selection model across the sidebar: the
+                        // session highlight only shows while the chat
+                        // view is actually open — picking Plugins /
+                        // PR / Scheduled leaves the row highlighted
+                        // otherwise (and New thread swaps in a fresh
+                        // id server-side, which drops it naturally).
+                        active={s.id === activeSessionId && activeView === 'chat'}
                         activeBusy={activeBusy}
+                        selecting={selecting}
+                        checked={selected.has(s.id)}
+                        onToggleSelect={() => toggleSelected(s.id)}
                         onPick={() => pickSession(s.id)}
                         onRename={() => setRenaming(s)}
                         onDelete={() => removeSession(s.id)}
+                        onPin={(p) => void flagSession(s.id, { pinned: p })}
+                        onArchive={() => void flagSession(s.id, { archived: true })}
                         onSetBackgroundMode={
                           onSetBackgroundMode
                             ? (mode) => onSetBackgroundMode(s.id, mode).catch((e) => setError(String(e.message ?? e)))
@@ -386,8 +590,49 @@ export function Sidebar({
               </div>
             );
           })}
+
+          {/* Archived view (issue #58) — sessions hidden from the main
+              list live here. Clicking a row or hitting Restore puts it
+              back in its folder; Delete is permanent. */}
+          {!selecting && (
+            <div className="mt-4 flex flex-col gap-0.5 px-0.5">
+              <button
+                type="button"
+                onClick={() => setShowArchived((v) => !v)}
+                className="flex items-center gap-1.5 rounded-md px-2 py-1 text-[11.5px] font-semibold uppercase tracking-wider text-muted-foreground/80 transition-colors hover:bg-white/[0.05] hover:text-foreground"
+              >
+                {showArchived ? (
+                  <ChevronDown className="size-3 shrink-0 text-muted-foreground/60" />
+                ) : (
+                  <ChevronRight className="size-3 shrink-0 text-muted-foreground/60" />
+                )}
+                <Archive className="size-3 shrink-0" />
+                Archived
+                {archived !== null && archived.length > 0 && (
+                  <span className="rounded-full bg-secondary/80 px-1.5 text-[10.5px] font-medium normal-case tracking-normal text-muted-foreground">
+                    {archived.length}
+                  </span>
+                )}
+              </button>
+              {showArchived && (
+                <div className="flex flex-col gap-0.5 pl-1">
+                  {archived === null && <Empty>Loading…</Empty>}
+                  {archived !== null && archived.length === 0 && <Empty>Nothing archived</Empty>}
+                  {archived?.map((s) => (
+                    <ArchivedRow
+                      key={s.id}
+                      session={s}
+                      onRestore={() => void flagSession(s.id, { archived: false })}
+                      onDelete={() => removeSession(s.id)}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
+      </div>
       </div>
       )}
 
@@ -399,6 +644,30 @@ export function Sidebar({
       onManual={applyManualRename}
       onAi={applyAiRename}
     />
+    {/* Bulk delete confirm (issue #58 acceptance: bulk actions confirm
+        before deleting). Archive is reversible, so it fires directly. */}
+    <Dialog open={confirmBulkDelete} onOpenChange={(o) => !o && setConfirmBulkDelete(false)}>
+      <DialogContent className="max-w-sm p-0 gap-0">
+        <div className="flex flex-col gap-4 p-5">
+          <div>
+            <div className="text-[15px] font-semibold text-foreground">
+              Delete {selected.size} session{selected.size === 1 ? '' : 's'}?
+            </div>
+            <div className="mt-1 text-[12.5px] text-muted-foreground">
+              This permanently removes the transcripts. This cannot be undone.
+            </div>
+          </div>
+          <div className="flex items-center justify-end gap-2">
+            <Button variant="outline" onClick={() => setConfirmBulkDelete(false)} disabled={bulkBusy}>
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={() => void bulkDelete()} disabled={bulkBusy}>
+              {bulkBusy ? 'Deleting…' : 'Delete'}
+            </Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
     </>
   );
 }
@@ -417,6 +686,11 @@ function SessionRow({
   onRename,
   onDelete,
   onSetBackgroundMode,
+  onPin,
+  onArchive,
+  selecting = false,
+  checked = false,
+  onToggleSelect,
 }: {
   session: SessionSummary;
   active: boolean;
@@ -429,6 +703,14 @@ function SessionRow({
    *  the server has materialized (persisted-but-not-loaded sessions
    *  have no runtime; the endpoint 404s until the session is loaded). */
   onSetBackgroundMode?: (mode: BackgroundMode) => void;
+  /** Optional pin toggle — wires the row menu's Pin/Unpin item. */
+  onPin?: (pinned: boolean) => void;
+  /** Optional archive action — wires the row menu's Archive item. */
+  onArchive?: () => void;
+  /** Bulk-select mode: rows toggle a checkbox instead of opening. */
+  selecting?: boolean;
+  checked?: boolean;
+  onToggleSelect?: () => void;
 }) {
   // A session is "running" from the sidebar's POV either because it's the
   // active session with a live in-flight turn (activeBusy), OR because the
@@ -441,62 +723,115 @@ function SessionRow({
       // Hover tooltip prefers the cleaned-up label (no `## Attached
       // files` markdown blob) so an attachment-only turn still hovers
       // sensibly. Falls back to session id when everything is empty.
-      title={sessionLabel(session) || session.id}
+      title={selecting ? undefined : sessionLabel(session) || session.id}
+      role={selecting ? 'checkbox' : 'button'}
+      tabIndex={0}
+      aria-checked={selecting ? checked : undefined}
+      onClick={selecting ? onToggleSelect : onPick}
+      onKeyDown={(e) => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        e.preventDefault();
+        if (selecting) onToggleSelect?.();
+        else onPick();
+      }}
       className={cn(
-        'group grid w-full grid-cols-[1fr_auto] items-start gap-1.5 rounded-md px-2 py-1.5 transition-colors',
-        active
-          ? 'bg-accent/60 text-foreground'
-          : 'text-foreground/90 hover:bg-accent/40 hover:text-foreground',
+        'group grid w-full cursor-pointer items-center gap-1.5 rounded-lg px-2 py-2 transition-colors',
+        selecting ? 'grid-cols-[auto_1fr_auto] cursor-pointer' : 'grid-cols-[1fr_auto]',
+        selecting && checked
+          ? 'bg-white/[0.1] text-foreground'
+          // Same active treatment as the nav items (New thread / PR /
+          // Plugins / Scheduled): 10% white band, full foreground.
+          : active
+            ? 'bg-white/[0.1] text-foreground'
+            : 'text-foreground/90 hover:bg-white/[0.05] hover:text-foreground',
       )}
     >
-      <button
-        type="button"
-        onClick={onPick}
-        className="flex min-w-0 items-baseline gap-1.5 text-left"
-      >
+      {selecting && (
+        <span className="flex size-4 items-center justify-center self-center text-mira-blue">
+          {checked ? <CircleCheck className="size-4" /> : <Circle className="size-3.5" />}
+        </span>
+      )}
+      {/* One centre line for everything in the row. The icon is a 16px box
+       *  — the height of the label's line — so it can't sit above or below
+       *  the text the way a taller badge on a baseline row did. */}
+      <span className="flex min-w-0 items-center gap-2 text-left">
+        {!selecting && <EngineBadge session={session} />}
         <span
           className={cn(
-            'min-w-0 flex-1 truncate text-[13.5px] leading-tight',
-            active ? 'font-semibold text-foreground' : 'font-medium text-foreground/90',
+            'min-w-0 flex-1 truncate text-[13.5px] leading-4',
+            active && !selecting ? 'font-semibold text-foreground' : 'font-medium text-foreground/90',
           )}
         >
           {sessionLabel(session)}
         </span>
-        <span className="shrink-0 text-[10.5px] text-muted-foreground/50">
+        {!selecting && session.pinned && (
+          <Pin className="size-3 shrink-0 rotate-45 text-mira-blue/70" aria-label="Pinned" />
+        )}
+        <span className="shrink-0 text-[10.5px] leading-4 tabular-nums text-muted-foreground/50">
           {timeAgo(session.updated_at)}
         </span>
-      </button>
+      </span>
       {/* Single far-right slot. Status circle sits underneath the row
        *  menu — both share the same absolute box so the layout never
        *  shifts when the menu appears on hover. Space is reserved even
-       *  when the menu is hidden. */}
-      <div className="relative flex size-5 items-center justify-center pt-0.5">
-        <span
-          className={cn(
-            'absolute inset-0 flex items-center justify-center transition-opacity',
-            'group-hover:opacity-0',
-          )}
-        >
-          <SessionStatus running={running} merged={session.worktree_status === 'merged'} />
-        </span>
-        <span
-          className={cn(
-            'absolute inset-0 flex items-center justify-center opacity-0 transition-opacity',
-            'group-hover:opacity-100 focus-within:opacity-100',
-          )}
-        >
-          <RowMenu
-            items={backgroundMenuItems({
-              session,
-              onRename,
-              onDelete,
-              onSetBackgroundMode,
-            })}
-          />
-        </span>
-      </div>
+       *  when the menu is hidden. Hidden while selecting. */}
+      {!selecting && (
+        <div className="relative flex size-5 items-center justify-center">
+          <span
+            className={cn(
+              'absolute inset-0 flex items-center justify-center transition-opacity',
+              'group-hover:opacity-0',
+            )}
+          >
+            <SessionStatus running={running} merged={session.worktree_status === 'merged'} />
+          </span>
+          <span
+            className={cn(
+              'absolute inset-0 flex items-center justify-center opacity-0 transition-opacity',
+              'group-hover:opacity-100 focus-within:opacity-100',
+            )}
+          >
+            <RowMenu
+              items={backgroundMenuItems({
+                session,
+                onRename,
+                onDelete,
+                onSetBackgroundMode,
+                onPin,
+                onArchive,
+              })}
+            />
+          </span>
+        </div>
+      )}
     </div>
   );
+}
+
+/** What runs this session: its agent's mark, or the vendor mark of the
+ *  model its provider serves. Every row gets one, so agent and provider
+ *  sessions read alike at a glance and the name is on hover. */
+function EngineBadge({ session }: { session: SessionSummary }) {
+  if (session.agent_driver) {
+    return (
+      <span title={`Runs on ${agentName(session.agent_driver)}`} className="flex shrink-0">
+        <AgentIcon kind={session.agent_driver} name={agentName(session.agent_driver)} size="xs" tile={false} />
+      </span>
+    );
+  }
+  return (
+    <span title={session.model || 'Mira provider'} className="flex shrink-0">
+      <ModelIcon model={session.model} size="xs" />
+    </span>
+  );
+}
+
+function agentName(kind: string): string {
+  const known: Record<string, string> = {
+    'claude-code': 'Claude Code', codex: 'Codex', cursor: 'Cursor', grok: 'Grok',
+    opencode: 'OpenCode', antigravity: 'Antigravity',
+  };
+  return known[kind] ?? kind;
 }
 
 /** The right-side status affordance. Priority: running (spinner) > merged
@@ -535,6 +870,50 @@ function SessionStatus({ running, merged }: { running: boolean; merged: boolean 
     >
       <Circle className="size-3.5" />
     </span>
+  );
+}
+
+/* ---------- archived row + bulk delete confirm ---------- */
+
+/** One archived session. Clicking the row (or Restore in the menu) puts
+ *  the session back in its folder; Delete is permanent and confirms. */
+function ArchivedRow({
+  session, onRestore, onDelete,
+}: {
+  session: SessionSummary;
+  onRestore: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <div
+      title="Restore to the list"
+      className="group grid w-full grid-cols-[1fr_auto] items-start gap-1.5 rounded-lg px-2 py-1.5 text-foreground/70 transition-colors hover:bg-white/[0.05] hover:text-foreground"
+    >
+      <button type="button" onClick={onRestore} className="flex min-w-0 items-baseline gap-1.5 text-left">
+        <span className="min-w-0 flex-1 truncate text-[13.5px] leading-tight font-medium">
+          {sessionLabel(session)}
+        </span>
+        <span className="shrink-0 text-[10.5px] text-muted-foreground/50">
+          {timeAgo(session.updated_at)}
+        </span>
+      </button>
+      <div className="relative flex size-5 items-center justify-center pt-0.5">
+        <span className="absolute inset-0 flex items-center justify-center opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+          <RowMenu
+            items={[
+              { label: 'Restore', icon: <ArchiveRestore className="size-3.5" />, onSelect: onRestore },
+              {
+                label: 'Delete permanently',
+                danger: true,
+                confirm: 'Delete this session? This cannot be undone.',
+                icon: <Trash2 className="size-3.5" />,
+                onSelect: onDelete,
+              },
+            ]}
+          />
+        </span>
+      </div>
+    </div>
   );
 }
 
@@ -691,6 +1070,11 @@ function groupByCwd(sessions: SessionSummary[], currentCwd: string): Group[] {
     const bucket = byCwd.get(s.cwd);
     if (bucket) bucket.push(s); else byCwd.set(s.cwd, [s]);
   }
+  // Pinned sessions float to the top of their folder (issue #58); a
+  // stable sort keeps the backend's newest-first order within each tier.
+  for (const list of byCwd.values()) {
+    list.sort((a, b) => Number(b.pinned ?? false) - Number(a.pinned ?? false));
+  }
   const groups: Group[] = [];
   for (const [cwd, list] of byCwd) {
     // Backend already sorts by updated_at DESC across all cwds, so this
@@ -736,6 +1120,42 @@ function persistCollapsed(set: Set<string>) {
   catch { /* private-mode etc; ignore */ }
 }
 
+/** Themed folder icon for a project row, falling back to the lucide glyph
+ *  while the icon set loads. */
+function SidebarFolderIcon({
+  name,
+  open,
+  className,
+  current,
+}: {
+  name: string;
+  open: boolean;
+  className?: string;
+  current?: boolean;
+}) {
+  const { folderIcon } = useFileIcons();
+  const dataUri = folderIcon(name, open);
+  if (dataUri) {
+    return (
+      <img
+        src={dataUri}
+        alt=""
+        className={cn('shrink-0', className, !current && 'opacity-80')}
+        draggable={false}
+      />
+    );
+  }
+  return (
+    <Folder
+      className={cn(
+        'shrink-0',
+        className,
+        current ? 'text-mira-blue' : 'text-muted-foreground/70',
+      )}
+    />
+  );
+}
+
 /* ---------- little helpers ---------- */
 
 function NavItem({
@@ -755,12 +1175,12 @@ function NavItem({
       onClick={onClick}
       title={disabled ? 'Not implemented yet' : undefined}
       className={cn(
-        'flex w-full items-center gap-2.5 rounded-md px-2.5 py-1.5 text-left text-[14.5px] transition-colors',
+        'flex w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-[14.5px] transition-colors',
         disabled
           ? 'text-muted-foreground/40 cursor-not-allowed'
           : active
-            ? 'bg-accent text-foreground'
-            : 'text-foreground hover:bg-accent',
+            ? 'bg-white/[0.1] text-foreground'
+            : 'text-foreground hover:bg-white/[0.05]',
       )}
     >
       <span
@@ -832,17 +1252,19 @@ type RowMenuItem = {
   onSelect: () => void | Promise<void>;
 };
 
-/** RowMenu items for a session row. Renders rename + delete plus, when the
- *  caller wired a background-mode handler, three radio-style items for
- *  the current per-slot policy. The three modes always render (rather
- *  than hiding when the slot isn't loaded) so the user can see the
- *  choice; clicking on a persisted-but-not-loaded row 404s — callers
- *  should typically attach first. */
+/** RowMenu items for a session row. Renders rename + pin/archive (when
+ *  wired) + delete plus, when the caller wired a background-mode handler,
+ *  three radio-style items for the current per-slot policy. The three
+ *  modes always render (rather than hiding when the slot isn't loaded) so
+ *  the user can see the choice; clicking on a persisted-but-not-loaded
+ *  row 404s — callers should typically attach first. */
 function backgroundMenuItems(args: {
   session: SessionSummary;
   onRename: () => void;
   onDelete: () => void;
   onSetBackgroundMode?: (mode: BackgroundMode) => void;
+  onPin?: (pinned: boolean) => void;
+  onArchive?: () => void;
 }): RowMenuItem[] {
   const items: RowMenuItem[] = [
     {
@@ -851,6 +1273,20 @@ function backgroundMenuItems(args: {
       onSelect: args.onRename,
     },
   ];
+  if (args.onPin) {
+    items.push({
+      label: args.session.pinned ? 'Unpin session' : 'Pin session',
+      icon: args.session.pinned ? <PinOff className="size-3.5" /> : <Pin className="size-3.5" />,
+      onSelect: () => args.onPin!(!args.session.pinned),
+    });
+  }
+  if (args.onArchive) {
+    items.push({
+      label: 'Archive session',
+      icon: <Archive className="size-3.5" />,
+      onSelect: args.onArchive,
+    });
+  }
   if (args.onSetBackgroundMode) {
     const current = args.session.background_mode ?? null;
     const modes: Array<{ mode: BackgroundMode; label: string; desc: string }> = [
@@ -903,7 +1339,7 @@ function RowMenu({ items }: { items: RowMenuItem[] }) {
           aria-label="Row menu"
           onClick={(e) => e.stopPropagation()}
           className={cn(
-            'shrink-0 rounded-sm p-0.5 text-muted-foreground/60 transition-opacity hover:bg-accent/60 hover:text-foreground',
+            'shrink-0 rounded-sm p-0.5 text-muted-foreground/60 transition-opacity hover:bg-white/[0.05] hover:text-foreground',
             open ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus:opacity-100',
           )}
         >
@@ -924,7 +1360,7 @@ function RowMenu({ items }: { items: RowMenuItem[] }) {
               <button
                 type="button"
                 onClick={() => setConfirming(null)}
-                className="rounded-md px-2 py-1 text-[12px] text-muted-foreground hover:bg-accent"
+                className="rounded-md px-2 py-1 text-[12px] text-muted-foreground hover:bg-white/[0.05]"
               >
                 Cancel
               </button>
@@ -955,10 +1391,10 @@ function RowMenu({ items }: { items: RowMenuItem[] }) {
                 type="button"
                 onClick={() => pick(it)}
                 className={cn(
-                  'flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] transition-colors',
+                  'flex items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] transition-colors',
                   it.danger
                     ? 'text-destructive hover:bg-destructive/10'
-                    : 'text-foreground hover:bg-accent/60',
+                    : 'text-foreground hover:bg-white/[0.05]',
                 )}
               >
                 {it.icon && <span className="shrink-0 text-muted-foreground">{it.icon}</span>}

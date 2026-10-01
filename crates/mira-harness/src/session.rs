@@ -141,6 +141,12 @@ pub struct SessionConfig {
     /// Providers that don't recognise the field ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// OpenAI service tier (`"flex" | "priority"`), the other half of
+    /// "make this fast". Separate from `reasoning_effort` because they
+    /// trade against different things: effort trades latency for quality,
+    /// the tier trades cost for latency. Set from the model options the UI
+    /// advertises; providers without the field ignore it.
+    pub service_tier: Option<String>,
     /// Constrain the model's text output. When set, the harness attaches
     /// this to every `ChatRequest` for this session. AgentTool wires
     /// this from an agent type's `response_schema` so subagents can
@@ -162,6 +168,14 @@ pub struct SessionConfig {
     /// `None` = reuse `model`. A failed call on it retries on `model`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub small_model: Option<String>,
+    /// The model's context window in tokens, when the engine layer
+    /// knows it from the provider's catalog. Overrides the built-in
+    /// prefix-match table in `history::model_context_window`, so
+    /// compaction plans against the real window instead of a substring
+    /// guess. `None` keeps the table; `MIRA_CONTEXT_WINDOW` still wins
+    /// over everything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u32>,
 }
 
 impl SessionConfig {
@@ -270,9 +284,11 @@ impl SessionConfig {
             temperature: None,
             max_tokens: None,
             reasoning_effort: None,
+            service_tier: None,
             response_format: None,
             compactor_model: None,
             small_model: None,
+            context_window: None,
         }
     }
 }
@@ -340,6 +356,12 @@ pub struct Session {
     /// hide subagents from the primary chat list and delete flows can
     /// cascade from the parent. `None` for top-level chats.
     parent_id: Option<SessionId>,
+    /// Which external agent drives turns here, if any. Mirrored in-memory
+    /// so checkpoints stamp it without the server re-setting it every
+    /// round — same story as `pinned`. The transcript itself lives in the
+    /// `<id>.agent.jsonl` sidecar, never in `messages`, so the harness
+    /// never feeds agent words back to the provider as history.
+    agent: Arc<Mutex<Option<crate::persist::AgentSessionMeta>>>,
     /// Currently in-flight children spawned by this session — kept so an
     /// interrupt on the parent cascades to every subagent whose turn is
     /// still running. Each entry is a boxed cancel callback keyed by a
@@ -358,6 +380,12 @@ pub struct Session {
     /// clean stop until the evaluator returns a terminal verdict or the
     /// iteration cap is hit.
     goal: Arc<Mutex<Option<Goal>>>,
+    /// Sidebar pin (web UI). Mirrored in-memory so checkpoints re-stamp
+    /// the flag the user set from the web UI instead of wiping it.
+    pinned: Arc<Mutex<bool>>,
+    /// Web-sidebar archive stamp (`None` = live). Same checkpoint story
+    /// as `pinned` — the record must never lose a flag mid-conversation.
+    archived_at: Arc<Mutex<Option<u64>>>,
     /// The current turn's event sender, when a turn is active. Long-
     /// running tools (bash today, others later) route live output
     /// through the [`ToolProgressSink`] attached to `tool_ctx`; that
@@ -482,9 +510,12 @@ impl Session {
             auto_extract: None,
             current_turn: Arc::new(Mutex::new(None)),
             parent_id: None,
+            agent: Arc::new(Mutex::new(None)),
             children,
             next_child_id,
             goal: Arc::new(Mutex::new(None)),
+            pinned: Arc::new(Mutex::new(false)),
+            archived_at: Arc::new(Mutex::new(None)),
             progress_slot,
             hooks: None,
             previews: Arc::new(Mutex::new(HashMap::new())),
@@ -558,9 +589,12 @@ impl Session {
             auto_extract: None,
             current_turn: Arc::new(Mutex::new(None)),
             parent_id: record.parent_id,
+            agent: Arc::new(Mutex::new(record.agent)),
             children,
             next_child_id,
             goal: Arc::new(Mutex::new(record.goal)),
+            pinned: Arc::new(Mutex::new(record.pinned)),
+            archived_at: Arc::new(Mutex::new(record.archived_at)),
             progress_slot,
             hooks: None,
             previews: Arc::new(Mutex::new(record.previews)),
@@ -578,6 +612,33 @@ impl Session {
     pub fn with_store(mut self, store: Arc<dyn SessionStore>) -> Self {
         self.store = Some(store);
         self
+    }
+
+    /// Record which external agent drives this session. Checkpoints stamp
+    /// it from here, so the server sets it once at agent start and never
+    /// again — including across restarts, because `resume_from` restores it.
+    pub async fn set_agent(&self, meta: crate::persist::AgentSessionMeta) {
+        *self.agent.lock().await = Some(meta);
+        // Checkpointed now rather than on the next turn: which engine a
+        // session runs on is what the sidebar badges and what a reload
+        // restores, and both read the record. A chat nobody has typed in
+        // yet stays unsaved, so picking an engine never litters the
+        // sidebar with empty rows.
+        let started = self
+            .history
+            .lock()
+            .await
+            .iter()
+            .any(|m| m.role == mira_core::Role::User)
+            || self.title.lock().await.is_some();
+        if started {
+            checkpoint(self).await;
+        }
+    }
+
+    /// Which external agent drives this session, if any.
+    pub async fn agent_meta(&self) -> Option<crate::persist::AgentSessionMeta> {
+        self.agent.lock().await.clone()
     }
 
     /// Mark this session as a subagent spawned by `parent`. The id is
@@ -806,6 +867,19 @@ impl Session {
         checkpoint(self).await;
     }
 
+    /// Sidebar pin/archive flags (see [`SessionRecord::pinned`] and
+    /// [`SessionRecord::archived_at`]). The server's flags endpoint writes
+    /// the record *and* syncs the live slot through [`Session::set_sidebar_flags`]
+    /// so the next checkpoint re-stamps the flags instead of wiping them.
+    pub async fn sidebar_flags(&self) -> (bool, Option<u64>) {
+        (*self.pinned.lock().await, *self.archived_at.lock().await)
+    }
+
+    pub async fn set_sidebar_flags(&self, pinned: bool, archived_at: Option<u64>) {
+        *self.pinned.lock().await = pinned;
+        *self.archived_at.lock().await = archived_at;
+    }
+
     /// Expose the session's undo/conflict guard. `None` when the FileGuard
     /// failed to initialise (see the warn! in `new` / `resume_from`).
     pub fn file_guard(&self) -> Option<Arc<FileGuard>> {
@@ -857,12 +931,27 @@ impl Session {
         self.cfg.lock().await.small_model = model.filter(|m| !m.trim().is_empty());
     }
 
+    /// Set the model's context window from the provider's catalog, so
+    /// compaction plans against the real number (see
+    /// [`SessionConfig::context_window`]). `None` falls back to the
+    /// built-in table.
+    pub async fn set_context_window(&self, tokens: Option<u32>) {
+        self.cfg.lock().await.context_window = tokens;
+    }
+
     /// Set the reasoning-effort field for future turns. `None` clears it so
     /// non-reasoning models aren't hit with an ignored parameter. Same
     /// snapshot-at-spawn caveat as `set_model` — in-flight turn keeps the
     /// prior value.
     pub async fn set_reasoning_effort(&self, effort: Option<String>) {
         self.cfg.lock().await.reasoning_effort = effort;
+    }
+
+    /// Set the service tier for future turns. `None` clears it. Same
+    /// snapshot-at-spawn caveat as [`Self::set_model`] — an in-flight turn
+    /// keeps the prior value.
+    pub async fn set_service_tier(&self, tier: Option<String>) {
+        self.cfg.lock().await.service_tier = tier;
     }
 
     /// Cheap snapshot of the current sandbox. `Sandbox` is a small `Clone`
@@ -1310,8 +1399,13 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
                     let history = sess.history.lock().await;
                     let mut cleared = sess.cleared_before.lock().await;
                     *cleared =
-                        crate::history::clear_tool_results_before(&history, &cfg.model, *cleared);
-                    crate::history::needs_compaction(&history, &cfg.model, *cleared)
+                        crate::history::clear_tool_results_before(
+                            &history,
+                            &cfg.model,
+                            cfg.context_window,
+                            *cleared,
+                        );
+                    crate::history::needs_compaction(&history, &cfg.model, cfg.context_window, *cleared)
                 };
                 if before {
                     match sess.compact_inner("auto", None, &tx).await {
@@ -1345,6 +1439,7 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
                 temperature: cfg.temperature,
                 max_tokens: cfg.max_tokens,
                 reasoning_effort: cfg.reasoning_effort.clone(),
+            service_tier: cfg.service_tier.clone(),
                 response_format: cfg.response_format.clone(),
             };
 
@@ -1429,7 +1524,16 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
                             }
                             // Ignore send errors — a dropped receiver just means the
                             // UI stopped listening; the totals are still recorded.
-                            let _ = tx.send(HarnessEvent::Usage { round, totals }).await;
+                            let window =
+                                crate::history::context_window_with(&cfg.model, cfg.context_window) as u64;
+                            let _ = tx
+                                .send(HarnessEvent::Usage {
+                                    round,
+                                    totals,
+                                    context_window: window,
+                                    compact_at: crate::history::auto_compact_at(window),
+                                })
+                                .await;
                         }
                         Ok(ChatEvent::Done(reason)) => {
                             finish = reason;
@@ -2280,8 +2384,11 @@ async fn checkpoint(sess: &Session) {
         turns: sess.turns.lock().await.clone(),
         usage: *sess.usage.lock().await,
         parent_id: sess.parent_id.clone(),
+        agent: sess.agent.lock().await.clone(),
         tasks: sess.tasks.snapshot_all().await,
         goal: sess.goal.lock().await.clone(),
+        pinned: *sess.pinned.lock().await,
+        archived_at: *sess.archived_at.lock().await,
         previews: sess.previews.lock().await.clone(),
     };
     if let Err(e) = store.save(&record).await {
@@ -2621,6 +2728,7 @@ async fn extract_facts(
         temperature: Some(0.0),
         max_tokens: Some(EXTRACTION_OUTPUT_TOKENS),
         reasoning_effort: None,
+        service_tier: None,
         response_format: None,
     };
     let mut stream = provider.stream(req).await?;

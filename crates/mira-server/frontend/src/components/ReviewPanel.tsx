@@ -1,12 +1,12 @@
 import { useEffect } from 'react';
 import {
-  CaretRight,
-  CircleNotch,
+  ChevronRight,
+  LoaderCircle,
   Eye,
   ShieldCheck,
-  ShieldWarning,
+  ShieldAlert,
   X,
-} from '@phosphor-icons/react';
+} from 'lucide-react';
 import type { ReviewFinding, ReviewProgressEvent, ReviewSeverity } from '../types';
 import { cn } from '@/lib/utils';
 
@@ -158,7 +158,7 @@ function ProgressPanel({ state }: { state: ReviewState }) {
   return (
     <div className="flex flex-col gap-3">
       <div className="flex items-center gap-2 text-[13px] text-foreground">
-        <CircleNotch className="size-4 animate-spin text-mira-blue" />
+        <LoaderCircle className="size-4 animate-spin text-mira-blue" />
         <span className="min-w-0 truncate">{state.status}</span>
       </div>
       {state.progressPct != null && (
@@ -184,7 +184,7 @@ function ProgressPanel({ state }: { state: ReviewState }) {
                 )}
               >
                 {v.kept
-                  ? <ShieldWarning className="size-3.5 text-amber-500 shrink-0" />
+                  ? <ShieldAlert className="size-3.5 text-amber-500 shrink-0" />
                   : <ShieldCheck className="size-3.5 text-emerald-500 shrink-0" />}
                 <span className={cn('min-w-0 truncate', !v.kept && 'line-through')}>
                   {v.title}
@@ -246,7 +246,7 @@ function FindingCard({ finding }: { finding: ReviewFinding }) {
         <span className="text-[13.5px] font-semibold text-foreground">{finding.title}</span>
       </div>
       <div className="flex items-center gap-1 text-[11.5px] text-muted-foreground/80 font-mono">
-        <CaretRight className="size-3" />
+        <ChevronRight className="size-3" />
         <span className="truncate">{where}</span>
       </div>
       <div className="mt-2 whitespace-pre-wrap text-[12.5px] text-foreground/85">

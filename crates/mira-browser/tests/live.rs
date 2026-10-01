@@ -112,3 +112,47 @@ async fn drives_a_page_end_to_end() {
     b.execute(&act(json!({"action": "close"}))).await.unwrap();
     let _ = std::fs::remove_dir_all(profile);
 }
+
+/// The failure that made the browser unusable: a Mira that exits without
+/// closing its browser leaves Chrome running on the profile, and every
+/// later launch died on the profile lock. A new `Browser` must adopt the
+/// running one instead — and the live view must stream it.
+#[tokio::test]
+#[ignore = "needs a Chromium-family browser"]
+async fn adopts_a_browser_left_running_and_streams_it() {
+    let profile = std::env::temp_dir().join(format!("mira-browser-adopt-{}", std::process::id()));
+    let opts = BrowserOptions { headless: true, profile_dir: profile.clone(), ..Default::default() };
+
+    // An "earlier Mira": launch, then forget the session without closing
+    // the browser, the way a crash would.
+    let launched = mira_browser::launch::launch(&opts).await.expect("launch");
+    let mut orphan = launched.child;
+
+    let b = Browser::new(opts.clone());
+    let (mut live, _) = b.subscribe();
+    let url = format!("data:text/html,{}", PAGE.replace('#', "%23"));
+    let out = b
+        .execute(&act(json!({"action": "navigate", "url": url})))
+        .await
+        .expect("navigating through the adopted browser");
+    assert!(out.text.contains("Mira test"), "{}", out.text);
+
+    // A frame arrives on the live view.
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let Ok(mira_browser::LiveEvent::Frame { width, .. }) = live.recv().await {
+                return width;
+            }
+        }
+    })
+    .await
+    .expect("a screencast frame");
+    assert!(frame > 0.0);
+
+    // Takeover input lands on the page.
+    b.input(&mira_browser::UserInput::Text { text: "x".into() }).await.expect("input");
+
+    b.execute(&act(json!({"action": "close"}))).await.unwrap();
+    let _ = orphan.kill().await;
+    let _ = std::fs::remove_dir_all(&profile);
+}

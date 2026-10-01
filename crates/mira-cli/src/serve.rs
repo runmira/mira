@@ -112,7 +112,16 @@ pub async fn run(cli: &super::Cli, args: ServeArgs) -> Result<()> {
     // one never blocks the server. Plugins, commands and MCP status are
     // managed live from the Plugins page.
     registry.add_source(extensions.mcp().tool_source());
-    super::register_computer_use(&mut registry, cli, &cfg).await;
+    // Serving, the browser is on unless switched off, and headless: the
+    // browser pane streams it live, so a separate Chrome window would only
+    // pop up behind the app. Config still wins either way.
+    let browser_cfg = {
+        let mut c = cfg.clone();
+        c.browser.enabled.get_or_insert(true);
+        c.browser.headless.get_or_insert(std::env::var("MIRA_BROWSER_HEADED").is_err());
+        c
+    };
+    super::register_computer_use(&mut registry, cli, &browser_cfg).await;
     let registry = Arc::new(registry);
 
     let mode = resolved.as_ref().map(|s| s.mode).unwrap_or_default();

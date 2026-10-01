@@ -395,6 +395,7 @@ async fn complete_messages(
         // larger diffs without truncating findings.
         max_tokens: Some(8192),
         reasoning_effort: None,
+        service_tier: None,
         response_format: None,
     };
     let mut stream = provider.stream(req).await.context("provider stream")?;

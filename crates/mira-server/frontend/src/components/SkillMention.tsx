@@ -1,4 +1,4 @@
-import { Sparkle } from '@phosphor-icons/react';
+import { Sparkle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { PaletteSkill } from './commands';
 
@@ -130,7 +130,7 @@ export function SkillChip({
       title={meta?.description ?? `Skill: ${name}`}
     >
       <Sparkle
-        weight="fill"
+        fill="currentColor"
         // `align-[-0.125em]` nudges the sparkle down from its default
         // baseline alignment so its optical centre lines up with the
         // x-height of the label, matching how the surrounding text

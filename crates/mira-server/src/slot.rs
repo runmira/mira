@@ -116,6 +116,21 @@ pub struct SessionSlot {
     /// aborts through this; delete_session takes the handle and aborts
     /// so a dead slot doesn't keep pumping tokens into a dropped channel.
     pub turn: Arc<Mutex<Option<JoinHandle<()>>>>,
+    /// The external ACP agent driving this session, if any. Owned by the slot
+    /// so a deleted session takes the agent process and its terminals with it
+    /// rather than leaving third-party processes running unowned.
+    pub acp_agent: crate::acp_session::AgentSlot,
+    /// What it took to start that agent, so a model or mode change on a
+    /// native transport can relaunch it without the client resending the
+    /// whole start message it already sent.
+    pub acp_launch: Mutex<Option<crate::acp_session::AcpLaunchParams>>,
+    /// The engine runtime: start serialization, agent lifecycle phase and
+    /// the provider ⇄ agent handoff marks. See [`crate::session_engine`].
+    pub engine: crate::session_engine::EngineRuntime,
+    /// The slot's interactive prompt channel (plan review, questions). An
+    /// external agent's `AskUserQuestion` and `ExitPlanMode` go through it,
+    /// so they get the same cards Mira's own tools do.
+    pub prompt_channel: Arc<dyn mira_tools::prompt::PromptChannel>,
     /// Live count of WS forwarders subscribed to this slot's `events_tx`.
     /// Bumped by [`AttachGuard::new`]; decremented on drop. Approver reads
     /// this to decide whether the session is "background" for the purposes
@@ -208,18 +223,19 @@ pub struct SlotDeps {
     /// wired to the slot's own prompt channel.
     pub base_registry: Arc<Registry>,
     pub agents_registry: Arc<AgentRegistry>,
+    /// The live roster, followed by every slot's `AgentTool`.
+    pub agents_live: Arc<std::sync::RwLock<Arc<AgentRegistry>>>,
     pub store: Option<Arc<dyn SessionStore>>,
     pub memory_runtime: MemoryRuntimeConfig,
     /// Cross-subagent scratchpad shared across all slots. Keyed inside by
     /// parent session id, so two sessions can't see each other's notes
     /// even though the map is process-global.
     pub scratchpads: Arc<Mutex<HashMap<String, Vec<ScratchpadEntry>>>>,
-    /// Default model handed to spawned subagents when the call doesn't
-    /// pin one. Snapshotted at boot; hot-swapping this would require a
-    /// slot rebuild.
-    pub default_model_for_agents: String,
-    /// What subagents asking for `model: small` (or `haiku`) run on.
-    pub small_model_for_agents: Option<String>,
+    /// The live engine selection (instance + model + small model),
+    /// shared with `AgentTool`. Read at *spawn* time, so a subagent
+    /// launched after a model switch runs on the model the user just
+    /// picked — not on a boot-time snapshot.
+    pub selection: Arc<crate::state::SharedSelection>,
     /// `compute:` config: named remote environments.
     pub compute: mira_config::ComputeConfig,
     /// Lifecycle hooks (plugins' and the user's).
@@ -263,7 +279,8 @@ pub async fn build_slot(
         cwd_lock.clone(),
         attached.clone(),
         background_mode.clone(),
-    ));
+    )
+    .with_policy(deps.policy.clone()));
 
     let prompt_channel = PromptChannel::new(events_tx.clone());
     let prompt_pending = prompt_channel.pending();
@@ -280,10 +297,23 @@ pub async fn build_slot(
     let mut agent_tool = AgentTool::new(
         deps.harness_provider.clone(),
         deps.base_registry.clone(),
-        deps.default_model_for_agents.clone(),
+        deps.selection
+            .model
+            .read()
+            .expect("selection lock poisoned")
+            .clone()
+            .unwrap_or_default(),
     )
     .with_agents(deps.agents_registry.clone())
-    .with_small_model(deps.small_model_for_agents.clone())
+    .with_live_agents(deps.agents_live.clone())
+    .with_small_model(
+        deps.selection
+            .small_model
+            .read()
+            .expect("selection lock poisoned")
+            .clone(),
+    )
+    .with_shared_selection(deps.selection.clone())
     .with_hooks(deps.hooks.clone())
     .with_events_tx(events_tx.clone())
     .with_parent_approver(approver.clone())
@@ -316,6 +346,16 @@ pub async fn build_slot(
         .with_compute_slot(environments.slot())
         .with_bg_progress(bg_progress)
         .with_bg_processes(bg_store);
+
+    // A session whose record says an agent is still its engine comes back
+    // set up for that agent: the next prompt resumes it with the same
+    // settings, instead of silently falling back to the provider.
+    let restored_launch = resume
+        .as_ref()
+        .and_then(|r| r.agent.as_ref())
+        .filter(|a| a.active)
+        .map(crate::acp_session::AcpLaunchParams::from_meta);
+    let resumed = resume.is_some();
 
     let mut session = match resume {
         Some(record) => Session::resume_from(
@@ -356,6 +396,18 @@ pub async fn build_slot(
     }
 
     let id = session.id.clone();
+    let engine = if resumed {
+        let harness_len = session.transcript().await.len();
+        let agent_lines = deps
+            .store
+            .as_ref()
+            .and_then(|s| s.agent_log_path(&id))
+            .map(|p| mira_acp::agent_sessions::read_lines(&p).len())
+            .unwrap_or(0);
+        crate::session_engine::EngineRuntime::resumed(harness_len, agent_lines)
+    } else {
+        crate::session_engine::EngineRuntime::default()
+    };
     Arc::new(SessionSlot {
         id,
         session: Arc::new(RwLock::new(session)),
@@ -368,6 +420,10 @@ pub async fn build_slot(
         registry,
         approver,
         turn: Arc::new(Mutex::new(None)),
+        acp_agent: crate::acp_session::AgentSlot::new(None),
+        acp_launch: Mutex::new(restored_launch),
+        engine,
+        prompt_channel: prompt_shared,
         attached,
         background_mode,
         environments,

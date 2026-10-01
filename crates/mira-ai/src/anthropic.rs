@@ -972,11 +972,14 @@ struct WireModel {
 
 impl From<WireModel> for ModelInfo {
     fn from(w: WireModel) -> Self {
+        let capabilities = crate::capabilities::anthropic(&w.id);
         ModelInfo {
             id: w.id,
             display_name: w.display_name,
             owned_by: Some("anthropic".to_owned()),
             context_length: None,
+            capabilities: (!capabilities.option_descriptors.is_empty())
+                .then_some(capabilities),
         }
     }
 }
@@ -1007,6 +1010,7 @@ mod tests {
             temperature: None,
             max_tokens: Some(2048),
             reasoning_effort: None,
+            service_tier: None,
             response_format: None,
         }
     }
@@ -1190,6 +1194,7 @@ mod tests {
     fn reasoning_effort_off_omits_thinking() {
         let req = ChatRequest {
             reasoning_effort: Some("off".into()),
+            service_tier: None,
             ..req_with(vec![Message::user("hi")])
         };
         let body = WireRequest::build(&req, false).unwrap();
@@ -1201,6 +1206,7 @@ mod tests {
     fn reasoning_effort_high_sets_thinking_budget() {
         let req = ChatRequest {
             reasoning_effort: Some("high".into()),
+            service_tier: None,
             max_tokens: Some(16_000),
             ..req_with(vec![Message::user("hi")])
         };
@@ -1227,6 +1233,7 @@ mod tests {
         // a caller that pairs a tiny cap with reasoning=high.
         let req = ChatRequest {
             reasoning_effort: Some("high".into()),
+            service_tier: None,
             max_tokens: Some(2000),
             ..req_with(vec![Message::user("hi")])
         };

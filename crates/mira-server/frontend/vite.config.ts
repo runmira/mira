@@ -20,4 +20,7 @@ export default defineConfig({
     },
   },
   build: { outDir: 'dist', sourcemap: true },
+  // Pierre's diff worker (`@pierre/diffs/worker/worker.js?worker`) code-splits
+  // (wasm loader chunk); workers must build as ES modules, not IIFE.
+  worker: { format: 'es' },
 });

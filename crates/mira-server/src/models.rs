@@ -70,6 +70,12 @@ pub fn invalidate() {
     }
 }
 
+/// The cached catalog, if fresh — for callers that want the models
+/// without owning a fetch (the engines API fills snapshots from here).
+pub fn cached() -> Option<Vec<ModelInfo>> {
+    read_cache()
+}
+
 fn read_cache() -> Option<Vec<ModelInfo>> {
     let guard = CACHE.lock().ok()?;
     let slot = guard.as_ref()?;

@@ -41,6 +41,9 @@ pub fn spawn(state: AppState) {
         tokio::time::sleep(Duration::from_secs(30)).await;
         let mut ticker = tokio::time::interval(REFRESH_INTERVAL);
         loop {
+            // Note: the interval's first tick fires immediately, so this
+            // loop does one quick check right after the boot sleep, then
+            // settles onto the 5-minute cadence.
             ticker.tick().await;
             if let Err(e) = tick(&state).await {
                 warn!(%e, "oauth refresh: tick failed");

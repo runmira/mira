@@ -1,21 +1,21 @@
 import type { ComponentType } from 'react';
 import {
-  ArrowCounterClockwise,
-  ArrowsInLineVertical,
   Brain,
+  CircleHelp,
   Eye,
   Folder,
+  FoldVertical,
   Lightbulb,
-  NotePencil,
+  NotebookPen,
   Paperclip,
-  Question,
+  RotateCcw,
   Shield,
-  Sparkle,
   SlidersHorizontal,
+  Sparkle,
+  SquareTerminal,
   Target,
-  Lightning,
-  TerminalWindow,
-} from '@phosphor-icons/react';
+  Zap,
+} from 'lucide-react';
 import type { Mode } from '../types';
 import type { CommandInfo, Origin } from '../api';
 
@@ -117,7 +117,7 @@ export function customToCommand(c: CommandInfo): SlashCommand {
     label: prompt ? c.name.split('__').slice(2).join('__') || c.name : undefined,
     description: c.description,
     usage: `/${c.name}${c.argument_hint ? ` ${c.argument_hint}` : ''}`,
-    icon: prompt ? Lightning : TerminalWindow,
+    icon: prompt ? Zap : SquareTerminal,
     takesArgs: !!c.argument_hint,
     isCustom: true,
     source: c.source,
@@ -188,7 +188,7 @@ export const COMMANDS: SlashCommand[] = [
     aliases: ['clear'],
     description: 'Start a new chat in this folder',
     usage: '/new',
-    icon: NotePencil,
+    icon: NotebookPen,
     takesArgs: false,
     run: (_a, ctx) => { ctx.onNewChat(); return undefined; },
   },
@@ -271,7 +271,7 @@ export const COMMANDS: SlashCommand[] = [
     name: 'compact',
     description: 'Summarize the conversation to free up context',
     usage: '/compact [what to focus on]',
-    icon: ArrowsInLineVertical,
+    icon: FoldVertical,
     takesArgs: true,
     run: (args, ctx) => { ctx.onCompact(args.trim()); return undefined; },
   },
@@ -327,7 +327,7 @@ export const COMMANDS: SlashCommand[] = [
     name: 'undo',
     description: 'Revert the last N file writes the agent made in this session',
     usage: '/undo [N]',
-    icon: ArrowCounterClockwise,
+    icon: RotateCcw,
     takesArgs: true,
     run: (args, ctx) => {
       const trimmed = args.trim();
@@ -386,7 +386,7 @@ export const COMMANDS: SlashCommand[] = [
     name: 'help',
     description: 'Show all available commands',
     usage: '/help',
-    icon: Question,
+    icon: CircleHelp,
     takesArgs: false,
     run: () => (
       `Available commands:\n\n` +

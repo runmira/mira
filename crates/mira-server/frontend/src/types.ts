@@ -147,6 +147,166 @@ export type SubagentReviewResponse = {
   note?: string;
 };
 
+/* ------------------------------------------------------------------ *
+ * ACP — external agent events (Grok, Cursor, Antigravity).
+ *
+ * These mirror the `Acp*` variants of the Rust `ServerMsg` enum. The
+ * normalization from ACP's own dialect happens in `mira-acp`; nothing
+ * above that crate has to know what an ACP session update looks like.
+ *
+ * `crates/mira-server/src/protocol.rs` has a test that parses this
+ * file and asserts every arm name here matches, so the hand-maintained
+ * boundary between the two cannot drift silently.
+ * ------------------------------------------------------------------ */
+
+/** A file a tool call touched. `line` is null when the call is file-level. */
+export type AcpLocation = {
+  path: string;
+  line?: number | null;
+};
+
+/** Output attached to a tool call. `type` is the discriminator. */
+export type AcpToolContent =
+  | { type: 'content'; text: string }
+  | { type: 'diff'; path: string; old_text?: string | null; new_text?: string | null }
+  | { type: 'terminal'; terminal_id: string };
+
+/** The agent's view of a tool call, forwarded whole.
+ *
+ *  Kept as the normalized shape rather than folded into Mira's own
+ *  `ToolCall`: ACP carries diff and terminal content that `ToolCall` has
+ *  no field for, and dropping it would lose the agent's actual output. */
+export type AcpToolCall = {
+  id: string;
+  title: string;
+  name?: string | null;
+  kind?: string | null;
+  status: string;
+  content: AcpToolContent[];
+  locations: AcpLocation[];
+  raw_input?: unknown | null;
+  raw_output?: unknown | null;
+};
+
+export type AcpPlanItem = {
+  content: string;
+  priority: string;
+  status: string;
+};
+
+export type AcpSessionMode = {
+  id: string;
+  name: string;
+  description?: string | null;
+};
+
+/**
+ * The server's posture mapping for one agent mode. Computed server-side
+ * from the fixed five-posture vocabulary, so the client renders options
+ * without pattern-matching agent mode ids itself.
+ */
+export type AgentPostureMapping = {
+  key: 'plan' | 'ask' | 'edits' | 'auto' | 'yolo';
+  mode_id: string;
+  mode_name: string;
+  mode_description?: string | null;
+  current: boolean;
+};
+
+/**
+ * Why an agent is not usable right now.
+ *
+ * Health only — deliberately has no `disabled` variant. Whether the user has
+ * switched an agent on is a local preference, and having the server report
+ * it meant every row read "Disabled" whatever was installed.
+ */
+export type AcpAgentState =
+  | { state: 'not_found'; looked_for: string }
+  | { state: 'failed'; reason: string }
+  | { state: 'ready' };
+
+/** One row in the agent list. */
+export type AcpAgentStatus = {
+  kind: string;
+  display_name: string;
+  state: AcpAgentState;
+  /** Self-reported version. Most adapters omit it, so often absent even
+   *  when the agent works. */
+  version?: string | null;
+  /** Human-readable auth summary, e.g. "Claude Pro Subscription". */
+  auth?: string | null;
+  auth_method_ids: string[];
+  /** The resolved command, with credentials redacted. */
+  launch: string;
+  /** Whether the agent's own CLI is present, when it is a separate program
+   *  from the ACP adapter we spawn. Undefined for agents that speak ACP
+   *  natively. */
+  cli_installed?: boolean;
+  /** The agent CLI's own version, e.g. "2.1.283" for Claude Code. This is
+   *  what the user has installed, and it is distinct from `version`, which
+   *  comes from the adapter's `agentInfo`. */
+  cli_version?: string | null;
+  /** How to install the missing ACP adapter. */
+  install_hint?: string;
+  /** How Mira reached this agent: its own CLI, or an ACP adapter. */
+  transport?: 'auto' | 'native' | 'acp';
+};
+
+/** One persisted agent-transcript line: a user prompt or a server frame. */
+export type AgentTranscriptLine = {
+  t: number;
+  driver: string;
+  frame?: unknown;
+  user?: { text: string; images: number };
+  /** Written when the session switched provider → agent: the harness
+   *  history up to `harness_len` happened before this point. Lets replay
+   *  interleave the two histories in order. */
+  switch?: { harness_len: number; to?: 'agent' | 'provider' };
+};
+
+/** What drives a session — one of Mira's providers, or an external agent —
+ *  and where it is in its lifecycle. Pushed by the server on every change;
+ *  the composer renders from this alone. */
+export type SessionEngine = {
+  kind: 'provider' | 'agent';
+  /** Provider: engine instance id (`anthropic`, `openrouter`, …). */
+  instance?: string | null;
+  /** Agent: driver kind (`claude-code`, `codex`, …). */
+  driver?: string | null;
+  display_name: string;
+  model?: string | null;
+  /** `idle`: picked, not running (starts on the next message). */
+  status: 'idle' | 'starting' | 'ready' | 'error';
+  error?: string | null;
+};
+
+/** A session from an agent's own history, resumable in Mira. */
+export type ExternalAgentSession = {
+  id: string;
+  cwd: string;
+  model?: string | null;
+  messages: number;
+  first_text?: string | null;
+  updated_at?: string | null;
+};
+
+export type AcpConfigValue = {
+  value: string;
+  name: string;
+  description?: string | null;
+};
+
+/** One config option. `category === 'model'` is the model selector —
+ *  ACP has no set-model method, the model list *is* a config option. */
+export type AcpConfigOption = {
+  id: string;
+  name: string;
+  description?: string | null;
+  category?: string | null;
+  current?: string | null;
+  values: AcpConfigValue[];
+};
+
 /* ask_user tool — model-supplied clarifying questions. */
 export type AskUserOption = {
   label: string;
@@ -235,14 +395,16 @@ export type EnvironmentStatus = {
 export type EnvironmentInfo = { name: string; backend: string; description: string };
 
 export type ServerMsg =
-  | { type: 'ready'; session_id: string; model: string; mode: Mode; cwd: string; history: Message[]; turns?: TurnMeta[]; usage?: UsageTotals; tasks?: TaskItem[]; goal?: Goal | null; previews?: Record<string, DiffPreview> }
+  | { type: 'ready'; session_id: string; model: string; mode: Mode; cwd: string; history: Message[]; turns?: TurnMeta[]; usage?: UsageTotals; tasks?: TaskItem[]; goal?: Goal | null; previews?: Record<string, DiffPreview>; agent_transcript?: AgentTranscriptLine[]; agent_driver?: string | null; agent_kind?: string | null; instance?: string | null; agent_configured?: string | null; engine?: SessionEngine | null; title?: string | null }
+  /** The session's engine changed: picked, starting, ready, failed, exited. */
+  | { type: 'session_engine'; engine: SessionEngine }
   | { type: 'token'; text: string }
   | { type: 'reasoning'; text: string }
   | { type: 'tool_start'; call: ToolCall }
   | { type: 'tool_end'; result: ToolResult }
   | { type: 'turn_complete' }
   | { type: 'done' }
-  | { type: 'approval_request'; call: ToolCall; preview?: DiffPreview | null }
+  | { type: 'approval_request'; call: ToolCall; preview?: DiffPreview | null; needs?: string[] }
   | { type: 'warning'; text: string }
   | { type: 'environment_status'; status: EnvironmentStatus; environments: EnvironmentInfo[] }
   | { type: 'environment_progress'; text: string }
@@ -251,7 +413,7 @@ export type ServerMsg =
   | { type: 'tool_preview'; call_id: string; preview: DiffPreview }
   | { type: 'skills_reloaded' }
   | { type: 'extensions_changed' }
-  | { type: 'model_changed'; model: string }
+  | { type: 'model_changed'; model: string; instance?: string | null }
   | { type: 'mode_changed'; mode: Mode }
   | { type: 'error'; text: string }
   | { type: 'review_started'; run_id: string }
@@ -262,7 +424,7 @@ export type ServerMsg =
   | { type: 'background_mode_changed'; session_id: string; mode: BackgroundMode }
   | { type: 'session_background_idle'; session_id: string }
   | { type: 'session_background_running'; session_id: string }
-  | { type: 'usage'; round: TokenUsage; totals: UsageTotals }
+  | { type: 'usage'; round: TokenUsage; totals: UsageTotals; context_window?: number | null; compact_at?: number | null }
   | { type: 'rate_limit'; rate_limit: RateLimit; summary: string | null }
   | { type: 'memory_learned'; count: number }
   | { type: 'compacted'; messages_removed: number }
@@ -287,6 +449,52 @@ export type ServerMsg =
       parent_call_id: string;
       parent_session_id: string;
       entry: ScratchpadEntry;
+    }
+  // -------- ACP (external agent) frames --------
+  // Distinct variants rather than a wrapped envelope, so this file
+  // pattern-matches by `type` the same way it already does for subagents.
+  | { type: 'acp_text'; text: string }
+  | { type: 'acp_thought'; text: string }
+  | { type: 'acp_tool_call'; call: AcpToolCall }
+  | { type: 'acp_tool_call_update'; call: AcpToolCall }
+  | { type: 'acp_plan'; entries: AcpPlanItem[] }
+  | { type: 'acp_modes'; current: string; available: AcpSessionMode[]; postures?: AgentPostureMapping[] }
+  | { type: 'acp_config_options'; options: AcpConfigOption[] }
+  | { type: 'acp_commands'; names: string[] }
+  | { type: 'acp_usage'; used: number; size: number; cost: { amount: number; currency: string } | null }
+  /** The agent account's plan limits (Claude's 5-hour and weekly windows). */
+  | { type: 'acp_limits'; windows: { name: string; utilization: number; resets_at?: number | null }[] }
+  | { type: 'acp_session_info'; title: string | null; updated_at: string | null }
+  /** The agent's own stop reason, verbatim. `cancelled` and
+   *  `max_tokens` must not render as a completed answer. */
+  | { type: 'acp_turn_end'; stop_reason: string; detail?: string | null }
+    /** Something this build does not model. Surfaced as a warning rather
+   *  than dropped: a silent gap is indistinguishable from a hung agent. */
+  | { type: 'acp_unmodelled'; method: string; reason: string }
+  /** An external agent was brought up, or failed to be. `error` is
+   *  user-facing: "grok isn't installed" rather than an opaque code. */
+  | { type: 'acp_agent_started'; kind: string; display_name: string; launch: string; error?: string | null }
+  /** Per-agent health, for the agent list. */
+  | { type: 'acp_agent_status'; agents: AcpAgentStatus[] }
+  /** The agent's session mode changed. Recorded for every change, not just
+   *  privileged ones: it is a standing change to what the agent may do. */
+  | {
+      type: 'acp_mode_changed';
+      kind: string;
+      display_name: string;
+      mode_id: string;
+      mode_name: string;
+      privileged: boolean;
+    }
+  /** A privileged mode was requested without acknowledgement. The UI must
+   *  explain `reason` to the user and retry with the flag set. */
+  | {
+      type: 'acp_privileged_mode_confirmation';
+      kind: string;
+      display_name: string;
+      mode_id: string;
+      mode_name: string;
+      reason: string;
     };
 
 export type ScratchpadEntry = {
@@ -307,11 +515,52 @@ export type ClientMsg =
   | { type: 'resend'; original: string; occurrence: number; text: string }
   | { type: 'approve'; call_id: string; allow: boolean; scope?: ApprovalScope }
   | ({ type: 'prompt_response'; prompt_id: string } & PromptResponse)
-  | { type: 'set_model'; model: string }
+  | { type: 'set_model'; model: string; instance?: string | null }
+  // -------- external ACP agents --------
+  /** Bring an external agent up for this session, replacing any running one. */
+  | {
+      type: 'acp_start';
+      /** Engine instance from `GET /api/engines` — its config comes from
+       *  mira.yaml's `engines:` block; the fields below layer on top. */
+      instance?: string | null;
+      /** Omit (or send the session's configured kind) to start with the
+       *  launch settings inherited from the previous chat. */
+      driver?: string | null;
+      binary_path?: string | null;
+      display_name?: string | null;
+      launch_args?: string[];
+      env?: Record<string, string>;
+      api_key?: string | null;
+      home_path?: string | null;
+      effort?: string | null;
+      setting_sources?: string | null;
+      resume?: string | null;
+      /** Agent model picked alongside the agent; remembered for restarts. */
+      model?: string | null;
+    }
+  /** Fork the agent session under a new id (Claude Code only). */
+  | { type: 'acp_fork' }
+  /** Ask the agent to compact its context (native transports only). */
+  | { type: 'acp_compact' }
+  /** Send a turn to the running agent. */
+  | { type: 'acp_prompt'; text: string; images?: { media_type: string; data: string }[] }
+  /** Stop the agent and release its terminals. */
+  | { type: 'acp_stop' }
+  /** Ask what every known agent's health is. */
+  | { type: 'acp_status' }
+  /** Switch the agent's own session mode. Not Mira's `set_mode`. */
+  | { type: 'acp_set_mode'; mode_id: string; acknowledge_privileged?: boolean }
+  /** Set one of the agent's config options — including its model, which
+   *  ACP models as a `category: "model"` option. */
+  | { type: 'acp_set_config_option'; option_id: string; value: string }
   /** No target = ask for `environment_status`; a name (or `local`) switches. */
   | { type: 'environment'; target?: string | null }
   | { type: 'set_mode'; mode: Mode }
-  | { type: 'set_effort'; effort: string | null }
+  /** Set one advertised model option. `id` is a descriptor id such as
+   *  `reasoning_effort` or `service_tier`; the server ignores ids it
+   *  doesn't know. Replaces the old `set_effort`, which had no server
+   *  handler and was silently dropped. */
+  | { type: 'set_model_option'; id: string; value: string }
   | { type: 'interrupt' }
   | { type: 'set_goal'; condition: string; max_iterations?: number | null; evaluator_model?: string | null }
   | { type: 'clear_goal' }
@@ -418,6 +667,9 @@ export type SessionSummary = {
   /** True when this session is the server's `active` pointer — HTTP
    *  handlers without a session_id in the URL target it. */
   active: boolean;
+  /** Driver slug when an external agent drove turns here, for the sidebar
+   *  badge. Absent for harness-only sessions. */
+  agent_driver?: string | null;
   /** True when at least one WS forwarder is currently subscribed to this
    *  slot's event stream. Sidebar renders a "•" indicator. */
   attached?: boolean;
@@ -433,6 +685,12 @@ export type SessionSummary = {
   worktree_status?: WorktreeMergeStatus | null;
   /** Branch name of the worktree — shown as tooltip on the merge chip. */
   worktree_branch?: string | null;
+  /** Sidebar pin — floats the session to the top of its project group.
+   *  Persisted server-side via `PUT /api/sessions/:id/flags`. */
+  pinned?: boolean;
+  /** True when the user archived this session. Archived sessions only
+   *  appear in the sidebar's "Archived" view (`?archived=true`). */
+  archived?: boolean;
   /** Running token totals across the session's turns. Omitted (or all-zero)
    *  for empty sessions that haven't hit the provider yet. */
   usage?: UsageTotals;

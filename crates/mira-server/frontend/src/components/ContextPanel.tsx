@@ -21,7 +21,8 @@ import type { GitStatusView, SessionDiffView, BranchPrView } from '../api';
 import type { TaskItem } from '../types';
 import type { SubagentStreamState, Entry } from '../App';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
-import { identityFor } from './AgentCard';
+import { SubagentFace } from './SubagentFace';
+import { personaName, useSubagents, type Subagent } from '../lib/subagents';
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                             */
@@ -58,11 +59,6 @@ function urlLabel(url: string): string {
   }
 }
 
-function agentColor(s: string): string {
-  const hash = [...s].reduce((h, c) => (h * 31 + c.charCodeAt(0)) | 0, 0);
-  const colors = ['#e06c75', '#e5c07b', '#98c379', '#56b6c2', '#61afef', '#c678dd'];
-  return colors[Math.abs(hash) % colors.length];
-}
 
 function formatAgentName(raw: string): string {
   return raw
@@ -72,15 +68,16 @@ function formatAgentName(raw: string): string {
 }
 
 function agentDisplayInfo(
-  callId: string,
   state: SubagentStreamState,
+  roster: Subagent[] | undefined,
 ): { name: string; badge: string | null; description: string } {
   const rawCat = state.agentCategory ?? null;
   const promptStr = (state.prompt ?? '').trim();
 
-  // Use the same codename as the subagent panel tab so the entry is
-  // immediately recognisable across both surfaces.
-  const name = identityFor(callId).name;
+  // The subagent's own persona, the same name its transcript row and
+  // panel tab show.
+  const type = state.agentName ?? null;
+  const name = type ? personaName(roster?.find((r) => r.name === type), type) : 'Helper';
   const badge = rawCat ? formatAgentName(rawCat) : null;
   const description = promptStr.split('\n')[0].replace(/^#+ /, '');
 
@@ -541,6 +538,7 @@ function SubagentsSection({
   onOpenAgent: (callId: string) => void;
 }) {
   const [open, setOpen] = useState(true);
+  const roster = useSubagents()?.subagents;
 
   const ordered: { callId: string; state: SubagentStreamState }[] = [];
   for (const e of entries) {
@@ -565,8 +563,9 @@ function SubagentsSection({
             <div className="flex flex-col gap-0.5 pb-1">
               <AnimatePresence>
                 {ordered.map(({ callId, state }, i) => {
-                  const color = agentColor(callId);
-                  const { name, badge, description } = agentDisplayInfo(callId, state);
+                  const type = state.agentName ?? null;
+                  const persona = type ? roster?.find((r) => r.name === type) : undefined;
+                  const { name, badge, description } = agentDisplayInfo(state, roster);
                   return (
                     <motion.button
                       key={callId}
@@ -578,9 +577,12 @@ function SubagentsSection({
                       onClick={() => onOpenAgent(callId)}
                       className="flex items-start gap-2.5 py-1.5 -mx-2 px-2 rounded text-left hover:bg-white/[0.04] transition-colors w-full"
                     >
-                      <span
-                        className={cn('size-2 rounded-full shrink-0 mt-[5px]', !state.done && 'animate-pulse')}
-                        style={{ backgroundColor: color }}
+                      <SubagentFace
+                        id={type ?? callId}
+                        face={persona?.face}
+                        size={20}
+                        state={state.done ? 'done' : 'working'}
+                        className="mt-px"
                       />
                       <span className="flex-1 min-w-0 flex flex-col gap-0.5">
                         <span className="flex items-baseline gap-1.5 min-w-0">

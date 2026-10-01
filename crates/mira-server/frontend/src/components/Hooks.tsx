@@ -6,16 +6,16 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Bell,
-  CircleNotch,
-  Lightning,
-  PencilSimple,
+  Bot,
+  Info,
+  LoaderCircle,
+  Pencil,
   Plus,
-  Robot,
-  TerminalWindow,
-  Trash,
-  Warning,
-} from '@phosphor-icons/react';
-import { getHooks, saveHooks, type HookRule, type HooksView } from '../api';
+  SquareTerminal,
+  Trash2,
+  TriangleAlert,
+  Zap,
+} from 'lucide-react';import { getHooks, saveHooks, type HookRule, type HooksView } from '../api';
 import { SectionInput } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { Button } from '@/components/ui/button';
@@ -140,10 +140,36 @@ const TOOLS: { matcher: string; label: string; does: string }[] = [
 ];
 const CUSTOM_TOOLS = '__custom__';
 
-const ACTION_LABEL: Record<Action, string> = {
-  notify: 'Show a notification',
-  check: 'Ask the AI to check',
-  command: 'Run a command',
+/** Per-action presentation: label, one-line blurb, and a hue. Hue classes
+ *  are hard-coded literals so Tailwind's JIT actually emits them. */
+const ACTION_META: Record<Action, {
+  label: string;
+  blurb: string;
+  icon: typeof Bell;
+  iconTint: string;
+  iconBox: string;
+}> = {
+  notify: {
+    label: 'Show a notification',
+    blurb: 'Ping you on the desktop',
+    icon: Bell,
+    iconTint: 'text-cyan-300',
+    iconBox: 'border-cyan-500/30 bg-cyan-500/10',
+  },
+  check: {
+    label: 'Ask the AI to check',
+    blurb: 'Mira pauses for an answer',
+    icon: Bot,
+    iconTint: 'text-mira-purple',
+    iconBox: 'border-mira-purple/30 bg-mira-purple/10',
+  },
+  command: {
+    label: 'Run a command',
+    blurb: 'Run your script or shell line',
+    icon: SquareTerminal,
+    iconTint: 'text-amber-300',
+    iconBox: 'border-amber-500/30 bg-amber-500/10',
+  },
 };
 
 const momentFor = (event: string) => MOMENTS.find((m) => m.event === event);
@@ -250,23 +276,27 @@ function whenText(rule: HookRule): string {
   return `When ${lowered}`;
 }
 
+/** Which action a saved rule performs — drives the row's tint + icon. */
+function actionOf(rule: HookRule): Action {
+  if (rule.type === 'prompt') return 'check';
+  return notifyMessageOf(rule.command) != null ? 'notify' : 'command';
+}
+
 /** "When … → …", for the list. */
-function describe(rule: HookRule): { when: string; does: React.ReactNode; icon: React.ReactNode } {
+function describe(rule: HookRule): { when: string; does: React.ReactNode } {
   const when = whenText(rule);
   if (rule.type === 'prompt') {
     return {
       when,
-      icon: <Robot className="size-4" />,
       does: <>Ask the AI: <q className="italic">{rule.prompt}</q></>,
     };
   }
   const note = notifyMessageOf(rule.command);
   if (note != null) {
-    return { when, icon: <Bell className="size-4" />, does: <>Show a notification: <q>{note}</q></> };
+    return { when, does: <>Show a notification: <q>{note}</q></> };
   }
   return {
     when,
-    icon: <TerminalWindow className="size-4" />,
     does: <>Run <code className="rounded bg-muted/70 px-1 py-px font-mono text-[11.5px]">{rule.command}</code></>,
   };
 }
@@ -301,19 +331,25 @@ export function HooksSection() {
   const os = view?.os ?? '';
   const canNotify = notifyCommand(os, 'x') != null;
   const presets = useMemo(() => {
-    const list: { label: string; rule: HookRule | null }[] = [
+    const list: { label: string; blurb: string; icon: typeof Bell; rule: HookRule | null }[] = [
       {
         label: 'Notify me when Mira needs approval',
+        blurb: 'Desktop ping on every approval',
+        icon: Bell,
         rule: canNotify
           ? { event: 'Notification', type: 'command', command: notifyCommand(os, 'Mira needs your approval') }
           : null,
       },
       {
         label: 'Notify me when Mira finishes',
+        blurb: 'Know when it’s your turn again',
+        icon: Bell,
         rule: canNotify ? { event: 'Stop', type: 'command', command: notifyCommand(os, 'Mira is done') } : null,
       },
       {
         label: 'Have the AI check the work before stopping',
+        blurb: 'Self-review on every reply',
+        icon: Bot,
         rule: {
           event: 'Stop',
           type: 'prompt',
@@ -321,27 +357,34 @@ export function HooksSection() {
         },
       },
     ];
-    return list.filter((p) => p.rule != null) as { label: string; rule: HookRule }[];
+    return list.filter((p) => p.rule != null) as { label: string; blurb: string; icon: typeof Bell; rule: HookRule }[];
   }, [os, canNotify]);
 
   if (!view) {
     return (
       <div className="flex items-center gap-2 px-1 text-[12.5px] text-muted-foreground">
-        {error ? <span className="text-destructive">{error}</span> : <><CircleNotch className="size-3.5 animate-spin" /> Loading hooks…</>}
+        {error ? <span className="text-destructive">{error}</span> : <><LoaderCircle className="size-3.5 animate-spin" /> Loading hooks…</>}
       </div>
     );
   }
 
   const rules = view.rules;
   return (
-    <div className="flex flex-col gap-5">
-      <div className="px-1">
-        <div className="text-[18px] font-semibold tracking-tight text-foreground">Hooks</div>
-        <div className="mt-1 text-[12.5px] text-muted-foreground/85">
-          Make Mira do something at key moments: get a notification, have the AI double-check its
-          work, or run your own script.
+    <div className="flex flex-col gap-2.5">
+      <section className="flex flex-col gap-2.5">
+        <div className="flex min-h-7 items-start justify-between gap-4 px-1">
+          <div className="min-w-0">
+            <h2 className="flex min-h-7 items-center gap-2 text-[13px] font-medium text-muted-foreground">
+              <Zap className="size-3.5" />
+              Hooks
+            </h2>
+            <p className="mt-1 max-w-xl text-[12px] leading-relaxed text-muted-foreground/75">
+              Make Mira do something at key moments: get a notification, have the AI double-check
+              its work, or run your own script.
+            </p>
+          </div>
         </div>
-      </div>
+      </section>
 
       {(error || view.problems.length > 0) && (
         <div className="flex flex-col gap-2">
@@ -351,26 +394,28 @@ export function HooksSection() {
       )}
 
       {view.failing.length > 0 && (
-        <div className="overflow-hidden rounded-2xl border border-amber-500/30 bg-amber-500/5">
-          <div className="px-5 py-4">
-            <div className="flex items-center gap-2 text-[14px] font-semibold text-foreground">
-              <Warning weight="fill" className="size-4 text-amber-500" /> Hooks that are failing
-            </div>
-            <div className="mt-0.5 text-[12.5px] text-muted-foreground">
-              They still run each time, but Mira only mentions a failure in chat once. Fix the
-              command, or turn off the plugin it came from.
+        <div className="overflow-hidden rounded-xl border border-amber-500/30 bg-amber-500/5">
+          <div className="flex items-center gap-2 px-4 py-3">
+            <TriangleAlert className="size-4 shrink-0 text-amber-400" />
+            <div>
+              <div className="text-[14px] font-semibold text-foreground">Hooks that are failing</div>
+              <div className="mt-0.5 text-[12.5px] text-muted-foreground">
+                They still run each time, but Mira only mentions a failure in chat once. Fix the
+                command, or turn off the plugin it came from.
+              </div>
             </div>
           </div>
           {view.failing.map((f) => (
-            <div key={f} className="break-words border-t border-amber-500/20 px-5 py-2.5 font-mono text-[11.5px] text-muted-foreground">
-              {f}
+            <div key={f} className="flex items-center gap-2 border-t border-amber-500/20 px-5 py-2.5 font-mono text-[11.5px] text-muted-foreground">
+              <TriangleAlert className="size-3.5 shrink-0 text-amber-500/70" />
+              <span className="break-words">{f}</span>
             </div>
           ))}
         </div>
       )}
 
-      <div className="overflow-hidden rounded-2xl border border-border/50 bg-mira-elev1/60">
-        <div className="flex items-center justify-between gap-3 px-5 py-4">
+      <div className="overflow-hidden rounded-xl border border-border/60 bg-card/40">
+        <div className="flex items-center justify-between gap-3 px-4 py-3">
           <div>
             <div className="text-[14px] font-semibold text-foreground">Your hooks</div>
             <div className="mt-0.5 text-[12.5px] text-muted-foreground">
@@ -385,7 +430,7 @@ export function HooksSection() {
         </div>
 
         {editing === -1 && (
-          <div className="border-t border-border/40 px-5 py-4">
+          <div className="border-t border-border/50 px-4 py-3">
             <Editor
               initial={freshDraft()}
               os={os}
@@ -397,68 +442,82 @@ export function HooksSection() {
         )}
 
         {rules.length === 0 && editing == null && (
-          <div className="border-t border-border/40 px-5 py-5">
+          <div className="border-t border-border/50 px-4 py-3">
             <div className="text-[12.5px] text-muted-foreground">Start with one of these:</div>
-            <div className="mt-2.5 flex flex-wrap gap-2">
+            <div className="mt-2.5 grid gap-2 sm:grid-cols-3">
               {presets.map((p) => (
                 <button
                   key={p.label}
                   type="button"
                   disabled={saving}
                   onClick={() => void save([p.rule])}
-                  className="inline-flex items-center gap-1.5 rounded-full border border-border/60 px-3 py-1.5 text-[12px] text-foreground transition-colors hover:bg-muted/40 disabled:opacity-60"
+                  className="group flex items-start gap-2.5 rounded-xl border border-border/60 bg-background/40 p-3 text-left transition-colors hover:border-mira-blue/40 hover:bg-secondary/40 disabled:opacity-60"
                 >
-                  <Lightning className="size-3.5 text-amber-500" /> {p.label}
+                  <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-amber-500/10 text-amber-300">
+                    <p.icon className="size-3.5" strokeWidth={1.75} />
+                  </span>
+                  <span className="min-w-0">
+                    <span className="block text-[12.5px] font-medium leading-snug text-foreground">{p.label}</span>
+                    <span className="mt-0.5 block text-[11px] text-muted-foreground">{p.blurb}</span>
+                  </span>
                 </button>
               ))}
             </div>
           </div>
         )}
 
-        {rules.map((rule, i) =>
-          editing === i ? (
-            <div key={i} className="border-t border-border/40 px-5 py-4">
-              <Editor
-                initial={draftFrom(rule)}
-                os={os}
-                saving={saving}
-                onCancel={() => setEditing(null)}
-                onSave={async (next) => {
-                  if (await save(rules.map((r, j) => (j === i ? next : r)))) setEditing(null);
-                }}
+        <div className="flex flex-col gap-0.5 p-2">
+          {rules.map((rule, i) =>
+            editing === i ? (
+              <div key={i} className="px-1 py-1 sm:px-1.5">
+                <Editor
+                  initial={draftFrom(rule)}
+                  heading="Edit hook"
+                  os={os}
+                  saving={saving}
+                  onCancel={() => setEditing(null)}
+                  onSave={async (next) => {
+                    if (await save(rules.map((r, j) => (j === i ? next : r)))) setEditing(null);
+                  }}
+                />
+              </div>
+            ) : (
+              <RuleRow
+                key={i}
+                rule={rule}
+                busy={saving}
+                onEdit={editing == null ? () => setEditing(i) : undefined}
+                onRemove={() => void save(rules.filter((_, j) => j !== i))}
               />
-            </div>
-          ) : (
-            <RuleRow
-              key={i}
-              rule={rule}
-              busy={saving}
-              onEdit={editing == null ? () => setEditing(i) : undefined}
-              onRemove={() => void save(rules.filter((_, j) => j !== i))}
-            />
-          ),
-        )}
+            ),
+          )}
+        </div>
       </div>
 
       {view.plugin_rules.length > 0 && (
-        <div className="overflow-hidden rounded-2xl border border-border/50 bg-mira-elev1/60">
-          <div className="px-5 py-4">
+        <div className="overflow-hidden rounded-xl border border-border/60 bg-card/40">
+          <div className="px-4 py-3">
             <div className="text-[14px] font-semibold text-foreground">From your plugins</div>
             <div className="mt-0.5 text-[12.5px] text-muted-foreground">
               These come with plugins you’ve turned on. Turn the plugin off to stop them.
             </div>
           </div>
-          {view.plugin_rules.map((r, i) => (
-            <RuleRow key={i} rule={r} source={r.plugin} />
-          ))}
+          <div className="flex flex-col gap-0.5 p-2">
+            {view.plugin_rules.map((r, i) => (
+              <RuleRow key={i} rule={r} source={r.plugin} />
+            ))}
+          </div>
         </div>
       )}
 
-      <p className="px-1 text-[11.5px] leading-relaxed text-muted-foreground/80">
-        Saved in <code>~/.mira/mira.yaml</code> and applied right away. Hooks in a project’s own
-        settings are ignored on purpose, so opening someone else’s repo can’t run commands on your
-        computer. Commands get the details as JSON on their input, in the same format Claude Code
-        uses, so hook scripts written for it work here too.
+      <p className="flex items-start gap-1.5 px-1 text-[11.5px] leading-relaxed text-muted-foreground/80">
+        <Info className="mt-0.5 size-3.5 shrink-0" />
+        <span>
+          Saved in <code>~/.mira/mira.yaml</code> and applied right away. Hooks in a project’s own
+          settings are ignored on purpose, so opening someone else’s repo can’t run commands on your
+          computer. Commands get the details as JSON on their input, in the same format Claude Code
+          uses, so hook scripts written for it work here too.
+        </span>
       </p>
     </div>
   );
@@ -473,29 +532,31 @@ function RuleRow({
   onEdit?: () => void;
   onRemove?: () => void;
 }) {
-  const { when, does, icon } = describe(rule);
+  const { when, does } = describe(rule);
+  const meta = ACTION_META[actionOf(rule)];
+  const Icon = meta.icon;
   return (
-    <div className="flex items-start gap-3 border-t border-border/40 px-5 py-3">
-      <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg border border-border/50 bg-background/60 text-foreground/80">
-        {icon}
-      </div>
+    <div className="group flex items-start gap-3 rounded-xl px-2.5 py-2.5 transition-colors hover:bg-secondary/30">
+      <span className={cn('flex size-9 shrink-0 items-center justify-center rounded-lg border', meta.iconBox)}>
+        <Icon className={cn('size-4', meta.iconTint)} strokeWidth={1.75} />
+      </span>
       <div className="min-w-0 flex-1">
-        <div className="text-[13px] font-medium text-foreground">{when}</div>
+        <div className="text-[13.5px] font-medium text-foreground">{when}</div>
         <div className="mt-0.5 break-words text-[12px] text-muted-foreground">
           {does}
           {source && <span className="ml-1.5 text-muted-foreground/70">· from {source}</span>}
         </div>
       </div>
       {(onEdit || onRemove) && (
-        <div className="flex shrink-0 items-center gap-1">
+        <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
           {onEdit && (
             <IconButton title="Edit" onClick={onEdit} disabled={busy}>
-              <PencilSimple className="size-3.5" />
+              <Pencil className="size-3.5" strokeWidth={1.75} />
             </IconButton>
           )}
           {onRemove && (
             <IconButton title="Remove" onClick={onRemove} disabled={busy}>
-              <Trash className="size-3.5" />
+              <Trash2 className="size-3.5" strokeWidth={1.75} />
             </IconButton>
           )}
         </div>
@@ -527,13 +588,14 @@ function IconButton({
 }
 
 function Editor({
-  initial, os, saving, onSave, onCancel,
+  initial, os, saving, onSave, onCancel, heading = 'New hook',
 }: {
   initial: Draft;
   os: string;
   saving: boolean;
   onSave: (rule: HookRule) => void;
   onCancel: () => void;
+  heading?: string;
 }) {
   const [d, setD] = useState<Draft>(initial);
   const [problem, setProblem] = useState<string | null>(null);
@@ -559,112 +621,133 @@ function Editor({
   }
 
   return (
-    <div className="flex flex-col gap-3.5">
-      <Row label="When">
-        <Select
-          value={d.event}
-          onChange={pickMoment}
-          options={MOMENTS.map((x) => ({ value: x.event, label: x.label, hint: x.help }))}
-        />
-      </Row>
+    <div className="rounded-xl border border-mira-blue/25 bg-mira-blue/[0.04] p-4">
+      <div className="mb-4 flex items-center gap-2">
+        <Zap className="size-4 text-mira-blue" strokeWidth={1.75} />
+        <span className="text-[13px] font-semibold text-foreground">{heading}</span>
+        <span className="text-[11.5px] text-muted-foreground">· runs in every chat, applies right away</span>
+      </div>
 
-      {m.tools && (
-        <Row label="For">
-          <div className="flex flex-col gap-2">
-            <Select
-              value={d.toolChoice}
-              onChange={(v) => set({ toolChoice: v })}
-              options={[
-                ...TOOLS.map((t) => ({ value: t.matcher, label: t.label })),
-                { value: CUSTOM_TOOLS, label: 'Specific tools…', hint: 'Tool names, e.g. Bash|Write' },
-              ]}
-            />
-            {d.toolChoice === CUSTOM_TOOLS && (
-              <SectionInput
-                value={d.customTools}
-                onChange={(e) => set({ customTools: e.target.value })}
-                placeholder="e.g. Bash|Write or mcp__github__.*"
-                spellCheck={false}
-                className="font-mono text-[12.5px]"
+      <div className="flex flex-col gap-4">
+        <Row label="When">
+          <Select
+            value={d.event}
+            onChange={pickMoment}
+            options={MOMENTS.map((x) => ({ value: x.event, label: x.label, hint: x.help }))}
+          />
+        </Row>
+
+        {m.tools && (
+          <Row label="For">
+            <div className="flex flex-col gap-2">
+              <Select
+                value={d.toolChoice}
+                onChange={(v) => set({ toolChoice: v })}
+                options={[
+                  ...TOOLS.map((t) => ({ value: t.matcher, label: t.label })),
+                  { value: CUSTOM_TOOLS, label: 'Specific tools…', hint: 'Tool names, e.g. Bash|Write' },
+                ]}
               />
-            )}
-          </div>
-        </Row>
-      )}
-
-      <Row label="Do">
-        <div className="flex flex-wrap gap-1.5">
-          {actions.map((a) => (
-            <button
-              key={a}
-              type="button"
-              onClick={() => set({ action: a })}
-              className={cn(
-                'inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[12px] transition-colors',
-                d.action === a
-                  ? 'border-foreground/40 bg-muted text-foreground'
-                  : 'border-border/60 text-muted-foreground hover:text-foreground',
+              {d.toolChoice === CUSTOM_TOOLS && (
+                <SectionInput
+                  value={d.customTools}
+                  onChange={(e) => set({ customTools: e.target.value })}
+                  placeholder="e.g. Bash|Write or mcp__github__.*"
+                  spellCheck={false}
+                  className="font-mono text-[12.5px]"
+                />
               )}
-            >
-              {a === 'notify' ? <Bell className="size-3.5" /> : a === 'check' ? <Robot className="size-3.5" /> : <TerminalWindow className="size-3.5" />}
-              {ACTION_LABEL[a]}
-            </button>
-          ))}
-        </div>
-      </Row>
+            </div>
+          </Row>
+        )}
 
-      {d.action === 'notify' && (
-        <Row label="Message">
-          <SectionInput value={d.message} onChange={(e) => set({ message: e.target.value })} />
-        </Row>
-      )}
-
-      {d.action === 'check' && (
-        <Row label="Question" note={m.check?.onNo}>
-          <textarea
-            value={d.question}
-            onChange={(e) => set({ question: e.target.value })}
-            placeholder={m.check?.example}
-            rows={2}
-            className="w-full resize-y rounded-md border border-border/60 bg-transparent px-3 py-2 text-[13px] text-foreground outline-none placeholder:text-muted-foreground/70 hover:border-border focus-visible:border-border focus-visible:ring-1 focus-visible:ring-ring"
-          />
-        </Row>
-      )}
-
-      {d.action === 'command' && (
-        <Row label="Command" note={m.commandNote ?? 'It gets the details as JSON on its input.'}>
-          <SectionInput
-            value={d.command}
-            onChange={(e) => set({ command: e.target.value })}
-            placeholder="e.g. ~/.mira/hooks/check.sh"
-            spellCheck={false}
-            className="font-mono text-[12.5px]"
-          />
-        </Row>
-      )}
-
-      {d.action !== 'notify' && (
-        <Row label="Time limit">
-          <div className="flex items-center gap-2">
-            <SectionInput
-              value={d.timeout}
-              onChange={(e) => set({ timeout: e.target.value.replace(/[^0-9.]/g, '') })}
-              placeholder={d.action === 'check' ? '30' : '60'}
-              className="w-20"
-            />
-            <span className="text-[12px] text-muted-foreground">seconds, then it’s skipped</span>
+        <Row label="Do">
+          <div className="grid gap-2 sm:grid-cols-3">
+            {actions.map((a) => {
+              const meta = ACTION_META[a];
+              const Icon = meta.icon;
+              const selected = d.action === a;
+              return (
+                <button
+                  key={a}
+                  type="button"
+                  onClick={() => set({ action: a })}
+                  className={cn(
+                    'flex items-start gap-2.5 rounded-lg border p-2.5 text-left transition-colors',
+                    selected
+                      ? 'border-mira-blue/50 bg-mira-blue/10'
+                      : 'border-border/60 hover:border-border hover:bg-secondary/40',
+                  )}
+                >
+                  <Icon
+                    className={cn('mt-0.5 size-4 shrink-0', selected ? 'text-mira-blue' : 'text-muted-foreground')}
+                    strokeWidth={1.75}
+                  />
+                  <span className="min-w-0">
+                    <span className={cn('block text-[12.5px] font-medium leading-snug', selected ? 'text-foreground' : 'text-foreground/85')}>
+                      {meta.label}
+                    </span>
+                    <span className="mt-0.5 block text-[11px] leading-snug text-muted-foreground">{meta.blurb}</span>
+                  </span>
+                </button>
+              );
+            })}
           </div>
         </Row>
-      )}
 
-      {problem && <Banner tone="error">{problem}</Banner>}
+        {d.action === 'notify' && (
+          <Row label="Message">
+            <SectionInput value={d.message} onChange={(e) => set({ message: e.target.value })} />
+          </Row>
+        )}
 
-      <div className="flex items-center justify-end gap-2">
-        <Button variant="outline" className="h-8 px-3 text-[12px]" onClick={onCancel} disabled={saving}>Cancel</Button>
-        <Button className="h-8 px-3 text-[12px]" onClick={submit} disabled={saving}>
-          {saving && <CircleNotch className="size-3.5 animate-spin" />}
-          Save hook
-        </Button>
+        {d.action === 'check' && (
+          <Row label="Question" note={m.check?.onNo}>
+            <textarea
+              value={d.question}
+              onChange={(e) => set({ question: e.target.value })}
+              placeholder={m.check?.example}
+              rows={2}
+              className="w-full resize-y rounded-md border border-border/60 bg-transparent px-3 py-2 text-[13px] text-foreground outline-none placeholder:text-muted-foreground/70 hover:border-border focus-visible:border-border focus-visible:ring-1 focus-visible:ring-ring"
+            />
+          </Row>
+        )}
+
+        {d.action === 'command' && (
+          <Row label="Command" note={m.commandNote ?? 'It gets the details as JSON on its input.'}>
+            <SectionInput
+              value={d.command}
+              onChange={(e) => set({ command: e.target.value })}
+              placeholder="e.g. ~/.mira/hooks/check.sh"
+              spellCheck={false}
+              className="font-mono text-[12.5px]"
+            />
+          </Row>
+        )}
+
+        {d.action !== 'notify' && (
+          <Row label="Time limit">
+            <div className="flex items-center gap-2">
+              <SectionInput
+                value={d.timeout}
+                onChange={(e) => set({ timeout: e.target.value.replace(/[^0-9.]/g, '') })}
+                placeholder={d.action === 'check' ? '30' : '60'}
+                className="w-20"
+              />
+              <span className="text-[12px] text-muted-foreground">seconds, then it’s skipped</span>
+            </div>
+          </Row>
+        )}
+
+        {problem && <Banner tone="error">{problem}</Banner>}
+
+        <div className="flex items-center justify-end gap-2">
+          <Button variant="outline" className="h-8 px-3 text-[12px]" onClick={onCancel} disabled={saving}>Cancel</Button>
+          <Button className="h-8 px-3 text-[12px]" onClick={submit} disabled={saving}>
+            {saving && <LoaderCircle className="size-3.5 animate-spin" />}
+            Save hook
+          </Button>
+        </div>
       </div>
     </div>
   );
@@ -672,7 +755,7 @@ function Editor({
 
 function Row({ label, note, children }: { label: string; note?: string; children: React.ReactNode }) {
   return (
-    <div className="grid gap-1.5 sm:grid-cols-[92px_1fr] sm:gap-3">
+    <div className="grid gap-1.5 sm:grid-cols-[110px_1fr] sm:gap-4">
       <div className="pt-2 text-[12px] font-medium text-muted-foreground">{label}</div>
       <div className="min-w-0">
         {children}
@@ -690,7 +773,7 @@ function Banner({ tone, children }: { tone: 'warn' | 'error'; children: React.Re
         tone === 'warn' ? 'bg-amber-500/10 text-amber-700 dark:text-amber-400' : 'bg-destructive/10 text-destructive',
       )}
     >
-      <Warning weight="fill" className="mt-px size-3.5 shrink-0" />
+      <TriangleAlert className="mt-px size-3.5 shrink-0" />
       <div className="min-w-0">{children}</div>
     </div>
   );

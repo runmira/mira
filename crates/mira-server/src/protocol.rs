@@ -71,8 +71,121 @@ pub enum ClientMsg {
         #[serde(flatten)]
         response: PromptResponse,
     },
-    /// Hot-swap the model for the next turn.
-    SetModel { model: String },
+    /// Hot-swap the model for the next turn, optionally on a
+    /// different engine instance. `instance` is a key from
+    /// `GET /api/engines` (`anthropic`, `codex`, `claude-code`, …):
+    /// switching it routes future turns through that backend, which
+    /// for a native instance also swaps the underlying provider.
+    /// Both fields optional: `{model}` keeps the instance, `{instance}`
+    /// alone adopts that instance's default model, and `{instance,
+    /// model}` sets both. Omitting both is a no-op.
+    SetModel {
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default)]
+        instance: Option<String>,
+    },
+    /// Set one of the model options the UI advertises for the current
+    /// model (see `mira_ai::provider::OptionDescriptor`).
+    ///
+    /// `id` is a descriptor id — `reasoning_effort`, `service_tier`. The
+    /// client only ever sends ids the server advertised for that model, but
+    /// the server still matches on a known set rather than trusting the
+    /// wire: an unknown id is ignored rather than written to some field by
+    /// name. This is the message the composer's model controls speak; the
+    /// previous `set_effort` the UI sent had no handler at all and was
+    /// silently dropped, which is why the effort selector did nothing.
+    SetModelOption { id: String, value: String },
+    /// Bring an external ACP agent up for this session, replacing any agent
+    /// already running.
+    AcpStart {
+        /// Start a configured engine instance (a key from
+        /// `GET /api/engines`) instead of naming a driver by hand —
+        /// its display name, binary, env and launch args come from
+        /// `mira.yaml`'s `engines:` block. When set, the per-field
+        /// overrides below layer on top of the instance config.
+        #[serde(default)]
+        instance: Option<String>,
+        /// Driver slug, e.g. `"claude-code"`, `"codex"`, `"grok"`.
+        /// Optional: omitted (or matching what this session already
+        /// recorded) resolves to the session's retained launch
+        /// settings — how a fresh chat starts the same agent the last
+        /// one ran, with the same config, by sending no fields at all.
+        #[serde(default)]
+        driver: Option<String>,
+        /// Overrides the driver's default binary path.
+        #[serde(default)]
+        binary_path: Option<String>,
+        /// Overrides the driver's display name for this instance.
+        #[serde(default)]
+        display_name: Option<String>,
+        /// Extra CLI arguments, appended verbatim.
+        #[serde(default)]
+        launch_args: Vec<String>,
+        /// Per-instance environment.
+        #[serde(default)]
+        env: std::collections::BTreeMap<String, String>,
+        /// API key, for agents that take one.
+        #[serde(default)]
+        api_key: Option<String>,
+        /// Per-instance home / config directory.
+        #[serde(default)]
+        home_path: Option<String>,
+        /// Resume this agent session id instead of starting blank (import).
+        #[serde(default)]
+        resume: Option<String>,
+        /// Effort level, for agents that take one (`claude --effort`).
+        #[serde(default)]
+        effort: Option<String>,
+        /// Setting sources, for agents that take them.
+        #[serde(default)]
+        setting_sources: Option<String>,
+        /// The agent model to run, picked alongside the agent in the model
+        /// picker. Applied at launch (native transports) or as the model
+        /// config option once the agent is up (ACP), and remembered for
+        /// every later restart.
+        #[serde(default)]
+        model: Option<String>,
+    },
+    /// Switch the running agent's session mode.
+    ///
+    /// Not the same as `set_mode`: that changes Mira's own harness mode,
+    /// while this asks the external agent (Codex's `read-only` / `agent` /
+    /// `agent-full-access`, Claude Code's `code` / `ask` / `architect`).
+    AcpSetMode {
+        mode_id: String,
+        /// Set once the user has been shown what a privileged mode does and
+        /// agreed. A privileged mode is refused without it, so a client
+        /// cannot widen an agent's authority by setting the flag itself.
+        #[serde(default)]
+        acknowledge_privileged: bool,
+    },
+    /// Set a config option on the running agent.
+    ///
+    /// ACP has no set-model method — the model selector is a config option
+    /// with `category: "model"` — so this is how a model is chosen.
+    AcpSetConfigOption {
+        option_id: String,
+        value: String,
+    },
+    /// Send a turn to the running agent.
+    AcpPrompt {
+        text: String,
+        /// Images staged into the agent's files dir and named in the text.
+        #[serde(default)]
+        images: Vec<mira_core::ImageData>,
+    },
+    /// Stop the running agent and release its terminals.
+    AcpStop,
+    /// Fork the agent session: continue its history under a new session id.
+    /// Claude Code only (`--fork-session`); anything else gets an honest
+    /// error, not a silent restart.
+    AcpFork,
+    /// Ask the agent to compact its context. Native transports only; ACP
+    /// has no such method.
+    AcpCompact,
+    /// Report what each known agent's health is.
+    AcpStatus,
     /// Remote environments for the attached session. `target: None`
     /// asks for the current status (answered with `environment_status`);
     /// a name (or `local`) switches, reporting `environment_progress`
@@ -197,6 +310,47 @@ pub enum ServerMsg {
         /// before this landed.
         #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
         previews: std::collections::HashMap<String, DiffPreview>,
+        /// The agent transcript sidecar, oldest first. The client replays
+        /// these through its live frame handling, so reloaded agent turns
+        /// render exactly like live ones. Empty for harness-only sessions
+        /// and for legacy sessions written before this landed.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        agent_transcript: Vec<serde_json::Value>,
+        /// Which agent that transcript belongs to, for badges and resume.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_driver: Option<String>,
+        /// Driver driving right now, if any. Attach restores the banner for
+        /// live agents and clears it otherwise — client agent state is
+        /// per-session, and a stale global "driving" flag routes new chats
+        /// to dead agents.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_kind: Option<String>,
+        /// The engine instance serving this session (a key from
+        /// `GET /api/engines`), when the session has one. Lets a
+        /// reloading client restore the picker without guessing which
+        /// provider was active.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instance: Option<String>,
+        /// Driver kind this session is *configured* to run — inherited
+        /// from the previous chat or retained after a stop-with-config —
+        /// while no agent is live. The UI shows the agent as the
+        /// session's setup; the first prompt (or one click) starts it
+        /// with exactly those settings.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_configured: Option<String>,
+        /// The session's title (AI-written or the agent's), when it has one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        /// What drives this session — provider or agent — and its state.
+        /// The single source of truth the composer renders from; the
+        /// `agent_*` fields above remain for older clients.
+        engine: crate::session_engine::SessionEngine,
+    },
+    /// The session's engine changed: a provider or agent was picked, an
+    /// agent started, failed, or exited. Sent on every transition so the
+    /// composer never has to wait for a turn to learn what it is talking to.
+    SessionEngine {
+        engine: crate::session_engine::SessionEngine,
     },
     /// Fragment of assistant text.
     Token { text: String },
@@ -221,6 +375,10 @@ pub enum ServerMsg {
         /// don't have a natural preview (e.g. `bash`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         preview: Option<DiffPreview>,
+        /// For a compound shell command, the operations that need approval
+        /// — the rest would run unasked. Empty for a single command.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        needs: Vec<String>,
     },
     /// Non-fatal warning surfaced to the UI.
     Warning { text: String },
@@ -267,8 +425,14 @@ pub enum ServerMsg {
     /// installed, …). The frontend refetches `/api/mcp`, `/api/plugins`
     /// and `/api/commands`.
     ExtensionsChanged,
-    /// Model changed (echoes SetModel).
-    ModelChanged { model: String },
+    /// Model changed (echoes SetModel). `instance` names the engine
+    /// instance now serving the session, when the selection carried
+    /// one — absent for legacy clients that only picked a model.
+    ModelChanged {
+        model: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instance: Option<String>,
+    },
     /// Mode changed (echoes SetMode).
     ModeChanged { mode: Mode },
     /// A protocol-level error (bad input, unknown call_id, etc.).
@@ -320,6 +484,12 @@ pub enum ServerMsg {
     Usage {
         round: TokenUsage,
         totals: UsageTotals,
+        /// The model's context window, for the composer's context ring.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_window: Option<u64>,
+        /// Where auto-compaction kicks in, in tokens.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        compact_at: Option<u64>,
     },
 
     /// The provider's rate limits after the latest request, from its
@@ -481,9 +651,213 @@ pub enum ServerMsg {
         /// The posted note. `author` is the subagent type (e.g. `explore`).
         entry: crate::interactive::ScratchpadEntry,
     },
+
+    // -------- ACP (external agent) event forwarding --------
+    //
+    // Same shape as the subagent family above: distinct variants rather than
+    // a wrapped envelope, so the JS side pattern-matches by `type` exactly
+    // the way it already does. These carry `mira-acp`'s *normalized* events
+    // — the ACP dialect is confined to that crate, so nothing above this
+    // point has to know what an ACP session update looks like.
+    /// A fragment of the external agent's reply. Chunks arrive as they are
+    /// produced, so the UI appends rather than replaces.
+    AcpText {
+        text: String,
+    },
+    /// A fragment of the agent's internal reasoning.
+    AcpThought {
+        text: String,
+    },
+    /// The agent started a tool call. The normalized state is forwarded
+    /// whole, because it carries diff and terminal content that a bare
+    /// `ToolCall` has no place for.
+    AcpToolCall {
+        call: mira_acp::events::ToolCallState,
+    },
+    /// Progress or completion for a call already announced by `AcpToolCall`.
+    AcpToolCallUpdate {
+        call: mira_acp::events::ToolCallState,
+    },
+    /// The agent's plan for the current task.
+    AcpPlan {
+        entries: Vec<mira_acp::events::PlanEntry>,
+    },
+    /// Session modes, and which one is active. `postures` is the
+    /// server's mapping of the canonical posture vocabulary onto the
+    /// agent's modes — computed here so clients render options without
+    /// pattern-matching agent mode names themselves.
+    AcpModes {
+        current: String,
+        available: Vec<mira_acp::events::SessionModeView>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        postures: Vec<mira_engine::PostureMapping>,
+    },
+    /// Config options. ACP has no set-model method — the model selector *is*
+    /// a `configOptions` entry with `category: "model"`.
+    AcpConfigOptions {
+        options: Vec<mira_acp::events::SessionConfigView>,
+    },
+    /// Slash commands the agent advertises.
+    AcpCommands {
+        names: Vec<String>,
+    },
+    /// Context-window and cost accounting for the turn so far.
+    AcpUsage {
+        used: u64,
+        size: u64,
+        cost: Option<AcpCost>,
+    },
+    /// The agent account's plan limits (5-hour, weekly), for the usage ring.
+    AcpLimits {
+        windows: Vec<mira_acp::events::LimitWindow>,
+    },
+    /// The agent retitled the session.
+    AcpSessionInfo {
+        title: Option<String>,
+        updated_at: Option<String>,
+    },
+    /// A turn finished. `stop_reason` is the agent's own reason verbatim, so
+    /// the UI can distinguish a completed answer from a cancelled or
+    /// truncated one rather than assuming success. `detail` carries
+    /// human context the agent supplied (e.g. when a limit resets), so the
+    /// client can render one message instead of a warning plus an error
+    /// saying the same thing twice.
+    AcpTurnEnd {
+        stop_reason: String,
+        detail: Option<String>,
+    },
+    /// Something arrived that this build does not model.
+    ///
+    /// Surfaced rather than dropped. ACP's own spec under-documents
+    /// `SessionUpdate`, and real agents send vendor extensions, so a silent
+    /// gap here is indistinguishable from a hang in the UI.
+    AcpUnmodelled {
+        method: String,
+        reason: String,
+    },
+    /// The agent's session mode changed.
+    ///
+    /// Emitted for every change, not just privileged ones: a mode change is
+    /// a standing change to what the agent may do, so it belongs in the
+    /// transcript as a record rather than living only in a dropdown.
+    AcpModeChanged {
+        kind: String,
+        display_name: String,
+        mode_id: String,
+        mode_name: String,
+        /// True when this mode grants more than Mira's own approval
+        /// pipeline would.
+        privileged: bool,
+    },
+    /// A privileged mode was requested without acknowledgement.
+    ///
+    /// The client should re-prompt the user and retry with
+    /// `acknowledge_privileged: true`. Carries the reason so the prompt can
+    /// explain the consequence rather than just naming the mode.
+    AcpPrivilegedModeConfirmation {
+        kind: String,
+        display_name: String,
+        mode_id: String,
+        mode_name: String,
+        reason: String,
+    },
+    /// Per-agent health, for the agent list.
+    AcpAgentStatus {
+        agents: Vec<mira_acp::status::AgentStatus>,
+    },
+    /// An external agent was brought up, or failed to be.
+    AcpAgentStarted {
+        kind: String,
+        display_name: String,
+        /// The resolved command, credentials redacted.
+        launch: String,
+        /// Present when startup failed; the reason is user-facing.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+}
+
+/// Cost reported by an external agent.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct AcpCost {
+    pub amount: f64,
+    pub currency: String,
 }
 
 impl ServerMsg {
+    /// Map a normalized ACP event from an external agent into a wire frame.
+    ///
+    /// Returns `None` only for a client message; the ACP variants are all
+    /// server-push. Every modelled event maps to a frame, and anything
+    /// unmodelled becomes `AcpUnmodelled` rather than being dropped — a
+    /// silent gap here is indistinguishable from a hung agent in the UI.
+    pub fn from_acp(ev: mira_acp::events::NormalizedEvent) -> Option<Self> {
+        use mira_acp::events::{EventSource, MiraEvent};
+        let event = ev.event;
+        Some(match event {
+            MiraEvent::AssistantText { text, .. } => Self::AcpText { text },
+            MiraEvent::AgentThought { text, .. } => Self::AcpThought { text },
+            MiraEvent::UserText { text, .. } => Self::AcpText { text },
+            MiraEvent::ToolCall(call) => Self::AcpToolCall { call },
+            MiraEvent::ToolCallUpdate(call) => Self::AcpToolCallUpdate { call },
+            MiraEvent::Plan { entries } => Self::AcpPlan { entries },
+            MiraEvent::Modes { current, available } => {
+                // The posture mapping is computed once, here, where the
+                // agent's own mode names are in scope — the fixed
+                // vocabulary lives in `mira-engine`, and clients never
+                // regex-match mode ids.
+                let modes: Vec<(String, String, Option<String>)> = available
+                    .iter()
+                    .map(|m| (m.id.clone(), m.name.clone(), m.description.clone()))
+                    .collect();
+                let postures = mira_engine::map_postures(&modes, Some(&current));
+                Self::AcpModes {
+                    current,
+                    available,
+                    postures,
+                }
+            }
+            MiraEvent::ConfigOptions { options } => Self::AcpConfigOptions { options },
+            MiraEvent::Commands { names } => Self::AcpCommands { names },
+            MiraEvent::Limits { windows } => Self::AcpLimits { windows },
+            MiraEvent::Usage { used, size, cost } => Self::AcpUsage {
+                used,
+                size,
+                cost: cost.map(|(amount, currency)| AcpCost { amount, currency }),
+            },
+            MiraEvent::SessionInfo { title, updated_at } => {
+                Self::AcpSessionInfo { title, updated_at }
+            }
+            MiraEvent::Unmodelled { source, reason } => match source {
+                EventSource::Unmodelled { method } => Self::AcpUnmodelled { method, reason },
+                // Modelled variant we chose not to surface as its own frame;
+                // still reported so the gap is visible rather than silent.
+                EventSource::Acp { variant } => Self::AcpUnmodelled {
+                    method: variant,
+                    reason,
+                },
+            },
+        })
+    }
+
+    /// Report a finished turn. Separate from [`Self::from_acp`] because the
+    /// stop reason arrives as a `session/prompt` response, not as an update.
+    pub fn acp_turn_end(stop_reason: impl Into<String>) -> Self {
+        Self::AcpTurnEnd {
+            stop_reason: stop_reason.into(),
+            detail: None,
+        }
+    }
+
+    /// Report a finished turn with human context (e.g. a usage-limit reset
+    /// time the agent reported). One frame, not a warning plus an end.
+    pub fn acp_turn_end_with(stop_reason: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self::AcpTurnEnd {
+            stop_reason: stop_reason.into(),
+            detail: Some(detail.into()),
+        }
+    }
+
     /// Map a raw harness event into a wire frame. Approval frames are emitted
     /// from the approver, not the event stream, so they don't appear here.
     pub fn from_harness(evt: HarnessEvent) -> Self {
@@ -495,7 +869,12 @@ impl ServerMsg {
             HarnessEvent::TurnComplete => Self::TurnComplete,
             HarnessEvent::Done => Self::Done,
             HarnessEvent::Warning(text) => Self::Warning { text },
-            HarnessEvent::Usage { round, totals } => Self::Usage { round, totals },
+            HarnessEvent::Usage { round, totals, context_window, compact_at } => Self::Usage {
+                round,
+                totals,
+                context_window: Some(context_window),
+                compact_at: Some(compact_at),
+            },
             HarnessEvent::RateLimit(rate_limit) => Self::RateLimit {
                 summary: rate_limit.summary(),
                 rate_limit,

@@ -4,20 +4,20 @@
  */
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  ArrowClockwise,
-  ArrowSquareOut,
-  ChatCircleDots,
-  CheckCircle,
-  CircleNotch,
-  GithubLogo,
+  RotateCw,
+  SquareArrowOutUpRight,
+  MessageCircleMore,
+  CircleCheck,
+  LoaderCircle,
+  GitFork,
   GitPullRequest,
   Lock,
-  MagnifyingGlass,
+  Search,
   Plus,
   ShieldCheck,
-  SlackLogo,
-  Warning,
-} from '@phosphor-icons/react';
+  Hash,
+  TriangleAlert,
+} from 'lucide-react';
 import {
   connectGithub,
   getGithubConnect,
@@ -65,7 +65,7 @@ export function IntegrationsSection({
       ) : (
         <Card>
           <CardHeader
-            icon={<GithubLogo weight="fill" className="size-5" />}
+            icon={<GitFork fill="currentColor" className="size-5" />}
             title="GitHub"
             subtitle={<>Reviews every pull request and works on <Code>{TRIGGER}</Code> requests.</>}
           />
@@ -159,7 +159,7 @@ function Avatar({ login, className }: { login: string; className?: string }) {
 }
 
 function Banner({ tone, children }: { tone: 'ok' | 'warn' | 'error'; children: React.ReactNode }) {
-  const Icon = tone === 'ok' ? CheckCircle : Warning;
+  const Icon = tone === 'ok' ? CircleCheck : TriangleAlert;
   return (
     <div
       className={cn(
@@ -169,7 +169,7 @@ function Banner({ tone, children }: { tone: 'ok' | 'warn' | 'error'; children: R
         tone === 'error' && 'bg-destructive/10 text-destructive',
       )}
     >
-      <Icon weight="fill" className="mt-px size-3.5 shrink-0" />
+      <Icon fill="currentColor" className="mt-px size-3.5 shrink-0" />
       <div className="min-w-0">{children}</div>
     </div>
   );
@@ -278,7 +278,7 @@ function GithubAppCard({
 
   const header = (
     <CardHeader
-      icon={<GithubLogo weight="fill" className="size-5" />}
+      icon={<GitFork fill="currentColor" className="size-5" />}
       title="GitHub"
       subtitle={
         <>Reviews every new pull request and works on <Code>{TRIGGER}</Code> requests in
@@ -289,7 +289,7 @@ function GithubAppCard({
           <>
             <StatusPill on label={active > 0 ? `${active} active` : 'Connected'} />
             <Button variant="outline" className="h-8 gap-1.5 px-2.5 text-[12px]" onClick={() => void install()} disabled={busy !== null}>
-              {busy === 'install' ? <CircleNotch className="size-3.5 animate-spin" /> : <Plus className="size-3.5" />}
+              {busy === 'install' ? <LoaderCircle className="size-3.5 animate-spin" /> : <Plus className="size-3.5" />}
               Add repositories
             </Button>
           </>
@@ -327,7 +327,7 @@ function GithubAppCard({
           <>
             <div className="flex flex-wrap items-center gap-2 px-5 py-3">
               <div className="relative min-w-[180px] flex-1">
-                <MagnifyingGlass className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
                 <SectionInput
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
@@ -354,7 +354,7 @@ function GithubAppCard({
                 disabled={refreshing}
                 className="flex size-8 items-center justify-center rounded-md border border-border/50 text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground disabled:opacity-60"
               >
-                <ArrowClockwise className={cn('size-3.5', refreshing && 'animate-spin')} />
+                <RotateCw className={cn('size-3.5', refreshing && 'animate-spin')} />
               </button>
             </div>
 
@@ -388,7 +388,7 @@ function GithubAppCard({
                   rel="noreferrer"
                   className="inline-flex items-center gap-1 hover:text-foreground"
                 >
-                  Manage on GitHub <ArrowSquareOut className="size-3" />
+                  Manage on GitHub <SquareArrowOutUpRight className="size-3" />
                 </a>
               )}
             </div>
@@ -501,12 +501,12 @@ function RepoRow({
             onClick={onEnable}
             title="Store your current model, provider and key, and refresh the workflow"
           >
-            {busy ? <CircleNotch className="size-3.5 animate-spin" /> : <ArrowClockwise className="size-3.5" />}
+            {busy ? <LoaderCircle className="size-3.5 animate-spin" /> : <RotateCw className="size-3.5" />}
             {busy ? 'Syncing…' : 'Sync'}
           </Button>
         ) : (
           <Button className="h-8 px-3 text-[12px]" disabled={disabled} onClick={onEnable}>
-            {busy && <CircleNotch className="size-3.5 animate-spin" />}
+            {busy && <LoaderCircle className="size-3.5 animate-spin" />}
             {busy ? 'Setting up…' : 'Turn on'}
           </Button>
         )}
@@ -519,7 +519,7 @@ function RepoSkeleton() {
   return (
     <div aria-busy="true">
       <div className="flex items-center gap-2 px-5 py-3 text-[12px] text-muted-foreground">
-        <CircleNotch className="size-3.5 animate-spin" /> Checking your GitHub connection…
+        <LoaderCircle className="size-3.5 animate-spin" /> Checking your GitHub connection…
       </div>
       {[0, 1, 2].map((i) => (
         <div key={i} className="flex items-center gap-3 border-t border-border/30 px-5 py-3">
@@ -538,7 +538,7 @@ function RepoSkeleton() {
 function ConnectEmptyState({ busy, onConnect }: { busy: boolean; onConnect: () => void }) {
   const points = [
     { icon: GitPullRequest, text: 'Reviews every new pull request, with comments on the changed lines' },
-    { icon: ChatCircleDots, text: <>Mention <Code>{TRIGGER}</Code> in an issue or PR and it opens a pull request</> },
+    { icon: MessageCircleMore, text: <>Mention <Code>{TRIGGER}</Code> in an issue or PR and it opens a pull request</> },
     { icon: ShieldCheck, text: 'Runs in your own GitHub Actions with your model key' },
   ];
   return (
@@ -549,7 +549,7 @@ function ConnectEmptyState({ busy, onConnect }: { busy: boolean; onConnect: () =
         repositories Mira can work in.
       </p>
       <Button className="mt-4 gap-2" onClick={onConnect} disabled={busy}>
-        {busy ? <CircleNotch className="size-4 animate-spin" /> : <GithubLogo weight="fill" className="size-4" />}
+        {busy ? <LoaderCircle className="size-4 animate-spin" /> : <GitFork fill="currentColor" className="size-4" />}
         {busy ? 'Opening GitHub…' : 'Connect GitHub'}
       </Button>
       <ul className="mt-6 grid w-full max-w-md gap-2 text-left">
@@ -649,7 +649,7 @@ function TokenConnect({ onOpenKeys }: { onOpenKeys: () => void }) {
           className="h-8 text-[12.5px]"
         />
         <Button className="h-8 px-3 text-[12px]" onClick={() => void connect()} disabled={busy || !!info?.problem || !repo.trim()}>
-          {busy && <CircleNotch className="size-3.5 animate-spin" />}
+          {busy && <LoaderCircle className="size-3.5 animate-spin" />}
           {busy ? 'Connecting…' : connected ? 'Sync' : 'Connect'}
         </Button>
       </div>
@@ -698,7 +698,7 @@ function SlackCard({ onOpenKeys }: { onOpenKeys: () => void }) {
   return (
     <Card>
       <CardHeader
-        icon={<SlackLogo weight="fill" className="size-5" />}
+        icon={<Hash fill="currentColor" className="size-5" />}
         title="Slack"
         subtitle="Ask Mira for changes from a channel or a direct message. It replies in the thread."
       />

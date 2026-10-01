@@ -24,13 +24,14 @@
 //! - `PATCH  /api/sessions/:id/title`      — manual rename.
 //! - `POST   /api/sessions/:id/title/regenerate` — AI rename.
 //! - `PUT    /api/sessions/:id/background` — swap background mode.
+//! - `PUT    /api/sessions/:id/flags`      — pin / archive / restore.
 
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use mira_config::RuntimeState;
-use mira_core::{Role, SessionId};
+use mira_core::SessionId;
 use mira_harness::{SessionConfig, SessionRecord};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
@@ -50,6 +51,10 @@ pub struct SessionSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     pub first_user_message: Option<String>,
+    /// Driver slug when an external agent drove turns here, for the sidebar
+    /// badge. Absent for harness-only sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_driver: Option<String>,
     /// True when this session is the server's `active` pointer (HTTP
     /// handlers without a session_id target it).
     pub active: bool,
@@ -71,6 +76,14 @@ pub struct SessionSummary {
     pub worktree_status: Option<WorktreeMergeStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worktree_branch: Option<String>,
+    /// Sidebar pin — the UI floats pinned sessions to the top of their
+    /// project group. Persisted on the record, not client state.
+    #[serde(default)]
+    pub pinned: bool,
+    /// True when the user archived this session; excluded from the
+    /// default list (`?archived=true` returns only these).
+    #[serde(default)]
+    pub archived: bool,
     #[serde(skip_serializing_if = "SessionUsageView::is_empty")]
     pub usage: SessionUsageView,
 }
@@ -102,6 +115,95 @@ const FIRST_MSG_TRUNC: usize = 80;
 pub struct ListQuery {
     #[serde(default)]
     pub all: bool,
+    /// `?archived=true` returns only archived sessions (the sidebar's
+    /// "Archived" view); the default list excludes them.
+    #[serde(default)]
+    pub archived: bool,
+}
+
+/// Sessions from the agents' own history dirs (currently Claude Code),
+/// resumable in Mira via `acp_start` with `resume`. Read-only and best
+/// effort: a missing dir lists nothing rather than failing.
+/// The agent side of a Ready frame: sidecar transcript plus which driver it
+/// belongs to. Shared by every Ready constructor so attach, cwd-switch and
+/// the socket handshake replay identically — three call sites building the
+/// same frame by hand is how one of them silently drops the transcript.
+pub async fn read_agent_state(
+    store: Option<&std::sync::Arc<dyn mira_harness::SessionStore>>,
+    sess: &mira_harness::Session,
+) -> (Vec<serde_json::Value>, Option<String>) {
+    let Some(store) = store else {
+        return (Vec::new(), None);
+    };
+    let sid = sess.id.clone();
+    let transcript = store
+        .agent_log_path(&sid)
+        .map(|p| mira_acp::agent_sessions::read_lines(&p))
+        .unwrap_or_default();
+    // In-memory meta wins (just started, not yet checkpointed); the sidecar
+    // is the fallback for slots rebuilt from disk.
+    let driver = sess
+        .agent_meta()
+        .await
+        .map(|a| a.driver_kind)
+        .or_else(|| {
+            transcript
+                .iter()
+                .rev()
+                .find_map(|l| l.get("driver").and_then(|d| d.as_str()).map(str::to_string))
+        });
+    (transcript, driver)
+}
+
+/// Turns recorded for an agent session, oldest first, for the revert
+/// picker. Read from the sidecar rather than any live process: revert
+/// targets recorded history, which outlives processes. Empty when nothing
+/// was recorded or persistence is off.
+pub async fn list_agent_turns(
+    State(state): State<AppState>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let Some(sid) = q.get("session") else {
+        return err(StatusCode::BAD_REQUEST, "missing ?session=<id>".to_string());
+    };
+    let turns = crate::acp_session::agent_turns(sid, state.store.as_ref());
+    Json(turns).into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub struct RevertRequest {
+    session_id: String,
+    turn: u64,
+}
+
+/// Revert an agent session to before a turn ran: files restored, transcript
+/// truncated, agent restarted fresh. See `revert_agent_turn` for the exact
+/// contract and its honest limits.
+pub async fn revert_agent_turn(
+    State(state): State<AppState>,
+    Json(req): Json<RevertRequest>,
+) -> Response {
+    let Some(slot) = state
+        .slots
+        .read()
+        .await
+        .get(&SessionId::from(req.session_id.as_str()))
+        .cloned()
+    else {
+        return err(StatusCode::NOT_FOUND, "no such session".to_string());
+    };
+    match crate::acp_session::revert_agent_turn(&state, &slot, req.turn).await {
+        Ok(note) => Json(serde_json::json!({ "ok": true, "note": note })).into_response(),
+        Err(e) => err(StatusCode::UNPROCESSABLE_ENTITY, e),
+    }
+}
+
+pub async fn list_external_agent_sessions() -> Response {
+    // Capped: history accumulates without bound, and the panel shows the
+    // most recent slice.
+    let mut sessions = mira_acp::agent_sessions::list_claude_sessions();
+    sessions.truncate(50);
+    axum::Json(sessions).into_response()
 }
 
 pub async fn list_sessions(State(state): State<AppState>, Query(q): Query<ListQuery>) -> Response {
@@ -111,7 +213,12 @@ pub async fn list_sessions(State(state): State<AppState>, Query(q): Query<ListQu
         let live: Vec<SessionSummary> = summarize_live(&state).await;
         return Json(live).into_response();
     };
-    let records = if q.all {
+    let records = if q.archived {
+        match store.list_archived(200).await {
+            Ok(r) => r,
+            Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("list: {e}")),
+        }
+    } else if q.all {
         match store.list_all(200).await {
             Ok(r) => r,
             Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("list: {e}")),
@@ -161,6 +268,14 @@ pub async fn list_sessions(State(state): State<AppState>, Query(q): Query<ListQu
             background_mode: Some(*slot.background_mode.read().await),
             worktree_status: None,
             worktree_branch: None,
+            pinned: false,
+            archived: false,
+            agent_driver: slot
+                .acp_launch
+                .lock()
+                .await
+                .as_ref()
+                .map(|p| p.driver_kind.clone()),
             usage: SessionUsageView::default(),
         });
     }
@@ -173,6 +288,9 @@ struct LiveMeta {
     attached: bool,
     running: bool,
     background_mode: BackgroundMode,
+    /// The agent this live session runs on, if any — fresher than the
+    /// record, which is only rewritten on checkpoint.
+    agent_driver: Option<String>,
 }
 
 async fn live_slot_metadata(state: &AppState) -> std::collections::HashMap<String, LiveMeta> {
@@ -184,6 +302,12 @@ async fn live_slot_metadata(state: &AppState) -> std::collections::HashMap<Strin
                 attached: slot.is_attached(),
                 running: slot.is_running().await,
                 background_mode: *slot.background_mode.read().await,
+                agent_driver: slot
+                    .acp_launch
+                    .lock()
+                    .await
+                    .as_ref()
+                    .map(|p| p.driver_kind.clone()),
             },
         );
     }
@@ -196,6 +320,14 @@ async fn summarize_live(state: &AppState) -> Vec<SessionSummary> {
     for slot in state.list_slots().await {
         let id = slot.id.to_string();
         let sess = slot.session.read().await;
+        // The session's engine right now, from memory: the checkpoint may
+        // predate the pick, and the row must badge correctly right now.
+        let agent_driver = slot
+            .acp_launch
+            .lock()
+            .await
+            .as_ref()
+            .map(|p| p.driver_kind.clone());
         out.push(SessionSummary {
             id: id.clone(),
             model: sess.config().await.model,
@@ -211,6 +343,9 @@ async fn summarize_live(state: &AppState) -> Vec<SessionSummary> {
             background_mode: Some(*slot.background_mode.read().await),
             worktree_status: None,
             worktree_branch: None,
+            pinned: false,
+            archived: false,
+            agent_driver,
             usage: SessionUsageView::default(),
         });
     }
@@ -228,6 +363,14 @@ pub struct SessionHistoryView {
     pub messages: Vec<mira_core::Message>,
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub previews: std::collections::HashMap<String, mira_tools::DiffPreview>,
+    /// The agent transcript sidecar, oldest first. Raw persisted lines —
+    /// the client replays them through its live frame handler, so replayed
+    /// turns render exactly like live ones. Empty for harness-only sessions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agent_transcript: Vec<serde_json::Value>,
+    /// Which agent that transcript belongs to, for badges and resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_driver: Option<String>,
 }
 
 pub async fn get_session_history(
@@ -244,6 +387,10 @@ pub async fn get_session_history(
         Ok(r) => r,
         Err(e) => return err(StatusCode::NOT_FOUND, format!("load: {e}")),
     };
+    let agent_transcript = store
+        .agent_log_path(&record.id)
+        .map(|p| mira_acp::agent_sessions::read_lines(&p))
+        .unwrap_or_default();
     let view = SessionHistoryView {
         id: record.id.to_string(),
         model: record.cfg.model.clone(),
@@ -253,6 +400,8 @@ pub async fn get_session_history(
         updated_at: record.updated_at,
         messages: record.messages,
         previews: record.previews,
+        agent_driver: record.agent.as_ref().map(|a| a.driver_kind.clone()),
+        agent_transcript,
     };
     Json(view).into_response()
 }
@@ -290,21 +439,31 @@ pub async fn load_session(
 }
 
 pub async fn new_session(State(state): State<AppState>) -> Response {
-    let prev = state.current_session().await;
+    let prev_slot = state.active_slot().await;
+    let prev = prev_slot.session.read().await.clone();
     let prev_cfg = prev.config().await;
-    let cwd = state.current_cwd().await;
+    let cwd = prev_slot.cwd.read().await.clone();
     let cfg = SessionConfig {
         model: prev_cfg.model.clone(),
         max_rounds: prev_cfg.max_rounds,
         temperature: prev_cfg.temperature,
         max_tokens: prev_cfg.max_tokens,
         reasoning_effort: prev_cfg.reasoning_effort.clone(),
+        service_tier: None,
         response_format: prev_cfg.response_format.clone(),
         compactor_model: prev_cfg.compactor_model.clone(),
         small_model: prev_cfg.small_model.clone(),
+        context_window: prev_cfg.context_window,
     };
     let deps = state.slot_deps();
     let slot = crate::slot::build_slot(cwd, cfg, None, &deps).await;
+    // A new chat inherits the previous chat's *setup*: the external
+    // agent it ran (driver, config, permission mode) comes along, so
+    // the first prompt on this session starts the same agent the same
+    // way. Only the config moves — no process is spawned here, and the
+    // resume cursor stays per-slot, so this agent begins a blank
+    // conversation. `AcpStop` is what declines the inheritance.
+    *slot.acp_launch.lock().await = prev_slot.acp_launch.lock().await.clone();
     let slot_id = slot.id.clone();
     state.insert_slot(slot.clone()).await;
     state.set_active(slot_id.clone()).await;
@@ -349,6 +508,10 @@ pub async fn delete_session(
             h.abort();
         }
         let _ = slot.session.read().await.cancel().await;
+        // The slot owned a third-party agent process; deleting the
+        // session takes the process down with it instead of leaving an
+        // orphaned CLI running with no transcript attached.
+        crate::acp_session::stop_agent(&slot).await;
         // Release its remote environments; pending changes are saved as a
         // patch under ~/.mira/sandbox, never applied.
         let envs = slot.environments.clone();
@@ -379,9 +542,11 @@ pub async fn delete_session(
                 temperature: prev_cfg.temperature,
                 max_tokens: prev_cfg.max_tokens,
                 reasoning_effort: prev_cfg.reasoning_effort.clone(),
+                service_tier: None,
                 response_format: prev_cfg.response_format.clone(),
                 compactor_model: prev_cfg.compactor_model.clone(),
                 small_model: prev_cfg.small_model.clone(),
+                context_window: prev_cfg.context_window,
             };
             let deps = state.slot_deps();
             let fresh = crate::slot::build_slot(cwd, cfg, None, &deps).await;
@@ -398,31 +563,74 @@ pub async fn delete_session(
     Json(serde_json::json!({ "ok": true, "promoted": promoted })).into_response()
 }
 
-/// Build a Ready frame for `slot` from its live session state.
-async fn build_ready_for_slot(slot: &crate::slot::SessionSlot, state: &AppState) -> ServerMsg {
-    let sess = slot.session.read().await.clone();
-    let cfg = sess.config().await;
-    let mode = state.policy.lock().await.mode();
-    // Everything, including what compaction summarized (shown behind a
-    // divider); the model itself only sees `history()`.
-    let history = sess.transcript().await;
-    let turns = sess.turns().await;
-    let usage = sess.usage().await;
-    let tasks = sess.tasks().await;
-    let goal = sess.goal().await;
-    let previews = sess.previews().await;
-    ServerMsg::Ready {
-        session_id: sess.id.to_string(),
-        model: cfg.model,
-        mode,
-        cwd: slot.cwd.read().await.display().to_string(),
-        history,
-        turns,
-        usage,
-        tasks,
-        goal,
-        previews,
+/// Pin / archive / restore a session. Each field is optional so the UI
+/// can flip one flag without knowing the other; the record is the source
+/// of truth, so this survives restarts and CLI use.
+///
+/// 404s for sessions with no persisted record yet — a brand-new slot
+/// that has never been checkpointed can't be meaningfully pinned, and
+/// "archive a session that doesn't exist on disk" is a stale-UI race.
+#[derive(Debug, Deserialize)]
+pub struct SetFlagsRequest {
+    pub pinned: Option<bool>,
+    /// `true` archives (stamped with the current time), `false` restores.
+    pub archived: Option<bool>,
+}
+
+pub async fn set_session_flags(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<SetFlagsRequest>,
+) -> Response {
+    let Some(store) = state.store.clone() else {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "persistence disabled — cannot pin or archive".to_string(),
+        );
+    };
+    let sid = SessionId::from(id.as_str());
+    let mut record = match store.load(&sid).await {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::NOT_FOUND, format!("load: {e}")),
+    };
+    if let Some(pinned) = body.pinned {
+        record.pinned = pinned;
     }
+    if let Some(archived) = body.archived {
+        record.archived_at = if archived {
+            Some(mira_harness::persist::now_secs())
+        } else {
+            None
+        };
+    }
+    if let Err(e) = store.save(&record).await {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, format!("save: {e}"));
+    }
+    // Mirror onto the live slot (if one exists) — checkpoints run after
+    // every turn and would otherwise overwrite the record with the
+    // session's stale in-memory flags.
+    for slot in state.list_slots().await {
+        if slot.id.to_string() == id {
+            slot.session
+                .read()
+                .await
+                .set_sidebar_flags(record.pinned, record.archived_at)
+                .await;
+        }
+    }
+    info!(%id, pinned = record.pinned, archived = record.archived_at.is_some(), "session flags updated");
+    Json(serde_json::json!({
+        "id": id,
+        "pinned": record.pinned,
+        "archived": record.archived_at.is_some(),
+    }))
+    .into_response()
+}
+
+/// Build a Ready frame for `slot` from its live session state — the same
+/// frame the WebSocket sends, so every path reports the session's engine.
+async fn build_ready_for_slot(slot: &crate::slot::SessionSlot, state: &AppState) -> ServerMsg {
+    crate::ws::build_ready(slot, state).await
 }
 
 fn summarize_record(
@@ -449,6 +657,18 @@ fn summarize_record(
         background_mode: live.map(|m| m.background_mode),
         worktree_status,
         worktree_branch,
+        pinned: r.pinned,
+        archived: r.archived_at.is_some(),
+        // Badge the engine the session runs on now: an agent it has left
+        // for a provider no longer counts.
+        agent_driver: match live {
+            Some(m) => m.agent_driver.clone(),
+            None => r
+                .agent
+                .as_ref()
+                .filter(|a| a.active)
+                .map(|a| a.driver_kind.clone()),
+        },
         usage: SessionUsageView {
             prompt_tokens: r.usage.prompt_tokens,
             completion_tokens: r.usage.completion_tokens,
@@ -632,35 +852,25 @@ pub async fn regenerate_session_title(
     };
 
     let user_msg = record.first_user_message().map(str::to_owned);
-    let assistant_msg = record
-        .conversation()
-        .find(|m| {
-            m.role == Role::Assistant
-                && m.content
-                    .as_deref()
-                    .map(|s| !s.trim().is_empty())
-                    .unwrap_or(false)
-        })
-        .and_then(|m| m.content.clone());
-    let (Some(user), Some(assistant)) = (user_msg, assistant_msg) else {
+    let users: Vec<String> = user_msg.into_iter().collect();
+    if users.is_empty() {
         return err(
             StatusCode::BAD_REQUEST,
-            "session doesn't have enough context yet (needs a user message + assistant reply)"
-                .to_string(),
+            "session doesn't have a user message yet".to_string(),
         );
-    };
+    }
 
     let provider = state.harness_provider.clone();
     let model = record.cfg.background_model(None);
     info!(session = %id, %model, "regenerate title: calling extractor");
-    let mut generated = crate::title::generate(&*provider, &model, &user, &assistant).await;
+    let mut generated = crate::title::generate(&*provider, &model, &users).await;
     if generated.is_err() && model != record.cfg.model {
-        generated = crate::title::generate(&*provider, &record.cfg.model, &user, &assistant).await;
+        generated = crate::title::generate(&*provider, &record.cfg.model, &users).await;
     }
     let title = match generated {
         Ok(t) if !t.is_empty() => t,
         Ok(_) => {
-            let fallback = crate::title::heuristic_from_user_message(&user);
+            let fallback = crate::title::heuristic_from_user_message(&users[0]);
             if fallback.is_empty() {
                 warn!(session = %id, "regenerate title: extractor empty, no heuristic fallback");
                 return err(

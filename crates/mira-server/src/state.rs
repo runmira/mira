@@ -20,6 +20,51 @@ use crate::protocol::ServerMsg;
 use crate::provider::SwappableProvider;
 use crate::slot::{SessionSlot, SlotDeps};
 
+/// The engine selection, shared where staleness used to live.
+///
+/// Subagent defaults (`default_model_for_agents` / `small_model_for_agents`)
+/// used to be snapshotted into `AppState` and every `SlotDeps` at boot and
+/// never refreshed — so after the user switched models, freshly spawned
+/// subagents still ran on the boot-time pick. Now there is one shared
+/// cell; the picker writes it, and [`crate::interactive::AgentTool`] reads
+/// it at spawn time.
+#[derive(Debug, Default)]
+pub struct SharedSelection {
+    /// Engine instance id the session is running on (`anthropic`,
+    /// `codex`, …). `None` until the user picks or the boot resolution
+    /// names one.
+    pub instance: std::sync::RwLock<Option<String>>,
+    /// The model on that instance.
+    pub model: std::sync::RwLock<Option<String>>,
+    /// What `model: small` (and `haiku`) resolves to on subagents.
+    pub small_model: std::sync::RwLock<Option<String>>,
+}
+
+impl SharedSelection {
+    pub fn new(model: Option<String>, small_model: Option<String>) -> Self {
+        Self {
+            instance: std::sync::RwLock::new(None),
+            model: std::sync::RwLock::new(model),
+            small_model: std::sync::RwLock::new(small_model),
+        }
+    }
+
+    /// (instance, model, small_model) as of now.
+    pub fn snapshot(&self) -> (Option<String>, Option<String>, Option<String>) {
+        (
+            self.instance
+                .read()
+                .expect("selection lock poisoned")
+                .clone(),
+            self.model.read().expect("selection lock poisoned").clone(),
+            self.small_model
+                .read()
+                .expect("selection lock poisoned")
+                .clone(),
+        )
+    }
+}
+
 /// Shared state handed to every axum handler.
 ///
 /// The server hosts a **map** of live [`SessionSlot`]s. Every session has
@@ -51,6 +96,8 @@ pub struct AppState {
     /// PlanTool / AskUserTool / AgentTool on top per session.
     pub base_registry: Arc<Registry>,
     pub agents_registry: Arc<AgentRegistry>,
+    /// The live subagent roster (see `subagents_api`).
+    pub agents_live: Arc<std::sync::RwLock<Arc<AgentRegistry>>>,
     /// `compute:` config handed to every slot's environment manager.
     pub compute: mira_config::ComputeConfig,
     pub store: Option<Arc<dyn SessionStore>>,
@@ -66,10 +113,19 @@ pub struct AppState {
     /// by parent session id, so this Mutex is process-shared but the
     /// notes stay isolated per session.
     pub scratchpads: Arc<Mutex<HashMap<String, Vec<ScratchpadEntry>>>>,
-    /// Default model handed to AgentTool for subagent spawns when the call
-    /// doesn't override it. Snapshotted from the initial session config.
-    pub default_model_for_agents: String,
-    pub small_model_for_agents: Option<String>,
+    /// The current engine selection, shared with `AgentTool` so
+    /// subagent defaults follow the user's picks instead of the
+    /// boot-time snapshot (see [`SharedSelection`]).
+    pub selection: Arc<SharedSelection>,
+    /// Every configured backend, derived from config at boot. Source
+    /// of truth for `GET /api/engines` and for resolving `SetModel`
+    /// instance switches.
+    pub engines: Arc<mira_engine::EngineRegistry>,
+    /// Shared browser for the right-hand browser pane. Constructed eagerly
+    /// but launches nothing until the first action, so an unused pane costs
+    /// no process. Held as `Arc` because `AppState` itself is cloned into
+    /// every axum handler.
+    pub browser: Arc<mira_browser::Browser>,
 }
 
 impl AppState {
@@ -191,11 +247,11 @@ impl AppState {
             harness_provider: self.harness_provider.clone(),
             base_registry: self.base_registry.clone(),
             agents_registry: self.agents_registry.clone(),
+            agents_live: self.agents_live.clone(),
             store: self.store.clone(),
             memory_runtime: self.memory_runtime.clone(),
             scratchpads: self.scratchpads.clone(),
-            default_model_for_agents: self.default_model_for_agents.clone(),
-            small_model_for_agents: self.small_model_for_agents.clone(),
+            selection: self.selection.clone(),
             compute: self.compute.clone(),
             hooks: Some(self.extensions.hook_runner()),
         }

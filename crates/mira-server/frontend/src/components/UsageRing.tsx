@@ -1,0 +1,217 @@
+import { useEffect, useRef, useState } from 'react';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { cn } from '@/lib/utils';
+import { formatDollars, shortNum } from '../lib/usage';
+
+/** One plan or rate-limit window. */
+export type UsageLimit = {
+  label: string;
+  /** Share used, 0–1. */
+  used: number;
+  /** When it resets, epoch ms. */
+  resetsAt: number | null;
+};
+
+/** Everything the ring shows, for whichever engine drives the chat. */
+export type UsageRingData = {
+  /** Tokens in context now, and the window they fill. */
+  used: number | null;
+  window: number | null;
+  /** Where the chat is summarized automatically, when Mira manages it. */
+  compactAt: number | null;
+  tokens: { prompt: number; completion: number; cached: number } | null;
+  costUsd: number | null;
+  limitsTitle: string | null;
+  limits: UsageLimit[];
+  onCompact?: () => void;
+};
+
+/**
+ * The composer's usage ring: how full the context is, at a glance, with the
+ * detail one click away — context, when it compacts, plan limits and what
+ * the session has spent. One control for providers and agents alike; each
+ * engine fills in what it knows.
+ */
+export function UsageRing({ data }: { data: UsageRingData }) {
+  const { used, window, compactAt } = data;
+  const frac = used != null && window ? Math.min(1, used / window) : null;
+  const hasAnything = frac != null || data.limits.length > 0 || data.tokens != null || data.costUsd != null;
+  // Opens on hover. Leaving starts a short grace period, cancelled by
+  // entering the popover, so the pointer can travel to "Compact session".
+  const [open, setOpen] = useState(false);
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hoverOpen = () => {
+    if (closeTimer.current) clearTimeout(closeTimer.current);
+    setOpen(true);
+  };
+  const hoverClose = () => {
+    if (closeTimer.current) clearTimeout(closeTimer.current);
+    closeTimer.current = setTimeout(() => setOpen(false), 180);
+  };
+  useEffect(() => () => {
+    if (closeTimer.current) clearTimeout(closeTimer.current);
+  }, []);
+  // Re-render each minute so "resets in" stays true while the popover is open.
+  const [, tick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => tick((n) => n + 1), 60_000);
+    return () => clearInterval(t);
+  }, []);
+  if (!hasAnything) return null;
+
+  const pct = frac != null ? Math.round(frac * 100) : null;
+  const tone = frac == null ? 'text-muted-foreground' : frac >= 0.9 ? 'text-red-400' : frac >= 0.7 ? 'text-amber-400' : 'text-mira-blue';
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          aria-label={pct != null ? `Context ${pct}% full` : 'Usage'}
+          onMouseEnter={hoverOpen}
+          onMouseLeave={hoverClose}
+          onFocus={hoverOpen}
+          className="grid size-7 shrink-0 place-items-center rounded-md transition-colors hover:bg-white/[0.05]"
+        >
+          <Ring frac={frac ?? 0} className={tone} />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="end"
+        side="top"
+        sideOffset={8}
+        className="w-80 rounded-xl border border-border/60 bg-popover/95 p-0 backdrop-blur"
+        onMouseEnter={hoverOpen}
+        onMouseLeave={hoverClose}
+        // Hover-opened: focus stays where the user was typing.
+        onOpenAutoFocus={(e) => e.preventDefault()}
+      >
+        {frac != null && used != null && window != null && (
+          <Section>
+            <Row
+              label="Context window"
+              value={`${shortNum(used)} / ${shortNum(window)} (${pct}%)`}
+            />
+            <Bar frac={frac} marker={compactAt && window ? compactAt / window : null} />
+            {compactAt != null && (
+              <div className="mt-2 flex items-center justify-between gap-2 text-[12px]">
+                <span className="text-muted-foreground">
+                  {used >= compactAt ? 'Compacts on the next turn' : `${shortNum(compactAt - used)} until auto-compact`}
+                </span>
+                {data.onCompact && <SmallButton onClick={data.onCompact}>Compact session</SmallButton>}
+              </div>
+            )}
+            {compactAt == null && data.onCompact && (
+              <div className="mt-2 flex justify-end">
+                <SmallButton onClick={data.onCompact}>Compact session</SmallButton>
+              </div>
+            )}
+          </Section>
+        )}
+
+        {data.limits.length > 0 && (
+          <Section>
+            <div className="mb-2 text-[12px] text-muted-foreground">{data.limitsTitle ?? 'Usage limits'}</div>
+            <div className="space-y-2.5">
+              {data.limits.map((l) => (
+                <div key={l.label}>
+                  <div className="flex items-baseline justify-between gap-2 text-[12.5px]">
+                    <span className="text-foreground/90">{l.label}</span>
+                    <span className="text-[11.5px] text-muted-foreground">
+                      {l.resetsAt ? `Resets ${resetPhrase(l.resetsAt)}` : ''}
+                      <span className="ml-2 tabular-nums text-foreground/80">{Math.round(l.used * 100)}%</span>
+                    </span>
+                  </div>
+                  <Bar frac={l.used} thin />
+                </div>
+              ))}
+            </div>
+          </Section>
+        )}
+
+        {(data.tokens || data.costUsd != null) && (
+          <div className="flex items-center justify-between gap-2 px-3.5 py-2.5 text-[12px] text-muted-foreground">
+            <span className="font-mono tabular-nums">
+              {data.tokens
+                ? `↑${shortNum(data.tokens.prompt)} ↓${shortNum(data.tokens.completion)}${data.tokens.cached ? ` · ${shortNum(data.tokens.cached)} cached` : ''}`
+                : 'This session'}
+            </span>
+            {data.costUsd != null && (
+              <span className="font-mono font-semibold tabular-nums text-emerald-400">{formatDollars(data.costUsd)}</span>
+            )}
+          </div>
+        )}
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+function Ring({ frac, className }: { frac: number; className?: string }) {
+  const r = 6.5;
+  const c = 2 * Math.PI * r;
+  return (
+    <svg viewBox="0 0 16 16" className={cn('size-4 -rotate-90', className)} aria-hidden>
+      <circle cx="8" cy="8" r={r} fill="none" strokeWidth="2.2" className="stroke-muted-foreground/25" />
+      <circle
+        cx="8"
+        cy="8"
+        r={r}
+        fill="none"
+        strokeWidth="2.2"
+        strokeLinecap="round"
+        stroke="currentColor"
+        strokeDasharray={c}
+        strokeDashoffset={c * (1 - Math.max(0.02, frac))}
+        className="transition-[stroke-dashoffset] duration-500"
+      />
+    </svg>
+  );
+}
+
+function Bar({ frac, marker, thin }: { frac: number; marker?: number | null; thin?: boolean }) {
+  const tone = frac >= 0.9 ? 'bg-red-400' : frac >= 0.7 ? 'bg-amber-400' : 'bg-mira-blue';
+  return (
+    <div className={cn('relative mt-1.5 w-full overflow-hidden rounded-full bg-white/[0.08]', thin ? 'h-1' : 'h-1.5')}>
+      <div className={cn('h-full rounded-full transition-[width] duration-500', tone)} style={{ width: `${Math.round(Math.min(1, frac) * 100)}%` }} />
+      {marker != null && marker > 0 && marker < 1 && (
+        <div className="absolute top-0 h-full w-px bg-foreground/50" style={{ left: `${marker * 100}%` }} title="Auto-compact" />
+      )}
+    </div>
+  );
+}
+
+function Section({ children }: { children: React.ReactNode }) {
+  return <div className="border-b border-border/50 px-3.5 py-3">{children}</div>;
+}
+
+function Row({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-baseline justify-between gap-2 text-[12.5px]">
+      <span className="text-foreground/90">{label}</span>
+      <span className="font-mono tabular-nums text-[12px] text-muted-foreground">{value}</span>
+    </div>
+  );
+}
+
+function SmallButton({ children, onClick }: { children: React.ReactNode; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="shrink-0 rounded-md bg-white/[0.06] px-2 py-1 text-[11.5px] text-foreground/85 transition-colors hover:bg-white/[0.1]"
+    >
+      {children}
+    </button>
+  );
+}
+
+/** "in 4 hr 38 min", or a weekday and time when it's days away. */
+function resetPhrase(at: number): string {
+  const ms = at - Date.now();
+  if (ms <= 0) return 'now';
+  const mins = Math.round(ms / 60_000);
+  if (mins < 60) return `in ${Math.max(1, mins)} min`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `in ${hrs} hr ${mins % 60} min`;
+  return new Date(at).toLocaleString(undefined, { weekday: 'short', hour: 'numeric', minute: '2-digit' });
+}

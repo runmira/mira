@@ -4,10 +4,10 @@ import {
   ArrowRight,
   Check,
   Info,
-  PencilSimpleLine,
+  PenLine,
   Sparkle,
   X,
-} from '@phosphor-icons/react';
+} from 'lucide-react';
 import type { AskUserAnswer, AskUserProposal } from '../types';
 import { cn } from '@/lib/utils';
 
@@ -103,7 +103,7 @@ export function AskUserCard({ proposal, decision, onSubmit, onCancel }: Props) {
           because we're paginating; the count now tells the user which
           question they're on, not how many they've answered. */}
       <div className="flex items-center gap-2.5 px-4 pt-3.5 pb-3">
-        <Sparkle weight="fill" className="size-3.5 text-mira-blue" />
+        <Sparkle fill="currentColor" className="size-3.5 text-mira-blue" />
         <span className="text-[12.5px] font-semibold tracking-tight text-foreground">
           Mira needs your input
         </span>
@@ -134,7 +134,7 @@ export function AskUserCard({ proposal, decision, onSubmit, onCancel }: Props) {
             onClick={goBack}
             className="inline-flex items-center gap-1 rounded-md px-2.5 py-1.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
           >
-            <ArrowLeft className="size-3" weight="bold" />
+            <ArrowLeft className="size-3" strokeWidth={2.5} />
             Back
           </button>
         ) : (
@@ -159,7 +159,7 @@ export function AskUserCard({ proposal, decision, onSubmit, onCancel }: Props) {
           )}
         >
           {isLast ? 'Send answers' : 'Next'}
-          <ArrowRight className="size-3" weight="bold" />
+          <ArrowRight className="size-3" strokeWidth={2.5} />
         </button>
       </div>
     </div>
@@ -281,14 +281,14 @@ function QuestionRow({
             onClick={openCustom}
             className="group flex items-center gap-2.5 rounded-xl px-3 py-2 text-left text-[12px] text-muted-foreground transition-colors hover:bg-secondary/40 hover:text-foreground"
           >
-            <PencilSimpleLine className="size-3.5" />
+            <PenLine className="size-3.5" />
             <span>Something else</span>
           </button>
         )}
         {customOpen && (
           <div className="rounded-xl bg-secondary/60 p-2.5">
             <div className="flex items-center gap-1.5 pb-1.5 text-[10px] font-semibold uppercase tracking-[0.11em] text-muted-foreground">
-              <PencilSimpleLine className="size-3" />
+              <PenLine className="size-3" />
               <span>Free response</span>
               <button
                 type="button"
@@ -331,7 +331,7 @@ function Indicator({ active, multi }: { active: boolean; multi: boolean }) {
       )}
     >
       {active && multi && (
-        <Check className="size-2.5 text-white" weight="bold" />
+        <Check className="size-2.5 text-white" strokeWidth={2.5} />
       )}
       {active && !multi && (
         <span className="size-1.5 rounded-full bg-white" />
@@ -360,7 +360,7 @@ function ResolvedCard({
   return (
     <div className="flex w-full max-w-[78%] flex-col overflow-hidden rounded-xl border border-border/40 bg-card/60">
       <div className="flex items-center gap-2 border-b border-border/30 px-3.5 py-2 text-[11.5px] text-muted-foreground">
-        <Check className="size-3.5 text-foreground/70" weight="bold" />
+        <Check className="size-3.5 text-foreground/70" strokeWidth={2.5} />
         <span>
           Answered {decision.answers.length} question
           {decision.answers.length === 1 ? '' : 's'}

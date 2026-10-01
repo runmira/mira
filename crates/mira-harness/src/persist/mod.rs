@@ -87,6 +87,53 @@ pub struct SessionRecord {
     /// arg-only `ReconstructedPreview`. Empty for legacy records.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub previews: HashMap<String, DiffPreview>,
+    /// Sidebar pin. Pinned sessions float to the top of their project
+    /// group. Absent (false) for records written before this existed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
+    /// Web-sidebar archive: `Some(epoch secs)` when the user archived
+    /// the session — hidden from the default sidebar list and the CLI
+    /// resume picker until restored. `None` = live. (Deliberately
+    /// distinct from `archived: Vec<Message>` above, which holds
+    /// compaction-replaced messages.)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<u64>,
+    /// An external agent drove (or drives) turns in this session. The agent's
+    /// own transcript lives in the `<id>.agent.jsonl` sidecar, not in
+    /// `messages` — see below. Absent for harness-only sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentSessionMeta>,
+}
+
+/// Which external agent a session belongs to, for badges, replay and resume.
+///
+/// Deliberately metadata only: the transcript itself is the sidecar file.
+/// Keeping them separate means listing (sidebar) never pays for content
+/// (transcript), and deleting the record can cascade to the sidecar.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AgentSessionMeta {
+    /// Driver slug, e.g. `"claude-code"`.
+    pub driver_kind: String,
+    /// The agent's running model, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Whether the agent is still this session's engine. `false` once the
+    /// user switched back to a provider: the sidecar (and this record of
+    /// who ran) stays for replay, but the session no longer routes to the
+    /// agent. Defaults to `true` so records written before the flag
+    /// existed keep meaning "agent session".
+    #[serde(default = "default_true")]
+    pub active: bool,
+    /// The launch settings the agent ran with, secrets removed — what lets
+    /// a session reloaded from disk (or after a restart) route its next
+    /// prompt to the same agent, configured the same way, without the
+    /// client re-sending anything. Opaque to the harness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch: Option<serde_json::Value>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl SessionRecord {
@@ -199,11 +246,21 @@ pub trait SessionStore: Send + Sync {
     ) -> Result<Vec<SessionRecord>, StoreError>;
     /// Every session across all cwds, newest first. Used by the web
     /// sidebar to group chats by project — the CLI resume flow still uses
-    /// `list_recent` scoped to the current folder.
+    /// `list_recent` scoped to the current folder. Archived sessions
+    /// (see `SessionRecord::archived_at`) are excluded.
     async fn list_all(&self, limit: usize) -> Result<Vec<SessionRecord>, StoreError>;
+    /// Sessions the user archived from the web sidebar, newest first.
+    /// Kept separate from `list_recent`/`list_all` so "archived" stays a
+    /// deliberate ask — those callers never want them mixed in.
+    async fn list_archived(&self, limit: usize) -> Result<Vec<SessionRecord>, StoreError>;
     /// Permanently remove a stored session. Idempotent on `NotFound` — a
     /// double-click on the sidebar delete menu shouldn't 404.
     async fn delete(&self, id: &SessionId) -> Result<(), StoreError>;
+    /// Path of the agent-transcript sidecar for a session, if this store
+    /// keeps one. `None` means agent turns are not persisted by this store.
+    fn agent_log_path(&self, _id: &SessionId) -> Option<std::path::PathBuf> {
+        None
+    }
 }
 
 /// Seconds since the Unix epoch. Public so `goal.rs` can stamp
@@ -217,7 +274,7 @@ pub fn now_secs() -> u64 {
 
 /// Millisecond epoch — used for turn timing (a fast turn can be under a
 /// second, so `now_secs` doesn't have the resolution we need).
-pub(crate) fn now_ms() -> u64 {
+pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)

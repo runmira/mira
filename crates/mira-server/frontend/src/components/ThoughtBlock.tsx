@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Brain, CaretDown } from '@phosphor-icons/react';
+import { Brain, ChevronDown } from 'lucide-react';
 import { Markdown } from './Markdown';
 import { cn } from '@/lib/utils';
 
@@ -82,8 +82,8 @@ export function ThoughtBlock({
         <span className={cn('font-medium', live && 'text-foreground/80')}>{label}</span>
         {live && dur && <span className="font-mono text-[11px] text-muted-foreground/70">{dur}</span>}
         {body && (
-          <CaretDown
-            weight="bold"
+          <ChevronDown
+            strokeWidth={2.5}
             className={cn(
               'size-3 text-muted-foreground/60 transition-transform',
               !open && '-rotate-90',

@@ -106,6 +106,16 @@ pub struct TuiConfig {
     pub browser_cfg: mira_config::BrowserConfig,
     /// MCP servers, plugins, custom commands (`/mcp`, `/plugin`).
     pub extensions: mira_server::extensions::Extensions,
+    /// Every configured backend (native providers + known agents),
+    /// derived from the global config at boot. Backs `/engine`.
+    pub engines: Arc<mira_engine::EngineRegistry>,
+    /// The config the registry was derived from — `/engine` re-probes
+    /// native instances against it when listing status.
+    pub engine_cfg: mira_config::MiraConfig,
+    /// The instance-routing provider pool the session runs on.
+    /// `/engine <id>` activates another registered native instance and
+    /// the very next turn runs on it.
+    pub swappable: Arc<mira_engine::SwappableProvider>,
 }
 
 /// Built-in slash commands the palette suggests. Order is display order.
@@ -116,6 +126,7 @@ pub(crate) const SLASH_COMMANDS: &[(&str, &str)] = &[
         "switch permission mode (plan|manual|auto|edit|yolo)",
     ),
     ("/model", "switch model for this session"),
+    ("/engine", "switch engine (list, or /engine <id> to switch)"),
     (
         "/effort",
         "reasoning effort — how hard the model thinks (off|minimal|low|medium|high)",
@@ -412,6 +423,8 @@ async fn run_slash(
                 state.flash = Some(format!("model → {rest}"));
             }
         }
+
+        "/engine" => run_engine_slash(rest, state, session, cfg).await,
 
         "/budget" => match parse_budget(rest) {
             Ok(None) => {
@@ -803,6 +816,102 @@ async fn find_skill_by_slash(
         .values()
         .find(|s| s.slash.as_deref() == Some(slash))
         .map(|s| s.name.clone())
+}
+
+/// Dispatch for `/engine ...` — switch which engine serves the session.
+///
+/// Shape:
+/// - `/engine`        — list every configured engine and its status
+/// - `/engine <id>`   — switch to that engine (native ones only from
+///   the TUI; external agents are driven from the web UI)
+///
+/// A switch activates the instance's provider in the pool and adopts
+/// its default model when it pins one, keeping the current model
+/// otherwise — the same fallback order the server's `SetModel` uses.
+async fn run_engine_slash(
+    rest: &str,
+    state: &mut state::TuiState,
+    session: &Session,
+    cfg: &TuiConfig,
+) {
+    let rest = rest.trim();
+    if rest.is_empty() {
+        let active = cfg.swappable.active_instance();
+        for inst in cfg.engines.instances() {
+            let id = inst.id.as_str();
+            let mark = if active.as_deref() == Some(id) { "•" } else { " " };
+            if inst.is_native() {
+                let status = match mira_engine::native::missing_piece(&cfg.engine_cfg, id) {
+                    None => "ready".to_owned(),
+                    Some(mira_engine::EngineState::NotConfigured { reason }) => reason,
+                    Some(other) => format!("{other:?}"),
+                };
+                state.push_info(format!("{mark} {id} — {status}"));
+            } else {
+                let note = match mira_acp::drivers::by_kind(inst.driver.as_str()) {
+                    Some(_) => format!("external agent ({})", inst.driver),
+                    None => "external agent — unknown driver for this build".to_owned(),
+                };
+                state.push_info(format!("{mark} {id} — {note}"));
+            }
+        }
+        return;
+    }
+
+    let Some(inst) = cfg.engines.get(rest) else {
+        state.push_warning(format!(
+            "unknown engine `{rest}` — run /engine for the list"
+        ));
+        return;
+    };
+    if !inst.is_native() {
+        state.push_warning(format!(
+            "`{rest}` is an external agent — the TUI runs Mira's own engines; \
+             external agents are driven from the web UI"
+        ));
+        return;
+    }
+    let id = inst.id.as_str();
+    if cfg.swappable.active_instance().as_deref() == Some(id) {
+        state.flash = Some(format!("already on {id}"));
+        return;
+    }
+    if !cfg.swappable.activate(id) {
+        // Not registered at boot (it couldn't build then) — try once
+        // more in case credentials arrived since.
+        match mira_engine::native::build_native_provider(&cfg.engine_cfg, id) {
+            Ok(p) => {
+                cfg.swappable.register(id, p);
+                if !cfg.swappable.activate(id) {
+                    state.push_warning(format!("could not activate `{id}`"));
+                    return;
+                }
+            }
+            Err(mira_engine::EngineState::NotConfigured { reason }) => {
+                state.push_warning(format!("can't switch to `{id}`: {reason}"));
+                return;
+            }
+            Err(other) => {
+                state.push_warning(format!("can't switch to `{id}`: {other:?}"));
+                return;
+            }
+        }
+    }
+    // Instance default model wins when it pins one; otherwise the
+    // current model carries over, matching the server's SetModel rule.
+    let new_model = inst
+        .model
+        .clone()
+        .unwrap_or_else(|| state.model.clone());
+    state.model = new_model.clone();
+    session.set_model(new_model.clone()).await;
+    let mut s = mira_config::RuntimeState::load().unwrap_or_default();
+    s.last_engine = Some(id.to_owned());
+    s.last_model = Some(new_model.clone());
+    if let Err(e) = s.save() {
+        tracing::debug!(%e, "state.yaml: save failed after engine switch");
+    }
+    state.flash = Some(format!("engine → {id} · model → {new_model}"));
 }
 
 /// Dispatch for `/goal ...` — the sub-verb decides.

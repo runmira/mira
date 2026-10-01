@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { CaretDown, Check } from '@phosphor-icons/react';
+import { Check, ChevronDown } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from './popover';
 import { cn } from '@/lib/utils';
 
@@ -30,6 +30,9 @@ export type SelectOption<T extends string = string> = {
    *  mark providers that support OAuth sign-in so users can see the
    *  affordance without picking each provider first. */
   badge?: string;
+  /** Optional leading icon (favicon, glyph) shown in the trigger and
+   *  on the dropdown row. */
+  icon?: React.ReactNode;
 };
 
 type SelectProps<T extends string = string> = {
@@ -82,9 +85,12 @@ export function Select<T extends string = string>({
               !current && 'text-muted-foreground',
             )}
           >
-            {current?.label ?? placeholder ?? '—'}
+            <span className="flex items-center gap-2">
+              {current?.icon}
+              <span className="min-w-0 truncate">{current?.label ?? placeholder ?? '—'}</span>
+            </span>
           </span>
-          <CaretDown className="size-3 shrink-0 text-muted-foreground" />
+          <ChevronDown className="size-3 shrink-0 text-muted-foreground" />
         </button>
       </PopoverTrigger>
       <PopoverContent
@@ -118,6 +124,7 @@ export function Select<T extends string = string>({
               >
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
+                    {o.icon}
                     <span className="min-w-0 flex-1 truncate">{o.label}</span>
                     {o.badge && (
                       <span

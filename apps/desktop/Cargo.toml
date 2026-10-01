@@ -15,7 +15,15 @@ publish = false
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# `unstable` gates `Webview::new`-style child webviews, which is how the
+# browser pane renders a real, native webview inside the main window at a
+# tracked rect. Electron's equivalent (WebContentsView overlay) has no
+# stable Tauri equivalent, so this is the only route to an in-panel browser.
+#   `unstable`      — child webviews (the browser pane's embedded browser)
+#   `macos-private-api` — required for a transparent window on macOS, which is
+#                     what lets `UnderWindowBackground` vibrancy show through
+#                     the sidebar. Excludes Mac App Store distribution.
+tauri = { version = "2", features = ["unstable", "macos-private-api"] }
 tauri-plugin-deep-link = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }

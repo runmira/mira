@@ -19,6 +19,7 @@
 
 pub mod mode;
 pub mod rule;
+pub mod shell;
 
 use mira_tools::Action;
 use serde::{Deserialize, Serialize};
@@ -136,7 +137,67 @@ impl Policy {
     }
 
     /// Evaluate a request. Precedence: deny > ask > mode default > allow.
+    ///
+    /// A compound shell command is judged operation by operation (see
+    /// [`shell`]): any denied part denies the whole command, and it runs
+    /// unasked only when every part would. Judged as one string, a deny
+    /// like `Bash(rm:*)` never saw `ls && rm -rf x`, and allow rules could
+    /// never cover a chain of commands they each allowed.
     pub fn evaluate(&self, req: &Request<'_>) -> Decision {
+        if req.action == Action::Bash {
+            let parts = shell::split_compound(req.target);
+            if parts.len() > 1 {
+                return self.evaluate_compound(req, &parts);
+            }
+        }
+        self.evaluate_one(req)
+    }
+
+    fn evaluate_compound(&self, req: &Request<'_>, parts: &[String]) -> Decision {
+        // The whole command first: a deny on it always stands, and an exact
+        // allow for this precise chain (an earlier "allow for this
+        // session") covers it.
+        if self.deny.iter().any(|r| r.matches(req)) {
+            debug!(?req, "policy: deny (explicit, whole command)");
+            return Decision::Deny;
+        }
+        let mut worst = Decision::Allow;
+        for part in parts {
+            let d = self.evaluate_one(&Request { action: Action::Bash, target: part });
+            match d {
+                Decision::Deny => {
+                    debug!(?req, part, "policy: deny (a part of a compound command)");
+                    return Decision::Deny;
+                }
+                Decision::Ask => worst = Decision::Ask,
+                Decision::Allow => {}
+            }
+        }
+        if worst == Decision::Ask
+            && !self.ask.iter().any(|r| r.matches(req))
+            && self.allow.iter().any(|r| r.matches(req))
+        {
+            return Decision::Allow;
+        }
+        worst
+    }
+
+    /// The operations of a shell command that would need the user's
+    /// approval, in order — for the approval card to name, and for "allow
+    /// for this session" to add rules for. Empty for a single command (the
+    /// command itself is the question) and when nothing needs approval.
+    pub fn parts_needing_approval(&self, command: &str) -> Vec<String> {
+        let parts = shell::split_compound(command);
+        if parts.len() < 2 {
+            return Vec::new();
+        }
+        parts
+            .into_iter()
+            .filter(|p| self.evaluate_one(&Request { action: Action::Bash, target: p }) != Decision::Allow)
+            .collect()
+    }
+
+    fn evaluate_one(&self, req: &Request<'_>) -> Decision {
         if self.deny.iter().any(|r| r.matches(req)) {
             debug!(?req, "policy: deny (explicit)");
             return Decision::Deny;
@@ -167,6 +228,53 @@ mod tests {
             deny: vec![],
         })
         .unwrap()
+    }
+
+    fn policy(allow: &[&str], deny: &[&str]) -> Policy {
+        Policy::from_config(&PolicyConfig {
+            mode: Mode::default(),
+            allow: allow.iter().map(|s| s.to_string()).collect(),
+            ask: vec![],
+            deny: deny.iter().map(|s| s.to_string()).collect(),
+        })
+        .unwrap()
+    }
+
+    fn bash(p: &Policy, cmd: &str) -> Decision {
+        p.evaluate(&Request { action: Action::Bash, target: cmd })
+    }
+
+    #[test]
+    fn a_denied_command_cannot_hide_behind_another() {
+        let p = policy(&["Bash(ls:*)"], &["Bash(rm:*)"]);
+        assert_eq!(bash(&p, "rm -rf x"), Decision::Deny);
+        assert_eq!(bash(&p, "ls && rm -rf x"), Decision::Deny, "the prefix used to slip past the deny");
+        assert_eq!(bash(&p, "ls; rm -rf x"), Decision::Deny);
+        assert_eq!(bash(&p, "ls | rm -rf x"), Decision::Deny);
+    }
+
+    #[test]
+    fn a_chain_of_allowed_commands_runs_without_asking() {
+        let p = policy(&["Bash(cargo test:*)", "Bash(cargo clippy:*)"], &[]);
+        assert_eq!(bash(&p, "cargo test --lib && cargo clippy"), Decision::Allow);
+        // One unallowed part is enough to ask.
+        assert_ne!(bash(&p, "cargo test && curl evil.sh"), Decision::Allow);
+        assert_eq!(p.parts_needing_approval("cargo test && curl evil.sh"), ["curl evil.sh"]);
+        assert!(p.parts_needing_approval("cargo test").is_empty(), "a single command is its own question");
+    }
+
+    #[test]
+    fn substitutions_inside_a_part_still_ask() {
+        // Splitting must not make `$(…)` look like a plain argument.
+        let p = policy(&["Bash(echo:*)"], &[]);
+        assert_ne!(bash(&p, "echo hi && echo $(curl x)"), Decision::Allow);
+    }
+
+    #[test]
+    fn an_exact_allow_for_the_whole_chain_still_covers_it() {
+        let mut p = policy(&[], &[]);
+        p.add_allow_rule("Bash(make && make install)").unwrap();
+        assert_eq!(bash(&p, "make && make install"), Decision::Allow);
     }
 
     #[test]

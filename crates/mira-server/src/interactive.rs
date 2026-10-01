@@ -174,10 +174,19 @@ pub struct AgentTool {
     base_registry: Arc<Registry>,
     /// Default model for children when the caller doesn't specify one.
     /// Usually the parent's model at server-boot time. Overridable per
-    /// call via the tool arg.
+    /// call via the tool arg. When `shared_selection` is wired, the
+    /// shared cell wins and this is only a fallback for tests /
+    /// headless callers that never wired one.
     default_model: String,
     /// What `model: small` resolves to; `None` means the default model.
     small_model: Option<String>,
+    /// The server's live engine selection (see
+    /// [`crate::state::SharedSelection`]). Read at *spawn* time so a
+    /// subagent launched after a model switch runs on the user's
+    /// current pick rather than a boot-time snapshot — the bug where
+    /// `default_model_for_agents` was captured once and never
+    /// refreshed.
+    shared_selection: Option<Arc<crate::state::SharedSelection>>,
     /// The parent's hooks. Subagents run them too: `PreToolUse` guards
     /// apply to their tool calls, and their `Stop` fires as `SubagentStop`.
     hooks: Option<Arc<dyn mira_harness::HookRunner>>,
@@ -193,6 +202,10 @@ pub struct AgentTool {
     /// (empty registry) means every call falls through to the raw
     /// primitive.
     agents: Arc<AgentRegistry>,
+    /// The live roster, when the host can edit it (Settings → Subagents).
+    /// Read on every use, so an edit applies to the next delegation without
+    /// a restart. `agents` is the fallback snapshot.
+    live_agents: Option<Arc<std::sync::RwLock<Arc<AgentRegistry>>>>,
     /// Session store shared with the parent — when set, spawned child
     /// sessions are checkpointed to disk so the SubagentPanel can
     /// reload their transcript after a browser refresh or process
@@ -248,14 +261,39 @@ impl AgentTool {
             base_registry,
             default_model,
             small_model: None,
+            shared_selection: None,
             hooks: None,
             events_tx: None,
             agents: Arc::new(AgentRegistry::default()),
+            live_agents: None,
             store: None,
             parent_approver: None,
             parent_policy: None,
             channel: None,
             scratchpads: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Follow the server's live engine selection for default models.
+    /// When set, the snapshot values from `new`/`with_small_model`
+    /// become fallbacks and the shared cell is read at spawn time.
+    pub fn with_shared_selection(
+        mut self,
+        shared: Arc<crate::state::SharedSelection>,
+    ) -> Self {
+        self.shared_selection = Some(shared);
+        self
+    }
+
+    /// (default model, small model) as of right now: the shared
+    /// selection when wired, else the constructor snapshot.
+    fn current_models(&self) -> (String, Option<String>) {
+        match &self.shared_selection {
+            Some(shared) => {
+                let (_instance, model, small) = shared.snapshot();
+                (model.unwrap_or_else(|| self.default_model.clone()), small)
+            }
+            None => (self.default_model.clone(), self.small_model.clone()),
         }
     }
 
@@ -282,6 +320,20 @@ impl AgentTool {
     pub fn with_agents(mut self, agents: Arc<AgentRegistry>) -> Self {
         self.agents = agents;
         self
+    }
+
+    /// Follow a roster the host can swap at runtime.
+    pub fn with_live_agents(mut self, live: Arc<std::sync::RwLock<Arc<AgentRegistry>>>) -> Self {
+        self.live_agents = Some(live);
+        self
+    }
+
+    /// The roster as of now.
+    fn registry(&self) -> Arc<AgentRegistry> {
+        match &self.live_agents {
+            Some(l) => l.read().map(|r| r.clone()).unwrap_or_else(|_| self.agents.clone()),
+            None => self.agents.clone(),
+        }
     }
 
     /// The parent session's hooks, for subagents to run.
@@ -337,7 +389,7 @@ impl AgentTool {
     /// correctness first.
     async fn route_auto(&self, task: &str) -> String {
         let fallback = "explore".to_owned();
-        if self.agents.types.is_empty() {
+        if self.registry().types.is_empty() {
             return fallback;
         }
 
@@ -365,7 +417,10 @@ impl AgentTool {
         );
 
         let req = ChatRequest {
-            model: self.default_model.clone(),
+            // The router call should always be cheap: it rides the
+            // user's current *default* model, not whatever heavy model
+            // a subagent type asked for.
+            model: self.current_models().0,
             messages: vec![
                 Message::system(system),
                 Message::user(format!("Task: {task}")),
@@ -374,6 +429,7 @@ impl AgentTool {
             temperature: Some(0.0),
             max_tokens: Some(32),
             reasoning_effort: None,
+            service_tier: None,
             response_format: None,
         };
 
@@ -414,7 +470,7 @@ impl AgentTool {
             .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
             .collect();
 
-        if self.agents.get(&cleaned).is_some() {
+        if self.registry().get(&cleaned).is_some() {
             cleaned
         } else {
             warn!(
@@ -454,7 +510,8 @@ impl Tool for AgentTool {
     fn spec(&self) -> ToolSpec {
         // Enumerate the loaded types so the model sees the roster and
         // description right in the tool spec, not just as freeform prose.
-        let type_names = self.agents.names();
+        let agents = self.registry();
+        let type_names = agents.names();
         // Advertised enum. Always include the sentinel `auto` so the
         // LLM-as-router path is reachable through strict-schema providers
         // (OpenAI structured tools, Anthropic in strict mode) — without
@@ -469,11 +526,14 @@ impl Tool for AgentTool {
              `auto` to let the router decide, or omit this field."
                 .to_owned()
         } else {
-            let roster = self
-                .agents
+            let roster = agents
                 .types
                 .values()
-                .map(|t| format!("• `{}` — {}", t.name, t.description))
+                .filter(|t| t.is_enabled())
+                .map(|t| match &t.display_name {
+                    Some(persona) => format!("• `{}` ({persona}) — {}", t.name, t.description),
+                    None => format!("• `{}` — {}", t.name, t.description),
+                })
                 .collect::<Vec<_>>()
                 .join("\n");
             format!(
@@ -558,7 +618,7 @@ impl Tool for AgentTool {
             Err(_) => return false, // bad args → play it safe
         };
         if let Some(name) = args.r#type.as_deref() {
-            if let Some(ty) = self.agents.get(name) {
+            if let Some(ty) = self.registry().get(name).cloned() {
                 if let Some(flag) = ty.parallel_safe {
                     return flag;
                 }
@@ -616,10 +676,11 @@ impl Tool for AgentTool {
         // Resolve the named type (if any) once. Explicit args on the call
         // still win over the type's defaults — the type provides a
         // baseline, the caller picks per-call overrides.
+        let roster = self.registry();
         let type_def = args
             .r#type
             .as_deref()
-            .and_then(|name| self.agents.get(name));
+            .and_then(|name| roster.get(name));
         if let (Some(name), None) = (args.r#type.as_deref(), type_def) {
             // Caller asked for a type we don't have — surface it clearly
             // rather than silently ignoring so bad prompts get flagged.
@@ -627,10 +688,10 @@ impl Tool for AgentTool {
                 call.id.clone(),
                 format!(
                     "unknown agent type `{name}`. Available: {}.",
-                    if self.agents.names().is_empty() {
+                    if roster.names().is_empty() {
                         "(none)".to_owned()
                     } else {
-                        self.agents.names().join(", ")
+                        roster.names().join(", ")
                     }
                 ),
             ));
@@ -670,14 +731,21 @@ impl Tool for AgentTool {
             }
         }
         if child_depth < MAX_AGENT_DEPTH {
+            // Nested tools follow the same live selection this tool
+            // does — a grandchild spawned after a model switch must
+            // not resurrect the boot-time model.
+            let (nested_default, nested_small) = self.current_models();
             let mut nested = AgentTool::new(
                 self.provider.clone(),
                 self.base_registry.clone(),
-                self.default_model.clone(),
+                nested_default,
             )
-            .with_agents(self.agents.clone())
-            .with_small_model(self.small_model.clone())
+            .with_agents(self.registry())
+            .with_small_model(nested_small)
             .with_hooks(self.hooks.clone());
+            if let Some(shared) = &self.shared_selection {
+                nested = nested.with_shared_selection(shared.clone());
+            }
             if let Some(tx) = &self.events_tx {
                 nested = nested.with_events_tx(tx.clone());
             }
@@ -867,6 +935,7 @@ impl Tool for AgentTool {
         //   explicit arg → type default → tool default → hard fallback.
         // `small` / `haiku` / `inherit`… become real model ids here, so a
         // cheap agent type runs on the user's `small_model`.
+        let (default_model, small_model) = self.current_models();
         let model = args
             .model
             .filter(|s| !s.trim().is_empty())
@@ -874,11 +943,11 @@ impl Tool for AgentTool {
             .map(|m| {
                 mira_config::resolve_model_alias(
                     &m,
-                    &self.default_model,
-                    self.small_model.as_deref(),
+                    &default_model,
+                    small_model.as_deref().or(self.small_model.as_deref()),
                 )
             })
-            .unwrap_or_else(|| self.default_model.clone());
+            .unwrap_or_else(|| default_model.clone());
         let mut cfg = SessionConfig::new(model.clone());
         cfg.max_rounds = args
             .max_rounds
@@ -1774,6 +1843,7 @@ mod tests {
                     worktree: None,
                     extends: None,
                     review_required: None,
+                    ..Default::default()
                 },
             );
         }

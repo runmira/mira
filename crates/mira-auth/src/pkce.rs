@@ -10,6 +10,8 @@ use base64::Engine;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 
+// URL-safe base64 encoding is critical for OAuth parameter safety across all transports.
+
 /// Generate a fresh PKCE code_verifier. Returns a URL-safe, unpadded
 /// base64 string in the RFC-7636-approved 43..128-character range.
 ///
@@ -37,6 +39,9 @@ pub fn code_challenge_s256(verifier: &str) -> String {
 /// Distinct from the verifier by design: leaking `state` in a browser
 /// history / referrer log doesn't leak the PKCE secret.
 pub fn gen_flow_id() -> String {
+    // 16 bytes of randomness → 22 base64url chars; plenty of space for
+    // collision resistance while staying short enough to survive URL
+    // length limits and logging redaction.
     let mut buf = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut buf);
     URL_SAFE_NO_PAD.encode(buf)
