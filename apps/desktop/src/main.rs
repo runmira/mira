@@ -134,7 +134,7 @@ fn main() {
 fn build_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     let handle = app.clone();
 
-    let mut builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+    let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
         // No window title: with the title bar hidden as an overlay, macOS
         // still paints the title next to the traffic lights, so leaving it
         // set would show "Mira" twice — once as the system title and once in
@@ -159,17 +159,15 @@ fn build_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     // distribution; that's fine for the GitHub-release channel this app
     // ships on.
     #[cfg(target_os = "macos")]
-    {
-        builder = builder
-            .title_bar_style(tauri::TitleBarStyle::Overlay)
-            .transparent(true)
-            .effects(tauri::utils::config::WindowEffectsConfig {
-                effects: vec![tauri::utils::WindowEffect::UnderWindowBackground],
-                state: Some(tauri::utils::WindowEffectState::Active),
-                radius: None,
-                color: None,
-            });
-    }
+    let builder = builder
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .transparent(true)
+        .effects(tauri::utils::config::WindowEffectsConfig {
+            effects: vec![tauri::utils::WindowEffect::UnderWindowBackground],
+            state: Some(tauri::utils::WindowEffectState::Active),
+            radius: None,
+            color: None,
+        });
 
     builder
         .on_navigation(move |url| {

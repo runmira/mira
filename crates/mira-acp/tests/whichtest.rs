@@ -101,6 +101,11 @@ fn the_acp_spawn_resolves_its_program_too() {
 fn check_and_spawn_agree_on_the_binary() {
     bare_path();
     let d = ClaudeCodeDriver;
+    // Needs Claude Code installed; CI machines don't have it.
+    if mira_acp::which::resolve(d.binary_names()[0]).is_none() {
+        eprintln!("skipped: {} is not installed", d.binary_names()[0]);
+        return;
+    }
     let cfg = DriverConfig::default();
     let program = PathBuf::from(d.binary_names()[0]);
     let native_bin = mira_acp::process::native_program(&d, &cfg, &program);
