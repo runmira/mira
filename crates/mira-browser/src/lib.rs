@@ -254,6 +254,10 @@ struct Session {
     cdp: std::sync::Arc<Cdp>,
     /// The tab whose screencast feeds the live view.
     screencast: Option<String>,
+    /// The live view's size (CSS pixels) and pixel density, when someone is
+    /// watching: pages take this viewport, so the view is the page at the
+    /// pane's own size rather than a fixed window scaled to fit.
+    view: Option<ViewSize>,
     /// Forwards screencast frames and navigations to [`Browser::subscribe`].
     pump: tokio::task::JoinHandle<()>,
     /// Page targets in the order Mira learned about them (tab indices).
@@ -301,6 +305,40 @@ pub enum UserInput {
     Text { text: String },
     /// One key or chord, in the `key` action's syntax (`Return`, `ctrl+a`).
     Key { key: String },
+    /// The live view's size changed: CSS pixels, and its pixel density.
+    Resize {
+        width: u32,
+        height: u32,
+        #[serde(default = "one")]
+        scale: f64,
+    },
+}
+
+fn one() -> f64 {
+    1.0
+}
+
+/// The live view's size: CSS pixels and device pixel ratio.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ViewSize {
+    width: u32,
+    height: u32,
+    scale: f64,
+}
+
+impl ViewSize {
+    /// Within what a page can sensibly be laid out at.
+    fn clamped(width: u32, height: u32, scale: f64) -> Self {
+        Self {
+            width: width.clamp(200, 4096),
+            height: height.clamp(200, 4096),
+            scale: if scale.is_finite() {
+                scale.clamp(1.0, 3.0)
+            } else {
+                1.0
+            },
+        }
+    }
 }
 
 /// A lazily-launched browser. The first action starts it; `close` (or
@@ -455,6 +493,21 @@ impl Browser {
                     .map(|_| ())
             }
             UserInput::Key { key } => press_key(sess, key).await,
+            UserInput::Resize {
+                width,
+                height,
+                scale,
+            } => {
+                let view = ViewSize::clamped(*width, *height, *scale);
+                if sess.view == Some(view) {
+                    return Ok(());
+                }
+                sess.view = Some(view);
+                // Restart the stream at the new size on the current tab.
+                sess.screencast = None;
+                sync_screencast(sess).await;
+                Ok(())
+            }
         }
     }
 }
@@ -491,12 +544,30 @@ async fn sync_screencast_inner(sess: &mut Session) {
         .cdp
         .call(Some(&sid), "Page.bringToFront", json!({}))
         .await;
+    // With someone watching, the page takes the view's size — set per tab,
+    // so a tab the agent opens or switches to fits too.
+    let (max_w, max_h) = match sess.view {
+        Some(v) => {
+            let _ = sess
+                .cdp
+                .call(
+                    Some(&sid),
+                    "Emulation.setDeviceMetricsOverride",
+                    json!({ "width": v.width, "height": v.height, "deviceScaleFactor": v.scale, "mobile": false }),
+                )
+                .await;
+            // Frames at the view's real pixel size, so text is sharp.
+            let px = |css: u32| (f64::from(css) * v.scale).round() as u32;
+            (px(v.width), px(v.height))
+        }
+        None => (1600, 1200),
+    };
     let started = sess
         .cdp
         .call(
             Some(&sid),
             "Page.startScreencast",
-            json!({ "format": "jpeg", "quality": 70, "maxWidth": 1600, "maxHeight": 1200, "everyNthFrame": 1 }),
+            json!({ "format": "jpeg", "quality": 70, "maxWidth": max_w, "maxHeight": max_h, "everyNthFrame": 1 }),
         )
         .await;
     if started.is_ok() {
@@ -654,6 +725,7 @@ async fn start(
         _child: child,
         cdp,
         screencast: None,
+        view: None,
         pump,
         tabs: vec![current.clone()],
         attached: HashMap::new(),
