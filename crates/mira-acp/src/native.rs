@@ -2185,7 +2185,7 @@ done
                 args: Vec::new(),
                 env: Default::default(),
                 secret_env: Vec::new(),
-        env_deny: Vec::new(),
+                env_deny: Vec::new(),
             },
             dir,
         )
@@ -2204,7 +2204,15 @@ done
             .await
             .expect("spawn");
 
-        // Past two idle windows with no output at all.
+        // Wait for the announcement first: under a loaded parallel test run
+        // the stand-in can take a while to start, and that isn't what this
+        // test is about.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while agent.session_id().await.is_none() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+
+        // Then past two idle windows with no output at all.
         tokio::time::sleep(Duration::from_millis(2500)).await;
 
         // Still alive, still has its session, and neither channel closed.

@@ -198,6 +198,7 @@ async fn dispatch(
     match cmd {
         ClientMsg::Send { text, images } => {
             debug!(len = text.len(), images = images.len(), "ws: send");
+            mark_baseline(&slot).await;
             // Engine routing, the same rule the model selection follows:
             // a session configured for an external agent (started here,
             // or inherited from the previous chat) gets the prompt, and
@@ -221,6 +222,7 @@ async fn dispatch(
             // native rewind doesn't apply to a transcript the agent
             // owns. (The original images were staged into the agent's
             // files dir and can't be re-staged, so text only.)
+            mark_baseline(&slot).await;
             let configured_for_agent = slot.acp_launch.lock().await.is_some();
             if configured_for_agent {
                 prompt_agent(state, &slot, text, Vec::new()).await;
@@ -1637,4 +1639,14 @@ mod attachment_tests {
         }];
         assert!(stage_agent_images(&dir, &bad).is_err());
     }
+}
+
+/// Before a chat's first prompt runs, snapshot the working tree so its
+/// changes can later be told apart from what was already there — however
+/// they're made (see `session_changes`). A no-op once taken, or outside a
+/// repo.
+async fn mark_baseline(slot: &SessionSlot) {
+    let cwd = slot.cwd.read().await.clone();
+    let id = slot.id.to_string();
+    let _ = tokio::task::spawn_blocking(move || crate::session_changes::ensure_baseline(&cwd, &id)).await;
 }

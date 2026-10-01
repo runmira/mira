@@ -20,6 +20,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
+use crate::session_changes::{ChangedFile, FileStatus};
 use crate::state::AppState;
 
 #[derive(Debug, Serialize)]
@@ -159,151 +160,77 @@ pub async fn get_status(State(state): State<AppState>) -> Response {
     .into_response()
 }
 
-/// Diff stats scoped to only the files this session has written.
-/// Returns zeroes when the session has no file guard or hasn't touched anything.
+/// What the active chat changed, by anyone — its tools, an external agent
+/// or a shell command — that a commit would still carry. See
+/// [`crate::session_changes`].
+async fn session_files(state: &AppState) -> (PathBuf, Vec<ChangedFile>) {
+    let slot = state.active_slot().await;
+    let cwd = slot.cwd.read().await.clone();
+    let session = slot.id.to_string();
+    let written: Vec<PathBuf> = match slot.session.read().await.file_guard() {
+        Some(g) => g.written_snapshot().await.into_iter().collect(),
+        None => Vec::new(),
+    };
+    let cwd_bg = cwd.clone();
+    let files = tokio::task::spawn_blocking(move || {
+        crate::session_changes::changed_files(&cwd_bg, &session, &written)
+    })
+    .await
+    .unwrap_or_default();
+    (cwd, files)
+}
+
+/// GET /api/git/session-diff
+/// Totals and per-file line counts for what this chat changed.
 pub async fn session_diff(State(state): State<AppState>) -> Response {
-    let cwd = state.current_cwd().await;
-    let session = state.current_session().await;
-
-    let written = match session.file_guard() {
-        Some(g) => g.written_snapshot().await,
-        None => {
-            return Json(serde_json::json!({ "added": 0, "removed": 0, "files": [], "uncommitted": 0, "untracked": 0 }))
-                .into_response()
-        }
-    };
-
-    if written.is_empty() {
-        return Json(serde_json::json!({ "added": 0, "removed": 0, "files": [], "uncommitted": 0, "untracked": 0 })).into_response();
-    }
-
-    // Collect relative paths (git diff requires paths relative to repo root).
-    let file_args: Vec<String> = written
-        .iter()
-        .filter_map(|p| {
-            p.strip_prefix(&cwd)
-                .ok()
-                .map(|r| r.to_string_lossy().into_owned())
-        })
-        .collect();
-
-    if file_args.is_empty() {
-        return Json(serde_json::json!({ "added": 0, "removed": 0, "files": [], "uncommitted": 0, "untracked": 0 })).into_response();
-    }
-
-    // `git diff HEAD --numstat -- file1 file2 …`
-    let mut args = vec!["diff", "HEAD", "--numstat", "--"];
-    let file_strs: Vec<&str> = file_args.iter().map(|s| s.as_str()).collect();
-    args.extend_from_slice(&file_strs);
-
-    let (added, removed) = match run(&cwd, &args) {
-        Ok(out) => {
-            let mut a = 0u64;
-            let mut r = 0u64;
-            for line in out.lines() {
-                let mut parts = line.split('\t');
-                if let (Some(ad), Some(rm)) = (parts.next(), parts.next()) {
-                    a += ad.parse::<u64>().unwrap_or(0);
-                    r += rm.parse::<u64>().unwrap_or(0);
-                }
-            }
-            (a, r)
-        }
-        Err(_) => (0, 0),
-    };
-
-    // Which of those files still have something to commit. `git diff HEAD`
-    // above can't see brand-new (untracked) files, and `written` never
-    // shrinks, so without this the UI can't tell "this session has work
-    // to commit" from "this session once touched a file".
-    let mut status_args = vec!["status", "--porcelain=v1", "-uall", "--"];
-    status_args.extend_from_slice(&file_strs);
-    let pending = run(&cwd, &status_args)
-        .map(|out| parse_pending(&out))
-        .unwrap_or_default();
-    // New files count as all-added lines, so the +N matches what a
-    // commit would actually carry.
-    let added = added
-        + pending
-            .untracked_paths
-            .iter()
-            .filter_map(|rel| std::fs::read_to_string(cwd.join(rel)).ok())
-            .map(|text| text.lines().count() as u64)
-            .sum::<u64>();
-
-    let file_names: Vec<String> = written
-        .iter()
-        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-        .collect();
-
+    let (_, files) = session_files(&state).await;
+    let added: u64 = files.iter().map(|f| f.added).sum();
+    let removed: u64 = files.iter().map(|f| f.removed).sum();
+    let untracked = files.iter().filter(|f| f.status == FileStatus::Added).count();
     Json(serde_json::json!({
         "added": added,
         "removed": removed,
-        "files": file_names,
-        "uncommitted": pending.uncommitted,
-        "untracked": pending.untracked_paths.len(),
+        "uncommitted": files.len(),
+        "untracked": untracked,
+        "files": files,
     }))
     .into_response()
 }
 
-/// Session files that still differ from HEAD, relative to the cwd.
-async fn session_pending_paths(state: &AppState, cwd: &Path) -> Vec<String> {
-    let session = state.current_session().await;
-    let Some(guard) = session.file_guard() else {
-        return Vec::new();
-    };
-    let rel: Vec<String> = guard
-        .written_snapshot()
-        .await
-        .iter()
-        .filter_map(|p| p.strip_prefix(cwd).ok())
-        .map(|r| r.to_string_lossy().into_owned())
-        .collect();
-    if rel.is_empty() {
-        return Vec::new();
-    }
-    let mut args = vec!["status", "--porcelain=v1", "-uall", "--"];
-    args.extend(rel.iter().map(String::as_str));
-    run(cwd, &args)
-        .map(|out| {
-            out.lines()
-                .filter(|l| l.len() > 3)
-                .map(|l| l[3..].trim_matches('"').to_owned())
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 /// GET /api/git/session-changes
-/// Full unified diffs for every file this session changed that still
-/// differs from HEAD — the data behind the "Review changes" panel.
+/// Full unified diffs for every file this chat changed that still differs
+/// from HEAD — the data behind the "Review changes" panel.
 pub async fn session_changes(State(state): State<AppState>) -> Response {
-    let cwd = state.current_cwd().await;
-    let mut files = Vec::new();
-    for path in session_pending_paths(&state, &cwd).await {
-        let tracked = run(&cwd, &["ls-files", "--error-unmatch", "--", &path]).is_ok();
-        let diff = if tracked {
-            run(&cwd, &["diff", "HEAD", "--", &path]).unwrap_or_default()
-        } else {
-            // `--no-index` exits 1 when the files differ, so read stdout
-            // directly instead of going through `run`.
-            Command::new("git")
-                .current_dir(&cwd)
-                .args(["diff", "--no-index", "--", "/dev/null", &path])
-                .output()
-                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-                .unwrap_or_default()
-        };
-        let status = if !tracked {
-            "added"
-        } else if !cwd.join(&path).exists() {
-            "deleted"
-        } else {
-            "modified"
-        };
-        files.push(serde_json::json!({ "path": path, "status": status, "diff": diff }));
-    }
-    Json(serde_json::json!({ "files": files })).into_response()
+    let (cwd, files) = session_files(&state).await;
+    let out = tokio::task::spawn_blocking(move || {
+        files
+            .into_iter()
+            .map(|f| {
+                let diff = if f.status == FileStatus::Added {
+                    // `--no-index` exits 1 when the files differ, so read
+                    // stdout directly instead of going through `run`.
+                    Command::new("git")
+                        .current_dir(&cwd)
+                        .args(["diff", "--no-index", "--", "/dev/null", &f.path])
+                        .output()
+                        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                        .unwrap_or_default()
+                } else {
+                    run(&cwd, &["diff", "--relative", "HEAD", "--", &f.path]).unwrap_or_default()
+                };
+                serde_json::json!({
+                    "path": f.path,
+                    "status": f.status,
+                    "added": f.added,
+                    "removed": f.removed,
+                    "diff": diff,
+                })
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap_or_default();
+    Json(serde_json::json!({ "files": out })).into_response()
 }
 
 #[derive(Deserialize)]
@@ -312,64 +239,33 @@ pub struct RevertFileRequest {
 }
 
 /// POST /api/git/revert-file { path }
-/// Throw away this session's changes to one file: restore it from HEAD,
-/// or delete it if the session created it. Only files the session wrote
-/// are accepted.
+/// Throw away this chat's changes to one file: restore it from HEAD, or
+/// delete it if the chat created it. Only files the chat changed are
+/// accepted.
 pub async fn revert_file(
     State(state): State<AppState>,
     Json(req): Json<RevertFileRequest>,
 ) -> Response {
-    let cwd = state.current_cwd().await;
-    if !session_pending_paths(&state, &cwd)
-        .await
-        .contains(&req.path)
-    {
+    let (cwd, files) = session_files(&state).await;
+    let Some(file) = files.iter().find(|f| f.path == req.path) else {
         return err(
             StatusCode::BAD_REQUEST,
             "not a file this session changed".into(),
         );
-    }
-    let tracked = run(&cwd, &["ls-files", "--error-unmatch", "--", &req.path]).is_ok();
-    let result = if tracked {
+    };
+    let result = if file.status == FileStatus::Added {
+        std::fs::remove_file(cwd.join(&file.path))
+    } else {
         run(
             &cwd,
-            &[
-                "restore",
-                "--source=HEAD",
-                "--staged",
-                "--worktree",
-                "--",
-                &req.path,
-            ],
+            &["restore", "--source=HEAD", "--staged", "--worktree", "--", &file.path],
         )
         .map(|_| ())
-    } else {
-        std::fs::remove_file(cwd.join(&req.path))
     };
     match result {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
-}
-
-/// Uncommitted state of a set of paths, from `git status --porcelain=v1`.
-#[derive(Debug, Default, PartialEq)]
-struct Pending {
-    /// Paths with anything to commit (modified, staged, new, deleted…).
-    uncommitted: usize,
-    /// The subset that git doesn't track yet.
-    untracked_paths: Vec<String>,
-}
-
-fn parse_pending(porcelain: &str) -> Pending {
-    let mut p = Pending::default();
-    for line in porcelain.lines().filter(|l| l.len() > 3) {
-        p.uncommitted += 1;
-        if let Some(path) = line.strip_prefix("?? ") {
-            p.untracked_paths.push(path.trim_matches('"').to_owned());
-        }
-    }
-    p
 }
 
 /// GET /api/git/branch-pr
@@ -431,25 +327,33 @@ pub async fn commit(State(state): State<AppState>, Json(req): Json<CommitRequest
         return err(StatusCode::BAD_REQUEST, "not a git repo".into());
     }
 
-    // Always stage modifications to tracked files; with the toggle also
-    // stage new/untracked files (-A vs -u).
-    Command::new("git")
-        .current_dir(&cwd)
-        .args(["add", if req.include_unstaged { "-A" } else { "-u" }])
-        .output()
-        .ok();
+    // Only this chat's files — the panel offers to commit what the chat
+    // changed, not whatever else is dirty in the repo. New files go in only
+    // when asked for.
+    let (_, files) = session_files(&state).await;
+    let paths: Vec<&str> = files
+        .iter()
+        .filter(|f| req.include_unstaged || f.status != FileStatus::Added)
+        .map(|f| f.path.as_str())
+        .collect();
+    if paths.is_empty() {
+        return err(StatusCode::BAD_REQUEST, "nothing from this session to commit".into());
+    }
+    let mut add = vec!["add", "-A", "--"];
+    add.extend(&paths);
+    if let Err(e) = run(&cwd, &add) {
+        return err(StatusCode::BAD_REQUEST, format!("git add: {e}"));
+    }
 
     let message = if req.message.trim().is_empty() {
-        // Auto-generate from staged files
-        let files = run(&cwd, &["diff", "--staged", "--name-only"]).unwrap_or_default();
-        let names: Vec<&str> = files
-            .lines()
-            .map(|l| l.trim())
-            .filter(|l| !l.is_empty())
+        let names: Vec<&str> = paths
+            .iter()
+            .map(|p| p.rsplit('/').next().unwrap_or(p))
             .take(3)
             .collect();
-        if names.is_empty() {
-            "chore: session changes".to_string()
+        let more = paths.len().saturating_sub(names.len());
+        if more > 0 {
+            format!("update {} and {more} more", names.join(", "))
         } else {
             format!("update {}", names.join(", "))
         }
@@ -457,9 +361,12 @@ pub async fn commit(State(state): State<AppState>, Json(req): Json<CommitRequest
         req.message.trim().to_string()
     };
 
+    // `--only`: commit exactly these paths, leaving anything else the
+    // user had staged where it was.
     let commit_out = Command::new("git")
         .current_dir(&cwd)
-        .args(["commit", "-m", &message])
+        .args(["commit", "-m", &message, "--only", "--"])
+        .args(&paths)
         .output();
 
     match commit_out {
@@ -917,26 +824,4 @@ fn run(cwd: &Path, args: &[&str]) -> Result<String, std::io::Error> {
 
 fn err(status: StatusCode, msg: String) -> Response {
     (status, Json(serde_json::json!({ "error": msg }))).into_response()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn pending_counts_changes_and_new_files() {
-        let out = " M src/a.rs\n?? src/new.rs\nA  src/staged.rs\n";
-        assert_eq!(
-            parse_pending(out),
-            Pending {
-                uncommitted: 3,
-                untracked_paths: vec!["src/new.rs".into()],
-            }
-        );
-    }
-
-    #[test]
-    fn nothing_pending_when_everything_is_committed() {
-        assert_eq!(parse_pending(""), Pending::default());
-    }
 }

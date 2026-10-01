@@ -583,9 +583,12 @@ mod tests {
         let proc = AgentProcess::spawn(&cfg, Arc::new(crate::conn::NullCallbacks))
             .await
             .expect("spawn");
-        // Poll the tail: stderr arrives on its own task, not with spawn.
+        // Poll the tail: stderr arrives on its own task, not with spawn. A
+        // deadline rather than a count — under a loaded parallel test run,
+        // starting a sandboxed shell can take seconds.
         let mut seen = String::new();
-        for _ in 0..100 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
             seen = proc.stderr_tail().await;
             if seen.contains("KEEP=") {
                 break;

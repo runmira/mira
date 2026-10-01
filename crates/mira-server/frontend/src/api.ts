@@ -506,12 +506,23 @@ export async function getGitStatus(): Promise<GitStatusView> {
   return (await r.json()) as GitStatusView;
 }
 
+/** One file the chat changed, as a commit of it would carry it. */
+export type SessionFile = {
+  /** Relative to the session's folder. */
+  path: string;
+  status: 'added' | 'modified' | 'deleted';
+  added: number;
+  removed: number;
+  binary: boolean;
+};
+
 export type SessionDiffView = {
   added: number;
   removed: number;
-  /** Every file this session has written (never shrinks). */
-  files: string[];
-  /** Of those, how many still have something to commit. */
+  /** What the chat changed that still differs from HEAD — by its tools, an
+   *  external agent or a shell command alike. */
+  files: SessionFile[];
+  /** `files.length`. */
   uncommitted?: number;
   /** Of those, how many git doesn't track yet (new files). */
   untracked?: number;
@@ -526,6 +537,8 @@ export async function getSessionDiff(): Promise<SessionDiffView> {
 export type SessionChange = {
   path: string;
   status: 'modified' | 'added' | 'deleted';
+  added: number;
+  removed: number;
   /** Unified diff against HEAD. */
   diff: string;
 };

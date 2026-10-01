@@ -969,6 +969,8 @@ export default function App() {
   // the branch are its own to push.
   const [sessionCommitted, setSessionCommitted] = useState(false);
   const [reviewOpen, setReviewOpen] = useState(false);
+  /** File the review drawer should open on, when opened from the file list. */
+  const [reviewFocus, setReviewFocus] = useState<string | null>(null);
   const [lightbox, setLightbox] = useState<string | null>(null);
   // "Open session" from the Usage page (Settings) — back to chat on it.
   useEffect(() => {
@@ -1044,6 +1046,20 @@ export default function App() {
   }, [keybindings]);
   const ctxFits = useContextPanelFits();
   const [branchPr, setBranchPr] = useState<BranchPrView | null>(null);
+  /** Re-read the repo state the panels show: git status, what this chat
+   *  changed, and the branch's PR. Responses are applied only if no newer
+   *  refresh has started since — after a quick session switch, a slow reply
+   *  for the previous chat must not overwrite the current one. */
+  const repoSeqRef = useRef(0);
+  const refreshRepo = useCallback(() => {
+    const seq = ++repoSeqRef.current;
+    const live = () => seq === repoSeqRef.current;
+    getGitStatus().then((s) => live() && setGitStatus(s)).catch(() => {});
+    getSessionDiff().then((d) => live() && setSessionDiff(d)).catch(() => {});
+    getBranchPr()
+      .then((pr) => live() && setBranchPr(pr))
+      .catch(() => live() && setBranchPr(null));
+  }, []);
   // Live task list — hydrated from `ready.tasks` on socket open and
   // upserted whenever a `task_*` tool result lands. Rendered as a
   // persistent "Plan" card near the top of the transcript.
@@ -1283,8 +1299,7 @@ export default function App() {
         setEnvSwitching(null);
         wsRef.current?.send({ type: 'environment' });
         // Fetch git status, session diff, and branch PR for the new cwd.
-        getGitStatus().then((s) => { setGitStatus(s); getBranchPr().then(setBranchPr).catch(() => setBranchPr(null)); }).catch(() => {});
-        getSessionDiff().then(setSessionDiff).catch(() => {});
+        refreshRepo();
         // A Ready frame means the harness swapped session context (new /
         // load / resume / reconnect). If the user was parked on Plugins
         // or another management view, jump back to chat so a fresh
@@ -1382,9 +1397,7 @@ export default function App() {
         setEntries(sealThought);
         playPing();
         // Refresh git status, session diff, and branch PR after each turn.
-        getGitStatus().then(setGitStatus).catch(() => {});
-        getSessionDiff().then(setSessionDiff).catch(() => {});
-        getBranchPr().then(setBranchPr).catch(() => setBranchPr(null));
+        refreshRepo();
         // Close out the most recent turn's timing.
         setTurnTimings((prev) => stampLastTurn(prev, Date.now()));
         setSidebarRefresh((n) => n + 1);
@@ -1768,6 +1781,9 @@ export default function App() {
         setThinking(false);
         clearThinkingIdle();
         acpStopRef.current = null;
+        // The agent edits files in its own process; nothing else tells the
+        // panels their counts are stale.
+        refreshRepo();
         // Close out the turn's timing, or "Worked for" keeps ticking on a
         // turn that ended minutes ago. The harness path does this on `done`;
         // the agent path never did, which is why a finished turn still showed
@@ -2930,12 +2946,13 @@ export default function App() {
               <ImageLightbox src={lightbox} onClose={() => setLightbox(null)} />
               <ReviewChanges
                 open={reviewOpen}
-                onClose={() => setReviewOpen(false)}
-                onSendComments={(text) => onSend(text)}
-                onChanged={() => {
-                  getGitStatus().then(setGitStatus).catch(() => {});
-                  getSessionDiff().then(setSessionDiff).catch(() => {});
+                onClose={() => {
+                  setReviewOpen(false);
+                  setReviewFocus(null);
                 }}
+                onSendComments={(text) => onSend(text)}
+                onChanged={refreshRepo}
+                focusPath={reviewFocus}
               />
 
               {showJump && (
@@ -2964,14 +2981,18 @@ export default function App() {
                   open={ctxOpen}
                   onOpenChange={onCtxOpenChange}
                   onOpenAgent={openAgentTab}
-                  onReview={() => setReviewOpen(true)}
-                  onPush={async () => { await gitPush(); getGitStatus().then(setGitStatus).catch(() => {}); getBranchPr().then(setBranchPr).catch(() => {}); }}
+                  onReview={(path) => {
+                    setReviewFocus(path ?? null);
+                    setReviewOpen(true);
+                  }}
+                  onPush={async () => {
+                    await gitPush();
+                    refreshRepo();
+                  }}
                   onCommit={async (message, includeUnstaged, pushAfter) => {
                     await gitCommit({ message, include_unstaged: includeUnstaged, push_after: pushAfter });
                     setSessionCommitted(true);
-                    getGitStatus().then(setGitStatus).catch(() => {});
-                    getSessionDiff().then(setSessionDiff).catch(() => {});
-                    getBranchPr().then(setBranchPr).catch(() => setBranchPr(null));
+                    refreshRepo();
                   }}
                 />
               </AnimatePresence>

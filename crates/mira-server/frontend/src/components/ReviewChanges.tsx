@@ -3,7 +3,7 @@
  * the Pierre CodeView diff surface, with a file tree, per-file collapse,
  * revert, and inline line comments sent back to the agent as one message.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { MessageCircle, RotateCcw, ChevronDown, X } from 'lucide-react';
 import type { FileDiffMetadata } from '@pierre/diffs';
 import { cn } from '@/lib/utils';
@@ -27,8 +27,11 @@ export function ReviewChanges({
   onClose,
   onSendComments,
   onChanged,
+  focusPath = null,
 }: {
   open: boolean;
+  /** Open scrolled to this file (a path relative to the session cwd). */
+  focusPath?: string | null;
   onClose: () => void;
   /** Send the composed review message to the agent. */
   onSendComments: (text: string) => void;
@@ -96,6 +99,29 @@ export function ReviewChanges({
   );
 
   const fileByKey = useMemo(() => new Map(reviewFiles.map((f) => [f.fileKey, f])), [reviewFiles]);
+
+  // Jump to the requested file once its diff has loaded. Keyed on the
+  // request, so reopening on the same file jumps again.
+  const focusedFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (!open) {
+      focusedFor.current = null;
+      return;
+    }
+    if (!focusPath || !viewer || focusedFor.current === focusPath) return;
+    const target = reviewFiles.find((f) => f.filePath === focusPath || f.filePath.endsWith(`/${focusPath}`));
+    if (!target) return;
+    focusedFor.current = focusPath;
+    setSelectedPath(target.filePath);
+    setRevealRequestId((n) => n + 1);
+    setCollapsed((prev) => {
+      if (!prev.has(target.fileKey)) return prev;
+      const next = new Set(prev);
+      next.delete(target.fileKey);
+      return next;
+    });
+    viewer.scrollTo({ type: 'item', id: target.fileKey, align: 'start' });
+  }, [open, focusPath, viewer, reviewFiles]);
 
   if (!open) return null;
 
