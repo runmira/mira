@@ -152,6 +152,7 @@ import type {
   AcpToolCall,
   AgentPostureMapping,
   SessionEngine,
+  TurnMeta,
 } from './types';
 
 /** Live per-child state for the subagent panel — mirrors the shape of
@@ -1219,6 +1220,9 @@ export default function App() {
   const usageRef = useRef<UsageTotals | null>(null);
   const turnBaseRef = useRef<{ turn: number; base: UsageTotals } | null>(null);
   const [turnUsage, setTurnUsage] = useState<Map<number, UsageTotals>>(new Map());
+  /** The model each reloaded turn ran on, for pricing it. Live turns use
+   *  the current model. */
+  const [turnModels, setTurnModels] = useState<Map<number, string>>(new Map());
   function startTurnUsage(turn: number) {
     turnBaseRef.current = {
       turn,
@@ -1314,6 +1318,10 @@ export default function App() {
         // (turn 0 = first user msg). Rebuild the local Map so "Worked for"
         // chips render on reloaded transcripts.
         setTurnTimings(rebuildTurnTimings(msg.turns ?? []));
+        // The reply hover row's tokens and cost, for turns from before this
+        // page loaded — the server keeps them per turn.
+        setTurnUsage(rebuildTurnUsage(msg.turns ?? []));
+        setTurnModels(rebuildTurnModels(msg.turns ?? []));
         setExpandedTurns(new Set());
         setUsage(msg.usage ?? null);
         setRateLimit(null);
@@ -3014,7 +3022,7 @@ export default function App() {
                         turn={turn}
                         timing={turnTimings.get(i) ?? null}
                         usage={turnUsage.get(i) ?? null}
-                        model={model}
+                        model={turnModels.get(i) ?? model}
                         index={i}
                         expanded={expandedTurns.has(i)}
                         onToggle={stableToggleTurn}
@@ -3743,6 +3751,25 @@ function rebuildTurnTimings(serverTurns: { started_at: number; ended_at?: number
       startedAt: t.started_at,
       endedAt: t.ended_at ?? null,
     });
+  });
+  return out;
+}
+
+/** Per-turn usage from the server's turn records, skipping turns that
+ *  have none (recorded before per-turn usage existed). */
+function rebuildTurnUsage(serverTurns: TurnMeta[]): Map<number, UsageTotals> {
+  const out = new Map<number, UsageTotals>();
+  serverTurns.forEach((t, i) => {
+    const u = t.usage;
+    if (u && u.prompt_tokens + u.completion_tokens > 0) out.set(i, u);
+  });
+  return out;
+}
+
+function rebuildTurnModels(serverTurns: TurnMeta[]): Map<number, string> {
+  const out = new Map<number, string>();
+  serverTurns.forEach((t, i) => {
+    if (t.model) out.set(i, t.model);
   });
   return out;
 }

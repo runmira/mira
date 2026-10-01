@@ -89,6 +89,11 @@ export type ReviewProgressEvent =
 export type TurnMeta = {
   started_at: number; // ms epoch
   ended_at?: number | null;
+  /** Tokens the turn used, summed over its rounds. Absent for turns
+   *  recorded before per-turn usage existed. */
+  usage?: UsageTotals | null;
+  /** The model the turn ran on — it can differ from the session's now. */
+  model?: string | null;
 };
 
 /* -------- /goal -------- */
