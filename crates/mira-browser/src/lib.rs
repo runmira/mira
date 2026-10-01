@@ -500,6 +500,29 @@ async fn sync_screencast_inner(sess: &mut Session) {
 
 /// Forward screencast frames and navigations, acknowledging each frame —
 /// Chrome sends the next one only after the last is acked.
+/// Whether a browser found running on the profile is the one Mira would
+/// launch now. With a browser configured, whatever is running is taken as
+/// intended. Otherwise it must be Mira's own Chromium, matched by version.
+async fn is_the_right_browser(opts: &BrowserOptions, cdp: &Cdp) -> bool {
+    if opts.executable.is_some() || std::env::var_os("MIRA_BROWSER").is_some() {
+        return true;
+    }
+    // Installs it if needed: an upgrade has to reach the right browser too.
+    if managed::ensure().await.is_err() {
+        return true; // nothing better to switch to
+    }
+    let Some((version, _)) = managed::installed() else {
+        return true;
+    };
+    match cdp.call(None, "Browser.getVersion", json!({})).await {
+        // `product` is e.g. `Chrome/154.0.8037.92` (or `HeadlessChrome/…`).
+        Ok(v) => v["product"]
+            .as_str()
+            .is_some_and(|p| p.ends_with(&format!("/{version}"))),
+        Err(_) => true,
+    }
+}
+
 fn spawn_pump(
     cdp: std::sync::Arc<Cdp>,
     live: tokio::sync::broadcast::Sender<LiveEvent>,
@@ -575,9 +598,24 @@ async fn start(
     // exited without closing it — is adopted rather than fought over.
     let adopted = match launch::active_devtools_url(&opts.profile_dir) {
         Some(url) => match tokio::time::timeout(Duration::from_secs(3), Cdp::connect(&url)).await {
-            Ok(Ok(cdp)) => {
+            Ok(Ok(cdp)) if is_the_right_browser(opts, &cdp).await => {
                 tracing::info!(%url, "reconnected to the running Mira browser");
                 Some(cdp)
+            }
+            Ok(Ok(cdp)) => {
+                // Left running by an older Mira on another browser (the
+                // user's Chrome, before Mira had its own). Adopting it
+                // would keep that browser forever; close it so the right
+                // one starts on the same profile.
+                tracing::info!(%url, "replacing the running browser with Mira's own");
+                let _ = cdp.call(None, "Browser.close", json!({})).await;
+                for _ in 0..50 {
+                    if launch::active_devtools_url(&opts.profile_dir).is_none() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                None
             }
             _ => None,
         },
