@@ -54,6 +54,22 @@ pub fn cost_usd(model: &str, usage: TokenUsage) -> Option<f64> {
 const MODEL_PRICES: &[(&str, ModelPrice)] = &[
     // -- OpenAI --
     (
+        "gpt-5-mini",
+        ModelPrice {
+            input_per_mtok: 0.25,
+            output_per_mtok: 2.00,
+            cached_input_per_mtok: 0.025,
+        },
+    ),
+    (
+        "gpt-5",
+        ModelPrice {
+            input_per_mtok: 1.25,
+            output_per_mtok: 10.00,
+            cached_input_per_mtok: 0.125,
+        },
+    ),
+    (
         "gpt-4o-mini",
         ModelPrice {
             input_per_mtok: 0.15,
@@ -132,6 +148,14 @@ const MODEL_PRICES: &[(&str, ModelPrice)] = &[
             input_per_mtok: 3.00,
             output_per_mtok: 15.00,
             cached_input_per_mtok: 0.30,
+        },
+    ),
+    (
+        "claude-opus-4-5",
+        ModelPrice {
+            input_per_mtok: 5.00,
+            output_per_mtok: 25.00,
+            cached_input_per_mtok: 0.50,
         },
     ),
     (

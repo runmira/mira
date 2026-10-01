@@ -49,7 +49,7 @@ pub enum FileStatus {
     Deleted,
 }
 
-fn git(cwd: &Path) -> Command {
+pub(crate) fn git(cwd: &Path) -> Command {
     let mut c = Command::new("git");
     c.current_dir(cwd)
         // Never block on a pager or an editor, never colour.
@@ -59,14 +59,14 @@ fn git(cwd: &Path) -> Command {
     c
 }
 
-fn run(cmd: &mut Command) -> Option<String> {
+pub(crate) fn run(cmd: &mut Command) -> Option<String> {
     let out = cmd.output().ok()?;
     out.status
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-fn git_path(cwd: &Path, what: &str) -> Option<PathBuf> {
+pub(crate) fn git_path(cwd: &Path, what: &str) -> Option<PathBuf> {
     let p = run(git(cwd).args(["rev-parse", "--git-path", what]))?;
     let p = PathBuf::from(p.trim());
     Some(if p.is_absolute() { p } else { cwd.join(p) })
@@ -109,12 +109,12 @@ pub fn snapshot_tree(cwd: &Path) -> Option<String> {
 }
 
 fn baseline_file(cwd: &Path, session: &str) -> Option<PathBuf> {
-    // Session ids are uuids; anything else is refused rather than joined
+    // Session ids are `sess_<hex>`; anything else is refused rather than joined
     // into a path.
     if session.is_empty()
         || !session
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
         return None;
     }
@@ -154,7 +154,7 @@ fn split_z(s: &str) -> impl Iterator<Item = &str> {
 }
 
 /// Paths under `cwd` that differ between two trees.
-fn tree_diff_paths(cwd: &Path, from: &str, to: &str) -> Vec<String> {
+pub(crate) fn tree_diff_paths(cwd: &Path, from: &str, to: &str) -> Vec<String> {
     run(git(cwd).args([
         "diff",
         "--name-only",
@@ -305,7 +305,8 @@ mod tests {
         d
     }
 
-    const S: &str = "0b9f6c1e-1111-4222-8333-444455556666";
+    /// The shape real session ids have (`SessionId`).
+    const S: &str = "sess_cbe42bdbc3d442c9814188145e99af38";
 
     #[test]
     fn changes_nobody_recorded_are_found() {

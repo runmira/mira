@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence } from 'framer-motion';
 import {
   RotateCw,
@@ -14,6 +14,8 @@ import {
   PanelLeft,
   Sparkle,
   Target,
+  History,
+  X,
 } from 'lucide-react';
 import { cn } from './lib/utils';
 import { acpOptionsToDescriptors } from './lib/acpOptions';
@@ -34,6 +36,7 @@ import {
 import { applyReduceMotion, getBoolPref, PREF_KEYS } from './lib/prefs';
 import { connect, type WsClient, type WsStatus } from './ws';
 import { costUsd, formatDollars, shortNum } from './lib/usage';
+import { previewCheckpoint, restoreCheckpoint, undoRestore, type MessageRef, type RestoreChange, type Restored } from './api';
 import { appendMemory, applyUndo, getBranchPr, getGitStatus, getSessionDiff, getSessionHistory, getSettings, gitCommit, gitPush, listCommands, listEngines, listSessions, listSkills, newSession, setSessionBackgroundMode, startReview, type BranchPrView, type EngineSnapshot, type GitStatusView, type SessionDiffView, type SkillView, type CommandInfo } from './api';
 import {
   ContextPanel,
@@ -653,6 +656,15 @@ function parseAskUserResultText(text: string, expectedQuestions: number): AskUse
   return { cancelled: false, answers };
 }
 
+/** A function whose identity never changes but always runs the latest
+ *  `fn` — so memoized children (each transcript turn) don't re-render just
+ *  because a parent re-created a handler, and never hold a stale one. */
+function useStableCallback<A extends unknown[], R>(fn: (...args: A) => R): (...args: A) => R {
+  const ref = useRef(fn);
+  ref.current = fn;
+  return useCallback((...args: A) => ref.current(...args), []);
+}
+
 export default function App() {
   const pingPrimedRef = useRef(false);
 
@@ -1221,12 +1233,15 @@ export default function App() {
         setSessionCommitted(false);
         setBranchPr(null);
         setSessionId(msg.session_id);
+        wsRef.current?.setSession(msg.session_id);
         sessionIdRef.current = msg.session_id;
         setSessionTitle(msg.title ?? null);
         // Context is per chat; the agent's plan limits are per account and
         // stay. The session's own usage frames (replayed below) restore it.
         setProviderContext(null);
         setAcpUsage(null);
+        setRestoreNote(null);
+        setRestoreAsk(null);
         setModel(msg.model);
         setMode(msg.mode);
         setCwd(msg.cwd);
@@ -1394,7 +1409,7 @@ export default function App() {
         setBusy(false);
         setThinking(false);
         clearThinkingIdle();
-        setEntries(sealThought);
+        setEntries((prev) => settleTools(sealThought(prev)));
         playPing();
         // Refresh git status, session diff, and branch PR after each turn.
         refreshRepo();
@@ -1797,7 +1812,7 @@ export default function App() {
         // a limit resets) on the frame so this is one message, not two.
         const stopped = msg.stop_reason;
         setEntries((prev) => {
-          const sealed = sealAcpThought(prev);
+          const sealed = settleTools(sealAcpThought(prev));
           if (isSuccessfulAcpStop(stopped)) return sealed;
           const detail = msg.detail ? ` ${msg.detail}` : '';
           return [
@@ -2228,13 +2243,56 @@ export default function App() {
   /** Edit & resend (or retry, with the same text) the user message at
    *  `userIdx`: the server rewinds history to just before it and starts a
    *  new turn. Later entries are dropped here to match. */
-  function onResend(userIdx: number, text: string) {
+  /** How the server identifies a user message: its text, and which match
+   *  of it counting from the latest. Shared by edit and restore so they can
+   *  never disagree about which message is meant. */
+  function messageRefAt(userIdx: number): MessageRef | null {
     const target = entries[userIdx];
-    if (busy || !target || target.kind !== 'msg' || target.msg.role !== 'user') return;
-    const original = target.msg.content ?? '';
+    if (!target || target.kind !== 'msg' || target.msg.role !== 'user') return null;
+    const text = target.msg.content ?? '';
     const occurrence = entries
       .slice(userIdx + 1)
-      .filter((e) => e.kind === 'msg' && e.msg.role === 'user' && e.msg.content === original).length;
+      .filter((e) => e.kind === 'msg' && e.msg.role === 'user' && e.msg.content === text).length;
+    return { text, occurrence };
+  }
+
+  // Restore files to before a message: preview → confirm → restore, with an
+  // Undo afterwards.
+  const [restoreAsk, setRestoreAsk] = useState<{ ref: MessageRef; changes: RestoreChange[] } | null>(null);
+  const [restoreNote, setRestoreNote] = useState<
+    { text: string; undo?: string; error?: boolean } | null
+  >(null);
+  async function askRestore(userIdx: number) {
+    const ref = messageRefAt(userIdx);
+    if (!ref || busy) return;
+    try {
+      const changes = await previewCheckpoint(ref);
+      if (changes.length === 0) {
+        setRestoreNote({ text: 'Nothing to restore — the files already match.' });
+        return;
+      }
+      setRestoreAsk({ ref, changes });
+    } catch (e) {
+      setRestoreNote({ text: (e as Error).message, error: true });
+    }
+  }
+  async function doRestore(run: () => Promise<Restored>, verb: string) {
+    try {
+      const r = await run();
+      const n = r.changes.length;
+      setRestoreNote({ text: `${verb} ${n} file${n === 1 ? '' : 's'}.`, undo: verb === 'Restored' ? r.undo : undefined });
+    } catch (e) {
+      setRestoreNote({ text: (e as Error).message, error: true });
+    } finally {
+      refreshRepo();
+    }
+  }
+
+  function onResend(userIdx: number, text: string) {
+    const ref = messageRefAt(userIdx);
+    const target = entries[userIdx];
+    if (busy || !ref || !target || target.kind !== 'msg') return;
+    const { text: original, occurrence } = ref;
     followRef.current = true;
     setShowJump(false);
     const next: Entry[] = [
@@ -2255,24 +2313,32 @@ export default function App() {
     wsRef.current?.send({ type: 'resend', original, occurrence, text });
   }
 
+  // Stable identities for everything handed to the transcript, so a
+  // streamed token re-renders only the turn it lands in.
+  const stableToggleTurn = useStableCallback((idx: number) => toggleTurn(idx));
+  const stableDecide = useStableCallback(decideApproval);
+  const stablePlanReply = useStableCallback(replyToPlan);
+  const stableAskUserReply = useStableCallback(replyToAskUser);
+  const stableOpenAgent = useStableCallback(openAgentTab);
+  const stableOpenFile = useStableCallback(openFileTab);
+  const stableSetMode = useStableCallback(onSetMode);
+  const editMessage = useStableCallback((entry: Entry, text: string) => onResend(entries.indexOf(entry), text));
+  const restoreMessage = useStableCallback((entry: Entry) => void askRestore(entries.indexOf(entry)));
+  const retryMessage = useStableCallback((entry: Entry) => {
+    const at = entries.indexOf(entry);
+    for (let i = at - 1; i >= 0; i--) {
+      const e = entries[i];
+      if (e.kind === 'msg' && e.msg.role === 'user') {
+        onResend(i, e.msg.content ?? '');
+        return;
+      }
+    }
+  });
+  // Changes only with `busy`: every message's action row reads this, and a
+  // value that changed per token would re-render all of them.
   const messageActions = useMemo<MessageActions>(
-    () => ({
-      busy,
-      openImage: setLightbox,
-      edit: (entry, text) => onResend(entries.indexOf(entry), text),
-      retry: (entry) => {
-        const at = entries.indexOf(entry);
-        for (let i = at - 1; i >= 0; i--) {
-          const e = entries[i];
-          if (e.kind === 'msg' && e.msg.role === 'user') {
-            onResend(i, e.msg.content ?? '');
-            return;
-          }
-        }
-      },
-    }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [busy, entries],
+    () => ({ busy, openImage: setLightbox, edit: editMessage, restore: restoreMessage, retry: retryMessage }),
+    [busy, editMessage, restoreMessage, retryMessage],
   );
 
   function onSetMode(m: Mode) { wsRef.current?.send({ type: 'set_mode', mode: m }); }
@@ -2654,6 +2720,32 @@ export default function App() {
     setActiveAgentTab(id);
   }
 
+  // Show the browser when Mira or an agent starts using it (Settings →
+  // General → Browser). Only for a live call — reloading a chat with old
+  // browser calls must not pop the pane — and once per turn, so closing the
+  // pane sticks until the next message.
+  const browserShownFor = useRef<string | null>(null);
+  useEffect(() => {
+    let live = false;
+    let turnStart = -1;
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const e = entries[i];
+      if (e.kind === 'msg' && e.msg.role === 'user') {
+        turnStart = i;
+        break;
+      }
+      if (e.kind === 'tool' && e.call.function.name === 'browser' && (e.status === 'running' || e.status === 'pending')) {
+        live = true;
+      }
+    }
+    if (!live) return;
+    const turn = `${sessionId}:${turnStart}`;
+    if (browserShownFor.current === turn) return;
+    browserShownFor.current = turn;
+    if (getBoolPref(PREF_KEYS.browserAutoOpen, true)) openToolPane('browser');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [entries]);
+
   function closeAnyTab(id: string) {
     if (agentTabs.includes(id)) closeAgentTab(id);
     else if (isToolPaneId(id)) closeToolTab(id);
@@ -2902,18 +2994,20 @@ export default function App() {
                         timing={turnTimings.get(i) ?? null}
                         usage={turnUsage.get(i) ?? null}
                         model={model}
+                        index={i}
                         expanded={expandedTurns.has(i)}
-                        onToggle={() => toggleTurn(i)}
-                        onDecide={decideApproval}
-                        onPlanReply={replyToPlan}
-                        onAskUserReply={replyToAskUser}
-                        onOpenAgent={openAgentTab}
-                        onOpenFile={openFileTab}
+                        onToggle={stableToggleTurn}
+                        onDecide={stableDecide}
+                        onPlanReply={stablePlanReply}
+                        onAskUserReply={stableAskUserReply}
+                        onOpenAgent={stableOpenAgent}
+                        onOpenFile={stableOpenFile}
                         isActive={busy && i === turns.length - 1}
                         skills={skills}
                         mode={mode}
-                        onSetMode={onSetMode}
+                        onSetMode={stableSetMode}
                         approvalViaDialog={false}
+                        offscreenOk={i < turns.length - 3}
                       />
                     ))}
                     </MessageActionsContext.Provider>
@@ -3002,6 +3096,35 @@ export default function App() {
               className="shrink-0 transition-[padding-right] duration-200"
               style={{ paddingRight: ctxReserve ? CONTEXT_PANEL_RESERVE : 0 }}
             >
+            {restoreNote && (
+              <div className="mx-auto mb-2 flex w-full max-w-3xl animate-fade-in items-center gap-2 rounded-lg border border-border/60 bg-secondary/70 px-3 py-1.5 text-[12.5px]">
+                <History className={cn('size-3.5 shrink-0', restoreNote.error ? 'text-amber-400' : 'text-muted-foreground')} />
+                <span className={cn('min-w-0 flex-1', restoreNote.error ? 'text-amber-200' : 'text-foreground/85')}>
+                  {restoreNote.text}
+                </span>
+                {restoreNote.undo && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const undo = restoreNote.undo!;
+                      setRestoreNote(null);
+                      void doRestore(() => undoRestore(undo), 'Put back');
+                    }}
+                    className="shrink-0 rounded px-1.5 py-0.5 text-[12px] font-medium text-foreground/80 hover:bg-white/[0.06] hover:text-foreground"
+                  >
+                    Undo
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setRestoreNote(null)}
+                  aria-label="Dismiss"
+                  className="shrink-0 rounded p-0.5 text-muted-foreground/60 hover:text-foreground"
+                >
+                  <X className="size-3.5" />
+                </button>
+              </div>
+            )}
             <Composer
               disabled={status !== 'open'}
               busy={busy}
@@ -3249,6 +3372,48 @@ export default function App() {
           setMainView('chat');
         }}
       />
+      {restoreAsk && (
+        <ApprovalDialog
+          tone="consequential"
+          request={{
+            title: `Restore ${restoreAsk.changes.length} file${restoreAsk.changes.length === 1 ? '' : 's'}?`,
+            source: { label: 'Checkpoint', detail: 'before this message' },
+            body: (
+              <div className="space-y-2">
+                <p>
+                  Every file that changed since this message goes back to how it was — including
+                  changes made after it, by anyone. You can undo this.
+                </p>
+                <ul className="max-h-48 space-y-0.5 overflow-auto rounded-md bg-background/60 px-2.5 py-2 font-mono text-[11.5px]">
+                  {restoreAsk.changes.map((c) => (
+                    <li key={c.path} className="flex gap-2">
+                      <span
+                        className={cn(
+                          'w-14 shrink-0',
+                          c.action === 'remove' ? 'text-red-400/80' : c.action === 'recreate' ? 'text-green-400/80' : 'text-amber-300/80',
+                        )}
+                      >
+                        {c.action === 'remove' ? 'remove' : c.action === 'recreate' ? 'bring back' : 'revert'}
+                      </span>
+                      <span className="min-w-0 break-all text-foreground/80">{c.path}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ),
+            choices: [
+              { id: 'cancel', label: 'Cancel' },
+              { id: 'restore', label: 'Restore files', primary: true },
+            ],
+            onDismiss: () => setRestoreAsk(null),
+            onChoose: (id) => {
+              const ask = restoreAsk;
+              setRestoreAsk(null);
+              if (id === 'restore') void doRestore(() => restoreCheckpoint(ask.ref), 'Restored');
+            },
+          }}
+        />
+      )}
       <FolderPicker
         open={pickerOpen}
         onClose={() => setPickerOpen(false)}
@@ -3296,6 +3461,36 @@ function appendReasoning(prev: Entry[], text: string): Entry[] {
     return [...prev.slice(0, -1), { ...last, text: last.text + text }];
   }
   return [...prev, { kind: 'thought', text, live: true, startedAt: Date.now(), endedAt: null }];
+}
+
+/** A turn is over: nothing in it can still be running or awaiting an
+ *  answer. A crashed agent or an aborted turn otherwise leaves an approval
+ *  card nobody can answer (the server no longer knows the call) and
+ *  spinners that never stop. Subagent calls are left alone — their state is
+ *  tracked separately and can outlive the turn that started them. */
+function settleTools(prev: Entry[]): Entry[] {
+  let changed = false;
+  const next = prev.map((e) => {
+    if (e.kind !== 'tool' || e.call.function.name === 'agent') return e;
+    if (e.status === 'pending') {
+      changed = true;
+      return {
+        ...e,
+        status: 'denied' as const,
+        result: e.result ?? { call_id: e.call.id, content: 'Not run — the turn ended before it was answered.', is_error: true },
+      };
+    }
+    if (e.status === 'running') {
+      changed = true;
+      return {
+        ...e,
+        status: 'complete' as const,
+        result: e.result ?? { call_id: e.call.id, content: 'Interrupted — the turn ended before this finished.', is_error: true },
+      };
+    }
+    return e;
+  });
+  return changed ? next : prev;
 }
 
 /** Close the live thought block, if any — the model moved on. */
@@ -3599,17 +3794,44 @@ function groupByTurn(entries: Entry[]): Turn[] {
 
 /* ---------- turn renderer ---------- */
 
-function TurnView({
-  turn, timing, usage, model, expanded, isActive, onToggle, onDecide, onPlanReply, onAskUserReply, onOpenAgent, onOpenFile, skills, mode, onSetMode, minimapId, approvalViaDialog,
+/** Same turn content: the same entries, by identity. Entries are replaced,
+ *  never mutated, so an untouched turn compares equal even though
+ *  `groupByTurn` builds a fresh `Turn` object on every update. */
+function sameTurn(a: Turn, b: Turn): boolean {
+  return a.user === b.user && a.body.length === b.body.length && a.body.every((e, i) => e === b.body[i]);
+}
+
+/** Re-render a turn only when something it shows changed. Handlers are
+ *  stable (see `useStableCallback`), so plain identity works for them. */
+const TurnView = memo(TurnViewImpl, (prev, next) => {
+  for (const k of Object.keys(next) as (keyof TurnViewProps)[]) {
+    if (k === 'turn') {
+      if (!sameTurn(prev.turn, next.turn)) return false;
+    } else if (prev[k] !== next[k]) {
+      return false;
+    }
+  }
+  return true;
+});
+
+type TurnViewProps = Parameters<typeof TurnViewImpl>[0];
+
+function TurnViewImpl({
+  turn, timing, usage, model, index, expanded, isActive, onToggle, onDecide, onPlanReply, onAskUserReply, onOpenAgent, onOpenFile, skills, mode, onSetMode, minimapId, approvalViaDialog, offscreenOk = false,
 }: {
   turn: Turn;
+  /** Position in the transcript; what `onToggle` is called with. */
+  index: number;
+  /** Not one of the latest turns: the browser may skip laying it out while
+   *  it's off screen. */
+  offscreenOk?: boolean;
   timing: TurnTiming | null;
   /** Tokens this turn used (live turns only; not persisted). */
   usage: UsageTotals | null;
   model: string;
   expanded: boolean;
   isActive: boolean;
-  onToggle: () => void;
+  onToggle: (index: number) => void;
   onDecide: (callId: string, allow: boolean, scope?: ApprovalScope) => void;
   onPlanReply: (callId: string, approved: boolean, steps?: PlanStep[], note?: string) => void;
   /** Answer callback for the `ask_user` clarification tool. */
@@ -3718,6 +3940,10 @@ function TurnView({
     <div
       data-minimap-id={minimapId ?? undefined}
       className="flex min-w-0 flex-col gap-2"
+      // Long chats: skip layout and paint for older turns while they're off
+      // screen. The browser remembers each one's last size, so scrolling and
+      // the minimap's jumps stay accurate.
+      style={offscreenOk ? { contentVisibility: 'auto', containIntrinsicSize: 'auto 480px' } : undefined}
     >
       {turn.user && <EntryView entry={turn.user} onDecide={onDecide} onPlanReply={onPlanReply} onAskUserReply={onAskUserReply} onOpenAgent={onOpenAgent} approvalViaDialog={approvalViaDialog} onOpenFile={onOpenFile} skills={skills} mode={mode} onSetMode={onSetMode} />}
 
@@ -3728,7 +3954,7 @@ function TurnView({
           waitingForUser={waitingForUser}
           expanded={effectivelyExpanded}
           locked={forceOpen}
-          onToggle={onToggle}
+          onToggle={() => onToggle(index)}
           activity={activitySummary}
         />
       )}
@@ -4518,6 +4744,8 @@ type MessageActions = {
   edit: (entry: Entry, text: string) => void;
   /** Re-send the user message that led to this reply. */
   retry: (entry: Entry) => void;
+  /** Offer to put the files back the way they were before this message. */
+  restore: (entry: Entry) => void;
   /** Show an image full-screen. */
   openImage: (src: string) => void;
 };
@@ -4645,7 +4873,7 @@ function UserMessage({
         />
         <div className="flex items-center justify-end gap-1.5">
           <span className="mr-auto px-1 text-[11px] text-muted-foreground/60">
-            Later messages are replaced; file edits stay.
+            Later messages are replaced; file edits stay (restore them with ↺).
           </span>
           <button
             type="button"
@@ -4684,6 +4912,15 @@ function UserMessage({
             }}
           >
             <Pencil className="size-3.5" />
+          </ActionButton>
+        )}
+        {actions && (
+          <ActionButton
+            title="Restore files to before this message"
+            disabled={actions.busy}
+            onClick={() => actions.restore(entry)}
+          >
+            <History className="size-3.5" />
           </ActionButton>
         )}
       </div>

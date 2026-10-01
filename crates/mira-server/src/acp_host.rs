@@ -828,7 +828,17 @@ mod tests {
 pub struct AcpEventPort {
     events: tokio::sync::broadcast::Sender<ServerMsg>,
     /// Where the agent's spend reports are booked, for the Usage page.
-    spend: Option<(crate::agent_spend::SpendLedger, crate::agent_spend::Spender)>,
+    spend: Option<SpendBooking>,
+}
+
+/// Books spend reports in the order they arrive. Reports are running
+/// totals, so order matters: a newer total booked before an older one
+/// would read as a reset and be counted twice.
+struct SpendBooking {
+    queue: tokio::sync::mpsc::UnboundedSender<(Option<String>, Vec<mira_acp::events::ModelSpend>)>,
+    /// The agent's current model, from its config options — what to file a
+    /// report under when the agent doesn't name one (Codex, ACP cost).
+    model: std::sync::Mutex<Option<String>>,
 }
 
 impl AcpEventPort {
@@ -845,24 +855,64 @@ impl AcpEventPort {
         ledger: crate::agent_spend::SpendLedger,
         who: crate::agent_spend::Spender,
     ) -> Arc<Self> {
+        let (queue, mut rx) = tokio::sync::mpsc::unbounded_channel::<(
+            Option<String>,
+            Vec<mira_acp::events::ModelSpend>,
+        )>();
+        tokio::spawn(async move {
+            while let Some((session, models)) = rx.recv().await {
+                let (ledger, who) = (ledger.clone(), who.clone());
+                // File I/O off the runtime, one report at a time.
+                let _ = tokio::task::spawn_blocking(move || {
+                    ledger.record(&who, session.as_deref(), &models)
+                })
+                .await;
+            }
+        });
         Arc::new(AcpEventPort {
             events,
-            spend: Some((ledger, who)),
+            spend: Some(SpendBooking {
+                queue,
+                model: std::sync::Mutex::new(None),
+            }),
         })
     }
 
     /// Book a spend report; anything else becomes a frame.
     fn route(&self, event: NormalizedEvent) {
-        if let mira_acp::events::MiraEvent::Spend { session, models } = &event.event {
-            if let Some((ledger, who)) = &self.spend {
-                let (ledger, who, session, models) =
-                    (ledger.clone(), who.clone(), session.clone(), models.clone());
-                // File I/O, off the event loop.
-                tokio::task::spawn_blocking(move || {
-                    ledger.record(&who, session.as_deref(), &models)
-                });
+        use mira_acp::events::MiraEvent;
+        if let Some(booking) = &self.spend {
+            match &event.event {
+                MiraEvent::ConfigOptions { options } => {
+                    if let Some(current) = options
+                        .iter()
+                        .find(|o| o.category.as_deref() == Some("model"))
+                        .and_then(|o| o.current.clone())
+                    {
+                        *booking.model.lock().unwrap_or_else(|p| p.into_inner()) = Some(current);
+                    }
+                }
+                MiraEvent::Spend { session, models } => {
+                    let current = booking
+                        .model
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .clone();
+                    let models = models
+                        .iter()
+                        .cloned()
+                        .map(|mut m| {
+                            if m.model.is_empty() {
+                                m.model = current.clone().unwrap_or_default();
+                            }
+                            m
+                        })
+                        .collect();
+                    let _ = booking.queue.send((session.clone(), models));
+                    return;
+                }
+                _ => {}
             }
-            return;
         }
         if let Some(msg) = ServerMsg::from_acp(event) {
             self.push(msg);
@@ -916,6 +966,65 @@ mod event_tests {
         ConfigValueView, EventSource, MiraEvent, NormalizedEvent, PlanEntry, SessionConfigView,
         SessionModeView, ToolCallState,
     };
+
+    #[tokio::test]
+    async fn spend_is_booked_in_order_under_the_current_model() {
+        use mira_acp::events::ModelSpend;
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, _rx) = tokio::sync::broadcast::channel(16);
+        let port = AcpEventPort::with_spend(
+            tx,
+            crate::agent_spend::SpendLedger::at(dir.path()),
+            crate::agent_spend::Spender {
+                session_id: "chat".into(),
+                cwd: "/p".into(),
+                driver: "codex".into(),
+                fallback_model: "codex".into(),
+            },
+        );
+        let ev = |event| NormalizedEvent {
+            source: EventSource::Acp {
+                variant: "x".into(),
+            },
+            event,
+        };
+        port.emit(ev(MiraEvent::ConfigOptions {
+            options: vec![SessionConfigView {
+                id: "model".into(),
+                name: "Model".into(),
+                description: None,
+                category: Some("model".into()),
+                current: Some("gpt-5-codex".into()),
+                values: vec![],
+            }],
+        }))
+        .await;
+        // Two running totals back to back, with no model named.
+        for total in [100, 250] {
+            port.emit(ev(MiraEvent::Spend {
+                session: Some("th-1".into()),
+                models: vec![ModelSpend {
+                    input_tokens: total,
+                    ..Default::default()
+                }],
+            }))
+            .await;
+        }
+        let ledger = crate::agent_spend::SpendLedger::at(dir.path());
+        let mut rows = Vec::new();
+        for _ in 0..200 {
+            rows = ledger.rows_since(0);
+            if rows.len() == 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let got: Vec<_> = rows
+            .iter()
+            .map(|r| (r.model.as_str(), r.input_tokens))
+            .collect();
+        assert_eq!(got, vec![("gpt-5-codex", 100), ("gpt-5-codex", 150)]);
+    }
 
     fn frame(e: MiraEvent) -> ServerMsg {
         ServerMsg::from_acp(NormalizedEvent {

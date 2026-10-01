@@ -86,6 +86,7 @@ export const PREF_KEYS = {
   diffLayout: 'mira.diff.layout',
   reduceMotion: 'mira.reduceMotion',
   notifyTurnDone: 'mira.notify.turnDone',
+  browserAutoOpen: 'mira.browser.autoOpen',
   preferredEditor: 'mira.editor.preferred',
 } as const;
 

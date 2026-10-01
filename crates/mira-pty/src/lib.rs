@@ -348,6 +348,9 @@ pub fn spawn(spec: PtySpawn) -> Result<Arc<PtyHandle>, PtyError> {
     let id = next_id();
     let scrollback = Arc::new(Mutex::new(VecDeque::with_capacity(8192)));
 
+    // Signalled when the reader has hit EOF, i.e. drained everything.
+    let (drained_tx, drained_rx) = std::sync::mpsc::channel::<()>();
+
     // Reader thread: portable_pty's reader is blocking, and a blocking read
     // inside an async task would stall the whole runtime.
     {
@@ -374,6 +377,7 @@ pub fn spawn(spec: PtySpawn) -> Result<Arc<PtyHandle>, PtyError> {
                         }
                     }
                 }
+                let _ = drained_tx.send(());
             })
             .map_err(PtyError::Io)?;
     }
@@ -388,6 +392,14 @@ pub fn spawn(spec: PtySpawn) -> Result<Arc<PtyHandle>, PtyError> {
             .name(format!("pty-{id}-wait"))
             .spawn(move || {
                 let code = child.wait().map(|s| s.exit_code() as i32).unwrap_or(-1);
+                // Publish the exit only once the output is all in: callers
+                // read `output()` right after `wait()` (ACP's
+                // `terminal/output` after `wait_for_exit`), and the reader
+                // can still be draining when the process ends — the tail,
+                // usually the part that matters, would be missing. Bounded,
+                // because a background grandchild (`cmd &`) can hold the
+                // PTY open long after the command itself is done.
+                let _ = drained_rx.recv_timeout(std::time::Duration::from_secs(2));
                 let _ = exit_tx.send(Some(Exit::Code(code)));
             })
             .map_err(PtyError::Io)?;
@@ -556,6 +568,27 @@ mod tests {
         };
         let out = wait_for(&h, |o| o.contains("HAS_TTY") || !o.is_empty());
         assert!(out.contains("HAS_TTY"), "expected a tty, got {out:?}");
+    }
+
+    /// The exit is published only once the output is all in, so reading
+    /// right after `wait()` sees the tail. Repeated: it's a race.
+    #[test]
+    fn output_is_complete_once_wait_returns() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for _ in 0..20 {
+            let Some(h) = sh("seq 1 2000; echo the-end", Path::new("/tmp")) else {
+                return;
+            };
+            rt.block_on(async {
+                tokio::time::timeout(Duration::from_secs(10), h.wait())
+                    .await
+                    .expect("terminal never reported an exit")
+            });
+            assert!(h.output().contains("the-end"), "tail missing after exit");
+        }
     }
 
     #[test]

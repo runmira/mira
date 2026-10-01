@@ -45,6 +45,7 @@ import {
   Target,
   Terminal,
   Wrench,
+  Globe2,
 } from 'lucide-react';
 import {
   getSettings,
@@ -750,6 +751,7 @@ function GeneralSection({
   const [diffLayout, setDiffLayout] = useStringPref(PREF_KEYS.diffLayout, 'unified');
   const [reduceMotion, setReduceMotionState] = useBoolPref(PREF_KEYS.reduceMotion, false);
   const [notifyTurnDone, setNotifyTurnDone] = useBoolPref(PREF_KEYS.notifyTurnDone, false);
+  const [browserAutoOpen, setBrowserAutoOpen] = useBoolPref(PREF_KEYS.browserAutoOpen, true);
   const [preferredEditor, setPreferredEditor] = useStringPref(PREF_KEYS.preferredEditor, '');
   const [editorOptions, setEditorOptions] = useState<{ value: string; label: string; icon?: React.ReactNode }[]>([]);
   const [notifyState, setNotifyState] = useState(() =>
@@ -932,6 +934,24 @@ function GeneralSection({
               checked={notifyTurnDone && notifyState !== 'denied' && notifyState !== 'unsupported'}
               onChange={(v) => void setNotify(v)}
               label="Notify when Mira finishes or needs you"
+            />
+          }
+        />
+      </TSection>
+
+      <TSection
+        icon={<Globe2 className="size-3.5" />}
+        title="Browser"
+        description="The browser Mira and its agents share. Stored in this browser only."
+      >
+        <TRow
+          title="Show the browser when it's used"
+          description="Open the browser pane as soon as Mira or an agent starts browsing, so you can watch and take over."
+          control={
+            <TSwitch
+              checked={browserAutoOpen}
+              onChange={setBrowserAutoOpen}
+              label="Show the browser when it's used"
             />
           }
         />

@@ -202,7 +202,7 @@ async fn dispatch(
     match cmd {
         ClientMsg::Send { text, images } => {
             debug!(len = text.len(), images = images.len(), "ws: send");
-            mark_baseline(&slot).await;
+            before_prompt(&slot, &text, None).await;
             // Engine routing, the same rule the model selection follows:
             // a session configured for an external agent (started here,
             // or inherited from the previous chat) gets the prompt, and
@@ -226,14 +226,16 @@ async fn dispatch(
             // native rewind doesn't apply to a transcript the agent
             // owns. (The original images were staged into the agent's
             // files dir and can't be re-staged, so text only.)
-            mark_baseline(&slot).await;
             let configured_for_agent = slot.acp_launch.lock().await.is_some();
             if configured_for_agent {
+                before_prompt(&slot, &text, Some((&original, occurrence))).await;
                 prompt_agent(state, &slot, text, Vec::new()).await;
                 return;
             }
             let sess = slot.session.read().await.clone();
             if let Some(images) = sess.rewind_to_user(&original, occurrence).await {
+                // Only once the rewind took: a refused edit changes nothing.
+                before_prompt(&slot, &text, Some((&original, occurrence))).await;
                 // Edits keep the original message's images.
                 spawn_turn(state.clone(), slot, text, images).await;
             } else {
@@ -1610,15 +1612,22 @@ fn stage_agent_images(
     Ok(names)
 }
 
-/// Before a chat's first prompt runs, snapshot the working tree so its
-/// changes can later be told apart from what was already there — however
-/// they're made (see `session_changes`). A no-op once taken, or outside a
+/// Before a prompt runs, snapshot the working tree: once per chat as the
+/// baseline its changes are measured from (`session_changes`), and once per
+/// message as the checkpoint it can be restored to (`checkpoints`).
+/// `replaces` is the message being edited, for a resend. No-ops outside a
 /// repo.
-async fn mark_baseline(slot: &SessionSlot) {
+async fn before_prompt(slot: &SessionSlot, text: &str, replaces: Option<(&str, usize)>) {
     let cwd = slot.cwd.read().await.clone();
     let id = slot.id.to_string();
-    let _ = tokio::task::spawn_blocking(move || crate::session_changes::ensure_baseline(&cwd, &id))
-        .await;
+    let text = text.to_string();
+    let replaces = replaces.map(|(t, n)| (t.to_string(), n));
+    let _ = tokio::task::spawn_blocking(move || {
+        crate::session_changes::ensure_baseline(&cwd, &id);
+        let replaces = replaces.as_ref().map(|(t, n)| (t.as_str(), *n));
+        crate::checkpoints::record(&cwd, &id, &text, replaces);
+    })
+    .await;
 }
 
 #[cfg(test)]

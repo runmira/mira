@@ -278,6 +278,72 @@ pub async fn revert_file(
     }
 }
 
+#[derive(Deserialize)]
+pub struct CheckpointRequest {
+    /// The message, as shown in the transcript.
+    pub text: String,
+    /// Which match of `text`, counted from the latest.
+    #[serde(default)]
+    pub occurrence: usize,
+}
+
+#[derive(Deserialize)]
+pub struct UndoRestoreRequest {
+    pub undo: String,
+}
+
+/// Run a checkpoint operation for the active chat, off the runtime.
+async fn with_checkpoints<T: Serialize + Send + 'static>(
+    state: &AppState,
+    op: impl FnOnce(&Path, &str) -> Result<T, String> + Send + 'static,
+) -> Response {
+    let slot = state.active_slot().await;
+    let cwd = slot.cwd.read().await.clone();
+    let session = slot.id.to_string();
+    match tokio::task::spawn_blocking(move || op(&cwd, &session)).await {
+        Ok(Ok(v)) => Json(v).into_response(),
+        Ok(Err(e)) => err(StatusCode::BAD_REQUEST, e),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// POST /api/checkpoints/preview { text, occurrence }
+/// What restoring the files to before that message would change.
+pub async fn checkpoint_preview(
+    State(state): State<AppState>,
+    Json(req): Json<CheckpointRequest>,
+) -> Response {
+    with_checkpoints(&state, move |cwd, session| {
+        crate::checkpoints::preview(cwd, session, &req.text, req.occurrence)
+            .map(|changes| serde_json::json!({ "changes": changes }))
+    })
+    .await
+}
+
+/// POST /api/checkpoints/restore { text, occurrence }
+/// Put the files back the way they were before that message.
+pub async fn checkpoint_restore(
+    State(state): State<AppState>,
+    Json(req): Json<CheckpointRequest>,
+) -> Response {
+    with_checkpoints(&state, move |cwd, session| {
+        crate::checkpoints::restore(cwd, session, &req.text, req.occurrence)
+    })
+    .await
+}
+
+/// POST /api/checkpoints/undo { undo }
+/// Undo a restore.
+pub async fn checkpoint_undo(
+    State(state): State<AppState>,
+    Json(req): Json<UndoRestoreRequest>,
+) -> Response {
+    with_checkpoints(&state, move |cwd, session| {
+        crate::checkpoints::undo(cwd, session, &req.undo)
+    })
+    .await
+}
+
 /// GET /api/git/branch-pr
 /// Returns the PR for the current branch using `gh pr view`.
 /// Returns 404 when no PR exists for the branch.

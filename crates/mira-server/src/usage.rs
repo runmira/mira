@@ -161,7 +161,9 @@ pub fn agent_rows(
             cwd: r.cwd.clone(),
             ..Default::default()
         });
-        sum.totals.prompt_tokens += r.input_tokens;
+        // `prompt_tokens` includes cached input, as on Mira's own rows; the
+        // ledger keeps fresh input separate.
+        sum.totals.prompt_tokens += r.input_tokens + r.cached_input_tokens;
         sum.totals.completion_tokens += r.output_tokens;
         sum.totals.cached_input_tokens += r.cached_input_tokens;
         if let Some(c) = r.cost_usd {

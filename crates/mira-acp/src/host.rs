@@ -404,7 +404,11 @@ impl AgentCallback for AcpHost {
                 .await
                 .insert(tool_key(&session, &state.id), state.clone());
         }
+        let spend = spend_of(&session, &event);
         self.events.emit(event).await;
+        if let Some(spend) = spend {
+            self.events.emit(spend).await;
+        }
     }
 
     async fn on_closed(&self, tail: String) {
@@ -433,6 +437,38 @@ fn parse<T: DeserializeOwned>(params: Value) -> Result<T, ConnError> {
     serde_json::from_value(params).map_err(|e| ConnError::Remote {
         code: -32602,
         message: format!("malformed params: {e}"),
+    })
+}
+
+/// An ACP usage update's cost, as a spend report for the usage ledger.
+/// ACP reports the session's cumulative cost — the same running-total shape
+/// the native transports report — but no tokens or model; the ledger files
+/// it under the agent's current model. Only USD is booked: the ledger
+/// doesn't convert currencies.
+fn spend_of(
+    session: &str,
+    event: &crate::events::NormalizedEvent,
+) -> Option<crate::events::NormalizedEvent> {
+    use crate::events::{MiraEvent, ModelSpend, NormalizedEvent};
+    let MiraEvent::Usage {
+        cost: Some((amount, currency)),
+        ..
+    } = &event.event
+    else {
+        return None;
+    };
+    if !currency.eq_ignore_ascii_case("USD") || *amount <= 0.0 {
+        return None;
+    }
+    Some(NormalizedEvent {
+        source: event.source.clone(),
+        event: MiraEvent::Spend {
+            session: Some(session.to_string()),
+            models: vec![ModelSpend {
+                cost_usd: Some(*amount),
+                ..Default::default()
+            }],
+        },
     })
 }
 

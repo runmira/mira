@@ -14,6 +14,8 @@ type Price = {
 
 // Prefix-match — longer prefixes first, so `gpt-4o-mini` beats `gpt-4o`.
 const MODEL_PRICES: [string, Price][] = [
+  ['gpt-5-mini',    { input: 0.25,  output: 2.00,  cached_input: 0.025 }],
+  ['gpt-5',         { input: 1.25,  output: 10.00, cached_input: 0.125 }],
   ['gpt-4o-mini',   { input: 0.15,  output: 0.60,  cached_input: 0.075 }],
   ['gpt-4o',        { input: 2.50,  output: 10.00, cached_input: 1.25  }],
   ['gpt-4.1-mini',  { input: 0.40,  output: 1.60,  cached_input: 0.10  }],
@@ -25,6 +27,7 @@ const MODEL_PRICES: [string, Price][] = [
 
   ['claude-haiku-4',  { input: 1.00,  output: 5.00,  cached_input: 0.10 }],
   ['claude-sonnet-4', { input: 3.00,  output: 15.00, cached_input: 0.30 }],
+  ['claude-opus-4-5', { input: 5.00,  output: 25.00, cached_input: 0.50 }],
   ['claude-opus-4',   { input: 15.00, output: 75.00, cached_input: 1.50 }],
 
   ['llama-3.3-70b',  { input: 0.59, output: 0.79, cached_input: 0.59 }],

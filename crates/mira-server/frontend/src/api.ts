@@ -550,6 +550,45 @@ export async function getSessionChanges(): Promise<SessionChange[]> {
   return ((await r.json()) as { files: SessionChange[] }).files;
 }
 
+/** What restoring a checkpoint would do to one file. */
+export type RestoreChange = {
+  path: string;
+  /** `revert`: content goes back; `remove`: created since; `recreate`: deleted since. */
+  action: 'revert' | 'remove' | 'recreate';
+};
+
+export type Restored = { changes: RestoreChange[]; undo: string };
+
+async function checkpointCall<T>(path: string, body: unknown): Promise<T> {
+  const r = await fetch(path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const json = (await r.json().catch(() => ({}))) as T & { error?: string };
+  if (!r.ok) throw new Error(json.error ?? `HTTP ${r.status}`);
+  return json;
+}
+
+/** A user message, as checkpoints identify it: its text, and which match
+ *  of that text counting from the latest (the same key editing uses). */
+export type MessageRef = { text: string; occurrence: number };
+
+/** What restoring the files to before a message would change. */
+export async function previewCheckpoint(ref: MessageRef): Promise<RestoreChange[]> {
+  return (await checkpointCall<{ changes: RestoreChange[] }>('/api/checkpoints/preview', ref)).changes;
+}
+
+/** Put the files back the way they were before a message. */
+export function restoreCheckpoint(ref: MessageRef): Promise<Restored> {
+  return checkpointCall<Restored>('/api/checkpoints/restore', ref);
+}
+
+/** Undo a restore. */
+export function undoRestore(undo: string): Promise<Restored> {
+  return checkpointCall<Restored>('/api/checkpoints/undo', { undo });
+}
+
 /** Discard this session's changes to one file (restore / delete). */
 export async function revertFile(path: string): Promise<void> {
   const r = await fetch('/api/git/revert-file', {

@@ -33,6 +33,7 @@ mod agent_worktree;
 pub mod approver;
 mod browse;
 mod browser;
+pub mod checkpoints;
 mod cwd;
 mod editors;
 mod embedded;
@@ -456,6 +457,18 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route(
             "/api/git/revert-file",
             axum::routing::post(git::revert_file),
+        )
+        .route(
+            "/api/checkpoints/preview",
+            axum::routing::post(git::checkpoint_preview),
+        )
+        .route(
+            "/api/checkpoints/restore",
+            axum::routing::post(git::checkpoint_restore),
+        )
+        .route(
+            "/api/checkpoints/undo",
+            axum::routing::post(git::checkpoint_undo),
         )
         .route("/api/git/push", axum::routing::post(git::push))
         .route("/api/git/branch-pr", get(git::branch_pr))
