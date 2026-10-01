@@ -485,6 +485,12 @@ async fn sync_screencast_inner(sess: &mut Session) {
     }
     let Ok(sid) = attach(sess).await else { return };
     let _ = sess.cdp.call(Some(&sid), "Page.enable", json!({})).await;
+    // A headless browser only paints its front tab: a background tab never
+    // produces a screencast frame, and the live view waits forever.
+    let _ = sess
+        .cdp
+        .call(Some(&sid), "Page.bringToFront", json!({}))
+        .await;
     let started = sess
         .cdp
         .call(
@@ -498,8 +504,6 @@ async fn sync_screencast_inner(sess: &mut Session) {
     }
 }
 
-/// Forward screencast frames and navigations, acknowledging each frame —
-/// Chrome sends the next one only after the last is acked.
 /// Whether a browser found running on the profile is the one Mira would
 /// launch now. With a browser configured, whatever is running is taken as
 /// intended. Otherwise it must be Mira's own Chromium, matched by version.
@@ -523,6 +527,8 @@ async fn is_the_right_browser(opts: &BrowserOptions, cdp: &Cdp) -> bool {
     }
 }
 
+/// Forward screencast frames and navigations, acknowledging each frame —
+/// Chrome sends the next one only after the last is acked.
 fn spawn_pump(
     cdp: std::sync::Arc<Cdp>,
     live: tokio::sync::broadcast::Sender<LiveEvent>,
