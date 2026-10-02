@@ -1,0 +1,28 @@
+{
+  "productName": "Mira Alpha",
+  "identifier": "dev.runmira.mira.alpha",
+  "bundle": {
+    "shortDescription": "Mira coding agent (alpha channel)",
+    "icon": [
+      "icons/alpha/32x32.png",
+      "icons/alpha/128x128.png",
+      "icons/alpha/128x128@2x.png",
+      "icons/alpha/icon.icns",
+      "icons/alpha/icon.ico"
+    ]
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": [
+          "mira-alpha"
+        ]
+      }
+    },
+    "updater": {
+      "endpoints": [
+        "https://github.com/runmira/mira/releases/download/desktop-updates/alpha.json"
+      ]
+    }
+  }
+}

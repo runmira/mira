@@ -1,0 +1,195 @@
+name: Desktop release
+
+# Builds, signs and notarizes the macOS desktop app, one channel per tag:
+#
+#   desktop-v0.6.0           → stable  ("Mira")
+#   desktop-v0.6.0-beta.2    → beta    ("Mira Beta", prerelease)
+#   desktop-v0.6.0-alpha.5   → alpha   ("Mira Alpha", prerelease)
+#
+# Or run it by hand (Actions → Desktop release → Run workflow) with a version.
+#
+# Secrets (set them from a Mac that's already set up with
+# `scripts/macos-signing.sh ci-secrets cert.p12`):
+#   APPLE_CERTIFICATE           Developer ID Application cert + key, .p12, base64
+#   APPLE_CERTIFICATE_PASSWORD  the .p12's export password
+#   APPLE_SIGNING_IDENTITY      "Developer ID Application: Name (TEAMID)"
+#   APPLE_ID, APPLE_TEAM_ID     the developer account
+#   APPLE_PASSWORD              an app-specific password for notarization
+#   TAURI_SIGNING_PRIVATE_KEY(_PASSWORD)  signs in-app updates
+#   VITE_SUPABASE_URL, VITE_SUPABASE_PUBLISHABLE_KEY  the web UI's sign-in
+#
+# Besides the release itself, each run refreshes the channel's update feed
+# in the `desktop-updates` release (alpha.json, beta.json, stable.json),
+# which installed apps poll, and on stable `Mira-arm64.dmg` there, which
+# the landing page links to. The update popup shows the `## Highlights`
+# of releases/vX.Y.Z.md.
+
+on:
+  push:
+    tags:
+      - 'desktop-v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version, e.g. 0.6.0, 0.6.0-beta.1, 0.6.0-alpha.3'
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  macos:
+    name: macOS (Apple Silicon)
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version and channel
+        id: meta
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          version="${INPUT_VERSION:-${GITHUB_REF_NAME#desktop-v}}"
+          case "$version" in
+            *-alpha*) channel=alpha ;;
+            *-beta*) channel=beta ;;
+            *) channel=stable ;;
+          esac
+          notes="releases/v${version%%-*}.md"
+          [ -f "$notes" ] || { echo "::error::missing $notes (release notes for ${version%%-*})"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+          echo "notes=$notes" >> "$GITHUB_OUTPUT"
+          echo "Building $channel $version"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            apps/desktop -> target
+          key: desktop-${{ steps.meta.outputs.channel }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: crates/mira-server/frontend/package-lock.json
+
+      - name: Install the Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Import the signing certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+          echo "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$RUNNER_TEMP/cert.p12" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/cert.p12"
+
+      - name: Build, sign and notarize
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.VITE_SUPABASE_PUBLISHABLE_KEY }}
+        run: >-
+          scripts/build-desktop.sh
+          --channel "${{ steps.meta.outputs.channel }}"
+          --version "${{ steps.meta.outputs.version }}"
+          --sign
+
+      - name: Collect the bundles
+        id: dist
+        run: |
+          set -euo pipefail
+          version="${{ steps.meta.outputs.version }}"
+          channel="${{ steps.meta.outputs.channel }}"
+          base="Mira-$version-arm64"
+          [ "$channel" = stable ] || base="Mira-$channel-$version-arm64"
+          bundle=apps/desktop/target/release/bundle
+          mkdir -p dist
+          cp "$(ls "$bundle"/dmg/*.dmg | head -1)" "dist/$base.dmg"
+          cp "$(ls "$bundle"/macos/*.app.tar.gz | head -1)" "dist/$base.app.tar.gz"
+          cp "$(ls "$bundle"/macos/*.app.tar.gz.sig | head -1)" "dist/$base.app.tar.gz.sig"
+          (cd dist && shasum -a 256 "$base.dmg" > "$base.dmg.sha256")
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: desktop-v${{ steps.meta.outputs.version }}
+          name: Mira desktop ${{ steps.meta.outputs.version }}
+          body_path: ${{ steps.meta.outputs.notes }}
+          prerelease: ${{ steps.meta.outputs.channel != 'stable' }}
+          # "Latest" stays the CLI's release, which Homebrew and install.sh follow.
+          make_latest: false
+          files: |
+            dist/${{ steps.dist.outputs.base }}.dmg
+            dist/${{ steps.dist.outputs.base }}.dmg.sha256
+            dist/${{ steps.dist.outputs.base }}.app.tar.gz
+            dist/${{ steps.dist.outputs.base }}.app.tar.gz.sig
+          fail_on_unmatched_files: true
+
+      - name: Update the channel's feed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          CHANNEL: ${{ steps.meta.outputs.channel }}
+          BASE: ${{ steps.dist.outputs.base }}
+          NOTES: ${{ steps.meta.outputs.notes }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import datetime, json, os, re
+          version, channel, base = os.environ["VERSION"], os.environ["CHANNEL"], os.environ["BASE"]
+          text = open(os.environ["NOTES"]).read()
+          # The popup shows the Highlights; the release page has the rest.
+          m = re.search(r"^## Highlights\s*\n(.*?)(?=^## |\Z)", text, re.S | re.M)
+          notes = m.group(1).strip() if m else text.split("\n## ", 1)[0].strip()
+          url = f"https://github.com/${{ github.repository }}/releases/download/desktop-v{version}/{base}.app.tar.gz"
+          feed = {
+              "version": version,
+              "notes": notes,
+              "pub_date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "platforms": {
+                  "darwin-aarch64": {"signature": open(f"dist/{base}.app.tar.gz.sig").read().strip(), "url": url}
+              },
+          }
+          json.dump(feed, open(f"dist/{channel}.json", "w"), indent=2)
+          PY
+          gh release view desktop-updates >/dev/null 2>&1 || gh release create desktop-updates \
+            --title "Desktop update feed" --prerelease --latest=false \
+            --notes "Update feeds the Mira desktop app checks (alpha.json, beta.json, stable.json) and the landing page's download. Updated by the Desktop release workflow; don't edit by hand."
+          gh release upload desktop-updates "dist/$CHANNEL.json" --clobber
+          if [ "$CHANNEL" = stable ]; then
+            cp "dist/$BASE.dmg" dist/Mira-arm64.dmg
+            gh release upload desktop-updates dist/Mira-arm64.dmg --clobber
+          fi
+
+      - name: Remove the signing keychain
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true

@@ -93,6 +93,37 @@ formula patch → tap sync → landing-site update.
   re-upload; re-run steps 6–9 by hand or re-run the script after
   deleting the release.
 
+## Desktop app releases
+
+The desktop app ships separately, by tag, on three channels:
+
+| Tag                       | Channel | App          |
+| ------------------------- | ------- | ------------ |
+| `desktop-v0.6.0-alpha.1`  | alpha   | Mira Alpha   |
+| `desktop-v0.6.0-beta.1`   | beta    | Mira Beta    |
+| `desktop-v0.6.0`          | stable  | Mira         |
+
+```sh
+git tag desktop-v0.6.0-alpha.1 && git push origin desktop-v0.6.0-alpha.1
+```
+
+[`desktop-release.yml`](../.github/workflows/desktop-release.yml) builds,
+signs, notarizes and publishes it, then updates that channel's feed in the
+`desktop-updates` release (`alpha.json`, `beta.json`, `stable.json`), which
+installed apps check — their toolbar shows a green update button. Stable
+also refreshes `Mira-arm64.dmg` there, the landing page's download link.
+
+The update popup shows the `## Highlights` section of
+`releases/vX.Y.Z.md` (the version without its `-alpha.N`), so write that
+section first: one `- **Title.** one line` per item. The GitHub release
+gets the whole file.
+
+One-time setup on a Mac: `scripts/macos-signing.sh setup` (Apple),
+`scripts/macos-signing.sh updater-key` (update signing), then
+`scripts/macos-signing.sh ci-secrets cert.p12` to give CI the same.
+Local builds: `scripts/build-desktop.sh --channel alpha --version
+0.6.0-alpha.1 --sign`.
+
 ## Past releases
 
-Notes live in this folder: [`v0.4.0.md`](./v0.4.0.md), [`v0.3.9.md`](./v0.3.9.md), [`v0.3.8.md`](./v0.3.8.md).
+Notes live in this folder: [`v0.6.0.md`](./v0.6.0.md), [`v0.4.0.md`](./v0.4.0.md), [`v0.3.9.md`](./v0.3.9.md), [`v0.3.8.md`](./v0.3.8.md).

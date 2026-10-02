@@ -189,6 +189,16 @@ export function modelIconUrls(modelId: string | null | undefined): string[] {
   return urlsFor(VENDOR_ICON[modelVendor(modelId)]);
 }
 
+/** Providers whose mark is a dark glyph on a transparent ground (xAI's X,
+ *  Ollama's llama, OpenRouter, ChatGPT): invisible on the dark theme unless drawn on a light
+ *  tile. */
+export const DARK_MARKS: ReadonlySet<string> = new Set(['xai', 'grok', 'ollama', 'openrouter', 'openai', 'lmstudio', 'llamacpp']);
+
+/** Whether a provider instance's mark needs a light tile behind it. */
+export function needsLightTile(instance: string | null | undefined): boolean {
+  return DARK_MARKS.has((instance ?? '').toLowerCase().replace(/[-_](work|personal|\d+)$/, ''));
+}
+
 /** Icon candidates for a provider instance (`openrouter`, `anthropic`, …). */
 export function providerIconUrls(instance: string | null | undefined, modelId?: string | null): string[] {
   const key = (instance ?? '').toLowerCase().replace(/[-_](work|personal|\d+)$/, '');

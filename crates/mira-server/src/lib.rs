@@ -33,6 +33,7 @@ mod agent_worktree;
 pub mod approver;
 mod browse;
 mod browser;
+mod chat_import;
 pub mod checkpoints;
 mod context_api;
 mod cwd;
@@ -452,6 +453,8 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
             "/api/engines/:instance/models",
             get(engines_api::instance_models),
         )
+        .route("/api/import/scan", get(chat_import::scan))
+        .route("/api/import", axum::routing::post(chat_import::import))
         .route("/api/git/status", get(git::get_status))
         .route("/api/git/session-diff", get(git::session_diff))
         .route("/api/usage", get(usage::get_usage))

@@ -1,0 +1,28 @@
+{
+  "productName": "Mira Beta",
+  "identifier": "dev.runmira.mira.beta",
+  "bundle": {
+    "shortDescription": "Mira coding agent (beta channel)",
+    "icon": [
+      "icons/beta/32x32.png",
+      "icons/beta/128x128.png",
+      "icons/beta/128x128@2x.png",
+      "icons/beta/icon.icns",
+      "icons/beta/icon.ico"
+    ]
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": [
+          "mira-beta"
+        ]
+      }
+    },
+    "updater": {
+      "endpoints": [
+        "https://github.com/runmira/mira/releases/download/desktop-updates/beta.json"
+      ]
+    }
+  }
+}

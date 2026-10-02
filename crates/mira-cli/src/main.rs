@@ -993,5 +993,13 @@ pub(crate) async fn register_computer_use(registry: &mut Registry, cli: &Cli, cf
     }
     if report.browser {
         eprintln!("browser enabled: Mira's model and its agents share one browser (watch it in the browser pane)");
+        // The desktop app doesn't ship a browser: fetch Mira's own now,
+        // in the background, unless the user picked one.
+        if std::env::var_os("MIRA_PREFETCH_BROWSER").is_some()
+            && cfg.browser.executable.is_none()
+            && std::env::var_os("MIRA_BROWSER").is_none()
+        {
+            mira_browser::managed::prefetch();
+        }
     }
 }

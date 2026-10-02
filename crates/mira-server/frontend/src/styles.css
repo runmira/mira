@@ -734,3 +734,13 @@
   vertical-align: -0.1em;
   opacity: 0.75;
 }
+
+/* Onboarding: each step eases in when it takes the stage. */
+@keyframes onb-in {
+  from { opacity: 0; transform: translateY(10px); filter: blur(3px); }
+  to   { opacity: 1; transform: none; filter: none; }
+}
+.onb-in { animation: onb-in 420ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+@media (prefers-reduced-motion: reduce) {
+  .onb-in { animation: none; }
+}

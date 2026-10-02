@@ -13,7 +13,10 @@ fn bare_path() {
 /// The reported failure: `could not start claude: No such file or directory`.
 /// The agent was validated as present, then the spawn failed — because the
 /// child gets a cleared environment whose PATH could not find `claude`.
+///
+/// Opt-in, like the test below: a full turn on the real Claude Code.
 #[tokio::test]
+#[ignore = "runs the real Claude Code against your account"]
 async fn a_native_agent_actually_starts_from_a_gui_launch() {
     bare_path();
     if mira_acp::which::resolve("claude").is_none() {
@@ -127,7 +130,12 @@ fn check_and_spawn_agree_on_the_binary() {
 /// This asserts the server half of the contract: a turn that ends produces
 /// exactly one `TurnEnd` carrying the agent's own stop reason, and an agent
 /// that dies mid-turn still produces one rather than nothing.
+///
+/// Opt-in: it runs the real Claude Code, which spends the developer's own
+/// subscription and leaves a chat in their history every run. Run it with
+/// `cargo test -p mira-acp --test whichtest -- --ignored`.
 #[tokio::test]
+#[ignore = "runs the real Claude Code against your account"]
 async fn a_turn_always_produces_exactly_one_stop_reason() {
     bare_path();
     if mira_acp::which::resolve("claude").is_none() {

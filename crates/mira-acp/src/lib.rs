@@ -27,6 +27,7 @@ pub mod driver;
 pub mod drivers;
 pub mod events;
 pub mod framing;
+pub mod history_import;
 pub mod host;
 pub mod native;
 pub mod process;
