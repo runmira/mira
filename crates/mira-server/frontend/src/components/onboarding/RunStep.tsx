@@ -20,6 +20,7 @@ import { PROVIDER_PRESETS } from '../../lib/providers';
 import { AgentIcon, ProviderIcon } from '../AgentIcon';
 import { PrivateText } from '../PrivateText';
 import { cn } from '@/lib/utils';
+import { ErrorText, GhostButton, PrimaryButton, StepFooter, StepHeader, field, tile } from './ui';
 
 /** The providers offered here; the rest are a click away in Settings. */
 const OFFERED = ['openrouter', 'anthropic', 'openai', 'google', 'groq', 'ollama'] as const;
@@ -63,7 +64,7 @@ function CopyLine({ text }: { text: string }) {
     <button
       type="button"
       onClick={() => void navigator.clipboard.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1200); })}
-      className="group mt-1.5 flex w-full items-center gap-2 rounded-md bg-background/60 px-2 py-1.5 text-left font-mono text-[11px] text-foreground/75 transition-colors hover:text-foreground"
+      className="group mt-2 flex w-full items-center gap-2 rounded-lg border border-white/[0.06] bg-black/40 px-2.5 py-1.5 text-left font-mono text-[11px] text-foreground/75 transition-colors hover:text-foreground"
       title="Copy"
     >
       <span className="min-w-0 flex-1 truncate">{text}</span>
@@ -137,22 +138,20 @@ export function RunStep({ onNext, onBack }: { onNext: () => void; onBack?: () =>
   }
 
   return (
-    <section className="flex flex-col gap-6">
-      <header className="flex flex-col gap-2">
-        <h1 className="text-2xl font-semibold tracking-tight text-foreground">How should Mira run?</h1>
-        <p className="max-w-[60ch] text-[13.5px] leading-relaxed text-muted-foreground">
-          Two different things: an <span className="text-foreground">external agent</span> you already use, or a{' '}
-          <span className="text-foreground">provider</span> that powers Mira's own agent. Set up either — or both, and pick
-          per chat.
-        </p>
-      </header>
+    <section className="flex flex-col gap-7">
+      <StepHeader eyebrow="Engines" title="How should Mira run?">
+        Two different things: an <span className="text-foreground">external agent</span> you already use, or a{' '}
+        <span className="text-foreground">provider</span> that powers Mira's own agent. Set up either — or both, and pick
+        per chat.
+      </StepHeader>
 
       <div className="grid gap-4 md:grid-cols-2">
         {/* External agents */}
-        <div className="flex flex-col rounded-2xl border border-border/70 bg-white/[0.02] p-4">
-          <div className="flex items-center gap-2">
-            <span className="grid size-7 place-items-center rounded-lg bg-mira-blue/15 text-mira-blue">
-              <Terminal className="size-4" />
+        <div className={cn(tile, 'relative flex flex-col overflow-hidden p-5')}>
+          <span className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-mira-blue/60 to-transparent" />
+          <div className="flex items-center gap-2.5">
+            <span className="grid size-9 place-items-center rounded-xl border border-mira-blue/25 bg-mira-blue/12 text-mira-blue">
+              <Terminal className="size-[18px]" />
             </span>
             <div className="min-w-0 flex-1">
               <div className="text-[14px] font-semibold text-foreground">External agents</div>
@@ -172,7 +171,7 @@ export function RunStep({ onNext, onBack }: { onNext: () => void; onBack?: () =>
               agents.map((a) => {
                 const st = agentStatus(a);
                 return (
-                  <div key={a.instance} className="rounded-xl border border-border/60 px-3 py-2.5">
+                  <div key={a.instance} className="rounded-xl border border-white/[0.07] bg-black/30 px-3 py-2.5">
                     <div className="flex items-center gap-2.5">
                       <AgentIcon kind={a.driver} name={a.display_name} size="sm" />
                       <span className="min-w-0 flex-1">
@@ -207,10 +206,11 @@ export function RunStep({ onNext, onBack }: { onNext: () => void; onBack?: () =>
         </div>
 
         {/* Providers */}
-        <div className="flex flex-col rounded-2xl border border-border/70 bg-white/[0.02] p-4">
-          <div className="flex items-center gap-2">
-            <span className="grid size-7 place-items-center rounded-lg bg-amber-400/15 text-amber-300">
-              <KeyRound className="size-4" />
+        <div className={cn(tile, 'relative flex flex-col overflow-hidden p-5')}>
+          <span className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-amber-300/60 to-transparent" />
+          <div className="flex items-center gap-2.5">
+            <span className="grid size-9 place-items-center rounded-xl border border-amber-300/25 bg-amber-400/12 text-amber-300">
+              <KeyRound className="size-[18px]" />
             </span>
             <div className="min-w-0 flex-1">
               <div className="text-[14px] font-semibold text-foreground">Providers</div>
@@ -234,7 +234,9 @@ export function RunStep({ onNext, onBack }: { onNext: () => void; onBack?: () =>
                   }}
                   className={cn(
                     'flex items-center gap-2 rounded-xl border px-2.5 py-2 text-left transition-colors',
-                    picked === name ? 'border-amber-400/60 bg-amber-400/[0.07]' : 'border-border/60 hover:border-border hover:bg-white/[0.03]',
+                    picked === name
+                      ? 'border-amber-400/60 bg-amber-400/[0.08] shadow-[0_0_0_3px_rgba(251,191,36,0.1)]'
+                      : 'border-white/[0.07] bg-black/30 hover:border-white/[0.16] hover:bg-white/[0.04]',
                   )}
                 >
                   <ProviderIcon instance={name} name={PROVIDER_LABEL[name]} size="xs" />
@@ -248,7 +250,7 @@ export function RunStep({ onNext, onBack }: { onNext: () => void; onBack?: () =>
             })}
           </div>
           {picked && (
-            <div className="mt-3 rounded-xl border border-border/60 p-3">
+            <div className="onb-in mt-3 rounded-xl border border-white/[0.07] bg-black/30 p-3">
               {picked === 'ollama' ? (
                 <p className="text-[12px] leading-relaxed text-muted-foreground">
                   Uses Ollama running on this computer at <span className="font-mono text-foreground/80">localhost:11434</span>. No key needed.
@@ -266,7 +268,7 @@ export function RunStep({ onNext, onBack }: { onNext: () => void; onBack?: () =>
                     onChange={(e) => setKey(e.target.value)}
                     onKeyDown={(e) => e.key === 'Enter' && void saveProvider()}
                     placeholder="Paste your key"
-                    className="mt-1 w-full rounded-lg border border-border/70 bg-background/60 px-2.5 py-2 font-mono text-[12.5px] outline-none focus:border-amber-400/60"
+                    className={cn(field, 'mt-1.5 h-10 font-mono text-[12.5px] focus:border-amber-400/60 focus:ring-amber-400/15')}
                   />
                   {KEY_URL[picked] && (
                     <a href={KEY_URL[picked]} target="_blank" rel="noreferrer" className="mt-1.5 inline-block text-[11.5px] text-muted-foreground underline underline-offset-2 hover:text-foreground">
@@ -276,12 +278,16 @@ export function RunStep({ onNext, onBack }: { onNext: () => void; onBack?: () =>
                   <p className="mt-1 text-[11px] text-muted-foreground/70">Stored on this computer only.</p>
                 </>
               )}
-              {error && <p className="mt-2 text-[12px] text-destructive">{error}</p>}
+              {error && (
+                <div className="mt-2">
+                  <ErrorText>{error}</ErrorText>
+                </div>
+              )}
               <button
                 type="button"
                 disabled={saving}
                 onClick={() => void saveProvider()}
-                className="mt-2.5 w-full rounded-lg bg-amber-400/90 py-2 text-[12.5px] font-semibold text-[#1a1b26] transition-opacity disabled:opacity-50"
+                className="mt-2.5 h-9 w-full rounded-lg bg-amber-300 text-[12.5px] font-semibold text-[#1a1b26] transition-[filter,opacity] hover:brightness-105 disabled:opacity-50"
               >
                 {saving ? 'Saving…' : `Use ${PROVIDER_LABEL[picked]}`}
               </button>
@@ -291,32 +297,24 @@ export function RunStep({ onNext, onBack }: { onNext: () => void; onBack?: () =>
         </div>
       </div>
 
-      <footer className="flex items-center gap-3">
-        {onBack && (
-          <button type="button" onClick={onBack} className="rounded-lg px-3 py-2 text-[13px] text-muted-foreground transition-colors hover:text-foreground">
-            Back
-          </button>
-        )}
-        <span className="flex-1 text-[12px] text-muted-foreground">
-          {anyAgent && anyProvider
+      <StepFooter
+        onBack={onBack}
+        status={
+          anyAgent && anyProvider
             ? 'Both set up — switch per chat from the model picker.'
             : anyAgent
               ? 'Ready with an external agent.'
               : anyProvider
                 ? 'Ready with a provider.'
-                : 'Set up one to start, or skip for now.'}
-        </span>
-        <button
-          type="button"
-          onClick={onNext}
-          className={cn(
-            'rounded-lg px-4 py-2 text-[13px] font-medium transition-colors',
-            anyAgent || anyProvider ? 'bg-mira-blue text-white' : 'text-muted-foreground hover:text-foreground',
-          )}
-        >
-          {anyAgent || anyProvider ? 'Continue' : 'Skip for now'}
-        </button>
-      </footer>
+                : 'Set up one to start, or skip for now.'
+        }
+      >
+        {anyAgent || anyProvider ? (
+          <PrimaryButton onClick={onNext}>Continue</PrimaryButton>
+        ) : (
+          <GhostButton onClick={onNext}>Skip for now</GhostButton>
+        )}
+      </StepFooter>
     </section>
   );
 }

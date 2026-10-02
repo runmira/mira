@@ -52,6 +52,8 @@ declare global {
      * lights floating over it and vibrancy behind the sidebar.
      */
     __MIRA_CHROME__?: { hiddenTitleBar: boolean; translucent: boolean };
+    /** The desktop app's release channel, set by its init script. */
+    __MIRA_CHANNEL__?: string;
   }
 }
 
@@ -68,9 +70,21 @@ export function hasHiddenTitleBar(): boolean {
  *  stays movable with no title bar. */
 export const TRAFFIC_LIGHT_INSET = { top: 28, left: 78 } as const;
 
-/** Where the system browser sends the user after sign-in. Must be listed
- *  in the Supabase project's allowed redirect URLs. */
-export const DESKTOP_AUTH_REDIRECT = 'mira://auth-callback';
+export type Channel = 'stable' | 'beta' | 'alpha';
+
+/** Which desktop build this is. Alpha and beta are separate apps with
+ *  their own `mira-alpha://` / `mira-beta://` schemes. */
+export function desktopChannel(): Channel {
+  const c = typeof window === 'undefined' ? undefined : window.__MIRA_CHANNEL__;
+  return c === 'alpha' || c === 'beta' ? c : 'stable';
+}
+
+/** Where the system browser sends the user after sign-in. Every channel's
+ *  scheme must be listed in the Supabase project's allowed redirect URLs. */
+export function desktopAuthRedirect(): string {
+  const channel = desktopChannel();
+  return `${channel === 'stable' ? 'mira' : `mira-${channel}`}://auth-callback`;
+}
 
 export function isDesktop(): boolean {
   return window.__MIRA_DESKTOP__ === true && window.__TAURI__ !== undefined;
@@ -84,7 +98,7 @@ export async function openExternal(url: string): Promise<void> {
   }
 }
 
-/** Calls `cb` with each `mira://auth-callback?...` URL the app receives. */
+/** Calls `cb` with each `mira[-channel]://auth-callback?...` URL the app receives. */
 export async function onAuthCallback(cb: (url: URL) => void): Promise<Unlisten> {
   if (!window.__TAURI__) return () => {};
   return window.__TAURI__.event.listen('mira-auth-callback', (e) => {

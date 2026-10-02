@@ -1,8 +1,11 @@
 import { useState } from 'react';
+import type { LucideIcon } from 'lucide-react';
+import { Check, User, Users } from 'lucide-react';
 import { getSupabase } from '../../lib/supabase';
 import { upsertProfile } from './persist';
 import type { AccountType, Profile } from './OnboardingFlow';
 import { cn } from '@/lib/utils';
+import { ErrorText, PrimaryButton, StepFooter, StepHeader, field } from './ui';
 
 export function AccountTypeStep({
   userId,
@@ -69,63 +72,61 @@ export function AccountTypeStep({
   }
 
   return (
-    <section className="flex flex-col gap-8">
-      <header className="flex flex-col gap-2">
-        <h1 className="text-2xl font-semibold tracking-tight text-foreground">
-          Who are you setting up Mira for?
-        </h1>
-      </header>
+    <section className="flex flex-col gap-7">
+      <StepHeader eyebrow="Welcome to Mira" title="Who are you setting Mira up for?">
+        This shapes your workspace. You can add a team later either way.
+      </StepHeader>
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <Option
-          title="Personal"
-          description="Just me. I'm exploring Mira for my own projects."
+          Icon={User}
+          title="Just me"
+          description="My own projects, on my own machine."
           selected={selected === 'personal'}
           onSelect={() => setSelected('personal')}
         />
         <Option
-          title="Team"
-          description="For my company, group, or a shared codebase."
+          Icon={Users}
+          title="My team"
+          description="A company, a group, or a shared codebase."
           selected={selected === 'team'}
           onSelect={() => setSelected('team')}
         />
       </div>
 
       {selected === 'team' && (
-        <label className="flex flex-col gap-2">
+        <label className="onb-in flex flex-col gap-2">
           <span className="text-[13px] font-medium text-foreground/90">Team name</span>
           <input
             value={teamName}
             onChange={(e) => setTeamName(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && void submit()}
             placeholder="Acme, Inc."
-            className="rounded-md border border-border bg-card px-3 py-2 text-[14px] text-foreground outline-none focus:ring-2 focus:ring-mira-blue"
+            className={field}
             autoFocus
           />
         </label>
       )}
 
-      {error && <p className="text-[13px] text-destructive">{error}</p>}
+      {error && <ErrorText>{error}</ErrorText>}
 
-      <div className="flex justify-end">
-        <button
-          type="button"
-          onClick={() => void submit()}
-          disabled={pending}
-          className="rounded-md bg-mira-blue px-5 py-2.5 text-[13.5px] font-medium text-white shadow-sm transition hover:opacity-90 disabled:opacity-60"
-        >
+      <StepFooter>
+        <PrimaryButton pending={pending} disabled={!selected} onClick={() => void submit()}>
           {pending ? 'Saving…' : 'Continue'}
-        </button>
-      </div>
+        </PrimaryButton>
+      </StepFooter>
     </section>
   );
 }
 
 function Option({
+  Icon,
   title,
   description,
   selected,
   onSelect,
 }: {
+  Icon: LucideIcon;
   title: string;
   description: string;
   selected: boolean;
@@ -137,14 +138,32 @@ function Option({
       onClick={onSelect}
       aria-pressed={selected}
       className={cn(
-        'flex flex-col items-start gap-1 rounded-lg border p-4 text-left transition',
+        'group relative flex flex-col items-start gap-4 rounded-2xl border p-5 text-left transition-[background-color,border-color,box-shadow] duration-200',
         selected
-          ? 'border-mira-blue bg-accent/60 shadow-sm'
-          : 'border-border hover:border-foreground/40',
+          ? 'border-mira-blue/70 bg-mira-blue/[0.08] shadow-[0_0_0_4px_rgba(122,162,247,0.12)]'
+          : 'border-white/[0.08] bg-white/[0.035] hover:border-white/[0.16] hover:bg-white/[0.06]',
       )}
     >
-      <span className="text-[14px] font-semibold text-foreground">{title}</span>
-      <span className="text-[12.5px] text-muted-foreground">{description}</span>
+      <span
+        className={cn(
+          'grid size-10 place-items-center rounded-xl border transition-colors',
+          selected ? 'border-mira-blue/40 bg-mira-blue/15 text-mira-blue' : 'border-white/[0.08] bg-white/[0.04] text-foreground/70',
+        )}
+      >
+        <Icon className="size-5" />
+      </span>
+      <span>
+        <span className="block text-[15px] font-semibold text-foreground">{title}</span>
+        <span className="mt-1 block text-[12.5px] leading-relaxed text-muted-foreground">{description}</span>
+      </span>
+      <span
+        className={cn(
+          'absolute right-4 top-4 grid size-5 place-items-center rounded-full border transition-colors',
+          selected ? 'border-mira-blue bg-mira-blue text-[#0b0d14]' : 'border-white/[0.15]',
+        )}
+      >
+        {selected && <Check className="size-3" strokeWidth={3.5} />}
+      </span>
     </button>
   );
 }

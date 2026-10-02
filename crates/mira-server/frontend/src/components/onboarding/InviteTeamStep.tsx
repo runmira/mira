@@ -1,20 +1,24 @@
 import { useEffect, useState } from 'react';
 import { getSupabase } from '../../lib/supabase';
 import { upsertProfile } from './persist';
+import { Mail, Plus } from 'lucide-react';
 import type { Profile } from './OnboardingFlow';
+import { ErrorText, GhostButton, PrimaryButton, StepFooter, StepHeader, field } from './ui';
 
 const MAX_ROWS = 5;
 
 /**
- * Team accounts only: capture teammate emails as pending invites,
- * then mark onboarding complete. Skippable — no invites is a valid outcome.
+ * Team accounts only: capture teammate emails as pending invites.
+ * Skippable — no invites is a valid outcome.
  */
 export function InviteTeamStep({
   userId,
   onSaved,
+  onBack,
 }: {
   userId: string;
   onSaved: (profile: Profile) => void;
+  onBack?: () => void;
 }) {
   const [emails, setEmails] = useState<string[]>(['', '', '']);
   const [teamName, setTeamName] = useState<string | null>(null);
@@ -90,65 +94,49 @@ export function InviteTeamStep({
   }
 
   return (
-    <section className="flex flex-col gap-8">
-      <header className="flex flex-col gap-2">
-        <h1 className="text-2xl font-semibold tracking-tight text-foreground">
-          Invite your teammates
-        </h1>
-        <p className="text-[13px] text-muted-foreground">
-          {teamName ? (
-            <>
-              Add people to <span className="font-medium text-foreground">{teamName}</span>. You can
-              always invite more later.
-            </>
-          ) : (
-            <>Add people to your team. You can always invite more later.</>
-          )}
-        </p>
-      </header>
+    <section className="flex flex-col gap-7">
+      <StepHeader eyebrow="Your team" title="Invite your teammates">
+        {teamName ? (
+          <>
+            Add people to <span className="font-medium text-foreground">{teamName}</span>. You can always invite more
+            later.
+          </>
+        ) : (
+          <>Add people to your team. You can always invite more later.</>
+        )}
+      </StepHeader>
 
-      <div className="flex flex-col gap-3">
+      <div className="flex flex-col gap-2.5">
         {emails.map((email, i) => (
-          <input
-            key={i}
-            type="email"
-            value={email}
-            onChange={(e) => updateAt(i, e.target.value)}
-            placeholder="teammate@company.com"
-            className="rounded-md border border-border bg-card px-3 py-2 text-[14px] text-foreground outline-none focus:ring-2 focus:ring-mira-blue"
-          />
+          <div key={i} className="relative">
+            <Mail className="pointer-events-none absolute left-3.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground/60" />
+            <input
+              type="email"
+              value={email}
+              onChange={(e) => updateAt(i, e.target.value)}
+              placeholder="teammate@company.com"
+              className={`${field} pl-10`}
+            />
+          </div>
         ))}
         {emails.length < MAX_ROWS && (
-          <button
-            type="button"
-            onClick={addRow}
-            className="self-start text-[13px] text-muted-foreground transition-colors hover:text-foreground"
-          >
-            + Add another
-          </button>
+          <GhostButton onClick={addRow} className="-ml-2 h-8 self-start px-2.5 text-[12.5px]">
+            <Plus className="size-3.5" />
+            Add another
+          </GhostButton>
         )}
       </div>
 
-      {error && <p className="text-[13px] text-destructive">{error}</p>}
+      {error && <ErrorText>{error}</ErrorText>}
 
-      <div className="flex items-center justify-between">
-        <button
-          type="button"
-          onClick={() => void submit(true)}
-          disabled={pending}
-          className="text-[13px] text-muted-foreground transition-colors hover:text-foreground disabled:opacity-60"
-        >
+      <StepFooter onBack={onBack}>
+        <GhostButton onClick={() => void submit(true)} disabled={pending}>
           Skip for now
-        </button>
-        <button
-          type="button"
-          onClick={() => void submit(false)}
-          disabled={pending}
-          className="rounded-md bg-mira-blue px-5 py-2.5 text-[13.5px] font-medium text-white shadow-sm transition hover:opacity-90 disabled:opacity-60"
-        >
+        </GhostButton>
+        <PrimaryButton pending={pending} onClick={() => void submit(false)}>
           {pending ? 'Sending…' : 'Send invites'}
-        </button>
-      </div>
+        </PrimaryButton>
+      </StepFooter>
     </section>
   );
 }

@@ -22,15 +22,38 @@ use tauri::{
 };
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_opener::OpenerExt;
+use tauri_plugin_updater::UpdaterExt;
 
+/// Release channel, fixed at build time (`MIRA_CHANNEL=alpha|beta`, see
+/// scripts/build-desktop.sh). Each channel is its own app — bundle id,
+/// name, icon, `mira://` scheme and port — so they install side by side.
+const CHANNEL: &str = match option_env!("MIRA_CHANNEL") {
+    Some(c) => c,
+    None => "stable",
+};
+/// The deep-link scheme sign-in returns through; matches the channel's
+/// `plugins.deep-link` config.
+const SCHEME: &str = match CHANNEL.as_bytes() {
+    b"alpha" => "mira-alpha",
+    b"beta" => "mira-beta",
+    _ => "mira",
+};
 /// Preferred port. Stable on purpose: the UI keeps its sign-in session and
 /// preferences in the page's storage, which is scoped to the origin, port
-/// included. Differs from `mira serve`'s 8787 so both can run at once.
-const PREFERRED_PORT: u16 = 8797;
-/// How many ports after the preferred one to try when it's taken.
+/// included. Differs from `mira serve`'s 8787 so both can run at once, and
+/// per channel so an alpha never shares (or overwrites) stable's sign-in.
+const PREFERRED_PORT: u16 = match CHANNEL.as_bytes() {
+    b"alpha" => 8877,
+    b"beta" => 8837,
+    _ => 8797,
+};
+/// How many ports after the preferred one to try when it's taken. Smaller
+/// than the gap between channels, so their ranges never overlap.
 const PORT_ATTEMPTS: u16 = 20;
 /// How long `mira serve` gets to start listening.
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
+/// Event carrying an update's download progress to the page.
+const UPDATE_PROGRESS_EVENT: &str = "mira-update-progress";
 /// Event the page listens for with the `mira://auth-callback?...` URL.
 const AUTH_EVENT: &str = "mira-auth-callback";
 
@@ -41,6 +64,7 @@ const AUTH_EVENT: &str = "mira-auth-callback";
 const INIT_SCRIPT: &str = r#"
 (function () {
   window.__MIRA_DESKTOP__ = true;
+  window.__MIRA_CHANNEL__ = "__CHANNEL__";
   // The app draws its own header where macOS's title bar used to be, so the
   // web UI needs to know to pad itself clear of the floating traffic lights
   // and to lay its surfaces over the window's vibrancy.
@@ -83,8 +107,14 @@ fn main() {
         }))
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Server(Mutex::new(None)))
-        .invoke_handler(tauri::generate_handler![open_external])
+        .invoke_handler(tauri::generate_handler![
+            open_external,
+            check_update,
+            install_update,
+            restart_app
+        ])
         .setup(|app| {
             #[cfg(any(windows, target_os = "linux"))]
             {
@@ -95,7 +125,7 @@ fn main() {
             let handle = app.handle().clone();
             app.deep_link().on_open_url(move |event| {
                 for url in event.urls() {
-                    if url.scheme() == "mira" {
+                    if url.scheme() == SCHEME {
                         focus_main(&handle);
                         let _ = handle.emit_to("main", AUTH_EVENT, url.to_string());
                     }
@@ -142,7 +172,7 @@ fn build_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .title("")
         .inner_size(1280.0, 840.0)
         .min_inner_size(760.0, 520.0)
-        .initialization_script(INIT_SCRIPT);
+        .initialization_script(INIT_SCRIPT.replace("__CHANNEL__", CHANNEL));
 
     // macOS: the title bar goes away and the app's own header takes its
     // place, so there's no duplicated title row and no wasted 28px. The
@@ -197,6 +227,75 @@ fn open_external(app: AppHandle, url: String) -> Result<(), String> {
     app.opener()
         .open_url(url, None::<&str>)
         .map_err(|e| e.to_string())
+}
+
+/// A newer build on this app's channel, as the page shows it.
+#[derive(serde::Serialize)]
+struct UpdateInfo {
+    version: String,
+    current: String,
+    channel: &'static str,
+    date: Option<String>,
+    notes: Option<String>,
+}
+
+/// Asks the channel's update feed whether there's a newer build. `None`
+/// when this is the latest.
+#[tauri::command]
+async fn check_update(app: AppHandle) -> Result<Option<UpdateInfo>, String> {
+    let update = app
+        .updater()
+        .map_err(|e| e.to_string())?
+        .check()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(update.map(|u| UpdateInfo {
+        version: u.version.clone(),
+        current: u.current_version.clone(),
+        channel: CHANNEL,
+        date: u.date.and_then(|d| {
+            d.format(&time::format_description::well_known::Rfc3339)
+                .ok()
+        }),
+        notes: u.body.clone(),
+    }))
+}
+
+/// Downloads the update, checks its signature and swaps the app in place.
+/// Progress goes out as `mira-update-progress` `{ downloaded, total }`;
+/// the page restarts the app once this returns.
+#[tauri::command]
+async fn install_update(app: AppHandle) -> Result<(), String> {
+    let update = app
+        .updater()
+        .map_err(|e| e.to_string())?
+        .check()
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("Mira is already up to date")?;
+    let mut downloaded: u64 = 0;
+    let progress = app.clone();
+    update
+        .download_and_install(
+            move |chunk, total| {
+                downloaded += chunk as u64;
+                let _ = progress.emit(
+                    UPDATE_PROGRESS_EVENT,
+                    serde_json::json!({ "downloaded": downloaded, "total": total }),
+                );
+            },
+            || {},
+        )
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Relaunches into the installed update. The server is stopped first, as
+/// on any quit, so the new build starts its own.
+#[tauri::command]
+fn restart_app(app: AppHandle) {
+    stop_server(&app);
+    app.restart();
 }
 
 fn focus_main(app: &AppHandle) {

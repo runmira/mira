@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { upsertProfile } from './persist';
 import type { Profile } from './OnboardingFlow';
+import { ErrorText, PrimaryButton, StepFooter, StepHeader, field } from './ui';
 
 /**
  * Display name. Team accounts go on to invite teammates; everyone then
@@ -11,11 +12,13 @@ export function YourNameStep({
   initialProfile,
   fallbackName,
   onSaved,
+  onBack,
 }: {
   userId: string;
   initialProfile: Profile | null;
   fallbackName: string;
   onSaved: (profile: Profile) => void;
+  onBack?: () => void;
 }) {
   const [name, setName] = useState<string>(initialProfile?.full_name || fallbackName);
   const [pending, setPending] = useState(false);
@@ -40,43 +43,48 @@ export function YourNameStep({
     }
   }
 
+  const initials = name
+    .trim()
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((w) => w[0]?.toUpperCase() ?? '')
+    .join('');
+
   return (
-    <section className="flex flex-col gap-8">
-      <header className="flex flex-col gap-2">
-        <h1 className="text-2xl font-semibold tracking-tight text-foreground">
-          What should we call you?
-        </h1>
-        <p className="text-[13px] text-muted-foreground">
-          This is how your name appears in Mira. You can change it later.
-        </p>
-      </header>
+    <section className="flex flex-col gap-7">
+      <StepHeader eyebrow="Your profile" title="What should we call you?">
+        This is how your name appears in Mira and to your teammates. You can change it later.
+      </StepHeader>
 
-      <label className="flex flex-col gap-2">
-        <span className="text-[13px] font-medium text-foreground/90">Your name</span>
-        <input
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          placeholder="Ada Lovelace"
-          className="rounded-md border border-border bg-card px-3 py-2 text-[14px] text-foreground outline-none focus:ring-2 focus:ring-mira-blue"
-          autoFocus
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') void submit();
-          }}
-        />
-      </label>
-
-      {error && <p className="text-[13px] text-destructive">{error}</p>}
-
-      <div className="flex justify-end">
-        <button
-          type="button"
-          onClick={() => void submit()}
-          disabled={pending}
-          className="rounded-md bg-mira-blue px-5 py-2.5 text-[13.5px] font-medium text-white shadow-sm transition hover:opacity-90 disabled:opacity-60"
+      <div className="flex items-center gap-4">
+        <span
+          aria-hidden
+          className="grid size-14 shrink-0 place-items-center rounded-2xl bg-gradient-to-br from-mira-blue via-[#8b9df9] to-mira-purple text-[19px] font-semibold text-[#0b0d14] shadow-[0_10px_30px_-10px_rgba(122,162,247,0.7)]"
         >
-          {pending ? 'Saving…' : 'Continue'}
-        </button>
+          {initials || '·'}
+        </span>
+        <label className="flex min-w-0 flex-1 flex-col gap-2">
+          <span className="text-[13px] font-medium text-foreground/90">Your name</span>
+          <input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Ada Lovelace"
+            className={field}
+            autoFocus
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') void submit();
+            }}
+          />
+        </label>
       </div>
+
+      {error && <ErrorText>{error}</ErrorText>}
+
+      <StepFooter onBack={onBack}>
+        <PrimaryButton pending={pending} onClick={() => void submit()}>
+          {pending ? 'Saving…' : 'Continue'}
+        </PrimaryButton>
+      </StepFooter>
     </section>
   );
 }

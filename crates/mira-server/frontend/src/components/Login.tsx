@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { DESKTOP_AUTH_REDIRECT, isDesktop, onAuthCallback, openExternal } from '../lib/desktop';
+import { desktopAuthRedirect, isDesktop, onAuthCallback, openExternal } from '../lib/desktop';
 import { getSupabase } from '../lib/supabase';
 
 type Provider = 'google' | 'github';
@@ -53,7 +53,7 @@ export function Login() {
       // webviews, so it happens in the system browser.
       const { data, error } = await supabase.auth.signInWithOAuth({
         provider,
-        options: { redirectTo: DESKTOP_AUTH_REDIRECT, skipBrowserRedirect: true },
+        options: { redirectTo: desktopAuthRedirect(), skipBrowserRedirect: true },
       });
       if (error || !data.url) {
         setPending(null);

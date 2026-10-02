@@ -101,6 +101,7 @@ import { CommandPalette, type PaletteAction } from './components/CommandPalette'
 import { splitFileRef } from './lib/refs';
 import { ContextInspector } from './components/ContextInspector';
 import { ImportChats } from './components/ImportChats';
+import { UpdateButton } from './components/UpdateButton';
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { callForAttention } from './lib/attention';
 import { GetStarted } from './components/onboarding/GetStarted';
@@ -3025,6 +3026,7 @@ export default function App() {
                 </button>
               )}
               <div className="flex items-center gap-0.5" data-tauri-drag-region="false">
+                <UpdateButton />
                 <RightPanelButton
                   open={panelOpen}
                   activeKind={toolPaneKindOf(activeAgentTab ?? '')}

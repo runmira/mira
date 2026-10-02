@@ -89,7 +89,7 @@ fn scan_all(fresh: bool) -> Vec<HistorySession> {
         // Mira's own agent worktrees are its sandboxes, not projects.
         .filter(|c| !c.cwd.contains("/.mira/"))
         .collect();
-    all.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    all.sort_by_key(|c| std::cmp::Reverse(c.updated_at));
     if let Ok(mut g) = SCAN.lock() {
         *g = Some((Instant::now(), all.clone()));
     }
@@ -215,7 +215,7 @@ fn scan_view(fresh: bool) -> ScanView {
             }
         })
         .collect();
-    projects.sort_by(|a, b| b.last_active.cmp(&a.last_active));
+    projects.sort_by_key(|p| std::cmp::Reverse(p.last_active));
     ScanView { sources, projects }
 }
 
