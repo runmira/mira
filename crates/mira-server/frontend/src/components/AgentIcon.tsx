@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { agentFaviconUrls, agentMonogram } from '../lib/acpAgents';
-import { modelIconUrls, modelVendor, prettyVendor, providerIconUrls } from '../lib/models';
+import { modelIconUrls, modelVendor, needsLightTile, prettyVendor, providerIconUrls } from '../lib/models';
 import { cn } from '@/lib/utils';
 
 type IconSize = 'xs' | 'sm' | 'md';
@@ -159,7 +159,7 @@ export function ProviderIcon({
       urls={providerIconUrls(instance, model)}
       name={name}
       size={size}
-      tile={tile}
+      tile={tile || needsLightTile(instance)}
       className={className}
     />
   );

@@ -51,6 +51,15 @@ fn read_all(home: &Path) -> BTreeMap<String, AgentCursor> {
         .unwrap_or_default()
 }
 
+/// Every agent session id Mira has driven: what an import must not bring
+/// back in as if it were someone else's history.
+pub fn agent_session_ids_in(home: &Path) -> std::collections::HashSet<String> {
+    read_all(home)
+        .into_values()
+        .map(|c| c.agent_session_id)
+        .collect()
+}
+
 /// Record where an agent session left off. Overwrites any previous cursor
 /// for the Mira session: there is exactly one agent per slot.
 pub fn record_in(home: &Path, mira_session: &str, driver_kind: &str, agent_session_id: &str) {

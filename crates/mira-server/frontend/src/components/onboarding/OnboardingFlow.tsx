@@ -2,6 +2,9 @@ import { useMemo, useState } from 'react';
 import { AccountTypeStep } from './AccountTypeStep';
 import { YourNameStep } from './YourNameStep';
 import { InviteTeamStep } from './InviteTeamStep';
+import { RunStep } from './RunStep';
+import { DoneStep } from './DoneStep';
+import { ImportChats } from '../ImportChats';
 import { cn } from '@/lib/utils';
 
 export type AccountType = 'personal' | 'team';
@@ -13,7 +16,7 @@ export type Profile = {
   onboarding_completed_at: string | null;
 };
 
-type StepSlug = 'account-type' | 'your-name' | 'invite-team';
+type StepSlug = 'account-type' | 'your-name' | 'invite-team' | 'run' | 'import' | 'done';
 
 /**
  * Client-side onboarding state machine. The step registry is a plain array
@@ -29,7 +32,13 @@ const STEPS: Step[] = [
   { slug: 'account-type', appliesTo: () => true },
   { slug: 'your-name', appliesTo: () => true },
   { slug: 'invite-team', appliesTo: (t) => t === 'team' },
+  { slug: 'run', appliesTo: () => true },
+  { slug: 'import', appliesTo: () => true },
+  { slug: 'done', appliesTo: () => true },
 ];
+
+/** Steps that need more room than a single column. */
+const WIDE: ReadonlySet<StepSlug> = new Set(['run', 'import']);
 
 function applicable(steps: Step[], type: AccountType | null): Step[] {
   return steps.filter((s) => s.appliesTo(type));
@@ -38,7 +47,9 @@ function applicable(steps: Step[], type: AccountType | null): Step[] {
 function firstIncomplete(profile: Profile | null): StepSlug {
   if (!profile?.account_type) return 'account-type';
   if (!profile.full_name || profile.full_name.trim().length === 0) return 'your-name';
-  return profile.account_type === 'team' ? 'invite-team' : 'your-name';
+  // Name saved but not finished: pick up at setup (invites are optional
+  // and were offered already).
+  return 'run';
 }
 
 export function OnboardingFlow({
@@ -54,9 +65,23 @@ export function OnboardingFlow({
 }) {
   const [profile, setProfile] = useState<Profile | null>(initialProfile);
   const [current, setCurrent] = useState<StepSlug>(() => firstIncomplete(initialProfile));
+  const [imported, setImported] = useState(0);
 
   const steps = useMemo(() => applicable(STEPS, profile?.account_type ?? null), [profile?.account_type]);
   const activeIndex = Math.max(0, steps.findIndex((s) => s.slug === current));
+
+  /** Advance from a step that saves nothing to the profile. */
+  function advance() {
+    const list = applicable(STEPS, profile?.account_type ?? null);
+    const idx = list.findIndex((s) => s.slug === current);
+    const next = list[idx + 1];
+    if (next) setCurrent(next.slug);
+  }
+  function back() {
+    const list = applicable(STEPS, profile?.account_type ?? null);
+    const idx = list.findIndex((s) => s.slug === current);
+    if (idx > 0) setCurrent(list[idx - 1].slug);
+  }
 
   function goNext(nextProfile: Profile) {
     setProfile(nextProfile);
@@ -71,7 +96,12 @@ export function OnboardingFlow({
   }
 
   return (
-    <div className="mx-auto flex min-h-screen w-full max-w-lg flex-col px-6 py-10">
+    <div
+      className={cn(
+        'mx-auto flex min-h-screen w-full flex-col px-6 py-10 transition-[max-width] duration-300',
+        WIDE.has(current) ? 'max-w-4xl' : 'max-w-lg',
+      )}
+    >
       <div className="flex items-center gap-2">
         {steps.map((s, i) => (
           <div
@@ -106,6 +136,26 @@ export function OnboardingFlow({
             onSaved={(next) => goNext(next)}
           />
         )}
+        {current === 'run' && <RunStep onNext={advance} onBack={back} />}
+        {current === 'import' && (
+          <section className="flex flex-col gap-6">
+            <header className="flex flex-col gap-2">
+              <h1 className="text-2xl font-semibold tracking-tight text-foreground">Bring your chats</h1>
+              <p className="max-w-[62ch] text-[13.5px] leading-relaxed text-muted-foreground">
+                Your Claude Code and Codex conversations, grouped by project. Imported chats open on the same agent and pick
+                up where they left off — the agent still remembers everything. Nothing leaves your computer.
+              </p>
+            </header>
+            <ImportChats
+              doneLabel="Continue"
+              onDone={(n) => {
+                setImported(n);
+                advance();
+              }}
+            />
+          </section>
+        )}
+        {current === 'done' && <DoneStep userId={userId} imported={imported} onSaved={(next) => goNext(next)} />}
       </div>
     </div>
   );

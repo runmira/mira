@@ -16,6 +16,7 @@ import {
   Target,
   History,
   X,
+  Download,
 } from 'lucide-react';
 import { cn } from './lib/utils';
 import { acpOptionsToDescriptors } from './lib/acpOptions';
@@ -98,6 +99,8 @@ import {
 } from 'lucide-react';
 import { CommandPalette, type PaletteAction } from './components/CommandPalette';
 import { ContextInspector } from './components/ContextInspector';
+import { ImportChats } from './components/ImportChats';
+import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { callForAttention } from './lib/attention';
 import { GetStarted } from './components/onboarding/GetStarted';
 
@@ -884,6 +887,8 @@ export default function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   /** The context inspector (issue #70). */
   const [inspectOpen, setInspectOpen] = useState(false);
+  /** "Bring chats from other agents", from ⌘K. */
+  const [importOpen, setImportOpen] = useState(false);
   // File picker opened from the right panel's "+" menu — distinct from the
   // folder picker, which switches the session's cwd.
   const [panelFilePickerOpen, setPanelFilePickerOpen] = useState(false);
@@ -998,6 +1003,12 @@ export default function App() {
     };
     window.addEventListener('mira:open-session', onOpen);
     return () => window.removeEventListener('mira:open-session', onOpen);
+  }, []);
+  // Chats were added outside a turn (imported from another agent).
+  useEffect(() => {
+    const refresh = () => setSidebarRefresh((n) => n + 1);
+    window.addEventListener('mira:sessions-changed', refresh);
+    return () => window.removeEventListener('mira:sessions-changed', refresh);
   }, []);
   // Integrated terminal (bottom panel); open state is remembered.
   // Settings → General can disable the restore (always start closed).
@@ -2504,6 +2515,7 @@ export default function App() {
     { id: 's-general', group: 'Settings', label: 'General settings', icon: Cog, shortcut: keyFor('settings.toggle'), run: goSettings('general') },
     { id: 's-provider', group: 'Settings', label: 'Providers & API keys', icon: Plug, run: goSettings('provider') },
     { id: 's-agents', group: 'Settings', label: 'External agents', icon: Bot, keywords: ['claude code', 'codex'], run: goSettings('agents') },
+    { id: 'import-chats', group: 'Chat', label: 'Import chats from Claude Code or Codex', icon: Download, keywords: ['history', 'migrate', 'bring'], run: () => setImportOpen(true) },
     { id: 's-subagents', group: 'Settings', label: 'Subagents', icon: Smile, keywords: ['scout', 'iris', 'atlas', 'bolt', 'quill', 'sentry', 'faces'], run: goSettings('subagents') },
     { id: 's-usage', group: 'Settings', label: 'Usage & cost', icon: ChartColumn, keywords: ['tokens', 'spend', 'limits'], run: goSettings('usage') },
     { id: 's-memory', group: 'Settings', label: 'Memory', icon: Brain, run: goSettings('memory') },
@@ -3392,6 +3404,19 @@ export default function App() {
         }}
       />
 
+      <Dialog open={importOpen} onOpenChange={setImportOpen}>
+        <DialogContent className="max-w-3xl gap-4 p-5">
+          <DialogTitle className="text-[16px] font-semibold">Bring chats from other agents</DialogTitle>
+          {importOpen && (
+            <ImportChats
+              onDone={() => {
+                setImportOpen(false);
+                setSidebarRefresh((n) => n + 1);
+              }}
+            />
+          )}
+        </DialogContent>
+      </Dialog>
       <ContextInspector
         open={inspectOpen}
         onOpenChange={setInspectOpen}

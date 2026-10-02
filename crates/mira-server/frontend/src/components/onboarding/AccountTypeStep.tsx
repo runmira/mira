@@ -71,7 +71,6 @@ export function AccountTypeStep({
   return (
     <section className="flex flex-col gap-8">
       <header className="flex flex-col gap-2">
-        <p className="text-[11px] uppercase tracking-wider text-muted-foreground">Step 1</p>
         <h1 className="text-2xl font-semibold tracking-tight text-foreground">
           Who are you setting up Mira for?
         </h1>

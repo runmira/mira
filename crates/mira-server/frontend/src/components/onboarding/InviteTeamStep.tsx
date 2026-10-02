@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'react';
 import { getSupabase } from '../../lib/supabase';
-import { markOnboardingComplete } from './persist';
+import { upsertProfile } from './persist';
 import type { Profile } from './OnboardingFlow';
 
 const MAX_ROWS = 5;
 
 /**
- * Step 3 (team accounts only): capture teammate emails as pending invites,
+ * Team accounts only: capture teammate emails as pending invites,
  * then mark onboarding complete. Skippable — no invites is a valid outcome.
  */
 export function InviteTeamStep({
@@ -81,8 +81,7 @@ export function InviteTeamStep({
           .upsert(rows, { onConflict: 'team_id,email' });
         if (insertErr) throw new Error(insertErr.message);
       }
-      const done = await markOnboardingComplete(userId);
-      onSaved(done);
+      onSaved(await upsertProfile(userId, {}));
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -93,7 +92,6 @@ export function InviteTeamStep({
   return (
     <section className="flex flex-col gap-8">
       <header className="flex flex-col gap-2">
-        <p className="text-[11px] uppercase tracking-wider text-muted-foreground">Step 3</p>
         <h1 className="text-2xl font-semibold tracking-tight text-foreground">
           Invite your teammates
         </h1>
