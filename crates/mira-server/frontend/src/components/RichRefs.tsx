@@ -206,12 +206,11 @@ export function BranchChip({ name, children }: { name: string; children: React.R
       onOpen={load}
       trigger={
         // No chip background: a filled teal pill fought the prose around it.
-        // The icon carries the color; the name reads like text.
         <span
           tabIndex={0}
-          className="md-ref inline-flex items-baseline gap-1 align-baseline font-mono text-[0.88em] text-foreground/90 decoration-[#73daca]/60 decoration-dotted underline-offset-[3px] outline-none hover:underline focus-visible:underline"
+          className="md-ref inline-flex items-baseline gap-1 align-baseline font-mono text-[0.88em] text-[#73daca] decoration-[#73daca]/60 decoration-dotted underline-offset-[3px] outline-none hover:underline focus-visible:underline"
         >
-          <GitBranch className="size-3.5 shrink-0 translate-y-[2px] text-[#73daca]" />
+          <GitBranch className="size-3.5 shrink-0 translate-y-[2px]" />
           {b.name}
           {b.current && <span className="size-1.5 shrink-0 -translate-y-px self-center rounded-full bg-[#73daca]" title="Checked out" />}
         </span>
