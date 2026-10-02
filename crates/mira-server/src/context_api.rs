@@ -76,6 +76,15 @@ fn home_relative(path: &str) -> String {
     }
 }
 
+/// An MCP server's display name: claude.ai connectors arrive as
+/// `claude_ai_Gmail`; the prefix says nothing the user needs.
+fn server_label(server: &str) -> String {
+    server
+        .strip_prefix("claude_ai_")
+        .unwrap_or(server)
+        .replace('_', " ")
+}
+
 /// Claude Code's `get_context_usage` answer, in the inspector's shape.
 ///
 /// Only categories that are actually in the context count as parts: free
@@ -133,25 +142,32 @@ fn from_agent(agent: &str, u: &Value) -> Value {
         .collect();
     skills.sort_by_key(|s| std::cmp::Reverse(n(&s["tokens"])));
     skills.truncate(8);
-    let mcp: Vec<Value> = u["mcpTools"]
-        .as_array()
+    // One row per MCP server, not per tool: a connected Gmail alone brings
+    // dozens of tools, which listed one by one drowned everything else.
+    let mut servers: std::collections::BTreeMap<String, (u64, u64)> = Default::default();
+    for t in u["mcpTools"].as_array().into_iter().flatten() {
+        let server = t["serverName"].as_str().unwrap_or("other");
+        let e = servers.entry(server_label(server)).or_default();
+        e.0 += 1;
+        e.1 += n(&t["tokens"]);
+    }
+    let mut mcp: Vec<Value> = servers
         .into_iter()
-        .flatten()
-        .map(|t| {
-            let name = t["name"].as_str().unwrap_or("");
-            let server = t["serverName"].as_str().unwrap_or("");
-            let label = if server.is_empty() {
-                name.to_string()
+        .map(|(server, (count, tokens))| {
+            let tools = if count == 1 {
+                "1 tool".to_string()
             } else {
-                format!("{server} · {name}")
+                format!("{count} tools")
             };
-            json!({ "label": label, "tokens": n(&t["tokens"]) })
+            json!({ "label": format!("{server} · {tools}"), "tokens": tokens })
         })
         .collect();
+    mcp.sort_by_key(|m| std::cmp::Reverse(n(&m["tokens"])));
+    mcp.truncate(8);
     let details: Vec<Value> = [
         ("Memory files", memory),
         ("Largest skills", skills),
-        ("MCP tools", mcp),
+        ("MCP servers", mcp),
     ]
     .into_iter()
     .filter(|(_, items)| !items.is_empty())
@@ -287,6 +303,36 @@ mod tests {
             "empty groups are left out"
         );
         assert_eq!(details[1]["items"][0]["label"], "dataviz");
+    }
+
+    #[test]
+    fn mcp_tools_are_grouped_by_server() {
+        let mut reply = claude_reply();
+        reply["mcpTools"] = json!([
+            {"name": "mcp__claude_ai_Gmail__search", "serverName": "claude_ai_Gmail", "tokens": 300},
+            {"name": "mcp__claude_ai_Gmail__send", "serverName": "claude_ai_Gmail", "tokens": 200},
+            {"name": "mcp__claude_ai_Luno__price", "serverName": "claude_ai_Luno", "tokens": 90}
+        ]);
+        let v = from_agent("Claude Code", &reply);
+        let group = v["details"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["title"] == "MCP servers")
+            .unwrap();
+        let rows: Vec<_> = group["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| (i["label"].as_str().unwrap().to_string(), n(&i["tokens"])))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("Gmail · 2 tools".to_string(), 500),
+                ("Luno · 1 tool".to_string(), 90)
+            ]
+        );
     }
 
     #[test]

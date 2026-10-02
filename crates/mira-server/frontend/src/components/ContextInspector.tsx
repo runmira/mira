@@ -69,7 +69,9 @@ export function ContextInspector({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg gap-0 p-0">
+      {/* Capped to the viewport; the body scrolls, the header and the
+          compact row stay put. */}
+      <DialogContent className="flex max-h-[85vh] max-w-lg flex-col gap-0 p-0">
         <div className="px-4 pb-3 pt-4">
           <DialogTitle className="text-[15px] font-semibold">Context window</DialogTitle>
           {b && (
@@ -95,6 +97,7 @@ export function ContextInspector({
 
         {b && (
           <>
+            <div className="min-h-0 flex-1 overflow-y-auto pb-1">
             {/* One bar: each part's share of the window, with where it compacts. */}
             <div className="px-4">
               <div className="relative flex h-2.5 overflow-hidden rounded-full bg-white/[0.06]">
@@ -131,7 +134,7 @@ export function ContextInspector({
                 <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/70">
                   {view?.droppable ? 'Largest tool results' : 'Tool use by type'}
                 </div>
-                <div className="max-h-56 overflow-y-auto">
+                <div>
                   {b.largest_results.map((r) => {
                     const share = total ? r.tokens / total : 0;
                     return (
@@ -180,8 +183,9 @@ export function ContextInspector({
             )}
 
             {error && <div className="px-4 pt-2 text-[12px] text-amber-300">{error}</div>}
+            </div>
 
-            <div className="mt-4 flex items-center gap-2 border-t border-border/50 px-4 py-3">
+            <div className="flex shrink-0 items-center gap-2 border-t border-border/50 px-4 py-3">
               <input
                 value={focus}
                 onChange={(e) => setFocus(e.target.value)}

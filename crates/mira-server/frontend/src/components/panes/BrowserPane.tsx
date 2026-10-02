@@ -10,6 +10,7 @@ import {
   RefreshCw,
   Square,
   X,
+  Globe2,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
@@ -21,19 +22,6 @@ import {
 
 type Shot = { png_base64: string; width: number; height: number };
 type ActionResult = { text: string; screenshot?: Shot };
-
-/** CSS-pixel viewport presets, applied as in-page zoom on the native
- *  webview. It's not true device emulation the way CDP's
- *  `setDeviceMetricsOverride` is — see the note on `zoomFor`. */
-const VIEWPORTS = [
-  { id: 'fluid', label: 'Fluid', w: 0, h: 0 },
-  { id: 'phone', label: 'Phone', w: 390, h: 844 },
-  { id: 'tablet', label: 'Tablet', w: 834, h: 1112 },
-  { id: 'laptop', label: 'Laptop', w: 1280, h: 800 },
-  { id: 'desktop', label: 'Desktop', w: 1680, h: 1050 },
-] as const;
-
-type ViewportId = (typeof VIEWPORTS)[number]['id'];
 
 const START_URL = 'https://example.com';
 
@@ -68,7 +56,6 @@ export function BrowserPane() {
   const [url, setUrl] = useState('');
   const [draft, setDraft] = useState('');
   const [snapshot, setSnapshot] = useState<string | null>(null);
-  const [viewport, setViewport] = useState<ViewportId>('laptop');
   const [busy, setBusy] = useState<null | string>(null);
   const [error, setError] = useState<string | null>(null);
   const inFlight = useRef(false);
@@ -161,6 +148,35 @@ export function BrowserPane() {
     }).catch(() => {});
   }, []);
 
+  // The page takes the pane's own size: no device presets, it simply
+  // reflows as the pane is resized, at the screen's pixel density.
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (mode !== 'cdp' || !el) return;
+    let t: ReturnType<typeof setTimeout> | undefined;
+    const report = () => {
+      clearTimeout(t);
+      t = setTimeout(() => {
+        const { width, height } = el.getBoundingClientRect();
+        if (width < 50 || height < 50) return;
+        send({
+          type: 'resize',
+          width: Math.round(width),
+          height: Math.round(height),
+          scale: window.devicePixelRatio || 1,
+        });
+      }, 150);
+    };
+    const ro = new ResizeObserver(report);
+    ro.observe(el);
+    report();
+    return () => {
+      clearTimeout(t);
+      ro.disconnect();
+    };
+  }, [mode, send]);
+
   /** A point on the frame image in the page's CSS pixels. */
   function toPage(e: { clientX: number; clientY: number; currentTarget: Element }) {
     const r = e.currentTarget.getBoundingClientRect();
@@ -203,23 +219,6 @@ export function BrowserPane() {
     [],
   );
 
-
-  /* ---------------- viewport presets ----------------
-   *
-   * The native webview is a fixed-size native view; asking it to emulate a
-   * 390px viewport isn't something the granted permission set exposes. What
-   * we can do is scale the rendered page, which is honest about being a
-   * *preview* rather than a real device emulation. The CDP path does get
-   * true emulation via `set_viewport`.
-   */
-  function zoomFor(vp: ViewportId): number {
-    const preset = VIEWPORTS.find((v) => v.id === vp)!;
-    if (preset.w === 0 || mode !== 'native') return 1;
-    // Scale so the preset's width is what's actually shown in the pane.
-    const el = surfaceRef.current;
-    if (!el) return 1;
-    return Math.min(1, preset.w / Math.max(1, el.clientWidth));
-  }
 
   /** Ask the server whether the origin will let us frame it. A browser
    *  can't answer this itself — reading the headers is cross-origin by
@@ -334,22 +333,6 @@ export function BrowserPane() {
     setUrl('');
   }
 
-  function changeViewport(id: ViewportId) {
-    setViewport(id);
-    if (mode === 'cdp') {
-      const preset = VIEWPORTS.find((v) => v.id === id)!;
-      void run('viewport', {
-        action: 'set_viewport',
-        width: preset.w,
-        height: preset.h,
-        mobile: id === 'phone',
-      });
-    } else {
-      wvRef.current?.setZoom(zoomFor(id));
-      wvRef.current?.focus();
-    }
-  }
-
   const showSnapshot = snapshot !== null;
 
   return (
@@ -372,6 +355,7 @@ export function BrowserPane() {
           <RefreshCw className="size-3.5" />
         </IconBtn>
 
+        <SiteIcon url={url} />
         <input
           value={draft || url}
           onChange={(e) => setDraft(e.target.value)}
@@ -391,29 +375,14 @@ export function BrowserPane() {
         </IconBtn>
       </form>
 
-      {/* viewport presets + per-mode actions */}
+      {/* per-mode actions */}
       <div className="flex shrink-0 items-center gap-1 border-b border-border/40 px-2 py-1">
-        {VIEWPORTS.map((v) => (
-          <button
-            key={v.id}
-            type="button"
-            onClick={() => changeViewport(v.id)}
-            className={cn(
-              'rounded px-1.5 py-0.5 text-[11px] transition-colors',
-              viewport === v.id
-                ? 'bg-white/[0.1] text-foreground'
-                : 'text-muted-foreground hover:bg-white/[0.05] hover:text-foreground',
-            )}
-          >
-            {v.label}
-          </button>
-        ))}
         <span className="flex-1" />
         <span
           className="mr-1 text-[10.5px] text-muted-foreground/60"
           title={
             mode === 'native'
-              ? 'Native webview inside the app window. Viewport presets scale the page.'
+              ? 'Native webview inside the app window.'
               : mode === 'iframe'
                 ? 'Framed page. Works for sites that allow embedding; back and reload are limited on cross-origin pages.'
                 : 'The browser Mira and your agents use, live. Click, scroll and type here to take over.'
@@ -473,7 +442,7 @@ export function BrowserPane() {
       )}
 
       {/* body */}
-      <div className="min-h-0 flex-1 overflow-hidden bg-black/30">
+      <div ref={bodyRef} className="min-h-0 flex-1 overflow-hidden bg-black/30">
         {!url && !(mode === 'cdp' && frame) && (
           <EmptyState live={mode === 'cdp'} onStart={() => void navigate(START_URL)} />
         )}
@@ -527,7 +496,7 @@ export function BrowserPane() {
                 src={frame.src}
                 alt={url ? `Live view of ${url}` : 'Live view of the agent browser'}
                 draggable={false}
-                className="max-h-full max-w-full cursor-default select-none object-contain"
+                className="h-full w-full cursor-default select-none object-contain"
                 onClick={(e) => {
                   const p = toPage(e);
                   (e.currentTarget.parentElement as HTMLElement | null)?.focus();
@@ -630,5 +599,33 @@ function IconBtn({
     >
       {children}
     </button>
+  );
+}
+
+/** The site's icon, as a browser tab shows it. Loaded from the site itself
+ *  (no third-party favicon service learns what's being browsed); a globe
+ *  when there's no page or the site has no icon. */
+function SiteIcon({ url }: { url: string }) {
+  const origin = (() => {
+    try {
+      const u = new URL(url);
+      return u.protocol === 'http:' || u.protocol === 'https:' ? u.origin : null;
+    } catch {
+      return null;
+    }
+  })();
+  const [failed, setFailed] = useState<string | null>(null);
+  if (!origin || failed === origin) {
+    return <Globe2 className="mx-0.5 size-3.5 shrink-0 text-muted-foreground/70" />;
+  }
+  return (
+    <img
+      key={origin}
+      src={`${origin}/favicon.ico`}
+      alt=""
+      referrerPolicy="no-referrer"
+      onError={() => setFailed(origin)}
+      className="mx-0.5 size-3.5 shrink-0 rounded-sm"
+    />
   );
 }

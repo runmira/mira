@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Build the Mira desktop app (apps/desktop).
 #
-#   scripts/build-desktop.sh           # release bundle (.app/.dmg, .msi, .deb/.AppImage)
+#   scripts/build-desktop.sh           # release bundle (.app/.dmg, .msi, .deb/.AppImage),
+#                                      # with Mira's Chromium inside (see fetch-chromium.sh)
 #   scripts/build-desktop.sh --dev     # run the app from source with a debug server
 #   scripts/build-desktop.sh --sidecar # only build + stage the bundled `mira`
 #
@@ -61,7 +62,23 @@ case "$MODE" in
   sidecar) ;;
   dev) cargo tauri dev ;;
   release)
-    cargo tauri build
+    # Ship Mira's browser in the bundle so it works on first run, offline.
+    # macOS goes through `macOS.files`, which copies directories with their
+    # symlinks intact; `resources` would flatten them and break Chrome's
+    # framework. MIRA_NO_BUNDLED_CHROMIUM=1 skips it (~350 MB smaller app;
+    # the browser then downloads on first use).
+    TAURI_ARGS=()
+    if [ -z "${MIRA_NO_BUNDLED_CHROMIUM:-}" ]; then
+      "$ROOT/scripts/fetch-chromium.sh" "$DESKTOP/chromium" "$TRIPLE"
+      if [ -f "$DESKTOP/chromium/current" ]; then
+        case "$TRIPLE" in
+          *apple-darwin) BUNDLE='{"bundle":{"macOS":{"files":{"Resources/chromium":"chromium"}}}}' ;;
+          *) BUNDLE='{"bundle":{"resources":{"chromium/":"chromium/"}}}' ;;
+        esac
+        TAURI_ARGS=(--config "$BUNDLE")
+      fi
+    fi
+    cargo tauri build ${TAURI_ARGS[@]+"${TAURI_ARGS[@]}"}
     echo
     echo "bundles: $DESKTOP/target/release/bundle/"
     ;;
