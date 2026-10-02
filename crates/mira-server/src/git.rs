@@ -596,6 +596,177 @@ pub async fn find_symbol(
     Json(hits).into_response()
 }
 
+/// A branch mentioned in a transcript, for its chip and hover card.
+#[derive(Debug, Serialize, PartialEq)]
+pub struct BranchCard {
+    pub name: String,
+    /// `local` or `remote` (only on `origin`).
+    pub location: &'static str,
+    /// Checked out in the chat's folder right now.
+    pub current: bool,
+    pub base: Option<String>,
+    pub ahead: u32,
+    pub behind: u32,
+    pub last_subject: String,
+    pub last_short: String,
+    pub last_author: String,
+    /// Unix seconds.
+    pub last_date: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pr: Option<serde_json::Value>,
+}
+
+fn rev_exists(cwd: &Path, rev: &str) -> bool {
+    run(
+        cwd,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{rev}^{{commit}}"),
+        ],
+    )
+    .is_ok()
+}
+
+/// The branch others are measured against: origin's default, else main or
+/// master.
+fn base_branch(cwd: &Path) -> Option<String> {
+    if let Ok(head) = run(
+        cwd,
+        &[
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ],
+    ) {
+        let head = head.trim().trim_start_matches("origin/").to_string();
+        if !head.is_empty() {
+            return Some(head);
+        }
+    }
+    ["main", "master"]
+        .into_iter()
+        .find(|b| rev_exists(cwd, &format!("refs/heads/{b}")))
+        .map(str::to_string)
+}
+
+fn branch_card(cwd: &Path, name: &str) -> Option<BranchCard> {
+    let name = name.trim_start_matches("origin/");
+    let (rev, location) = if rev_exists(cwd, &format!("refs/heads/{name}")) {
+        (format!("refs/heads/{name}"), "local")
+    } else if rev_exists(cwd, &format!("refs/remotes/origin/{name}")) {
+        (format!("refs/remotes/origin/{name}"), "remote")
+    } else {
+        return None;
+    };
+    let current = run(cwd, &["branch", "--show-current"]).is_ok_and(|b| b.trim() == name);
+    let base = base_branch(cwd);
+    let (mut ahead, mut behind) = (0, 0);
+    if let Some(b) = base.as_deref().filter(|b| *b != name) {
+        let base_rev = if rev_exists(cwd, &format!("refs/heads/{b}")) {
+            format!("refs/heads/{b}")
+        } else {
+            format!("refs/remotes/origin/{b}")
+        };
+        if let Ok(out) = run(
+            cwd,
+            &[
+                "rev-list",
+                "--left-right",
+                "--count",
+                &format!("{base_rev}...{rev}"),
+            ],
+        ) {
+            let mut it = out.split_whitespace();
+            behind = it.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+            ahead = it.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+        }
+    }
+    let log = run(
+        cwd,
+        &[
+            "log",
+            "-1",
+            &format!("--format=%h{SEP}%s{SEP}%an{SEP}%at"),
+            &rev,
+        ],
+    )
+    .ok()?;
+    let mut f = log.trim_end().split(SEP);
+    Some(BranchCard {
+        name: name.to_string(),
+        location,
+        current,
+        base,
+        ahead,
+        behind,
+        last_short: f.next()?.to_string(),
+        last_subject: f.next()?.to_string(),
+        last_author: f.next()?.to_string(),
+        last_date: f.next()?.parse().unwrap_or(0),
+        pr: None,
+    })
+}
+
+#[derive(Deserialize)]
+pub struct BranchQuery {
+    pub name: String,
+    /// Also look up the branch's PR (slower: a GitHub call).
+    #[serde(default)]
+    pub pr: bool,
+}
+
+/// GET /api/git/branch?name=…[&pr=true] — a branch in the chat's repo:
+/// last commit, ahead/behind its base, and optionally its PR. 404 when no
+/// such branch exists, which is how the client tells a branch name from an
+/// ordinary word.
+pub async fn branch_info(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<BranchQuery>,
+) -> Response {
+    let name = q.name.trim().to_string();
+    let ok = (1..=200).contains(&name.len())
+        && !name.starts_with('-')
+        && !name.contains("..")
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || "/-_.".contains(c));
+    if !ok {
+        return err(StatusCode::NOT_FOUND, "not a branch".into());
+    }
+    let cwd = state.current_cwd().await;
+    let want_pr = q.pr;
+    let card = tokio::task::spawn_blocking(move || {
+        let mut card = branch_card(&cwd, &name)?;
+        if want_pr {
+            // Best effort, through the signed-in gh CLI.
+            card.pr = Command::new("gh")
+                .current_dir(&cwd)
+                .args([
+                    "pr",
+                    "view",
+                    &card.name,
+                    "--json",
+                    "number,title,state,isDraft,url",
+                ])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .and_then(|o| serde_json::from_slice(&o.stdout).ok());
+        }
+        Some(card)
+    })
+    .await
+    .ok()
+    .flatten();
+    match card {
+        Some(c) => Json(c).into_response(),
+        None => err(StatusCode::NOT_FOUND, "no such branch".into()),
+    }
+}
+
 /// GET /api/git/branch-pr
 /// Returns the PR for the current branch using `gh pr view`.
 /// Returns 404 when no PR exists for the branch.
@@ -1292,5 +1463,55 @@ mod commit_tests {
             .success());
         assert!(find_definitions(p, "quoted_name").is_empty());
         assert!(find_definitions(p, "commented_name").is_empty());
+    }
+
+    #[test]
+    fn branches_are_described_and_words_are_not() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path();
+        let g = |args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .current_dir(p)
+                    .args([
+                        "-c",
+                        "user.name=Ada",
+                        "-c",
+                        "user.email=a@x",
+                        "-c",
+                        "commit.gpgsign=false"
+                    ])
+                    .args(args)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success(),
+                "git {args:?}"
+            )
+        };
+        g(&["init", "-q", "--template=", "-b", "main"]);
+        std::fs::write(p.join("a"), "1").unwrap();
+        g(&["add", "-A"]);
+        g(&["commit", "-qm", "base"]);
+        g(&["checkout", "-q", "-b", "feat/cli-oauth"]);
+        std::fs::write(p.join("a"), "2").unwrap();
+        g(&["commit", "-qam", "Add OAuth"]);
+        std::fs::write(p.join("a"), "3").unwrap();
+        g(&["commit", "-qam", "Refresh tokens"]);
+        let c = branch_card(p, "feat/cli-oauth").expect("a branch");
+        assert_eq!(
+            (c.ahead, c.behind, c.current, c.location),
+            (2, 0, true, "local")
+        );
+        assert_eq!(c.base.as_deref(), Some("main"));
+        assert_eq!(c.last_subject, "Refresh tokens");
+        assert!(
+            branch_card(p, "origin/feat/cli-oauth").is_some(),
+            "origin/ prefix accepted"
+        );
+        assert!(
+            branch_card(p, "explanation").is_none(),
+            "a word isn't a branch"
+        );
     }
 }

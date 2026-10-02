@@ -480,6 +480,7 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/api/git/push", axum::routing::post(git::push))
         .route("/api/git/branch-pr", get(git::branch_pr))
         .route("/api/git/commit/:sha", get(git::commit_card))
+        .route("/api/git/branch", get(git::branch_info))
         .route("/api/git/apply", axum::routing::post(git::apply_patch))
         .route("/api/symbol", get(git::find_symbol))
         .route("/api/unfurl", get(unfurl::unfurl))

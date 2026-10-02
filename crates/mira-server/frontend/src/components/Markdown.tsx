@@ -10,7 +10,7 @@ import type { DiffPreview } from '../types';
 import { GithubRef } from './GithubRef';
 import { linkifyGithubRefs, parseGithubRef } from '../lib/githubRefs';
 import { classifyInline, splitFileRef } from '../lib/refs';
-import { ColorChip, CommitChip, FileChip, KeysChip, LinkRef, SymbolRef } from './RichRefs';
+import { BranchChip, ColorChip, CommitChip, FileChip, KeysChip, LinkRef, SymbolRef } from './RichRefs';
 import { Blockquote, DiffBlock, Table, Th, remarkCallouts } from './RichBlocks';
 
 /**
@@ -162,6 +162,8 @@ export function Markdown({ text, onOpenFile }: Props) {
                   return <ColorChip color={ref.color}>{children}</ColorChip>;
                 case 'keys':
                   return <KeysChip keys={ref.keys} />;
+                case 'branch':
+                  return <BranchChip name={ref.name}>{children}</BranchChip>;
                 case 'symbol':
                   return <SymbolRef name={ref.name} onOpen={open}>{children}</SymbolRef>;
               }

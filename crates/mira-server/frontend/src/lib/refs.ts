@@ -10,7 +10,10 @@ export type InlineRef =
   | { kind: 'commit'; sha: string }
   | { kind: 'color'; color: string }
   | { kind: 'keys'; keys: string[] }
-  | { kind: 'symbol'; name: string };
+  | { kind: 'symbol'; name: string }
+  /** Might be a branch; only the repo can say, so it's checked before it
+   *  becomes a chip. */
+  | { kind: 'branch'; name: string };
 
 /** `src/a.rs:42` / `src/a.rs:42:7` → path and line. */
 export function splitFileRef(ref: string): { path: string; line: number | null } {
@@ -74,6 +77,18 @@ function isSymbol(s: string): boolean {
   return s.endsWith('()') || /[a-z0-9]_[a-z0-9]/i.test(name) || /[a-z][A-Z]/.test(name);
 }
 
+const BASE_BRANCHES = new Set(['main', 'master', 'develop', 'dev', 'trunk', 'staging']);
+
+/** `feat/cli-oauth`, `origin/main`, `main`: shaped like a branch (and not a
+ *  file — those are caught first). */
+function isBranchLike(s: string): boolean {
+  if (BASE_BRANCHES.has(s)) return true;
+  // kebab-case (`rich-formatting`): a common branch shape.
+  if (/^[a-z0-9]+(?:-[a-z0-9]+)+$/.test(s) && s.length <= 60) return true;
+  if (s.length > 100 || !/^[A-Za-z0-9][\w.-]*(\/[\w.-]+)+$/.test(s)) return false;
+  return !s.includes('..') && !s.endsWith('.lock');
+}
+
 export function classifyInline(raw: string): InlineRef | null {
   const s = raw.trim();
   if (!s) return null;
@@ -85,6 +100,54 @@ export function classifyInline(raw: string): InlineRef | null {
   if (isColor(s)) return { kind: 'color', color: s };
   const keys = parseKeys(s);
   if (keys) return { kind: 'keys', keys };
+  if (isBranchLike(s)) return { kind: 'branch', name: s };
   if (isSymbol(s)) return { kind: 'symbol', name: s.replace(/\(\)$/, '') };
   return null;
+}
+
+/** What a bare URL is shown as: GitHub URLs by what they point at, others
+ *  as host and path, decoded and shortened in the middle. `kind` picks
+ *  the glyph shown after the site icon. */
+export type UrlLabel = { label: string; kind: 'branch' | 'file' | 'commit' | 'list' | 'repo' | 'page' };
+
+function middle(s: string, max: number): string {
+  return s.length <= max ? s : `${s.slice(0, Math.ceil(max * 0.6))}…${s.slice(s.length - Math.floor(max * 0.4) + 1)}`;
+}
+
+export function prettyUrl(href: string): UrlLabel | null {
+  let u: URL;
+  try {
+    u = new URL(href);
+  } catch {
+    return null;
+  }
+  const host = u.hostname.replace(/^www\./, '');
+  const parts = u.pathname.split('/').filter(Boolean).map((p) => {
+    try {
+      return decodeURIComponent(p);
+    } catch {
+      return p;
+    }
+  });
+  if (host === 'github.com' && parts.length >= 2) {
+    const repo = `${parts[0]}/${parts[1]}`;
+    const [, , kind, ...rest] = parts;
+    if (!kind) return { label: repo, kind: 'repo' };
+    if (kind === 'tree' && rest.length) return { label: `${repo} · ${rest.join('/')}`, kind: 'branch' };
+    if (kind === 'blob' && rest.length > 1) {
+      const line = /^#L(\d+)/.exec(u.hash)?.[1];
+      return { label: `${repo} · ${middle(rest.slice(1).join('/'), 40)}${line ? `:${line}` : ''}`, kind: 'file' };
+    }
+    if (kind === 'commit' && rest[0]) return { label: `${repo}@${rest[0].slice(0, 7)}`, kind: 'commit' };
+    if (kind === 'pulls' || kind === 'issues') {
+      const q = u.searchParams.get('q');
+      const branch = q && /head:([^\s]+)|branch:([^\s]+)/.exec(q);
+      const what = kind === 'pulls' ? 'pull requests' : 'issues';
+      return { label: `${repo} · ${what}${branch ? ` for ${branch[1] ?? branch[2]}` : ''}`, kind: 'list' };
+    }
+    if (kind === 'actions' && rest[0] === 'runs' && rest[1]) return { label: `${repo} · run ${rest[1]}`, kind: 'page' };
+    return { label: `${repo} · ${middle(rest.length ? `${kind}/${rest.join('/')}` : kind, 40)}`, kind: 'page' };
+  }
+  const path = parts.join('/');
+  return { label: middle(path ? `${host}/${path}` : host, 56), kind: 'page' };
 }

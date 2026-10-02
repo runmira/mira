@@ -5,8 +5,9 @@
  * quiet pill per kind, details on hover — so a dense answer stays
  * readable instead of turning into a wall of badges.
  */
-import { useState } from 'react';
-import { GitCommitHorizontal, Globe2, SquareFunction } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { FileCode2, GitBranch, GitCommitHorizontal, GitPullRequest, Globe2, ListFilter, SquareFunction, type LucideIcon } from 'lucide-react';
+import { prettyUrl } from '@/lib/refs';
 import { HoverCard } from '@/components/ui/hover-card';
 import { useFileIcons } from '@/lib/fileIcons';
 import { cn } from '@/lib/utils';
@@ -162,6 +163,103 @@ export function CommitChip({ sha }: { sha: string }) {
 }
 
 /* ---------------------------------------------------------------- */
+/* Branch                                                            */
+/* ---------------------------------------------------------------- */
+
+type Branch = {
+  name: string;
+  location: 'local' | 'remote';
+  current: boolean;
+  base: string | null;
+  ahead: number;
+  behind: number;
+  last_subject: string;
+  last_short: string;
+  last_author: string;
+  last_date: number;
+  pr?: { number: number; title: string; state: string; isDraft: boolean; url: string } | null;
+};
+
+const PR_TONE: Record<string, string> = { OPEN: 'text-emerald-400', MERGED: 'text-violet-400', CLOSED: 'text-red-400' };
+
+/** A branch name. Checked against the repo first: only a branch that
+ *  exists becomes a chip, so ordinary words in backticks stay plain. */
+export function BranchChip({ name, children }: { name: string; children: React.ReactNode }) {
+  const [exists, setExists] = useState<Branch | null | undefined>(undefined);
+  const [full, setFull] = useState<Branch | null | undefined>(undefined);
+  const q = `/api/git/branch?name=${encodeURIComponent(name)}`;
+  useEffect(() => {
+    let live = true;
+    void cached(`branch:${name}`, () => getJson<Branch>(q)).then((b) => live && setExists(b));
+    return () => {
+      live = false;
+    };
+  }, [name, q]);
+  if (!exists) return <code className="md-inline">{children}</code>;
+  const b = full ?? exists;
+  const load = () => {
+    if (full !== undefined) return;
+    void cached(`branch-pr:${name}`, () => getJson<Branch>(`${q}&pr=true`)).then((v) => setFull(v ?? exists));
+  };
+  return (
+    <HoverCard
+      onOpen={load}
+      trigger={
+        <span
+          tabIndex={0}
+          className="md-ref inline-flex items-baseline gap-1 rounded-md border border-[#73daca]/25 bg-[#73daca]/[0.08] px-1.5 py-px align-baseline font-mono text-[0.85em] text-[#73daca] outline-none focus-visible:ring-1 focus-visible:ring-[#73daca]/50"
+        >
+          <GitBranch className="size-3.5 shrink-0 translate-y-[2px]" />
+          {b.name}
+          {b.current && <span className="size-1.5 shrink-0 -translate-y-px self-center rounded-full bg-[#73daca]" title="Checked out" />}
+        </span>
+      }
+    >
+      <div>
+        <div className="flex items-center gap-1.5">
+          <GitBranch className="size-3.5 text-[#73daca]" />
+          <span className="min-w-0 flex-1 truncate font-mono text-[12.5px] font-semibold text-foreground">{b.name}</span>
+          {b.current && <span className="rounded-full bg-[#73daca]/15 px-1.5 py-0.5 text-[10.5px] font-medium text-[#73daca]">checked out</span>}
+          {b.location === 'remote' && <span className="rounded-full bg-white/[0.06] px-1.5 py-0.5 text-[10.5px] text-muted-foreground">origin only</span>}
+        </div>
+        {b.base && b.base !== b.name && (
+          <div className="mt-2 flex items-center gap-2 text-[11.5px] text-muted-foreground">
+            <span>
+              <span className="font-medium text-emerald-400">{b.ahead}</span> ahead ·{' '}
+              <span className="font-medium text-amber-300">{b.behind}</span> behind <span className="font-mono">{b.base}</span>
+            </span>
+          </div>
+        )}
+        <div className="mt-2 border-t border-border/50 pt-2">
+          <div className="truncate text-[12.5px] text-foreground/90">{b.last_subject}</div>
+          <div className="mt-0.5 flex gap-1.5 text-[11px] text-muted-foreground">
+            <span className="font-mono text-[#e0af68]">{b.last_short}</span>
+            <span className="truncate">{b.last_author}</span>
+            <span className="shrink-0">· {ago(b.last_date)}</span>
+          </div>
+        </div>
+        {full === undefined ? (
+          <div className="mt-2 text-[11px] text-muted-foreground/70">Looking for a pull request…</div>
+        ) : b.pr ? (
+          <a
+            href={b.pr.url}
+            target="_blank"
+            rel="noreferrer"
+            className="mt-2 flex items-center gap-1.5 rounded-md bg-white/[0.04] px-2 py-1.5 text-[12px] no-underline transition-colors hover:bg-white/[0.08]"
+          >
+            <GitPullRequest className={cn('size-3.5 shrink-0', b.pr.isDraft ? 'text-zinc-400' : (PR_TONE[b.pr.state] ?? 'text-muted-foreground'))} />
+            <span className="shrink-0 text-muted-foreground">#{b.pr.number}</span>
+            <span className="min-w-0 flex-1 truncate text-foreground/90">{b.pr.title}</span>
+          </a>
+        ) : (
+          <div className="mt-2 text-[11px] text-muted-foreground/70">No pull request</div>
+        )}
+      </div>
+    </HoverCard>
+  );
+}
+
+/* ---------------------------------------------------------------- */
 /* Color                                                             */
 /* ---------------------------------------------------------------- */
 
@@ -262,6 +360,15 @@ export function SymbolRef({ name, onOpen, children }: { name: string; onOpen?: O
 /* Link                                                              */
 /* ---------------------------------------------------------------- */
 
+const LINK_GLYPH: Record<string, LucideIcon | null> = {
+  branch: GitBranch,
+  file: FileCode2,
+  commit: GitCommitHorizontal,
+  list: ListFilter,
+  repo: null,
+  page: null,
+};
+
 type Preview = { url: string; title: string | null; description: string | null; image: string | null; site_name: string | null };
 
 /** An external link: the site's icon in front, and on hover a preview from
@@ -278,6 +385,10 @@ export function LinkRef({ href, children }: { href: string; children: React.Reac
   } catch {
     /* not absolute */
   }
+  // A bare URL (its own text) reads better as what it points at.
+  const bare = typeof children === 'string' ? children : Array.isArray(children) && children.length === 1 && typeof children[0] === 'string' ? children[0] : null;
+  const pretty = bare && (bare === href || bare === href.replace(/\/$/, '')) ? prettyUrl(href) : null;
+  const Glyph = pretty ? LINK_GLYPH[pretty.kind] : null;
   const load = () => {
     if (preview !== undefined || !origin) return;
     void cached(`unfurl:${href}`, () => getJson<Preview>(`/api/unfurl?url=${encodeURIComponent(href)}`)).then(setPreview);
@@ -288,20 +399,20 @@ export function LinkRef({ href, children }: { href: string; children: React.Reac
       disabled={!origin}
       className="w-[21rem] overflow-hidden p-0"
       trigger={
-        <a href={href} target="_blank" rel="noreferrer" className="md-link">
-          {origin &&
-            (iconFailed ? (
-              <Globe2 className="mr-1 inline size-3.5 -translate-y-px text-[#7dcfff]/70" />
-            ) : (
-              <img
-                src={`${origin}/favicon.ico`}
-                alt=""
-                referrerPolicy="no-referrer"
-                onError={() => setIconFailed(true)}
-                className="mr-1 inline size-3.5 -translate-y-px rounded-sm"
-              />
-            ))}
-          {children}
+        <a href={href} target="_blank" rel="noreferrer" className="md-link" title={href}>
+          {origin && (
+            // On a light tile: plenty of favicons (GitHub's among them) are
+            // dark glyphs that vanish on a dark background.
+            <span className="md-favicon" aria-hidden>
+              {iconFailed ? (
+                <Globe2 className="size-[11px] text-[#1a1b26]" />
+              ) : (
+                <img src={`${origin}/favicon.ico`} alt="" referrerPolicy="no-referrer" onError={() => setIconFailed(true)} />
+              )}
+            </span>
+          )}
+          {pretty && Glyph && <Glyph className="md-link-glyph" aria-hidden />}
+          {pretty ? pretty.label : children}
         </a>
       }
     >

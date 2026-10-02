@@ -712,3 +712,25 @@
 .md details > :not(summary) { margin-left: 0.8rem; margin-right: 0.8rem; }
 .md details > :nth-child(2) { margin-top: 0.6rem; }
 .md details > :last-child { margin-bottom: 0.7rem; }
+
+/* Site icon before a link: a small light tile, so dark favicons show, sat
+   on the text's middle rather than its baseline. */
+.md-favicon {
+  display: inline-grid;
+  place-items: center;
+  width: 15px;
+  height: 15px;
+  margin-right: 0.3rem;
+  border-radius: 4px;
+  background: #e6e9f2;
+  vertical-align: -2px;
+}
+.md-favicon img { width: 11px; height: 11px; border-radius: 2px; }
+.md-link-glyph {
+  display: inline-block;
+  width: 0.85em;
+  height: 0.85em;
+  margin-right: 0.25rem;
+  vertical-align: -0.1em;
+  opacity: 0.75;
+}
