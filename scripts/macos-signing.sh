@@ -286,10 +286,20 @@ cmd_ci_secrets() {
   echo >&2
   # The certificate inside must be the one this Mac signs with: an "Apple
   # Development" certificate exports just as happily and fails only in CI.
-  local inside
-  inside="$(P12_PASSWORD="$p12_password" openssl pkcs12 -in "$p12" -nokeys -passin env:P12_PASSWORD 2>/dev/null \
-    | sed -n 's/^subject=.*CN *= *\([^,/]*\).*/\1/p' | head -1)"
-  [ -n "$inside" ] || die "couldn't open $p12 (wrong password, or not a .p12)"
+  # Read it with Apple's own tools (a throwaway keychain): macOS's openssl
+  # can't open the encryption newer Keychain Access exports use.
+  local probe probe_pw inside
+  probe="$(mktemp -d)/probe.keychain-db"
+  probe_pw="$(openssl rand -hex 16)"
+  security create-keychain -p "$probe_pw" "$probe" >/dev/null 2>&1
+  if ! security import "$p12" -k "$probe" -P "$p12_password" -f pkcs12 >/dev/null 2>&1; then
+    security delete-keychain "$probe" >/dev/null 2>&1 || true
+    die "couldn't open $p12: wrong password, or not a .p12"
+  fi
+  inside="$(security find-identity -p codesigning "$probe" 2>/dev/null \
+    | sed -n 's/^ *[0-9]*) [0-9A-F]* "\(.*\)".*$/\1/p' | head -1 || true)"
+  security delete-keychain "$probe" >/dev/null 2>&1 || true
+  [ -n "$inside" ] || die "$p12 has no signing identity (export the certificate with its private key)"
   [ "$inside" = "$APPLE_SIGNING_IDENTITY" ] || die "$p12 holds \"$inside\", not \"$APPLE_SIGNING_IDENTITY\".
   In Keychain Access → My Certificates, export the one named \"$APPLE_SIGNING_IDENTITY\""
   ok "certificate: $inside"
