@@ -399,6 +399,9 @@ fn start_server(app: &AppHandle) -> Result<tauri::Url, String> {
         .current_dir(home_dir())
         .envs(login_shell_env())
         .envs(bundled_chromium(app).map(|d| ("MIRA_BUNDLED_CHROMIUM", d)))
+        // The app doesn't ship a browser (it would quadruple the download):
+        // the server fetches Mira's own in the background at launch instead.
+        .env("MIRA_PREFETCH_BROWSER", "1")
         .stdin(Stdio::null())
         .stdout(log)
         .stderr(log_err);

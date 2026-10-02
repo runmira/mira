@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Build the Mira desktop app (apps/desktop).
 #
-#   scripts/build-desktop.sh           # release bundle (.app/.dmg, .msi, .deb/.AppImage),
-#                                      # with Mira's Chromium inside (see fetch-chromium.sh)
+#   scripts/build-desktop.sh           # release bundle (.app/.dmg, .msi, .deb/.AppImage);
+#                                      # MIRA_BUNDLE_CHROMIUM=1 also ships Mira's browser inside
 #   scripts/build-desktop.sh --dev     # run the app from source with a debug server
 #   scripts/build-desktop.sh --sidecar # only build + stage the bundled `mira`
 #
@@ -114,12 +114,14 @@ case "$MODE" in
     # downloads (`<App>.app.tar.gz` + `.sig`).
     [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ] || TAURI_ARGS+=(--config '{"bundle":{"createUpdaterArtifacts":true}}')
 
-    # Ship Mira's browser in the bundle so it works on first run, offline.
-    # macOS goes through `macOS.files`, which copies directories with their
+    # Mira's browser isn't bundled: it's 360 MB, three quarters of the app.
+    # The app has its server fetch it in the background at first launch
+    # instead (MIRA_PREFETCH_BROWSER), so it's ready long before it's used.
+    # MIRA_BUNDLE_CHROMIUM=1 ships it inside for offline installs. macOS
+    # goes through `macOS.files`, which copies directories with their
     # symlinks intact; `resources` would flatten them and break Chrome's
-    # framework. MIRA_NO_BUNDLED_CHROMIUM=1 skips it (~350 MB smaller app;
-    # the browser then downloads on first use).
-    if [ -z "${MIRA_NO_BUNDLED_CHROMIUM:-}" ]; then
+    # framework.
+    if [ -n "${MIRA_BUNDLE_CHROMIUM:-}" ]; then
       "$ROOT/scripts/fetch-chromium.sh" "$DESKTOP/chromium" "$TRIPLE"
       if [ -f "$DESKTOP/chromium/current" ]; then
         CHROMIUM_DIR=chromium

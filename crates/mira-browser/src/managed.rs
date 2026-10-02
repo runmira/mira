@@ -172,6 +172,25 @@ pub async fn ensure() -> Result<PathBuf, BrowserError> {
     install(&root, platform).await.map(|(_, exe)| exe)
 }
 
+/// Install the managed browser in the background if it isn't yet, so it's
+/// ready before the first time it's needed. The desktop app asks for this
+/// at launch (`MIRA_PREFETCH_BROWSER`) instead of shipping a copy that
+/// would quadruple its download. A failure is left for [`ensure`] to retry
+/// when the browser is actually used.
+pub fn prefetch() {
+    if root().is_none() || platform().is_none() || installed().is_some() {
+        return;
+    }
+    tokio::spawn(async {
+        match ensure().await {
+            Ok(exe) => tracing::info!(exe = %exe.display(), "Mira's browser is installed"),
+            Err(e) => {
+                tracing::warn!(%e, "couldn't prefetch Mira's browser; it installs on first use")
+            }
+        }
+    });
+}
+
 /// Fetch the current Stable, unless it's the one already in use. Returns
 /// its version and binary.
 async fn install(root: &Path, platform: &str) -> Result<(String, PathBuf), BrowserError> {
