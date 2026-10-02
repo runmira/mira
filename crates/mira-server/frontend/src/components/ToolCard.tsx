@@ -961,13 +961,13 @@ function LiveOutputPanel({
     <div
       className={cn(
         'ml-6 mt-0.5 rounded-md border font-mono text-[11.5px] leading-[1.55]',
-        'border-border/30 bg-[#1a1b1e]',
+        'border-border/30 bg-[#f6f7f9] dark:bg-[#1a1b1e]',
         expanded ? 'max-h-[40vh]' : 'max-h-[8rem]',
         'overflow-auto',
       )}
     >
       {/* Header strip */}
-      <div className="sticky top-0 flex items-center gap-2 border-b border-border/20 bg-[#141416] px-3 py-1">
+      <div className="sticky top-0 flex items-center gap-2 border-b border-border/20 bg-[#eef0f3] dark:bg-[#141416] px-3 py-1">
         <span
           className={cn(
             'size-1.5 rounded-full',
@@ -993,7 +993,7 @@ function LiveOutputPanel({
         {visibleLines.map((line, i) => (
           <div
             key={i}
-            className="whitespace-pre-wrap break-all text-[#abb2bf]"
+            className="whitespace-pre-wrap break-all text-[#24292f] dark:text-[#abb2bf]"
           >
             {line || <span className="text-transparent">{'.'}</span>}
           </div>

@@ -35,7 +35,7 @@ export function GetStarted({
       </p>
 
       <div className="mt-5 grid gap-3 sm:grid-cols-2">
-        <div className="flex flex-col rounded-xl border border-border/70 bg-white/[0.025] p-4">
+        <div className="flex flex-col rounded-xl border border-border/70 bg-fg/[0.025] p-4">
           <div className="flex items-center gap-2 text-[13px] font-medium text-foreground">
             <Terminal className="size-4 text-mira-blue" />
             An agent you already use
@@ -75,7 +75,7 @@ export function GetStarted({
           </div>
         </div>
 
-        <div className="flex flex-col rounded-xl border border-border/70 bg-white/[0.025] p-4">
+        <div className="flex flex-col rounded-xl border border-border/70 bg-fg/[0.025] p-4">
           <div className="flex items-center gap-2 text-[13px] font-medium text-foreground">
             <KeyRound className="size-4 text-amber-400" />
             Your own API key

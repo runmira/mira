@@ -60,20 +60,20 @@ export function FileChip({ path, line, onOpen }: { path: string; line: number | 
       {icon ? (
         <img src={icon} alt="" draggable={false} className="size-3.5 shrink-0 self-center" />
       ) : null}
-      {dir && <span className="max-w-[18ch] truncate text-[#7f88b0]">{dir}</span>}
-      <span className="text-[#c0caf5]">{name}</span>
-      {line != null && <span className="text-[#e0af68]">:{line}</span>}
+      {dir && <span className="max-w-[18ch] truncate text-muted-foreground dark:text-[#7f88b0]">{dir}</span>}
+      <span className="text-foreground/90 dark:text-[#c0caf5]">{name}</span>
+      {line != null && <span className="text-amber-700 dark:text-[#e0af68]">:{line}</span>}
     </>
   );
   const cls =
-    'md-ref inline-flex max-w-full items-baseline gap-1 rounded-md border border-[#7aa2f7]/20 bg-[#7aa2f7]/[0.08] px-1.5 py-px align-baseline font-mono text-[0.85em]';
+    'md-ref inline-flex max-w-full items-baseline gap-1 rounded-md border border-mira-blue/20 bg-mira-blue/[0.08] px-1.5 py-px align-baseline font-mono text-[0.85em]';
   if (!onOpen) return <span className={cls} title={path}>{label}</span>;
   return (
     <button
       type="button"
       title={line != null ? `Open ${path} at line ${line}` : `Open ${path}`}
       onClick={() => onOpen(path, line)}
-      className={cn(cls, 'cursor-pointer transition-colors hover:border-[#7aa2f7]/45 hover:bg-[#7aa2f7]/[0.14]')}
+      className={cn(cls, 'cursor-pointer transition-colors hover:border-mira-blue/45 hover:bg-mira-blue/[0.14]')}
     >
       {label}
     </button>
@@ -109,7 +109,7 @@ export function CommitChip({ sha }: { sha: string }) {
       trigger={
         <span
           tabIndex={0}
-          className="md-ref inline-flex items-baseline gap-1 rounded-md border border-[#e0af68]/25 bg-[#e0af68]/[0.08] px-1.5 py-px align-baseline font-mono text-[0.85em] text-[#e0af68] outline-none focus-visible:ring-1 focus-visible:ring-[#e0af68]/50"
+          className="md-ref inline-flex items-baseline gap-1 rounded-md border border-amber-600/30 dark:border-[#e0af68]/25 bg-[#e0af68]/[0.08] px-1.5 py-px align-baseline font-mono text-[0.85em] text-amber-700 dark:text-[#e0af68] outline-none focus-visible:ring-1 focus-visible:ring-[#e0af68]/50"
         >
           <GitCommitHorizontal className="size-3.5 shrink-0 translate-y-[2px]" />
           {sha.slice(0, 7)}
@@ -119,7 +119,7 @@ export function CommitChip({ sha }: { sha: string }) {
       {commit ? (
         <div>
           <div className="flex items-center gap-2 text-[11.5px] text-muted-foreground">
-            <span className="font-mono text-[#e0af68]">{commit.short}</span>
+            <span className="font-mono text-amber-700 dark:text-[#e0af68]">{commit.short}</span>
             <span className="min-w-0 flex-1 truncate">{commit.author}</span>
             <span className="shrink-0">{ago(commit.date)}</span>
           </div>
@@ -142,7 +142,7 @@ export function CommitChip({ sha }: { sha: string }) {
                     <span className="shrink-0 tabular-nums text-emerald-400">+{a}</span>
                     <span className="shrink-0 tabular-nums text-red-400">−{r}</span>
                     {/* Proportion bar, GitHub-style. */}
-                    <span className="flex h-1.5 w-12 shrink-0 overflow-hidden rounded-full bg-white/[0.06]">
+                    <span className="flex h-1.5 w-12 shrink-0 overflow-hidden rounded-full bg-fg/[0.06]">
                       <span className="bg-emerald-400/80" style={{ width: `${(a / max) * 100}%` }} />
                       <span className="bg-red-400/80" style={{ width: `${(r / max) * 100}%` }} />
                     </span>
@@ -208,20 +208,20 @@ export function BranchChip({ name, children }: { name: string; children: React.R
         // No chip background: a filled teal pill fought the prose around it.
         <span
           tabIndex={0}
-          className="md-ref inline-flex items-baseline gap-1 align-baseline font-mono text-[0.88em] text-[#73daca] decoration-[#73daca]/60 decoration-dotted underline-offset-[3px] outline-none hover:underline focus-visible:underline"
+          className="md-ref inline-flex items-baseline gap-1 align-baseline font-mono text-[0.88em] text-teal-700 dark:text-[#73daca] decoration-[#73daca]/60 decoration-dotted underline-offset-[3px] outline-none hover:underline focus-visible:underline"
         >
           <GitBranch className="size-3.5 shrink-0 translate-y-[2px]" />
           {b.name}
-          {b.current && <span className="size-1.5 shrink-0 -translate-y-px self-center rounded-full bg-[#73daca]" title="Checked out" />}
+          {b.current && <span className="size-1.5 shrink-0 -translate-y-px self-center rounded-full bg-teal-600 dark:bg-[#73daca]" title="Checked out" />}
         </span>
       }
     >
       <div>
         <div className="flex items-center gap-1.5">
-          <GitBranch className="size-3.5 text-[#73daca]" />
+          <GitBranch className="size-3.5 text-teal-700 dark:text-[#73daca]" />
           <span className="min-w-0 flex-1 truncate font-mono text-[12.5px] font-semibold text-foreground">{b.name}</span>
-          {b.current && <span className="rounded-full bg-[#73daca]/15 px-1.5 py-0.5 text-[10.5px] font-medium text-[#73daca]">checked out</span>}
-          {b.location === 'remote' && <span className="rounded-full bg-white/[0.06] px-1.5 py-0.5 text-[10.5px] text-muted-foreground">origin only</span>}
+          {b.current && <span className="rounded-full bg-teal-600/15 dark:bg-teal-600 dark:bg-[#73daca]/15 px-1.5 py-0.5 text-[10.5px] font-medium text-teal-700 dark:text-[#73daca]">checked out</span>}
+          {b.location === 'remote' && <span className="rounded-full bg-fg/[0.06] px-1.5 py-0.5 text-[10.5px] text-muted-foreground">origin only</span>}
         </div>
         {b.base && b.base !== b.name && (
           <div className="mt-2 flex items-center gap-2 text-[11.5px] text-muted-foreground">
@@ -234,7 +234,7 @@ export function BranchChip({ name, children }: { name: string; children: React.R
         <div className="mt-2 border-t border-border/50 pt-2">
           <div className="truncate text-[12.5px] text-foreground/90">{b.last_subject}</div>
           <div className="mt-0.5 flex gap-1.5 text-[11px] text-muted-foreground">
-            <span className="font-mono text-[#e0af68]">{b.last_short}</span>
+            <span className="font-mono text-amber-700 dark:text-[#e0af68]">{b.last_short}</span>
             <span className="truncate">{b.last_author}</span>
             <span className="shrink-0">· {ago(b.last_date)}</span>
           </div>
@@ -246,7 +246,7 @@ export function BranchChip({ name, children }: { name: string; children: React.R
             href={b.pr.url}
             target="_blank"
             rel="noreferrer"
-            className="mt-2 flex items-center gap-1.5 rounded-md bg-white/[0.04] px-2 py-1.5 text-[12px] no-underline transition-colors hover:bg-white/[0.08]"
+            className="mt-2 flex items-center gap-1.5 rounded-md bg-fg/[0.04] px-2 py-1.5 text-[12px] no-underline transition-colors hover:bg-fg/[0.08]"
           >
             <GitPullRequest className={cn('size-3.5 shrink-0', b.pr.isDraft ? 'text-zinc-400' : (PR_TONE[b.pr.state] ?? 'text-muted-foreground'))} />
             <span className="shrink-0 text-muted-foreground">#{b.pr.number}</span>
@@ -269,7 +269,7 @@ export function ColorChip({ color, children }: { color: string; children: React.
     <code className="md-inline inline-flex items-baseline gap-1.5">
       <span
         aria-hidden
-        className="inline-block size-[0.8em] shrink-0 translate-y-[1px] rounded-[3px] ring-1 ring-white/25"
+        className="inline-block size-[0.8em] shrink-0 translate-y-[1px] rounded-[3px] ring-1 ring-fg/25"
         // A checkerboard under the color, so translucent colors read as such.
         style={{
           background: `linear-gradient(${color}, ${color}), repeating-conic-gradient(#808080 0 25%, #c0c0c0 0 50%) 0 0 / 6px 6px`,
@@ -332,7 +332,7 @@ export function SymbolRef({ name, onOpen, children }: { name: string; onOpen?: O
       {found ? (
         <div>
           <div className="mb-1.5 flex items-center gap-1.5 text-[11.5px] text-muted-foreground">
-            <SquareFunction className="size-3.5 text-[#bb9af7]" />
+            <SquareFunction className="size-3.5 text-mira-purple" />
             {hits!.length === 1 ? 'Defined in' : `${hits!.length} definitions`}
           </div>
           <div className="space-y-1">
@@ -341,11 +341,11 @@ export function SymbolRef({ name, onOpen, children }: { name: string; onOpen?: O
                 key={`${h.path}:${h.line}`}
                 type="button"
                 onClick={() => onOpen?.(h.path, h.line)}
-                className="block w-full rounded-md px-1.5 py-1 text-left transition-colors hover:bg-white/[0.06]"
+                className="block w-full rounded-md px-1.5 py-1 text-left transition-colors hover:bg-fg/[0.06]"
               >
-                <div className="truncate font-mono text-[11px] text-[#7f88b0]">
+                <div className="truncate font-mono text-[11px] text-muted-foreground dark:text-[#7f88b0]">
                   {h.path}
-                  <span className="text-[#e0af68]">:{h.line}</span>
+                  <span className="text-amber-700 dark:text-[#e0af68]">:{h.line}</span>
                 </div>
                 <div className="truncate font-mono text-[11.5px] text-foreground/85">{h.preview}</div>
               </button>

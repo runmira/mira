@@ -17,6 +17,7 @@ import {
   type ReactNode,
 } from 'react';
 import { resolveDiffThemeName, type DiffThemeName } from '@/lib/diffRender';
+import { useTheme } from '@/lib/theme';
 
 const DIFF_WORKER_IDLE_TTL_MS = 30_000;
 let sharedWorkerPool:
@@ -117,8 +118,8 @@ function DiffWorkerReady({ children }: { children?: ReactNode }) {
 }
 
 export function DiffWorkerPoolProvider({ children }: { children?: ReactNode }) {
-  // Mira is dark-only.
-  const diffThemeName = resolveDiffThemeName('dark');
+  // Follows the app theme; DiffWorkerThemeSync re-renders open diffs.
+  const diffThemeName = resolveDiffThemeName(useTheme());
   const workerPoolSize = useMemo(() => {
     const cores =
       typeof navigator === 'undefined' ? 4 : Math.max(1, navigator.hardwareConcurrency || 4);

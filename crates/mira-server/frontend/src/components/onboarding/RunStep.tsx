@@ -64,7 +64,7 @@ function CopyLine({ text }: { text: string }) {
     <button
       type="button"
       onClick={() => void navigator.clipboard.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1200); })}
-      className="group mt-2 flex w-full items-center gap-2 rounded-lg border border-white/[0.06] bg-black/40 px-2.5 py-1.5 text-left font-mono text-[11px] text-foreground/75 transition-colors hover:text-foreground"
+      className="group mt-2 flex w-full items-center gap-2 rounded-lg border border-fg/[0.06] bg-shade/40 px-2.5 py-1.5 text-left font-mono text-[11px] text-foreground/75 transition-colors hover:text-foreground"
       title="Copy"
     >
       <span className="min-w-0 flex-1 truncate">{text}</span>
@@ -171,7 +171,7 @@ export function RunStep({ onNext, onBack }: { onNext: () => void; onBack?: () =>
               agents.map((a) => {
                 const st = agentStatus(a);
                 return (
-                  <div key={a.instance} className="rounded-xl border border-white/[0.07] bg-black/30 px-3 py-2.5">
+                  <div key={a.instance} className="rounded-xl border border-fg/[0.07] bg-shade/30 px-3 py-2.5">
                     <div className="flex items-center gap-2.5">
                       <AgentIcon kind={a.driver} name={a.display_name} size="sm" />
                       <span className="min-w-0 flex-1">
@@ -186,9 +186,9 @@ export function RunStep({ onNext, onBack }: { onNext: () => void; onBack?: () =>
                         className={cn(
                           'shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium',
                           st === 'ready' && 'bg-emerald-500/12 text-emerald-400',
-                          st === 'missing' && 'bg-white/[0.06] text-muted-foreground',
+                          st === 'missing' && 'bg-fg/[0.06] text-muted-foreground',
                           st === 'problem' && 'bg-amber-500/12 text-amber-300',
-                          st === 'checking' && 'bg-white/[0.06] text-muted-foreground',
+                          st === 'checking' && 'bg-fg/[0.06] text-muted-foreground',
                         )}
                       >
                         {st === 'ready' ? 'Ready' : st === 'missing' ? 'Not installed' : st === 'checking' ? 'Checking…' : 'Needs attention'}
@@ -236,7 +236,7 @@ export function RunStep({ onNext, onBack }: { onNext: () => void; onBack?: () =>
                     'flex items-center gap-2 rounded-xl border px-2.5 py-2 text-left transition-colors',
                     picked === name
                       ? 'border-amber-400/60 bg-amber-400/[0.08] shadow-[0_0_0_3px_rgba(251,191,36,0.1)]'
-                      : 'border-white/[0.07] bg-black/30 hover:border-white/[0.16] hover:bg-white/[0.04]',
+                      : 'border-fg/[0.07] bg-shade/30 hover:border-fg/[0.16] hover:bg-fg/[0.04]',
                   )}
                 >
                   <ProviderIcon instance={name} name={PROVIDER_LABEL[name]} size="xs" />
@@ -250,7 +250,7 @@ export function RunStep({ onNext, onBack }: { onNext: () => void; onBack?: () =>
             })}
           </div>
           {picked && (
-            <div className="onb-in mt-3 rounded-xl border border-white/[0.07] bg-black/30 p-3">
+            <div className="onb-in mt-3 rounded-xl border border-fg/[0.07] bg-shade/30 p-3">
               {picked === 'ollama' ? (
                 <p className="text-[12px] leading-relaxed text-muted-foreground">
                   Uses Ollama running on this computer at <span className="font-mono text-foreground/80">localhost:11434</span>. No key needed.

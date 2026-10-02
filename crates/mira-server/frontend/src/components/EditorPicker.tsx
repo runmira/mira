@@ -53,7 +53,7 @@ export function EditorIcon({
     <span
       className={cn(
         'inline-flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-lg',
-        'bg-white/[0.04] ring-1 ring-white/10',
+        'bg-fg/[0.04] ring-1 ring-fg/10',
         className,
       )}
     >
@@ -114,7 +114,7 @@ export function EditorPicker({ cwd, onOpenSettings }: { cwd: string; onOpenSetti
           aria-label="Open session folder in an editor"
           className="group flex h-8 shrink-0 items-center gap-1 rounded-lg border border-border/60 bg-secondary/40 py-1 pl-1 pr-1.5 transition-colors hover:border-border hover:bg-secondary"
         >
-          <span className="inline-flex size-6 items-center justify-center overflow-hidden rounded-md bg-white/[0.04] ring-1 ring-white/10">
+          <span className="inline-flex size-6 items-center justify-center overflow-hidden rounded-md bg-fg/[0.04] ring-1 ring-fg/10">
             {current ? (
               <EditorIcon entry={current} className="size-[18px]" />
             ) : (
@@ -163,7 +163,7 @@ export function EditorPicker({ cwd, onOpenSettings }: { cwd: string; onOpenSetti
                 )}
               >
                 {busy ? (
-                  <span className="inline-flex size-8 shrink-0 items-center justify-center rounded-lg bg-white/[0.04] ring-1 ring-white/10">
+                  <span className="inline-flex size-8 shrink-0 items-center justify-center rounded-lg bg-fg/[0.04] ring-1 ring-fg/10">
                     <LoaderCircle className="size-4 animate-spin text-muted-foreground" />
                   </span>
                 ) : (

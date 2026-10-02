@@ -93,7 +93,7 @@ export function RevertButton({
                   type="button"
                   disabled={busy}
                   onClick={() => setConfirm(null)}
-                  className="rounded-md px-2 py-1 text-[12px] text-muted-foreground hover:bg-white/[0.05]"
+                  className="rounded-md px-2 py-1 text-[12px] text-muted-foreground hover:bg-fg/[0.05]"
                 >
                   Cancel
                 </button>
@@ -114,7 +114,7 @@ export function RevertButton({
                   key={t.turn}
                   type="button"
                   onClick={() => setConfirm(t)}
-                  className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-white/[0.05]"
+                  className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-fg/[0.05]"
                 >
                   <span className="shrink-0 rounded bg-muted/70 px-1.5 py-px font-mono text-[10.5px] text-muted-foreground">
                     {t.turn}

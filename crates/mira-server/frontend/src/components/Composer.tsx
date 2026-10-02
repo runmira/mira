@@ -839,7 +839,7 @@ export function Composer({
               <button
                 type="button"
                 onClick={onInterrupt}
-                className="flex size-8 items-center justify-center rounded-full bg-mira-error text-[#0e1013] transition-colors hover:brightness-110"
+                className="flex size-8 items-center justify-center rounded-full bg-mira-error text-mira-on-accent transition-colors hover:brightness-110"
                 title="Stop"
                 aria-label="Stop"
               >
@@ -929,8 +929,8 @@ function SlashPalette({
     <div
       className={cn(
         'absolute bottom-full left-0 right-0 z-10 mb-2 mx-auto max-w-xl overflow-hidden',
-        'rounded-2xl border border-white/[0.07] bg-[#1f2024]/95 backdrop-blur-md',
-        'shadow-[0_20px_50px_-16px_rgba(0,0,0,0.85)] ring-1 ring-black/40',
+        'rounded-2xl border border-fg/[0.07] bg-popover/95 dark:bg-[#1f2024]/95 backdrop-blur-md',
+        'shadow-[0_20px_50px_-16px_rgba(0,0,0,0.85)] ring-1 ring-shade/40',
         'animate-fade-in',
       )}
       role="listbox"
@@ -942,7 +942,7 @@ function SlashPalette({
               <div
                 className={cn(
                   'flex items-center gap-2 px-4 pb-1 pt-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/70',
-                  gi > 0 && 'mt-1 border-t border-white/[0.05]',
+                  gi > 0 && 'mt-1 border-t border-fg/[0.05]',
                 )}
               >
                 {g.origin && <OriginIcon origin={g.origin} />}
@@ -966,7 +966,7 @@ function SlashPalette({
                   aria-selected={active}
                   className={cn(
                     'flex w-full items-baseline gap-3 px-4 py-1.5 text-left transition-colors',
-                    active ? 'bg-white/[0.06]' : 'hover:bg-white/[0.035]',
+                    active ? 'bg-fg/[0.06]' : 'hover:bg-fg/[0.035]',
                   )}
                 >
                   <Icon
@@ -992,7 +992,7 @@ function SlashPalette({
                     {cmd.description}
                   </span>
                   {cmd.kindLabel && (
-                    <span className="shrink-0 self-center rounded border border-white/[0.08] px-1.5 text-[10px] uppercase tracking-wide text-muted-foreground/70">
+                    <span className="shrink-0 self-center rounded border border-fg/[0.08] px-1.5 text-[10px] uppercase tracking-wide text-muted-foreground/70">
                       {cmd.kindLabel}
                     </span>
                   )}
@@ -1018,7 +1018,7 @@ function OriginIcon({ origin, fallback }: { origin: Origin; fallback?: SlashComm
     return <F className="size-3.5 shrink-0 text-muted-foreground" />;
   }
   return (
-    <span className="flex size-3.5 shrink-0 items-center justify-center rounded-[3px] bg-white/10 text-[9px] font-semibold text-foreground/80">
+    <span className="flex size-3.5 shrink-0 items-center justify-center rounded-[3px] bg-fg/10 text-[9px] font-semibold text-foreground/80">
       {origin.label.charAt(0).toUpperCase()}
     </span>
   );
@@ -2195,7 +2195,7 @@ function EmbeddedAskUserCard({
                 onClick={() => toggleOption(opt.label)}
                 className={cn(
                   'group flex items-start gap-3 rounded-xl px-3 py-2.5 text-left transition-colors',
-                  active ? 'bg-white text-black' : 'bg-secondary/40 hover:bg-secondary/60',
+                  active ? 'bg-foreground text-background' : 'bg-secondary/40 hover:bg-secondary/60',
                 )}
               >
                 <span
@@ -2210,17 +2210,17 @@ function EmbeddedAskUserCard({
                 </span>
                 <div className="flex min-w-0 flex-1 flex-col gap-0.5">
                   <div className="flex items-center gap-1.5">
-                    <span className={cn('text-[13px] font-medium', active ? 'text-black' : 'text-foreground')}>
+                    <span className={cn('text-[13px] font-medium', active ? 'text-background' : 'text-foreground')}>
                       {opt.label}
                     </span>
                     {opt.recommended && (
-                      <span className={cn('text-[10px] font-medium uppercase tracking-wider', active ? 'text-black/60' : 'text-muted-foreground/80')}>
+                      <span className={cn('text-[10px] font-medium uppercase tracking-wider', active ? 'text-shade/60' : 'text-muted-foreground/80')}>
                         · Recommended
                       </span>
                     )}
                   </div>
                   {opt.description && (
-                    <span className={cn('text-[11.5px] leading-snug', active ? 'text-black/70' : 'text-muted-foreground')}>
+                    <span className={cn('text-[11.5px] leading-snug', active ? 'text-shade/70' : 'text-muted-foreground')}>
                       {opt.description}
                     </span>
                   )}

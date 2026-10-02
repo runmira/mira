@@ -378,7 +378,7 @@ export function Sidebar({
               to keep the wallpaper from muddying the label, and a hairline.
               The selected half is near-opaque so the active tab is
               unambiguous without relying on colour alone. */}
-          <div className="grid grid-cols-2 gap-0.5 rounded-full border border-border/80 bg-black/25 p-0.5 backdrop-blur-md">
+          <div className="grid grid-cols-2 gap-0.5 rounded-full border border-border/80 bg-shade/25 p-0.5 backdrop-blur-md">
             <span className="rounded-full bg-foreground/90 px-3.5 py-1 text-center text-[12.5px] font-medium text-background">
               Chat
             </span>
@@ -423,8 +423,8 @@ export function Sidebar({
                   className={cn(
                     'flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[13.5px] transition-colors',
                     active
-                      ? 'bg-white/[0.1] text-foreground'
-                      : 'text-foreground/80 hover:bg-white/[0.05] hover:text-foreground',
+                      ? 'bg-fg/[0.1] text-foreground'
+                      : 'text-foreground/80 hover:bg-fg/[0.05] hover:text-foreground',
                   )}
                 >
                   <Icon className={cn('size-4 shrink-0', active ? 'text-mira-blue' : 'text-muted-foreground')} />
@@ -491,7 +491,7 @@ export function Sidebar({
                   type="button"
                   onClick={() => void bulkArchive()}
                   disabled={bulkBusy || selected.size === 0}
-                  className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[12px] text-foreground/85 transition-colors hover:bg-white/[0.05] hover:text-foreground disabled:opacity-40"
+                  className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[12px] text-foreground/85 transition-colors hover:bg-fg/[0.05] hover:text-foreground disabled:opacity-40"
                 >
                   <Archive className="size-3.5" /> Archive
                 </button>
@@ -508,7 +508,7 @@ export function Sidebar({
                   onClick={toggleSelectMode}
                   disabled={bulkBusy}
                   title="Cancel selection"
-                  className="inline-flex items-center rounded-md p-1 text-muted-foreground transition-colors hover:bg-white/[0.05] hover:text-foreground disabled:opacity-40"
+                  className="inline-flex items-center rounded-md p-1 text-muted-foreground transition-colors hover:bg-fg/[0.05] hover:text-foreground disabled:opacity-40"
                 >
                   <X className="size-3.5" />
                 </button>
@@ -528,7 +528,7 @@ export function Sidebar({
             return (
               <div key={g.cwd} className="flex flex-col">
                 <div
-                  className="group flex items-center gap-1.5 rounded-md px-2 py-1 text-[14.5px] font-semibold text-foreground/90 transition-colors hover:bg-white/[0.05] hover:text-foreground"
+                  className="group flex items-center gap-1.5 rounded-md px-2 py-1 text-[14.5px] font-semibold text-foreground/90 transition-colors hover:bg-fg/[0.05] hover:text-foreground"
                   title={g.cwd}
                 >
                   <button
@@ -633,7 +633,7 @@ export function Sidebar({
               <button
                 type="button"
                 onClick={() => setShowArchived((v) => !v)}
-                className="flex items-center gap-1.5 rounded-md px-2 py-1 text-[11.5px] font-semibold uppercase tracking-wider text-muted-foreground/80 transition-colors hover:bg-white/[0.05] hover:text-foreground"
+                className="flex items-center gap-1.5 rounded-md px-2 py-1 text-[11.5px] font-semibold uppercase tracking-wider text-muted-foreground/80 transition-colors hover:bg-fg/[0.05] hover:text-foreground"
               >
                 {showArchived ? (
                   <ChevronDown className="size-3 shrink-0 text-muted-foreground/60" />
@@ -775,12 +775,12 @@ function SessionRow({
         'group grid w-full cursor-pointer items-center gap-1.5 rounded-lg px-2 py-2 transition-colors',
         selecting ? 'grid-cols-[auto_1fr_auto] cursor-pointer' : 'grid-cols-[1fr_auto]',
         selecting && checked
-          ? 'bg-white/[0.1] text-foreground'
+          ? 'bg-fg/[0.1] text-foreground'
           // Same active treatment as the nav items (New thread / PR /
           // Plugins / Scheduled): 10% white band, full foreground.
           : active
-            ? 'bg-white/[0.1] text-foreground'
-            : 'text-foreground/90 hover:bg-white/[0.05] hover:text-foreground',
+            ? 'bg-fg/[0.1] text-foreground'
+            : 'text-foreground/90 hover:bg-fg/[0.05] hover:text-foreground',
       )}
     >
       {selecting && (
@@ -935,7 +935,7 @@ function ArchivedRow({
   return (
     <div
       title="Restore to the list"
-      className="group grid w-full grid-cols-[1fr_auto] items-start gap-1.5 rounded-lg px-2 py-1.5 text-foreground/70 transition-colors hover:bg-white/[0.05] hover:text-foreground"
+      className="group grid w-full grid-cols-[1fr_auto] items-start gap-1.5 rounded-lg px-2 py-1.5 text-foreground/70 transition-colors hover:bg-fg/[0.05] hover:text-foreground"
     >
       <button type="button" onClick={onRestore} className="flex min-w-0 items-baseline gap-1.5 text-left">
         <span className="min-w-0 flex-1 truncate text-[13.5px] leading-tight font-medium">
@@ -1227,8 +1227,8 @@ function NavItem({
         disabled
           ? 'text-muted-foreground/40 cursor-not-allowed'
           : active
-            ? 'bg-white/[0.1] text-foreground'
-            : 'text-foreground hover:bg-white/[0.05]',
+            ? 'bg-fg/[0.1] text-foreground'
+            : 'text-foreground hover:bg-fg/[0.05]',
       )}
     >
       <span
@@ -1387,7 +1387,7 @@ function RowMenu({ items }: { items: RowMenuItem[] }) {
           aria-label="Row menu"
           onClick={(e) => e.stopPropagation()}
           className={cn(
-            'shrink-0 rounded-sm p-0.5 text-muted-foreground/60 transition-opacity hover:bg-white/[0.05] hover:text-foreground',
+            'shrink-0 rounded-sm p-0.5 text-muted-foreground/60 transition-opacity hover:bg-fg/[0.05] hover:text-foreground',
             open ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus:opacity-100',
           )}
         >
@@ -1408,7 +1408,7 @@ function RowMenu({ items }: { items: RowMenuItem[] }) {
               <button
                 type="button"
                 onClick={() => setConfirming(null)}
-                className="rounded-md px-2 py-1 text-[12px] text-muted-foreground hover:bg-white/[0.05]"
+                className="rounded-md px-2 py-1 text-[12px] text-muted-foreground hover:bg-fg/[0.05]"
               >
                 Cancel
               </button>
@@ -1442,7 +1442,7 @@ function RowMenu({ items }: { items: RowMenuItem[] }) {
                   'flex items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] transition-colors',
                   it.danger
                     ? 'text-destructive hover:bg-destructive/10'
-                    : 'text-foreground hover:bg-white/[0.05]',
+                    : 'text-foreground hover:bg-fg/[0.05]',
                 )}
               >
                 {it.icon && <span className="shrink-0 text-muted-foreground">{it.icon}</span>}

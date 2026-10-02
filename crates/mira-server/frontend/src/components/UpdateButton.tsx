@@ -58,14 +58,14 @@ function UpdateDialog({
 
   return (
     <Dialog open={open} onOpenChange={(v) => !busy && onOpenChange(v)}>
-      <DialogContent className="max-w-[520px] gap-0 overflow-hidden border-white/[0.08] bg-[#111215] p-0">
+      <DialogContent className="max-w-[520px] gap-0 overflow-hidden border-fg/[0.08] bg-popover dark:bg-[#111215] p-0">
         {/* Header: the mark on a green glow, the version, what you're on now. */}
         <div className="relative overflow-hidden px-7 pb-6 pt-8">
           <div className="pointer-events-none absolute -top-24 left-1/2 h-56 w-[420px] -translate-x-1/2 rounded-full bg-[radial-gradient(closest-side,rgba(16,185,129,0.22),transparent)]" />
           <div className="relative flex items-center gap-4">
             <span className="relative">
               <img src={miraLogo} alt="" className="size-12 rounded-full shadow-[0_8px_24px_-6px_rgba(30,58,255,0.6)]" draggable={false} />
-              <span className="absolute -bottom-1 -right-1 grid size-5 place-items-center rounded-full border-2 border-[#111215] bg-emerald-500 text-white">
+              <span className="absolute -bottom-1 -right-1 grid size-5 place-items-center rounded-full border-2 border-popover dark:border-[#111215] bg-emerald-500 text-white">
                 <ArrowDownToLine className="size-2.5" strokeWidth={3} />
               </span>
             </span>
@@ -87,7 +87,7 @@ function UpdateDialog({
         </div>
 
         {/* What shipped. */}
-        <div className="max-h-[46vh] overflow-y-auto border-y border-white/[0.06] bg-black/20 px-7 py-5">
+        <div className="max-h-[46vh] overflow-y-auto border-y border-fg/[0.06] bg-shade/20 px-7 py-5">
           {sections.length === 0 ? (
             <p className="text-[13px] leading-relaxed text-muted-foreground">
               {update.notes?.trim() || 'Fixes and improvements.'}
@@ -144,7 +144,7 @@ function Footer({ phase, onLater, onInstall }: { phase: UpdatePhase; onLater: ()
             </span>
           )}
         </div>
-        <div className="h-1.5 overflow-hidden rounded-full bg-white/[0.08]">
+        <div className="h-1.5 overflow-hidden rounded-full bg-fg/[0.08]">
           <div
             className={cn('h-full rounded-full bg-emerald-500 transition-[width] duration-300', pct === null && 'w-1/3 animate-pulse')}
             style={pct === null ? undefined : { width: `${pct}%` }}
@@ -165,7 +165,7 @@ function Footer({ phase, onLater, onInstall }: { phase: UpdatePhase; onLater: ()
         <button
           type="button"
           onClick={onLater}
-          className="h-9 rounded-lg px-3.5 text-[13px] text-muted-foreground transition-colors hover:bg-white/[0.05] hover:text-foreground"
+          className="h-9 rounded-lg px-3.5 text-[13px] text-muted-foreground transition-colors hover:bg-fg/[0.05] hover:text-foreground"
         >
           Later
         </button>
@@ -190,7 +190,7 @@ function mb(bytes: number): string {
 function inline(text: string): ReactNode {
   return text.split(/(`[^`]+`|\*\*[^*]+\*\*)/g).map((part, i) =>
     part.startsWith('`') && part.endsWith('`') && part.length > 2 ? (
-      <code key={i} className="rounded bg-white/[0.07] px-1 py-px font-mono text-[11.5px] text-foreground/85">
+      <code key={i} className="rounded bg-fg/[0.07] px-1 py-px font-mono text-[11.5px] text-foreground/85">
         {part.slice(1, -1)}
       </code>
     ) : part.startsWith('**') && part.endsWith('**') && part.length > 4 ? (

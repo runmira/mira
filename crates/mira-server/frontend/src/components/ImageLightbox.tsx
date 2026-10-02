@@ -11,7 +11,7 @@ export function ImageLightbox({ src, onClose }: { src: string | null; onClose: (
   if (!src) return null;
   return (
     <div
-      className="fixed inset-0 z-[60] flex animate-fade-in cursor-zoom-out items-center justify-center bg-black/80 p-8"
+      className="fixed inset-0 z-[60] flex animate-fade-in cursor-zoom-out items-center justify-center bg-shade/80 p-8"
       onClick={onClose}
     >
       <img src={src} alt="" className="max-h-full max-w-full rounded-lg shadow-2xl" />

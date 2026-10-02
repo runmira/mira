@@ -61,8 +61,8 @@ const STATUS_CLS: Record<McpStatus['state'], string> = {
   connecting:     'bg-mira-blue animate-pulse',
   needs_auth:     'bg-amber-400',
   needs_approval: 'bg-amber-400',
-  rejected:       'bg-white/20',
-  disabled:       'bg-white/20',
+  rejected:       'bg-fg/20',
+  disabled:       'bg-fg/20',
   needs_setup:    'bg-amber-400',
   failed:         'bg-destructive',
 };
@@ -114,12 +114,12 @@ export function McpTab({
     <div className="flex flex-col gap-5">
       <div className="flex items-start justify-between gap-3">
         <p className="text-[12.5px] leading-relaxed text-muted-foreground/70">
-          Tools appear as <code className="rounded bg-white/5 px-1 font-mono text-[11.5px]">mcp__server__tool</code> — servers connect in the background and changes apply right away.
+          Tools appear as <code className="rounded bg-fg/5 px-1 font-mono text-[11.5px]">mcp__server__tool</code> — servers connect in the background and changes apply right away.
         </p>
         <button
           type="button"
           onClick={actions.onAdd}
-          className="shrink-0 rounded-full bg-white px-4 py-1.5 text-[12px] font-medium text-black transition-all hover:bg-white/90 active:scale-95"
+          className="shrink-0 rounded-full bg-foreground px-4 py-1.5 text-[12px] font-medium text-background transition-all hover:bg-foreground/90 active:scale-95"
         >
           + Add server
         </button>
@@ -147,7 +147,7 @@ export function McpTab({
           </p>
           <ul className="mt-3 flex flex-col gap-2">
             {pending.map((s) => (
-              <li key={s.name} className="flex items-center gap-3 rounded-xl bg-black/20 px-3 py-2.5">
+              <li key={s.name} className="flex items-center gap-3 rounded-xl bg-shade/20 px-3 py-2.5">
                 <div className="min-w-0 flex-1">
                   <div className="text-[13px] font-medium">{s.name}</div>
                   <div className="truncate font-mono text-[11.5px] text-muted-foreground" title={s.target}>
@@ -175,7 +175,7 @@ export function McpTab({
             <button
               type="button"
               onClick={actions.onAdd}
-              className="mt-2 rounded-full bg-white px-4 py-1.5 text-[12px] font-medium text-black transition-all hover:bg-white/90 active:scale-95"
+              className="mt-2 rounded-full bg-foreground px-4 py-1.5 text-[12px] font-medium text-background transition-all hover:bg-foreground/90 active:scale-95"
             >
               + Add server
             </button>
@@ -273,7 +273,7 @@ function ServerCard({ s, busy, actions }: { s: McpServerView; busy: string | nul
       tabIndex={0}
       onClick={() => actions.onOpen(s)}
       onKeyDown={(e) => e.key === 'Enter' && actions.onOpen(s)}
-      className="group flex cursor-pointer gap-3.5 rounded-2xl border border-border/60 bg-white/[0.08] p-4 text-left shadow-sm shadow-black/30 transition-all hover:border-border/80 hover:bg-white/[0.11] hover:shadow-md hover:shadow-black/40"
+      className="group flex cursor-pointer gap-3.5 rounded-2xl border border-border/60 bg-fg/[0.08] p-4 text-left shadow-sm shadow-shade/30 transition-all hover:border-border/80 hover:bg-fg/[0.11] hover:shadow-md hover:shadow-shade/40"
     >
       <div className="relative shrink-0 self-start">
         <Avatar name={displayName} src={iconSrc} size="md" />
@@ -320,7 +320,7 @@ function ServerCard({ s, busy, actions }: { s: McpServerView; busy: string | nul
               type="button"
               disabled={!!busy}
               onClick={primary.run}
-              className="rounded-full bg-white px-3 py-1 text-[11.5px] font-medium text-black transition-all hover:bg-white/90 active:scale-95 disabled:opacity-40"
+              className="rounded-full bg-foreground px-3 py-1 text-[11.5px] font-medium text-background transition-all hover:bg-foreground/90 active:scale-95 disabled:opacity-40"
             >
               {working ? 'Working…' : primary.label}
             </button>
@@ -330,7 +330,7 @@ function ServerCard({ s, busy, actions }: { s: McpServerView; busy: string | nul
                 disabled={!!busy}
                 onClick={() => actions.onAddToken(s)}
                 title="Use a token instead of signing in"
-                className="rounded-full border border-border/70 px-3 py-1 text-[11.5px] text-foreground/85 transition-colors hover:bg-white/[0.06] disabled:opacity-40"
+                className="rounded-full border border-border/70 px-3 py-1 text-[11.5px] text-foreground/85 transition-colors hover:bg-fg/[0.06] disabled:opacity-40"
               >
                 Add token
               </button>
@@ -365,7 +365,7 @@ function ToolLoadingPicker({
   onChange: (m: ToolLoading) => void;
 }) {
   return (
-    <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-border/50 bg-white/[0.035] px-4 py-3">
+    <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-border/50 bg-fg/[0.035] px-4 py-3">
       <div className="min-w-0">
         <div className="text-[13px] font-medium">Tool loading</div>
         <div className="text-[12px] text-muted-foreground/80">
@@ -376,7 +376,7 @@ function ToolLoadingPicker({
           {mode === 'auto' && ' · switches to on demand above 30 tools'}
         </div>
       </div>
-      <div className="inline-flex shrink-0 rounded-full border border-border/60 bg-black/20 p-0.5">
+      <div className="inline-flex shrink-0 rounded-full border border-border/60 bg-shade/20 p-0.5">
         {LOADING.map((o) => (
           <button
             key={o.mode}
@@ -385,7 +385,7 @@ function ToolLoadingPicker({
             onClick={() => o.mode !== mode && onChange(o.mode)}
             className={cn(
               'rounded-full px-3 py-1 text-[11.5px] transition-colors disabled:opacity-50',
-              o.mode === mode ? 'bg-white text-black' : 'text-muted-foreground hover:text-foreground',
+              o.mode === mode ? 'bg-foreground text-background' : 'text-muted-foreground hover:text-foreground',
             )}
           >
             {o.label}

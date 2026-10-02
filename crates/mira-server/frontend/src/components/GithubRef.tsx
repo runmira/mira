@@ -116,7 +116,7 @@ export function GithubRef({ target, href, children }: { target: GithubRefTarget;
           rel="noreferrer"
           onMouseEnter={show}
           onMouseLeave={hide}
-          className="not-prose inline-flex items-baseline gap-1 rounded-md bg-white/[0.06] px-1.5 py-px align-baseline text-[0.92em] font-medium text-mira-blue no-underline transition-colors hover:bg-white/[0.1]"
+          className="not-prose inline-flex items-baseline gap-1 rounded-md bg-fg/[0.06] px-1.5 py-px align-baseline text-[0.92em] font-medium text-mira-blue no-underline transition-colors hover:bg-fg/[0.1]"
         >
           <StateIcon card={card} kind={target.kind} className={cn('size-3.5 shrink-0 translate-y-[2px]', iconTone(card))} />
           {text}
@@ -147,13 +147,13 @@ export function GithubRef({ target, href, children }: { target: GithubRefTarget;
             {card.author_avatar && <img src={card.author_avatar} alt="" className="size-4 rounded-full" />}
             <span className="min-w-0 flex-1 truncate text-muted-foreground">{card.author}</span>
             {card.additions != null && (
-              <span className="shrink-0 rounded-md bg-white/[0.05] px-1.5 py-0.5 font-mono text-[11px]">
+              <span className="shrink-0 rounded-md bg-fg/[0.05] px-1.5 py-0.5 font-mono text-[11px]">
                 <span className="text-emerald-400">+{card.additions}</span>{' '}
                 <span className="text-red-400">−{card.deletions ?? 0}</span>
               </span>
             )}
             {card.changed_files != null && (
-              <span className="shrink-0 rounded-md bg-white/[0.05] px-1.5 py-0.5 text-[11px] text-muted-foreground">
+              <span className="shrink-0 rounded-md bg-fg/[0.05] px-1.5 py-0.5 text-[11px] text-muted-foreground">
                 {card.changed_files} file{card.changed_files === 1 ? '' : 's'}
               </span>
             )}

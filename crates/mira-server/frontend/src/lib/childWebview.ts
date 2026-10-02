@@ -1,3 +1,4 @@
+import { desktopZoom } from './appearance';
 /**
  * Native child webview, positioned over a DOM element.
  *
@@ -97,19 +98,23 @@ export async function attachChildWebview(
   const parent = await resolveParentLabel();
 
   const rect = element.getBoundingClientRect();
+  // The page's CSS pixels are scaled by the interface size (the desktop
+  // webview's zoom); the native view is placed in the window's pixels.
+  const z = desktopZoom();
   const wv = new Webview(parent, safeLabel(kind, nextSeq(kind)), {
     url: initialUrl,
     // Geometry at construction, not just via setPosition/setSize after:
     // otherwise the native view first paints at 0,0 and visibly jumps.
-    x: Math.round(rect.left),
-    y: Math.round(rect.top),
-    width: Math.round(rect.width),
-    height: Math.round(rect.height),
+    x: Math.round(rect.left * z),
+    y: Math.round(rect.top * z),
+    width: Math.round(rect.width * z),
+    height: Math.round(rect.height * z),
   });
 
   const applyRect = (r: Rect) => {
-    void wv.setPosition(Math.round(r.x), Math.round(r.y));
-    void wv.setSize(Math.round(r.width), Math.round(r.height));
+    const k = desktopZoom();
+    void wv.setPosition(Math.round(r.x * k), Math.round(r.y * k));
+    void wv.setSize(Math.round(r.width * k), Math.round(r.height * k));
   };
 
   let closed = false;

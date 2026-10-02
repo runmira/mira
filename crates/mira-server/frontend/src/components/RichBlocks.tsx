@@ -74,7 +74,7 @@ export function DiffBlock({ raw }: { raw: string }) {
       <div className="md-code-head">
         <span className="md-code-lang">diff</span>
         {files.length > 0 && (
-          <span className="min-w-0 truncate font-mono text-[11px] text-[#a9b1d6]" title={files.join('\n')}>
+          <span className="min-w-0 truncate font-mono text-[11px] text-foreground/80 dark:text-[#a9b1d6]" title={files.join('\n')}>
             {files.length === 1 ? files[0] : `${files.length} files`}
           </span>
         )}

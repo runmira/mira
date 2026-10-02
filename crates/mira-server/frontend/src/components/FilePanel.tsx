@@ -19,10 +19,10 @@ import type { DiffLine, DiffPreview } from '../types';
 import { browse } from '../api';
 import { readFile } from '../api';
 import { cn } from '@/lib/utils';
-import { PREF_KEYS, useStringPref } from '@/lib/prefs';
 import { openInEditor } from '@/lib/editors';
 import { useFileIcons } from '@/lib/fileIcons';
 import { StyledDiffCodeView } from './diffs/StyledDiffCodeView';
+import { useDiffOptions } from '../lib/diffPrefs';
 
 export type FilePanelTab = {
   id: string;
@@ -325,7 +325,7 @@ function DirNode({
               <button
                 type="button"
                 style={{ paddingLeft: depth * 14 + 6 }}
-                className="group flex w-full items-center gap-1.5 py-[3px] pr-2 text-left text-[12px] text-muted-foreground/75 transition-colors hover:bg-white/[0.04] hover:text-foreground"
+                className="group flex w-full items-center gap-1.5 py-[3px] pr-2 text-left text-[12px] text-muted-foreground/75 transition-colors hover:bg-fg/[0.04] hover:text-foreground"
                 onClick={() => void onOpenDir(e.path)}
               >
                 <span className="flex size-3 shrink-0 items-center justify-center text-muted-foreground/35">
@@ -358,8 +358,8 @@ function DirNode({
             className={cn(
               'flex w-full items-center gap-1.5 py-[3px] pr-2 text-left text-[12px] transition-colors',
               isActive
-                ? 'bg-white/[0.07] text-foreground'
-                : 'text-muted-foreground/65 hover:bg-white/[0.04] hover:text-foreground',
+                ? 'bg-fg/[0.07] text-foreground'
+                : 'text-muted-foreground/65 hover:bg-fg/[0.04] hover:text-foreground',
             )}
             onClick={() => onSelectFile(e.path)}
             title={e.path}
@@ -377,8 +377,8 @@ function DirNode({
 /* Shared constants & hljs helper                                        */
 /* ------------------------------------------------------------------ */
 
-const BG  = '#282c34';    /* atom-one-dark background */
-const TNG = '#4b5263';    /* gutter line-number color */
+const BG  = 'var(--fp-code)';    /* atom-one-dark / light paper, per theme */
+const TNG = 'var(--fp-gutter)';  /* gutter line-number color */
 
 /** Split hljs HTML by newlines, closing and reopening any open spans at each
  *  boundary so every fragment is valid standalone HTML. This fixes multi-line
@@ -473,7 +473,7 @@ function CodeViewer({ content, lang, line, reveal }: { content: string; lang: st
           aria-hidden
         >
           {hlLines.map((_, i) => (
-            <div key={i} style={i + 1 === target ? { color: '#c0caf5' } : undefined}>{i + 1}</div>
+            <div key={i} style={i + 1 === target ? { color: 'var(--fp-target)' } : undefined}>{i + 1}</div>
           ))}
         </div>
         {/* Code */}
@@ -499,8 +499,8 @@ function CodeViewer({ content, lang, line, reveal }: { content: string; lang: st
 /* ------------------------------------------------------------------ */
 
 function DiffViewer({ path, lines }: { path: string; lines: DiffLine[] }) {
-  // Diff layout follows Settings → General → Diff.
-  const [diffLayout] = useStringPref(PREF_KEYS.diffLayout, 'unified');
+  // Follows Settings → Appearance → Diffs.
+  const diffOptions = useDiffOptions();
   /* Reconstruct old/new file contents from the preview lines, then let
    * Pierre diff them — the same FileDiffMetadata the review drawer renders. */
   const fileDiff = useMemo(() => {
@@ -531,7 +531,7 @@ function DiffViewer({ path, lines }: { path: string; lines: DiffLine[] }) {
     <StyledDiffCodeView
       className="h-full min-h-0 overflow-auto"
       items={[{ id: path, type: 'diff', fileDiff, collapsed: false }]}
-      options={{ diffStyle: diffLayout === 'split' ? 'split' : 'unified' }}
+      options={diffOptions}
       renderHeaderFilenameSuffix={() => null}
       renderHeaderPrefix={() => null}
     />
@@ -603,7 +603,7 @@ export function FilePanelBody({ tab, cwd, onOpenFile }: Props) {
       {/* VS Code-style header */}
       <div
         className="flex h-9 shrink-0 items-center gap-2 border-b px-3"
-        style={{ background: '#0a0a0a', borderColor: '#1e1e2e' }}
+        style={{ background: 'var(--fp-header)', borderColor: 'var(--fp-border)' }}
       >
         <button
           type="button"
@@ -638,7 +638,7 @@ export function FilePanelBody({ tab, cwd, onOpenFile }: Props) {
               setLoadError('Could not open in editor — pick one in Settings → General.');
             });
           }}
-          className="shrink-0 rounded p-1 text-muted-foreground transition-colors hover:bg-white/10 hover:text-foreground"
+          className="shrink-0 rounded p-1 text-muted-foreground transition-colors hover:bg-fg/10 hover:text-foreground"
         >
           <SquareArrowOutUpRight className="size-3.5" />
         </button>
@@ -649,11 +649,11 @@ export function FilePanelBody({ tab, cwd, onOpenFile }: Props) {
         {treeVisible && (
           <div
             className="flex w-52 shrink-0 flex-col overflow-hidden border-r"
-            style={{ background: '#050505', borderColor: '#1e1e2e' }}
+            style={{ background: 'var(--fp-tree)', borderColor: 'var(--fp-border)' }}
           >
             <div
               className="shrink-0 px-3 pb-1 pt-2.5 text-[9px] font-semibold uppercase tracking-[0.14em]"
-              style={{ color: '#4b5263' }}
+              style={{ color: 'var(--fp-gutter)' }}
             >
               Explorer
             </div>

@@ -33,7 +33,7 @@ export function OnboardingShell({
   const inset = hasHiddenTitleBar();
   const channel = desktopChannel();
   return (
-    <div className="fixed inset-0 flex flex-col overflow-hidden bg-[#08090b] text-foreground">
+    <div className="fixed inset-0 flex flex-col overflow-hidden bg-panel dark:bg-[#08090b] text-foreground">
       <Ambient />
 
       <div
@@ -66,7 +66,7 @@ export function OnboardingShell({
             key={s.slug}
             className={cn(
               'h-1 flex-1 rounded-full transition-colors duration-500',
-              i < active ? 'bg-mira-blue/70' : i === active ? 'bg-mira-blue' : 'bg-white/[0.08]',
+              i < active ? 'bg-mira-blue/70' : i === active ? 'bg-mira-blue' : 'bg-fg/[0.08]',
             )}
           />
         ))}
@@ -80,9 +80,9 @@ export function OnboardingShell({
             wide ? 'max-w-[920px]' : 'max-w-[560px]',
           )}
         >
-          <div className="relative rounded-[24px] border border-white/[0.08] bg-[#111215]/95 p-7 shadow-[0_40px_120px_-30px_rgba(0,0,0,0.9),0_0_0_1px_rgba(0,0,0,0.6)] sm:p-9">
+          <div className="relative rounded-[24px] border border-fg/[0.08] bg-background/95 dark:bg-[#111215]/95 p-7 shadow-[0_40px_120px_-30px_rgba(0,0,0,0.9),0_0_0_1px_rgba(0,0,0,0.6)] sm:p-9">
             {/* Light catching the top edge. */}
-            <span className="pointer-events-none absolute inset-x-10 top-0 h-px bg-gradient-to-r from-transparent via-white/25 to-transparent" />
+            <span className="pointer-events-none absolute inset-x-10 top-0 h-px bg-gradient-to-r from-transparent via-fg/25 to-transparent" />
             <div key={steps[active]?.slug} className="onb-in">
               {children}
             </div>
@@ -98,7 +98,7 @@ function Rail({ steps, active }: { steps: RailStep[]; active: number }) {
     <nav aria-label="Setup steps" className="sticky top-0 hidden w-[210px] shrink-0 self-start pt-3 xl:block">
       <ol className="relative flex flex-col gap-1">
         {/* The spine the step dots sit on. */}
-        <span className="absolute bottom-5 left-[13px] top-5 w-px bg-white/[0.07]" />
+        <span className="absolute bottom-5 left-[13px] top-5 w-px bg-fg/[0.07]" />
         <span
           className="absolute left-[13px] top-5 w-px bg-mira-blue/60 transition-[height] duration-500"
           style={{ height: `calc((100% - 40px) * ${steps.length > 1 ? active / (steps.length - 1) : 0})` }}
@@ -112,8 +112,8 @@ function Rail({ steps, active }: { steps: RailStep[]; active: number }) {
                 className={cn(
                   'relative z-10 grid size-[27px] shrink-0 place-items-center rounded-full border text-[11.5px] font-semibold tabular-nums transition-colors duration-300',
                   done && 'border-mira-blue/60 bg-mira-blue/15 text-mira-blue',
-                  now && 'border-mira-blue bg-mira-blue text-[#0b0d14] shadow-[0_0_0_4px_rgba(122,162,247,0.15)]',
-                  !done && !now && 'border-white/[0.1] bg-[#0e0f12] text-muted-foreground/70',
+                  now && 'border-mira-blue bg-mira-blue text-mira-on-accent shadow-[0_0_0_4px_rgba(122,162,247,0.15)]',
+                  !done && !now && 'border-fg/[0.1] bg-background dark:bg-[#0e0f12] text-muted-foreground/70',
                 )}
               >
                 {done ? <Check className="size-3.5" strokeWidth={3} /> : i + 1}

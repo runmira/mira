@@ -12,13 +12,13 @@ import { ArrowLeft, ArrowRight, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 /** A raised surface inside the stage: visible on the card, quiet at rest. */
-export const tile = 'rounded-2xl border border-white/[0.08] bg-white/[0.035]';
+export const tile = 'rounded-2xl border border-fg/[0.08] bg-fg/[0.035]';
 /** The same, for things you can click. */
 export const tileButton =
-  'rounded-2xl border border-white/[0.08] bg-white/[0.035] transition-[background-color,border-color,box-shadow] hover:border-white/[0.16] hover:bg-white/[0.06]';
+  'rounded-2xl border border-fg/[0.08] bg-fg/[0.035] transition-[background-color,border-color,box-shadow] hover:border-fg/[0.16] hover:bg-fg/[0.06]';
 /** Text inputs. */
 export const field =
-  'h-11 w-full rounded-xl border border-white/[0.1] bg-black/40 px-3.5 text-[14px] text-foreground outline-none transition-[border-color,box-shadow] placeholder:text-muted-foreground/45 focus:border-mira-blue/70 focus:ring-4 focus:ring-mira-blue/15';
+  'h-11 w-full rounded-xl border border-fg/[0.1] bg-shade/40 px-3.5 text-[14px] text-foreground outline-none transition-[border-color,box-shadow] placeholder:text-muted-foreground/45 focus:border-mira-blue/70 focus:ring-4 focus:ring-mira-blue/15';
 
 export function StepHeader({ eyebrow, title, children }: { eyebrow?: string; title: ReactNode; children?: ReactNode }) {
   return (
@@ -47,7 +47,7 @@ export function PrimaryButton({
       disabled={pending || rest.disabled}
       {...rest}
       className={cn(
-        'group inline-flex h-10 items-center justify-center gap-2 rounded-xl bg-mira-blue px-5 text-[13.5px] font-semibold text-[#0b0d14]',
+        'group inline-flex h-10 items-center justify-center gap-2 rounded-xl bg-mira-blue px-5 text-[13.5px] font-semibold text-mira-on-accent',
         'shadow-[0_0_0_1px_rgba(122,162,247,0.5),0_8px_24px_-8px_rgba(122,162,247,0.55)] transition-[filter,opacity,transform]',
         'hover:brightness-110 active:translate-y-px disabled:pointer-events-none disabled:opacity-45',
         className,
@@ -66,7 +66,7 @@ export function GhostButton({ children, className, ...rest }: ButtonHTMLAttribut
       type="button"
       {...rest}
       className={cn(
-        'inline-flex h-10 items-center gap-1.5 rounded-xl px-3.5 text-[13px] text-muted-foreground transition-colors hover:bg-white/[0.05] hover:text-foreground disabled:opacity-50',
+        'inline-flex h-10 items-center gap-1.5 rounded-xl px-3.5 text-[13px] text-muted-foreground transition-colors hover:bg-fg/[0.05] hover:text-foreground disabled:opacity-50',
         className,
       )}
     >
@@ -78,7 +78,7 @@ export function GhostButton({ children, className, ...rest }: ButtonHTMLAttribut
 /** The bottom row of a step: Back on the left, a status line, actions on the right. */
 export function StepFooter({ onBack, status, children }: { onBack?: () => void; status?: ReactNode; children: ReactNode }) {
   return (
-    <footer className="mt-2 flex items-center gap-3 border-t border-white/[0.06] pt-5">
+    <footer className="mt-2 flex items-center gap-3 border-t border-fg/[0.06] pt-5">
       {onBack && (
         <GhostButton onClick={onBack} className="-ml-2 pl-2.5">
           <ArrowLeft className="size-4" />

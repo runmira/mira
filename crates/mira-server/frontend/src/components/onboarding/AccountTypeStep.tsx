@@ -141,13 +141,13 @@ function Option({
         'group relative flex flex-col items-start gap-4 rounded-2xl border p-5 text-left transition-[background-color,border-color,box-shadow] duration-200',
         selected
           ? 'border-mira-blue/70 bg-mira-blue/[0.08] shadow-[0_0_0_4px_rgba(122,162,247,0.12)]'
-          : 'border-white/[0.08] bg-white/[0.035] hover:border-white/[0.16] hover:bg-white/[0.06]',
+          : 'border-fg/[0.08] bg-fg/[0.035] hover:border-fg/[0.16] hover:bg-fg/[0.06]',
       )}
     >
       <span
         className={cn(
           'grid size-10 place-items-center rounded-xl border transition-colors',
-          selected ? 'border-mira-blue/40 bg-mira-blue/15 text-mira-blue' : 'border-white/[0.08] bg-white/[0.04] text-foreground/70',
+          selected ? 'border-mira-blue/40 bg-mira-blue/15 text-mira-blue' : 'border-fg/[0.08] bg-fg/[0.04] text-foreground/70',
         )}
       >
         <Icon className="size-5" />
@@ -159,7 +159,7 @@ function Option({
       <span
         className={cn(
           'absolute right-4 top-4 grid size-5 place-items-center rounded-full border transition-colors',
-          selected ? 'border-mira-blue bg-mira-blue text-[#0b0d14]' : 'border-white/[0.15]',
+          selected ? 'border-mira-blue bg-mira-blue text-mira-on-accent' : 'border-fg/[0.15]',
         )}
       >
         {selected && <Check className="size-3" strokeWidth={3.5} />}

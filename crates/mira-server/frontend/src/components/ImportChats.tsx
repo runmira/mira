@@ -73,7 +73,7 @@ function GroupRow({
     });
   const Icon = g.isGit ? FolderGit2 : Folder;
   return (
-    <div className="rounded-xl border border-white/[0.08] bg-white/[0.035] transition-colors hover:border-white/[0.12]">
+    <div className="rounded-xl border border-fg/[0.08] bg-fg/[0.035] transition-colors hover:border-fg/[0.12]">
       <div className="flex items-center gap-3 px-3 py-2.5">
         <Tick state={state} onClick={toggleAll} disabled={g.chats.every((c) => c.imported_as)} />
         <button type="button" onClick={() => setOpen((v) => !v)} className="flex min-w-0 flex-1 items-center gap-2.5 text-left">
@@ -99,14 +99,14 @@ function GroupRow({
         </button>
       </div>
       {open && (
-        <div className="max-h-64 overflow-y-auto border-t border-white/[0.06] bg-black/20 py-1">
+        <div className="max-h-64 overflow-y-auto border-t border-fg/[0.06] bg-shade/20 py-1">
           {g.chats.map((c) => {
             const key = chatKey(c);
             const done = c.imported_as != null;
             return (
               <label
                 key={key}
-                className={cn('flex cursor-pointer items-center gap-3 px-3 py-1.5 transition-colors hover:bg-white/[0.03]', done && 'cursor-default opacity-60')}
+                className={cn('flex cursor-pointer items-center gap-3 px-3 py-1.5 transition-colors hover:bg-fg/[0.03]', done && 'cursor-default opacity-60')}
               >
                 <Tick
                   state={done || selected.has(key) ? 'all' : 'none'}
@@ -202,7 +202,7 @@ export function ImportChats({
   }
   if (!scan) {
     return (
-      <div className="flex items-center gap-2.5 rounded-xl border border-white/[0.08] bg-white/[0.035] px-4 py-6 text-[13px] text-muted-foreground">
+      <div className="flex items-center gap-2.5 rounded-xl border border-fg/[0.08] bg-fg/[0.035] px-4 py-6 text-[13px] text-muted-foreground">
         <Loader2 className="size-4 animate-spin" />
         Looking for chats from Claude Code and Codex…
       </div>
@@ -232,7 +232,7 @@ export function ImportChats({
   }
   if (total === 0) {
     return (
-      <div className="rounded-xl border border-white/[0.08] bg-white/[0.035] px-4 py-6 text-center text-[13px] text-muted-foreground">
+      <div className="rounded-xl border border-fg/[0.08] bg-fg/[0.035] px-4 py-6 text-center text-[13px] text-muted-foreground">
         No Claude Code or Codex chats on this computer yet.
         {onDone && (
           <button type="button" onClick={() => onDone(0)} className="ml-2 underline underline-offset-2 hover:text-foreground">
@@ -251,7 +251,7 @@ export function ImportChats({
         {scan.sources
           .filter((s) => s.found || s.chats > 0)
           .map((s) => (
-            <span key={s.id} className="flex items-center gap-1.5 rounded-full border border-white/[0.08] bg-white/[0.035] px-2.5 py-1 text-[12px] text-foreground/85">
+            <span key={s.id} className="flex items-center gap-1.5 rounded-full border border-fg/[0.08] bg-fg/[0.035] px-2.5 py-1 text-[12px] text-foreground/85">
               <AgentIcon kind={s.id} name={s.label} size="xs" tile={false} />
               {s.label}
               <span className="tabular-nums text-muted-foreground">{s.chats}</span>
@@ -261,7 +261,7 @@ export function ImportChats({
         <button
           type="button"
           onClick={() => load(true)}
-          className="flex items-center gap-1 rounded-md px-2 py-1 text-[11.5px] text-muted-foreground transition-colors hover:bg-white/[0.05] hover:text-foreground"
+          className="flex items-center gap-1 rounded-md px-2 py-1 text-[11.5px] text-muted-foreground transition-colors hover:bg-fg/[0.05] hover:text-foreground"
         >
           <RefreshCw className="size-3" /> Rescan
         </button>
@@ -301,12 +301,12 @@ export function ImportChats({
         )}
       </div>
 
-      <div className="flex items-center gap-3 border-t border-white/[0.06] pt-4">
+      <div className="flex items-center gap-3 border-t border-fg/[0.06] pt-4">
         {onBack && !progress && (
           <button
             type="button"
             onClick={onBack}
-            className="-ml-2 flex items-center gap-1.5 rounded-lg px-2.5 py-2 text-[13px] text-muted-foreground transition-colors hover:bg-white/[0.05] hover:text-foreground"
+            className="-ml-2 flex items-center gap-1.5 rounded-lg px-2.5 py-2 text-[13px] text-muted-foreground transition-colors hover:bg-fg/[0.05] hover:text-foreground"
           >
             <ArrowLeft className="size-4" />
             Back
@@ -314,7 +314,7 @@ export function ImportChats({
         )}
         {progress ? (
           <div className="flex flex-1 items-center gap-3">
-            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-white/[0.1]">
+            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-fg/[0.1]">
               <div className="h-full rounded-full bg-mira-blue transition-[width] duration-300" style={{ width: `${(progress.done / Math.max(1, progress.total)) * 100}%` }} />
             </div>
             <span className="text-[12px] tabular-nums text-muted-foreground">
@@ -335,7 +335,7 @@ export function ImportChats({
               type="button"
               disabled={count === 0}
               onClick={() => void run()}
-              className="rounded-xl bg-mira-blue px-4 py-2 text-[13px] font-semibold text-[#0b0d14] shadow-[0_8px_24px_-8px_rgba(122,162,247,0.55)] transition-[filter,opacity] hover:brightness-110 disabled:opacity-40 disabled:shadow-none"
+              className="rounded-xl bg-mira-blue px-4 py-2 text-[13px] font-semibold text-mira-on-accent shadow-[0_8px_24px_-8px_rgba(122,162,247,0.55)] transition-[filter,opacity] hover:brightness-110 disabled:opacity-40 disabled:shadow-none"
             >
               Import {count > 0 ? count : ''} chat{count === 1 ? '' : 's'}
             </button>

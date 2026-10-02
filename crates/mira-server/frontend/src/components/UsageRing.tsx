@@ -97,7 +97,7 @@ export function UsageRing({ data }: { data: UsageRingData }) {
             setOpen(false);
             data.onInspect();
           }}
-          className="grid size-7 shrink-0 place-items-center rounded-md transition-colors hover:bg-white/[0.05]"
+          className="grid size-7 shrink-0 place-items-center rounded-md transition-colors hover:bg-fg/[0.05]"
         >
           <Ring frac={frac ?? 0} className={tone} />
         </button>
@@ -230,7 +230,7 @@ function Bar({
   const fill = Math.min(1, frac);
   const sum = parts?.reduce((n, p) => n + p.tokens, 0) ?? 0;
   return (
-    <div className={cn('relative mt-1.5 flex w-full overflow-hidden rounded-full bg-white/[0.08]', thin ? 'h-1' : 'h-1.5')}>
+    <div className={cn('relative mt-1.5 flex w-full overflow-hidden rounded-full bg-fg/[0.08]', thin ? 'h-1' : 'h-1.5')}>
       {parts && sum > 0 ? (
         parts.map((p, i) => (
           <div
@@ -268,7 +268,7 @@ function SmallButton({ children, onClick }: { children: React.ReactNode; onClick
     <button
       type="button"
       onClick={onClick}
-      className="shrink-0 rounded-md bg-white/[0.06] px-2 py-1 text-[11.5px] text-foreground/85 transition-colors hover:bg-white/[0.1]"
+      className="shrink-0 rounded-md bg-fg/[0.06] px-2 py-1 text-[11.5px] text-foreground/85 transition-colors hover:bg-fg/[0.1]"
     >
       {children}
     </button>

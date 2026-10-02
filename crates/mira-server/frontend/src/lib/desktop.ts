@@ -38,8 +38,14 @@ interface TauriGlobal {
     // `.label` is undefined on it. The parent window's label only comes
     // back from the async `getCurrent()`.
     getCurrent?: () => Promise<{ label: string }>;
+    /** The current window, for appearance (`setTheme`). */
+    getCurrentWindow?: () => { setTheme?: (theme: 'light' | 'dark' | null) => Promise<void> };
   };
-  webview?: { Webview: TauriWebviewCtor };
+  webview?: {
+    Webview: TauriWebviewCtor;
+    /** This page's own webview, for page zoom. */
+    getCurrentWebview?: () => { setZoom?: (scale: number) => Promise<void> };
+  };
 }
 
 declare global {

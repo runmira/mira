@@ -50,7 +50,7 @@ export function UserCard({
       <PopoverTrigger asChild>
         <button
           type="button"
-          className="flex w-full items-center gap-2.5 px-3 py-2.5 text-left transition-colors hover:bg-white/[0.05]"
+          className="flex w-full items-center gap-2.5 px-3 py-2.5 text-left transition-colors hover:bg-fg/[0.05]"
         >
           <span className="relative shrink-0">
             <Avatar src={avatar} mono={mono} />
@@ -159,7 +159,7 @@ function MenuItem({
       disabled={disabled}
       className={cn(
         'flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] transition-colors disabled:opacity-60',
-        danger ? 'text-destructive hover:bg-destructive/10' : 'text-foreground hover:bg-white/[0.05]',
+        danger ? 'text-destructive hover:bg-destructive/10' : 'text-foreground hover:bg-fg/[0.05]',
       )}
     >
       <span className={cn('shrink-0', danger ? '' : 'text-muted-foreground')}>{icon}</span>

@@ -54,18 +54,24 @@ export default {
         // Mira-specific accents kept as flat values — we reach for these
         // for chat bubbles, code, reasoning blocks, syntax highlighting.
         mira: {
-          bg:       '#131417',
-          sidebar:  '#1a1c20',
-          elev1:    '#212327',
-          elev2:    '#2a2d33',
-          border:   '#2b2e34',
-          user:     '#a6d189',
-          tool:     '#e5c07b',
-          error:    '#f7768e',
-          cyan:     '#7dcfff',
-          purple:   '#bb9af7',
-          blue:     '#7aa2f7',
+          bg:       'rgb(var(--mira-bg) / <alpha-value>)',
+          sidebar:  'rgb(var(--mira-sidebar) / <alpha-value>)',
+          elev1:    'rgb(var(--mira-elev1) / <alpha-value>)',
+          elev2:    'rgb(var(--mira-elev2) / <alpha-value>)',
+          border:   'rgb(var(--mira-border) / <alpha-value>)',
+          user:     'rgb(var(--mira-user) / <alpha-value>)',
+          tool:     'rgb(var(--mira-tool) / <alpha-value>)',
+          error:    'rgb(var(--mira-error) / <alpha-value>)',
+          cyan:     'rgb(var(--mira-cyan) / <alpha-value>)',
+          purple:   'rgb(var(--mira-purple) / <alpha-value>)',
+          blue:     'rgb(var(--mira-blue) / <alpha-value>)',
+          'on-accent': 'rgb(var(--mira-on-accent) / <alpha-value>)',
         },
+        // Theme-aware overlays (see styles.css): `fg` is the subtle
+        // light-on-surface tint (white on dark, ink on light); `shade` the
+        // recess/scrim tint, softened on light.
+        fg:    'rgb(var(--fg-rgb) / <alpha-value>)',
+        shade: 'rgb(var(--shade-rgb) / calc(<alpha-value> * var(--shade-k)))',
       },
       borderRadius: {
         lg: 'var(--radius)',

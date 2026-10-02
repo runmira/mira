@@ -52,7 +52,7 @@ export function MarketplacesTab({
           onChange={(e) => setSource(e.target.value)}
           placeholder="owner/repo, git URL, marketplace.json URL, or local path"
           disabled={!!adding}
-          className="h-9 min-w-0 flex-1 rounded-xl border border-border/60 bg-white/[0.03] px-3 font-mono text-[12.5px] outline-none placeholder:text-muted-foreground/40 focus:border-border focus:bg-white/[0.05] disabled:opacity-60"
+          className="h-9 min-w-0 flex-1 rounded-xl border border-border/60 bg-fg/[0.03] px-3 font-mono text-[12.5px] outline-none placeholder:text-muted-foreground/40 focus:border-border focus:bg-fg/[0.05] disabled:opacity-60"
         />
         <Button
           type="submit"
@@ -71,7 +71,7 @@ export function MarketplacesTab({
           <h3 className="mb-2.5 text-[11.5px] font-semibold uppercase tracking-wider text-muted-foreground/60">
             Added
           </h3>
-          <ul className="flex flex-col divide-y divide-border/50 overflow-hidden rounded-2xl border border-border/60 bg-white/[0.08] shadow-sm shadow-black/20">
+          <ul className="flex flex-col divide-y divide-border/50 overflow-hidden rounded-2xl border border-border/60 bg-fg/[0.08] shadow-sm shadow-shade/20">
             {data.marketplaces.map((m) => (
               <MarketplaceRow
                 key={m.name}
@@ -98,7 +98,7 @@ export function MarketplacesTab({
                 type="button"
                 disabled={!!busy}
                 onClick={() => submit(s.source)}
-                className="flex items-center gap-3.5 rounded-xl border border-border/60 bg-white/[0.08] px-4 py-3.5 text-left shadow-sm shadow-black/20 transition-all hover:border-border/75 hover:bg-white/[0.11] hover:shadow-md hover:shadow-black/40 disabled:opacity-60"
+                className="flex items-center gap-3.5 rounded-xl border border-border/60 bg-fg/[0.08] px-4 py-3.5 text-left shadow-sm shadow-shade/20 transition-all hover:border-border/75 hover:bg-fg/[0.11] hover:shadow-md hover:shadow-shade/40 disabled:opacity-60"
               >
                 <Avatar name={s.name} size="sm" src={marketplaceIconSrc(s.source)} />
                 <div className="min-w-0 flex-1">
@@ -143,7 +143,7 @@ function MarketplaceRow({
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-[13.5px] font-semibold">{m.name.replace(/^\w/, (c) => c.toUpperCase())}</span>
-          <span className="rounded-md bg-white/[0.07] px-2 py-0.5 text-[10.5px] text-muted-foreground/60">
+          <span className="rounded-md bg-fg/[0.07] px-2 py-0.5 text-[10.5px] text-muted-foreground/60">
             {plural(m.plugin_count, 'plugin')}
           </span>
         </div>

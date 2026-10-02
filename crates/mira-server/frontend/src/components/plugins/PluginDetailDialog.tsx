@@ -130,7 +130,7 @@ export function PluginDetailDialog({
                   <h3 className="mb-3 flex items-center gap-1.5 text-[11.5px] font-semibold uppercase tracking-wider text-muted-foreground/60">
                     <BookOpen className="size-3.5" /> Readme
                   </h3>
-                  <div className="rounded-xl border border-border/60 bg-white/[0.02] px-4 py-3 text-[13.5px]">
+                  <div className="rounded-xl border border-border/60 bg-fg/[0.02] px-4 py-3 text-[13.5px]">
                     <Markdown text={detail.readme} />
                   </div>
                 </section>
@@ -208,7 +208,7 @@ function Includes({
 }) {
   if (items.length === 0) return null;
   return (
-    <div className="rounded-xl border border-border/50 bg-white/[0.02] px-3 py-2.5">
+    <div className="rounded-xl border border-border/50 bg-fg/[0.02] px-3 py-2.5">
       <div className="flex items-center gap-1.5 text-[12.5px] font-medium [&_svg]:size-3.5 [&_svg]:text-muted-foreground/70">
         {icon}
         {label}
@@ -219,7 +219,7 @@ function Includes({
         {items.slice(0, 12).map((i) => (
           <code
             key={i}
-            className="rounded-md bg-white/5 px-1.5 py-0.5 font-mono text-[11.5px] text-foreground/80"
+            className="rounded-md bg-fg/5 px-1.5 py-0.5 font-mono text-[11.5px] text-foreground/80"
           >
             {i}
           </code>

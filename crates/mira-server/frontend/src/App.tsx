@@ -10,6 +10,9 @@ import {
   Info,
   Lightbulb,
   Pencil,
+  Palette,
+  Sun,
+  Moon,
   ShieldAlert,
   PanelLeft,
   Sparkle,
@@ -102,6 +105,8 @@ import { splitFileRef } from './lib/refs';
 import { ContextInspector } from './components/ContextInspector';
 import { ImportChats } from './components/ImportChats';
 import { UpdateButton } from './components/UpdateButton';
+import { playTurnSound } from './lib/sound';
+import { resolveTheme, setThemePref } from './lib/theme';
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { callForAttention } from './lib/attention';
 import { GetStarted } from './components/onboarding/GetStarted';
@@ -743,6 +748,10 @@ function useStableCallback<A extends unknown[], R>(fn: (...args: A) => R): (...a
   return useCallback((...args: A) => ref.current(...args), []);
 }
 
+/** Narrowest the transcript should get before the open context panel
+ *  stops taking its own column and floats over the stream instead. */
+const MIN_STREAM_WIDTH = 560;
+
 export default function App() {
   const pingPrimedRef = useRef(false);
 
@@ -767,13 +776,8 @@ export default function App() {
     };
   }, []);
 
-  const playPing = useCallback(() => {
-    try {
-      const audio = new Audio('/ping.mp3');
-      audio.volume = 0.7;
-      void audio.play();
-    } catch { /* audio unavailable */ }
-  }, []);
+  // Respects Settings → General → "Sound when a reply finishes".
+  const playPing = useCallback(() => playTurnSound(), []);
 
   const [status, setStatus] = useState<WsStatus>('connecting');
   const [sessionId, setSessionId] = useState<string>('');
@@ -1147,6 +1151,17 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [keybindings]);
   const ctxFits = useContextPanelFits();
+  // The chat column's width, for whether the open context panel sits
+  // beside the transcript or over it.
+  const [chatColWidth, setChatColWidth] = useState(0);
+  const chatColObserver = useRef<ResizeObserver | null>(null);
+  const chatColRef = useCallback((el: HTMLDivElement | null) => {
+    chatColObserver.current?.disconnect();
+    if (!el) return;
+    const ro = new ResizeObserver(([e]) => setChatColWidth(Math.round(e.contentRect.width)));
+    ro.observe(el);
+    chatColObserver.current = ro;
+  }, []);
   const [branchPr, setBranchPr] = useState<BranchPrView | null>(null);
   /** Re-read the repo state the panels show: git status, what this chat
    *  changed, and the branch's PR. Responses are applied only if no newer
@@ -2603,6 +2618,14 @@ export default function App() {
     { id: 'browser', group: 'View', label: 'Open browser', icon: Globe2, keywords: ['chrome', 'web'], run: () => { setMainView('chat'); openToolPane('browser'); } },
     { id: 'whiteboard', group: 'View', label: 'Open whiteboard', icon: Pencil, keywords: ['sketch', 'draw'], run: () => { setMainView('chat'); openToolPane('whiteboard'); } },
     { id: 's-general', group: 'Settings', label: 'General settings', icon: Cog, shortcut: keyFor('settings.toggle'), run: goSettings('general') },
+    { id: 's-appearance', group: 'Settings', label: 'Appearance', icon: Palette, keywords: ['theme', 'light', 'dark', 'motion'], run: goSettings('appearance') },
+    {
+      id: 'theme-toggle', group: 'View',
+      label: resolveTheme() === 'dark' ? 'Switch to light theme' : 'Switch to dark theme',
+      icon: resolveTheme() === 'dark' ? Sun : Moon,
+      keywords: ['theme', 'appearance', 'light', 'dark', 'mode'],
+      run: () => setThemePref(resolveTheme() === 'dark' ? 'light' : 'dark'),
+    },
     { id: 's-provider', group: 'Settings', label: 'Providers & API keys', icon: Plug, run: goSettings('provider') },
     { id: 's-agents', group: 'Settings', label: 'External agents', icon: Bot, keywords: ['claude code', 'codex'], run: goSettings('agents') },
     { id: 'import-chats', group: 'Chat', label: 'Import chats from Claude Code or Codex', icon: Download, keywords: ['history', 'migrate', 'bring'], run: () => setImportOpen(true) },
@@ -2693,7 +2716,10 @@ export default function App() {
       subagentState,
       entries,
     });
-  const ctxReserve = ctxOpen && ctxHasContent;
+  // Beside the stream when the chat column has room for both; over it
+  // (stacked, nothing reserved) when reserving would crush the transcript.
+  const ctxRoomy = chatColWidth === 0 || chatColWidth >= CONTEXT_PANEL_RESERVE + MIN_STREAM_WIDTH;
+  const ctxReserve = ctxOpen && ctxHasContent && ctxRoomy;
   // The collapsed pill floats over the top-right corner; drop the first
   // line of the transcript below it rather than under it.
   const ctxPill = !ctxOpen && ctxHasContent;
@@ -3053,7 +3079,7 @@ export default function App() {
                       : 'bg-secondary/40 text-muted-foreground hover:bg-secondary hover:text-foreground',
                   )}
                 >
-                  <span className="inline-flex size-6 items-center justify-center overflow-hidden rounded-md bg-white/[0.04] ring-1 ring-white/10">
+                  <span className="inline-flex size-6 items-center justify-center overflow-hidden rounded-md bg-fg/[0.04] ring-1 ring-fg/10">
                     <SquareTerminal className="size-3.5" strokeWidth={1.75} />
                   </span>
                 </button>
@@ -3065,7 +3091,7 @@ export default function App() {
             </div>
 
             {/* Transcript — full width, panel floats above it */}
-            <div className="relative flex-1 min-h-0">
+            <div className="relative flex-1 min-h-0" ref={chatColRef}>
               <div
                 className="absolute inset-0 overflow-y-auto px-5 pb-5 transition-[padding] duration-200"
                 style={{
@@ -3246,7 +3272,7 @@ export default function App() {
                       setRestoreNote(null);
                       void doRestore(() => undoRestore(undo), 'Put back');
                     }}
-                    className="shrink-0 rounded px-1.5 py-0.5 text-[12px] font-medium text-foreground/80 hover:bg-white/[0.06] hover:text-foreground"
+                    className="shrink-0 rounded px-1.5 py-0.5 text-[12px] font-medium text-foreground/80 hover:bg-fg/[0.06] hover:text-foreground"
                   >
                     Undo
                   </button>
@@ -4458,7 +4484,7 @@ function EmptyState({
             key={p}
             type="button"
             onClick={() => onPrompt(p)}
-            className="rounded-full border border-border/70 bg-white/[0.03] px-3 py-1.5 text-[12.5px] text-muted-foreground backdrop-blur-sm transition-colors hover:border-border hover:bg-white/[0.07] hover:text-foreground"
+            className="rounded-full border border-border/70 bg-fg/[0.03] px-3 py-1.5 text-[12.5px] text-muted-foreground backdrop-blur-sm transition-colors hover:border-border hover:bg-fg/[0.07] hover:text-foreground"
           >
             {p}
           </button>
@@ -4476,7 +4502,7 @@ function EmptyState({
                 key={r.id}
                 type="button"
                 onClick={() => onOpenSession(r.id)}
-                className="group flex items-center gap-3 rounded-md px-2 py-1.5 text-left text-[13px] transition-colors hover:bg-white/[0.04]"
+                className="group flex items-center gap-3 rounded-md px-2 py-1.5 text-left text-[13px] transition-colors hover:bg-fg/[0.04]"
               >
                 <span className="min-w-0 flex-1 truncate text-foreground/75 group-hover:text-foreground">
                   {r.title || r.first_user_message || 'Untitled'}
@@ -5173,7 +5199,7 @@ function parseStatus(raw: string, forced?: StatusTone): { tone: StatusTone; text
 function withCode(text: string): React.ReactNode[] {
   return text.split(/(`[^`]+`)/g).map((part, i) =>
     part.startsWith('`') && part.endsWith('`') && part.length > 2 ? (
-      <code key={i} className="rounded bg-white/[0.06] px-1 font-mono text-[11.5px] text-foreground/75">
+      <code key={i} className="rounded bg-fg/[0.06] px-1 font-mono text-[11.5px] text-foreground/75">
         {part.slice(1, -1)}
       </code>
     ) : (

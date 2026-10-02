@@ -114,7 +114,7 @@ export function PullRequestPanel({
     )}>
       {/* left: list */}
       <div className={cn(
-        'flex min-w-0 min-h-0 flex-col border-r border-border bg-white/[0.03]',
+        'flex min-w-0 min-h-0 flex-col border-r border-border bg-fg/[0.03]',
         expanded && 'hidden',
       )}>
         <FilterBar filter={filter} onChange={setFilter} />
