@@ -8,6 +8,7 @@ import {
   X,
 } from 'lucide-react';
 import type { ApprovalScope, DiffLine, DiffPreview, Mode, ToolCall, ToolResult } from '../types';
+import { InlineDiff } from './diffs/InlineDiff';
 import { cn } from '@/lib/utils';
 import { infoFor } from './ToolGroup';
 
@@ -408,12 +409,12 @@ function CompactToolRow({
             />
           )}
           {!isDiffCardTool && preview && (
-            <div className="diff compact">
-              {preview.lines.slice(0, 20).map((l, i) => <DiffRow key={i} line={l} />)}
-              {preview.lines.length > 20 && (
-                <div className="diff-line hunk">… {preview.lines.length - 20} more lines</div>
-              )}
-            </div>
+            <InlineDiff
+              path={filePath || call.function.name}
+              lines={preview.lines}
+              maxHeight="20rem"
+              className="rounded-lg border border-border/50"
+            />
           )}
           {!isDiffCardTool && !preview && <ReconstructedPreview call={call} />}
           {/* Result block skipped for write/edit — the diff already
@@ -495,65 +496,7 @@ function DiffCard({
           </span>
         )}
       </div>
-      <div className="max-h-[50vh] overflow-auto font-mono text-[12px] leading-relaxed">
-        {(() => {
-          const CAP = 200;
-          const shown = lines.slice(0, CAP);
-          let ln = 0;
-          return (
-            <>
-              {shown.map((line, i) => {
-                if (line.tag === 'hunkgap') {
-                  return (
-                    <div key={i} className="px-3 py-0.5 text-center text-muted-foreground/60">
-                      ···
-                    </div>
-                  );
-                }
-                // Only count real lines toward the line-number
-                // counter; deletions don't advance the "new file"
-                // number in a real diff, but for the sequential
-                // approximation we count adds + context only.
-                if (line.tag !== 'del') ln += 1;
-                const shownNum = line.tag === 'del' ? '' : String(ln);
-                const bg =
-                  line.tag === 'add'
-                    ? 'bg-emerald-500/[0.08]'
-                    : line.tag === 'del'
-                      ? 'bg-rose-500/[0.08]'
-                      : '';
-                const text =
-                  line.tag === 'add'
-                    ? 'text-emerald-200/90'
-                    : line.tag === 'del'
-                      ? 'text-rose-200/85'
-                      : 'text-foreground/85';
-                return (
-                  <div
-                    key={i}
-                    className={cn(
-                      'flex items-start gap-2 whitespace-pre-wrap break-words',
-                      bg,
-                    )}
-                  >
-                    <span className="w-10 shrink-0 select-none border-r border-border/30 bg-mira-elev1/40 px-2 py-0.5 text-right text-muted-foreground/60">
-                      {shownNum}
-                    </span>
-                    <span className={cn('flex-1 py-0.5 pr-2', text)}>
-                      {line.text || ' '}
-                    </span>
-                  </div>
-                );
-              })}
-              {lines.length > CAP && (
-                <div className="border-t border-border/30 px-3 py-1.5 text-center text-[11px] text-muted-foreground/70">
-                  … {lines.length - CAP} more lines
-                </div>
-              )}
-            </>
-          );
-        })()}
-      </div>
+      <InlineDiff path={filePath || tool} lines={lines} />
     </div>
   );
 }
@@ -591,14 +534,9 @@ function ReconstructedPreview({ call }: { call: ToolCall }) {
   const pseudo = useMemo(() => reconstructDiff(tool, args), [tool, args]);
 
   if (pseudo) {
-    const lines = pseudo.slice(0, 20);
+    const path = typeof args?.path === 'string' ? args.path : typeof args?.file_path === 'string' ? args.file_path : tool;
     return (
-      <div className="diff compact">
-        {lines.map((l, i) => <DiffRow key={i} line={l} />)}
-        {pseudo.length > 20 && (
-          <div className="diff-line hunk">… {pseudo.length - 20} more lines</div>
-        )}
-      </div>
+      <InlineDiff path={path} lines={pseudo} maxHeight="20rem" className="rounded-lg border border-border/50" />
     );
   }
 
