@@ -18,6 +18,11 @@ import { cn } from '@/lib/utils';
 /** Past this, the inline preview stops; the file viewer has the rest. */
 const MAX_LINES = 400;
 
+/** The card draws its own header, so drop the gap the renderer leaves
+ *  under the (hidden) file header. */
+const INLINE_UNSAFE_CSS = `${DIFF_SURFACE_THEME_UNSAFE_CSS}
+pre[data-diff] > [data-code] { padding-top: 0 !important; }`;
+
 export function InlineDiff({
   path,
   lines,
@@ -39,7 +44,10 @@ export function InlineDiff({
       capped
         .map((l) => (l.tag === 'ctx' || l.tag === keep ? l.text : null))
         .filter((t): t is string => t !== null)
-        .join('\n');
+        // A trailing newline: the preview's lines are whole lines, so the
+        // last one isn't missing one (else every card says "No newline at
+        // end of file").
+        .join('\n') + '\n';
     try {
       return parseDiffFromFile(
         { name: path || 'file', contents: side('del') },
@@ -58,7 +66,7 @@ export function InlineDiff({
         <FileDiff
           fileDiff={fileDiff}
           className="diff-render-surface"
-          options={{ ...options, disableFileHeader: true, unsafeCSS: DIFF_SURFACE_THEME_UNSAFE_CSS }}
+          options={{ ...options, disableFileHeader: true, unsafeCSS: INLINE_UNSAFE_CSS }}
         />
       </DiffWorkerPoolProvider>
       {lines.length > MAX_LINES && (

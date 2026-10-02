@@ -507,11 +507,11 @@ function DiffViewer({ path, lines }: { path: string; lines: DiffLine[] }) {
     const oldText = lines
       .map((l) => (l.tag === 'ctx' || l.tag === 'del' ? l.text : null))
       .filter((t): t is string => t !== null)
-      .join('\n');
+      .join('\n') + '\n';
     const newText = lines
       .map((l) => (l.tag === 'ctx' || l.tag === 'add' ? l.text : null))
       .filter((t): t is string => t !== null)
-      .join('\n');
+      .join('\n') + '\n';
     try {
       return parseDiffFromFile(
         { name: path, contents: oldText },
