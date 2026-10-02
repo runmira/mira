@@ -103,8 +103,16 @@ jobs:
           security unlock-keychain -p "$keychain_password" "$keychain"
           security import "$RUNNER_TEMP/cert.p12" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
           security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" >/dev/null
+          # A .p12 exported from Keychain Access holds the certificate and
+          # key but not Apple's intermediate that vouches for it; without
+          # it the identity isn't valid on a fresh runner.
+          for ca in DeveloperIDG2CA DeveloperIDCA; do
+            curl -fsSL "https://www.apple.com/certificateauthority/$ca.cer" -o "$RUNNER_TEMP/$ca.cer"
+            security import "$RUNNER_TEMP/$ca.cer" -k "$keychain" -T /usr/bin/codesign >/dev/null || true
+          done
           security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
           rm "$RUNNER_TEMP/cert.p12"
+          echo "valid signing identities: $(security find-identity -v -p codesigning "$keychain" | grep -c 'Developer ID Application' || true)"
 
       - name: Build, sign and notarize
         env:

@@ -154,7 +154,12 @@ EOF
 
 cmd_check() {
   load_env
-  identities | grep -Fxq "$APPLE_SIGNING_IDENTITY" || die "certificate not in the keychain: $APPLE_SIGNING_IDENTITY"
+  if ! identities | grep -Fxq "$APPLE_SIGNING_IDENTITY"; then
+    # Say why: a listed-but-invalid identity is almost always a missing
+    # intermediate certificate, not a missing key.
+    security find-identity -p codesigning >&2 || true
+    die "certificate not usable for signing: $APPLE_SIGNING_IDENTITY (not in the keychain, or its Apple intermediate certificate is missing)"
+  fi
   ok "certificate: $APPLE_SIGNING_IDENTITY"
   xcrun notarytool history --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$(keychain_password)" >/dev/null 2>&1 \
     || die "Apple rejected the saved notarization credentials: run setup again"
