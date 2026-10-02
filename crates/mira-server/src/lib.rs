@@ -573,6 +573,10 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
             get(pull_requests::get_pull_request),
         )
         .route(
+            "/api/prs/:owner/:repo/:number/card",
+            get(pull_requests::mention_card),
+        )
+        .route(
             "/api/prs/:owner/:repo/:number/files",
             get(pull_requests::get_pull_request_files),
         )

@@ -841,6 +841,30 @@ struct SpendBooking {
     model: std::sync::Mutex<Option<String>>,
 }
 
+/// The spend a report added, as one frame for the client (summed across
+/// models, under the one that spent most). `None` when it added nothing.
+fn turn_usage(rows: &[crate::agent_spend::SpendRow]) -> Option<ServerMsg> {
+    if rows.is_empty() {
+        return None;
+    }
+    let model = rows
+        .iter()
+        .max_by_key(|r| r.input_tokens + r.output_tokens + r.cached_input_tokens)
+        .map(|r| r.model.clone())
+        .unwrap_or_default();
+    let cost: Option<f64> = rows
+        .iter()
+        .filter_map(|r| r.cost_usd)
+        .fold(None, |acc, c| Some(acc.unwrap_or(0.0) + c));
+    Some(ServerMsg::AcpTurnUsage {
+        model,
+        input_tokens: rows.iter().map(|r| r.input_tokens).sum(),
+        output_tokens: rows.iter().map(|r| r.output_tokens).sum(),
+        cached_input_tokens: rows.iter().map(|r| r.cached_input_tokens).sum(),
+        cost_usd: cost,
+    })
+}
+
 impl AcpEventPort {
     pub fn new(events: tokio::sync::broadcast::Sender<ServerMsg>) -> Arc<Self> {
         Arc::new(AcpEventPort {
@@ -859,14 +883,20 @@ impl AcpEventPort {
             Option<String>,
             Vec<mira_acp::events::ModelSpend>,
         )>();
+        let events_bg = events.clone();
         tokio::spawn(async move {
             while let Some((session, models)) = rx.recv().await {
                 let (ledger, who) = (ledger.clone(), who.clone());
                 // File I/O off the runtime, one report at a time.
-                let _ = tokio::task::spawn_blocking(move || {
+                let rows = tokio::task::spawn_blocking(move || {
                     ledger.record(&who, session.as_deref(), &models)
                 })
-                .await;
+                .await
+                .unwrap_or_default();
+                // What this report added, for the reply's stats.
+                if let Some(msg) = turn_usage(&rows) {
+                    let _ = events_bg.send(msg);
+                }
             }
         });
         Arc::new(AcpEventPort {
@@ -971,7 +1001,7 @@ mod event_tests {
     async fn spend_is_booked_in_order_under_the_current_model() {
         use mira_acp::events::ModelSpend;
         let dir = tempfile::tempdir().unwrap();
-        let (tx, _rx) = tokio::sync::broadcast::channel(16);
+        let (tx, mut rx) = tokio::sync::broadcast::channel(16);
         let port = AcpEventPort::with_spend(
             tx,
             crate::agent_spend::SpendLedger::at(dir.path()),
@@ -1024,6 +1054,25 @@ mod event_tests {
             .map(|r| (r.model.as_str(), r.input_tokens))
             .collect();
         assert_eq!(got, vec![("gpt-5-codex", 100), ("gpt-5-codex", 150)]);
+        // Each report's delta goes out as a frame, for the reply's stats.
+        let mut frames = Vec::new();
+        while let Ok(m) = rx.try_recv() {
+            if let ServerMsg::AcpTurnUsage {
+                model,
+                input_tokens,
+                ..
+            } = m
+            {
+                frames.push((model, input_tokens));
+            }
+        }
+        assert_eq!(
+            frames,
+            vec![
+                ("gpt-5-codex".to_string(), 100),
+                ("gpt-5-codex".to_string(), 150)
+            ]
+        );
     }
 
     fn frame(e: MiraEvent) -> ServerMsg {

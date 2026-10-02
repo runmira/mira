@@ -467,6 +467,7 @@ export type ServerMsg =
   | { type: 'acp_config_options'; options: AcpConfigOption[] }
   | { type: 'acp_commands'; names: string[] }
   | { type: 'acp_usage'; used: number; size: number; cost: { amount: number; currency: string } | null }
+  | { type: 'acp_turn_usage'; model: string; input_tokens: number; output_tokens: number; cached_input_tokens: number; cost_usd?: number | null }
   /** The agent account's plan limits (Claude's 5-hour and weekly windows). */
   | { type: 'acp_limits'; windows: { name: string; utilization: number; resets_at?: number | null }[] }
   | { type: 'acp_session_info'; title: string | null; updated_at: string | null }

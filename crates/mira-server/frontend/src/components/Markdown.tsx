@@ -7,6 +7,8 @@ import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import { useEffect, useMemo, useState } from 'react';
 import 'highlight.js/styles/atom-one-dark.css';
 import type { DiffPreview } from '../types';
+import { GithubRef } from './GithubRef';
+import { linkifyGithubRefs, parseGithubRef } from '../lib/githubRefs';
 
 /**
  * Markdown rendering for assistant / thought content.
@@ -78,6 +80,8 @@ function sanitizeMermaidSvg(svg: string): string {
 }
 
 export function Markdown({ text, onOpenFile }: Props) {
+  // `owner/repo#123` mentions become links, rendered as PR/issue chips.
+  const linked = useMemo(() => linkifyGithubRefs(text), [text]);
   const hasMath = MATH_RE.test(text);
 
   // rehype-katex + katex.min.css load on first use (issue #68 acceptance:
@@ -162,11 +166,13 @@ export function Markdown({ text, onOpenFile }: Props) {
             return <CodeBlock lang={lang} raw={raw} className={className}>{children}</CodeBlock>;
           },
           a({ children, ...rest }: any) {
+            const target = parseGithubRef(rest.href);
+            if (target) return <GithubRef target={target} href={rest.href}>{children}</GithubRef>;
             return <a target="_blank" rel="noreferrer" {...rest}>{children}</a>;
           },
         }}
       >
-        {text}
+        {linked}
       </ReactMarkdown>
     </div>
   );
