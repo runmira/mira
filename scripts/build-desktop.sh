@@ -58,14 +58,15 @@ fi
 # __MIRA_CHANNEL__); build.rs reruns when this changes.
 if [ "$CHANNEL" = stable ]; then unset MIRA_CHANNEL; else export MIRA_CHANNEL="$CHANNEL"; fi
 echo "==> channel: $CHANNEL${VERSION:+, version $VERSION}"
-# Signing problems should fail now, not after a ten-minute compile.
-if [ "$SIGN" = 1 ] && [ "$MODE" = release ]; then
-  "$ROOT/scripts/macos-signing.sh" check
-fi
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 FRONTEND="$ROOT/crates/mira-server/frontend"
 DESKTOP="$ROOT/apps/desktop"
+
+# Signing problems should fail now, not after a ten-minute compile.
+if [ "$SIGN" = 1 ] && [ "$MODE" = release ]; then
+  "$ROOT/scripts/macos-signing.sh" check
+fi
 
 echo "==> web UI"
 (
