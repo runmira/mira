@@ -284,6 +284,15 @@ cmd_ci_secrets() {
   local p12_password
   read -r -s -p "Password you gave the .p12 when exporting: " p12_password
   echo >&2
+  # The certificate inside must be the one this Mac signs with: an "Apple
+  # Development" certificate exports just as happily and fails only in CI.
+  local inside
+  inside="$(P12_PASSWORD="$p12_password" openssl pkcs12 -in "$p12" -nokeys -passin env:P12_PASSWORD 2>/dev/null \
+    | sed -n 's/^subject=.*CN *= *\([^,/]*\).*/\1/p' | head -1)"
+  [ -n "$inside" ] || die "couldn't open $p12 (wrong password, or not a .p12)"
+  [ "$inside" = "$APPLE_SIGNING_IDENTITY" ] || die "$p12 holds \"$inside\", not \"$APPLE_SIGNING_IDENTITY\".
+  In Keychain Access → My Certificates, export the one named \"$APPLE_SIGNING_IDENTITY\""
+  ok "certificate: $inside"
   local repo
   repo="$(cd "$ROOT" && gh repo view --json nameWithOwner -q .nameWithOwner)"
   read -r -p "Set APPLE_* secrets on $repo? [y/N] " yes
