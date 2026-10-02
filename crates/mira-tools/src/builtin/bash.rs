@@ -34,7 +34,10 @@ impl Tool for Bash {
             "Run a shell command via `bash -lc` inside the sandbox. \
              Working directory is the current session directory. \
              Combined stdout/stderr is returned. Default timeout is \
-             300 seconds; override with `timeout_ms` (maximum 600000).",
+             300 seconds; override with `timeout_ms` (maximum 600000). \
+             Prefer the dedicated `grep`/`glob`/`read` tools over `bash` + \
+             `grep`/`sed` pipelines: they avoid shell-quoting and glob \
+             pitfalls (e.g. `crates//Cargo.toml` vs `crates/*/Cargo.toml`).",
             json!({
                 "type": "object",
                 "properties": {
@@ -127,6 +130,20 @@ impl Tool for Bash {
 
         body.push_str("--- output ---\n");
         body.push_str(&truncate(&output, 32_000));
+
+        // General-class hint for the most common empty-result retry loop:
+        // a missing path (often a `//` typo or a missing `*` glob) yields
+        // `exit != 0` + empty stdout. Point the model at `glob`/`grep`
+        // instead of letting it re-run the identical bash+grep.
+        if let Some(code) = outcome.exit_code {
+            if code != 0 && output.contains("No such file or directory") {
+                body.push_str(
+                    "\n--- hint ---\nPath not found. Verify with the `glob` tool first \
+                     (e.g. `crates/*/Cargo.toml`, not `crates//Cargo.toml`), or use the \
+                     dedicated `grep` tool with a `path` + `glob` instead of a `bash` grep pipeline.",
+                );
+            }
+        }
 
         Ok(ToolResult::ok(call.id.clone(), body))
     }

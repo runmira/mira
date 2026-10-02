@@ -1348,6 +1348,12 @@ impl ChildTracker for SessionChildTracker {
 /// intervene manually.
 const MAX_VERIFY_ATTEMPTS: usize = 3;
 
+/// Cap on how many times a single turn will rescue a near-miss tool call
+/// (model emitted tool-call-like markup as plain text, so `pending_calls`
+/// is empty). Prevents silent `CleanStop` when the model drifts to an
+/// unsupported syntax like `<dots_function_call>...</dots_function_call>`.
+const MAX_MISSED_CALL_RESCUES: usize = 2;
+
 /// How many consecutive rounds with an identical tool-call signature
 /// (same set of `(name, canonicalized-args)`) constitutes a stuck loop.
 /// On the Nth such round the harness skips dispatch, emits a warning,
@@ -1412,6 +1418,7 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
                 None => std::collections::HashSet::new(),
             };
         let mut verify_attempts = 0usize;
+        let mut missed_call_rescues = 0usize;
 
         // Where the auto-extractor's "just-finished round" slice starts. The
         // user message for this turn was pushed either in `Session::send`
@@ -1659,6 +1666,42 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
             let _ = tx.send(HarnessEvent::TurnComplete).await;
 
             if pending_calls.is_empty() || finish == FinishReason::Stop {
+                // Near-miss tool-call rescue: the model sometimes emits
+                // tool-call-like markup as plain text (e.g.
+                // `<dots_function_call>cd ... && grep ...</dots_function_call>`)
+                // instead of a real function call — often inside the
+                // `Thought`/`reasoning` channel rather than the main text.
+                // Treating that as CleanStop silently ends the turn. Nudge
+                // once or twice so it re-issues via proper function calling.
+                let mut near_miss_haystack = assistant_text.clone();
+                for block in &reasoning_blocks {
+                    near_miss_haystack.push('\n');
+                    near_miss_haystack.push_str(&block.text);
+                }
+                if pending_calls.is_empty()
+                    && looks_like_missed_tool_call(&near_miss_haystack)
+                    && missed_call_rescues < MAX_MISSED_CALL_RESCUES
+                {
+                    missed_call_rescues += 1;
+                    warn!(
+                        rescues = missed_call_rescues,
+                        "near-miss tool call in text — injecting correction instead of CleanStop"
+                    );
+                    let _ = tx
+                        .send(HarnessEvent::Warning(
+                            "[tool-call] output looked like a tool call emitted as text — asking model to re-issue via function calling".to_owned(),
+                        ))
+                        .await;
+                    sess.history.lock().await.push(Message::user(
+                        "That last message looks like you tried to call a tool by writing \
+                         markup (e.g. `<dots_function_call>...</dots_function_call>`) as text. \
+                         That does not execute anything. Re-issue it as a real function call \
+                         (e.g. `bash` with a `command` argument, or the dedicated `grep`/`glob`/`read` tool). \
+                         If you genuinely cannot proceed, stop and tell me what you tried and what is blocking you."
+                            .to_owned(),
+                    ));
+                    continue;
+                }
                 // Apply-verify: if the model wrote source files this turn, run
                 // the project's natural safety check (cargo check / tsc / …).
                 // On failure, feed the errors back and let the model take one
@@ -2546,6 +2589,29 @@ fn fingerprint_calls(calls: &[ToolCall]) -> u64 {
         a.hash(&mut hasher);
     }
     hasher.finish()
+}
+
+/// True when assistant text looks like a tool call emitted as plain text
+/// instead of a real function call (e.g. `<dots_function_call>cd ... &&
+/// grep ...</dots_function_call>`, `<function_call>`, `<tool_call>`).
+/// Only the markup counts — an opening or closing tag — never the bare
+/// words: a coding agent talks about `tool_call` fields and OpenAI's
+/// `function_call` all the time, and nudging those replies would be wrong.
+/// Case-insensitive, so any syntax drift in this family is still rescued
+/// rather than silently ending the turn via CleanStop.
+fn looks_like_missed_tool_call(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    [
+        "<dots_function_call",
+        "<function_call",
+        "</function_call",
+        "<tool_call",
+        "</tool_call",
+        "<invoke",
+        "</invoke",
+    ]
+    .iter()
+    .any(|tag| lower.contains(tag))
 }
 
 /// Serialize a JSON args blob with recursively sorted object keys.
@@ -3446,6 +3512,30 @@ mod stuck_loop_tests {
         let a = vec![call("1", "cfg", r#"{"opts":{"b":1,"a":2},"flag":true}"#)];
         let b = vec![call("2", "cfg", r#"{"flag":true,"opts":{"a":2,"b":1}}"#)];
         assert_eq!(fingerprint_calls(&a), fingerprint_calls(&b));
+    }
+
+    #[test]
+    fn dots_function_call_markup_is_a_near_miss() {
+        assert!(looks_like_missed_tool_call(
+            "<dots_function_call> cd /repo && grep -rh \"x\" crates//Cargo.toml </dots_function_call>"
+        ));
+    }
+
+    #[test]
+    fn plain_prose_is_not_a_near_miss() {
+        assert!(!looks_like_missed_tool_call(
+            "I searched the workspace and found nothing. Stopping."
+        ));
+    }
+
+    #[test]
+    fn talking_about_tool_calls_is_not_a_near_miss() {
+        assert!(!looks_like_missed_tool_call(
+            "The `tool_call` id comes back on the result, like OpenAI's function_call field."
+        ));
+        assert!(looks_like_missed_tool_call(
+            "<tool_call>{\"name\":\"bash\"}</tool_call>"
+        ));
     }
 }
 
