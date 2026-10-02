@@ -104,7 +104,7 @@ and set `install: preinstalled`:
 # e2b.Dockerfile — start from E2B's base image (see their template docs
 # for the current name), then add Mira and what your project needs.
 FROM e2bdev/base
-RUN curl -fsSL https://raw.githubusercontent.com/runmira/mira/main/install.sh | bash
+RUN curl -fsSL https://runmira.dev/install.sh | bash
 RUN curl -sSf https://sh.rustup.rs | sh -s -- -y   # example: a Rust toolchain
 ```
 

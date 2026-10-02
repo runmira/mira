@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Mira installer.
 #
-#   curl -fsSL https://raw.githubusercontent.com/runmira/mira/main/install.sh | bash
+#   curl -fsSL https://runmira.dev/install.sh | bash
 #
 # Environment overrides:
 #   MIRA_VERSION   pin to a release tag (default: latest)

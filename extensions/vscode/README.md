@@ -47,7 +47,7 @@ Install Mira (macOS / Linux):
 ```bash
 brew install runmira/tap/mira
 # or, no Homebrew:
-curl -fsSL https://raw.githubusercontent.com/runmira/mira/main/install.sh | bash
+curl -fsSL https://runmira.dev/install.sh | bash
 ```
 
 Configure a provider (either via env vars or by editing `~/.mira/mira.yaml`):
