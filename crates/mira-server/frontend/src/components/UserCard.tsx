@@ -5,6 +5,7 @@ import { avatarUrl, displayName as oauthDisplayName, initials, useCurrentUser } 
 import { useProfile } from '../lib/useProfile';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
+import { UpdateButton } from './UpdateButton';
 import type { WsStatus } from '../ws';
 
 /**
@@ -46,11 +47,13 @@ export function UserCard({
   }
 
   return (
+    // The account button, with updates at the far right of the row.
+    <div className="flex items-center gap-1 pr-2 transition-colors hover:bg-fg/[0.03]">
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <button
           type="button"
-          className="flex w-full items-center gap-2.5 px-3 py-2.5 text-left transition-colors hover:bg-fg/[0.05]"
+          className="flex min-w-0 flex-1 items-center gap-2.5 py-2.5 pl-3 pr-1 text-left"
         >
           <span className="relative shrink-0">
             <Avatar src={avatar} mono={mono} />
@@ -97,6 +100,8 @@ export function UserCard({
         </div>
       </PopoverContent>
     </Popover>
+    <UpdateButton />
+    </div>
   );
 }
 

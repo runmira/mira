@@ -1,8 +1,10 @@
 /**
- * In-app updates for the desktop app. The app checks its channel's update
- * feed (a signed build per channel, published by the desktop release
- * workflow) and the page offers it. In a browser there are no updates to
- * offer: everything here stays idle.
+ * Updates, for the toolbar's update button.
+ *
+ * - Desktop app: checks its channel's update feed (a signed build per
+ *   channel, published by the desktop release workflow) and installs it.
+ * - Browser: compares the server's version with the latest CLI release on
+ *   GitHub; a page can't upgrade a CLI, so it offers the command instead.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { isDesktop } from './desktop';
@@ -15,7 +17,51 @@ export type UpdateInfo = {
   date: string | null;
   /** Release notes, markdown: the release's highlights. */
   notes: string | null;
+  /** Where it comes from: the desktop app installs it, the CLI is told how. */
+  target: 'desktop' | 'cli';
 };
+
+/** Release notes on the web, for "What's new" links. */
+export const RELEASES_URL = 'https://runmira.dev/releases';
+
+/** a > b, for plain or pre-release semver (`0.6.1-alpha.2`). */
+export function newerVersion(a: string, b: string): boolean {
+  const parse = (v: string) => {
+    const [core, pre] = v.replace(/^v/, '').split('-', 2);
+    return { nums: core.split('.').map((n) => Number(n) || 0), pre: pre ?? null };
+  };
+  const x = parse(a);
+  const y = parse(b);
+  for (let i = 0; i < 3; i++) {
+    if ((x.nums[i] ?? 0) !== (y.nums[i] ?? 0)) return (x.nums[i] ?? 0) > (y.nums[i] ?? 0);
+  }
+  if (x.pre === y.pre) return false;
+  if (x.pre === null) return true; // 1.0.0 > 1.0.0-beta
+  if (y.pre === null) return false;
+  return x.pre.localeCompare(y.pre, undefined, { numeric: true }) > 0;
+}
+
+async function currentVersion(): Promise<string | null> {
+  try {
+    if (isDesktop()) return ((await window.__TAURI__?.app?.getVersion?.()) as string | undefined) ?? null;
+    const r = await fetch('/api/version');
+    return r.ok ? ((await r.json()) as { version: string }).version : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The newest CLI release, when it's newer than this server. */
+async function cliUpdate(current: string): Promise<UpdateInfo | null> {
+  const r = await fetch('https://api.github.com/repos/runmira/mira/releases/latest', {
+    headers: { Accept: 'application/vnd.github+json' },
+  });
+  if (!r.ok) return null;
+  const rel = (await r.json()) as { tag_name: string; published_at?: string; body?: string };
+  const version = rel.tag_name.replace(/^v/, '');
+  if (!newerVersion(version, current)) return null;
+  return { version, current, channel: 'stable', date: rel.published_at ?? null, notes: rel.body ?? null, target: 'cli' };
+}
 
 export type UpdatePhase =
   | { kind: 'idle' }
@@ -36,20 +82,39 @@ function invoke<T>(cmd: string): Promise<T> {
 export function useAppUpdate() {
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
   const [phase, setPhase] = useState<UpdatePhase>({ kind: 'idle' });
+  const [current, setCurrent] = useState<string | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [checkedAt, setCheckedAt] = useState<number | null>(null);
+  const [checkFailed, setCheckFailed] = useState(false);
   const lastCheck = useRef(0);
-
-  const check = useCallback(async () => {
-    if (!isDesktop()) return;
-    lastCheck.current = Date.now();
-    try {
-      setUpdate(await invoke<UpdateInfo | null>('check_update'));
-    } catch {
-      // Offline, or the feed isn't published yet: try again later, quietly.
-    }
-  }, []);
+  const channel = (window.__MIRA_CHANNEL__ === 'alpha' || window.__MIRA_CHANNEL__ === 'beta' ? window.__MIRA_CHANNEL__ : 'stable') as UpdateInfo['channel'];
 
   useEffect(() => {
-    if (!isDesktop()) return;
+    void currentVersion().then(setCurrent);
+  }, []);
+
+  const check = useCallback(async () => {
+    lastCheck.current = Date.now();
+    setChecking(true);
+    setCheckFailed(false);
+    try {
+      if (isDesktop()) {
+        const u = await invoke<Omit<UpdateInfo, 'target'> | null>('check_update');
+        setUpdate(u ? { ...u, target: 'desktop' } : null);
+      } else {
+        const now = current ?? (await currentVersion());
+        setUpdate(now ? await cliUpdate(now) : null);
+      }
+      setCheckedAt(Date.now());
+    } catch {
+      // Offline, or nothing published yet: say so, try again later.
+      setCheckFailed(true);
+    } finally {
+      setChecking(false);
+    }
+  }, [current]);
+
+  useEffect(() => {
     // Not at launch itself: the app is busy starting its server.
     const first = window.setTimeout(() => void check(), 8_000);
     const every = window.setInterval(() => void check(), CHECK_EVERY_MS);
@@ -82,7 +147,7 @@ export function useAppUpdate() {
     }
   }, []);
 
-  return { update, phase, install, check };
+  return { update, phase, install, check, current, channel, checking, checkedAt, checkFailed };
 }
 
 /** One shipped thing, from a `- **Title.** what it does` bullet. */

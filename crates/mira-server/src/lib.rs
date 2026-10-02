@@ -367,6 +367,7 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/api/terminals", get(terminal::list))
         .route("/api/terminals/:id", axum::routing::delete(terminal::kill))
         .route("/api/health", get(health))
+        .route("/api/version", get(version))
         .route(
             "/api/settings",
             get(settings::get_settings).put(settings::put_settings),
@@ -621,6 +622,11 @@ async fn embedded_fallback(uri: axum::http::Uri) -> axum::response::Response {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+/// This server's version, for the web UI's "up to date" check.
+async fn version() -> axum::Json<serde_json::Value> {
+    axum::Json(serde_json::json!({ "version": env!("CARGO_PKG_VERSION") }))
 }
 
 async fn inline_index() -> axum::response::Html<&'static str> {

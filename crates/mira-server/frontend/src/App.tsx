@@ -104,7 +104,6 @@ import { CommandPalette, type PaletteAction } from './components/CommandPalette'
 import { splitFileRef } from './lib/refs';
 import { ContextInspector } from './components/ContextInspector';
 import { ImportChats } from './components/ImportChats';
-import { UpdateButton } from './components/UpdateButton';
 import { playTurnSound } from './lib/sound';
 import { resolveTheme, setThemePref } from './lib/theme';
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
@@ -3052,7 +3051,6 @@ export default function App() {
                 </button>
               )}
               <div className="flex items-center gap-0.5" data-tauri-drag-region="false">
-                <UpdateButton />
                 <RightPanelButton
                   open={panelOpen}
                   activeKind={toolPaneKindOf(activeAgentTab ?? '')}

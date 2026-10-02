@@ -41,6 +41,8 @@ interface TauriGlobal {
     /** The current window, for appearance (`setTheme`). */
     getCurrentWindow?: () => { setTheme?: (theme: 'light' | 'dark' | null) => Promise<void> };
   };
+  /** App metadata (`core:app:default`). */
+  app?: { getVersion?: () => Promise<string> };
   webview?: {
     Webview: TauriWebviewCtor;
     /** This page's own webview, for page zoom. */
