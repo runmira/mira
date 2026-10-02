@@ -696,6 +696,18 @@ pub enum ServerMsg {
     },
     /// Slash commands the agent advertises.
     AcpCommands { names: Vec<String> },
+    /// What an external agent's turn spent since its last report: tokens
+    /// and, when the agent estimates it, cost. Deltas — a turn can report
+    /// several times (Codex does), and the client adds them up. Saved with
+    /// the transcript, so a reloaded chat's replies keep their stats.
+    AcpTurnUsage {
+        model: String,
+        input_tokens: u64,
+        output_tokens: u64,
+        cached_input_tokens: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cost_usd: Option<f64>,
+    },
     /// Context-window and cost accounting for the turn so far.
     AcpUsage {
         used: u64,

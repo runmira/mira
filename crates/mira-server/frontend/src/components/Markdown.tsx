@@ -7,6 +7,11 @@ import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import { useEffect, useMemo, useState } from 'react';
 import 'highlight.js/styles/atom-one-dark.css';
 import type { DiffPreview } from '../types';
+import { GithubRef } from './GithubRef';
+import { linkifyGithubRefs, parseGithubRef } from '../lib/githubRefs';
+import { classifyInline, splitFileRef } from '../lib/refs';
+import { BranchChip, ColorChip, CommitChip, FileChip, KeysChip, LinkRef, SymbolRef } from './RichRefs';
+import { Blockquote, DiffBlock, Table, Th, remarkCallouts } from './RichBlocks';
 
 /**
  * Markdown rendering for assistant / thought content.
@@ -25,13 +30,7 @@ import type { DiffPreview } from '../types';
  *   syntax-highlight spans survive.
  */
 
-type Props = { text: string; onOpenFile?: (path: string, diff: DiffPreview | null) => void };
-
-function looksLikeFilePath(s: string): boolean {
-  if (/^https?:\/\//.test(s)) return false;
-  if (!s.includes('/')) return false;
-  return /\.\w{1,6}$/.test(s);
-}
+type Props = { text: string; onOpenFile?: (path: string, diff: DiffPreview | null, line?: number | null) => void };
 
 // How short a block has to be to be treated as a "one-liner" (path, filename,
 // short command) instead of a full code block. Models routinely wrap single
@@ -51,6 +50,8 @@ const SANITIZE_SCHEMA = {
   attributes: {
     ...defaultSchema.attributes,
     details: [...(defaultSchema.attributes?.details ?? []), 'open'],
+    // Set by remarkCallouts for `> [!NOTE]` alerts.
+    blockquote: [...(defaultSchema.attributes?.blockquote ?? []), 'dataCallout'],
   },
 };
 
@@ -78,6 +79,8 @@ function sanitizeMermaidSvg(svg: string): string {
 }
 
 export function Markdown({ text, onOpenFile }: Props) {
+  // `owner/repo#123` mentions become links, rendered as PR/issue chips.
+  const linked = useMemo(() => linkifyGithubRefs(text), [text]);
   const hasMath = MATH_RE.test(text);
 
   // rehype-katex + katex.min.css load on first use (issue #68 acceptance:
@@ -107,7 +110,7 @@ export function Markdown({ text, onOpenFile }: Props) {
   return (
     <div className="md">
       <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkMath]}
+        remarkPlugins={[remarkGfm, remarkMath, remarkCallouts]}
         rehypePlugins={rehypePlugins}
         components={{
           // react-markdown wraps fenced code in `<pre><code>...</code></pre>`.
@@ -117,13 +120,20 @@ export function Markdown({ text, onOpenFile }: Props) {
           pre({ children }: any) {
             return <>{children}</>;
           },
-          code({ className, children, ...rest }: any) {
-            const raw = String(children ?? '').replace(/\n$/, '');
+          code({ className, children, node, ...rest }: any) {
+            // From the parsed node, not `children`: once a block is
+            // highlighted its children are spans, and String() of those
+            // is "[object Object]".
+            const raw = (node ? hastText(node) : String(children ?? '')).replace(/\n$/, '');
             const lang = /language-([\w-]+)/.exec(className ?? '')?.[1];
 
             // Diagram fences render as diagrams (lazy-loaded), not code.
             if (lang === 'mermaid') {
               return <MermaidBlock code={raw} />;
+            }
+            // Diffs render as diffs, and can be applied.
+            if (lang === 'diff' || lang === 'patch') {
+              return <DiffBlock raw={raw} />;
             }
 
             // react-markdown v9 dropped the `inline` prop. Fall back to a
@@ -140,17 +150,22 @@ export function Markdown({ text, onOpenFile }: Props) {
             if (looksInline) {
               const isFenced = /\blanguage-/.test(className ?? '');
               const cls = isFenced ? 'md-inline md-inline-fenced' : 'md-inline';
-              if (onOpenFile && looksLikeFilePath(raw)) {
-                return (
-                  <button
-                    type="button"
-                    onClick={() => onOpenFile(raw, null)}
-                    className={`${cls} ${className ?? ''} cursor-pointer underline decoration-dotted underline-offset-2 hover:opacity-80`}
-                    title="Open in file viewer"
-                  >
-                    {children}
-                  </button>
-                );
+              // A span that names something gets drawn as that thing.
+              const ref = classifyInline(raw);
+              const open = onOpenFile ? (path: string, line?: number | null) => onOpenFile(path, null, line) : undefined;
+              switch (ref?.kind) {
+                case 'file':
+                  return <FileChip path={ref.path} line={ref.line} onOpen={open} />;
+                case 'commit':
+                  return <CommitChip sha={ref.sha} />;
+                case 'color':
+                  return <ColorChip color={ref.color}>{children}</ColorChip>;
+                case 'keys':
+                  return <KeysChip keys={ref.keys} />;
+                case 'branch':
+                  return <BranchChip name={ref.name}>{children}</BranchChip>;
+                case 'symbol':
+                  return <SymbolRef name={ref.name} onOpen={open}>{children}</SymbolRef>;
               }
               return (
                 <code className={`${cls} ${className ?? ''}`} {...rest}>
@@ -161,19 +176,60 @@ export function Markdown({ text, onOpenFile }: Props) {
 
             return <CodeBlock lang={lang} raw={raw} className={className}>{children}</CodeBlock>;
           },
-          a({ children, ...rest }: any) {
+          a({ children, node: _node, ...rest }: any) {
+            const href: string = rest.href ?? '';
+            const target = parseGithubRef(href);
+            if (target) return <GithubRef target={target} href={href}>{children}</GithubRef>;
+            if (/^https?:\/\//i.test(href)) return <LinkRef href={href}>{children}</LinkRef>;
+            // A link to a file in the project: `[the parser](src/parse.rs#L40)`.
+            const fileLink = /^(?!\w+:)([^#?]+\.\w{1,8})(?:#L(\d+))?$/.exec(href);
+            if (fileLink && onOpenFile) {
+              const { path, line } = splitFileRef(fileLink[1]);
+              const at = fileLink[2] ? Number(fileLink[2]) : line;
+              return (
+                <a
+                  href={href}
+                  className="md-link"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    onOpenFile(path, null, at);
+                  }}
+                >
+                  {children}
+                </a>
+              );
+            }
             return <a target="_blank" rel="noreferrer" {...rest}>{children}</a>;
+          },
+          blockquote({ node: _node, ...props }: any) {
+            return <Blockquote {...props} />;
+          },
+          table({ node, children }: any) {
+            return <Table node={node}>{children}</Table>;
+          },
+          th({ node, children, style }: any) {
+            return <Th node={node} style={style}>{children}</Th>;
           },
         }}
       >
-        {text}
+        {linked}
       </ReactMarkdown>
     </div>
   );
 }
 
+/** The text of a parsed (hast) node. */
+function hastText(n: { type: string; value?: string; children?: unknown[] }): string {
+  if (n.type === 'text') return n.value ?? '';
+  return ((n.children ?? []) as { type: string; value?: string; children?: unknown[] }[]).map(hastText).join('');
+}
+
 /** Code blocks longer than this start collapsed. */
 const CODE_COLLAPSE_LINES = 30;
+/** Output-like blocks (logs, traces, terminal output) fold sooner: their
+ *  head and tail matter, the middle rarely does. */
+const LOG_COLLAPSE_LINES = 12;
+const LOG_LANGS = new Set(['log', 'text', 'txt', 'console', 'output', 'stacktrace', 'traceback', 'stderr', 'stdout']);
 
 function CodeBlock({
   lang, raw, className, children,
@@ -187,7 +243,8 @@ function CodeBlock({
     } catch { /* ignore */ }
   }
   const lineCount = raw.replace(/\n$/, '').split('\n').length;
-  const long = lineCount > CODE_COLLAPSE_LINES;
+  const foldAt = LOG_LANGS.has(lang ?? 'text') ? LOG_COLLAPSE_LINES : CODE_COLLAPSE_LINES;
+  const long = lineCount > foldAt;
   const [expanded, setExpanded] = useState(false);
   const collapsed = long && !expanded;
   return (
@@ -198,7 +255,7 @@ function CodeBlock({
       </div>
       <div
         className={collapsed ? 'md-code-body md-code-collapsed' : 'md-code-body'}
-        style={collapsed ? { maxHeight: `calc(${CODE_COLLAPSE_LINES} * 1.6em + 0.9rem)` } : undefined}
+        style={collapsed ? { maxHeight: `calc(${foldAt} * 1.6em + 0.9rem)` } : undefined}
       >
         {lineCount > 1 && (
           <div className="md-code-gutter" aria-hidden="true">

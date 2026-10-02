@@ -997,6 +997,116 @@ fn roll_up_checks(runs: &[CheckRunView]) -> String {
 
 /* ---------- token + error plumbing ---------- */
 
+/// The hover card for a PR or issue mentioned in a transcript: one small
+/// read, not the full detail view's six.
+#[derive(Debug, Serialize, PartialEq)]
+pub struct MentionCard {
+    /// `pr` or `issue`.
+    pub kind: &'static str,
+    pub number: u64,
+    pub title: String,
+    /// `open`, `closed`, `merged` or `draft`.
+    pub state: String,
+    pub author: Option<String>,
+    pub author_avatar: Option<String>,
+    pub additions: Option<u64>,
+    pub deletions: Option<u64>,
+    pub changed_files: Option<u64>,
+    /// ISO-8601.
+    pub created_at: Option<String>,
+    pub url: String,
+}
+
+fn card_from(kind: &'static str, v: &Value) -> MentionCard {
+    let s = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_owned);
+    let n = |k: &str| v.get(k).and_then(Value::as_u64);
+    let merged = v.get("merged").and_then(Value::as_bool).unwrap_or(false)
+        || v.get("merged_at").is_some_and(|m| !m.is_null());
+    let draft = v.get("draft").and_then(Value::as_bool).unwrap_or(false);
+    let state = if merged {
+        "merged".to_string()
+    } else if draft && s("state").as_deref() == Some("open") {
+        "draft".to_string()
+    } else {
+        s("state").unwrap_or_else(|| "open".into())
+    };
+    MentionCard {
+        kind,
+        number: n("number").unwrap_or(0),
+        title: s("title").unwrap_or_default(),
+        state,
+        author: v
+            .pointer("/user/login")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        author_avatar: v
+            .pointer("/user/avatar_url")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        additions: n("additions"),
+        deletions: n("deletions"),
+        changed_files: n("changed_files"),
+        created_at: s("created_at"),
+        url: s("html_url").unwrap_or_default(),
+    }
+}
+
+/// One GitHub REST read: with the stored token when there is one, else
+/// through the `gh` CLI if it's signed in. `None` on a 404.
+async fn github_read(path: &str) -> Result<Option<Value>, String> {
+    if let Some(token) = resolve_token() {
+        let url = format!("{GITHUB_API}/{path}");
+        return match gh_get::<Value>(&build_client(), &token, &url).await {
+            Ok(v) => Ok(Some(v)),
+            Err(e) if e.status == Some(404) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        };
+    }
+    let path = path.to_string();
+    let out = tokio::task::spawn_blocking(move || Command::new("gh").args(["api", &path]).output())
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|_| missing_token_msg())?;
+    if out.status.success() {
+        return serde_json::from_slice(&out.stdout)
+            .map(Some)
+            .map_err(|e| e.to_string());
+    }
+    let err = String::from_utf8_lossy(&out.stderr);
+    if err.contains("404") || err.contains("Not Found") {
+        Ok(None)
+    } else {
+        Err(err.trim().to_string())
+    }
+}
+
+/// GET /api/prs/:owner/:repo/:number/card — a PR, or else an issue.
+pub async fn mention_card(
+    AxumPath((owner, repo, number)): AxumPath<(String, String, u64)>,
+) -> Response {
+    let ok = |c: &str| {
+        !c.is_empty()
+            && c.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+    };
+    if !ok(&owner) || !ok(&repo) {
+        return err(StatusCode::BAD_REQUEST, "bad repository".into());
+    }
+    let pr = github_read(&format!("repos/{owner}/{repo}/pulls/{number}")).await;
+    let found = match pr {
+        Ok(Some(v)) => Ok(Some(card_from("pr", &v))),
+        Ok(None) => github_read(&format!("repos/{owner}/{repo}/issues/{number}"))
+            .await
+            .map(|v| v.map(|v| card_from("issue", &v))),
+        Err(e) => Err(e),
+    };
+    match found {
+        Ok(Some(card)) => Json(card).into_response(),
+        Ok(None) => err(StatusCode::NOT_FOUND, "not found".into()),
+        Err(e) => err(StatusCode::BAD_GATEWAY, e),
+    }
+}
+
 fn resolve_token() -> Option<String> {
     resolve_github_token()
 }
@@ -1029,4 +1139,39 @@ fn missing_token_msg() -> String {
 
 fn err(status: StatusCode, msg: String) -> Response {
     (status, Json(serde_json::json!({ "error": msg }))).into_response()
+}
+
+#[cfg(test)]
+mod mention_tests {
+    use super::*;
+
+    #[test]
+    fn merged_draft_and_open_are_told_apart() {
+        let pr = serde_json::json!({
+            "number": 93, "title": "Browser: Mira manages its own Chromium", "state": "open",
+            "draft": false, "merged": false, "user": {"login": "DamilolaDami", "avatar_url": "https://a/x.png"},
+            "additions": 850, "deletions": 85, "changed_files": 12,
+            "created_at": "2026-10-01T13:00:00Z", "html_url": "https://github.com/runmira/mira/pull/93"
+        });
+        let c = card_from("pr", &pr);
+        assert_eq!(
+            (c.state.as_str(), c.additions, c.deletions, c.changed_files),
+            ("open", Some(850), Some(85), Some(12))
+        );
+        assert_eq!(c.author.as_deref(), Some("DamilolaDami"));
+        let mut merged = pr.clone();
+        merged["state"] = "closed".into();
+        merged["merged_at"] = "2026-10-01T14:00:00Z".into();
+        assert_eq!(card_from("pr", &merged).state, "merged");
+        let mut draft = pr.clone();
+        draft["draft"] = true.into();
+        assert_eq!(card_from("pr", &draft).state, "draft");
+        // An issue has no diff stats.
+        let issue = serde_json::json!({"number": 70, "title": "Context inspector", "state": "closed", "html_url": "u"});
+        let i = card_from("issue", &issue);
+        assert_eq!(
+            (i.kind, i.state.as_str(), i.additions),
+            ("issue", "closed", None)
+        );
+    }
 }
