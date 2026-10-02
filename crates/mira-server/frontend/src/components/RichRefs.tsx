@@ -205,11 +205,13 @@ export function BranchChip({ name, children }: { name: string; children: React.R
     <HoverCard
       onOpen={load}
       trigger={
+        // No chip background: a filled teal pill fought the prose around it.
+        // The icon carries the color; the name reads like text.
         <span
           tabIndex={0}
-          className="md-ref inline-flex items-baseline gap-1 rounded-md border border-[#73daca]/25 bg-[#73daca]/[0.08] px-1.5 py-px align-baseline font-mono text-[0.85em] text-[#73daca] outline-none focus-visible:ring-1 focus-visible:ring-[#73daca]/50"
+          className="md-ref inline-flex items-baseline gap-1 align-baseline font-mono text-[0.88em] text-foreground/90 decoration-[#73daca]/60 decoration-dotted underline-offset-[3px] outline-none hover:underline focus-visible:underline"
         >
-          <GitBranch className="size-3.5 shrink-0 translate-y-[2px]" />
+          <GitBranch className="size-3.5 shrink-0 translate-y-[2px] text-[#73daca]" />
           {b.name}
           {b.current && <span className="size-1.5 shrink-0 -translate-y-px self-center rounded-full bg-[#73daca]" title="Checked out" />}
         </span>
