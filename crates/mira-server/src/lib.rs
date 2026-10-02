@@ -65,6 +65,7 @@ mod subagents_api;
 mod terminal;
 mod title;
 mod undo;
+mod unfurl;
 mod usage;
 mod ws;
 
@@ -478,6 +479,10 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         )
         .route("/api/git/push", axum::routing::post(git::push))
         .route("/api/git/branch-pr", get(git::branch_pr))
+        .route("/api/git/commit/:sha", get(git::commit_card))
+        .route("/api/git/apply", axum::routing::post(git::apply_patch))
+        .route("/api/symbol", get(git::find_symbol))
+        .route("/api/unfurl", get(unfurl::unfurl))
         .route("/api/git/commit", axum::routing::post(git::commit))
         .route(
             "/api/git/worktree",

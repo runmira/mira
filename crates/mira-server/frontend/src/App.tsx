@@ -97,6 +97,7 @@ import {
   Zap,
 } from 'lucide-react';
 import { CommandPalette, type PaletteAction } from './components/CommandPalette';
+import { splitFileRef } from './lib/refs';
 import { ContextInspector } from './components/ContextInspector';
 import { callForAttention } from './lib/attention';
 import { GetStarted } from './components/onboarding/GetStarted';
@@ -1149,6 +1150,11 @@ export default function App() {
       .then((pr) => live() && setBranchPr(pr))
       .catch(() => live() && setBranchPr(null));
   }, []);
+  // Something outside a turn changed files (a diff applied from a reply).
+  useEffect(() => {
+    window.addEventListener('mira:repo-changed', refreshRepo);
+    return () => window.removeEventListener('mira:repo-changed', refreshRepo);
+  }, [refreshRepo]);
   // Live task list — hydrated from `ready.tasks` on socket open and
   // upserted whenever a `task_*` tool result lands. Rendered as a
   // persistent "Plan" card near the top of the transcript.
@@ -2771,13 +2777,17 @@ export default function App() {
     setActiveAgentTab(null);
   }
 
-  function openFileTab(path: string, diff: DiffPreview | null) {
+  function openFileTab(ref: string, diff: DiffPreview | null, atLine?: number | null) {
+    // `src/a.rs:42` is a file and a line, not a file named that.
+    const { path, line: refLine } = splitFileRef(ref);
+    const line = atLine ?? refLine;
+    const reveal = Date.now();
     setFileTabs((prev) => {
       // If already open, update the diff (re-opening after a new write).
       if (prev.some((t) => t.id === path)) {
-        return prev.map((t) => t.id === path ? { ...t, diff } : t);
+        return prev.map((t) => t.id === path ? { ...t, diff, line, reveal } : t);
       }
-      return [...prev, { id: path, path, diff }];
+      return [...prev, { id: path, path, diff, line, reveal }];
     });
     setActiveAgentTab(path);
   }
