@@ -20,8 +20,9 @@ name: Desktop release
 #
 # Besides the release itself, each run refreshes the channel's update feed
 # in the `desktop-updates` release (alpha.json, beta.json, stable.json),
-# which installed apps poll, and on stable `Mira-arm64.dmg` there, which
-# the landing page links to. The update popup shows the `## Highlights`
+# which installed apps poll, and the channel's latest disk image there
+# under a fixed name (Mira-arm64.dmg, Mira-beta-arm64.dmg,
+# Mira-alpha-arm64.dmg), which the landing page links to. The update popup shows the `## Highlights`
 # of releases/vX.Y.Z.md.
 
 on:
@@ -195,10 +196,12 @@ jobs:
             --title "Desktop update feed" --prerelease --latest=false \
             --notes "Update feeds the Mira desktop app checks (alpha.json, beta.json, stable.json) and the landing page's download. Updated by the Desktop release workflow; don't edit by hand."
           gh release upload desktop-updates "dist/$CHANNEL.json" --clobber
-          if [ "$CHANNEL" = stable ]; then
-            cp "dist/$BASE.dmg" dist/Mira-arm64.dmg
-            gh release upload desktop-updates dist/Mira-arm64.dmg --clobber
-          fi
+          # The channel's latest disk image under a name that never changes,
+          # for the landing page's download links.
+          latest=Mira-arm64.dmg
+          [ "$CHANNEL" = stable ] || latest="Mira-$CHANNEL-arm64.dmg"
+          cp "dist/$BASE.dmg" "dist/$latest"
+          gh release upload desktop-updates "dist/$latest" --clobber
 
       - name: Remove the signing keychain
         if: always()
