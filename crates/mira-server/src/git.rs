@@ -344,6 +344,429 @@ pub async fn checkpoint_undo(
     .await
 }
 
+/// A commit mentioned in a transcript, for its hover card.
+#[derive(Debug, Serialize, PartialEq)]
+pub struct CommitCard {
+    pub sha: String,
+    pub short: String,
+    pub subject: String,
+    pub body: String,
+    pub author: String,
+    /// Unix seconds.
+    pub date: i64,
+    pub files: Vec<CommitFile>,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+pub struct CommitFile {
+    pub path: String,
+    pub added: Option<u64>,
+    pub removed: Option<u64>,
+}
+
+/// Separates the header fields of `git show --format`; can't appear in them.
+const SEP: char = '\u{1f}';
+
+fn parse_commit(out: &str) -> Option<CommitCard> {
+    let (head, stat) = out.split_once("\u{1e}").unwrap_or((out, ""));
+    let mut f = head.split(SEP);
+    let (sha, short, author, date, subject, body) = (
+        f.next()?,
+        f.next()?,
+        f.next()?,
+        f.next()?,
+        f.next()?,
+        f.next().unwrap_or(""),
+    );
+    let files = stat
+        .lines()
+        .filter_map(|l| {
+            let mut p = l.splitn(3, '\t');
+            let (a, r, path) = (p.next()?, p.next()?, p.next()?);
+            Some(CommitFile {
+                path: path.to_string(),
+                added: a.parse().ok(),
+                removed: r.parse().ok(),
+            })
+        })
+        .collect();
+    Some(CommitCard {
+        sha: sha.trim().to_string(),
+        short: short.trim().to_string(),
+        subject: subject.to_string(),
+        body: body.trim().to_string(),
+        author: author.to_string(),
+        date: date.trim().parse().unwrap_or(0),
+        files,
+    })
+}
+
+/// GET /api/git/commit/:sha — a commit in the chat's repo: message, author,
+/// date and files changed.
+pub async fn commit_card(
+    State(state): State<AppState>,
+    axum::extract::Path(sha): axum::extract::Path<String>,
+) -> Response {
+    if !(7..=40).contains(&sha.len()) || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+        return err(StatusCode::BAD_REQUEST, "not a commit hash".into());
+    }
+    let cwd = state.current_cwd().await;
+    let format = format!("--format=%H{SEP}%h{SEP}%an{SEP}%at{SEP}%s{SEP}%b%x1e");
+    let out = tokio::task::spawn_blocking(move || {
+        run(
+            &cwd,
+            &[
+                "show",
+                "--no-color",
+                "--numstat",
+                &format,
+                &format!("{sha}^{{commit}}"),
+                "--",
+            ],
+        )
+    })
+    .await;
+    match out {
+        Ok(Ok(text)) => match parse_commit(&text) {
+            Some(card) => Json(card).into_response(),
+            None => err(StatusCode::NOT_FOUND, "no such commit".into()),
+        },
+        _ => err(
+            StatusCode::NOT_FOUND,
+            "no such commit in this repository".into(),
+        ),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ApplyPatchRequest {
+    pub patch: String,
+    /// Only check whether it applies.
+    #[serde(default)]
+    pub check: bool,
+}
+
+/// Run `git apply` on a patch in `cwd`, feeding it on stdin.
+fn git_apply(cwd: &Path, patch: &str, check: bool) -> Result<(), String> {
+    use std::io::Write;
+    let mut args = vec!["apply", "--whitespace=nowarn", "--recount"];
+    if check {
+        args.push("--check");
+    }
+    let mut child = Command::new("git")
+        .current_dir(cwd)
+        .args(&args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let mut text = patch.to_string();
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    child
+        .stdin
+        .take()
+        .ok_or("no stdin")?
+        .write_all(text.as_bytes())
+        .map_err(|e| e.to_string())?;
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr)
+            .trim()
+            .trim_start_matches("error: ")
+            .to_string())
+    }
+}
+
+/// POST /api/git/apply { patch, check } — apply a diff a reply proposed,
+/// in the chat's folder. `git apply` refuses paths outside the repository
+/// and applies all of the patch or none of it.
+pub async fn apply_patch(
+    State(state): State<AppState>,
+    Json(req): Json<ApplyPatchRequest>,
+) -> Response {
+    if req.patch.len() > 2_000_000 {
+        return err(StatusCode::PAYLOAD_TOO_LARGE, "patch too large".into());
+    }
+    let cwd = state.current_cwd().await;
+    let check = req.check;
+    let res = tokio::task::spawn_blocking(move || git_apply(&cwd, &req.patch, check)).await;
+    match res {
+        Ok(Ok(())) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Ok(Err(e)) => err(StatusCode::CONFLICT, e),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// Where a name is defined.
+#[derive(Debug, Serialize, PartialEq)]
+pub struct SymbolHit {
+    pub path: String,
+    pub line: u32,
+    /// The defining line, trimmed.
+    pub preview: String,
+}
+
+/// Definitions of `name` in the repo at `cwd`, best first: the common
+/// declaration forms across Rust, TS/JS, Python, Go, Swift, Kotlin, Java.
+fn find_definitions(cwd: &Path, name: &str) -> Vec<SymbolHit> {
+    let n = regex_escape(name);
+    let pattern = format!(
+        r"(^|[^[:alnum:]_])(fn|function|def|class|struct|enum|trait|interface|type|impl|const|let|var|static|mod|func|object|protocol)[[:space:]]+{n}([^[:alnum:]_]|$)"
+    );
+    let Ok(out) = run(
+        cwd,
+        &["grep", "-n", "-I", "-E", "--full-name", "-e", &pattern],
+    ) else {
+        return Vec::new();
+    };
+    let mut hits: Vec<SymbolHit> = out
+        .lines()
+        .filter_map(|l| {
+            let mut p = l.splitn(3, ':');
+            let (path, line, text) = (p.next()?, p.next()?.parse().ok()?, p.next()?);
+            // A declaration inside a string or a comment isn't one.
+            let at = text.find(name)?;
+            let before = &text[..at];
+            if before.matches('"').count() % 2 == 1
+                || before.contains("//")
+                || before.trim_start().starts_with('#')
+                || before.trim_start().starts_with('*')
+            {
+                return None;
+            }
+            Some(SymbolHit {
+                path: path.to_string(),
+                line,
+                preview: text.trim().chars().take(160).collect(),
+            })
+        })
+        .collect();
+    // Source before tests and docs; declarations before `let`/`const`.
+    let rank = |h: &SymbolHit| {
+        let test = h.path.contains("test") || h.path.ends_with(".md");
+        let weak = h.preview.starts_with("let ") || h.preview.starts_with("var ");
+        (test, weak, h.path.len())
+    };
+    hits.sort_by_key(rank);
+    hits.truncate(8);
+    hits
+}
+
+fn regex_escape(s: &str) -> String {
+    s.chars()
+        .flat_map(|c| {
+            if r"\.^$|?*+()[]{}".contains(c) {
+                vec!['\\', c]
+            } else {
+                vec![c]
+            }
+        })
+        .collect()
+}
+
+#[derive(Deserialize)]
+pub struct SymbolQuery {
+    pub name: String,
+}
+
+/// GET /api/symbol?name=… — where a name mentioned in a reply is defined.
+pub async fn find_symbol(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<SymbolQuery>,
+) -> Response {
+    let name = q.name.trim().trim_end_matches("()").to_string();
+    let ok = (2..=80).contains(&name.len())
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_alphanumeric() || c == '_');
+    if !ok {
+        return Json(Vec::<SymbolHit>::new()).into_response();
+    }
+    let cwd = state.current_cwd().await;
+    let hits = tokio::task::spawn_blocking(move || find_definitions(&cwd, &name))
+        .await
+        .unwrap_or_default();
+    Json(hits).into_response()
+}
+
+/// A branch mentioned in a transcript, for its chip and hover card.
+#[derive(Debug, Serialize, PartialEq)]
+pub struct BranchCard {
+    pub name: String,
+    /// `local` or `remote` (only on `origin`).
+    pub location: &'static str,
+    /// Checked out in the chat's folder right now.
+    pub current: bool,
+    pub base: Option<String>,
+    pub ahead: u32,
+    pub behind: u32,
+    pub last_subject: String,
+    pub last_short: String,
+    pub last_author: String,
+    /// Unix seconds.
+    pub last_date: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pr: Option<serde_json::Value>,
+}
+
+fn rev_exists(cwd: &Path, rev: &str) -> bool {
+    run(
+        cwd,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{rev}^{{commit}}"),
+        ],
+    )
+    .is_ok()
+}
+
+/// The branch others are measured against: origin's default, else main or
+/// master.
+fn base_branch(cwd: &Path) -> Option<String> {
+    if let Ok(head) = run(
+        cwd,
+        &[
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ],
+    ) {
+        let head = head.trim().trim_start_matches("origin/").to_string();
+        if !head.is_empty() {
+            return Some(head);
+        }
+    }
+    ["main", "master"]
+        .into_iter()
+        .find(|b| rev_exists(cwd, &format!("refs/heads/{b}")))
+        .map(str::to_string)
+}
+
+fn branch_card(cwd: &Path, name: &str) -> Option<BranchCard> {
+    let name = name.trim_start_matches("origin/");
+    let (rev, location) = if rev_exists(cwd, &format!("refs/heads/{name}")) {
+        (format!("refs/heads/{name}"), "local")
+    } else if rev_exists(cwd, &format!("refs/remotes/origin/{name}")) {
+        (format!("refs/remotes/origin/{name}"), "remote")
+    } else {
+        return None;
+    };
+    let current = run(cwd, &["branch", "--show-current"]).is_ok_and(|b| b.trim() == name);
+    let base = base_branch(cwd);
+    let (mut ahead, mut behind) = (0, 0);
+    if let Some(b) = base.as_deref().filter(|b| *b != name) {
+        let base_rev = if rev_exists(cwd, &format!("refs/heads/{b}")) {
+            format!("refs/heads/{b}")
+        } else {
+            format!("refs/remotes/origin/{b}")
+        };
+        if let Ok(out) = run(
+            cwd,
+            &[
+                "rev-list",
+                "--left-right",
+                "--count",
+                &format!("{base_rev}...{rev}"),
+            ],
+        ) {
+            let mut it = out.split_whitespace();
+            behind = it.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+            ahead = it.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+        }
+    }
+    let log = run(
+        cwd,
+        &[
+            "log",
+            "-1",
+            &format!("--format=%h{SEP}%s{SEP}%an{SEP}%at"),
+            &rev,
+        ],
+    )
+    .ok()?;
+    let mut f = log.trim_end().split(SEP);
+    Some(BranchCard {
+        name: name.to_string(),
+        location,
+        current,
+        base,
+        ahead,
+        behind,
+        last_short: f.next()?.to_string(),
+        last_subject: f.next()?.to_string(),
+        last_author: f.next()?.to_string(),
+        last_date: f.next()?.parse().unwrap_or(0),
+        pr: None,
+    })
+}
+
+#[derive(Deserialize)]
+pub struct BranchQuery {
+    pub name: String,
+    /// Also look up the branch's PR (slower: a GitHub call).
+    #[serde(default)]
+    pub pr: bool,
+}
+
+/// GET /api/git/branch?name=…[&pr=true] — a branch in the chat's repo:
+/// last commit, ahead/behind its base, and optionally its PR. 404 when no
+/// such branch exists, which is how the client tells a branch name from an
+/// ordinary word.
+pub async fn branch_info(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<BranchQuery>,
+) -> Response {
+    let name = q.name.trim().to_string();
+    let ok = (1..=200).contains(&name.len())
+        && !name.starts_with('-')
+        && !name.contains("..")
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || "/-_.".contains(c));
+    if !ok {
+        return err(StatusCode::NOT_FOUND, "not a branch".into());
+    }
+    let cwd = state.current_cwd().await;
+    let want_pr = q.pr;
+    let card = tokio::task::spawn_blocking(move || {
+        let mut card = branch_card(&cwd, &name)?;
+        if want_pr {
+            // Best effort, through the signed-in gh CLI.
+            card.pr = Command::new("gh")
+                .current_dir(&cwd)
+                .args([
+                    "pr",
+                    "view",
+                    &card.name,
+                    "--json",
+                    "number,title,state,isDraft,url",
+                ])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .and_then(|o| serde_json::from_slice(&o.stdout).ok());
+        }
+        Some(card)
+    })
+    .await
+    .ok()
+    .flatten();
+    match card {
+        Some(c) => Json(c).into_response(),
+        None => err(StatusCode::NOT_FOUND, "no such branch".into()),
+    }
+}
+
 /// GET /api/git/branch-pr
 /// Returns the PR for the current branch using `gh pr view`.
 /// Returns 404 when no PR exists for the branch.
@@ -903,4 +1326,192 @@ fn run(cwd: &Path, args: &[&str]) -> Result<String, std::io::Error> {
 
 fn err(status: StatusCode, msg: String) -> Response {
     (status, Json(serde_json::json!({ "error": msg }))).into_response()
+}
+
+#[cfg(test)]
+mod commit_tests {
+    use super::*;
+
+    #[test]
+    fn a_real_commit_is_described() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path();
+        let g = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .current_dir(p)
+                .args([
+                    "-c",
+                    "user.name=Ada",
+                    "-c",
+                    "user.email=a@x",
+                    "-c",
+                    "commit.gpgsign=false"
+                ])
+                .args(args)
+                .status()
+                .unwrap()
+                .success())
+        };
+        g(&["init", "-q", "--template="]);
+        std::fs::write(p.join("a.rs"), "one\ntwo\n").unwrap();
+        g(&["add", "-A"]);
+        g(&["commit", "-qm", "Add a\n\nWhy it exists."]);
+        let format = format!("--format=%H{SEP}%h{SEP}%an{SEP}%at{SEP}%s{SEP}%b%x1e");
+        let out = run(
+            p,
+            &[
+                "show",
+                "--no-color",
+                "--numstat",
+                &format,
+                "HEAD^{commit}",
+                "--",
+            ],
+        )
+        .unwrap();
+        let c = parse_commit(&out).unwrap();
+        assert_eq!(
+            (c.subject.as_str(), c.body.as_str(), c.author.as_str()),
+            ("Add a", "Why it exists.", "Ada")
+        );
+        assert_eq!(
+            c.files,
+            vec![CommitFile {
+                path: "a.rs".into(),
+                added: Some(2),
+                removed: Some(0)
+            }]
+        );
+        assert!(c.sha.starts_with(&c.short) && c.date > 0);
+    }
+
+    #[test]
+    fn a_patch_checks_then_applies_all_or_nothing() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path();
+        assert!(std::process::Command::new("git")
+            .current_dir(p)
+            .args(["init", "-q", "--template="])
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(p.join("a.txt"), "one\ntwo\n").unwrap();
+        let patch = "--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n one\n-two\n+TWO\n";
+        git_apply(p, patch, true).expect("applies");
+        assert_eq!(
+            std::fs::read_to_string(p.join("a.txt")).unwrap(),
+            "one\ntwo\n",
+            "check changes nothing"
+        );
+        git_apply(p, patch, false).expect("applied");
+        assert_eq!(
+            std::fs::read_to_string(p.join("a.txt")).unwrap(),
+            "one\nTWO\n"
+        );
+        // Applying again no longer fits, and says why.
+        assert!(git_apply(p, patch, true).is_err());
+        // Paths outside the folder are refused.
+        let escape = "--- a/../x.txt\n+++ b/../x.txt\n@@ -0,0 +1 @@\n+x\n";
+        assert!(git_apply(p, escape, false).is_err());
+    }
+
+    #[test]
+    fn definitions_are_found_and_ranked() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path();
+        assert!(std::process::Command::new("git")
+            .current_dir(p)
+            .args(["init", "-q", "--template="])
+            .status()
+            .unwrap()
+            .success());
+        std::fs::create_dir_all(p.join("src")).unwrap();
+        std::fs::create_dir_all(p.join("tests")).unwrap();
+        std::fs::write(
+            p.join("src/a.rs"),
+            "use x;\n\npub fn spawn_turn(s: u8) {}\nfn spawn_turns() {}\n",
+        )
+        .unwrap();
+        std::fs::write(p.join("tests/t.rs"), "fn spawn_turn() {}\n").unwrap();
+        std::fs::write(p.join("src/b.ts"), "export function spawnTurn() {}\n").unwrap();
+        assert!(std::process::Command::new("git")
+            .current_dir(p)
+            .args(["add", "-A"])
+            .status()
+            .unwrap()
+            .success());
+        let hits = find_definitions(p, "spawn_turn");
+        let got: Vec<_> = hits.iter().map(|h| (h.path.as_str(), h.line)).collect();
+        assert_eq!(
+            got,
+            [("src/a.rs", 3), ("tests/t.rs", 1)],
+            "exact name only, source first"
+        );
+        assert_eq!(find_definitions(p, "spawnTurn")[0].path, "src/b.ts");
+        assert!(find_definitions(p, "nothing_here").is_empty());
+        // Mentions in strings and comments aren't definitions.
+        std::fs::write(
+            p.join("src/c.rs"),
+            "let s = \"fn quoted_name() {}\";\n// fn commented_name()\n",
+        )
+        .unwrap();
+        assert!(std::process::Command::new("git")
+            .current_dir(p)
+            .args(["add", "-A"])
+            .status()
+            .unwrap()
+            .success());
+        assert!(find_definitions(p, "quoted_name").is_empty());
+        assert!(find_definitions(p, "commented_name").is_empty());
+    }
+
+    #[test]
+    fn branches_are_described_and_words_are_not() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path();
+        let g = |args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .current_dir(p)
+                    .args([
+                        "-c",
+                        "user.name=Ada",
+                        "-c",
+                        "user.email=a@x",
+                        "-c",
+                        "commit.gpgsign=false"
+                    ])
+                    .args(args)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success(),
+                "git {args:?}"
+            )
+        };
+        g(&["init", "-q", "--template=", "-b", "main"]);
+        std::fs::write(p.join("a"), "1").unwrap();
+        g(&["add", "-A"]);
+        g(&["commit", "-qm", "base"]);
+        g(&["checkout", "-q", "-b", "feat/cli-oauth"]);
+        std::fs::write(p.join("a"), "2").unwrap();
+        g(&["commit", "-qam", "Add OAuth"]);
+        std::fs::write(p.join("a"), "3").unwrap();
+        g(&["commit", "-qam", "Refresh tokens"]);
+        let c = branch_card(p, "feat/cli-oauth").expect("a branch");
+        assert_eq!(
+            (c.ahead, c.behind, c.current, c.location),
+            (2, 0, true, "local")
+        );
+        assert_eq!(c.base.as_deref(), Some("main"));
+        assert_eq!(c.last_subject, "Refresh tokens");
+        assert!(
+            branch_card(p, "origin/feat/cli-oauth").is_some(),
+            "origin/ prefix accepted"
+        );
+        assert!(
+            branch_card(p, "explanation").is_none(),
+            "a word isn't a branch"
+        );
+    }
 }

@@ -1103,6 +1103,7 @@ fn is_transcript_frame(msg: &ServerMsg) -> bool {
             | AcpConfigOptions { .. }
             | AcpCommands { .. }
             | AcpUsage { .. }
+            | AcpTurnUsage { .. }
             | AcpLimits { .. }
             | AcpSessionInfo { .. }
             | AcpTurnEnd { .. }

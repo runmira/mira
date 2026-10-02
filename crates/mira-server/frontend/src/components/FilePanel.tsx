@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, useRef } from 'react';
 import {
   ChevronDown,
   ChevronRight,
@@ -28,6 +28,10 @@ export type FilePanelTab = {
   id: string;
   path: string;
   diff: DiffPreview | null;
+  /** Line to reveal (1-based), from a `path:42` reference. */
+  line?: number | null;
+  /** Bumped on every open, so revealing the same line again scrolls again. */
+  reveal?: number;
 };
 
 /* ------------------------------------------------------------------ */
@@ -427,19 +431,50 @@ export function highlightLines(text: string, lang: string): string[] {
 /* Syntax-highlighted code viewer                                        */
 /* ------------------------------------------------------------------ */
 
-function CodeViewer({ content, lang }: { content: string; lang: string }) {
+/** Code line height: text-[12.5px] × leading-[1.65]. */
+const LINE_PX = 12.5 * 1.65;
+/** The code area's top padding (py-4). */
+const PAD_PX = 16;
+
+function CodeViewer({ content, lang, line, reveal }: { content: string; lang: string; line?: number | null; reveal?: number }) {
   const hlLines = useMemo(() => highlightLines(content, lang), [content, lang]);
+  const scroller = useRef<HTMLDivElement | null>(null);
+  const target = line && line >= 1 && line <= hlLines.length ? line : null;
+
+  // Bring the referenced line into view, a third of the way down so its
+  // context shows above it.
+  useEffect(() => {
+    const el = scroller.current;
+    if (!el || !target) return;
+    const y = PAD_PX + (target - 1) * LINE_PX;
+    el.scrollTo({ top: Math.max(0, y - el.clientHeight / 3), behavior: 'smooth' });
+  }, [target, reveal, hlLines.length]);
 
   return (
-    <div className="h-full overflow-auto font-mono text-[12.5px] leading-[1.65]" style={{ background: BG }}>
-      <div className="flex py-4">
+    <div ref={scroller} className="h-full overflow-auto font-mono text-[12.5px] leading-[1.65]" style={{ background: BG }}>
+      <div className="relative flex py-4">
+        {target && (
+          <div
+            key={reveal}
+            aria-hidden
+            className="mira-line-flash pointer-events-none absolute inset-x-0"
+            style={{
+              top: PAD_PX + (target - 1) * LINE_PX,
+              height: LINE_PX,
+              background: 'rgba(122, 162, 247, 0.13)',
+              boxShadow: 'inset 2px 0 0 #7aa2f7',
+            }}
+          />
+        )}
         {/* Gutter — no border, just muted numbers on same dark bg */}
         <div
           className="sticky left-0 z-10 shrink-0 select-none pr-5 text-right"
           style={{ background: BG, color: TNG, minWidth: '3.5rem', paddingLeft: '1rem' }}
           aria-hidden
         >
-          {hlLines.map((_, i) => <div key={i}>{i + 1}</div>)}
+          {hlLines.map((_, i) => (
+            <div key={i} style={i + 1 === target ? { color: '#c0caf5' } : undefined}>{i + 1}</div>
+          ))}
         </div>
         {/* Code */}
         <pre className="min-w-0 flex-1 pr-8" style={{ background: BG, overflow: 'hidden' }}>
@@ -642,7 +677,7 @@ export function FilePanelBody({ tab, cwd, onOpenFile }: Props) {
           ) : loadError ? (
             <div className="p-4 font-mono text-[12px] text-destructive">{loadError}</div>
           ) : content !== null ? (
-            <CodeViewer content={content} lang={lang} />
+            <CodeViewer content={content} lang={lang} line={tab.line} reveal={tab.reveal} />
           ) : null}
         </div>
       </div>

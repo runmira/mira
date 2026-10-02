@@ -98,6 +98,7 @@ import {
   Zap,
 } from 'lucide-react';
 import { CommandPalette, type PaletteAction } from './components/CommandPalette';
+import { splitFileRef } from './lib/refs';
 import { ContextInspector } from './components/ContextInspector';
 import { ImportChats } from './components/ImportChats';
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
@@ -253,6 +254,18 @@ type AcpPlanEntry = { kind: 'acp_plan'; entries: AcpPlanItem[] };
 /** Where the chat moved to another engine (provider ⇄ agent). A quiet
  *  divider, so a reader can tell which engine wrote what. */
 type EngineSwitchEntry = { kind: 'engine_switch'; engine: SessionEngine };
+/** An external agent's turn: how long it took and what it spent. Not
+ *  rendered — the turn's reply shows it in its hover row. Kept in the
+ *  entries (rather than a map by turn number) so it stays with its turn
+ *  however provider and agent turns interleave. */
+type TurnStatsEntry = {
+  kind: 'turn_stats';
+  startedAt: number | null;
+  endedAt: number | null;
+  usage: UsageTotals | null;
+  model: string | null;
+  costUsd: number | null;
+};
 
 export type Entry =
   | MsgEntry
@@ -263,7 +276,8 @@ export type Entry =
   | CompactEntry
   | ThoughtEntry
   | AcpPlanEntry
-  | EngineSwitchEntry;
+  | EngineSwitchEntry
+  | TurnStatsEntry;
 
 type TurnTiming = {
   startedAt: number;
@@ -395,14 +409,67 @@ function agentDisplayName(driver: string, fallback: string): string {
   return known[driver] ?? (fallback && fallback !== driver ? fallback : driver);
 }
 
+/** Index of the current turn's stats entry (after the last user message),
+ *  or -1. */
+function turnStatsIndex(entries: Entry[]): number {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i];
+    if (e.kind === 'turn_stats') return i;
+    if (e.kind === 'msg' && e.msg.role === 'user') return -1;
+  }
+  return -1;
+}
+
+/** Update the current turn's stats, creating them if this is the first. */
+function withTurnStats(entries: Entry[], update: (s: TurnStatsEntry) => TurnStatsEntry): Entry[] {
+  const i = turnStatsIndex(entries);
+  const blank: TurnStatsEntry = { kind: 'turn_stats', startedAt: null, endedAt: null, usage: null, model: null, costUsd: null };
+  const cur = i >= 0 ? (entries[i] as TurnStatsEntry) : blank;
+  const next = update(cur);
+  if (i >= 0) return [...entries.slice(0, i), next, ...entries.slice(i + 1)];
+  // New: right after the turn's user message, never at the tail — a stats
+  // report mid-stream (Codex sends them) would otherwise split the message
+  // being streamed in two.
+  let at = entries.length;
+  for (let j = entries.length - 1; j >= 0; j--) {
+    const e = entries[j];
+    if (e.kind === 'msg' && e.msg.role === 'user') {
+      at = j + 1;
+      break;
+    }
+  }
+  return [...entries.slice(0, at), next, ...entries.slice(at)];
+}
+
+/** Add one usage report (a delta) to the current turn. */
+function addTurnUsage(entries: Entry[], f: Extract<ServerMsg, { type: 'acp_turn_usage' }>): Entry[] {
+  return withTurnStats(entries, (s) => {
+    const u = s.usage ?? { prompt_tokens: 0, completion_tokens: 0, cached_input_tokens: 0, rounds: 0 };
+    return {
+      ...s,
+      // Prompt tokens include cached input, as everywhere else.
+      usage: {
+        prompt_tokens: u.prompt_tokens + f.input_tokens + f.cached_input_tokens,
+        completion_tokens: u.completion_tokens + f.output_tokens,
+        cached_input_tokens: u.cached_input_tokens + f.cached_input_tokens,
+        rounds: u.rounds,
+      },
+      model: f.model || s.model,
+      costUsd: f.cost_usd != null ? (s.costUsd ?? 0) + f.cost_usd : s.costUsd,
+    };
+  });
+}
+
 export function replayAgentTranscript(lines: AgentTranscriptLine[]): Entry[] {
   let out: Entry[] = [];
+  let turnStartedAt: number | null = null;
   for (const line of lines) {
     if (line.user) {
       out = [
         ...out,
         { kind: 'msg', msg: { role: 'user', content: line.user.text } },
       ];
+      turnStartedAt = line.t;
       continue;
     }
     const f = line.frame as ServerMsg | null | undefined;
@@ -432,8 +499,13 @@ export function replayAgentTranscript(lines: AgentTranscriptLine[]): Entry[] {
             : [...sealed, entry];
         break;
       }
+      case 'acp_turn_usage':
+        out = addTurnUsage(out, f as Extract<ServerMsg, { type: 'acp_turn_usage' }>);
+        break;
       case 'acp_turn_end': {
         const msg = f as Extract<ServerMsg, { type: 'acp_turn_end' }>;
+        const started = turnStartedAt;
+        out = withTurnStats(out, (s) => ({ ...s, startedAt: s.startedAt ?? started, endedAt: line.t }));
         const sealed = sealAcpThought(out);
         if (isSuccessfulAcpStop(msg.stop_reason)) {
           out = sealed;
@@ -859,6 +931,8 @@ export default function App() {
   // Only turns started in *this* session have timing (reloaded transcripts
   // have no wall-clock data, so their turns skip the "Worked for" header).
   const [turnTimings, setTurnTimings] = useState<Map<number, TurnTiming>>(new Map());
+  /** When the latest turn was sent — what an agent turn's stats start from. */
+  const turnStartRef = useRef<number | null>(null);
   const [expandedTurns, setExpandedTurns] = useState<Set<number>>(new Set());
   const [busy, setBusy] = useState<boolean>(false);
   const [thinking, setThinking] = useState<boolean>(false);
@@ -1087,6 +1161,11 @@ export default function App() {
       .then((pr) => live() && setBranchPr(pr))
       .catch(() => live() && setBranchPr(null));
   }, []);
+  // Something outside a turn changed files (a diff applied from a reply).
+  useEffect(() => {
+    window.addEventListener('mira:repo-changed', refreshRepo);
+    return () => window.removeEventListener('mira:repo-changed', refreshRepo);
+  }, [refreshRepo]);
   // Live task list — hydrated from `ready.tasks` on socket open and
   // upserted whenever a `task_*` tool result lands. Rendered as a
   // persistent "Plan" card near the top of the transcript.
@@ -1841,6 +1920,11 @@ export default function App() {
         // the agent path never did, which is why a finished turn still showed
         // a live duration.
         setTurnTimings((prev) => stampLastTurn(prev, Date.now()));
+        {
+          const started = turnStartRef.current;
+          const ended = Date.now();
+          setEntries((prev) => withTurnStats(prev, (st) => ({ ...st, startedAt: st.startedAt ?? started, endedAt: ended })));
+        }
 
         // A turn that did not complete should say why. A usage limit is an
         // error, not an aside: the agent produced no answer, so presenting it
@@ -1911,6 +1995,9 @@ export default function App() {
         break;
       case 'acp_usage':
         setAcpUsage(msg);
+        break;
+      case 'acp_turn_usage':
+        setEntries((prev) => addTurnUsage(prev, msg));
         break;
       case 'acp_limits':
         setAcpLimits(msg.windows);
@@ -2258,6 +2345,7 @@ export default function App() {
     followRef.current = true;
     setShowJump(false);
     const now = Date.now();
+    turnStartRef.current = now;
     setEntries((prev) => {
       const next: Entry[] = [...prev, { kind: 'msg', msg: { role: 'user', content: text, images } }];
       const turnIndex = countUserMessages(next) - 1;
@@ -2344,7 +2432,8 @@ export default function App() {
     setEntries(next);
     setTurnTimings((tt) => {
       const clone = new Map([...tt].filter(([i]) => i < turnIndex));
-      clone.set(turnIndex, { startedAt: Date.now(), endedAt: null });
+      turnStartRef.current = Date.now();
+      clone.set(turnIndex, { startedAt: turnStartRef.current, endedAt: null });
       return clone;
     });
     setBusy(true);
@@ -2700,13 +2789,17 @@ export default function App() {
     setActiveAgentTab(null);
   }
 
-  function openFileTab(path: string, diff: DiffPreview | null) {
+  function openFileTab(ref: string, diff: DiffPreview | null, atLine?: number | null) {
+    // `src/a.rs:42` is a file and a line, not a file named that.
+    const { path, line: refLine } = splitFileRef(ref);
+    const line = atLine ?? refLine;
+    const reveal = Date.now();
     setFileTabs((prev) => {
       // If already open, update the diff (re-opening after a new write).
       if (prev.some((t) => t.id === path)) {
-        return prev.map((t) => t.id === path ? { ...t, diff } : t);
+        return prev.map((t) => t.id === path ? { ...t, diff, line, reveal } : t);
       }
-      return [...prev, { id: path, path, diff }];
+      return [...prev, { id: path, path, diff, line, reveal }];
     });
     setActiveAgentTab(path);
   }
@@ -3908,7 +4001,7 @@ const TurnView = memo(TurnViewImpl, (prev, next) => {
 type TurnViewProps = Parameters<typeof TurnViewImpl>[0];
 
 function TurnViewImpl({
-  turn, timing, usage, model, index, expanded, isActive, onToggle, onDecide, onPlanReply, onAskUserReply, onOpenAgent, onOpenFile, skills, mode, onSetMode, minimapId, approvalViaDialog, offscreenOk = false,
+  turn, timing: timingProp, usage: usageProp, model: modelProp, index, expanded, isActive, onToggle, onDecide, onPlanReply, onAskUserReply, onOpenAgent, onOpenFile, skills, mode, onSetMode, minimapId, approvalViaDialog, offscreenOk = false,
 }: {
   turn: Turn;
   /** Position in the transcript; what `onToggle` is called with. */
@@ -3947,14 +4040,24 @@ function TurnViewImpl({
    *  the unified dialog, not on the cards. */
   approvalViaDialog?: boolean;
 }) {
+  // An agent turn carries its own stats; they win over the per-index
+  // maps, which only line up with Mira's own turns.
+  const own = turn.body.find((e): e is TurnStatsEntry => e.kind === 'turn_stats');
+  const timing: TurnTiming | null =
+    own?.startedAt != null ? { startedAt: own.startedAt, endedAt: own.endedAt } : timingProp;
+  const usage = own?.usage ?? usageProp;
+  const model = own?.model ?? modelProp;
+
   // Split the body into "intermediate work" and the final assistant text.
   // Rule: the LAST assistant text message with non-empty content is the
   // final answer; everything before it is intermediate. Tool cards + earlier
   // assistant text hide behind the "Worked for" chip when collapsed.
-  const finalIdx = findFinalAssistantIndex(turn.body);
-  const intermediateRaw = finalIdx >= 0 ? turn.body.slice(0, finalIdx) : turn.body;
-  const finalEntry = finalIdx >= 0 ? turn.body[finalIdx] : null;
-  const trailing = finalIdx >= 0 ? turn.body.slice(finalIdx + 1) : [];
+  // The stats entry is data, not content: it mustn't count as work done.
+  const body = useMemo(() => turn.body.filter((e) => e.kind !== 'turn_stats'), [turn.body]);
+  const finalIdx = findFinalAssistantIndex(body);
+  const intermediateRaw = finalIdx >= 0 ? body.slice(0, finalIdx) : body;
+  const finalEntry = finalIdx >= 0 ? body[finalIdx] : null;
+  const trailing = finalIdx >= 0 ? body.slice(finalIdx + 1) : [];
 
   // Fold consecutive `agent` tool entries into a single group so a parallel
   // spawn ("N agents working") reads as one bar instead of N loud cards.
@@ -4090,7 +4193,7 @@ function TurnViewImpl({
         <TurnStatsContext.Provider
           value={
             timing?.endedAt != null
-              ? { durationMs: durationMs ?? timing.endedAt - timing.startedAt, usage, model }
+              ? { durationMs: durationMs ?? timing.endedAt - timing.startedAt, usage, model, costUsd: own?.costUsd ?? null }
               : null
           }
         >
@@ -4645,6 +4748,8 @@ function EntryView({
       );
     case 'engine_switch':
       return <EngineSwitchDivider engine={entry.engine} />;
+    case 'turn_stats':
+      return null;
     case 'warning':
       return <StatusLine text={entry.text} />;
     case 'error':
@@ -4844,14 +4949,20 @@ type MessageActions = {
 const MessageActionsContext = createContext<MessageActions | null>(null);
 
 /** Stats for the turn a final reply closes — shown in its hover row. */
-type TurnStats = { durationMs: number; usage: UsageTotals | null; model: string };
+type TurnStats = {
+  durationMs: number;
+  usage: UsageTotals | null;
+  model: string;
+  /** The agent's own cost estimate, when it reports one. */
+  costUsd?: number | null;
+};
 const TurnStatsContext = createContext<TurnStats | null>(null);
 
 function turnStatsLabel(t: TurnStats): string {
   const parts = [formatDuration(t.durationMs)];
   if (t.usage) {
     parts.push(`${shortNum(t.usage.prompt_tokens)} in · ${shortNum(t.usage.completion_tokens)} out`);
-    const cost = costUsd(t.model, t.usage);
+    const cost = t.costUsd ?? costUsd(t.model, t.usage);
     if (cost != null) parts.push(formatDollars(cost));
   }
   return parts.join(' · ');
