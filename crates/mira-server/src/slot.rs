@@ -63,8 +63,8 @@ use crate::protocol::ServerMsg;
 /// broadcast channel. Unlike the harness `TurnProgress`, this is never
 /// cleared between turns, so background process drain tasks can keep emitting
 /// `ToolProgress` frames even after `invoke` has returned.
-struct SessionProgress {
-    tx: broadcast::Sender<ServerMsg>,
+pub(crate) struct SessionProgress {
+    pub(crate) tx: broadcast::Sender<ServerMsg>,
 }
 
 impl ToolProgressSink for SessionProgress {
@@ -141,6 +141,10 @@ pub struct SessionSlot {
     /// switching worktrees makes a new slot, so each worktree keeps its
     /// own environment.
     pub environments: Arc<mira_compute::EnvironmentManager>,
+    /// Processes the agent started with `run_background` (dev servers,
+    /// watchers) — the same store its tools use, so the Processes pane
+    /// sees and stops exactly what the agent sees.
+    pub bg_processes: Arc<BackgroundProcessStore>,
 }
 
 impl SessionSlot {
@@ -180,6 +184,13 @@ impl SessionSlot {
     /// mutex. Cheap probe used by the sessions API to badge the sidebar
     /// with a "running" indicator.
     pub async fn is_running(&self) -> bool {
+        if self
+            .engine
+            .agent_in_turn
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return true;
+        }
         let guard = self.turn.lock().await;
         match guard.as_ref() {
             Some(h) => !h.is_finished(),
@@ -347,7 +358,7 @@ pub async fn build_slot(
         .with_episodic(episodic_store.clone())
         .with_compute_slot(environments.slot())
         .with_bg_progress(bg_progress)
-        .with_bg_processes(bg_store);
+        .with_bg_processes(bg_store.clone());
 
     // A session whose record says an agent is still its engine comes back
     // set up for that agent: the next prompt resumes it with the same
@@ -429,6 +440,7 @@ pub async fn build_slot(
         attached,
         background_mode,
         environments,
+        bg_processes: bg_store,
     })
 }
 

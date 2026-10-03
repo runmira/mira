@@ -447,13 +447,16 @@ export async function getSkill(name: string): Promise<SkillDetail | null> {
 
 export type FileView = { path: string; bytes: number; content: string };
 
-export async function readFile(path: string): Promise<FileView> {
-  const r = await fetch(`/api/file?path=${encodeURIComponent(path)}`);
+/** Read a text file. `view` is for the file viewer, which allows larger
+ *  files than attaching one to a message does. */
+export async function readFile(path: string, opts?: { view?: boolean }): Promise<FileView> {
+  const r = await fetch(`/api/file?path=${encodeURIComponent(path)}${opts?.view ? '&purpose=view' : ''}`);
   if (!r.ok) {
-    let msg = `file GET ${r.status}`;
+    let msg = `Couldn't read the file (HTTP ${r.status}).`;
     try {
       const j = await r.json();
-      if (j.error) msg += `: ${j.error}`;
+      // The server's message is written for people; show it as is.
+      if (j.error) msg = j.error;
     } catch { /* ignore */ }
     throw new Error(msg);
   }
@@ -634,6 +637,12 @@ export async function previewCheckpoint(ref: MessageRef): Promise<RestoreChange[
 /** Put the files back the way they were before a message. */
 export function restoreCheckpoint(ref: MessageRef): Promise<Restored> {
   return checkpointCall<Restored>('/api/checkpoints/restore', ref);
+}
+
+/** "Fork from here": a new chat with this one's history through the
+ *  given message's turn. Resolves to the new chat's id. */
+export async function forkSession(sessionId: string, ref: MessageRef): Promise<string> {
+  return (await checkpointCall<{ id: string }>(`/api/sessions/${encodeURIComponent(sessionId)}/fork`, ref)).id;
 }
 
 /** Undo a restore. */

@@ -115,6 +115,10 @@ pub struct EngineRuntime {
     /// Unix seconds of the agent's last sign of life (a prompt or a frame),
     /// for the idle reaper.
     pub last_active: std::sync::atomic::AtomicU64,
+    /// An agent turn is in flight: set when a prompt goes out, cleared when
+    /// its turn ends. A window that opens the chat mid-turn reads it (via
+    /// `Ready.running`) to show Stop rather than an idle composer.
+    pub agent_in_turn: AtomicBool,
 }
 
 impl EngineRuntime {

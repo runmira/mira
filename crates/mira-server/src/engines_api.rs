@@ -40,6 +40,10 @@ struct ExternalCache {
 }
 
 static EXTERNAL: Mutex<Option<ExternalCache>> = Mutex::new(None);
+/// Results of the sweep in progress, by instance, so each agent shows its
+/// real state as soon as its own probe ends.
+static PARTIAL: Mutex<Option<std::collections::HashMap<String, EngineSnapshot>>> =
+    Mutex::new(None);
 static REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Serialize)]
@@ -115,13 +119,19 @@ pub async fn list_engines(
             true
         }
         None => {
+            spawn_refresh(state);
+            let partial = PARTIAL.lock().ok().and_then(|g| g.clone()).unwrap_or_default();
             out.extend(
                 engines
                     .instances()
                     .filter(|i| !i.is_native())
-                    .map(presence_only),
+                    .map(|i| {
+                        partial
+                            .get(i.id.as_str())
+                            .cloned()
+                            .unwrap_or_else(|| presence_only(i))
+                    }),
             );
-            spawn_refresh(state);
             false
         }
     };
@@ -175,14 +185,70 @@ fn spawn_refresh(state: AppState) {
         return;
     }
     tokio::spawn(async move {
-        let snapshots = state.engines.snapshot_externals().await;
-        if let Ok(mut guard) = EXTERNAL.lock() {
-            *guard = Some(ExternalCache {
-                at: Instant::now(),
-                snapshots,
-            });
+        // Reset the in-flight flag however this ends — including a panic
+        // or a cancelled task — or no refresh would ever spawn again and
+        // the cache would answer placeholders forever.
+        struct ResetOnDrop;
+        impl Drop for ResetOnDrop {
+            fn drop(&mut self) {
+                REFRESH_IN_FLIGHT.store(false, Ordering::SeqCst);
+            }
         }
-        REFRESH_IN_FLIGHT.store(false, Ordering::SeqCst);
+        let _reset = ResetOnDrop;
+        if let Ok(mut p) = PARTIAL.lock() {
+            *p = Some(Default::default());
+        }
+        // The whole sweep is bounded: probes have their own budgets, but
+        // they run sequentially enough that a few wedged ones must not
+        // hold the flag (and the cache) hostage.
+        match tokio::time::timeout(
+            Duration::from_secs(300),
+            state.engines.snapshot_externals_with(|snap| {
+                if let Ok(mut p) = PARTIAL.lock() {
+                    p.get_or_insert_with(Default::default)
+                        .insert(snap.instance.to_string(), snap.clone());
+                }
+            }),
+        )
+        .await
+        {
+            Ok(snapshots) => {
+                if let Ok(mut guard) = EXTERNAL.lock() {
+                    *guard = Some(ExternalCache {
+                        at: Instant::now(),
+                        snapshots,
+                    });
+                }
+            }
+            Err(_) => {
+                // Keep what finished, and say so for the rest — leaving them
+                // on "checking…" reads as a hang that never ends.
+                tracing::warn!("external engine probe sweep timed out");
+                let partial = PARTIAL.lock().ok().and_then(|g| g.clone()).unwrap_or_default();
+                let snapshots = state
+                    .engines
+                    .instances()
+                    .filter(|i| !i.is_native())
+                    .map(|i| {
+                        partial.get(i.id.as_str()).cloned().unwrap_or_else(|| {
+                            let mut s = presence_only(i);
+                            if matches!(s.state, EngineState::Failed { .. }) {
+                                s.state = EngineState::Failed {
+                                    reason: "didn't answer in time — try again".into(),
+                                };
+                            }
+                            s
+                        })
+                    })
+                    .collect();
+                if let Ok(mut guard) = EXTERNAL.lock() {
+                    *guard = Some(ExternalCache {
+                        at: Instant::now(),
+                        snapshots,
+                    });
+                }
+            }
+        }
     });
 }
 

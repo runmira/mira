@@ -268,6 +268,7 @@ mod tests {
             previews: Default::default(),
             archived_at: None,
             agent: None,
+            forked_from: None,
             pinned: false,
         };
         let rows = rows_for(&rec, "2000-01-01");

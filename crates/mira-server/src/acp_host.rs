@@ -25,7 +25,10 @@ use std::sync::Arc;
 
 use mira_acp::events::NormalizedEvent;
 use mira_acp::events::PermissionRequest;
-use mira_acp::host::{EventPort, FilePort, HostError, PermissionPort, TerminalPort};
+use mira_acp::host::{
+    ElicitationReply, ElicitationRequest, EventPort, FilePort, HostError, PermissionPort,
+    TerminalPort,
+};
 use mira_harness::approver::Approver;
 use mira_policy::Decision;
 use mira_pty::{Exit, PtyRegistry, PtySpawn};
@@ -285,11 +288,29 @@ fn synthetic_call(path: &str) -> mira_core::ToolCall {
 /// `Cancelled` — never a fabricated id.
 pub struct AcpPermissions {
     approver: Arc<dyn Approver>,
+    /// The session it serves, for what goes beyond yes/no: the scope the
+    /// user picked ("allow for this chat") and the question card. Weak —
+    /// the slot owns the agent that owns this.
+    slot: Option<std::sync::Weak<crate::slot::SessionSlot>>,
 }
 
 impl AcpPermissions {
     pub fn new(approver: Arc<dyn Approver>) -> Arc<Self> {
-        Arc::new(AcpPermissions { approver })
+        Arc::new(AcpPermissions {
+            approver,
+            slot: None,
+        })
+    }
+
+    pub fn for_slot(slot: &Arc<crate::slot::SessionSlot>) -> Arc<Self> {
+        Arc::new(AcpPermissions {
+            approver: slot.approver.clone(),
+            slot: Some(Arc::downgrade(slot)),
+        })
+    }
+
+    fn slot(&self) -> Option<Arc<crate::slot::SessionSlot>> {
+        self.slot.as_ref().and_then(std::sync::Weak::upgrade)
     }
 }
 
@@ -299,7 +320,14 @@ impl AcpPermissions {
 /// decision — for example it offered only "always allow" and the user said
 /// no. The caller then answers `Cancelled`, which tells the agent to unwind
 /// the turn instead of retrying against a wall.
-fn choose_option(req: &PermissionRequest, allowed: bool) -> Option<String> {
+fn choose_option(req: &PermissionRequest, allowed: bool, widen: bool) -> Option<String> {
+    // "Allow for this chat": the agent's standing grant, when it offers one,
+    // so it stops asking about the same thing.
+    if allowed && widen {
+        if let Some(o) = req.options.iter().find(|o| o.is_allow() && o.is_persistent()) {
+            return Some(o.option_id.clone());
+        }
+    }
     let pick = |once: bool| -> Option<String> {
         req.options
             .iter()
@@ -373,7 +401,18 @@ impl PermissionPort for AcpPermissions {
         };
 
         let allowed = self.approver.approve(&call, Decision::Ask).await;
-        let chosen = choose_option(req, allowed);
+        let scope = self.slot().and_then(|s| {
+            s.engine
+                .approval_scopes
+                .lock()
+                .ok()
+                .and_then(|mut m| m.remove(&call.id.to_string()))
+        });
+        let widen = matches!(
+            scope,
+            Some(crate::protocol::ApprovalScope::Session | crate::protocol::ApprovalScope::Always)
+        );
+        let chosen = choose_option(req, allowed, widen);
         if chosen.is_none() {
             tracing::info!(
                 tool_call_id = %req.tool_call_id,
@@ -383,6 +422,13 @@ impl PermissionPort for AcpPermissions {
             );
         }
         Ok(chosen)
+    }
+
+    async fn elicit(&self, req: &ElicitationRequest) -> Result<ElicitationReply, HostError> {
+        match self.slot() {
+            Some(slot) => Ok(crate::acp_session::ask_elicitation(&slot, req).await),
+            None => Ok(ElicitationReply::Cancel),
+        }
     }
 }
 
@@ -682,7 +728,7 @@ mod tests {
                 },
             ],
         };
-        assert_eq!(choose_option(&r, true).as_deref(), Some("once"));
+        assert_eq!(choose_option(&r, true, false).as_deref(), Some("once"));
     }
 
     #[test]
@@ -699,7 +745,32 @@ mod tests {
                 kind: Kind::AllowAlways,
             }],
         };
-        assert_eq!(choose_option(&r, true).as_deref(), Some("always"));
+        assert_eq!(choose_option(&r, true, false).as_deref(), Some("always"));
+    }
+
+    #[test]
+    fn allow_for_this_chat_takes_the_agents_standing_grant() {
+        use mira_acp::events::{AcpPermissionOptionKind as Kind, PermissionChoice};
+        let opt = |id: &str, kind| PermissionChoice {
+            option_id: id.into(),
+            name: id.into(),
+            kind,
+        };
+        let r = PermissionRequest {
+            session_id: "s".into(),
+            tool_call_id: "c".into(),
+            title: "t".into(),
+            kind: None,
+            options: vec![
+                opt("once", Kind::AllowOnce),
+                opt("always", Kind::AllowAlways),
+                opt("reject", Kind::RejectOnce),
+            ],
+        };
+        assert_eq!(choose_option(&r, true, true).as_deref(), Some("always"));
+        assert_eq!(choose_option(&r, true, false).as_deref(), Some("once"));
+        // Widening never turns a "no" into a standing anything.
+        assert_eq!(choose_option(&r, false, true).as_deref(), Some("reject"));
     }
 
     #[test]
@@ -716,7 +787,7 @@ mod tests {
                 kind: Kind::AllowAlways,
             }],
         };
-        assert_eq!(choose_option(&r, false), None);
+        assert_eq!(choose_option(&r, false, false), None);
     }
 
     #[test]
@@ -737,7 +808,7 @@ mod tests {
                 mk("no", Kind::RejectOnce),
             ],
         };
-        assert_eq!(choose_option(&r, false).as_deref(), Some("no"));
+        assert_eq!(choose_option(&r, false, false).as_deref(), Some("no"));
     }
 
     #[test]
@@ -749,8 +820,8 @@ mod tests {
             kind: None,
             options: vec![],
         };
-        assert_eq!(choose_option(&r, true), None);
-        assert_eq!(choose_option(&r, false), None);
+        assert_eq!(choose_option(&r, true, false), None);
+        assert_eq!(choose_option(&r, false, false), None);
     }
 
     #[test]
@@ -768,7 +839,7 @@ mod tests {
                     kind: Kind::AllowOnce,
                 }],
             };
-            assert_eq!(choose_option(&r, true).as_deref(), Some(id));
+            assert_eq!(choose_option(&r, true, false).as_deref(), Some(id));
         }
     }
 

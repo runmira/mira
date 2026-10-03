@@ -103,6 +103,20 @@ pub struct SessionRecord {
     /// `messages` — see below. Absent for harness-only sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentSessionMeta>,
+    /// Set on a chat made with "Fork from here": where it branched off.
+    /// The sidebar nests it under that chat. Unlike `parent_id` (subagents)
+    /// it's a full, user-facing chat, and deleting the original leaves it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from: Option<ForkPoint>,
+}
+
+/// Where a forked chat branched off its original.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ForkPoint {
+    pub session_id: SessionId,
+    /// The message the fork was taken at (its opening words), for the
+    /// "forked from …" label.
+    pub at: String,
 }
 
 /// Which external agent a session belongs to, for badges, replay and resume.
@@ -136,7 +150,97 @@ fn default_true() -> bool {
     true
 }
 
+/// Why a chat couldn't be forked at a message.
+#[derive(Debug, Error, PartialEq)]
+pub enum ForkError {
+    #[error("that message isn't in this chat's live history (it may have been compacted)")]
+    MessageNotFound,
+    #[error("forking chats run by an external agent isn't supported yet")]
+    AgentChat,
+}
+
 impl SessionRecord {
+    /// A new chat with this one's history through the turn opened by the
+    /// `occurrence`-th most recent user message whose text is `text` (the
+    /// same key edit & resend uses): that message and every reply to it,
+    /// nothing after. Usage starts from zero, a running goal is dropped,
+    /// and it isn't pinned or archived.
+    pub fn fork_at(
+        &self,
+        new_id: SessionId,
+        text: &str,
+        occurrence: usize,
+    ) -> Result<SessionRecord, ForkError> {
+        if self.agent.as_ref().is_some_and(|a| a.active) {
+            return Err(ForkError::AgentChat);
+        }
+        let is_prompt = |m: &Message| {
+            m.role == mira_core::Role::User && !crate::history::is_summary(m)
+        };
+        let idx = self
+            .messages
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, m)| {
+                m.role == mira_core::Role::User
+                    && m.content.as_deref().map(crate::history::strip_hook_context) == Some(text)
+            })
+            .nth(occurrence)
+            .map(|(i, _)| i)
+            .ok_or(ForkError::MessageNotFound)?;
+        // Through the end of that turn: up to the next prompt.
+        let end = self.messages[idx + 1..]
+            .iter()
+            .position(is_prompt)
+            .map_or(self.messages.len(), |p| idx + 1 + p);
+        let messages: Vec<Message> = self.messages[..end].to_vec();
+
+        let prompts = messages.iter().filter(|m| is_prompt(m)).count();
+        let mut turns = self.turns.clone();
+        turns.truncate(prompts);
+        let kept_calls: std::collections::HashSet<String> = messages
+            .iter()
+            .flat_map(|m| m.tool_calls.iter().map(|c| c.id.to_string()))
+            .collect();
+        let previews = self
+            .previews
+            .iter()
+            .filter(|(k, _)| kept_calls.contains(*k))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let at: String = text.trim().chars().take(80).collect();
+        let base = self
+            .title
+            .clone()
+            .or_else(|| self.first_user_message().map(str::to_string))
+            .unwrap_or_else(|| "Chat".into());
+        let now = now_secs();
+        Ok(SessionRecord {
+            id: new_id,
+            cwd: self.cwd.clone(),
+            cfg: self.cfg.clone(),
+            messages,
+            archived: self.archived.clone(),
+            created_at: now,
+            updated_at: now,
+            title: Some(format!("{} (fork)", base.chars().take(60).collect::<String>())),
+            turns,
+            usage: UsageTotals::default(),
+            parent_id: None,
+            tasks: self.tasks.clone(),
+            goal: None,
+            previews,
+            pinned: false,
+            archived_at: None,
+            agent: None,
+            forked_from: Some(ForkPoint {
+                session_id: self.id.clone(),
+                at,
+            }),
+        })
+    }
+
     /// Every message of the conversation in order, as a person would
     /// read it: what compaction replaced, then the live history. System
     /// messages and compaction summaries are left out.
@@ -279,4 +383,93 @@ pub fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod fork_tests {
+    use super::*;
+
+    fn record(messages: Vec<Message>) -> SessionRecord {
+        SessionRecord {
+            id: SessionId::from("sess_src"),
+            cwd: PathBuf::from("/tmp"),
+            cfg: SessionConfig::new("m"),
+            messages,
+            archived: Vec::new(),
+            created_at: 1,
+            updated_at: 2,
+            title: Some("Fix the parser".into()),
+            turns: vec![TurnMeta::default(), TurnMeta::default(), TurnMeta::default()],
+            usage: UsageTotals { prompt_tokens: 9, ..Default::default() },
+            parent_id: None,
+            tasks: Vec::new(),
+            goal: None,
+            previews: HashMap::new(),
+            pinned: true,
+            archived_at: None,
+            agent: None,
+            forked_from: None,
+        }
+    }
+
+    #[test]
+    fn keeps_history_through_the_chosen_turn() {
+        let src = record(vec![
+            Message::system("sys"),
+            Message::user("one"),
+            Message::assistant("a1"),
+            Message::user("two"),
+            Message::assistant("a2"),
+            Message::user("three"),
+            Message::assistant("a3"),
+        ]);
+        let f = src.fork_at(SessionId::from("sess_new"), "two", 0).unwrap();
+        let texts: Vec<_> = f.messages.iter().filter_map(|m| m.content.clone()).collect();
+        assert_eq!(texts, ["sys", "one", "a1", "two", "a2"]);
+        assert_eq!(f.turns.len(), 2);
+        assert_eq!(f.title.as_deref(), Some("Fix the parser (fork)"));
+        assert_eq!(f.forked_from.as_ref().unwrap().session_id, SessionId::from("sess_src"));
+        assert_eq!(f.forked_from.as_ref().unwrap().at, "two");
+        assert!(f.usage.is_zero() && !f.pinned && f.parent_id.is_none());
+    }
+
+    #[test]
+    fn the_last_turn_keeps_everything() {
+        let src = record(vec![Message::user("one"), Message::assistant("a1")]);
+        let f = src.fork_at(SessionId::from("n"), "one", 0).unwrap();
+        assert_eq!(f.messages.len(), 2);
+    }
+
+    #[test]
+    fn counts_repeated_messages_from_the_latest() {
+        let src = record(vec![
+            Message::user("again"),
+            Message::assistant("first"),
+            Message::user("again"),
+            Message::assistant("second"),
+        ]);
+        let f = src.fork_at(SessionId::from("n"), "again", 1).unwrap();
+        assert_eq!(f.messages.len(), 2);
+        assert_eq!(f.messages[1].content.as_deref(), Some("first"));
+    }
+
+    #[test]
+    fn refuses_what_it_cant_fork() {
+        let src = record(vec![Message::user("one")]);
+        assert_eq!(
+            src.fork_at(SessionId::from("n"), "missing", 0).unwrap_err(),
+            ForkError::MessageNotFound
+        );
+        let mut agent = record(vec![Message::user("one")]);
+        agent.agent = Some(AgentSessionMeta {
+            driver_kind: "claude-code".into(),
+            model: None,
+            active: true,
+            launch: None,
+        });
+        assert_eq!(
+            agent.fork_at(SessionId::from("n"), "one", 0).unwrap_err(),
+            ForkError::AgentChat
+        );
+    }
 }

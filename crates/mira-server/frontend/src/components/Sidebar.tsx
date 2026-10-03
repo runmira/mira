@@ -20,6 +20,7 @@ import {
   Timer,
   Trash2,
   X,
+  GitFork,
 } from 'lucide-react';
 import {
   deleteSession,
@@ -119,6 +120,15 @@ export function Sidebar({
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(() => loadCollapsed());
+  // Chats whose forks are folded away (the fork pill on the row).
+  const [forksHidden, setForksHidden] = useState<Set<string>>(() => new Set());
+  const toggleForks = (id: string) =>
+    setForksHidden((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   const [showMore, setShowMore] = useState<Set<string>>(() => new Set());
   const [renaming, setRenaming] = useState<SessionSummary | null>(null);
   // Pin/archive/bulk actions bump this so the list refetches without
@@ -522,8 +532,13 @@ export function Sidebar({
           {groups.map((g) => {
             const isCollapsed = collapsed.has(g.cwd);
             const expandedAll = showMore.has(g.cwd);
-            const visible = expandedAll ? g.sessions : g.sessions.slice(0, PER_GROUP_LIMIT);
-            const overflow = g.sessions.length - visible.length;
+            const roots = forkForest(g.sessions);
+            const visible = expandedAll ? roots : roots.slice(0, PER_GROUP_LIMIT);
+            const overflow = roots.length - visible.length;
+            const labelOf = (id: string | null | undefined) => {
+              const p = g.sessions.find((x) => x.id === id);
+              return p ? sessionLabel(p) : undefined;
+            };
 
             return (
               <div key={g.cwd} className="flex flex-col">
@@ -575,10 +590,19 @@ export function Sidebar({
 
                 {!isCollapsed && (
                   <div className="flex flex-col gap-0.5 pl-1">
-                    {visible.map((s) => (
-                      <SessionRow
-                        key={s.id}
+                    {visible.map((root) => {
+                      const renderNode = (node: ForkNode, depth: number): React.ReactNode => {
+                        const s = node.session;
+                        const open = !forksHidden.has(s.id);
+                        return (
+                          <div key={s.id} className="flex flex-col gap-0.5">
+                            <SessionRow
                         session={s}
+                        depth={depth}
+                        forkedFromLabel={labelOf(s.forked_from)}
+                        forkCount={node.forks.length}
+                        forksOpen={!forksHidden.has(s.id)}
+                        onToggleForks={() => toggleForks(s.id)}
                         // One selection model across the sidebar: the
                         // session highlight only shows while the chat
                         // view is actually open — picking Plugins /
@@ -602,7 +626,32 @@ export function Sidebar({
                             : undefined
                         }
                       />
-                    ))}
+                            {node.forks.length > 0 && open && (
+                              // Branch lines: a rail down from the chat's icon,
+                              // with a rounded elbow into each fork.
+                              <div className="ml-[15px] flex flex-col gap-0.5 pl-3">
+                                {node.forks.map((f, i) => (
+                                  <div key={f.session.id} className="relative">
+                                    {i < node.forks.length - 1 && (
+                                      <span
+                                        aria-hidden
+                                        className="pointer-events-none absolute -bottom-0.5 -left-3 top-0 border-l border-fg/15"
+                                      />
+                                    )}
+                                    <span
+                                      aria-hidden
+                                      className="pointer-events-none absolute -left-3 top-0 h-4 w-2.5 rounded-bl-[7px] border-b border-l border-fg/15"
+                                    />
+                                    {renderNode(f, depth + 1)}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      };
+                      return renderNode(root, 0);
+                    })}
                     {overflow > 0 && (
                       <button
                         onClick={() => toggleShowMore(g.cwd)}
@@ -712,8 +761,54 @@ export function Sidebar({
  *  `short-id · time · optional branch · optional provider-dot`, and a
  *  right-side status circle (running / merged / idle) — the row background
  *  itself stays quiet even when active so the sidebar doesn't shout. */
+/** A chat and the chats forked from it ("Fork from here"), newest first
+ *  at each level. A fork whose original isn't in the list (archived, or
+ *  another project) stands on its own. */
+type ForkNode = { session: SessionSummary; forks: ForkNode[] };
+
+function forkForest(sessions: SessionSummary[]): ForkNode[] {
+  const ids = new Set(sessions.map((s) => s.id));
+  const nodes = new Map(sessions.map((s) => [s.id, { session: s, forks: [] as ForkNode[] }]));
+  const roots: ForkNode[] = [];
+  for (const s of sessions) {
+    const node = nodes.get(s.id)!;
+    const parent = s.forked_from && s.forked_from !== s.id && ids.has(s.forked_from) ? nodes.get(s.forked_from) : undefined;
+    if (parent) parent.forks.push(node);
+    else roots.push(node);
+  }
+  // A cycle would leave nodes unreachable; promote them so nothing vanishes.
+  const seen = new Set<string>();
+  const mark = (n: ForkNode) => {
+    if (seen.has(n.session.id)) return;
+    seen.add(n.session.id);
+    n.forks.forEach(mark);
+  };
+  roots.forEach(mark);
+  for (const n of nodes.values()) {
+    if (!seen.has(n.session.id)) {
+      roots.push(n);
+      mark(n);
+    }
+  }
+  return roots;
+}
+
+/** What a fork row says. Forks of one chat share its title, so the
+ *  message each one branched at is what tells them apart — unless the
+ *  fork has been renamed (its title no longer ends in "(fork)"). */
+function forkLabel(s: SessionSummary): string {
+  const label = sessionLabel(s);
+  if (s.forked_at && /\(fork\)$/.test(label)) return s.forked_at;
+  return label.replace(/\s*\(fork\)$/, '');
+}
+
 function SessionRow({
   session,
+  depth = 0,
+  forkedFromLabel,
+  forkCount = 0,
+  forksOpen = true,
+  onToggleForks,
   active,
   activeBusy,
   unread = false,
@@ -728,6 +823,14 @@ function SessionRow({
   onToggleSelect,
 }: {
   session: SessionSummary;
+  /** Fork nesting level: 0 for a chat, 1 for a fork of it, … */
+  depth?: number;
+  /** The label of the chat this one was forked from, for the tooltip. */
+  forkedFromLabel?: string;
+  /** How many chats were forked from this one, and whether they show. */
+  forkCount?: number;
+  forksOpen?: boolean;
+  onToggleForks?: () => void;
   active: boolean;
   activeBusy: boolean;
   /** Finished in the background since you last looked. */
@@ -760,7 +863,13 @@ function SessionRow({
       // Hover tooltip prefers the cleaned-up label (no `## Attached
       // files` markdown blob) so an attachment-only turn still hovers
       // sensibly. Falls back to session id when everything is empty.
-      title={selecting ? undefined : sessionLabel(session) || session.id}
+      title={
+        selecting
+          ? undefined
+          : session.forked_from
+            ? `${sessionLabel(session) || session.id}\nForked from “${forkedFromLabel ?? 'another chat'}” at “${session.forked_at ?? ''}”`
+            : sessionLabel(session) || session.id
+      }
       role={selecting ? 'checkbox' : 'button'}
       tabIndex={0}
       aria-checked={selecting ? checked : undefined}
@@ -792,15 +901,44 @@ function SessionRow({
        *  — the height of the label's line — so it can't sit above or below
        *  the text the way a taller badge on a baseline row did. */}
       <span className="flex min-w-0 items-center gap-2 text-left">
-        {!selecting && <EngineBadge session={session} />}
+        {!selecting &&
+          (depth > 0 ? (
+            <GitFork className="size-3.5 shrink-0 text-mira-blue/70" aria-label="Fork" />
+          ) : (
+            <EngineBadge session={session} />
+          ))}
         <span
           className={cn(
-            'min-w-0 flex-1 truncate text-[13.5px] leading-4',
-            active && !selecting ? 'font-semibold text-foreground' : 'font-medium text-foreground/90',
+            'min-w-0 flex-1 truncate leading-4',
+            depth > 0 ? 'text-[13px]' : 'text-[13.5px]',
+            active && !selecting
+              ? 'font-semibold text-foreground'
+              : depth > 0
+                ? 'text-foreground/80'
+                : 'font-medium text-foreground/90',
           )}
         >
-          {sessionLabel(session)}
+          {depth > 0 ? forkLabel(session) : sessionLabel(session)}
         </span>
+        {!selecting && forkCount > 0 && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleForks?.();
+            }}
+            title={`${forksOpen ? 'Hide' : 'Show'} ${forkCount} fork${forkCount === 1 ? '' : 's'}`}
+            className={cn(
+              'inline-flex h-4 shrink-0 items-center gap-0.5 rounded-full px-1.5 text-[10.5px] font-medium tabular-nums transition-colors',
+              forksOpen
+                ? 'bg-mira-blue/12 text-mira-blue hover:bg-mira-blue/20'
+                : 'bg-fg/[0.07] text-muted-foreground hover:bg-fg/[0.12] hover:text-foreground',
+            )}
+          >
+            <GitFork className="size-2.5" />
+            {forkCount}
+          </button>
+        )}
         {!selecting && session.pinned && (
           <Pin className="size-3 shrink-0 rotate-45 text-mira-blue/70" aria-label="Pinned" />
         )}

@@ -3,6 +3,7 @@
  * tables you can sort and copy.
  */
 import { Children, cloneElement, createContext, isValidElement, useContext, useEffect, useMemo, useState, type ReactElement, type ReactNode } from 'react';
+import { Tip } from './ui/Tip';
 import { ArrowDown, ArrowUp, ArrowUpDown, Check, CircleAlert, Copy, Info, Lightbulb, MessageSquareWarning, OctagonAlert, Wand2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -94,17 +95,21 @@ export function DiffBlock({ raw }: { raw: string }) {
           {copied ? 'copied' : 'copy'}
         </button>
         {applicable && (
-          <button
-            className={cn('md-diff-apply', state)}
-            disabled={state !== 'ready' && state !== 'failed'}
-            onClick={() => void apply()}
-            title={
+          <Tip
+            align="end"
+            label={
               state === 'cannot'
-                ? `Doesn't apply to your files: ${reason ?? ''}`
+                ? "Doesn't apply to your files"
                 : state === 'applied'
                   ? 'Applied to your files'
                   : 'Apply this change to your files'
             }
+            hint={state === 'cannot' ? reason ?? undefined : undefined}
+          >
+          <button
+            className={cn('md-diff-apply', state)}
+            disabled={state !== 'ready' && state !== 'failed'}
+            onClick={() => void apply()}
           >
             {state === 'applied' ? (
               <>
@@ -122,6 +127,7 @@ export function DiffBlock({ raw }: { raw: string }) {
               </>
             )}
           </button>
+          </Tip>
         )}
       </div>
       <pre className="md-diff-body">

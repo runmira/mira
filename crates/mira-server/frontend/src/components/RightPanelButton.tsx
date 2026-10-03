@@ -3,12 +3,13 @@ import { ChevronDown, PanelRight } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Menu, MenuItem, MenuLabel } from './ui/Menu';
 import {
+  OPENABLE_PANES,
   TOOL_PANE_DEFS,
   type ToolPaneKind,
   type ToolPaneTab,
 } from './panes/toolPanes';
 
-const KINDS: ToolPaneKind[] = ['browser', 'whiteboard', 'devtools'];
+const KINDS = OPENABLE_PANES;
 
 /**
  * Split button in the chat toolbar: the main half focuses (or opens) the
