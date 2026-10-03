@@ -329,6 +329,13 @@ pub struct PermissionRequest {
     pub title: String,
     pub kind: Option<ToolKind>,
     pub options: Vec<PermissionChoice>,
+    /// What the tool was called with (`{"command": "date"}`), when the agent
+    /// says — so the approval shows the action, not just its title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_input: Option<serde_json::Value>,
+    /// Files the call touches.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub locations: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -745,6 +752,15 @@ pub fn from_permission_request(src: &RequestPermissionRequest) -> PermissionRequ
         title: src.tool_call.fields.title.clone().unwrap_or_default(),
         kind: src.tool_call.fields.kind,
         options: permission_options(&src.options),
+        raw_input: src.tool_call.fields.raw_input.clone(),
+        locations: src
+            .tool_call
+            .fields
+            .locations
+            .iter()
+            .flatten()
+            .map(|l| l.path.display().to_string())
+            .collect(),
     }
 }
 

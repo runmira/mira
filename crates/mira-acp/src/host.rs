@@ -369,7 +369,25 @@ impl AgentCallback for AcpHost {
             }
             "session/request_permission" => {
                 let wire: RequestPermissionRequest = parse(params)?;
-                let req = from_permission_request(&wire);
+                let mut req = from_permission_request(&wire);
+                // Agents often send the input on the tool call and only the
+                // title on the permission request; fill it in from there.
+                if req.raw_input.is_none() || req.locations.is_empty() {
+                    let known = self
+                        .tool_state
+                        .lock()
+                        .await
+                        .get(&tool_key(&req.session_id, &req.tool_call_id))
+                        .cloned();
+                    if let Some(state) = known {
+                        if req.raw_input.is_none() {
+                            req.raw_input = state.raw_input.clone();
+                        }
+                        if req.locations.is_empty() {
+                            req.locations = state.locations.iter().map(|l| l.path.clone()).collect();
+                        }
+                    }
+                }
                 // Recorded before the user is asked, so a cancel arriving
                 // mid-prompt still finds it.
                 self.pending_permissions.track(id.clone()).await;
