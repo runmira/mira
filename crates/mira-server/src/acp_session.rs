@@ -166,6 +166,11 @@ pub async fn start_agent(
         driver_cfg
             .launch_args
             .push(crate::browser::agent_mcp_config(state.local_port, &slot.id.to_string()).to_string());
+        // Looking (snapshots, screenshots, process output) doesn't need an
+        // approval each time; anything that acts still asks.
+        driver_cfg
+            .launch_args
+            .push(format!("--allowedTools={}", crate::browser::claude_allowed_tools()));
     }
     let launch: LaunchConfig = match transport {
         Transport::Native => {
@@ -266,7 +271,7 @@ pub async fn start_agent(
         native_overrides,
         // Mira's tools for ACP agents (OpenCode, Gemini…): they may call MCP
         // tools without asking, so Mira gates the ones that run commands.
-        Some(crate::browser::agent_mcp_url(
+        Some(crate::browser::agent_mcp(
             state.local_port,
             &slot.id.to_string(),
             crate::browser::McpGate::Mira,
@@ -1020,7 +1025,7 @@ async fn start_acp_agent_with_ports(
     cwd: &std::path::Path,
     gate: mira_acp::native::PermissionGate,
     native: Option<mira_acp::native::NativeOverrides>,
-    mira_mcp: Option<String>,
+    mira_mcp: Option<mira_acp::session::MiraMcp>,
 ) -> Result<AgentHandle, StartError> {
     start_acp_agent(
         driver,
@@ -1404,6 +1409,8 @@ pub async fn revert_agent_turn(
 
 /// Stop whatever agent `slot` is running.
 pub async fn stop_agent(slot: &Arc<SessionSlot>) -> bool {
+    // The chat's tool-server token stays: the next agent here reuses it
+    // (it ends when the chat is deleted, or goes unused for 12 h).
     match slot.acp_agent.write().await.take() {
         Some(prev) => {
             prev.stop().await;

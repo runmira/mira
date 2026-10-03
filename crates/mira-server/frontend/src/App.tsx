@@ -139,6 +139,8 @@ import {
   POSTURES,
 } from './lib/agentPostures';
 import { AgentCard, AgentGroup } from './components/AgentCard';
+import { DelegateCard, isDelegateTaskName } from './components/DelegateCard';
+import type { DelegateStep } from './components/DelegateCard';
 import miraLogo from './assets/mira-logo.png';
 import { SubagentPanel, type SubagentTab, type FilePanelTab } from './components/SubagentPanel';
 import { TaskListPanel } from './components/TaskListPanel';
@@ -227,6 +229,13 @@ type ToolEntry = {
    *  `run_background` and any other long-running tool that emits progress.
    *  Lines accumulate even after the tool result has landed. */
   progressLines?: string[];
+  /** Epoch ms the call started, when known (live turns only — not carried
+   *  through history reload). Powers the delegation card's elapsed clock. */
+  startedAt?: number | null;
+  /** Visible steps streamed from a `delegate_task` child (via
+   *  `delegate_progress` frames), newest last. The delegation card renders
+   *  them as a live activity log; empty for every other tool. */
+  delegateSteps?: DelegateStep[];
   /** Set when an external agent made this call: its own description of it,
    *  kept so later updates merge onto it. `call` is its Mira translation,
    *  which is what renders. */
@@ -1894,6 +1903,12 @@ export default function App() {
             { kind: 'warning', text: `[note ${msg.entry.author}] ${msg.entry.text}` },
           ],
         })));
+        break;
+      case 'delegate_progress':
+        // A step the delegated child just took. Routes to its card by call id
+        // (the parent's `delegate_task` id), with a fallback to the most
+        // recent running delegation for providers that don't echo the id.
+        setEntries((prev) => appendDelegateStep(prev, msg.call_id, msg.kind, msg.text));
         break;
       case 'plan_request':
         // Server reuses the tool call id as the prompt id. Attach immediately
@@ -3903,6 +3918,7 @@ function upsertAcpTool(prevRaw: Entry[], call: AcpToolCall): Entry[] {
     }
   }
   if (AGENT_PROMPT_TOOLS.has(merged.name ?? '')) return idx >= 0 ? prev.filter((_, i) => i !== idx) : prev;
+  const prior = idx >= 0 ? (prev[idx] as ToolEntry) : null;
   const entry: Entry = {
     kind: 'tool',
     call: agentCallToToolCall(merged),
@@ -3910,6 +3926,11 @@ function upsertAcpTool(prevRaw: Entry[], call: AcpToolCall): Entry[] {
     status: agentToolStatus(merged),
     result: agentToolResult(merged),
     agentCall: merged,
+    // Updates rebuild the entry from the agent's merged call; that call
+    // carries no Mira-side state, so accumulated fields would be lost on
+    // every progress frame unless carried across here.
+    startedAt: prior?.startedAt ?? Date.now(),
+    delegateSteps: prior?.delegateSteps,
   };
   if (idx >= 0) return [...prev.slice(0, idx), entry, ...prev.slice(idx + 1)];
   return [...prev, entry];
@@ -3922,7 +3943,7 @@ function upsertToolStart(prevRaw: Entry[], call: ToolCall): Entry[] {
   const prev = sealThought(prevRaw);
   const existing = prev.findIndex((e) => e.kind === 'tool' && e.call.id === call.id);
   if (existing >= 0) return prev;
-  return [...prev, { kind: 'tool', call, preview: null, status: 'running', result: null }];
+  return [...prev, { kind: 'tool', call, preview: null, status: 'running', result: null, startedAt: Date.now() }];
 }
 
 function attachToolResult(prev: Entry[], result: ToolResult): Entry[] {
@@ -3975,6 +3996,38 @@ function appendProgressLine(prev: Entry[], callId: string, line: string): Entry[
     }
   }
   return prev;
+}
+
+/** Attach a delegated child's step to its card. Prefers an exact call-id
+ *  match; when none is found (a provider that doesn't echo the spawning id)
+ *  falls back to the most recent still-running `delegate_task`, so live
+ *  activity is never dropped on the floor. */
+function appendDelegateStep(prev: Entry[], callId: string, kind: string, text: string): Entry[] {
+  const isDelegateRunning = (e: Entry) =>
+    e.kind === 'tool' &&
+    isDelegateTaskName(e.call.function.name) &&
+    (e.status === 'running' || e.status === 'pending');
+  let idx = -1;
+  for (let i = prev.length - 1; i >= 0; i--) {
+    const e = prev[i];
+    if (e.kind === 'tool' && isDelegateTaskName(e.call.function.name) && e.call.id === callId) {
+      idx = i;
+      break;
+    }
+  }
+  if (idx === -1) {
+    for (let i = prev.length - 1; i >= 0; i--) {
+      if (isDelegateRunning(prev[i])) {
+        idx = i;
+        break;
+      }
+    }
+  }
+  if (idx === -1) return prev;
+  const e = prev[idx] as ToolEntry;
+  const step: DelegateStep = { kind, text, at: Date.now() };
+  const updated: ToolEntry = { ...e, delegateSteps: [...(e.delegateSteps ?? []), step] };
+  return [...prev.slice(0, idx), updated, ...prev.slice(idx + 1)];
 }
 
 function attachPlanProposal(prev: Entry[], callId: string, proposal: PlanProposal): Entry[] {
@@ -4377,11 +4430,12 @@ export type GroupItem =
   | { kind: 'agent-group'; entries: (Entry & { kind: 'tool' })[] }
   | { kind: 'tool-group'; entries: (Entry & { kind: 'tool' })[] };
 
-/** Types that render as their own cards (agent, plan, ask_user) — never
- *  fold into a generic tool-group. Agent has its own AgentGroup path;
- *  plan and ask_user each swap in for the tool row when their proposal
- *  attaches, so grouping would hide the interactive card. */
-const SPECIAL_TOOLS = new Set(['agent', 'plan', 'ask_user']);
+/** Types that render as their own cards (agent, delegate, plan, ask_user) —
+ *  never fold into a generic tool-group. Agent has its own AgentGroup path;
+ *  delegate gets the cross-engine hand-off card; plan and ask_user each swap
+ *  in for the tool row when their proposal attaches, so grouping would hide
+ *  the interactive card. */
+const SPECIAL_TOOLS = new Set(['agent', 'delegate_task', 'plan', 'ask_user']);
 
 export function groupAgentRuns(entries: Entry[]): GroupItem[] {
   const out: GroupItem[] = [];
@@ -4436,9 +4490,10 @@ function isAgentEntry(e: Entry): boolean {
 }
 
 /** A tool entry is groupable when it isn't a special one-off renderer
- *  (agent/plan) and isn't currently awaiting user approval. */
+ *  (agent/delegate/plan) and isn't currently awaiting user approval. */
 function isGroupableTool(e: Entry): boolean {
   if (e.kind !== 'tool') return false;
+  if (isDelegateTaskName(e.call.function.name)) return false;
   if (SPECIAL_TOOLS.has(e.call.function.name)) return false;
   if (e.status === 'pending') return false;
   return true;
@@ -4847,6 +4902,22 @@ function EntryView({
               status={entry.status}
               result={entry.result}
               onOpen={onOpenAgent}
+            />
+          </div>
+        );
+      }
+      // A cross-engine hand-off gets its own card (who took it, what it is
+      // doing) instead of a generic tool row. Agents' own `Task`/`Agent`
+      // calls map to `delegate` and stay ordinary tool rows — see the card.
+      if (isDelegateTaskName(entry.call.function.name)) {
+        return (
+          <div className="flex justify-start">
+            <DelegateCard
+              call={entry.call}
+              status={entry.status}
+              result={entry.result}
+              startedAt={entry.startedAt}
+              steps={entry.delegateSteps}
             />
           </div>
         );
