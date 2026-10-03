@@ -1972,6 +1972,10 @@ export default function App() {
         // clearing `busy` here the composer spins forever, which is what a
         // rate-limited turn looks like: the agent is long finished, the UI
         // just never hears about it.
+        // The same "turn finished" sound Mira's own turns make — only for a
+        // turn that was running here (a Stop already settled the composer,
+        // and its confirmation shouldn't chime).
+        if (busyRef.current) playPing();
         setBusy(false);
         busyRef.current = false;
         setThinking(false);

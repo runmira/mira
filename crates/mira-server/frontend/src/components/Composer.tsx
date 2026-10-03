@@ -2219,11 +2219,11 @@ function EmbeddedAskUserCard({
                   className={cn(
                     'mt-[3px] flex size-[14px] shrink-0 items-center justify-center transition-colors',
                     multi ? 'rounded-[5px]' : 'rounded-full',
-                    active ? 'bg-black' : 'bg-background/60 ring-1 ring-inset ring-border',
+                    active ? 'bg-background' : 'bg-background/60 ring-1 ring-inset ring-border',
                   )}
                 >
-                  {active && multi && <PhCheck className="size-2.5 text-white" strokeWidth={2.5} />}
-                  {active && !multi && <span className="size-1.5 rounded-full bg-white" />}
+                  {active && multi && <PhCheck className="size-2.5 text-foreground" strokeWidth={2.5} />}
+                  {active && !multi && <span className="size-1.5 rounded-full bg-foreground" />}
                 </span>
                 <div className="flex min-w-0 flex-1 flex-col gap-0.5">
                   <div className="flex items-center gap-1.5">
@@ -2231,13 +2231,13 @@ function EmbeddedAskUserCard({
                       {opt.label}
                     </span>
                     {opt.recommended && (
-                      <span className={cn('text-[10px] font-medium uppercase tracking-wider', active ? 'text-shade/60' : 'text-muted-foreground/80')}>
+                      <span className={cn('text-[10px] font-medium uppercase tracking-wider', active ? 'text-background/65' : 'text-muted-foreground/80')}>
                         · Recommended
                       </span>
                     )}
                   </div>
                   {opt.description && (
-                    <span className={cn('text-[11.5px] leading-snug', active ? 'text-shade/70' : 'text-muted-foreground')}>
+                    <span className={cn('text-[11.5px] leading-snug', active ? 'text-background/70' : 'text-muted-foreground')}>
                       {opt.description}
                     </span>
                   )}

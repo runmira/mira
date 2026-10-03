@@ -251,7 +251,7 @@ function QuestionRow({
                     <span
                       className={cn(
                         'text-[10px] font-medium uppercase tracking-wider',
-                        active ? 'text-shade/60' : 'text-muted-foreground/80',
+                        active ? 'text-background/65' : 'text-muted-foreground/80',
                       )}
                     >
                       · Recommended
@@ -262,7 +262,7 @@ function QuestionRow({
                   <span
                     className={cn(
                       'text-[11.5px] leading-snug',
-                      active ? 'text-shade/70' : 'text-muted-foreground',
+                      active ? 'text-background/70' : 'text-muted-foreground',
                     )}
                   >
                     {opt.description}
@@ -325,16 +325,17 @@ function Indicator({ active, multi }: { active: boolean; multi: boolean }) {
       className={cn(
         'mt-[3px] flex size-[14px] shrink-0 items-center justify-center transition-colors',
         shape,
-        // Selected tile is white → indicator is a filled black disc so
-        // it reads as a strong "picked" mark on the light background.
-        active ? 'bg-black' : 'bg-background/60 ring-1 ring-inset ring-border',
+        // The selected tile is inverted (`bg-foreground`) in either theme,
+        // so the picked mark is the page color with a foreground center —
+        // it reads on the tile in light and dark alike.
+        active ? 'bg-background' : 'bg-background/60 ring-1 ring-inset ring-border',
       )}
     >
       {active && multi && (
-        <Check className="size-2.5 text-white" strokeWidth={2.5} />
+        <Check className="size-2.5 text-foreground" strokeWidth={2.5} />
       )}
       {active && !multi && (
-        <span className="size-1.5 rounded-full bg-white" />
+        <span className="size-1.5 rounded-full bg-foreground" />
       )}
     </span>
   );

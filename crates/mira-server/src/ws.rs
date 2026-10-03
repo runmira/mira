@@ -1384,9 +1384,10 @@ async fn prompt_agent(
                     .find(|l| !l.is_empty())
                     .map(|l| l.chars().take(300).collect::<String>());
                 let _ = events.send(ServerMsg::Error {
-                    text: match said {
-                        Some(said) => format!("agent turn failed: {e}. It said: {said}"),
-                        None => format!("agent turn failed: {e}"),
+                    text: match (explain_agent_error(&e), said) {
+                        (Some(why), _) => why,
+                        (None, Some(said)) => format!("agent turn failed: {e}. It said: {said}"),
+                        (None, None) => format!("agent turn failed: {e}"),
                     },
                 });
                 // Nothing else will end this turn: the prompt never landed.
@@ -1394,6 +1395,22 @@ async fn prompt_agent(
             }
         }
     });
+}
+
+/// A plain-language reading of agent errors that aren't Mira's to fix but
+/// are confusing raw ("-32603 Internal error: OpenAI Chat tool call delta
+/// is missing id or name"). `None` leaves the raw text as is.
+fn explain_agent_error(e: &str) -> Option<String> {
+    let lower = e.to_lowercase();
+    if lower.contains("tool call delta") || lower.contains("invalid-output") {
+        return Some(
+            "The agent's model sent a malformed tool call, so the agent stopped. \
+             This comes from the model, not Mira — it's usually a one-off: try \
+             again, or pick a different model for the agent."
+                .into(),
+        );
+    }
+    None
 }
 
 /// Mark the slot as mid-turn until the agent's turn ends (however it ends:
@@ -1790,5 +1807,17 @@ mod attachment_tests {
             data: "!!!not-base64!!!".into(),
         }];
         assert!(stage_agent_images(&dir, &bad).is_err());
+    }
+}
+
+#[cfg(test)]
+mod agent_error_tests {
+    use super::explain_agent_error;
+
+    #[test]
+    fn explains_a_models_malformed_tool_call() {
+        let raw = "acp: agent returned an error: -32603 Internal error: OpenAI Chat tool call delta is missing id or name";
+        assert!(explain_agent_error(raw).unwrap().contains("malformed tool call"));
+        assert!(explain_agent_error("acp: the agent's stdin closed").is_none());
     }
 }
