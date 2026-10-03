@@ -17,7 +17,7 @@ form each agent understands, with tools shaped so a model uses them well.
 | --- | --- | --- | --- |
 | Claude Code | native `claude -p` (stream-json) | `browser` + background processes, via `--mcp-config` | one multipurpose `browser` tool; every call prompts |
 | OpenCode | ACP (`opencode acp`) | same, via `session/new` `mcpServers` (HTTP) | one multipurpose `browser` tool |
-| Gemini / Grok / other ACP | ACP | same, **only if** the agent takes HTTP MCP servers | agents with stdio-only MCP get nothing |
+| Gemini / Grok / other ACP | ACP | same — over HTTP, or through `mira mcp-bridge` (stdio) for agents that don't take HTTP | — |
 | Codex | `codex app-server` (JSON-RPC) | browser + processes, via `thread/start` `config.mcp_servers` | not yet tried against a live Codex |
 
 
@@ -98,7 +98,7 @@ actions follow the browser tool's own policy, as for Mira's model.
       server, sharing Mira's browser session.
       *Done when* OpenCode and Codex complete "open localhost:5173, click
       Sign in, screenshot" without retries.
-- [ ] **3 · stdio bridge** — `mira mcp-bridge <url>`; ACP agents without
+- [x] **3 · stdio bridge** — `mira mcp-bridge <url>`; ACP agents without
       HTTP MCP get the tools through it.
       *Done when* an agent advertising `mcpCapabilities.http: false` lists
       Mira's tools.

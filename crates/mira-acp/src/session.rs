@@ -79,6 +79,22 @@ impl ClientCaps {
     }
 }
 
+/// Mira's tool server as an ACP `mcpServers` entry: over HTTP when the agent
+/// takes HTTP servers, otherwise as a stdio server — this same `mira`
+/// binary run as `mira mcp-bridge <url>` (every ACP agent takes stdio).
+fn mira_mcp_entry(url: &str, http: bool, exe: Option<std::path::PathBuf>) -> Option<Value> {
+    if http {
+        return Some(json!({ "type": "http", "name": "mira", "url": url, "headers": [] }));
+    }
+    let exe = exe?;
+    Some(json!({
+        "name": "mira",
+        "command": exe,
+        "args": ["mcp-bridge", url],
+        "env": [],
+    }))
+}
+
 /// A live ACP conversation with one agent process.
 pub struct AcpSession {
     conn: Connection,
@@ -250,15 +266,14 @@ impl AcpSession {
         let mut params = serde_json::to_value(req).unwrap_or(json!({}));
         // Mira's tools (its browser, background processes), as an MCP server
         // the agent connects to — only when it says it can take one over HTTP.
-        let mira_mcp = {
+        let entry = {
             let st = self.state.lock().await;
-            st.mira_mcp.clone().filter(|_| st.mcp_http)
+            st.mira_mcp
+                .as_deref()
+                .and_then(|url| mira_mcp_entry(url, st.mcp_http, std::env::current_exe().ok()))
         };
-        if let (Some(url), Some(obj)) = (mira_mcp, params.as_object_mut()) {
-            obj.insert(
-                "mcpServers".into(),
-                json!([{ "type": "http", "name": "mira", "url": url, "headers": [] }]),
-            );
+        if let (Some(entry), Some(obj)) = (entry, params.as_object_mut()) {
+            obj.insert("mcpServers".into(), json!([entry]));
         }
         let res: NewSessionResponse = self.conn.request("session/new", params).await?;
         *self.session_id.lock().await = Some(res.session_id.to_string());
@@ -548,6 +563,19 @@ mod tests {
             "agentCapabilities": { "loadSession": true, "promptCapabilities": {} },
             "authMethods": [{ "id": "cursor_login", "name": "Sign in" }]
         })
+    }
+
+    #[test]
+    fn mira_tools_go_over_http_or_through_the_stdio_bridge() {
+        let url = "http://127.0.0.1:1/mcp/t?session=s&gate=mira";
+        let http = mira_mcp_entry(url, true, None).unwrap();
+        assert_eq!(http["type"], "http");
+        assert_eq!(http["url"], url);
+        let stdio = mira_mcp_entry(url, false, Some("/bin/mira".into())).unwrap();
+        assert!(stdio.get("type").is_none(), "stdio entries are untagged");
+        assert_eq!(stdio["command"], "/bin/mira");
+        assert_eq!(stdio["args"], json!(["mcp-bridge", url]));
+        assert!(mira_mcp_entry(url, false, None).is_none());
     }
 
     #[tokio::test]
