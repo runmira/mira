@@ -10,6 +10,7 @@ import { extractPrompt, faceStateFor, stripAgentIdMarker, useSubagentIdentity } 
 import { SubagentFace } from './SubagentFace';
 import { ToolCard } from './ToolCard';
 import { ToolGroup } from './ToolGroup';
+import { DelegateCard, isDelegateTaskName } from './DelegateCard';
 import { FilePanelBody, type FilePanelTab } from './FilePanel';
 import { PanelNewTabButton } from './RightPanelButton';
 import { useFileIcons } from '@/lib/fileIcons';
@@ -570,6 +571,17 @@ function SubagentEntryView({ entry }: { entry: Entry }) {
       );
     }
     case 'tool':
+      if (isDelegateTaskName(entry.call.function.name)) {
+        return (
+          <DelegateCard
+            call={entry.call}
+            status={entry.status}
+            result={entry.result}
+            startedAt={entry.startedAt}
+            steps={entry.delegateSteps}
+          />
+        );
+      }
       return (
         <ToolCard
           call={entry.call}

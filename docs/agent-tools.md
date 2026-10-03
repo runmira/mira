@@ -67,6 +67,27 @@ the agent server exposes the split set.
 sizes), the chat's task list, and orchestration (`delegate_task` to another
 engine — "have Codex review what Claude wrote").
 
+### The delegation view
+
+`delegate_task` is a hand-off, not an ordinary tool call, so the UI gives it
+its own card rather than a generic "Handed off …" row. The row carries the
+two ends of the gesture (Mira's orb → the receiving engine's mark), who took
+the task, a live stage, and an elapsed clock; opening it shows the brief,
+what the helper may touch (read and search only), a three-stop progress track,
+a live **activity log** of the steps the child is taking, and the answer as
+prose. The card is in `frontend/src/components/DelegateCard.tsx` and is used
+by both the main transcript and the subagent panel. It matches on
+`delegate_task` only — an external agent's own `Task`/`Agent` call is a
+subagent inside that agent and keeps folding into the ordinary tool rows.
+
+The activity log is fed by `delegate_progress` frames: `delegate.rs` drains
+the child's own `HarnessEvent` stream (tool starts and warnings on the Mira
+engine; `AcpToolCall` frames on an agent engine) and re-broadcasts each as a
+step on the parent's channel, tagged with the parent's call id. The snippets
+come from the same verb/target vocabulary the tool rows use, so a delegated
+step reads exactly like a step Mira ran itself (`Read src/lib.rs`,
+`Searched for "bind_any"`, `Ran cargo test`).
+
 ### Approval
 
 | Gate | Who asks | Used for |
