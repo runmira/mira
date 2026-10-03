@@ -1153,6 +1153,8 @@ pub async fn start_agent(
                         model,
                         resume,
                         gate,
+                        // Mira's tools (browser, processes) for this chat.
+                        ports.mira_mcp.clone(),
                     )
                     .await
                     .map_err(|e| StartError::Transport(e.to_string()))?;

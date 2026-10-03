@@ -18,7 +18,7 @@ form each agent understands, with tools shaped so a model uses them well.
 | Claude Code | native `claude -p` (stream-json) | `browser` + background processes, via `--mcp-config` | one multipurpose `browser` tool; every call prompts |
 | OpenCode | ACP (`opencode acp`) | same, via `session/new` `mcpServers` (HTTP) | one multipurpose `browser` tool |
 | Gemini / Grok / other ACP | ACP | same, **only if** the agent takes HTTP MCP servers | agents with stdio-only MCP get nothing |
-| Codex | `codex app-server` (JSON-RPC) | **none** | no MCP server passed at `thread/start` |
+| Codex | `codex app-server` (JSON-RPC) | browser + processes, via `thread/start` `config.mcp_servers` | not yet tried against a live Codex |
 
 
 
@@ -109,11 +109,11 @@ actions follow the browser tool's own policy, as for Mira's model.
 - [x] **0 · Tool server for ACP agents** — `mcpServers` at `session/new`;
       per-chat URL; background-process tools; Mira-side approval gate.
       (#97)
-- [ ] **1 · Codex** — `config.mcp_servers.mira` on `thread/start` and
+- [x] **1 · Codex** — `config.mcp_servers.mira` on `thread/start` and
       `thread/resume`, gate `mira`.
       *Done when* Codex opens a page in Mira's browser and its background
       command shows in Processes after Mira's approval.
-- [ ] **2 · Granular browser tools** — the split set above on the agent
+- [x] **2 · Granular browser tools** — the split set above on the agent
       server, sharing Mira's browser session.
       *Done when* OpenCode and Codex complete "open localhost:5173, click
       Sign in, screenshot" without retries.
