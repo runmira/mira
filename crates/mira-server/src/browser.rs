@@ -844,10 +844,10 @@ async fn delegate_result(state: &AppState, q: &McpGrant, args: &Value) -> Value 
         kind: mira_core::ToolCallKind::Function,
         function: mira_core::ToolCallFunction::new("delegate_task", args.to_string()),
     };
-    if q.gate == McpGate::Mira {
-        if !slot.approver.approve(&call, mira_policy::Decision::Ask).await {
-            return text("The user declined handing this task off. Don't retry it as-is.".into(), true);
-        }
+    if q.gate == McpGate::Mira
+        && !slot.approver.approve(&call, mira_policy::Decision::Ask).await
+    {
+        return text("The user declined handing this task off. Don't retry it as-is.".into(), true);
     }
     let call_id = call.id.to_string();
     match crate::delegate::delegate(state, &slot, prompt, engine, &call_id).await {
