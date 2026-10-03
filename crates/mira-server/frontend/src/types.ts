@@ -400,7 +400,7 @@ export type EnvironmentStatus = {
 export type EnvironmentInfo = { name: string; backend: string; description: string };
 
 export type ServerMsg =
-  | { type: 'ready'; session_id: string; model: string; mode: Mode; cwd: string; history: Message[]; turns?: TurnMeta[]; usage?: UsageTotals; tasks?: TaskItem[]; goal?: Goal | null; previews?: Record<string, DiffPreview>; agent_transcript?: AgentTranscriptLine[]; agent_driver?: string | null; agent_kind?: string | null; instance?: string | null; agent_configured?: string | null; engine?: SessionEngine | null; title?: string | null }
+  | { type: 'ready'; session_id: string; model: string; mode: Mode; cwd: string; history: Message[]; turns?: TurnMeta[]; usage?: UsageTotals; tasks?: TaskItem[]; goal?: Goal | null; previews?: Record<string, DiffPreview>; agent_transcript?: AgentTranscriptLine[]; agent_driver?: string | null; agent_kind?: string | null; instance?: string | null; agent_configured?: string | null; engine?: SessionEngine | null; title?: string | null; running?: boolean }
   /** The session's engine changed: picked, starting, ready, failed, exited. */
   | { type: 'session_engine'; engine: SessionEngine }
   | { type: 'token'; text: string }
@@ -439,6 +439,16 @@ export type ServerMsg =
   | { type: 'goal_done'; status: GoalStatus; reason?: string | null }
   | { type: 'plan_request'; prompt_id: string; plan: PlanProposal }
   | { type: 'ask_user_request'; prompt_id: string; proposal: AskUserProposal }
+  | {
+      type: 'prompt_resolved';
+      prompt_id: string;
+      kind: 'ask_user' | 'plan' | 'subagent_review';
+      answers?: AskUserAnswer[];
+      cancelled?: boolean;
+      approved?: boolean;
+      steps?: PlanStep[] | null;
+      note?: string | null;
+    }
   // Subagent live-stream frames. Every subagent-related event carries the
   // parent's tool_call id so the frontend routes it to the right panel tab.
   | { type: 'subagent_started'; parent_call_id: string; agent_id: string; model: string; prompt: string; agent_name?: string | null; agent_category?: string | null }
@@ -694,6 +704,10 @@ export type SessionSummary = {
   /** Sidebar pin — floats the session to the top of its project group.
    *  Persisted server-side via `PUT /api/sessions/:id/flags`. */
   pinned?: boolean;
+  /** Made with "Fork from here": the chat it branched off, and the
+   *  message it was taken at. The sidebar nests it under that chat. */
+  forked_from?: string | null;
+  forked_at?: string | null;
   /** True when the user archived this session. Archived sessions only
    *  appear in the sidebar's "Archived" view (`?archived=true`). */
   archived?: boolean;

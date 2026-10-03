@@ -62,6 +62,9 @@ type Props = {
   onOpenPane?: (kind: import('./panes/toolPanes').ToolPaneKind) => void;
   /** Opens the project file picker, for the "File…" row. */
   onBrowseFile?: () => void;
+  /** Body for the panes that need the chat's state (Ask aside, Processes,
+   *  Tests, Activity, Devices). Null falls through to the built-ins. */
+  renderPane?: (kind: import('./panes/toolPanes').ToolPaneKind) => React.ReactNode | null;
   /** Active panel id — either a subagent callId or a file tab id (= path). */
   activeCallId: string | null;
   /** Current working directory — passed through to the file panel for
@@ -82,7 +85,7 @@ type Props = {
   onOpenFile?: (path: string, diff: DiffPreview | null) => void;
 };
 
-export function SubagentPanel({ tabs, fileTabs, toolTabs, onWhiteboardSend, onOpenPane, onBrowseFile, activeCallId, cwd, onSelectTab, onCloseTab, onClose, onReview, onResizeStart, onOpenFile }: Props) {
+export function SubagentPanel({ tabs, fileTabs, toolTabs, onWhiteboardSend, onOpenPane, onBrowseFile, renderPane, activeCallId, cwd, onSelectTab, onCloseTab, onClose, onReview, onResizeStart, onOpenFile }: Props) {
   if (tabs.length === 0 && fileTabs.length === 0 && toolTabs.length === 0) return null;
 
   // Fall back to first available tab when nothing is explicitly active.
@@ -94,6 +97,7 @@ export function SubagentPanel({ tabs, fileTabs, toolTabs, onWhiteboardSend, onOp
   const effectiveAgent = tabs.find((t) => t.callId === effectiveActiveId);
   const effectiveFile = fileTabs.find((t) => t.id === effectiveActiveId);
   const effectiveTool = toolTabs.find((t) => t.id === effectiveActiveId);
+  const customPane = effectiveTool ? (renderPane?.(effectiveTool.kind) ?? null) : null;
 
   return (
     <aside className="relative flex h-full min-w-0 flex-col overflow-hidden bg-transparent">
@@ -106,7 +110,7 @@ export function SubagentPanel({ tabs, fileTabs, toolTabs, onWhiteboardSend, onOp
       {/* tab strip — h-11 matches the main pane's header so the two
           dividers line up exactly across the vertical border. */}
       <div className="flex h-11 shrink-0 items-center gap-1 border-b border-border/60 pl-2 pr-1.5">
-        <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+        <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           {tabs.map((t) => (
             <TabCapsule
               key={t.callId}
@@ -134,17 +138,19 @@ export function SubagentPanel({ tabs, fileTabs, toolTabs, onWhiteboardSend, onOp
               onClose={() => onCloseTab(t.id)}
             />
           ))}
-          {onOpenPane && (
-            <PanelNewTabButton
-              toolTabs={toolTabs}
-              activeId={effectiveActiveId}
-              onOpenPane={onOpenPane}
-              onOpenFile={() => {
-                onBrowseFile?.();
-              }}
-            />
-          )}
         </div>
+        {/* Outside the scrolling strip, so it stays reachable however
+            many tabs are open. */}
+        {onOpenPane && (
+          <PanelNewTabButton
+            toolTabs={toolTabs}
+            activeId={effectiveActiveId}
+            onOpenPane={onOpenPane}
+            onOpenFile={() => {
+              onBrowseFile?.();
+            }}
+          />
+        )}
         <button
           type="button"
           onClick={onClose}
@@ -158,7 +164,9 @@ export function SubagentPanel({ tabs, fileTabs, toolTabs, onWhiteboardSend, onOp
       {/* active tab body */}
       <div className="min-h-0 flex-1 overflow-hidden">
         {effectiveTool ? (
-          effectiveTool.kind === 'new' ? (
+          customPane !== null ? (
+            customPane
+          ) : effectiveTool.kind === 'new' ? (
             <PanelLauncher
               onOpenPane={onOpenPane ?? (() => {})}
               onOpenFile={() => onBrowseFile?.()}
@@ -174,9 +182,9 @@ export function SubagentPanel({ tabs, fileTabs, toolTabs, onWhiteboardSend, onOp
             <WhiteboardPane
               onSendToChat={(png) => onWhiteboardSend?.(png)}
             />
-          ) : (
+          ) : effectiveTool.kind === 'devtools' ? (
             <DevToolsPane />
-          )
+          ) : null
         ) : effectiveFile ? (
           <FilePanelBody tab={effectiveFile} cwd={cwd} onOpenFile={onOpenFile} />
         ) : effectiveAgent ? (
@@ -326,7 +334,7 @@ function ToolTabCapsule({
       onClick={onSelect}
       title={def.blurb}
       className={cn(
-        'group inline-flex cursor-pointer items-center gap-1.5 rounded px-2.5 py-1 text-[12.5px] transition-colors',
+        'group inline-flex shrink-0 cursor-pointer whitespace-nowrap items-center gap-1.5 rounded px-2.5 py-1 text-[12.5px] transition-colors',
         active
           ? 'bg-fg/[0.1] text-foreground'
           : 'text-muted-foreground hover:bg-fg/[0.05] hover:text-foreground',

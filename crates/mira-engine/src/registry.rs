@@ -154,18 +154,77 @@ impl EngineRegistry {
         })
     }
 
-    /// Probe every external instance. Same cost caveat as
-    /// [`Self::snapshot_external`].
+    /// Probe every external instance. Each probe is slow, so a few
+    /// run at once — but not all: a fleet of Node-based agents starting
+    /// simultaneously is the jank the cap avoids. A per-instance ceiling
+    /// keeps one wedged agent from stalling the whole sweep.
     pub async fn snapshot_externals(&self) -> Vec<EngineSnapshot> {
-        let mut out = Vec::new();
-        for inst in self.instances.values() {
-            if !inst.is_native() {
-                if let Some(s) = self.snapshot_external(inst.id.as_str()).await {
-                    out.push(s);
+        self.snapshot_externals_with(|_| {}).await
+    }
+
+    /// [`Self::snapshot_externals`], reporting each agent as soon as its
+    /// probe ends — so a picker can show Claude Code ready while a slower
+    /// agent is still starting, instead of "checking…" for the whole sweep.
+    /// The common agents go first.
+    pub async fn snapshot_externals_with<F>(&self, on_each: F) -> Vec<EngineSnapshot>
+    where
+        F: Fn(&EngineSnapshot) + Sync,
+    {
+        use futures::stream::{self, StreamExt};
+        const PER_INSTANCE_CEILING: std::time::Duration = std::time::Duration::from_secs(75);
+        let mut ids: Vec<(String, String)> = self
+            .instances
+            .values()
+            .filter(|i| !i.is_native())
+            .map(|i| (i.id.to_string(), i.driver.to_string()))
+            .collect();
+        let rank = |driver: &str| match driver {
+            "claude-code" => 0,
+            "codex" => 1,
+            _ => 2,
+        };
+        ids.sort_by_key(|(_, driver)| rank(driver));
+        let on_each = &on_each;
+        stream::iter(ids.into_iter().map(|(id, _)| id))
+            .map(move |id| async move {
+                let snap = match tokio::time::timeout(PER_INSTANCE_CEILING, self.snapshot_external(&id)).await {
+                    Ok(snap) => snap,
+                    Err(_) => {
+                        // A wedged probe must still say something: vanishing
+                        // from the list would look like "not installed".
+                        let inst = self.instances.get(id.as_str())?;
+                        Some(EngineSnapshot {
+                            instance: inst.id.clone(),
+                            driver: inst.driver.clone(),
+                            flavor: EngineFlavor::External,
+                            display_name: inst
+                                .display_name
+                                .clone()
+                                .unwrap_or_else(|| inst.id.to_string()),
+                            enabled: inst.enabled,
+                            state: EngineState::Failed {
+                                reason: format!(
+                                    "probe did not finish within {}s",
+                                    PER_INSTANCE_CEILING.as_secs()
+                                ),
+                            },
+                            models: Vec::new(),
+                            default_model: inst.model.clone(),
+                            auth: None,
+                            install_hint: None,
+                            launch: None,
+                        })
+                    }
+                };
+                if let Some(s) = &snap {
+                    on_each(s);
                 }
-            }
-        }
-        out
+                snap
+            })
+            .buffer_unordered(2)
+            .filter_map(|s| async move { s })
+            .collect()
+            .await
     }
 
     /// Parse an external instance's opaque config into the

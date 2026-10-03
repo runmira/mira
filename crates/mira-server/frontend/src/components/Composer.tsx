@@ -50,7 +50,7 @@ import { customToCommand, filterCommands, groupCommands, originIconSrc, slashSta
 import type { CommandInfo, Origin } from '../api';
 import { MentionInput, type MentionInputHandle } from './MentionInput';
 import { cn } from '@/lib/utils';
-import { ATTACH_FILE_EVENT } from '@/lib/attachBridge';
+import { ATTACH_FILE_EVENT, COMPOSE_TEXT_EVENT } from '@/lib/attachBridge';
 import { shortcutLabelForCommand, useKeybindings } from '@/lib/keybindings';
 
 const MODES: { value: Mode; label: string; desc: string }[] = [
@@ -498,6 +498,23 @@ export function Composer({
     }
     window.addEventListener(ATTACH_FILE_EVENT, onAttach);
     return () => window.removeEventListener(ATTACH_FILE_EVENT, onAttach);
+  }, []);
+
+  // A pane handing over a prompt (see `composeText`). Appended, so it
+  // never clobbers a half-typed message.
+  const textRef = useRef(text);
+  textRef.current = text;
+  useEffect(() => {
+    function onCompose(e: Event) {
+      const add = (e as CustomEvent<string>).detail;
+      if (typeof add !== 'string' || !add) return;
+      const cur = textRef.current.trimEnd();
+      updateText(cur ? `${cur}\n\n${add}` : add);
+      requestAnimationFrame(() => mentionRef.current?.focus());
+    }
+    window.addEventListener(COMPOSE_TEXT_EVENT, onCompose);
+    return () => window.removeEventListener(COMPOSE_TEXT_EVENT, onCompose);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function removeAttachment(path: string) {
@@ -1603,7 +1620,7 @@ function EnvironmentChip({
           }
         >
           {switching ? <Loader className="size-3 shrink-0 animate-spin" /> : <Icon className="size-3 shrink-0" />}
-          <span className="truncate">{switching ? 'switching…' : (status.current === 'e2b' ? 'Code Sandbox' : status.current)}</span>
+          <span className="truncate">{switching ? 'switching…' : (status.current === 'e2b' ? 'Cloud Sandbox' : status.current)}</span>
         </button>
       </PopoverTrigger>
       <PopoverContent className="w-80 p-1.5" align="start">
@@ -1633,16 +1650,16 @@ function EnvironmentChip({
                 <EIcon className="size-3.5 shrink-0 mt-0.5" />
                 <span className="min-w-0 flex-1">
                   <span className="flex items-center gap-1.5">
-                    <span className="truncate">{e.name === 'e2b' ? 'Code Sandbox' : e.name}</span>
+                    <span className="truncate">{e.name === 'e2b' ? 'Cloud Sandbox' : e.name}</span>
                     {e.backend !== 'local' && e.backend !== e.name && (
-                      <span className="rounded-sm bg-secondary px-1 text-[9.5px] uppercase tracking-wider text-muted-foreground">{e.backend === 'e2b' ? 'Code Sandbox' : e.backend}</span>
+                      <span className="rounded-sm bg-secondary px-1 text-[9.5px] uppercase tracking-wider text-muted-foreground">{e.backend === 'e2b' ? 'Cloud Sandbox' : e.backend}</span>
                     )}
                     {parked && (
                       <span className="rounded-sm bg-mira-blue/15 px-1 text-[9.5px] uppercase tracking-wider text-mira-blue" title="paused — resumes quickly">paused</span>
                     )}
                   </span>
                   {e.description && (
-                    <span className="block truncate text-[11px] text-muted-foreground/70">{e.description.replace(/\bE2B\b/g, 'Code Sandbox')}</span>
+                    <span className="block truncate text-[11px] text-muted-foreground/70">{e.description.replace(/\bE2B\b/g, 'Cloud Sandbox')}</span>
                   )}
                 </span>
                 {current && <span className="text-mira-blue text-xs">✓</span>}
@@ -2202,11 +2219,11 @@ function EmbeddedAskUserCard({
                   className={cn(
                     'mt-[3px] flex size-[14px] shrink-0 items-center justify-center transition-colors',
                     multi ? 'rounded-[5px]' : 'rounded-full',
-                    active ? 'bg-black' : 'bg-background/60 ring-1 ring-inset ring-border',
+                    active ? 'bg-background' : 'bg-background/60 ring-1 ring-inset ring-border',
                   )}
                 >
-                  {active && multi && <PhCheck className="size-2.5 text-white" strokeWidth={2.5} />}
-                  {active && !multi && <span className="size-1.5 rounded-full bg-white" />}
+                  {active && multi && <PhCheck className="size-2.5 text-foreground" strokeWidth={2.5} />}
+                  {active && !multi && <span className="size-1.5 rounded-full bg-foreground" />}
                 </span>
                 <div className="flex min-w-0 flex-1 flex-col gap-0.5">
                   <div className="flex items-center gap-1.5">
@@ -2214,13 +2231,13 @@ function EmbeddedAskUserCard({
                       {opt.label}
                     </span>
                     {opt.recommended && (
-                      <span className={cn('text-[10px] font-medium uppercase tracking-wider', active ? 'text-shade/60' : 'text-muted-foreground/80')}>
+                      <span className={cn('text-[10px] font-medium uppercase tracking-wider', active ? 'text-background/65' : 'text-muted-foreground/80')}>
                         · Recommended
                       </span>
                     )}
                   </div>
                   {opt.description && (
-                    <span className={cn('text-[11.5px] leading-snug', active ? 'text-shade/70' : 'text-muted-foreground')}>
+                    <span className={cn('text-[11.5px] leading-snug', active ? 'text-background/70' : 'text-muted-foreground')}>
                       {opt.description}
                     </span>
                   )}

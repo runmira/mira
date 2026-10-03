@@ -356,6 +356,9 @@ pub struct Session {
     /// hide subagents from the primary chat list and delete flows can
     /// cascade from the parent. `None` for top-level chats.
     parent_id: Option<SessionId>,
+    /// Where this chat was forked from ("Fork from here"), kept on every
+    /// checkpoint so the sidebar can nest it under the original.
+    forked_from: Option<crate::persist::ForkPoint>,
     /// Which external agent drives turns here, if any. Mirrored in-memory
     /// so checkpoints stamp it without the server re-setting it every
     /// round — same story as `pinned`. The transcript itself lives in the
@@ -513,6 +516,7 @@ impl Session {
             auto_extract: None,
             current_turn: Arc::new(Mutex::new(None)),
             parent_id: None,
+            forked_from: None,
             agent: Arc::new(Mutex::new(None)),
             children,
             next_child_id,
@@ -593,6 +597,7 @@ impl Session {
             auto_extract: None,
             current_turn: Arc::new(Mutex::new(None)),
             parent_id: record.parent_id,
+            forked_from: record.forked_from,
             agent: Arc::new(Mutex::new(record.agent)),
             children,
             next_child_id,
@@ -974,6 +979,12 @@ impl Session {
     /// have generated a sensible short title; the harness doesn't validate
     /// content beyond trimming whitespace and enforcing a hard cap so a
     /// runaway model can't stuff the sidebar with a paragraph.
+    /// Write the session to its store now (it otherwise saves after each
+    /// round) — e.g. before forking it, so the copy is current.
+    pub async fn save_now(&self) {
+        checkpoint(self).await;
+    }
+
     pub async fn set_title(&self, title: impl Into<String>) {
         let mut t = title.into().trim().to_string();
         if t.is_empty() {
@@ -2514,6 +2525,7 @@ async fn checkpoint(sess: &Session) {
         turns: sess.turns.lock().await.clone(),
         usage: *sess.usage.lock().await,
         parent_id: sess.parent_id.clone(),
+        forked_from: sess.forked_from.clone(),
         agent: sess.agent.lock().await.clone(),
         tasks: sess.tasks.snapshot_all().await,
         goal: sess.goal.lock().await.clone(),

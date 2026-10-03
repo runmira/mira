@@ -162,6 +162,7 @@ mod tests {
             pinned: false,
             archived_at: None,
             agent: None,
+            forked_from: None,
         }
     }
 

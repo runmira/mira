@@ -165,7 +165,7 @@ pub async fn start_agent(
         driver_cfg.launch_args.push("--mcp-config".into());
         driver_cfg
             .launch_args
-            .push(crate::browser::agent_mcp_config(state.local_port).to_string());
+            .push(crate::browser::agent_mcp_config(state.local_port, &slot.id.to_string()).to_string());
     }
     let launch: LaunchConfig = match transport {
         Transport::Native => {
@@ -205,7 +205,7 @@ pub async fn start_agent(
         /* sandboxed */ true,
     );
     let files = AcpFiles::new(tool_ctx, slot.approver.clone(), MAX_ACP_READ_BYTES);
-    let permissions = AcpPermissions::new(slot.approver.clone());
+    let permissions = AcpPermissions::for_slot(slot);
     // Spend reports are booked to the user's ledger, against this chat, so
     // the Usage page counts agent turns next to Mira's own.
     let events = match crate::agent_spend::SpendLedger::user() {
@@ -264,6 +264,13 @@ pub async fn start_agent(
         &repo_root,
         gate,
         native_overrides,
+        // Mira's tools for ACP agents (OpenCode, Gemini…): they may call MCP
+        // tools without asking, so Mira gates the ones that run commands.
+        Some(crate::browser::agent_mcp_url(
+            state.local_port,
+            &slot.id.to_string(),
+            crate::browser::McpGate::Mira,
+        )),
     )
     .await
     {
@@ -662,6 +669,213 @@ async fn ask_agent_questions(
     .await
 }
 
+/// One field of an agent's elicitation form, as a question on the card.
+struct FormField {
+    key: String,
+    /// `{key}_custom`, when the form has a free-text twin for this field
+    /// (OpenCode's "Type your own answer").
+    custom_key: Option<String>,
+    kind: FieldKind,
+    /// `(value sent back, label shown)`.
+    choices: Vec<(serde_json::Value, String)>,
+    question: mira_tools::prompt::AskUserQuestion,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum FieldKind {
+    Text,
+    Number,
+    Boolean,
+    Choice,
+    Multi,
+}
+
+fn form_fields(message: &str, schema: &serde_json::Value) -> Vec<FormField> {
+    use mira_tools::prompt::{AskUserOption, AskUserQuestion};
+    let Some(props) = schema.get("properties").and_then(|p| p.as_object()) else {
+        return Vec::new();
+    };
+    let s = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
+    let choices_of = |list: Option<&serde_json::Value>| -> Vec<(serde_json::Value, String, Option<String>)> {
+        list.and_then(|l| l.as_array())
+            .map(|l| {
+                l.iter()
+                    .filter_map(|o| match o {
+                        serde_json::Value::String(v) => Some((o.clone(), v.clone(), None)),
+                        _ => {
+                            let value = o.get("const")?.clone();
+                            let label = s(o, "title").unwrap_or_else(|| {
+                                value.as_str().map(str::to_string).unwrap_or_else(|| value.to_string())
+                            });
+                            Some((value, label, s(o, "description")))
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut out = Vec::new();
+    for (key, prop) in props {
+        // A free-text twin is folded into the field it belongs to.
+        if let Some(base) = key.strip_suffix("_custom") {
+            if props.contains_key(base) {
+                continue;
+            }
+        }
+        let ty = s(prop, "type").unwrap_or_default();
+        let (kind, choices) = if ty == "array" {
+            let items = prop.get("items").cloned().unwrap_or_default();
+            let c = choices_of(items.get("anyOf").or(items.get("oneOf")).or(items.get("enum")));
+            (FieldKind::Multi, c)
+        } else if prop.get("oneOf").is_some() || prop.get("enum").is_some() {
+            (FieldKind::Choice, choices_of(prop.get("oneOf").or(prop.get("enum"))))
+        } else if ty == "boolean" {
+            (
+                FieldKind::Boolean,
+                vec![
+                    (serde_json::Value::Bool(true), "Yes".to_string(), None),
+                    (serde_json::Value::Bool(false), "No".to_string(), None),
+                ],
+            )
+        } else if ty == "number" || ty == "integer" {
+            (FieldKind::Number, Vec::new())
+        } else {
+            (FieldKind::Text, Vec::new())
+        };
+        let title = s(prop, "title");
+        let description = s(prop, "description");
+        let question = description
+            .clone()
+            .or_else(|| title.clone())
+            .unwrap_or_else(|| if message.is_empty() { key.clone() } else { message.to_string() });
+        let custom_key = format!("{key}_custom");
+        out.push(FormField {
+            key: key.clone(),
+            custom_key: props.contains_key(&custom_key).then_some(custom_key),
+            kind,
+            choices: choices.iter().map(|(v, l, _)| (v.clone(), l.clone())).collect(),
+            question: AskUserQuestion {
+                question,
+                // The title is the short topic when there's a sentence too.
+                header: description.and(title),
+                options: choices
+                    .into_iter()
+                    .map(|(_, label, description)| AskUserOption {
+                        label,
+                        description,
+                        recommended: false,
+                    })
+                    .collect(),
+                multi_select: kind == FieldKind::Multi,
+            },
+        });
+    }
+    out
+}
+
+/// The card's answers, as the content object the form asked for.
+fn form_content(
+    fields: &[FormField],
+    answers: &[mira_tools::prompt::AskUserAnswer],
+) -> serde_json::Map<String, serde_json::Value> {
+    use serde_json::Value;
+    let mut content = serde_json::Map::new();
+    for (f, a) in fields.iter().zip(answers) {
+        let picked: Vec<Value> = a
+            .picked
+            .iter()
+            .filter_map(|l| f.choices.iter().find(|(_, label)| label == l).map(|(v, _)| v.clone()))
+            .collect();
+        let typed = a.custom.as_deref().map(str::trim).filter(|t| !t.is_empty());
+        match f.kind {
+            FieldKind::Multi => {
+                if !picked.is_empty() {
+                    content.insert(f.key.clone(), Value::Array(picked));
+                }
+            }
+            FieldKind::Choice | FieldKind::Boolean => {
+                if let Some(v) = picked.into_iter().next() {
+                    content.insert(f.key.clone(), v);
+                } else if f.kind == FieldKind::Boolean {
+                    if let Some(t) = typed {
+                        let yes = matches!(t.to_lowercase().as_str(), "yes" | "y" | "true");
+                        content.insert(f.key.clone(), Value::Bool(yes));
+                    }
+                }
+            }
+            FieldKind::Number => {
+                if let Some(n) = typed.and_then(|t| t.parse::<f64>().ok()) {
+                    content.insert(f.key.clone(), serde_json::json!(n));
+                }
+            }
+            FieldKind::Text => {
+                if let Some(t) = typed {
+                    content.insert(f.key.clone(), Value::String(t.to_string()));
+                }
+            }
+        }
+        if let (Some(t), Some(ck)) = (typed, &f.custom_key) {
+            if f.kind != FieldKind::Text {
+                content.insert(ck.clone(), Value::String(t.to_string()));
+            }
+        }
+    }
+    content
+}
+
+/// An agent's form (ACP `elicitation/create`) → Mira's question card → the
+/// filled-in form. OpenCode's `question` tool and its plan prompts arrive
+/// this way.
+pub(crate) async fn ask_elicitation(
+    slot: &SessionSlot,
+    req: &mira_acp::host::ElicitationRequest,
+) -> mira_acp::host::ElicitationReply {
+    use mira_acp::host::ElicitationReply;
+    use mira_tools::prompt::{AskUserProposal, PromptRequest, PromptResponse};
+    slot.engine.touch();
+    let fields = form_fields(&req.message, &req.schema);
+    if fields.is_empty() {
+        // Nothing to fill in: a bare confirmation.
+        return ElicitationReply::Accept(serde_json::Map::new());
+    }
+    let proposal = AskUserProposal {
+        questions: fields.iter().map(|f| f.question.clone()).collect(),
+    };
+    let args = serde_json::json!({
+        "questions": fields.iter().map(|f| serde_json::json!({
+            "question": f.question.question,
+            "header": f.question.header,
+            "multiSelect": f.question.multi_select,
+            "options": f.question.options.iter().map(|o| serde_json::json!({
+                "label": o.label,
+                "description": o.description,
+            })).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+    });
+    let channel = slot.prompt_channel.clone();
+    with_prompt_card(slot, "ask_user", args, |id| async move {
+        match channel.ask(id, PromptRequest::AskUser(proposal)).await {
+            Some(PromptResponse::AskUser(r)) if !r.cancelled && !r.answers.is_empty() => {
+                let summary = fields
+                    .iter()
+                    .zip(&r.answers)
+                    .map(|(f, a)| {
+                        let text = match a.custom.as_deref().map(str::trim) {
+                            Some(c) if !c.is_empty() => c.to_string(),
+                            _ => a.picked.join(", "),
+                        };
+                        format!("{}: {}", f.question.question, text)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                (ElicitationReply::Accept(form_content(&fields, &r.answers)), summary)
+            }
+            _ => (ElicitationReply::Cancel, "dismissed".to_string()),
+        }
+    })
+    .await
+}
+
 /// `ExitPlanMode` → Mira's plan card.
 ///
 /// Approving lets the agent leave plan mode and start; an edited plan goes
@@ -806,6 +1020,7 @@ async fn start_acp_agent_with_ports(
     cwd: &std::path::Path,
     gate: mira_acp::native::PermissionGate,
     native: Option<mira_acp::native::NativeOverrides>,
+    mira_mcp: Option<String>,
 ) -> Result<AgentHandle, StartError> {
     start_acp_agent(
         driver,
@@ -817,6 +1032,7 @@ async fn start_acp_agent_with_ports(
             terminals,
             permissions,
             events,
+            mira_mcp,
         },
         Some(cwd),
         gate,
@@ -1298,6 +1514,63 @@ mod privilege_tests {
         // Anything reaching for `Default` (a probe, a call-site that forgot
         // to pick) must get `Ask`, never auto-approval.
         assert_eq!(PermissionMode::default(), PermissionMode::Ask);
+    }
+
+    /// OpenCode's question form: a single choice with a free-text twin,
+    /// and a multi-select.
+    fn opencode_form() -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "q0": {
+                    "type": "string", "title": "Approach", "description": "Which approach?",
+                    "oneOf": [
+                        {"const": "Rewrite", "title": "Rewrite", "description": "Start over"},
+                        {"const": "Patch", "title": "Patch"}
+                    ]
+                },
+                "q0_custom": {"type": "string", "title": "Approach (other)", "description": "Type your own answer"},
+                "q1": {
+                    "type": "array", "title": "Targets", "description": "Which targets?",
+                    "items": {"anyOf": [{"const": "web", "title": "Web"}, {"const": "ios", "title": "iOS"}]}
+                }
+            },
+            "required": []
+        })
+    }
+
+    #[test]
+    fn an_elicitation_form_becomes_card_questions() {
+        let f = form_fields("Questions", &opencode_form());
+        assert_eq!(f.len(), 2, "the free-text twin folds into its field");
+        assert_eq!(f[0].question.question, "Which approach?");
+        assert_eq!(f[0].question.header.as_deref(), Some("Approach"));
+        assert_eq!(f[0].question.options.len(), 2);
+        assert_eq!(f[0].custom_key.as_deref(), Some("q0_custom"));
+        assert!(f[1].question.multi_select);
+        assert_eq!(f[1].question.options[1].label, "iOS");
+    }
+
+    #[test]
+    fn card_answers_fill_the_form() {
+        use mira_tools::prompt::AskUserAnswer;
+        let f = form_fields("Questions", &opencode_form());
+        let content = form_content(
+            &f,
+            &[
+                AskUserAnswer { picked: vec![], custom: Some("Both, carefully".into()) },
+                AskUserAnswer { picked: vec!["Web".into(), "iOS".into()], custom: None },
+            ],
+        );
+        assert_eq!(content["q0_custom"], "Both, carefully");
+        assert!(content.get("q0").is_none());
+        assert_eq!(content["q1"], serde_json::json!(["web", "ios"]));
+        let picked = form_content(
+            &f,
+            &[AskUserAnswer { picked: vec!["Patch".into()], custom: None }, AskUserAnswer { picked: vec![], custom: None }],
+        );
+        assert_eq!(picked["q0"], "Patch");
+        assert!(picked.get("q1").is_none());
     }
 }
 

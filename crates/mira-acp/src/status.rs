@@ -143,7 +143,7 @@ pub async fn probe(
             if let Some(auth_args) =
                 (!driver.cli_auth_args().is_empty()).then(|| driver.cli_auth_args())
             {
-                if let Some(raw) = run_cli(
+                if let Some(raw) = run_cli_status(
                     driver.underlying_cli_names().first().copied().unwrap_or(""),
                     auth_args,
                 )
@@ -166,7 +166,16 @@ pub async fn probe(
                 // child with a cleared environment, and the probe spawns one.
                 let found = crate::which::resolve_for_spawn(&prog);
                 if found.is_absolute() {
-                    if let Some(probe) = crate::appserver::probe_handshake(&found).await {
+                    // Same budget as the ACP handshake: a wedged app-server
+                    // must not stall the sweep past the driver's ceiling.
+                    if let Some(probe) = tokio::time::timeout(
+                        driver.probe_timeout(),
+                        crate::appserver::probe_handshake(&found),
+                    )
+                    .await
+                    .ok()
+                    .flatten()
+                    {
                         status.version = Some(probe.user_agent);
                         let mut bits = Vec::new();
                         if let Some(e) = probe.email {
@@ -185,6 +194,15 @@ pub async fn probe(
             // agent's own, not an adapter's, and the label says so.
             if status.version.is_none() {
                 status.version = status.cli_version.clone();
+            }
+            status.transport = crate::driver::Transport::Native;
+            // Installed but signed out isn't ready: every message would come
+            // back "Not logged in". Say so where the user can act on it.
+            if status.auth.as_deref() == Some(NOT_SIGNED_IN) {
+                status.state = AgentState::Failed {
+                    reason: signed_out_reason(driver),
+                };
+                return status;
             }
             status.state = AgentState::Ready;
             status.transport = crate::driver::Transport::Native;
@@ -285,6 +303,7 @@ async fn probe_initialize(
         // No session is opened: a probe only needs the agent to introduce
         // itself, and `session/new` can fail for reasons unrelated to health.
         cwd: None,
+        mira_mcp: None,
     })
     .await
     .map_err(|e| match e {
@@ -361,7 +380,7 @@ async fn fill_cli_status(status: &mut AgentStatus, driver: &dyn AcpDriver) {
     if auth_args.is_empty() {
         return;
     }
-    if let Some(raw) = run_cli(first, auth_args).await {
+    if let Some(raw) = run_cli_status(first, auth_args).await {
         if let Some(label) = summarize_cli_auth(&raw) {
             status.auth = Some(label);
         }
@@ -371,6 +390,17 @@ async fn fill_cli_status(status: &mut AgentStatus, driver: &dyn AcpDriver) {
 /// Run the CLI and capture stdout, with a short ceiling so a hung CLI cannot
 /// wedge the settings list.
 async fn run_cli(bin: &str, args: &[&str]) -> Option<String> {
+    run_cli_with(bin, args, false).await
+}
+
+/// `<cli> auth status`: signed out is a non-zero exit with the answer
+/// still on stdout (Claude Code prints `{"loggedIn": false, …}` and exits
+/// 1). Dropping it made a signed-out agent look signed in with no account.
+async fn run_cli_status(bin: &str, args: &[&str]) -> Option<String> {
+    run_cli_with(bin, args, true).await
+}
+
+async fn run_cli_with(bin: &str, args: &[&str], keep_failure_output: bool) -> Option<String> {
     use std::process::Stdio;
     // Resolved absolutely: the agent's CLI is usually under a version
     // manager's directory, which is not on the PATH of a process that was
@@ -391,7 +421,7 @@ async fn run_cli(bin: &str, args: &[&str]) -> Option<String> {
         .await
         .ok()?
         .ok()?;
-    if !out.status.success() {
+    if !out.status.success() && !keep_failure_output {
         return None;
     }
     let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -404,6 +434,22 @@ async fn run_cli(bin: &str, args: &[&str]) -> Option<String> {
 /// and account the CLI itself printed, and nothing more. An account name is
 /// included because that is what identifies *who* is signed in; nothing is
 /// inferred.
+const NOT_SIGNED_IN: &str = "Not signed in";
+
+/// "Not signed in" with the command that fixes it, in backticks so the UI
+/// can offer it as a copyable line.
+fn signed_out_reason(driver: &dyn AcpDriver) -> String {
+    let login = driver.login_command();
+    if login.is_empty() {
+        format!("{} isn't signed in. Sign in, then check again.", driver.display_name())
+    } else {
+        format!(
+            "{} isn't signed in. Run `{login}` in a terminal, then check again.",
+            driver.display_name()
+        )
+    }
+}
+
 fn summarize_cli_auth(raw: &str) -> Option<String> {
     let v: Value = serde_json::from_str(raw).ok()?;
 
@@ -418,7 +464,7 @@ fn summarize_cli_auth(raw: &str) -> Option<String> {
         .and_then(Value::as_str);
 
     if logged_in == Some(false) {
-        return Some("Not signed in".to_string());
+        return Some(NOT_SIGNED_IN.to_string());
     }
     if logged_in != Some(true) && method.is_none() {
         return None;

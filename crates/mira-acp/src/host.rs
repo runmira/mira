@@ -125,6 +125,30 @@ pub trait TerminalPort: Send + Sync {
     async fn kill(&self, terminal_id: &str) -> Result<(), HostError>;
 }
 
+/// An agent's structured question for the user (`elicitation/create`,
+/// form mode): a message and a JSON Schema object whose properties are the
+/// fields to fill in.
+#[derive(Clone, Debug)]
+pub struct ElicitationRequest {
+    pub session_id: String,
+    /// The tool call it belongs to, when the agent says so.
+    pub tool_call_id: Option<String>,
+    pub message: String,
+    /// `{ "type": "object", "properties": {…}, "required": [...] }`.
+    pub schema: Value,
+}
+
+/// How the user answered an [`ElicitationRequest`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum ElicitationReply {
+    /// Filled in: an object matching the requested schema.
+    Accept(serde_json::Map<String, Value>),
+    /// Said no.
+    Decline,
+    /// Dismissed, or no one was there to answer.
+    Cancel,
+}
+
 /// The user-decision port for `session/request_permission`.
 #[async_trait::async_trait]
 pub trait PermissionPort: Send + Sync {
@@ -136,6 +160,13 @@ pub trait PermissionPort: Send + Sync {
         &self,
         req: &PermissionRequest,
     ) -> Result<Option<String>, HostError>;
+
+    /// Ask the user the agent's questions (`elicitation/create`). Hosts
+    /// without a question UI cancel, which is what ACP expects from a
+    /// client that can't answer.
+    async fn elicit(&self, _req: &ElicitationRequest) -> Result<ElicitationReply, HostError> {
+        Ok(ElicitationReply::Cancel)
+    }
 }
 
 /// Where normalized events go.
@@ -338,7 +369,25 @@ impl AgentCallback for AcpHost {
             }
             "session/request_permission" => {
                 let wire: RequestPermissionRequest = parse(params)?;
-                let req = from_permission_request(&wire);
+                let mut req = from_permission_request(&wire);
+                // Agents often send the input on the tool call and only the
+                // title on the permission request; fill it in from there.
+                if req.raw_input.is_none() || req.locations.is_empty() {
+                    let known = self
+                        .tool_state
+                        .lock()
+                        .await
+                        .get(&tool_key(&req.session_id, &req.tool_call_id))
+                        .cloned();
+                    if let Some(state) = known {
+                        if req.raw_input.is_none() {
+                            req.raw_input = state.raw_input.clone();
+                        }
+                        if req.locations.is_empty() {
+                            req.locations = state.locations.iter().map(|l| l.path.clone()).collect();
+                        }
+                    }
+                }
                 // Recorded before the user is asked, so a cancel arriving
                 // mid-prompt still finds it.
                 self.pending_permissions.track(id.clone()).await;
@@ -359,6 +408,37 @@ impl AgentCallback for AcpHost {
                     // Cancelled is not an error and not a rejection: it tells
                     // the agent to unwind this turn rather than retry.
                     None => json!({ "outcome": { "outcome": "cancelled" } }),
+                })
+            }
+            "elicitation/create" => {
+                // Only form mode is advertised; a URL elicitation (open a
+                // page, come back) has nothing here to show it.
+                if params.get("mode").and_then(Value::as_str) != Some("form") {
+                    return Ok(json!({ "action": "cancel" }));
+                }
+                let req = ElicitationRequest {
+                    session_id: params
+                        .get("sessionId")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    tool_call_id: params
+                        .get("toolCallId")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    message: params
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    schema: params.get("requestedSchema").cloned().unwrap_or(Value::Null),
+                };
+                Ok(match self.permissions.elicit(&req).await? {
+                    ElicitationReply::Accept(content) => {
+                        json!({ "action": "accept", "content": content })
+                    }
+                    ElicitationReply::Decline => json!({ "action": "decline" }),
+                    ElicitationReply::Cancel => json!({ "action": "cancel" }),
                 })
             }
             other => Err(ConnError::Unhandled {

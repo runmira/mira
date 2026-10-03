@@ -264,6 +264,12 @@ pub trait AcpDriver: Send + Sync {
         ""
     }
 
+    /// The command that signs the agent's CLI in, for the "installed but
+    /// signed out" case. Empty when there isn't one to suggest.
+    fn login_command(&self) -> &'static str {
+        ""
+    }
+
     /// Arguments that make the underlying CLI print its version.
     fn cli_version_args(&self) -> &'static [&'static str] {
         &["--version"]
@@ -351,7 +357,14 @@ pub trait AcpDriver: Send + Sync {
             fs_read: true,
             fs_write: true,
             terminal: true,
+            elicitation_form: true,
         }
+    }
+
+    /// Environment that carries the permission mode, for agents configured
+    /// that way rather than by flags. Explicit user `env` still wins.
+    fn permission_env(&self, _mode: PermissionMode) -> Vec<(String, String)> {
+        Vec::new()
     }
 
     /// Resolve a user config into a concrete launch.
@@ -374,6 +387,9 @@ pub trait AcpDriver: Send + Sync {
         }
         if let (Some(var), Some(key)) = (self.api_key_env_vars().first(), cfg.api_key.as_ref()) {
             env.entry((*var).to_string()).or_insert_with(|| key.clone());
+        }
+        for (k, v) in self.permission_env(mode) {
+            env.entry(k).or_insert(v);
         }
 
         LaunchConfig {

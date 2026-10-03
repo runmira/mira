@@ -578,7 +578,7 @@ export function FilePanelBody({ tab, cwd, onOpenFile }: Props) {
     let cancelled = false;
     setLoading(true);
     setLoadError(null);
-    readFile(viewPath)
+    readFile(viewPath, { view: true })
       .then((v) => { if (!cancelled) setContent(v.content); })
       .catch((e) => { if (!cancelled) setLoadError(String((e as Error).message)); })
       .finally(() => { if (!cancelled) setLoading(false); });

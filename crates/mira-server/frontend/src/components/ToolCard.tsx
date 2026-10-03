@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { Tip } from './ui/Tip';
 import {
   ChevronDown,
   Check,
@@ -194,33 +195,36 @@ function PendingApprovalCard({
       ) : (
       <>
       <div className="flex items-center gap-1.5 pt-1 relative">
-        <button
-          type="button"
-          onClick={() => onDecide(false)}
-          className="ml-auto rounded-md px-2.5 py-1.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
-          title="Deny (n)"
-        >
-          Deny
-        </button>
-        <div className="inline-flex overflow-hidden rounded-full bg-foreground">
+        <Tip label="Deny" shortcut="N" className="ml-auto">
           <button
             type="button"
-            onClick={() => onDecide(true, 'once')}
-            className="px-3.5 py-1.5 text-[11.5px] font-semibold text-background transition-all hover:brightness-95"
-            title="Allow this one call (y)"
+            onClick={() => onDecide(false)}
+            className="rounded-md px-2.5 py-1.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
           >
-            Allow
+            Deny
           </button>
-          <button
-            type="button"
-            onClick={() => setScopeMenuOpen(v => !v)}
-            aria-expanded={scopeMenuOpen}
-            aria-label="More approve options"
-            className="border-l border-background/25 px-2 text-background transition-all hover:brightness-95"
-            title="More scope options"
-          >
-            <ChevronDown size={12} strokeWidth={2.5} />
-          </button>
+        </Tip>
+        <div className="inline-flex rounded-full bg-foreground">
+          <Tip label="Allow this one call" shortcut="Y">
+            <button
+              type="button"
+              onClick={() => onDecide(true, 'once')}
+              className="rounded-l-full px-3.5 py-1.5 text-[11.5px] font-semibold text-background transition-all hover:brightness-95"
+            >
+              Allow
+            </button>
+          </Tip>
+          <Tip label="More options" hint="Allow for this chat, or always" align="end">
+            <button
+              type="button"
+              onClick={() => setScopeMenuOpen(v => !v)}
+              aria-expanded={scopeMenuOpen}
+              aria-label="More approve options"
+              className="rounded-r-full border-l border-background/25 px-2 py-1.5 text-background transition-all hover:brightness-95"
+            >
+              <ChevronDown size={12} strokeWidth={2.5} />
+            </button>
+          </Tip>
         </div>
         {scopeMenuOpen && (
           <div
@@ -348,14 +352,15 @@ function CompactToolRow({
           {summary.target && (
             isDiffCardTool && onOpenFile ? (
               // Filename chip: click opens the file panel (with diff if available).
-              <button
-                type="button"
-                onClick={(e) => { e.stopPropagation(); onOpenFile(filePath, openDiff); }}
-                className="ml-1.5 min-w-0 truncate rounded bg-mira-elev1/70 px-1.5 py-0.5 font-mono text-[12px] text-foreground transition-colors hover:bg-mira-blue/15 hover:text-mira-blue"
-                title="Open in file viewer"
-              >
-                {summary.target}
-              </button>
+              <Tip label="Open in file viewer" className="ml-1.5 min-w-0">
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); onOpenFile(filePath, openDiff); }}
+                  className="min-w-0 truncate rounded bg-mira-elev1/70 px-1.5 py-0.5 font-mono text-[12px] text-foreground transition-colors hover:bg-mira-blue/15 hover:text-mira-blue"
+                >
+                  {summary.target}
+                </button>
+              </Tip>
             ) : targetIsPath ? (
               <span className="ml-1.5 min-w-0 truncate rounded bg-mira-elev1/70 px-1.5 py-0.5 font-mono text-[12px] text-foreground">
                 {summary.target}
@@ -472,14 +477,15 @@ function DiffCard({
       <div className="flex items-center gap-2 border-b border-border/40 bg-mira-elev1/80 px-3 py-2 text-[12px]">
         <FileText className="size-3.5 shrink-0 text-muted-foreground" />
         {onOpenFile && filePath ? (
-          <button
-            type="button"
-            onClick={() => onOpenFile(filePath, diffPreview)}
-            className="shrink-0 font-medium text-foreground transition-colors hover:text-mira-blue hover:underline underline-offset-2"
-            title="Open in file viewer"
-          >
-            {shortName}
-          </button>
+          <Tip label="Open in file viewer" className="shrink-0">
+            <button
+              type="button"
+              onClick={() => onOpenFile(filePath, diffPreview)}
+              className="font-medium text-foreground transition-colors hover:text-mira-blue hover:underline underline-offset-2"
+            >
+              {shortName}
+            </button>
+          </Tip>
         ) : (
           <span className="shrink-0 font-medium text-foreground">{shortName}</span>
         )}

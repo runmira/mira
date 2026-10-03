@@ -82,6 +82,10 @@ impl AgentProcess {
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        // A probe or aborted session must not orphan the agent: when the
+        // handle is dropped (including the timeout-dropped future in
+        // `probe_initialize`), the child goes too.
+        cmd.kill_on_drop(true);
         // Its own process group, so a session teardown can take the agent's
         // children with it rather than orphaning a running build.
         #[cfg(unix)]
@@ -217,6 +221,8 @@ pub struct StartSpec<'a> {
     /// Working directory for `session/new`. `None` skips session creation,
     /// leaving the caller to do it once it has somewhere valid to point at.
     pub cwd: Option<&'a Path>,
+    /// Mira's tool server URL, offered to agents that take HTTP MCP servers.
+    pub mira_mcp: Option<String>,
 }
 
 /// Start an agent, taking both the launch and the capabilities from `driver`.
@@ -241,6 +247,7 @@ pub async fn start_driver(
         permissions: ports.permissions,
         events: ports.events,
         cwd,
+        mira_mcp: ports.mira_mcp,
     })
     .await
 }
@@ -289,6 +296,8 @@ pub struct HostPorts {
     pub terminals: Arc<dyn crate::host::TerminalPort>,
     pub permissions: Arc<dyn crate::host::PermissionPort>,
     pub events: Arc<dyn crate::host::EventPort>,
+    /// Mira's tool server for this session, if the host runs one.
+    pub mira_mcp: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -416,6 +425,7 @@ pub async fn start(spec: StartSpec<'_>) -> Result<AcpAgent, StartError> {
             .await;
         return Err(StartError::Session(e));
     }
+    session.set_mira_mcp(spec.mira_mcp.clone()).await;
     if let Some(cwd) = spec.cwd {
         if let Err(e) = session.new_session(cwd, Vec::new()).await {
             process
@@ -948,6 +958,7 @@ esac
             permissions: seen.clone() as Arc<dyn PermissionPort>,
             events: seen.clone() as Arc<dyn EventPort>,
             cwd: Some(&cwd),
+            mira_mcp: None,
         }))
         .await
         .expect("start");
@@ -974,6 +985,7 @@ esac
             permissions: seen.clone() as Arc<dyn PermissionPort>,
             events: seen.clone() as Arc<dyn EventPort>,
             cwd: Some(&cwd),
+            mira_mcp: None,
         }))
         .await
         .expect("start");
@@ -1012,6 +1024,7 @@ esac
             permissions: seen.clone() as Arc<dyn PermissionPort>,
             events: seen.clone() as Arc<dyn EventPort>,
             cwd: Some(&cwd),
+            mira_mcp: None,
         }))
         .await
         .expect("start");
@@ -1040,6 +1053,7 @@ esac
             permissions: seen.clone() as Arc<dyn PermissionPort>,
             events: seen.clone() as Arc<dyn EventPort>,
             cwd: None,
+            mira_mcp: None,
         }))
         .await;
         assert!(res.is_err(), "expected a start failure");
@@ -1064,6 +1078,7 @@ esac
             permissions: seen.clone() as Arc<dyn PermissionPort>,
             events: seen.clone() as Arc<dyn EventPort>,
             cwd: None,
+            mira_mcp: None,
         }))
         .await;
         assert!(

@@ -273,18 +273,65 @@ pub fn mcp_token() -> &'static str {
     TOKEN.get_or_init(|| uuid::Uuid::new_v4().simple().to_string())
 }
 
-/// The MCP server entry an agent is launched with, so Claude Code (or any
-/// MCP client) drives Mira's browser — the one the pane shows — rather
-/// than starting a browser of its own.
-pub fn agent_mcp_config(port: u16) -> Value {
+/// Who approves the actions an agent takes through Mira's tool server.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum McpGate {
+    /// The agent asks before each tool call, and its asking already reaches
+    /// Mira's approval card (Claude Code's permission gate).
+    Agent,
+    /// The agent may call tools without asking (OpenCode allows MCP tools
+    /// by default), so Mira asks before anything that runs a command.
+    Mira,
+}
+
+/// The URL of Mira's tool server for one chat: the browser the pane shows,
+/// and background processes that land in that chat's Processes window.
+pub fn agent_mcp_url(port: u16, session: &str, gate: McpGate) -> String {
+    let gate = match gate {
+        McpGate::Agent => "agent",
+        McpGate::Mira => "mira",
+    };
+    format!(
+        "http://127.0.0.1:{port}/mcp/{}?session={}&gate={gate}",
+        mcp_token(),
+        urlencoding_light(session),
+    )
+}
+
+/// Session ids are `sess_<hex>`; anything else is escaped conservatively.
+fn urlencoding_light(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c.to_string()
+            } else {
+                format!("%{:02X}", c as u32 & 0xff)
+            }
+        })
+        .collect()
+}
+
+/// The MCP server entry an agent is launched with (`--mcp-config`), so
+/// Claude Code drives Mira's browser — the one the pane shows — rather
+/// than starting a browser of its own, and its background commands show
+/// in Mira's Processes window.
+pub fn agent_mcp_config(port: u16, session: &str) -> Value {
     serde_json::json!({
         "mcpServers": {
             "mira": {
                 "type": "http",
-                "url": format!("http://127.0.0.1:{port}/mcp/{}", mcp_token()),
+                "url": agent_mcp_url(port, session, McpGate::Agent),
             }
         }
     })
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct McpQuery {
+    #[serde(default)]
+    session: Option<String>,
+    #[serde(default)]
+    gate: Option<String>,
 }
 
 fn browser_tool_spec(state: &AppState) -> mira_ai::ToolSpec {
@@ -306,6 +353,7 @@ pub async fn mcp_get() -> Response {
 pub async fn mcp(
     State(state): State<AppState>,
     axum::extract::Path(token): axum::extract::Path<String>,
+    Query(q): Query<McpQuery>,
     Json(req): Json<Value>,
 ) -> Response {
     if token != mcp_token() {
@@ -317,7 +365,7 @@ pub async fn mcp(
     };
     let mut replies = Vec::new();
     for r in reqs {
-        if let Some(reply) = mcp_one(&state, r).await {
+        if let Some(reply) = mcp_one(&state, &q, r).await {
             replies.push(reply);
         }
     }
@@ -329,7 +377,15 @@ pub async fn mcp(
     }
 }
 
-async fn mcp_one(state: &AppState, req: Value) -> Option<Value> {
+/// The background-process tools, with exactly the specs Mira's own model
+/// gets. They act on the chat's own process store, so what an agent starts
+/// shows (and can be stopped) in that chat's Processes window.
+fn background_tools() -> Vec<Box<dyn mira_tools::Tool>> {
+    use mira_tools::builtin::background::{KillBackground, ReadOutput, RunBackground};
+    vec![Box::new(RunBackground), Box::new(ReadOutput), Box::new(KillBackground)]
+}
+
+async fn mcp_one(state: &AppState, q: &McpQuery, req: Value) -> Option<Value> {
     use serde_json::json;
     let id = req.get("id").cloned()?; // a notification gets no reply
     let method = req.get("method").and_then(Value::as_str).unwrap_or("");
@@ -344,23 +400,37 @@ async fn mcp_one(state: &AppState, req: Value) -> Option<Value> {
                 "protocolVersion": version,
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "mira", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "Mira's browser. It is the same browser the user watches live in \
-                                 Mira's browser pane, in a dedicated profile (never the user's own).",
+                "instructions": "Mira's tools. `browser` is the browser the user watches live in \
+                                 Mira's browser pane (a dedicated profile, never the user's own): use \
+                                 it to open, click, type and screenshot pages. `run_background` starts \
+                                 a long-running command (a dev server, a watcher) the user can see, \
+                                 read and stop in Mira's Processes window; `read_output` and \
+                                 `kill_background` read and stop it.",
             }))
         }
         "ping" => ok(json!({})),
         "tools/list" => {
-            let spec = browser_tool_spec(state);
-            ok(json!({ "tools": [{
-                "name": spec.name,
-                "description": spec.description,
-                "inputSchema": spec.parameters,
-            }]}))
+            let mut specs = vec![browser_tool_spec(state)];
+            if mcp_slot(state, q).await.is_some() {
+                specs.extend(background_tools().iter().map(|t| t.spec()));
+            }
+            ok(json!({ "tools": specs.iter().map(|s| json!({
+                "name": s.name,
+                "description": s.description,
+                "inputSchema": s.parameters,
+            })).collect::<Vec<_>>() }))
         }
         "tools/call" => {
             let name = req["params"]["name"].as_str().unwrap_or("");
             if name != "browser" {
-                return Some(err(-32602, format!("unknown tool `{name}`")));
+                return Some(match call_background(state, q, name, &req["params"]["arguments"]).await {
+                    Some(Ok((text, is_error))) => ok(json!({
+                        "content": [{ "type": "text", "text": text }],
+                        "isError": is_error,
+                    })),
+                    Some(Err(e)) => err(-32603, e),
+                    None => err(-32602, format!("unknown tool `{name}`")),
+                });
             }
             let args = req["params"]["arguments"].clone();
             let action = match BrowserAction::from_args(&args) {
@@ -391,5 +461,55 @@ async fn mcp_one(state: &AppState, req: Value) -> Option<Value> {
             }
         }
         other => err(-32601, format!("method not found: {other}")),
+    })
+}
+
+/// The chat a tool-server URL belongs to (`?session=`).
+async fn mcp_slot(state: &AppState, q: &McpQuery) -> Option<std::sync::Arc<crate::slot::SessionSlot>> {
+    state.slot_str(q.session.as_deref()?).await
+}
+
+/// Run one of the background-process tools for the URL's chat. `None` when
+/// the tool isn't one of them (or there's no chat to run it in).
+async fn call_background(
+    state: &AppState,
+    q: &McpQuery,
+    name: &str,
+    args: &Value,
+) -> Option<Result<(String, bool), String>> {
+    let tool = background_tools().into_iter().find(|t| t.spec().name == name)?;
+    let slot = mcp_slot(state, q).await?;
+    let call = mira_core::ToolCall {
+        id: mira_core::ToolCallId::new(),
+        kind: mira_core::ToolCallKind::Function,
+        function: mira_core::ToolCallFunction {
+            name: name.to_string(),
+            arguments: if args.is_null() { "{}".into() } else { args.to_string() },
+        },
+    };
+    // An agent that doesn't ask before tool calls gets Mira's approval card
+    // for anything that runs or stops a command (as Mira's own model does).
+    if q.gate.as_deref() == Some("mira") && matches!(tool.action(), mira_tools::Action::Bash) {
+        let allowed = slot
+            .approver
+            .approve(&call, mira_policy::Decision::Ask)
+            .await;
+        if !allowed {
+            return Some(Ok((
+                "The user denied this in Mira. Don't retry it as-is.".into(),
+                true,
+            )));
+        }
+    }
+    let ctx = slot
+        .make_tool_ctx(state.sandbox.clone())
+        .await
+        .with_bg_processes(slot.bg_processes.clone())
+        .with_bg_progress(std::sync::Arc::new(crate::slot::SessionProgress {
+            tx: slot.events_tx.clone(),
+        }));
+    Some(match tool.invoke(&call, &ctx).await {
+        Ok(r) => Ok((r.content, r.is_error)),
+        Err(e) => Ok((e.to_string(), true)),
     })
 }

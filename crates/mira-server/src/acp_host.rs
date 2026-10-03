@@ -25,7 +25,10 @@ use std::sync::Arc;
 
 use mira_acp::events::NormalizedEvent;
 use mira_acp::events::PermissionRequest;
-use mira_acp::host::{EventPort, FilePort, HostError, PermissionPort, TerminalPort};
+use mira_acp::host::{
+    ElicitationReply, ElicitationRequest, EventPort, FilePort, HostError, PermissionPort,
+    TerminalPort,
+};
 use mira_harness::approver::Approver;
 use mira_policy::Decision;
 use mira_pty::{Exit, PtyRegistry, PtySpawn};
@@ -285,11 +288,29 @@ fn synthetic_call(path: &str) -> mira_core::ToolCall {
 /// `Cancelled` — never a fabricated id.
 pub struct AcpPermissions {
     approver: Arc<dyn Approver>,
+    /// The session it serves, for what goes beyond yes/no: the scope the
+    /// user picked ("allow for this chat") and the question card. Weak —
+    /// the slot owns the agent that owns this.
+    slot: Option<std::sync::Weak<crate::slot::SessionSlot>>,
 }
 
 impl AcpPermissions {
     pub fn new(approver: Arc<dyn Approver>) -> Arc<Self> {
-        Arc::new(AcpPermissions { approver })
+        Arc::new(AcpPermissions {
+            approver,
+            slot: None,
+        })
+    }
+
+    pub fn for_slot(slot: &Arc<crate::slot::SessionSlot>) -> Arc<Self> {
+        Arc::new(AcpPermissions {
+            approver: slot.approver.clone(),
+            slot: Some(Arc::downgrade(slot)),
+        })
+    }
+
+    fn slot(&self) -> Option<Arc<crate::slot::SessionSlot>> {
+        self.slot.as_ref().and_then(std::sync::Weak::upgrade)
     }
 }
 
@@ -299,7 +320,14 @@ impl AcpPermissions {
 /// decision — for example it offered only "always allow" and the user said
 /// no. The caller then answers `Cancelled`, which tells the agent to unwind
 /// the turn instead of retrying against a wall.
-fn choose_option(req: &PermissionRequest, allowed: bool) -> Option<String> {
+fn choose_option(req: &PermissionRequest, allowed: bool, widen: bool) -> Option<String> {
+    // "Allow for this chat": the agent's standing grant, when it offers one,
+    // so it stops asking about the same thing.
+    if allowed && widen {
+        if let Some(o) = req.options.iter().find(|o| o.is_allow() && o.is_persistent()) {
+            return Some(o.option_id.clone());
+        }
+    }
     let pick = |once: bool| -> Option<String> {
         req.options
             .iter()
@@ -348,32 +376,23 @@ impl PermissionPort for AcpPermissions {
         &self,
         req: &PermissionRequest,
     ) -> Result<Option<String>, HostError> {
-        // The agent's own title and options ride along in the arguments so
-        // the existing approval UI has something to show, not a bare tool name.
-        let call = mira_core::ToolCall {
-            id: mira_core::ToolCallId::new(),
-            kind: mira_core::ToolCallKind::Function,
-            function: mira_core::ToolCallFunction {
-                name: format!("acp: {}", req.title),
-                arguments: serde_json::json!({
-                    "tool_call_id": req.tool_call_id,
-                    "title": req.title,
-                    "options": req
-                        .options
-                        .iter()
-                        .map(|o| serde_json::json!({
-                            "id": o.option_id,
-                            "name": o.name,
-                            "kind": format!("{:?}", o.kind).to_lowercase(),
-                        }))
-                        .collect::<Vec<_>>(),
-                })
-                .to_string(),
-            },
-        };
+        // Shown on the approval card as the action itself: a command as a
+        // command, an edit as a diff — the same cards Mira's own tools get.
+        let call = permission_call(req);
 
         let allowed = self.approver.approve(&call, Decision::Ask).await;
-        let chosen = choose_option(req, allowed);
+        let scope = self.slot().and_then(|s| {
+            s.engine
+                .approval_scopes
+                .lock()
+                .ok()
+                .and_then(|mut m| m.remove(&call.id.to_string()))
+        });
+        let widen = matches!(
+            scope,
+            Some(crate::protocol::ApprovalScope::Session | crate::protocol::ApprovalScope::Always)
+        );
+        let chosen = choose_option(req, allowed, widen);
         if chosen.is_none() {
             tracing::info!(
                 tool_call_id = %req.tool_call_id,
@@ -383,6 +402,88 @@ impl PermissionPort for AcpPermissions {
             );
         }
         Ok(chosen)
+    }
+
+    async fn elicit(&self, req: &ElicitationRequest) -> Result<ElicitationReply, HostError> {
+        match self.slot() {
+            Some(slot) => Ok(crate::acp_session::ask_elicitation(&slot, req).await),
+            None => Ok(ElicitationReply::Cancel),
+        }
+    }
+}
+
+/// The approval card's view of an agent's permission request.
+///
+/// A shell command becomes `bash {command}`, an edit `edit_file` / a write
+/// `write_file` (so the card computes a real diff), and anything else keeps
+/// the agent's title with just its input — never the request's plumbing
+/// (tool-call ids, option kinds), which means nothing to a person.
+fn permission_call(req: &PermissionRequest) -> mira_core::ToolCall {
+    // The SDK's kind enum isn't re-exported; its name is all that's needed.
+    let kind = req.kind.map(|k| format!("{k:?}"));
+    let is_kind = |want: &str| kind.as_deref().is_none_or(|k| k == want);
+    let raw = req.raw_input.as_ref().and_then(|v| v.as_object());
+    let get = |keys: &[&str]| -> Option<String> {
+        let raw = raw?;
+        keys.iter().find_map(|k| match raw.get(*k)? {
+            serde_json::Value::String(s) => Some(s.clone()),
+            // `["ls", "-la"]` style argv.
+            serde_json::Value::Array(a) => Some(
+                a.iter()
+                    .filter_map(|x| x.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            ),
+            _ => None,
+        })
+    };
+    let path = get(&["path", "filePath", "file_path", "filepath", "file"])
+        .or_else(|| req.locations.first().cloned());
+
+    let (name, args) = if let Some(cmd) = get(&["command", "cmd"])
+        .filter(|_| is_kind("Execute"))
+    {
+        ("bash".to_string(), serde_json::json!({ "command": cmd }))
+    } else if let (Some(path), Some(old), Some(new)) = (
+        path.clone().filter(|_| is_kind("Edit")),
+        get(&["old_string", "oldString", "oldText", "old_text"]),
+        get(&["new_string", "newString", "newText", "new_text"]),
+    ) {
+        (
+            "edit_file".to_string(),
+            serde_json::json!({ "path": path, "old_string": old, "new_string": new }),
+        )
+    } else if let (Some(path), Some(content)) = (
+        path.clone().filter(|_| is_kind("Edit")),
+        get(&["content", "contents", "text"]),
+    ) {
+        (
+            "write_file".to_string(),
+            serde_json::json!({ "path": path, "content": content }),
+        )
+    } else {
+        let title = if req.title.trim().is_empty() {
+            "Agent action".to_string()
+        } else {
+            req.title.clone()
+        };
+        let mut args = req
+            .raw_input
+            .clone()
+            .filter(|v| v.as_object().is_some_and(|o| !o.is_empty()))
+            .unwrap_or_else(|| serde_json::json!({}));
+        if let (Some(obj), Some(p)) = (args.as_object_mut(), path) {
+            obj.entry("path").or_insert(serde_json::Value::String(p));
+        }
+        (title, args)
+    };
+    mira_core::ToolCall {
+        id: mira_core::ToolCallId::new(),
+        kind: mira_core::ToolCallKind::Function,
+        function: mira_core::ToolCallFunction {
+            name,
+            arguments: args.to_string(),
+        },
     }
 }
 
@@ -681,8 +782,10 @@ mod tests {
                     kind: Kind::AllowOnce,
                 },
             ],
+            raw_input: None,
+            locations: Vec::new(),
         };
-        assert_eq!(choose_option(&r, true).as_deref(), Some("once"));
+        assert_eq!(choose_option(&r, true, false).as_deref(), Some("once"));
     }
 
     #[test]
@@ -698,8 +801,37 @@ mod tests {
                 name: "Always".into(),
                 kind: Kind::AllowAlways,
             }],
+            raw_input: None,
+            locations: Vec::new(),
         };
-        assert_eq!(choose_option(&r, true).as_deref(), Some("always"));
+        assert_eq!(choose_option(&r, true, false).as_deref(), Some("always"));
+    }
+
+    #[test]
+    fn allow_for_this_chat_takes_the_agents_standing_grant() {
+        use mira_acp::events::{AcpPermissionOptionKind as Kind, PermissionChoice};
+        let opt = |id: &str, kind| PermissionChoice {
+            option_id: id.into(),
+            name: id.into(),
+            kind,
+        };
+        let r = PermissionRequest {
+            session_id: "s".into(),
+            tool_call_id: "c".into(),
+            title: "t".into(),
+            kind: None,
+            options: vec![
+                opt("once", Kind::AllowOnce),
+                opt("always", Kind::AllowAlways),
+                opt("reject", Kind::RejectOnce),
+            ],
+            raw_input: None,
+            locations: Vec::new(),
+        };
+        assert_eq!(choose_option(&r, true, true).as_deref(), Some("always"));
+        assert_eq!(choose_option(&r, true, false).as_deref(), Some("once"));
+        // Widening never turns a "no" into a standing anything.
+        assert_eq!(choose_option(&r, false, true).as_deref(), Some("reject"));
     }
 
     #[test]
@@ -715,8 +847,10 @@ mod tests {
                 name: "Always".into(),
                 kind: Kind::AllowAlways,
             }],
+            raw_input: None,
+            locations: Vec::new(),
         };
-        assert_eq!(choose_option(&r, false), None);
+        assert_eq!(choose_option(&r, false, false), None);
     }
 
     #[test]
@@ -736,8 +870,10 @@ mod tests {
                 mk("no-always", Kind::RejectAlways),
                 mk("no", Kind::RejectOnce),
             ],
+            raw_input: None,
+            locations: Vec::new(),
         };
-        assert_eq!(choose_option(&r, false).as_deref(), Some("no"));
+        assert_eq!(choose_option(&r, false, false).as_deref(), Some("no"));
     }
 
     #[test]
@@ -748,9 +884,11 @@ mod tests {
             title: "t".into(),
             kind: None,
             options: vec![],
+            raw_input: None,
+            locations: Vec::new(),
         };
-        assert_eq!(choose_option(&r, true), None);
-        assert_eq!(choose_option(&r, false), None);
+        assert_eq!(choose_option(&r, true, false), None);
+        assert_eq!(choose_option(&r, false, false), None);
     }
 
     #[test]
@@ -767,8 +905,10 @@ mod tests {
                     name: id.into(),
                     kind: Kind::AllowOnce,
                 }],
+                raw_input: None,
+                locations: Vec::new(),
             };
-            assert_eq!(choose_option(&r, true).as_deref(), Some(id));
+            assert_eq!(choose_option(&r, true, false).as_deref(), Some(id));
         }
     }
 
@@ -793,6 +933,8 @@ mod tests {
                     kind: Kind::AllowOnce,
                 },
             ],
+            raw_input: None,
+            locations: Vec::new(),
         };
         assert_eq!(
             p.request_permission(&r).await.expect("permission"),
@@ -814,6 +956,8 @@ mod tests {
                 name: "a".into(),
                 kind: Kind::AllowAlways,
             }],
+            raw_input: None,
+            locations: Vec::new(),
         };
         assert_eq!(p.request_permission(&r).await.expect("permission"), None);
     }
@@ -1329,5 +1473,56 @@ mod event_tests {
         })
         .await;
         port.turn_ended("end_turn");
+    }
+}
+
+#[cfg(test)]
+mod permission_call_tests {
+    use super::*;
+
+    fn req(title: &str, raw: serde_json::Value, locations: &[&str]) -> PermissionRequest {
+        PermissionRequest {
+            session_id: "s".into(),
+            tool_call_id: "functions.shell:0".into(),
+            title: title.into(),
+            kind: None,
+            options: Vec::new(),
+            raw_input: Some(raw),
+            locations: locations.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn args(c: &mira_core::ToolCall) -> serde_json::Value {
+        serde_json::from_str(&c.function.arguments).unwrap()
+    }
+
+    #[test]
+    fn a_command_shows_as_bash() {
+        let c = permission_call(&req("date", serde_json::json!({ "command": "date", "description": "x" }), &[]));
+        assert_eq!(c.function.name, "bash");
+        assert_eq!(args(&c), serde_json::json!({ "command": "date" }));
+    }
+
+    #[test]
+    fn an_edit_shows_as_a_diff() {
+        let c = permission_call(&req(
+            "Edit",
+            serde_json::json!({ "filePath": "/r/a.rs", "oldString": "a", "newString": "b" }),
+            &[],
+        ));
+        assert_eq!(c.function.name, "edit_file");
+        assert_eq!(args(&c)["path"], "/r/a.rs");
+        let w = permission_call(&req("Write", serde_json::json!({ "content": "hi" }), &["/r/new.md"]));
+        assert_eq!(w.function.name, "write_file");
+        assert_eq!(args(&w)["path"], "/r/new.md");
+    }
+
+    #[test]
+    fn anything_else_keeps_its_title_and_input_without_plumbing() {
+        let c = permission_call(&req("Fetch docs", serde_json::json!({ "url": "https://x.dev" }), &[]));
+        assert_eq!(c.function.name, "Fetch docs");
+        let a = args(&c);
+        assert_eq!(a["url"], "https://x.dev");
+        assert!(a.get("tool_call_id").is_none() && a.get("options").is_none());
     }
 }

@@ -143,10 +143,11 @@
     --input: 240 6% 85%;
     --ring: 240 6% 25%;
 
-    --tooltip: 240 6% 12%;
-    --tooltip-foreground: 0 0% 97%;
-    --tooltip-tag: 240 5% 24%;
-    --tooltip-tag-foreground: 0 0% 78%;
+    /* Tips follow the theme: a light card with dark text in light mode. */
+    --tooltip: 0 0% 100%;
+    --tooltip-foreground: 240 10% 12%;
+    --tooltip-tag: 240 5% 93%;
+    --tooltip-tag-foreground: 240 4% 38%;
 
     --code-background: #f6f7f9;
     --code-foreground: #24292f;
@@ -220,6 +221,11 @@
     line-height: 1rem;
     color: hsl(var(--tooltip-foreground));
     box-shadow: 0 8px 24px -6px rgb(0 0 0 / 0.55);
+  }
+  :root[data-theme='light'] .tooltip {
+    box-shadow:
+      0 1px 2px rgb(0 0 0 / 0.06),
+      0 8px 24px -8px rgb(0 0 0 / 0.18);
   }
 
   /* Stacked variant for tooltips that hold rows (the usage chart) instead of

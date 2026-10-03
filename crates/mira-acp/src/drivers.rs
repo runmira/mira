@@ -160,6 +160,7 @@ impl AcpDriver for AntigravityDriver {
             fs_read: true,
             fs_write: true,
             terminal: false,
+            elicitation_form: true,
         }
     }
 }
@@ -375,6 +376,10 @@ impl AcpDriver for ClaudeCodeDriver {
         &["claude"]
     }
 
+    fn login_command(&self) -> &'static str {
+        "claude auth login"
+    }
+
     fn install_hint(&self) -> &'static str {
         "npm install -g @agentclientprotocol/claude-agent-acp"
     }
@@ -473,6 +478,10 @@ impl AcpDriver for CodexDriver {
     /// The adapter bundles a compatible Codex, so there is no separate CLI
     /// to install — but the package name moved, and the old one is
     /// deprecated.
+    fn login_command(&self) -> &'static str {
+        "codex login"
+    }
+
     fn install_hint(&self) -> &'static str {
         "npm install -g @agentclientprotocol/codex-acp"
     }
@@ -552,6 +561,7 @@ impl AcpDriver for CodexDriver {
             fs_read: true,
             fs_write: true,
             terminal: false,
+            elicitation_form: true,
         }
     }
 }
@@ -797,6 +807,33 @@ impl AcpDriver for OpenCodeDriver {
     fn permission_args(&self, _mode: PermissionMode) -> Vec<String> {
         Vec::new()
     }
+
+    /// OpenCode allows every tool by default and only asks about other
+    /// folders and `.env` files, so on its own it never asks Mira to
+    /// approve an edit or a command. Its inline config
+    /// (`OPENCODE_CONFIG_CONTENT`, layered over the user's own) sets the
+    /// rules Mira's mode means; anything set to `ask` comes back as
+    /// `session/request_permission`, which is Mira's approval card.
+    fn permission_env(&self, mode: PermissionMode) -> Vec<(String, String)> {
+        let rules = match mode {
+            PermissionMode::Ask => serde_json::json!({
+                "edit": "ask",
+                "bash": "ask",
+                "webfetch": "ask",
+            }),
+            PermissionMode::AcceptEdits => serde_json::json!({
+                "edit": "allow",
+                "bash": "ask",
+                "webfetch": "ask",
+            }),
+            // OpenCode's own default is already "allow".
+            PermissionMode::Auto => return Vec::new(),
+        };
+        vec![(
+            "OPENCODE_CONFIG_CONTENT".to_string(),
+            serde_json::json!({ "permission": rules }).to_string(),
+        )]
+    }
 }
 
 #[cfg(test)]
@@ -820,6 +857,20 @@ mod opencode_tests {
         let cfg = resolve(&OpenCodeDriver);
         assert_eq!(cfg.program, PathBuf::from("bin"));
         assert_eq!(cfg.args, vec!["acp".to_string()]);
+    }
+
+    #[test]
+    fn opencode_asks_through_its_inline_config() {
+        let ask = DriverConfig::default();
+        let cfg = OpenCodeDriver.resolve(&ask, PermissionMode::Ask, PathBuf::from("bin"));
+        let content: serde_json::Value =
+            serde_json::from_str(&cfg.env["OPENCODE_CONFIG_CONTENT"]).unwrap();
+        assert_eq!(content["permission"]["edit"], "ask");
+        assert_eq!(content["permission"]["bash"], "ask");
+        let edits = OpenCodeDriver.resolve(&ask, PermissionMode::AcceptEdits, PathBuf::from("bin"));
+        assert!(edits.env["OPENCODE_CONFIG_CONTENT"].contains(r#""edit":"allow""#));
+        let auto = OpenCodeDriver.resolve(&ask, PermissionMode::Auto, PathBuf::from("bin"));
+        assert!(!auto.env.contains_key("OPENCODE_CONFIG_CONTENT"));
     }
 
     #[test]

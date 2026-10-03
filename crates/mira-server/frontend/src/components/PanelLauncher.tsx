@@ -1,6 +1,6 @@
 import { FileText, Plus } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { TOOL_PANE_DEFS, type ToolPaneKind } from './panes/toolPanes';
+import { OPENABLE_PANES, TOOL_PANE_DEFS, type ToolPaneKind } from './panes/toolPanes';
 
 /**
  * The panel's empty state: what can be opened in the right-hand column.
@@ -24,7 +24,7 @@ export function PanelLauncher({
   onOpenFileTab: (id: string) => void;
   className?: string;
 }) {
-  const kinds: ToolPaneKind[] = ['browser', 'whiteboard', 'devtools'];
+  const kinds = OPENABLE_PANES;
 
   return (
     <div className={cn('h-full overflow-y-auto p-3', className)}>
