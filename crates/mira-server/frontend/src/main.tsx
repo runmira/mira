@@ -5,6 +5,8 @@ import { AuthGate } from './components/AuthGate';
 import { OnboardingGate } from './components/onboarding/OnboardingGate';
 import { install as installNetLog } from './lib/netLog';
 import { hasHiddenTitleBar } from './lib/desktop';
+import { applyTheme, watchSystemTheme } from './lib/theme';
+import { applyAppearance } from './lib/appearance';
 import './styles.css';
 
 // Must run before the first render so the auth and onboarding gates are
@@ -19,6 +21,12 @@ installNetLog();
 if (hasHiddenTitleBar()) {
   document.documentElement.dataset.miraChrome = 'translucent';
 }
+
+// index.html already set the theme before paint; this also syncs the
+// desktop window and starts following the system when that's the choice.
+applyTheme();
+watchSystemTheme();
+applyAppearance();
 
 // Lucide icons size via `size` prop or tailwind size-* classes (which set
 // width/height in CSS and override the SVG's own width attr).

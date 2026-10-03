@@ -126,7 +126,7 @@ export function DoneStep({
         onBack={onBack}
         status={
           <span className="hidden sm:inline">
-            Press <kbd className="rounded-md border border-white/[0.1] bg-white/[0.05] px-1.5 py-0.5 font-mono text-[11px]">↵</kbd> to start
+            Press <kbd className="rounded-md border border-fg/[0.1] bg-fg/[0.05] px-1.5 py-0.5 font-mono text-[11px]">↵</kbd> to start
           </span>
         }
       >

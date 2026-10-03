@@ -89,9 +89,9 @@ function Row({
     <button
       type="button"
       onClick={onClick}
-      className="flex w-full items-center gap-2.5 rounded-lg border border-border/60 px-2.5 py-2 text-left transition-colors hover:border-border hover:bg-white/[0.03]"
+      className="flex w-full items-center gap-2.5 rounded-lg border border-border/60 px-2.5 py-2 text-left transition-colors hover:border-border hover:bg-fg/[0.03]"
     >
-      <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-white/[0.04] text-muted-foreground">
+      <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-fg/[0.04] text-muted-foreground">
         {icon}
       </span>
       <span className="min-w-0 flex-1">

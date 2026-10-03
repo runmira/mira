@@ -5,6 +5,8 @@ import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { cn } from '@/lib/utils';
 import * as agentTerminal from '../lib/agentTerminal';
+import { useTheme, type Theme } from '../lib/theme';
+import type { ITheme } from '@xterm/xterm';
 
 /** The pinned, read-only tab that mirrors the agent's shell commands. */
 const AGENT_TAB = 'agent';
@@ -16,6 +18,45 @@ const AGENT_TAB = 'agent';
  */
 
 type Tab = { key: string; id: string | null; title: string };
+
+/** The terminal's background, matching the panel around it. */
+const TERM_BG: Record<Theme, string> = { dark: '#0b0b0d', light: '#fbfbfc' };
+
+/**
+ * xterm colors for the app theme. Dark keeps xterm's own ANSI palette;
+ * light needs a full one, or "white" and "yellow" output (ls, git, test
+ * runners) vanishes on the light background — GitHub's light terminal
+ * palette, made for exactly that. The read-only agent tab hides its cursor.
+ */
+function terminalTheme(theme: Theme, hideCursor = false): ITheme {
+  const bg = TERM_BG[theme];
+  if (theme === 'dark') {
+    return { background: bg, foreground: '#d4d4d8', cursor: hideCursor ? bg : '#d4d4d8', selectionBackground: '#3f3f46' };
+  }
+  return {
+    background: bg,
+    foreground: '#24292f',
+    cursor: hideCursor ? bg : '#24292f',
+    cursorAccent: bg,
+    selectionBackground: 'rgba(9, 105, 218, 0.18)',
+    black: '#24292f',
+    red: '#cf222e',
+    green: '#116329',
+    yellow: '#4d2d00',
+    blue: '#0969da',
+    magenta: '#8250df',
+    cyan: '#1b7c83',
+    white: '#6e7781',
+    brightBlack: '#57606a',
+    brightRed: '#a40e26',
+    brightGreen: '#1a7f37',
+    brightYellow: '#633c01',
+    brightBlue: '#218bff',
+    brightMagenta: '#a475f9',
+    brightCyan: '#3192aa',
+    brightWhite: '#8c959f',
+  };
+}
 
 const TABS_KEY = 'mira.terminal.tabs';
 const HEIGHT_KEY = 'mira.terminal.height';
@@ -118,7 +159,7 @@ export function TerminalPanel({ onClose }: { onClose: () => void }) {
   }
 
   return (
-    <div className="relative flex shrink-0 flex-col border-t border-border bg-[#0b0b0d]" style={{ height }}>
+    <div className="relative flex shrink-0 flex-col border-t border-border bg-[#fbfbfc] dark:bg-[#0b0b0d]" style={{ height }}>
       <div
         onPointerDown={startResize}
         className="absolute inset-x-0 -top-1 z-10 h-2 cursor-row-resize"
@@ -214,6 +255,14 @@ function TerminalView({
   const idRef = useRef(termId);
   const onIdRef = useRef(onId);
   onIdRef.current = onId;
+  const theme = useTheme();
+  const themeRef = useRef(theme);
+  themeRef.current = theme;
+
+  // Recolor live when the app theme changes.
+  useEffect(() => {
+    if (termRef.current) termRef.current.options.theme = terminalTheme(theme);
+  }, [theme]);
 
   useEffect(() => {
     const term = new Terminal({
@@ -221,7 +270,7 @@ function TerminalView({
       fontSize: 12.5,
       cursorBlink: true,
       scrollback: 5000,
-      theme: { background: '#0b0b0d', foreground: '#d4d4d8', cursor: '#d4d4d8', selectionBackground: '#3f3f46' },
+      theme: terminalTheme(themeRef.current),
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
@@ -268,6 +317,7 @@ function TerminalView({
       resize.dispose();
       ws.close();
       term.dispose();
+      if (termRef.current === term) termRef.current = null;
     };
   }, []);
 
@@ -290,6 +340,14 @@ function TerminalView({
 function AgentTerminalView({ visible }: { visible: boolean }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  const termRef = useRef<Terminal | null>(null);
+  const theme = useTheme();
+  const themeRef = useRef(theme);
+  themeRef.current = theme;
+
+  useEffect(() => {
+    if (termRef.current) termRef.current.options.theme = terminalTheme(theme, true);
+  }, [theme]);
 
   useEffect(() => {
     const term = new Terminal({
@@ -299,8 +357,9 @@ function AgentTerminalView({ visible }: { visible: boolean }) {
       cursorBlink: false,
       cursorStyle: 'bar',
       scrollback: 10000,
-      theme: { background: '#0b0b0d', foreground: '#d4d4d8', cursor: '#0b0b0d', selectionBackground: '#3f3f46' },
+      theme: terminalTheme(themeRef.current, true),
     });
+    termRef.current = term;
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(hostRef.current!);
@@ -324,6 +383,7 @@ function AgentTerminalView({ visible }: { visible: boolean }) {
       unsubscribe();
       ro.disconnect();
       term.dispose();
+      if (termRef.current === term) termRef.current = null;
     };
   }, []);
 

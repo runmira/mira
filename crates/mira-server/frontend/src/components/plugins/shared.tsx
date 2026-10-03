@@ -81,7 +81,7 @@ export function Switch({
       className={cn(
         'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors',
         'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50',
-        checked ? 'bg-mira-purple' : 'bg-white/15',
+        checked ? 'bg-mira-purple' : 'bg-fg/15',
       )}
     >
       <span
@@ -106,7 +106,7 @@ export function Pill({
   className?: string;
 }) {
   const tones = {
-    neutral: 'bg-white/[0.08] text-muted-foreground/80',
+    neutral: 'bg-fg/[0.08] text-muted-foreground/80',
     green:   'bg-emerald-500/15 text-emerald-300',
     amber:   'bg-amber-500/15 text-amber-300',
     red:     'bg-destructive/15 text-destructive',
@@ -145,8 +145,8 @@ export function RowMenu({ items, label = 'More actions' }: { items: MenuItem[]; 
           aria-label={label}
           onClick={(e) => e.stopPropagation()}
           className={cn(
-            'shrink-0 rounded-lg p-1.5 text-muted-foreground/60 transition-colors hover:bg-white/8 hover:text-foreground',
-            open && 'bg-white/8 text-foreground',
+            'shrink-0 rounded-lg p-1.5 text-muted-foreground/60 transition-colors hover:bg-fg/8 hover:text-foreground',
+            open && 'bg-fg/8 text-foreground',
           )}
         >
           <Ellipsis className="size-4" />
@@ -298,8 +298,8 @@ export function EmptyState({
   action?: ReactNode;
 }) {
   return (
-    <div className="flex flex-col items-center justify-center gap-3 rounded-2xl border border-dashed border-border/60 bg-white/[0.02] px-6 py-16 text-center">
-      <div className="rounded-2xl border border-border/60 bg-white/5 p-3.5 text-muted-foreground [&_svg]:size-5">
+    <div className="flex flex-col items-center justify-center gap-3 rounded-2xl border border-dashed border-border/60 bg-fg/[0.02] px-6 py-16 text-center">
+      <div className="rounded-2xl border border-border/60 bg-fg/5 p-3.5 text-muted-foreground [&_svg]:size-5">
         {icon}
       </div>
       <div className="text-[14.5px] font-semibold">{title}</div>

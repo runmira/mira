@@ -177,7 +177,7 @@ export function SubagentsSection() {
                   'group relative flex items-start gap-3 rounded-2xl border p-3.5 text-left transition-all',
                   active
                     ? 'border-mira-blue/50 bg-mira-blue/[0.06]'
-                    : 'border-border/60 bg-white/[0.02] hover:-translate-y-0.5 hover:border-border hover:bg-white/[0.04]',
+                    : 'border-border/60 bg-fg/[0.02] hover:-translate-y-0.5 hover:border-border hover:bg-fg/[0.04]',
                   off && 'opacity-55',
                 )}
               >
@@ -247,14 +247,14 @@ function Editor({
   return (
     <div className="overflow-hidden rounded-2xl border border-border/60 bg-background/40">
       {/* Who they are */}
-      <div className="flex items-start gap-5 border-b border-border/50 bg-gradient-to-b from-white/[0.03] to-transparent px-5 py-5">
-        <div className="grid size-24 shrink-0 place-items-center rounded-3xl bg-white/[0.03]">
+      <div className="flex items-start gap-5 border-b border-border/50 bg-gradient-to-b from-fg/[0.03] to-transparent px-5 py-5">
+        <div className="grid size-24 shrink-0 place-items-center rounded-3xl bg-fg/[0.03]">
           <SubagentFace id={draft.name || 'new'} face={draft.face} size={72} state="idle" />
         </div>
         <div className="min-w-0 flex-1 space-y-3">
           <div className="flex items-center gap-2">
             <span className="truncate text-[17px] font-semibold text-foreground">{display}</span>
-            <button type="button" onClick={onClose} className="ml-auto rounded-md p-1 text-muted-foreground hover:bg-white/[0.06] hover:text-foreground" aria-label="Close">
+            <button type="button" onClick={onClose} className="ml-auto rounded-md p-1 text-muted-foreground hover:bg-fg/[0.06] hover:text-foreground" aria-label="Close">
               <X className="size-4" />
             </button>
           </div>
@@ -421,7 +421,7 @@ const inputCls =
   'w-full rounded-lg border border-border/80 bg-background/60 px-3 py-2 text-[12.5px] outline-none transition-colors ' +
   'placeholder:text-muted-foreground/40 focus:border-mira-blue/50 focus:bg-background disabled:opacity-60';
 const secondaryBtn =
-  'inline-flex items-center gap-1.5 rounded-lg border border-border/80 px-3 py-1.5 text-[12px] text-muted-foreground transition-colors hover:bg-white/[0.04] hover:text-foreground';
+  'inline-flex items-center gap-1.5 rounded-lg border border-border/80 px-3 py-1.5 text-[12px] text-muted-foreground transition-colors hover:bg-fg/[0.04] hover:text-foreground';
 
 function Group({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -476,7 +476,7 @@ function Choice({ active, onClick, label, children }: { active: boolean; onClick
       title={label}
       className={cn(
         'grid size-11 place-items-center rounded-xl border transition-colors',
-        active ? 'border-mira-blue/60 bg-mira-blue/10' : 'border-border/50 hover:border-border hover:bg-white/[0.04]',
+        active ? 'border-mira-blue/60 bg-mira-blue/10' : 'border-border/50 hover:border-border hover:bg-fg/[0.04]',
       )}
     >
       {children}
@@ -489,7 +489,7 @@ function Badge({ children, tone }: { children: React.ReactNode; tone?: 'blue' })
     <span
       className={cn(
         'rounded-full px-1.5 py-px text-[10px] font-medium',
-        tone === 'blue' ? 'bg-mira-blue/15 text-mira-blue' : 'bg-white/[0.06] text-muted-foreground',
+        tone === 'blue' ? 'bg-mira-blue/15 text-mira-blue' : 'bg-fg/[0.06] text-muted-foreground',
       )}
     >
       {children}

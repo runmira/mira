@@ -44,7 +44,7 @@ export function McpDetailPage({
       </button>
 
       {/* Hero card */}
-      <div className="flex gap-5 rounded-2xl border border-border/60 bg-white/[0.035] p-6">
+      <div className="flex gap-5 rounded-2xl border border-border/60 bg-fg/[0.035] p-6">
         <div className="relative shrink-0 self-start">
           <Avatar name={displayName} size="lg" src={iconSrc} />
           <StatusBadge status={s.status} size="lg" />
@@ -79,7 +79,7 @@ export function McpDetailPage({
                   type="button"
                   disabled={!!busy}
                   onClick={() => actions.onAddToken(s)}
-                  className="rounded-full border border-border/70 px-3.5 py-1.5 text-[12px] text-foreground/90 transition-colors hover:bg-white/[0.06] disabled:opacity-40"
+                  className="rounded-full border border-border/70 px-3.5 py-1.5 text-[12px] text-foreground/90 transition-colors hover:bg-fg/[0.06] disabled:opacity-40"
                 >
                   Add token
                 </button>
@@ -89,7 +89,7 @@ export function McpDetailPage({
                   type="button"
                   disabled={!!busy}
                   onClick={() => actions.onSignIn(s.name)}
-                  className="rounded-full bg-white px-3.5 py-1.5 text-[12px] font-medium text-black transition-all hover:bg-white/90 active:scale-95 disabled:opacity-40"
+                  className="rounded-full bg-foreground px-3.5 py-1.5 text-[12px] font-medium text-background transition-all hover:bg-foreground/90 active:scale-95 disabled:opacity-40"
                 >
                   {working ? 'Working…' : 'Sign in'}
                 </button>
@@ -99,7 +99,7 @@ export function McpDetailPage({
                   type="button"
                   disabled={!!busy}
                   onClick={() => actions.onReconnect(s.name)}
-                  className="inline-flex items-center gap-1.5 rounded-full bg-white px-3.5 py-1.5 text-[12px] font-medium text-black transition-all hover:bg-white/90 active:scale-95 disabled:opacity-40"
+                  className="inline-flex items-center gap-1.5 rounded-full bg-foreground px-3.5 py-1.5 text-[12px] font-medium text-background transition-all hover:bg-foreground/90 active:scale-95 disabled:opacity-40"
                 >
                   <RotateCcw className="size-3" />
                   {working ? 'Working…' : 'Retry'}
@@ -148,7 +148,7 @@ export function McpDetailPage({
       {s.instructions && (
         <section>
           <SectionH icon={<BookOpen />}>Instructions from the server</SectionH>
-          <div className="rounded-xl border border-border/60 bg-white/[0.035] px-4 py-3">
+          <div className="rounded-xl border border-border/60 bg-fg/[0.035] px-4 py-3">
             <p className="whitespace-pre-wrap text-[12.5px] leading-relaxed text-muted-foreground">{s.instructions}</p>
           </div>
         </section>
@@ -161,11 +161,11 @@ export function McpDetailPage({
           {s.tools.some((t) => !t.enabled) && ` of ${s.tools.length} on`}
         </SectionH>
         {s.tools.length === 0 ? (
-          <div className="rounded-xl border border-border/50 bg-white/[0.035] px-4 py-3 text-[13px] text-muted-foreground">
+          <div className="rounded-xl border border-border/50 bg-fg/[0.035] px-4 py-3 text-[13px] text-muted-foreground">
             {st === 'connected' ? 'This server exposes no tools.' : 'Available once connected.'}
           </div>
         ) : (
-          <div className="overflow-hidden rounded-xl border border-border/60 bg-white/[0.035]">
+          <div className="overflow-hidden rounded-xl border border-border/60 bg-fg/[0.035]">
             {s.tools.map((t, i) => (
               <div key={t.name} className={cn('px-4 py-3', i > 0 && 'border-t border-border/40', !t.enabled && 'opacity-60')}>
                 <div className="flex items-center gap-2">
@@ -193,7 +193,7 @@ export function McpDetailPage({
       {s.prompts.length > 0 && (
         <section>
           <SectionH icon={<Terminal />}>Prompts · run as slash commands</SectionH>
-          <div className="overflow-hidden rounded-xl border border-border/60 bg-white/[0.035]">
+          <div className="overflow-hidden rounded-xl border border-border/60 bg-fg/[0.035]">
             {s.prompts.map((p, i) => (
               <div key={p.name} className={cn('px-4 py-3', i > 0 && 'border-t border-border/40')}>
                 <code className="font-mono text-[12.5px] text-foreground/90">
@@ -217,7 +217,7 @@ export function McpDetailPage({
       {s.resources.length > 0 && (
         <section>
           <SectionH icon={<BookOpen />}>Resources · {s.resources.length}</SectionH>
-          <div className="overflow-hidden rounded-xl border border-border/60 bg-white/[0.035]">
+          <div className="overflow-hidden rounded-xl border border-border/60 bg-fg/[0.035]">
             {s.resources.slice(0, 50).map((r, i) => (
               <div key={r.uri} className={cn('flex items-center gap-3 px-4 py-2.5', i > 0 && 'border-t border-border/40')}>
                 <span className="min-w-0 flex-1 truncate text-[13px] text-foreground/90">{r.name}</span>
@@ -231,7 +231,7 @@ export function McpDetailPage({
       {/* Information */}
       <section>
         <SectionH>Information</SectionH>
-        <div className="overflow-hidden rounded-xl border border-border/60 bg-white/[0.035]">
+        <div className="overflow-hidden rounded-xl border border-border/60 bg-fg/[0.035]">
           {s.server_name && (
             <InfoRow label="Server" value={`${s.server_name}${s.server_version ? ` ${s.server_version}` : ''}`} />
           )}
@@ -250,7 +250,7 @@ export function McpDetailPage({
       </section>
 
       <p className="pb-4 text-[12px] text-muted-foreground">
-        Server tools are available as <code className="rounded bg-white/5 px-1 font-mono text-[11.5px]">mcp__{displayName.replace(/[^A-Za-z0-9-]+/g, '_')}__tool_name</code>.
+        Server tools are available as <code className="rounded bg-fg/5 px-1 font-mono text-[11.5px]">mcp__{displayName.replace(/[^A-Za-z0-9-]+/g, '_')}__tool_name</code>.
       </p>
     </div>
   );

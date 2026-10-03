@@ -300,7 +300,7 @@ export function PluginsPanel({ version = 0 }: { version?: number }) {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder={tab === 'mcp' ? 'Search servers…' : 'Search plugins…'}
-            className="h-8 w-full rounded-full border border-border/60 bg-white/[0.03] pl-8 pr-3 text-[12.5px] outline-none placeholder:text-muted-foreground/50 focus:border-border focus:bg-white/[0.05]"
+            className="h-8 w-full rounded-full border border-border/60 bg-fg/[0.03] pl-8 pr-3 text-[12.5px] outline-none placeholder:text-muted-foreground/50 focus:border-border focus:bg-fg/[0.05]"
           />
         </label>
       </header>
@@ -314,15 +314,15 @@ export function PluginsPanel({ version = 0 }: { version?: number }) {
             className={cn(
               'flex shrink-0 items-center gap-1.5 rounded-full px-4 py-1.5 text-[12.5px] font-medium transition-all',
               tab === t.key
-                ? 'bg-white text-black shadow-sm'
-                : 'text-muted-foreground hover:bg-white/8 hover:text-foreground',
+                ? 'bg-foreground text-background shadow-sm'
+                : 'text-muted-foreground hover:bg-fg/8 hover:text-foreground',
             )}
           >
             {t.label}
             {t.count !== undefined && t.count > 0 && (
               <span className={cn(
                 'rounded-full px-1.5 text-[11px]',
-                tab === t.key ? 'bg-black/10 text-black/60' : 'bg-white/8 text-muted-foreground',
+                tab === t.key ? 'bg-background/15 text-background/70' : 'bg-fg/8 text-muted-foreground',
               )}>
                 {t.count}
               </span>

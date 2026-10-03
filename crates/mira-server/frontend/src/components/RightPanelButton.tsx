@@ -128,7 +128,7 @@ export function PanelNewTabButton({
         aria-haspopup="menu"
         aria-expanded={menu}
         title="New tab"
-        className="flex size-6 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-white/[0.05] hover:text-foreground"
+        className="flex size-6 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-fg/[0.05] hover:text-foreground"
       >
         <PlusIcon />
       </button>

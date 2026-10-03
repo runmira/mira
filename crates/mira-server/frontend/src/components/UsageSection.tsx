@@ -417,7 +417,7 @@ function Segmented({
           className={cn(
             'rounded-full px-2.5 py-0.5 text-[12px] font-medium transition-colors',
             o.value === value
-              ? 'bg-mira-elev2 text-foreground shadow-sm ring-1 ring-white/5'
+              ? 'bg-mira-elev2 text-foreground shadow-sm ring-1 ring-fg/5'
               : 'text-muted-foreground hover:text-foreground',
           )}
         >

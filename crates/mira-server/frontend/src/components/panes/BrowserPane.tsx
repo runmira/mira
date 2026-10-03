@@ -442,7 +442,7 @@ export function BrowserPane() {
       )}
 
       {/* body */}
-      <div ref={bodyRef} className="min-h-0 flex-1 overflow-hidden bg-black/30">
+      <div ref={bodyRef} className="min-h-0 flex-1 overflow-hidden bg-shade/30">
         {!url && !(mode === 'cdp' && frame) && (
           <EmptyState live={mode === 'cdp'} onStart={() => void navigate(START_URL)} />
         )}
@@ -535,7 +535,7 @@ function EmptyState({ onStart, live }: { onStart: () => void; live?: boolean }) 
   if (live) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
-        <span className="flex size-10 items-center justify-center rounded-xl border border-border/60 bg-white/[0.04] text-muted-foreground">
+        <span className="flex size-10 items-center justify-center rounded-xl border border-border/60 bg-fg/[0.04] text-muted-foreground">
           <Globe className="size-5" />
         </span>
         <div>
@@ -547,7 +547,7 @@ function EmptyState({ onStart, live }: { onStart: () => void; live?: boolean }) 
         <button
           type="button"
           onClick={onStart}
-          className="rounded-md border border-border/60 px-2.5 py-1 text-[12px] text-foreground transition-colors hover:border-border hover:bg-white/[0.05]"
+          className="rounded-md border border-border/60 px-2.5 py-1 text-[12px] text-foreground transition-colors hover:border-border hover:bg-fg/[0.05]"
         >
           Open
         </button>
@@ -556,7 +556,7 @@ function EmptyState({ onStart, live }: { onStart: () => void; live?: boolean }) 
   }
   return (
     <div className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
-      <span className="flex size-10 items-center justify-center rounded-xl border border-border/60 bg-white/[0.04] text-muted-foreground">
+      <span className="flex size-10 items-center justify-center rounded-xl border border-border/60 bg-fg/[0.04] text-muted-foreground">
         <Globe className="size-5" />
       </span>
       <div>
@@ -570,7 +570,7 @@ function EmptyState({ onStart, live }: { onStart: () => void; live?: boolean }) 
       <button
         type="button"
         onClick={onStart}
-        className="rounded-md border border-border/60 px-2.5 py-1 text-[12px] text-foreground transition-colors hover:border-border hover:bg-white/[0.05]"
+        className="rounded-md border border-border/60 px-2.5 py-1 text-[12px] text-foreground transition-colors hover:border-border hover:bg-fg/[0.05]"
       >
         Open
       </button>
@@ -595,7 +595,7 @@ function IconBtn({
       title={title}
       onClick={onClick}
       disabled={disabled}
-      className="flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-white/[0.05] hover:text-foreground disabled:opacity-30"
+      className="flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-fg/[0.05] hover:text-foreground disabled:opacity-30"
     >
       {children}
     </button>

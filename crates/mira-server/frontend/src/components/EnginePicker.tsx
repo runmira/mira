@@ -276,7 +276,7 @@ export function EnginePicker(props: EnginePickerProps) {
           <button
             type="button"
             title={isAgent ? `${engine?.display_name}${currentModel ? ` · ${currentModel}` : ''}` : currentModel ?? ''}
-            className="inline-flex max-w-[22rem] items-center gap-1.5 rounded-md px-2 py-1.5 text-foreground transition-colors hover:bg-white/[0.04]"
+            className="inline-flex max-w-[22rem] items-center gap-1.5 rounded-md px-2 py-1.5 text-foreground transition-colors hover:bg-fg/[0.04]"
           >
             {/* Every child sits in the same 16px line box — icon, labels,
                 status and chevron — so they share one centre line. The
@@ -313,7 +313,7 @@ export function EnginePicker(props: EnginePickerProps) {
         >
           <div className="grid h-[26rem] grid-cols-[12.5rem_minmax(0,1fr)]">
             {/* Rail */}
-            <div className="flex min-h-0 flex-col border-r border-border/50 bg-white/[0.015]">
+            <div className="flex min-h-0 flex-col border-r border-border/50 bg-fg/[0.015]">
               <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
                 <RailSection label="Providers" />
                 {rail.filter((r) => r.kind === 'provider').map((r) => (
@@ -521,7 +521,7 @@ function RailRow({
       onClick={onShow}
       className={cn(
         'relative flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors',
-        shown ? 'bg-white/[0.08]' : 'hover:bg-white/[0.04]',
+        shown ? 'bg-fg/[0.08]' : 'hover:bg-fg/[0.04]',
       )}
     >
       {item.kind === 'agent' ? (
@@ -805,7 +805,7 @@ function OptionControl({
       <PopoverTrigger asChild>
         <button
           type="button"
-          className="inline-flex max-w-[11rem] items-center gap-1 rounded-md px-1.5 py-0.5 text-[12.5px] text-foreground/85 transition-colors hover:bg-white/[0.05]"
+          className="inline-flex max-w-[11rem] items-center gap-1 rounded-md px-1.5 py-0.5 text-[12.5px] text-foreground/85 transition-colors hover:bg-fg/[0.05]"
         >
           <span className="truncate">{current.label}</span>
           <ChevronDown className="size-3 shrink-0 text-muted-foreground/60" />
@@ -820,7 +820,7 @@ function OptionControl({
             aria-checked={o.value === current.value}
             onClick={() => onChange(o.value)}
             className={cn(
-              'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-white/[0.05]',
+              'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-fg/[0.05]',
               o.value === current.value ? 'text-foreground' : 'text-muted-foreground',
             )}
           >

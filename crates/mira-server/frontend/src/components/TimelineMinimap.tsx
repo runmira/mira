@@ -151,7 +151,7 @@ export function TimelineMinimap({
           ? cn(
               'left-0.5 block rounded-full transition-[width,opacity,background-color,box-shadow] duration-200',
               engaged
-                ? 'w-8 border border-white/10 bg-background/55 opacity-100 shadow-[0_6px_24px_rgba(0,0,0,0.35),inset_0_1px_0_rgba(255,255,255,0.08)] backdrop-blur-md'
+                ? 'w-8 border border-fg/10 bg-background/55 opacity-100 shadow-[0_6px_24px_rgba(0,0,0,0.35),inset_0_1px_0_rgba(255,255,255,0.08)] backdrop-blur-md'
                 : peekVisible
                   ? 'w-3 opacity-60'
                   : 'w-3 opacity-0',
@@ -233,7 +233,7 @@ export function TimelineMinimap({
               transform: 'translateY(-12%)',
             }}
           >
-            <div className="block rounded-xl border border-border bg-popover p-3 text-left shadow-xl shadow-black/25">
+            <div className="block rounded-xl border border-border bg-popover p-3 text-left shadow-xl shadow-shade/25">
               <div className="block max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-sm font-medium leading-5 text-foreground">
                 {compact(previewItem.userText) || 'User message'}
               </div>

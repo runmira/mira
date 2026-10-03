@@ -328,8 +328,8 @@ function ToolTabCapsule({
       className={cn(
         'group inline-flex cursor-pointer items-center gap-1.5 rounded px-2.5 py-1 text-[12.5px] transition-colors',
         active
-          ? 'bg-white/[0.1] text-foreground'
-          : 'text-muted-foreground hover:bg-white/[0.05] hover:text-foreground',
+          ? 'bg-fg/[0.1] text-foreground'
+          : 'text-muted-foreground hover:bg-fg/[0.05] hover:text-foreground',
       )}
     >
       <span

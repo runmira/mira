@@ -4,6 +4,26 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Mira</title>
+    <script>
+      // The theme, before first paint (lib/theme.ts does the same later).
+      (function () {
+        var pref = 'system';
+        try { pref = localStorage.getItem('mira.theme') || 'system'; } catch (e) {}
+        var light = pref === 'light' ||
+          (pref !== 'dark' && window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches);
+        var root = document.documentElement;
+        root.dataset.theme = light ? 'light' : 'dark';
+        root.classList.toggle('dark', !light);
+        root.style.colorScheme = light ? 'light' : 'dark';
+        // Accent and (in a browser) interface size: see lib/appearance.ts.
+        try {
+          var accent = localStorage.getItem('mira.accent');
+          if (accent && accent !== 'blue') root.dataset.accent = accent;
+          var scale = Number(localStorage.getItem('mira.uiScale') || '1');
+          if (!window.__MIRA_DESKTOP__ && scale && scale !== 1) root.style.zoom = String(scale);
+        } catch (e) {}
+      })();
+    </script>
     <link rel="icon" type="image/png" href="/favicon.png" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />

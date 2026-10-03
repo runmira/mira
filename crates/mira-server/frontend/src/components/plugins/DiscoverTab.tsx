@@ -104,7 +104,7 @@ export function DiscoverTab({
                 type="button"
                 disabled={!!busy}
                 onClick={() => onAddSuggested(s.source)}
-                className="flex items-center gap-3 rounded-xl border border-border/60 bg-white/[0.03] px-4 py-3 text-left transition-all hover:border-border hover:bg-white/[0.06] disabled:opacity-60"
+                className="flex items-center gap-3 rounded-xl border border-border/60 bg-fg/[0.03] px-4 py-3 text-left transition-all hover:border-border hover:bg-fg/[0.06] disabled:opacity-60"
               >
                 <Avatar name={s.name} size="sm" />
                 <div className="min-w-0 flex-1">
@@ -179,8 +179,8 @@ function Chip({ active, onClick, children }: { active: boolean; onClick: () => v
       className={cn(
         'inline-flex h-7 items-center gap-1.5 rounded-lg px-3 text-[12px] capitalize transition-all',
         active
-          ? 'bg-mira-purple/18 font-semibold text-mira-purple ring-2 ring-white/20'
-          : 'bg-white/[0.05] text-muted-foreground/65 hover:bg-white/[0.09] hover:text-foreground',
+          ? 'bg-mira-purple/18 font-semibold text-mira-purple ring-2 ring-fg/20'
+          : 'bg-fg/[0.05] text-muted-foreground/65 hover:bg-fg/[0.09] hover:text-foreground',
       )}
     >
       {active && <span className="size-1.5 shrink-0 rounded-full bg-mira-purple" />}
@@ -227,7 +227,7 @@ function PluginCard({
       tabIndex={0}
       onClick={onOpen}
       onKeyDown={(e) => (e.key === 'Enter' ? onOpen() : undefined)}
-      className="group flex cursor-pointer gap-3.5 rounded-2xl border border-border/60 bg-white/[0.08] p-4 text-left shadow-sm shadow-black/30 transition-all hover:border-border/80 hover:bg-white/[0.11] hover:shadow-md hover:shadow-black/40"
+      className="group flex cursor-pointer gap-3.5 rounded-2xl border border-border/60 bg-fg/[0.08] p-4 text-left shadow-sm shadow-shade/30 transition-all hover:border-border/80 hover:bg-fg/[0.11] hover:shadow-md hover:shadow-shade/40"
     >
       {/* Icon */}
       <Avatar name={entry.id} src={src} size="md" />
@@ -266,9 +266,9 @@ function PluginCard({
               title={!entry.installable ? "Mira can't install this source type yet" : undefined}
               onClick={(e) => { e.stopPropagation(); onInstall(); }}
               className={cn(
-                'shrink-0 rounded-full bg-white px-3 py-1 text-[12px] font-medium text-black transition-all',
+                'shrink-0 rounded-full bg-foreground px-3 py-1 text-[12px] font-medium text-background transition-all',
                 'disabled:opacity-40',
-                !entry.installable || !!busy ? 'cursor-not-allowed' : 'hover:bg-white/90 active:scale-95',
+                !entry.installable || !!busy ? 'cursor-not-allowed' : 'hover:bg-foreground/90 active:scale-95',
               )}
             >
               {installing ? 'Installing…' : '+ Install'}
@@ -283,7 +283,7 @@ function PluginCard({
 
         {/* Category tag */}
         {entry.category && (
-          <span className="self-start rounded-md bg-white/[0.07] px-2 py-0.5 text-[10.5px] capitalize text-muted-foreground/60">
+          <span className="self-start rounded-md bg-fg/[0.07] px-2 py-0.5 text-[10.5px] capitalize text-muted-foreground/60">
             {entry.category}
           </span>
         )}

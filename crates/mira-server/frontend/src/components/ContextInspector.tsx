@@ -100,7 +100,7 @@ export function ContextInspector({
             <div className="min-h-0 flex-1 overflow-y-auto pb-1">
             {/* One bar: each part's share of the window, with where it compacts. */}
             <div className="px-4">
-              <div className="relative flex h-2.5 overflow-hidden rounded-full bg-white/[0.06]">
+              <div className="relative flex h-2.5 overflow-hidden rounded-full bg-fg/[0.06]">
                 {b.parts.map((p, i) =>
                   p.tokens > 0 ? (
                     <div
@@ -112,7 +112,7 @@ export function ContextInspector({
                 )}
                 {view?.compact_at != null && window > 0 && (
                   <div
-                    className="absolute inset-y-0 w-px bg-white/70"
+                    className="absolute inset-y-0 w-px bg-fg/70"
                     style={{ left: `${(view.compact_at / scale) * 100}%` }}
                     title="Compacts automatically here"
                   />
@@ -151,7 +151,7 @@ export function ContextInspector({
                           disabled={busy || dropping != null}
                           onClick={() => void drop(r.call_id)}
                           title={busy ? 'Wait for the reply to finish' : 'Replace it with a short note; the model can re-run the tool'}
-                          className="shrink-0 rounded px-1.5 py-0.5 text-[11.5px] text-muted-foreground transition-colors hover:bg-white/[0.06] hover:text-foreground disabled:opacity-40"
+                          className="shrink-0 rounded px-1.5 py-0.5 text-[11.5px] text-muted-foreground transition-colors hover:bg-fg/[0.06] hover:text-foreground disabled:opacity-40"
                         >
                           {dropping === r.call_id ? 'Dropping…' : 'Drop'}
                         </button>}
@@ -196,7 +196,7 @@ export function ContextInspector({
                   }
                 }}
                 placeholder="Keep in focus (optional)"
-                className="min-w-0 flex-1 rounded-md bg-white/[0.05] px-2.5 py-1.5 text-[12.5px] outline-none placeholder:text-muted-foreground/60 focus:ring-1 focus:ring-white/15"
+                className="min-w-0 flex-1 rounded-md bg-fg/[0.05] px-2.5 py-1.5 text-[12.5px] outline-none placeholder:text-muted-foreground/60 focus:ring-1 focus:ring-fg/15"
               />
               <button
                 type="button"

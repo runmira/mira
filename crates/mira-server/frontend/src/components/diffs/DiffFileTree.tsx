@@ -10,6 +10,7 @@ import { ChevronsDownUpIcon, ChevronsUpDownIcon } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 
 import { cn } from '@/lib/utils';
+import { useTheme } from '@/lib/theme';
 
 import { PIERRE_TREE_UNSAFE_CSS, pierreTreeStyle } from './pierreTreeTheme';
 import {
@@ -112,6 +113,7 @@ export function DiffFileTree({
   footer,
   className,
 }: DiffFileTreeProps) {
+  const theme = useTheme();
   const paths = useMemo(() => entries.map((entry) => entry.path), [entries]);
   const directoryPaths = useMemo(() => collectDirectoryPaths(paths), [paths]);
   const positions = useMemo(() => diffFileTreePositions(paths), [paths]);
@@ -275,7 +277,7 @@ export function DiffFileTree({
           if (clickedSelectedRow) onSelectFileRef.current(path);
         }}
         className="min-h-0 flex-1 overflow-hidden"
-        style={pierreTreeStyle('dark')}
+        style={pierreTreeStyle(theme)}
       />
       {footer}
     </div>

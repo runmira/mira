@@ -15,7 +15,7 @@ export const DialogOverlay = React.forwardRef<
   <DialogPrimitive.Overlay
     ref={ref}
     className={cn(
-      'fixed inset-0 z-50 bg-black/60 backdrop-blur-[2px] data-[state=open]:animate-fade-in',
+      'fixed inset-0 z-50 bg-shade/60 backdrop-blur-[2px] data-[state=open]:animate-fade-in',
       className,
     )}
     {...props}
@@ -39,8 +39,8 @@ export const DialogContent = React.forwardRef<
         // then snaps back to the middle when the animation ends.
         //
         // The shell is a single opaque popover surface with a 10%-white
-        // hairline. The old version leaned on `border-white/10` plus a
-        // `ring-white/5` to fake elevation, which stacked two translucent
+        // hairline. The old version leaned on `border-fg/10` plus a
+        // `ring-fg/5` to fake elevation, which stacked two translucent
         // rings into a visibly brighter, blurrier edge than the rest of the
         // app's borders.
         'fixed left-1/2 top-1/2 z-50 w-full max-w-lg -translate-x-1/2 -translate-y-1/2 ' +

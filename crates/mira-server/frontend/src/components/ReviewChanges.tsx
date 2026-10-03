@@ -7,7 +7,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { MessageCircle, RotateCcw, ChevronDown, X } from 'lucide-react';
 import type { FileDiffMetadata } from '@pierre/diffs';
 import { cn } from '@/lib/utils';
-import { PREF_KEYS, useStringPref } from '@/lib/prefs';
 import { getSessionChanges, revertFile, type SessionChange } from '../api';
 import {
   buildFileDiffContentVersion,
@@ -21,6 +20,7 @@ import { DiffFileTree, type DiffFileTreeEntry } from './diffs/DiffFileTree';
 import { diffFileTreeEntries } from './diffs/diffFileTree.logic';
 import { DiffStatLabel } from './diffs/DiffStatLabel';
 import { ReviewDiffView, type ReviewDiffFile, type ReviewDiffViewHandle } from './diffs/ReviewDiffView';
+import { useDiffOptions } from '../lib/diffPrefs';
 
 export function ReviewChanges({
   open,
@@ -47,7 +47,7 @@ export function ReviewChanges({
   const [revealRequestId, setRevealRequestId] = useState(0);
   const [viewer, setViewer] = useState<ReviewDiffViewHandle | null>(null);
   // Diff layout (Settings → General → Diff).
-  const [diffLayout] = useStringPref(PREF_KEYS.diffLayout, 'unified');
+  const diffOptions = useDiffOptions();
 
   const load = useCallback(() => {
     setError(null);
@@ -175,7 +175,7 @@ export function ReviewChanges({
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end">
-      <div className="absolute inset-0 bg-black/40" onClick={onClose} />
+      <div className="absolute inset-0 bg-shade/40" onClick={onClose} />
       <aside className="relative flex h-full w-full max-w-[1040px] animate-fade-in flex-col border-l border-border bg-background shadow-2xl">
         <header className="flex h-10 min-h-10 shrink-0 flex-wrap items-center gap-2 border-b border-border/60 bg-background px-4">
           <span className="text-[14px] font-semibold">Review changes</span>
@@ -266,7 +266,7 @@ export function ReviewChanges({
                 onRemoveComment={(id) => setComments((prev) => prev.filter((c) => c.id !== id))}
                 viewerRef={setViewer}
                 className="h-full min-h-0 overflow-auto"
-                options={{ diffStyle: diffLayout === 'split' ? 'split' : 'unified' }}
+                options={diffOptions}
                 renderHeaderFilenameSuffix={() => null}
                 renderHeaderPrefix={(_fileDiff, fileKey, isCollapsed) => (
                   <span className="flex shrink-0 items-center">

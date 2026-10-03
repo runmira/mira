@@ -55,8 +55,8 @@ function ViewTab({
       className={cn(
         'rounded-md px-2.5 py-1 text-[12px] transition-colors',
         active
-          ? 'bg-white/[0.1] text-foreground'
-          : 'text-muted-foreground hover:bg-white/[0.05] hover:text-foreground',
+          ? 'bg-fg/[0.1] text-foreground'
+          : 'text-muted-foreground hover:bg-fg/[0.05] hover:text-foreground',
       )}
     >
       {children}
@@ -146,7 +146,7 @@ function TokenTable() {
           type="button"
           title="Refresh"
           onClick={() => setNonce((n) => n + 1)}
-          className="flex size-6 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-white/[0.05] hover:text-foreground"
+          className="flex size-6 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-fg/[0.05] hover:text-foreground"
         >
           <RefreshCw className="size-3.5" />
         </button>
@@ -284,8 +284,8 @@ function NetworkLog() {
             className={cn(
               'rounded-md px-1.5 py-0.5 text-[11.5px] transition-colors',
               kind === f.id
-                ? 'bg-white/[0.1] text-foreground'
-                : 'text-muted-foreground hover:bg-white/[0.05] hover:text-foreground',
+                ? 'bg-fg/[0.1] text-foreground'
+                : 'text-muted-foreground hover:bg-fg/[0.05] hover:text-foreground',
             )}
           >
             {f.label}
@@ -302,7 +302,7 @@ function NetworkLog() {
           type="button"
           title="Export CSV"
           onClick={downloadCsv}
-          className="flex size-6 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-white/[0.05] hover:text-foreground"
+          className="flex size-6 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-fg/[0.05] hover:text-foreground"
         >
           <Download className="size-3.5" />
         </button>
@@ -310,7 +310,7 @@ function NetworkLog() {
           type="button"
           title="Clear log"
           onClick={clearNet}
-          className="flex size-6 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-white/[0.05] hover:text-foreground"
+          className="flex size-6 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-fg/[0.05] hover:text-foreground"
         >
           <Trash2 className="size-3.5" />
         </button>
@@ -327,7 +327,7 @@ function NetworkLog() {
             <button
               type="button"
               onClick={() => setExpanded(expanded === e.id ? null : e.id)}
-              className="flex w-full items-center gap-2 px-2.5 py-1 text-left font-mono text-[11.5px] hover:bg-white/[0.03]"
+              className="flex w-full items-center gap-2 px-2.5 py-1 text-left font-mono text-[11.5px] hover:bg-fg/[0.03]"
             >
               <span className="w-11 shrink-0 text-muted-foreground/80">
                 {e.method}
@@ -341,7 +341,7 @@ function NetworkLog() {
               </span>
             </button>
             {expanded === e.id && (
-              <dl className="grid grid-cols-[88px_minmax(0,1fr)] gap-x-3 gap-y-0.5 bg-black/20 px-2.5 py-2 font-mono text-[11px]">
+              <dl className="grid grid-cols-[88px_minmax(0,1fr)] gap-x-3 gap-y-0.5 bg-shade/20 px-2.5 py-2 font-mono text-[11px]">
                 <dt className="text-muted-foreground/70">url</dt>
                 <dd className="break-all text-foreground/80">{e.url}</dd>
                 <dt className="text-muted-foreground/70">started</dt>

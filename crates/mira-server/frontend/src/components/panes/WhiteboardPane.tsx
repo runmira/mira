@@ -268,7 +268,7 @@ export function WhiteboardPane({
             onClick={() => setWidthIdx(i)}
             className={cn(
               'flex size-5 items-center justify-center rounded transition-colors',
-              widthIdx === i ? 'bg-white/[0.1]' : 'hover:bg-white/[0.05]',
+              widthIdx === i ? 'bg-fg/[0.1]' : 'hover:bg-fg/[0.05]',
             )}
           >
             <span
@@ -293,7 +293,7 @@ export function WhiteboardPane({
           type="button"
           onClick={send}
           disabled={empty}
-          className="ml-1 inline-flex items-center gap-1.5 rounded-md border border-border/60 px-2 py-1 text-[12px] text-foreground transition-colors hover:border-border hover:bg-white/[0.05] disabled:opacity-40"
+          className="ml-1 inline-flex items-center gap-1.5 rounded-md border border-border/60 px-2 py-1 text-[12px] text-foreground transition-colors hover:border-border hover:bg-fg/[0.05] disabled:opacity-40"
         >
           <Send className="size-3.5" />
           Send
@@ -350,8 +350,8 @@ function ToolBtn({
       className={cn(
         'flex size-6 shrink-0 items-center justify-center rounded transition-colors disabled:opacity-30',
         active
-          ? 'bg-white/[0.1] text-foreground'
-          : 'text-muted-foreground hover:bg-white/[0.05] hover:text-foreground',
+          ? 'bg-fg/[0.1] text-foreground'
+          : 'text-muted-foreground hover:bg-fg/[0.05] hover:text-foreground',
       )}
     >
       {children}

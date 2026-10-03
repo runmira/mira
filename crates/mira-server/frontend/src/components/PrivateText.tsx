@@ -72,9 +72,9 @@ function Frosted({ value }: { value: string }) {
         aria-hidden
         className={cn(
           'pointer-events-none absolute -inset-x-1 -inset-y-[1px] rounded-[6px] transition-opacity duration-300 ease-out',
-          'border border-white/15 bg-white/[0.06] backdrop-blur-[6px] backdrop-saturate-150',
+          'border border-fg/15 bg-fg/[0.06] backdrop-blur-[6px] backdrop-saturate-150',
           'shadow-[inset_0_1px_0_rgba(255,255,255,0.18),inset_0_-1px_0_rgba(0,0,0,0.25),0_1px_6px_rgba(0,0,0,0.25)]',
-          'bg-gradient-to-b from-white/[0.12] to-white/[0.02]',
+          'bg-gradient-to-b from-fg/[0.12] to-fg/[0.02]',
           shown ? 'opacity-0' : 'opacity-100',
         )}
       />

@@ -232,7 +232,7 @@ function QuestionRow({
               className={cn(
                 'group flex items-start gap-3 rounded-xl px-3 py-2.5 text-left transition-colors',
                 active
-                  ? 'bg-white text-black'
+                  ? 'bg-foreground text-background'
                   : 'bg-secondary/40 hover:bg-secondary/60',
               )}
             >
@@ -242,7 +242,7 @@ function QuestionRow({
                   <span
                     className={cn(
                       'text-[13px] font-medium',
-                      active ? 'text-black' : 'text-foreground',
+                      active ? 'text-background' : 'text-foreground',
                     )}
                   >
                     {opt.label}
@@ -251,7 +251,7 @@ function QuestionRow({
                     <span
                       className={cn(
                         'text-[10px] font-medium uppercase tracking-wider',
-                        active ? 'text-black/60' : 'text-muted-foreground/80',
+                        active ? 'text-shade/60' : 'text-muted-foreground/80',
                       )}
                     >
                       · Recommended
@@ -262,7 +262,7 @@ function QuestionRow({
                   <span
                     className={cn(
                       'text-[11.5px] leading-snug',
-                      active ? 'text-black/70' : 'text-muted-foreground',
+                      active ? 'text-shade/70' : 'text-muted-foreground',
                     )}
                   >
                     {opt.description}

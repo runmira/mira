@@ -31,7 +31,7 @@ export function SecondOpinion({
   const reviewer = useSubagent('reviewer');
   const name = personaName(reviewer, 'reviewer');
   return (
-    <div className="group/second mt-1 flex animate-fade-in items-center gap-3 rounded-xl border border-border/60 bg-white/[0.025] px-3 py-2.5">
+    <div className="group/second mt-1 flex animate-fade-in items-center gap-3 rounded-xl border border-border/60 bg-fg/[0.025] px-3 py-2.5">
       <SubagentFace id="reviewer" face={reviewer?.face} size={30} state="idle" />
       <div className="min-w-0 flex-1">
         <div className="text-[13px] text-foreground/90">

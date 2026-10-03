@@ -12,6 +12,7 @@ import { linkifyGithubRefs, parseGithubRef } from '../lib/githubRefs';
 import { classifyInline, splitFileRef } from '../lib/refs';
 import { BranchChip, ColorChip, CommitChip, FileChip, KeysChip, LinkRef, SymbolRef } from './RichRefs';
 import { Blockquote, DiffBlock, Table, Th, remarkCallouts } from './RichBlocks';
+import { resolveTheme } from '../lib/theme';
 
 /**
  * Markdown rendering for assistant / thought content.
@@ -283,19 +284,23 @@ let mermaidReady: Promise<typeof import('mermaid')> | null = null;
  *  `suppressErrorRendering` stops failed parses from appending mermaid's
  *  "Syntax error in text" bomb diagrams to document.body — one per
  *  streaming re-render, piling up at the bottom of the screen. */
+let mermaidTheme: 'dark' | 'default' | null = null;
 function loadMermaid(): Promise<typeof import('mermaid')> {
-  if (!mermaidReady) {
-    mermaidReady = import('mermaid').then((m) => {
+  if (!mermaidReady) mermaidReady = import('mermaid');
+  // Re-initialize when the app theme has changed since the last diagram.
+  return mermaidReady.then((m) => {
+    const theme = resolveTheme() === 'light' ? 'default' : 'dark';
+    if (theme !== mermaidTheme) {
       m.default.initialize({
         startOnLoad: false,
         securityLevel: 'strict',
-        theme: 'dark',
+        theme,
         suppressErrorRendering: true,
       });
-      return m;
-    });
-  }
-  return mermaidReady;
+      mermaidTheme = theme;
+    }
+    return m;
+  });
 }
 
 let mermaidSeq = 0;

@@ -219,10 +219,10 @@ export function MenuItem({
       }}
       className={cn(
         'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors',
-        'focus:outline-none focus-visible:bg-white/[0.1]',
+        'focus:outline-none focus-visible:bg-fg/[0.1]',
         disabled
           ? 'cursor-not-allowed text-muted-foreground/40'
-          : 'text-foreground hover:bg-white/[0.05]',
+          : 'text-foreground hover:bg-fg/[0.05]',
         className,
       )}
     >
