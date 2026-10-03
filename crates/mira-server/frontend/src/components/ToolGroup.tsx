@@ -411,6 +411,7 @@ export function infoFor(name: string): ToolInfo {
     case 'ask_user':        return { verbPast: 'Asked you',  verbCont: 'Waiting on you', Icon: MessageCircleMore };
     case 'plan':            return { verbPast: 'Proposed a plan', verbCont: 'Drafting a plan', Icon: ClipboardList };
     case 'agent':           return { verbPast: 'Delegated',  verbCont: 'Delegating',    Icon: Users };
+    case 'delegate_task':   return { verbPast: 'Handed off', verbCont: 'Handing off',   Icon: Users };
     // Tools an external agent has that Mira's harness doesn't name.
     case 'delegate':        return { verbPast: 'Delegated',  verbCont: 'Delegating',    Icon: Users };
     case 'browser':         return { verbPast: 'Browsed',    verbCont: 'Browsing',      Icon: Globe };

@@ -67,6 +67,19 @@ the agent server exposes the split set.
 sizes), the chat's task list, and orchestration (`delegate_task` to another
 engine — "have Codex review what Claude wrote").
 
+### The delegation view
+
+`delegate_task` is a hand-off, not an ordinary tool call, so the UI gives it
+its own card rather than a generic "Handed off …" row. The row carries the
+two ends of the gesture (Mira's orb → the receiving engine's mark), who took
+the task, a live stage, and an elapsed clock; opening it shows the brief,
+what the helper may touch (read and search only), a three-stop progress track,
+and the answer as prose. The card is in
+`frontend/src/components/DelegateCard.tsx` and is used by both the main
+transcript and the subagent panel. It matches on `delegate_task` only — an
+external agent's own `Task`/`Agent` call is a subagent inside that agent and
+keeps folding into the ordinary tool rows.
+
 ### Approval
 
 | Gate | Who asks | Used for |

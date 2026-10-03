@@ -139,6 +139,7 @@ import {
   POSTURES,
 } from './lib/agentPostures';
 import { AgentCard, AgentGroup } from './components/AgentCard';
+import { DelegateCard, isDelegateTaskName } from './components/DelegateCard';
 import miraLogo from './assets/mira-logo.png';
 import { SubagentPanel, type SubagentTab, type FilePanelTab } from './components/SubagentPanel';
 import { TaskListPanel } from './components/TaskListPanel';
@@ -227,6 +228,9 @@ type ToolEntry = {
    *  `run_background` and any other long-running tool that emits progress.
    *  Lines accumulate even after the tool result has landed. */
   progressLines?: string[];
+  /** Epoch ms the call started, when known (live turns only — not carried
+   *  through history reload). Powers the delegation card's elapsed clock. */
+  startedAt?: number | null;
   /** Set when an external agent made this call: its own description of it,
    *  kept so later updates merge onto it. `call` is its Mira translation,
    *  which is what renders. */
@@ -3922,7 +3926,7 @@ function upsertToolStart(prevRaw: Entry[], call: ToolCall): Entry[] {
   const prev = sealThought(prevRaw);
   const existing = prev.findIndex((e) => e.kind === 'tool' && e.call.id === call.id);
   if (existing >= 0) return prev;
-  return [...prev, { kind: 'tool', call, preview: null, status: 'running', result: null }];
+  return [...prev, { kind: 'tool', call, preview: null, status: 'running', result: null, startedAt: Date.now() }];
 }
 
 function attachToolResult(prev: Entry[], result: ToolResult): Entry[] {
@@ -4377,11 +4381,12 @@ export type GroupItem =
   | { kind: 'agent-group'; entries: (Entry & { kind: 'tool' })[] }
   | { kind: 'tool-group'; entries: (Entry & { kind: 'tool' })[] };
 
-/** Types that render as their own cards (agent, plan, ask_user) — never
- *  fold into a generic tool-group. Agent has its own AgentGroup path;
- *  plan and ask_user each swap in for the tool row when their proposal
- *  attaches, so grouping would hide the interactive card. */
-const SPECIAL_TOOLS = new Set(['agent', 'plan', 'ask_user']);
+/** Types that render as their own cards (agent, delegate, plan, ask_user) —
+ *  never fold into a generic tool-group. Agent has its own AgentGroup path;
+ *  delegate gets the cross-engine hand-off card; plan and ask_user each swap
+ *  in for the tool row when their proposal attaches, so grouping would hide
+ *  the interactive card. */
+const SPECIAL_TOOLS = new Set(['agent', 'delegate_task', 'plan', 'ask_user']);
 
 export function groupAgentRuns(entries: Entry[]): GroupItem[] {
   const out: GroupItem[] = [];
@@ -4436,9 +4441,10 @@ function isAgentEntry(e: Entry): boolean {
 }
 
 /** A tool entry is groupable when it isn't a special one-off renderer
- *  (agent/plan) and isn't currently awaiting user approval. */
+ *  (agent/delegate/plan) and isn't currently awaiting user approval. */
 function isGroupableTool(e: Entry): boolean {
   if (e.kind !== 'tool') return false;
+  if (isDelegateTaskName(e.call.function.name)) return false;
   if (SPECIAL_TOOLS.has(e.call.function.name)) return false;
   if (e.status === 'pending') return false;
   return true;
@@ -4847,6 +4853,21 @@ function EntryView({
               status={entry.status}
               result={entry.result}
               onOpen={onOpenAgent}
+            />
+          </div>
+        );
+      }
+      // A cross-engine hand-off gets its own card (who took it, what it is
+      // doing) instead of a generic tool row. Agents' own `Task`/`Agent`
+      // calls map to `delegate` and stay ordinary tool rows — see the card.
+      if (isDelegateTaskName(entry.call.function.name)) {
+        return (
+          <div className="flex justify-start">
+            <DelegateCard
+              call={entry.call}
+              status={entry.status}
+              result={entry.result}
+              startedAt={entry.startedAt}
             />
           </div>
         );
