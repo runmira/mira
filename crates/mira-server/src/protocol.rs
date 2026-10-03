@@ -664,6 +664,18 @@ pub enum ServerMsg {
         entry: crate::interactive::ScratchpadEntry,
     },
 
+    /// Live activity from inside a `delegate_task` child, re-broadcast on the
+    /// parent's channel so the delegation card can show what the helper is
+    /// actually doing instead of just a spinner. `call_id` is the parent's
+    /// `delegate_task` call id. `kind` is a coarse verb (`read` / `search` /
+    /// `run` / …) the frontend maps to an icon and tense; `text` is the
+    /// human-readable step ("Read src/lib.rs").
+    DelegateProgress {
+        call_id: String,
+        kind: String,
+        text: String,
+    },
+
     // -------- ACP (external agent) event forwarding --------
     //
     // Same shape as the subagent family above: distinct variants rather than

@@ -25,8 +25,12 @@ import {
   CircleAlert,
   Eye,
   FileText,
+  Globe,
   LoaderCircle,
+  NotebookPen,
   Search,
+  Sparkle,
+  Terminal,
 } from 'lucide-react';
 import type { ToolCall, ToolResult } from '../types';
 import type { ToolStatus } from './ToolCard';
@@ -40,6 +44,16 @@ export type DelegateEngine = {
   id: string;
   name: string;
   kind: 'mira' | 'agent';
+};
+
+/** One visible step a delegated child took, streamed live via
+ *  `delegate_progress`. `kind` is a coarse verb bucket; `text` is the
+ *  human-readable step. */
+export type DelegateStep = {
+  kind: string;
+  text: string;
+  /** Epoch ms the step arrived, for relative ordering. */
+  at?: number;
 };
 
 /** Display name per agent driver. The id stays the key (`claude-code`), the
@@ -123,12 +137,15 @@ export function DelegateCard({
   status,
   result,
   startedAt,
+  steps,
 }: {
   call: ToolCall;
   status: ToolStatus;
   result: ToolResult | null;
   /** Epoch ms the call started, when known — powers the elapsed clock. */
   startedAt?: number | null;
+  /** Live activity streamed from the child (newest last). */
+  steps?: DelegateStep[];
 }) {
   const { prompt, engine: engineId } = useMemo(
     () => parseDelegateArgs(call.function.arguments),
@@ -142,6 +159,8 @@ export function DelegateCard({
 
   const answer = answerOf(result);
   const elapsed = useElapsed(startedAt, active || undefined);
+  const live = steps ?? [];
+  const last = live[live.length - 1];
 
   return (
     <div className="w-full max-w-[78%]">
@@ -163,7 +182,16 @@ export function DelegateCard({
           >
             {engine.name}
           </span>
-          <StageChip stage={stage} isError={isError} active={active} />
+          {/* While working, the live step is more informative than the word
+              "working"; fall back to the stage chip when there's nothing yet. */}
+          {active && last ? (
+            <span className="flex min-w-0 items-center gap-1.5 text-[11.5px] text-mira-blue">
+              <LoaderCircle className="size-3 shrink-0 animate-spin" />
+              <span className="truncate" title={last.text}>{last.text}</span>
+            </span>
+          ) : (
+            <StageChip stage={stage} isError={isError} active={active} />
+          )}
         </span>
         {elapsed && (
           <span className="ml-2 shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground/55">
@@ -188,6 +216,7 @@ export function DelegateCard({
           answer={answer}
           isError={isError}
           stage={stage}
+          steps={live}
         />
       )}
     </div>
@@ -316,12 +345,14 @@ function DelegatePanel({
   answer,
   isError,
   stage,
+  steps,
 }: {
   engine: DelegateEngine;
   prompt: string;
   answer: string;
   isError: boolean;
   stage: Stage;
+  steps: DelegateStep[];
 }) {
   return (
     <div className="ml-6 mb-1.5 mt-1 flex animate-fade-in flex-col gap-2">
@@ -342,6 +373,13 @@ function DelegatePanel({
 
         <div className="space-y-3 px-3 py-2.5">
           <StageTrack stage={stage} isError={isError} />
+
+          {steps.length > 0 && (
+            <section className="space-y-1">
+              <SectionLabel>Activity</SectionLabel>
+              <ActivityLog steps={steps} active={stage === 'working'} />
+            </section>
+          )}
 
           {prompt && (
             <section className="space-y-1">
@@ -384,6 +422,55 @@ function DelegatePanel({
       </div>
     </div>
   );
+}
+
+/** The child's live step log: one quiet row per action it took, oldest first,
+ *  with the newest at the bottom and a trailing spinner while it runs. Reads
+ *  like a condensed trace of the work being done on the user's behalf. */
+function ActivityLog({ steps, active }: { steps: DelegateStep[]; active: boolean }) {
+  // Keep the tail in view as steps arrive; the whole card is already inside
+  // the panel's scroll, so no fixed height here — just the full list.
+  const tail = steps.slice(-24);
+  return (
+    <ol className="space-y-0.5 rounded-lg border border-border/40 bg-background/40 px-2 py-1.5">
+      {tail.map((s, i) => (
+        <li key={i} className="flex items-start gap-2 text-[12px] leading-snug">
+          <span className="mt-[3px] grid size-3 shrink-0 place-items-center text-muted-foreground/50">
+            <StepIcon kind={s.kind} />
+          </span>
+          <span className="min-w-0 flex-1 truncate text-foreground/80" title={s.text}>
+            {s.text}
+          </span>
+        </li>
+      ))}
+      {active && (
+        <li className="flex items-center gap-2 text-[12px] text-mira-blue">
+          <LoaderCircle className="size-3 shrink-0 animate-spin" />
+          <span>working…</span>
+        </li>
+      )}
+    </ol>
+  );
+}
+
+function StepIcon({ kind }: { kind: string }) {
+  switch (kind) {
+    case 'read':
+      return <FileText className="size-3" />;
+    case 'search':
+      return <Search className="size-3" />;
+    case 'run':
+      return <Terminal className="size-3" />;
+    case 'fetch':
+      return <Globe className="size-3" />;
+    case 'write':
+    case 'edit':
+      return <NotebookPen className="size-3" />;
+    case 'note':
+      return <CircleAlert className="size-3" />;
+    default:
+      return <Sparkle className="size-3" />;
+  }
 }
 
 function SectionLabel({ children }: { children: React.ReactNode }) {

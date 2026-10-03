@@ -578,6 +578,7 @@ function SubagentEntryView({ entry }: { entry: Entry }) {
             status={entry.status}
             result={entry.result}
             startedAt={entry.startedAt}
+            steps={entry.delegateSteps}
           />
         );
       }

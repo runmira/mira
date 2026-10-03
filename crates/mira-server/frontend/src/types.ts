@@ -465,6 +465,11 @@ export type ServerMsg =
       parent_session_id: string;
       entry: ScratchpadEntry;
     }
+  /** Live activity from a `delegate_task` child, routed to the delegation
+   *  card by `call_id` (or, failing an exact match, the most recent running
+   *  delegation). `kind` is a coarse verb the UI maps to an icon; `text` is
+   *  the human-readable step. */
+  | { type: 'delegate_progress'; call_id: string; kind: string; text: string }
   // -------- ACP (external agent) frames --------
   // Distinct variants rather than a wrapped envelope, so this file
   // pattern-matches by `type` the same way it already does for subagents.
