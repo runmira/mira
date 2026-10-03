@@ -36,6 +36,7 @@ mod browser;
 mod chat_import;
 pub mod checkpoints;
 mod aside;
+mod delegate;
 mod processes;
 mod tests_api;
 mod context_api;
@@ -454,7 +455,7 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/api/browser/live", get(browser::live))
         .route("/api/browser/input", axum::routing::post(browser::input))
         .route(
-            "/mcp/:token",
+            "/mcp",
             axum::routing::post(browser::mcp).get(browser::mcp_get),
         )
         .route("/api/browser/embeddable", get(browser::embeddable))

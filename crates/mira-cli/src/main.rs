@@ -11,6 +11,7 @@ mod goal;
 mod headless;
 mod init;
 mod login;
+mod mcp_bridge;
 mod memory;
 mod models;
 mod permissions;
@@ -193,6 +194,10 @@ enum Command {
     /// Run Mira as a Slack bot (Socket Mode): mention it or DM it, and it
     /// works in this folder, one session per thread.
     Slack(slack::SlackArgs),
+    /// Relay Mira's tool server over stdio, for agents that only launch
+    /// MCP servers themselves. Mira passes this to them; not for direct use.
+    #[command(hide = true)]
+    McpBridge(mcp_bridge::McpBridgeArgs),
 }
 
 #[tokio::main]
@@ -203,7 +208,9 @@ async fn main() -> Result<()> {
     // before we build the session, provider, and tools.
     if let Some(cmd) = cli.command.clone() {
         // Evals run many sessions; keep their per-round logs quiet.
-        init_tracing(false, matches!(cmd, Command::Eval(_)));
+        // Evals and the stdio bridge stay quiet (the bridge's stdout is
+        // protocol; its stderr is an agent's log).
+        init_tracing(false, matches!(cmd, Command::Eval(_) | Command::McpBridge(_)));
         return match cmd {
             Command::Init(args) => init::run(&cli, args).await,
             Command::Doctor(args) => doctor::run(&cli, args).await,
@@ -225,6 +232,7 @@ async fn main() -> Result<()> {
             Command::Acp(args) => acp::run(&cli, args).await,
             Command::Github(args) => github::run(&cli, args).await,
             Command::Slack(args) => slack::run(&cli, args).await,
+            Command::McpBridge(args) => mcp_bridge::run(args).await,
         };
     }
 

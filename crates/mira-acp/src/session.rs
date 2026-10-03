@@ -79,6 +79,45 @@ impl ClientCaps {
     }
 }
 
+/// Mira's tool server for one agent session: where it is, and the bearer
+/// token that grants this session (and only this session) its tools.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MiraMcp {
+    pub url: String,
+    pub token: String,
+}
+
+impl MiraMcp {
+    pub fn authorization(&self) -> String {
+        format!("Bearer {}", self.token)
+    }
+}
+
+/// The env var `mira mcp-bridge` reads its token from — a token in argv
+/// would show up in process listings.
+pub const MIRA_MCP_TOKEN_ENV: &str = "MIRA_MCP_TOKEN";
+
+/// Mira's tool server as an ACP `mcpServers` entry: over HTTP when the agent
+/// takes HTTP servers, otherwise as a stdio server — this same `mira`
+/// binary run as `mira mcp-bridge <url>` (every ACP agent takes stdio).
+fn mira_mcp_entry(mcp: &MiraMcp, http: bool, exe: Option<std::path::PathBuf>) -> Option<Value> {
+    if http {
+        return Some(json!({
+            "type": "http",
+            "name": "mira",
+            "url": mcp.url,
+            "headers": [{ "name": "Authorization", "value": mcp.authorization() }],
+        }));
+    }
+    let exe = exe?;
+    Some(json!({
+        "name": "mira",
+        "command": exe,
+        "args": ["mcp-bridge", mcp.url],
+        "env": [{ "name": MIRA_MCP_TOKEN_ENV, "value": mcp.token }],
+    }))
+}
+
 /// A live ACP conversation with one agent process.
 pub struct AcpSession {
     conn: Connection,
@@ -99,7 +138,7 @@ struct SessionState {
     mcp_http: bool,
     /// Mira's own tool server for this session (browser, background
     /// processes), handed to the agent at `session/new` when it can take it.
-    mira_mcp: Option<String>,
+    mira_mcp: Option<MiraMcp>,
     /// Modes the agent advertises at `initialize`, so a `set_mode` can be
     /// validated before it is sent.
     modes: Vec<Value>,
@@ -231,8 +270,8 @@ impl AcpSession {
     }
 
     /// Offer the agent Mira's tool server (by URL) at the next `session/new`.
-    pub async fn set_mira_mcp(&self, url: Option<String>) {
-        self.state.lock().await.mira_mcp = url;
+    pub async fn set_mira_mcp(&self, mcp: Option<MiraMcp>) {
+        self.state.lock().await.mira_mcp = mcp;
     }
 
     /// Step 2. `cwd` is the agent's working directory; `additional_directories`
@@ -250,15 +289,14 @@ impl AcpSession {
         let mut params = serde_json::to_value(req).unwrap_or(json!({}));
         // Mira's tools (its browser, background processes), as an MCP server
         // the agent connects to — only when it says it can take one over HTTP.
-        let mira_mcp = {
+        let entry = {
             let st = self.state.lock().await;
-            st.mira_mcp.clone().filter(|_| st.mcp_http)
+            st.mira_mcp
+                .as_ref()
+                .and_then(|m| mira_mcp_entry(m, st.mcp_http, std::env::current_exe().ok()))
         };
-        if let (Some(url), Some(obj)) = (mira_mcp, params.as_object_mut()) {
-            obj.insert(
-                "mcpServers".into(),
-                json!([{ "type": "http", "name": "mira", "url": url, "headers": [] }]),
-            );
+        if let (Some(entry), Some(obj)) = (entry, params.as_object_mut()) {
+            obj.insert("mcpServers".into(), json!([entry]));
         }
         let res: NewSessionResponse = self.conn.request("session/new", params).await?;
         *self.session_id.lock().await = Some(res.session_id.to_string());
@@ -548,6 +586,22 @@ mod tests {
             "agentCapabilities": { "loadSession": true, "promptCapabilities": {} },
             "authMethods": [{ "id": "cursor_login", "name": "Sign in" }]
         })
+    }
+
+    #[test]
+    fn mira_tools_go_over_http_or_through_the_stdio_bridge() {
+        let m = MiraMcp { url: "http://127.0.0.1:1/mcp".into(), token: "tok".into() };
+        let http = mira_mcp_entry(&m, true, None).unwrap();
+        assert_eq!(http["type"], "http");
+        assert_eq!(http["url"], m.url);
+        assert_eq!(http["headers"], json!([{ "name": "Authorization", "value": "Bearer tok" }]));
+        let stdio = mira_mcp_entry(&m, false, Some("/bin/mira".into())).unwrap();
+        assert!(stdio.get("type").is_none(), "stdio entries are untagged");
+        assert_eq!(stdio["command"], "/bin/mira");
+        assert_eq!(stdio["args"], json!(["mcp-bridge", m.url]));
+        assert_eq!(stdio["env"], json!([{ "name": MIRA_MCP_TOKEN_ENV, "value": "tok" }]));
+        assert!(!stdio.to_string().contains("Bearer"), "no token in argv");
+        assert!(mira_mcp_entry(&m, false, None).is_none());
     }
 
     #[tokio::test]

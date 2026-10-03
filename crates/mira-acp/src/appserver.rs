@@ -49,6 +49,44 @@ pub fn mode_for_permission(mode: PermissionMode) -> &'static str {
     }
 }
 
+/// `thread/start` (or `thread/resume`) and its params.
+///
+/// `mira_mcp` is Mira's tool server for this chat (its browser, background
+/// processes): passed per thread as a config override, the way Codex takes
+/// MCP servers from `config.toml` (`[mcp_servers.<name>] url = …`), so the
+/// user's own Codex config is untouched.
+pub fn thread_open_params(
+    cwd: Option<String>,
+    policy: &str,
+    sandbox: &str,
+    model: Option<&str>,
+    resume_thread_id: Option<&str>,
+    mira_mcp: Option<&crate::session::MiraMcp>,
+) -> (&'static str, Value) {
+    let mut params = json!({
+        "cwd": cwd.unwrap_or_else(|| ".".to_string()),
+        "approvalPolicy": policy,
+        "sandbox": sandbox,
+    });
+    if let Some(m) = model {
+        params["model"] = json!(m);
+    }
+    if let Some(m) = mira_mcp {
+        params["config"] = json!({ "mcp_servers": { "mira": {
+            "url": m.url,
+            "http_headers": { "Authorization": m.authorization() },
+        } } });
+    }
+    match resume_thread_id {
+        Some(tid) => {
+            params["threadId"] = json!(tid);
+            params["excludeTurns"] = json!(true);
+            ("thread/resume", params)
+        }
+        None => ("thread/start", params),
+    }
+}
+
 /// The argv for an app-server session. One process hosts the thread.
 pub fn launch_args() -> Vec<String> {
     vec!["app-server".to_string()]
@@ -702,6 +740,7 @@ impl AppServerAgent {
         model: Option<String>,
         resume_thread_id: Option<String>,
         gate: PermissionGate,
+        mira_mcp: Option<crate::session::MiraMcp>,
     ) -> Result<Self, NativeError> {
         let (policy, sandbox) = policy_for_mode(runtime_mode);
         let (tx, rx) = mpsc::channel(256);
@@ -748,21 +787,15 @@ impl AppServerAgent {
         .await?;
         let _ = conn.notify("initialized", json!({})).await;
 
-        let mut start_params = json!({
-            "cwd": cwd.unwrap_or_else(|| ".".to_string()),
-            "approvalPolicy": policy,
-            "sandbox": sandbox,
-        });
-        if let Some(m) = model.as_ref() {
-            start_params["model"] = json!(m);
-        }
-        let opened: Value = if let Some(tid) = resume_thread_id.as_ref() {
-            start_params["threadId"] = json!(tid);
-            start_params["excludeTurns"] = json!(true);
-            call(conn, "thread/resume", start_params).await?
-        } else {
-            call(conn, "thread/start", start_params).await?
-        };
+        let (method, start_params) = thread_open_params(
+            cwd,
+            policy,
+            sandbox,
+            model.as_deref(),
+            resume_thread_id.as_deref(),
+            mira_mcp.as_ref(),
+        );
+        let opened: Value = call(conn, method, start_params).await?;
         let tid = opened
             .get("threadId")
             .or_else(|| opened.get("thread").and_then(|t| t.get("id")))
@@ -1184,6 +1217,30 @@ done
         )
     }
 
+    #[test]
+    fn mira_tools_ride_on_the_thread_config() {
+        let mcp = crate::session::MiraMcp { url: "http://127.0.0.1:1/mcp".into(), token: "tok".into() };
+        let (m, p) = thread_open_params(
+            Some("/r".into()),
+            "untrusted",
+            "read-only",
+            Some("gpt-5"),
+            None,
+            Some(&mcp),
+        );
+        assert_eq!(m, "thread/start");
+        assert_eq!(p["config"]["mcp_servers"]["mira"]["url"], "http://127.0.0.1:1/mcp");
+        assert_eq!(
+            p["config"]["mcp_servers"]["mira"]["http_headers"]["Authorization"],
+            "Bearer tok"
+        );
+        assert_eq!(p["model"], "gpt-5");
+        let (m, p) = thread_open_params(None, "never", "danger-full-access", None, Some("th-9"), None);
+        assert_eq!(m, "thread/resume");
+        assert_eq!(p["threadId"], "th-9");
+        assert!(p.get("config").is_none(), "no tool server, no override");
+    }
+
     #[tokio::test]
     async fn a_full_app_server_session() {
         let (cfg, _dir) = fake_codex();
@@ -1197,7 +1254,7 @@ done
             })
         });
 
-        let agent = AppServerAgent::start(&cfg, "approval-required", None, None, None, gate)
+        let agent = AppServerAgent::start(&cfg, "approval-required", None, None, None, gate, None)
             .await
             .expect("handshake + thread/start");
         assert_eq!(agent.session_id().await.as_deref(), Some("th-1"));

@@ -264,15 +264,6 @@ pub async fn input(
 // MCP: the same browser, for external agents
 // ---------------------------------------------------------------------------
 
-/// The secret in the MCP endpoint's path. Generated per process: the server
-/// listens on loopback, but any page open in a local browser can reach
-/// loopback too, and the browser tool acts in a logged-in profile — so the
-/// endpoint must not be guessable.
-pub fn mcp_token() -> &'static str {
-    static TOKEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    TOKEN.get_or_init(|| uuid::Uuid::new_v4().simple().to_string())
-}
-
 /// Who approves the actions an agent takes through Mira's tool server.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum McpGate {
@@ -284,31 +275,97 @@ pub enum McpGate {
     Mira,
 }
 
-/// The URL of Mira's tool server for one chat: the browser the pane shows,
-/// and background processes that land in that chat's Processes window.
-pub fn agent_mcp_url(port: u16, session: &str, gate: McpGate) -> String {
-    let gate = match gate {
-        McpGate::Agent => "agent",
-        McpGate::Mira => "mira",
-    };
-    format!(
-        "http://127.0.0.1:{port}/mcp/{}?session={}&gate={gate}",
-        mcp_token(),
-        urlencoding_light(session),
-    )
+/// What a tool-server token grants: one chat's tools, under one gate.
+#[derive(Clone, Debug, PartialEq)]
+pub struct McpGrant {
+    pub session: String,
+    pub gate: McpGate,
 }
 
-/// Session ids are `sess_<hex>`; anything else is escaped conservatively.
-fn urlencoding_light(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                c.to_string()
-            } else {
-                format!("%{:02X}", c as u32 & 0xff)
-            }
-        })
-        .collect()
+/// A token unused this long stops working (an agent left idle overnight
+/// gets a fresh one when it restarts).
+const GRANT_IDLE: std::time::Duration = std::time::Duration::from_secs(12 * 60 * 60);
+
+struct GrantEntry {
+    grant: McpGrant,
+    last_used: std::time::Instant,
+}
+
+/// Live tokens. Each agent session gets its own, sent as a bearer header
+/// (never in the URL, which ends up in agent configs and logs): the server
+/// listens on loopback, but any page in a local browser can reach loopback
+/// too, and the browser tool acts in a logged-in profile.
+fn grants() -> &'static std::sync::Mutex<std::collections::HashMap<String, GrantEntry>> {
+    static G: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, GrantEntry>>> =
+        std::sync::OnceLock::new();
+    G.get_or_init(Default::default)
+}
+
+/// The token for agents in `session` under `gate`: the chat's existing one
+/// while it's live, otherwise a new one. Stable across agent restarts on
+/// purpose — an agent (re)started in the chat, or one still holding the
+/// token from before, keeps working; revoking on every stop handed agents
+/// tokens that were dead on arrival (401). Tokens end when the chat is
+/// deleted or after `GRANT_IDLE` unused.
+pub fn issue_mcp_grant(session: &str, gate: McpGate) -> String {
+    if let Ok(mut g) = grants().lock() {
+        g.retain(|_, e| e.last_used.elapsed() < GRANT_IDLE);
+        if let Some((token, e)) = g
+            .iter_mut()
+            .find(|(_, e)| e.grant.session == session && e.grant.gate == gate)
+        {
+            e.last_used = std::time::Instant::now();
+            return token.clone();
+        }
+    }
+    let token = format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+    if let Ok(mut g) = grants().lock() {
+        g.insert(
+            token.clone(),
+            GrantEntry {
+                grant: McpGrant {
+                    session: session.to_string(),
+                    gate,
+                },
+                last_used: std::time::Instant::now(),
+            },
+        );
+    }
+    token
+}
+
+/// Revoke a chat's tokens (the chat was deleted).
+pub fn revoke_mcp_grants(session: &str) {
+    if let Ok(mut g) = grants().lock() {
+        g.retain(|_, e| e.grant.session != session);
+    }
+}
+
+/// The grant behind a token, if it's live; using it keeps it alive.
+fn grant_for(token: &str) -> Option<McpGrant> {
+    let mut g = grants().lock().ok()?;
+    g.retain(|_, e| e.last_used.elapsed() < GRANT_IDLE);
+    let e = g.get_mut(token)?;
+    e.last_used = std::time::Instant::now();
+    Some(e.grant.clone())
+}
+
+/// The tool server's address.
+pub fn agent_mcp_endpoint(port: u16) -> String {
+    format!("http://127.0.0.1:{port}/mcp")
+}
+
+/// Mira's tool server for one agent session: the browser the pane shows,
+/// and background processes that land in that chat's Processes window.
+pub fn agent_mcp(port: u16, session: &str, gate: McpGate) -> mira_acp::session::MiraMcp {
+    mira_acp::session::MiraMcp {
+        url: agent_mcp_endpoint(port),
+        token: issue_mcp_grant(session, gate),
+    }
 }
 
 /// The MCP server entry an agent is launched with (`--mcp-config`), so
@@ -316,49 +373,44 @@ fn urlencoding_light(s: &str) -> String {
 /// than starting a browser of its own, and its background commands show
 /// in Mira's Processes window.
 pub fn agent_mcp_config(port: u16, session: &str) -> Value {
+    let m = agent_mcp(port, session, McpGate::Agent);
     serde_json::json!({
         "mcpServers": {
             "mira": {
                 "type": "http",
-                "url": agent_mcp_url(port, session, McpGate::Agent),
+                "url": m.url,
+                "headers": { "Authorization": m.authorization() },
             }
         }
     })
 }
 
-#[derive(Debug, Default, Deserialize)]
-pub struct McpQuery {
-    #[serde(default)]
-    session: Option<String>,
-    #[serde(default)]
-    gate: Option<String>,
-}
-
-fn browser_tool_spec(state: &AppState) -> mira_ai::ToolSpec {
-    use mira_tools::Tool as _;
-    mira_tools::builtin::browser::BrowserTool::new(state.browser.clone()).spec()
-}
-
-/// `GET /mcp/:token` — no server-initiated stream is offered; the spec's
-/// answer for that is 405.
+/// `GET /mcp` — no server-initiated stream is offered; the spec's answer
+/// for that is 405.
 pub async fn mcp_get() -> Response {
     StatusCode::METHOD_NOT_ALLOWED.into_response()
 }
 
-/// `POST /mcp/:token` — a minimal streamable-HTTP MCP server exposing one
-/// tool, `browser`, with exactly the schema Mira's own model gets.
+/// `POST /mcp` — Mira's tool server for external agents (streamable HTTP,
+/// JSON replies): single-purpose browser tools on the pane's browser, and
+/// background processes in the chat's Processes window.
 ///
-/// Calls arrive already approved: the agent's host (Mira) asked the user
-/// through its permission gate before the agent was allowed to call.
+/// `Authorization: Bearer <token>` decides everything: which chat, and who
+/// approves. No token, or a revoked or idle one, is a 401.
 pub async fn mcp(
     State(state): State<AppState>,
-    axum::extract::Path(token): axum::extract::Path<String>,
-    Query(q): Query<McpQuery>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<Value>,
 ) -> Response {
-    if token != mcp_token() {
-        return StatusCode::NOT_FOUND.into_response();
-    }
+    let token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim)
+        .unwrap_or("");
+    let Some(q) = grant_for(token) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
     let reqs = match req {
         Value::Array(items) => items,
         one => vec![one],
@@ -377,6 +429,303 @@ pub async fn mcp(
     }
 }
 
+/// Mira tools that only look — they never change a page, a file or a
+/// process — so agents that gate each tool call (Claude Code) can run them
+/// without asking.
+pub const READ_ONLY_AGENT_TOOLS: &[&str] = &[
+    "browser_snapshot",
+    "browser_screenshot",
+    "browser_tabs",
+    "browser_wait",
+    "read_output",
+];
+
+/// Claude Code's `--allowedTools` value for Mira's read-only tools (its MCP
+/// tools are named `mcp__<server>__<tool>`).
+pub fn claude_allowed_tools() -> String {
+    READ_ONLY_AGENT_TOOLS
+        .iter()
+        .map(|t| format!("mcp__mira__{t}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// One single-purpose browser tool for agents: its name, the browser action
+/// it runs, what it's for, and its own arguments (JSON Schema properties).
+struct BrowserVerb {
+    name: &'static str,
+    action: &'static str,
+    description: &'static str,
+    properties: fn() -> Value,
+    required: &'static [&'static str],
+}
+
+/// The agent-facing browser: one tool per verb, the way models handle
+/// browsers best (one multipurpose tool with an `action` switch is what they
+/// fumble). Each maps onto an action of the same browser Mira's own model
+/// and the browser pane use.
+const BROWSER_VERBS: &[BrowserVerb] = &[
+    BrowserVerb {
+        name: "browser_open",
+        action: "navigate",
+        description: "Open a URL in Mira's browser — the one the user watches live in Mira's \
+                      browser pane. Starts the browser if needed. Then read the page with \
+                      browser_snapshot.",
+        properties: || serde_json::json!({ "url": { "type": "string", "description": "Full URL, e.g. http://localhost:5173" } }),
+        required: &["url"],
+    },
+    BrowserVerb {
+        name: "browser_snapshot",
+        action: "snapshot",
+        description: "Read the current page: title, URL, readable text, and its interactive \
+                      elements, each with a `ref` to pass to browser_click / browser_type. \
+                      Prefer this to screenshots for reading.",
+        properties: || serde_json::json!({}),
+        required: &[],
+    },
+    BrowserVerb {
+        name: "browser_screenshot",
+        action: "screenshot",
+        description: "A PNG screenshot of the visible page, for checking layout and visuals.",
+        properties: || serde_json::json!({}),
+        required: &[],
+    },
+    BrowserVerb {
+        name: "browser_click",
+        action: "click",
+        description: "Click an element: by `ref` from browser_snapshot (best), a CSS \
+                      `selector`, or a viewport `coordinate`.",
+        properties: || serde_json::json!({
+            "ref": { "type": "string", "description": "Element ref from browser_snapshot" },
+            "selector": { "type": "string" },
+            "coordinate": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+            "double": { "type": "boolean", "description": "Double-click" }
+        }),
+        required: &[],
+    },
+    BrowserVerb {
+        name: "browser_type",
+        action: "type",
+        description: "Type text into a field (by `ref` or `selector`; otherwise the focused \
+                      element). `clear` empties it first; `submit` presses Enter after.",
+        properties: || serde_json::json!({
+            "text": { "type": "string" },
+            "ref": { "type": "string" },
+            "selector": { "type": "string" },
+            "clear": { "type": "boolean" },
+            "submit": { "type": "boolean" }
+        }),
+        required: &["text"],
+    },
+    BrowserVerb {
+        name: "browser_press",
+        action: "key",
+        description: "Press a key or chord: Enter, Escape, Tab, ArrowDown, Meta+A…",
+        properties: || serde_json::json!({ "key": { "type": "string" } }),
+        required: &["key"],
+    },
+    BrowserVerb {
+        name: "browser_scroll",
+        action: "scroll",
+        description: "Scroll the page (or the element with `ref`): `direction` up, down, left \
+                      or right; `amount` in screen-steps.",
+        properties: || serde_json::json!({
+            "direction": { "type": "string", "enum": ["up", "down", "left", "right"] },
+            "amount": { "type": "integer", "minimum": 1 },
+            "ref": { "type": "string" }
+        }),
+        required: &[],
+    },
+    BrowserVerb {
+        name: "browser_evaluate",
+        action: "evaluate",
+        description: "Run a JavaScript expression in the page and get its JSON value back.",
+        properties: || serde_json::json!({ "expression": { "type": "string" } }),
+        required: &["expression"],
+    },
+    BrowserVerb {
+        name: "browser_wait",
+        action: "wait",
+        description: "Wait a moment (seconds) for the page to settle — after a navigation or \
+                      an action that loads.",
+        properties: || serde_json::json!({ "duration": { "type": "number", "minimum": 0, "maximum": 30 } }),
+        required: &[],
+    },
+    BrowserVerb {
+        name: "browser_back",
+        action: "back",
+        description: "Go back in history.",
+        properties: || serde_json::json!({}),
+        required: &[],
+    },
+    BrowserVerb {
+        name: "browser_reload",
+        action: "reload",
+        description: "Reload the page.",
+        properties: || serde_json::json!({}),
+        required: &[],
+    },
+    BrowserVerb {
+        name: "browser_resize",
+        action: "set_viewport",
+        description: "Set the page's viewport (CSS pixels) to check responsive layouts; \
+                      `mobile` adds touch and mobile semantics. 0×0 restores the real size.",
+        properties: || serde_json::json!({
+            "width": { "type": "integer", "minimum": 0 },
+            "height": { "type": "integer", "minimum": 0 },
+            "mobile": { "type": "boolean" }
+        }),
+        required: &["width", "height"],
+    },
+    BrowserVerb {
+        name: "browser_tabs",
+        action: "list_tabs",
+        description: "List the open tabs (index, title, URL).",
+        properties: || serde_json::json!({}),
+        required: &[],
+    },
+    BrowserVerb {
+        name: "browser_switch_tab",
+        action: "switch_tab",
+        description: "Switch to the tab at `index` (from browser_tabs).",
+        properties: || serde_json::json!({ "index": { "type": "integer", "minimum": 0 } }),
+        required: &["index"],
+    },
+];
+
+/// Device sizes for `browser_devices`: (id, label, width, height, mobile).
+const DEVICES: &[(&str, &str, u32, u32, bool)] = &[
+    ("iphone", "iPhone 15", 393, 852, true),
+    ("pixel", "Pixel 8", 412, 915, true),
+    ("ipad", "iPad mini", 744, 1133, true),
+    ("laptop", "Laptop", 1280, 800, false),
+    ("desktop", "Desktop", 1440, 900, false),
+];
+
+/// Mira's own tools beyond the browser verbs, for agents: a page at several
+/// device sizes at once, and handing a task to another engine.
+fn extra_agent_tools() -> Vec<Value> {
+    use serde_json::json;
+    vec![
+        json!({
+            "name": "browser_devices",
+            "description": "Screenshot one page at several device sizes at once (iPhone, Pixel, \
+                            iPad, laptop, desktop) to check a responsive layout. Uses the browser \
+                            in Mira's pane and restores its size afterwards.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "description": "Open this first (otherwise the current page)" },
+                    "devices": {
+                        "type": "array",
+                        "items": { "type": "string", "enum": DEVICES.iter().map(|d| d.0).collect::<Vec<_>>() },
+                        "description": "Default: iphone, ipad, laptop"
+                    }
+                },
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "delegate_task",
+            "description": "Hand a task to another engine and get its answer: a second opinion, \
+                            a review, research. `engine` is `mira` (Mira's own model) or an \
+                            installed agent. Read-only: it can read and search this project, not \
+                            edit or run commands. Takes up to 10 minutes.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "prompt": { "type": "string", "description": "The whole task; it doesn't see this conversation" },
+                    "engine": { "type": "string", "enum": crate::delegate::engines() }
+                },
+                "required": ["prompt"],
+                "additionalProperties": false
+            }
+        }),
+    ]
+}
+
+/// `browser_devices`: the page at each size, then the real size back.
+async fn devices_result(state: &AppState, args: &Value) -> Value {
+    use serde_json::json;
+    let picked: Vec<&str> = args
+        .get("devices")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .filter(|v: &Vec<&str>| !v.is_empty())
+        .unwrap_or_else(|| vec!["iphone", "ipad", "laptop"]);
+    let fail = |e: String| json!({ "content": [{ "type": "text", "text": e }], "isError": true });
+    if let Some(url) = args.get("url").and_then(Value::as_str).filter(|u| !u.trim().is_empty()) {
+        if let Err(e) = state
+            .browser
+            .execute(&BrowserAction::Navigate { url: url.to_string() })
+            .await
+        {
+            return fail(e.to_string());
+        }
+    }
+    let mut content = Vec::new();
+    for id in picked {
+        let Some(&(_, label, w, h, mobile)) = DEVICES.iter().find(|d| d.0 == id) else {
+            content.push(json!({ "type": "text", "text": format!("{id}: unknown device") }));
+            continue;
+        };
+        let sized = state
+            .browser
+            .execute(&BrowserAction::SetViewport { width: w, height: h, mobile })
+            .await;
+        if let Err(e) = sized {
+            content.push(json!({ "type": "text", "text": format!("{label}: {e}") }));
+            continue;
+        }
+        let _ = state.browser.execute(&BrowserAction::Wait { duration: Some(0.6) }).await;
+        match state.browser.execute(&BrowserAction::Screenshot).await {
+            Ok(out) => {
+                content.push(json!({ "type": "text", "text": format!("{label} — {w}×{h}") }));
+                if let Some(shot) = out.screenshot {
+                    content.push(json!({ "type": "image", "data": shot.png_base64, "mimeType": "image/png" }));
+                }
+            }
+            Err(e) => content.push(json!({ "type": "text", "text": format!("{label}: {e}") })),
+        }
+    }
+    let _ = state
+        .browser
+        .execute(&BrowserAction::SetViewport { width: 0, height: 0, mobile: false })
+        .await;
+    json!({ "content": content, "isError": false })
+}
+
+/// The browser action a single-purpose tool call means.
+fn browser_verb_action(name: &str, args: &Value) -> Option<Result<BrowserAction, String>> {
+    let verb = BROWSER_VERBS.iter().find(|v| v.name == name)?;
+    let mut obj = args.as_object().cloned().unwrap_or_default();
+    obj.insert("action".into(), Value::String(verb.action.into()));
+    Some(BrowserAction::from_args(&Value::Object(obj)).map_err(|e| e.to_string()))
+}
+
+/// Run a browser action and shape the MCP result (text, plus the
+/// screenshot when there is one).
+async fn browser_result(state: &AppState, action: &BrowserAction) -> Value {
+    use serde_json::json;
+    match state.browser.execute(action).await {
+        Ok(out) => {
+            let mut content = vec![json!({ "type": "text", "text": out.text })];
+            if let Some(shot) = out.screenshot {
+                content.push(json!({
+                    "type": "image",
+                    "data": shot.png_base64,
+                    "mimeType": "image/png",
+                }));
+            }
+            json!({ "content": content, "isError": false })
+        }
+        Err(e) => json!({
+            "content": [{ "type": "text", "text": e.to_string() }],
+            "isError": true,
+        }),
+    }
+}
+
 /// The background-process tools, with exactly the specs Mira's own model
 /// gets. They act on the chat's own process store, so what an agent starts
 /// shows (and can be stopped) in that chat's Processes window.
@@ -385,7 +734,7 @@ fn background_tools() -> Vec<Box<dyn mira_tools::Tool>> {
     vec![Box::new(RunBackground), Box::new(ReadOutput), Box::new(KillBackground)]
 }
 
-async fn mcp_one(state: &AppState, q: &McpQuery, req: Value) -> Option<Value> {
+async fn mcp_one(state: &AppState, q: &McpGrant, req: Value) -> Option<Value> {
     use serde_json::json;
     let id = req.get("id").cloned()?; // a notification gets no reply
     let method = req.get("method").and_then(Value::as_str).unwrap_or("");
@@ -400,28 +749,63 @@ async fn mcp_one(state: &AppState, q: &McpQuery, req: Value) -> Option<Value> {
                 "protocolVersion": version,
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "mira", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "Mira's tools. `browser` is the browser the user watches live in \
-                                 Mira's browser pane (a dedicated profile, never the user's own): use \
-                                 it to open, click, type and screenshot pages. `run_background` starts \
-                                 a long-running command (a dev server, a watcher) the user can see, \
-                                 read and stop in Mira's Processes window; `read_output` and \
-                                 `kill_background` read and stop it.",
+                "instructions": "Mira's tools. The browser_* tools drive the browser the user \
+                                 watches live in Mira's browser pane (a dedicated profile, never the \
+                                 user's own): browser_open a URL, browser_snapshot to read it (with \
+                                 element refs), then browser_click / browser_type / browser_press; \
+                                 browser_screenshot to check visuals. run_background starts a \
+                                 long-running command (a dev server, a watcher) the user can see, read \
+                                 and stop in Mira's Processes window; read_output and kill_background \
+                                 read and stop it.",
             }))
         }
         "ping" => ok(json!({})),
         "tools/list" => {
-            let mut specs = vec![browser_tool_spec(state)];
+            // Single-purpose browser tools for agents; the multipurpose
+            // `browser` stays callable for sessions that listed it before.
+            let mut tools: Vec<Value> = BROWSER_VERBS
+                .iter()
+                .map(|v| {
+                    json!({
+                        "name": v.name,
+                        "description": v.description,
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": (v.properties)(),
+                            "required": v.required,
+                            "additionalProperties": false,
+                        },
+                    })
+                })
+                .collect();
+            tools.push(extra_agent_tools()[0].clone());
             if mcp_slot(state, q).await.is_some() {
-                specs.extend(background_tools().iter().map(|t| t.spec()));
+                tools.push(extra_agent_tools()[1].clone());
+                tools.extend(background_tools().iter().map(|t| {
+                    let s = t.spec();
+                    json!({ "name": s.name, "description": s.description, "inputSchema": s.parameters })
+                }));
             }
-            ok(json!({ "tools": specs.iter().map(|s| json!({
-                "name": s.name,
-                "description": s.description,
-                "inputSchema": s.parameters,
-            })).collect::<Vec<_>>() }))
+            ok(json!({ "tools": tools }))
         }
         "tools/call" => {
             let name = req["params"]["name"].as_str().unwrap_or("");
+            let args = &req["params"]["arguments"];
+            if name == "browser_devices" {
+                return Some(ok(devices_result(state, args).await));
+            }
+            if name == "delegate_task" {
+                return Some(ok(delegate_result(state, q, args).await));
+            }
+            if let Some(action) = browser_verb_action(name, &req["params"]["arguments"]) {
+                return Some(match action {
+                    Ok(a) => ok(browser_result(state, &a).await),
+                    Err(e) => ok(json!({
+                        "content": [{ "type": "text", "text": e }],
+                        "isError": true,
+                    })),
+                });
+            }
             if name != "browser" {
                 return Some(match call_background(state, q, name, &req["params"]["arguments"]).await {
                     Some(Ok((text, is_error))) => ok(json!({
@@ -433,27 +817,8 @@ async fn mcp_one(state: &AppState, q: &McpQuery, req: Value) -> Option<Value> {
                 });
             }
             let args = req["params"]["arguments"].clone();
-            let action = match BrowserAction::from_args(&args) {
-                Ok(a) => a,
-                Err(e) => {
-                    return Some(ok(json!({
-                        "content": [{ "type": "text", "text": e.to_string() }],
-                        "isError": true,
-                    })))
-                }
-            };
-            match state.browser.execute(&action).await {
-                Ok(out) => {
-                    let mut content = vec![json!({ "type": "text", "text": out.text })];
-                    if let Some(shot) = out.screenshot {
-                        content.push(json!({
-                            "type": "image",
-                            "data": shot.png_base64,
-                            "mimeType": "image/png",
-                        }));
-                    }
-                    ok(json!({ "content": content, "isError": false }))
-                }
+            match BrowserAction::from_args(&args) {
+                Ok(a) => ok(browser_result(state, &a).await),
                 Err(e) => ok(json!({
                     "content": [{ "type": "text", "text": e.to_string() }],
                     "isError": true,
@@ -464,16 +829,45 @@ async fn mcp_one(state: &AppState, q: &McpQuery, req: Value) -> Option<Value> {
     })
 }
 
-/// The chat a tool-server URL belongs to (`?session=`).
-async fn mcp_slot(state: &AppState, q: &McpQuery) -> Option<std::sync::Arc<crate::slot::SessionSlot>> {
-    state.slot_str(q.session.as_deref()?).await
+/// `delegate_task`: run the task on another engine (asking first when the
+/// agent doesn't gate its own tool calls — it starts another model).
+async fn delegate_result(state: &AppState, q: &McpGrant, args: &Value) -> Value {
+    use serde_json::json;
+    let text = |t: String, err: bool| json!({ "content": [{ "type": "text", "text": t }], "isError": err });
+    let Some(slot) = mcp_slot(state, q).await else {
+        return text("this chat isn't open in Mira".into(), true);
+    };
+    let prompt = args.get("prompt").and_then(Value::as_str).unwrap_or("");
+    let engine = args.get("engine").and_then(Value::as_str);
+    if q.gate == McpGate::Mira {
+        let call = mira_core::ToolCall {
+            id: mira_core::ToolCallId::new(),
+            kind: mira_core::ToolCallKind::Function,
+            function: mira_core::ToolCallFunction {
+                name: "delegate_task".into(),
+                arguments: args.to_string(),
+            },
+        };
+        if !slot.approver.approve(&call, mira_policy::Decision::Ask).await {
+            return text("The user declined handing this task off. Don't retry it as-is.".into(), true);
+        }
+    }
+    match crate::delegate::delegate(state, &slot, prompt, engine).await {
+        Ok(answer) => text(answer, false),
+        Err(e) => text(e, true),
+    }
+}
+
+/// The chat a token belongs to.
+async fn mcp_slot(state: &AppState, q: &McpGrant) -> Option<std::sync::Arc<crate::slot::SessionSlot>> {
+    state.slot_str(&q.session).await
 }
 
 /// Run one of the background-process tools for the URL's chat. `None` when
 /// the tool isn't one of them (or there's no chat to run it in).
 async fn call_background(
     state: &AppState,
-    q: &McpQuery,
+    q: &McpGrant,
     name: &str,
     args: &Value,
 ) -> Option<Result<(String, bool), String>> {
@@ -489,7 +883,7 @@ async fn call_background(
     };
     // An agent that doesn't ask before tool calls gets Mira's approval card
     // for anything that runs or stops a command (as Mira's own model does).
-    if q.gate.as_deref() == Some("mira") && matches!(tool.action(), mira_tools::Action::Bash) {
+    if q.gate == McpGate::Mira && matches!(tool.action(), mira_tools::Action::Bash) {
         let allowed = slot
             .approver
             .approve(&call, mira_policy::Decision::Ask)
@@ -512,4 +906,103 @@ async fn call_background(
         Ok(r) => Ok((r.content, r.is_error)),
         Err(e) => Ok((e.to_string(), true)),
     })
+}
+
+#[cfg(test)]
+mod browser_verb_tests {
+    use super::*;
+
+    #[test]
+    fn every_verb_maps_to_a_browser_action_with_its_own_arguments() {
+        // A sample call per tool, using every property its schema offers:
+        // `deny_unknown_fields` on the action rejects anything that drifts.
+        let samples: &[(&str, Value)] = &[
+            ("browser_open", serde_json::json!({ "url": "http://localhost:5173" })),
+            ("browser_snapshot", serde_json::json!({})),
+            ("browser_screenshot", serde_json::json!({})),
+            ("browser_click", serde_json::json!({ "ref": "e3", "selector": "#a", "coordinate": [1.0, 2.0], "double": true })),
+            ("browser_type", serde_json::json!({ "text": "hi", "ref": "e1", "selector": "#q", "clear": true, "submit": true })),
+            ("browser_press", serde_json::json!({ "key": "Enter" })),
+            ("browser_scroll", serde_json::json!({ "direction": "down", "amount": 2, "ref": "e9" })),
+            ("browser_evaluate", serde_json::json!({ "expression": "document.title" })),
+            ("browser_wait", serde_json::json!({ "duration": 1.5 })),
+            ("browser_back", serde_json::json!({})),
+            ("browser_reload", serde_json::json!({})),
+            ("browser_resize", serde_json::json!({ "width": 390, "height": 844, "mobile": true })),
+            ("browser_tabs", serde_json::json!({})),
+            ("browser_switch_tab", serde_json::json!({ "index": 1 })),
+        ];
+        assert_eq!(samples.len(), BROWSER_VERBS.len(), "a sample per tool");
+        for (name, args) in samples {
+            let verb = BROWSER_VERBS.iter().find(|v| v.name == *name).expect(name);
+            // The sample uses exactly the schema's properties.
+            let props = (verb.properties)();
+            for k in args.as_object().unwrap().keys() {
+                assert!(props.get(k).is_some(), "{name}: `{k}` isn't in its schema");
+            }
+            let action = browser_verb_action(name, args).unwrap();
+            assert!(action.is_ok(), "{name}: {:?}", action.err());
+            assert_eq!(action.unwrap().verb(), verb.action);
+        }
+        assert!(browser_verb_action("browser", &serde_json::json!({})).is_none());
+    }
+}
+
+#[cfg(test)]
+mod grant_tests {
+    use super::*;
+
+    #[test]
+    fn a_token_grants_one_chat_until_revoked() {
+        let t = issue_mcp_grant("sess_grant_a", McpGate::Mira);
+        assert_eq!(
+            grant_for(&t),
+            Some(McpGrant { session: "sess_grant_a".into(), gate: McpGate::Mira })
+        );
+        assert_eq!(grant_for("not-a-token"), None);
+        // An agent restarted in the chat gets the same, still-valid token.
+        assert_eq!(issue_mcp_grant("sess_grant_a", McpGate::Mira), t);
+        assert!(grant_for(&t).is_some());
+        // Another gate is another token; both stay valid.
+        let t2 = issue_mcp_grant("sess_grant_a", McpGate::Agent);
+        assert_ne!(t2, t);
+        assert!(grant_for(&t).is_some());
+        assert_eq!(grant_for(&t2).unwrap().gate, McpGate::Agent);
+        // Deleting the chat ends them.
+        revoke_mcp_grants("sess_grant_a");
+        assert_eq!(grant_for(&t), None);
+        assert_eq!(grant_for(&t2), None);
+        // Another chat's token never resolves to this one.
+        let other = issue_mcp_grant("sess_grant_c", McpGate::Mira);
+        assert_ne!(other, t);
+        assert_eq!(grant_for(&other).unwrap().session, "sess_grant_c");
+        revoke_mcp_grants("sess_grant_c");
+    }
+
+    #[test]
+    fn the_token_never_rides_in_the_url() {
+        let cfg = agent_mcp_config(8787, "sess_grant_b");
+        let url = cfg["mcpServers"]["mira"]["url"].as_str().unwrap();
+        assert_eq!(url, "http://127.0.0.1:8787/mcp");
+        let auth = cfg["mcpServers"]["mira"]["headers"]["Authorization"].as_str().unwrap();
+        let token = auth.strip_prefix("Bearer ").unwrap();
+        assert!(!url.contains(token));
+        assert_eq!(grant_for(token).unwrap().session, "sess_grant_b");
+        revoke_mcp_grants("sess_grant_b");
+    }
+}
+
+#[cfg(test)]
+mod extra_tool_tests {
+    use super::*;
+
+    #[test]
+    fn extra_tools_are_well_formed() {
+        let t = extra_agent_tools();
+        assert_eq!(t[0]["name"], "browser_devices");
+        assert_eq!(t[1]["name"], "delegate_task");
+        assert_eq!(t[1]["inputSchema"]["required"], serde_json::json!(["prompt"]));
+        let devices = t[0]["inputSchema"]["properties"]["devices"]["items"]["enum"].as_array().unwrap();
+        assert_eq!(devices.len(), DEVICES.len());
+    }
 }
