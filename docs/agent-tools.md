@@ -20,9 +20,7 @@ form each agent understands, with tools shaped so a model uses them well.
 | Gemini / Grok / other ACP | ACP | same, **only if** the agent takes HTTP MCP servers | agents with stdio-only MCP get nothing |
 | Codex | `codex app-server` (JSON-RPC) | **none** | no MCP server passed at `thread/start` |
 
-## How T3 Code does it (reference)
 
-From [pingdotgg/t3code](https://github.com/pingdotgg/t3code):
 
 - **One app-owned MCP endpoint** (`127.0.0.1:<port>/mcp`, server key
   `t3-code`), authenticated per provider session with a short-lived bearer
