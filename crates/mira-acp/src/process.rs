@@ -222,7 +222,7 @@ pub struct StartSpec<'a> {
     /// leaving the caller to do it once it has somewhere valid to point at.
     pub cwd: Option<&'a Path>,
     /// Mira's tool server URL, offered to agents that take HTTP MCP servers.
-    pub mira_mcp: Option<String>,
+    pub mira_mcp: Option<crate::session::MiraMcp>,
 }
 
 /// Start an agent, taking both the launch and the capabilities from `driver`.
@@ -297,7 +297,7 @@ pub struct HostPorts {
     pub permissions: Arc<dyn crate::host::PermissionPort>,
     pub events: Arc<dyn crate::host::EventPort>,
     /// Mira's tool server for this session, if the host runs one.
-    pub mira_mcp: Option<String>,
+    pub mira_mcp: Option<crate::session::MiraMcp>,
 }
 
 #[derive(Debug, Error)]

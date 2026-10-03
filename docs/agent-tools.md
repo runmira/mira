@@ -1,6 +1,6 @@
 # Mira's tools for external agents
 
-Status: **in progress** · Tracking PR: `agent-tools` → `windows`
+Status: **done** (phases 0–6) · Tracking PR: `agent-tools` → `windows`
 
 ## Why
 
@@ -25,7 +25,7 @@ form each agent understands, with tools shaped so a model uses them well.
 
 ### One tool server, per chat
 
-`/mcp/<server-token>?session=<chat>&gate=<agent|mira>` today. Every tool
+`POST /mcp`, authorized per agent session (see Security). Every tool
 acts on that chat: background processes land in its Processes window; the
 browser is the one in its pane.
 
@@ -80,10 +80,11 @@ actions follow the browser tool's own policy, as for Mira's model.
 ### Security
 
 - Loopback only (the server binds 127.0.0.1).
-- Today: one process-wide unguessable token in the URL.
-- Target: **per-session tokens** in an `Authorization` header (not the URL,
-  so they don't end up in agent logs), expiring when idle and revoked when
-  the agent stops. Required before remote control exposes the server.
+- **Per-session tokens** in an `Authorization: Bearer` header (never the
+  URL, so they don't end up in agent configs or logs). A token names one
+  chat and its gate; it expires after 12 h unused and is revoked when the
+  agent stops or the chat is deleted. The stdio bridge reads it from
+  `MIRA_MCP_TOKEN`, not argv. `/mcp` without a live token is a 401.
 
 ## Phases
 
@@ -102,10 +103,10 @@ actions follow the browser tool's own policy, as for Mira's model.
       HTTP MCP get the tools through it.
       *Done when* an agent advertising `mcpCapabilities.http: false` lists
       Mira's tools.
-- [ ] **4 · Fewer prompts for Claude Code** — `--allowedTools` for the
+- [x] **4 · Fewer prompts for Claude Code** — `--allowedTools` for the
       read-only Mira tools.
-- [ ] **5 · Per-session tokens** — header auth, idle expiry, revoke on stop.
-- [ ] **6 · Device preview + orchestration tools** (separate PRs).
+- [x] **5 · Per-session tokens** — header auth, idle expiry, revoke on stop.
+- [x] **6 · Device preview + orchestration tools** — `browser_devices`; `delegate_task` to Mira's model or an installed agent, read-only, in a hidden child chat.
 
 ## Testing
 

@@ -509,6 +509,8 @@ pub async fn delete_session(
     // Tear down the live slot if any. Aborts the in-flight turn so it
     // stops pumping tokens; the AttachGuard on any WS forwarder is
     // dropped when the socket next closes.
+    // A deleted chat's agent loses its tool-server token too.
+    crate::browser::revoke_mcp_grants(&sid.to_string());
     if let Some(slot) = state.remove_slot(&sid).await {
         if let Some(h) = slot.turn.lock().await.take() {
             h.abort();

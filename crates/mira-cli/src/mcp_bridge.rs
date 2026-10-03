@@ -8,6 +8,9 @@
 //! writes nothing. The `mcp-session-id` and the negotiated protocol version
 //! are replayed on every later request, as streamable HTTP expects.
 //!
+//! The bearer token comes from `MIRA_MCP_TOKEN` (set by Mira in the agent's
+//! MCP server entry), never argv, which process listings show.
+//!
 //! stdout carries protocol only; anything else goes to stderr.
 
 use std::sync::Arc;
@@ -32,6 +35,10 @@ struct Negotiated {
 
 pub async fn run(args: McpBridgeArgs) -> Result<()> {
     let client = reqwest::Client::builder().build()?;
+    let auth = std::env::var(mira_acp::session::MIRA_MCP_TOKEN_ENV)
+        .ok()
+        .filter(|t| !t.trim().is_empty())
+        .map(|t| format!("Bearer {}", t.trim()));
     let out = Arc::new(Mutex::new(tokio::io::stdout()));
     let negotiated = Arc::new(Mutex::new(Negotiated::default()));
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
@@ -52,7 +59,14 @@ pub async fn run(args: McpBridgeArgs) -> Result<()> {
         // `initialize` must settle the session before anything else goes out;
         // everything after runs concurrently, so one slow tool call (a page
         // loading) doesn't hold up the rest.
-        let job = relay(client.clone(), args.url.clone(), msg, negotiated.clone(), out.clone());
+        let job = relay(
+            client.clone(),
+            args.url.clone(),
+            auth.clone(),
+            msg,
+            negotiated.clone(),
+            out.clone(),
+        );
         if is_initialize {
             job.await;
         } else {
@@ -67,6 +81,7 @@ pub async fn run(args: McpBridgeArgs) -> Result<()> {
 async fn relay(
     client: reqwest::Client,
     url: String,
+    auth: Option<String>,
     msg: Value,
     negotiated: Arc<Mutex<Negotiated>>,
     out: Arc<Mutex<tokio::io::Stdout>>,
@@ -77,6 +92,9 @@ async fn relay(
         .header("content-type", "application/json")
         .header("accept", "application/json, text/event-stream")
         .body(msg.to_string());
+    if let Some(a) = &auth {
+        req = req.header("authorization", a);
+    }
     {
         let n = negotiated.lock().await;
         if let Some(s) = &n.session_id {

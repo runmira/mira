@@ -61,7 +61,7 @@ pub fn thread_open_params(
     sandbox: &str,
     model: Option<&str>,
     resume_thread_id: Option<&str>,
-    mira_mcp: Option<&str>,
+    mira_mcp: Option<&crate::session::MiraMcp>,
 ) -> (&'static str, Value) {
     let mut params = json!({
         "cwd": cwd.unwrap_or_else(|| ".".to_string()),
@@ -71,8 +71,11 @@ pub fn thread_open_params(
     if let Some(m) = model {
         params["model"] = json!(m);
     }
-    if let Some(url) = mira_mcp {
-        params["config"] = json!({ "mcp_servers": { "mira": { "url": url } } });
+    if let Some(m) = mira_mcp {
+        params["config"] = json!({ "mcp_servers": { "mira": {
+            "url": m.url,
+            "http_headers": { "Authorization": m.authorization() },
+        } } });
     }
     match resume_thread_id {
         Some(tid) => {
@@ -737,7 +740,7 @@ impl AppServerAgent {
         model: Option<String>,
         resume_thread_id: Option<String>,
         gate: PermissionGate,
-        mira_mcp: Option<String>,
+        mira_mcp: Option<crate::session::MiraMcp>,
     ) -> Result<Self, NativeError> {
         let (policy, sandbox) = policy_for_mode(runtime_mode);
         let (tx, rx) = mpsc::channel(256);
@@ -790,7 +793,7 @@ impl AppServerAgent {
             sandbox,
             model.as_deref(),
             resume_thread_id.as_deref(),
-            mira_mcp.as_deref(),
+            mira_mcp.as_ref(),
         );
         let opened: Value = call(conn, method, start_params).await?;
         let tid = opened
@@ -1216,18 +1219,20 @@ done
 
     #[test]
     fn mira_tools_ride_on_the_thread_config() {
+        let mcp = crate::session::MiraMcp { url: "http://127.0.0.1:1/mcp".into(), token: "tok".into() };
         let (m, p) = thread_open_params(
             Some("/r".into()),
             "untrusted",
             "read-only",
             Some("gpt-5"),
             None,
-            Some("http://127.0.0.1:1/mcp/t?session=s&gate=mira"),
+            Some(&mcp),
         );
         assert_eq!(m, "thread/start");
+        assert_eq!(p["config"]["mcp_servers"]["mira"]["url"], "http://127.0.0.1:1/mcp");
         assert_eq!(
-            p["config"]["mcp_servers"]["mira"]["url"],
-            "http://127.0.0.1:1/mcp/t?session=s&gate=mira"
+            p["config"]["mcp_servers"]["mira"]["http_headers"]["Authorization"],
+            "Bearer tok"
         );
         assert_eq!(p["model"], "gpt-5");
         let (m, p) = thread_open_params(None, "never", "danger-full-access", None, Some("th-9"), None);
