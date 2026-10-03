@@ -165,7 +165,7 @@ pub async fn start_agent(
         driver_cfg.launch_args.push("--mcp-config".into());
         driver_cfg
             .launch_args
-            .push(crate::browser::agent_mcp_config(state.local_port).to_string());
+            .push(crate::browser::agent_mcp_config(state.local_port, &slot.id.to_string()).to_string());
     }
     let launch: LaunchConfig = match transport {
         Transport::Native => {
@@ -264,6 +264,13 @@ pub async fn start_agent(
         &repo_root,
         gate,
         native_overrides,
+        // Mira's tools for ACP agents (OpenCode, Gemini…): they may call MCP
+        // tools without asking, so Mira gates the ones that run commands.
+        Some(crate::browser::agent_mcp_url(
+            state.local_port,
+            &slot.id.to_string(),
+            crate::browser::McpGate::Mira,
+        )),
     )
     .await
     {
@@ -1013,6 +1020,7 @@ async fn start_acp_agent_with_ports(
     cwd: &std::path::Path,
     gate: mira_acp::native::PermissionGate,
     native: Option<mira_acp::native::NativeOverrides>,
+    mira_mcp: Option<String>,
 ) -> Result<AgentHandle, StartError> {
     start_acp_agent(
         driver,
@@ -1024,6 +1032,7 @@ async fn start_acp_agent_with_ports(
             terminals,
             permissions,
             events,
+            mira_mcp,
         },
         Some(cwd),
         gate,

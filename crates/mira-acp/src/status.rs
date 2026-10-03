@@ -303,6 +303,7 @@ async fn probe_initialize(
         // No session is opened: a probe only needs the agent to introduce
         // itself, and `session/new` can fail for reasons unrelated to health.
         cwd: None,
+        mira_mcp: None,
     })
     .await
     .map_err(|e| match e {

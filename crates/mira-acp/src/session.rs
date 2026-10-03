@@ -95,6 +95,11 @@ pub struct AcpSession {
 #[derive(Default)]
 struct SessionState {
     initialized: bool,
+    /// The agent takes MCP servers over HTTP (`mcpCapabilities.http`).
+    mcp_http: bool,
+    /// Mira's own tool server for this session (browser, background
+    /// processes), handed to the agent at `session/new` when it can take it.
+    mira_mcp: Option<String>,
     /// Modes the agent advertises at `initialize`, so a `set_mode` can be
     /// validated before it is sent.
     modes: Vec<Value>,
@@ -214,6 +219,7 @@ impl AcpSession {
         {
             let mut st = self.state.lock().await;
             st.initialized = true;
+            st.mcp_http = res.agent_capabilities.mcp_capabilities.http;
             st.version = res.agent_info.as_ref().map(|i| i.version.clone());
             st.auth_method_ids = res
                 .auth_methods
@@ -222,6 +228,11 @@ impl AcpSession {
                 .collect();
         }
         Ok(res)
+    }
+
+    /// Offer the agent Mira's tool server (by URL) at the next `session/new`.
+    pub async fn set_mira_mcp(&self, url: Option<String>) {
+        self.state.lock().await.mira_mcp = url;
     }
 
     /// Step 2. `cwd` is the agent's working directory; `additional_directories`
@@ -236,13 +247,20 @@ impl AcpSession {
         }
         let mut req = NewSessionRequest::new(cwd);
         req.additional_directories = additional_directories;
-        let res: NewSessionResponse = self
-            .conn
-            .request(
-                "session/new",
-                serde_json::to_value(req).unwrap_or(json!({})),
-            )
-            .await?;
+        let mut params = serde_json::to_value(req).unwrap_or(json!({}));
+        // Mira's tools (its browser, background processes), as an MCP server
+        // the agent connects to — only when it says it can take one over HTTP.
+        let mira_mcp = {
+            let st = self.state.lock().await;
+            st.mira_mcp.clone().filter(|_| st.mcp_http)
+        };
+        if let (Some(url), Some(obj)) = (mira_mcp, params.as_object_mut()) {
+            obj.insert(
+                "mcpServers".into(),
+                json!([{ "type": "http", "name": "mira", "url": url, "headers": [] }]),
+            );
+        }
+        let res: NewSessionResponse = self.conn.request("session/new", params).await?;
         *self.session_id.lock().await = Some(res.session_id.to_string());
         {
             let mut st = self.state.lock().await;
