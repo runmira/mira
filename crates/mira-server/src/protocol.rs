@@ -346,6 +346,10 @@ pub enum ServerMsg {
         /// The single source of truth the composer renders from; the
         /// `agent_*` fields above remain for older clients.
         engine: crate::session_engine::SessionEngine,
+        /// A turn is in flight right now (opened mid-turn): the composer
+        /// shows Stop and the working indicator until it ends.
+        #[serde(default)]
+        running: bool,
     },
     /// The session's engine changed: a provider or agent was picked, an
     /// agent started, failed, or exited. Sent on every transition so the
@@ -553,6 +557,13 @@ pub enum ServerMsg {
     AskUserRequest {
         prompt_id: String,
         proposal: AskUserProposal,
+    },
+    /// A plan / question card was answered (by any window). Clients that
+    /// still show it open record the answer and close it.
+    PromptResolved {
+        prompt_id: String,
+        #[serde(flatten)]
+        response: PromptResponse,
     },
 
     // -------- subagent (child session) event forwarding --------

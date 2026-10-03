@@ -86,6 +86,12 @@ pub struct SessionSummary {
     pub archived: bool,
     #[serde(skip_serializing_if = "SessionUsageView::is_empty")]
     pub usage: SessionUsageView,
+    /// Made with "Fork from here": the chat it branched off (the sidebar
+    /// nests it there) and the message it was taken at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_at: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -273,6 +279,8 @@ pub async fn list_sessions(State(state): State<AppState>, Query(q): Query<ListQu
                 .as_ref()
                 .map(|p| p.driver_kind.clone()),
             usage: SessionUsageView::default(),
+            forked_from: None,
+            forked_at: None,
         });
     }
     Json(summaries).into_response()
@@ -343,6 +351,8 @@ async fn summarize_live(state: &AppState) -> Vec<SessionSummary> {
             archived: false,
             agent_driver,
             usage: SessionUsageView::default(),
+            forked_from: None,
+            forked_at: None,
         });
     }
     out
@@ -671,7 +681,51 @@ fn summarize_record(
             cached_input_tokens: r.usage.cached_input_tokens,
             rounds: r.usage.rounds,
         },
+        forked_from: r.forked_from.as_ref().map(|f| f.session_id.to_string()),
+        forked_at: r.forked_from.as_ref().map(|f| f.at.clone()),
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ForkBody {
+    /// The user message to fork at, as edit & resend identifies it: its
+    /// text, and which match counting from the latest.
+    text: String,
+    #[serde(default)]
+    occurrence: usize,
+}
+
+/// `POST /api/sessions/:id/fork` — "Fork from here": a new chat with this
+/// one's history through the given message's turn, nested under it in the
+/// sidebar. The files on disk are left as they are. Answers `{ "id": … }`.
+pub async fn fork_session(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(body): Json<ForkBody>,
+) -> Response {
+    let Some(store) = state.store.clone() else {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "forking needs saved chats (persistence is off)".to_string(),
+        );
+    };
+    let src = SessionId::from(id.as_str());
+    // A live chat may be a round ahead of its last save.
+    if let Some(slot) = state.slot(&src).await {
+        slot.session.read().await.clone().save_now().await;
+    }
+    let record = match store.load(&src).await {
+        Ok(r) => r,
+        Err(e) => return err(StatusCode::NOT_FOUND, format!("load: {e}")),
+    };
+    let fork = match record.fork_at(SessionId::new(), &body.text, body.occurrence) {
+        Ok(f) => f,
+        Err(e) => return err(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()),
+    };
+    if let Err(e) = store.save(&fork).await {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, format!("save: {e}"));
+    }
+    Json(serde_json::json!({ "id": fork.id.to_string() })).into_response()
 }
 
 fn detect_worktree_status(cwd: &std::path::Path) -> (Option<WorktreeMergeStatus>, Option<String>) {

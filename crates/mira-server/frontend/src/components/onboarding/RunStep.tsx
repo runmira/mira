@@ -13,7 +13,7 @@
  * allowed (skip; the app asks again when a chat needs one).
  */
 import { useEffect, useState } from 'react';
-import { Check, Copy, KeyRound, Loader2, Terminal } from 'lucide-react';
+import { Check, Copy, KeyRound, Loader2, RotateCw, Terminal } from 'lucide-react';
 import { getSettings, listEngines, putSettings, type EngineSnapshot } from '../../api';
 import type { SettingsView } from '../../types';
 import { PROVIDER_PRESETS } from '../../lib/providers';
@@ -81,29 +81,62 @@ export function RunStep({ onNext, onBack }: { onNext: () => void; onBack?: () =>
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Agents are probed in the background on the server: poll until the
-  // answer is in, briefly.
+  // Agents are probed in the background on the server, and each one's
+  // row fills in as its own probe ends. Poll until the sweep is done (a
+  // couple of minutes at most), and never leave a row spinning after that:
+  // what's still unanswered by then is shown as needing attention, with a
+  // way to check again.
+  const [round, setRound] = useState(0);
+  const [gaveUp, setGaveUp] = useState(false);
   useEffect(() => {
     let live = true;
     let tries = 0;
+    setGaveUp(false);
     const tick = () =>
-      listEngines(tries === 0).then((v) => {
-        if (!live) return;
-        setEngines(v.engines);
-        tries += 1;
-        if (!v.fresh && tries < 12) setTimeout(tick, 1200);
-      });
+      listEngines(tries === 0)
+        .then((v) => {
+          if (!live) return;
+          setEngines(v.engines);
+          tries += 1;
+          if (v.fresh) return;
+          if (tries < 120) setTimeout(tick, 1500);
+          else setGaveUp(true);
+        })
+        .catch(() => {
+          if (!live) return;
+          tries += 1;
+          if (tries < 120) setTimeout(tick, 2000);
+          else {
+            setEngines((e) => e ?? []);
+            setGaveUp(true);
+          }
+        });
     void tick();
+    return () => {
+      live = false;
+    };
+  }, [round]);
+  useEffect(() => {
+    let live = true;
     void getSettings().then((s) => live && setSettings(s)).catch(() => {});
     return () => {
       live = false;
     };
   }, []);
 
+  /** A row's state, once polling has given up on the slow ones. */
+  const statusOf = (e: EngineSnapshot) => {
+    const st = agentStatus(e);
+    return st === 'checking' && gaveUp ? 'problem' : st;
+  };
+  const reasonOf = (e: EngineSnapshot) =>
+    agentStatus(e) === 'checking' ? "Didn't answer in time." : 'reason' in e.state ? e.state.reason : '';
+
   const agents = (engines ?? [])
     .filter((e) => e.flavor === 'external')
     .filter((e) => FEATURED_AGENTS.includes(e.driver) || agentStatus(e) === 'ready')
     .sort((a, b) => Number(agentStatus(b) === 'ready') - Number(agentStatus(a) === 'ready'));
+  const needsAttention = agents.some((a) => statusOf(a) === 'problem');
   const connected = new Set(
     (settings?.providers ?? []).filter((p) => p.has_api_key || p.name === 'ollama').map((p) => p.name),
   );
@@ -169,7 +202,11 @@ export function RunStep({ onNext, onBack }: { onNext: () => void; onBack?: () =>
               </div>
             ) : (
               agents.map((a) => {
-                const st = agentStatus(a);
+                const st = statusOf(a);
+                const reason = st === 'problem' ? reasonOf(a) : '';
+                // A command in backticks ("Run `claude auth login`…") is
+                // offered as a copyable line under the reason.
+                const command = /`([^`]+)`/.exec(reason)?.[1];
                 return (
                   <div key={a.instance} className="rounded-xl border border-fg/[0.07] bg-shade/30 px-3 py-2.5">
                     <div className="flex items-center gap-2.5">
@@ -195,12 +232,25 @@ export function RunStep({ onNext, onBack }: { onNext: () => void; onBack?: () =>
                       </span>
                     </div>
                     {st === 'missing' && a.install_hint && <CopyLine text={a.install_hint} />}
-                    {st === 'problem' && 'reason' in a.state && (
-                      <p className="mt-1.5 text-[11px] leading-snug text-amber-200/80">{a.state.reason}</p>
+                    {st === 'problem' && reason && (
+                      <p className="mt-1.5 text-[11px] leading-snug text-amber-700 dark:text-amber-200/80">
+                        {reason.replace(/`/g, '')}
+                      </p>
                     )}
+                    {st === 'problem' && command && <CopyLine text={command} />}
                   </div>
                 );
               })
+            )}
+            {needsAttention && (
+              <button
+                type="button"
+                onClick={() => setRound((r) => r + 1)}
+                className="mt-0.5 inline-flex items-center gap-1.5 self-start rounded-md px-1.5 py-1 text-[11.5px] text-muted-foreground transition-colors hover:bg-fg/[0.05] hover:text-foreground"
+              >
+                <RotateCw className="size-3" />
+                Check again
+              </button>
             )}
           </div>
         </div>

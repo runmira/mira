@@ -186,6 +186,7 @@ pub(crate) async fn build_ready(slot: &SessionSlot, state: &AppState) -> ServerM
         agent_configured,
         title: sess.title().await,
         engine: crate::session_engine::current(state, slot).await,
+        running: slot.is_running().await,
     }
 }
 
@@ -277,7 +278,14 @@ async fn dispatch(
             prompt_id,
             response,
         } => {
-            if !crate::interactive::resolve(&slot.prompt_pending, &prompt_id, response).await {
+            if crate::interactive::resolve(&slot.prompt_pending, &prompt_id, response.clone()).await {
+                // Every window on this chat closes its copy of the card with
+                // the same answer — not only the one that answered.
+                let _ = slot.events_tx.send(ServerMsg::PromptResolved {
+                    prompt_id,
+                    response,
+                });
+            } else {
                 warn!(prompt_id, "prompt response for unknown id");
             }
         }
@@ -855,8 +863,32 @@ async fn dispatch(
                 None => false,
             };
             if agent_live {
+                // Stop must end the turn even when the agent doesn't say so
+                // itself (or says it late): otherwise the composer spins until
+                // the chat is reopened. Listen before cancelling so a prompt
+                // turn-end isn't missed.
+                let mut rx = slot.events_tx.subscribe();
                 if let Some(h) = &agent {
                     h.cancel_current_turn().await;
+                }
+                {
+                    let events = slot.events_tx.clone();
+                    tokio::spawn(async move {
+                        let ended = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                            loop {
+                                match rx.recv().await {
+                                    Ok(ServerMsg::AcpTurnEnd { .. }) => return true,
+                                    Err(broadcast::error::RecvError::Closed) => return false,
+                                    _ => {}
+                                }
+                            }
+                        })
+                        .await
+                        .unwrap_or(false);
+                        if !ended {
+                            crate::acp_host::AcpEventPort::new(events).turn_ended("cancelled");
+                        }
+                    });
                 }
                 let denied = approver::drain_pending_as_denied(&slot.pending).await;
                 let text = if denied > 0 {
@@ -1328,6 +1360,8 @@ async fn prompt_agent(
     // task: the WS reader must stay free to carry permission requests
     // and the cancel that a blocked turn would otherwise prevent.
     let events = slot.events_tx.clone();
+    spawn_quiet_agent_watchdog(&events);
+    track_agent_turn(slot);
     tokio::spawn(async move {
         match agent.prompt_text(&text).await {
             // `None` means a native agent, which announces its own
@@ -1338,11 +1372,91 @@ async fn prompt_agent(
             }
             Ok(None) => {}
             Err(e) => {
+                // The agent's own last words say why ("unknown option",
+                // "not logged in"); "stdin closed" alone leaves the user
+                // guessing. Give its stderr a moment to drain first.
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                let tail = agent.stderr_tail().await;
+                let said = tail
+                    .lines()
+                    .rev()
+                    .map(str::trim)
+                    .find(|l| !l.is_empty())
+                    .map(|l| l.chars().take(300).collect::<String>());
                 let _ = events.send(ServerMsg::Error {
-                    text: format!("agent turn failed: {e}"),
+                    text: match said {
+                        Some(said) => format!("agent turn failed: {e}. It said: {said}"),
+                        None => format!("agent turn failed: {e}"),
+                    },
                 });
                 // Nothing else will end this turn: the prompt never landed.
                 crate::acp_host::AcpEventPort::new(events).turn_ended("error");
+            }
+        }
+    });
+}
+
+/// Mark the slot as mid-turn until the agent's turn ends (however it ends:
+/// done, error, or a Stop), so a window that opens the chat meanwhile knows.
+fn track_agent_turn(slot: &Arc<SessionSlot>) {
+    use std::sync::atomic::Ordering;
+    let mut rx = slot.events_tx.subscribe();
+    slot.engine.agent_in_turn.store(true, Ordering::SeqCst);
+    let slot = slot.clone();
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(ServerMsg::AcpTurnEnd { .. }) | Err(broadcast::error::RecvError::Closed) => {
+                    break
+                }
+                _ => {}
+            }
+        }
+        slot.engine.agent_in_turn.store(false, Ordering::SeqCst);
+    });
+}
+
+/// An agent that says nothing at all after a prompt is usually waiting on
+/// something Mira can't see — a sign-in, a macOS keychain or permission
+/// dialog, a network it can't reach. Say so once instead of spinning in
+/// silence. Any frame from the agent (text, a tool, the turn ending) means
+/// it's alive and ends the watch.
+fn spawn_quiet_agent_watchdog(events: &tokio::sync::broadcast::Sender<ServerMsg>) {
+    const QUIET: std::time::Duration = std::time::Duration::from_secs(45);
+    let mut rx = events.subscribe();
+    let tx = events.clone();
+    tokio::spawn(async move {
+        let deadline = tokio::time::Instant::now() + QUIET;
+        loop {
+            match tokio::time::timeout_at(deadline, rx.recv()).await {
+                // The agent working on the turn: words, thoughts, tools, an
+                // approval it's waiting on, or the end.
+                Ok(Ok(
+                    ServerMsg::AcpText { .. }
+                    | ServerMsg::AcpThought { .. }
+                    | ServerMsg::AcpToolCall { .. }
+                    | ServerMsg::AcpToolCallUpdate { .. }
+                    | ServerMsg::AcpPlan { .. }
+                    | ServerMsg::AcpTurnEnd { .. }
+                    | ServerMsg::ApprovalRequest { .. }
+                    | ServerMsg::ToolStart { .. }
+                    | ServerMsg::Error { .. },
+                ))
+                | Ok(Err(broadcast::error::RecvError::Closed)) => return,
+                // Start-up chatter (modes, commands, engine status) and our
+                // own notices don't mean the turn is moving.
+                Ok(Ok(_)) => continue,
+                Ok(Err(broadcast::error::RecvError::Lagged(_))) => return,
+                Err(_) => {
+                    let _ = tx.send(ServerMsg::Warning {
+                        text: "The agent hasn't responded in 45 seconds. It may be waiting on \
+                               something outside Mira — a sign-in, a macOS permission or \
+                               keychain prompt, or the network. Try running it in a terminal \
+                               to see, or press Stop."
+                            .into(),
+                    });
+                    return;
+                }
             }
         }
     });

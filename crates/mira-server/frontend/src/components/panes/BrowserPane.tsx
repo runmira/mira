@@ -234,7 +234,13 @@ export function BrowserPane() {
         `/api/browser/embeddable?url=${encodeURIComponent(target)}`,
       );
       if (!res.ok) return { ok: true, reason: '', finalUrl: target };
-      return (await res.json()) as { ok: boolean; reason: string; finalUrl: string };
+      // The server's shape is `{ embeddable, reason, final_url }`.
+      const j = (await res.json()) as { embeddable?: boolean; reason?: string; final_url?: string };
+      return {
+        ok: j.embeddable !== false,
+        reason: j.reason ?? '',
+        finalUrl: j.final_url || target,
+      };
     } catch {
       // Probe unreachable: assume it frames and let the frame speak for
       // itself rather than blocking the user.

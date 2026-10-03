@@ -21,6 +21,15 @@ export function attachFilesToComposer(files: File | File[]): void {
   }
 }
 
+export const COMPOSE_TEXT_EVENT = 'mira:compose-text';
+
+/** Put `text` in the composer (after whatever is already typed) and focus
+ *  it — for panes that hand the user a ready prompt ("Fix this failure",
+ *  "Send to agent") without sending it behind their back. */
+export function composeText(text: string): void {
+  window.dispatchEvent(new CustomEvent<string>(COMPOSE_TEXT_EVENT, { detail: text }));
+}
+
 /** `data:image/png;base64,…` → `File`, so the whiteboard can hand its
  *  canvas export to `attachFilesToComposer`. */
 export async function dataUrlToFile(

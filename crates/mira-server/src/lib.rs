@@ -35,6 +35,9 @@ mod browse;
 mod browser;
 mod chat_import;
 pub mod checkpoints;
+mod aside;
+mod processes;
+mod tests_api;
 mod context_api;
 mod cwd;
 mod editors;
@@ -368,6 +371,22 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/api/terminals/:id", axum::routing::delete(terminal::kill))
         .route("/api/health", get(health))
         .route("/api/version", get(version))
+        .route("/api/aside", post(aside::ask))
+        .route("/api/sessions/:id/fork", post(sessions::fork_session))
+        .route(
+            "/api/processes",
+            get(processes::list).post(processes::start),
+        )
+        .route("/api/processes/:id/output", get(processes::output))
+        .route("/api/processes/:id/stop", post(processes::stop))
+        .route("/api/processes/:id/restart", post(processes::restart))
+        .route(
+            "/api/processes/:id",
+            axum::routing::delete(processes::forget),
+        )
+        .route("/api/ports/stop", post(processes::stop_port))
+        .route("/api/tests/detect", get(tests_api::detect))
+        .route("/api/tests/run", post(tests_api::run))
         .route(
             "/api/settings",
             get(settings::get_settings).put(settings::put_settings),

@@ -40,7 +40,7 @@ import {
 import { applyReduceMotion, getBoolPref, PREF_KEYS } from './lib/prefs';
 import { connect, type WsClient, type WsStatus } from './ws';
 import { costUsd, formatDollars, shortNum } from './lib/usage';
-import { getContextBreakdown, previewCheckpoint, restoreCheckpoint, undoRestore, type MessageRef, type RestoreChange, type Restored } from './api';
+import { forkSession, getContextBreakdown, previewCheckpoint, restoreCheckpoint, undoRestore, type MessageRef, type RestoreChange, type Restored } from './api';
 import { appendMemory, applyUndo, getBranchPr, getGitStatus, getSessionDiff, getSessionHistory, getSettings, gitCommit, gitPush, listCommands, listEngines, listSessions, listSkills, newSession, setSessionBackgroundMode, startReview, type BranchPrView, type EngineSnapshot, type GitStatusView, type SessionDiffView, type SkillView, type CommandInfo } from './api';
 import {
   ContextPanel,
@@ -56,6 +56,12 @@ import { Sidebar, type MainView } from './components/Sidebar';
 import { hasHiddenTitleBar } from './lib/desktop';
 import { RightPanelButton } from './components/RightPanelButton';
 import { attachFilesToComposer, dataUrlToFile } from './lib/attachBridge';
+import { Tip } from './components/ui/Tip';
+import { AsidePane } from './components/panes/AsidePane';
+import { ActivityPane, type ActivityTurn } from './components/panes/ActivityPane';
+import { DevicesPane } from './components/panes/DevicesPane';
+import { ProcessesPane } from './components/panes/ProcessesPane';
+import { TestsPane } from './components/panes/TestsPane';
 import { FilePicker } from './components/FilePicker';
 import {
   TOOL_PANE_DEFS,
@@ -99,6 +105,11 @@ import {
   Cpu,
   Sparkles,
   Zap,
+  MessageCircleQuestion,
+  FlaskConical,
+  Activity,
+  Smartphone,
+  GitFork,
 } from 'lucide-react';
 import { CommandPalette, type PaletteAction } from './components/CommandPalette';
 import { splitFileRef } from './lib/refs';
@@ -899,6 +910,15 @@ export default function App() {
       model: model || null,
     });
   }, []);
+  /** Switch this window to another chat. The composer stops showing the
+   *  last chat's turn at once; the new chat's `ready` turns Stop back on if
+   *  a turn is running there. */
+  function attachSession(id: string) {
+    setBusy(false);
+    busyRef.current = false;
+    setThinking(false);
+    wsRef.current?.attach(id);
+  }
   function forkAcpAgent() {
     wsRef.current?.send({ type: 'acp_fork' });
   }
@@ -906,6 +926,7 @@ export default function App() {
     // A compaction is a turn like any other: busy until its end arrives, or
     // the composer would take input for a session that is summarizing.
     setBusy(true);
+    busyRef.current = true;
     setThinking(true);
     wsRef.current?.send({ type: 'acp_compact', focus: focus?.trim() || null });
   }
@@ -939,6 +960,11 @@ export default function App() {
   const turnStartRef = useRef<number | null>(null);
   const [expandedTurns, setExpandedTurns] = useState<Set<number>>(new Set());
   const [busy, setBusy] = useState<boolean>(false);
+  // Read by the frame handler, which is a long-lived closure: a frame that
+  // arrives after the turn ended (a cancelled tool's result, a late
+  // turn_complete) must not restart the working indicator.
+  const busyRef = useRef(false);
+  busyRef.current = busy;
   const [thinking, setThinking] = useState<boolean>(false);
   // When text tokens go quiet mid-turn — typically because the model is
   // emitting tool-call deltas that don't surface as `token` events — we
@@ -1076,7 +1102,7 @@ export default function App() {
     const onOpen = (e: Event) => {
       const id = (e as CustomEvent<string>).detail;
       if (!id) return;
-      wsRef.current?.attach(id);
+      attachSession(id);
       setMainView('chat');
     };
     window.addEventListener('mira:open-session', onOpen);
@@ -1432,8 +1458,11 @@ export default function App() {
         setRateLimit(null);
         setTasks(msg.tasks ?? []);
         setGoal(msg.goal ?? null);
-        setBusy(false);
-        setThinking(false);
+        // Opened mid-turn: show Stop and the working indicator until the
+        // turn's end arrives, instead of an idle composer over a live reply.
+        setBusy(!!msg.running);
+        busyRef.current = !!msg.running;
+        setThinking(!!msg.running);
         clearThinkingIdle();
         setSidebarRefresh((n) => n + 1);
         // Refresh the skill roster on every Ready — a cwd swap may
@@ -1503,8 +1532,8 @@ export default function App() {
         break;
       case 'tool_end':
         // The model usually starts thinking again after a tool result comes
-        // back before the next text token arrives.
-        setThinking(true);
+        // back before the next text token arrives — while the turn lasts.
+        if (busyRef.current) setThinking(true);
         setEntries((prev) => attachToolResult(prev, msg.result));
         agentTerminal.commandEnd(msg.result.call_id, msg.result.content, !!msg.result.is_error);
         // Piggyback: task_* tools ship the current task or full list in
@@ -1514,8 +1543,9 @@ export default function App() {
         break;
       case 'turn_complete':
         // A turn ended (assistant round complete). More may follow if there
-        // were tool calls; if not, `done` will clear us right after.
-        setThinking(true);
+        // were tool calls; if not, `done` will clear us right after. A late
+        // one after Stop must not set the spinner going again.
+        if (busyRef.current) setThinking(true);
         // Belt-and-suspenders sidebar refresh — the onSend-triggered
         // refetch can race the harness's first checkpoint on a very
         // fresh session; this fires once the first assistant round has
@@ -1538,6 +1568,7 @@ export default function App() {
         }
         turnBaseRef.current = null;
         setBusy(false);
+        busyRef.current = false;
         setThinking(false);
         clearThinkingIdle();
         setEntries((prev) => settleTools(sealThought(prev)));
@@ -1879,6 +1910,24 @@ export default function App() {
           return attachPlanProposal(prev, msg.prompt_id, msg.plan);
         });
         break;
+      case 'prompt_resolved':
+        // Answered in another window (or tab, or device): close this copy
+        // with the same answer instead of leaving it waiting.
+        if (msg.kind === 'ask_user') {
+          const decision: AskUserDecision = msg.cancelled
+            ? { cancelled: true }
+            : { cancelled: false, answers: msg.answers ?? [] };
+          setEntries((prev) => recordAskUserDecision(prev, msg.prompt_id, decision));
+        } else if (msg.kind === 'plan') {
+          setEntries((prev) =>
+            recordPlanDecision(prev, msg.prompt_id, {
+              approved: !!msg.approved,
+              steps: msg.steps ?? undefined,
+              note: msg.note ?? undefined,
+            }),
+          );
+        }
+        break;
       case 'ask_user_request':
         // Same race-guard pattern as plan_request — attach immediately when
         // the tool_start already landed; stash otherwise.
@@ -1924,6 +1973,7 @@ export default function App() {
         // rate-limited turn looks like: the agent is long finished, the UI
         // just never hears about it.
         setBusy(false);
+        busyRef.current = false;
         setThinking(false);
         clearThinkingIdle();
         acpStopRef.current = null;
@@ -2373,6 +2423,7 @@ export default function App() {
       return next;
     });
     setBusy(true);
+    busyRef.current = true;
     setThinking(true);
     // The server routes by the session's engine: a session on an agent
     // sends this to the agent (starting it if needed, with the
@@ -2418,6 +2469,20 @@ export default function App() {
       setRestoreNote({ text: (e as Error).message, error: true });
     }
   }
+  /** "Fork from here": copy the chat through this message's turn into a
+   *  new chat (nested under this one in the sidebar) and switch to it. */
+  async function forkAt(userIdx: number) {
+    const ref = messageRefAt(userIdx);
+    if (!ref || !sessionId) return;
+    try {
+      const id = await forkSession(sessionId, ref);
+      setSidebarRefresh((n) => n + 1);
+      attachSession(id);
+    } catch (e) {
+      setRestoreNote({ text: `Couldn't fork: ${(e as Error).message}`, error: true });
+    }
+  }
+
   async function doRestore(run: () => Promise<Restored>, verb: string) {
     try {
       const r = await run();
@@ -2452,6 +2517,7 @@ export default function App() {
       return clone;
     });
     setBusy(true);
+    busyRef.current = true;
     setThinking(true);
     wsRef.current?.send({ type: 'resend', original, occurrence, text });
   }
@@ -2467,6 +2533,7 @@ export default function App() {
   const stableSetMode = useStableCallback(onSetMode);
   const editMessage = useStableCallback((entry: Entry, text: string) => onResend(entries.indexOf(entry), text));
   const restoreMessage = useStableCallback((entry: Entry) => void askRestore(entries.indexOf(entry)));
+  const forkMessage = useStableCallback((entry: Entry) => void forkAt(entries.indexOf(entry)));
   const retryMessage = useStableCallback((entry: Entry) => {
     const at = entries.indexOf(entry);
     for (let i = at - 1; i >= 0; i--) {
@@ -2480,8 +2547,15 @@ export default function App() {
   // Changes only with `busy`: every message's action row reads this, and a
   // value that changed per token would re-render all of them.
   const messageActions = useMemo<MessageActions>(
-    () => ({ busy, openImage: setLightbox, edit: editMessage, restore: restoreMessage, retry: retryMessage }),
-    [busy, editMessage, restoreMessage, retryMessage],
+    () => ({
+      busy,
+      openImage: setLightbox,
+      edit: editMessage,
+      restore: restoreMessage,
+      retry: retryMessage,
+      fork: acpDriver ? null : forkMessage,
+    }),
+    [busy, editMessage, restoreMessage, retryMessage, forkMessage, acpDriver],
   );
 
   function onSetMode(m: Mode) { wsRef.current?.send({ type: 'set_mode', mode: m }); }
@@ -2549,7 +2623,7 @@ export default function App() {
       // and published a Ready on ITS channel. Our WS forwarder is still
       // subscribed to the previous slot — attach so we start receiving
       // the new slot's frames (Ready + subsequent tokens).
-      wsRef.current?.attach(id);
+      attachSession(id);
     } catch (e) {
       setEntries((prev) => [...prev, { kind: 'error', text: `new chat: ${(e as Error).message}` }]);
     }
@@ -2616,6 +2690,11 @@ export default function App() {
     { id: 'terminal', group: 'View', label: 'Toggle terminal', icon: SquareTerminal, shortcut: keyFor('terminal.toggle'), run: () => setTerminal(!terminalOpen) },
     { id: 'browser', group: 'View', label: 'Open browser', icon: Globe2, keywords: ['chrome', 'web'], run: () => { setMainView('chat'); openToolPane('browser'); } },
     { id: 'whiteboard', group: 'View', label: 'Open whiteboard', icon: Pencil, keywords: ['sketch', 'draw'], run: () => { setMainView('chat'); openToolPane('whiteboard'); } },
+    { id: 'aside', group: 'View', label: 'Ask aside', icon: MessageCircleQuestion, keywords: ['side question', 'btw', 'quick question'], run: () => { setMainView('chat'); openToolPane('aside'); } },
+    { id: 'processes', group: 'View', label: 'Open processes', icon: SquareTerminal, keywords: ['dev server', 'ports', 'logs', 'background'], run: () => { setMainView('chat'); openToolPane('processes'); } },
+    { id: 'tests', group: 'View', label: 'Open tests', icon: FlaskConical, keywords: ['run tests', 'failures', 'test runner'], run: () => { setMainView('chat'); openToolPane('tests'); } },
+    { id: 'activity', group: 'View', label: 'Open activity', icon: Activity, keywords: ['timeline', 'history', 'restore', 'changes'], run: () => { setMainView('chat'); openToolPane('activity'); } },
+    { id: 'devices', group: 'View', label: 'Open device preview', icon: Smartphone, keywords: ['responsive', 'mobile', 'iphone', 'ipad'], run: () => { setMainView('chat'); openToolPane('devices'); } },
     { id: 's-general', group: 'Settings', label: 'General settings', icon: Cog, shortcut: keyFor('settings.toggle'), run: goSettings('general') },
     { id: 's-appearance', group: 'Settings', label: 'Appearance', icon: Palette, keywords: ['theme', 'light', 'dark', 'motion'], run: goSettings('appearance') },
     {
@@ -2694,6 +2773,22 @@ export default function App() {
   }, [turns]);
 
   // Jump the transcript pane to a minimap turn.
+  // The Activity pane's cards: one per turn opened by a user message, keyed
+  // like the minimap so "Jump to message" lands on the same anchor.
+  const activityTurns = useMemo<ActivityTurn[]>(() => {
+    const out: ActivityTurn[] = [];
+    turns.forEach((turn, i) => {
+      if (turn.user?.kind !== 'msg' || turn.user.msg.role !== 'user') return;
+      out.push({
+        id: `turn-${i}`,
+        userIdx: entries.indexOf(turn.user),
+        text: parseSentAttachments(turn.user.msg.content ?? '').text.trim(),
+        body: turn.body,
+      });
+    });
+    return out;
+  }, [turns, entries]);
+
   const jumpToMinimapTurn = useCallback((id: string) => {
     const pane = paneRef.current;
     if (!pane) return;
@@ -2987,7 +3082,7 @@ export default function App() {
           onOpenSettings={() => openSettings()}
           onOpenPicker={() => setPickerOpen(true)}
           onSessionLoaded={() => { /* Ready broadcast refreshes + jumps to chat */ }}
-          onAttachSession={(id) => wsRef.current?.attach(id)}
+          onAttachSession={(id) => attachSession(id)}
           onSetBackgroundMode={async (id, mode) => {
             await setSessionBackgroundMode(id, mode);
             setSidebarRefresh((n) => n + 1);
@@ -3131,7 +3226,7 @@ export default function App() {
                   configured === false && !acpDriver ? null : <EmptyState
                     cwd={cwd}
                     onPrompt={(text) => onSend(text)}
-                    onOpenSession={(id) => wsRef.current?.attach(id)}
+                    onOpenSession={(id) => attachSession(id)}
                   />
                 ) : (
                   <div data-transcript-column className="mx-auto flex max-w-3xl flex-col gap-2">
@@ -3325,7 +3420,7 @@ export default function App() {
               sessionId={sessionId}
               onAgentCompact={compactAcpAgent}
               onAgentFork={forkAcpAgent}
-              onAgentReverted={() => wsRef.current?.attach(sessionId)}
+              onAgentReverted={() => attachSession(sessionId)}
               onAcpModes={acpModes?.available ?? null}
               onAcpCurrentMode={acpModes?.current ?? null}
               onPickAgentMode={(m) => {
@@ -3338,7 +3433,7 @@ export default function App() {
               }}
               agentDriving={acpDriver != null}
               onOpenPicker={() => setPickerOpen(true)}
-              onCwdSwitched={(_path, id) => { if (id) wsRef.current?.attach(id); }}
+              onCwdSwitched={(_path, id) => { if (id) attachSession(id); }}
               environment={environment}
               environments={environments}
               envSwitching={envSwitching}
@@ -3346,7 +3441,14 @@ export default function App() {
                 setEnvSwitching(`switching to ${target}…`);
                 wsRef.current?.send({ type: 'environment', target });
               }}
-              onInterrupt={() => wsRef.current?.send({ type: 'interrupt' })}
+              onInterrupt={() => {
+                wsRef.current?.send({ type: 'interrupt' });
+                // Settle the composer now; the server's turn end follows
+                // (within a few seconds even for an agent that never says).
+                setBusy(false);
+                busyRef.current = false;
+                setThinking(false);
+              }}
               onNewChat={onNewChat}
               onOpenSettings={() => openSettings()}
               onRunReview={runReview}
@@ -3500,6 +3602,33 @@ export default function App() {
           onWhiteboardSend={(png) => void sendWhiteboardToChat(png)}
           onOpenPane={openToolPane}
           onBrowseFile={() => setPanelFilePickerOpen(true)}
+          renderPane={(kind) => {
+            switch (kind) {
+              case 'aside':
+                return <AsidePane sessionId={sessionId} entries={entries} agentBusy={busy} />;
+              case 'processes':
+                return <ProcessesPane sessionId={sessionId} onPreview={() => openToolPane('devices')} />;
+              case 'tests':
+                return <TestsPane sessionId={sessionId} cwd={cwd ?? ''} />;
+              case 'activity':
+                return (
+                  <ActivityPane
+                    turns={activityTurns}
+                    busy={busy}
+                    onJump={(id) => {
+                      setMainView('chat');
+                      jumpToMinimapTurn(id);
+                    }}
+                    onRestore={(idx) => void askRestore(idx)}
+                    onOpenFile={(path, preview) => openFileTab(path, preview)}
+                  />
+                );
+              case 'devices':
+                return <DevicesPane />;
+              default:
+                return null;
+            }
+          }}
           activeCallId={activeAgentTab}
           cwd={cwd ?? ''}
           onSelectTab={setActiveAgentTab}
@@ -3559,7 +3688,7 @@ export default function App() {
         onOpenChange={setPaletteOpen}
         actions={paletteActions}
         onOpenSession={(id) => {
-          wsRef.current?.attach(id);
+          attachSession(id);
           setMainView('chat');
         }}
       />
@@ -3613,7 +3742,7 @@ export default function App() {
           // the freshly-published Ready lands in our transcript — without
           // this, the socket keeps forwarding the previous slot's frames
           // and the UI silently stays on the old folder.
-          if (id) wsRef.current?.attach(id);
+          if (id) attachSession(id);
         }}
       />
       <ReviewPanel
@@ -4341,10 +4470,23 @@ function WorkedForChip({
    *  no-tool answer). */
   activity: string;
 }) {
+  // The turn around this chip is memoized and only re-renders when its
+  // entries change, so a live count can't ride the parent's tick (it sat
+  // at "0s" while the thinking line below counted up). Tick here instead,
+  // from the moment the given duration was measured.
+  const live = active && !waitingForUser;
+  const measuredAt = useMemo(() => Date.now(), [durationMs]);
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (!live) return;
+    const t = setInterval(() => setTick((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, [live]);
+  const shownMs = live ? durationMs + (Date.now() - measuredAt) : durationMs;
   const durationLabel = waitingForUser
     ? 'Waiting for you'
     : active
-      ? `Working… ${formatDuration(durationMs)}`
+      ? `Working… ${formatDuration(shownMs)}`
       : `Worked for ${formatDuration(durationMs)}`;
   const dot = waitingForUser
     ? 'bg-amber-400'
@@ -4968,6 +5110,9 @@ type MessageActions = {
   retry: (entry: Entry) => void;
   /** Offer to put the files back the way they were before this message. */
   restore: (entry: Entry) => void;
+  /** New chat with the history through this message's turn. `null` when
+   *  this chat can't be forked (an external agent drives it). */
+  fork: ((entry: Entry) => void) | null;
   /** Show an image full-screen. */
   openImage: (src: string) => void;
 };
@@ -4996,34 +5141,43 @@ function turnStatsLabel(t: TurnStats): string {
 
 function ActionButton({
   title,
+  hint,
+  align = 'center',
   onClick,
   disabled,
   children,
 }: {
   title: string;
+  /** A second, quieter line under the label. */
+  hint?: string;
+  /** Where the tip sits against the button: `end` for rows at the right
+   *  edge (your messages) so it never runs off the transcript. */
+  align?: 'start' | 'center' | 'end';
   onClick: () => void;
   disabled?: boolean;
   children: React.ReactNode;
 }) {
   return (
-    <button
-      type="button"
-      title={title}
-      aria-label={title}
-      onClick={onClick}
-      disabled={disabled}
-      className="rounded-md p-1 text-muted-foreground/60 transition-colors hover:bg-accent/50 hover:text-foreground disabled:pointer-events-none disabled:opacity-30"
-    >
-      {children}
-    </button>
+    <Tip label={title} hint={hint} align={align}>
+      <button
+        type="button"
+        aria-label={title}
+        onClick={onClick}
+        disabled={disabled}
+        className="rounded-md p-1 text-muted-foreground/60 transition-colors hover:bg-accent/50 hover:text-foreground disabled:pointer-events-none disabled:opacity-30"
+      >
+        {children}
+      </button>
+    </Tip>
   );
 }
 
-function CopyButton({ text }: { text: string }) {
+function CopyButton({ text, align }: { text: string; align?: 'start' | 'center' | 'end' }) {
   const [copied, setCopied] = useState(false);
   return (
     <ActionButton
       title={copied ? 'Copied' : 'Copy'}
+      align={align}
       onClick={() => {
         void navigator.clipboard.writeText(text).then(() => {
           setCopied(true);
@@ -5043,9 +5197,15 @@ function AssistantActions({ entry, text }: { entry: Entry; text: string }) {
   if (!text.trim()) return null;
   return (
     <div className="mt-1 flex items-center gap-0.5 opacity-0 transition-opacity group-hover/msg:opacity-100 focus-within:opacity-100">
-      <CopyButton text={text} />
+      <CopyButton text={text} align="start" />
       {actions && (
-        <ActionButton title="Retry" disabled={actions.busy} onClick={() => actions.retry(entry)}>
+        <ActionButton
+          title="Retry"
+          hint="Send the message before this reply again"
+          align="start"
+          disabled={actions.busy}
+          onClick={() => actions.retry(entry)}
+        >
           <RotateCw className="size-3.5" />
         </ActionButton>
       )}
@@ -5129,10 +5289,12 @@ function UserMessage({
         {children}
       </div>
       <div className="mt-1 flex items-center gap-0.5 opacity-0 transition-opacity group-hover/msg:opacity-100 focus-within:opacity-100">
-        <CopyButton text={text} />
+        <CopyButton text={text} align="end" />
         {actions && (
           <ActionButton
             title="Edit"
+            hint="Change this message and send it again"
+            align="end"
             disabled={actions.busy}
             onClick={() => {
               setDraft(raw);
@@ -5144,11 +5306,23 @@ function UserMessage({
         )}
         {actions && (
           <ActionButton
-            title="Restore files to before this message"
+            title="Restore files"
+            hint="Put files back as they were before this message"
+            align="end"
             disabled={actions.busy}
             onClick={() => actions.restore(entry)}
           >
             <History className="size-3.5" />
+          </ActionButton>
+        )}
+        {actions?.fork && (
+          <ActionButton
+            title="Fork from here"
+            hint="New chat with everything through this reply"
+            align="end"
+            onClick={() => actions.fork?.(entry)}
+          >
+            <GitFork className="size-3.5" />
           </ActionButton>
         )}
       </div>

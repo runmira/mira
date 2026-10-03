@@ -345,6 +345,7 @@ async fn import_one(
             active: true,
             launch: None,
         }),
+        forked_from: None,
     };
     let log = store.agent_log_path(&id).ok_or("no transcript storage")?;
     for line in transcript_lines(chat) {

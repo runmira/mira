@@ -29,7 +29,9 @@ pub use goal::{
     DEFAULT_MAX_ITERATIONS,
 };
 pub use hooks::{HookEvent, HookOutcome, HookPermission, HookRunner};
-pub use persist::{FileStore, SessionRecord, SessionStore, StoreError, TurnMeta, UsageTotals};
+pub use persist::{
+    FileStore, ForkError, ForkPoint, SessionRecord, SessionStore, StoreError, TurnMeta, UsageTotals,
+};
 pub use session::{
     profile_for_mode, AutoExtractConfig, MemoryRetrievalConfig, Session, SessionConfig,
 };

@@ -19,7 +19,8 @@
 //! request it has in flight and answers all of them on the way out.
 
 use agent_client_protocol::schema::v1::{
-    ClientCapabilities, ContentBlock, InitializeRequest, InitializeResponse, NewSessionRequest,
+    ClientCapabilities, ContentBlock, ElicitationCapabilities, ElicitationFormCapabilities,
+    InitializeRequest, InitializeResponse, NewSessionRequest,
     NewSessionResponse, PromptRequest, PromptResponse, StopReason,
 };
 use agent_client_protocol::schema::ProtocolVersion;
@@ -53,6 +54,13 @@ pub struct ClientCaps {
     pub fs_read: bool,
     pub fs_write: bool,
     pub terminal: bool,
+    /// Form elicitation (`elicitation/create`, `mode: "form"`): the agent
+    /// may ask the user structured questions, which the host shows as
+    /// Mira's question card. OpenCode only asks its `question` tool's
+    /// questions — and its plan prompts — when this is advertised; without
+    /// it they are cancelled on the spot ("The user dismissed this
+    /// question").
+    pub elicitation_form: bool,
 }
 
 impl ClientCaps {
@@ -63,6 +71,10 @@ impl ClientCaps {
         caps.fs.read_text_file = self.fs_read;
         caps.fs.write_text_file = self.fs_write;
         caps.terminal = self.terminal;
+        if self.elicitation_form {
+            caps.elicitation =
+                Some(ElicitationCapabilities::new().form(ElicitationFormCapabilities::new()));
+        }
         caps
     }
 }
@@ -528,6 +540,7 @@ mod tests {
             fs_read: true,
             fs_write: false,
             terminal: true,
+            elicitation_form: true,
         })
         .await;
         let waiter = tokio::spawn({
@@ -540,6 +553,7 @@ mod tests {
         assert_eq!(caps["fs"]["readTextFile"], true);
         assert_eq!(caps["fs"]["writeTextFile"], false);
         assert_eq!(caps["terminal"], true);
+        assert_eq!(caps["elicitation"]["form"], json!({}));
         r.reply(frame["id"].clone(), init_ok()).await;
         waiter.await.unwrap().expect("initialize");
     }

@@ -15,13 +15,28 @@ use tracing::debug;
 
 use crate::state::AppState;
 
-/// Hard cap on what we'll read. Anything bigger fails cleanly rather than
-/// truncating silently — the user picked the wrong file.
+/// Cap for attaching a file to a message: anything bigger fails cleanly
+/// rather than truncating silently — the user picked the wrong file, and a
+/// 5 MB log would swamp the model's context.
 const MAX_BYTES: u64 = 200 * 1024;
+/// Cap for showing a file in the viewer (`?purpose=view`): nothing goes to
+/// the model, so only rendering cost matters.
+const MAX_VIEW_BYTES: u64 = 2 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 pub struct FileQuery {
     pub path: String,
+    /// `view` for the file viewer (larger cap); absent for attachments.
+    #[serde(default)]
+    pub purpose: Option<String>,
+}
+
+fn human(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{} KB", bytes.div_ceil(1024))
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -88,15 +103,23 @@ pub async fn read_file(State(state): State<AppState>, Query(q): Query<FileQuery>
             format!("not a regular file: {}", path.display()),
         );
     }
-    if meta.len() > MAX_BYTES {
-        return err(
-            StatusCode::PAYLOAD_TOO_LARGE,
+    let viewing = q.purpose.as_deref() == Some("view");
+    let cap = if viewing { MAX_VIEW_BYTES } else { MAX_BYTES };
+    if meta.len() > cap {
+        let msg = if viewing {
             format!(
-                "file is {} bytes; cap is {} bytes (paste a subset by hand for now)",
-                meta.len(),
-                MAX_BYTES
-            ),
-        );
+                "This file is {} — too large to preview here (the limit is {}). Open it in your editor.",
+                human(meta.len()),
+                human(cap)
+            )
+        } else {
+            format!(
+                "This file is {} — attachments are limited to {}. Attach a smaller file, or paste the part that matters.",
+                human(meta.len()),
+                human(cap)
+            )
+        };
+        return err(StatusCode::PAYLOAD_TOO_LARGE, msg);
     }
 
     let bytes = match std::fs::read(&path) {
