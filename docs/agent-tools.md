@@ -21,25 +21,6 @@ form each agent understands, with tools shaped so a model uses them well.
 | Codex | `codex app-server` (JSON-RPC) | browser + processes, via `thread/start` `config.mcp_servers` | not yet tried against a live Codex |
 
 
-
-- **One app-owned MCP endpoint** (`127.0.0.1:<port>/mcp`, server key
-  `t3-code`), authenticated per provider session with a short-lived bearer
-  token that expires when idle and is revoked when the session ends.
-- **Injected natively per agent**
-  - Codex: per thread, in `thread/start`'s `config.mcp_servers.t3-code`
-    (`url` + `http_headers.Authorization`).
-  - Claude: an `http` entry in `mcpServers`, plus `allowedTools:
-    ["mcp__t3-code__*"]` so its own tools don't prompt.
-  - ACP: `mcpServers` on `session/new` / `load` / `fork`.
-  - Agents without HTTP MCP: `t3 acp-mcp-bridge`, a stdio MCP server that
-    relays each JSON-RPC line to the HTTP endpoint.
-- **Granular browser tools** ("preview" toolkit): `preview_open`,
-  `preview_navigate`, `preview_click`, `preview_type`, `preview_press`,
-  `preview_scroll`, `preview_snapshot`, `preview_evaluate`,
-  `preview_wait_for`, `preview_resize`, recording… — one verb per tool.
-- **Orchestration tools**: delegate a task to a sub-agent on any provider,
-  manage threads.
-
 ## Target design
 
 ### One tool server, per chat
