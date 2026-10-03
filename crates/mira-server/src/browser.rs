@@ -301,16 +301,29 @@ fn grants() -> &'static std::sync::Mutex<std::collections::HashMap<String, Grant
     G.get_or_init(Default::default)
 }
 
-/// A fresh token for an agent session in `session`. Earlier tokens for the
-/// chat are revoked — one agent runs in a chat at a time.
+/// The token for agents in `session` under `gate`: the chat's existing one
+/// while it's live, otherwise a new one. Stable across agent restarts on
+/// purpose — an agent (re)started in the chat, or one still holding the
+/// token from before, keeps working; revoking on every stop handed agents
+/// tokens that were dead on arrival (401). Tokens end when the chat is
+/// deleted or after `GRANT_IDLE` unused.
 pub fn issue_mcp_grant(session: &str, gate: McpGate) -> String {
+    if let Ok(mut g) = grants().lock() {
+        g.retain(|_, e| e.last_used.elapsed() < GRANT_IDLE);
+        if let Some((token, e)) = g
+            .iter_mut()
+            .find(|(_, e)| e.grant.session == session && e.grant.gate == gate)
+        {
+            e.last_used = std::time::Instant::now();
+            return token.clone();
+        }
+    }
     let token = format!(
         "{}{}",
         uuid::Uuid::new_v4().simple(),
         uuid::Uuid::new_v4().simple()
     );
     if let Ok(mut g) = grants().lock() {
-        g.retain(|_, e| e.grant.session != session);
         g.insert(
             token.clone(),
             GrantEntry {
@@ -325,7 +338,7 @@ pub fn issue_mcp_grant(session: &str, gate: McpGate) -> String {
     token
 }
 
-/// Revoke a chat's tokens (its agent stopped, or the chat was deleted).
+/// Revoke a chat's tokens (the chat was deleted).
 pub fn revoke_mcp_grants(session: &str) {
     if let Ok(mut g) = grants().lock() {
         g.retain(|_, e| e.grant.session != session);
@@ -947,12 +960,23 @@ mod grant_tests {
             Some(McpGrant { session: "sess_grant_a".into(), gate: McpGate::Mira })
         );
         assert_eq!(grant_for("not-a-token"), None);
-        // A new agent in the chat replaces the old token.
+        // An agent restarted in the chat gets the same, still-valid token.
+        assert_eq!(issue_mcp_grant("sess_grant_a", McpGate::Mira), t);
+        assert!(grant_for(&t).is_some());
+        // Another gate is another token; both stay valid.
         let t2 = issue_mcp_grant("sess_grant_a", McpGate::Agent);
-        assert_eq!(grant_for(&t), None);
+        assert_ne!(t2, t);
+        assert!(grant_for(&t).is_some());
         assert_eq!(grant_for(&t2).unwrap().gate, McpGate::Agent);
+        // Deleting the chat ends them.
         revoke_mcp_grants("sess_grant_a");
+        assert_eq!(grant_for(&t), None);
         assert_eq!(grant_for(&t2), None);
+        // Another chat's token never resolves to this one.
+        let other = issue_mcp_grant("sess_grant_c", McpGate::Mira);
+        assert_ne!(other, t);
+        assert_eq!(grant_for(&other).unwrap().session, "sess_grant_c");
+        revoke_mcp_grants("sess_grant_c");
     }
 
     #[test]

@@ -82,8 +82,8 @@ actions follow the browser tool's own policy, as for Mira's model.
 - Loopback only (the server binds 127.0.0.1).
 - **Per-session tokens** in an `Authorization: Bearer` header (never the
   URL, so they don't end up in agent configs or logs). A token names one
-  chat and its gate; it expires after 12 h unused and is revoked when the
-  agent stops or the chat is deleted. The stdio bridge reads it from
+  chat and its gate, is reused by every agent started in that chat, and
+  ends when the chat is deleted or after 12 h unused. The stdio bridge reads it from
   `MIRA_MCP_TOKEN`, not argv. `/mcp` without a live token is a 401.
 
 ## Phases

@@ -1409,8 +1409,8 @@ pub async fn revert_agent_turn(
 
 /// Stop whatever agent `slot` is running.
 pub async fn stop_agent(slot: &Arc<SessionSlot>) -> bool {
-    // Its tool-server token goes with it.
-    crate::browser::revoke_mcp_grants(&slot.id.to_string());
+    // The chat's tool-server token stays: the next agent here reuses it
+    // (it ends when the chat is deleted, or goes unused for 12 h).
     match slot.acp_agent.write().await.take() {
         Some(prev) => {
             prev.stop().await;
