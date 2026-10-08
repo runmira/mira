@@ -15,7 +15,7 @@ import { TurnChanges } from './components/TurnChanges';
 import { composeQuote, setAsidePassage } from './lib/attachBridge';
 import { VirtualTranscript, hasTranscriptPosition } from './components/VirtualTranscript';
 import { appendNativeText, boundedOutput, appendNativeToolOutput, applyNativeMetadata } from './lib/nativeStream';
-import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createContext, memo, Suspense, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   RotateCw,
@@ -71,9 +71,14 @@ import {
   useContextPanelFits,
 } from './components/ContextPanel';
 import { extractAgentId } from './components/AgentCard';
-import { SettingsSurface } from './components/Settings';
-import { PluginsPanel } from './components/Plugins';
-import { PullRequestPanel } from './components/PullRequestPanel';
+import { lazyNamed, useLatch } from './lib/lazy';
+// Views that aren't on screen at first load get their own chunks (issue #72).
+const SettingsSurface = lazyNamed(() => import('./components/Settings'), 'SettingsSurface');
+const PluginsPanel = lazyNamed(() => import('./components/Plugins'), 'PluginsPanel');
+const PullRequestPanel = lazyNamed(() => import('./components/PullRequestPanel'), 'PullRequestPanel');
+const ReviewChanges = lazyNamed(() => import('./components/ReviewChanges'), 'ReviewChanges');
+const SubagentPanel = lazyNamed(() => import('./components/SubagentPanel'), 'SubagentPanel');
+const TerminalPanel = lazyNamed(() => import('./components/TerminalPanel'), 'TerminalPanel');
 import { Sidebar, type MainView } from './components/Sidebar';
 import { ProjectSwitcher } from './components/ProjectSwitcher';
 import { hasHiddenTitleBar, isDesktop, pickFolder } from './lib/desktop';
@@ -106,11 +111,9 @@ import { UserRichText } from './components/UserRichText';
 import { FolderPicker } from './components/FolderPicker';
 import { AssistantContent } from './components/AssistantContent';
 import { ThoughtBlock } from './components/ThoughtBlock';
-import { ReviewChanges } from './components/ReviewChanges';
 import { EditorPicker } from './components/EditorPicker';
 import { TimelineMinimap, type MinimapItem } from './components/TimelineMinimap';
 import { ImageLightbox } from './components/ImageLightbox';
-import { TerminalPanel } from './components/TerminalPanel';
 import * as agentTerminal from './lib/agentTerminal';
 import {
   Bot,
@@ -213,7 +216,7 @@ import { AgentCard, AgentGroup } from './components/AgentCard';
 import { DelegateCard, isDelegateTaskName } from './components/DelegateCard';
 import type { DelegateStep } from './components/DelegateCard';
 import miraLogo from './assets/mira-logo.png';
-import { SubagentPanel, type SubagentTab, type FilePanelTab } from './components/SubagentPanel';
+import type { SubagentTab, FilePanelTab } from './components/SubagentPanel';
 import { TaskListPanel } from './components/TaskListPanel';
 import { GoalPanel } from './components/GoalPanel';
 import { categoryFor, countsByCategory, countsPhrase, ToolGroup } from './components/ToolGroup';
@@ -1467,6 +1470,9 @@ export default function App() {
   // the branch are its own to push.
   const [sessionCommitted, setSessionCommitted] = useState(false);
   const [reviewOpen, setReviewOpen] = useState(false);
+  // Lazy chunk: fetched on first open, then kept mounted so draft review
+  // comments survive closing the drawer.
+  const reviewMounted = useLatch(reviewOpen);
   /** File the review drawer should open on, when opened from the file list. */
   const [reviewFocus, setReviewFocus] = useState<string | null>(null);
   const [lightbox, setLightbox] = useState<string | null>(null);
@@ -4125,16 +4131,20 @@ export default function App() {
 
               <TimelineMinimap items={minimapItems} paneRef={paneRef} onSelect={jumpToMinimapTurn} />
               <ImageLightbox src={lightbox} onClose={() => setLightbox(null)} />
-              <ReviewChanges
-                open={reviewOpen}
-                onClose={() => {
-                  setReviewOpen(false);
-                  setReviewFocus(null);
-                }}
-                onSendComments={(text) => onSend(text)}
-                onChanged={refreshRepo}
-                focusPath={reviewFocus}
-              />
+              {reviewMounted && (
+                <Suspense fallback={null}>
+                  <ReviewChanges
+                    open={reviewOpen}
+                    onClose={() => {
+                      setReviewOpen(false);
+                      setReviewFocus(null);
+                    }}
+                    onSendComments={(text) => onSend(text)}
+                    onChanged={refreshRepo}
+                    focusPath={reviewFocus}
+                  />
+                </Suspense>
+              )}
 
               {showJump && (
                 <button
@@ -4353,38 +4363,48 @@ export default function App() {
               }
             />
             </div>
-            {terminalOpen && <TerminalPanel onClose={() => setTerminal(false)} />}
+            {terminalOpen && (
+              <Suspense fallback={null}>
+                <TerminalPanel onClose={() => setTerminal(false)} />
+              </Suspense>
+            )}
           </>
         )}
 
         {mainView === 'plugins' && (
           <div className="flex-1 min-h-0 overflow-y-auto">
-            <PluginsPanel version={extensionsVersion} />
+            <Suspense fallback={null}>
+              <PluginsPanel version={extensionsVersion} />
+            </Suspense>
           </div>
         )}
 
         {mainView === 'pull-request' && (
-          <PullRequestPanel
-            onOpenSettings={() => openSettings()}
-            onReviewPr={runPrReview}
-          />
+          <Suspense fallback={null}>
+            <PullRequestPanel
+              onOpenSettings={() => openSettings()}
+              onReviewPr={runPrReview}
+            />
+          </Suspense>
         )}
         {mainView === 'scheduled' && <ComingSoon label="Scheduled" />}
         {mainView === 'settings' && (
-          <SettingsSurface
-            section={settingsSection}
-            onSectionChange={setSettingsSection}
-            onSaved={settingsHandler}
-            onExit={exitSettings}
-            skillsVersion={skillsVersion}
-            githubReturn={githubReturn}
-            acpAgents={acpAgents}
-            acpRefreshing={acpStatusPending}
-            acpDriver={acpDriver}
-            acpError={acpError}
-            onAcpRefresh={requestAcpStatus}
-            onAcpStart={startAcpAgent}
-          />
+          <Suspense fallback={null}>
+            <SettingsSurface
+              section={settingsSection}
+              onSectionChange={setSettingsSection}
+              onSaved={settingsHandler}
+              onExit={exitSettings}
+              skillsVersion={skillsVersion}
+              githubReturn={githubReturn}
+              acpAgents={acpAgents}
+              acpRefreshing={acpStatusPending}
+              acpDriver={acpDriver}
+              acpError={acpError}
+              onAcpRefresh={requestAcpStatus}
+              onAcpStart={startAcpAgent}
+            />
+          </Suspense>
         )}
         </div>
       </main>
@@ -4449,6 +4469,7 @@ export default function App() {
       {panelOpen && (
         <div className="min-h-0 min-w-0 py-2 pr-2">
           <div className="h-full overflow-hidden rounded-xl border border-border bg-background">
+        <Suspense fallback={null}>
         <SubagentPanel
           tabs={subagentTabs}
           fileTabs={fileTabs}
@@ -4492,6 +4513,7 @@ export default function App() {
           onResizeStart={handlePanelResizeStart}
           onOpenFile={openFileTab}
         />
+        </Suspense>
           </div>
         </div>
       )}

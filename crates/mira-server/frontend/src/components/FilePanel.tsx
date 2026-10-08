@@ -13,7 +13,7 @@ import {
   Loader,
   SquareArrowOutUpRight,
 } from 'lucide-react';
-import hljs from 'highlight.js';
+import { hljs, useHighlightLanguages } from '../lib/highlight';
 import { parseDiffFromFile } from '@pierre/diffs';
 import type { DiffLine, DiffPreview } from '../types';
 import { browse } from '../api';
@@ -439,7 +439,9 @@ const LINE_PX = 12.5 * 1.65;
 const PAD_PX = 16;
 
 function CodeViewer({ content, lang, line, reveal }: { content: string; lang: string; line?: number | null; reveal?: number }) {
-  const hlLines = useMemo(() => highlightLines(content, lang), [content, lang]);
+  // Grammars outside the common set load on demand; re-highlight when one lands.
+  const grammars = useHighlightLanguages(lang === 'plaintext' ? [] : [lang]);
+  const hlLines = useMemo(() => highlightLines(content, lang), [content, lang, grammars]);
   const scroller = useRef<HTMLDivElement | null>(null);
   const target = line && line >= 1 && line <= hlLines.length ? line : null;
 

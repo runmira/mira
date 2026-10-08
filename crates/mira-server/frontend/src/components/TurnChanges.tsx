@@ -3,7 +3,7 @@ import { useTranscriptDisclosure, TranscriptSessionContext } from './TranscriptD
 import { useContext, useEffect, useState } from 'react';
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import { getTurnFileDiff } from '../api';
-import { TurnSnapshotDiff } from './diffs/TurnSnapshotDiff';
+import { TurnSnapshotDiff } from './diffs/LazyDiffs';
 import { ChevronDown, ClipboardPlus, Undo2, X } from 'lucide-react';
 import { cn } from '../lib/utils';
 import type { TurnDiffSummary } from '../types';

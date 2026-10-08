@@ -36,7 +36,7 @@ import {
 import type { BackgroundMode, SessionSummary } from '../types';
 import type { WsStatus } from '../ws';
 import { parseSentAttachments } from './Composer';
-import { SETTINGS_SECTIONS, type SettingsSectionId } from './Settings';
+import { SETTINGS_SECTIONS, type SettingsSectionId } from './settings/sections';
 
 import { UserCard } from './UserCard';
 import { Dialog, DialogContent } from '@/components/ui/dialog';

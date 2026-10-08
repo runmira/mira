@@ -37,6 +37,31 @@ jobs:
       - name: test
         run: cargo test --workspace --all-targets
 
+  web:
+    name: web UI (build · bundle budget)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/mira-server/frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/mira-server/frontend/package-lock.json
+
+      - run: npm ci
+
+      - name: build
+        run: npm run build
+
+      # Fails when the first-load JS grows past the budget (issue #72).
+      # `npm run analyze` locally writes dist/stats.html to see why.
+      - name: bundle budget
+        run: npm run size
+
   desktop:
     name: desktop app (fmt · clippy)
     runs-on: ubuntu-latest

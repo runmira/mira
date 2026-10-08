@@ -2,8 +2,6 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { OAUTH_PROVIDERS, PROVIDER_FAVICON_DOMAIN, PROVIDER_PRESETS } from '../lib/providers';
 import { needsLightTile } from '../lib/models';
 import {
-  Bot,
-  Smile,
   RotateCw,
   Book,
   BookOpen,
@@ -26,10 +24,8 @@ import {
   GitPullRequest,
   Info,
   Key,
-  Keyboard,
   Lightbulb,
   MessagesSquare,
-  Zap,
   Search,
   NotebookPen,
   Package,
@@ -63,7 +59,6 @@ export type { GithubReturn } from './Integrations';
 import { Markdown } from './Markdown';
 import { IntegrationsSection, type GithubReturn } from './Integrations';
 import { UsageSection } from './UsageSection';
-import { ChartColumn } from 'lucide-react';
 import { HooksSection } from './Hooks';
 import { KeybindingsSection } from './settings/KeybindingsSettings';
 import { Collapse } from './ui/Collapse';
@@ -185,34 +180,8 @@ const KEY_META: Record<string, { label: string; help: string; url?: string }> = 
   },
 };
 
-export type SettingsSectionId = 'general' | 'appearance' | 'provider' | 'agents' | 'subagents' | 'usage' | 'memory' | 'skills' | 'hooks' | 'keybindings' | 'search' | 'integrations' | 'about';
-
-/** Section metadata exported so the Sidebar can render the same nav in
- *  its "settings mode" (the settings surface is now inline in the main
- *  pane, not a dialog — the sidebar drives section selection). */
-export const SETTINGS_SECTIONS: {
-  id: SettingsSectionId;
-  label: string;
-  icon: React.ComponentType<{ className?: string }>;
-}[] = [
-  { id: 'general',     label: 'General',     icon: Cog },
-  { id: 'appearance',  label: 'Appearance',  icon: Palette },
-  { id: 'provider',    label: 'Provider',    icon: Plug },
-  // External coding agents. A sibling of Provider, not a child: they
-  // authenticate and bill separately, so a Provider key does not apply.
-  { id: 'agents',      label: 'External agents', icon: Bot },
-  // Mira's own helpers — a different thing from external agents, hence
-  // a different word everywhere.
-  { id: 'subagents',   label: 'Subagents',   icon: Smile },
-  { id: 'usage',       label: 'Usage',       icon: ChartColumn },
-  { id: 'memory',      label: 'Memory',      icon: Brain },
-  { id: 'skills',      label: 'Skills',      icon: Sparkle },
-  { id: 'hooks',       label: 'Hooks',       icon: Zap },
-  { id: 'keybindings', label: 'Keyboard shortcuts', icon: Keyboard },
-  { id: 'search',      label: 'Search & keys', icon: Search },
-  { id: 'integrations', label: 'Integrations', icon: Plug },
-  { id: 'about',       label: 'About',       icon: Info },
-];
+export { SETTINGS_SECTIONS, type SettingsSectionId } from './settings/sections';
+import { SETTINGS_SECTIONS, type SettingsSectionId } from './settings/sections';
 
 // Local alias — the exported name is `SETTINGS_SECTIONS` (used by the
 // Sidebar); everywhere inside this file we still refer to it as
