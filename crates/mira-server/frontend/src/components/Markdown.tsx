@@ -1,8 +1,6 @@
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
-import rehypeHighlight from 'rehype-highlight';
-import rehypeRaw from 'rehype-raw';
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import { useEffect, useMemo, useState } from 'react';
 import 'highlight.js/styles/atom-one-dark.css';
@@ -13,6 +11,7 @@ import { classifyInline, parseWorkspaceFileLink } from '../lib/refs';
 import { BranchChip, ColorChip, CommitChip, FileChip, KeysChip, LinkRef, SymbolRef } from './RichRefs';
 import { Blockquote, DiffBlock, Table, Th, remarkCallouts } from './RichBlocks';
 import { resolveTheme } from '../lib/theme';
+import { lazyModule, useLazyModule } from '../lib/lazy';
 
 /**
  * Markdown rendering for assistant / thought content.
@@ -46,6 +45,31 @@ const ONE_LINER_MAX = 80;
 /** Anything remark-math would turn into math: $$..$$, \(..\), \[…\], or
  *  a reasonably-shaped inline $..$ (no spaces right inside, no digits
  *  immediately after the closing $ so "$5 and $10" stays prose). */
+/** ``` / ~~~ fence info strings — the only code rehype-highlight touches
+ *  (`detect: false`), so the highlighter loads only when one is present.
+ *  Fences can sit inside blockquotes and list items (`> ```js`, `- ```go`),
+ *  so those prefixes are allowed; a false positive only loads the
+ *  highlighter early, a miss leaves a block unhighlighted. */
+const FENCE_LANG_RE = /^[ \t]*(?:(?:>|[-*+]|\d{1,9}[.)])[ \t]*)*(?:`{3,}|~{3,})[ \t]*([\w+#.-]+)/gm;
+
+function fenceLanguages(text: string): string[] {
+  const out = new Set<string>();
+  for (const m of text.matchAll(FENCE_LANG_RE)) {
+    const lang = m[1].toLowerCase();
+    if (lang !== 'mermaid') out.add(lang);
+  }
+  return [...out].sort();
+}
+
+/** Anything that could be a raw HTML tag or comment. */
+const HTML_RE = /<[a-z!/]/i;
+
+// Kept out of the main chunk (issue #72): the highlighter (core + common
+// grammars) and rehype-raw (parse5) load the first time a message needs
+// them, then stay cached for every later message.
+const highlighter = lazyModule(() => import('../lib/highlight'));
+const rawHtml = lazyModule(() => import('rehype-raw'));
+
 const MATH_RE =
   /\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\]|\\\([\s\S]+?\\\)|\$(?!\s)(?:[^$\n\\]|\\.)+?\$(?!\d)/;
 
@@ -84,6 +108,27 @@ function sanitizeMermaidSvg(svg: string): string {
   return new XMLSerializer().serializeToString(el);
 }
 
+/** Load any fence languages outside the common set once the highlighter
+ *  is in; returns a counter that bumps as grammars land. */
+function useFenceGrammars(hl: typeof import('../lib/highlight') | null, langs: string[]): number {
+  const [n, setN] = useState(0);
+  const key = langs.join('\0');
+  useEffect(() => {
+    if (!hl) return;
+    const missing = langs.filter((l) => !hl.isRegistered(l));
+    if (!missing.length) return;
+    let live = true;
+    void Promise.all(missing.map(hl.loadLanguage)).then((ok) => {
+      if (live && ok.some(Boolean)) setN((v) => v + 1);
+    });
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hl, key]);
+  return n;
+}
+
 export function Markdown({ text, onOpenFile, document = false }: Props) {
   // `owner/repo#123` mentions become links, rendered as PR/issue chips.
   const linked = useMemo(() => document ? text : linkifyGithubRefs(text), [text, document]);
@@ -106,12 +151,27 @@ export function Markdown({ text, onOpenFile, document = false }: Props) {
     };
   }, [hasMath, katex]);
 
+  // Until they land, code shows unhighlighted and raw HTML is skipped.
+  const fenceLangs = useMemo(() => fenceLanguages(text), [text]);
+  const hl = useLazyModule(highlighter, fenceLangs.length > 0);
+  const html = useLazyModule(rawHtml, HTML_RE.test(text));
+  const grammars = useFenceGrammars(hl, fenceLangs);
+
   const rehypePlugins = useMemo(() => {
-    const plugins: any[] = [rehypeRaw, [rehypeSanitize, SANITIZE_SCHEMA]];
+    const plugins: any[] = [];
+    if (html) plugins.push(html.default);
+    plugins.push([rehypeSanitize, SANITIZE_SCHEMA]);
     if (katex) plugins.push([katex.default, { strict: false }]);
-    plugins.push([rehypeHighlight, { detect: false, ignoreMissing: true }]);
+    if (hl) {
+      plugins.push([
+        hl.rehypeHighlight,
+        { detect: false, ignoreMissing: true, languages: hl.markdownLanguages(), aliases: hl.markdownAliases() },
+      ]);
+    }
     return plugins;
-  }, [katex]);
+    // `grammars` bumps when an on-demand language lands.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [html, katex, hl, grammars]);
 
   return (
     <div className="md">

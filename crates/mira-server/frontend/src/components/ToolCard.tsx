@@ -14,7 +14,7 @@ import {
 } from 'lucide-react';
 import type { ApprovalScope, DiffLine, DiffPreview, Mode, ToolCall, ToolResult } from '../types';
 import { ansiToSegments, foldOutputLines, parseBashOutput } from '../lib/toolOutput.mjs';
-import { InlineDiff } from './diffs/InlineDiff';
+import { InlineDiff } from './diffs/LazyDiffs';
 import { cn } from '@/lib/utils';
 import { infoFor } from './ToolGroup';
 
