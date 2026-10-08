@@ -1033,6 +1033,17 @@ export default function App() {
   const [ruleEditorCallId, setRuleEditorCallId] = useState<string | null>(null);
   const [approvalRules, setApprovalRules] = useState<Record<string, { rules: string[]; error: string | null }>>({});
   const approvalStarted = useRef<Record<string, number>>({});
+  useEffect(() => {
+    const pending = new Set(entries.flatMap(entry => entry.kind === 'tool' && entry.status === 'pending' ? [entry.call.id] : []));
+    for (const id of Object.keys(approvalStarted.current)) {
+      if (!pending.has(id)) delete approvalStarted.current[id];
+    }
+    setApprovalRules(previous => {
+      const retained = Object.entries(previous).filter(([id]) => pending.has(id));
+      return retained.length === Object.keys(previous).length ? previous : Object.fromEntries(retained);
+    });
+    setRuleEditorCallId(previous => previous && pending.has(previous) ? previous : null);
+  }, [entries]);
   const [historyCursor, setHistoryCursor] = useState<string | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
@@ -1861,6 +1872,9 @@ export default function App() {
         setSessionCommitted(false);
         setBranchPr(null);
         setSessionId(msg.session_id);
+        approvalStarted.current = {};
+        setApprovalRules({});
+        setRuleEditorCallId(null);
         wsRef.current?.setSession(msg.session_id);
         sessionIdRef.current = msg.session_id;
         setSessionTitle(msg.title ?? null);
@@ -2020,12 +2034,14 @@ export default function App() {
         break;
       }
       case 'approval_rules':
+        if (approvalStarted.current[msg.call_id] === undefined) break;
         setApprovalRules(previous => ({ ...previous, [msg.call_id]: { rules: msg.rules, error: msg.error } }));
         break;
       case 'approval_resolved':
         setEntries(previous => previous.flatMap(entry => {
           if (entry.kind !== 'tool' || entry.call.id !== msg.call_id) return [entry];
           if (isAgentRequest(entry.call)) return [];
+          if (entry.status !== 'pending') return [entry];
           return [{ ...entry, status: msg.allow ? 'running' as const : 'denied' as const }];
         }));
         break;
@@ -2993,7 +3009,8 @@ export default function App() {
       const t = e.target as HTMLElement | null;
       if (t) {
         const tag = t.tagName;
-        if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+        const queueCheckbox = t instanceof HTMLInputElement && t.type === 'checkbox' && t.dataset.approvalQueue === 'true';
+        if ((tag === 'INPUT' && !queueCheckbox) || tag === 'TEXTAREA') return;
         if (t.isContentEditable) return;
       }
       const command = resolveShortcutCommand(e, keybindings, { context: shortcutContext() });
@@ -4302,6 +4319,7 @@ export default function App() {
               onActiveApprovalChange={callId => { visibleApprovalRef.current = callId; }}
               pendingApprovals={pendingApprovals}
               ruleEditorCallId={ruleEditorCallId}
+              onRuleEditorCancel={() => setRuleEditorCallId(null)}
               pendingPlans={pendingPlans}
               pendingQuestions={pendingQuestions}
               notices={[
