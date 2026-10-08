@@ -74,8 +74,14 @@ const CHECK_EVERY_MS = 6 * 60 * 60 * 1000;
 /** Window focus re-checks, but not more often than this. */
 const FOCUS_MIN_GAP_MS = 30 * 60 * 1000;
 
-function invoke<T>(cmd: string): Promise<T> {
-  return window.__TAURI__!.core.invoke(cmd) as Promise<T>;
+function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  return window.__TAURI__!.core.invoke(cmd, args) as Promise<T>;
+}
+
+/** Read a channel through the native updater, including platform validation. */
+export async function checkReleaseChannel(channel: UpdateInfo['channel']): Promise<UpdateInfo | null> {
+  const update = await invoke<Omit<UpdateInfo, 'target'> | null>('check_update', { channel });
+  return update ? { ...update, target: 'desktop' } : null;
 }
 
 /** The pending update, if any, and the actions on it. */
@@ -129,7 +135,7 @@ export function useAppUpdate() {
     };
   }, [check]);
 
-  const install = useCallback(async () => {
+  const install = useCallback(async (channel?: UpdateInfo['channel']) => {
     if (!window.__TAURI__) return;
     setPhase({ kind: 'downloading', downloaded: 0, total: null });
     const unlisten = await window.__TAURI__.event.listen('mira-update-progress', (e) => {
@@ -137,7 +143,7 @@ export function useAppUpdate() {
       setPhase({ kind: 'downloading', downloaded: p.downloaded, total: p.total });
     });
     try {
-      await invoke('install_update');
+      await invoke('install_update', channel ? { channel } : undefined);
       setPhase({ kind: 'restarting' });
       await invoke('restart_app');
     } catch (e) {
@@ -147,7 +153,11 @@ export function useAppUpdate() {
     }
   }, []);
 
-  return { update, phase, install, check, current, channel, checking, checkedAt, checkFailed };
+  const resetError = useCallback(() => {
+    setPhase(previous => previous.kind === 'error' ? { kind: 'idle' } : previous);
+  }, []);
+
+  return { update, phase, install, check, current, channel, checking, checkedAt, checkFailed, resetError };
 }
 
 /** One shipped thing, from a `- **Title.** what it does` bullet. */
