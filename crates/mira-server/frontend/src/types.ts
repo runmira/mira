@@ -1,5 +1,7 @@
 export type ImageSource = { name: string; window?: string; captured_at?: string; width?: number; height?: number; accessible_text?: string };
-export type ImageAttachment = { media_type: string; data: string; source?: ImageSource };
+/** `data` is base64. Large images in loaded history arrive with `data` empty
+ *  and a `url` to fetch them from instead — render with `imageSrc`. */
+export type ImageAttachment = { media_type: string; data: string; url?: string; source?: ImageSource };
 // Wire types — mirror crates/mira-server/src/protocol.rs.
 
 export type Mode = 'plan' | 'manual' | 'auto' | 'edit' | 'yolo';

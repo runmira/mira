@@ -103,6 +103,8 @@ use mira_sandbox::Sandbox;
 use mira_tools::Registry;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, RwLock};
+use tower_http::compression::predicate::{NotForContentType, Predicate};
+use tower_http::compression::{CompressionLayer, CompressionLevel, DefaultPredicate};
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
@@ -458,6 +460,10 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
             get(sessions::get_session_history),
         )
         .route(
+            "/api/sessions/:id/images/:key",
+            get(sessions::get_session_image),
+        )
+        .route(
             "/api/sessions/:id/preview",
             get(sessions::get_session_preview),
         )
@@ -685,7 +691,31 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         router.route("/", get(inline_index))
     };
 
-    router.with_state(state).layer(TraceLayer::new_for_http())
+    router
+        .with_state(state)
+        .layer(compression_layer())
+        .layer(TraceLayer::new_for_http())
+}
+
+/// gzip/brotli for the web UI and API responses. Matters most when the UI is
+/// reached over a network (tunnel, LAN, remote host): the first-load bundle
+/// is ~1.3 MB raw and ~380 kB compressed. Session history JSON shrinks the
+/// same way.
+///
+/// Level 4 rather than the default: brotli's default (11) spends hundreds of
+/// milliseconds on the larger chunks, which would trade transfer time for an
+/// equally long encode. Hashed assets are cached `immutable`, so each is
+/// compressed once per client.
+///
+/// Streaming bodies are left alone: the default predicate already skips SSE
+/// (and images, gRPC, tiny bodies), and the NDJSON streams (aside, tests)
+/// must not be buffered by the encoder.
+fn compression_layer() -> CompressionLayer<impl Predicate> {
+    CompressionLayer::new()
+        .quality(CompressionLevel::Precise(4))
+        .compress_when(
+            DefaultPredicate::new().and(NotForContentType::const_new("application/x-ndjson")),
+        )
 }
 
 async fn embedded_fallback(uri: axum::http::Uri) -> axum::response::Response {
@@ -880,3 +910,54 @@ pub fn default_start_cwd() -> PathBuf {
 // small-handler crates that used to reach into `state.session` directly.
 #[allow(unused_imports)]
 pub(crate) use tokio::sync::broadcast;
+
+#[cfg(test)]
+mod compression_tests {
+    use super::compression_layer;
+    use axum::body::Body;
+    use axum::http::{header, Request};
+    use axum::routing::get;
+    use axum::Router;
+    use tower::ServiceExt;
+
+    fn app() -> Router {
+        let big = "x".repeat(4096);
+        let json = big.clone();
+        Router::new()
+            .route(
+                "/json",
+                get(move || async move { ([(header::CONTENT_TYPE, "application/json")], json) }),
+            )
+            .route(
+                "/ndjson",
+                get(move || async move { ([(header::CONTENT_TYPE, "application/x-ndjson")], big) }),
+            )
+            .layer(compression_layer())
+    }
+
+    async fn encoding(path: &str) -> Option<String> {
+        let res = app()
+            .oneshot(
+                Request::get(path)
+                    .header(header::ACCEPT_ENCODING, "br, gzip")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        res.headers()
+            .get(header::CONTENT_ENCODING)
+            .map(|v| v.to_str().unwrap().to_string())
+    }
+
+    #[tokio::test]
+    async fn compresses_json() {
+        assert_eq!(encoding("/json").await.as_deref(), Some("br"));
+    }
+
+    /// NDJSON endpoints stream; an encoder would buffer them.
+    #[tokio::test]
+    async fn leaves_ndjson_streams_alone() {
+        assert_eq!(encoding("/ndjson").await, None);
+    }
+}

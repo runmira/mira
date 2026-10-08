@@ -82,7 +82,7 @@ similar   = "2"
 # Web (mira serve)
 axum        = { version = "0.7", features = ["ws", "macros"] }
 tower       = "0.5"
-tower-http  = { version = "0.6", features = ["fs", "trace", "cors"] }
+tower-http  = { version = "0.6", features = ["fs", "trace", "cors", "compression-gzip", "compression-br"] }
 
 # MCP client (Model Context Protocol) — official Rust SDK.
 # `client` enables the client role; the two transports cover stdio (subprocess

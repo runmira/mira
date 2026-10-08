@@ -462,7 +462,79 @@ pub async fn get_session_history(
         agent_driver: record.agent.as_ref().map(|a| a.driver_kind.clone()),
         agent_transcript,
     };
+    let mut view = match serde_json::to_value(view) {
+        Ok(v) => v,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("encode: {e}")),
+    };
+    if let Some(messages) = view.get_mut("messages").and_then(|m| m.as_array_mut()) {
+        for message in messages {
+            crate::transcript_history::externalize_images(&id, message);
+        }
+    }
     Json(view).into_response()
+}
+
+/// `GET /api/sessions/:id/images/:key` — one transcript image, by the key
+/// [`crate::transcript_history::externalize_images`] put in its URL. The
+/// key is a content hash, so the response never changes and is cached
+/// `immutable`.
+pub async fn get_session_image(
+    State(state): State<AppState>,
+    AxumPath((id, key)): AxumPath<(String, String)>,
+) -> Response {
+    use axum::http::header;
+    use base64::Engine as _;
+
+    let mut messages = Vec::new();
+    if let Some(slot) = state.slot_str(&id).await {
+        let sess = slot.session.read().await.clone();
+        messages = sess.transcript().await;
+    }
+    let find = |messages: &[mira_core::Message]| {
+        messages
+            .iter()
+            .flat_map(|m| m.images.iter())
+            .find(|img| crate::transcript_history::image_key(&img.data) == key)
+            .cloned()
+    };
+    let mut image = find(&messages);
+    if image.is_none() {
+        if let Some(store) = state.store.clone() {
+            if let Ok(record) = store.load(&SessionId::from(id.as_str())).await {
+                image = find(&record.messages);
+            }
+        }
+    }
+    let Some(image) = image else {
+        return err(StatusCode::NOT_FOUND, "image not found".to_string());
+    };
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(image.data.as_bytes()) else {
+        return err(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "image is not valid base64".to_string(),
+        );
+    };
+    // Only raster types render as-is; anything else downloads as bytes.
+    let content_type = if matches!(
+        image.media_type.as_str(),
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+    ) {
+        image.media_type
+    } else {
+        "application/octet-stream".to_string()
+    };
+    (
+        [
+            (header::CONTENT_TYPE, content_type),
+            (
+                header::CACHE_CONTROL,
+                "private, max-age=31536000, immutable".to_string(),
+            ),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+        ],
+        bytes,
+    )
+        .into_response()
 }
 
 /// The handful of fields a sidebar hover card needs: when the chat was

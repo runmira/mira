@@ -15,16 +15,25 @@ export function retryFailedLazyLoads(): void {
 
 /**
  * `React.lazy` for a named export, so heavy views can live in their own
- * chunk without a default export (issue #72). A failed download is
- * retryable (see `retryFailedLazyLoads`); render inside a `LazyBoundary`.
+ * chunk without a default export (issue #72). `preload()` starts fetching
+ * the chunk early — call it on hover/focus of whatever opens the view, so
+ * the click usually finds it ready. A failed download is retryable (see
+ * `retryFailedLazyLoads`); render inside a `LazyBoundary`.
  */
 export function lazyNamed<M, K extends keyof M>(
   load: () => Promise<M>,
   name: K,
-): M[K] extends ComponentType<any> ? M[K] : never {
+): (M[K] extends ComponentType<any> ? M[K] : never) & { preload: () => void } {
+  // One fetch shared by preload() and render; cleared on failure so the
+  // next attempt fetches again.
+  let pending: Promise<M> | null = null;
+  const once = () => (pending ??= load().catch((e) => {
+    pending = null;
+    throw e;
+  }));
   const make = () =>
     lazy(() =>
-      load().then(
+      once().then(
         (m) => ({ default: m[name] as ComponentType<any> }),
         (e) => {
           failed.add(() => (current = make()));
@@ -35,7 +44,13 @@ export function lazyNamed<M, K extends keyof M>(
   let current = make();
   const Lazy = (props: any) => createElement(current, props);
   Lazy.displayName = `Lazy(${String(name)})`;
-  return Lazy as any;
+  return Object.assign(Lazy, { preload: () => void once().catch(() => {}) }) as any;
+}
+
+/** Hover/focus handlers that preload a lazy view. Both bubble, so they
+ *  can go on a wrapper around the control. */
+export function preloadOnIntent(preload: () => void) {
+  return { onPointerOver: preload, onFocus: preload };
 }
 
 /** `true` from the first render where `on` is true, onwards. For lazy views

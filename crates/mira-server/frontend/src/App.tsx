@@ -41,6 +41,7 @@ import {
   Download,
 } from 'lucide-react';
 import { cn } from './lib/utils';
+import { imageSrc } from './lib/images';
 import { acpOptionsToDescriptors } from './lib/acpOptions';
 import { loadAgentCaps, migrateLegacyAgentConfigs, saveAgentCaps } from './lib/acpAgents';
 import { EngineMark } from './components/EnginePicker';
@@ -71,15 +72,9 @@ import {
   useContextPanelFits,
 } from './components/ContextPanel';
 import { extractAgentId } from './components/AgentCard';
-import { lazyNamed, useLatch } from './lib/lazy';
+import { preloadOnIntent, useLatch } from './lib/lazy';
 import { LazyBoundary } from './components/LazyBoundary';
-// Views that aren't on screen at first load get their own chunks (issue #72).
-const SettingsSurface = lazyNamed(() => import('./components/Settings'), 'SettingsSurface');
-const PluginsPanel = lazyNamed(() => import('./components/Plugins'), 'PluginsPanel');
-const PullRequestPanel = lazyNamed(() => import('./components/PullRequestPanel'), 'PullRequestPanel');
-const ReviewChanges = lazyNamed(() => import('./components/ReviewChanges'), 'ReviewChanges');
-const SubagentPanel = lazyNamed(() => import('./components/SubagentPanel'), 'SubagentPanel');
-const TerminalPanel = lazyNamed(() => import('./components/TerminalPanel'), 'TerminalPanel');
+import { PluginsPanel, PullRequestPanel, ReviewChanges, SettingsSurface, SubagentPanel, TerminalPanel } from './lazyViews';
 import { Sidebar, type MainView } from './components/Sidebar';
 import { ProjectSwitcher } from './components/ProjectSwitcher';
 import { hasHiddenTitleBar, isDesktop, pickFolder } from './lib/desktop';
@@ -3955,6 +3950,7 @@ export default function App() {
                   type="button"
                   data-tauri-drag-region="false"
                   onClick={() => setReviewOpen(true)}
+                  {...preloadOnIntent(ReviewChanges.preload)}
                   title="Review this session's changes"
                   // h-8 and rounded-lg to match the icon controls beside it.
                   // It used to be a `rounded-full` py-1 pill, which read as a
@@ -3969,12 +3965,14 @@ export default function App() {
                 </button>
               )}
               <div className="flex items-center gap-0.5" data-tauri-drag-region="false">
+                <div className="contents" {...preloadOnIntent(SubagentPanel.preload)}>
                 <RightPanelButton
                   open={panelOpen}
                   activeKind={toolPaneKindOf(activeAgentTab ?? '')}
                   onOpen={() => openToolPane('new')}
                   onOpenPane={openToolPane}
                 />
+                </div>
                 <EditorPicker
                   cwd={cwd}
                   onOpenSettings={() => {
@@ -5577,9 +5575,10 @@ function EntryView({
               <div className="flex max-w-[78%] flex-wrap justify-end gap-1.5">
                 {images.map((img, i) => (
                   <div key={i} className="flex flex-col gap-1"><img
-                    src={`data:${img.media_type};base64,${img.data}`}
+                    src={imageSrc(img)}
+                    loading="lazy"
                     alt="attached image"
-                    onClick={() => actions?.openImage(`data:${img.media_type};base64,${img.data}`)}
+                    onClick={() => actions?.openImage(imageSrc(img))}
                     className="max-h-40 max-w-[240px] cursor-zoom-in rounded-xl border border-border object-cover"
                   /><ImageAttachmentDetails image={img} /></div>
                 ))}

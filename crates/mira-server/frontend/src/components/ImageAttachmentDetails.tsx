@@ -2,7 +2,7 @@ import { useTranscriptDisclosure } from './TranscriptDisclosure';
 import type { ImageAttachment } from '../types';
 export function ImageAttachmentDetails({ image }: { image: ImageAttachment }) {
   const source = image.source;
-  const [open, setOpen] = useTranscriptDisclosure(`image-details:${source?.name}:${source?.captured_at ?? image.data.slice(-64)}`);
+  const [open, setOpen] = useTranscriptDisclosure(`image-details:${source?.name}:${source?.captured_at ?? (image.url ?? image.data.slice(-64))}`);
   if (!source) return null;
   return <details open={open} onToggle={event => setOpen(event.currentTarget.open)} className="max-w-[240px] text-left text-[11px] text-muted-foreground">
     <summary className="cursor-pointer truncate" title={source.window ?? source.name}>{source.window ?? source.name}</summary>
