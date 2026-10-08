@@ -38,11 +38,17 @@ enum InstallKind {
     Standalone,
 }
 
-fn install_kind(exe: &Path) -> InstallKind {
+fn install_kind(exe: &Path, cargo_home: Option<&Path>) -> InstallKind {
     let s = exe.to_string_lossy();
+    // `cargo install` (any --root) records what it installed next to bin/.
+    let cargo_records = exe.parent().and_then(Path::parent).is_some_and(|root| {
+        root.join(".crates.toml").exists() || root.join(".crates2.json").exists()
+    });
     if s.contains("/Cellar/") {
         InstallKind::Homebrew
-    } else if s.contains("/.cargo/bin/")
+    } else if cargo_records
+        || cargo_home.is_some_and(|h| exe.starts_with(h.join("bin")))
+        || s.contains("/.cargo/bin/")
         || s.contains("/target/debug/")
         || s.contains("/target/release/")
     {
@@ -137,6 +143,15 @@ pub async fn run(args: UpdateArgs) -> Result<()> {
     let exe = std::env::current_exe().context("locate the mira binary")?;
     let exe = exe.canonicalize().unwrap_or(exe);
 
+    let cargo_home = std::env::var_os("CARGO_HOME").map(PathBuf::from);
+    let kind = install_kind(&exe, cargo_home.as_deref());
+    if kind == InstallKind::Homebrew && args.version.is_some() && !args.check {
+        bail!(
+            "Homebrew installs follow the tap's formula, so --version isn't supported; \
+             `brew upgrade runmira/tap/mira` installs the latest"
+        );
+    }
+
     let http = client()?;
     let tag = match &args.version {
         Some(t) if t.starts_with('v') => t.clone(),
@@ -166,16 +181,17 @@ pub async fn run(args: UpdateArgs) -> Result<()> {
         return Ok(());
     }
 
-    match install_kind(&exe) {
+    match kind {
         InstallKind::Homebrew => {
-            println!("installed with Homebrew — running `brew upgrade runmira/tap/mira`");
+            let verb = if args.force { "reinstall" } else { "upgrade" };
+            println!("installed with Homebrew — running `brew {verb} runmira/tap/mira`");
             let ok = Proc::new("brew")
-                .args(["upgrade", "runmira/tap/mira"])
+                .args([verb, "runmira/tap/mira"])
                 .status()
                 .context("run brew")?
                 .success();
             if !ok {
-                bail!("brew upgrade failed");
+                bail!("brew {verb} failed");
             }
             restart_service();
             return Ok(());
@@ -189,6 +205,8 @@ pub async fn run(args: UpdateArgs) -> Result<()> {
     }
 
     let asset = asset_name()?;
+    // Fail on permissions before downloading anything.
+    let staged = Staged::new(&exe)?;
     let base = format!("https://github.com/{REPO}/releases/download/{tag}");
     println!("downloading {asset} ({tag})");
     let tarball = download(&http, &format!("{base}/{asset}")).await?;
@@ -201,24 +219,11 @@ pub async fn run(args: UpdateArgs) -> Result<()> {
         bail!("checksum mismatch for {asset}: expected {expected}, got {actual} — not installing");
     }
 
-    let tmp = tempfile::tempdir().context("create a temp dir")?;
-    let archive = tmp.path().join(&asset);
-    std::fs::write(&archive, &tarball)?;
-    let ok = Proc::new("tar")
-        .arg("-xzf")
-        .arg(&archive)
-        .arg("-C")
-        .arg(tmp.path())
-        .status()
-        .context("run tar")?
-        .success();
-    let new_bin = tmp.path().join("mira");
-    if !ok || !new_bin.is_file() {
-        bail!("{asset} didn't contain a mira binary");
-    }
+    extract_binary(&tarball, &staged.path).with_context(|| format!("unpack {asset}"))?;
 
-    // Never swap in something that can't start.
-    let version_out = Proc::new(&new_bin)
+    // Never swap in something that can't start. Run from the staging file
+    // beside the target, not /tmp, which may be mounted noexec.
+    let version_out = Proc::new(&staged.path)
         .arg("--version")
         .output()
         .context("run the downloaded binary")?;
@@ -226,7 +231,7 @@ pub async fn run(args: UpdateArgs) -> Result<()> {
         bail!("the downloaded binary doesn't run on this machine — not installing");
     }
 
-    replace_binary(&new_bin, &exe)?;
+    staged.install(&exe)?;
     println!(
         "updated {current} → {} ({})",
         tag.trim_start_matches('v'),
@@ -236,38 +241,96 @@ pub async fn run(args: UpdateArgs) -> Result<()> {
     Ok(())
 }
 
+/// Pull the `mira` binary out of a release tarball, in-process. No `tar`
+/// from `PATH`: under `sudo mira update` that lookup would run whatever
+/// `tar` sits first on the user's `PATH` as root. Only a regular file
+/// named `mira` is taken; links and everything else are ignored.
+fn extract_binary(tarball: &[u8], dest: &Path) -> Result<()> {
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(tarball));
+    for entry in archive.entries().context("read the archive")? {
+        let mut entry = entry.context("read the archive")?;
+        // Release tarballs store `./mira`; a lone `mira` is fine too.
+        // Anything nested, absolute, or with `..` is not the binary.
+        let is_mira = entry
+            .path()
+            .ok()
+            .map(|p| {
+                use std::path::Component;
+                let parts: Vec<_> = p.components().filter(|c| *c != Component::CurDir).collect();
+                matches!(parts.as_slice(), [Component::Normal(n)] if *n == "mira")
+            })
+            .unwrap_or(false);
+        if is_mira && entry.header().entry_type().is_file() {
+            let mut out = std::fs::File::create(dest).context("write the binary")?;
+            std::io::copy(&mut entry, &mut out).context("write the binary")?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o755))
+                    .context("make the binary executable")?;
+            }
+            return Ok(());
+        }
+    }
+    bail!("no mira binary in the archive")
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Copy next to the target, then rename over it: atomic on one filesystem,
-/// and safe while the old binary is running (it keeps its open inode).
-fn replace_binary(new_bin: &Path, target: &Path) -> Result<()> {
-    let dir = target.parent().context("binary has no parent directory")?;
-    let staged: PathBuf = dir.join(format!(".mira-update-{}", std::process::id()));
-    let result = (|| -> std::io::Result<()> {
-        std::fs::copy(new_bin, &staged)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))?;
+/// The new binary, staged beside the one it replaces: same filesystem, so
+/// the final rename is atomic (and safe while the old binary is running —
+/// it keeps its open inode). Removed again unless installed.
+struct Staged {
+    path: PathBuf,
+    installed: bool,
+}
+
+impl Staged {
+    fn new(target: &Path) -> Result<Self> {
+        let dir = target.parent().context("binary has no parent directory")?;
+        let path = dir.join(format!(".mira-update-{}", std::process::id()));
+        if let Err(e) = std::fs::File::create(&path) {
+            if e.kind() == std::io::ErrorKind::PermissionDenied {
+                bail!(
+                    "no permission to write {} — re-run with `sudo mira update`",
+                    dir.display()
+                );
+            }
+            return Err(e).with_context(|| format!("write to {}", dir.display()));
         }
-        std::fs::rename(&staged, target)
-    })();
-    if let Err(e) = result {
-        let _ = std::fs::remove_file(&staged);
-        if e.kind() == std::io::ErrorKind::PermissionDenied {
-            bail!(
-                "no permission to write {} — re-run with `sudo mira update`",
-                dir.display()
-            );
-        }
-        return Err(e).with_context(|| format!("replace {}", target.display()));
+        Ok(Self {
+            path,
+            installed: false,
+        })
     }
-    Ok(())
+
+    fn install(mut self, target: &Path) -> Result<()> {
+        std::fs::rename(&self.path, target)
+            .with_context(|| format!("replace {}", target.display()))?;
+        self.installed = true;
+        Ok(())
+    }
+}
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        if !self.installed {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
 }
 
 fn restart_service() {
+    // The service belongs to the user, not root; under sudo, launchctl and
+    // systemctl --user would look in root's session.
+    if std::env::var_os("SUDO_USER").is_some() {
+        println!(
+            "run `mira service restart` (without sudo) to move the service onto the new version"
+        );
+        return;
+    }
     match crate::service::restart() {
         Ok(true) => println!("restarted the background service"),
         Ok(false) => {}
@@ -291,19 +354,19 @@ mod tests {
     #[test]
     fn detects_install_method_from_path() {
         assert_eq!(
-            install_kind(Path::new("/opt/homebrew/Cellar/mira/0.5.2/bin/mira")),
+            install_kind(Path::new("/opt/homebrew/Cellar/mira/0.5.2/bin/mira"), None),
             InstallKind::Homebrew
         );
         assert_eq!(
-            install_kind(Path::new("/Users/me/.cargo/bin/mira")),
+            install_kind(Path::new("/Users/me/.cargo/bin/mira"), None),
             InstallKind::Cargo
         );
         assert_eq!(
-            install_kind(Path::new("/usr/local/bin/mira")),
+            install_kind(Path::new("/usr/local/bin/mira"), None),
             InstallKind::Standalone
         );
         assert_eq!(
-            install_kind(Path::new("/home/me/.local/bin/mira")),
+            install_kind(Path::new("/home/me/.local/bin/mira"), None),
             InstallKind::Standalone
         );
     }
@@ -316,16 +379,93 @@ mod tests {
         assert_eq!(parse_sha256(""), None);
     }
 
+    fn tarball(entries: &[(&str, tar::EntryType, &[u8])]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::fast(),
+        ));
+        for (name, kind, data) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(*kind);
+            header.set_size(data.len() as u64);
+            header.set_mode(0o755);
+            if *kind == tar::EntryType::Symlink {
+                header.set_link_name("/etc/passwd").unwrap();
+            }
+            builder.append_data(&mut header, name, *data).unwrap();
+        }
+        builder.into_inner().unwrap().finish().unwrap()
+    }
+
     #[test]
-    fn replaces_the_target_atomically() {
+    fn extracts_only_the_mira_binary() {
         let dir = tempfile::tempdir().unwrap();
-        let new_bin = dir.path().join("new");
+        let dest = dir.path().join("out");
+        let tgz = tarball(&[
+            ("README", tar::EntryType::Regular, b"hi"),
+            ("nested/mira", tar::EntryType::Regular, b"wrong"),
+            ("mira", tar::EntryType::Regular, b"binary"),
+        ]);
+        extract_binary(&tgz, &dest).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"binary");
+        // The release workflow's layout.
+        let tgz = tarball(&[
+            ("./LICENSE", tar::EntryType::Regular, b"l"),
+            ("./mira", tar::EntryType::Regular, b"release"),
+        ]);
+        extract_binary(&tgz, &dest).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"release");
+    }
+
+    #[test]
+    fn refuses_a_symlinked_or_missing_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out");
+        let link = tarball(&[("mira", tar::EntryType::Symlink, b"")]);
+        assert!(extract_binary(&link, &dest).is_err());
+        let none = tarball(&[("other", tar::EntryType::Regular, b"x")]);
+        assert!(extract_binary(&none, &dest).is_err());
+        assert!(!dest.exists());
+    }
+
+    #[test]
+    fn staged_binary_replaces_the_target() {
+        let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("mira");
-        std::fs::write(&new_bin, b"new").unwrap();
         std::fs::write(&target, b"old").unwrap();
-        replace_binary(&new_bin, &target).unwrap();
+        let staged = Staged::new(&target).unwrap();
+        assert_eq!(staged.path.parent(), Some(dir.path()));
+        std::fs::write(&staged.path, b"new").unwrap();
+        staged.install(&target).unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), b"new");
-        // No staging file left behind.
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn abandoned_staging_is_cleaned_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("mira");
+        std::fs::write(&target, b"old").unwrap();
+        drop(Staged::new(&target).unwrap());
+        assert_eq!(std::fs::read(&target).unwrap(), b"old");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn cargo_installs_are_found_by_their_records() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("bin")).unwrap();
+        let exe = root.path().join("bin/mira");
+        assert_eq!(install_kind(&exe, None), InstallKind::Standalone);
+        std::fs::write(root.path().join(".crates2.json"), "{}").unwrap();
+        assert_eq!(install_kind(&exe, None), InstallKind::Cargo);
+        // A custom CARGO_HOME, without records.
+        assert_eq!(
+            install_kind(
+                Path::new("/opt/cargo/bin/mira"),
+                Some(Path::new("/opt/cargo"))
+            ),
+            InstallKind::Cargo
+        );
     }
 }

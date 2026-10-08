@@ -34,8 +34,9 @@ jobs:
   build:
     name: build ${{ matrix.target }}
     needs: check-version
-    # Still runs for workflow_dispatch, where check-version is skipped.
-    if: ${{ !failure() && !cancelled() }}
+    # Still runs for workflow_dispatch, where check-version is skipped:
+    # without always(), a skipped dependency skips this job too.
+    if: ${{ always() && !failure() && !cancelled() }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false

@@ -59,6 +59,17 @@ struct ServiceConfig {
 }
 
 const LAUNCHD_LABEL: &str = "dev.runmira.mira";
+
+// System tools by absolute path, never via `PATH`, so a shadowing binary
+// earlier on `PATH` can't stand in for them.
+const LAUNCHCTL: &str = "/bin/launchctl";
+
+fn systemctl_bin() -> &'static str {
+    ["/usr/bin/systemctl", "/bin/systemctl"]
+        .into_iter()
+        .find(|p| Path::new(p).exists())
+        .unwrap_or("/usr/bin/systemctl")
+}
 const SYSTEMD_UNIT: &str = "mira.service";
 
 pub async fn run(args: ServiceArgs) -> Result<()> {
@@ -130,7 +141,7 @@ async fn install(args: InstallArgs) -> Result<()> {
         std::fs::create_dir_all(target.parent().unwrap())
             .context("create ~/Library/LaunchAgents")?;
         // Replace a previous install: unload it first, or bootstrap fails.
-        let _ = launchctl(&["bootout", &launchd_service()?]);
+        launchd_stop()?;
         std::fs::write(&target, plist).with_context(|| format!("write {}", target.display()))?;
         launchctl(&["bootstrap", &launchd_domain()?, &target.to_string_lossy()])
             .context("launchctl bootstrap")?;
@@ -182,7 +193,8 @@ fn uninstall() -> Result<()> {
     let mut removed = false;
     if cfg!(target_os = "macos") {
         let target = launchd_plist_path(&home);
-        let _ = launchctl(&["bootout", &launchd_service()?]);
+        // A stop that fails leaves the files, so it isn't reported as gone.
+        launchd_stop()?;
         if target.exists() {
             std::fs::remove_file(&target)?;
             removed = true;
@@ -190,7 +202,7 @@ fn uninstall() -> Result<()> {
     } else if cfg!(target_os = "linux") {
         let target = systemd_unit_path(&home);
         if target.exists() {
-            let _ = systemctl(&["disable", "--now", SYSTEMD_UNIT]);
+            systemctl(&["disable", "--now", SYSTEMD_UNIT]).context("stop the service")?;
             std::fs::remove_file(&target)?;
             let _ = systemctl(&["daemon-reload"]);
             removed = true;
@@ -273,10 +285,16 @@ pub fn restart() -> Result<bool> {
 }
 
 fn url(cfg: &ServiceConfig) -> String {
-    let host = if cfg.host == "0.0.0.0" {
-        "127.0.0.1"
+    let host = match cfg.host.as_str() {
+        "0.0.0.0" => "127.0.0.1",
+        "::" => "::1",
+        h => h,
+    };
+    // IPv6 literals need brackets in a URL.
+    let host = if host.contains(':') {
+        format!("[{host}]")
     } else {
-        &cfg.host
+        host.to_string()
     };
     format!("http://{host}:{}", cfg.port)
 }
@@ -314,7 +332,10 @@ fn launchd_plist_path(home: &Path) -> PathBuf {
 }
 
 fn uid() -> Result<String> {
-    let out = Proc::new("id").arg("-u").output().context("run `id -u`")?;
+    let out = Proc::new("/usr/bin/id")
+        .arg("-u")
+        .output()
+        .context("run `id -u`")?;
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
@@ -403,8 +424,18 @@ fn launchd_state(print: &str) -> Option<String> {
     })
 }
 
+/// Unload the agent if it's loaded. Not being loaded is fine; failing to
+/// unload one that is, is an error.
+fn launchd_stop() -> Result<()> {
+    let service = launchd_service()?;
+    if launchctl_output(&["print", &service]).is_ok() {
+        launchctl(&["bootout", &service]).context("stop the service")?;
+    }
+    Ok(())
+}
+
 fn launchctl(args: &[&str]) -> Result<()> {
-    let out = Proc::new("launchctl")
+    let out = Proc::new(LAUNCHCTL)
         .args(args)
         .output()
         .context("run launchctl")?;
@@ -419,7 +450,7 @@ fn launchctl(args: &[&str]) -> Result<()> {
 }
 
 fn launchctl_output(args: &[&str]) -> Result<String> {
-    let out = Proc::new("launchctl")
+    let out = Proc::new(LAUNCHCTL)
         .args(args)
         .output()
         .context("run launchctl")?;
@@ -479,7 +510,7 @@ fn systemd_unit(cfg: &ServiceConfig, path_env: &str) -> String {
 }
 
 fn ensure_systemd_user() -> Result<()> {
-    match Proc::new("systemctl")
+    match Proc::new(systemctl_bin())
         .args(["--user", "is-system-running"])
         .output()
     {
@@ -493,7 +524,7 @@ fn ensure_systemd_user() -> Result<()> {
 }
 
 fn systemctl(args: &[&str]) -> Result<()> {
-    let out = Proc::new("systemctl")
+    let out = Proc::new(systemctl_bin())
         .arg("--user")
         .args(args)
         .output()
@@ -509,7 +540,7 @@ fn systemctl(args: &[&str]) -> Result<()> {
 }
 
 fn systemctl_output(args: &[&str]) -> Result<String> {
-    let out = Proc::new("systemctl")
+    let out = Proc::new(systemctl_bin())
         .arg("--user")
         .args(args)
         .output()
@@ -527,6 +558,18 @@ mod tests {
             host: "127.0.0.1".into(),
             exe: PathBuf::from(exe),
         }
+    }
+
+    #[test]
+    fn urls_bracket_ipv6_hosts() {
+        let mut c = cfg("/bin/mira");
+        assert_eq!(url(&c), "http://127.0.0.1:8787");
+        c.host = "::1".into();
+        assert_eq!(url(&c), "http://[::1]:8787");
+        c.host = "::".into();
+        assert_eq!(url(&c), "http://[::1]:8787");
+        c.host = "0.0.0.0".into();
+        assert_eq!(url(&c), "http://127.0.0.1:8787");
     }
 
     #[test]
