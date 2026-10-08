@@ -1,7 +1,12 @@
 import { useEffect, useState } from 'react';
+import { LazyBoundary } from '../LazyBoundary';
 import { getSupabase } from '../../lib/supabase';
 import { useCurrentUser } from '../../lib/useCurrentUser';
-import { OnboardingFlow, type Profile } from './OnboardingFlow';
+import type { Profile } from './OnboardingFlow';
+import { lazyNamed } from '../../lib/lazy';
+
+// First-run only, so it stays out of every other load.
+const OnboardingFlow = lazyNamed(() => import('./OnboardingFlow'), 'OnboardingFlow');
 
 type Status = 'loading' | 'onboarding' | 'done' | 'error';
 
@@ -57,12 +62,14 @@ export function OnboardingGate({ children }: { children: React.ReactNode }) {
 
   if (status === 'onboarding') {
     return (
-      <OnboardingFlow
-        userId={user.id}
-        initialProfile={profile}
-        userMetadata={user.user_metadata ?? {}}
-        onDone={() => setStatus('done')}
-      />
+      <LazyBoundary>
+        <OnboardingFlow
+          userId={user.id}
+          initialProfile={profile}
+          userMetadata={user.user_metadata ?? {}}
+          onDone={() => setStatus('done')}
+        />
+      </LazyBoundary>
     );
   }
 

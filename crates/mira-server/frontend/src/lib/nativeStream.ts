@@ -1,4 +1,4 @@
-import type { Entry } from '../App';
+import type { Entry } from '../transcript/entries';
 
 /** Native IDs are scoped to the current user turn. Preserve message order
  * when deltas interleave with work; legacy frames use appendToken. */
