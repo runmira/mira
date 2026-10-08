@@ -138,7 +138,11 @@ pub async fn start_agent(
     // Secrets are never written to a session record, so a chat restored
     // after a restart comes back without its key. The engine's config in
     // mira.yaml is the one place they live; fill in what's missing from it.
-    if let Some(current) = state.engines.current().external_driver_config(&params.instance) {
+    if let Some(current) = state
+        .engines
+        .current()
+        .external_driver_config(&params.instance)
+    {
         if driver_cfg.api_key.is_none() {
             driver_cfg.api_key = current.api_key;
         }

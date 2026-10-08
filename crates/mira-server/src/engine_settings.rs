@@ -145,7 +145,12 @@ fn view(
         launch_args: cfg
             .get("launch_args")
             .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
             .unwrap_or_default(),
         env,
         effort: text(cfg, "effort"),
@@ -322,7 +327,13 @@ mod tests {
             "api_key": "sk-ant-abcdefghijklmnop",
             "env": { "GITHUB_TOKEN": "ghp_1234567890abcd", "CODEX_PROFILE": "work" },
         }}));
-        let v = view("codex", "codex", None, true, e.config.as_ref().unwrap().as_object().unwrap());
+        let v = view(
+            "codex",
+            "codex",
+            None,
+            true,
+            e.config.as_ref().unwrap().as_object().unwrap(),
+        );
         let body = serde_json::to_string(&v).unwrap();
         assert!(!body.contains("sk-ant-abcdefghijklmnop"));
         assert!(!body.contains("ghp_1234567890abcd"));
@@ -333,12 +344,16 @@ mod tests {
             value: Some("work".into()),
             masked: None,
         }));
-        assert!(v.env.iter().any(|e| e.key == "GITHUB_TOKEN" && e.value.is_none()));
+        assert!(v
+            .env
+            .iter()
+            .any(|e| e.key == "GITHUB_TOKEN" && e.value.is_none()));
     }
 
     #[test]
     fn a_null_env_value_keeps_the_stored_secret() {
-        let mut e = entry(json!({ "config": { "env": { "GITHUB_TOKEN": "ghp_secret", "OLD": "x" } } }));
+        let mut e =
+            entry(json!({ "config": { "env": { "GITHUB_TOKEN": "ghp_secret", "OLD": "x" } } }));
         apply(
             &mut e,
             AgentSettingsPatch {
@@ -355,7 +370,8 @@ mod tests {
 
     #[test]
     fn empty_strings_clear_and_absent_fields_stay() {
-        let mut e = entry(json!({ "config": { "api_key": "sk-old", "home_path": "~/.codex-work" } }));
+        let mut e =
+            entry(json!({ "config": { "api_key": "sk-old", "home_path": "~/.codex-work" } }));
         apply(
             &mut e,
             AgentSettingsPatch {
