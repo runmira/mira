@@ -351,6 +351,18 @@ mod tests {
 pub struct ClaudeCodeDriver;
 
 impl AcpDriver for ClaudeCodeDriver {
+    /// Claude Code's model aliases always resolve to the newest model of
+    /// that family, so they're a catalog that can't go stale.
+    fn known_models(&self) -> &'static [(&'static str, &'static str)] {
+        &[
+            ("default", "Default"),
+            ("fable", "Fable (latest)"),
+            ("opus", "Opus (latest)"),
+            ("sonnet", "Sonnet (latest)"),
+            ("haiku", "Haiku (latest)"),
+        ]
+    }
+
     fn kind(&self) -> &'static str {
         "claude-code"
     }

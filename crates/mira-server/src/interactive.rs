@@ -1328,6 +1328,8 @@ fn subagent_wire(parent_call_id: &str, evt: &HarnessEvent) -> Option<ServerMsg> 
         | HarnessEvent::RateLimit(_)
         | HarnessEvent::MemoryLearned { .. }
         | HarnessEvent::Compacted { .. }
+        | HarnessEvent::Compacting { .. }
+        | HarnessEvent::CompactionFailed { .. }
         | HarnessEvent::GoalSet { .. }
         | HarnessEvent::GoalCleared
         | HarnessEvent::GoalProgress { .. }

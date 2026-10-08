@@ -77,10 +77,17 @@ fn store_file(cwd: &Path, session: &str) -> Option<PathBuf> {
 }
 
 fn store_lock(file: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
-    static LOCKS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<PathBuf, std::sync::Weak<std::sync::Mutex<()>>>>> = std::sync::OnceLock::new();
-    let mut locks = LOCKS.get_or_init(Default::default).lock().unwrap_or_else(|error| error.into_inner());
+    static LOCKS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, std::sync::Weak<std::sync::Mutex<()>>>>,
+    > = std::sync::OnceLock::new();
+    let mut locks = LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     locks.retain(|_, lock| lock.strong_count() > 0);
-    if let Some(lock) = locks.get(file).and_then(std::sync::Weak::upgrade) { return lock; }
+    if let Some(lock) = locks.get(file).and_then(std::sync::Weak::upgrade) {
+        return lock;
+    }
     let lock = std::sync::Arc::new(std::sync::Mutex::new(()));
     locks.insert(file.to_owned(), std::sync::Arc::downgrade(&lock));
     lock
@@ -153,74 +160,163 @@ pub fn record(cwd: &Path, session: &str, text: &str, replaces: Option<(&str, usi
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct TurnDiffSummary { pub text: String, pub occurrence: usize, pub files: Vec<crate::session_changes::ChangedFile> }
+pub struct TurnDiffSummary {
+    pub text: String,
+    pub occurrence: usize,
+    pub files: Vec<crate::session_changes::ChangedFile>,
+}
 
 pub fn pending_tree(cwd: &Path, session: &str) -> Option<String> {
     let file = store_file(cwd, session)?;
-    load(&file).checkpoints.iter().enumerate().last().filter(|(_, checkpoint)| checkpoint.result_tree.is_none()).map(|(index, checkpoint)| format!("{index}:{}", checkpoint.tree))
+    load(&file)
+        .checkpoints
+        .iter()
+        .enumerate()
+        .next_back()
+        .filter(|(_, checkpoint)| checkpoint.result_tree.is_none())
+        .map(|(index, checkpoint)| format!("{index}:{}", checkpoint.tree))
 }
 pub fn finish(cwd: &Path, session: &str, expected_tree: &str) {
-    let Some(file) = store_file(cwd, session) else { return; };
+    let Some(file) = store_file(cwd, session) else {
+        return;
+    };
     let lock = store_lock(&file);
     let _guard = lock.lock().unwrap_or_else(|error| error.into_inner());
     let result = snapshot_tree(cwd);
     let mut store = load(&file);
-    let Some((index, tree)) = expected_tree.split_once(':') else { return; };
-    let Ok(index) = index.parse::<usize>() else { return; };
-    let Some(checkpoint) = store.checkpoints.get_mut(index).filter(|checkpoint| checkpoint.tree == tree && checkpoint.result_tree.is_none()) else { return; };
+    let Some((index, tree)) = expected_tree.split_once(':') else {
+        return;
+    };
+    let Ok(index) = index.parse::<usize>() else {
+        return;
+    };
+    let Some(checkpoint) = store
+        .checkpoints
+        .get_mut(index)
+        .filter(|checkpoint| checkpoint.tree == tree && checkpoint.result_tree.is_none())
+    else {
+        return;
+    };
     checkpoint.result_tree = result;
     save(&file, &store);
 }
 
 pub fn turn_diffs(cwd: &Path, session: &str) -> Vec<TurnDiffSummary> {
-    let Some(file) = store_file(cwd, session) else { return vec![]; };
+    let Some(file) = store_file(cwd, session) else {
+        return vec![];
+    };
     let store = load(&file);
-    store.checkpoints.iter().enumerate().filter_map(|(index, checkpoint)| {
-        let result = checkpoint.result_tree.as_ref()?;
-        let output = run(git(cwd).args(["diff", "--relative", "--numstat", "-z", "--no-renames", &checkpoint.tree, result]))?;
-        Some(TurnDiffSummary { text: checkpoint.text.clone(), occurrence: store.checkpoints[index+1..].iter().filter(|other| other.text == checkpoint.text).count(), files: crate::session_changes::parse_numstat_z(&output) })
-    }).collect()
+    store
+        .checkpoints
+        .iter()
+        .enumerate()
+        .filter_map(|(index, checkpoint)| {
+            let result = checkpoint.result_tree.as_ref()?;
+            let output = run(git(cwd).args([
+                "diff",
+                "--relative",
+                "--numstat",
+                "-z",
+                "--no-renames",
+                &checkpoint.tree,
+                result,
+            ]))?;
+            Some(TurnDiffSummary {
+                text: checkpoint.text.clone(),
+                occurrence: store.checkpoints[index + 1..]
+                    .iter()
+                    .filter(|other| other.text == checkpoint.text)
+                    .count(),
+                files: crate::session_changes::parse_numstat_z(&output),
+            })
+        })
+        .collect()
 }
 
 /// Read only the frozen before/after trees. Never substitute today's working file.
 #[derive(Debug, Serialize)]
 pub struct TurnFileDiff {
-    #[serde(flatten)] pub preview: mira_tools::DiffPreview,
+    #[serde(flatten)]
+    pub preview: mira_tools::DiffPreview,
     pub before: String,
     pub after: String,
 }
-pub fn turn_file_diff(cwd: &Path, session: &str, text: &str, occurrence: usize, path: &str) -> Result<TurnFileDiff, String> {
-    if path.is_empty() || Path::new(path).components().any(|part| !matches!(part, std::path::Component::Normal(_))) {
+pub fn turn_file_diff(
+    cwd: &Path,
+    session: &str,
+    text: &str,
+    occurrence: usize,
+    path: &str,
+) -> Result<TurnFileDiff, String> {
+    if path.is_empty()
+        || Path::new(path)
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+    {
         return Err("invalid file path".into());
     }
     let file = store_file(cwd, session).ok_or("no checkpoints for this chat")?;
     let store = load(&file);
     let index = find(&store, text, occurrence).ok_or("no checkpoint for this turn")?;
     let checkpoint = &store.checkpoints[index];
-    let result = checkpoint.result_tree.as_ref().ok_or("this turn has no completed snapshot")?;
+    let result = checkpoint
+        .result_tree
+        .as_ref()
+        .ok_or("this turn has no completed snapshot")?;
     let read = |tree: &str| -> Result<Option<String>, String> {
-        if !tree_exists(cwd, tree) { return Err("this snapshot has expired".into()); }
+        if !tree_exists(cwd, tree) {
+            return Err("this snapshot has expired".into());
+        }
         let spec = format!("{tree}:./{path}");
-        if !in_tree(cwd, tree, path) { return Ok(None); }
-        let size = run(git(cwd).args(["cat-file", "-s", &spec])).and_then(|s| s.trim().parse::<usize>().ok()).ok_or("could not read snapshot size")?;
-        if size > 2 * 1024 * 1024 { return Err("this file is too large for an inline diff".into()); }
+        if !in_tree(cwd, tree, path) {
+            return Ok(None);
+        }
+        let size = run(git(cwd).args(["cat-file", "-s", &spec]))
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .ok_or("could not read snapshot size")?;
+        if size > 2 * 1024 * 1024 {
+            return Err("this file is too large for an inline diff".into());
+        }
         let value = run(git(cwd).args(["show", &spec])).ok_or("could not read snapshot")?;
-        if value.contains('\0') { return Err("binary files have no text diff".into()); }
+        if value.contains('\0') {
+            return Err("binary files have no text diff".into());
+        }
         Ok(Some(value))
     };
     let before = read(&checkpoint.tree)?;
     let after = read(result)?;
-    if before.is_none() && after.is_none() { return Err("this file is absent from the turn snapshots".into()); }
-    let kind = if before.is_none() { mira_tools::DiffKind::Create } else { mira_tools::DiffKind::Edit };
-    let before = before.unwrap_or_default(); let after = after.unwrap_or_default();
-    Ok(TurnFileDiff { preview: mira_tools::preview_between(path.to_owned(), &before, &after, kind), before, after })
+    if before.is_none() && after.is_none() {
+        return Err("this file is absent from the turn snapshots".into());
+    }
+    let kind = if before.is_none() {
+        mira_tools::DiffKind::Create
+    } else {
+        mira_tools::DiffKind::Edit
+    };
+    let before = before.unwrap_or_default();
+    let after = after.unwrap_or_default();
+    Ok(TurnFileDiff {
+        preview: mira_tools::preview_between(path.to_owned(), &before, &after, kind),
+        before,
+        after,
+    })
 }
 
 pub(crate) async fn finish_slot(slot: std::sync::Arc<crate::slot::SessionSlot>) {
     let cwd = slot.cwd.read().await.clone();
     let id = slot.id.to_string();
-    let summaries = tokio::task::spawn_blocking(move || { if let Some(tree) = pending_tree(&cwd, &id) { finish(&cwd, &id, &tree); } turn_diffs(&cwd, &id) }).await;
-    if let Ok(summaries) = summaries { let _ = slot.events_tx.send(crate::protocol::ServerMsg::TurnDiffs { summaries }); }
+    let summaries = tokio::task::spawn_blocking(move || {
+        if let Some(tree) = pending_tree(&cwd, &id) {
+            finish(&cwd, &id, &tree);
+        }
+        turn_diffs(&cwd, &id)
+    })
+    .await;
+    if let Ok(summaries) = summaries {
+        let _ = slot
+            .events_tx
+            .send(crate::protocol::ServerMsg::TurnDiffs { summaries });
+    }
 }
 
 fn tree_exists(cwd: &Path, tree: &str) -> bool {
@@ -484,13 +580,24 @@ mod tests {
 
     #[test]
     fn historical_diff_uses_frozen_versions_and_rejects_traversal() {
-        let dir = repo(); let cwd = dir.path();
-        std::fs::write(cwd.join("a.txt"), "before\n").unwrap(); record(cwd, S, "change", None);
-        let token = pending_tree(cwd, S).unwrap(); std::fs::write(cwd.join("a.txt"), "after\n").unwrap(); std::fs::write(cwd.join("new.txt"), "created\n").unwrap(); finish(cwd, S, &token);
+        let dir = repo();
+        let cwd = dir.path();
+        std::fs::write(cwd.join("a.txt"), "before\n").unwrap();
+        record(cwd, S, "change", None);
+        let token = pending_tree(cwd, S).unwrap();
+        std::fs::write(cwd.join("a.txt"), "after\n").unwrap();
+        std::fs::write(cwd.join("new.txt"), "created\n").unwrap();
+        finish(cwd, S, &token);
         std::fs::write(cwd.join("a.txt"), "unrelated later edit\n").unwrap();
         let diff = turn_file_diff(cwd, S, "change", 0, "a.txt").unwrap();
-        assert_eq!(diff.before, "before\n"); assert_eq!(diff.after, "after\n");
-        assert_eq!(turn_file_diff(cwd, S, "change", 0, "new.txt").unwrap().before, "");
+        assert_eq!(diff.before, "before\n");
+        assert_eq!(diff.after, "after\n");
+        assert_eq!(
+            turn_file_diff(cwd, S, "change", 0, "new.txt")
+                .unwrap()
+                .before,
+            ""
+        );
         assert!(turn_file_diff(cwd, S, "change", 0, "../a.txt").is_err());
         assert!(turn_file_diff(cwd, S, "change", 0, "missing.txt").is_err());
     }

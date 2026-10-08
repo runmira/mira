@@ -1076,6 +1076,15 @@ mod tests {
     }
 }
 
+/// The chat this port's agent runs in: its slot, engine instance, driver,
+/// and the slot generation it was bound at.
+type RuntimeBinding = (
+    std::sync::Weak<crate::slot::SessionSlot>,
+    String,
+    String,
+    u64,
+);
+
 /// Forwards normalized ACP events onto a Mira session's WebSocket stream.
 ///
 /// The seam that lets `mira-acp` stay ignorant of Mira: it produces
@@ -1083,14 +1092,7 @@ mod tests {
 /// the session's existing broadcast channel, so an external agent's output
 /// reaches the frontend by the same path as Mira's own.
 pub struct AcpEventPort {
-    runtime: std::sync::Mutex<
-        Option<(
-            std::sync::Weak<crate::slot::SessionSlot>,
-            String,
-            String,
-            u64,
-        )>,
-    >,
+    runtime: std::sync::Mutex<Option<RuntimeBinding>>,
 
     events: tokio::sync::broadcast::Sender<ServerMsg>,
     /// Where the agent's spend reports are booked, for the Usage page.
@@ -1327,7 +1329,17 @@ impl AcpEventPort {
             slot.engine.touch();
             match &event.event {
                 MiraEvent::Limits { windows } => {
-                    *slot.message_queue.limit_reset.lock().unwrap_or_else(|e|e.into_inner()) = windows.iter().filter(|w| w.utilization >= 1.0).filter_map(|w| w.resets_at).filter(|at| *at > 0).max().map(|at| (at as u64).saturating_mul(1000));
+                    *slot
+                        .message_queue
+                        .limit_reset
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()) = windows
+                        .iter()
+                        .filter(|w| w.utilization >= 1.0)
+                        .filter_map(|w| w.resets_at)
+                        .filter(|at| *at > 0)
+                        .max()
+                        .map(|at| (at as u64).saturating_mul(1000));
                 }
                 MiraEvent::RuntimeRequest(request) => {
                     if !slot.runtime_requests.is_persistent() {
@@ -1437,8 +1449,15 @@ impl AcpEventPort {
         }
         if let Some((slot, _, _)) = self.runtime_owner() {
             if stop_reason == "agent_exited" {
-                let cancelled=slot.engine.activity.lock().unwrap_or_else(|e|e.into_inner()).cancel_work();
-                for work in cancelled { self.push(ServerMsg::RuntimeWorkUpdated {work}); }
+                let cancelled = slot
+                    .engine
+                    .activity
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .cancel_work();
+                for work in cancelled {
+                    self.push(ServerMsg::RuntimeWorkUpdated { work });
+                }
             }
             if matches!(
                 stop_reason,
@@ -1465,7 +1484,12 @@ impl AcpEventPort {
                 let id = slot.id.to_string();
                 if let Some(tree) = crate::checkpoints::pending_tree(&cwd, &id) {
                     let events = slot.events_tx.clone();
-                    tokio::task::spawn_blocking(move || { crate::checkpoints::finish(&cwd, &id, &tree); let _ = events.send(ServerMsg::TurnDiffs { summaries: crate::checkpoints::turn_diffs(&cwd, &id) }); });
+                    tokio::task::spawn_blocking(move || {
+                        crate::checkpoints::finish(&cwd, &id, &tree);
+                        let _ = events.send(ServerMsg::TurnDiffs {
+                            summaries: crate::checkpoints::turn_diffs(&cwd, &id),
+                        });
+                    });
                 }
             }
         }

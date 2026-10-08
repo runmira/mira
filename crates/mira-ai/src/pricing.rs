@@ -19,6 +19,17 @@ pub struct ModelPrice {
     /// Cached prompt tokens are usually discounted (OpenAI charges 0.5x,
     /// Anthropic 0.1x). We charge them at this rate instead of `input`.
     pub cached_input_per_mtok: f64,
+    /// Prompt tokens written to the cache (Anthropic, Bedrock). `None` =
+    /// the usual 1.25x input.
+    pub cache_write_per_mtok: Option<f64>,
+}
+
+impl ModelPrice {
+    /// What one million cache-write tokens cost.
+    pub fn cache_write_rate(&self) -> f64 {
+        self.cache_write_per_mtok
+            .unwrap_or(self.input_per_mtok * 1.25)
+    }
 }
 
 /// Look up pricing by model id. Matches on prefix so `gpt-4o-2024-11-20`
@@ -26,6 +37,12 @@ pub struct ModelPrice {
 /// and so `openai/gpt-4o` (a gateway id)
 /// resolves the same way.
 pub fn price_for(model: &str) -> Option<ModelPrice> {
+    // A background model routed to an engine instance (`groq:llama-…`)
+    // prices as its model.
+    price_for_id(model).or_else(|| model.split_once(':').and_then(|(_, m)| price_for_id(m)))
+}
+
+fn price_for_id(model: &str) -> Option<ModelPrice> {
     // Prefer the dynamic table (LiteLLM) when one is installed — it is fresher
     // than the embedded snapshot. Fall back to the builtin table on a miss so
     // offline-only setups keep working with exactly one pricing crate.
@@ -50,11 +67,15 @@ pub fn price_for(model: &str) -> Option<ModelPrice> {
 /// Compute USD cost for a usage record, if the model is priced.
 pub fn cost_usd(model: &str, usage: TokenUsage) -> Option<f64> {
     let p = price_for(model)?;
+    // Prompt tokens split three ways: cache reads (discounted), cache
+    // writes (a premium), and the rest at the input rate.
     let uncached_input = usage
         .prompt_tokens
-        .saturating_sub(usage.cached_input_tokens);
+        .saturating_sub(usage.cached_input_tokens)
+        .saturating_sub(usage.cache_write_tokens);
     let dollars = (uncached_input as f64) * p.input_per_mtok / 1_000_000.0
         + (usage.cached_input_tokens as f64) * p.cached_input_per_mtok / 1_000_000.0
+        + (usage.cache_write_tokens as f64) * p.cache_write_rate() / 1_000_000.0
         + (usage.completion_tokens as f64) * p.output_per_mtok / 1_000_000.0;
     Some(dollars)
 }
@@ -85,6 +106,9 @@ pub struct PricingRow {
     pub input_per_mtok: f64,
     pub output_per_mtok: f64,
     pub cached_input_per_mtok: f64,
+    /// From LiteLLM's `cache_creation_input_token_cost`, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_per_mtok: Option<f64>,
 }
 
 /// What the client is handed for quoting.
@@ -145,6 +169,7 @@ fn parse_litellm_rows(body: &serde_json::Value) -> Vec<PricingRow> {
             input_per_mtok: input,
             output_per_mtok: output,
             cached_input_per_mtok: cached,
+            cache_write_per_mtok: pick("cache_creation_input_token_cost"),
         });
     }
     rows
@@ -174,6 +199,7 @@ fn dynamic_lookup(rows: &[PricingRow], model: &str) -> Option<ModelPrice> {
             input_per_mtok: r.input_per_mtok,
             output_per_mtok: r.output_per_mtok,
             cached_input_per_mtok: r.cached_input_per_mtok,
+            cache_write_per_mtok: r.cache_write_per_mtok,
         })
 }
 
@@ -203,6 +229,7 @@ pub fn pricing_snapshot() -> PricingSnapshot {
                     input_per_mtok: r.input_per_mtok,
                     output_per_mtok: r.output_per_mtok,
                     cached_input_per_mtok: r.cached_input_per_mtok,
+                    cache_write_per_mtok: r.cache_write_per_mtok,
                 })
                 .collect(),
             source,
@@ -216,6 +243,7 @@ pub fn pricing_snapshot() -> PricingSnapshot {
                     input_per_mtok: p.input_per_mtok,
                     output_per_mtok: p.output_per_mtok,
                     cached_input_per_mtok: p.cached_input_per_mtok,
+                    cache_write_per_mtok: Some(p.cache_write_rate()),
                 })
                 .collect(),
             source: PricingSource::Builtin,
@@ -339,6 +367,7 @@ const MODEL_PRICES: &[(&str, ModelPrice)] = &[
             input_per_mtok: 0.25,
             output_per_mtok: 2.00,
             cached_input_per_mtok: 0.025,
+            cache_write_per_mtok: None,
         },
     ),
     (
@@ -347,6 +376,7 @@ const MODEL_PRICES: &[(&str, ModelPrice)] = &[
             input_per_mtok: 1.25,
             output_per_mtok: 10.00,
             cached_input_per_mtok: 0.125,
+            cache_write_per_mtok: None,
         },
     ),
     (
@@ -355,6 +385,7 @@ const MODEL_PRICES: &[(&str, ModelPrice)] = &[
             input_per_mtok: 0.15,
             output_per_mtok: 0.60,
             cached_input_per_mtok: 0.075,
+            cache_write_per_mtok: None,
         },
     ),
     (
@@ -363,6 +394,7 @@ const MODEL_PRICES: &[(&str, ModelPrice)] = &[
             input_per_mtok: 2.50,
             output_per_mtok: 10.00,
             cached_input_per_mtok: 1.25,
+            cache_write_per_mtok: None,
         },
     ),
     (
@@ -371,6 +403,7 @@ const MODEL_PRICES: &[(&str, ModelPrice)] = &[
             input_per_mtok: 0.40,
             output_per_mtok: 1.60,
             cached_input_per_mtok: 0.10,
+            cache_write_per_mtok: None,
         },
     ),
     (
@@ -379,6 +412,7 @@ const MODEL_PRICES: &[(&str, ModelPrice)] = &[
             input_per_mtok: 2.00,
             output_per_mtok: 8.00,
             cached_input_per_mtok: 0.50,
+            cache_write_per_mtok: None,
         },
     ),
     (
@@ -387,6 +421,7 @@ const MODEL_PRICES: &[(&str, ModelPrice)] = &[
             input_per_mtok: 3.00,
             output_per_mtok: 12.00,
             cached_input_per_mtok: 1.50,
+            cache_write_per_mtok: None,
         },
     ),
     (
@@ -395,6 +430,7 @@ const MODEL_PRICES: &[(&str, ModelPrice)] = &[
             input_per_mtok: 15.00,
             output_per_mtok: 60.00,
             cached_input_per_mtok: 7.50,
+            cache_write_per_mtok: None,
         },
     ),
     (
@@ -403,6 +439,7 @@ const MODEL_PRICES: &[(&str, ModelPrice)] = &[
             input_per_mtok: 1.10,
             output_per_mtok: 4.40,
             cached_input_per_mtok: 0.55,
+            cache_write_per_mtok: None,
         },
     ),
     (
@@ -411,6 +448,7 @@ const MODEL_PRICES: &[(&str, ModelPrice)] = &[
             input_per_mtok: 2.00,
             output_per_mtok: 8.00,
             cached_input_per_mtok: 0.50,
+            cache_write_per_mtok: None,
         },
     ),
     // -- Anthropic (via native or compat endpoint) --
@@ -420,6 +458,7 @@ const MODEL_PRICES: &[(&str, ModelPrice)] = &[
             input_per_mtok: 1.00,
             output_per_mtok: 5.00,
             cached_input_per_mtok: 0.10,
+            cache_write_per_mtok: None,
         },
     ),
     (
@@ -428,6 +467,7 @@ const MODEL_PRICES: &[(&str, ModelPrice)] = &[
             input_per_mtok: 3.00,
             output_per_mtok: 15.00,
             cached_input_per_mtok: 0.30,
+            cache_write_per_mtok: None,
         },
     ),
     (
@@ -436,6 +476,7 @@ const MODEL_PRICES: &[(&str, ModelPrice)] = &[
             input_per_mtok: 5.00,
             output_per_mtok: 25.00,
             cached_input_per_mtok: 0.50,
+            cache_write_per_mtok: None,
         },
     ),
     (
@@ -444,6 +485,7 @@ const MODEL_PRICES: &[(&str, ModelPrice)] = &[
             input_per_mtok: 15.00,
             output_per_mtok: 75.00,
             cached_input_per_mtok: 1.50,
+            cache_write_per_mtok: None,
         },
     ),
     // -- Groq / Together / open-weight (very rough; often free tier) --
@@ -453,6 +495,7 @@ const MODEL_PRICES: &[(&str, ModelPrice)] = &[
             input_per_mtok: 0.59,
             output_per_mtok: 0.79,
             cached_input_per_mtok: 0.59,
+            cache_write_per_mtok: None,
         },
     ),
     (
@@ -461,6 +504,7 @@ const MODEL_PRICES: &[(&str, ModelPrice)] = &[
             input_per_mtok: 0.59,
             output_per_mtok: 0.79,
             cached_input_per_mtok: 0.59,
+            cache_write_per_mtok: None,
         },
     ),
     (
@@ -469,6 +513,7 @@ const MODEL_PRICES: &[(&str, ModelPrice)] = &[
             input_per_mtok: 0.05,
             output_per_mtok: 0.08,
             cached_input_per_mtok: 0.05,
+            cache_write_per_mtok: None,
         },
     ),
     (
@@ -477,6 +522,7 @@ const MODEL_PRICES: &[(&str, ModelPrice)] = &[
             input_per_mtok: 0.90,
             output_per_mtok: 0.90,
             cached_input_per_mtok: 0.90,
+            cache_write_per_mtok: None,
         },
     ),
     (
@@ -485,6 +531,7 @@ const MODEL_PRICES: &[(&str, ModelPrice)] = &[
             input_per_mtok: 0.27,
             output_per_mtok: 1.10,
             cached_input_per_mtok: 0.07,
+            cache_write_per_mtok: None,
         },
     ),
 ];
@@ -506,6 +553,7 @@ mod tests {
         assert!(cost_usd(
             "some-unknown-model",
             TokenUsage {
+                cache_write_tokens: 0,
                 prompt_tokens: 1000,
                 completion_tokens: 500,
                 cached_input_tokens: 0
@@ -517,11 +565,13 @@ mod tests {
     #[test]
     fn cached_tokens_are_discounted() {
         let usage_no_cache = TokenUsage {
+            cache_write_tokens: 0,
             prompt_tokens: 1_000_000,
             completion_tokens: 0,
             cached_input_tokens: 0,
         };
         let usage_all_cache = TokenUsage {
+            cache_write_tokens: 0,
             prompt_tokens: 1_000_000,
             completion_tokens: 0,
             cached_input_tokens: 1_000_000,
@@ -567,6 +617,7 @@ mod tests {
                 input_per_mtok: 11.0,
                 output_per_mtok: 22.0,
                 cached_input_per_mtok: 5.5,
+                cache_write_per_mtok: None,
             }],
             PricingSource::Fetched,
             1_500_000_000,
@@ -579,5 +630,21 @@ mod tests {
         let p = price_for("openai/zz-pullet").unwrap();
         assert_eq!(p.input_per_mtok, 11.0, "gateway prefix still matches");
         set_dynamic_table_for_test(None);
+    }
+
+    #[test]
+    fn cache_writes_are_priced_at_a_premium() {
+        let p = ModelPrice {
+            input_per_mtok: 3.0,
+            output_per_mtok: 15.0,
+            cached_input_per_mtok: 0.3,
+            cache_write_per_mtok: None,
+        };
+        assert!((p.cache_write_rate() - 3.75).abs() < 1e-9);
+        let explicit = ModelPrice {
+            cache_write_per_mtok: Some(4.0),
+            ..p
+        };
+        assert!((explicit.cache_write_rate() - 4.0).abs() < 1e-9);
     }
 }

@@ -216,22 +216,30 @@ export function providerIconUrls(instance: string | null | undefined, modelId?: 
  */
 const OPTIONS_KEY = 'mira.model-options';
 
-export function loadModelOptions(model: string): Record<string, string> {
+/** Options are remembered per engine instance and model (`groq:llama-…`),
+ *  so two instances offering the same model id keep their own settings.
+ *  Entries saved before that were keyed by model alone; they're the
+ *  fallback, so existing picks carry over. */
+function optionsKey(model: string, instance?: string | null): string {
+  return instance ? `${instance}:${model}` : model;
+}
+
+export function loadModelOptions(model: string, instance?: string | null): Record<string, string> {
   try {
     const raw = localStorage.getItem(OPTIONS_KEY);
     if (!raw) return {};
     const map = JSON.parse(raw) as Record<string, Record<string, string>>;
-    return map[model] ?? {};
+    return map[optionsKey(model, instance)] ?? map[model] ?? {};
   } catch {
     return {};
   }
 }
 
-export function saveModelOptions(model: string, next: Record<string, string>) {
+export function saveModelOptions(model: string, next: Record<string, string>, instance?: string | null) {
   try {
     const raw = localStorage.getItem(OPTIONS_KEY);
     const map = raw ? (JSON.parse(raw) as Record<string, Record<string, string>>) : {};
-    map[model] = next;
+    map[optionsKey(model, instance)] = next;
     localStorage.setItem(OPTIONS_KEY, JSON.stringify(map));
   } catch {
     /* private mode — options still apply for this session */

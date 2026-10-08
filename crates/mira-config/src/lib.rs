@@ -34,14 +34,22 @@ pub struct MiraConfig {
     /// drop; the compactor's job is single-shot summarization, so a
     /// smaller tier handles it fine. Unset falls back to the session's
     /// active model.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "model_ref::deserialize"
+    )]
     pub compactor_model: Option<String>,
     /// A cheap, fast model on the same provider for background work:
     /// session titles, compaction summaries, memory extraction, and
     /// subagents whose type asks for `model: small` (or Claude Code's
     /// `haiku`). Each job's own setting (`compactor_model`,
     /// `memory.extractor_model`) still wins. Unset = the main model.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "model_ref::deserialize"
+    )]
     pub small_model: Option<String>,
     pub providers: BTreeMap<String, ProviderConfig>,
     /// Engine instances: overrides and additions on top of the derived
@@ -154,7 +162,11 @@ pub struct CloudConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub budget_usd: Option<f64>,
     /// Cheaper model for the goal evaluator.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "model_ref::deserialize"
+    )]
     pub evaluator_model: Option<String>,
     /// Env var holding the GitHub token. Default: `GITHUB_TOKEN`, then
     /// `GH_TOKEN`, then `gh auth token`.
@@ -358,7 +370,11 @@ pub struct MemoryRuntimeConfig {
     /// session's active model (expensive but always works). Point this at
     /// the provider's cheap tier — e.g. `"claude-haiku-4-5"` on Anthropic,
     /// `"gpt-5-nano"` on OpenAI — to keep per-round cost negligible.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "model_ref::deserialize"
+    )]
     pub extractor_model: Option<String>,
     /// Register the `memory_*` agent tools. Default on. Turn off to shrink
     /// the tool list and see whether tool-count is causing over-exploration
@@ -614,10 +630,39 @@ pub fn export_keys_to_env(cfg: &MiraConfig) {
 /// The rule: explicit `Some(x)` always wins; otherwise auto-enable for
 /// Anthropic-flavored endpoints and leave off for everything else.
 pub fn prompt_caching_enabled(name: &str, base_url: &str, explicit: Option<bool>) -> bool {
-    if let Some(v) = explicit {
-        return v;
+    // An explicit `prompt_caching:` always wins; otherwise only providers
+    // that take Anthropic-style cache markers get them.
+    explicit.unwrap_or(caching_capability(name, base_url) == CachingCapability::AnthropicBlocks)
+}
+
+/// How a provider caches prompts, which decides whether Mira marks them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CachingCapability {
+    /// Wants explicit `cache_control` markers (Anthropic, and Anthropic's
+    /// API behind any base URL).
+    AnthropicBlocks,
+    /// Caches long prompts on its own; markers would only risk rejection
+    /// (OpenAI and OpenAI-hosted families).
+    Automatic,
+    /// Unknown or none (local servers, most gateways): never sent markers
+    /// unless `prompt_caching: true` says otherwise.
+    None,
+}
+
+/// The caching capability of a provider preset at a base URL.
+pub fn caching_capability(name: &str, base_url: &str) -> CachingCapability {
+    let name = name.to_ascii_lowercase();
+    if name == "anthropic" || base_url.contains("anthropic.com") {
+        return CachingCapability::AnthropicBlocks;
     }
-    name.eq_ignore_ascii_case("anthropic") || base_url.contains("anthropic.com")
+    if matches!(
+        name.as_str(),
+        "openai" | "azure" | "azure-openai" | "deepseek" | "xai" | "groq"
+    ) || base_url.contains("api.openai.com")
+    {
+        return CachingCapability::Automatic;
+    }
+    CachingCapability::None
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -720,6 +765,36 @@ impl MiraConfig {
         // decide that its code gets shipped to a third-party sandbox.
         // `hooks` are global-only too: they run arbitrary commands.
         self
+    }
+}
+
+/// A background job's model (`small_model`, `compactor_model`,
+/// `memory.extractor_model`, `evaluator_model`): `"model"` runs on the chat's
+/// provider; `"instance:model"` or `{ instance, model }` runs on that engine
+/// instance whatever the chat is on (#83). Stored as `"instance:model"`, which
+/// the provider pool routes.
+pub mod model_ref {
+    use serde::{Deserialize, Deserializer};
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Ref {
+        Text(String),
+        Pair {
+            instance: Option<String>,
+            model: String,
+        },
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+        Ok(Option::<Ref>::deserialize(d)?.map(|r| match r {
+            Ref::Text(s) => s,
+            Ref::Pair {
+                instance: Some(i),
+                model,
+            } if !i.trim().is_empty() => format!("{}:{model}", i.trim()),
+            Ref::Pair { model, .. } => model,
+        }))
     }
 }
 
@@ -1031,13 +1106,81 @@ mod tests {
     }
 
     #[test]
+    fn background_models_take_an_instance() {
+        let c: MiraConfig = serde_yaml::from_str(
+            "small_model: { instance: groq, model: llama-3.1-8b-instant }\n\
+             compactor_model: openrouter:google/gemini-2.5-flash\n\
+             memory:\n  extractor_model: claude-haiku-4-5\n",
+        )
+        .unwrap();
+        assert_eq!(c.small_model.as_deref(), Some("groq:llama-3.1-8b-instant"));
+        assert_eq!(
+            c.compactor_model.as_deref(),
+            Some("openrouter:google/gemini-2.5-flash")
+        );
+        assert_eq!(
+            c.memory.extractor_model.as_deref(),
+            Some("claude-haiku-4-5")
+        );
+        // Round-trips as the routed string form.
+        let back: MiraConfig = serde_yaml::from_str(&serde_yaml::to_string(&c).unwrap()).unwrap();
+        assert_eq!(back.small_model, c.small_model);
+    }
+
+    #[test]
+    fn prompt_caching_follows_the_providers_capability() {
+        // Anthropic behind a custom gateway URL still gets markers.
+        assert!(prompt_caching_enabled(
+            "anthropic",
+            "https://gw.example/v1",
+            None
+        ));
+        assert!(prompt_caching_enabled(
+            "my-proxy",
+            "https://api.anthropic.com/v1",
+            None
+        ));
+        // A local llama.cpp server never does, unless asked.
+        assert!(!prompt_caching_enabled(
+            "local",
+            "http://127.0.0.1:8080/v1",
+            None
+        ));
+        assert!(prompt_caching_enabled(
+            "local",
+            "http://127.0.0.1:8080/v1",
+            Some(true)
+        ));
+        // OpenAI caches on its own: no markers.
+        assert_eq!(
+            caching_capability("openai", "https://api.openai.com/v1"),
+            CachingCapability::Automatic
+        );
+        assert!(!prompt_caching_enabled(
+            "openai",
+            "https://api.openai.com/v1",
+            None
+        ));
+        // Explicit off wins over the capability.
+        assert!(!prompt_caching_enabled(
+            "anthropic",
+            "https://api.anthropic.com",
+            Some(false)
+        ));
+    }
+
+    #[test]
     fn sessions_settings_default_off_and_round_trip() {
-        let cfg: MiraConfig = serde_yaml::from_str("sessions:\n  keep_awake_while_running: true\n").unwrap();
+        let cfg: MiraConfig =
+            serde_yaml::from_str("sessions:\n  keep_awake_while_running: true\n").unwrap();
         assert!(cfg.sessions.keep_awake());
         assert!(!cfg.sessions.auto_resume());
         assert!(!MiraConfig::default().sessions.keep_awake());
         let yaml = serde_yaml::to_string(&MiraConfig::default()).unwrap();
-        assert!(!yaml.contains("sessions"), "an untouched config stays clean: {yaml}");
+        assert!(
+            !yaml.contains("sessions"),
+            "an untouched config stays clean: {yaml}"
+        );
     }
 
     #[test]

@@ -189,12 +189,13 @@ pub(crate) async fn build_ready(slot: &SessionSlot, state: &AppState) -> ServerM
         None
     };
     let items = crate::transcript_history::interleave(&history, &agent_transcript);
-    let transcript_page = crate::transcript_history::page(&sess.id.to_string(), &items, None, 20).expect("initial history page has no cursor");
+    let transcript_page = crate::transcript_history::page(&sess.id.to_string(), &items, None, 20)
+        .expect("initial history page has no cursor");
     let agent_transcript = crate::transcript_history::latest_state(&agent_transcript);
     let turn_diffs = crate::checkpoints::turn_diffs(&cwd, &sess.id.to_string());
     ServerMsg::Ready {
         queued_inputs: slot.message_queue.snapshot().await,
-        session_activity:state.session_activity.snapshot(),
+        session_activity: state.session_activity.snapshot(),
         turn_diffs,
         transcript_page,
         session_id: sess.id.to_string(),
@@ -237,73 +238,171 @@ async fn dispatch(
 
     match cmd {
         ClientMsg::SyncActivity => {
-            let _=slot.events_tx.send(ServerMsg::SessionActivitySnapshot {snapshot:state.session_activity.snapshot()});
+            let _ = slot.events_tx.send(ServerMsg::SessionActivitySnapshot {
+                snapshot: state.session_activity.snapshot(),
+            });
         }
-        ClientMsg::QueueInput { session_id, id, text, images } => {
-            let Ok(slot) = state.ensure_slot(&mira_core::SessionId::from(session_id.as_str())).await else { return; };
-            let (engine,_,_) = slot.selection.snapshot();
-            let item = crate::message_queue::QueuedInput { id, text, images, engine, dispatching:false,delivered:false,fingerprint:String::new(),error:None,recovery:None };
-            if let Err(text) = slot.message_queue.enqueue(item).await { let _ = slot.events_tx.send(ServerMsg::Error {text}); }
+        ClientMsg::QueueInput {
+            session_id,
+            id,
+            text,
+            images,
+        } => {
+            let Ok(slot) = state
+                .ensure_slot(&mira_core::SessionId::from(session_id.as_str()))
+                .await
+            else {
+                return;
+            };
+            let (engine, _, _) = slot.selection.snapshot();
+            let item = crate::message_queue::QueuedInput {
+                id,
+                text,
+                images,
+                engine,
+                dispatching: false,
+                delivered: false,
+                fingerprint: String::new(),
+                error: None,
+                recovery: None,
+            };
+            if let Err(text) = slot.message_queue.enqueue(item).await {
+                let _ = slot.events_tx.send(ServerMsg::Error { text });
+            }
             crate::message_queue::publish(&slot).await;
-            crate::message_queue::wake(state,&slot);
+            crate::message_queue::wake(state, &slot);
         }
         ClientMsg::RemoveQueuedInput { session_id, id } => {
-            let Ok(slot) = state.ensure_slot(&mira_core::SessionId::from(session_id.as_str())).await else { return; };
-            if let Err(text) = slot.message_queue.remove(&id).await { let _ = slot.events_tx.send(ServerMsg::Error {text}); }
+            let Ok(slot) = state
+                .ensure_slot(&mira_core::SessionId::from(session_id.as_str()))
+                .await
+            else {
+                return;
+            };
+            if let Err(text) = slot.message_queue.remove(&id).await {
+                let _ = slot.events_tx.send(ServerMsg::Error { text });
+            }
             crate::message_queue::publish(&slot).await;
-            crate::message_queue::wake(state,&slot);
+            crate::message_queue::wake(state, &slot);
         }
-        ClientMsg::EditQueuedInput { session_id, request_id, id, fingerprint, text, images } => {
+        ClientMsg::EditQueuedInput {
+            session_id,
+            request_id,
+            id,
+            fingerprint,
+            text,
+            images,
+        } => {
             let result = if session_id != slot.id.to_string() {
                 Err("Queue edit belongs to another chat".into())
             } else {
-                slot.message_queue.edit(&id, &fingerprint, text, images).await
+                slot.message_queue
+                    .edit(&id, &fingerprint, text, images)
+                    .await
             };
             crate::message_queue::publish(&slot).await;
-            let _ = slot.events_tx.send(ServerMsg::QueueMutationResult { session_id, request_id, error: result.err() });
+            let _ = slot.events_tx.send(ServerMsg::QueueMutationResult {
+                session_id,
+                request_id,
+                error: result.err(),
+            });
             crate::message_queue::wake(state, &slot);
         }
-        ClientMsg::ReorderQueuedInput { session_id, request_id, id, before_id } => {
+        ClientMsg::ReorderQueuedInput {
+            session_id,
+            request_id,
+            id,
+            before_id,
+        } => {
             let result = if session_id != slot.id.to_string() {
                 Err("Queue reorder belongs to another chat".into())
             } else {
                 slot.message_queue.reorder(&id, before_id.as_deref()).await
             };
             crate::message_queue::publish(&slot).await;
-            let _ = slot.events_tx.send(ServerMsg::QueueMutationResult { session_id, request_id, error: result.err() });
+            let _ = slot.events_tx.send(ServerMsg::QueueMutationResult {
+                session_id,
+                request_id,
+                error: result.err(),
+            });
             crate::message_queue::wake(state, &slot);
         }
 
-        ClientMsg::UpdateLimitRecovery { session_id, request_id, id, action } => {
-            let result = if session_id != slot.id.to_string() { Err("Recovery belongs to another chat".into()) }
-                else if slot.is_foreground_running().await { Err("Wait for the current turn to finish".into()) }
-                else { slot.message_queue.update_recovery(&id, &action).await };
-            crate::message_queue::publish(&slot).await;
-            let _ = slot.events_tx.send(ServerMsg::QueueMutationResult { session_id, request_id, error: result.err() });
-            crate::message_queue::wake(state, &slot);
-        }
-        ClientMsg::History {session_id, cursor, request_id} => {
-            let sess = slot.session.read().await.clone();
-            let result = if session_id != sess.id.to_string() { Err("history request belongs to another chat".into()) } else {
-                let messages = sess.transcript().await;
-                let (lines, _) = crate::sessions::read_agent_state(state.store.as_ref(), &sess).await;
-                let items = crate::transcript_history::interleave(&messages, &lines);
-                crate::transcript_history::page(&session_id, &items, Some(&cursor),20)
+        ClientMsg::UpdateLimitRecovery {
+            session_id,
+            request_id,
+            id,
+            action,
+        } => {
+            let result = if session_id != slot.id.to_string() {
+                Err("Recovery belongs to another chat".into())
+            } else if slot.is_foreground_running().await {
+                Err("Wait for the current turn to finish".into())
+            } else {
+                slot.message_queue.update_recovery(&id, &action).await
             };
-            let (page,error) = match result { Ok(page) => (Some(page),None), Err(error) => (None,Some(error)) };
-            let _ = slot.events_tx.send(ServerMsg::HistoryPage {session_id,request_id,page,error});
+            crate::message_queue::publish(&slot).await;
+            let _ = slot.events_tx.send(ServerMsg::QueueMutationResult {
+                session_id,
+                request_id,
+                error: result.err(),
+            });
+            crate::message_queue::wake(state, &slot);
+        }
+        ClientMsg::History {
+            session_id,
+            cursor,
+            request_id,
+        } => {
+            let sess = slot.session.read().await.clone();
+            let result = if session_id != sess.id.to_string() {
+                Err("history request belongs to another chat".into())
+            } else {
+                let messages = sess.transcript().await;
+                let (lines, _) =
+                    crate::sessions::read_agent_state(state.store.as_ref(), &sess).await;
+                let items = crate::transcript_history::interleave(&messages, &lines);
+                crate::transcript_history::page(&session_id, &items, Some(&cursor), 20)
+            };
+            let (page, error) = match result {
+                Ok(page) => (Some(page), None),
+                Err(error) => (None, Some(error)),
+            };
+            let _ = slot.events_tx.send(ServerMsg::HistoryPage {
+                session_id,
+                request_id,
+                page,
+                error,
+            });
         }
 
-        ClientMsg::Steer { request_id, text, images } => {
+        ClientMsg::Steer {
+            request_id,
+            text,
+            images,
+        } => {
             let state = state.clone();
             let slot = slot.clone();
             // Keep the reader free for approvals while provider tools finish.
             tokio::spawn(async move {
-                let stored = slot.message_queue.snapshot().await.into_iter().find(|i|i.id == request_id);
+                let stored = slot
+                    .message_queue
+                    .snapshot()
+                    .await
+                    .into_iter()
+                    .find(|i| i.id == request_id);
                 let queued = stored.is_some();
                 if let Some(stored) = stored {
-                    if stored.text != text || serde_json::to_value(stored.images).ok() != serde_json::to_value(&images).ok() {
-                        let _ = slot.events_tx.send(ServerMsg::SteerResult {session_id:slot.id.to_string(),request_id,message:None,error:Some("Queued input changed; refresh before steering".into())});
+                    if stored.text != text
+                        || serde_json::to_value(stored.images).ok()
+                            != serde_json::to_value(&images).ok()
+                    {
+                        let _ = slot.events_tx.send(ServerMsg::SteerResult {
+                            session_id: slot.id.to_string(),
+                            request_id,
+                            message: None,
+                            error: Some("Queued input changed; refresh before steering".into()),
+                        });
                         return;
                     }
                 }
@@ -312,23 +411,43 @@ async fn dispatch(
                     return;
                 }
                 if !slot.is_foreground_running().await {
-                    crate::message_queue::wake(&state,&slot);
-                    let _ = slot.events_tx.send(ServerMsg::SteerResult {session_id:slot.id.to_string(),request_id,message:None,error:Some("The turn has finished. This input will run from the queue.".into())});
+                    crate::message_queue::wake(&state, &slot);
+                    let _ = slot.events_tx.send(ServerMsg::SteerResult {
+                        session_id: slot.id.to_string(),
+                        request_id,
+                        message: None,
+                        error: Some(
+                            "The turn has finished. This input will run from the queue.".into(),
+                        ),
+                    });
                     return;
                 }
                 if queued {
-                    let (engine,_,_) = slot.selection.snapshot();
-                    if let Err(error) = slot.message_queue.claim(&request_id,engine.as_deref()).await {
-                        let _ = slot.events_tx.send(ServerMsg::SteerResult { session_id:slot.id.to_string(),request_id,message:None,error:Some(error) });
+                    let (engine, _, _) = slot.selection.snapshot();
+                    if let Err(error) = slot
+                        .message_queue
+                        .claim(&request_id, engine.as_deref())
+                        .await
+                    {
+                        let _ = slot.events_tx.send(ServerMsg::SteerResult {
+                            session_id: slot.id.to_string(),
+                            request_id,
+                            message: None,
+                            error: Some(error),
+                        });
                         return;
                     }
                 }
-                let mut message = mira_core::Message::user(text.clone()).with_images(images.clone());
-                message.input_id=Some(request_id.clone());
+                let mut message =
+                    mira_core::Message::user(text.clone()).with_images(images.clone());
+                message.input_id = Some(request_id.clone());
                 message.input_intent = Some("steer".into());
                 let result: Result<(), String> = if slot.acp_launch.lock().await.is_some() {
                     let handle = slot.acp_agent.read().await.clone();
-                    let agent = match &handle { Some(handle) => handle.agent().await, None => None };
+                    let agent = match &handle {
+                        Some(handle) => handle.agent().await,
+                        None => None,
+                    };
                     match agent {
                         Some(mira_acp::native::AgentHandle::AppServer(agent)) => {
                             match agent.steer_with_images(&text, &images).await {
@@ -354,37 +473,60 @@ async fn dispatch(
                     }
                 } else {
                     let session = slot.session.read().await.clone();
-                    if session.steer_with_id(text.clone(), images.clone(),Some(request_id.clone())).await { Ok(()) }
-                    else { Err("The active turn ended before it could accept this message. Your message is still queued.".into()) }
+                    if session
+                        .steer_with_id(text.clone(), images.clone(), Some(request_id.clone()))
+                        .await
+                    {
+                        Ok(())
+                    } else {
+                        Err("The active turn ended before it could accept this message. Your message is still queued.".into())
+                    }
                 };
                 if result.is_ok() && slot.acp_launch.lock().await.is_some() {
-                    if let Some(path) = state.store.as_ref().and_then(|store| store.agent_log_path(&slot.id)) {
-                        mira_acp::agent_sessions::append_line_to(&path, &serde_json::json!({
-                            "t": mira_harness::persist::now_ms(),
-                            "user": { "text": message.content, "images": images.len(), "attached_images": images, "input_intent": "steer", "input_id": request_id, "request_id": request_id }
-                        }));
+                    if let Some(path) = state
+                        .store
+                        .as_ref()
+                        .and_then(|store| store.agent_log_path(&slot.id))
+                    {
+                        mira_acp::agent_sessions::append_line_to(
+                            &path,
+                            &serde_json::json!({
+                                "t": mira_harness::persist::now_ms(),
+                                "user": { "text": message.content, "images": images.len(), "attached_images": images, "input_intent": "steer", "input_id": request_id, "request_id": request_id }
+                            }),
+                        );
                     }
                 }
                 if queued {
-                    let _ = slot.message_queue.settle(&request_id,result.as_ref().err().cloned()).await;
+                    let _ = slot
+                        .message_queue
+                        .settle(&request_id, result.as_ref().err().cloned())
+                        .await;
                     crate::message_queue::publish(&slot).await;
                 }
                 let _ = slot.events_tx.send(ServerMsg::SteerResult {
-                    session_id: slot.id.to_string(), request_id,
-                    message: result.is_ok().then_some(message), error: result.err(),
+                    session_id: slot.id.to_string(),
+                    request_id,
+                    message: result.is_ok().then_some(message),
+                    error: result.err(),
                 });
             });
         }
 
         ClientMsg::Send { text, images } => {
-            if let Err(text) = send_input(state, &slot, text, images, None).await { let _ = slot.events_tx.send(ServerMsg::Warning {text}); }
+            if let Err(text) = send_input(state, &slot, text, images, None).await {
+                let _ = slot.events_tx.send(ServerMsg::Warning { text });
+            }
         }
         ClientMsg::Resend {
             original,
             occurrence,
             text,
         } => {
-            if let Err(text) = slot.message_queue.supersede_recovery(None).await { let _ = slot.events_tx.send(ServerMsg::Warning { text }); return; }
+            if let Err(text) = slot.message_queue.supersede_recovery(None).await {
+                let _ = slot.events_tx.send(ServerMsg::Warning { text });
+                return;
+            }
             crate::message_queue::publish(&slot).await;
             // Same engine routing as `Send`: on an agent-configured
             // session the resend is a fresh prompt to that agent — the
@@ -475,7 +617,10 @@ async fn dispatch(
                 let response = match response {
                     crate::interactive::PromptResponse::Secret(s) => {
                         crate::interactive::PromptResponse::Secret(
-                            mira_tools::prompt::SecretResponse { value: None, cancelled: s.cancelled },
+                            mira_tools::prompt::SecretResponse {
+                                value: None,
+                                cancelled: s.cancelled,
+                            },
                         )
                     }
                     other => other,
@@ -858,7 +1003,9 @@ async fn dispatch(
         }
 
         ClientMsg::AcpPrompt { text, images } => {
-            if let Err(text) = send_input(state, &slot, text, images, None).await { let _ = slot.events_tx.send(ServerMsg::Warning { text }); }
+            if let Err(text) = send_input(state, &slot, text, images, None).await {
+                let _ = slot.events_tx.send(ServerMsg::Warning { text });
+            }
         }
 
         ClientMsg::AcpStop => {
@@ -1027,26 +1174,17 @@ async fn dispatch(
         }
 
         ClientMsg::SetModelOption { id, value } => {
-            // `off` / `auto` are the sentinels meaning "omit the field
-            // entirely", which is what non-reasoning models and the
-            // default service tier need.
-            let normalize = |v: &str| -> Option<String> {
-                match v {
-                    "" | "off" | "auto" => None,
-                    other => Some(other.to_string()),
-                }
-            };
-            let session = slot.session.read().await;
-            match id.as_str() {
-                "reasoning_effort" => session.set_reasoning_effort(normalize(&value)).await,
-                "service_tier" => session.set_service_tier(normalize(&value)).await,
-                // Unknown id: log and drop. Accepting arbitrary ids here
-                // would let a client write to any config field by name.
-                other => debug!("ws: ignoring unknown model option id {other:?} (value {value:?})"),
-            }
+            apply_model_option(&slot, &id, &value).await;
         }
-        ClientMsg::SetModel { model, instance } => {
+        ClientMsg::SetModel {
+            model,
+            instance,
+            options,
+        } => {
             apply_model_selection(state.clone(), slot.clone(), instance, model).await;
+            for (id, value) in &options {
+                apply_model_option(&slot, id, value).await;
+            }
         }
         ClientMsg::SetMode { mode } => {
             if slot.acp_launch.lock().await.is_some() {
@@ -1068,7 +1206,10 @@ async fn dispatch(
                 // from its next turn without a restart.
                 if let Some(mode_id) = codex_mode {
                     let handle = slot.acp_agent.read().await.clone();
-                    if let Some(agent) = match handle { Some(h) => h.agent().await, None => None } {
+                    if let Some(agent) = match handle {
+                        Some(h) => h.agent().await,
+                        None => None,
+                    } {
                         let _ = agent.set_mode(mode_id).await;
                     }
                 }
@@ -1125,7 +1266,9 @@ async fn dispatch(
                     if h.driver_kind == "grok" {
                         crate::acp_session::stop_agent(&slot).await;
                         crate::acp_host::AcpEventPort::for_slot(&slot).turn_ended("cancelled");
-                    } else { h.cancel_current_turn().await; }
+                    } else {
+                        h.cancel_current_turn().await;
+                    }
                 }
                 {
                     let turn_port = crate::acp_host::AcpEventPort::for_slot(&slot);
@@ -1170,7 +1313,9 @@ async fn dispatch(
             };
             sess.end_current_turn().await;
             let _ = slot.events_tx.send(ServerMsg::Warning { text });
-            slot.engine.provider_in_turn.store(false,std::sync::atomic::Ordering::SeqCst);
+            slot.engine
+                .provider_in_turn
+                .store(false, std::sync::atomic::Ordering::SeqCst);
             slot.publish_activity();
             let _ = slot.events_tx.send(ServerMsg::Done);
             // Abort the JoinHandle too so its tokio task doesn't keep
@@ -1220,13 +1365,20 @@ async fn dispatch(
             let sess = slot.session.read().await.clone();
             let tx = slot.events_tx.clone();
             tokio::spawn(async move {
+                let before = mira_harness::history::estimated_tokens(&sess.history().await);
+                let _ = tx.send(ServerMsg::Compacting {
+                    trigger: "manual".into(),
+                    tokens_before: Some(before),
+                });
                 let msg = match sess.compact_now(focus.as_deref()).await {
                     Ok(n) => ServerMsg::Compacted {
                         messages_removed: n,
+                        tokens_before: Some(before),
+                        tokens_after: Some(mira_harness::history::estimated_tokens(
+                            &sess.history().await,
+                        )),
                     },
-                    Err(e) => ServerMsg::Error {
-                        text: format!("couldn't compact: {e}"),
-                    },
+                    Err(e) => ServerMsg::CompactionFailed { error: e },
                 };
                 let _ = tx.send(msg);
             });
@@ -1318,23 +1470,35 @@ async fn dispatch(
     }
 }
 
-/// Apply a `SetModel`: resolve the engine instance, route native
-/// providers through the pool, adopt default models, and persist.
-///
-/// This is the whole seamless-switching flow in one place:
-/// - `{model}` alone keeps the current instance (legacy clients).
-/// - `{instance}` alone adopts that instance's default model.
-/// - `{instance, model}` sets both.
-/// - A native instance switch rebuilds/activates its provider and
-///   kicks a background catalog fetch so the harness learns the real
-///   context window; a model the new provider can't serve falls back
-///   to the instance's default rather than erroring mid-turn.
+/// Set one model option on the session. `off` / `auto` mean "omit the field
+/// entirely", which is what non-reasoning models and the default service
+/// tier need. Unknown ids are dropped: accepting arbitrary ids would let a
+/// client write any config field by name.
+async fn apply_model_option(slot: &SessionSlot, id: &str, value: &str) {
+    let normalize = |v: &str| -> Option<String> {
+        match v {
+            "" | "off" | "auto" => None,
+            other => Some(other.to_string()),
+        }
+    };
+    let session = slot.session.read().await;
+    match id {
+        "reasoning_effort" => session.set_reasoning_effort(normalize(value)).await,
+        "service_tier" => session.set_service_tier(normalize(value)).await,
+        other => debug!("ws: ignoring unknown model option id {other:?} (value {value:?})"),
+    }
+}
+
 /// The warning for a model switch that can't carry earlier reasoning over,
 /// or `None` when nothing is lost. Anthropic (and Claude on Bedrock) replay
 /// signed and redacted thinking; unsigned reasoning (OpenAI, DeepSeek,
 /// Gemini) is display-only everywhere, and OpenAI-style providers replay
 /// none at all.
-fn reasoning_loss_warning(history: &[mira_core::Message], replays_signed: bool, target: &str) -> Option<String> {
+fn reasoning_loss_warning(
+    history: &[mira_core::Message],
+    replays_signed: bool,
+    target: &str,
+) -> Option<String> {
     let lost = history
         .iter()
         .filter(|m| m.role == mira_core::Role::Assistant)
@@ -1353,6 +1517,17 @@ fn reasoning_loss_warning(history: &[mira_core::Message], replays_signed: bool, 
     })
 }
 
+/// Apply a `SetModel`: resolve the engine instance, route native
+/// providers through the pool, adopt default models, and persist.
+///
+/// This is the whole seamless-switching flow in one place:
+/// - `{model}` alone keeps the current instance (legacy clients).
+/// - `{instance}` alone adopts that instance's default model.
+/// - `{instance, model}` sets both.
+/// - A native instance switch rebuilds/activates its provider and
+///   kicks a background catalog fetch so the harness learns the real
+///   context window; a model the new provider can't serve falls back
+///   to the instance's default rather than erroring mid-turn.
 async fn apply_model_selection(
     state: AppState,
     slot: Arc<SessionSlot>,
@@ -1413,7 +1588,11 @@ async fn apply_model_selection(
     if let (Some(i), false) = (inst, is_native) {
         // An external engine instance picked from the model list is an
         // agent pick: same path as the Agent section of the picker.
-        let Some(cfg) = state.engines.current().external_driver_config(&target_instance) else {
+        let Some(cfg) = state
+            .engines
+            .current()
+            .external_driver_config(&target_instance)
+        else {
             return;
         };
         let mut params = crate::acp_session::AcpLaunchParams::for_instance(
@@ -1531,7 +1710,11 @@ async fn apply_model_selection(
     if is_native && switched {
         let settings = mira_engine::native::native_settings(&engine_cfg, &target_instance);
         let replays_signed = matches!(settings.preset.as_str(), "anthropic" | "bedrock")
-            || settings.entry.base_url.as_deref().is_some_and(|u| u.contains("anthropic.com"));
+            || settings
+                .entry
+                .base_url
+                .as_deref()
+                .is_some_and(|u| u.contains("anthropic.com"));
         let history = slot.session.read().await.transcript().await;
         if let Some(text) = reasoning_loss_warning(&history, replays_signed, &target_model) {
             let _ = slot.events_tx.send(ServerMsg::Warning { text });
@@ -1566,19 +1749,40 @@ async fn apply_model_selection(
 /// Deliver a prompt to the session's external agent, starting it first
 /// when the session is configured but nothing is running.
 ///
-pub(crate) async fn send_input(state: &AppState, slot: &Arc<SessionSlot>, text: String, images: Vec<mira_core::ImageData>, input_id:Option<String>) -> Result<(), String> {
+pub(crate) async fn send_input(
+    state: &AppState,
+    slot: &Arc<SessionSlot>,
+    text: String,
+    images: Vec<mira_core::ImageData>,
+    input_id: Option<String>,
+) -> Result<(), String> {
     let _input_dispatch = slot.engine.input_dispatch.lock().await;
-    if slot.engine.retired.load(std::sync::atomic::Ordering::SeqCst) { return Err("This chat was deleted".into()); }
-    if slot.is_foreground_running().await { return Err("A foreground turn is already running".into()); }
+    if slot
+        .engine
+        .retired
+        .load(std::sync::atomic::Ordering::SeqCst)
+    {
+        return Err("This chat was deleted".into());
+    }
+    if slot.is_foreground_running().await {
+        return Err("A foreground turn is already running".into());
+    }
     if let Some(id) = input_id.as_deref() {
         let (engine, model, _) = slot.selection.snapshot();
-        slot.message_queue.validate_recovery(id, engine.as_deref(), model.as_deref()).await?;
+        slot.message_queue
+            .validate_recovery(id, engine.as_deref(), model.as_deref())
+            .await?;
     }
-    slot.message_queue.supersede_recovery(input_id.as_deref()).await?;
+    slot.message_queue
+        .supersede_recovery(input_id.as_deref())
+        .await?;
     crate::message_queue::publish(slot).await;
     before_prompt(slot, &text, None).await;
-    if slot.acp_launch.lock().await.is_some() { prompt_agent(state, slot, text, images, input_id).await; }
-    else { spawn_turn(state.clone(), slot.clone(), text, images, input_id).await; }
+    if slot.acp_launch.lock().await.is_some() {
+        prompt_agent(state, slot, text, images, input_id).await;
+    } else {
+        spawn_turn(state.clone(), slot.clone(), text, images, input_id).await;
+    }
     Ok(())
 }
 
@@ -1654,8 +1858,23 @@ async fn prompt_agent(
                 let agent = agent.clone();
                 let state = state.clone();
                 let description = text.clone();
+                // Agents that can't title their own chat (Codex) get one from
+                // Mira's own provider on its cheap model. No provider set up
+                // means the first-prompt title simply stays.
+                let provider = slot.native_provider.clone();
                 tokio::spawn(async move {
-                    if let Some(title) = agent.generate_title(&description).await {
+                    let title = match agent.generate_title(&description).await {
+                        Some(t) => Some(t),
+                        None => {
+                            let cfg = session.config().await;
+                            let users = vec![description.clone()];
+                            crate::title::generate(&provider, &cfg.background_model(None), &users)
+                                .await
+                                .ok()
+                                .filter(|t| !t.trim().is_empty())
+                        }
+                    };
+                    if let Some(title) = title {
                         session.set_title(&title).await;
                         state
                             .broadcast_all(ServerMsg::SessionTitleUpdated {
@@ -1732,7 +1951,9 @@ async fn prompt_agent(
             // turn end when the CLI reports `result`. Announcing it
             // here as well would end the turn twice.
             Ok(Some(stop_reason)) => {
-                if stop_reason == "rate_limited" { crate::message_queue::offer_recovery(&recovery_slot, None).await; }
+                if stop_reason == "rate_limited" {
+                    crate::message_queue::offer_recovery(&recovery_slot, None).await;
+                }
                 turn_port.turn_ended(&stop_reason);
             }
             Ok(None) => {}
@@ -1963,11 +2184,23 @@ async fn persist_allow_rules(rules: &[String]) -> anyhow::Result<()> {
 
 /// Drop runs on success, panic and cancellation. Generation ownership
 /// prevents an old aborted task from marking its replacement idle.
-struct ForegroundTurnGuard { slot:Arc<SessionSlot>, generation:u64 }
+struct ForegroundTurnGuard {
+    slot: Arc<SessionSlot>,
+    generation: u64,
+}
 impl Drop for ForegroundTurnGuard {
     fn drop(&mut self) {
-        if self.slot.engine.provider_generation.load(std::sync::atomic::Ordering::SeqCst) == self.generation {
-            self.slot.engine.provider_in_turn.store(false,std::sync::atomic::Ordering::SeqCst);
+        if self
+            .slot
+            .engine
+            .provider_generation
+            .load(std::sync::atomic::Ordering::SeqCst)
+            == self.generation
+        {
+            self.slot
+                .engine
+                .provider_in_turn
+                .store(false, std::sync::atomic::Ordering::SeqCst);
             self.slot.publish_activity();
         }
     }
@@ -1985,7 +2218,11 @@ async fn spawn_turn(
 ) {
     // Tools would run against a half-moved tree mid-switch.
     if slot.environments.is_switching() {
-        let _ = slot.events_tx.send(ServerMsg::StreamActivity { kind: "workspace".into(), title: "Workspace is switching".into(), detail: "Send again when the environment switch finishes.".into() });
+        let _ = slot.events_tx.send(ServerMsg::StreamActivity {
+            kind: "workspace".into(),
+            title: "Workspace is switching".into(),
+            detail: "Send again when the environment switch finishes.".into(),
+        });
         let _ = slot.events_tx.send(ServerMsg::Done);
         return;
     }
@@ -2003,14 +2240,23 @@ async fn spawn_turn(
         }
     };
 
-    let generation=slot.engine.provider_generation.fetch_add(1,std::sync::atomic::Ordering::SeqCst)+1;
-    let foreground_guard=ForegroundTurnGuard {slot:slot.clone(),generation};
-    slot.engine.provider_in_turn.store(true,std::sync::atomic::Ordering::SeqCst);
+    let generation = slot
+        .engine
+        .provider_generation
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        + 1;
+    let foreground_guard = ForegroundTurnGuard {
+        slot: slot.clone(),
+        generation,
+    };
+    slot.engine
+        .provider_in_turn
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     slot.publish_activity();
     let slot_for_task = slot.clone();
     let state_for_task = state.clone();
     let handle = tokio::spawn(async move {
-        let _foreground_guard=foreground_guard;
+        let _foreground_guard = foreground_guard;
         let sess = slot_for_task.session.read().await.clone();
         let mut stream = sess.send_with_images_and_id(text, images, input_id).await;
         while let Some(evt) = stream.next().await {
@@ -2018,7 +2264,11 @@ async fn spawn_turn(
             crate::message_queue::observe_limits(&slot_for_task, &frame);
             if let ServerMsg::Error { text } = &frame {
                 let lower = text.to_lowercase();
-                if lower.contains("rate limit") || lower.contains("rate_limit") || lower.contains("usage limit") || lower.contains("429") {
+                if lower.contains("rate limit")
+                    || lower.contains("rate_limit")
+                    || lower.contains("usage limit")
+                    || lower.contains("429")
+                {
                     crate::message_queue::offer_recovery(&slot_for_task, None).await;
                 }
             }
@@ -2039,7 +2289,6 @@ async fn spawn_turn(
             fallback,
             state_for_task.clone(),
         );
-
     });
 
     // Replace any existing handle; abort the prior one to prevent
@@ -2142,17 +2391,31 @@ mod reasoning_warning_tests {
         m
     }
     fn block(signed: bool) -> ReasoningBlock {
-        ReasoningBlock { text: "thinking".into(), signature: signed.then(|| "sig".into()), redacted: None }
+        ReasoningBlock {
+            text: "thinking".into(),
+            signature: signed.then(|| "sig".into()),
+            redacted: None,
+        }
     }
 
     #[test]
     fn warns_only_about_reasoning_the_target_cant_replay() {
-        let history = vec![Message::user("hi"), with(vec![block(true)]), with(vec![block(false)]), Message::assistant("plain")];
+        let history = vec![
+            Message::user("hi"),
+            with(vec![block(true)]),
+            with(vec![block(false)]),
+            Message::assistant("plain"),
+        ];
         // To an OpenAI-style model: both replies with reasoning lose it.
         let w = reasoning_loss_warning(&history, false, "gpt-5").unwrap();
-        assert!(w.contains("2 earlier replies") && w.contains("/compact"), "{w}");
+        assert!(
+            w.contains("2 earlier replies") && w.contains("/compact"),
+            "{w}"
+        );
         // To Claude: only the unsigned one.
-        assert!(reasoning_loss_warning(&history, true, "claude-opus").unwrap().contains("1 earlier reply"));
+        assert!(reasoning_loss_warning(&history, true, "claude-opus")
+            .unwrap()
+            .contains("1 earlier reply"));
         // Nothing to lose: no warning.
         assert!(reasoning_loss_warning(&[Message::assistant("x")], false, "gpt-5").is_none());
         assert!(reasoning_loss_warning(&[with(vec![block(true)])], true, "claude").is_none());
@@ -2174,12 +2437,12 @@ mod attachment_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let imgs = vec![
             mira_core::ImageData {
-            source: None,
+                source: None,
                 media_type: "image/png".into(),
                 data: png_data(),
             },
             mira_core::ImageData {
-            source: None,
+                source: None,
                 media_type: "image/jpeg".into(),
                 data: png_data(),
             },

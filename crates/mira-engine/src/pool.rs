@@ -12,6 +12,13 @@
 //! History never mentions instances: it is provider-neutral, so the
 //! same conversation can flow through OpenRouter at turn 4 and
 //! Anthropic at turn 5 with no conversion pass.
+//!
+//! A request's model may also name its instance, `instance:model`
+//! (`groq:llama-3.1-8b-instant`): background jobs configured that way
+//! (compaction, titles, memory extraction, goal checks) run on that
+//! instance whatever the chat is on. A prefix that isn't a known instance
+//! is part of the model id (`llama3:8b`), and a known instance that can't
+//! serve (no key) degrades to the active provider with a warning.
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -35,6 +42,9 @@ struct Pool {
     /// and that provider is active even when its instance id is not
     /// known to the server.
     entries: HashMap<String, Arc<dyn ChatProvider>>,
+    /// Every configured instance id, buildable or not, so `x:model` can
+    /// tell "instance x" from a model id that contains a colon.
+    known: std::collections::HashSet<String>,
 }
 
 impl SwappableProvider {
@@ -46,6 +56,7 @@ impl SwappableProvider {
             pool: Arc::new(RwLock::new(Pool {
                 active: Some(initial),
                 entries: HashMap::new(),
+                known: Default::default(),
             })),
         }
     }
@@ -62,6 +73,7 @@ impl SwappableProvider {
             pool: Arc::new(RwLock::new(Pool {
                 active,
                 entries: pool.entries.clone(),
+                known: pool.known.clone(),
             })),
         }
     }
@@ -103,6 +115,34 @@ impl SwappableProvider {
             .expect("provider pool lock poisoned")
             .entries
             .remove(instance);
+    }
+
+    /// Record every configured instance id (see the module docs).
+    pub fn set_known_instances(&self, ids: impl IntoIterator<Item = String>) {
+        self.pool
+            .write()
+            .expect("provider pool lock poisoned")
+            .known = ids.into_iter().collect();
+    }
+
+    /// Where a request goes: the instance its model names, or the active
+    /// delegate. Returns the request with any `instance:` prefix removed.
+    fn route(&self, mut request: ChatRequest) -> (Option<Arc<dyn ChatProvider>>, ChatRequest) {
+        let pool = self.pool.read().expect("provider pool lock poisoned");
+        if let Some((instance, model)) = request.model.split_once(':') {
+            if let Some(p) = pool.entries.get(instance) {
+                request.model = model.to_string();
+                return (Some(p.clone()), request);
+            }
+            if pool.known.contains(instance) {
+                tracing::warn!(
+                    %instance,
+                    "background model names engine `{instance}`, which can't serve right now; using the active provider"
+                );
+                request.model = model.to_string();
+            }
+        }
+        (pool.active.clone(), request)
     }
 
     /// Ids of every registered instance.
@@ -148,13 +188,7 @@ impl ChatProvider for SwappableProvider {
         &self,
         request: ChatRequest,
     ) -> Result<BoxStream<'static, Result<ChatEvent, ProviderError>>, ProviderError> {
-        let delegate = {
-            self.pool
-                .read()
-                .expect("provider pool lock poisoned")
-                .active
-                .clone()
-        };
+        let (delegate, request) = self.route(request);
         // The active slot is only ever empty before `new` runs — which
         // the constructor makes impossible — but a `None` here should
         // fail the request rather than panic the harness.
@@ -188,6 +222,44 @@ mod tests {
 
     fn provider() -> Arc<dyn ChatProvider> {
         Arc::new(NullProvider::default())
+    }
+
+    fn request(model: &str) -> ChatRequest {
+        ChatRequest {
+            model: model.into(),
+            messages: Vec::new(),
+            tools: Vec::new(),
+            temperature: None,
+            max_tokens: None,
+            reasoning_effort: None,
+            service_tier: None,
+            response_format: None,
+        }
+    }
+
+    #[test]
+    fn instance_prefixed_models_route_to_that_instance() {
+        let active = provider();
+        let groq = provider();
+        let pool = SwappableProvider::new(active.clone());
+        pool.register("groq", groq.clone());
+        pool.set_known_instances(["groq".to_string(), "anthropic-work".to_string()]);
+
+        // A background job pinned to groq runs there, with the bare model id.
+        let (p, r) = pool.route(request("groq:llama-3.1-8b-instant"));
+        assert!(Arc::ptr_eq(&p.unwrap(), &groq));
+        assert_eq!(r.model, "llama-3.1-8b-instant");
+        // A colon inside a model id isn't an instance.
+        let (p, r) = pool.route(request("llama3:8b"));
+        assert!(Arc::ptr_eq(&p.unwrap(), &active));
+        assert_eq!(r.model, "llama3:8b");
+        // A configured instance that can't serve degrades to the active one.
+        let (p, r) = pool.route(request("anthropic-work:claude-haiku-4-5"));
+        assert!(Arc::ptr_eq(&p.unwrap(), &active));
+        assert_eq!(r.model, "claude-haiku-4-5");
+        // Forks (each chat's pool) keep the routing.
+        let (p, _) = pool.fork(None).route(request("groq:x"));
+        assert!(Arc::ptr_eq(&p.unwrap(), &groq));
     }
 
     #[test]

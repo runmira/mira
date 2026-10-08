@@ -301,6 +301,14 @@ pub trait AcpDriver: Send + Sync {
         &[]
     }
 
+    /// Models the CLI always accepts, as `(value, label)`, for agents whose
+    /// CLI can't list them before a session starts. Only stable aliases
+    /// belong here (Claude Code's `opus` always means the latest Opus), so
+    /// the list can't go stale. Used when nothing better was found.
+    fn known_models(&self) -> &'static [(&'static str, &'static str)] {
+        &[]
+    }
+
     /// Arguments that make the underlying CLI print auth status as JSON.
     ///
     /// Empty means "this CLI has no such command", and auth is then not

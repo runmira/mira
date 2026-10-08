@@ -60,7 +60,13 @@ pub fn native_settings(cfg: &MiraConfig, name: &str) -> NativeSettings {
             from_engine: false,
         };
     };
-    let text = |k: &str| o.get(k).and_then(|v| v.as_str()).map(str::trim).filter(|v| !v.is_empty()).map(str::to_owned);
+    let text = |k: &str| {
+        o.get(k)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned)
+    };
     let preset = text("provider").unwrap_or_else(|| name.to_string());
     // The instance's own `providers:` entry if it has one, else the preset's.
     let mut entry = cfg
@@ -91,13 +97,21 @@ pub fn native_settings(cfg: &MiraConfig, name: &str) -> NativeSettings {
     if let Some(b) = o.get("prompt_caching").and_then(|v| v.as_bool()) {
         entry.prompt_caching = Some(b);
     }
-    NativeSettings { preset, entry, from_engine: true }
+    NativeSettings {
+        preset,
+        entry,
+        from_engine: true,
+    }
 }
 
 /// Why a native provider can't be built, phrased for the user. Pure
 /// config inspection: no network, no build.
 pub fn missing_piece(cfg: &MiraConfig, name: &str) -> Option<EngineState> {
-    let NativeSettings { preset, entry, from_engine } = native_settings(cfg, name);
+    let NativeSettings {
+        preset,
+        entry,
+        from_engine,
+    } = native_settings(cfg, name);
     // Say which layer to fix: the engine entry, or the provider entry.
     let layer = if from_engine {
         format!("engine `{name}` (engines.{name}.config)")
@@ -147,7 +161,8 @@ pub fn build_native_provider(
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    let prompt_caching = mira_config::prompt_caching_enabled(&preset, &base_url, entry.prompt_caching);
+    let prompt_caching =
+        mira_config::prompt_caching_enabled(&preset, &base_url, entry.prompt_caching);
     build_chat_provider(&preset, base_url, api_key, extra_headers, prompt_caching).map_err(|e| {
         EngineState::NotConfigured {
             reason: format!("provider `{name}` failed to build: {e}"),
@@ -209,7 +224,10 @@ mod tests {
         assert_eq!(work.entry.resolved_api_key().as_deref(), Some("work-key"));
         assert!(work.from_engine);
         let personal = native_settings(&c, "anthropic");
-        assert_eq!(personal.entry.resolved_api_key().as_deref(), Some("personal-key"));
+        assert_eq!(
+            personal.entry.resolved_api_key().as_deref(),
+            Some("personal-key")
+        );
         // Both build, and both are in the pool.
         assert!(build_native_provider(&c, "anthropic-work").is_ok());
         let pool = build_native_pool(&c);

@@ -83,6 +83,16 @@ pub struct EngineSnapshot {
     /// however different the rest of their config is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_note: Option<String>,
+    /// Native instances: how prompts are cached. `markers` (Mira marks
+    /// prompts for the provider's cache), `automatic` (the provider caches on
+    /// its own) or `off`. Absent for external agents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_caching: Option<String>,
+    /// External agents: the full agent status (versions, transport, sign-in
+    /// methods, install hint), so clients read agent health from this one
+    /// list instead of a second probe (#85).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<mira_acp::status::AgentStatus>,
 }
 
 impl EngineSnapshot {

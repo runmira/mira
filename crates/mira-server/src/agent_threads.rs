@@ -57,9 +57,11 @@ fn launched_by(parent: &str) -> Vec<Launched> {
 
 /// The chat that launched `id`, if it was launched this run.
 pub fn launcher_of(id: &str) -> Option<String> {
-    registry().lock().ok()?.iter().find_map(|(parent, threads)| {
-        threads.iter().any(|t| t.id == id).then(|| parent.clone())
-    })
+    registry()
+        .lock()
+        .ok()?
+        .iter()
+        .find_map(|(parent, threads)| threads.iter().any(|t| t.id == id).then(|| parent.clone()))
 }
 
 fn is_launched_thread(id: &str) -> bool {
@@ -102,7 +104,9 @@ async fn ensure_worktree(cwd: &Path, branch: &str, base: Option<&str>) -> Result
     let root = PathBuf::from(
         git(cwd, &["rev-parse", "--show-toplevel"])
             .await
-            .map_err(|_| "this chat's folder isn't a git repository, so it can't have worktrees".to_string())?,
+            .map_err(|_| {
+                "this chat's folder isn't a git repository, so it can't have worktrees".to_string()
+            })?,
     );
     let repo = root
         .file_name()
@@ -117,9 +121,17 @@ async fn ensure_worktree(cwd: &Path, branch: &str, base: Option<&str>) -> Result
         return Ok(path);
     }
     let path_str = path.to_string_lossy().to_string();
-    let exists = git(&root, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")])
-        .await
-        .is_ok();
+    let exists = git(
+        &root,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
+    )
+    .await
+    .is_ok();
     let result = if exists {
         git(&root, &["worktree", "add", &path_str, branch]).await
     } else {
@@ -152,7 +164,11 @@ async fn send(state: &AppState, slot: &Arc<SessionSlot>, text: &str) -> Result<(
 }
 
 /// `thread_launch`: a new chat, running `message` on `engine`.
-pub async fn launch(state: &AppState, parent: &Arc<SessionSlot>, args: &Value) -> Result<String, String> {
+pub async fn launch(
+    state: &AppState,
+    parent: &Arc<SessionSlot>,
+    args: &Value,
+) -> Result<String, String> {
     let parent_id = parent.id.to_string();
     if parent.session.read().await.is_subagent() || is_launched_thread(&parent_id) {
         return Err("a launched or delegated thread can't launch more threads".into());
@@ -280,7 +296,10 @@ async fn latest_reply(state: &AppState, slot: &SessionSlot) -> Option<String> {
     if agent {
         let path = state.store.as_ref()?.agent_log_path(&slot.id)?;
         let lines = mira_acp::agent_sessions::read_lines(&path);
-        let start = lines.iter().rposition(|l| l.get("user").is_some()).unwrap_or(0);
+        let start = lines
+            .iter()
+            .rposition(|l| l.get("user").is_some())
+            .unwrap_or(0);
         let text = crate::session_engine::agent_lines_to_text(&lines[start..]);
         let reply: Vec<&str> = text
             .split("\n\n")
@@ -296,7 +315,9 @@ async fn latest_reply(state: &AppState, slot: &SessionSlot) -> Option<String> {
         .await
         .iter()
         .rev()
-        .find(|m| m.role == Role::Assistant && m.content.as_deref().is_some_and(|c| !c.trim().is_empty()))
+        .find(|m| {
+            m.role == Role::Assistant && m.content.as_deref().is_some_and(|c| !c.trim().is_empty())
+        })
         .and_then(|m| m.content.clone())
 }
 
@@ -393,13 +414,19 @@ pub async fn wait(state: &AppState, parent: &SessionSlot, args: &Value) -> Resul
     }
     let mut d = describe(state, &t).await;
     if !finished {
-        d["note"] = json!(format!("still running after {secs:.0}s; wait again or read it later"));
+        d["note"] = json!(format!(
+            "still running after {secs:.0}s; wait again or read it later"
+        ));
     }
     Ok(serde_json::to_string_pretty(&d).unwrap_or_default())
 }
 
 /// `thread_send`: a follow-up message, queued behind anything in flight.
-pub async fn send_to(state: &AppState, parent: &SessionSlot, args: &Value) -> Result<String, String> {
+pub async fn send_to(
+    state: &AppState,
+    parent: &SessionSlot,
+    args: &Value,
+) -> Result<String, String> {
     let t = find(&parent.id.to_string(), thread_id(args)?)?;
     let message = args
         .get("message")
@@ -494,7 +521,12 @@ pub fn tool_specs() -> Vec<Value> {
 }
 
 /// Route a thread tool call, or `None` when `name` isn't one.
-pub async fn call(state: &AppState, slot: &Arc<SessionSlot>, name: &str, args: &Value) -> Option<Result<String, String>> {
+pub async fn call(
+    state: &AppState,
+    slot: &Arc<SessionSlot>,
+    name: &str,
+    args: &Value,
+) -> Option<Result<String, String>> {
     Some(match name {
         "thread_launch" => launch(state, slot, args).await,
         "thread_list" => list(state, slot).await,
@@ -534,7 +566,17 @@ mod tests {
         std::fs::create_dir(&repo).unwrap();
         for args in [
             vec!["init", "-q"],
-            vec!["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"],
+            vec![
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
         ] {
             git(&repo, &args).await.unwrap();
         }
@@ -542,8 +584,14 @@ mod tests {
         // git reports the resolved path (`/private/var/…` on macOS).
         let root = dir.path().canonicalize().unwrap();
         assert_eq!(wt, root.join("app-worktrees").join("feature-ui"));
-        assert_eq!(git(&wt, &["branch", "--show-current"]).await.unwrap(), "feature/ui");
-        assert_eq!(ensure_worktree(&repo, "feature/ui", None).await.unwrap(), wt);
+        assert_eq!(
+            git(&wt, &["branch", "--show-current"]).await.unwrap(),
+            "feature/ui"
+        );
+        assert_eq!(
+            ensure_worktree(&repo, "feature/ui", None).await.unwrap(),
+            wt
+        );
         assert!(ensure_worktree(&repo, "bad..name", None).await.is_err());
     }
 }

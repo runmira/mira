@@ -38,13 +38,49 @@ pub enum ApprovalScope {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMsg {
     SyncActivity,
-    QueueInput { session_id: String, id: String, text: String, #[serde(default)] images: Vec<mira_core::ImageData> },
-    UpdateLimitRecovery { session_id: String, request_id: String, id: String, action: String },
-    RemoveQueuedInput { session_id: String, id: String },
-    EditQueuedInput { session_id: String, request_id: String, id: String, fingerprint: String, text: String, #[serde(default)] images: Vec<mira_core::ImageData> },
-    ReorderQueuedInput { session_id: String, request_id: String, id: String, before_id: Option<String> },
-    Steer { request_id: String, text: String, #[serde(default)] images: Vec<mira_core::ImageData> },
-    History { session_id: String, cursor: String, request_id: String },
+    QueueInput {
+        session_id: String,
+        id: String,
+        text: String,
+        #[serde(default)]
+        images: Vec<mira_core::ImageData>,
+    },
+    UpdateLimitRecovery {
+        session_id: String,
+        request_id: String,
+        id: String,
+        action: String,
+    },
+    RemoveQueuedInput {
+        session_id: String,
+        id: String,
+    },
+    EditQueuedInput {
+        session_id: String,
+        request_id: String,
+        id: String,
+        fingerprint: String,
+        text: String,
+        #[serde(default)]
+        images: Vec<mira_core::ImageData>,
+    },
+    ReorderQueuedInput {
+        session_id: String,
+        request_id: String,
+        id: String,
+        before_id: Option<String>,
+    },
+    Steer {
+        request_id: String,
+        text: String,
+        #[serde(default)]
+        images: Vec<mira_core::ImageData>,
+    },
+    History {
+        session_id: String,
+        cursor: String,
+        request_id: String,
+    },
     /// Start a new user turn.
     Send {
         text: String,
@@ -92,6 +128,10 @@ pub enum ClientMsg {
         model: Option<String>,
         #[serde(default)]
         instance: Option<String>,
+        /// Model options (`reasoning_effort`, `service_tier`) applied with
+        /// the switch, so they arrive with the model rather than after it.
+        #[serde(default)]
+        options: std::collections::BTreeMap<String, String>,
     },
     /// Set one of the model options the UI advertises for the current
     /// model (see `mira_ai::provider::OptionDescriptor`).
@@ -103,7 +143,10 @@ pub enum ClientMsg {
     /// name. This is the message the composer's model controls speak; the
     /// previous `set_effort` the UI sent had no handler at all and was
     /// silently dropped, which is why the effort selector did nothing.
-    SetModelOption { id: String, value: String },
+    SetModelOption {
+        id: String,
+        value: String,
+    },
     /// Bring an external ACP agent up for this session, replacing any agent
     /// already running.
     AcpStart {
@@ -172,7 +215,10 @@ pub enum ClientMsg {
     ///
     /// ACP has no set-model method — the model selector is a config option
     /// with `category: "model"` — so this is how a model is chosen.
-    AcpSetConfigOption { option_id: String, value: String },
+    AcpSetConfigOption {
+        option_id: String,
+        value: String,
+    },
     /// Send a turn to the running agent.
     AcpPrompt {
         text: String,
@@ -204,7 +250,9 @@ pub enum ClientMsg {
         target: Option<String>,
     },
     /// Change the permission mode.
-    SetMode { mode: Mode },
+    SetMode {
+        mode: Mode,
+    },
     /// Set reasoning effort for the current session. `None` (or the string
     /// `"off"`) clears the field entirely so non-reasoning models aren't
     /// hit with an unexpected parameter.
@@ -265,7 +313,9 @@ pub enum ClientMsg {
     /// 4. Emitting a fresh `Ready` frame for the new session.
     /// 5. Updating the server's `active` pointer so subsequent
     ///    HTTP calls target this session.
-    Attach { session_id: String },
+    Attach {
+        session_id: String,
+    },
     /// Detach from any session on this WS connection — used when a client
     /// wants to explicitly stop watching without closing the socket. Rare
     /// on the current UI (tab close does the same job); provided for
@@ -274,7 +324,9 @@ pub enum ClientMsg {
     Detach,
     /// Update the *attached* session's background mode. Applies to how
     /// the approver answers `Ask` decisions when no client is attached.
-    SetBackgroundMode { mode: BackgroundMode },
+    SetBackgroundMode {
+        mode: BackgroundMode,
+    },
 }
 
 /// Server → client.
@@ -284,18 +336,47 @@ pub enum ClientMsg {
 // connection; boxing it would only add churn at every construction site.
 #[allow(clippy::large_enum_variant)]
 pub enum ServerMsg {
-    SessionActivity { epoch:String, revision:u64, session_id:String, running:bool },
-    SessionActivitySnapshot { snapshot:crate::session_activity::ActivitySnapshot },
-    QueueUpdated { session_id: String, items: Vec<crate::message_queue::QueuedInput> },
-    QueueDelivery { session_id: String, item: crate::message_queue::QueuedInput },
-    QueueMutationResult { session_id: String, request_id: String, error: Option<String> },
-    SteerResult { session_id: String, request_id: String, message: Option<Message>, error: Option<String> },
+    SessionActivity {
+        epoch: String,
+        revision: u64,
+        session_id: String,
+        running: bool,
+    },
+    SessionActivitySnapshot {
+        snapshot: crate::session_activity::ActivitySnapshot,
+    },
+    QueueUpdated {
+        session_id: String,
+        items: Vec<crate::message_queue::QueuedInput>,
+    },
+    QueueDelivery {
+        session_id: String,
+        item: crate::message_queue::QueuedInput,
+    },
+    QueueMutationResult {
+        session_id: String,
+        request_id: String,
+        error: Option<String>,
+    },
+    SteerResult {
+        session_id: String,
+        request_id: String,
+        message: Option<Message>,
+        error: Option<String>,
+    },
     /// Emitted once when the socket opens, with the session's current state.
-    HistoryPage { session_id: String, request_id: String, page: Option<crate::transcript_history::TranscriptPage>, error: Option<String> },
-    TurnDiffs { summaries: Vec<crate::checkpoints::TurnDiffSummary> },
+    HistoryPage {
+        session_id: String,
+        request_id: String,
+        page: Option<crate::transcript_history::TranscriptPage>,
+        error: Option<String>,
+    },
+    TurnDiffs {
+        summaries: Vec<crate::checkpoints::TurnDiffSummary>,
+    },
     Ready {
         queued_inputs: Vec<crate::message_queue::QueuedInput>,
-        session_activity:crate::session_activity::ActivitySnapshot,
+        session_activity: crate::session_activity::ActivitySnapshot,
         turn_diffs: Vec<crate::checkpoints::TurnDiffSummary>,
         transcript_page: crate::transcript_history::TranscriptPage,
         session_id: String,
@@ -571,6 +652,22 @@ pub enum ServerMsg {
     /// "compacted N turns" chip for transparency.
     Compacted {
         messages_removed: usize,
+        /// Estimated history size before and after, when known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tokens_before: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tokens_after: Option<usize>,
+    },
+    /// Compaction started: `manual` (/compact) or `auto` (the history
+    /// outgrew the context window mid-turn).
+    Compacting {
+        trigger: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tokens_before: Option<usize>,
+    },
+    /// Compaction failed; the conversation continues uncompacted.
+    CompactionFailed {
+        error: String,
     },
 
     /// A `/goal` was set on this session. Emitted immediately after
@@ -786,8 +883,15 @@ pub enum ServerMsg {
         message_id: Option<String>,
     },
     /// Authoritative completed prose, replacing the streamed partial message.
-    AcpMessageMetadata { message_id: String, phase: String },
-    StreamActivity { kind: String, title: String, detail: String },
+    AcpMessageMetadata {
+        message_id: String,
+        phase: String,
+    },
+    StreamActivity {
+        kind: String,
+        title: String,
+        detail: String,
+    },
     AcpTextSnapshot {
         message_id: String,
         text: String,
@@ -947,8 +1051,18 @@ impl ServerMsg {
         use mira_acp::events::{EventSource, MiraEvent};
         let event = ev.event;
         Some(match event {
-            MiraEvent::MessageMetadata { message_id, phase } => Self::AcpMessageMetadata { message_id, phase },
-            MiraEvent::Activity { kind, title, detail } => Self::StreamActivity { kind, title, detail },
+            MiraEvent::MessageMetadata { message_id, phase } => {
+                Self::AcpMessageMetadata { message_id, phase }
+            }
+            MiraEvent::Activity {
+                kind,
+                title,
+                detail,
+            } => Self::StreamActivity {
+                kind,
+                title,
+                detail,
+            },
             MiraEvent::AssistantText { text, message_id } => Self::AcpText { text, message_id },
             MiraEvent::AssistantSnapshot { message_id, text } => {
                 Self::AcpTextSnapshot { message_id, text }
@@ -1033,7 +1147,11 @@ impl ServerMsg {
             HarnessEvent::ToolEnd(result) => Self::ToolEnd { result },
             HarnessEvent::TurnComplete => Self::TurnComplete,
             HarnessEvent::Done => Self::Done,
-            HarnessEvent::Warning(text) if text.starts_with("[retry]") => Self::StreamActivity { kind: "retry".into(), title: "Retrying verification".into(), detail: text.trim_start_matches("[retry]").trim().into() },
+            HarnessEvent::Warning(text) if text.starts_with("[retry]") => Self::StreamActivity {
+                kind: "retry".into(),
+                title: "Retrying verification".into(),
+                detail: text.trim_start_matches("[retry]").trim().into(),
+            },
             HarnessEvent::Warning(text) => Self::Warning { text },
             HarnessEvent::Usage {
                 round,
@@ -1051,7 +1169,16 @@ impl ServerMsg {
                 rate_limit,
             },
             HarnessEvent::MemoryLearned { count } => Self::MemoryLearned { count },
-            HarnessEvent::Compacted { messages_removed } => Self::Compacted { messages_removed },
+            HarnessEvent::Compacted { messages_removed } => Self::Compacted {
+                messages_removed,
+                tokens_before: None,
+                tokens_after: None,
+            },
+            HarnessEvent::Compacting { tokens_before } => Self::Compacting {
+                trigger: "auto".into(),
+                tokens_before: Some(tokens_before),
+            },
+            HarnessEvent::CompactionFailed { error } => Self::CompactionFailed { error },
             HarnessEvent::GoalSet { goal } => Self::GoalSet { goal },
             HarnessEvent::GoalCleared => Self::GoalCleared,
             HarnessEvent::GoalProgress {

@@ -699,6 +699,7 @@ impl ConverseState {
                             + n("cacheWriteInputTokens"),
                         completion_tokens: n("outputTokens"),
                         cached_input_tokens: n("cacheReadInputTokens"),
+                        cache_write_tokens: n("cacheWriteInputTokens"),
                     }));
                 }
             }

@@ -27,7 +27,14 @@ fn hold() -> Option<tokio::process::Child> {
         c
     } else if cfg!(target_os = "linux") {
         let mut c = tokio::process::Command::new("systemd-inhibit");
-        c.args(["--what=idle:sleep", "--who=Mira", "--why=A chat is running", "--mode=block", "sleep", "infinity"]);
+        c.args([
+            "--what=idle:sleep",
+            "--who=Mira",
+            "--why=A chat is running",
+            "--mode=block",
+            "sleep",
+            "infinity",
+        ]);
         c
     } else {
         return None;
@@ -104,7 +111,11 @@ mod tests {
         drop(child);
         tokio::time::sleep(Duration::from_millis(300)).await;
         // kill_on_drop: the assertion is gone with it.
-        let alive = std::process::Command::new("kill").args(["-0", &pid.to_string()]).status().unwrap().success();
+        let alive = std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .unwrap()
+            .success();
         assert!(!alive, "caffeinate {pid} outlived its handle");
     }
 }

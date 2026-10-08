@@ -21,11 +21,20 @@ pub struct RuntimeCapabilities {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SteeringCapability { #[default] Unavailable, Native, SafeBoundary }
+pub enum SteeringCapability {
+    #[default]
+    Unavailable,
+    Native,
+    SafeBoundary,
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum StopBehavior { #[default] CurrentTurn, Runtime }
+pub enum StopBehavior {
+    #[default]
+    CurrentTurn,
+    Runtime,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeQuestion {
@@ -132,7 +141,13 @@ impl RuntimeActivity {
             .collect()
     }
     pub fn cancel_work(&mut self) -> Vec<RuntimeWork> {
-        self.work.drain().map(|(_,mut work)| {work.status=WorkStatus::Cancelled;work}).collect()
+        self.work
+            .drain()
+            .map(|(_, mut work)| {
+                work.status = WorkStatus::Cancelled;
+                work
+            })
+            .collect()
     }
     pub fn has_pending_work(&self) -> bool {
         !self.turns.is_empty() || !self.work.is_empty()

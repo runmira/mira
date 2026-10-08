@@ -73,6 +73,7 @@ fn add(into: &mut UsageTotals, u: &UsageTotals) {
     into.prompt_tokens += u.prompt_tokens;
     into.completion_tokens += u.completion_tokens;
     into.cached_input_tokens += u.cached_input_tokens;
+    into.cache_write_tokens += u.cache_write_tokens;
 }
 
 /// Usage rows for one session, from `since_day` (inclusive) on.
@@ -102,6 +103,10 @@ pub fn rows_for(rec: &SessionRecord, since_day: &str) -> Vec<UsageRow> {
             .usage
             .cached_input_tokens
             .saturating_sub(tracked.cached_input_tokens),
+        cache_write_tokens: rec
+            .usage
+            .cache_write_tokens
+            .saturating_sub(tracked.cache_write_tokens),
         rounds: 0,
     };
     if rest.prompt_tokens + rest.completion_tokens > 0 {

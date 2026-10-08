@@ -366,6 +366,7 @@ pub fn check_budget(
         // right dollar total (modulo the u32 → u64 conversion, which
         // saturates safely).
         let synth = mira_ai::TokenUsage {
+            cache_write_tokens: 0,
             prompt_tokens: clip_u64_to_u32(usage.prompt_tokens),
             completion_tokens: clip_u64_to_u32(usage.completion_tokens),
             cached_input_tokens: clip_u64_to_u32(usage.cached_input_tokens),
@@ -879,6 +880,7 @@ mod tests {
 
     fn usage_with(prompt: u64, completion: u64) -> crate::persist::UsageTotals {
         crate::persist::UsageTotals {
+            cache_write_tokens: 0,
             prompt_tokens: prompt,
             completion_tokens: completion,
             cached_input_tokens: 0,

@@ -48,7 +48,11 @@ fn is_delegable(state: &AppState, engine: &str) -> bool {
     if engines().contains(&engine) {
         return true;
     }
-    state.engines.current().get(engine).is_some_and(|i| !i.is_native())
+    state
+        .engines
+        .current()
+        .get(engine)
+        .is_some_and(|i| !i.is_native())
 }
 
 /// Run `prompt` on `engine` in a child of `parent`; the final answer, or why
@@ -240,25 +244,32 @@ pub(crate) fn agent_launch_params(
     state: &AppState,
     engine: &str,
 ) -> Result<crate::acp_session::AcpLaunchParams, String> {
-    Ok(match state.engines.current().get(engine).filter(|i| !i.is_native()) {
-        Some(inst) => {
-            let kind = inst.driver.to_string();
-            let cfg = state
-                .engines
-                .current()
-                .external_driver_config(engine)
-                .unwrap_or_default();
-            crate::acp_session::AcpLaunchParams::for_instance(engine, kind, cfg)
-        }
-        None => {
-            let resolved = crate::acp_session::resolve_start_params(None, None, Some(engine))?;
-            crate::acp_session::AcpLaunchParams::for_instance(
-                resolved.instance,
-                resolved.kind,
-                resolved.cfg,
-            )
-        }
-    })
+    Ok(
+        match state
+            .engines
+            .current()
+            .get(engine)
+            .filter(|i| !i.is_native())
+        {
+            Some(inst) => {
+                let kind = inst.driver.to_string();
+                let cfg = state
+                    .engines
+                    .current()
+                    .external_driver_config(engine)
+                    .unwrap_or_default();
+                crate::acp_session::AcpLaunchParams::for_instance(engine, kind, cfg)
+            }
+            None => {
+                let resolved = crate::acp_session::resolve_start_params(None, None, Some(engine))?;
+                crate::acp_session::AcpLaunchParams::for_instance(
+                    resolved.instance,
+                    resolved.kind,
+                    resolved.cfg,
+                )
+            }
+        },
+    )
 }
 
 /// Whether `engine` can run a task: `mira` or an external agent.

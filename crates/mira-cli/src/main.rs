@@ -303,6 +303,13 @@ async fn main() -> Result<()> {
     let engine_cfg = mira_config::MiraConfig::load_global().unwrap_or_default();
     let engines = Arc::new(mira_engine::EngineRegistry::from_config(&engine_cfg));
     let swappable = Arc::new(mira_engine::SwappableProvider::new(provider.clone()));
+    // `instance:model` background models route by instance (#83).
+    swappable.set_known_instances(
+        engines
+            .instances()
+            .filter(|i| i.is_native())
+            .map(|i| i.id.to_string()),
+    );
     for inst in engines.instances().filter(|i| i.is_native()) {
         let id = inst.id.as_str();
         if id != settings.provider_name {

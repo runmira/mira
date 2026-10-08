@@ -245,7 +245,7 @@ impl AppState {
     /// each time a new slot is spun up.
     pub fn slot_deps(&self) -> SlotDeps {
         SlotDeps {
-            session_activity:self.session_activity.clone(),
+            session_activity: self.session_activity.clone(),
             policy: self.policy.clone(),
             sandbox: self.sandbox.clone(),
             harness_provider: self.harness_provider.clone(),
@@ -294,15 +294,21 @@ impl AppState {
         // Coalesce recovery and concurrent attaches for the same chat.
         // Weak entries retain only in-flight loads, rather than every chat ID.
         let load_lock = {
-            let mut loads = self.slot_loads.lock().unwrap_or_else(|e|e.into_inner());
-            loads.retain(|_,lock|lock.strong_count()>0);
+            let mut loads = self.slot_loads.lock().unwrap_or_else(|e| e.into_inner());
+            loads.retain(|_, lock| lock.strong_count() > 0);
             match loads.get(id).and_then(std::sync::Weak::upgrade) {
                 Some(lock) => lock,
-                None => {let lock=Arc::new(Mutex::new(())); loads.insert(id.clone(),Arc::downgrade(&lock));lock}
+                None => {
+                    let lock = Arc::new(Mutex::new(()));
+                    loads.insert(id.clone(), Arc::downgrade(&lock));
+                    lock
+                }
             }
         };
-        let _loading=load_lock.lock().await;
-        if let Some(slot)=self.slot(id).await {return Ok(slot);}
+        let _loading = load_lock.lock().await;
+        if let Some(slot) = self.slot(id).await {
+            return Ok(slot);
+        }
         let Some(store) = self.store.clone() else {
             return Err(
                 "persistence disabled — cannot materialize a slot for an unloaded session"

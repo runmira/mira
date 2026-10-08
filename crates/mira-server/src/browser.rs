@@ -654,7 +654,8 @@ const BROWSER_VERBS: &[BrowserVerb] = &[
     BrowserVerb {
         name: "browser_dialog",
         action: "dialog",
-        description: "Answer the page's open alert / confirm / prompt dialog. While one is \
+        description:
+            "Answer the page's open alert / confirm / prompt dialog. While one is \
                       open, other browser tools report it instead of acting. `text` fills a prompt.",
         properties: || {
             serde_json::json!({
@@ -685,9 +686,7 @@ const BROWSER_VERBS: &[BrowserVerb] = &[
         action: "color_scheme",
         description: "Make the page prefer `light` or `dark` mode, or `auto` to follow the \
                       system, to check both themes.",
-        properties: || {
-            serde_json::json!({ "scheme": { "type": "string", "enum": ["light", "dark", "auto"] } })
-        },
+        properties: || serde_json::json!({ "scheme": { "type": "string", "enum": ["light", "dark", "auto"] } }),
         required: &["scheme"],
     },
 ];
@@ -739,6 +738,18 @@ fn extra_agent_tools() -> Vec<Value> {
                 "required": ["prompt"],
                 "additionalProperties": false
             }
+        }),
+        json!({
+            "name": "browser_record_start",
+            "description": "Start recording the browser the user watches (an animated GIF), e.g. to show a flow \
+                            working. Do the steps, then call browser_record_stop. Up to 3 minutes.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        }),
+        json!({
+            "name": "browser_record_stop",
+            "description": "Stop the browser recording: saves the GIF, shows it in the chat when it's small \
+                            enough, and returns its path.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         }),
         json!({
             "name": "request_secret",
@@ -878,7 +889,16 @@ async fn browser_result(state: &AppState, action: &BrowserAction) -> Value {
 }
 
 // A deliberate allowlist: never accidentally publish privileged registry tools.
-const SESSION_MCP_TOOLS: &[&str] = &["ask_user", "plan", "read_file", "write_file", "edit_file", "grep", "glob", "bash"];
+const SESSION_MCP_TOOLS: &[&str] = &[
+    "ask_user",
+    "plan",
+    "read_file",
+    "write_file",
+    "edit_file",
+    "grep",
+    "glob",
+    "bash",
+];
 
 /// Which tools an agent is shown. Codex has its own shell, patch, search and
 /// plan tools; listing Mira's copies beside them only splits its attention,
@@ -894,8 +914,15 @@ impl ToolProfile {
         let codex = headers
             .get(mira_acp::session::MIRA_TOOL_PROFILE_HEADER)
             .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v.trim().eq_ignore_ascii_case(mira_acp::session::CODEX_TOOL_PROFILE));
-        if codex { Self::Codex } else { Self::All }
+            .is_some_and(|v| {
+                v.trim()
+                    .eq_ignore_ascii_case(mira_acp::session::CODEX_TOOL_PROFILE)
+            });
+        if codex {
+            Self::Codex
+        } else {
+            Self::All
+        }
     }
 
     /// Listed in `tools/list`. Calls stay accepted either way, so a thread
@@ -923,6 +950,8 @@ impl ToolProfile {
                           self-contained task to another engine and returns its answer. \
                           request_secret collects an API key or token privately (never ask for \
                           one in chat); html_render shows a self-contained HTML page in the chat. \
+                          device_* tools drive iOS Simulators and Android Emulators; \
+                          browser_record_start/stop records the browser as a GIF. \
                           Call a tool when you need its effect; never claim to have shown a form, \
                           run a command, or delegated without calling the tool first. Text \
                           descriptions of tool actions are invisible to the user.",
@@ -936,22 +965,34 @@ impl ToolProfile {
                             shows a question form and waits for the answer, for when \
                             request_user_input isn't available. request_secret collects an API key \
                             or token privately. html_render shows a self-contained HTML page (a \
-                            chart, table, mockup) in the chat. delegate_task hands a \
+                            chart, table, mockup) in the chat. device_* tools drive iOS Simulators \
+                            and Android Emulators; browser_record_start/stop records the browser. delegate_task hands a \
                             self-contained task to another engine. Never claim to have shown a \
                             form or run a command without calling the tool.",
         }
     }
 }
 
-async fn session_tool_decision(state: &AppState, slot: &crate::slot::SessionSlot, tool: &dyn mira_tools::Tool, call: &mira_core::ToolCall) -> mira_policy::Decision {
+async fn session_tool_decision(
+    state: &AppState,
+    slot: &crate::slot::SessionSlot,
+    tool: &dyn mira_tools::Tool,
+    call: &mira_core::ToolCall,
+) -> mira_policy::Decision {
     // Clone rules, then apply this chat's current mode without changing another
     // chat's policy. Explicit denies still win, including multi-target edits.
     let mut policy = state.policy.lock().await.clone();
     policy.set_mode(slot.session.read().await.config().await.agent_approval_mode);
     let mut decision = mira_policy::Decision::Allow;
-    for target in tool.policy_targets(&call) {
-        match policy.evaluate(&mira_policy::Request { action: tool.action(), target: &target }) {
-            mira_policy::Decision::Deny => { decision = mira_policy::Decision::Deny; break; }
+    for target in tool.policy_targets(call) {
+        match policy.evaluate(&mira_policy::Request {
+            action: tool.action(),
+            target: &target,
+        }) {
+            mira_policy::Decision::Deny => {
+                decision = mira_policy::Decision::Deny;
+                break;
+            }
             mira_policy::Decision::Ask => decision = mira_policy::Decision::Ask,
             mira_policy::Decision::Allow => {}
         }
@@ -960,7 +1001,12 @@ async fn session_tool_decision(state: &AppState, slot: &crate::slot::SessionSlot
 }
 
 /// Execute the chat's own tools, with its live approval posture and environment.
-async fn session_tool_result(state: &AppState, grant: &McpGrant, name: &str, args: &Value) -> Value {
+async fn session_tool_result(
+    state: &AppState,
+    grant: &McpGrant,
+    name: &str,
+    args: &Value,
+) -> Value {
     use serde_json::json;
     let error = |message: &str| json!({ "content": [{ "type": "text", "text": message }], "isError": true });
     let Some(slot) = mcp_slot(state, grant).await else {
@@ -982,12 +1028,26 @@ async fn session_tool_result(state: &AppState, grant: &McpGrant, name: &str, arg
         .send(crate::protocol::ServerMsg::ToolStart { call: call.clone() });
     let decision = session_tool_decision(state, &slot, tool.as_ref(), &call).await;
     let allowed = slot.approver.approve(&call, decision).await;
-    let ctx = slot.make_tool_ctx(state.sandbox.clone()).await
+    let ctx = slot
+        .make_tool_ctx(state.sandbox.clone())
+        .await
         .with_compute_slot(slot.environments.slot())
         .with_bg_processes(slot.bg_processes.clone())
-        .with_bg_progress(std::sync::Arc::new(crate::slot::SessionProgress { tx: slot.events_tx.clone() }));
-    let invoked = if allowed { tool.invoke(&call, &ctx).await } else {
-        Ok(mira_core::ToolResult { call_id: call.id.clone(), content: "This tool call was denied by Mira's policy or the user. Do not retry it unchanged.".into(), is_error: true, data: None, images: Vec::new() })
+        .with_bg_progress(std::sync::Arc::new(crate::slot::SessionProgress {
+            tx: slot.events_tx.clone(),
+        }));
+    let invoked = if allowed {
+        tool.invoke(&call, &ctx).await
+    } else {
+        Ok(mira_core::ToolResult {
+            call_id: call.id.clone(),
+            content:
+                "This tool call was denied by Mira's policy or the user. Do not retry it unchanged."
+                    .into(),
+            is_error: true,
+            data: None,
+            images: Vec::new(),
+        })
     };
     match invoked {
         Ok(result) => {
@@ -1027,7 +1087,12 @@ fn background_tools() -> Vec<Box<dyn mira_tools::Tool>> {
     ]
 }
 
-async fn mcp_one(state: &AppState, q: &McpGrant, profile: ToolProfile, req: Value) -> Option<Value> {
+async fn mcp_one(
+    state: &AppState,
+    q: &McpGrant,
+    profile: ToolProfile,
+    req: Value,
+) -> Option<Value> {
     use serde_json::json;
     let id = req.get("id").cloned()?; // a notification gets no reply
     let method = req.get("method").and_then(Value::as_str).unwrap_or("");
@@ -1073,6 +1138,7 @@ async fn mcp_one(state: &AppState, q: &McpGrant, profile: ToolProfile, req: Valu
                     }
                 }
                 tools.extend(extra_agent_tools().into_iter().skip(1));
+                tools.extend(crate::devices::tool_specs());
                 // Delegated chats run read-only and can't fan out.
                 if !slot.session.read().await.is_subagent() {
                     tools.extend(crate::agent_threads::tool_specs());
@@ -1091,7 +1157,9 @@ async fn mcp_one(state: &AppState, q: &McpGrant, profile: ToolProfile, req: Valu
             // for Mira's own browser tool.
             if name == "browser" || name.starts_with("browser_") {
                 if let Some(slot) = mcp_slot(state, q).await {
-                    let _ = slot.events_tx.send(crate::protocol::ServerMsg::BrowserActive);
+                    let _ = slot
+                        .events_tx
+                        .send(crate::protocol::ServerMsg::BrowserActive);
                 }
             }
             if name == "browser_devices" {
@@ -1102,6 +1170,14 @@ async fn mcp_one(state: &AppState, q: &McpGrant, profile: ToolProfile, req: Valu
             }
             if name == "delegate_task" {
                 return Some(ok(delegate_result(state, q, args).await));
+            }
+            if name.starts_with("device_") {
+                return Some(ok(match crate::devices::call(name, args).await {
+                    Ok(content) => json!({ "content": content, "isError": false }),
+                    Err(e) => {
+                        json!({ "content": [{ "type": "text", "text": e }], "isError": true })
+                    }
+                }));
             }
             if name.starts_with("thread_") {
                 let text = |t: String, err: bool| json!({ "content": [{ "type": "text", "text": t }], "isError": err });
@@ -1114,6 +1190,21 @@ async fn mcp_one(state: &AppState, q: &McpGrant, profile: ToolProfile, req: Valu
                         Err(e) => text(e, true),
                     }));
                 }
+            }
+            if name == "browser_record_start" || name == "browser_record_stop" {
+                let text = |t: String, err: bool| json!({ "content": [{ "type": "text", "text": t }], "isError": err });
+                let Some(slot) = mcp_slot(state, q).await else {
+                    return Some(ok(text("This chat has closed.".into(), true)));
+                };
+                let out = if name == "browser_record_start" {
+                    crate::browser_recording::start(state, &slot).await
+                } else {
+                    crate::browser_recording::stop(state, &slot).await
+                };
+                return Some(ok(match out {
+                    Ok(t) => text(t, false),
+                    Err(e) => text(e, true),
+                }));
             }
             if name == "request_secret" || name == "html_render" {
                 let text = |t: String, err: bool| json!({ "content": [{ "type": "text", "text": t }], "isError": err });
@@ -1231,7 +1322,11 @@ async fn call_background(
     };
     let decision = session_tool_decision(state, &slot, tool.as_ref(), &call).await;
     if !slot.approver.approve(&call, decision).await {
-        return Some(Ok(("This command was denied by Mira's policy or the user. Do not retry it unchanged.".into(), true)));
+        return Some(Ok((
+            "This command was denied by Mira's policy or the user. Do not retry it unchanged."
+                .into(),
+            true,
+        )));
     }
     let ctx = slot
         .make_tool_ctx(state.sandbox.clone())
@@ -1289,18 +1384,30 @@ mod browser_verb_tests {
             ("browser_tabs", serde_json::json!({})),
             ("browser_switch_tab", serde_json::json!({ "index": 1 })),
             ("browser_hover", serde_json::json!({ "ref": "e2" })),
-            ("browser_select", serde_json::json!({ "values": ["Canada"], "selector": "#country" })),
-            ("browser_upload", serde_json::json!({ "files": ["/tmp/a.png"], "ref": "e5" })),
+            (
+                "browser_select",
+                serde_json::json!({ "values": ["Canada"], "selector": "#country" }),
+            ),
+            (
+                "browser_upload",
+                serde_json::json!({ "files": ["/tmp/a.png"], "ref": "e5" }),
+            ),
             (
                 "browser_drag",
                 serde_json::json!({ "from_ref": "e1", "from_selector": "#a", "to_ref": "e2", "to_selector": "#b" }),
             ),
-            ("browser_dialog", serde_json::json!({ "accept": true, "text": "yes" })),
+            (
+                "browser_dialog",
+                serde_json::json!({ "accept": true, "text": "yes" }),
+            ),
             (
                 "browser_wait_for",
                 serde_json::json!({ "text": "Saved", "selector": "#ok", "gone": false, "timeout": 5 }),
             ),
-            ("browser_color_scheme", serde_json::json!({ "scheme": "dark" })),
+            (
+                "browser_color_scheme",
+                serde_json::json!({ "scheme": "dark" }),
+            ),
         ];
         assert_eq!(samples.len(), BROWSER_VERBS.len(), "a sample per tool");
         for (name, args) in samples {
@@ -1332,7 +1439,10 @@ mod tool_profile_tests {
         );
         let codex = ToolProfile::from_headers(&headers);
         assert_eq!(codex, ToolProfile::Codex);
-        let listed: Vec<_> = SESSION_MCP_TOOLS.iter().filter(|n| codex.lists(n)).collect();
+        let listed: Vec<_> = SESSION_MCP_TOOLS
+            .iter()
+            .filter(|n| codex.lists(n))
+            .collect();
         assert_eq!(listed, [&"ask_user"]);
         assert!(SESSION_MCP_TOOLS.iter().all(|n| ToolProfile::All.lists(n)));
         assert!(!codex.instructions().contains("plan displays"));

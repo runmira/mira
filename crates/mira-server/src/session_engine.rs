@@ -290,14 +290,23 @@ pub async fn current(state: &AppState, slot: &SessionSlot) -> SessionEngine {
         let model = slot.session.read().await.config().await.model;
         let display_name = instance
             .as_deref()
-            .and_then(|id| state.engines.current().get(id).and_then(|i| i.display_name.clone()))
+            .and_then(|id| {
+                state
+                    .engines
+                    .current()
+                    .get(id)
+                    .and_then(|i| i.display_name.clone())
+            })
             .or_else(|| instance.clone())
             .unwrap_or_else(|| "Mira".to_string());
         return SessionEngine {
             kind: EngineKind::Provider,
             capabilities: mira_acp::runtime::RuntimeCapabilities {
                 steering: mira_acp::runtime::SteeringCapability::SafeBoundary,
-                image_input: true, cancellation: true, live_model_switch: true, live_mode_switch: true,
+                image_input: true,
+                cancellation: true,
+                live_model_switch: true,
+                live_mode_switch: true,
                 ..Default::default()
             },
             instance,
@@ -331,9 +340,17 @@ pub async fn current(state: &AppState, slot: &SessionSlot) -> SessionEngine {
         .and_then(|m| m.clone());
     let capabilities = match slot.acp_agent.read().await.clone() {
         Some(handle) => {
-            let mut caps = handle.agent().await.map(|a| a.runtime_capabilities()).unwrap_or_default();
-            if handle.opencode_control.is_some() { caps.steering = mira_acp::runtime::SteeringCapability::Native; }
-            if handle.driver_kind == "grok" { caps.stop_behavior = mira_acp::runtime::StopBehavior::Runtime; }
+            let mut caps = handle
+                .agent()
+                .await
+                .map(|a| a.runtime_capabilities())
+                .unwrap_or_default();
+            if handle.opencode_control.is_some() {
+                caps.steering = mira_acp::runtime::SteeringCapability::Native;
+            }
+            if handle.driver_kind == "grok" {
+                caps.stop_behavior = mira_acp::runtime::StopBehavior::Runtime;
+            }
             caps
         }
         None => Default::default(),
@@ -371,9 +388,10 @@ pub async fn select_agent(state: &AppState, slot: &Arc<SessionSlot>, params: Acp
     if !same_setup {
         crate::acp_session::stop_agent(slot).await;
     }
-    if let Some(prev) = previous.as_ref().filter(|p| {
-        p.driver_kind != params.driver_kind || p.instance != params.instance
-    }) {
+    if let Some(prev) = previous
+        .as_ref()
+        .filter(|p| p.driver_kind != params.driver_kind || p.instance != params.instance)
+    {
         hand_agent_turns_to_agent(state, slot, prev, &params).await;
     }
     if from_provider {
@@ -406,7 +424,9 @@ pub async fn select_agent(state: &AppState, slot: &Arc<SessionSlot>, params: Acp
     }
     {
         let mut launch = slot.acp_launch.lock().await;
-        if !same_setup { clear_reported_model(&slot.engine); }
+        if !same_setup {
+            clear_reported_model(&slot.engine);
+        }
         *launch = Some(params.clone());
     }
     *slot
@@ -641,7 +661,13 @@ async fn provider_ref(
     let model = slot.session.read().await.config().await.model;
     let display_name = instance
         .as_deref()
-        .and_then(|id| state.engines.current().get(id).and_then(|i| i.display_name.clone()))
+        .and_then(|id| {
+            state
+                .engines
+                .current()
+                .get(id)
+                .and_then(|i| i.display_name.clone())
+        })
         .or_else(|| instance.clone())
         .unwrap_or_else(|| "Mira".to_string());
     serde_json::json!({
@@ -696,7 +722,7 @@ pub async fn take_context_for_agent(slot: &SessionSlot) -> Option<String> {
     if !handoff.notes.is_empty() {
         out.push_str(&format!(
             "<mira_note>\n{}\n</mira_note>\n\n",
-            handoff.notes.drain(..).collect::<Vec<_>>().join("\n")
+            std::mem::take(&mut handoff.notes).join("\n")
         ));
     }
     (!out.is_empty()).then_some(out)
@@ -802,7 +828,10 @@ fn tail_chars(s: &str, max: usize) -> String {
 /// A model report belongs to the process that supplied it. Replacing that
 /// process must clear the report before publishing the next agent selection.
 fn clear_reported_model(runtime: &EngineRuntime) {
-    *runtime.reported_model.lock().unwrap_or_else(|error| error.into_inner()) = None;
+    *runtime
+        .reported_model
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = None;
 }
 
 /// Track the model an agent reports running, from its config-option frames.
@@ -811,7 +840,13 @@ pub fn observe_frame(rt: &EngineRuntime, msg: &ServerMsg, active_driver: Option<
     let ServerMsg::AcpConfigOptions { options, driver } = msg else {
         return false;
     };
-    if active_driver.is_none() || driver.as_deref().is_some_and(|driver| Some(driver) != active_driver) { return false; }
+    if active_driver.is_none()
+        || driver
+            .as_deref()
+            .is_some_and(|driver| Some(driver) != active_driver)
+    {
+        return false;
+    }
     let Some(current) = options
         .iter()
         .find(|o| o.category.as_deref() == Some("model"))
@@ -929,12 +964,38 @@ mod tests {
         *runtime.reported_model.lock().unwrap() = Some("gpt-6.1-sol".into());
         clear_reported_model(&runtime);
         assert_eq!(*runtime.reported_model.lock().unwrap(), None);
-        let old = ServerMsg::AcpConfigOptions { driver:Some("codex".into()), options:vec![mira_acp::events::SessionConfigView { id:"model".into(), name:"Model".into(), description:None, category:Some("model".into()), current:Some("gpt-6.1-sol".into()), values:vec![] }] };
-        assert!(!observe_frame(&runtime, &old, Some("opencode")), "queued old-agent reports must not restore its model");
+        let old = ServerMsg::AcpConfigOptions {
+            driver: Some("codex".into()),
+            options: vec![mira_acp::events::SessionConfigView {
+                id: "model".into(),
+                name: "Model".into(),
+                description: None,
+                category: Some("model".into()),
+                current: Some("gpt-6.1-sol".into()),
+                values: vec![],
+            }],
+        };
+        assert!(
+            !observe_frame(&runtime, &old, Some("opencode")),
+            "queued old-agent reports must not restore its model"
+        );
         assert_eq!(*runtime.reported_model.lock().unwrap(), None);
-        let frame = ServerMsg::AcpConfigOptions { driver: Some("opencode".into()), options: vec![mira_acp::events::SessionConfigView { id:"model".into(), name:"Model".into(), description:None, category:Some("model".into()), current:Some("opencode/default".into()), values:vec![] }] };
+        let frame = ServerMsg::AcpConfigOptions {
+            driver: Some("opencode".into()),
+            options: vec![mira_acp::events::SessionConfigView {
+                id: "model".into(),
+                name: "Model".into(),
+                description: None,
+                category: Some("model".into()),
+                current: Some("opencode/default".into()),
+                values: vec![],
+            }],
+        };
         assert!(observe_frame(&runtime, &frame, Some("opencode")));
-        assert_eq!(runtime.reported_model.lock().unwrap().as_deref(), Some("opencode/default"));
+        assert_eq!(
+            runtime.reported_model.lock().unwrap().as_deref(),
+            Some("opencode/default")
+        );
     }
 
     #[test]
@@ -951,8 +1012,14 @@ mod tests {
                 values: Vec::new(),
             }],
         };
-        assert!(observe_frame(&rt, &frame, Some("claude-code")), "first sighting is a change");
-        assert!(!observe_frame(&rt, &frame, Some("claude-code")), "the same model again is not");
+        assert!(
+            observe_frame(&rt, &frame, Some("claude-code")),
+            "first sighting is a change"
+        );
+        assert!(
+            !observe_frame(&rt, &frame, Some("claude-code")),
+            "the same model again is not"
+        );
         assert_eq!(rt.reported_model.lock().unwrap().as_deref(), Some("opus"));
     }
 }

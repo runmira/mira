@@ -88,9 +88,13 @@ pub struct ListView {
     self_port: u16,
 }
 
-async fn slot_for(state: &AppState, q: &SessionQuery) -> Result<Arc<SessionSlot>,Response> {
+#[allow(clippy::result_large_err)] // an axum Response as the early-return error, like the other handlers
+async fn slot_for(state: &AppState, q: &SessionQuery) -> Result<Arc<SessionSlot>, Response> {
     match q.session.as_deref() {
-        Some(id) if !id.is_empty() => state.slot_str(id).await.ok_or_else(||err(StatusCode::NOT_FOUND,"chat is not loaded")),
+        Some(id) if !id.is_empty() => state
+            .slot_str(id)
+            .await
+            .ok_or_else(|| err(StatusCode::NOT_FOUND, "chat is not loaded")),
         _ => Ok(state.active_slot().await),
     }
 }
@@ -100,12 +104,17 @@ fn err(code: StatusCode, msg: impl Into<String>) -> Response {
 }
 
 pub async fn list(State(state): State<AppState>, Query(q): Query<SessionQuery>) -> Response {
-    let slot = match slot_for(&state,&q).await {Ok(slot)=>slot,Err(response)=>return response};
+    let slot = match slot_for(&state, &q).await {
+        Ok(slot) => slot,
+        Err(response) => return response,
+    };
     let entries = slot.bg_processes.list().await;
     let (ports, procs) = if q.owned_only {
-        (Vec::new(),HashMap::new())
+        (Vec::new(), HashMap::new())
     } else {
-        tokio::task::spawn_blocking(|| (listening_ports(), process_table())).await.unwrap_or_default()
+        tokio::task::spawn_blocking(|| (listening_ports(), process_table()))
+            .await
+            .unwrap_or_default()
     };
 
     let mut ports: Vec<PortView> = ports;
@@ -186,7 +195,10 @@ pub async fn start(
     if command.is_empty() {
         return err(StatusCode::BAD_REQUEST, "command is empty");
     }
-    let slot = match slot_for(&state,&q).await {Ok(slot)=>slot,Err(response)=>return response};
+    let slot = match slot_for(&state, &q).await {
+        Ok(slot) => slot,
+        Err(response) => return response,
+    };
     let cwd = slot.cwd.read().await.clone();
     let id = slot
         .bg_processes
@@ -200,7 +212,10 @@ pub async fn output(
     Path(id): Path<u32>,
     Query(q): Query<SessionQuery>,
 ) -> Response {
-    let slot = match slot_for(&state,&q).await {Ok(slot)=>slot,Err(response)=>return response};
+    let slot = match slot_for(&state, &q).await {
+        Ok(slot) => slot,
+        Err(response) => return response,
+    };
     let Some(e) = slot.bg_processes.get(id).await else {
         return err(StatusCode::NOT_FOUND, format!("no process {id}"));
     };
@@ -221,7 +236,10 @@ pub async fn stop(
     // content type needs a CORS preflight, which this server never grants.
     Json(_): Json<serde_json::Value>,
 ) -> Response {
-    let slot = match slot_for(&state,&q).await {Ok(slot)=>slot,Err(response)=>return response};
+    let slot = match slot_for(&state, &q).await {
+        Ok(slot) => slot,
+        Err(response) => return response,
+    };
     let Some(e) = slot.bg_processes.get(id).await else {
         return err(StatusCode::NOT_FOUND, format!("no process {id}"));
     };
@@ -238,7 +256,10 @@ pub async fn restart(
     // content type needs a CORS preflight, which this server never grants.
     Json(_): Json<serde_json::Value>,
 ) -> Response {
-    let slot = match slot_for(&state,&q).await {Ok(slot)=>slot,Err(response)=>return response};
+    let slot = match slot_for(&state, &q).await {
+        Ok(slot) => slot,
+        Err(response) => return response,
+    };
     let Some(e) = slot.bg_processes.get(id).await else {
         return err(StatusCode::NOT_FOUND, format!("no process {id}"));
     };
@@ -265,7 +286,10 @@ pub async fn forget(
     Path(id): Path<u32>,
     Query(q): Query<SessionQuery>,
 ) -> Response {
-    let slot = match slot_for(&state,&q).await {Ok(slot)=>slot,Err(response)=>return response};
+    let slot = match slot_for(&state, &q).await {
+        Ok(slot) => slot,
+        Err(response) => return response,
+    };
     if slot.bg_processes.remove_finished(id).await {
         Json(serde_json::json!({ "ok": true })).into_response()
     } else {
