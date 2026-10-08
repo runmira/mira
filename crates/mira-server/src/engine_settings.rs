@@ -234,15 +234,15 @@ fn error(status: StatusCode, message: impl Into<String>) -> Response {
 }
 
 /// The external instance's driver, or the error to answer with.
-fn external_driver(state: &AppState, instance: &str) -> Result<String, Response> {
+fn external_driver(state: &AppState, instance: &str) -> Result<String, (StatusCode, String)> {
     let engines = state.engines.current();
     match engines.get(instance) {
-        Some(inst) if inst.is_native() => Err(error(
+        Some(inst) if inst.is_native() => Err((
             StatusCode::BAD_REQUEST,
             format!("`{instance}` is a provider; its key is set under Settings → Provider"),
         )),
         Some(inst) => Ok(inst.driver.to_string()),
-        None => Err(error(
+        None => Err((
             StatusCode::NOT_FOUND,
             format!("unknown engine instance `{instance}`"),
         )),
@@ -264,7 +264,7 @@ fn current_view(state: &AppState, instance: &str, driver: &str) -> AgentSettings
 pub async fn get_settings(State(state): State<AppState>, Path(instance): Path<String>) -> Response {
     match external_driver(&state, &instance) {
         Ok(driver) => Json(current_view(&state, &instance, &driver)).into_response(),
-        Err(e) => e,
+        Err((status, message)) => error(status, message),
     }
 }
 
@@ -275,7 +275,7 @@ pub async fn put_settings(
 ) -> Response {
     let driver = match external_driver(&state, &instance) {
         Ok(d) => d,
-        Err(e) => return e,
+        Err((status, message)) => return error(status, message),
     };
     // One writer at a time: two quick saves must not interleave their
     // read-modify-write of the file.

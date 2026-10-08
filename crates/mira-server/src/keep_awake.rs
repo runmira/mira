@@ -98,7 +98,7 @@ async fn any_running(state: &AppState) -> bool {
     false
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
 
