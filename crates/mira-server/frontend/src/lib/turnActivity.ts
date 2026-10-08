@@ -1,4 +1,4 @@
-import type { Entry } from '../App';
+import type { Entry } from '../transcript/entries';
 
 /** Item produced by `groupAgentRuns`: either a single passthrough entry,
  *  a run of `>=2` consecutive `agent` tool entries folded into a group,

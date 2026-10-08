@@ -29,7 +29,7 @@ import { Collapse } from './ui/Collapse';
 import { prettyUrl } from '../lib/refs';
 import type { GitStatusView, SessionDiffView, SessionFile, BranchPrView } from '../api';
 import type { TaskItem } from '../types';
-import type { SubagentStreamState, Entry } from '../App';
+import type { SubagentStreamState, Entry } from '../transcript/entries';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import { SubagentFace } from './SubagentFace';
 import { personaName, useSubagents, type Subagent } from '../lib/subagents';

@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { ChevronRight, CircleAlert, File as FileIcon, Info, LoaderCircle, X } from 'lucide-react';
-import type { Entry } from '../App';
-import { groupAgentRuns } from '../App';
+import type { Entry } from '../transcript/entries';
+import { groupAgentRuns } from '../lib/turnActivity';
 import type { DiffPreview, ToolCall, ToolResult } from '../types';
 import type { ToolStatus } from './ToolCard';
 import { AssistantContent } from './AssistantContent';
