@@ -135,4 +135,4 @@ Local builds: `scripts/build-desktop.sh --channel alpha --version
 
 ## Past releases
 
-Notes live in this folder: [`v0.6.1-alpha.8.md`](./v0.6.1-alpha.8.md), [`v0.6.1.md`](./v0.6.1.md), [`v0.6.0.md`](./v0.6.0.md), [`v0.4.0.md`](./v0.4.0.md), [`v0.3.9.md`](./v0.3.9.md), [`v0.3.8.md`](./v0.3.8.md).
+Notes live in this folder: [`v0.6.1-alpha.9.md`](./v0.6.1-alpha.9.md), [`v0.6.1-alpha.8.md`](./v0.6.1-alpha.8.md), [`v0.6.1.md`](./v0.6.1.md), [`v0.6.0.md`](./v0.6.0.md), [`v0.4.0.md`](./v0.4.0.md), [`v0.3.9.md`](./v0.3.9.md), [`v0.3.8.md`](./v0.3.8.md).
