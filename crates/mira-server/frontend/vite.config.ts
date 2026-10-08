@@ -3,6 +3,21 @@ import react from '@vitejs/plugin-react';
 import path from 'node:path';
 import { visualizer } from 'rollup-plugin-visualizer';
 
+// `REACT_COMPILER_REPORT=1 npm run build` lists components the compiler
+// skipped and why.
+function compilerLogger() {
+  if (!process.env.REACT_COMPILER_REPORT) return {};
+  return {
+    logger: {
+      logEvent(filename: string | null, event: { kind: string; fnName?: string | null; detail?: unknown }) {
+        if (event.kind === 'CompileSuccess') console.log(`[compiler] ok ${filename}`);
+        else if (event.kind === 'CompileError' || event.kind === 'CompileSkip' || event.kind === 'PipelineError')
+          console.log(`[compiler] ${event.kind} ${filename} ${event.fnName ?? ''} ${String((event.detail as any)?.reason ?? (event.detail as any)?.options?.reason ?? '').slice(0, 120)}`);
+      },
+    },
+  };
+}
+
 const VENDOR_CHUNKS: [string, RegExp][] = [
   ['vendor-react', /^(react|react-dom|scheduler)$/],
   ['vendor-motion', /^(framer-motion|motion-dom|motion-utils)$/],
@@ -30,7 +45,14 @@ function isInitial(id: string, getModuleInfo: ModuleInfoLookup, seen = new Set<s
 // assets directly via --static-dir dist/.
 export default defineConfig({
   plugins: [
-    react(),
+    react({
+      babel: {
+        // Auto-memoizes components and hooks, so render work doesn't depend
+        // on hand-placed useMemo/useCallback. Components that break the
+        // Rules of React are skipped (left as-is), not miscompiled.
+        plugins: [['babel-plugin-react-compiler', { target: '19', ...compilerLogger() }]],
+      },
+    }),
     // `ANALYZE=1 npm run build` writes dist/stats.html (treemap of every chunk).
     process.env.ANALYZE && visualizer({ filename: 'dist/stats.html', gzipSize: true, template: 'treemap' }),
   ],
