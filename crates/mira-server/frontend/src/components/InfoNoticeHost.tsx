@@ -4,7 +4,7 @@
  */
 import { updateExternalAgent } from '../api';
 import { useState } from 'react';
-import { AnimatePresence, motion } from 'framer-motion';
+import { AnimatePresence, m } from 'framer-motion';
 import {
   Check,
   Bell,
@@ -83,7 +83,7 @@ export function InfoNoticeHost({ notices, onDismiss, onAgentUpdated, inline = fa
       <div className="pointer-events-none fixed left-1/2 top-4 z-[80] flex -translate-x-1/2 flex-col items-center gap-2">
         <AnimatePresence initial={false}>
           {short.map((notice) => (
-            <motion.div
+            <m.div
               key={notice.id}
               layout
               initial={{ opacity: 0, y: -18, scale: 0.96 }}
@@ -98,14 +98,14 @@ export function InfoNoticeHost({ notices, onDismiss, onAgentUpdated, inline = fa
               <button type="button" onClick={() => onDismiss(notice.id)} className="ml-1 rounded-full p-0.5 text-muted-foreground transition-colors hover:bg-fg/[0.06] hover:text-foreground" aria-label="Dismiss notification">
                 <X className="size-3.5" />
               </button>
-            </motion.div>
+            </m.div>
           ))}
         </AnimatePresence>
       </div>
       <div className={inline ? "mx-1 mb-1 flex flex-col gap-2" : "pointer-events-none fixed right-4 top-4 z-[79] flex w-[min(24rem,calc(100vw-2rem))] flex-col gap-2"}>
         <AnimatePresence initial={false}>
           {persistent.map((notice) => (
-            <motion.div
+            <m.div
               key={notice.id}
               layout
               initial={{ opacity: 0, x: 28, scale: 0.98 }}
@@ -129,7 +129,7 @@ export function InfoNoticeHost({ notices, onDismiss, onAgentUpdated, inline = fa
                   <X className="size-3.5" />
                 </button>
               </div>
-            </motion.div>
+            </m.div>
           ))}
         </AnimatePresence>
       </div>

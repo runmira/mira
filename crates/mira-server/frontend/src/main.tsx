@@ -1,5 +1,6 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
+import { LazyMotion } from 'framer-motion';
 import App from './App';
 import { AuthGate } from './components/AuthGate';
 import { OnboardingGate } from './components/onboarding/OnboardingGate';
@@ -34,10 +35,14 @@ applyAppearance();
 // width/height in CSS and override the SVG's own width attr).
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
+    {/* Components use the slim `m.*` elements; the animation features load
+        after first paint. `strict` throws if a full `motion.*` sneaks in. */}
+    <LazyMotion features={() => import('./lib/motionFeatures').then((r) => r.default)} strict>
     <AuthGate>
       <OnboardingGate>
         <App />
       </OnboardingGate>
     </AuthGate>
+    </LazyMotion>
   </StrictMode>,
 );

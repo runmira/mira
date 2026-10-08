@@ -1,5 +1,6 @@
 import { BranchElbow } from './BranchElbow';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { LazyBoundary } from './LazyBoundary';
 import {
   Archive,
   ArchiveRestore,
@@ -37,7 +38,7 @@ import type { BackgroundMode, SessionSummary } from '../types';
 import type { WsStatus } from '../ws';
 import { parseSentAttachments } from './Composer';
 import { SETTINGS_SECTIONS, type SettingsSectionId } from './settings/sections';
-import { PluginsPanel, PullRequestPanel } from '../lazyViews';
+import { PluginsPanel, PullRequestPanel, SessionPeek } from '../lazyViews';
 
 import { UserCard } from './UserCard';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
@@ -45,7 +46,8 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
-import { SessionPeek, type PeekTarget } from './SessionPeek';
+import type { PeekTarget } from './SessionPeek';
+import { useLatch } from '../lib/lazy';
 import { hasHiddenTitleBar, TRAFFIC_LIGHT_INSET } from '@/lib/desktop';
 import { Collapse } from './ui/Collapse';
 import { useFileIcons } from '@/lib/fileIcons';
@@ -161,6 +163,8 @@ export function Sidebar({
   // so sliding the pointer down the list moves one card rather than
   // mounting twenty.
   const [peek, setPeek] = useState<PeekTarget | null>(null);
+  // Hover card chunk loads on the first hover, then stays mounted.
+  const peekMounted = useLatch(peek !== null);
   // Sidebar search: filters every folder at once, and opens them while it
   // has text so a match is never hidden behind a collapsed folder.
   const [query, setQuery] = useState('');
@@ -797,11 +801,15 @@ export function Sidebar({
 
       <UserCard status={status} onOpenSettings={onOpenSettings} />
       {/* One hover card for every row in the list. */}
-      <SessionPeek
-        target={peek}
-        pr={peek && peek.session.id === activeSessionId ? activePr ?? null : null}
-        onDismiss={() => setPeek(null)}
-      />
+      {peekMounted && (
+        <LazyBoundary>
+          <SessionPeek
+            target={peek}
+            pr={peek && peek.session.id === activeSessionId ? activePr ?? null : null}
+            onDismiss={() => setPeek(null)}
+          />
+        </LazyBoundary>
+      )}
     </aside>
     <RenameDialog
       session={renaming}

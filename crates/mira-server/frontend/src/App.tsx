@@ -52,16 +52,30 @@ import {
 import { extractAgentId } from './components/AgentCard';
 import { preloadOnIntent, useLatch } from './lib/lazy';
 import { LazyBoundary } from './components/LazyBoundary';
-import { PluginsPanel, PullRequestPanel, ReviewChanges, SettingsSurface, SubagentPanel, TerminalPanel } from './lazyViews';
+import {
+  ActivityPane,
+  AsidePane,
+  CommandPalette,
+  ContextInspector,
+  DevicesPane,
+  FolderPicker,
+  GetStarted,
+  GoalPanel,
+  ImportChats,
+  PluginsPanel,
+  ProcessesPane,
+  PullRequestPanel,
+  ReviewChanges,
+  SettingsSurface,
+  SubagentPanel,
+  TerminalPanel,
+  TestsPane,
+} from './lazyViews';
 import { Sidebar, type MainView } from './components/Sidebar';
 import { hasHiddenTitleBar, isDesktop, pickFolder } from './lib/desktop';
 import { RightPanelButton } from './components/RightPanelButton';
 import { attachFilesToComposer, dataUrlToFile } from './lib/attachBridge';
-import { AsidePane } from './components/panes/AsidePane';
-import { ActivityPane, type ActivityTurn } from './components/panes/ActivityPane';
-import { DevicesPane } from './components/panes/DevicesPane';
-import { ProcessesPane } from './components/panes/ProcessesPane';
-import { TestsPane } from './components/panes/TestsPane';
+import type { ActivityTurn } from './components/panes/ActivityPane';
 import { FilePicker } from './components/FilePicker';
 import {
   TOOL_PANE_DEFS,
@@ -77,7 +91,6 @@ import {
   type PendingApproval,
   type QueuedComposerMessage,
 } from './components/Composer';
-import { FolderPicker } from './components/FolderPicker';
 import { EditorPicker } from './components/EditorPicker';
 import { TimelineMinimap, type MinimapItem } from './components/TimelineMinimap';
 import { ImageLightbox } from './components/ImageLightbox';
@@ -105,15 +118,12 @@ import {
   Activity,
   Smartphone,
 } from 'lucide-react';
-import { CommandPalette, type PaletteAction } from './components/CommandPalette';
+import type { PaletteAction } from './components/CommandPalette';
 import { splitFileRef } from './lib/refs';
-import { ContextInspector } from './components/ContextInspector';
-import { ImportChats } from './components/ImportChats';
 import { playTurnSound } from './lib/sound';
 import { resolveTheme, setThemePref } from './lib/theme';
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { callForAttention } from './lib/attention';
-import { GetStarted } from './components/onboarding/GetStarted';
 
 const IS_MAC = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
 import { Thinking } from './components/Thinking';
@@ -132,7 +142,6 @@ import {
 } from './lib/agentPostures';
 import type { SubagentTab, FilePanelTab } from './components/SubagentPanel';
 import { TaskListPanel } from './components/TaskListPanel';
-import { GoalPanel } from './components/GoalPanel';
 import { categoryFor } from './components/ToolGroup';
 import { EntryBoundary } from './components/EntryBoundary';
 import { SecondOpinion } from './components/SecondOpinion';
@@ -544,6 +553,17 @@ export default function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   /** The context inspector (issue #70). */
   const [inspectOpen, setInspectOpen] = useState(false);
+  // Lazy dialogs: fetched on first open, then kept mounted so their close
+  // transitions still run.
+  const inspectOpenMounted = useLatch(inspectOpen);
+  const paletteOpenMounted = useLatch(paletteOpen);
+  const pickerOpenMounted = useLatch(pickerOpen);
+  // ⌘K is usually how the palette opens, so there's no hover to preload
+  // on; fetch it once the first load has settled.
+  useEffect(() => {
+    const idle = window.requestIdleCallback ?? ((cb: () => void) => window.setTimeout(cb, 2000));
+    idle(() => CommandPalette.preload());
+  }, []);
   /** "Bring chats from other agents", from ⌘K. */
   const [importOpen, setImportOpen] = useState(false);
   // File picker opened from the right panel's "+" menu — distinct from the
@@ -3213,15 +3233,17 @@ export default function App() {
               >
                 {/* Agents bring their own login, so a chat on one needs no provider. */}
                 {configured === false && !acpDriver && isEmpty && (
-                  <GetStarted
-                    agents={acpAgents}
-                    onUseAgent={(kind) => startAcpAgent(kind, null)}
-                    onAddProvider={() => {
-                      openSettings();
-                      setSettingsSection('provider');
-                    }}
-                    onSetUpAgents={openAgentSettings}
-                  />
+                  <LazyBoundary>
+                    <GetStarted
+                      agents={acpAgents}
+                      onUseAgent={(kind) => startAcpAgent(kind, null)}
+                      onAddProvider={() => {
+                        openSettings();
+                        setSettingsSection('provider');
+                      }}
+                      onSetUpAgents={openAgentSettings}
+                    />
+                  </LazyBoundary>
                 )}
                 {configured === false && !acpDriver && !isEmpty && (
                   <div className="mx-auto mb-4 max-w-3xl rounded-lg border border-amber-500/30 bg-amber-500/[0.08] px-3 py-2 text-[13px] text-amber-200">
@@ -3248,13 +3270,15 @@ export default function App() {
                 ) : (
                   <div data-transcript-column className="mx-auto flex max-w-3xl flex-col gap-2">
                     {goal && (
-                      <GoalPanel
-                        goal={goal}
-                        busy={busy}
-                        activity={goalActivity(entries)}
-                        onClear={onClearGoal}
-                        onRestart={(condition, maxIter) => onSetGoal(condition, maxIter)}
-                      />
+                      <LazyBoundary>
+                        <GoalPanel
+                          goal={goal}
+                          busy={busy}
+                          activity={goalActivity(entries)}
+                          onClear={onClearGoal}
+                          onRestart={(condition, maxIter) => onSetGoal(condition, maxIter)}
+                        />
+                      </LazyBoundary>
                     )}
                     {tasks.length > 0 && <TaskListPanel tasks={tasks} />}
                     <SourceCitationNavigator pane={paneRef} sessionId={sessionId} hasOlder={!!historyCursor} loading={historyLoading} loadOlder={loadOlderHistory} historyError={historyError} onOpenSession={attachSession} />
@@ -3673,7 +3697,8 @@ export default function App() {
           onOpenPane={openToolPane}
           onBrowseFile={() => setPanelFilePickerOpen(true)}
           renderPane={(kind) => {
-            switch (kind) {
+            // Panes are lazy chunks; suspend just the pane, not the panel.
+            const pane = (() => { switch (kind) {
               case 'aside':
                 return <AsidePane sessionId={sessionId} entries={entries} agentBusy={busy} />;
               case 'processes':
@@ -3697,7 +3722,8 @@ export default function App() {
                 return <DevicesPane />;
               default:
                 return null;
-            }
+            } })();
+            return pane && <LazyBoundary>{pane}</LazyBoundary>;
           }}
           activeCallId={activeAgentTab}
           cwd={cwd ?? ''}
@@ -3727,42 +3753,52 @@ export default function App() {
         <DialogContent className="max-w-3xl gap-4 p-5">
           <DialogTitle className="text-[16px] font-semibold">Bring chats from other agents</DialogTitle>
           {importOpen && (
-            <ImportChats
-              onDone={() => {
-                setImportOpen(false);
-                setSidebarRefresh((n) => n + 1);
-              }}
-            />
+            <LazyBoundary>
+              <ImportChats
+                onDone={() => {
+                  setImportOpen(false);
+                  setSidebarRefresh((n) => n + 1);
+                }}
+              />
+            </LazyBoundary>
           )}
         </DialogContent>
       </Dialog>
-      <ContextInspector
-        open={inspectOpen}
-        onOpenChange={setInspectOpen}
-        busy={busy}
-        onCompact={(focus) => (acpDriver ? compactAcpAgent(focus) : onCompact(focus))}
-        onDropped={(callId, d) => {
-          // The tool card shows what the model now sees, and a status line
-          // records the drop where it happened.
-          setEntries((prev) => [
-            ...prev.map((e) =>
-              e.kind === 'tool' && e.call.id === callId && e.result
-                ? { ...e, result: { ...e.result, content: `[Removed from context — ~${shortNum(d.tokens)} tokens]`, images: undefined } }
-                : e,
-            ),
-            { kind: 'warning', text: `[context] removed ${d.label || d.tool} from context (~${shortNum(d.tokens)} tokens)` },
-          ]);
-        }}
-      />
-      <CommandPalette
-        open={paletteOpen}
-        onOpenChange={setPaletteOpen}
-        actions={paletteActions}
-        onOpenSession={(id) => {
-          attachSession(id);
-          setMainView('chat');
-        }}
-      />
+      {inspectOpenMounted && (
+        <LazyBoundary>
+          <ContextInspector
+            open={inspectOpen}
+            onOpenChange={setInspectOpen}
+            busy={busy}
+            onCompact={(focus) => (acpDriver ? compactAcpAgent(focus) : onCompact(focus))}
+            onDropped={(callId, d) => {
+              // The tool card shows what the model now sees, and a status line
+              // records the drop where it happened.
+              setEntries((prev) => [
+                ...prev.map((e) =>
+                  e.kind === 'tool' && e.call.id === callId && e.result
+                    ? { ...e, result: { ...e.result, content: `[Removed from context — ~${shortNum(d.tokens)} tokens]`, images: undefined } }
+                    : e,
+                ),
+                { kind: 'warning', text: `[context] removed ${d.label || d.tool} from context (~${shortNum(d.tokens)} tokens)` },
+              ]);
+            }}
+          />
+        </LazyBoundary>
+      )}
+      {paletteOpenMounted && (
+        <LazyBoundary>
+          <CommandPalette
+            open={paletteOpen}
+            onOpenChange={setPaletteOpen}
+            actions={paletteActions}
+            onOpenSession={(id) => {
+              attachSession(id);
+              setMainView('chat');
+            }}
+          />
+        </LazyBoundary>
+      )}
       {restoreAsk && (
         <ApprovalDialog
           tone="consequential"
@@ -3805,17 +3841,21 @@ export default function App() {
           }}
         />
       )}
-      <FolderPicker
-        open={pickerOpen}
-        onClose={() => setPickerOpen(false)}
-        onPicked={(_path, id) => {
-          // Server built a fresh slot for the new cwd. Attach the WS so
-          // the freshly-published Ready lands in our transcript — without
-          // this, the socket keeps forwarding the previous slot's frames
-          // and the UI silently stays on the old folder.
-          if (id) attachSession(id);
-        }}
-      />
+      {pickerOpenMounted && (
+        <LazyBoundary>
+          <FolderPicker
+            open={pickerOpen}
+            onClose={() => setPickerOpen(false)}
+            onPicked={(_path, id) => {
+              // Server built a fresh slot for the new cwd. Attach the WS so
+              // the freshly-published Ready lands in our transcript — without
+              // this, the socket keeps forwarding the previous slot's frames
+              // and the UI silently stays on the old folder.
+              if (id) attachSession(id);
+            }}
+          />
+        </LazyBoundary>
+      )}
       <ReviewPanel
         open={reviewPanelOpen}
         state={reviewState}

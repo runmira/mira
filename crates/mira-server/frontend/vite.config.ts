@@ -20,7 +20,6 @@ function compilerLogger() {
 
 const VENDOR_CHUNKS: [string, RegExp][] = [
   ['vendor-react', /^(react|react-dom|scheduler)$/],
-  ['vendor-motion', /^(framer-motion|motion-dom|motion-utils)$/],
   ['vendor-markdown', /^(react-markdown|remark-.*|rehype-.*|micromark.*|mdast-.*|hast-.*|unist-.*|unified|vfile.*|property-information|entities|decode-named-character-reference|character-entities.*|space-separated-tokens|comma-separated-tokens|html-url-attributes|devlop|bail|trough|is-plain-obj|ccount|escape-string-regexp|markdown-table|longest-streak|zwitch|trim-lines|style-to-.*|inline-style-parser|estree-util-.*)$/],
 ];
 
@@ -83,6 +82,10 @@ export default defineConfig({
         manualChunks(id, { getModuleInfo }) {
           const pkg = /node_modules\/((?:@[^/]+\/)?[^/]+)/.exec(id)?.[1];
           if (!pkg || !isInitial(id, getModuleInfo)) return;
+          // framer-motion's entry re-exports its animation features, so they
+          // look statically reachable here even though only the lazy
+          // <LazyMotion> import uses them. Let Rollup place it by actual use.
+          if (/^(framer-motion|motion-dom|motion-utils)$/.test(pkg)) return;
           for (const [chunk, test] of VENDOR_CHUNKS) if (test.test(pkg)) return chunk;
           return 'vendor';
         },

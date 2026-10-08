@@ -5,7 +5,7 @@
  * is when they want them.
  */
 import { useState } from 'react';
-import { AnimatePresence, motion } from 'framer-motion';
+import { AnimatePresence, m } from 'framer-motion';
 import { listAgentTurns, revertAgentTurn, type AgentTurn } from '../api';
 
 /**
@@ -71,7 +71,7 @@ export function RevertButton({
       </button>
       <AnimatePresence initial={false}>
       {open && (
-        <motion.div
+        <m.div
           initial={{ opacity: 0, y: 4, scale: 0.98 }}
           animate={{ opacity: 1, y: 0, scale: 1, transition: { duration: 0.14 } }}
           exit={{ opacity: 0, y: 4, scale: 0.98, transition: { duration: 0.1 } }}
@@ -137,7 +137,7 @@ export function RevertButton({
               ))}
             </div>
           )}
-        </motion.div>
+        </m.div>
       )}
       </AnimatePresence>
     </div>

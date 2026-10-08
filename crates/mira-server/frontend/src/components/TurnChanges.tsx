@@ -1,7 +1,7 @@
 import { PREF_KEYS, useBoolPref } from '../lib/prefs';
 import { useTranscriptDisclosure, TranscriptSessionContext } from './TranscriptDisclosure';
 import { useContext, useEffect, useState } from 'react';
-import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
+import { AnimatePresence, m, useReducedMotion } from 'framer-motion';
 import { getTurnFileDiff } from '../api';
 import { TurnSnapshotDiff } from './diffs/LazyDiffs';
 import { ChevronDown, ClipboardPlus, Undo2, X } from 'lucide-react';
@@ -40,12 +40,12 @@ export function TurnChanges({ summary, onOpenFile, onUndo, busy = false }: { sum
       <div className="min-w-0 flex-1"><p className="text-[14px] font-medium leading-5 text-foreground">Edited {summary.files.length} file{summary.files.length === 1 ? '' : 's'}</p><p className="mt-0.5 text-[12px] tabular-nums"><span className="text-emerald-600 dark:text-emerald-400">+{added}</span>{' '}<span className="text-red-600 dark:text-red-400">−{removed}</span></p></div>
       <div className="flex shrink-0 items-center gap-2">{onUndo && <button type="button" disabled={busy} onClick={onUndo} title="Preview restoring files to before this turn" className="inline-flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[13px] text-foreground transition-colors hover:bg-secondary disabled:opacity-40">Undo<Undo2 className="size-3.5" /></button>}<button type="button" onClick={() => setSelected(summary.files[0].path)} className="rounded-lg border border-border/70 px-2.5 py-1.5 text-[13px] text-foreground transition-colors hover:bg-secondary">View changes</button></div>
     </div>
-    <div className="py-1">{summary.files.slice(0, 3).map(fileRow)}<AnimatePresence initial={false}>{more && <motion.div key="more-files" initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} transition={{ duration: reduceMotion ? 0 : 0.22, ease: 'easeInOut' }} className="overflow-hidden">{summary.files.slice(3).map(fileRow)}</motion.div>}</AnimatePresence>
+    <div className="py-1">{summary.files.slice(0, 3).map(fileRow)}<AnimatePresence initial={false}>{more && <m.div key="more-files" initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} transition={{ duration: reduceMotion ? 0 : 0.22, ease: 'easeInOut' }} className="overflow-hidden">{summary.files.slice(3).map(fileRow)}</m.div>}</AnimatePresence>
       {summary.files.length > 3 && <button type="button" aria-expanded={more} onClick={() => setMore(value => !value)} className="flex items-center gap-2 px-4 py-2.5 text-[13px] text-foreground hover:text-muted-foreground">{more ? 'Show fewer files' : `Show ${summary.files.length - 3} more file${summary.files.length - 3 === 1 ? '' : 's'}`}<ChevronDown className={cn('size-3.5 transition-transform', more && 'rotate-180')} /></button>}
     </div>
-    <AnimatePresence initial={false}>{selected && <motion.div key="turn-diff" initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} transition={{ duration: reduceMotion ? 0 : 0.22, ease: 'easeInOut' }} className="min-w-0 overflow-hidden border-t border-border/70">
+    <AnimatePresence initial={false}>{selected && <m.div key="turn-diff" initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} transition={{ duration: reduceMotion ? 0 : 0.22, ease: 'easeInOut' }} className="min-w-0 overflow-hidden border-t border-border/70">
       <div className="flex flex-wrap items-center gap-2 px-4 py-2 text-xs text-muted-foreground"><select aria-label="File to review in this turn" value={selected} onChange={event => setSelected(event.target.value)} className="min-w-0 flex-1 bg-background text-foreground">{summary.files.map(file => <option key={file.path} value={file.path}>{file.path}</option>)}</select><button onClick={() => onOpenFile(selected)}>Open current file</button><button aria-label="Close turn diff" onClick={() => setSelected(null)}><X className="size-3.5" /></button></div>
       {error ? <div role="alert" className="px-4 py-2 text-xs text-muted-foreground">{error} <button onClick={() => setRetry(value => value + 1)}>Retry</button></div> : diff ? <TurnSnapshotDiff path={selected} before={diff.before} after={diff.after} /> : <p role="status" className="px-4 py-2 text-xs text-muted-foreground">Loading turn diff…</p>}
-    </motion.div>}</AnimatePresence>
+    </m.div>}</AnimatePresence>
   </section>;
 }

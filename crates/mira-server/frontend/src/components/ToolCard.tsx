@@ -3,7 +3,7 @@ import { ActivityShimmer } from './ActivityShimmer';
 import { useTranscriptDisclosure } from './TranscriptDisclosure';
 import { useMemo, useState } from 'react';
 import { imageSrc } from '../lib/images';
-import { AnimatePresence, motion } from 'framer-motion';
+import { AnimatePresence, m } from 'framer-motion';
 import { Tip } from './ui/Tip';
 import {
   ChevronDown,
@@ -236,7 +236,7 @@ function PendingApprovalCard({
         </div>
         <AnimatePresence initial={false}>
         {scopeMenuOpen && (
-          <motion.div
+          <m.div
             initial={{ opacity: 0, y: -4, scale: 0.98 }}
             animate={{ opacity: 1, y: 0, scale: 1, transition: { duration: 0.13 } }}
             exit={{ opacity: 0, y: -4, scale: 0.98, transition: { duration: 0.1 } }}
@@ -253,7 +253,7 @@ function PendingApprovalCard({
               hint="Also save the rule to ~/.mira/mira.yaml — persists across restarts."
               onClick={() => { setScopeMenuOpen(false); onDecide(true, 'always'); }}
             />
-          </motion.div>
+          </m.div>
         )}
         </AnimatePresence>
       </div>
@@ -524,7 +524,7 @@ function CompactToolRow({
 
       <AnimatePresence initial={false}>
         {expanded && (
-        <motion.div
+        <m.div
           initial={{ height: 0, opacity: 0 }}
           animate={{ height: 'auto', opacity: 1, transition: { duration: 0.16 } }}
           exit={{ height: 0, opacity: 0, transition: { duration: 0.12 } }}
@@ -574,7 +574,7 @@ function CompactToolRow({
               style={{ maxWidth: '100%', borderRadius: 6, marginTop: 8, display: 'block' }}
             />
           ))}
-        </motion.div>
+        </m.div>
         )}
       </AnimatePresence>
     </div>
