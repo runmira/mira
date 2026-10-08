@@ -202,9 +202,8 @@ async function disable(req: Request) {
   if (!row) return json({ ok: true });
 
   if (row.dns_record_id) {
-    await cf(`/zones/${ZONE}/dns_records/${row.dns_record_id}`, { method: "DELETE" }).catch((e) => {
-      if (!(e instanceof HttpError)) throw e;
-    });
+    await cf(`/zones/${ZONE}/dns_records/${row.dns_record_id}`, { method: "DELETE" });
+  }
   }
   // A tunnel with live connections can't be deleted; drop them first.
   await cf(`/accounts/${ACCOUNT}/cfd_tunnel/${row.tunnel_id}/connections`, { method: "DELETE" }).catch(() => {});
