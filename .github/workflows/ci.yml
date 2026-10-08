@@ -62,6 +62,48 @@ jobs:
       - name: bundle budget
         run: npm run size
 
+  supabase:
+    name: supabase (migrations · remote-access tests)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      PGHOST: localhost
+      PGUSER: postgres
+      PGPASSWORD: postgres
+    steps:
+      - uses: actions/checkout@v4
+
+      # Every migration, in order, on a disposable database with stand-ins
+      # for Supabase's auth schema and roles; then the SQL tests.
+      - name: migrations + SQL tests
+        run: |
+          psql -v ON_ERROR_STOP=1 -q -f supabase/tests/stubs.sql
+          for f in supabase/migrations/*.sql; do
+            echo "applying $f"
+            psql -v ON_ERROR_STOP=1 -q -f "$f"
+          done
+          psql -v ON_ERROR_STOP=1 -f supabase/tests/remote_tunnel_slots.sql
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/mira-server/frontend/package-lock.json
+
+      - name: install (for TypeScript)
+        working-directory: crates/mira-server/frontend
+        run: npm ci
+
+      - name: remote-access function + pairing tests
+        run: node supabase/tests/remote-access.cjs
+
   desktop:
     name: desktop app (fmt · clippy)
     runs-on: ubuntu-latest

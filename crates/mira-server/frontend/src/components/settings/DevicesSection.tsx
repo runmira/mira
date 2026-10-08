@@ -9,7 +9,7 @@ import {
   type DevicesView,
   type PairedDevice,
 } from '../../lib/pairing';
-import { getRemote, remoteAccessAvailable, turnOffRemote, turnOnRemote, type RemoteStatus } from '../../lib/remote';
+import { getRemote, remoteAccessAvailable, syncRemotePort, turnOffRemote, turnOnRemote, type RemoteStatus } from '../../lib/remote';
 
 /**
  * Settings → Devices: pair phones and other computers with this Mira, see
@@ -40,16 +40,24 @@ export function DevicesSection() {
 
   useEffect(() => {
     void refresh();
-    getRemote().then(setRemote).catch(() => {});
+    // Re-points the tunnel first if Mira restarted on another port.
+    syncRemotePort()
+      .then((r) => r && setRemote(r))
+      .catch((e) => setError((e as Error).message));
   }, [refresh]);
 
-  // Follow the connector while it's coming up or recovering.
+  // Follow the connector for as long as remote access is on — quickly while
+  // it's coming up or recovering, then slowly, so a later drop shows.
+  const remoteOn = !!remote?.enabled;
   const remoteSettling = remote?.status === 'starting' || remote?.status === 'reconnecting';
   useEffect(() => {
-    if (!remoteSettling) return;
-    const t = window.setInterval(() => getRemote().then(setRemote).catch(() => {}), 1500);
+    if (!remoteOn) return;
+    const t = window.setInterval(
+      () => getRemote().then(setRemote).catch(() => {}),
+      remoteSettling ? 1500 : 5000,
+    );
     return () => window.clearInterval(t);
-  }, [remoteSettling]);
+  }, [remoteOn, remoteSettling]);
 
   async function setRemoteAccess(on: boolean): Promise<RemoteStatus | null> {
     if (!remote) return null;
@@ -90,14 +98,29 @@ export function DevicesSection() {
     setPairingBusy(true);
     setJustPaired(null);
     try {
-      // A phone needs remote access before it can reach this computer.
+      // A phone needs remote access to reach this computer from anywhere,
+      // so pairing turns it on. If that fails, pair with the code anyway:
+      // a device on the same network (or Tailscale) doesn't need it, and the
+      // error stays on screen.
+      let remoteError: string | null = null;
       if (remote && !remote.enabled && remote.supported && remoteAccessAvailable()) {
-        if (!(await setRemoteAccess(true))) return;
+        setRemoteBusy(true);
+        try {
+          setRemote(await turnOnRemote(remote));
+        } catch (e) {
+          remoteError = (e as Error).message;
+          getRemote().then(setRemote).catch(() => {});
+        } finally {
+          setRemoteBusy(false);
+        }
       }
       const baseline = await refresh();
       if (!baseline) return;
       const { code, expires_at } = await openPairingCode();
       setPairing({ code, expiresAt: expires_at, known: new Set(baseline.devices.map((d) => d.id)) });
+      if (remoteError) {
+        setError(`Remote access couldn't turn on (${remoteError}), so this code only works from this network.`);
+      }
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -131,7 +154,9 @@ export function DevicesSection() {
       {remote && (
         <RemoteAccessCard
           remote={remote}
-          busy={remoteBusy}
+          // Locked while a pairing code is being opened, so the code can't
+          // end up pointing at an address that was just turned off.
+          busy={remoteBusy || pairingBusy}
           available={remoteAccessAvailable()}
           onToggle={(on) => void setRemoteAccess(on)}
         />

@@ -60,6 +60,13 @@ fn cloudflared_asset() -> Option<(&'static str, &'static str)> {
 struct RemoteConfig {
     hostname: String,
     token: String,
+    /// The local port the tunnel was pointed at when it was enabled.
+    /// Cloudflare forwards there, so if Mira restarts on another port (the
+    /// desktop app picks the next free one) the tunnel has to be re-pointed;
+    /// `view` reports `port_stale` and the signed-in UI does it. 0 = unknown
+    /// (saved before this field existed), treated as stale.
+    #[serde(default)]
+    port: u16,
 }
 
 #[derive(Serialize, Clone, Copy, PartialEq, Debug)]
@@ -215,6 +222,13 @@ impl Remote {
         let _ = std::fs::remove_file(self.dir.join("remote.json"));
     }
 
+    #[cfg(test)]
+    fn disable_task_for_test(&self) {
+        if let Some(t) = self.lock().task.take() {
+            t.abort();
+        }
+    }
+
     fn view(&self) -> serde_json::Value {
         let inner = self.lock();
         serde_json::json!({
@@ -222,6 +236,7 @@ impl Remote {
             "port": self.port,
             "enabled": inner.config.is_some(),
             "hostname": inner.config.as_ref().map(|c| c.hostname.clone()),
+            "port_stale": inner.config.as_ref().is_some_and(|c| c.port != self.port),
             "status": inner.status,
             "error": inner.error,
             "supported": cloudflared_asset().is_some(),
@@ -354,6 +369,8 @@ pub async fn enable(State(remote): State<Arc<Remote>>, req: Request) -> Response
     match remote.enable(RemoteConfig {
         hostname: body.hostname,
         token: body.token.trim().to_string(),
+        // The UI asked the backend to point the tunnel at this port.
+        port: remote.port,
     }) {
         Ok(()) => Json(remote.view()).into_response(),
         Err(e) => (
@@ -396,6 +413,37 @@ mod tests {
         assert!(!valid_hostname("m-abc.runmira.dev.evil.example"));
         assert!(!valid_hostname("a.b.runmira.dev"));
         assert!(!valid_hostname("UPPER.runmira.dev"));
+    }
+
+    #[test]
+    fn a_restart_on_another_port_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let saved = RemoteConfig {
+            hostname: "m-abc.runmira.dev".into(),
+            token: "t".into(),
+            port: 8787,
+        };
+        std::fs::write(
+            dir.path().join("remote.json"),
+            serde_json::to_vec(&saved).unwrap(),
+        )
+        .unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let same = Remote::start(dir.path().to_path_buf(), 8787);
+            assert_eq!(same.view()["port_stale"], false);
+            same.disable_task_for_test();
+            let moved = Remote::start(dir.path().to_path_buf(), 8790);
+            assert_eq!(moved.view()["port_stale"], true);
+            moved.disable_task_for_test();
+        });
+        // Saved before the port was recorded: unknown, so re-point.
+        let old: RemoteConfig =
+            serde_json::from_str(r#"{"hostname":"m-abc.runmira.dev","token":"t"}"#).unwrap();
+        assert_eq!(old.port, 0);
     }
 
     #[test]

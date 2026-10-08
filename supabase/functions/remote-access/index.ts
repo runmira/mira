@@ -124,101 +124,154 @@ async function enable(req: Request) {
   const machine = machineId(body.machine_id);
   const p = port(body.port);
 
-  const { data: existing, error: lookupError } = await db
-    .from("remote_tunnels")
-    .select("tunnel_id, hostname, port")
-    .eq("user_id", u.id)
-    .eq("machine_id", machine)
-    .maybeSingle();
+  const reused = await reuse(u.id, machine, p);
+  if (reused) return reused;
 
-  if (lookupError) throw new HttpError(500, lookupError.message);
-  if (existing) {
-    if (existing.port !== p) {
-      await configure(existing.tunnel_id, existing.hostname, p);
-      const { error } = await db
-        .from("remote_tunnels")
-        .update({ port: p, updated_at: new Date().toISOString() })
-        .eq("user_id", u.id)
-        .eq("machine_id", machine);
-      if (error) throw new HttpError(500, `Couldn't update the tunnel: ${error.message}`);
-    }
-    return json({ hostname: existing.hostname, token: await connectorToken(existing.tunnel_id) });
-  }
-
-  // The database reserves capacity before any Cloudflare resources are made.
-  const { data: claim, error: claimError } = await db.rpc("claim_remote_tunnel_slot", {
-    owner_id: u.id, computer_id: machine,
+  // Reserve capacity before making anything at Cloudflare. See
+  // supabase/migrations/20261008180000_remote_tunnel_slots.sql.
+  const claim = await rpc("claim_remote_tunnel_slot", {
+    owner_id: u.id,
+    computer_id: machine,
+    max_slots: MAX_MACHINES,
   });
-  if (claimError) throw new HttpError(500, claimError.message);
-  if (claim !== "claimed") {
-    throw new HttpError(409, claim === "full"
-      ? `Remote access is on for ${MAX_MACHINES} computers already. Turn it off on one first.`
-      : "Remote access is already being enabled for this computer. Try again shortly.");
+  if (claim.status === "active") {
+    // Another request finished enabling this computer a moment ago.
+    const again = await reuse(u.id, machine, p);
+    if (again) return again;
   }
+  if (claim.status !== "claimed") {
+    throw new HttpError(409, claim.status === "full"
+      ? `Remote access is on for ${MAX_MACHINES} computers already. Turn it off on one first.`
+      : "Remote access is already being turned on for this computer. Try again in a minute.");
+  }
+  const claimId: string = claim.claim_id;
+
+  // Taking over an enable that failed midway: remove what it left behind
+  // first. If that fails the leftovers stay recorded for the next try.
+  await removeResources(claim.leftover_tunnel_id, claim.leftover_dns_record_id);
 
   const label = `m-${randomLabel()}`;
   const hostname = `${label}.${DOMAIN}`;
-  let tunnel: { id: string } | undefined;
-  let record: { id: string } | undefined;
+  let tunnelId: string | null = null;
+  let dnsId: string | null = null;
   try {
-    tunnel = await cf(`/accounts/${ACCOUNT}/cfd_tunnel`, {
+    const tunnel = await cf(`/accounts/${ACCOUNT}/cfd_tunnel`, {
       method: "POST",
       body: JSON.stringify({ name: `mira-${label}`, config_src: "cloudflare" }),
     });
-    await configure(tunnel!.id, hostname, p);
-    record = await cf(`/zones/${ZONE}/dns_records`, {
+    tunnelId = tunnel.id;
+    // Record each resource as soon as it exists, so a failure from here on
+    // can always be cleaned up later, even if this request dies.
+    await record(u.id, machine, claimId, tunnelId, null);
+    await configure(tunnelId!, hostname, p);
+    const dns = await cf(`/zones/${ZONE}/dns_records`, {
       method: "POST",
       body: JSON.stringify({
         type: "CNAME",
         name: hostname,
-        content: `${tunnel!.id}.cfargotunnel.com`,
+        content: `${tunnelId}.cfargotunnel.com`,
         proxied: true,
         ttl: 1,
         comment: "Mira remote access",
       }),
     });
-    const { error } = await db.from("remote_tunnels").insert({
-      user_id: u.id,
-      machine_id: machine,
-      tunnel_id: tunnel!.id,
-      hostname,
-      dns_record_id: record!.id,
-      port: p,
+    dnsId = dns.id;
+    await record(u.id, machine, claimId, tunnelId, dnsId);
+    const active = await rpc("activate_remote_tunnel", {
+      owner_id: u.id,
+      computer_id: machine,
+      claim: claimId,
+      tunnel: tunnelId,
+      host: hostname,
+      dns_record: dnsId,
+      local_port: p,
     });
-    if (error) throw new HttpError(500, `Couldn't save the tunnel: ${error.message}`);
+    if (!active) throw new HttpError(409, "Remote access was turned off or restarted meanwhile. Try again.");
   } catch (e) {
-    // Keep the reservation if cleanup fails, so retries cannot exceed the cap.
-    if (record) await cf(`/zones/${ZONE}/dns_records/${record.id}`, { method: "DELETE" }, true);
-    if (tunnel) await cf(`/accounts/${ACCOUNT}/cfd_tunnel/${tunnel.id}`, { method: "DELETE" }, true);
-    const { error } = await db.rpc("release_remote_tunnel_slot", { owner_id: u.id, computer_id: machine });
-    if (error) throw new HttpError(500, `Couldn't release the tunnel reservation: ${error.message}`);
+    // Undo what this request made, then give the slot back. If either step
+    // fails the slot keeps the recorded ids; it becomes recoverable once
+    // stale, and the next enable removes the leftovers.
+    try {
+      await removeResources(tunnelId, dnsId);
+      await rpc("release_remote_tunnel_slot", { owner_id: u.id, computer_id: machine, claim: claimId });
+    } catch (cleanup) {
+      console.error("remote-access: cleanup after failed enable", cleanup);
+    }
     throw e;
   }
-  return json({ hostname, token: await connectorToken(tunnel!.id) });
+  return json({ hostname, token: await connectorToken(tunnelId!) });
+}
+
+/** This computer's existing tunnel, pointed at `p`, if it has one. Called
+ *  on every enable — including when Mira restarts on a different port. */
+async function reuse(owner: string, machine: string, p: number): Promise<Response | null> {
+  const { data: existing, error } = await db
+    .from("remote_tunnels")
+    .select("tunnel_id, hostname, port")
+    .eq("user_id", owner)
+    .eq("machine_id", machine)
+    .maybeSingle();
+  if (error) throw new HttpError(500, error.message);
+  if (!existing) return null;
+  if (existing.port !== p) {
+    await configure(existing.tunnel_id, existing.hostname, p);
+    const { error: updateError } = await db
+      .from("remote_tunnels")
+      .update({ port: p, updated_at: new Date().toISOString() })
+      .eq("user_id", owner)
+      .eq("machine_id", machine);
+    if (updateError) throw new HttpError(500, `Couldn't update the tunnel: ${updateError.message}`);
+  }
+  return json({ hostname: existing.hostname, token: await connectorToken(existing.tunnel_id) });
 }
 
 async function disable(req: Request) {
   const u = await user(req);
   const body = await req.json().catch(() => ({}));
   const machine = machineId(body.machine_id);
-  const { data: row, error: lookupError } = await db
-    .from("remote_tunnels")
-    .select("tunnel_id, dns_record_id")
+  const { data: slot, error: lookupError } = await db
+    .from("remote_tunnel_slots")
+    .select("claim_id, tunnel_id, dns_record_id")
     .eq("user_id", u.id)
     .eq("machine_id", machine)
     .maybeSingle();
   if (lookupError) throw new HttpError(500, lookupError.message);
-  if (!row) return json({ ok: true });
+  if (!slot) return json({ ok: true });
 
-  if (row.dns_record_id) {
-    await cf(`/zones/${ZONE}/dns_records/${row.dns_record_id}`, { method: "DELETE" }, true);
-  }
-  // A tunnel with live connections can't be deleted; drop them first.
-  await cf(`/accounts/${ACCOUNT}/cfd_tunnel/${row.tunnel_id}/connections`, { method: "DELETE" }).catch(() => {});
-  await cf(`/accounts/${ACCOUNT}/cfd_tunnel/${row.tunnel_id}`, { method: "DELETE" }, true);
-  const { error } = await db.rpc("release_remote_tunnel_slot", { owner_id: u.id, computer_id: machine });
-  if (error) throw new HttpError(500, `Couldn't remove the tunnel: ${error.message}`);
+  // Errors here keep the slot (and its recorded ids) for a retry.
+  await removeResources(slot.tunnel_id, slot.dns_record_id);
+  // Only releases if the slot is still the one we read: a disable that was
+  // overtaken by a re-enable must not remove the new tunnel.
+  await rpc("release_remote_tunnel_slot", { owner_id: u.id, computer_id: machine, claim: slot.claim_id });
   return json({ ok: true });
+}
+
+/** Delete a tunnel and its DNS record, tolerating ones already gone. */
+async function removeResources(tunnelId: string | null | undefined, dnsId: string | null | undefined) {
+  if (dnsId) await cf(`/zones/${ZONE}/dns_records/${dnsId}`, { method: "DELETE" }, true);
+  if (tunnelId) {
+    // A tunnel with live connections can't be deleted; drop them first.
+    await cf(`/accounts/${ACCOUNT}/cfd_tunnel/${tunnelId}/connections`, { method: "DELETE" }, true).catch(() => {});
+    await cf(`/accounts/${ACCOUNT}/cfd_tunnel/${tunnelId}`, { method: "DELETE" }, true);
+  }
+}
+
+async function record(owner: string, machine: string, claim: string, tunnel: string | null, dns: string | null) {
+  const ok = await rpc("record_remote_tunnel_resources", {
+    owner_id: owner,
+    computer_id: machine,
+    claim,
+    tunnel,
+    dns_record: dns,
+  });
+  if (!ok) throw new HttpError(409, "Remote access was turned off or restarted meanwhile. Try again.");
+}
+
+// deno-lint-ignore no-explicit-any
+async function rpc(name: string, args: Record<string, unknown>): Promise<any> {
+  const { data, error } = await db.rpc(name, args);
+  if (error) throw new HttpError(500, `${name}: ${error.message}`);
+  return data;
 }
 
 Deno.serve(async (req) => {

@@ -15,6 +15,8 @@ export type RemoteStatus = {
   port: number;
   enabled: boolean;
   hostname: string | null;
+  /** Mira restarted on a different port than the tunnel points at. */
+  port_stale: boolean;
   status: 'off' | 'starting' | 'connected' | 'reconnecting';
   error: string | null;
   supported: boolean;
@@ -59,6 +61,19 @@ export async function turnOnRemote(current: RemoteStatus): Promise<RemoteStatus>
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ hostname, token }),
   });
+}
+
+/**
+ * If Mira came back on a different port than its tunnel points at (the
+ * desktop app takes the next free port when its usual one is busy),
+ * re-point the tunnel. Needs a signed-in session; does nothing otherwise.
+ */
+export async function syncRemotePort(): Promise<RemoteStatus | null> {
+  const current = await getRemote().catch(() => null);
+  if (!current?.enabled || !current.port_stale || !remoteAccessAvailable()) return current;
+  const { data } = await getSupabase()!.auth.getSession();
+  if (!data.session) return current;
+  return turnOnRemote(current);
 }
 
 export async function turnOffRemote(current: RemoteStatus): Promise<RemoteStatus> {
