@@ -69,6 +69,28 @@ pick_install_dir() {
   fi
 }
 
+# Check the tarball against the release's published SHA-256 (what
+# `mira update` does too). Fails on a mismatch; only warns when the release
+# has no checksum file or this machine has no SHA-256 tool.
+verify_checksum() {
+  local tmp="$1" tarball="$2" url="$3" expected actual
+  if ! curl -fsSL "${url}.sha256" -o "$tmp/$tarball.sha256"; then
+    info "warning: no checksum published for ${tarball}; skipping verification"
+    return
+  fi
+  expected="$(awk '{print $1}' "$tmp/$tarball.sha256")"
+  if command -v shasum >/dev/null 2>&1; then
+    actual="$(shasum -a 256 "$tmp/$tarball" | awk '{print $1}')"
+  elif command -v sha256sum >/dev/null 2>&1; then
+    actual="$(sha256sum "$tmp/$tarball" | awk '{print $1}')"
+  else
+    info "warning: no shasum/sha256sum found; skipping checksum verification"
+    return
+  fi
+  [ "$expected" = "$actual" ] || err "checksum mismatch for ${tarball} (expected ${expected}, got ${actual})"
+  info "checksum ok"
+}
+
 main() {
   local platform tarball url tmp install_dir sudo
   platform="$(detect_platform)"
@@ -95,6 +117,8 @@ main() {
   curl -fsSL "$url" -o "$tmp/$tarball" \
     || err "download failed: $url"
 
+  verify_checksum "$tmp" "$tarball" "$url"
+
   info "extracting"
   tar -C "$tmp" -xzf "$tmp/$tarball"
 
@@ -106,6 +130,12 @@ main() {
 
   info ""
   info "installed $($sudo "${install_dir}/${BIN_NAME}" --version 2>/dev/null || echo "${BIN_NAME} ${VERSION}")"
+
+  # install.sh is served from main, so it can be newer than the release.
+  if "${install_dir}/${BIN_NAME}" service --help >/dev/null 2>&1; then
+    info "keep it running in the background: mira service install"
+    info "update later with: mira update"
+  fi
 
   case ":$PATH:" in
     *":$install_dir:"*) ;;

@@ -20,9 +20,11 @@ mod repl;
 mod review;
 mod sandbox;
 mod serve;
+mod service;
 mod slack;
 mod swebench;
 mod tui;
+mod update;
 
 // Entry point for the mira CLI binary.
 
@@ -163,6 +165,11 @@ enum Command {
     /// Run Mira as a local web server. Binds to 127.0.0.1 by default; a
     /// browser (or, later, the desktop app) is the frontend.
     Serve(serve::ServeArgs),
+    /// Keep `mira serve` running in the background: starts at login,
+    /// restarts if it exits (launchd on macOS, systemd on Linux).
+    Service(service::ServiceArgs),
+    /// Update this binary to the latest release (checksum-verified).
+    Update(update::UpdateArgs),
     /// Two-stage diff review: generate findings, then hostile re-verify.
     Review(review::ReviewArgs),
     /// Batch-run regression eval tasks and print a summary.
@@ -222,6 +229,8 @@ async fn main() -> Result<()> {
             Command::Models(args) => models::run(&cli, args).await,
             Command::Permissions(args) => permissions::run(&cli, args).await,
             Command::Serve(args) => serve::run(&cli, args).await,
+            Command::Service(args) => service::run(args).await,
+            Command::Update(args) => update::run(args).await,
             Command::Review(args) => review::run(&cli, args).await,
             Command::Eval(args) => eval::run(&cli, args).await,
             Command::Memory(args) => memory::run(&cli, args).await,

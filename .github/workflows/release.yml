@@ -14,8 +14,29 @@ env:
   BIN_NAME: mira
 
 jobs:
+  # A tag on the wrong commit ships a binary that reports another version
+  # (v0.5.2 shipped as 0.5.1), and `mira update` then offers the same
+  # update forever. Fail before building anything.
+  check-version:
+    name: tag matches Cargo version
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          cargo_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$cargo_version" != "$tag" ]; then
+            echo "::error::tag $GITHUB_REF_NAME but Cargo.toml says $cargo_version — tag the release commit (scripts/release.sh does)"
+            exit 1
+          fi
+
   build:
     name: build ${{ matrix.target }}
+    needs: check-version
+    # Still runs for workflow_dispatch, where check-version is skipped:
+    # without always(), a skipped dependency skips this job too.
+    if: ${{ always() && !failure() && !cancelled() }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
