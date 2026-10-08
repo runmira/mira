@@ -53,6 +53,9 @@ tracing      = { workspace = true }
 uuid         = { workspace = true }
 portable-pty = "0.8"
 reqwest      = { workspace = true }
+# Unpacking Cloudflare's connector for remote access (remote.rs).
+flate2       = "1"
+tar          = "0.4"
 # Filesystem watcher for skill hot-reload — picks up new / edited
 # SKILL.md files without the user clicking Reload.
 notify       = "6"

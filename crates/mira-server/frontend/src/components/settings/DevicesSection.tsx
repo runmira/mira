@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Check, Copy, Laptop, Loader2, Monitor, Plus, RefreshCw, Smartphone, Tablet, X } from 'lucide-react';
+import { Check, Copy, Globe, Laptop, Loader2, Monitor, Plus, RefreshCw, Smartphone, Tablet, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { QrCode } from '../pairing/QrCode';
 import {
@@ -8,8 +8,8 @@ import {
   revokeDevice,
   type DevicesView,
   type PairedDevice,
-  type TailscaleInfo,
 } from '../../lib/pairing';
+import { getRemote, remoteAccessAvailable, turnOffRemote, turnOnRemote, type RemoteStatus } from '../../lib/remote';
 
 /**
  * Settings → Devices: pair phones and other computers with this Mira, see
@@ -21,6 +21,10 @@ export function DevicesSection() {
   const [error, setError] = useState<string | null>(null);
   const [pairing, setPairing] = useState<{ code: string; expiresAt: number; known: Set<string> } | null>(null);
   const [justPaired, setJustPaired] = useState<PairedDevice | null>(null);
+  const [remote, setRemote] = useState<RemoteStatus | null>(null);
+  const [remoteBusy, setRemoteBusy] = useState(false);
+  const pairingStarting = useRef(false);
+  const [pairingBusy, setPairingBusy] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -36,7 +40,33 @@ export function DevicesSection() {
 
   useEffect(() => {
     void refresh();
+    getRemote().then(setRemote).catch(() => {});
   }, [refresh]);
+
+  // Follow the connector while it's coming up or recovering.
+  const remoteSettling = remote?.status === 'starting' || remote?.status === 'reconnecting';
+  useEffect(() => {
+    if (!remoteSettling) return;
+    const t = window.setInterval(() => getRemote().then(setRemote).catch(() => {}), 1500);
+    return () => window.clearInterval(t);
+  }, [remoteSettling]);
+
+  async function setRemoteAccess(on: boolean): Promise<RemoteStatus | null> {
+    if (!remote) return null;
+    setRemoteBusy(true);
+    setError(null);
+    try {
+      const next = on ? await turnOnRemote(remote) : await turnOffRemote(remote);
+      setRemote(next);
+      return next;
+    } catch (e) {
+      setError((e as Error).message);
+      getRemote().then(setRemote).catch(() => {});
+      return null;
+    } finally {
+      setRemoteBusy(false);
+    }
+  }
 
   // While a code is open, watch for the device that uses it.
   useEffect(() => {
@@ -55,12 +85,24 @@ export function DevicesSection() {
   }, [pairing, refresh]);
 
   async function startPairing() {
+    if (pairingStarting.current) return;
+    pairingStarting.current = true;
+    setPairingBusy(true);
     setJustPaired(null);
     try {
+      // A phone needs remote access before it can reach this computer.
+      if (remote && !remote.enabled && remote.supported && remoteAccessAvailable()) {
+        if (!(await setRemoteAccess(true))) return;
+      }
+      const baseline = await refresh();
+      if (!baseline) return;
       const { code, expires_at } = await openPairingCode();
-      setPairing({ code, expiresAt: expires_at, known: new Set(view?.devices.map((d) => d.id)) });
+      setPairing({ code, expiresAt: expires_at, known: new Set(baseline.devices.map((d) => d.id)) });
     } catch (e) {
       setError((e as Error).message);
+    } finally {
+      pairingStarting.current = false;
+      setPairingBusy(false);
     }
   }
 
@@ -71,7 +113,6 @@ export function DevicesSection() {
     void refresh();
   }
 
-  const tailscale = view?.addresses.tailscale ?? null;
   const devices = view?.devices ?? [];
 
   return (
@@ -87,11 +128,20 @@ export function DevicesSection() {
         </div>
       )}
 
+      {remote && (
+        <RemoteAccessCard
+          remote={remote}
+          busy={remoteBusy}
+          available={remoteAccessAvailable()}
+          onToggle={(on) => void setRemoteAccess(on)}
+        />
+      )}
+
       {pairing ? (
         <PairingCard
           code={pairing.code}
           expiresAt={pairing.expiresAt}
-          tailscale={tailscale}
+          remote={remote}
           onCancel={() => setPairing(null)}
           onRenew={() => void startPairing()}
         />
@@ -101,10 +151,11 @@ export function DevicesSection() {
         <button
           type="button"
           onClick={() => void startPairing()}
+          disabled={remoteBusy || pairingBusy}
           className="group flex w-full items-center gap-4 rounded-2xl border border-dashed border-border/70 bg-fg/[0.015] p-5 text-left transition-all hover:-translate-y-0.5 hover:border-mira-blue/50 hover:bg-mira-blue/[0.04]"
         >
           <div className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-mira-blue/[0.12] text-mira-blue transition-transform group-hover:scale-105">
-            <Plus className="size-5" />
+            {remoteBusy || pairingBusy ? <Loader2 className="size-5 animate-spin" /> : <Plus className="size-5" />}
           </div>
           <div className="min-w-0">
             <div className="text-[14px] font-medium text-foreground">Pair a new device</div>
@@ -152,13 +203,13 @@ export function DevicesSection() {
 function PairingCard({
   code,
   expiresAt,
-  tailscale,
+  remote,
   onCancel,
   onRenew,
 }: {
   code: string;
   expiresAt: number;
-  tailscale: TailscaleInfo | null;
+  remote: RemoteStatus | null;
   onCancel: () => void;
   onRenew: () => void;
 }) {
@@ -166,10 +217,7 @@ function PairingCard({
   const total = 600;
   const left = Math.max(0, Math.round(expiresAt - now / 1000));
   const expired = left === 0;
-  const port = window.location.port || (window.location.protocol === 'https:' ? '443' : '80');
-  const host = tailscale?.dns_name ?? null;
-  // tailscale serve gives the machine an HTTPS name on your tailnet.
-  const url = host ? `https://${host}/` : null;
+  const url = remote?.enabled && remote.hostname ? `https://${remote.hostname}/` : null;
   const qrValue = url ? `${url}?pair=${code.replace('-', '')}` : null;
 
   return (
@@ -189,7 +237,7 @@ function PairingCard({
           <QrCode value={qrValue} />
         ) : (
           <div className="flex size-[184px] shrink-0 items-center justify-center rounded-2xl border border-dashed border-border/70 px-6 text-center text-[12px] text-muted-foreground">
-            {expired ? 'Code expired' : 'Set up Tailscale below to scan with your phone'}
+            {expired ? 'Code expired' : 'Turn on remote access to scan with your phone'}
           </div>
         )}
 
@@ -228,25 +276,86 @@ function PairingCard({
                 </li>
               </>
             ) : (
-              <li>
-                Open this Mira on the other device and enter the code. To reach it from anywhere, install{' '}
-                <a href="https://tailscale.com/download" target="_blank" rel="noreferrer" className="text-mira-blue hover:underline">
-                  Tailscale
-                </a>{' '}
-                on both.
-              </li>
+              <li>Open this Mira on the other device and enter the code.</li>
             )}
           </ol>
         </div>
       </div>
 
-      {(url || tailscale === null) && (
-        <div className="relative mt-5 rounded-xl border border-border/50 bg-background/50 px-3.5 py-3 text-[12px] text-muted-foreground">
-          {url ? 'Not loading on the other device? ' : 'Once Tailscale is running, '}
-          make Mira reachable on your tailnet with{' '}
-          <CopyText text={`tailscale serve --bg ${port}`} mono />
+    </div>
+  );
+}
+
+function RemoteAccessCard({
+  remote,
+  busy,
+  available,
+  onToggle,
+}: {
+  remote: RemoteStatus;
+  busy: boolean;
+  available: boolean;
+  onToggle: (on: boolean) => void;
+}) {
+  const on = remote.enabled;
+  const url = remote.hostname ? `https://${remote.hostname}` : null;
+  const blocked = !remote.supported || !available;
+  return (
+    <div className="flex items-center gap-4 rounded-2xl border border-border/60 bg-fg/[0.02] p-4 sm:p-5">
+      <div
+        className={cn(
+          'relative flex size-11 shrink-0 items-center justify-center rounded-xl transition-colors',
+          on ? 'bg-emerald-500/15 text-emerald-400' : 'bg-fg/[0.05] text-muted-foreground',
+        )}
+      >
+        <Globe className="size-5" />
+        {on && remote.status === 'connected' && (
+          <span className="absolute -right-0.5 -top-0.5 size-2.5 animate-pulse rounded-full bg-emerald-400 ring-2 ring-background" />
+        )}
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="text-[14px] font-medium text-foreground">Reach Mira from anywhere</div>
+        <div className="mt-0.5 text-[12.5px] text-muted-foreground">
+          {!remote.supported ? (
+            'Not available on this platform yet.'
+          ) : !available ? (
+            'Sign in to Mira to turn this on.'
+          ) : !on ? (
+            'Use Mira from your phone on any network. Nothing to install or configure.'
+          ) : remote.status === 'connected' && url ? (
+            <span className="inline-flex flex-wrap items-center gap-1.5">
+              Connected at <CopyText text={url} />
+            </span>
+          ) : remote.status === 'reconnecting' ? (
+            <span className="text-amber-400/90">Reconnecting…{remote.error ? ` ${remote.error}` : ''}</span>
+          ) : (
+            <span className="inline-flex items-center gap-1.5">
+              <Loader2 className="size-3 animate-spin" /> Connecting…
+            </span>
+          )}
         </div>
-      )}
+      </div>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={on}
+        aria-label="Reach Mira from anywhere"
+        disabled={busy || blocked}
+        onClick={() => onToggle(!on)}
+        className={cn(
+          'relative h-6 w-11 shrink-0 rounded-full transition-colors disabled:opacity-50',
+          on ? 'bg-emerald-500' : 'bg-fg/[0.15]',
+        )}
+      >
+        <span
+          className={cn(
+            'absolute left-0.5 top-0.5 flex size-5 items-center justify-center rounded-full bg-white shadow transition-transform',
+            on && 'translate-x-5',
+          )}
+        >
+          {busy && <Loader2 className="size-3 animate-spin text-neutral-500" />}
+        </span>
+      </button>
     </div>
   );
 }
