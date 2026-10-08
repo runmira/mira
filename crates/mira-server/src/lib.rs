@@ -68,6 +68,7 @@ mod processes;
 pub mod protocol;
 pub mod provider;
 mod pull_requests;
+mod remote;
 mod review;
 mod runtime_admission;
 mod runtime_requests;
@@ -395,7 +396,9 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
     oauth::refresh::spawn(state.clone());
 
     let devices = Arc::new(pairing::Devices::load(pairing::Devices::default_path()));
-    let router = build_router(state, cfg.static_dir.clone(), devices);
+    // Restarts Cloudflare's connector if remote access was on.
+    let remote = remote::Remote::start(remote::Remote::default_dir(), local_port);
+    let router = build_router(state, cfg.static_dir.clone(), devices, remote);
     info!(addr = %cfg.bind, "mira serve: listening");
 
     // Peer addresses feed the pairing guard's "is this local?" check.
@@ -412,6 +415,7 @@ fn build_router(
     state: AppState,
     static_dir: Option<PathBuf>,
     devices: Arc<pairing::Devices>,
+    remote: Arc<remote::Remote>,
 ) -> Router {
     let mut router = Router::new()
         .route("/ws", get(ws::ws_handler))
@@ -709,10 +713,17 @@ fn build_router(
             axum::routing::delete(pairing::revoke),
         )
         .with_state(devices.clone());
+    // Remote access: reach this computer from anywhere (remote.rs).
+    let remote_routes = Router::new()
+        .route("/api/remote", get(remote::status))
+        .route("/api/remote/enable", post(remote::enable))
+        .route("/api/remote/disable", post(remote::disable))
+        .with_state(remote);
 
     router
         .with_state(state)
         .merge(pairing_routes)
+        .merge(remote_routes)
         .layer(axum::middleware::from_fn_with_state(
             devices,
             pairing::guard,

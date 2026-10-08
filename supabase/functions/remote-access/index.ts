@@ -1,0 +1,293 @@
+// Remote access: give a user's computer a stable public address, so their
+// phone can reach that computer's Mira without any networking setup.
+//
+//   POST /enable   (user)  { machine_id, port } → { hostname, token }
+//   POST /disable  (user)  { machine_id }       → { ok }
+//
+// Each (user, computer) gets one Cloudflare Tunnel and a hostname
+// https://m-<random>.runmira.dev. The computer's Mira runs Cloudflare's
+// connector with the returned token; the connector dials out to Cloudflare,
+// so nothing is opened on the user's network. Cloudflare forwards requests
+// to that computer's loopback port, where Mira's device pairing decides who
+// gets in (crates/mira-server/src/pairing.rs) — a hostname alone grants
+// nothing.
+//
+// The Cloudflare API token (CLOUDFLARE_API_TOKEN secret) never leaves this
+// function. "(user)" routes take the caller's Supabase session as a Bearer
+// token, as in github-app; the gateway's JWT check is off and each route
+// checks the caller itself.
+
+import { createClient } from "npm:@supabase/supabase-js@2";
+
+const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
+const CF = "https://api.cloudflare.com/client/v4";
+const CF_TOKEN = Deno.env.get("CLOUDFLARE_API_TOKEN") ?? "";
+// Not secret: they identify the account and the runmira.dev zone.
+const ACCOUNT = Deno.env.get("CLOUDFLARE_ACCOUNT_ID") ?? "bb8f0e46ed03b3ea2bcdc4dab563269c";
+const ZONE = Deno.env.get("CLOUDFLARE_ZONE_ID") ?? "151e3c6ff614dd06d81155a58f3b01ba";
+const DOMAIN = "runmira.dev";
+/** Computers one account may expose at once. */
+const MAX_MACHINES = 5;
+
+const db = createClient(SUPABASE_URL, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!, {
+  auth: { persistSession: false },
+});
+
+const cors = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+};
+
+class HttpError extends Error {
+  constructor(public status: number, message: string) {
+    super(message);
+  }
+}
+
+const json = (body: unknown, status = 200) =>
+  new Response(JSON.stringify(body), {
+    status,
+    headers: { ...cors, "Content-Type": "application/json" },
+  });
+
+async function user(req: Request) {
+  const jwt = req.headers.get("Authorization")?.replace(/^Bearer\s+/i, "");
+  if (!jwt) throw new HttpError(401, "Sign in to Mira first.");
+  const { data, error } = await db.auth.getUser(jwt);
+  if (error || !data.user) throw new HttpError(401, "Your Mira session has expired; sign in again.");
+  return data.user;
+}
+
+/** A Cloudflare API call; throws a readable error on failure. */
+async function cf(path: string, init: RequestInit = {}, allowMissing = false) {
+  if (!CF_TOKEN) throw new HttpError(503, "Remote access isn't set up on the server yet.");
+  const res = await fetch(`${CF}${path}`, {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${CF_TOKEN}`,
+      ...(init.body ? { "Content-Type": "application/json" } : {}),
+    },
+  });
+  if (allowMissing && res.status === 404) return null;
+  const body = await res.json().catch(() => null);
+  if (!res.ok || body?.success === false) {
+    const msg = body?.errors?.map((e: { message: string }) => e.message).join("; ") || res.status;
+    console.error(`cloudflare ${init.method ?? "GET"} ${path}: ${msg}`);
+    throw new HttpError(502, `Cloudflare refused the request (${msg}).`);
+  }
+  return body?.result;
+}
+
+function machineId(v: unknown): string {
+  const id = String(v ?? "");
+  if (!/^[0-9a-f]{32}$/.test(id)) throw new HttpError(400, "machine_id must be 32 hex characters.");
+  return id;
+}
+
+function port(v: unknown): number {
+  const p = Number(v);
+  if (!Number.isInteger(p) || p < 1 || p > 65535) throw new HttpError(400, "port must be 1–65535.");
+  return p;
+}
+
+/** Lowercase letters and digits, unguessable: the hostname isn't a secret
+ *  (pairing is), but it shouldn't be enumerable either. */
+function randomLabel(len = 12): string {
+  const alphabet = "abcdefghijkmnpqrstuvwxyz23456789";
+  const bytes = crypto.getRandomValues(new Uint8Array(len));
+  return Array.from(bytes, (b) => alphabet[b % alphabet.length]).join("");
+}
+
+/** Point the tunnel at the computer's Mira; anything else is a 404. */
+async function configure(tunnelId: string, hostname: string, p: number) {
+  await cf(`/accounts/${ACCOUNT}/cfd_tunnel/${tunnelId}/configurations`, {
+    method: "PUT",
+    body: JSON.stringify({
+      config: {
+        ingress: [
+          { hostname, service: `http://127.0.0.1:${p}` },
+          { service: "http_status:404" },
+        ],
+      },
+    }),
+  });
+}
+
+async function connectorToken(tunnelId: string): Promise<string> {
+  return await cf(`/accounts/${ACCOUNT}/cfd_tunnel/${tunnelId}/token`);
+}
+
+async function enable(req: Request) {
+  const u = await user(req);
+  const body = await req.json().catch(() => ({}));
+  const machine = machineId(body.machine_id);
+  const p = port(body.port);
+
+  const reused = await reuse(u.id, machine, p);
+  if (reused) return reused;
+
+  // Reserve capacity before making anything at Cloudflare. See
+  // supabase/migrations/20261008180000_remote_tunnel_slots.sql.
+  const claim = await rpc("claim_remote_tunnel_slot", {
+    owner_id: u.id,
+    computer_id: machine,
+    max_slots: MAX_MACHINES,
+  });
+  if (claim.status === "active") {
+    // Another request finished enabling this computer a moment ago.
+    const again = await reuse(u.id, machine, p);
+    if (again) return again;
+  }
+  if (claim.status !== "claimed") {
+    throw new HttpError(409, claim.status === "full"
+      ? `Remote access is on for ${MAX_MACHINES} computers already. Turn it off on one first.`
+      : "Remote access is already being turned on for this computer. Try again in a minute.");
+  }
+  const claimId: string = claim.claim_id;
+
+  // Taking over an enable that failed midway: remove what it left behind
+  // first. If that fails the leftovers stay recorded for the next try.
+  await removeResources(claim.leftover_tunnel_id, claim.leftover_dns_record_id);
+
+  const label = `m-${randomLabel()}`;
+  const hostname = `${label}.${DOMAIN}`;
+  let tunnelId: string | null = null;
+  let dnsId: string | null = null;
+  try {
+    const tunnel = await cf(`/accounts/${ACCOUNT}/cfd_tunnel`, {
+      method: "POST",
+      body: JSON.stringify({ name: `mira-${label}`, config_src: "cloudflare" }),
+    });
+    tunnelId = tunnel.id;
+    // Record each resource as soon as it exists, so a failure from here on
+    // can always be cleaned up later, even if this request dies.
+    await record(u.id, machine, claimId, tunnelId, null);
+    await configure(tunnelId!, hostname, p);
+    const dns = await cf(`/zones/${ZONE}/dns_records`, {
+      method: "POST",
+      body: JSON.stringify({
+        type: "CNAME",
+        name: hostname,
+        content: `${tunnelId}.cfargotunnel.com`,
+        proxied: true,
+        ttl: 1,
+        comment: "Mira remote access",
+      }),
+    });
+    dnsId = dns.id;
+    await record(u.id, machine, claimId, tunnelId, dnsId);
+    const active = await rpc("activate_remote_tunnel", {
+      owner_id: u.id,
+      computer_id: machine,
+      claim: claimId,
+      tunnel: tunnelId,
+      host: hostname,
+      dns_record: dnsId,
+      local_port: p,
+    });
+    if (!active) throw new HttpError(409, "Remote access was turned off or restarted meanwhile. Try again.");
+  } catch (e) {
+    // Undo what this request made, then give the slot back. If either step
+    // fails the slot keeps the recorded ids; it becomes recoverable once
+    // stale, and the next enable removes the leftovers.
+    try {
+      await removeResources(tunnelId, dnsId);
+      await rpc("release_remote_tunnel_slot", { owner_id: u.id, computer_id: machine, claim: claimId });
+    } catch (cleanup) {
+      console.error("remote-access: cleanup after failed enable", cleanup);
+    }
+    throw e;
+  }
+  return json({ hostname, token: await connectorToken(tunnelId!) });
+}
+
+/** This computer's existing tunnel, pointed at `p`, if it has one. Called
+ *  on every enable — including when Mira restarts on a different port. */
+async function reuse(owner: string, machine: string, p: number): Promise<Response | null> {
+  const { data: existing, error } = await db
+    .from("remote_tunnels")
+    .select("tunnel_id, hostname, port")
+    .eq("user_id", owner)
+    .eq("machine_id", machine)
+    .maybeSingle();
+  if (error) throw new HttpError(500, error.message);
+  if (!existing) return null;
+  if (existing.port !== p) {
+    await configure(existing.tunnel_id, existing.hostname, p);
+    const { error: updateError } = await db
+      .from("remote_tunnels")
+      .update({ port: p, updated_at: new Date().toISOString() })
+      .eq("user_id", owner)
+      .eq("machine_id", machine);
+    if (updateError) throw new HttpError(500, `Couldn't update the tunnel: ${updateError.message}`);
+  }
+  return json({ hostname: existing.hostname, token: await connectorToken(existing.tunnel_id) });
+}
+
+async function disable(req: Request) {
+  const u = await user(req);
+  const body = await req.json().catch(() => ({}));
+  const machine = machineId(body.machine_id);
+  const { data: slot, error: lookupError } = await db
+    .from("remote_tunnel_slots")
+    .select("claim_id, tunnel_id, dns_record_id")
+    .eq("user_id", u.id)
+    .eq("machine_id", machine)
+    .maybeSingle();
+  if (lookupError) throw new HttpError(500, lookupError.message);
+  if (!slot) return json({ ok: true });
+
+  // Errors here keep the slot (and its recorded ids) for a retry.
+  await removeResources(slot.tunnel_id, slot.dns_record_id);
+  // Only releases if the slot is still the one we read: a disable that was
+  // overtaken by a re-enable must not remove the new tunnel.
+  await rpc("release_remote_tunnel_slot", { owner_id: u.id, computer_id: machine, claim: slot.claim_id });
+  return json({ ok: true });
+}
+
+/** Delete a tunnel and its DNS record, tolerating ones already gone. */
+async function removeResources(tunnelId: string | null | undefined, dnsId: string | null | undefined) {
+  if (dnsId) await cf(`/zones/${ZONE}/dns_records/${dnsId}`, { method: "DELETE" }, true);
+  if (tunnelId) {
+    // A tunnel with live connections can't be deleted; drop them first.
+    await cf(`/accounts/${ACCOUNT}/cfd_tunnel/${tunnelId}/connections`, { method: "DELETE" }, true).catch(() => {});
+    await cf(`/accounts/${ACCOUNT}/cfd_tunnel/${tunnelId}`, { method: "DELETE" }, true);
+  }
+}
+
+async function record(owner: string, machine: string, claim: string, tunnel: string | null, dns: string | null) {
+  const ok = await rpc("record_remote_tunnel_resources", {
+    owner_id: owner,
+    computer_id: machine,
+    claim,
+    tunnel,
+    dns_record: dns,
+  });
+  if (!ok) throw new HttpError(409, "Remote access was turned off or restarted meanwhile. Try again.");
+}
+
+// deno-lint-ignore no-explicit-any
+async function rpc(name: string, args: Record<string, unknown>): Promise<any> {
+  const { data, error } = await db.rpc(name, args);
+  if (error) throw new HttpError(500, `${name}: ${error.message}`);
+  return data;
+}
+
+Deno.serve(async (req) => {
+  if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
+  const url = new URL(req.url);
+  const route = url.pathname.replace(/^.*?\/remote-access/, "") || "/";
+  try {
+    switch (`${req.method} ${route}`) {
+      case "POST /enable": return await enable(req);
+      case "POST /disable": return await disable(req);
+      default: return json({ error: "not found" }, 404);
+    }
+  } catch (e) {
+    const status = e instanceof HttpError ? e.status : 500;
+    const message = e instanceof Error ? e.message : String(e);
+    if (status === 500) console.error(e);
+    return json({ error: message }, status);
+  }
+});
