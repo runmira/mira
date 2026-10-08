@@ -1,3 +1,4 @@
+import { cn } from '@/lib/utils';
 import type { ReactNode } from 'react';
 import { AlertTriangle, ShieldQuestion, ShieldCheck, FileCheck2, ClipboardList, Zap, Check, CheckCheck, X, Undo2 } from 'lucide-react';
 import type { Mode } from '../types';
@@ -96,7 +97,7 @@ export function ApprovalChoices({
           <Button
             variant={c.destructive ? 'destructive' : c.primary ? 'default' : 'ghost'}
             size={size}
-            className={c.mode === 'edit' || c.mode === 'yolo' ? 'bg-orange-600 text-white hover:bg-orange-700 dark:bg-orange-400 dark:text-orange-950 dark:hover:bg-orange-300' : undefined}
+            className={cn('rounded-full px-4', !c.primary && !c.destructive && 'bg-fg/[0.04] ring-1 ring-fg/[0.08]', c.mode === 'edit' || c.mode === 'yolo' ? 'bg-orange-600 text-white hover:bg-orange-700 dark:bg-orange-400 dark:text-orange-950 dark:hover:bg-orange-300' : undefined)}
             disabled={c.disabled}
             title={c.title}
             onClick={() => onChoose(c.id)}

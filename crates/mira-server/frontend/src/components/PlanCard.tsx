@@ -118,7 +118,7 @@ export function PlanCard({ proposal, decision, onApprove, onCancel }: Props) {
         <button
           type="button"
           onClick={add}
-          className="mt-1.5 inline-flex items-center gap-1.5 rounded-md px-2 py-1.5 text-[11.5px] text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
+          className="mt-1.5 inline-flex items-center gap-1.5 rounded-full bg-fg/[0.04] ring-1 ring-fg/[0.08] px-3 py-1.5 text-[11.5px] text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
         >
           <Plus className="size-3" /> Add step
         </button>
@@ -143,7 +143,7 @@ export function PlanCard({ proposal, decision, onApprove, onCancel }: Props) {
             <button
               type="button"
               onClick={() => onCancel(note)}
-              className="rounded-md px-2.5 py-1.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
+              className="rounded-full bg-fg/[0.04] ring-1 ring-fg/[0.08] px-4 py-1.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
             >
               Cancel
             </button>

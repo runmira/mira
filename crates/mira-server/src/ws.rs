@@ -554,11 +554,62 @@ async fn dispatch(
                 let _ = slot.events_tx.send(ServerMsg::Done);
             }
         }
+        ClientMsg::ApprovalRules { call_id } => {
+            let call = slot
+                .pending
+                .lock()
+                .await
+                .get(&call_id)
+                .map(|(_, call)| call.clone());
+            let (rules, error) = match call {
+                Some(call) if state.base_registry.get(&call.function.name).is_some() => {
+                    (approval_rule_strings(state, &call).await, None)
+                }
+                _ => (
+                    Vec::new(),
+                    Some(
+                        "This agent manages its own permission rules; Mira cannot edit them."
+                            .into(),
+                    ),
+                ),
+            };
+            let _ = slot.events_tx.send(ServerMsg::ApprovalRules {
+                call_id,
+                rules,
+                error,
+            });
+        }
         ClientMsg::Approve {
             call_id,
             allow,
             scope,
+            rules,
         } => {
+            if let Some(ref rules) = rules {
+                let native = slot
+                    .pending
+                    .lock()
+                    .await
+                    .get(&call_id)
+                    .is_some_and(|(_, call)| {
+                        state.base_registry.get(&call.function.name).is_some()
+                    });
+                if !native
+                    || !allow
+                    || matches!(scope, crate::protocol::ApprovalScope::Once)
+                    || rules.is_empty()
+                    || rules
+                        .iter()
+                        .any(|rule| rule.parse::<mira_policy::Rule>().is_err())
+                {
+                    let _ = slot.events_tx.send(ServerMsg::ApprovalRules {
+                        call_id,
+                        rules: rules.clone(),
+                        error: Some("Enter valid policy rules before saving.".into()),
+                    });
+                    return;
+                }
+            }
             // Recorded before the approval resolves: an agent's gate wakes
             // on resolve and reads the scope to decide what rules to adopt.
             if allow {
@@ -568,8 +619,12 @@ async fn dispatch(
             }
             match approver::resolve(&slot.pending, &call_id, allow).await {
                 Some(call) => {
+                    let _ = slot.events_tx.send(ServerMsg::ApprovalResolved {
+                        call_id: call_id.clone(),
+                        allow,
+                    });
                     if allow && !matches!(scope, crate::protocol::ApprovalScope::Once) {
-                        apply_scope_widening(state, &slot, &call, scope).await;
+                        apply_scope_widening(state, &slot, &call, scope, rules).await;
                     }
                 }
                 None => {
@@ -2038,26 +2093,12 @@ fn spawn_quiet_agent_watchdog(events: &tokio::sync::broadcast::Sender<ServerMsg>
     });
 }
 
-/// Widen the session's policy in response to an "Allow for session" /
-/// "Allow always" approval. Builds one rule per policy target the call/// would touch (usually one; `apply_patch` returns every source + dest)
-/// and appends it to the shared `Policy`'s allow list. On `Always`
-/// scope, the same rules also get appended to `~/.mira/mira.yaml` so
-/// they survive a restart.
-///
-/// Never fails the WS handler — a bad target or write error is logged
-/// and surfaced as a Warning frame so the user can see something went
-/// wrong without losing the one-shot approval that already resolved.
-async fn apply_scope_widening(
-    state: &AppState,
-    slot: &Arc<SessionSlot>,
-    call: &mira_core::ToolCall,
-    scope: crate::protocol::ApprovalScope,
-) {
+async fn approval_rule_strings(state: &AppState, call: &mira_core::ToolCall) -> Vec<String> {
     let Some(tool) = state.base_registry.get(&call.function.name) else {
         // Interactive/agent tools aren't in base_registry — they run at
         // `Action::Pure` so they wouldn't have triggered Ask anyway. Silent
         // no-op is the right thing.
-        return;
+        return Vec::new();
     };
     // A compound shell command is approved part by part (see
     // `Policy::evaluate`), so "allow for this session" adds a rule for each
@@ -2075,13 +2116,35 @@ async fn apply_scope_widening(
             expanded.extend(policy.parts_needing_approval(t));
         }
     }
-    let rule_strings: Vec<String> = expanded
+    expanded
         .into_iter()
         .map(|t| rule_string_for(tool.action(), &t))
         .filter(|r| !r.is_empty())
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
-        .collect();
+        .collect()
+}
+
+/// Widen the session's policy in response to an "Allow for session" /
+/// "Allow always" approval. Builds one rule per policy target the call/// would touch (usually one; `apply_patch` returns every source + dest)
+/// and appends it to the shared `Policy`'s allow list. On `Always`
+/// scope, the same rules also get appended to `~/.mira/mira.yaml` so
+/// they survive a restart.
+///
+/// Never fails the WS handler — a bad target or write error is logged
+/// and surfaced as a Warning frame so the user can see something went
+/// wrong without losing the one-shot approval that already resolved.
+async fn apply_scope_widening(
+    state: &AppState,
+    slot: &Arc<SessionSlot>,
+    call: &mira_core::ToolCall,
+    scope: crate::protocol::ApprovalScope,
+    rules: Option<Vec<String>>,
+) {
+    let rule_strings = match rules {
+        Some(rules) => rules,
+        None => approval_rule_strings(state, call).await,
+    };
 
     if rule_strings.is_empty() {
         return;
@@ -2099,9 +2162,10 @@ async fn apply_scope_widening(
         }
     }
 
-    let persisted = matches!(scope, crate::protocol::ApprovalScope::Always);
+    let mut persisted = matches!(scope, crate::protocol::ApprovalScope::Always);
     if persisted {
         if let Err(e) = persist_allow_rules(&rule_strings).await {
+            persisted = false;
             warn!(%e, "scope widen: persist to global config failed");
             let _ = slot.events_tx.send(ServerMsg::Warning {
                 text: format!("saved for this session; couldn't persist to config: {e}"),
@@ -2463,5 +2527,54 @@ mod agent_error_tests {
             .unwrap()
             .contains("malformed tool call"));
         assert!(explain_agent_error("acp: the agent's stdin closed").is_none());
+    }
+}
+
+#[cfg(test)]
+mod approval_rule_tests {
+    use super::rule_string_for;
+    use mira_policy::{Request, Rule};
+    use mira_tools::Action;
+
+    #[test]
+    fn preview_rules_parse_and_match_the_original_targets() {
+        for (action, target) in [
+            (Action::Read, "src/main.rs"),
+            (Action::Edit, "src/main.rs"),
+            (Action::Write, "src/new.rs"),
+            (Action::Bash, "cargo test --workspace"),
+        ] {
+            let text = rule_string_for(action, target);
+            let rule: Rule = text.parse().unwrap();
+            assert!(rule.matches(&Request { action, target }));
+        }
+    }
+
+    #[test]
+    fn edited_bash_rule_allows_arguments_but_not_a_command_chain() {
+        let rule: Rule = "Bash(cargo test:*)".parse().unwrap();
+        assert!(rule.matches(&Request {
+            action: Action::Bash,
+            target: "cargo test --workspace"
+        }));
+        assert!(!rule.matches(&Request {
+            action: Action::Bash,
+            target: "cargo test && rm -rf /tmp/project"
+        }));
+        assert!("not a policy rule".parse::<Rule>().is_err());
+    }
+
+    #[test]
+    fn approval_wire_keeps_edited_rules_and_accepts_legacy_clients() {
+        let legacy: crate::protocol::ClientMsg =
+            serde_json::from_str(r#"{"type":"approve","call_id":"a","allow":true}"#).unwrap();
+        assert!(matches!(
+            legacy,
+            crate::protocol::ClientMsg::Approve { rules: None, .. }
+        ));
+        let edited: crate::protocol::ClientMsg = serde_json::from_str(r#"{"type":"approve","call_id":"a","allow":true,"scope":"always","rules":["Read(src/**)","Bash(cargo test:*)"]}"#).unwrap();
+        assert!(
+            matches!(edited, crate::protocol::ClientMsg::Approve { rules: Some(rules), .. } if rules == vec!["Read(src/**)", "Bash(cargo test:*)"])
+        );
     }
 }

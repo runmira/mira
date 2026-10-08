@@ -468,6 +468,8 @@ export type ServerMsg =
   | { type: 'tool_end'; result: ToolResult }
   | { type: 'turn_complete' }
   | { type: 'done' }
+  | { type: 'approval_rules'; call_id: string; rules: string[]; error: string | null }
+  | { type: 'approval_resolved'; call_id: string; allow: boolean }
   | { type: 'approval_request'; call: ToolCall; preview?: DiffPreview | null; needs?: string[] }
   | { type: 'warning'; text: string }
   | { type: 'environment_status'; status: EnvironmentStatus; environments: EnvironmentInfo[] }
@@ -614,7 +616,8 @@ export type ClientMsg =
   | { type: 'history'; session_id: string; cursor: string; request_id: string }
   | { type: 'send'; text: string; images?: ImageAttachment[] }
   | { type: 'resend'; original: string; occurrence: number; text: string }
-  | { type: 'approve'; call_id: string; allow: boolean; scope?: ApprovalScope }
+  | { type: 'approve'; call_id: string; allow: boolean; scope?: ApprovalScope; rules?: string[] }
+  | { type: 'approval_rules'; call_id: string }
   | ({ type: 'prompt_response'; prompt_id: string } & PromptResponse)
   | { type: 'set_model'; model: string; instance?: string | null; options?: Record<string, string> }
   // -------- external ACP agents --------
