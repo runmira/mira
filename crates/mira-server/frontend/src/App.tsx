@@ -1030,6 +1030,20 @@ export default function App() {
   const [mode, setMode] = useState<Mode>('manual');
   const [cwd, setCwd] = useState<string>('');
   const [entries, setEntries] = useState<Entry[]>([]);
+  const [ruleEditorCallId, setRuleEditorCallId] = useState<string | null>(null);
+  const [approvalRules, setApprovalRules] = useState<Record<string, { rules: string[]; error: string | null }>>({});
+  const approvalStarted = useRef<Record<string, number>>({});
+  useEffect(() => {
+    const pending = new Set(entries.flatMap(entry => entry.kind === 'tool' && entry.status === 'pending' ? [entry.call.id] : []));
+    for (const id of Object.keys(approvalStarted.current)) {
+      if (!pending.has(id)) delete approvalStarted.current[id];
+    }
+    setApprovalRules(previous => {
+      const retained = Object.entries(previous).filter(([id]) => pending.has(id));
+      return retained.length === Object.keys(previous).length ? previous : Object.fromEntries(retained);
+    });
+    setRuleEditorCallId(previous => previous && pending.has(previous) ? previous : null);
+  }, [entries]);
   const [historyCursor, setHistoryCursor] = useState<string | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
@@ -1858,6 +1872,9 @@ export default function App() {
         setSessionCommitted(false);
         setBranchPr(null);
         setSessionId(msg.session_id);
+        approvalStarted.current = {};
+        setApprovalRules({});
+        setRuleEditorCallId(null);
         wsRef.current?.setSession(msg.session_id);
         sessionIdRef.current = msg.session_id;
         setSessionTitle(msg.title ?? null);
@@ -2016,7 +2033,21 @@ export default function App() {
         });
         break;
       }
+      case 'approval_rules':
+        if (approvalStarted.current[msg.call_id] === undefined) break;
+        setApprovalRules(previous => ({ ...previous, [msg.call_id]: { rules: msg.rules, error: msg.error } }));
+        break;
+      case 'approval_resolved':
+        setEntries(previous => previous.flatMap(entry => {
+          if (entry.kind !== 'tool' || entry.call.id !== msg.call_id) return [entry];
+          if (isAgentRequest(entry.call)) return [];
+          if (entry.status !== 'pending') return [entry];
+          return [{ ...entry, status: msg.allow ? 'running' as const : 'denied' as const }];
+        }));
+        break;
       case 'approval_request':
+        approvalStarted.current[msg.call.id] = Date.now();
+        wsRef.current?.send({ type: 'approval_rules', call_id: msg.call.id });
         setThinking(false);
         clearThinkingIdle();
         playPing();
@@ -2846,8 +2877,11 @@ export default function App() {
     }
   }
 
-  function decideApproval(callId: string, allow: boolean, scope: ApprovalScope = 'once') {
-    wsRef.current?.send({ type: 'approve', call_id: callId, allow, scope });
+  function decideApproval(callId: string, allow: boolean, scope: ApprovalScope = 'once', rules?: string[]) {
+    const pendingCall = entries.find(entry => entry.kind === 'tool' && entry.call.id === callId);
+    if (allow && scope === 'always' && !rules && pendingCall?.kind === 'tool' && !isAgentRequest(pendingCall.call)) { setRuleEditorCallId(callId); return; }
+    wsRef.current?.send({ type: 'approve', call_id: callId, allow, scope, rules });
+    if (rules) return; // Keep the editor visible if server validation rejects the rule.
     // An agent's request is only the question; the agent's own tool card
     // shows the call running. Keeping the request would leave a second
     // card that never finishes.
@@ -2871,8 +2905,8 @@ export default function App() {
     () =>
       entries
         .filter((e): e is Extract<Entry, { kind: 'tool' }> => e.kind === 'tool' && e.status === 'pending')
-        .map((e) => ({ callId: e.call.id, call: e.call, preview: e.preview, needs: e.needs })),
-    [entries],
+        .map((e) => ({ callId: e.call.id, call: e.call, preview: e.preview, needs: e.needs, startedAt: approvalStarted.current[e.call.id], rulePreview: approvalRules[e.call.id] })),
+    [entries, approvalRules],
   );
 
   /** The canonical postures mapped onto this agent's modes. Empty when the
@@ -2975,7 +3009,8 @@ export default function App() {
       const t = e.target as HTMLElement | null;
       if (t) {
         const tag = t.tagName;
-        if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+        const queueCheckbox = t instanceof HTMLInputElement && t.type === 'checkbox' && t.dataset.approvalQueue === 'true';
+        if ((tag === 'INPUT' && !queueCheckbox) || tag === 'TEXTAREA') return;
         if (t.isContentEditable) return;
       }
       const command = resolveShortcutCommand(e, keybindings, { context: shortcutContext() });
@@ -4283,6 +4318,8 @@ export default function App() {
               }}
               onActiveApprovalChange={callId => { visibleApprovalRef.current = callId; }}
               pendingApprovals={pendingApprovals}
+              ruleEditorCallId={ruleEditorCallId}
+              onRuleEditorCancel={() => setRuleEditorCallId(null)}
               pendingPlans={pendingPlans}
               pendingQuestions={pendingQuestions}
               notices={[
@@ -4290,7 +4327,7 @@ export default function App() {
                 ...secretRequests.map(request => ({ id:`secret:${request.promptId}`, kind:'question' as const, title:`An agent needs ${request.name}`, content:<SecretPrompt request={request} onReply={replyToSecret} /> })),
                 ...infoNotices.filter(notice => notice.kind === 'persistent').map(notice => ({ id:notice.id, kind:'update' as const, title:notice.title, detail:notice.body ?? undefined, content:<InfoNoticeHost inline notices={[notice]} onDismiss={dismissInfoNotice} onAgentUpdated={kind => { completedUpdatesRef.current.add(kind); requestAcpStatus(); void listEngines().then(view => setEngines(view.engines)).catch(() => {}); }} /> })),
               ]}
-              onDecide={(callId, allow, scope) => decideApproval(callId, allow, scope)}
+              onDecide={(callId, allow, scope, rules) => decideApproval(callId, allow, scope, rules)}
               onPlanReply={replyToPlan}
               onAskUserReply={replyToAskUser}
               commands={

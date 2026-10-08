@@ -85,10 +85,9 @@ fn head(cwd: &Path) -> String {
 }
 
 /// The working tree under `cwd` as a tree object, without touching the
-/// user's index. Seeded from a copy of the real index so unchanged files
-/// aren't re-hashed.
+/// user's index. Seeded from the staged tree with fresh stat information so same-size
+/// edits made within a filesystem timestamp tick are still re-hashed.
 pub fn snapshot_tree(cwd: &Path) -> Option<String> {
-    let index = git_path(cwd, "index")?;
     // Unique per call: the diff and review endpoints often snapshot at once.
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -96,14 +95,27 @@ pub fn snapshot_tree(cwd: &Path) -> Option<String> {
         cwd,
         &format!("mira-snapshot-{}-{n}.index", std::process::id()),
     )?;
-    if index.exists() {
-        std::fs::copy(&index, &tmp).ok()?;
-    }
-    let tree = run(git(cwd)
-        .env("GIT_INDEX_FILE", &tmp)
-        .args(["add", "-A", "--", "."]))
-    .and_then(|_| run(git(cwd).env("GIT_INDEX_FILE", &tmp).arg("write-tree")))
-    .map(|s| s.trim().to_string());
+    let tree = (|| {
+        let index = git_path(cwd, "index")?;
+        let staged = if index.exists() {
+            std::fs::copy(&index, &tmp).ok()?;
+            let staged = run(git(cwd).env("GIT_INDEX_FILE", &tmp).arg("write-tree"))?;
+            // Rebuild from the staged tree: preserve force-added ignored
+            // files, but discard cached stats. Copying an index alone gives
+            // it a newer mtime and defeats Git's racy timestamp detection.
+            std::fs::remove_file(&tmp).ok()?;
+            staged.trim().to_string()
+        } else {
+            head(cwd)
+        };
+        run(git(cwd)
+            .env("GIT_INDEX_FILE", &tmp)
+            .args(["read-tree", &staged]))?;
+        run(git(cwd)
+            .env("GIT_INDEX_FILE", &tmp)
+            .args(["add", "-A", "--", "."]))?;
+        run(git(cwd).env("GIT_INDEX_FILE", &tmp).arg("write-tree")).map(|s| s.trim().to_string())
+    })();
     let _ = std::fs::remove_file(&tmp);
     tree.filter(|t| !t.is_empty())
 }
@@ -355,9 +367,22 @@ mod tests {
     #[test]
     fn paths_are_relative_to_a_subfolder_cwd() {
         let d = repo();
+        // Model filesystems where ctime cannot distinguish rapid writes.
+        sh(d.path(), &["config", "core.trustctime", "false"]);
         let sub = d.path().join("sub");
         ensure_baseline(&sub, S);
+        let modified = std::fs::metadata(sub.join("mod.rs"))
+            .unwrap()
+            .modified()
+            .unwrap();
         std::fs::write(sub.join("mod.rs"), "fn c() {}\n").unwrap();
+        // Reproduce a same-size edit within one filesystem timestamp tick.
+        std::fs::File::options()
+            .write(true)
+            .open(sub.join("mod.rs"))
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
         std::fs::write(d.path().join("a.txt"), "outside the cwd\n").unwrap();
         let files = changed_files(&sub, S, &[]);
         assert_eq!(
@@ -395,6 +420,31 @@ mod tests {
                 .unwrap()
                 .contains("loose.txt")
         );
+    }
+
+    #[test]
+    fn force_added_ignored_files_are_snapshotted_without_changing_the_index() {
+        let d = repo();
+        let p = d.path();
+        std::fs::create_dir(p.join("target")).unwrap();
+        std::fs::write(p.join("target/kept.txt"), "before\n").unwrap();
+        sh(p, &["add", "-f", "target/kept.txt"]);
+        let index = git_path(p, "index").unwrap();
+        let original_index = std::fs::read(&index).unwrap();
+        let before = snapshot_tree(p).unwrap();
+        std::fs::write(p.join("target/kept.txt"), "after\n").unwrap();
+        std::fs::write(p.join("target/ignored.txt"), "ignored\n").unwrap();
+        let after = snapshot_tree(p).unwrap();
+        assert_eq!(tree_diff_paths(p, &before, &after), vec!["target/kept.txt"]);
+        assert_eq!(
+            run(git(p).args(["show", &format!("{before}:target/kept.txt")])),
+            Some("before\n".into())
+        );
+        assert_eq!(
+            run(git(p).args(["show", &format!("{after}:target/kept.txt")])),
+            Some("after\n".into())
+        );
+        assert_eq!(std::fs::read(index).unwrap(), original_index);
     }
 
     #[test]

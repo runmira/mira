@@ -101,11 +101,16 @@ pub enum ClientMsg {
     /// decision only covers this specific call, or should also add a
     /// rule to the session policy (and optionally persist it) so
     /// identical future calls skip the modal.
+    ApprovalRules {
+        call_id: String,
+    },
     Approve {
         call_id: String,
         allow: bool,
         #[serde(default)]
         scope: ApprovalScope,
+        #[serde(default)]
+        rules: Option<Vec<String>>,
     },
     /// Answer an interactive tool prompt (plan review, question, etc.).
     /// `prompt_id` matches the `prompt_id` on the server frame that opened
@@ -470,6 +475,15 @@ pub enum ServerMsg {
         /// — the rest would run unasked. Empty for a single command.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         needs: Vec<String>,
+    },
+    ApprovalRules {
+        call_id: String,
+        rules: Vec<String>,
+        error: Option<String>,
+    },
+    ApprovalResolved {
+        call_id: String,
+        allow: bool,
     },
     /// Non-fatal warning surfaced to the UI.
     Warning {

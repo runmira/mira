@@ -132,7 +132,7 @@ export function AskUserCard({ proposal, decision, onSubmit, onCancel }: Props) {
           <button
             type="button"
             onClick={goBack}
-            className="inline-flex items-center gap-1 rounded-md px-2.5 py-1.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
+            className="inline-flex items-center gap-1 rounded-full bg-fg/[0.04] ring-1 ring-fg/[0.08] px-4 py-1.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
           >
             <ArrowLeft className="size-3" strokeWidth={2.5} />
             Back
@@ -143,7 +143,7 @@ export function AskUserCard({ proposal, decision, onSubmit, onCancel }: Props) {
         <button
           type="button"
           onClick={onCancel}
-          className="ml-auto rounded-md px-2.5 py-1.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
+          className="ml-auto rounded-full bg-fg/[0.04] ring-1 ring-fg/[0.08] px-4 py-1.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
         >
           Skip
         </button>

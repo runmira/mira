@@ -176,6 +176,8 @@ type Props = {
   usageRing?: UsageRingData | null;
   pendingApproval?: PendingApproval | null;
   pendingApprovals?: PendingApproval[];
+  ruleEditorCallId?: string | null;
+  onRuleEditorCancel?: () => void;
   onActiveApprovalChange?: (callId: string | null) => void;
   pendingPlans?: { callId: string; proposal: PlanProposal }[];
   pendingQuestions?: { callId: string; proposal: AskUserProposal }[];
@@ -189,7 +191,7 @@ type Props = {
   /** Active ask_user proposal waiting for answers. */
   pendingAskUser?: { callId: string; proposal: AskUserProposal } | null;
   /** Approve/deny a pending tool call. */
-  onDecide?: (callId: string, allow: boolean, scope?: ApprovalScope) => void;
+  onDecide?: (callId: string, allow: boolean, scope?: ApprovalScope, rules?: string[]) => void;
   /** Reply to a plan proposal. */
   onPlanReply?: (callId: string, approved: boolean, steps?: PlanStep[], note?: string) => void;
   /** Reply to an ask_user proposal. */
@@ -204,6 +206,8 @@ export type PendingApproval = {
   preview: DiffPreview | null;
   /** Parts of a compound command that need approval (Mira's policy). */
   needs?: string[];
+  startedAt?: number;
+  rulePreview?: { rules: string[]; error: string | null };
 };
 
 type Attachment = { path: string; content: string; bytes: number };
@@ -277,7 +281,7 @@ export function Composer({
   onSend, onQueueMessage, queuedMessages = [], onRemoveQueuedMessage, onEditQueuedMessage, onReorderQueuedMessage, onSteerQueuedMessage, onSetMode, onSetModel, onSetModelOption, onAcpModes, onAcpCurrentMode, onPickAgentMode, agentDriving, onOpenPicker, onCwdSwitched, onInterrupt, onNewChat, onOpenSettings, onRunReview, onSetGoal, onClearGoal, onCompact, goal, onRemember, onUndo,
   engine, engines, agents, agentsChecking, onCheckAgents, agentConfig, agentDescriptors, onPickProvider, onPickAgent, onConfigureAgents, sessionId, onAgentCompact, onAgentFork, onAgentReverted,
   skills, commands,
-  usageRing, pendingApproval: fallbackApproval, pendingApprovals, onActiveApprovalChange, pendingPlans, pendingQuestions, notices = [], pendingApprovalCount = 0, onAllowAllPending, pendingPlan: fallbackPlan, pendingAskUser: fallbackQuestion, onDecide, onPlanReply, onAskUserReply,
+  usageRing, pendingApproval: fallbackApproval, pendingApprovals, ruleEditorCallId, onRuleEditorCancel, onActiveApprovalChange, pendingPlans, pendingQuestions, notices = [], pendingApprovalCount = 0, onAllowAllPending, pendingPlan: fallbackPlan, pendingAskUser: fallbackQuestion, onDecide, onPlanReply, onAskUserReply,
 }: Props) {
   const acpModes_modes = onAcpModes ?? null;
   const acpCurrentMode = onAcpCurrentMode ?? null;
@@ -745,6 +749,7 @@ export function Composer({
     ...notices,
   ];
   const [selectedNotice, setSelectedNotice] = useState<string | null>(null);
+  useEffect(() => { if (ruleEditorCallId) setSelectedNotice(`approval:${ruleEditorCallId}`); }, [ruleEditorCallId]);
   const selected = noticeItems.find(item => item.id === selectedNotice) ?? noticeItems[0];
   const pendingAskUser = questions.find(item => selected?.id === `question:${item.callId}`);
   const pendingPlan = plans.find(item => selected?.id === `plan:${item.callId}`);
@@ -994,8 +999,9 @@ export function Composer({
 
         {/* Bottom slot: the approval card when one is pending (where the
             model picker used to sit), the toolbar otherwise. */}
-        {approvals.map(approval => <div key={`approval:${approval.callId}`} hidden={pendingApproval?.callId !== approval.callId}>
-          {onDecide && <EmbeddedApprovalCard approval={approval} queued={pendingApprovalCount} onAllowAll={onAllowAllPending} onDecide={(allow, scope) => onDecide(approval.callId, allow, scope)} />}
+        {approvals.length > 1 && onDecide && <ApprovalQueue approvals={approvals} activeId={pendingApproval?.callId} onFocus={id => setSelectedNotice(`approval:${id}`)} onDecide={(id, allow) => onDecide(id, allow, 'once')} />}
+        {approvals.map((approval, index) => <div key={`approval:${approval.callId}`} hidden={pendingApproval?.callId !== approval.callId}>
+          {onDecide && <EmbeddedApprovalCard position={index + 1} openRuleEditor={ruleEditorCallId === approval.callId} onRuleEditorCancel={onRuleEditorCancel} approval={approval} queued={pendingApprovalCount} onAllowAll={onAllowAllPending} onDecide={(allow, scope, rules) => onDecide(approval.callId, allow, scope, rules)} />}
         </div>)}
         {(!activePromptKind && (
           <div className="flex items-center gap-1.5 px-1">
@@ -2423,7 +2429,7 @@ function EmbeddedPlanCard({
         <button
           type="button"
           onClick={add}
-          className="mx-1.5 mt-1.5 inline-flex items-center gap-1.5 rounded-md px-2 py-1.5 text-[11.5px] text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
+          className="mx-1.5 mt-1.5 inline-flex items-center gap-1.5 rounded-full bg-fg/[0.04] ring-1 ring-fg/[0.08] px-3 py-1.5 text-[11.5px] text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
         >
           <Plus className="size-3" /> Add step
         </button>
@@ -2446,7 +2452,7 @@ function EmbeddedPlanCard({
           <button
             type="button"
             onClick={() => onCancel(note)}
-            className="rounded-md px-2.5 py-1.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
+            className="rounded-full bg-fg/[0.04] ring-1 ring-fg/[0.08] px-4 py-1.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
           >
             Cancel
           </button>
@@ -2739,7 +2745,7 @@ function EmbeddedAskUserCard({
           <button
             type="button"
             onClick={() => { setDir(-1); setIdx((i) => Math.max(0, i - 1)); }}
-            className="inline-flex items-center gap-1 rounded-md px-2.5 py-1.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
+            className="inline-flex items-center gap-1 rounded-full bg-fg/[0.04] ring-1 ring-fg/[0.08] px-4 py-1.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
           >
             <PhArrowLeft className="size-3" strokeWidth={2.5} />
             Back
@@ -2750,7 +2756,7 @@ function EmbeddedAskUserCard({
         <button
           type="button"
           onClick={onCancel}
-          className="ml-auto rounded-md px-2.5 py-1.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
+          className="ml-auto rounded-full bg-fg/[0.04] ring-1 ring-fg/[0.08] px-4 py-1.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
         >
           Skip
         </button>
@@ -2838,20 +2844,66 @@ function safeJson(text: string): Record<string, unknown> | null {
   }
 }
 
+function ApprovalQueue({ approvals, activeId, onFocus, onDecide }: { approvals: PendingApproval[]; activeId?: string; onFocus: (id: string) => void; onDecide: (id: string, allow: boolean) => void }) {
+  const [excluded, setExcluded] = useState<Set<string>>(new Set());
+  const [now, setNow] = useState(Date.now());
+  const firstSeen = useRef<Record<string, number>>({});
+  useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 1000); return () => window.clearInterval(timer); }, []);
+  const groups = new Map<string, PendingApproval[]>();
+  for (const approval of approvals) {
+    firstSeen.current[approval.callId] ??= Date.now();
+    const agent = agentRequestOf(approval.call);
+    const args = agent?.input ?? safeJson(approval.call.function.arguments) ?? {};
+    const tool = agent?.tool ?? approval.call.function.name;
+    const path = typeof args.path === 'string' ? args.path : typeof args.file_path === 'string' ? args.file_path : '';
+    const folder = path.includes('/') ? path.slice(0, path.lastIndexOf('/') + 1) : '';
+    const key = `${tool}${folder ? ` in ${folder}` : ''}`;
+    groups.set(key, [...(groups.get(key) ?? []), approval]);
+  }
+  const selected = approvals.filter(approval => !excluded.has(approval.callId));
+  return <section aria-label="Approval queue" className="mb-2 rounded-xl border border-border/70 bg-background/40 p-2">
+    <div className="mb-2 flex items-center justify-between gap-2"><span className="text-xs font-medium">{approvals.length} pending approvals</span><button type="button" onClick={() => setExcluded(selected.length === approvals.length ? new Set(approvals.map(item => item.callId)) : new Set())} className="text-[11px] text-muted-foreground">{selected.length === approvals.length ? 'Deselect all' : 'Select all'}</button></div>
+    <div className="max-h-48 overflow-auto space-y-2">{Array.from(groups, ([label, items]) => <div key={label}>
+      <p className="px-1 text-[11px] text-muted-foreground">{items.length} × {label}</p>
+      {items.map(item => {
+        const seconds = Math.max(0, Math.floor((now - (item.startedAt ?? firstSeen.current[item.callId])) / 1000));
+        const agent = agentRequestOf(item.call);
+        const args = agent?.input ?? safeJson(item.call.function.arguments) ?? {};
+        const summary = String(args.command ?? args.path ?? args.file_path ?? args.query ?? item.call.function.name);
+        return <div key={item.callId} className={cn('flex items-center gap-2 rounded-lg px-2 py-1.5', activeId === item.callId && 'bg-mira-blue/10')}>
+          <input type="checkbox" data-approval-queue="true" onFocus={() => onFocus(item.callId)} aria-label={`Select ${summary}`} checked={!excluded.has(item.callId)} onChange={event => setExcluded(previous => { const next = new Set(previous); if (event.target.checked) next.delete(item.callId); else next.add(item.callId); return next; })} />
+          <button type="button" aria-pressed={activeId === item.callId} onClick={() => onFocus(item.callId)} onFocus={() => onFocus(item.callId)} className="min-w-0 flex-1 truncate text-left font-mono text-[11.5px]" title={summary}>{summary}</button>
+          <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">{seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`}</span>
+        </div>;
+      })}
+    </div>)}</div>
+    <div className="mt-2 flex justify-end gap-2"><button type="button" disabled={!selected.length} onClick={() => selected.forEach(item => onDecide(item.callId, false))} className="rounded-full border border-border px-4 py-2 text-xs font-medium disabled:opacity-40">Deny {selected.length === approvals.length ? 'all' : 'selected'} ({selected.length})</button><button type="button" disabled={!selected.length} onClick={() => selected.forEach(item => onDecide(item.callId, true))} className="rounded-full bg-mira-blue px-4 py-2 text-xs font-medium text-mira-on-accent disabled:opacity-40">Approve {selected.length === approvals.length ? 'all' : 'selected'} ({selected.length})</button></div>
+  </section>;
+}
+
 /** Tool approval rendered directly inside the Composer. */
 function EmbeddedApprovalCard({
   approval,
+  openRuleEditor,
+  onRuleEditorCancel,
   onDecide,
   queued = 1,
-  onAllowAll,
+  position = 1,
 }: {
   approval: PendingApproval;
-  onDecide: (allow: boolean, scope?: ApprovalScope) => void;
+  openRuleEditor?: boolean;
+  onRuleEditorCancel?: () => void;
+  onDecide: (allow: boolean, scope?: ApprovalScope, rules?: string[]) => void;
   /** Requests waiting, this one included. */
   queued?: number;
+  position?: number;
   onAllowAll?: () => void;
 }) {
   const { call, preview } = approval;
+  const [editingRule, setEditingRule] = useState(false);
+  useEffect(() => { if (openRuleEditor) setEditingRule(true); }, [openRuleEditor]);
+  const [ruleDraft, setRuleDraft] = useState<string | null>(null);
+  const rules = (ruleDraft ?? approval.rulePreview?.rules.join('\n') ?? '').split('\n').map(rule => rule.trim()).filter(Boolean);
   // The keys App listens for, as the user has them bound.
   const keybindings = useKeybindings();
   const allowKey = shortcutLabelForCommand(keybindings, 'approval.accept', { context: { approvalOpen: true } }) ?? 'Y';
@@ -2908,7 +2960,7 @@ function EmbeddedApprovalCard({
           </span>
         )}
         <span className="ml-auto shrink-0 rounded-full bg-secondary px-2 py-0.5 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">
-          {queued > 1 ? `1 of ${queued} awaiting` : 'awaiting approval'}
+          {queued > 1 ? `${position} of ${queued} awaiting` : 'awaiting approval'}
         </span>
       </div>
 
@@ -2977,21 +3029,26 @@ function EmbeddedApprovalCard({
       <div className="px-1.5 py-2">
         <ApprovalChoices
           choices={[
-            ...(queued > 1 && onAllowAll
-              ? [{ id: 'all', label: `Allow all ${queued}`, title: 'Allow every waiting request once' }]
-              : []),
             { id: 'deny', label: 'Deny', title: 'Deny', kbd: denyKey },
-            { id: 'always', label: 'Always allow', title: 'Never ask again' },
+            { id: 'always', label: agent ? 'Always allow via agent' : 'Always allow', title: agent ? 'Use the agent’s own permission scope' : 'Preview the saved permission rule' },
             { id: 'session', label: 'Allow for this chat', title: 'Stop asking about this until the chat ends' },
             { id: 'once', label: 'Allow', primary: true, title: 'Allow this one call', kbd: allowKey },
           ]}
           onChoose={(id: string) => {
-            if (id === 'all') onAllowAll?.();
+            if (id === 'always' && !agent) setEditingRule(true);
             else if (id === 'deny') onDecide(false);
             else onDecide(true, id === 'always' ? 'always' : id === 'session' ? 'session' : 'once');
           }}
         />
       </div>
+      {editingRule && <div className="space-y-2 rounded-lg border border-border bg-background/60 p-3">
+        <p className="text-xs font-medium">Always allow · saved policy rules</p>
+        <p className="text-[11px] text-muted-foreground">One rule per line. These exact patterns will be saved for future calls.</p>
+        {approval.rulePreview?.error && <p role="alert" className="text-xs text-amber-600 dark:text-amber-400">{approval.rulePreview.error}</p>}
+        {!approval.rulePreview && <p className="text-xs text-muted-foreground">Loading the exact policy rules…</p>}
+        <textarea aria-label="Permission rule patterns" value={ruleDraft ?? approval.rulePreview?.rules.join('\n') ?? ''} onChange={event => setRuleDraft(event.target.value)} className="w-full rounded-md border border-border bg-background p-2 font-mono text-xs" rows={3} />
+        <div className="flex justify-end gap-2"><button type="button" onClick={() => { setEditingRule(false); onRuleEditorCancel?.(); }} className="rounded-full px-4 py-2 text-xs font-medium hover:bg-secondary">Cancel</button><button type="button" disabled={!rules.length || !approval.rulePreview || (!!agent && !!approval.rulePreview.error)} onClick={() => onDecide(true, 'always', rules)} className="rounded-full bg-mira-blue px-4 py-2 text-xs font-medium text-mira-on-accent disabled:opacity-40">Save rule & allow</button></div>
+      </div>}
       <div className="px-1.5 pb-1.5 text-right text-[10.5px] text-muted-foreground/60">
         <kbd className="rounded bg-secondary/70 px-1 py-0.5 font-mono text-[10px]">y</kbd> allow ·{' '}
         <kbd className="rounded bg-secondary/70 px-1 py-0.5 font-mono text-[10px]">n</kbd> deny

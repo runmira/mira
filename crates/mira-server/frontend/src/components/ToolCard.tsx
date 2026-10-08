@@ -206,7 +206,7 @@ function PendingApprovalCard({
           <button
             type="button"
             onClick={() => onDecide(false)}
-            className="rounded-md px-2.5 py-1.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
+            className="rounded-full bg-fg/[0.04] ring-1 ring-fg/[0.08] px-4 py-1.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
           >
             Deny
           </button>
