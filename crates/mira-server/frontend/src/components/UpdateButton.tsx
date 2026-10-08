@@ -5,10 +5,10 @@
  * popup says what shipped and installs it — or, for the CLI behind a
  * browser, gives the command).
  */
-import { Fragment, type ReactNode, useMemo, useState } from 'react';
-import { ArrowDownToLine, ArrowUpRight, Check, CheckCircle2, Copy, Loader2, RefreshCw, RotateCw, Sparkles, WifiOff } from 'lucide-react';
+import { Fragment, type ReactNode, useEffect, useMemo, useState } from 'react';
+import { ArrowDownToLine, ArrowUpRight, Check, CheckCircle2, ChevronDown, Copy, Loader2, RefreshCw, RotateCw, Sparkles, WifiOff } from 'lucide-react';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from './ui/dialog';
-import { parseNotes, RELEASES_URL, useAppUpdate, type UpdateInfo, type UpdatePhase } from '../lib/updates';
+import { checkReleaseChannel, newerVersion, parseNotes, RELEASES_URL, useAppUpdate, type UpdateInfo, type UpdatePhase } from '../lib/updates';
 import { isDesktop } from '../lib/desktop';
 import miraLogo from '../assets/mira-logo.png';
 import { cn } from '@/lib/utils';
@@ -16,7 +16,10 @@ import { cn } from '@/lib/utils';
 export function UpdateButton() {
   const u = useAppUpdate();
   const [open, setOpen] = useState(false);
-  const { update } = u;
+  const [selected, setSelected] = useState<UpdateInfo | null>(null);
+  const update = selected ?? u.update;
+  const changeOpen = (value: boolean) => { setOpen(value); if (!value) setSelected(null); };
+  const earlyReleases = isDesktop() ? <EarlyReleases current={u.current} channel={u.channel} onSelect={setSelected} /> : null;
   const tip = update
     ? `Mira ${update.version} is available`
     : u.current
@@ -51,20 +54,102 @@ export function UpdateButton() {
         </span>
       </div>
       {update ? (
-        <UpdateDialog open={open} onOpenChange={setOpen} update={update} phase={u.phase} onInstall={() => void u.install()} />
+        <UpdateDialog open={open} onOpenChange={changeOpen} update={update} phase={u.phase} onInstall={() => void u.install(selected?.channel)} earlyReleases={earlyReleases} />
       ) : (
         <UpToDateDialog
           open={open}
-          onOpenChange={setOpen}
+          onOpenChange={changeOpen}
           current={u.current}
           channel={u.channel}
           checking={u.checking}
           checkedAt={u.checkedAt}
           failed={u.checkFailed}
+          earlyReleases={earlyReleases}
           onCheck={() => void u.check()}
         />
       )}
     </>
+  );
+}
+
+type EarlyChannel = 'alpha' | 'beta';
+type ChannelResult = { update?: UpdateInfo; error?: string; loading?: boolean };
+
+/** Small illustrations drawn for the release channels. */
+function ReleaseChannelIcon({ channel }: { channel: EarlyChannel }) {
+  return channel === 'beta' ? (
+    <svg aria-hidden="true" viewBox="0 0 40 40" className="size-10 overflow-visible" fill="none">
+      <path d="M19.5 20C16 7 4 7 6 18c.7 4 6 6 13.5 4" fill="#a78bfa" />
+      <path d="M20.5 20C24 7 36 7 34 18c-.7 4-6 6-13.5 4" fill="#c4b5fd" />
+      <path d="M19 22C8 20 8 33 14 32c4-.5 5-5 6-9" fill="#8b5cf6" />
+      <path d="M21 22c11-2 11 11 5 10-4-.5-5-5-6-9" fill="#a78bfa" />
+      <path d="m17 12 3 5 3-5M20 18v9" stroke="#5b21b6" strokeWidth="2" strokeLinecap="round" />
+      <circle cx="11" cy="15" r="2" fill="#ede9fe" /><circle cx="29" cy="15" r="2" fill="#ede9fe" />
+      <path d="m33 5 .8 2.2L36 8l-2.2.8L33 11l-.8-2.2L30 8l2.2-.8Z" fill="#c4b5fd" />
+    </svg>
+  ) : (
+    <svg aria-hidden="true" viewBox="0 0 40 40" className="size-10 overflow-visible" fill="none">
+      <path d="M6 32 22 11M12 34l15-19M5 25l13-15" stroke="#fb923c" strokeWidth="3" strokeLinecap="round" />
+      <path d="m26 6 3.2 6.4 7.1 1-5.2 5 1.2 7.1-6.3-3.3-6.3 3.3 1.2-7.1-5.2-5 7.1-1Z" fill="#fbbf24" stroke="#f59e0b" strokeWidth="1.2" strokeLinejoin="round" />
+      <path d="m23 13 2-3" stroke="#fef3c7" strokeWidth="2" strokeLinecap="round" />
+      <circle cx="25" cy="16" r=".9" fill="#92400e" /><circle cx="29" cy="16" r=".9" fill="#92400e" />
+      <path d="M25.5 19q1.5 1.5 3 0" stroke="#92400e" strokeWidth="1.2" strokeLinecap="round" />
+      <path d="m8 5 .7 2.3L11 8l-2.3.7L8 11l-.7-2.3L5 8l2.3-.7Z" fill="#fdba74" /><circle cx="34" cy="31" r="1.5" fill="#fdba74" />
+    </svg>
+  );
+}
+
+function EarlyReleases({ current, channel, onSelect }: { current: string | null; channel: UpdateInfo['channel']; onSelect: (update: UpdateInfo) => void }) {
+  const [expanded, setExpanded] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  const [results, setResults] = useState<Partial<Record<EarlyChannel, ChannelResult>>>({});
+  useEffect(() => {
+    let live = true;
+    setResults({ alpha: { loading: true }, beta: { loading: true } });
+    for (const name of ['beta', 'alpha'] as const) {
+      void checkReleaseChannel(name).then(update => {
+        if (live) setResults(prev => ({ ...prev, [name]: update ? { update } : {} }));
+      }).catch(error => {
+        const message = String(error);
+        const unpublished = /404|release not found|no releases|Could not fetch a valid release JSON/i.test(message);
+        if (live) setResults(prev => ({ ...prev, [name]: unpublished ? {} : { error: 'Couldn’t check this channel.' } }));
+      });
+    }
+    return () => { live = false; };
+  }, [attempt]);
+  const newerChannels = (['beta', 'alpha'] as const).filter(name => {
+    const release = results[name]?.update;
+    return !!current && !!release && newerVersion(release.version, current);
+  });
+  const availability = newerChannels.length === 2 ? 'New Alpha and Beta releases' : newerChannels.length ? `New ${newerChannels[0] === 'alpha' ? 'Alpha' : 'Beta'} release` : null;
+  return (
+    <section className="border-b border-fg/[0.06] px-5 py-3">
+      <button type="button" aria-expanded={expanded} onClick={() => setExpanded(value => !value)} className="flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left hover:bg-fg/[0.04]">
+        <span aria-hidden="true" className="relative h-10 w-14 shrink-0">
+          <span className="absolute left-0 top-0 -rotate-12"><ReleaseChannelIcon channel="beta" /></span>
+          <span className="absolute left-5 top-1 rotate-6"><ReleaseChannelIcon channel="alpha" /></span>
+        </span>
+        <span className="min-w-0 flex-1"><span className="flex items-center gap-2 text-[13px] font-medium">Early releases{availability && <span className="rounded-full bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-600 dark:text-emerald-400">New</span>}</span><span aria-live="polite" className={cn('block text-[11.5px]', availability ? 'text-emerald-600 dark:text-emerald-400' : 'text-muted-foreground')}>{availability ?? 'Try what’s next with Beta and Alpha'}</span></span>
+        <ChevronDown className={cn('size-4 text-muted-foreground transition-transform', expanded && 'rotate-180')} />
+      </button>
+      {expanded && <div className="mt-2 space-y-2 pb-1">
+        <p className="px-2 pb-1 text-[11.5px] leading-relaxed text-muted-foreground">Early builds may have bugs. Choose a release to review it before updating.</p>
+        {(['beta', 'alpha'] as const).map(name => {
+          const result = results[name];
+          const release = result?.update;
+          const installed = release?.version === current;
+          const older = !!release && name === channel && !!current && !newerVersion(release.version, current);
+          return <div key={name} className="flex items-center gap-3 rounded-xl border border-fg/[0.08] bg-fg/[0.025] px-3 py-3">
+            <span className="grid size-10 shrink-0 place-items-center"><ReleaseChannelIcon channel={name} /></span>
+            <div className="min-w-0 flex-1"><div className="flex items-center gap-2 text-[13px] font-medium">{name === 'beta' ? 'Beta' : 'Alpha'}{name === channel && <span className="rounded bg-fg/[0.06] px-1.5 text-[10px] text-muted-foreground">Current channel</span>}</div>
+              <p className="text-[11.5px] text-muted-foreground">{result?.loading ? 'Checking…' : result?.error ?? (release ? release.version : 'No release available yet')}</p>
+              <p className="mt-0.5 text-[11px] text-muted-foreground/80">{name === 'beta' ? 'Upcoming features, closer to release' : 'Latest experiments, more frequent changes'}</p>
+            </div>
+            {result?.loading ? <Loader2 className="size-4 animate-spin text-muted-foreground" /> : result?.error ? <button type="button" onClick={() => setAttempt(value => value + 1)} className="text-[12px] text-mira-blue">Retry</button> : release && <button type="button" disabled={installed || older} onClick={() => onSelect(release)} className="shrink-0 rounded-lg border border-fg/[0.1] bg-background px-3 py-1.5 text-[12px] font-medium hover:bg-fg/[0.05] disabled:opacity-50">{installed ? 'Installed' : older ? 'Up to date' : 'Review update'}</button>}
+          </div>;
+        })}
+      </div>}
+    </section>
   );
 }
 
@@ -85,6 +170,7 @@ function UpToDateDialog({
   checkedAt,
   failed,
   onCheck,
+  earlyReleases,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -94,6 +180,7 @@ function UpToDateDialog({
   checkedAt: number | null;
   failed: boolean;
   onCheck: () => void;
+  earlyReleases: ReactNode;
 }) {
   const desktop = isDesktop();
   const product = !desktop ? 'Mira' : channel === 'stable' ? 'Mira' : `Mira ${channel === 'alpha' ? 'Alpha' : 'Beta'}`;
@@ -106,7 +193,7 @@ function UpToDateDialog({
         : "You're up to date";
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-[440px] gap-0 overflow-hidden p-0">
+      <DialogContent className="max-h-[90vh] max-w-[440px] gap-0 overflow-y-auto p-0">
         <div className="relative overflow-hidden px-7 pb-6 pt-8 text-center">
           <div className="pointer-events-none absolute -top-24 left-1/2 h-56 w-[380px] -translate-x-1/2 rounded-full bg-[radial-gradient(closest-side,rgb(var(--mira-blue)/0.16),transparent)]" />
           <div className="relative mx-auto w-fit">
@@ -141,7 +228,14 @@ function UpToDateDialog({
             rel="noreferrer"
             className="flex items-center gap-3 rounded-lg px-3 py-2 text-[13px] text-foreground/85 transition-colors hover:bg-fg/[0.05] hover:text-foreground"
           >
-            <Sparkles className="size-4 text-mira-blue" />
+            <svg aria-hidden="true" viewBox="0 0 32 32" className="size-6 shrink-0" fill="none">
+              <path d="M6 15h20v13H6z" fill="#a78bfa" />
+              <path d="M4 11h24v6H4z" fill="#c4b5fd" />
+              <path d="M14 11h4v17h-4z" fill="#fbbf24" />
+              <path d="M16 11C5 11 7 2 12 5c3 2 4 6 4 6Zm0 0c11 0 9-9 4-6-3 2-4 6-4 6Z" fill="#fbbf24" stroke="#f59e0b" strokeWidth="1.2" strokeLinejoin="round" />
+              <path d="M9 20v4" stroke="#ede9fe" strokeWidth="2" strokeLinecap="round" />
+              <path d="M6 28h20" stroke="#8b5cf6" strokeWidth="1.5" strokeLinecap="round" />
+            </svg>
             <span className="flex-1">What's new in Mira</span>
             <ArrowUpRight className="size-3.5 text-muted-foreground" />
           </a>
@@ -157,6 +251,7 @@ function UpToDateDialog({
           )}
         </div>
 
+        {earlyReleases}
         <div className="flex items-center justify-end gap-2 px-6 py-4">
           <button
             type="button"
@@ -186,12 +281,14 @@ function UpdateDialog({
   update,
   phase,
   onInstall,
+  earlyReleases,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   update: UpdateInfo;
   phase: UpdatePhase;
   onInstall: () => void;
+  earlyReleases: ReactNode;
 }) {
   // GitHub's generated notes end each line "by @user in <PR url>": keep
   // just the PR number.
@@ -212,7 +309,7 @@ function UpdateDialog({
 
   return (
     <Dialog open={open} onOpenChange={(v) => !busy && onOpenChange(v)}>
-      <DialogContent className="max-w-[520px] gap-0 overflow-hidden border-fg/[0.08] bg-popover dark:bg-[#111215] p-0">
+      <DialogContent className="max-h-[90vh] max-w-[520px] gap-0 overflow-y-auto border-fg/[0.08] bg-popover dark:bg-[#111215] p-0">
         {/* Header: the mark on a green glow, the version, what you're on now. */}
         <div className="relative overflow-hidden px-7 pb-6 pt-8">
           <div className="pointer-events-none absolute -top-24 left-1/2 h-56 w-[420px] -translate-x-1/2 rounded-full bg-[radial-gradient(closest-side,rgba(16,185,129,0.22),transparent)]" />
@@ -232,6 +329,7 @@ function UpdateDialog({
               </DialogTitle>
               <DialogDescription className="mt-0.5 text-[12.5px] text-muted-foreground">
                 You're on {update.current}
+                {update.channel !== (window.__MIRA_CHANNEL__ ?? 'stable') && update.target === 'desktop' && <span className="block mt-1">Switching to {update.channel} replaces this app. Sign-in and preferences may need to be set again.</span>}
                 {date && !Number.isNaN(date.getTime()) && (
                   <> · released {date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}</>
                 )}
@@ -274,6 +372,7 @@ function UpdateDialog({
           )}
         </div>
 
+        {!busy && earlyReleases}
         {update.target === 'cli' ? (
           <CliFooter onLater={() => onOpenChange(false)} />
         ) : (

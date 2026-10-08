@@ -243,20 +243,56 @@ struct UpdateInfo {
     notes: Option<String>,
 }
 
+/// Only built-in channels can select an update endpoint.
+fn update_channel(requested: Option<&str>) -> Result<&'static str, String> {
+    match requested.unwrap_or(CHANNEL) {
+        "stable" => Ok("stable"),
+        "alpha" => Ok("alpha"),
+        "beta" => Ok("beta"),
+        _ => Err("Unknown release channel".into()),
+    }
+}
+
+fn channel_updater(
+    app: &AppHandle,
+    channel: &'static str,
+    preview: bool,
+) -> Result<tauri_plugin_updater::Updater, String> {
+    let endpoint =
+        format!("https://github.com/runmira/mira/releases/download/desktop-updates/{channel}.json");
+    let mut builder = app
+        .updater_builder()
+        .timeout(Duration::from_secs(20))
+        .endpoints(vec![endpoint
+            .parse()
+            .map_err(|e| format!("Invalid update URL: {e}"))?])
+        .map_err(|e| e.to_string())?;
+    if preview {
+        // Show the published version even when this build already has it.
+        builder = builder.version_comparator(|_, _| true);
+    } else if channel != CHANNEL {
+        // Changing channels is an explicit choice; a beta may precede stable.
+        builder = builder.version_comparator(|current, release| release.version != current);
+    }
+    builder.build().map_err(|e| e.to_string())
+}
+
 /// Asks the channel's update feed whether there's a newer build. `None`
 /// when this is the latest.
 #[tauri::command]
-async fn check_update(app: AppHandle) -> Result<Option<UpdateInfo>, String> {
-    let update = app
-        .updater()
-        .map_err(|e| e.to_string())?
+async fn check_update(
+    app: AppHandle,
+    channel: Option<String>,
+) -> Result<Option<UpdateInfo>, String> {
+    let selected = update_channel(channel.as_deref())?;
+    let update = channel_updater(&app, selected, channel.is_some())?
         .check()
         .await
         .map_err(|e| e.to_string())?;
     Ok(update.map(|u| UpdateInfo {
         version: u.version.clone(),
         current: u.current_version.clone(),
-        channel: CHANNEL,
+        channel: selected,
         date: u.date.and_then(|d| {
             d.format(&time::format_description::well_known::Rfc3339)
                 .ok()
@@ -269,10 +305,9 @@ async fn check_update(app: AppHandle) -> Result<Option<UpdateInfo>, String> {
 /// Progress goes out as `mira-update-progress` `{ downloaded, total }`;
 /// the page restarts the app once this returns.
 #[tauri::command]
-async fn install_update(app: AppHandle) -> Result<(), String> {
-    let update = app
-        .updater()
-        .map_err(|e| e.to_string())?
+async fn install_update(app: AppHandle, channel: Option<String>) -> Result<(), String> {
+    let selected = update_channel(channel.as_deref())?;
+    let update = channel_updater(&app, selected, false)?
         .check()
         .await
         .map_err(|e| e.to_string())?
