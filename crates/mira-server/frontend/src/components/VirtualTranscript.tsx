@@ -11,11 +11,11 @@ export function hasTranscriptPosition(identity: string): boolean { return !!save
 
 /** Keep a bounded set of measured transcript rows mounted. Measurements survive
  * streaming updates; browser scroll anchoring preserves the visible row. */
-export function VirtualTranscript({ children, pane, identity, onNeedOlder, hasOlder }: { onNeedOlder?: () => void; hasOlder?: boolean; children: ReactNode; pane: RefObject<HTMLDivElement>; identity: string }) {
+export function VirtualTranscript({ children, pane, identity, onNeedOlder, hasOlder }: { onNeedOlder?: () => void; hasOlder?: boolean; children: ReactNode; pane: RefObject<HTMLDivElement | null>; identity: string }) {
   const rows = Children.toArray(children);
   const root = useRef<HTMLDivElement>(null);
-  const pendingRestore = useRef<Anchor | undefined>();
-  const visibleAnchor = useRef<Anchor>();
+  const pendingRestore = useRef<Anchor | undefined>(undefined);
+  const visibleAnchor = useRef<Anchor | undefined>(undefined);
   const previousIdentity = useRef('');
   if (previousIdentity.current !== identity) { previousIdentity.current = identity; pendingRestore.current = savedPosition(identity); visibleAnchor.current = undefined; }
   const offsetsRef = useRef<number[]>([]);

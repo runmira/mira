@@ -3,7 +3,7 @@ import { ActivityShimmer } from './ActivityShimmer';
 import { plainToolAction, latestToolEntry, completedToolSummary, toolActivityKind } from '../lib/toolActivity';
 import { useTranscriptDisclosure } from './TranscriptDisclosure';
 import { useEffect, useMemo } from 'react';
-import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
+import { AnimatePresence, m, useReducedMotion } from 'framer-motion';
 import {
   Brain,
   Wrench,
@@ -131,7 +131,7 @@ export function ToolGroup({
         <GroupIcon aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" />
         {entries.length > 1 ? <>
           <span className="min-w-0 flex-1 overflow-hidden" title={lastAction}>
-            <AnimatePresence initial={false} mode="popLayout"><motion.span key={lastAction} initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }} transition={{ duration: reduceMotion ? 0 : 0.18, ease: 'easeOut' }} className="block truncate"><ActivityShimmer active={anyActive}>{lastAction}</ActivityShimmer></motion.span></AnimatePresence>
+            <AnimatePresence initial={false} mode="popLayout"><m.span key={lastAction} initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }} transition={{ duration: reduceMotion ? 0 : 0.18, ease: 'easeOut' }} className="block truncate"><ActivityShimmer active={anyActive}>{lastAction}</ActivityShimmer></m.span></AnimatePresence>
           </span>
           <ActivityShimmer active={anyActive} className="shrink-0 text-[11px]">{parallel ? 'Parallel tools' : 'Tools'}</ActivityShimmer><CountBadge n={entries.length} />
         </> : <><ActivityShimmer active={anyActive} className="shrink-0">{header.verb}</ActivityShimmer>
@@ -163,14 +163,14 @@ export function ToolGroup({
 
       <AnimatePresence initial={false}>
         {expanded && (
-        <motion.div
+        <m.div
           initial={{ height: 0, opacity: 0 }}
           animate={{ height: 'auto', opacity: 1, transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.22, 1, 0.36, 1] } }}
           exit={{ height: 0, opacity: 0, transition: { duration: reduceMotion ? 0 : 0.18, ease: 'easeInOut' } }}
           className="ml-6 mt-0.5 flex flex-col gap-0.5 overflow-hidden border-l border-border/40 pl-3"
         >
           {entries.map((e, i) => (
-            <motion.div
+            <m.div
               key={e.call.id}
               custom={i}
               variants={itemVariants}
@@ -188,9 +188,9 @@ export function ToolGroup({
                 onDecide={() => {}}
                 onOpenFile={onOpenFile}
               />
-            </motion.div>
+            </m.div>
           ))}
-        </motion.div>
+        </m.div>
         )}
       </AnimatePresence>
     </div>

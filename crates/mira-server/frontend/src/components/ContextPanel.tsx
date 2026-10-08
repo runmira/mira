@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { m, AnimatePresence } from 'framer-motion';
 import {
   ArrowUp,
   GitBranch,
@@ -29,7 +29,7 @@ import { Collapse } from './ui/Collapse';
 import { prettyUrl } from '../lib/refs';
 import type { GitStatusView, SessionDiffView, SessionFile, BranchPrView } from '../api';
 import type { TaskItem } from '../types';
-import type { SubagentStreamState, Entry } from '../App';
+import type { SubagentStreamState, Entry } from '../transcript/entries';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import { SubagentFace } from './SubagentFace';
 import { personaName, useSubagents, type Subagent } from '../lib/subagents';
@@ -168,7 +168,7 @@ function ProgressSection({ tasks: all }: { tasks: TaskItem[] }) {
       />
       <AnimatePresence initial={false}>
         {open && (
-          <motion.div
+          <m.div
             initial={{ height: 0, opacity: 0 }}
             animate={{ height: 'auto', opacity: 1, transition: { duration: 0.16 } }}
             exit={{ height: 0, opacity: 0, transition: { duration: 0.12 } }}
@@ -181,7 +181,7 @@ function ProgressSection({ tasks: all }: { tasks: TaskItem[] }) {
                   const isDone = task.status === 'completed';
                   const isCurrent = task.status === 'in_progress';
                   return (
-                    <motion.div
+                    <m.div
                       key={task.id}
                       custom={i}
                       variants={itemVariants}
@@ -202,13 +202,13 @@ function ProgressSection({ tasks: all }: { tasks: TaskItem[] }) {
                       <span className={cn('min-w-0', isDone && 'line-through decoration-fg/15')}>
                         {task.subject}
                       </span>
-                    </motion.div>
+                    </m.div>
                   );
                 })}
               </AnimatePresence>
               {active && (
                 <div className="mt-1.5 h-px bg-fg/10 rounded-full overflow-hidden">
-                  <motion.div
+                  <m.div
                     className="h-full bg-blue-400/40 rounded-full"
                     animate={{ x: ['-100%', '200%'] }}
                     transition={{ duration: 2, repeat: Infinity, ease: 'easeInOut' }}
@@ -216,7 +216,7 @@ function ProgressSection({ tasks: all }: { tasks: TaskItem[] }) {
                 </div>
               )}
             </div>
-          </motion.div>
+          </m.div>
         )}
       </AnimatePresence>
     </div>
@@ -465,7 +465,7 @@ function WorkspaceSection({
       <SectionHeader label="Changes" open={open} onToggle={() => setOpen((v) => !v)} />
       <AnimatePresence initial={false}>
         {open && (
-          <motion.div
+          <m.div
             initial={{ height: 0, opacity: 0 }}
             animate={{ height: 'auto', opacity: 1, transition: { duration: 0.16 } }}
             exit={{ height: 0, opacity: 0, transition: { duration: 0.12 } }}
@@ -560,7 +560,7 @@ function WorkspaceSection({
                 </a>
               )}
             </div>
-          </motion.div>
+          </m.div>
         )}
       </AnimatePresence>
     </div>
@@ -666,7 +666,7 @@ function SubagentsSection({
       <SectionHeader label="Subagents" open={open} onToggle={() => setOpen((v) => !v)} />
       <AnimatePresence initial={false}>
         {open && (
-          <motion.div
+          <m.div
             initial={{ height: 0, opacity: 0 }}
             animate={{ height: 'auto', opacity: 1, transition: { duration: 0.16 } }}
             exit={{ height: 0, opacity: 0, transition: { duration: 0.12 } }}
@@ -680,7 +680,7 @@ function SubagentsSection({
                   const persona = type ? roster?.find((r) => r.name === type) : undefined;
                   const { name, badge, description } = agentDisplayInfo(state, roster);
                   return (
-                    <motion.button
+                    <m.button
                       key={callId}
                       custom={i}
                       variants={itemVariants}
@@ -707,12 +707,12 @@ function SubagentsSection({
                         )}
                       </span>
                       {!state.done && <span className="text-[10px] text-fg/20 shrink-0 mt-0.5">running</span>}
-                    </motion.button>
+                    </m.button>
                   );
                 })}
               </AnimatePresence>
             </div>
-          </motion.div>
+          </m.div>
         )}
       </AnimatePresence>
     </div>
@@ -826,7 +826,7 @@ function SourcesSection({ sources }: { sources: string[] }) {
       <SectionHeader label="Sources" open={open} onToggle={() => setOpen((v) => !v)} />
       <AnimatePresence initial={false}>
         {open && (
-          <motion.div
+          <m.div
             initial={{ height: 0, opacity: 0 }}
             animate={{ height: 'auto', opacity: 1, transition: { duration: 0.16 } }}
             exit={{ height: 0, opacity: 0, transition: { duration: 0.12 } }}
@@ -836,9 +836,9 @@ function SourcesSection({ sources }: { sources: string[] }) {
             <div className="flex flex-col gap-0.5 pb-1">
               <AnimatePresence>
                 {shown.map((url, i) => (
-                  <motion.div key={url} custom={i} variants={itemVariants} initial="hidden" animate="visible">
+                  <m.div key={url} custom={i} variants={itemVariants} initial="hidden" animate="visible">
                     <SourceRow url={url} />
-                  </motion.div>
+                  </m.div>
                 ))}
               </AnimatePresence>
               {sources.length > SOURCES_SHOWN && (
@@ -851,7 +851,7 @@ function SourcesSection({ sources }: { sources: string[] }) {
                 </button>
               )}
             </div>
-          </motion.div>
+          </m.div>
         )}
       </AnimatePresence>
     </div>
@@ -968,7 +968,7 @@ export function ContextPanel(props: ContextPanelProps) {
     <AnimatePresence mode="wait" initial={false}>
       {!open ? (
         /* Collapsed: a small pill that summarizes, out of the way. */
-        <motion.button
+        <m.button
           key="pill"
           type="button"
           onClick={() => onOpenChange(true)}
@@ -1015,9 +1015,9 @@ export function ContextPanel(props: ContextPanelProps) {
           {agentsRunning && (
             <span className="size-1.5 shrink-0 rounded-full bg-mira-purple animate-pulse" title="subagents running" />
           )}
-        </motion.button>
+        </m.button>
       ) : (
-        <motion.aside
+        <m.aside
           key="card"
           initial={{ opacity: 0, scale: 0.97, y: -6 }}
           animate={{ opacity: 1, scale: 1, y: 0, transition: { duration: 0.18, ease: 'easeOut' } }}
@@ -1070,7 +1070,7 @@ export function ContextPanel(props: ContextPanelProps) {
               </div>
             )}
           </div>
-        </motion.aside>
+        </m.aside>
       )}
     </AnimatePresence>
   );
