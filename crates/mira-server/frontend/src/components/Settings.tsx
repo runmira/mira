@@ -64,6 +64,7 @@ import { KeybindingsSection } from './settings/KeybindingsSettings';
 import { Collapse } from './ui/Collapse';
 import { AcpAgentsSection } from './settings/AcpAgentsSection';
 import { SubagentsSection } from './settings/SubagentsSection';
+import { DevicesSection } from './settings/DevicesSection';
 import { ImportChats } from './ImportChats';
 import type { AcpAgentStatus, SessionsSettings } from '../types';
 import { applyReduceMotion, PREF_KEYS, useBoolPref, useStringPref } from '@/lib/prefs';
@@ -481,6 +482,7 @@ export function SettingsSurface({
           {view && section === 'integrations' && (
             <IntegrationsSection onOpenKeys={() => onSectionChange('search')} githubReturn={githubReturn} />
           )}
+          {section === 'devices' && <DevicesSection />}
           {view && section === 'about' && (
             <AboutSection view={view} />
           )}

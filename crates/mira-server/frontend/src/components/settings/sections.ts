@@ -8,12 +8,13 @@ import {
   Palette,
   Plug,
   Search,
+  Smartphone,
   Smile,
   Sparkle,
   Zap,
 } from 'lucide-react';
 
-export type SettingsSectionId = 'general' | 'appearance' | 'provider' | 'agents' | 'subagents' | 'usage' | 'memory' | 'skills' | 'hooks' | 'keybindings' | 'search' | 'integrations' | 'about';
+export type SettingsSectionId = 'general' | 'appearance' | 'provider' | 'agents' | 'subagents' | 'usage' | 'memory' | 'skills' | 'hooks' | 'keybindings' | 'search' | 'integrations' | 'devices' | 'about';
 
 /** Section metadata, shared with the Sidebar so it can render the same nav
  *  in its "settings mode" (the settings surface is inline in the main pane,
@@ -41,5 +42,7 @@ export const SETTINGS_SECTIONS: {
   { id: 'keybindings', label: 'Keyboard shortcuts', icon: Keyboard },
   { id: 'search',      label: 'Search & keys', icon: Search },
   { id: 'integrations', label: 'Integrations', icon: Plug },
+  // Phones and other computers paired with this Mira (pairing.rs).
+  { id: 'devices',     label: 'Devices',     icon: Smartphone },
   { id: 'about',       label: 'About',       icon: Info },
 ];
