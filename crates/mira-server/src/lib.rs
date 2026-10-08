@@ -62,11 +62,13 @@ mod message_queue;
 mod models;
 mod oauth;
 mod opencode_control;
+pub mod pairing;
 pub mod plugins;
 mod processes;
 pub mod protocol;
 pub mod provider;
 mod pull_requests;
+mod remote;
 mod review;
 mod runtime_admission;
 mod runtime_requests;
@@ -393,14 +395,28 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
     oauth::refresh::boot_rehydrate(&state).await;
     oauth::refresh::spawn(state.clone());
 
-    let router = build_router(state, cfg.static_dir.clone());
+    let devices = Arc::new(pairing::Devices::load(pairing::Devices::default_path()));
+    // Restarts Cloudflare's connector if remote access was on.
+    let remote = remote::Remote::start(remote::Remote::default_dir(), local_port);
+    let router = build_router(state, cfg.static_dir.clone(), devices, remote);
     info!(addr = %cfg.bind, "mira serve: listening");
 
-    axum::serve(listener, router).await.context("axum serve")?;
+    // Peer addresses feed the pairing guard's "is this local?" check.
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await
+    .context("axum serve")?;
     Ok(())
 }
 
-fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
+fn build_router(
+    state: AppState,
+    static_dir: Option<PathBuf>,
+    devices: Arc<pairing::Devices>,
+    remote: Arc<remote::Remote>,
+) -> Router {
     let mut router = Router::new()
         .route("/ws", get(ws::ws_handler))
         .route("/ws/terminal", get(terminal::terminal_ws))
@@ -685,7 +701,34 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         router.route("/", get(inline_index))
     };
 
-    router.with_state(state).layer(TraceLayer::new_for_http())
+    // Device pairing: its own routes, and a guard in front of everything
+    // that only lets in this machine and paired devices (see pairing.rs).
+    let pairing_routes = Router::new()
+        .route("/api/pairing/me", get(pairing::me))
+        .route("/api/pairing/devices", get(pairing::list))
+        .route("/api/pairing/code", post(pairing::open_pairing))
+        .route("/api/pairing/pair", post(pairing::pair))
+        .route(
+            "/api/pairing/devices/:id",
+            axum::routing::delete(pairing::revoke),
+        )
+        .with_state(devices.clone());
+    // Remote access: reach this computer from anywhere (remote.rs).
+    let remote_routes = Router::new()
+        .route("/api/remote", get(remote::status))
+        .route("/api/remote/enable", post(remote::enable))
+        .route("/api/remote/disable", post(remote::disable))
+        .with_state(remote);
+
+    router
+        .with_state(state)
+        .merge(pairing_routes)
+        .merge(remote_routes)
+        .layer(axum::middleware::from_fn_with_state(
+            devices,
+            pairing::guard,
+        ))
+        .layer(TraceLayer::new_for_http())
 }
 
 async fn embedded_fallback(uri: axum::http::Uri) -> axum::response::Response {

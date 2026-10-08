@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import App from './App';
 import { AuthGate } from './components/AuthGate';
 import { OnboardingGate } from './components/onboarding/OnboardingGate';
+import { PairingGate } from './components/pairing/PairingGate';
 import { install as installNetLog } from './lib/netLog';
 import { hasHiddenTitleBar } from './lib/desktop';
 import { applyTheme, watchSystemTheme } from './lib/theme';
@@ -34,10 +35,13 @@ applyAppearance();
 // width/height in CSS and override the SVG's own width attr).
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <AuthGate>
-      <OnboardingGate>
-        <App />
-      </OnboardingGate>
-    </AuthGate>
+    {/* This computer goes straight through; other devices pair first. */}
+    <PairingGate>
+      <AuthGate>
+        <OnboardingGate>
+          <App />
+        </OnboardingGate>
+      </AuthGate>
+    </PairingGate>
   </StrictMode>,
 );
