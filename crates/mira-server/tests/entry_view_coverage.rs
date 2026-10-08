@@ -20,6 +20,9 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
+/// Where `EntryView` lives (moved out of App.tsx).
+const ENTRY_VIEW: &str = "src/components/transcript/EntryView.tsx";
+
 fn frontend(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("frontend")
@@ -34,12 +37,19 @@ fn frontend(rel: &str) -> PathBuf {
 /// body. Scanning the union body finds nothing, which is why the first
 /// version of this test reported zero kinds and would have passed vacuously.
 fn entry_kinds() -> BTreeSet<String> {
-    let src = std::fs::read_to_string(frontend("src/App.tsx")).expect("read App.tsx");
+    let src = std::fs::read_to_string(frontend("src/transcript/entries.ts"))
+        .expect("read transcript/entries.ts");
     let after = src
         .split_once("export type Entry =")
         .expect("Entry union")
         .1;
-    let body = after.split_once("\ntype ").map(|(b, _)| b).unwrap_or(after);
+    // The union ends at the next declaration.
+    let end = ["\ntype ", "\nexport type "]
+        .iter()
+        .filter_map(|d| after.find(d))
+        .min()
+        .unwrap_or(after.len());
+    let body = &after[..end];
 
     // Union members are `| AliasName`.
     let mut aliases: BTreeSet<&str> = BTreeSet::new();
@@ -73,7 +83,7 @@ fn entry_kinds() -> BTreeSet<String> {
 
 /// Every `kind` `EntryView` handles.
 fn rendered_kinds() -> BTreeSet<String> {
-    let src = std::fs::read_to_string(frontend("src/App.tsx")).expect("read App.tsx");
+    let src = std::fs::read_to_string(frontend(ENTRY_VIEW)).expect("read EntryView.tsx");
     let start = src.find("function EntryView").expect("EntryView");
     // The switch is the first `switch (entry.kind)` in the function.
     let sw = src[start..]
@@ -113,7 +123,7 @@ fn entry_view_has_a_fallback_arm() {
     // The runtime half of the same protection: a kind we cannot render
     // should say so rather than vanish. Without this, an unknown kind is
     // indistinguishable from a wedged agent.
-    let src = std::fs::read_to_string(frontend("src/App.tsx")).expect("read App.tsx");
+    let src = std::fs::read_to_string(frontend(ENTRY_VIEW)).expect("read EntryView.tsx");
     let start = src.find("function EntryView").expect("EntryView");
     let tail = &src[start..];
     let sw = tail.find("switch (entry.kind)").expect("switch");
