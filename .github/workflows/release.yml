@@ -84,7 +84,14 @@ jobs:
 
       - name: Build frontend
         working-directory: crates/mira-server/frontend
+        # The web UI's sign-in. Without these the embedded UI only shows
+        # "Auth not configured" (as v0.5.2 did), so fail instead.
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.VITE_SUPABASE_PUBLISHABLE_KEY }}
         run: |
+          : "${VITE_SUPABASE_URL:?missing secret VITE_SUPABASE_URL}"
+          : "${VITE_SUPABASE_PUBLISHABLE_KEY:?missing secret VITE_SUPABASE_PUBLISHABLE_KEY}"
           npm ci
           npm run build
 
