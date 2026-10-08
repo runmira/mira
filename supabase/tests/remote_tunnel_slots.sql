@@ -3,6 +3,8 @@
 begin;
 
 insert into auth.users (id) values ('11300000-0000-0000-0000-000000000001');
+-- As the remote-access edge function connects.
+set local role service_role;
 
 do $$
 declare
@@ -91,6 +93,7 @@ end;
 $$;
 
 -- Release is all-or-nothing: if deleting the tunnel row fails, the slot stays.
+reset role;  -- the fault injection below needs the table owner
 insert into public.remote_tunnels (user_id, machine_id, tunnel_id, hostname, port)
 select user_id, machine_id, '11300000-0000-0000-0000-0000000000d4', 'm-four.runmira.dev', 3000
 from public.remote_tunnel_slots where machine_id = lpad('4', 32, '0');
@@ -99,6 +102,7 @@ begin raise exception 'simulated deletion failure'; end;
 $$;
 create trigger reject_delete before delete on public.remote_tunnels
 for each row execute function pg_temp.reject_delete();
+set local role service_role;
 do $$
 declare
   owner uuid := '11300000-0000-0000-0000-000000000001';
@@ -116,6 +120,7 @@ begin
   assert exists (select 1 from public.remote_tunnel_slots where machine_id = m4);
 end;
 $$;
+reset role;
 drop trigger reject_delete on public.remote_tunnels;
 
 select 'remote_tunnel_slots: all assertions passed' as result;
