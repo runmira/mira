@@ -6,6 +6,8 @@ import { useProfile } from '../lib/useProfile';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
 import { UpdateButton } from './UpdateButton';
+import { SettingsSurface } from '../lazyViews';
+import { preloadOnIntent } from '@/lib/lazy';
 import type { WsStatus } from '../ws';
 
 /**
@@ -53,6 +55,8 @@ export function UserCard({
       <PopoverTrigger asChild>
         <button
           type="button"
+          // The menu's main item is Settings; start fetching it now.
+          {...preloadOnIntent(SettingsSurface.preload)}
           className="flex min-w-0 flex-1 items-center gap-2.5 py-2.5 pl-3 pr-1 text-left"
         >
           <span className="relative shrink-0">

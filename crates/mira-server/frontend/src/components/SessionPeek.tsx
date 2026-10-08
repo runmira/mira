@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { AnimatePresence, motion } from 'framer-motion';
+import { AnimatePresence, m } from 'framer-motion';
 import {
   Bot,
   CircleAlert,
@@ -166,7 +166,7 @@ export function SessionPeek({
   return (
     <AnimatePresence>
       {shown && session && (
-        <motion.div
+        <m.div
           key="peek"
           initial={{ opacity: 0, x: -6, scale: 0.98 }}
           animate={{ opacity: 1, x: 0, scale: 1 }}
@@ -258,7 +258,7 @@ export function SessionPeek({
               </div>
             )}
           </div>
-        </motion.div>
+        </m.div>
       )}
     </AnimatePresence>
   );

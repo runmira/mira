@@ -1,5 +1,5 @@
 import { PREF_KEYS, useBoolPref } from '../../lib/prefs';
-import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
+import { AnimatePresence, m, useReducedMotion } from 'framer-motion';
 import { cn } from '@/lib/utils';
 
 /** Shared open/close animation for every collapsible block in the UI.
@@ -26,14 +26,14 @@ export function Collapse({
   return (
     <AnimatePresence initial={false}>
       {open && (
-        <motion.div
+        <m.div
           initial={{ height: 0, opacity: 0 }}
           animate={{ height: 'auto', opacity: 1, transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.22, 1, 0.36, 1] } }}
           exit={{ height: 0, opacity: 0, transition: { duration: reduceMotion ? 0 : 0.18, ease: 'easeInOut' } }}
           className={cn('overflow-hidden', className)}
         >
           {children}
-        </motion.div>
+        </m.div>
       )}
     </AnimatePresence>
   );

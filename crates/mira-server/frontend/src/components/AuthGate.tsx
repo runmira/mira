@@ -1,7 +1,11 @@
 import { useEffect, useState } from 'react';
+import { LazyBoundary } from './LazyBoundary';
 import type { User } from '@supabase/supabase-js';
 import { getSupabase, isSupabaseConfigured } from '../lib/supabase';
-import { Login } from './Login';
+import { lazyNamed } from '../lib/lazy';
+
+// Signed-out only, so it stays out of every signed-in load.
+const Login = lazyNamed(() => import('./Login'), 'Login');
 
 type Status = 'loading' | 'signed-out' | 'signed-in';
 
@@ -89,7 +93,11 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   }
 
   if (status === 'signed-out') {
-    return <Login />;
+    return (
+      <LazyBoundary>
+        <Login />
+      </LazyBoundary>
+    );
   }
 
   return <>{children}</>;

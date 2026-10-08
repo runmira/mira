@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type RefObject } from 'react';
 import { parseCitation, resolveCitationRange, type SourceCitation } from '../lib/sourceCitations';
 
 export function SourceCitationNavigator({ pane, sessionId, hasOlder, loading, loadOlder, historyError, onOpenSession }: {
-  pane: RefObject<HTMLDivElement>; sessionId: string | null; hasOlder: boolean; loading: boolean; loadOlder: () => void; historyError: string | null; onOpenSession: (id: string) => void;
+  pane: RefObject<HTMLDivElement | null>; sessionId: string | null; hasOlder: boolean; loading: boolean; loadOlder: () => void; historyError: string | null; onOpenSession: (id: string) => void;
 }) {
   const [target, setTarget] = useState<SourceCitation | null>(null);
   const [error, setError] = useState<string | null>(null);

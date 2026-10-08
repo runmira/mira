@@ -3,9 +3,23 @@ import react from '@vitejs/plugin-react';
 import path from 'node:path';
 import { visualizer } from 'rollup-plugin-visualizer';
 
+// `REACT_COMPILER_REPORT=1 npm run build` lists components the compiler
+// skipped and why.
+function compilerLogger() {
+  if (!process.env.REACT_COMPILER_REPORT) return {};
+  return {
+    logger: {
+      logEvent(filename: string | null, event: { kind: string; fnName?: string | null; detail?: unknown }) {
+        if (event.kind === 'CompileSuccess') console.log(`[compiler] ok ${filename}`);
+        else if (event.kind === 'CompileError' || event.kind === 'CompileSkip' || event.kind === 'PipelineError')
+          console.log(`[compiler] ${event.kind} ${filename} ${event.fnName ?? ''} ${String((event.detail as any)?.reason ?? (event.detail as any)?.options?.reason ?? '').slice(0, 120)}`);
+      },
+    },
+  };
+}
+
 const VENDOR_CHUNKS: [string, RegExp][] = [
   ['vendor-react', /^(react|react-dom|scheduler)$/],
-  ['vendor-motion', /^(framer-motion|motion-dom|motion-utils)$/],
   ['vendor-markdown', /^(react-markdown|remark-.*|rehype-.*|micromark.*|mdast-.*|hast-.*|unist-.*|unified|vfile.*|property-information|entities|decode-named-character-reference|character-entities.*|space-separated-tokens|comma-separated-tokens|html-url-attributes|devlop|bail|trough|is-plain-obj|ccount|escape-string-regexp|markdown-table|longest-streak|zwitch|trim-lines|style-to-.*|inline-style-parser|estree-util-.*)$/],
 ];
 
@@ -30,7 +44,14 @@ function isInitial(id: string, getModuleInfo: ModuleInfoLookup, seen = new Set<s
 // assets directly via --static-dir dist/.
 export default defineConfig({
   plugins: [
-    react(),
+    react({
+      babel: {
+        // Auto-memoizes components and hooks, so render work doesn't depend
+        // on hand-placed useMemo/useCallback. Components that break the
+        // Rules of React are skipped (left as-is), not miscompiled.
+        plugins: [['babel-plugin-react-compiler', { target: '19', ...compilerLogger() }]],
+      },
+    }),
     // `ANALYZE=1 npm run build` writes dist/stats.html (treemap of every chunk).
     process.env.ANALYZE && visualizer({ filename: 'dist/stats.html', gzipSize: true, template: 'treemap' }),
   ],
@@ -61,6 +82,10 @@ export default defineConfig({
         manualChunks(id, { getModuleInfo }) {
           const pkg = /node_modules\/((?:@[^/]+\/)?[^/]+)/.exec(id)?.[1];
           if (!pkg || !isInitial(id, getModuleInfo)) return;
+          // framer-motion's entry re-exports its animation features, so they
+          // look statically reachable here even though only the lazy
+          // <LazyMotion> import uses them. Let Rollup place it by actual use.
+          if (/^(framer-motion|motion-dom|motion-utils)$/.test(pkg)) return;
           for (const [chunk, test] of VENDOR_CHUNKS) if (test.test(pkg)) return chunk;
           return 'vendor';
         },

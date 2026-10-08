@@ -1,5 +1,6 @@
 import { BranchElbow } from './BranchElbow';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { LazyBoundary } from './LazyBoundary';
 import {
   Archive,
   ArchiveRestore,
@@ -37,6 +38,7 @@ import type { BackgroundMode, SessionSummary } from '../types';
 import type { WsStatus } from '../ws';
 import { parseSentAttachments } from './Composer';
 import { SETTINGS_SECTIONS, type SettingsSectionId } from './settings/sections';
+import { PluginsPanel, PullRequestPanel, SessionPeek } from '../lazyViews';
 
 import { UserCard } from './UserCard';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
@@ -44,7 +46,8 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
-import { SessionPeek, type PeekTarget } from './SessionPeek';
+import type { PeekTarget } from './SessionPeek';
+import { useLatch } from '../lib/lazy';
 import { hasHiddenTitleBar, TRAFFIC_LIGHT_INSET } from '@/lib/desktop';
 import { Collapse } from './ui/Collapse';
 import { useFileIcons } from '@/lib/fileIcons';
@@ -160,6 +163,8 @@ export function Sidebar({
   // so sliding the pointer down the list moves one card rather than
   // mounting twenty.
   const [peek, setPeek] = useState<PeekTarget | null>(null);
+  // Hover card chunk loads on the first hover, then stays mounted.
+  const peekMounted = useLatch(peek !== null);
   // Sidebar search: filters every folder at once, and opens them while it
   // has text so a match is never hidden behind a collapsed folder.
   const [query, setQuery] = useState('');
@@ -491,6 +496,7 @@ export function Sidebar({
             icon={<GitBranch className="size-3.5" />}
             active={activeView === 'pull-request'}
             onClick={() => onNavigate('pull-request')}
+            onIntent={PullRequestPanel.preload}
           >
             Pull request
           </NavItem>
@@ -498,6 +504,7 @@ export function Sidebar({
             icon={<Puzzle className="size-3.5" />}
             active={activeView === 'plugins'}
             onClick={() => onNavigate('plugins')}
+            onIntent={PluginsPanel.preload}
           >
             Plugins
           </NavItem>
@@ -794,11 +801,15 @@ export function Sidebar({
 
       <UserCard status={status} onOpenSettings={onOpenSettings} />
       {/* One hover card for every row in the list. */}
-      <SessionPeek
-        target={peek}
-        pr={peek && peek.session.id === activeSessionId ? activePr ?? null : null}
-        onDismiss={() => setPeek(null)}
-      />
+      {peekMounted && (
+        <LazyBoundary>
+          <SessionPeek
+            target={peek}
+            pr={peek && peek.session.id === activeSessionId ? activePr ?? null : null}
+            onDismiss={() => setPeek(null)}
+          />
+        </LazyBoundary>
+      )}
     </aside>
     <RenameDialog
       session={renaming}
@@ -1504,7 +1515,7 @@ function SidebarFolderIcon({
 /* ---------- little helpers ---------- */
 
 function NavItem({
-  icon, disabled, active, onClick, children,
+  icon, disabled, active, onClick, onIntent, children,
 }: {
   icon: React.ReactNode;
   disabled?: boolean;
@@ -1512,12 +1523,16 @@ function NavItem({
    *  gets the same accent treatment as an active session row. */
   active?: boolean;
   onClick?: () => void;
+  /** Hover/focus: preload whatever the click opens. */
+  onIntent?: () => void;
   children: React.ReactNode;
 }) {
   return (
     <button
       disabled={disabled}
       onClick={onClick}
+      onPointerEnter={onIntent}
+      onFocus={onIntent}
       title={disabled ? 'Not implemented yet' : undefined}
       className={cn(
         'flex w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-[14.5px] transition-colors',

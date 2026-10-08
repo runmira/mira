@@ -4,7 +4,7 @@ import { ImageAttachmentDetails } from './ImageAttachmentDetails';
 import { reportWorkspaceSetup, type WorkspaceSetup } from './WorkspaceSetupCard';
 import { useEffect, useLayoutEffect, useId, useMemo, useRef, useState } from 'react';
 import { ImageLightbox } from './ImageLightbox';
-import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
+import { AnimatePresence, m, useReducedMotion } from 'framer-motion';
 import {
   ArrowUp,
   Camera,
@@ -866,12 +866,12 @@ export function Composer({
         )}
 
         {/* Keep unsent answers and edited plans mounted when switching notices. */}
-        {plans.map(plan => <motion.div key={`plan:${plan.callId}`} hidden={pendingPlan?.callId !== plan.callId} initial={false} animate={{opacity:pendingPlan?.callId === plan.callId ? 1 : 0}} transition={{duration:.15}}>
+        {plans.map(plan => <m.div key={`plan:${plan.callId}`} hidden={pendingPlan?.callId !== plan.callId} initial={false} animate={{opacity:pendingPlan?.callId === plan.callId ? 1 : 0}} transition={{duration:.15}}>
           {onPlanReply && <EmbeddedPlanCard proposal={plan.proposal} onApprove={steps => onPlanReply(plan.callId, true, steps)} onCancel={note => onPlanReply(plan.callId, false, undefined, note || undefined)} />}
-        </motion.div>)}
-        {questions.map(question => <motion.div key={`question:${question.callId}`} hidden={pendingAskUser?.callId !== question.callId} initial={false} animate={{opacity:pendingAskUser?.callId === question.callId ? 1 : 0}} transition={{duration:.15}}>
+        </m.div>)}
+        {questions.map(question => <m.div key={`question:${question.callId}`} hidden={pendingAskUser?.callId !== question.callId} initial={false} animate={{opacity:pendingAskUser?.callId === question.callId ? 1 : 0}} transition={{duration:.15}}>
           {onAskUserReply && <EmbeddedAskUserCard asker={engine?.kind === 'agent' ? engine.display_name : 'Mira'} proposal={question.proposal} onSubmit={answers => onAskUserReply(question.callId, {cancelled:false,answers})} onCancel={() => onAskUserReply(question.callId, {cancelled:true})} />}
-        </motion.div>)}
+        </m.div>)}
 
         {!activePromptKind && (
           <div className="relative">
@@ -1702,7 +1702,7 @@ function QueuedMessageStack({
   const extra = items.length - shown.length;
   return (
     <>
-    {items.length > 0 && <motion.div
+    {items.length > 0 && <m.div
       layout
       className="-mb-3 w-full max-w-3xl px-7 sm:px-8"
       initial={{ opacity: 0, y: reduceMotion ? 0 : 8 }}
@@ -1714,7 +1714,7 @@ function QueuedMessageStack({
         <div id={listId} role="list" aria-label="Queued messages" className="max-h-64 overflow-y-auto">
         <AnimatePresence initial={false}>
           {shown.map((item, index) => (
-            <motion.div
+            <m.div
               layout={!reduceMotion}
               key={item.id}
               initial={{ opacity: 0, height: 0, y: 6 }}
@@ -1775,14 +1775,14 @@ function QueuedMessageStack({
                 onMoveDown={index < items.length - 1 && editable(item) && editable(items[index + 1]) && onReorder && !moving && !saving ? () => void move(item.id, items[index + 2]?.id ?? null) : undefined}
                 onRemove={saving || moving ? undefined : onRemove}
               />}
-            </motion.div>
+            </m.div>
           ))}
         </AnimatePresence>
         </div>
         {items.length > 4 && <button type="button" aria-expanded={expanded} aria-controls={listId} onClick={() => setExpanded(value => !value)} className="flex w-full items-center gap-1.5 px-10 py-1 text-left text-[12px] text-muted-foreground hover:text-foreground">{expanded ? 'Show fewer messages' : `Show ${extra} more queued`}<ChevronDown className={cn('size-3 transition-transform', expanded && 'rotate-180')} /></button>}
         {error && <p role="alert" className="px-4 py-1 text-xs text-destructive">{error}</p>}
       </div>
-    </motion.div>}
+    </m.div>}
     <Dialog open={!!editing} onOpenChange={open => { if (!open && !saving) setEditing(null); }}>
       <DialogContent onEscapeKeyDown={event => { if (saving) event.preventDefault(); }} onPointerDownOutside={event => { if (saving) event.preventDefault(); }}>
         <DialogTitle>Edit queued message</DialogTitle>
@@ -2005,7 +2005,7 @@ function ComposerContextDock({
   onCwdSwitched?: (path: string, sessionId?: string) => void;
 }) {
   return (
-    <motion.div
+    <m.div
       layout
       className="-mb-3 w-full max-w-3xl px-4 sm:px-5"
       initial={{ opacity: 0, y: 4 }}
@@ -2024,7 +2024,7 @@ function ComposerContextDock({
         {usageRing && <UsageRing data={usageRing} />}
         <WorktreeChip cwd={cwd} onCwdSwitched={onCwdSwitched} />
       </div>
-    </motion.div>
+    </m.div>
   );
 }
 
@@ -2639,7 +2639,7 @@ function EmbeddedAskUserCard({
       <div className="border-t border-border/30" />
 
       <AnimatePresence initial={false} mode="wait">
-      <motion.div
+      <m.div
         key={clampedIdx}
         initial={{ opacity: 0, x: dir * 24 }}
         animate={{ opacity: 1, x: 0 }}
@@ -2735,7 +2735,7 @@ function EmbeddedAskUserCard({
             </div>
           )}
         </div>
-      </motion.div>
+      </m.div>
       </AnimatePresence>
 
       <div className="border-t border-border/30" />

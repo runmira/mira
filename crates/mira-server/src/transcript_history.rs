@@ -81,6 +81,14 @@ fn fingerprint(session: &str, items: &[Value]) -> String {
     }
     format!("{:016x}", hash.finish())
 }
+/// Target encoded size of one history page (before compression). A single
+/// turn larger than this is still sent whole.
+const PAGE_BYTES: usize = 1024 * 1024;
+
+fn turn_of(item: &Value) -> usize {
+    item.get("turn_index").and_then(Value::as_u64).unwrap_or(0) as usize
+}
+
 pub fn page(
     session: &str,
     items: &[Value],
@@ -110,21 +118,77 @@ pub fn page(
         .and_then(|i| i.get("turn_index"))
         .and_then(Value::as_u64)
         .unwrap_or(0) as usize;
-    let first_turn = last_turn.saturating_sub(turns.clamp(1, 50) - 1);
-    let start = items[..before]
+    let mut first_turn = last_turn.saturating_sub(turns.clamp(1, 50) - 1);
+    let mut start = items[..before]
         .iter()
-        .position(|i| {
-            i.get("turn_index").and_then(Value::as_u64).unwrap_or(0) as usize >= first_turn
-        })
+        .position(|i| turn_of(i) >= first_turn)
         .unwrap_or(before);
+    let mut page_items = items[start..before].to_vec();
+    for item in &mut page_items {
+        if let Some(message) = item.get_mut("message") {
+            externalize_images(session, message);
+        }
+    }
+    // Byte budget: drop whole older turns while the page is over it, but
+    // always keep the newest turn. Older turns come with the next page.
+    let sizes: Vec<usize> = page_items.iter().map(|i| i.to_string().len()).collect();
+    let mut total: usize = sizes.iter().sum();
+    let mut cut = 0;
+    while total > PAGE_BYTES {
+        let turn = turn_of(&page_items[cut]);
+        let Some(next) = page_items[cut..].iter().position(|i| turn_of(i) != turn) else {
+            break;
+        };
+        total -= sizes[cut..cut + next].iter().sum::<usize>();
+        cut += next;
+    }
+    if cut > 0 {
+        page_items.drain(..cut);
+        start += cut;
+        first_turn = page_items.first().map_or(first_turn, turn_of);
+    }
     Ok(TranscriptPage {
-        items: items[start..before].to_vec(),
+        items: page_items,
         next_cursor: (start > 0)
             .then(|| format!("{start}:{}", fingerprint(session, &items[..start]))),
         total_turns,
         first_turn,
     })
 }
+/// Images at or below this size stay inline; small ones aren't worth a
+/// round trip.
+const INLINE_IMAGE_MAX: usize = 16 * 1024;
+
+/// Stable key for an image's base64 payload, used in its URL.
+pub fn image_key(data: &str) -> String {
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    data.hash(&mut hash);
+    format!("{:016x}{:x}", hash.finish(), data.len())
+}
+
+/// Swap a message's large inline images for URLs the browser fetches (and
+/// caches) when they scroll into view. Computer-use screenshots are ~1 MB
+/// of base64 each and dominate transcript size; sent inline, a handful of
+/// them made opening a chat multi-megabyte. The client renders `url` when
+/// `data` is empty. Resend/fork never ship images back, so nothing depends
+/// on the client holding the bytes.
+pub fn externalize_images(session: &str, message: &mut Value) {
+    let Some(images) = message.get_mut("images").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for image in images {
+        let Some(data) = image.get("data").and_then(Value::as_str) else {
+            continue;
+        };
+        if data.len() <= INLINE_IMAGE_MAX {
+            continue;
+        }
+        let url = format!("/api/sessions/{session}/images/{}", image_key(data));
+        image["url"] = json!(url);
+        image["data"] = json!("");
+    }
+}
+
 pub fn latest_state(lines: &[Value]) -> Vec<Value> {
     let mut state = std::collections::BTreeMap::new();
     for line in lines {
@@ -142,6 +206,50 @@ pub fn latest_state(lines: &[Value]) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn user_turn(text: &str, image_bytes: usize) -> Vec<mira_core::Message> {
+        let mut user = mira_core::Message::user(text);
+        if image_bytes > 0 {
+            user.images = vec![mira_core::ImageData::png("A".repeat(image_bytes))];
+        }
+        vec![user, mira_core::Message::assistant("ok")]
+    }
+
+    #[test]
+    fn large_images_become_urls_and_small_ones_stay_inline() {
+        let mut messages = user_turn("big", 64 * 1024);
+        messages.extend(user_turn("small", 100));
+        let items = interleave(&messages, &[]);
+        let page = page("s1", &items, None, 20).unwrap();
+        let big = &page.items[0]["message"]["images"][0];
+        assert_eq!(big["data"], "");
+        let key = image_key(&"A".repeat(64 * 1024));
+        assert_eq!(big["url"], format!("/api/sessions/s1/images/{key}"));
+        let small = &page.items[2]["message"]["images"][0];
+        assert_eq!(small["data"].as_str().unwrap().len(), 100);
+        assert!(small.get("url").is_none());
+    }
+
+    #[test]
+    fn byte_budget_drops_older_turns_but_keeps_the_newest() {
+        // Each turn's text alone is ~0.4 MiB, so 20 turns can't fit in one page.
+        let mut messages = Vec::new();
+        for i in 0..5 {
+            messages.extend(user_turn(&format!("{i}{}", "x".repeat(400 * 1024)), 0));
+        }
+        let items = interleave(&messages, &[]);
+        let first = page("s1", &items, None, 20).unwrap();
+        assert!(first.items.len() < items.len());
+        assert_eq!(first.first_turn, 3);
+        assert_eq!(first.items.last().unwrap()["turn_index"], 4);
+        // The cursor picks up exactly where the budget cut.
+        let older = page("s1", &items, first.next_cursor.as_deref(), 20).unwrap();
+        assert_eq!(older.items.last().unwrap()["turn_index"], 2);
+
+        // A single turn over budget is still sent whole.
+        let huge = interleave(&user_turn(&"y".repeat(2 << 20), 0), &[]);
+        assert_eq!(page("s1", &huge, None, 20).unwrap().items.len(), 2);
+    }
     #[test]
     fn steering_keeps_provider_and_native_messages_in_the_existing_turn() {
         let mut steer = mira_core::Message::user("continue differently");

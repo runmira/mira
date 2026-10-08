@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { AlarmClock, ArrowRight, BellOff, Check, Gauge, LoaderCircle, X } from 'lucide-react';
-import { motion, useReducedMotion } from 'framer-motion';
+import { m, useReducedMotion } from 'framer-motion';
 import type { QueuedInput } from '../types';
 
 export type RecoveryAction = 'schedule' | 'retry' | 'cancel' | 'snooze' | 'show' | 'dismiss';
@@ -23,7 +23,7 @@ export function UsageRecoveryCard({ item, disabled, onAction }: { item: QueuedIn
     finally { setPending(null); }
   }
   const muted = recovery.snoozed && future;
-  return <motion.section aria-label="Usage limit recovery" initial={reduced ? false : { opacity: 0, y: 5 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: .18 }} className="mt-2 overflow-hidden rounded-2xl border border-border bg-background text-foreground">
+  return <m.section aria-label="Usage limit recovery" initial={reduced ? false : { opacity: 0, y: 5 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: .18 }} className="mt-2 overflow-hidden rounded-2xl border border-border bg-background text-foreground">
     <div className="flex items-start gap-3 p-4">
       <span className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-amber-500/10 text-amber-700 dark:text-amber-400"><Gauge className="size-[18px]" /></span>
       <div className="min-w-0 flex-1">
@@ -43,5 +43,5 @@ export function UsageRecoveryCard({ item, disabled, onAction }: { item: QueuedIn
     </div>}
     {item.error && <div className="border-t border-border px-4 py-3"><p className="mb-2 text-[12px] text-muted-foreground">Check the transcript before sending a new message. Automatic delivery is paused.</p><button disabled={disabled || !!pending} onClick={() => void act('dismiss')} className="text-[12px] font-medium hover:underline">Dismiss recovery</button></div>}
     {(error || disabled) && <p role={error ? 'alert' : undefined} className="px-4 pb-3 text-[12px] text-muted-foreground">{error ?? 'Reconnect or wait for the active turn to finish to change recovery.'}</p>}
-  </motion.section>;
+  </m.section>;
 }

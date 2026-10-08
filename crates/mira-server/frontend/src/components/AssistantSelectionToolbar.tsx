@@ -7,7 +7,7 @@ type Captured = { text: string; turn: string; range: Range; citation: SourceCita
 /** Viewport coordinates belong in a body portal: transcript transforms and
  * scroll containers must never change the selection toolbar's origin. */
 export function AssistantSelectionToolbar({ pane, sessionId, onQuote, onAskAside }: {
-  pane: RefObject<HTMLDivElement>; sessionId: string | null;
+  pane: RefObject<HTMLDivElement | null>; sessionId: string | null;
   onQuote: (text: string, turn: string, href: string) => void;
   /** Open the side chat about this passage. */
   onAskAside?: (text: string) => void;

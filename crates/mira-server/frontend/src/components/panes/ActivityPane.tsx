@@ -15,7 +15,7 @@ import {
   Search,
   Terminal,
 } from 'lucide-react';
-import type { Entry } from '../../App';
+import type { Entry } from '../../transcript/entries';
 import type { DiffPreview } from '../../types';
 import { categoryFor, targetOf } from '../ToolGroup';
 import { cn } from '@/lib/utils';

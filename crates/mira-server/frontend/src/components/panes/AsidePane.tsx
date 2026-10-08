@@ -9,7 +9,7 @@
  */
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { ArrowUp, Check, Copy, CornerDownLeft, MessageCircleQuestion, Quote, Square, Trash2, X } from 'lucide-react';
-import type { Entry } from '../../App';
+import type { Entry } from '../../transcript/entries';
 import { Markdown } from '../Markdown';
 import { composeText, getAsidePassage, setAsidePassage, subscribeAsidePassage } from '@/lib/attachBridge';
 import { postNdjson, sessionQuery } from '@/lib/ndjson';

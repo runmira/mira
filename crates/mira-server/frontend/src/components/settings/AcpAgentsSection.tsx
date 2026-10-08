@@ -24,7 +24,7 @@
  * or a secret-looking env value, and starting an agent sends no settings.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { motion } from 'framer-motion';
+import { m } from 'framer-motion';
 import { AlertCircle, Check, Key, Loader2, RefreshCw, Terminal } from 'lucide-react';
 import type { AcpAgentStatus } from '../../types';
 import { AgentHistoryImport } from './AgentHistoryImport';
@@ -139,7 +139,7 @@ function Switch({
         on ? 'bg-mira-blue' : 'bg-muted-foreground/25 hover:bg-muted-foreground/35',
       ].join(' ')}
     >
-      <motion.span
+      <m.span
         layout
         transition={{ type: 'spring', stiffness: 500, damping: 34 }}
         className={[
