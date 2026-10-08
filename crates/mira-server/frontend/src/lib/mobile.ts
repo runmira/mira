@@ -46,6 +46,9 @@ export function trackVisibleViewport() {
   update();
 }
 
+/** Portalled layers (popovers, menus, nested dialogs) that handle their own keys. */
+const NESTED_LAYER = '[data-radix-popper-content-wrapper], [role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"]';
+
 const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"]), [contenteditable="true"]';
 
 /**
@@ -62,6 +65,11 @@ export function useModalFocus(open: boolean, ref: RefObject<HTMLElement | null>,
     const focusables = () => Array.from(panel.querySelectorAll<HTMLElement>(FOCUSABLE)).filter((el) => el.offsetParent !== null);
     (focusables()[0] ?? panel).focus({ preventScroll: true });
     const onKey = (e: KeyboardEvent) => {
+      // A menu or popup opened from the panel renders outside it (in a
+      // portal) and owns its keys: Tab moves between its items, Escape
+      // closes it, not the panel.
+      const active = document.activeElement;
+      if (active && !panel.contains(active) && active.closest(NESTED_LAYER)) return;
       if (e.key === 'Escape') {
         e.preventDefault();
         onClose();
@@ -75,7 +83,6 @@ export function useModalFocus(open: boolean, ref: RefObject<HTMLElement | null>,
       }
       const first = items[0];
       const last = items[items.length - 1];
-      const active = document.activeElement;
       if (e.shiftKey && (active === first || !panel.contains(active))) {
         e.preventDefault();
         last.focus();
@@ -84,9 +91,12 @@ export function useModalFocus(open: boolean, ref: RefObject<HTMLElement | null>,
         first.focus();
       }
     };
-    document.addEventListener('keydown', onKey);
+    // Capture phase: a popup closes itself on Escape (moving focus back
+    // into the panel) in its own document listener, so checking afterwards
+    // would close the panel along with it.
+    document.addEventListener('keydown', onKey, true);
     return () => {
-      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('keydown', onKey, true);
       previous?.focus?.({ preventScroll: true });
     };
   }, [open, ref, onClose]);
