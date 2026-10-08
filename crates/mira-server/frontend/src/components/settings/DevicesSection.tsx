@@ -23,6 +23,8 @@ export function DevicesSection() {
   const [justPaired, setJustPaired] = useState<PairedDevice | null>(null);
   const [remote, setRemote] = useState<RemoteStatus | null>(null);
   const [remoteBusy, setRemoteBusy] = useState(false);
+  const pairingStarting = useRef(false);
+  const [pairingBusy, setPairingBusy] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -83,17 +85,24 @@ export function DevicesSection() {
   }, [pairing, refresh]);
 
   async function startPairing() {
+    if (pairingStarting.current) return;
+    pairingStarting.current = true;
+    setPairingBusy(true);
     setJustPaired(null);
-    // A phone can only reach this computer with remote access on, so
-    // pairing turns it on: one click, not two.
-    if (remote && !remote.enabled && remote.supported && remoteAccessAvailable()) {
-      if (!(await setRemoteAccess(true))) return;
-    }
     try {
+      // A phone needs remote access before it can reach this computer.
+      if (remote && !remote.enabled && remote.supported && remoteAccessAvailable()) {
+        if (!(await setRemoteAccess(true))) return;
+      }
+      const baseline = await refresh();
+      if (!baseline) return;
       const { code, expires_at } = await openPairingCode();
-      setPairing({ code, expiresAt: expires_at, known: new Set(view?.devices.map((d) => d.id)) });
+      setPairing({ code, expiresAt: expires_at, known: new Set(baseline.devices.map((d) => d.id)) });
     } catch (e) {
       setError((e as Error).message);
+    } finally {
+      pairingStarting.current = false;
+      setPairingBusy(false);
     }
   }
 
@@ -142,11 +151,11 @@ export function DevicesSection() {
         <button
           type="button"
           onClick={() => void startPairing()}
-          disabled={remoteBusy}
+          disabled={remoteBusy || pairingBusy}
           className="group flex w-full items-center gap-4 rounded-2xl border border-dashed border-border/70 bg-fg/[0.015] p-5 text-left transition-all hover:-translate-y-0.5 hover:border-mira-blue/50 hover:bg-mira-blue/[0.04]"
         >
           <div className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-mira-blue/[0.12] text-mira-blue transition-transform group-hover:scale-105">
-            {remoteBusy ? <Loader2 className="size-5 animate-spin" /> : <Plus className="size-5" />}
+            {remoteBusy || pairingBusy ? <Loader2 className="size-5 animate-spin" /> : <Plus className="size-5" />}
           </div>
           <div className="min-w-0">
             <div className="text-[14px] font-medium text-foreground">Pair a new device</div>

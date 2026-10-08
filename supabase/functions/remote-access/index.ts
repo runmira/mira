@@ -60,7 +60,7 @@ async function user(req: Request) {
 }
 
 /** A Cloudflare API call; throws a readable error on failure. */
-async function cf(path: string, init: RequestInit = {}) {
+async function cf(path: string, init: RequestInit = {}, allowMissing = false) {
   if (!CF_TOKEN) throw new HttpError(503, "Remote access isn't set up on the server yet.");
   const res = await fetch(`${CF}${path}`, {
     ...init,
@@ -69,6 +69,7 @@ async function cf(path: string, init: RequestInit = {}) {
       ...(init.body ? { "Content-Type": "application/json" } : {}),
     },
   });
+  if (allowMissing && res.status === 404) return null;
   const body = await res.json().catch(() => null);
   if (!res.ok || body?.success === false) {
     const msg = body?.errors?.map((e: { message: string }) => e.message).join("; ") || res.status;
@@ -123,47 +124,54 @@ async function enable(req: Request) {
   const machine = machineId(body.machine_id);
   const p = port(body.port);
 
-  const { data: existing } = await db
+  const { data: existing, error: lookupError } = await db
     .from("remote_tunnels")
     .select("tunnel_id, hostname, port")
     .eq("user_id", u.id)
     .eq("machine_id", machine)
     .maybeSingle();
 
+  if (lookupError) throw new HttpError(500, lookupError.message);
   if (existing) {
     if (existing.port !== p) {
       await configure(existing.tunnel_id, existing.hostname, p);
-      await db
+      const { error } = await db
         .from("remote_tunnels")
         .update({ port: p, updated_at: new Date().toISOString() })
         .eq("user_id", u.id)
         .eq("machine_id", machine);
+      if (error) throw new HttpError(500, `Couldn't update the tunnel: ${error.message}`);
     }
     return json({ hostname: existing.hostname, token: await connectorToken(existing.tunnel_id) });
   }
 
-  const { count } = await db
-    .from("remote_tunnels")
-    .select("machine_id", { count: "exact", head: true })
-    .eq("user_id", u.id);
-  if ((count ?? 0) >= MAX_MACHINES) {
-    throw new HttpError(409, `Remote access is on for ${MAX_MACHINES} computers already. Turn it off on one first.`);
+  // The database reserves capacity before any Cloudflare resources are made.
+  const { data: claim, error: claimError } = await db.rpc("claim_remote_tunnel_slot", {
+    owner_id: u.id, computer_id: machine,
+  });
+  if (claimError) throw new HttpError(500, claimError.message);
+  if (claim !== "claimed") {
+    throw new HttpError(409, claim === "full"
+      ? `Remote access is on for ${MAX_MACHINES} computers already. Turn it off on one first.`
+      : "Remote access is already being enabled for this computer. Try again shortly.");
   }
 
   const label = `m-${randomLabel()}`;
   const hostname = `${label}.${DOMAIN}`;
-  const tunnel = await cf(`/accounts/${ACCOUNT}/cfd_tunnel`, {
-    method: "POST",
-    body: JSON.stringify({ name: `mira-${label}`, config_src: "cloudflare" }),
-  });
+  let tunnel: { id: string } | undefined;
+  let record: { id: string } | undefined;
   try {
-    await configure(tunnel.id, hostname, p);
-    const record = await cf(`/zones/${ZONE}/dns_records`, {
+    tunnel = await cf(`/accounts/${ACCOUNT}/cfd_tunnel`, {
+      method: "POST",
+      body: JSON.stringify({ name: `mira-${label}`, config_src: "cloudflare" }),
+    });
+    await configure(tunnel!.id, hostname, p);
+    record = await cf(`/zones/${ZONE}/dns_records`, {
       method: "POST",
       body: JSON.stringify({
         type: "CNAME",
         name: hostname,
-        content: `${tunnel.id}.cfargotunnel.com`,
+        content: `${tunnel!.id}.cfargotunnel.com`,
         proxied: true,
         ttl: 1,
         comment: "Mira remote access",
@@ -172,43 +180,44 @@ async function enable(req: Request) {
     const { error } = await db.from("remote_tunnels").insert({
       user_id: u.id,
       machine_id: machine,
-      tunnel_id: tunnel.id,
+      tunnel_id: tunnel!.id,
       hostname,
-      dns_record_id: record.id,
+      dns_record_id: record!.id,
       port: p,
     });
-    if (error) {
-      await cf(`/zones/${ZONE}/dns_records/${record.id}`, { method: "DELETE" }).catch(() => {});
-      throw new HttpError(500, `Couldn't save the tunnel: ${error.message}`);
-    }
+    if (error) throw new HttpError(500, `Couldn't save the tunnel: ${error.message}`);
   } catch (e) {
-    // Don't leave a half-made tunnel behind.
-    await cf(`/accounts/${ACCOUNT}/cfd_tunnel/${tunnel.id}`, { method: "DELETE" }).catch(() => {});
+    // Keep the reservation if cleanup fails, so retries cannot exceed the cap.
+    if (record) await cf(`/zones/${ZONE}/dns_records/${record.id}`, { method: "DELETE" }, true);
+    if (tunnel) await cf(`/accounts/${ACCOUNT}/cfd_tunnel/${tunnel.id}`, { method: "DELETE" }, true);
+    const { error } = await db.rpc("release_remote_tunnel_slot", { owner_id: u.id, computer_id: machine });
+    if (error) throw new HttpError(500, `Couldn't release the tunnel reservation: ${error.message}`);
     throw e;
   }
-  return json({ hostname, token: await connectorToken(tunnel.id) });
+  return json({ hostname, token: await connectorToken(tunnel!.id) });
 }
 
 async function disable(req: Request) {
   const u = await user(req);
   const body = await req.json().catch(() => ({}));
   const machine = machineId(body.machine_id);
-  const { data: row } = await db
+  const { data: row, error: lookupError } = await db
     .from("remote_tunnels")
     .select("tunnel_id, dns_record_id")
     .eq("user_id", u.id)
     .eq("machine_id", machine)
     .maybeSingle();
+  if (lookupError) throw new HttpError(500, lookupError.message);
   if (!row) return json({ ok: true });
 
   if (row.dns_record_id) {
-    await cf(`/zones/${ZONE}/dns_records/${row.dns_record_id}`, { method: "DELETE" });
-  }
+    await cf(`/zones/${ZONE}/dns_records/${row.dns_record_id}`, { method: "DELETE" }, true);
   }
   // A tunnel with live connections can't be deleted; drop them first.
   await cf(`/accounts/${ACCOUNT}/cfd_tunnel/${row.tunnel_id}/connections`, { method: "DELETE" }).catch(() => {});
-  await cf(`/accounts/${ACCOUNT}/cfd_tunnel/${row.tunnel_id}`, { method: "DELETE" });
-  await db.from("remote_tunnels").delete().eq("user_id", u.id).eq("machine_id", machine);
+  await cf(`/accounts/${ACCOUNT}/cfd_tunnel/${row.tunnel_id}`, { method: "DELETE" }, true);
+  const { error } = await db.rpc("release_remote_tunnel_slot", { owner_id: u.id, computer_id: machine });
+  if (error) throw new HttpError(500, `Couldn't remove the tunnel: ${error.message}`);
   return json({ ok: true });
 }
 
