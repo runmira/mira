@@ -19,7 +19,7 @@ export function UpdateButton() {
   const [selected, setSelected] = useState<UpdateInfo | null>(null);
   const update = selected ?? u.update;
   const changeOpen = (value: boolean) => { setOpen(value); if (!value) { setSelected(null); u.resetError(); } };
-  const early = useEarlyReleases(isDesktop());
+  const early = useEarlyReleases(isDesktop() && open, u.checkedAt);
   const selectRelease = (release: UpdateInfo) => { u.resetError(); setSelected(release); };
   const earlyReleases = isDesktop() ? <EarlyReleases current={u.current} channel={u.channel} onSelect={selectRelease} state={early} /> : null;
   const tip = update
@@ -101,7 +101,7 @@ function ReleaseChannelIcon({ channel }: { channel: EarlyChannel }) {
   );
 }
 
-function useEarlyReleases(enabled: boolean) {
+function useEarlyReleases(enabled: boolean, checkedAt: number | null) {
   const [expanded, setExpanded] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const [results, setResults] = useState<Partial<Record<EarlyChannel, ChannelResult>>>({});
@@ -119,7 +119,7 @@ function useEarlyReleases(enabled: boolean) {
       });
     }
     return () => { live = false; };
-  }, [enabled, attempt]);
+  }, [enabled, checkedAt, attempt]);
   return { expanded, setExpanded, results, retry: () => setAttempt(value => value + 1) };
 }
 
