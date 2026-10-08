@@ -325,6 +325,37 @@ fn remember_external_snapshot(snapshot: EngineSnapshot) {
     }
 }
 
+/// After an agent's settings change, carry its new name and on/off switch
+/// into the cached probe rows. Probe facts (installed, signed in) don't
+/// change with them, so there is nothing to re-probe.
+pub fn refresh_cached_flags(state: &AppState, instance: &str) {
+    let engines = state.engines.current();
+    let Some(inst) = engines.get(instance) else {
+        return;
+    };
+    let name = inst.display_name.clone().unwrap_or_else(|| {
+        mira_acp::drivers::by_kind(inst.driver.as_str())
+            .map(|d| d.display_name().to_string())
+            .unwrap_or_else(|| instance.to_string())
+    });
+    let patch = |s: &mut EngineSnapshot| {
+        if s.instance.as_str() == instance {
+            s.enabled = inst.enabled;
+            s.display_name = name.clone();
+        }
+    };
+    if let Ok(mut cache) = EXTERNAL.lock() {
+        if let Some(hit) = cache.as_mut() {
+            hit.snapshots.iter_mut().for_each(patch);
+        }
+    }
+    if let Ok(mut partial) = PARTIAL.lock() {
+        if let Some(rows) = partial.as_mut() {
+            rows.values_mut().for_each(patch);
+        }
+    }
+}
+
 /// Per-instance catalogs for providers other than the active one.
 type Catalogs = std::collections::HashMap<String, (Instant, Vec<mira_ai::ModelInfo>)>;
 static INSTANCE_CATALOGS: Mutex<Option<Catalogs>> = Mutex::new(None);

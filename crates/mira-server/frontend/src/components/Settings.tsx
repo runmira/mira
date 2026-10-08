@@ -67,7 +67,7 @@ import { ChartColumn } from 'lucide-react';
 import { HooksSection } from './Hooks';
 import { KeybindingsSection } from './settings/KeybindingsSettings';
 import { Collapse } from './ui/Collapse';
-import { AcpAgentsSection, type AcpInstanceConfig } from './settings/AcpAgentsSection';
+import { AcpAgentsSection } from './settings/AcpAgentsSection';
 import { SubagentsSection } from './settings/SubagentsSection';
 import { ImportChats } from './ImportChats';
 import type { AcpAgentStatus, SessionsSettings } from '../types';
@@ -245,7 +245,7 @@ type SurfaceProps = {
   acpDriver?: string | null;
   acpError?: string | null;
   onAcpRefresh?: () => void;
-  onAcpStart?: (kind: string, cfg: AcpInstanceConfig, resume?: string | null) => void;
+  onAcpStart?: (kind: string, resume?: string | null) => void;
 };
 
 type Draft = {

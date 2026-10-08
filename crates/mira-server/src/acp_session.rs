@@ -135,6 +135,17 @@ pub async fn start_agent(
         .ok_or_else(|| format!("unknown agent: {}", params.driver_kind))?;
     let driver = driver.as_ref();
     let mut driver_cfg = params.cfg.clone();
+    // Secrets are never written to a session record, so a chat restored
+    // after a restart comes back without its key. The engine's config in
+    // mira.yaml is the one place they live; fill in what's missing from it.
+    if let Some(current) = state.engines.current().external_driver_config(&params.instance) {
+        if driver_cfg.api_key.is_none() {
+            driver_cfg.api_key = current.api_key;
+        }
+        for (k, v) in current.env {
+            driver_cfg.env.entry(k).or_insert(v);
+        }
+    }
     let mode = params.mode;
     // Where the binary lives. `binary_path` in the driver config wins;
     // otherwise the driver's own name on PATH.

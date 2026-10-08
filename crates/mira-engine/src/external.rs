@@ -16,7 +16,7 @@ use crate::instance::EngineInstance;
 /// Build a launch config from an instance's opaque blob.
 ///
 /// Recognized keys (all optional): `binary_path`, `launch_args`,
-/// `env`, `home_path`, `api_key`, `effort`, `setting_sources`,
+/// `env`, `home_path`, `api_key` or `api_key_env`, `effort`, `setting_sources`,
 /// `auto_compact_after`. Wrong-typed values degrade to the default
 /// rather than failing the whole instance — a typo in one field should
 /// not hide the other five.
@@ -49,7 +49,13 @@ pub fn driver_config_for(inst: &EngineInstance) -> DriverConfig {
                     .collect()
             })
             .unwrap_or_default(),
-        api_key: str_field("api_key"),
+        // A literal key wins; `api_key_env` names a variable in Mira's own
+        // environment to read it from at launch.
+        api_key: str_field("api_key").filter(|k| !k.is_empty()).or_else(|| {
+            str_field("api_key_env")
+                .and_then(|name| std::env::var(name).ok())
+                .filter(|k| !k.is_empty())
+        }),
         effort: str_field("effort"),
         setting_sources: str_field("setting_sources"),
     }
@@ -120,6 +126,22 @@ mod tests {
         assert!(dc.launch_args.is_empty());
         assert!(dc.env.is_empty());
         assert_eq!(dc.api_key.as_deref(), Some("still-fine"));
+    }
+
+    #[test]
+    fn api_key_env_reads_the_named_variable_and_a_literal_key_wins() {
+        // PATH is set in every test environment; it stands in for a key var.
+        let path = std::env::var("PATH").unwrap();
+        let dc = driver_config_for(&instance("\n      api_key_env: PATH\n"));
+        assert_eq!(dc.api_key.as_deref(), Some(path.as_str()));
+        let dc = driver_config_for(&instance(
+            "\n      api_key: sk-literal\n      api_key_env: PATH\n",
+        ));
+        assert_eq!(dc.api_key.as_deref(), Some("sk-literal"));
+        let dc = driver_config_for(&instance(
+            "\n      api_key_env: MIRA_TEST_SURELY_UNSET_VAR\n",
+        ));
+        assert!(dc.api_key.is_none());
     }
 
     #[test]

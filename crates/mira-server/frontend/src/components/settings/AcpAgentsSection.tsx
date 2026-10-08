@@ -15,36 +15,98 @@
  * So the two are siblings, cross-referenced from both sides, and this list
  * says plainly that keys here do not come from Provider.
  *
- * # Why the config lives client-side
+ * # Where the config lives
  *
- * An agent's binary path, config dir and launch args describe how to run a
- * third-party binary *on this machine* — a local concern, unlike provider
- * credentials which the server needs in order to call an API. So it persists
- * in `localStorage` and travels with the start request, rather than joining
- * the server's settings blob.
+ * On the server, in mira.yaml's `engines:` block, through
+ * `/api/engines/:id/settings`. It used to live in `localStorage` and travel
+ * with every start, API key included (#79): anything running in the page
+ * could read the key. Now the browser only ever sees a masked copy of a key
+ * or a secret-looking env value, and starting an agent sends no settings.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
-import { AlertCircle, Check, Loader2, RefreshCw, Terminal } from 'lucide-react';
+import { AlertCircle, Check, Key, Loader2, RefreshCw, Terminal } from 'lucide-react';
 import type { AcpAgentStatus } from '../../types';
 import { AgentHistoryImport } from './AgentHistoryImport';
 import { AgentIcon } from '../AgentIcon';
 import { openExternal } from '@/lib/desktop';
 import { PrivateText, redactEmails } from '../PrivateText';
 import {
+  argsToText,
   describeAgentStatus,
-  loadInstanceConfigs,
   parseArgs,
   parseEnv,
-  saveInstanceConfigs,
-  type AcpInstanceConfig,
   type AgentHealthTone,
 } from '../../lib/acpAgents';
+import { getAgentSettings, putAgentSettings, type AgentSettings, type AgentSettingsPatch } from '../../api';
 
-// Kept here so existing imports keep working; the implementation lives in
-// lib/acpAgents.ts, shared with the sidebar.
-export type { AcpInstanceConfig } from '../../lib/acpAgents';
-export { loadInstanceConfigs, saveInstanceConfigs };
+/**
+ * The editable form of an agent's settings. Text fields are edited as
+ * typed and saved shortly after typing stops; `envText` shows masked
+ * secrets as their masks, which save back as "keep" unless edited.
+ */
+type Draft = {
+  displayName: string;
+  binaryPath: string;
+  homePath: string;
+  launchArgs: string;
+  envText: string;
+  effort: string;
+  settingSources: string;
+  enabled: boolean;
+};
+
+function draftFrom(v: AgentSettings): Draft {
+  return {
+    displayName: v.display_name ?? '',
+    binaryPath: v.binary_path ?? '',
+    homePath: v.home_path ?? '',
+    launchArgs: argsToText(v.launch_args),
+    envText: v.env.map((e) => `${e.key}=${e.value ?? e.masked ?? ''}`).join('\n'),
+    effort: v.effort ?? '',
+    settingSources: v.setting_sources ?? '',
+    enabled: v.enabled,
+  };
+}
+
+/** The env edit as a patch: a masked secret left as its mask means keep. */
+export function envPatch(text: string, view: AgentSettings): Record<string, string | null> {
+  const parsed = parseEnv(text);
+  return Object.fromEntries(
+    Object.entries(parsed).map(([k, v]) => {
+      const stored = view.env.find((e) => e.key === k);
+      return [k, stored?.masked !== undefined && v === stored.masked ? null : v];
+    }),
+  );
+}
+
+/** Only what changed between the saved view and the draft. */
+function patchFrom(prev: Draft, next: Draft, view: AgentSettings): AgentSettingsPatch {
+  const p: AgentSettingsPatch = {};
+  if (prev.displayName !== next.displayName) p.display_name = next.displayName;
+  if (prev.binaryPath !== next.binaryPath) p.binary_path = next.binaryPath;
+  if (prev.homePath !== next.homePath) p.home_path = next.homePath;
+  if (prev.launchArgs !== next.launchArgs) p.launch_args = parseArgs(next.launchArgs);
+  if (prev.envText !== next.envText) p.env = envPatch(next.envText, view);
+  if (prev.effort !== next.effort) p.effort = next.effort;
+  if (prev.settingSources !== next.settingSources) p.setting_sources = next.settingSources;
+  if (prev.enabled !== next.enabled) p.enabled = next.enabled;
+  return p;
+}
+
+const EMPTY_DRAFT: Draft = {
+  displayName: '',
+  binaryPath: '',
+  homePath: '',
+  launchArgs: '',
+  envText: '',
+  effort: '',
+  settingSources: '',
+  enabled: true,
+};
+
+/** Fields that save on every change rather than after typing stops. */
+const IMMEDIATE: (keyof Draft)[] = ['enabled', 'effort'];
 
 type Tone = AgentHealthTone;
 
@@ -189,6 +251,145 @@ function HowAgentsWork() {
 const ENGINES_DOC = 'https://github.com/runmira/mira/blob/main/docs/engines.md';
 
 /**
+ * The agent's API key, Provider-tab style: a saved key shows as a masked
+ * badge with Replace and Remove; typing a new one saves only on Save, never
+ * per keystroke. The key goes to the server and never comes back.
+ */
+function AgentKeyField({
+  agent,
+  view,
+  saveKey,
+}: {
+  agent: AcpAgentStatus;
+  view: AgentSettings;
+  saveKey: (kind: string, patch: Pick<AgentSettingsPatch, 'api_key' | 'api_key_env'>) => Promise<void>;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [mode, setMode] = useState<'key' | 'env'>('key');
+  const [value, setValue] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const vars = view.api_key_vars;
+
+  if (vars.length === 0) {
+    return (
+      <Field label="API key">
+        <div className="text-[11.5px] text-muted-foreground/70">
+          {agent.display_name} signs in through its own CLI and doesn't take a key.
+        </div>
+      </Field>
+    );
+  }
+
+  const save = async (patch: Pick<AgentSettingsPatch, 'api_key' | 'api_key_env'>) => {
+    setBusy(true);
+    setErr(null);
+    try {
+      await saveKey(agent.kind, patch);
+      setEditing(false);
+      setValue('');
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const saved = view.has_api_key
+    ? { icon: <Check className="size-3.5" />, label: 'Key saved', shown: view.api_key_masked ?? '' }
+    : view.api_key_env
+      ? { icon: <Key className="size-3.5" />, label: 'From variable', shown: `$${view.api_key_env}` }
+      : null;
+
+  return (
+    <Field
+      label="API key"
+      hint={`Optional; without one ${agent.display_name} uses its own sign-in. Passed to it as ${vars.join(' / ')}. Stored in ~/.mira/mira.yaml on this computer, never in the browser.`}
+    >
+      {saved && !editing ? (
+        <div className="flex items-center gap-2 rounded-lg border border-border/80 bg-background/60 px-3 py-1.5 text-[12px]">
+          <span className={view.has_api_key ? 'text-emerald-500' : 'text-mira-blue'}>{saved.icon}</span>
+          <span className="text-muted-foreground">{saved.label}</span>
+          <span className="min-w-0 flex-1 truncate font-mono text-[11.5px]">{saved.shown}</span>
+          <button
+            type="button"
+            onClick={() => {
+              setMode(view.api_key_env && !view.has_api_key ? 'env' : 'key');
+              setEditing(true);
+            }}
+            className="rounded-md px-2 py-0.5 text-[11.5px] text-muted-foreground hover:bg-fg/[0.06] hover:text-foreground"
+          >
+            Replace
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void save({ api_key: '', api_key_env: '' })}
+            className="rounded-md px-2 py-0.5 text-[11.5px] text-muted-foreground hover:bg-destructive/10 hover:text-destructive disabled:opacity-50"
+          >
+            Remove
+          </button>
+        </div>
+      ) : (
+        <form
+          className="space-y-1.5"
+          onSubmit={(e) => {
+            e.preventDefault();
+            const v = value.trim();
+            if (!v) return;
+            // A key and a variable are alternatives: setting one clears the other.
+            void save(mode === 'key' ? { api_key: v, api_key_env: '' } : { api_key_env: v, api_key: '' });
+          }}
+        >
+          <div className="flex gap-2">
+            <input
+              className={inputCls + ' font-mono text-[11.5px]'}
+              type={mode === 'key' ? 'password' : 'text'}
+              value={value}
+              autoComplete="off"
+              spellCheck={false}
+              autoFocus={editing}
+              placeholder={mode === 'key' ? (view.api_key_masked ? `replaces ${view.api_key_masked}` : 'sk-…') : vars[0]}
+              onChange={(e) => setValue(e.target.value)}
+            />
+            <button
+              type="submit"
+              disabled={busy || !value.trim()}
+              className="shrink-0 rounded-lg border border-border/80 px-3 text-[11.5px] hover:bg-muted/50 disabled:opacity-50"
+            >
+              {busy ? 'Saving' : 'Save'}
+            </button>
+            {saved && (
+              <button
+                type="button"
+                onClick={() => {
+                  setEditing(false);
+                  setValue('');
+                  setErr(null);
+                }}
+                className="shrink-0 rounded-lg px-2 text-[11.5px] text-muted-foreground hover:text-foreground"
+              >
+                Cancel
+              </button>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setMode((m) => (m === 'key' ? 'env' : 'key'));
+              setValue('');
+            }}
+            className="text-[11px] text-muted-foreground/75 underline decoration-dotted underline-offset-2 hover:text-foreground"
+          >
+            {mode === 'key' ? "Read it from an environment variable instead" : 'Paste a key instead'}
+          </button>
+          {err && <Note text={err} tone="error" />}
+        </form>
+      )}
+    </Field>
+  );
+}
+
+/**
  * One agent's full detail: status, config, start, history import.
  *
  * Rendered in the right pane for whichever agent the left list selects —
@@ -199,27 +400,32 @@ const ENGINES_DOC = 'https://github.com/runmira/mira/blob/main/docs/engines.md';
 function AgentDetail({
   agent,
   cfg,
+  view,
   update,
+  saveKey,
   onStart,
 }: {
   agent: AcpAgentStatus;
-  cfg: AcpInstanceConfig;
-  update: (kind: string, patch: Partial<AcpInstanceConfig>) => void;
-  onStart: (kind: string, cfg: AcpInstanceConfig, resume?: string | null) => void;
+  cfg: Draft;
+  view: AgentSettings | null;
+  update: (kind: string, patch: Partial<Draft>) => void;
+  saveKey: (kind: string, patch: Pick<AgentSettingsPatch, 'api_key' | 'api_key_env'>) => Promise<void>;
+  onStart: (kind: string, resume?: string | null) => void;
 }) {
   return (
-    <div className="space-y-3.5">
+    // Disabled until the server's copy loads, so nothing typed is lost.
+    <fieldset disabled={!view} className="space-y-3.5 disabled:opacity-60">
   <Field
     label="Display name"
     hint="Shown in place of the agent's own name."
   >
     <input
       className={inputCls}
-      value={cfg.displayName ?? ''}
+      value={cfg.displayName}
       placeholder={agent.display_name}
       onChange={(e) =>
         update(agent.kind, {
-          displayName: e.target.value || undefined,
+          displayName: e.target.value,
         })
       }
     />
@@ -231,11 +437,11 @@ function AgentDetail({
   >
     <input
       className={inputCls + ' font-mono text-[11.5px]'}
-      value={cfg.binaryPath ?? ''}
+      value={cfg.binaryPath}
       placeholder="(from PATH)"
       onChange={(e) =>
         update(agent.kind, {
-          binaryPath: e.target.value || undefined,
+          binaryPath: e.target.value,
         })
       }
     />
@@ -247,10 +453,10 @@ function AgentDetail({
   >
     <input
       className={inputCls + ' font-mono text-[11.5px]'}
-      value={cfg.homePath ?? ''}
+      value={cfg.homePath}
       placeholder="~/.claude"
       onChange={(e) =>
-        update(agent.kind, { homePath: e.target.value || undefined })
+        update(agent.kind, { homePath: e.target.value })
       }
     />
   </Field>
@@ -262,9 +468,9 @@ function AgentDetail({
     >
       <select
         className={inputCls + ' text-[12.5px]'}
-        value={cfg.effort ?? ''}
+        value={cfg.effort}
         onChange={(e) =>
-          update(agent.kind, { effort: e.target.value || undefined })
+          update(agent.kind, { effort: e.target.value })
         }
       >
         <option value="">Agent default</option>
@@ -281,10 +487,10 @@ function AgentDetail({
     >
       <input
         className={inputCls + ' font-mono text-[11.5px]'}
-        value={cfg.settingSources ?? ''}
+        value={cfg.settingSources}
         placeholder="user,project,local"
         onChange={(e) =>
-          update(agent.kind, { settingSources: e.target.value || undefined })
+          update(agent.kind, { settingSources: e.target.value })
         }
       />
     </Field>
@@ -295,39 +501,26 @@ function AgentDetail({
   >
     <input
       className={inputCls + ' font-mono text-[11.5px]'}
-      value={cfg.launchArgs ?? ''}
+      value={cfg.launchArgs}
       onChange={(e) =>
-        update(agent.kind, { launchArgs: e.target.value || undefined })
+        update(agent.kind, { launchArgs: e.target.value })
       }
     />
   </Field>
 
   <Field
     label="Environment"
-    hint="One KEY=value per line. Blank lines and # comments are ignored."
+    hint="One KEY=value per line. Values of variables named like a key, token, secret or password are stored on this computer and shown masked; leave a masked value as it is to keep it."
   >
     <textarea
       className={inputCls + ' h-20 resize-y font-mono text-[11.5px]'}
-      value={cfg.env ?? ''}
-      onChange={(e) =>
-        update(agent.kind, { env: e.target.value || undefined })
-      }
+      value={cfg.envText}
+      spellCheck={false}
+      onChange={(e) => update(agent.kind, { envText: e.target.value })}
     />
   </Field>
 
-  <Field
-    label="API key"
-    hint="Only for agents that take one. Stored in this browser and never logged — the resolved command is shown redacted."
-  >
-    <input
-      className={inputCls + ' font-mono text-[11.5px]'}
-      type="password"
-      value={cfg.apiKey ?? ''}
-      onChange={(e) =>
-        update(agent.kind, { apiKey: e.target.value || undefined })
-      }
-    />
-  </Field>
+  {view && <AgentKeyField agent={agent} view={view} saveKey={saveKey} />}
 
   {(agent.state.state === 'not_found' || !cfg.enabled) && (
     <div className="flex items-center gap-3 pt-0.5">
@@ -357,21 +550,11 @@ function AgentDetail({
   {agent.kind === 'claude-code' && (
     <div className="border-t border-border/60 pt-2.5">
       <AgentHistoryImport
-        onResume={(sid) =>
-          onStart(
-            'claude-code',
-            {
-              ...cfg,
-              launchArgs: cfg.launchArgs ?? '',
-              env: cfg.env ?? '',
-            },
-            sid,
-          )
-        }
+        onResume={(sid) => onStart('claude-code', sid)}
       />
     </div>
   )}
-    </div>
+    </fieldset>
   );
 }
 
@@ -387,14 +570,92 @@ export function AcpAgentsSection({
   onRefresh: () => void;
   refreshing: boolean;
   /** Only for opening an imported agent session in the current chat. */
-  onStart: (kind: string, cfg: AcpInstanceConfig, resume?: string | null) => void;
+  onStart: (kind: string, resume?: string | null) => void;
   /** The agent the current chat runs on, badged in the list. */
   activeKind: string | null;
   error?: string | null;
 }) {
-  const [configs, setConfigs] = useState<Record<string, AcpInstanceConfig>>(() =>
-    loadInstanceConfigs(),
+  // Server-side settings per agent, and the form being edited over them.
+  const [views, setViews] = useState<Record<string, AgentSettings>>({});
+  const [drafts, setDrafts] = useState<Record<string, Draft>>({});
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const viewsRef = useRef(views);
+  viewsRef.current = views;
+  const draftsRef = useRef(drafts);
+  draftsRef.current = drafts;
+  /** The draft each agent's last save started from, to diff against. */
+  const savedDrafts = useRef<Record<string, Draft>>({});
+  const timers = useRef<Record<string, number>>({});
+
+  const kinds = agents.map((a) => a.kind).join(',');
+  useEffect(() => {
+    let cancelled = false;
+    for (const kind of kinds ? kinds.split(',') : []) {
+      if (viewsRef.current[kind]) continue;
+      getAgentSettings(kind)
+        .then((v) => {
+          if (cancelled) return;
+          setViews((prev) => ({ ...prev, [kind]: v }));
+          savedDrafts.current[kind] = draftFrom(v);
+          setDrafts((prev) => (prev[kind] ? prev : { ...prev, [kind]: draftFrom(v) }));
+        })
+        .catch(() => {
+          /* an agent this server doesn't know as an engine: shown read-only */
+        });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [kinds]);
+
+  const flush = useCallback(async (kind: string) => {
+    window.clearTimeout(timers.current[kind]);
+    const view = viewsRef.current[kind];
+    const prev = savedDrafts.current[kind];
+    const next = draftsRef.current[kind];
+    if (!view || !prev || !next) return;
+    const patch = patchFrom(prev, next, view);
+    if (Object.keys(patch).length === 0) return;
+    savedDrafts.current[kind] = next;
+    try {
+      const saved = await putAgentSettings(kind, patch);
+      setViews((p) => ({ ...p, [kind]: saved }));
+      setSaveError(null);
+    } catch (e) {
+      // Let the next edit retry the whole difference.
+      savedDrafts.current[kind] = prev;
+      setSaveError(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
+  // Save what's pending when the page closes.
+  useEffect(
+    () => () => {
+      for (const kind of Object.keys(timers.current)) void flush(kind);
+    },
+    [flush],
   );
+
+  const update = useCallback(
+    (kind: string, patch: Partial<Draft>) => {
+      const base = draftsRef.current[kind];
+      if (!base) return;
+      const next = { ...base, ...patch };
+      draftsRef.current = { ...draftsRef.current, [kind]: next };
+      setDrafts(draftsRef.current);
+      window.clearTimeout(timers.current[kind]);
+      const now = (Object.keys(patch) as (keyof Draft)[]).some((k) => IMMEDIATE.includes(k));
+      if (now) void flush(kind);
+      else timers.current[kind] = window.setTimeout(() => void flush(kind), 600);
+    },
+    [flush],
+  );
+
+  const saveKey = useCallback(async (kind: string, patch: Pick<AgentSettingsPatch, 'api_key' | 'api_key_env'>) => {
+    const saved = await putAgentSettings(kind, patch);
+    setViews((p) => ({ ...p, [kind]: saved }));
+  }, []);
+
   const [selected, setSelected] = useState<string | null>(null);
   // Health is probed on demand, but landing on this page IS the demand —
   // showing "no agents yet" until a manual click is a dead end, especially
@@ -408,21 +669,15 @@ export function AcpAgentsSection({
     }
   }, [agents.length, refreshing, onRefresh]);
 
-  const update = useCallback((kind: string, patch: Partial<AcpInstanceConfig>) => {
-    setConfigs((prev) => {
-      const next = {
-        ...prev,
-        [kind]: { ...(prev[kind] ?? { enabled: true }), ...patch },
-      };
-      saveInstanceConfigs(next);
-      return next;
-    });
-  }, []);
-
   const rows = useMemo(
     () =>
-      agents.map((a) => ({ agent: a, cfg: configs[a.kind] ?? { enabled: true } })),
-    [agents, configs],
+      agents.map((a) => ({
+        agent: a,
+        view: views[a.kind] ?? null,
+        // Until its settings load, an agent shows as on with no overrides.
+        cfg: drafts[a.kind] ?? EMPTY_DRAFT,
+      })),
+    [agents, views, drafts],
   );
 
   if (agents.length === 0) {
@@ -486,6 +741,7 @@ export function AcpAgentsSection({
       <HowAgentsWork />
 
       {error && <Note text={error} tone="error" />}
+      {saveError && <Note text={`Couldn't save: ${saveError}`} tone="error" />}
 
       {/* Master-detail: the list scans, the pane acts. Selecting never
           navigates away, and configuring never requires expanding rows one
@@ -578,7 +834,7 @@ export function AcpAgentsSection({
             rows.find((r) => r.agent.kind === (selected ?? activeKind ?? rows[0]?.agent.kind)) ??
             rows[0];
           if (!sel) return null;
-          const { agent, cfg } = sel;
+          const { agent, cfg, view } = sel;
           const name = cfg.displayName || agent.display_name;
           const isActive = activeKind === agent.kind;
           const st = describeAgentStatus(agent);
@@ -620,7 +876,9 @@ export function AcpAgentsSection({
                 <AgentDetail
                   agent={agent}
                   cfg={cfg}
+                  view={view}
                   update={update}
+                  saveKey={saveKey}
                   onStart={onStart}
                 />
               </div>

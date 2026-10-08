@@ -9,7 +9,7 @@ import { ImageAttachmentDetails } from './components/ImageAttachmentDetails';
 import { ChatRelationships } from './components/ChatRelationships';
 import { WorkspaceSetupCard } from './components/WorkspaceSetupCard';
 import { SourceCitationNavigator } from './components/SourceCitationNavigator';
-import { updateExternalAgent } from './api';
+import { getAgentSettings, putAgentSettings, updateExternalAgent } from './api';
 import { AssistantSelectionToolbar } from './components/AssistantSelectionToolbar';
 import { TurnChanges } from './components/TurnChanges';
 import { composeQuote, setAsidePassage } from './lib/attachBridge';
@@ -42,7 +42,7 @@ import {
 } from 'lucide-react';
 import { cn } from './lib/utils';
 import { acpOptionsToDescriptors } from './lib/acpOptions';
-import { loadAgentCaps, loadInstanceConfigs, parseArgs, parseEnv, saveAgentCaps } from './lib/acpAgents';
+import { loadAgentCaps, migrateLegacyAgentConfigs, saveAgentCaps } from './lib/acpAgents';
 import { EngineMark } from './components/EnginePicker';
 import { AgentIcon, ProviderIcon } from './components/AgentIcon';
 import { HtmlRenderCard } from './components/HtmlRenderCard';
@@ -52,7 +52,6 @@ import { loadModelOptions, prettyModel } from './lib/models';
 import type { UsageRingData } from './components/UsageRing';
 import { isAgentRequest } from './lib/agentRequest';
 import { agentCallToToolCall, agentToolResult, agentToolStatus, boundAgentOutput } from './lib/agentTools';
-import type { AcpInstanceConfig } from './components/settings/AcpAgentsSection';
 import {
   getCustomKeybindingRules,
   resolveShortcutCommand,
@@ -1186,6 +1185,16 @@ export default function App() {
     load();
   }, []);
 
+  // Agent setups older builds kept in localStorage (API key included) move
+  // to the server once, then leave the browser (#79).
+  useEffect(() => {
+    void migrateLegacyAgentConfigs(putAgentSettings, getAgentSettings)
+      .then((moved) => {
+        if (moved.length > 0) loadEngines();
+      })
+      .catch(() => {});
+  }, [loadEngines]);
+
   /** Agent health comes from one place: `GET /api/engines` (#85). This
    *  forces the server to probe every agent again, for the explicit
    *  "check agents" actions; normal loads read the cached list. */
@@ -1197,22 +1206,14 @@ export default function App() {
       .finally(() => setAcpStatusPending(false));
   }, []);
 
-  const startAcpAgent = useCallback((kind: string, cfg: AcpInstanceConfig, resume?: string | null, model?: string | null, instance?: string | null) => {
+  /** Start an agent in this chat. Only names it: its setup comes from
+   *  the engine's settings on the server (#79). */
+  const startAcpAgent = useCallback((kind: string, resume?: string | null, model?: string | null, instance?: string | null) => {
     setAcpError(null);
     wsRef.current?.send({
       type: 'acp_start',
       driver: kind,
-      // The configured engine (mira.yaml `engines:`) the pick maps to: the
-      // server takes its binary, home, env and display name from there.
       instance: instance ?? null,
-      binary_path: cfg.binaryPath || null,
-      display_name: cfg.displayName || null,
-      launch_args: parseArgs(cfg.launchArgs ?? ''),
-      env: parseEnv(cfg.env ?? ''),
-      api_key: cfg.apiKey || null,
-      home_path: cfg.homePath || null,
-      effort: cfg.effort || null,
-      setting_sources: cfg.settingSources || null,
       resume: resume || null,
       model: model || null,
     });
@@ -3978,10 +3979,7 @@ export default function App() {
                 {configured === false && !acpDriver && isEmpty && (
                   <GetStarted
                     agents={acpAgents}
-                    onUseAgent={(kind) => {
-                      const cfg = loadInstanceConfigs()[kind] ?? { enabled: true };
-                      startAcpAgent(kind, { ...cfg, launchArgs: cfg.launchArgs ?? '', env: cfg.env ?? '', enabled: true }, null);
-                    }}
+                    onUseAgent={(kind) => startAcpAgent(kind, null)}
                     onAddProvider={() => {
                       openSettings();
                       setSettingsSection('provider');
@@ -4220,14 +4218,12 @@ export default function App() {
                   if (m && m !== engine?.model) onSetModel(m);
                   return;
                 }
-                // The agent's saved setup (Settings → Agents) travels with
-                // the pick, so its paths, env and effort apply.
-                const cfg = loadInstanceConfigs()[driver] ?? { enabled: true };
-                // Prefer the engine instance named after the driver (its
+                // Its saved setup (Settings → Agents) is the engine's, on the
+                // server. Prefer the engine instance named after the driver (its
                 // default), else the only external instance of that driver.
                 const external = (engines ?? []).filter((e) => e.flavor === 'external' && e.driver === driver);
                 const instance = (external.find((e) => e.instance === driver) ?? (external.length === 1 ? external[0] : undefined))?.instance ?? null;
-                startAcpAgent(driver, { ...cfg, launchArgs: cfg.launchArgs ?? '', env: cfg.env ?? '', enabled: true }, null, m, instance);
+                startAcpAgent(driver, null, m, instance);
               }}
               onConfigureAgents={openAgentSettings}
               sessionId={sessionId}

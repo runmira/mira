@@ -327,6 +327,64 @@ export async function listInstanceModels(instance: string): Promise<ModelInfo[]>
   return body.models ?? [];
 }
 
+/** One `env` entry of an agent's setup. Secret-looking values come back
+ *  masked only; the real value never reaches the browser. */
+export type AgentEnvVar = { key: string; value?: string; masked?: string };
+
+/** An external agent's setup, stored on the server in mira.yaml (#79). */
+export type AgentSettings = {
+  instance: string;
+  driver: string;
+  display_name?: string;
+  enabled: boolean;
+  binary_path?: string;
+  home_path?: string;
+  launch_args: string[];
+  env: AgentEnvVar[];
+  effort?: string;
+  setting_sources?: string;
+  has_api_key: boolean;
+  api_key_masked?: string;
+  api_key_env?: string;
+  /** Variables the agent reads a key from; empty when it only signs in
+   *  through its own CLI. */
+  api_key_vars: string[];
+};
+
+/** A partial update: absent fields stay, `''` clears. In `env`, `null`
+ *  keeps that variable's stored (masked) value. */
+export type AgentSettingsPatch = {
+  display_name?: string;
+  enabled?: boolean;
+  binary_path?: string;
+  home_path?: string;
+  launch_args?: string[];
+  env?: Record<string, string | null>;
+  effort?: string;
+  setting_sources?: string;
+  api_key?: string;
+  api_key_env?: string;
+};
+
+async function agentSettingsRequest(instance: string, init?: RequestInit): Promise<AgentSettings> {
+  const r = await fetch(`/api/engines/${encodeURIComponent(instance)}/settings`, init);
+  const body = (await r.json().catch(() => ({}))) as AgentSettings & { error?: string };
+  if (!r.ok) throw new Error(body.error ?? `agent settings ${r.status}`);
+  return body;
+}
+
+export function getAgentSettings(instance: string): Promise<AgentSettings> {
+  return agentSettingsRequest(instance);
+}
+
+export function putAgentSettings(instance: string, patch: AgentSettingsPatch): Promise<AgentSettings> {
+  return agentSettingsRequest(instance, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+}
+
 export async function listEngines(refresh = false): Promise<EngineListView> {
   const r = await fetch(`/api/engines${refresh ? '?refresh=1' : ''}`);
   if (!r.ok) {
