@@ -250,6 +250,8 @@ export function historyToEntries(
         call_id: String(m.tool_call_id),
         content: m.content ?? '',
         is_error: false,
+        // Screenshots arrive as URLs (fetched lazily when the card opens).
+        ...(m.images?.length ? { images: m.images } : {}),
       });
     }
   }
