@@ -7,11 +7,13 @@ import { Tip } from './ui/Tip';
 import {
   ChevronDown,
   Check,
+  Copy,
   LoaderCircle,
   FileText,
   X,
 } from 'lucide-react';
 import type { ApprovalScope, DiffLine, DiffPreview, Mode, ToolCall, ToolResult } from '../types';
+import { ansiToSegments, foldOutputLines, parseBashOutput } from '../lib/toolOutput.mjs';
 import { InlineDiff } from './diffs/InlineDiff';
 import { cn } from '@/lib/utils';
 import { infoFor } from './ToolGroup';
@@ -430,6 +432,18 @@ function CompactToolRow({
   // command would look strange.
   const targetIsPath = isPathishTool(call.function.name);
   const completedCommand = call.function.name === 'bash' && status === 'complete';
+  const bashOutput = call.function.name === 'bash' && result
+    ? parseBashOutput(result.content)
+    : null;
+  const commandFailed = completedCommand && (
+    result?.is_error === true ||
+    (bashOutput?.exitCode != null && bashOutput.exitCode !== 0)
+  );
+  const bashCommand = useMemo(() => {
+    if (call.function.name !== 'bash') return undefined;
+    const args = safeParse(call.function.arguments);
+    return typeof args?.command === 'string' ? args.command : undefined;
+  }, [call.function.name, call.function.arguments]);
 
   return (
     <div className="w-full max-w-[78%]">
@@ -441,7 +455,11 @@ function CompactToolRow({
         tabIndex={0}
         onClick={() => setExpanded((v) => !v)}
         onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setExpanded((v) => !v); }}
-        className={cn("group relative flex w-full min-w-0 cursor-pointer items-center gap-1.5 rounded-md px-1 py-0.5 text-left text-[13px] transition-colors hover:bg-accent/40", completedCommand && "pl-4")}
+        className={cn(
+          "group relative flex w-full min-w-0 cursor-pointer items-center gap-1.5 rounded-md px-1 py-0.5 text-left text-[13px] transition-colors hover:bg-accent/40",
+          completedCommand && "pl-4",
+          commandFailed && "rounded-md border border-rose-500/30 bg-rose-500/5 text-rose-200",
+        )}
       >
         {completedCommand && <BranchElbow className="left-0 top-0" />}
         <span aria-hidden="true" className="inline-flex size-3.5 shrink-0 items-center justify-center text-muted-foreground">{summary.icon}</span>
@@ -489,7 +507,7 @@ function CompactToolRow({
             !expanded && 'opacity-0 group-hover:opacity-100',
           )}
         />
-        <StatusMark status={status} />
+        <StatusMark status={status} failed={commandFailed} />
       </div>}
 
       {/* Live output panel — visible whenever the tool has streamed lines,
@@ -536,7 +554,14 @@ function CompactToolRow({
               its output because the output IS the point there. */}
           {result &&
             !(call.function.name in RESULT_SUPPRESSED) && (
-              <ResultBlock stateKey={call.id} content={result.content} isError={result.is_error ?? false} live={status === 'running'} />
+              <ResultBlock
+                stateKey={call.id}
+                content={bashOutput?.output ?? result.content}
+                isError={result.is_error ?? false}
+                exitCode={bashOutput?.exitCode}
+                timedOut={bashOutput?.timedOut}
+                command={bashCommand}
+              />
             )}
           {result?.images?.map((img, i) => (
             <img
@@ -764,40 +789,98 @@ function reconstructDiff(tool: string, args: any): DiffLine[] | null {
  * so it clearly belongs to the row above.
  *
  * Errors get a rose tint (not a full red card) so the transcript
- * still reads calmly during a run where a few tool calls fail;
- * "show all" toggles the tail past the first N lines.
+ * still reads calmly during a run where a few tool calls fail.
+ * Long outputs keep their first and last lines visible until expanded.
  */
-function ResultBlock({ content, isError, live = false, stateKey }: { content: string; isError: boolean; live?: boolean; stateKey: string }) {
+function ResultBlock({
+  content,
+  isError,
+  stateKey,
+  exitCode,
+  timedOut = false,
+  command,
+}: {
+  content: string;
+  isError: boolean;
+  stateKey: string;
+  exitCode?: number | null;
+  timedOut?: boolean;
+  command?: string;
+}) {
   const [showAll, setShowAll] = useTranscriptDisclosure(`output:${stateKey}`);
-  const lines = content.split('\n');
-  const CAP = 6;
-  const overflow = lines.length > CAP;
-  const shown = showAll ? content : (live ? lines.slice(-CAP) : lines.slice(0, CAP)).join('\n');
+  const [copyState, setCopyState] = useState<string | null>(null);
+  const folded = foldOutputLines(content);
+  const overflow = folded.hidden > 0;
+  const shown = showAll || !overflow
+    ? content
+    : [
+      ...folded.lines.slice(0, 10),
+      `… ${folded.hidden} more lines`,
+      ...folded.lines.slice(10),
+    ].join('\n');
+  const failed = isError || (exitCode != null && exitCode !== 0);
+
+  const copy = async (value: string, label: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopyState(`${label} copied`);
+    } catch {
+      setCopyState('Copy failed');
+    }
+  };
 
   return (
     <div
       className={cn(
         'overflow-hidden rounded-md border bg-mira-elev1/50',
-        isError ? 'border-rose-500/30' : 'border-border/40',
+        failed ? 'border-rose-500/30' : 'border-border/40',
       )}
     >
+      <div className="flex items-center gap-2 border-b border-border/30 bg-mira-elev1/70 px-2.5 py-1.5 text-[11px]">
+        {(command !== undefined || exitCode !== undefined || timedOut) && (
+          <span className={cn('font-medium', failed ? 'text-rose-300' : 'text-muted-foreground')}>
+            {exitCode == null ? 'exit code unknown' : `exit code ${exitCode}`}
+          </span>
+        )}
+        {timedOut && <span className="text-rose-300">timed out</span>}
+        <div className="ml-auto flex items-center gap-1">
+          {command !== undefined && (
+            <button
+              type="button"
+              className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              onClick={() => { void copy(command, 'Command'); }}
+            >
+              <Copy className="size-3" />
+              {copyState === 'Command copied' ? 'Copied' : 'Copy command'}
+            </button>
+          )}
+          <button
+            type="button"
+            className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+            onClick={() => { void copy(content, 'Output'); }}
+          >
+            <Copy className="size-3" />
+            {copyState === 'Output copied' ? 'Copied' : 'Copy output'}
+          </button>
+          {copyState === 'Copy failed' && <span role="status" className="text-rose-300">Copy failed</span>}
+        </div>
+      </div>
       <pre
         className={cn(
           'm-0 max-h-[24vh] overflow-auto whitespace-pre-wrap break-words px-3 py-2 font-mono text-[11.5px] leading-relaxed',
-          isError ? 'text-rose-200/90' : 'text-foreground/80',
+          failed ? 'text-rose-200/90' : 'text-foreground/80',
         )}
       >
-        {!showAll && overflow && live ? `… ${lines.length - CAP} earlier lines\n` : ''}
-        {shown}
-        {!showAll && overflow && !live ? `\n… ${lines.length - CAP} more lines` : ''}
+        <AnsiText text={shown} />
       </pre>
       {overflow && (
         <div className="flex items-center justify-end border-t border-border/30 bg-mira-elev1/70 px-2 py-1">
           <button
+            type="button"
             className="rounded px-1.5 py-0.5 text-[11px] text-mira-blue transition-colors hover:bg-mira-blue/10"
             onClick={() => setShowAll((v) => !v)}
           >
-            {showAll ? 'show less' : `show all (${lines.length} lines)`}
+            {showAll ? 'Show less' : `Show ${folded.hidden} more lines`}
           </button>
         </div>
       )}
@@ -805,13 +888,25 @@ function ResultBlock({ content, isError, live = false, stateKey }: { content: st
   );
 }
 
+function AnsiText({ text }: { text: string }) {
+  return (
+    <>
+      {ansiToSegments(text).map((segment, index) => (
+        <span key={index} style={segment.style}>{segment.text}</span>
+      ))}
+    </>
+  );
+}
+
 /* ---------- bits ---------- */
 
-function StatusMark({ status }: { status: ToolStatus }) {
+function StatusMark({ status, failed = false }: { status: ToolStatus; failed?: boolean }) {
   switch (status) {
     case 'running':  return <LoaderCircle className="size-3 shrink-0 animate-spin text-mira-blue" />;
     case 'denied':   return <X className="size-3.5 shrink-0 text-destructive" />;
-    case 'complete': return <Check className="size-3.5 shrink-0 text-emerald-500" />;
+    case 'complete': return failed
+      ? <X className="size-3.5 shrink-0 text-rose-400" />
+      : <Check className="size-3.5 shrink-0 text-emerald-500" />;
     default:         return null;
   }
 }
@@ -1034,7 +1129,7 @@ function LiveOutputPanel({
             key={i}
             className="whitespace-pre-wrap break-all text-[#24292f] dark:text-[#abb2bf]"
           >
-            {line || <span className="text-transparent">{'.'}</span>}
+            {line ? <AnsiText text={line} /> : <span className="text-transparent">{'.'}</span>}
           </div>
         ))}
       </div>
