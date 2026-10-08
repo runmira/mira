@@ -18,8 +18,10 @@ export function UpdateButton() {
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState<UpdateInfo | null>(null);
   const update = selected ?? u.update;
-  const changeOpen = (value: boolean) => { setOpen(value); if (!value) setSelected(null); };
-  const earlyReleases = isDesktop() ? <EarlyReleases current={u.current} channel={u.channel} onSelect={setSelected} /> : null;
+  const changeOpen = (value: boolean) => { setOpen(value); if (!value) { setSelected(null); u.resetError(); } };
+  const early = useEarlyReleases(isDesktop());
+  const selectRelease = (release: UpdateInfo) => { u.resetError(); setSelected(release); };
+  const earlyReleases = isDesktop() ? <EarlyReleases current={u.current} channel={u.channel} onSelect={selectRelease} state={early} /> : null;
   const tip = update
     ? `Mira ${update.version} is available`
     : u.current
@@ -99,11 +101,12 @@ function ReleaseChannelIcon({ channel }: { channel: EarlyChannel }) {
   );
 }
 
-function EarlyReleases({ current, channel, onSelect }: { current: string | null; channel: UpdateInfo['channel']; onSelect: (update: UpdateInfo) => void }) {
+function useEarlyReleases(enabled: boolean) {
   const [expanded, setExpanded] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const [results, setResults] = useState<Partial<Record<EarlyChannel, ChannelResult>>>({});
   useEffect(() => {
+    if (!enabled) return;
     let live = true;
     setResults({ alpha: { loading: true }, beta: { loading: true } });
     for (const name of ['beta', 'alpha'] as const) {
@@ -116,7 +119,12 @@ function EarlyReleases({ current, channel, onSelect }: { current: string | null;
       });
     }
     return () => { live = false; };
-  }, [attempt]);
+  }, [enabled, attempt]);
+  return { expanded, setExpanded, results, retry: () => setAttempt(value => value + 1) };
+}
+
+function EarlyReleases({ current, channel, onSelect, state }: { current: string | null; channel: UpdateInfo['channel']; onSelect: (update: UpdateInfo) => void; state: ReturnType<typeof useEarlyReleases> }) {
+  const { expanded, setExpanded, results, retry } = state;
   const newerChannels = (['beta', 'alpha'] as const).filter(name => {
     const release = results[name]?.update;
     return !!current && !!release && newerVersion(release.version, current);
@@ -145,7 +153,7 @@ function EarlyReleases({ current, channel, onSelect }: { current: string | null;
               <p className="text-[11.5px] text-muted-foreground">{result?.loading ? 'Checking…' : result?.error ?? (release ? release.version : 'No release available yet')}</p>
               <p className="mt-0.5 text-[11px] text-muted-foreground/80">{name === 'beta' ? 'Upcoming features, closer to release' : 'Latest experiments, more frequent changes'}</p>
             </div>
-            {result?.loading ? <Loader2 className="size-4 animate-spin text-muted-foreground" /> : result?.error ? <button type="button" onClick={() => setAttempt(value => value + 1)} className="text-[12px] text-mira-blue">Retry</button> : release && <button type="button" disabled={installed || older} onClick={() => onSelect(release)} className="shrink-0 rounded-lg border border-fg/[0.1] bg-background px-3 py-1.5 text-[12px] font-medium hover:bg-fg/[0.05] disabled:opacity-50">{installed ? 'Installed' : older ? 'Up to date' : 'Review update'}</button>}
+            {result?.loading ? <Loader2 className="size-4 animate-spin text-muted-foreground" /> : result?.error ? <button type="button" onClick={retry} className="text-[12px] text-mira-blue">Retry</button> : release && <button type="button" disabled={installed || older} onClick={() => onSelect(release)} className="shrink-0 rounded-lg border border-fg/[0.1] bg-background px-3 py-1.5 text-[12px] font-medium hover:bg-fg/[0.05] disabled:opacity-50">{installed ? 'Installed' : older ? 'Up to date' : 'Review update'}</button>}
           </div>;
         })}
       </div>}

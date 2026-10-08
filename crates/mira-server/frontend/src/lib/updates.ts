@@ -153,7 +153,11 @@ export function useAppUpdate() {
     }
   }, []);
 
-  return { update, phase, install, check, current, channel, checking, checkedAt, checkFailed };
+  const resetError = useCallback(() => {
+    setPhase(previous => previous.kind === 'error' ? { kind: 'idle' } : previous);
+  }, []);
+
+  return { update, phase, install, check, current, channel, checking, checkedAt, checkFailed, resetError };
 }
 
 /** One shipped thing, from a `- **Title.** what it does` bullet. */
