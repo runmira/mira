@@ -90,6 +90,8 @@ jobs:
             psql -v ON_ERROR_STOP=1 -q -f "$f"
           done
           psql -v ON_ERROR_STOP=1 -f supabase/tests/remote_tunnel_slots.sql
+          # Two real sessions racing for the last slot.
+          supabase/tests/remote_tunnel_slots_concurrency.sh
 
       - uses: actions/setup-node@v4
         with:
