@@ -113,7 +113,7 @@ function InstalledCard({
       tabIndex={0}
       onClick={() => onOpen(p.id)}
       onKeyDown={(e) => (e.key === 'Enter' ? onOpen(p.id) : undefined)}
-      className="group flex cursor-pointer gap-3.5 rounded-2xl border border-border/60 bg-fg/[0.08] p-4 text-left shadow-sm shadow-shade/30 transition-all hover:border-border/80 hover:bg-fg/[0.11] hover:shadow-md hover:shadow-shade/40"
+      className="group flex cursor-pointer gap-3.5 rounded-2xl border border-border/60 elev-card dark:bg-fg/[0.08] p-4 text-left transition-all hover:border-border/80 hover:shadow-md dark:hover:bg-fg/[0.11]"
     >
       <Avatar name={p.id} src={iconSrc} size="md" />
 

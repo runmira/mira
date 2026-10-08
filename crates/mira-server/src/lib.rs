@@ -29,18 +29,20 @@
 pub mod acp_host;
 pub mod acp_session;
 pub mod agent_spend;
+mod agent_secrets;
+mod agent_threads;
 mod agent_worktree;
+mod engines_reload;
+mod keep_awake;
 pub mod approver;
+mod aside;
 mod browse;
 mod browser;
 mod chat_import;
 pub mod checkpoints;
-mod aside;
-mod delegate;
-mod processes;
-mod tests_api;
 mod context_api;
 mod cwd;
+mod delegate;
 mod editors;
 mod embedded;
 pub mod engines_api;
@@ -55,19 +57,28 @@ mod memory;
 mod models;
 mod oauth;
 pub mod plugins;
+mod processes;
 pub mod protocol;
 pub mod provider;
 mod pull_requests;
 mod review;
 pub mod session_changes;
 pub mod session_engine;
+mod runtime_requests;
+mod transcript_history;
+mod runtime_admission;
+mod opencode_control;
+mod message_queue;
+mod session_activity;
 mod sessions;
+mod agent_updates;
 mod settings;
 mod skills;
 pub mod slot;
 mod state;
 mod subagents_api;
 mod terminal;
+mod tests_api;
 mod title;
 mod undo;
 mod unfurl;
@@ -185,7 +196,10 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
     // `engines:` overrides). Errors here leave an empty registry — the
     // engines API reports "not configured" instead of failing boot.
     let engine_cfg = mira_config::MiraConfig::load_global().unwrap_or_default();
-    let engines = Arc::new(mira_engine::EngineRegistry::from_config(&engine_cfg));
+    let engines = Arc::new(crate::state::EnginesHandle::new(
+        mira_engine::EngineRegistry::from_config(&engine_cfg),
+    ));
+    let boot_engines = engines.current();
 
     // The shared selection: what AgentTool reads for subagent defaults
     // and what `GET /api/engines` reports as active. Seeded from the
@@ -197,12 +211,12 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
     ));
     {
         let mut inst = selection.instance.write().expect("selection lock poisoned");
-        if let Some(default) = engines.default_native_instance(&engine_cfg) {
+        if let Some(default) = boot_engines.default_native_instance(&engine_cfg) {
             *inst = Some(default.id.to_string());
         }
         if let Ok(runtime) = mira_config::RuntimeState::load() {
             if let Some(last) = runtime.last_engine {
-                if engines.get(&last).is_some() {
+                if boot_engines.get(&last).is_some() {
                     *inst = Some(last);
                 }
             }
@@ -215,10 +229,10 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
     // (missing key) are simply absent, and switching to them later
     // surfaces the reason. Finally, activate the selection, falling
     // back to the default when it can't be served.
-    let default_instance = engines
+    let default_instance = boot_engines
         .default_native_instance(&engine_cfg)
         .map(|i| i.id.to_string());
-    for inst in engines.instances().filter(|i| i.is_native()) {
+    for inst in boot_engines.instances().filter(|i| i.is_native()) {
         let id = inst.id.as_str();
         if Some(id) == default_instance.as_deref() {
             swappable.register(id, cfg.provider.clone());
@@ -247,10 +261,13 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
 
     // Build the initial slot. Seeded from the ServerConfig's `resume` (if
     // present) so a `mira serve --resume <id>` picks up where it left off.
+    let session_activity = Arc::new(crate::session_activity::ActivityHub::default());
     let deps = crate::slot::SlotDeps {
+        session_activity: session_activity.clone(),
         policy: cfg.policy.clone(),
         sandbox: cfg.sandbox.clone(),
         harness_provider: harness_provider.clone(),
+        provider_pool: swappable.clone(),
         base_registry: base_registry.clone(),
         agents_registry: agents_registry.clone(),
         agents_live: agents_live.clone(),
@@ -272,6 +289,9 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
     slots.insert(initial_id.clone(), initial_slot);
 
     let state = AppState {
+        slot_loads:Arc::new(std::sync::Mutex::new(HashMap::new())),
+        session_activity,
+        runtime_retries: Arc::new(crate::runtime_requests::RetryQueue::default()),
         slots: Arc::new(RwLock::new(slots)),
         active: Arc::new(RwLock::new(initial_id)),
         policy: cfg.policy.clone(),
@@ -319,6 +339,9 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
         },
     };
 
+    crate::runtime_requests::spawn_dispatcher(state.clone());
+    crate::message_queue::recover(state.clone());
+
     // Filesystem watcher for skills — picks up `npx skills add`
     // installs, hand-authored `SKILL.md` files, and the model's own
     // `write_file` outputs without the user clicking Reload. Broadcasts
@@ -328,6 +351,8 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
 
     // Idle external agents are stopped (not forgotten) after a while.
     session_engine::spawn_reaper(state.clone());
+    keep_awake::spawn(state.clone());
+    engines_reload::spawn(state.clone());
 
     // MCP status changes (a server connecting, dropping, asking for
     // sign-in) → `ExtensionsChanged` to every tab, debounced so a burst of
@@ -374,6 +399,8 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/api/version", get(version))
         .route("/api/aside", post(aside::ask))
         .route("/api/sessions/:id/fork", post(sessions::fork_session))
+        .route("/api/sessions/:id/relationships", get(sessions::relationships))
+        .route("/api/sessions/:id/turn-diff", post(git::turn_file_diff))
         .route(
             "/api/processes",
             get(processes::list).post(processes::start),
@@ -409,11 +436,16 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
             "/api/acp/external-sessions",
             get(sessions::list_external_agent_sessions),
         )
+        .route("/api/acp/agents/:kind/update", post(agent_updates::update))
         .route("/api/acp/turns", get(sessions::list_agent_turns))
         .route("/api/acp/revert", post(sessions::revert_agent_turn))
         .route(
             "/api/sessions/:id/history",
             get(sessions::get_session_history),
+        )
+        .route(
+            "/api/sessions/:id/preview",
+            get(sessions::get_session_preview),
         )
         .route(
             "/api/sessions/:id/load",
@@ -479,6 +511,8 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/api/git/status", get(git::get_status))
         .route("/api/git/session-diff", get(git::session_diff))
         .route("/api/usage", get(usage::get_usage))
+        .route("/api/pricing", get(usage::get_pricing))
+        .route("/api/usage/external", get(usage::get_external_usage))
         .route("/api/git/session-changes", get(git::session_changes))
         .route(
             "/api/git/revert-file",
@@ -707,7 +741,18 @@ pub fn system_prompt(cwd: &std::path::Path, registry: &Registry) -> String {
     let tool_lines: Vec<String> = registry
         .specs()
         .into_iter()
-        .map(|s| format!("- {}: {}", s.name, first_sentence(&s.description)))
+        .map(|s| {
+            // Interactive tools carry enforcement clauses the model must see
+            // verbatim — a first-sentence truncation drops exactly the
+            // "never claim you asked without calling" lines that stop
+            // hallucinations like "I've sent you three questions" with no
+            // tool call. Everything else stays one line to save context.
+            if s.name == "ask_user" || s.name == "plan" {
+                format!("- {}: {}", s.name, s.description)
+            } else {
+                format!("- {}: {}", s.name, first_sentence(&s.description))
+            }
+        })
         .collect();
     let tools_block = if tool_lines.is_empty() {
         String::from("(no tools registered — you have only free-form text.)")
@@ -742,20 +787,28 @@ pub fn system_prompt(cwd: &std::path::Path, registry: &Registry) -> String {
          summarize existing code.\n\n\
          When in doubt: plan. A short approved plan beats starting to edit \
          and having to backtrack.\n\n\
-         CLARIFY FIRST WHEN AMBIGUOUS.\n\
-         Before you propose a plan for a request that could plausibly be \
-         shaped several different ways — target user vs. admin, permissions \
-         model, scope boundary, storage backend, framework choice, migration \
-         vs. rewrite — call the `ask_user` tool with 1-4 structured multiple- \
-         choice questions. Mark exactly one option `recommended: true` when \
-         you have a considered preference. The UI automatically adds a \
-         \"Tell mira what to do differently\" free-text path to every \
-         question, so you don't need to include it as an option. Use the \
-         user's answers to shape the subsequent `plan` call. Do NOT chain \
-         `ask_user` calls — ask everything you need in one round. Skip \
-         `ask_user` when the request is unambiguous, when a quick file read \
-         would resolve the ambiguity, or when you're mid-execution and \
-         picking would derail the flow.\n\n\
+          CLARIFY FIRST WHEN AMBIGUOUS.\n\
+          Before you propose a plan for a request that could plausibly be \
+          shaped several different ways — target user vs. admin, permissions \
+          model, scope boundary, storage backend, framework choice, migration \
+          vs. rewrite — call the `ask_user` tool with 1-4 structured multiple- \
+          choice questions. Mark exactly one option `recommended: true` when \
+          you have a considered preference. The UI automatically adds a \
+          \"Tell mira what to do differently\" free-text path to every \
+          question, so you don't need to include it as an option. Use the \
+          user's answers to shape the subsequent `plan` call. Do NOT chain \
+          `ask_user` calls — ask everything you need in one round. Skip \
+          `ask_user` when the request is unambiguous, when a quick file read \
+          would resolve the ambiguity, or when you're mid-execution and \
+          picking would derail the flow.\n\n\
+          TOOL-CALL GROUNDING (mandatory).\n\
+          The UI renders a question card or plan panel ONLY from a real \
+          `ask_user` / `plan` tool call. Text that looks like questions or a \
+          plan shows nothing to the user and returns no answer. Never write \
+          \"I've asked / sent / proposed\" unless the tool call already \
+          happened in this turn. When the user explicitly names a tool \
+          (\"ask me\", \"propose a plan\", \"for approval\"), call that tool \
+          immediately — no preamble, no summary first.\n\n\
          DELEGATION.\n\
          When a subtask would take many tool calls to investigate — searching \
          a large codebase for every use of X, reading half a dozen files to \

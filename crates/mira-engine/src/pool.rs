@@ -50,6 +50,22 @@ impl SwappableProvider {
         }
     }
 
+    /// A session owns its active pointer. Entries are shared by Arc, while
+    /// selecting one in a sibling session cannot redirect this session.
+    pub fn fork(&self, instance: Option<&str>) -> Self {
+        let pool = self.pool.read().expect("provider pool lock poisoned");
+        let active = match instance {
+            Some(id) => pool.entries.get(id).cloned(),
+            None => pool.active.clone(),
+        };
+        Self {
+            pool: Arc::new(RwLock::new(Pool {
+                active,
+                entries: pool.entries.clone(),
+            })),
+        }
+    }
+
     /// Replace the active delegate — the settings hot-swap path for the
     /// *currently selected* instance. When the active delegate belongs
     /// to a registered instance, its pool row is refreshed too, so the
@@ -77,6 +93,27 @@ impl SwappableProvider {
             .expect("provider pool lock poisoned")
             .entries
             .insert(instance.to_string(), provider);
+    }
+
+    /// Drop an instance's provider (its config was removed). The active
+    /// pointer is untouched: a turn already on it finishes there.
+    pub fn unregister(&self, instance: &str) {
+        self.pool
+            .write()
+            .expect("provider pool lock poisoned")
+            .entries
+            .remove(instance);
+    }
+
+    /// Ids of every registered instance.
+    pub fn instances(&self) -> Vec<String> {
+        self.pool
+            .read()
+            .expect("provider pool lock poisoned")
+            .entries
+            .keys()
+            .cloned()
+            .collect()
     }
 
     /// Point at a registered instance. Returns `false` when no
@@ -153,6 +190,23 @@ mod tests {
         Arc::new(NullProvider::default())
     }
 
+    #[test]
+    fn session_selection_does_not_redirect_siblings_or_boot_defaults() {
+        let pool = SwappableProvider::new(provider());
+        pool.register("a", provider());
+        pool.register("b", provider());
+        pool.activate("a");
+        let a = pool.fork(Some("a"));
+        let b = pool.fork(Some("b"));
+        pool.activate("b");
+        assert_eq!(a.active_instance().as_deref(), Some("a"));
+        assert_eq!(b.active_instance().as_deref(), Some("b"));
+        a.activate("b");
+        b.activate("a");
+        assert_eq!(a.active_instance().as_deref(), Some("b"));
+        assert_eq!(b.active_instance().as_deref(), Some("a"));
+        assert!(pool.fork(Some("missing")).active_instance().is_none());
+    }
     #[test]
     fn activate_switches_and_reports_the_active_instance() {
         let swappable = SwappableProvider::new(provider());

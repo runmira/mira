@@ -128,6 +128,11 @@ pub struct ForkPoint {
 pub struct AgentSessionMeta {
     /// Driver slug, e.g. `"claude-code"`.
     pub driver_kind: String,
+    /// Engine instance that drove it, e.g. `"codex-work"`. Absent on
+    /// records written before instances were routed: those always ran
+    /// the default instance, whose id is its driver kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
     /// The agent's running model, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -174,9 +179,8 @@ impl SessionRecord {
         if self.agent.as_ref().is_some_and(|a| a.active) {
             return Err(ForkError::AgentChat);
         }
-        let is_prompt = |m: &Message| {
-            m.role == mira_core::Role::User && !crate::history::is_summary(m)
-        };
+        let is_prompt =
+            |m: &Message| m.role == mira_core::Role::User && !crate::history::is_summary(m);
         let idx = self
             .messages
             .iter()
@@ -224,7 +228,10 @@ impl SessionRecord {
             archived: self.archived.clone(),
             created_at: now,
             updated_at: now,
-            title: Some(format!("{} (fork)", base.chars().take(60).collect::<String>())),
+            title: Some(format!(
+                "{} (fork)",
+                base.chars().take(60).collect::<String>()
+            )),
             turns,
             usage: UsageTotals::default(),
             parent_id: None,
@@ -257,6 +264,38 @@ impl SessionRecord {
             .find(|m| m.role == mira_core::Role::User)
             .and_then(|m| m.content.as_deref())
             .map(crate::history::strip_hook_context)
+    }
+}
+
+/// Lightweight sidebar metadata. Never contains transcript, images, tool results, or diffs.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SessionListRecord {
+    pub id: SessionId,
+    pub cwd: PathBuf,
+    pub model: String,
+    pub created_at: u64,
+    pub updated_at: u64,
+    pub title: Option<String>,
+    pub first_user_message: Option<String>,
+    pub message_count: usize,
+    pub usage: UsageTotals,
+    pub parent_id: Option<SessionId>,
+    pub pinned: bool,
+    pub archived_at: Option<u64>,
+    pub agent_driver: Option<String>,
+    pub forked_from: Option<ForkPoint>,
+}
+impl From<&SessionRecord> for SessionListRecord {
+    fn from(record: &SessionRecord) -> Self {
+        Self {
+            id: record.id.clone(), cwd: record.cwd.clone(), model: record.cfg.model.clone(),
+            created_at: record.created_at, updated_at: record.updated_at, title: record.title.clone(),
+            first_user_message: record.first_user_message().map(|text| text.chars().take(512).collect()),
+            message_count: record.conversation().count(), usage: record.usage,
+            parent_id: record.parent_id.clone(), pinned: record.pinned, archived_at: record.archived_at,
+            agent_driver: record.agent.as_ref().filter(|agent| agent.active).map(|agent| agent.driver_kind.clone()),
+            forked_from: record.forked_from.clone(),
+        }
     }
 }
 
@@ -353,6 +392,21 @@ pub trait SessionStore: Send + Sync {
     /// `list_recent` scoped to the current folder. Archived sessions
     /// (see `SessionRecord::archived_at`) are excluded.
     async fn list_all(&self, limit: usize) -> Result<Vec<SessionRecord>, StoreError>;
+    /// List only sidebar metadata. Other stores retain the full-record fallback.
+    async fn list_metadata(&self, cwd: Option<&std::path::Path>, archived: bool, include_children: bool, limit: usize) -> Result<Vec<SessionListRecord>, StoreError> {
+        let records = if archived { self.list_archived(usize::MAX).await? }
+            else if let Some(cwd) = cwd { self.list_recent(cwd, usize::MAX).await? }
+            else { self.list_all(usize::MAX).await? };
+        Ok(records.iter().filter(|record| include_children || record.parent_id.is_none()).take(limit).map(SessionListRecord::from).collect())
+    }
+
+    /// Direct child chats (forks and delegated agents), across all ages and folders.
+    async fn list_related(&self, parent: &SessionId, limit: usize) -> Result<Vec<SessionRecord>, StoreError> {
+        let mut records = self.list_all(usize::MAX).await?;
+        records.retain(|record| record.parent_id.as_ref() == Some(parent) || record.forked_from.as_ref().is_some_and(|fork| &fork.session_id == parent));
+        records.truncate(limit);
+        Ok(records)
+    }
     /// Sessions the user archived from the web sidebar, newest first.
     /// Kept separate from `list_recent`/`list_all` so "archived" stays a
     /// deliberate ask — those callers never want them mixed in.
@@ -360,6 +414,19 @@ pub trait SessionStore: Send + Sync {
     /// Permanently remove a stored session. Idempotent on `NotFound` — a
     /// double-click on the sidebar delete menu shouldn't 404.
     async fn delete(&self, id: &SessionId) -> Result<(), StoreError>;
+    /// Provider runtime ledger sidecar. Its extension deliberately does
+    /// not match session JSON so listing chats never parses request ledgers.
+    /// Stores may enumerate pending input outboxes without loading transcripts.
+    async fn queued_sessions(&self) -> Result<Vec<SessionId>, StoreError> { Ok(Vec::new()) }
+
+    fn queue_state_path(&self, id: &SessionId) -> Option<std::path::PathBuf> {
+        self.agent_log_path(id).map(|p| p.with_extension("queue"))
+    }
+
+    fn runtime_state_path(&self, id: &SessionId) -> Option<std::path::PathBuf> {
+        self.agent_log_path(id).map(|p| p.with_extension("runtime"))
+    }
+
     /// Path of the agent-transcript sidecar for a session, if this store
     /// keeps one. `None` means agent turns are not persisted by this store.
     fn agent_log_path(&self, _id: &SessionId) -> Option<std::path::PathBuf> {
@@ -399,8 +466,15 @@ mod fork_tests {
             created_at: 1,
             updated_at: 2,
             title: Some("Fix the parser".into()),
-            turns: vec![TurnMeta::default(), TurnMeta::default(), TurnMeta::default()],
-            usage: UsageTotals { prompt_tokens: 9, ..Default::default() },
+            turns: vec![
+                TurnMeta::default(),
+                TurnMeta::default(),
+                TurnMeta::default(),
+            ],
+            usage: UsageTotals {
+                prompt_tokens: 9,
+                ..Default::default()
+            },
             parent_id: None,
             tasks: Vec::new(),
             goal: None,
@@ -424,11 +498,18 @@ mod fork_tests {
             Message::assistant("a3"),
         ]);
         let f = src.fork_at(SessionId::from("sess_new"), "two", 0).unwrap();
-        let texts: Vec<_> = f.messages.iter().filter_map(|m| m.content.clone()).collect();
+        let texts: Vec<_> = f
+            .messages
+            .iter()
+            .filter_map(|m| m.content.clone())
+            .collect();
         assert_eq!(texts, ["sys", "one", "a1", "two", "a2"]);
         assert_eq!(f.turns.len(), 2);
         assert_eq!(f.title.as_deref(), Some("Fix the parser (fork)"));
-        assert_eq!(f.forked_from.as_ref().unwrap().session_id, SessionId::from("sess_src"));
+        assert_eq!(
+            f.forked_from.as_ref().unwrap().session_id,
+            SessionId::from("sess_src")
+        );
         assert_eq!(f.forked_from.as_ref().unwrap().at, "two");
         assert!(f.usage.is_zero() && !f.pinned && f.parent_id.is_none());
     }
@@ -463,6 +544,7 @@ mod fork_tests {
         let mut agent = record(vec![Message::user("one")]);
         agent.agent = Some(AgentSessionMeta {
             driver_kind: "claude-code".into(),
+            instance: None,
             model: None,
             active: true,
             launch: None,

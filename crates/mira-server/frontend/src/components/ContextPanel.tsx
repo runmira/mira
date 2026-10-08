@@ -19,8 +19,13 @@ import {
   ListChecks,
   BookMarked,
   Globe2,
+  SquareTerminal,
+  Square,
+  LoaderCircle,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
+import type { BackgroundProcess } from '../lib/backgroundProcesses';
+import { Collapse } from './ui/Collapse';
 import { prettyUrl } from '../lib/refs';
 import type { GitStatusView, SessionDiffView, SessionFile, BranchPrView } from '../api';
 import type { TaskItem } from '../types';
@@ -216,6 +221,35 @@ function ProgressSection({ tasks: all }: { tasks: TaskItem[] }) {
       </AnimatePresence>
     </div>
   );
+}
+
+function BackgroundProcessesSection({processes,onOpen,onStop,stopping}: {
+  processes:BackgroundProcess[];onOpen:(id:number)=>void;onStop:(id:number)=>Promise<void>;
+  stopping:ReadonlySet<number>;
+}) {
+  const [open,setOpen]=useState(true);
+  const [error,setError]=useState<string|null>(null);
+  useEffect(()=>setError(null),[onStop]);
+  async function stop(id:number){setError(null);try{await onStop(id);}catch(error){setError((error as Error).message);}}
+  return <div>
+    <SectionHeader label="Background processes" open={open} onToggle={()=>setOpen(value=>!value)} />
+    <Collapse open={open}><div className="mt-1 space-y-0.5">
+      {processes.map(process=><div key={process.id} className="group flex min-w-0 items-center gap-1 rounded-md hover:bg-fg/[0.04]">
+        <button type="button" onClick={()=>onOpen(process.id)} title={process.command}
+          className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-1.5 py-1.5 text-left text-[12px] text-fg/65 focus-visible:outline focus-visible:outline-2 focus-visible:outline-mira-blue">
+          <SquareTerminal aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" />
+          <span className="min-w-0 truncate">{process.command}</span>
+          <span aria-label="Running" className="ml-auto size-1.5 shrink-0 rounded-full bg-emerald-500" />
+        </button>
+        <button type="button" aria-label={`Stop ${process.command}`} title="Stop process" disabled={stopping.has(process.id)}
+          onClick={()=>void stop(process.id)}
+          className="mr-1 inline-flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground opacity-0 transition-opacity hover:bg-destructive/10 hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 disabled:opacity-100 [@media(hover:none)]:opacity-100">
+          {stopping.has(process.id)?<LoaderCircle aria-hidden="true" className="size-3 animate-spin"/>:<Square aria-hidden="true" className="size-3"/>}
+        </button>
+      </div>)}
+      {error&&<p role="alert" className="px-1.5 py-1 text-xs text-destructive">{error}</p>}
+    </div></Collapse>
+  </div>;
 }
 
 /* ------------------------------------------------------------------ */
@@ -847,6 +881,7 @@ export function useContextPanelFits(): boolean {
 
 /** True when the panel has anything to show for this session. */
 export function contextPanelHasContent(p: {
+  processes?: BackgroundProcess[];
   tasks: TaskItem[];
   gitStatus: GitStatusView | null;
   sessionDiff: SessionDiffView;
@@ -856,6 +891,7 @@ export function contextPanelHasContent(p: {
   entries: Entry[];
 }): boolean {
   return (
+    (p.processes?.some(process=>process.running) ?? false) ||
     liveTasks(p.tasks).length > 0 ||
     workspaceHasContent(p.gitStatus, p.sessionDiff, p.branchPr, p.sessionCommitted) ||
     chatSubagents(p.subagentState, p.entries).length > 0 ||
@@ -864,6 +900,10 @@ export function contextPanelHasContent(p: {
 }
 
 export type ContextPanelProps = {
+  processes?:BackgroundProcess[];
+  stoppingProcesses?:ReadonlySet<number>;
+  onOpenProcess?:(id:number)=>void;
+  onStopProcess?:(id:number)=>Promise<void>;
   sessionTitle?: string;
   tasks: TaskItem[];
   subagentState: Map<string, SubagentStreamState>;
@@ -907,6 +947,7 @@ export function ContextPanel(props: ContextPanelProps) {
     onPush,
     onCommit,
   } = props;
+  const runningProcesses=(props.processes ?? []).filter(process=>process.running);
   const fits = useContextPanelFits();
   // Derived once per render and shared by the pill and every section, so
   // they can't disagree about what there is to show.
@@ -915,7 +956,7 @@ export function ContextPanel(props: ContextPanelProps) {
   const live = liveTasks(tasks);
   const showWorkspace = workspaceHasContent(gitStatus, sessionDiff, branchPr, sessionCommitted);
 
-  if (!fits || (live.length === 0 && !showWorkspace && subagents.length === 0 && sources.length === 0)) {
+  if (!fits || (live.length === 0 && !showWorkspace && subagents.length === 0 && sources.length === 0 && runningProcesses.length === 0)) {
     return null;
   }
 
@@ -966,6 +1007,11 @@ export function ContextPanel(props: ContextPanelProps) {
               #{branchPr.number}
             </span>
           )}
+          {runningProcesses.length > 0 && (
+            <span className="inline-flex shrink-0 items-center gap-1" title="Background processes running">
+              <SquareTerminal aria-hidden="true" className="size-3" />{runningProcesses.length}
+            </span>
+          )}
           {agentsRunning && (
             <span className="size-1.5 shrink-0 rounded-full bg-mira-purple animate-pulse" title="subagents running" />
           )}
@@ -1013,6 +1059,10 @@ export function ContextPanel(props: ContextPanelProps) {
               <div className="py-2">
                 <SubagentsSection ordered={subagents} onOpenAgent={onOpenAgent} />
               </div>
+            )}
+            {runningProcesses.length > 0 && props.onOpenProcess && props.onStopProcess && (
+              <div className="py-2"><BackgroundProcessesSection processes={runningProcesses}
+                onOpen={props.onOpenProcess} onStop={props.onStopProcess} stopping={props.stoppingProcesses ?? new Set()}/></div>
             )}
             {sources.length > 0 && (
               <div className="py-2">

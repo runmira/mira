@@ -4,6 +4,8 @@ export type WsStatus = 'connecting' | 'open' | 'closed';
 
 export interface WsClient {
   send(msg: ClientMsg): void;
+  /** Conditional mutations must not enter the reconnect replay buffer. */
+  sendImmediate(msg: ClientMsg): boolean;
   /** Convenience: swap which session this WS is watching. Server updates
    *  its per-connection attached slot, replays a fresh Ready, and points
    *  the process-wide `active` pointer here so subsequent HTTP calls
@@ -88,6 +90,9 @@ export function connect(
       if (reattaching) {
         // A restarted server greets the socket with its own default
         // session; showing that, even briefly, flashes another chat.
+        if (msg.type === 'session_activity' || msg.type === 'session_activity_snapshot') {
+          onMsg(msg); return;
+        }
         if (msg.type !== 'ready' || msg.session_id !== reattaching) return;
         reattaching = null;
       }
@@ -95,6 +100,9 @@ export function connect(
     };
   }
 
+  const resync = () => { if (!document.hidden && ws?.readyState === WebSocket.OPEN) sendMsg({type:'sync_activity'}); };
+  document.addEventListener('visibilitychange',resync);
+  window.addEventListener('online',resync);
   open();
 
   function sendMsg(msg: ClientMsg) {
@@ -108,6 +116,11 @@ export function connect(
 
   return {
     send: sendMsg,
+    sendImmediate(msg) {
+      if (!ws || ws.readyState !== WebSocket.OPEN || reattaching) return false;
+      ws.send(JSON.stringify(msg));
+      return true;
+    },
     attach(sessionId) {
       sendMsg({ type: 'attach', session_id: sessionId });
     },
@@ -119,6 +132,8 @@ export function connect(
     },
     close() {
       stopped = true;
+      document.removeEventListener('visibilitychange',resync);
+      window.removeEventListener('online',resync);
       if (ws) ws.close();
     },
   };

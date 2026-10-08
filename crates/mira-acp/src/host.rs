@@ -384,7 +384,8 @@ impl AgentCallback for AcpHost {
                             req.raw_input = state.raw_input.clone();
                         }
                         if req.locations.is_empty() {
-                            req.locations = state.locations.iter().map(|l| l.path.clone()).collect();
+                            req.locations =
+                                state.locations.iter().map(|l| l.path.clone()).collect();
                         }
                     }
                 }
@@ -431,7 +432,10 @@ impl AgentCallback for AcpHost {
                         .and_then(Value::as_str)
                         .unwrap_or_default()
                         .to_string(),
-                    schema: params.get("requestedSchema").cloned().unwrap_or(Value::Null),
+                    schema: params
+                        .get("requestedSchema")
+                        .cloned()
+                        .unwrap_or(Value::Null),
                 };
                 Ok(match self.permissions.elicit(&req).await? {
                     ElicitationReply::Accept(content) => {

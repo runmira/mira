@@ -102,11 +102,16 @@ pub enum BackgroundMode {
 /// handle to a task or handler; individual fields have their own
 /// `Arc<Mutex<..>>` / `Arc<RwLock<..>>` guards where mutation is needed.
 pub struct SessionSlot {
+    pub session_activity: Arc<crate::session_activity::ActivityHub>,
     pub id: SessionId,
     pub session: Arc<RwLock<Session>>,
+    pub native_provider: crate::provider::SwappableProvider,
+    pub selection: Arc<crate::state::SharedSelection>,
     pub events_tx: broadcast::Sender<ServerMsg>,
     pub pending: PendingMap,
     pub prompt_pending: PendingPromptMap,
+    pub runtime_requests: crate::runtime_requests::RequestStore,
+    pub message_queue: crate::message_queue::MessageQueue,
     pub cwd: Arc<RwLock<PathBuf>>,
     pub memory: Arc<RwLock<Arc<dyn MemoryStore>>>,
     pub episodic: Arc<RwLock<Arc<dyn EpisodicStore>>>,
@@ -183,20 +188,38 @@ impl SessionSlot {
     /// True while a spawned turn task is still holding the slot's turn
     /// mutex. Cheap probe used by the sessions API to badge the sidebar
     /// with a "running" indicator.
-    pub async fn is_running(&self) -> bool {
-        if self
-            .engine
-            .agent_in_turn
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
+    /// Background workers keep the runtime owned, but do not occupy its input slot.
+    /// Waiting on the user: a tool approval, an open question / plan /
+    /// secret card, or an agent's question left unanswered.
+    pub async fn needs_attention(&self) -> bool {
+        if !self.pending.lock().await.is_empty() || !self.prompt_pending.lock().await.is_empty() {
             return true;
         }
-        let guard = self.turn.lock().await;
-        match guard.as_ref() {
-            Some(h) => !h.is_finished(),
-            None => false,
-        }
+        self.runtime_requests
+            .snapshot()
+            .await
+            .iter()
+            .any(|r| r.delivery == crate::runtime_requests::Delivery::Pending)
     }
+
+    pub async fn is_foreground_running(&self) -> bool {
+        self.engine.agent_in_turn.load(Ordering::SeqCst) || self.engine.provider_in_turn.load(Ordering::SeqCst)
+    }
+    pub fn publish_activity(&self) {
+        // Serialize computing and publishing, so a delayed completion cannot
+        // overwrite a concurrently started foreground or background task.
+        let _publish = self.engine.activity_publish.lock().unwrap_or_else(|e|e.into_inner());
+        let running = self.engine.agent_in_turn.load(Ordering::SeqCst)
+            || self.engine.provider_in_turn.load(Ordering::SeqCst)
+            || self.engine.activity.lock().unwrap_or_else(|e|e.into_inner()).has_pending_work();
+        self.session_activity.set(self.id.to_string(),running);
+        self.engine.activity_changed.notify_waiters();
+        self.engine.activity_changed.notify_one();
+    }
+    pub async fn is_running(&self) -> bool {
+        self.is_foreground_running().await || self.engine.activity.lock().unwrap_or_else(|e|e.into_inner()).has_pending_work()
+    }
+
 }
 
 /// RAII counter for attached WS clients. On construction, bumps the slot's
@@ -226,9 +249,11 @@ impl Drop for AttachGuard {
 /// shared pieces reused across every slot in the process.
 #[derive(Clone)]
 pub struct SlotDeps {
+    pub session_activity: Arc<crate::session_activity::ActivityHub>,
     pub policy: Arc<Mutex<Policy>>,
     pub sandbox: Arc<Sandbox>,
     pub harness_provider: Arc<dyn ChatProvider>,
+    pub provider_pool: crate::provider::SwappableProvider,
     /// Pre-`AgentTool`, pre-interactive registry snapshot. The slot factory
     /// clones this and layers in `PlanTool` / `AskUserTool` / `AgentTool`
     /// wired to the slot's own prompt channel.
@@ -265,6 +290,26 @@ pub async fn build_slot(
     resume: Option<SessionRecord>,
     deps: &SlotDeps,
 ) -> Arc<SessionSlot> {
+    let saved_cfg = resume.as_ref().map(|r| &r.cfg).unwrap_or(&cfg);
+    let (default_instance, _, default_small) = deps.selection.snapshot();
+    let instance = saved_cfg.engine_instance.clone().or(default_instance);
+    let selection = Arc::new(crate::state::SharedSelection::new(
+        Some(saved_cfg.model.clone()),
+        saved_cfg.small_model.clone().or(default_small),
+    ));
+    *selection.instance.write().expect("selection lock poisoned") = instance.clone();
+    let native_provider = deps.provider_pool.fork(instance.as_deref());
+    // Persisted instances may have been added since boot. Resolve them
+    // directly; a failure leaves an unavailable delegate, never another account.
+    if let Some(id) = instance.as_deref() {
+        if let Ok(config) = mira_config::MiraConfig::load_global() {
+            if let Ok(provider) = mira_engine::native::build_native_provider(&config, id) {
+                native_provider.register(id, provider);
+                native_provider.activate(id);
+            }
+        }
+    }
+    let session_provider: Arc<dyn ChatProvider> = Arc::new(native_provider.clone());
     let (events_tx, _rx0) = broadcast::channel::<ServerMsg>(256);
     // NOTE: we intentionally drop `_rx0` — its only purpose was to keep the
     // channel alive before subscribers attach. Sends with zero receivers
@@ -308,9 +353,9 @@ pub async fn build_slot(
     registry_owned.register(PlanTool::new(prompt_shared.clone()));
     registry_owned.register(AskUserTool::new(prompt_shared.clone()));
     let mut agent_tool = AgentTool::new(
-        deps.harness_provider.clone(),
+        session_provider.clone(),
         deps.base_registry.clone(),
-        deps.selection
+        selection
             .model
             .read()
             .expect("selection lock poisoned")
@@ -320,13 +365,13 @@ pub async fn build_slot(
     .with_agents(deps.agents_registry.clone())
     .with_live_agents(deps.agents_live.clone())
     .with_small_model(
-        deps.selection
+        selection
             .small_model
             .read()
             .expect("selection lock poisoned")
             .clone(),
     )
-    .with_shared_selection(deps.selection.clone())
+    .with_shared_selection(selection.clone())
     .with_hooks(deps.hooks.clone())
     .with_events_tx(events_tx.clone())
     .with_parent_approver(approver.clone())
@@ -373,7 +418,7 @@ pub async fn build_slot(
     let mut session = match resume {
         Some(record) => Session::resume_from(
             record,
-            deps.harness_provider.clone(),
+            session_provider.clone(),
             registry.clone(),
             deps.policy.clone(),
             approver.clone(),
@@ -382,7 +427,7 @@ pub async fn build_slot(
         None => Session::new(
             cfg,
             crate::system_prompt(&cwd, &registry),
-            deps.harness_provider.clone(),
+            session_provider.clone(),
             registry.clone(),
             deps.policy.clone(),
             approver.clone(),
@@ -408,6 +453,7 @@ pub async fn build_slot(
         ));
     }
 
+    session.set_engine_instance(instance).await;
     let id = session.id.clone();
     let engine = if resumed {
         let harness_len = session.transcript().await.len();
@@ -421,12 +467,24 @@ pub async fn build_slot(
     } else {
         crate::session_engine::EngineRuntime::default()
     };
+    let runtime_requests = crate::runtime_requests::RequestStore::open(
+        deps.store
+            .as_ref()
+            .and_then(|s| s.runtime_state_path(&id)),
+    )
+    .await;
+    let message_queue = crate::message_queue::MessageQueue::open(deps.store.as_ref().and_then(|s|s.queue_state_path(&id))).await;
     Arc::new(SessionSlot {
+        session_activity:deps.session_activity.clone(),
         id,
         session: Arc::new(RwLock::new(session)),
+        native_provider,
+        selection,
         events_tx,
         pending,
         prompt_pending,
+        runtime_requests,
+        message_queue,
         cwd: cwd_lock,
         memory,
         episodic,

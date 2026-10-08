@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { ChevronDown, Circle, CircleCheck, LoaderCircle } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { Collapse } from './ui/Collapse';
 import type { TaskItem } from '../types';
 
 type Props = {
@@ -52,11 +53,11 @@ export function TaskListPanel({ tasks }: Props) {
             {inProgress ? ` · ${activeLabel(inProgress)}` : ''}
           </span>
         </button>
-        {open && (
+        <Collapse open={open}>
           <ul className="border-t border-mira-border/40 px-3 py-2">
             {sorted.map((t) => (
-              <li key={t.id} className="flex items-start gap-2 py-1 text-[13px]">
-                <StatusIcon status={t.status} />
+              <li key={t.id} className="flex items-start gap-2 py-1 text-[13px] leading-5">
+                <span className="flex h-5 shrink-0 items-center"><StatusIcon status={t.status} /></span>
                 <span
                   className={
                     t.status === 'completed'
@@ -71,7 +72,7 @@ export function TaskListPanel({ tasks }: Props) {
               </li>
             ))}
           </ul>
-        )}
+        </Collapse>
       </div>
     </div>
   );
@@ -80,11 +81,11 @@ export function TaskListPanel({ tasks }: Props) {
 function StatusIcon({ status }: { status: TaskItem['status'] }) {
   switch (status) {
     case 'completed':
-      return <CircleCheck size={16} fill="currentColor" className="mt-[2px] shrink-0 text-emerald-400" />;
+      return <CircleCheck size={16} fill="currentColor" className="shrink-0 text-emerald-400" />;
     case 'in_progress':
-      return <LoaderCircle size={16} strokeWidth={2.5} className="mt-[2px] shrink-0 animate-spin text-mira-blue" />;
+      return <LoaderCircle size={16} strokeWidth={2.5} className="shrink-0 animate-spin text-mira-blue" />;
     default:
-      return <Circle size={16} className="mt-[2px] shrink-0 text-mira-muted" />;
+      return <Circle size={16} className="shrink-0 text-mira-muted" />;
   }
 }
 

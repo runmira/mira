@@ -9,7 +9,7 @@ import 'highlight.js/styles/atom-one-dark.css';
 import type { DiffPreview } from '../types';
 import { GithubRef } from './GithubRef';
 import { linkifyGithubRefs, parseGithubRef } from '../lib/githubRefs';
-import { classifyInline, splitFileRef } from '../lib/refs';
+import { classifyInline, parseWorkspaceFileLink } from '../lib/refs';
 import { BranchChip, ColorChip, CommitChip, FileChip, KeysChip, LinkRef, SymbolRef } from './RichRefs';
 import { Blockquote, DiffBlock, Table, Th, remarkCallouts } from './RichBlocks';
 import { resolveTheme } from '../lib/theme';
@@ -31,7 +31,12 @@ import { resolveTheme } from '../lib/theme';
  *   syntax-highlight spans survive.
  */
 
-type Props = { text: string; onOpenFile?: (path: string, diff: DiffPreview | null, line?: number | null) => void };
+type Props = {
+  text: string;
+  onOpenFile?: (path: string, diff: DiffPreview | null, line?: number | null) => void;
+  /** File previews retain document text rather than chat reference chips. */
+  document?: boolean;
+};
 
 // How short a block has to be to be treated as a "one-liner" (path, filename,
 // short command) instead of a full code block. Models routinely wrap single
@@ -79,9 +84,9 @@ function sanitizeMermaidSvg(svg: string): string {
   return new XMLSerializer().serializeToString(el);
 }
 
-export function Markdown({ text, onOpenFile }: Props) {
+export function Markdown({ text, onOpenFile, document = false }: Props) {
   // `owner/repo#123` mentions become links, rendered as PR/issue chips.
-  const linked = useMemo(() => linkifyGithubRefs(text), [text]);
+  const linked = useMemo(() => document ? text : linkifyGithubRefs(text), [text, document]);
   const hasMath = MATH_RE.test(text);
 
   // rehype-katex + katex.min.css load on first use (issue #68 acceptance:
@@ -125,7 +130,8 @@ export function Markdown({ text, onOpenFile }: Props) {
             // From the parsed node, not `children`: once a block is
             // highlighted its children are spans, and String() of those
             // is "[object Object]".
-            const raw = (node ? hastText(node) : String(children ?? '')).replace(/\n$/, '');
+            const codeText = node ? hastText(node) : String(children ?? '');
+            const raw = codeText.replace(/\n$/, '');
             const lang = /language-([\w-]+)/.exec(className ?? '')?.[1];
 
             // Diagram fences render as diagrams (lazy-loaded), not code.
@@ -133,7 +139,7 @@ export function Markdown({ text, onOpenFile }: Props) {
               return <MermaidBlock code={raw} />;
             }
             // Diffs render as diffs, and can be applied.
-            if (lang === 'diff' || lang === 'patch') {
+            if (!document && (lang === 'diff' || lang === 'patch')) {
               return <DiffBlock raw={raw} />;
             }
 
@@ -143,14 +149,16 @@ export function Markdown({ text, onOpenFile }: Props) {
             // a code block). Short single-line ``` fences without a lang
             // also render inline — models routinely wrap filenames or
             // one-word commands in ``` where `` was the right call.
-            const looksInline =
-              !raw.includes('\n') &&
-              (!lang || lang === 'text') &&
-              raw.length <= ONE_LINER_MAX;
+            const looksInline = document
+              ? !codeText.endsWith('\n') && !lang
+              : !raw.includes('\n') && (!lang || lang === 'text') && raw.length <= ONE_LINER_MAX;
 
             if (looksInline) {
               const isFenced = /\blanguage-/.test(className ?? '');
               const cls = isFenced ? 'md-inline md-inline-fenced' : 'md-inline';
+              if (document) {
+                return <code className={`${cls} ${className ?? ''}`} {...rest}>{children}</code>;
+              }
               // A span that names something gets drawn as that thing.
               const ref = classifyInline(raw);
               const open = onOpenFile ? (path: string, line?: number | null) => onOpenFile(path, null, line) : undefined;
@@ -179,14 +187,28 @@ export function Markdown({ text, onOpenFile }: Props) {
           },
           a({ children, node: _node, ...rest }: any) {
             const href: string = rest.href ?? '';
+            if (document) {
+              const local = href && !href.startsWith('#') && !href.startsWith('//') && !/^\w[\w+.-]*:/.test(href);
+              return (
+                <a
+                  {...rest}
+                  target={local || href.startsWith('#') ? undefined : '_blank'}
+                  rel="noreferrer"
+                  onClick={local && onOpenFile ? (e) => {
+                    e.preventDefault();
+                    const match = /^(.*?)(?:#L(\d+))?$/.exec(href);
+                    onOpenFile(match?.[1] ?? href, null, match?.[2] ? Number(match[2]) : undefined);
+                  } : undefined}
+                >
+                  {children}
+                </a>
+              );
+            }
             const target = parseGithubRef(href);
             if (target) return <GithubRef target={target} href={href}>{children}</GithubRef>;
-            if (/^https?:\/\//i.test(href)) return <LinkRef href={href}>{children}</LinkRef>;
-            // A link to a file in the project: `[the parser](src/parse.rs#L40)`.
-            const fileLink = /^(?!\w+:)([^#?]+\.\w{1,8})(?:#L(\d+))?$/.exec(href);
+            const fileLink = parseWorkspaceFileLink(href);
             if (fileLink && onOpenFile) {
-              const { path, line } = splitFileRef(fileLink[1]);
-              const at = fileLink[2] ? Number(fileLink[2]) : line;
+              const { path, line: at } = fileLink;
               return (
                 <a
                   href={href}
@@ -200,6 +222,7 @@ export function Markdown({ text, onOpenFile }: Props) {
                 </a>
               );
             }
+            if (/^https?:\/\//i.test(href)) return <LinkRef href={href}>{children}</LinkRef>;
             return <a target="_blank" rel="noreferrer" {...rest}>{children}</a>;
           },
           blockquote({ node: _node, ...props }: any) {
@@ -256,7 +279,11 @@ function CodeBlock({
       </div>
       <div
         className={collapsed ? 'md-code-body md-code-collapsed' : 'md-code-body'}
-        style={collapsed ? { maxHeight: `calc(${foldAt} * 1.6em + 0.9rem)` } : undefined}
+        style={{
+          maxHeight: collapsed ? `calc(${foldAt} * 1.6em + 0.9rem)` : `calc(${lineCount} * 1.6em + 0.9rem)`,
+          transition: 'max-height 200ms ease',
+          overflow: 'hidden',
+        }}
       >
         {lineCount > 1 && (
           <div className="md-code-gutter" aria-hidden="true">

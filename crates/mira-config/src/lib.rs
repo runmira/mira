@@ -92,6 +92,36 @@ pub struct MiraConfig {
     /// from the global file: a cloned repo must not run commands this way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hooks: Option<serde_json::Value>,
+    /// How running chats behave in the background. Only read from the
+    /// global file: a project can't keep your Mac awake or spend your
+    /// limits on resumes.
+    #[serde(default, skip_serializing_if = "SessionsConfig::is_empty")]
+    pub sessions: SessionsConfig,
+}
+
+/// `sessions:` block. Both default off.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SessionsConfig {
+    /// When a chat stops on a usage limit, resume it automatically once the
+    /// limit resets (instead of offering a button).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_resume_after_limit: Option<bool>,
+    /// Keep the display and the machine awake while any chat is running.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_awake_while_running: Option<bool>,
+}
+
+impl SessionsConfig {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+    pub fn auto_resume(&self) -> bool {
+        self.auto_resume_after_limit.unwrap_or(false)
+    }
+    pub fn keep_awake(&self) -> bool {
+        self.keep_awake_while_running.unwrap_or(false)
+    }
 }
 
 /// `cloud:` block: defaults for `mira cloud run`.
@@ -998,6 +1028,16 @@ mod tests {
                 .unwrap();
         let merged = global.merge(MiraConfig::default());
         assert!(merged.computer.enabled() && merged.browser.enabled());
+    }
+
+    #[test]
+    fn sessions_settings_default_off_and_round_trip() {
+        let cfg: MiraConfig = serde_yaml::from_str("sessions:\n  keep_awake_while_running: true\n").unwrap();
+        assert!(cfg.sessions.keep_awake());
+        assert!(!cfg.sessions.auto_resume());
+        assert!(!MiraConfig::default().sessions.keep_awake());
+        let yaml = serde_yaml::to_string(&MiraConfig::default()).unwrap();
+        assert!(!yaml.contains("sessions"), "an untouched config stays clean: {yaml}");
     }
 
     #[test]

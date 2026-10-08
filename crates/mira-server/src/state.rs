@@ -78,6 +78,9 @@ impl SharedSelection {
 /// connection's own `attached_id` so two tabs can watch two sessions.
 #[derive(Clone)]
 pub struct AppState {
+    pub slot_loads: Arc<std::sync::Mutex<HashMap<SessionId, std::sync::Weak<Mutex<()>>>>>,
+    pub session_activity: Arc<crate::session_activity::ActivityHub>,
+    pub runtime_retries: Arc<crate::runtime_requests::RetryQueue>,
     // ---------- multi-session runtime ----------
     /// Live slots keyed by session id. Insert on new / load / cwd-switch;
     /// remove on delete_session (which also aborts the running turn).
@@ -120,7 +123,7 @@ pub struct AppState {
     /// Every configured backend, derived from config at boot. Source
     /// of truth for `GET /api/engines` and for resolving `SetModel`
     /// instance switches.
-    pub engines: Arc<mira_engine::EngineRegistry>,
+    pub engines: Arc<EnginesHandle>,
     /// Shared browser for the right-hand browser pane. Constructed eagerly
     /// but launches nothing until the first action, so an unused pane costs
     /// no process. Held as `Arc` because `AppState` itself is cloned into
@@ -242,9 +245,11 @@ impl AppState {
     /// each time a new slot is spun up.
     pub fn slot_deps(&self) -> SlotDeps {
         SlotDeps {
+            session_activity:self.session_activity.clone(),
             policy: self.policy.clone(),
             sandbox: self.sandbox.clone(),
             harness_provider: self.harness_provider.clone(),
+            provider_pool: self.provider.clone(),
             base_registry: self.base_registry.clone(),
             agents_registry: self.agents_registry.clone(),
             agents_live: self.agents_live.clone(),
@@ -269,7 +274,9 @@ impl AppState {
     /// currently focused on.
     pub async fn broadcast_all(&self, msg: ServerMsg) {
         for slot in self.list_slots().await {
-            let _ = slot.events_tx.send(msg.clone());
+            if slot.is_attached() {
+                let _ = slot.events_tx.send(msg.clone());
+            }
         }
     }
 
@@ -284,6 +291,18 @@ impl AppState {
         if let Some(slot) = self.slot(id).await {
             return Ok(slot);
         }
+        // Coalesce recovery and concurrent attaches for the same chat.
+        // Weak entries retain only in-flight loads, rather than every chat ID.
+        let load_lock = {
+            let mut loads = self.slot_loads.lock().unwrap_or_else(|e|e.into_inner());
+            loads.retain(|_,lock|lock.strong_count()>0);
+            match loads.get(id).and_then(std::sync::Weak::upgrade) {
+                Some(lock) => lock,
+                None => {let lock=Arc::new(Mutex::new(())); loads.insert(id.clone(),Arc::downgrade(&lock));lock}
+            }
+        };
+        let _loading=load_lock.lock().await;
+        if let Some(slot)=self.slot(id).await {return Ok(slot);}
         let Some(store) = self.store.clone() else {
             return Err(
                 "persistence disabled — cannot materialize a slot for an unloaded session"
@@ -297,5 +316,22 @@ impl AppState {
         let slot = crate::slot::build_slot(cwd, cfg, Some(record), &deps).await;
         self.insert_slot(slot.clone()).await;
         Ok(slot)
+    }
+}
+
+/// The engine registry, swapped whole when `mira.yaml` changes (see
+/// `engines_reload`). Readers take [`EnginesHandle::current`] once and use
+/// that snapshot for the rest of the operation.
+pub struct EnginesHandle(std::sync::RwLock<Arc<mira_engine::EngineRegistry>>);
+
+impl EnginesHandle {
+    pub fn new(registry: mira_engine::EngineRegistry) -> Self {
+        Self(std::sync::RwLock::new(Arc::new(registry)))
+    }
+    pub fn current(&self) -> Arc<mira_engine::EngineRegistry> {
+        self.0.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+    pub fn replace(&self, registry: mira_engine::EngineRegistry) {
+        *self.0.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(registry);
     }
 }

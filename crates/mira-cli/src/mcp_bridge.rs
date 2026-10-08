@@ -51,7 +51,11 @@ pub async fn run(args: McpBridgeArgs) -> Result<()> {
         let msg: Value = match serde_json::from_str(&line) {
             Ok(v) => v,
             Err(e) => {
-                write_line(&out, &rpc_error(&Value::Null, -32700, &format!("parse error: {e}"))).await;
+                write_line(
+                    &out,
+                    &rpc_error(&Value::Null, -32700, &format!("parse error: {e}")),
+                )
+                .await;
                 continue;
             }
         };
@@ -108,12 +112,20 @@ async fn relay(
         Ok(r) => r,
         Err(e) => {
             if let Some(id) = id {
-                write_line(&out, &rpc_error(&id, -32603, &format!("Mira isn't reachable: {e}"))).await;
+                write_line(
+                    &out,
+                    &rpc_error(&id, -32603, &format!("Mira isn't reachable: {e}")),
+                )
+                .await;
             }
             return;
         }
     };
-    if let Some(s) = resp.headers().get("mcp-session-id").and_then(|v| v.to_str().ok()) {
+    if let Some(s) = resp
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+    {
         negotiated.lock().await.session_id = Some(s.to_string());
     }
     let status = resp.status();
@@ -129,7 +141,11 @@ async fn relay(
         Ok(b) => b,
         Err(e) => {
             if let Some(id) = id {
-                write_line(&out, &rpc_error(&id, -32603, &format!("reading Mira's reply: {e}"))).await;
+                write_line(
+                    &out,
+                    &rpc_error(&id, -32603, &format!("reading Mira's reply: {e}")),
+                )
+                .await;
             }
             return;
         }

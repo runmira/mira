@@ -136,6 +136,12 @@ pub async fn compute_preview(cwd: &Path, call: &ToolCall) -> Option<DiffPreview>
     })
 }
 
+/// Render immutable file versions, using the same bounded preview as tool approvals.
+pub fn preview_between(path: String, before: &str, after: &str, kind: DiffKind) -> DiffPreview {
+    let diff = render_diff(before, after);
+    DiffPreview { path, kind, lines: diff.lines, hunks: diff.hunks, truncated: diff.truncated }
+}
+
 struct RenderedDiff {
     /// Flat compat view (unchanged shape, includes the truncation
     /// notice embedded when truncated).

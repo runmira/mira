@@ -1226,7 +1226,7 @@ function KeybindingsList(props: KeybindingsListProps) {
   );
 }
 
-export function KeybindingsSection() {
+export function AdvancedKeybindingsSection() {
   const keybindings = useKeybindings();
   const [query, setQuery] = useState('');
   const [isSearchOpen, setIsSearchOpen] = useState(false);
@@ -1407,3 +1407,5 @@ export function KeybindingsSection() {
     </div>
   );
 }
+
+export { KeyboardShortcutsSettings as KeybindingsSection } from './KeyboardShortcutsSettings';

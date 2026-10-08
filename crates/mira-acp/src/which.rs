@@ -60,6 +60,11 @@ const SYSTEM_BIN_DIRS: &[&str] = &[
     "/usr/sbin",
     "/sbin",
     "/snap/bin",
+    // ChatGPT for macOS bundles the Codex CLI here. Finder-launched Mira
+    // does not inherit the shell alias/PATH entry that `codex login` creates,
+    // so without this we incorrectly fall back to `codex-acp` and lose
+    // Codex app-server features such as `model/list` and requestUserInput.
+    "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS",
 ];
 
 /// How long the login shell gets before we give up on it.

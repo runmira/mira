@@ -1,3 +1,4 @@
+import { BranchElbow } from './BranchElbow';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Archive,
@@ -5,6 +6,7 @@ import {
   ArrowLeft,
   ChevronDown,
   ChevronRight,
+  CircleAlert,
   CircleCheck,
   Circle,
   Ellipsis,
@@ -16,6 +18,7 @@ import {
   Pin,
   PinOff,
   Puzzle,
+  Search,
   Sparkles,
   Timer,
   Trash2,
@@ -33,7 +36,6 @@ import {
 import type { BackgroundMode, SessionSummary } from '../types';
 import type { WsStatus } from '../ws';
 import { parseSentAttachments } from './Composer';
-import { costUsd, formatDollars } from '../lib/usage';
 import { SETTINGS_SECTIONS, type SettingsSectionId } from './Settings';
 
 import { UserCard } from './UserCard';
@@ -42,7 +44,9 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
+import { SessionPeek, type PeekTarget } from './SessionPeek';
 import { hasHiddenTitleBar, TRAFFIC_LIGHT_INSET } from '@/lib/desktop';
+import { Collapse } from './ui/Collapse';
 import { useFileIcons } from '@/lib/fileIcons';
 import { AgentIcon, ModelIcon } from './AgentIcon';
 
@@ -80,6 +84,8 @@ type Props = {
   /** True when the active session is currently streaming — drives the
    *  pulsing indicator on that row. */
   activeBusy: boolean;
+  runningSessions: ReadonlySet<string> | null;
+  completedSessions:ReadonlyMap<string,number>;
   refreshKey: number;
   /** Highlights the matching nav item in the sidebar. */
   activeView: MainView;
@@ -97,6 +103,10 @@ type Props = {
   /** Change a session's background mode. Provided by the app so the
    *  RowMenu can call `PUT /api/sessions/:id/background`. */
   onSetBackgroundMode?: (id: string, mode: BackgroundMode) => Promise<void>;
+  /** The open chat's PR, when the app already knows it. Shown on the
+   *  hover card of that chat only — a GitHub lookup per hovered row
+   *  would put a network call in front of a glance. */
+  activePr?: { number: number; title?: string } | null;
   /** Settings-mode state. Ignored unless `activeView === 'settings'`,
    *  in which case the sidebar renders the section tabs + a "Back to
    *  app" pill instead of the default nav. */
@@ -111,13 +121,15 @@ const PER_GROUP_LIMIT = 5;
 export function Sidebar({
   status, cwd, activeSessionId, activeBusy, refreshKey, activeView, onNavigate,
   onNewChat, onOpenSettings, onSessionLoaded, onAttachSession,
-  onSetBackgroundMode,
+  onSetBackgroundMode, activePr, runningSessions, completedSessions,
   settingsSection = 'provider',
   onSettingsSectionChange,
   onExitSettings,
 }: Props) {
   const hiddenTitleBar = hasHiddenTitleBar();
-  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [storedSessions, setSessions] = useState<SessionSummary[]>([]);
+  const sessions = useMemo(() => runningSessions == null ? storedSessions
+    : storedSessions.map(session => ({...session, running:runningSessions.has(session.id)})), [storedSessions,runningSessions]);
   const [error, setError] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(() => loadCollapsed());
   // Chats whose forks are folded away (the fork pill on the row).
@@ -143,14 +155,25 @@ export function Sidebar({
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
   const [confirmBulkDelete, setConfirmBulkDelete] = useState(false);
+  // Hover peek — one card for the whole list, anchored to whichever row
+  // the pointer is resting on. State lives here rather than in the row
+  // so sliding the pointer down the list moves one card rather than
+  // mounting twenty.
+  const [peek, setPeek] = useState<PeekTarget | null>(null);
+  // Sidebar search: filters every folder at once, and opens them while it
+  // has text so a match is never hidden behind a collapsed folder.
+  const [query, setQuery] = useState('');
+  const searching = query.trim().length > 0;
 
   useEffect(() => {
     // Fetch all non-archived sessions across every folder — grouped
     // in-memory below. The server excludes archived ones here; they come
     // through the separate archived fetch when the user opens that view.
+    let cancelled = false;
     listSessions({ all: true })
-      .then((s) => { setSessions(s); setError(null); })
-      .catch((e) => setError(String(e.message ?? e)));
+      .then((s) => { if (!cancelled) {setSessions(s); setError(null);} })
+      .catch((e) => {if (!cancelled) setError(String(e.message ?? e));});
+    return () => {cancelled = true;};
   }, [refreshKey, localVersion]);
 
   useEffect(() => {
@@ -165,7 +188,9 @@ export function Sidebar({
   // Background chats only report through this list, so while any of them
   // is mid-turn, look again every few seconds — that's how a spinner turns
   // into "finished" without the user having to open the chat.
-  const anyRunning = sessions.some((s) => s.running === true && s.id !== activeSessionId);
+  // Also how a chat that starts waiting on you gets its badge: that change
+  // isn't pushed, and a chat waiting on you is mid-turn, so it's covered.
+  const anyRunning = sessions.some((s) => (s.running === true || s.needs_attention === true) && s.id !== activeSessionId);
   useEffect(() => {
     if (!anyRunning) return;
     const id = window.setInterval(refresh, 4000);
@@ -176,9 +201,16 @@ export function Sidebar({
   // dot until you open them. Remembered across reloads.
   const [unread, setUnread] = useState<Set<string>>(() => loadUnread());
   const wasRunning = useRef<Set<string>>(new Set());
+  const seenCompletions=useRef(new Map<string,number>());
   useEffect(() => {
     const next = new Set(unread);
     let changed = false;
+    for(const [id,revision] of completedSessions){
+      if(seenCompletions.current.get(id)===revision)continue;
+      seenCompletions.current.set(id,revision);
+      if(id!==activeSessionId&&!next.has(id)){next.add(id);changed=true;}
+    }
+    while(seenCompletions.current.size>500)seenCompletions.current.delete(seenCompletions.current.keys().next().value!);
     for (const s of sessions) {
       if (s.running) continue;
       if (wasRunning.current.has(s.id) && s.id !== activeSessionId && !next.has(s.id)) {
@@ -193,7 +225,7 @@ export function Sidebar({
       saveUnread(next);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessions, activeSessionId]);
+  }, [sessions, activeSessionId, completedSessions]);
 
   /** Flip one session's pin/archive flag and refresh. Errors surface in
    *  the same slot as fetch errors. */
@@ -252,7 +284,10 @@ export function Sidebar({
     refresh();
   }
 
-  const groups = useMemo(() => groupByCwd(sessions, cwd), [sessions, cwd]);
+  const groups = useMemo(
+    () => groupByCwd(searching ? sessions.filter((s) => matchesQuery(s, query)) : sessions, cwd),
+    [sessions, cwd, query, searching],
+  );
 
   async function pickSession(id: string) {
     // Prefer WS attach — no HTTP round-trip, no reload flash, and the
@@ -491,6 +526,29 @@ export function Sidebar({
             )}
           </div>
 
+          {!selecting && (sessions.length > 0 || searching) && (
+            <label className="mx-1 mb-1 flex items-center gap-2 rounded-lg border border-border/60 bg-shade/10 px-2 py-1 text-[12.5px] focus-within:border-border">
+              <Search className="size-3.5 shrink-0 text-muted-foreground/70" aria-hidden />
+              {/* Plain text, not type=search: that adds the browser's own
+                  clear button beside ours. */}
+              <input
+                type="text"
+                enterKeyHint="search"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Escape') setQuery(''); }}
+                placeholder="Search chats"
+                aria-label="Search chats"
+                className="min-w-0 flex-1 bg-transparent text-foreground outline-none placeholder:text-muted-foreground/60"
+              />
+              {searching && (
+                <button type="button" onClick={() => setQuery('')} aria-label="Clear search" className="text-muted-foreground/70 hover:text-foreground">
+                  <X className="size-3.5" />
+                </button>
+              )}
+            </label>
+          )}
+
           {selecting && (
             <div className="sticky top-0 z-10 flex items-center gap-1 rounded-lg border border-border/70 bg-mira-elev1/95 px-2.5 py-1.5 shadow-sm backdrop-blur">
               <span className="text-[12px] font-medium text-foreground">
@@ -527,13 +585,17 @@ export function Sidebar({
           )}
 
           {error && <Empty>error: {error}</Empty>}
-          {!error && groups.length === 0 && <Empty>No saved chats yet</Empty>}
+          {!error && groups.length === 0 && <Empty>{searching ? 'No chats match' : 'No saved chats yet'}</Empty>}
 
           {groups.map((g) => {
-            const isCollapsed = collapsed.has(g.cwd);
-            const expandedAll = showMore.has(g.cwd);
+            const isCollapsed = !searching && collapsed.has(g.cwd);
+            const expandedAll = searching || showMore.has(g.cwd);
             const roots = forkForest(g.sessions);
             const visible = expandedAll ? roots : roots.slice(0, PER_GROUP_LIMIT);
+            const waiting = g.sessions.filter((x) => x.needs_attention && x.id !== activeSessionId).length;
+            // Date sections only when they say something: rows spanning
+            // more than one period.
+            const sections = new Set(visible.map((r) => dateSection(r.session))).size > 1;
             const overflow = roots.length - visible.length;
             const labelOf = (id: string | null | undefined) => {
               const p = g.sessions.find((x) => x.id === id);
@@ -563,18 +625,16 @@ export function Sidebar({
                       current={g.isCurrent}
                     />
                     <span className={cn('truncate', g.isCurrent && 'text-foreground')}>{g.label}</span>
-                  </button>
-                  {(() => {
-                    const total = groupCost(g.sessions);
-                    return total != null ? (
+                    {isCollapsed && waiting > 0 && (
                       <span
-                        className="mr-1 font-mono text-[11px] tabular-nums text-emerald-400/80"
-                        title={`Total spend across ${g.sessions.length} session${g.sessions.length === 1 ? '' : 's'} in this project`}
+                        className="ml-0.5 inline-flex items-center gap-0.5 rounded-full bg-amber-500/15 px-1.5 text-[10.5px] font-medium tabular-nums text-amber-600 dark:text-amber-400"
+                        title={`${waiting} chat${waiting === 1 ? '' : 's'} waiting on you`}
                       >
-                        {formatDollars(total)}
+                        <CircleAlert className="size-2.5" />
+                        {waiting}
                       </span>
-                    ) : null;
-                  })()}
+                    )}
+                  </button>
                   <RowMenu
                     items={[
                       {
@@ -588,9 +648,16 @@ export function Sidebar({
                   />
                 </div>
 
-                {!isCollapsed && (
+                <Collapse open={!isCollapsed}>
                   <div className="flex flex-col gap-0.5 pl-1">
-                    {visible.map((root) => {
+                    {visible.map((root, rootIndex) => {
+                      const section = dateSection(root.session);
+                      const header =
+                        sections && (rootIndex === 0 || dateSection(visible[rootIndex - 1].session) !== section) ? (
+                          <div key={`h-${section}`} className="px-2 pb-0.5 pt-2 text-[10.5px] font-medium uppercase tracking-wider text-muted-foreground/55 first:pt-0.5">
+                            {section}
+                          </div>
+                        ) : null;
                       const renderNode = (node: ForkNode, depth: number): React.ReactNode => {
                         const s = node.session;
                         const open = !forksHidden.has(s.id);
@@ -610,11 +677,13 @@ export function Sidebar({
                         // otherwise (and New thread swaps in a fresh
                         // id server-side, which drops it naturally).
                         active={s.id === activeSessionId && activeView === 'chat'}
-                        activeBusy={activeBusy}
+                        activeBusy={runningSessions == null && activeBusy}
                         unread={unread.has(s.id)}
+                        launched={depth > 0 && !s.forked_from && !!s.launched_by}
                         selecting={selecting}
                         checked={selected.has(s.id)}
                         onToggleSelect={() => toggleSelected(s.id)}
+                        onPeek={(rect) => setPeek(rect ? { session: s, rect } : null)}
                         onPick={() => pickSession(s.id)}
                         onRename={() => setRenaming(s)}
                         onDelete={() => removeSession(s.id)}
@@ -626,9 +695,9 @@ export function Sidebar({
                             : undefined
                         }
                       />
-                            {node.forks.length > 0 && open && (
-                              // Branch lines: a rail down from the chat's icon,
-                              // with a rounded elbow into each fork.
+                            <Collapse open={node.forks.length > 0 && open}>
+                              {/* Branch lines: a rail down from the chat's icon,
+                                  with a rounded elbow into each fork. */}
                               <div className="ml-[15px] flex flex-col gap-0.5 pl-3">
                                 {node.forks.map((f, i) => (
                                   <div key={f.session.id} className="relative">
@@ -638,19 +707,21 @@ export function Sidebar({
                                         className="pointer-events-none absolute -bottom-0.5 -left-3 top-0 border-l border-fg/15"
                                       />
                                     )}
-                                    <span
-                                      aria-hidden
-                                      className="pointer-events-none absolute -left-3 top-0 h-4 w-2.5 rounded-bl-[7px] border-b border-l border-fg/15"
-                                    />
+                                    <BranchElbow className="-left-3 top-0" />
                                     {renderNode(f, depth + 1)}
                                   </div>
                                 ))}
                               </div>
-                            )}
+                            </Collapse>
                           </div>
                         );
                       };
-                      return renderNode(root, 0);
+                      return (
+                        <div key={root.session.id} className="flex flex-col gap-0.5">
+                          {header}
+                          {renderNode(root, 0)}
+                        </div>
+                      );
                     })}
                     {overflow > 0 && (
                       <button
@@ -669,15 +740,15 @@ export function Sidebar({
                       </button>
                     )}
                   </div>
-                )}
+                </Collapse>
               </div>
             );
           })}
 
           {/* Archived view (issue #58) — sessions hidden from the main
-              list live here. Clicking a row or hitting Restore puts it
-              back in its folder; Delete is permanent. */}
-          {!selecting && (
+              list live here. Clicking a row opens it; Restore puts it back
+              in its folder; Delete is permanent. */}
+          {!selecting && !searching && (
             <div className="mt-4 flex flex-col gap-0.5 px-0.5">
               <button
                 type="button"
@@ -705,6 +776,8 @@ export function Sidebar({
                     <ArchivedRow
                       key={s.id}
                       session={s}
+                      active={s.id === activeSessionId && activeView === 'chat'}
+                      onOpen={() => void pickSession(s.id)}
                       onRestore={() => void flagSession(s.id, { archived: false })}
                       onDelete={() => removeSession(s.id)}
                     />
@@ -720,6 +793,12 @@ export function Sidebar({
       )}
 
       <UserCard status={status} onOpenSettings={onOpenSettings} />
+      {/* One hover card for every row in the list. */}
+      <SessionPeek
+        target={peek}
+        pr={peek && peek.session.id === activeSessionId ? activePr ?? null : null}
+        onDismiss={() => setPeek(null)}
+      />
     </aside>
     <RenameDialog
       session={renaming}
@@ -761,8 +840,8 @@ export function Sidebar({
  *  `short-id · time · optional branch · optional provider-dot`, and a
  *  right-side status circle (running / merged / idle) — the row background
  *  itself stays quiet even when active so the sidebar doesn't shout. */
-/** A chat and the chats forked from it ("Fork from here"), newest first
- *  at each level. A fork whose original isn't in the list (archived, or
+/** A chat and the chats forked from it ("Fork from here") or launched
+ *  from it (`thread_launch`), newest first at each level. A fork whose original isn't in the list (archived, or
  *  another project) stands on its own. */
 type ForkNode = { session: SessionSummary; forks: ForkNode[] };
 
@@ -772,7 +851,10 @@ function forkForest(sessions: SessionSummary[]): ForkNode[] {
   const roots: ForkNode[] = [];
   for (const s of sessions) {
     const node = nodes.get(s.id)!;
-    const parent = s.forked_from && s.forked_from !== s.id && ids.has(s.forked_from) ? nodes.get(s.forked_from) : undefined;
+    // A fork nests under its original; a launched thread under the chat
+    // that launched it.
+    const up = s.forked_from ?? s.launched_by ?? null;
+    const parent = up && up !== s.id && ids.has(up) ? nodes.get(up) : undefined;
     if (parent) parent.forks.push(node);
     else roots.push(node);
   }
@@ -812,6 +894,8 @@ function SessionRow({
   active,
   activeBusy,
   unread = false,
+  launched = false,
+  onPeek,
   onPick,
   onRename,
   onDelete,
@@ -835,7 +919,13 @@ function SessionRow({
   activeBusy: boolean;
   /** Finished in the background since you last looked. */
   unread?: boolean;
+  /** A thread another chat launched (rather than a fork of it). */
+  launched?: boolean;
   onPick: () => void;
+  /** Pointer entered the row with its viewport rect (so the hover card
+   *  can sit beside it), or left it with `null`. Omitted in bulk-select
+   *  mode, where hovering is about choosing, not looking. */
+  onPeek?: (rect: DOMRect | null) => void;
   onRename: () => void;
   onDelete: () => void;
   /** Optional — when provided, the RowMenu shows a "Background mode ▸"
@@ -874,6 +964,13 @@ function SessionRow({
       tabIndex={0}
       aria-checked={selecting ? checked : undefined}
       onClick={selecting ? onToggleSelect : onPick}
+      onMouseEnter={
+        onPeek && !selecting ? (e) => onPeek(e.currentTarget.getBoundingClientRect()) : undefined
+      }
+      // Leaving the row hands the sidebar a null target; the card's own
+      // short linger means sliding straight onto the next row doesn't
+      // make it blink.
+      onMouseLeave={onPeek && !selecting ? () => onPeek(null) : undefined}
       onKeyDown={(e) => {
         if (e.key !== 'Enter' && e.key !== ' ') return;
         e.preventDefault();
@@ -902,7 +999,7 @@ function SessionRow({
        *  the text the way a taller badge on a baseline row did. */}
       <span className="flex min-w-0 items-center gap-2 text-left">
         {!selecting &&
-          (depth > 0 ? (
+          (depth > 0 && !launched ? (
             <GitFork className="size-3.5 shrink-0 text-mira-blue/70" aria-label="Fork" />
           ) : (
             <EngineBadge session={session} />
@@ -918,8 +1015,15 @@ function SessionRow({
                 : 'font-medium text-foreground/90',
           )}
         >
-          {depth > 0 ? forkLabel(session) : sessionLabel(session)}
+          {depth > 0 && !launched ? forkLabel(session) : sessionLabel(session)}
         </span>
+        {/* Just the mark: the title gets the width, the branch is on hover
+            and in the peek. */}
+        {!selecting && session.worktree_branch && session.worktree_status !== 'merged' && (
+          <span className="flex shrink-0 text-muted-foreground/60" title={`Worktree branch ${session.worktree_branch}`}>
+            <GitBranch className="size-3" aria-label={`Branch ${session.worktree_branch}`} />
+          </span>
+        )}
         {!selecting && forkCount > 0 && (
           <button
             type="button"
@@ -927,7 +1031,7 @@ function SessionRow({
               e.stopPropagation();
               onToggleForks?.();
             }}
-            title={`${forksOpen ? 'Hide' : 'Show'} ${forkCount} fork${forkCount === 1 ? '' : 's'}`}
+            title={`${forksOpen ? 'Hide' : 'Show'} ${forkCount} fork${forkCount === 1 ? '' : 's'} and thread${forkCount === 1 ? '' : 's'}`}
             className={cn(
               'inline-flex h-4 shrink-0 items-center gap-0.5 rounded-full px-1.5 text-[10.5px] font-medium tabular-nums transition-colors',
               forksOpen
@@ -958,7 +1062,12 @@ function SessionRow({
               'group-hover:opacity-0',
             )}
           >
-            <SessionStatus running={running} unread={unread} merged={session.worktree_status === 'merged'} />
+            <SessionStatus
+              running={running}
+              unread={unread}
+              merged={session.worktree_status === 'merged'}
+              waiting={!active && session.needs_attention === true}
+            />
           </span>
           <span
             className={cn(
@@ -1012,7 +1121,20 @@ function agentName(kind: string): string {
 /** The right-side status affordance. Priority: running (spinner) > merged
  *  (green check) > idle (empty circle outline). Matches Codex's row-status
  *  ring — quiet by default, expressive when there's a state worth noting. */
-function SessionStatus({ running, unread, merged }: { running: boolean; unread: boolean; merged: boolean }) {
+function SessionStatus({ running, unread, merged, waiting = false }: { running: boolean; unread: boolean; merged: boolean; waiting?: boolean }) {
+  // Waiting on you beats everything: it's the one state that stalls
+  // without you.
+  if (waiting) {
+    return (
+      <span
+        className="inline-flex size-4 items-center justify-center text-amber-500"
+        title="Waiting on you: an approval, a question or a plan"
+        aria-label="needs you"
+      >
+        <CircleAlert className="size-3.5" />
+      </span>
+    );
+  }
   if (unread && !running) {
     return (
       <span
@@ -1061,43 +1183,55 @@ function SessionStatus({ running, unread, merged }: { running: boolean; unread: 
 
 /* ---------- archived row + bulk delete confirm ---------- */
 
-/** One archived session. Clicking the row (or Restore in the menu) puts
- *  the session back in its folder; Delete is permanent and confirms. */
+/** One archived session. Clicking the row opens it where it is; Restore
+ *  puts it back in its folder; Delete is permanent and confirms. */
 function ArchivedRow({
-  session, onRestore, onDelete,
+  session, active, onOpen, onRestore, onDelete,
 }: {
   session: SessionSummary;
+  active: boolean;
+  onOpen: () => void;
   onRestore: () => void;
   onDelete: () => void;
 }) {
   return (
     <div
-      title="Restore to the list"
-      className="group grid w-full grid-cols-[1fr_auto] items-start gap-1.5 rounded-lg px-2 py-1.5 text-foreground/70 transition-colors hover:bg-fg/[0.05] hover:text-foreground"
+      className={cn(
+        'group grid w-full grid-cols-[1fr_auto] items-center gap-1.5 rounded-lg px-2 py-1.5 transition-colors',
+        active ? 'bg-fg/[0.1] text-foreground' : 'text-foreground/70 hover:bg-fg/[0.05] hover:text-foreground',
+      )}
     >
-      <button type="button" onClick={onRestore} className="flex min-w-0 items-baseline gap-1.5 text-left">
-        <span className="min-w-0 flex-1 truncate text-[13.5px] leading-tight font-medium">
+      <button type="button" onClick={onOpen} className="flex min-w-0 items-center gap-2 text-left" title="Open">
+        <EngineBadge session={session} />
+        <span className="min-w-0 flex-1 truncate text-[13px] leading-4 font-medium">
           {sessionLabel(session)}
         </span>
-        <span className="shrink-0 text-[10.5px] text-muted-foreground/50">
+        <span className="shrink-0 text-[10.5px] tabular-nums text-muted-foreground/50">
           {timeAgo(session.updated_at)}
         </span>
       </button>
-      <div className="relative flex size-5 items-center justify-center pt-0.5">
-        <span className="absolute inset-0 flex items-center justify-center opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
-          <RowMenu
-            items={[
-              { label: 'Restore', icon: <ArchiveRestore className="size-3.5" />, onSelect: onRestore },
-              {
-                label: 'Delete permanently',
-                danger: true,
-                confirm: 'Delete this session? This cannot be undone.',
-                icon: <Trash2 className="size-3.5" />,
-                onSelect: onDelete,
-              },
-            ]}
-          />
-        </span>
+      <div className="flex items-center gap-0.5">
+        <button
+          type="button"
+          onClick={onRestore}
+          title="Restore to its folder"
+          aria-label="Restore"
+          className="rounded-sm p-0.5 text-muted-foreground/60 opacity-0 transition-opacity hover:bg-fg/[0.05] hover:text-foreground group-hover:opacity-100 focus:opacity-100"
+        >
+          <ArchiveRestore className="size-3.5" />
+        </button>
+        <RowMenu
+          items={[
+            { label: 'Restore', icon: <ArchiveRestore className="size-3.5" />, onSelect: onRestore },
+            {
+              label: 'Delete permanently',
+              danger: true,
+              confirm: 'Delete this session? This cannot be undone.',
+              icon: <Trash2 className="size-3.5" />,
+              onSelect: onDelete,
+            },
+          ]}
+        />
       </div>
     </div>
   );
@@ -1283,6 +1417,31 @@ function groupByCwd(sessions: SessionSummary[], currentCwd: string): Group[] {
   return groups;
 }
 
+/** Search: title, first message, folder and branch, case-insensitive. */
+function matchesQuery(s: SessionSummary, query: string): boolean {
+  const q = query.trim().toLowerCase();
+  if (!q) return true;
+  return [sessionLabel(s), s.first_user_message, s.worktree_branch, basename(s.cwd), s.agent_driver]
+    .some((field) => (field ?? '').toLowerCase().includes(q));
+}
+
+/** Which period a row falls in, for the date sections. Pinned chats sit
+ *  at the top of their folder, so they get their own section. */
+function dateSection(s: SessionSummary): string {
+  if (s.pinned) return 'Pinned';
+  if (!s.updated_at) return 'Older';
+  const then = new Date(s.updated_at * 1000);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const day = 86_400_000;
+  const t = then.getTime();
+  if (t >= today.getTime()) return 'Today';
+  if (t >= today.getTime() - day) return 'Yesterday';
+  if (t >= today.getTime() - 6 * day) return 'This week';
+  if (t >= today.getTime() - 29 * day) return 'This month';
+  return 'Older';
+}
+
 function basename(p: string): string {
   if (!p) return 'unknown';
   const trimmed = p.replace(/\/+$/, '');
@@ -1390,29 +1549,9 @@ function Empty({ children }: { children: React.ReactNode }) {
   return <div className="px-2.5 py-1 text-[13px] text-muted-foreground/60">{children}</div>;
 }
 
-function sessionCost(s: SessionSummary): number | null {
-  if (!s.usage) return null;
-  if (s.usage.prompt_tokens === 0 && s.usage.completion_tokens === 0) return null;
-  return costUsd(s.model, s.usage);
-}
-
-/** Sum of known session costs in the group. Sessions on unpriced models are
- *  skipped rather than treated as $0 so the badge doesn't lie by omission —
- *  if nothing is priceable, the badge just doesn't render. */
-function groupCost(sessions: SessionSummary[]): number | null {
-  let total = 0;
-  let any = false;
-  for (const s of sessions) {
-    const c = sessionCost(s);
-    if (c == null) continue;
-    total += c;
-    any = true;
-  }
-  return any ? total : null;
-}
-
-
 function timeAgo(unixSecs: number): string {
+  // No timestamp (0) is unknown, not 1970: show nothing rather than "2961w".
+  if (!unixSecs || unixSecs <= 0) return '';
   const now = Math.floor(Date.now() / 1000);
   const diff = Math.max(0, now - unixSecs);
   if (diff < 60) return `${diff}s`;
@@ -1420,7 +1559,9 @@ function timeAgo(unixSecs: number): string {
   if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
   const days = Math.floor(diff / 86400);
   if (days < 7) return `${days}d`;
-  return `${Math.floor(days / 7)}w`;
+  if (days < 60) return `${Math.floor(days / 7)}w`;
+  if (days < 365) return `${Math.floor(days / 30)}mo`;
+  return `${Math.floor(days / 365)}y`;
 }
 
 

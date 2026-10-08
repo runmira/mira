@@ -115,6 +115,21 @@ pub struct LimitWindow {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MiraEvent {
+    MessageMetadata { message_id: String, phase: String },
+    Activity { kind: String, title: String, detail: String },
+    RuntimeRequest(crate::runtime::RuntimeRequest),
+    RuntimeWork(crate::runtime::RuntimeWork),
+    RuntimeTurn(crate::runtime::RuntimeTurn),
+    /// Authoritative completed message, replacing streamed partial prose.
+    AssistantSnapshot {
+        message_id: String,
+        text: String,
+    },
+    /// Incremental tool stdout/stderr; complete tool events remain snapshots.
+    ToolOutputDelta {
+        id: String,
+        text: String,
+    },
     /// Streamed assistant prose. Chunks sharing a `message_id` belong to one
     /// message; a change of id starts a new one.
     AssistantText {
@@ -545,6 +560,33 @@ mod tests {
             TurnEnd::EndTurn
         );
     }
+    /// An image-only reply must not render as an empty bubble: the agent
+    /// said something, we just can't show it, and the transcript has to
+    /// say which.
+    #[test]
+    fn an_image_only_reply_says_it_cannot_be_shown() {
+        let image = ContentBlock::Image(agent_client_protocol::schema::v1::ImageContent::new(
+            "AAAA".to_string(),
+            "image/png".to_string(),
+        ));
+        let text = assistant_chunk_text(&image);
+        assert!(text.contains("image"), "{text}");
+        // Real text still passes through untouched.
+        let plain = ContentBlock::Text(agent_client_protocol::schema::v1::TextContent::new(
+            "hello".to_string(),
+        ));
+        assert_eq!(assistant_chunk_text(&plain), "hello");
+    }
+
+    /// An empty text delta is the agent's own doing, not a rendering
+    /// failure, so it stays empty rather than growing a placeholder.
+    #[test]
+    fn an_empty_text_delta_stays_empty() {
+        let empty = ContentBlock::Text(agent_client_protocol::schema::v1::TextContent::new(
+            String::new(),
+        ));
+        assert_eq!(assistant_chunk_text(&empty), "");
+    }
 }
 
 /// `sessionUpdate` variants this build knows exist but does not model.
@@ -641,7 +683,7 @@ pub fn from_session_notification(params: &serde_json::Value) -> Option<Normalize
         },
         SessionUpdate::AgentMessageChunk(c) => MiraEvent::AssistantText {
             message_id: c.message_id.as_ref().map(|m| m.to_string()),
-            text: text_of(&c.content).unwrap_or_default(),
+            text: assistant_chunk_text(&c.content),
         },
         SessionUpdate::AgentThoughtChunk(c) => MiraEvent::AgentThought {
             message_id: c.message_id.as_ref().map(|m| m.to_string()),
@@ -729,6 +771,39 @@ pub fn from_session_notification(params: &serde_json::Value) -> Option<Normalize
 
 fn text_of(block: &ContentBlock) -> Option<String> {
     content_to_text(block)
+}
+
+/// The text of a reply chunk, saying so when the chunk held something else.
+///
+/// An agent can answer with an image, a resource link, or audio. Mira can't
+/// render those inline yet, and mapping them to `""` produced an empty
+/// bubble — a reply that looks truncated for a reason the reader can't
+/// see. Naming the content is the difference between "the agent sent
+/// something I can't show" and "the agent said nothing".
+fn assistant_chunk_text(block: &ContentBlock) -> String {
+    match text_of(block) {
+        Some(t) if !t.trim().is_empty() => t,
+        _ => describe_unrenderable_content(block),
+    }
+}
+
+/// A short, honest label for content that isn't text.
+fn describe_unrenderable_content(block: &ContentBlock) -> String {
+    let kind = serde_json::to_value(block)
+        .ok()
+        .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(str::to_string))
+        .unwrap_or_else(|| "content".to_string());
+    match kind.as_str() {
+        "image" => "[image — Mira can't show images from an agent yet]".to_string(),
+        "audio" => "[audio — Mira can't play audio from an agent yet]".to_string(),
+        "resource" | "resource_link" => {
+            "[attachment — Mira can't show attachments from an agent yet]".to_string()
+        }
+        other if other != "text" => format!("[{other} — not shown]"),
+        // A text chunk that is empty is the agent's own doing (an empty
+        // delta), not something we failed to render.
+        _ => String::new(),
+    }
 }
 
 /// Unwrap ACP's `MaybeUndefined`, where `Null` is a *value* meaning

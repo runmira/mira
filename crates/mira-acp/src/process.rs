@@ -223,6 +223,10 @@ pub struct StartSpec<'a> {
     pub cwd: Option<&'a Path>,
     /// Mira's tool server URL, offered to agents that take HTTP MCP servers.
     pub mira_mcp: Option<crate::session::MiraMcp>,
+    /// Resume a previous agent session (`session/resume`) instead of
+    /// starting blank. The id comes from the per-(mira-session, driver)
+    /// cursor; a confirmed "session not found" falls back to `session/new`.
+    pub resume_session_id: Option<String>,
 }
 
 /// Start an agent, taking both the launch and the capabilities from `driver`.
@@ -238,6 +242,19 @@ pub async fn start_driver(
     ports: HostPorts,
     cwd: Option<&Path>,
 ) -> Result<AcpAgent, StartError> {
+    start_driver_resuming(driver, cfg, mode, program, ports, cwd, None).await
+}
+
+/// [`start_driver`], resuming a previous agent session when `resume` is set.
+pub async fn start_driver_resuming(
+    driver: &dyn crate::driver::AcpDriver,
+    cfg: &crate::driver::DriverConfig,
+    mode: crate::driver::PermissionMode,
+    program: &Path,
+    ports: HostPorts,
+    cwd: Option<&Path>,
+    resume: Option<String>,
+) -> Result<AcpAgent, StartError> {
     let launch = driver.resolve(cfg, mode, program.to_path_buf());
     start(StartSpec {
         launch: &launch,
@@ -248,6 +265,7 @@ pub async fn start_driver(
         events: ports.events,
         cwd,
         mira_mcp: ports.mira_mcp,
+        resume_session_id: resume,
     })
     .await
 }
@@ -427,7 +445,48 @@ pub async fn start(spec: StartSpec<'_>) -> Result<AcpAgent, StartError> {
     }
     session.set_mira_mcp(spec.mira_mcp.clone()).await;
     if let Some(cwd) = spec.cwd {
-        if let Err(e) = session.new_session(cwd, Vec::new()).await {
+        // A stored cursor resumes the agent's own session instead of
+        // starting blank: re-adopting the session id IS the resume, the
+        // agent loads its history itself. A confirmed "not found" falls
+        // back to `session/new`; anything else propagates so a live
+        // thread never silently resets to empty.
+        if let Some(resume_id) = spec.resume_session_id.as_deref() {
+            let resumed = if session.supports_resume() {
+                match session.resume_session(resume_id, cwd, Vec::new()).await {
+                    Ok(_) => Ok(true),
+                    Err(e)
+                        if crate::session::is_session_not_found(&e)
+                            || crate::session::is_remote_internal_error(&e) =>
+                    {
+                        tracing::warn!(session = %resume_id, err = %e, "agent session no longer resumable; starting fresh");
+                        Ok(false)
+                    }
+                    Err(e) => Err(e),
+                }?
+            } else if session.supports_load() {
+                match session.load_session(resume_id, cwd, Vec::new()).await {
+                    Ok(_) => Ok(true),
+                    Err(e)
+                        if crate::session::is_session_not_found(&e)
+                            || crate::session::is_remote_internal_error(&e) =>
+                    {
+                        tracing::warn!(session = %resume_id, err = %e, "agent session no longer resumable; starting fresh");
+                        Ok(false)
+                    }
+                    Err(e) => Err(e),
+                }?
+            } else {
+                false
+            };
+            if !resumed {
+                if let Err(e) = session.new_session(cwd, Vec::new()).await {
+                    process
+                        .shutdown(std::time::Duration::from_millis(500))
+                        .await;
+                    return Err(StartError::Session(e));
+                }
+            }
+        } else if let Err(e) = session.new_session(cwd, Vec::new()).await {
             process
                 .shutdown(std::time::Duration::from_millis(500))
                 .await;
@@ -484,6 +543,114 @@ mod tests {
             std::path::Path::new("opencode"),
         );
         assert_eq!(chosen, Transport::Acp);
+    }
+
+    /// A driver with a native flavor *and* deny prefixes, for proving the
+    /// native launch carries enforcement. None of the six shippers pair
+    /// both today, which is exactly how the drop went unnoticed.
+    struct DenyingNative;
+    impl AcpDriver for DenyingNative {
+        fn kind(&self) -> &'static str {
+            "denying-native"
+        }
+        fn display_name(&self) -> &'static str {
+            "Denying Native"
+        }
+        fn base_args(&self) -> &'static [&'static str] {
+            &[]
+        }
+        fn binary_names(&self) -> &'static [&'static str] {
+            &["denying-native"]
+        }
+        fn auth_shape(&self) -> crate::driver::AuthShape {
+            crate::driver::AuthShape::EnvKey
+        }
+        fn api_key_env_vars(&self) -> &'static [&'static str] {
+            &["DENYING_API_KEY"]
+        }
+        fn home_env_var(&self) -> Option<&'static str> {
+            Some("DENYING_HOME")
+        }
+        fn env_deny_prefixes(&self) -> &'static [&'static str] {
+            &["AMBIENT_"]
+        }
+        fn native_flavor(&self) -> Option<crate::native::NativeFlavor> {
+            Some(crate::native::NativeFlavor::Claude)
+        }
+    }
+
+    #[test]
+    fn native_launches_keep_the_resolved_env_and_its_denies() {
+        // The regression: `build_native_launch` copied `env` and
+        // `secret_env` but not `env_deny`, so native transports spawned
+        // with enforcement silently switched off.
+        let cfg = DriverConfig {
+            api_key: Some("sk-test".into()),
+            home_path: Some(std::path::PathBuf::from("/tmp/denying-home")),
+            ..Default::default()
+        };
+        let l = build_native_launch(
+            &DenyingNative,
+            &cfg,
+            crate::driver::PermissionMode::Ask,
+            std::path::Path::new("denying-native"),
+            None,
+        )
+        .expect("flavor implies a launch");
+        assert_eq!(
+            l.env.get("DENYING_HOME").map(String::as_str),
+            Some("/tmp/denying-home")
+        );
+        assert_eq!(
+            l.env.get("DENYING_API_KEY").map(String::as_str),
+            Some("sk-test")
+        );
+        assert!(
+            l.secret_env.contains(&"DENYING_API_KEY".to_string()),
+            "key must stay redacted: {l:?}"
+        );
+        assert_eq!(l.env_deny, vec!["AMBIENT_".to_string()]);
+    }
+
+    #[test]
+    fn codex_app_server_launches_carry_the_instance_config() {
+        // The sharper regression: the Codex spawn bypassed
+        // `build_native_launch` entirely, so `CODEX_HOME`, the API key,
+        // user env and launch args never reached `codex app-server` — a
+        // `codex-work` instance silently ran as ambient.
+        use crate::drivers::CodexDriver;
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("CODEX_PROFILE".to_string(), "work".to_string());
+        let cfg = DriverConfig {
+            home_path: Some(std::path::PathBuf::from("/tmp/codex-work")),
+            api_key: Some("sk-codex".into()),
+            env,
+            launch_args: vec!["--oss".to_string()],
+            ..Default::default()
+        };
+        let l = build_native_launch(
+            &CodexDriver,
+            &cfg,
+            crate::driver::PermissionMode::Ask,
+            std::path::Path::new("codex"),
+            None,
+        )
+        .expect("flavor implies a launch");
+        assert_eq!(
+            l.env.get("CODEX_HOME").map(String::as_str),
+            Some("/tmp/codex-work")
+        );
+        assert_eq!(
+            l.env.get("CODEX_API_KEY").map(String::as_str),
+            Some("sk-codex")
+        );
+        assert_eq!(l.env.get("CODEX_PROFILE").map(String::as_str), Some("work"));
+        assert!(
+            l.args.contains(&"--oss".to_string()),
+            "user launch args must reach the spawn: {:?}",
+            l.args
+        );
+        assert!(l.secret_env.contains(&"CODEX_API_KEY".to_string()));
     }
 
     use super::*;
@@ -959,6 +1126,7 @@ esac
             events: seen.clone() as Arc<dyn EventPort>,
             cwd: Some(&cwd),
             mira_mcp: None,
+            resume_session_id: None,
         }))
         .await
         .expect("start");
@@ -986,6 +1154,7 @@ esac
             events: seen.clone() as Arc<dyn EventPort>,
             cwd: Some(&cwd),
             mira_mcp: None,
+            resume_session_id: None,
         }))
         .await
         .expect("start");
@@ -1025,6 +1194,7 @@ esac
             events: seen.clone() as Arc<dyn EventPort>,
             cwd: Some(&cwd),
             mira_mcp: None,
+            resume_session_id: None,
         }))
         .await
         .expect("start");
@@ -1054,6 +1224,7 @@ esac
             events: seen.clone() as Arc<dyn EventPort>,
             cwd: None,
             mira_mcp: None,
+            resume_session_id: None,
         }))
         .await;
         assert!(res.is_err(), "expected a start failure");
@@ -1079,6 +1250,7 @@ esac
             events: seen.clone() as Arc<dyn EventPort>,
             cwd: None,
             mira_mcp: None,
+            resume_session_id: None,
         }))
         .await;
         assert!(
@@ -1134,8 +1306,14 @@ pub async fn start_agent(
                     Ok(crate::native::AgentHandle::Native(Arc::new(agent)))
                 }
                 crate::native::NativeFlavor::CodexAppServer => {
-                    let prog = native_program(driver, cfg, program);
-                    let launch = crate::appserver::launch(prog);
+                    // The resolved driver env belongs on this spawn too: home,
+                    // API key, user env, launch args and deny prefixes. The
+                    // bare `appserver::launch` carries none of those, so a
+                    // `codex-work` instance with its own home silently ran as
+                    // ambient — same bug class `build_native_launch` exists to
+                    // prevent. Model/mode/resume travel over RPC, not argv.
+                    let launch = build_native_launch(driver, cfg, mode, program, native.as_ref())
+                        .expect("flavor implies a launch");
                     // The runtime mode id travels verbatim: the policy pair
                     // is derived inside, and the Modes event reports the id
                     // back so the picker and the process agree.
@@ -1163,7 +1341,12 @@ pub async fn start_agent(
             }
         }
         crate::driver::Transport::Acp | crate::driver::Transport::Auto => {
-            let agent = start_driver(driver, cfg, mode, program, ports, cwd).await?;
+            // `native.resume` doubles as the ACP resume cursor: the slot's
+            // recorded agent session id. A fresh process re-adopts it via
+            // `session/resume` instead of starting blank.
+            let resume = native.as_ref().and_then(|o| o.resume.clone());
+            let agent =
+                start_driver_resuming(driver, cfg, mode, program, ports, cwd, resume).await?;
             Ok(crate::native::AgentHandle::Acp(agent))
         }
     }
@@ -1202,6 +1385,11 @@ pub fn build_native_launch(
     };
     launch.env = resolved.env;
     launch.secret_env = resolved.secret_env;
+    // Deny prefixes are enforcement, not decoration: without this line a
+    // native transport (Claude's CLI, Codex's app-server — the latter is
+    // forced native) spawns with an empty deny list and the driver's
+    // ambient-credential stripping silently stops applying.
+    launch.env_deny = resolved.env_deny;
     launch.args.extend(cfg.launch_args.clone());
     Some(launch)
 }

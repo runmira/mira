@@ -130,6 +130,26 @@ pub enum PromptResponse {
     Plan(PlanResponse),
     AskUser(AskUserResponse),
     SubagentReview(SubagentReviewResponse),
+    Secret(SecretResponse),
+}
+
+/// The user's answer to a private secret prompt. `value` is never echoed to
+/// other windows or written to logs.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SecretResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(default)]
+    pub cancelled: bool,
+}
+
+impl std::fmt::Debug for SecretResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretResponse")
+            .field("value", &self.value.as_ref().map(|_| "<redacted>"))
+            .field("cancelled", &self.cancelled)
+            .finish()
+    }
 }
 
 /// The UI side of an interactive prompt. Implemented once per frontend:
@@ -171,7 +191,10 @@ impl Tool for PlanTool {
              changes, non-trivial features. The user can approve, edit, or \
              cancel. On approval you'll get back the final agreed plan; \
              execute it step by step using the appropriate tools. On \
-             cancellation, stop and ask the user what they'd prefer.",
+             cancellation, stop and ask the user what they'd prefer. \
+             Only a plan sent through this tool reaches the user — describing \
+             a plan in text shows nothing. Never claim you proposed, showed, \
+             or sent a plan without calling this tool first.",
             json!({
                 "type": "object",
                 "properties": {
@@ -308,7 +331,14 @@ impl Tool for AskUserTool {
              the code you write — target user vs. admin, permissions \
              model, scope boundary, storage backend, auth flow, \
              framework choice, migration vs. rewrite, etc.\n\n\
-             Each question offers 2-4 concrete options; mark exactly \
+              Only questions sent through this tool reach the user. Text \
+              questions are invisible — no card is shown, no answer comes \
+              back. Never claim you asked, sent, or showed questions without \
+              calling this tool first, and never describe answers you have \
+              not received. When the user explicitly asks for questions or \
+              names this tool, call it immediately in this turn with no \
+              preamble.\n\n\
+              Each question offers 2-4 concrete options; mark exactly \
              one option `recommended: true` when you have a considered \
              preference, otherwise leave them all unmarked. Users can \
              always answer with free text via a built-in \"Tell mira \

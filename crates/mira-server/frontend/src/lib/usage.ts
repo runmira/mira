@@ -2,7 +2,9 @@
 //
 // Keep the two in sync — the backend is authoritative for cost accounting;
 // this exists so the UI can render `$0.024` without a round-trip. Unknown
-// models fall through to "tokens-only" rendering.
+// models fall through to "tokens-only" rendering. The embedded table is a
+// fallback: once `/api/pricing` answers, those rows (LiteLLM, cached
+// on-disk by the server) win.
 
 import type { TokenUsage, UsageTotals } from '../types';
 
@@ -11,6 +13,32 @@ type Price = {
   output: number;
   cached_input: number;  // usually cheaper than fresh input
 };
+
+// Remote table, hydrated from `/api/pricing` on first use. `[key, Price]`
+// rows in the backend's raw format; matched with the same prefix rule.
+let remotePrices: Array<[string, Price]> | null = null;
+let remotePricesPromise: Promise<void> | null = null;
+
+
+export function ensureServerPricing(): Promise<void> {
+  if (remotePrices) return Promise.resolve();
+  if (remotePricesPromise) return remotePricesPromise;
+  if (typeof window === 'undefined') return Promise.resolve();
+  remotePricesPromise = (async () => {
+    try {
+      const r = await fetch('/api/pricing');
+      if (!r.ok) return;
+      const data = (await r.json()) as { rows?: Array<{ key: string; input_per_mtok: number; output_per_mtok: number; cached_input_per_mtok: number }> };
+      remotePrices = (data.rows ?? []).map((row) => [
+        row.key,
+        { input: row.input_per_mtok, output: row.output_per_mtok, cached_input: row.cached_input_per_mtok },
+      ] as [string, Price]);
+    } catch {
+      // offline / marketing web builds: keep the embedded table
+    }
+  })();
+  return remotePricesPromise;
+}
 
 // Prefix-match — longer prefixes first, so `gpt-4o-mini` beats `gpt-4o`.
 const MODEL_PRICES: [string, Price][] = [
@@ -41,6 +69,10 @@ export function priceFor(model: string): Price | null {
   // Gateways like OpenRouter prefix the vendor (`anthropic/claude-…`);
   // price on the model part, as pricing.rs does.
   const m = model.toLowerCase().split('/').pop() ?? '';
+  if (remotePrices) {
+    const hit = remotePrices.find(([key]) => m.startsWith(key.toLowerCase().split('/').pop() ?? ''));
+    if (hit) return hit[1];
+  }
   const hit = MODEL_PRICES.find(([prefix]) => m.startsWith(prefix));
   return hit ? hit[1] : null;
 }

@@ -116,7 +116,193 @@ pub fn source_home(source: Source) -> Option<PathBuf> {
     }
 }
 
-/// Transcript files for a source, newest first, capped.
+/// One turn's token accounting, read out of an agent's own transcript so
+/// the Usage page can show work Mira never drove (and never paid for
+/// through its own harness).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct NativeUsageRow {
+    pub source: Source,
+    /// The model the agent reported for the turn. Codex's rollouts don't
+    /// name one per event, so those rows say `unknown-codex` and price as
+    /// unknown (tokens still shown).
+    pub model: String,
+    /// The session file the row came from, so repeat scans can dedupe.
+    pub file_id: String,
+    /// UTC date, `YYYY-MM-DD`, from the record's own timestamp.
+    pub day: String,
+    /// Prompt tokens including cached (the convention everywhere else).
+    pub input_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+/// Read an agent's own token accounting from its transcript files — the
+/// same files a chat import reads, but yielding token counts instead of
+/// messages.
+///
+/// Claude Code rows are turn-scoped already: every `assistant` record
+/// carries `message.usage`. Codex reports a running `last_token_usage`
+/// per `token_count` event, which is what one turn added.
+///
+/// Defensive by contract, like the rest of this module: unknown records
+/// are skipped, oversized lines are never parsed, error rows Claude writes
+/// in place of a reply are dropped, and the scan is capped by
+/// [`transcript_files`] so a huge history can't stall it.
+pub fn native_usage_rows(source: Source, home: &Path, since_day: &str) -> Vec<NativeUsageRow> {
+    let mut out = Vec::new();
+    for path in transcript_files(source, home) {
+        let file_id = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
+        // Claude Code writes one record per assistant content block, and
+        // every one of them repeats the *same* cumulative `message.usage`.
+        // Counting them all would inflate a day's tokens several-fold, so
+        // each API message id contributes exactly once per file.
+        let mut counted: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for line in read_capped_lines(&path, MAX_LINE_BYTES) {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            if source == Source::ClaudeCode {
+                if let Some(id) = claude_message_id(&v) {
+                    if !counted.insert(id) {
+                        continue;
+                    }
+                }
+            }
+            if let Some(row) = usage_row(source, &v, &file_id, since_day) {
+                out.push(row);
+            }
+        }
+    }
+    out
+}
+
+/// The API message id of an assistant record, when it names one. Records
+/// without an id (older writers) are kept, since there is nothing to
+/// dedupe them by.
+fn claude_message_id(v: &serde_json::Value) -> Option<String> {
+    if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+        return None;
+    }
+    v.get("message")?.get("id")?.as_str().map(str::to_string)
+}
+
+/// One row from one record, or `None` when the record isn't usage (or is
+/// usage we can't honestly account for).
+fn usage_row(
+    source: Source,
+    v: &serde_json::Value,
+    file_id: &str,
+    since_day: &str,
+) -> Option<NativeUsageRow> {
+    let (model, usage) = match source {
+        Source::ClaudeCode => {
+            if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+                return None;
+            }
+            // Claude writes a synthetic message in place of a reply when
+            // the turn failed (rate limit, API error). Its usage is zeros
+            // and its model is a placeholder — never a billable turn.
+            let message = v.get("message")?;
+            let model = message.get("model")?.as_str()?;
+            if model == "<synthetic>"
+                || v.get("isApiErrorMessage").and_then(|b| b.as_bool()) == Some(true)
+            {
+                return None;
+            }
+            (model.to_string(), message.get("usage")?)
+        }
+        Source::Codex => {
+            let p = v.get("payload")?;
+            if v.get("type").and_then(|t| t.as_str()) != Some("event_msg")
+                || p.get("type").and_then(|t| t.as_str()) != Some("token_count")
+            {
+                return None;
+            }
+            // `last_token_usage` is what the last turn added; the sibling
+            // `total_token_usage` is a running total and would double-count.
+            let last = p.get("info")?.get("last_token_usage")?;
+            ("unknown-codex".to_string(), last)
+        }
+    };
+    let day = day_of(v.get("timestamp")?);
+    if day.as_str() < since_day {
+        return None;
+    }
+    let (input_key, cached_key, output_key) = match source {
+        Source::ClaudeCode => ("input_tokens", "cache_read_input_tokens", "output_tokens"),
+        Source::Codex => ("input_tokens", "cached_input_tokens", "output_tokens"),
+    };
+    let num = |k: &str| usage.get(k).and_then(|n| n.as_u64()).unwrap_or(0);
+    // Cache writes and reads both bill as input, and both count as cached.
+    let cache_extra = match source {
+        Source::ClaudeCode => usage
+            .get("cache_creation_input_tokens")
+            .and_then(|n| n.as_u64())
+            .unwrap_or(0),
+        Source::Codex => usage
+            .get("cache_write_input_tokens")
+            .and_then(|n| n.as_u64())
+            .unwrap_or(0),
+    };
+    let cached = num(cached_key);
+    let input = num(input_key) + cached + cache_extra;
+    let output = num(output_key)
+        + (if source == Source::Codex {
+            // Reasoning is billed as output; keep it in the output column
+            // rather than dropping it, so the row sums to what was used.
+            usage
+                .get("reasoning_output_tokens")
+                .and_then(|n| n.as_u64())
+                .unwrap_or(0)
+        } else {
+            0
+        });
+    if input == 0 && output == 0 {
+        return None;
+    }
+    Some(NativeUsageRow {
+        source,
+        model,
+        file_id: file_id.to_string(),
+        day,
+        input_tokens: input,
+        cached_input_tokens: cached,
+        output_tokens: output,
+    })
+}
+
+/// `YYYY-MM-DD` (UTC) for an RFC 3339 timestamp, or empty when it isn't
+/// one. An empty day can't be filtered by `since_day` meaningfully, so
+/// such rows are treated as out of range rather than invented.
+fn day_of(ts: &serde_json::Value) -> String {
+    ts.as_str()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|t| t.with_timezone(&chrono::Utc).format("%Y-%m-%d").to_string())
+        .unwrap_or_default()
+}
+
+/// Lines of a transcript, skipping any longer than `max_bytes`: those are
+/// inline images and giant tool output, never usage.
+fn read_capped_lines(path: &Path, max_bytes: usize) -> impl Iterator<Item = String> + '_ {
+    let cap = max_bytes;
+    std::fs::File::open(path)
+        .ok()
+        .into_iter()
+        .flat_map(move |f| {
+            std::io::BufReader::new(f)
+                .split(b'\n')
+                .map_while(Result::ok)
+                .filter(move |b| b.len() <= cap)
+                .map(|b| String::from_utf8_lossy(&b).into_owned())
+                .collect::<Vec<_>>()
+        })
+}
+
+/// Read transcript files for a source, newest first, capped.
 pub fn transcript_files(source: Source, home: &Path) -> Vec<PathBuf> {
     let mut files: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
     let mut push = |p: PathBuf| {
@@ -491,6 +677,104 @@ mod tests {
         let body: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
         std::fs::write(&p, body.join("\n")).unwrap();
         p
+    }
+
+    fn claude_usage_row(
+        ts: &str,
+        model: &str,
+        inp: u64,
+        out: u64,
+        cache_read: u64,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "type": "assistant",
+            "timestamp": ts,
+            "isSidechain": false,
+            "message": {
+                "role": "assistant",
+                "model": model,
+                "usage": {
+                    "input_tokens": inp,
+                    "output_tokens": out,
+                    "cache_read_input_tokens": cache_read,
+                    "cache_creation_input_tokens": 0,
+                },
+            },
+        })
+    }
+
+    #[test]
+    fn claude_usage_reads_every_turn_and_drops_the_placeholder() {
+        let d = tempfile::tempdir().unwrap();
+        let home = d.path();
+        write(
+            home,
+            "projects/p/s.jsonl",
+            &[
+                claude_usage_row("2026-10-04T12:00:00Z", "claude-sonnet-4-6", 10, 100, 0),
+                claude_usage_row("2026-10-04T12:05:00Z", "claude-sonnet-4-6", 4, 40, 900),
+                // Placeholder reply (rate limit / API error): not billable.
+                claude_usage_row("2026-10-04T12:06:00Z", "<synthetic>", 0, 0, 0),
+                // Outside the window.
+                claude_usage_row("2026-01-01T00:00:00Z", "claude-sonnet-4-6", 9, 9, 0),
+            ],
+        );
+        let rows = native_usage_rows(Source::ClaudeCode, home, "2026-10-01");
+        assert_eq!(rows.len(), 2, "got {rows:?}");
+        let r = &rows[0];
+        assert_eq!(r.model, "claude-sonnet-4-6");
+        assert_eq!(r.file_id, "s");
+        assert_eq!(r.day, "2026-10-04");
+        // Cached reads count as prompt input and as cached.
+        assert_eq!(r.input_tokens, 10);
+        assert_eq!(r.cached_input_tokens, 0);
+        let r2 = &rows[1];
+        assert_eq!(r2.input_tokens, 904, "fresh + cached");
+        assert_eq!(r2.cached_input_tokens, 900);
+        assert_eq!(r2.output_tokens, 40);
+    }
+
+    #[test]
+    fn codex_usage_uses_the_per_turn_counter_not_the_running_total() {
+        let d = tempfile::tempdir().unwrap();
+        let home = d.path();
+        write(
+            home,
+            "sessions/2026/10/04/rollout-x.jsonl",
+            &[
+                serde_json::json!({
+                    "timestamp": "2026-10-04T09:00:00Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "total_token_usage": {"input_tokens": 200, "output_tokens": 20},
+                            "last_token_usage": {
+                                "input_tokens": 200,
+                                "cached_input_tokens": 150,
+                                "cache_write_input_tokens": 10,
+                                "output_tokens": 20,
+                                "reasoning_output_tokens": 5,
+                            },
+                        },
+                    },
+                }),
+                // A null info (nothing counted yet) is not a row.
+                serde_json::json!({
+                    "timestamp": "2026-10-04T09:00:01Z",
+                    "type": "event_msg",
+                    "payload": {"type": "token_count", "info": null},
+                }),
+            ],
+        );
+        let rows = native_usage_rows(Source::Codex, home, "2026-10-01");
+        assert_eq!(rows.len(), 1, "got {rows:?}");
+        let r = &rows[0];
+        assert_eq!(r.file_id, "rollout-x");
+        // Cached reads and writes both bill as input; reasoning bills as output.
+        assert_eq!(r.input_tokens, 200 + 150 + 10);
+        assert_eq!(r.cached_input_tokens, 150);
+        assert_eq!(r.output_tokens, 25);
     }
 
     #[test]

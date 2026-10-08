@@ -12,6 +12,7 @@ import { importChats, scanImportableChats, type ImportScan, type ImportSource } 
 import { automatedCount, chatKey, defaultSelection, groupProjects, groupState, type ProjectGroup } from '../lib/importSelection';
 import { AgentIcon } from './AgentIcon';
 import { cn } from '@/lib/utils';
+import { Collapse } from './ui/Collapse';
 
 function ago(ms: number | null): string {
   if (!ms) return '';
@@ -98,7 +99,7 @@ function GroupRow({
           </span>
         </button>
       </div>
-      {open && (
+      <Collapse open={open}>
         <div className="max-h-64 overflow-y-auto border-t border-fg/[0.06] bg-shade/20 py-1">
           {g.chats.map((c) => {
             const key = chatKey(c);
@@ -132,7 +133,7 @@ function GroupRow({
             );
           })}
         </div>
-      )}
+      </Collapse>
     </div>
   );
 }
@@ -154,7 +155,7 @@ export function ImportChats({
   const [showOther, setShowOther] = useState(false);
   const [showScripted, setShowScripted] = useState(false);
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
-  const [result, setResult] = useState<{ imported: number; failed: number } | null>(null);
+  const [result, setResult] = useState<{ imported: number; existing: number; failed: number } | null>(null);
 
   const load = (fresh = false) => {
     setError(null);
@@ -176,6 +177,10 @@ export function ImportChats({
     const all = [...groups, ...other].flatMap((g) => g.chats).filter((c) => selected.has(chatKey(c)));
     setProgress({ done: 0, total: all.length });
     let imported = 0;
+    // Chats the server says it already has. The scan marks these too, but
+    // the ledger is the authority: a chat imported in another window (or
+    // since the scan) comes back here as an existing id.
+    let existing = 0;
     let failed = 0;
     // In batches, so the bar moves and a slow chat doesn't hide progress.
     for (let i = 0; i < all.length; i += 10) {
@@ -183,13 +188,14 @@ export function ImportChats({
       try {
         const r = await importChats(batch.map((c) => ({ source: c.source, id: c.id })));
         imported += r.imported.length;
+        existing += r.existing?.length ?? 0;
         failed += r.failed.length;
       } catch {
         failed += batch.length;
       }
       setProgress({ done: Math.min(all.length, i + batch.length), total: all.length });
     }
-    setResult({ imported, failed });
+    setResult({ imported, existing, failed });
     setProgress(null);
   }
 
@@ -215,11 +221,16 @@ export function ImportChats({
           <Check className="size-5" strokeWidth={2.5} />
         </span>
         <div className="text-[15px] font-semibold text-foreground">
-          {result.imported === 0 ? 'Nothing new to bring over' : `${result.imported} chat${result.imported === 1 ? '' : 's'} imported`}
+          {result.imported === 0
+            ? result.existing > 0
+              ? 'Nothing new — you already have these'
+              : 'Nothing new to bring over'
+            : `${result.imported} chat${result.imported === 1 ? '' : 's'} imported`}
         </div>
         <p className="max-w-[44ch] text-[12.5px] leading-relaxed text-muted-foreground">
           They're in your sidebar, under their projects. Open one and keep going — your next message continues the
           original session, with everything the agent remembers.
+          {result.existing > 0 && ` ${result.existing} you already had ${result.existing === 1 ? 'was' : 'were'} left where ${result.existing === 1 ? 'it is' : 'they are'}.`}
           {result.failed > 0 && ` ${result.failed} couldn't be read and were skipped.`}
         </p>
         {onDone && (
@@ -286,7 +297,9 @@ export function ImportChats({
               <ChevronRight className={cn('size-3.5 transition-transform', showOther && 'rotate-90')} />
               Other folders ({other.reduce((n, g) => n + g.chats.length, 0)} chats outside a repository)
             </button>
-            {showOther && other.map((g) => <GroupRow key={g.key} g={g} selected={selected} setSelected={setSelected} />)}
+            <Collapse open={showOther}>
+              {other.map((g) => <GroupRow key={g.key} g={g} selected={selected} setSelected={setSelected} />)}
+            </Collapse>
           </>
         )}
         {scripted > 0 && (

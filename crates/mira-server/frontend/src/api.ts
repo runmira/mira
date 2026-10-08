@@ -24,7 +24,7 @@ export async function putSettings(update: SettingsUpdate): Promise<SettingsView>
 }
 
 export async function listSessions(
-  opts: { all?: boolean; archived?: boolean } = {},
+  opts: { all?: boolean; archived?: boolean; includeChildren?: boolean } = {},
 ): Promise<SessionSummary[]> {
   // axum's Query bool deserializer expects the literal string `true`, not `1`.
   // `no-store` + a cache-busting param defeat any browser/HTTP caching so
@@ -33,6 +33,7 @@ export async function listSessions(
   const params = new URLSearchParams();
   if (opts.all) params.set('all', 'true');
   if (opts.archived) params.set('archived', 'true');
+  if (opts.includeChildren) params.set('include_children', 'true');
   params.set('_ts', String(Date.now()));
   const r = await fetch(`/api/sessions?${params.toString()}`, { cache: 'no-store' });
   if (!r.ok) throw new Error(`sessions GET ${r.status}`);
@@ -1376,13 +1377,31 @@ export async function scanImportableChats(fresh = false): Promise<ImportScan> {
 /** Bring chats into Mira; each becomes a chat on its agent that resumes. */
 export async function importChats(
   chats: { source: ImportSource; id: string }[],
-): Promise<{ imported: string[]; skipped: number; failed: string[] }> {
+): Promise<{ imported: string[]; existing: string[]; failed: string[] }> {
   const r = await fetch('/api/import', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ chats }),
   });
-  const j = (await r.json().catch(() => ({}))) as { imported?: string[]; skipped?: number; failed?: string[]; error?: string };
+  const j = (await r.json().catch(() => ({}))) as { imported?: string[]; existing?: string[]; failed?: string[]; error?: string };
   if (!r.ok) throw new Error(j.error ?? `import ${r.status}`);
-  return { imported: j.imported ?? [], skipped: j.skipped ?? 0, failed: j.failed ?? [] };
+  return { imported: j.imported ?? [], existing: j.existing ?? [], failed: j.failed ?? [] };
+}
+
+export function updateExternalAgent(kind: string): Promise<{ updated: boolean }> {
+  return post(`/api/acp/agents/${encodeURIComponent(kind)}/update`, {}, 'Updating agent');
+}
+
+export async function getTurnFileDiff(session: string, text: string, occurrence: number, path: string, signal?: AbortSignal): Promise<import('./types').DiffPreview & { before: string; after: string }> {
+  const response = await fetch(`/api/sessions/${encodeURIComponent(session)}/turn-diff`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text, occurrence, path }), signal });
+  const body = await response.json();
+  if (!response.ok) throw new Error(body.error ?? 'Could not load this turn’s diff');
+  return body;
+}
+
+export type ChatRelationshipView = { current: SessionSummary | null; parent: SessionSummary | null; children: SessionSummary[]; has_more: boolean };
+export async function getChatRelationships(session: string, limit = 20, signal?: AbortSignal): Promise<ChatRelationshipView> {
+  const response = await fetch(`/api/sessions/${encodeURIComponent(session)}/relationships?limit=${limit}`, { cache: 'no-store', signal });
+  if (!response.ok) throw new Error('Could not load related chats');
+  return response.json();
 }

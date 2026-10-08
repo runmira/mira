@@ -168,7 +168,7 @@ export function EnginePicker(props: EnginePickerProps) {
   // trip to Settings.
   const probed = useRef(false);
   useEffect(() => {
-    if (open && !probed.current && (agents == null || agents.length === 0)) {
+    if (open && !probed.current && (agents == null || agents.length === 0 || agents.some((a) => a.kind === 'codex' && !a.models?.length))) {
       probed.current = true;
       onCheckAgents?.();
     }
@@ -218,9 +218,28 @@ export function EnginePicker(props: EnginePickerProps) {
   };
 
   // ---- agent model lists --------------------------------------------------
-  const agentChoices = (driver: string): { choices: Choice[]; live: boolean } => {
+  const [agentCatalogs, setAgentCatalogs] = useState<Record<string, ModelInfo[] | { error: string }>>({});
+  const shownAgent = shown?.kind === 'agent' ? shown.driver : null;
+  useEffect(() => {
+    if (!open || !shownAgent || agentCatalogs[shownAgent]) return;
+    const existing = agents?.find((a) => a.kind === shownAgent)?.models ?? [];
+    if (existing.length > 0) return;
+    const driver = shownAgent;
+    listInstanceModels(driver)
+      .then((models) => setAgentCatalogs((c) => ({ ...c, [driver]: models })))
+      .catch((e) => setAgentCatalogs((c) => ({ ...c, [driver]: { error: String((e as Error).message) } })));
+  }, [open, shownAgent, agents, agentCatalogs]);
+
+  const agentChoices = (driver: string): { choices: Choice[]; live: boolean; error?: string } => {
     const live = isAgent && engine?.driver === driver ? agentModelChoices(agentConfig) : [];
     if (live.length > 0) return { choices: live.map((c) => ({ id: c.value, label: c.label })), live: true };
+    const fetched = agentCatalogs[driver];
+    if (Array.isArray(fetched) && fetched.length > 0) {
+      return { choices: fetched.map((m) => ({ id: m.id, label: m.display_name || prettyModel(m.id) })), live: true };
+    }
+    if (fetched && !Array.isArray(fetched)) return { choices: [], live: false, error: fetched.error };
+    const catalog = agents?.find((a) => a.kind === driver)?.models ?? [];
+    if (catalog.length > 0) return { choices: catalog.map((m) => ({ id: m.value, label: m.label })), live: true };
     const cached = agentModelChoices(loadAgentCaps(driver).config);
     return { choices: cached.map((c) => ({ id: c.value, label: c.label })), live: false };
   };
@@ -283,20 +302,20 @@ export function EnginePicker(props: EnginePickerProps) {
                 labels used to sit on a shared *baseline* inside a centred
                 row, which left the smaller glyphs (and the chevron beside
                 them) visibly off-centre. */}
-            <EngineMark engine={engine} model={currentModel} />
+            <span className="grid size-4 shrink-0 place-items-center"><EngineMark engine={engine} model={currentModel} /></span>
             <span className="inline-flex h-4 min-w-0 items-center gap-1.5">
               {isAgent ? (
                 <>
-                  <span className="shrink-0 text-[14px] font-semibold leading-4">{engine?.display_name}</span>
-                  <span className="min-w-0 truncate text-[12.5px] font-medium leading-4 text-muted-foreground">
+                  <span className="shrink-0 text-[12.5px] font-semibold leading-none">{engine?.display_name}</span>
+                  <span className="min-w-0 truncate text-[12.5px] font-medium leading-none text-muted-foreground">
                     {triggerLabel}
                   </span>
                 </>
               ) : (
-                <span className="min-w-0 truncate text-[14px] font-semibold leading-4">{triggerLabel}</span>
+                <span className="min-w-0 truncate text-[12.5px] font-semibold leading-none">{triggerLabel}</span>
               )}
               {optionSummary && (
-                <span className="shrink-0 text-[11.5px] font-medium leading-4 text-muted-foreground/80">{optionSummary}</span>
+                <span className="shrink-0 text-[11.5px] font-medium leading-none text-muted-foreground/80">{optionSummary}</span>
               )}
             </span>
             <EngineStatusGlyph engine={engine} />
@@ -604,7 +623,7 @@ function ModelList({
   currentModel: string | null;
   isCurrent: boolean;
   providerModels: ModelInfo[] | null;
-  agentChoices: { choices: Choice[]; live: boolean } | null;
+  agentChoices: { choices: Choice[]; live: boolean; error?: string } | null;
   catalogError: string | null;
   onPick: (model: string | null) => void;
 }) {
@@ -659,6 +678,7 @@ function ModelList({
       />
       <CommandList className="max-h-none min-h-0 flex-1 overflow-y-auto">
         {catalogError && <div className="px-3 py-2 text-[11.5px] text-destructive">{catalogError}</div>}
+        {item.kind === 'agent' && agentChoices?.error && <div className="px-3 py-2 text-[11.5px] text-destructive">{agentChoices.error}</div>}
         {loading && (
           <div className="flex items-center gap-2 px-3 py-3 text-[12px] text-muted-foreground">
             <Loader2 className="size-3.5 animate-spin" /> Fetching models…

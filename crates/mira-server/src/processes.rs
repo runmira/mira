@@ -39,6 +39,8 @@ pub struct SessionQuery {
     session: Option<String>,
     #[serde(default)]
     tail: Option<usize>,
+    #[serde(default)]
+    owned_only: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -86,13 +88,10 @@ pub struct ListView {
     self_port: u16,
 }
 
-async fn slot_for(state: &AppState, q: &SessionQuery) -> Arc<SessionSlot> {
+async fn slot_for(state: &AppState, q: &SessionQuery) -> Result<Arc<SessionSlot>,Response> {
     match q.session.as_deref() {
-        Some(id) if !id.is_empty() => match state.slot_str(id).await {
-            Some(s) => s,
-            None => state.active_slot().await,
-        },
-        _ => state.active_slot().await,
+        Some(id) if !id.is_empty() => state.slot_str(id).await.ok_or_else(||err(StatusCode::NOT_FOUND,"chat is not loaded")),
+        _ => Ok(state.active_slot().await),
     }
 }
 
@@ -101,11 +100,13 @@ fn err(code: StatusCode, msg: impl Into<String>) -> Response {
 }
 
 pub async fn list(State(state): State<AppState>, Query(q): Query<SessionQuery>) -> Response {
-    let slot = slot_for(&state, &q).await;
+    let slot = match slot_for(&state,&q).await {Ok(slot)=>slot,Err(response)=>return response};
     let entries = slot.bg_processes.list().await;
-    let (ports, procs) = tokio::task::spawn_blocking(|| (listening_ports(), process_table()))
-        .await
-        .unwrap_or_default();
+    let (ports, procs) = if q.owned_only {
+        (Vec::new(),HashMap::new())
+    } else {
+        tokio::task::spawn_blocking(|| (listening_ports(), process_table())).await.unwrap_or_default()
+    };
 
     let mut ports: Vec<PortView> = ports;
     let by_pid: HashMap<u32, u32> = entries
@@ -185,7 +186,7 @@ pub async fn start(
     if command.is_empty() {
         return err(StatusCode::BAD_REQUEST, "command is empty");
     }
-    let slot = slot_for(&state, &q).await;
+    let slot = match slot_for(&state,&q).await {Ok(slot)=>slot,Err(response)=>return response};
     let cwd = slot.cwd.read().await.clone();
     let id = slot
         .bg_processes
@@ -199,7 +200,7 @@ pub async fn output(
     Path(id): Path<u32>,
     Query(q): Query<SessionQuery>,
 ) -> Response {
-    let slot = slot_for(&state, &q).await;
+    let slot = match slot_for(&state,&q).await {Ok(slot)=>slot,Err(response)=>return response};
     let Some(e) = slot.bg_processes.get(id).await else {
         return err(StatusCode::NOT_FOUND, format!("no process {id}"));
     };
@@ -209,8 +210,7 @@ pub async fn output(
         .iter()
         .map(|l| strip_ansi(l))
         .collect();
-    Json(serde_json::json!({ "lines": lines, "running": e.running().await }))
-        .into_response()
+    Json(serde_json::json!({ "lines": lines, "running": e.running().await })).into_response()
 }
 
 pub async fn stop(
@@ -221,7 +221,7 @@ pub async fn stop(
     // content type needs a CORS preflight, which this server never grants.
     Json(_): Json<serde_json::Value>,
 ) -> Response {
-    let slot = slot_for(&state, &q).await;
+    let slot = match slot_for(&state,&q).await {Ok(slot)=>slot,Err(response)=>return response};
     let Some(e) = slot.bg_processes.get(id).await else {
         return err(StatusCode::NOT_FOUND, format!("no process {id}"));
     };
@@ -238,7 +238,7 @@ pub async fn restart(
     // content type needs a CORS preflight, which this server never grants.
     Json(_): Json<serde_json::Value>,
 ) -> Response {
-    let slot = slot_for(&state, &q).await;
+    let slot = match slot_for(&state,&q).await {Ok(slot)=>slot,Err(response)=>return response};
     let Some(e) = slot.bg_processes.get(id).await else {
         return err(StatusCode::NOT_FOUND, format!("no process {id}"));
     };
@@ -265,7 +265,7 @@ pub async fn forget(
     Path(id): Path<u32>,
     Query(q): Query<SessionQuery>,
 ) -> Response {
-    let slot = slot_for(&state, &q).await;
+    let slot = match slot_for(&state,&q).await {Ok(slot)=>slot,Err(response)=>return response};
     if slot.bg_processes.remove_finished(id).await {
         Json(serde_json::json!({ "ok": true })).into_response()
     } else {
@@ -473,9 +473,15 @@ mod tests {
 
     #[test]
     fn tells_apps_from_dev_servers() {
-        assert!(is_system_exe("/System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter"));
-        assert!(is_system_exe("/Applications/Spotify.app/Contents/MacOS/Spotify"));
-        assert!(is_system_exe("/Users/me/Applications/Raycast.app/Contents/MacOS/Raycast"));
+        assert!(is_system_exe(
+            "/System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter"
+        ));
+        assert!(is_system_exe(
+            "/Applications/Spotify.app/Contents/MacOS/Spotify"
+        ));
+        assert!(is_system_exe(
+            "/Users/me/Applications/Raycast.app/Contents/MacOS/Raycast"
+        ));
         assert!(is_system_exe(
             "/private/var/folders/x/T/AppTranslocation/1/d/Visual Studio Code.app/Contents/MacOS/Code Helper"
         ));

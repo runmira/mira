@@ -5,6 +5,7 @@
  * is when they want them.
  */
 import { useState } from 'react';
+import { AnimatePresence, motion } from 'framer-motion';
 import { listAgentTurns, revertAgentTurn, type AgentTurn } from '../api';
 
 /**
@@ -68,8 +69,13 @@ export function RevertButton({
       >
         Revert
       </button>
+      <AnimatePresence initial={false}>
       {open && (
-        <div className="absolute bottom-full right-0 z-50 mb-1.5 w-72 rounded-xl border border-border/70 bg-popover p-1.5 shadow-xl">
+        <motion.div
+          initial={{ opacity: 0, y: 4, scale: 0.98 }}
+          animate={{ opacity: 1, y: 0, scale: 1, transition: { duration: 0.14 } }}
+          exit={{ opacity: 0, y: 4, scale: 0.98, transition: { duration: 0.1 } }}
+          className="absolute bottom-full right-0 z-50 mb-1.5 w-72 origin-bottom-right rounded-xl border border-border/70 bg-popover p-1.5 shadow-xl">
           {error && <div className="px-2 py-1.5 text-[11.5px] text-destructive">{error}</div>}
           {turns === null ? (
             <div className="px-2 py-2 text-[12px] text-muted-foreground">Loading turns…</div>
@@ -131,8 +137,9 @@ export function RevertButton({
               ))}
             </div>
           )}
-        </div>
+        </motion.div>
       )}
+      </AnimatePresence>
     </div>
   );
 }

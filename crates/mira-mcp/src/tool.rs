@@ -187,6 +187,7 @@ pub(crate) fn render_blocks(blocks: &[ContentBlock]) -> Rendered {
             ContentBlock::Text(t) => push(&t.text, &mut out),
             ContentBlock::Image(img) => {
                 out.images.push(ImageData {
+            source: None,
                     media_type: img.mime_type.clone(),
                     data: img.data.clone(),
                 });

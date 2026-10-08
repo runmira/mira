@@ -24,11 +24,31 @@ use crate::state::AppState;
 const DELEGATE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 /// Engines a task can go to: Mira's own model, or an external agent.
+/// Driver kinds (`codex`) route at that kind's default instance; engine
+/// registry ids (`codex-work`) route at the instance, with its own home,
+/// key and environment. Anything else is rejected before a process
+/// starts, so a typo cannot silently delegate to the ambient account.
 pub fn engines() -> Vec<&'static str> {
     let mut out = vec!["mira"];
-    out.extend(["claude-code", "codex", "opencode", "gemini", "grok", "cursor"]);
+    out.extend([
+        "claude-code",
+        "codex",
+        "opencode",
+        "gemini",
+        "grok",
+        "cursor",
+    ]);
     out.retain(|e| *e == "mira" || mira_acp::drivers::by_kind(e).is_some());
     out
+}
+
+/// Whether `engine` names something delegable: the static kinds above or
+/// any external instance in the registry.
+fn is_delegable(state: &AppState, engine: &str) -> bool {
+    if engines().contains(&engine) {
+        return true;
+    }
+    state.engines.current().get(engine).is_some_and(|i| !i.is_native())
 }
 
 /// Run `prompt` on `engine` in a child of `parent`; the final answer, or why
@@ -52,8 +72,13 @@ pub async fn delegate(
     if prompt.is_empty() {
         return Err("`prompt` is empty".into());
     }
-    let engine = engine.map(str::trim).filter(|e| !e.is_empty()).unwrap_or("mira");
-    if !engines().contains(&engine) {
+    let engine = engine
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .unwrap_or("mira");
+    if !is_delegable(state, engine) {
+        // Name the static kinds in the error: registry ids are user
+        // config, but the kinds are what a model author reaches for.
         return Err(format!(
             "unknown engine `{engine}` — use one of: {}",
             engines().join(", ")
@@ -84,7 +109,12 @@ pub async fn delegate(
         }
     })
     .await
-    .unwrap_or_else(|_| Err(format!("the task took longer than {} minutes", DELEGATE_TIMEOUT.as_secs() / 60)));
+    .unwrap_or_else(|_| {
+        Err(format!(
+            "the task took longer than {} minutes",
+            DELEGATE_TIMEOUT.as_secs() / 60
+        ))
+    });
 
     // Nothing of the child keeps running.
     crate::acp_session::stop_agent(&child).await;
@@ -125,7 +155,9 @@ async fn run_on_mira(
     transcript
         .iter()
         .rev()
-        .find(|m| m.role == Role::Assistant && m.content.as_deref().is_some_and(|c| !c.trim().is_empty()))
+        .find(|m| {
+            m.role == Role::Assistant && m.content.as_deref().is_some_and(|c| !c.trim().is_empty())
+        })
         .and_then(|m| m.content.clone())
         .ok_or_else(|| "Mira's model finished without an answer (is a provider set up?)".into())
 }
@@ -134,12 +166,12 @@ async fn run_on_agent(
     state: &AppState,
     parent: &Arc<SessionSlot>,
     child: &Arc<SessionSlot>,
-    driver: &str,
+    engine: &str,
     task: &str,
     parent_call_id: &str,
 ) -> Result<String, String> {
-    let (kind, cfg) = crate::acp_session::resolve_start_params(None, None, Some(driver))?;
-    let params = crate::acp_session::AcpLaunchParams::new(kind, cfg);
+    let params = agent_launch_params(state, engine)?;
+    let driver = params.driver_kind.clone();
     let mut rx = child.events_tx.subscribe();
     let handle = crate::acp_session::start_agent(state, child, &params, None).await?;
     let agent = handle
@@ -152,11 +184,11 @@ async fn run_on_agent(
         tokio::spawn(async move { agent.prompt_text(&task).await })
     };
     let mut prompt_done = false;
-    let mut answer = String::new();
+    let mut answer_messages = Vec::new();
     loop {
         tokio::select! {
             msg = rx.recv() => match msg {
-                Ok(ServerMsg::AcpText { text }) => answer.push_str(&text),
+                Ok(frame @ (ServerMsg::AcpText { .. } | ServerMsg::AcpTextSnapshot { .. })) => collect_agent_answer(&mut answer_messages, &frame),
                 // The agent's own tool calls, forwarded as card activity.
                 Ok(ServerMsg::AcpToolCall { call }) => {
                     let (k, text) = acp_activity(&call);
@@ -184,16 +216,54 @@ async fn run_on_agent(
     }
     // Text already sent before the end was noticed.
     while let Ok(m) = rx.try_recv() {
-        if let ServerMsg::AcpText { text } = m {
-            answer.push_str(&text);
-        }
+        collect_agent_answer(&mut answer_messages, &m);
     }
-    let answer = answer.trim().to_string();
+    let answer = answer_messages
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect::<Vec<_>>()
+        .join("\n\n")
+        .trim()
+        .to_string();
     if answer.is_empty() {
         Err(format!("{driver} finished without an answer"))
     } else {
         Ok(answer)
     }
+}
+
+/// Launch parameters for an external engine. An instance id resolves to its
+/// own config (home, key, env); a bare driver kind falls back to that kind's
+/// default instance. Either way the agent inherits the instance's credential
+/// boundary rather than ambient — work must not bill a stranger's account.
+pub(crate) fn agent_launch_params(
+    state: &AppState,
+    engine: &str,
+) -> Result<crate::acp_session::AcpLaunchParams, String> {
+    Ok(match state.engines.current().get(engine).filter(|i| !i.is_native()) {
+        Some(inst) => {
+            let kind = inst.driver.to_string();
+            let cfg = state
+                .engines
+                .current()
+                .external_driver_config(engine)
+                .unwrap_or_default();
+            crate::acp_session::AcpLaunchParams::for_instance(engine, kind, cfg)
+        }
+        None => {
+            let resolved = crate::acp_session::resolve_start_params(None, None, Some(engine))?;
+            crate::acp_session::AcpLaunchParams::for_instance(
+                resolved.instance,
+                resolved.kind,
+                resolved.cfg,
+            )
+        }
+    })
+}
+
+/// Whether `engine` can run a task: `mira` or an external agent.
+pub(crate) fn is_engine(state: &AppState, engine: &str) -> bool {
+    is_delegable(state, engine)
 }
 
 /* ---------- activity summarizers ---------- */
@@ -255,7 +325,9 @@ fn tool_target(name: &str, args: &serde_json::Value) -> Option<String> {
     let val = match name {
         "read_file" | "write_file" | "edit_file" => s(&args["path"]).map(short_path),
         "grep" | "glob" | "find_symbol" | "find_references" | "find_callers" | "web_search" => {
-            s(&args["pattern"]).or_else(|| s(&args["query"])).or_else(|| s(&args["name"]))
+            s(&args["pattern"])
+                .or_else(|| s(&args["query"]))
+                .or_else(|| s(&args["name"]))
         }
         "bash" => s(&args["command"]).map(|c| {
             let one = c.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -302,7 +374,9 @@ mod tests {
     fn mira_is_always_an_engine_and_unknown_ones_are_not() {
         let e = engines();
         assert_eq!(e[0], "mira");
-        assert!(e.iter().all(|k| *k == "mira" || mira_acp::drivers::by_kind(k).is_some()));
+        assert!(e
+            .iter()
+            .all(|k| *k == "mira" || mira_acp::drivers::by_kind(k).is_some()));
         assert!(!e.contains(&"nonsense"));
     }
 
@@ -331,8 +405,7 @@ mod tests {
             kind: mira_core::ToolCallKind::Function,
             function: mira_core::ToolCallFunction::new("grep", r#"{"pattern":"bind_any"}"#),
         };
-        let (kind, text) =
-            harness_activity(&mira_harness::HarnessEvent::ToolStart(grep)).unwrap();
+        let (kind, text) = harness_activity(&mira_harness::HarnessEvent::ToolStart(grep)).unwrap();
         assert_eq!(kind, "search");
         assert_eq!(text, "Searched for bind_any");
 
@@ -341,8 +414,7 @@ mod tests {
             kind: mira_core::ToolCallKind::Function,
             function: mira_core::ToolCallFunction::new("bash", r#"{"command":"cargo test"}"#),
         };
-        let (kind, text) =
-            harness_activity(&mira_harness::HarnessEvent::ToolStart(bash)).unwrap();
+        let (kind, text) = harness_activity(&mira_harness::HarnessEvent::ToolStart(bash)).unwrap();
         assert_eq!(kind, "run");
         assert_eq!(text, "Ran cargo test");
     }
@@ -351,5 +423,51 @@ mod tests {
     fn token_frames_are_not_steps() {
         assert!(harness_activity(&mira_harness::HarnessEvent::Token("hi".into())).is_none());
         assert!(harness_activity(&mira_harness::HarnessEvent::Done).is_none());
+    }
+}
+
+/// Reconcile native messages for delegated answers just as the chat does.
+fn collect_agent_answer(messages: &mut Vec<(Option<String>, String)>, frame: &ServerMsg) {
+    let (id, text, snapshot) = match frame {
+        ServerMsg::AcpText { message_id, text } => (message_id.clone(), text, false),
+        ServerMsg::AcpTextSnapshot { message_id, text } => (Some(message_id.clone()), text, true),
+        _ => return,
+    };
+    let existing = if id.is_some() {
+        messages.iter_mut().find(|(key, _)| *key == id)
+    } else {
+        messages.last_mut().filter(|(key, _)| key.is_none())
+    };
+    if let Some((_, content)) = existing {
+        if snapshot {
+            *content = text.clone();
+        } else {
+            content.push_str(text);
+        }
+    } else {
+        messages.push((id, text.clone()));
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    #[test]
+    fn partial_delegated_answers_are_replaced_without_duplicates() {
+        let mut messages = Vec::new();
+        collect_agent_answer(
+            &mut messages,
+            &ServerMsg::AcpText {
+                message_id: Some("one".into()),
+                text: "partial".into(),
+            },
+        );
+        let complete = ServerMsg::AcpTextSnapshot {
+            message_id: "one".into(),
+            text: "full answer".into(),
+        };
+        collect_agent_answer(&mut messages, &complete);
+        collect_agent_answer(&mut messages, &complete);
+        assert_eq!(messages, vec![(Some("one".into()), "full answer".into())]);
     }
 }

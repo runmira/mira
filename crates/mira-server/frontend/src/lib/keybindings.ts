@@ -19,6 +19,48 @@ export const MAX_KEYBINDINGS_COUNT = 256;
 
 export const MIRA_KEYBINDING_COMMANDS = [
   'chat.new',
+  'panel.tests',
+  'panel.activity',
+  'panel.devices',
+  'panel.whiteboard',
+  'panel.aside',
+  'panel.devtools',
+  'panel.next',
+  'panel.previous',
+  'panel.closeTab',
+  'chat.bottom',
+  'chat.top',
+  'composer.attach',
+
+  'chat.slot1',
+  'chat.slot2',
+  'chat.slot3',
+  'chat.slot4',
+  'chat.slot5',
+  'chat.slot6',
+  'chat.slot7',
+  'chat.slot8',
+  'chat.slot9',
+  'panel.slot1',
+  'panel.slot2',
+  'panel.slot3',
+  'panel.slot4',
+  'panel.slot5',
+  'panel.slot6',
+  'panel.slot7',
+  'panel.slot8',
+  'panel.slot9',
+
+  'composer.focus',
+  'chat.stop',
+  'panel.files',
+  'panel.processes',
+  'panel.browser',
+  'panel.close',
+  'chat.copyResponse',
+  'chat.copyCode',
+  'settings.shortcuts',
+
   'terminal.toggle',
   'approval.accept',
   'approval.reject',
@@ -331,6 +373,47 @@ export function compileResolvedKeybindingsConfig(
 /* ------------------------------------------------------------------ */
 
 export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
+  {key:'mod+shift+t', command:'panel.tests', when:'!terminalFocus'},
+  {key:'mod+shift+h', command:'panel.activity', when:'!terminalFocus'},
+  {key:'mod+shift+v', command:'panel.devices', when:'!terminalFocus'},
+  {key:'mod+alt+w', command:'panel.whiteboard', when:'!terminalFocus'},
+  {key:'mod+alt+a', command:'panel.aside', when:'!terminalFocus'},
+  {key:'mod+alt+i', command:'panel.devtools', when:'!terminalFocus'},
+  {key:'ctrl+tab', command:'panel.next', when:'!terminalFocus'},
+  {key:'ctrl+shift+tab', command:'panel.previous', when:'!terminalFocus'},
+  {key:'mod+alt+backspace', command:'panel.closeTab', when:'!terminalFocus'},
+  {key:'mod+alt+arrowdown', command:'chat.bottom', when:'!terminalFocus'},
+  {key:'mod+alt+arrowup', command:'chat.top', when:'!terminalFocus'},
+  {key:'mod+shift+a', command:'composer.attach', when:'!terminalFocus'},
+
+  {key:'alt+1',command:'chat.slot1',when:'!terminalFocus'},
+  {key:'alt+2',command:'chat.slot2',when:'!terminalFocus'},
+  {key:'alt+3',command:'chat.slot3',when:'!terminalFocus'},
+  {key:'alt+4',command:'chat.slot4',when:'!terminalFocus'},
+  {key:'alt+5',command:'chat.slot5',when:'!terminalFocus'},
+  {key:'alt+6',command:'chat.slot6',when:'!terminalFocus'},
+  {key:'alt+7',command:'chat.slot7',when:'!terminalFocus'},
+  {key:'alt+8',command:'chat.slot8',when:'!terminalFocus'},
+  {key:'alt+9',command:'chat.slot9',when:'!terminalFocus'},
+  {key:'mod+alt+1',command:'panel.slot1',when:'!terminalFocus'},
+  {key:'mod+alt+2',command:'panel.slot2',when:'!terminalFocus'},
+  {key:'mod+alt+3',command:'panel.slot3',when:'!terminalFocus'},
+  {key:'mod+alt+4',command:'panel.slot4',when:'!terminalFocus'},
+  {key:'mod+alt+5',command:'panel.slot5',when:'!terminalFocus'},
+  {key:'mod+alt+6',command:'panel.slot6',when:'!terminalFocus'},
+  {key:'mod+alt+7',command:'panel.slot7',when:'!terminalFocus'},
+  {key:'mod+alt+8',command:'panel.slot8',when:'!terminalFocus'},
+  {key:'mod+alt+9',command:'panel.slot9',when:'!terminalFocus'},
+
+  { key: 'mod+shift+l', command: 'composer.focus', when: '!terminalFocus' },
+  { key: 'mod+shift+x', command: 'chat.stop', when: '!terminalFocus' },
+  { key: 'mod+shift+e', command: 'panel.files', when: '!terminalFocus' },
+  { key: 'mod+shift+p', command: 'panel.processes', when: '!terminalFocus' },
+  { key: 'mod+shift+b', command: 'panel.browser', when: '!terminalFocus' },
+  { key: 'mod+shift+\\', command: 'panel.close', when: '!terminalFocus' },
+  { key: 'mod+shift+c', command: 'chat.copyResponse', when: '!terminalFocus' },
+  { key: 'mod+shift+;', command: 'chat.copyCode', when: '!terminalFocus' },
+  { key: 'mod+alt+,', command: 'settings.shortcuts', when: '!terminalFocus' },
   { key: 'mod+shift+o', command: 'chat.new', when: '!terminalFocus' },
   // NOTE: `mod+j` is listed last so labels prefer it over `ctrl+`` —
   // most-recent match wins for display; both still dispatch.
@@ -711,10 +794,18 @@ function snapshot(): ResolvedKeybindingsConfig {
   return cachedResolved;
 }
 
+function syncStorage(event: StorageEvent) {
+  if (event.storageArea !== localStorage || (event.key !== STORAGE_KEY && event.key !== null)) return;
+  cachedCustom = null;
+  cachedResolved = null;
+  listeners.forEach(listener => listener());
+}
 function subscribe(listener: Listener): () => void {
+  if (listeners.size === 0) window.addEventListener('storage', syncStorage);
   listeners.add(listener);
   return () => {
     listeners.delete(listener);
+    if (listeners.size === 0) window.removeEventListener('storage', syncStorage);
   };
 }
 
@@ -813,4 +904,10 @@ export function removeKeybinding(input: RemoveKeybindingInput): void {
 /** Reset one command to defaults: drop every custom rule for it. */
 export function resetKeybindingCommand(command: MiraKeybindingCommand): void {
   persistCustom(customRules().filter((rule) => rule.command !== command));
+}
+
+/** Replace a command's bindings, preserving explicit unassignment across reloads. */
+export function setCommandKeybindings(command: MiraKeybindingCommand, rules: KeybindingRule[]) {
+  persistCustom([...customRules().filter(rule => rule.command !== command),
+    ...(rules.length ? rules : [{command, key:'space', when:'false'}])]);
 }

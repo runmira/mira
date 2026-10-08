@@ -16,6 +16,8 @@
 //! - `GET    /api/sessions/:id/history`    — persisted history for
 //!   rehydrating a subagent panel
 //!   on reload.
+//! - `GET    /api/sessions/:id/preview`    — the few fields a sidebar
+//!   hover card shows, without the transcript.
 //! - `POST   /api/sessions/:id/load`       — ensure a slot exists for `id`
 //!   and mark it active.
 //! - `POST   /api/sessions/new`            — create a fresh slot.
@@ -33,6 +35,7 @@ use axum::Json;
 use mira_config::RuntimeState;
 use mira_core::SessionId;
 use mira_harness::{SessionConfig, SessionRecord};
+use mira_harness::persist::SessionListRecord;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
@@ -42,6 +45,8 @@ use crate::state::AppState;
 
 #[derive(Debug, Serialize)]
 pub struct SessionSummary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
     pub id: String,
     pub model: String,
     pub cwd: String,
@@ -92,6 +97,14 @@ pub struct SessionSummary {
     pub forked_from: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_at: Option<String>,
+    /// Waiting on the user (an approval, a question, a plan, a secret).
+    /// Only known for chats loaded in memory.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub needs_attention: bool,
+    /// The chat that launched this one with `thread_launch`, so the sidebar
+    /// can nest it there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launched_by: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -119,6 +132,8 @@ const FIRST_MSG_TRUNC: usize = 80;
 
 #[derive(Debug, Deserialize)]
 pub struct ListQuery {
+    #[serde(default)]
+    pub include_children: bool,
     #[serde(default)]
     pub all: bool,
     /// `?archived=true` returns only archived sessions (the sidebar's
@@ -215,22 +230,10 @@ pub async fn list_sessions(State(state): State<AppState>, Query(q): Query<ListQu
         let live: Vec<SessionSummary> = summarize_live(&state).await;
         return Json(live).into_response();
     };
-    let records = if q.archived {
-        match store.list_archived(200).await {
-            Ok(r) => r,
-            Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("list: {e}")),
-        }
-    } else if q.all {
-        match store.list_all(200).await {
-            Ok(r) => r,
-            Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("list: {e}")),
-        }
-    } else {
-        let cwd = state.current_cwd().await;
-        match store.list_recent(&cwd, 50).await {
-            Ok(r) => r,
-            Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("list: {e}")),
-        }
+    let cwd = if q.all || q.archived {None} else {Some(state.current_cwd().await)};
+    let records = match store.list_metadata(cwd.as_deref(), q.archived, q.include_children, if q.all || q.archived {200} else {50}).await {
+        Ok(records) => records,
+        Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("list: {error}")),
     };
     let active_id = state.active.read().await.to_string();
 
@@ -241,28 +244,54 @@ pub async fn list_sessions(State(state): State<AppState>, Query(q): Query<ListQu
     // Persisted records → summaries.
     let mut summaries: Vec<SessionSummary> = records
         .into_iter()
-        .filter(|r| r.parent_id.is_none())
-        .map(|r| summarize_record(&r, &active_id, &live_meta))
+        .filter(|r| q.include_children || r.parent_id.is_none())
+        .map(|r| summarize_metadata(&r, &active_id, &live_meta))
         .collect();
 
     // Any live slot the user just started that hasn't yet been checkpointed
     // to disk (or is running under `--no-persist`) still needs to show up
     // in the sidebar. Add slots whose id isn't in the persisted list.
+    //
+    // Only slots that were never saved: a saved one missing from this list
+    // was filtered out on purpose (another folder, archived, a subagent).
+    // And never in the archived view — an unsaved chat can't be archived;
+    // adding them there listed every open chat as "Untitled", dated 1970.
     let known_ids: std::collections::HashSet<String> =
         summaries.iter().map(|s| s.id.clone()).collect();
-    for slot in state.list_slots().await {
+    let live_slots = if q.archived { Vec::new() } else { state.list_slots().await };
+    for slot in live_slots {
         let id = slot.id.to_string();
         if known_ids.contains(&id) {
             continue;
         }
+        let slot_cwd = slot.cwd.read().await.clone();
+        if cwd.as_deref().is_some_and(|c| c != slot_cwd.as_path()) {
+            continue;
+        }
+        let sess = slot.session.read().await.clone();
+        if sess.is_subagent() && !q.include_children {
+            continue;
+        }
+        if store.load(&slot.id).await.is_ok() {
+            continue;
+        }
+        let now = mira_harness::persist::now_secs();
+        let message_count = sess
+            .transcript()
+            .await
+            .iter()
+            .filter(|m| m.role == mira_core::Role::User)
+            .count();
         summaries.push(SessionSummary {
+            parent_id: None,
             id: id.clone(),
-            model: slot.session.read().await.config().await.model,
-            cwd: slot.cwd.read().await.display().to_string(),
-            created_at: 0,
-            updated_at: 0,
-            message_count: 0,
-            title: None,
+            model: sess.config().await.model,
+            cwd: slot_cwd.display().to_string(),
+            // Live and unsaved: it's happening now.
+            created_at: now,
+            updated_at: now,
+            message_count,
+            title: sess.title().await,
             first_user_message: None,
             active: id == active_id,
             attached: slot.is_attached(),
@@ -281,8 +310,11 @@ pub async fn list_sessions(State(state): State<AppState>, Query(q): Query<ListQu
             usage: SessionUsageView::default(),
             forked_from: None,
             forked_at: None,
+            needs_attention: false,
+            launched_by: crate::agent_threads::launcher_of(&id),
         });
     }
+    enrich_worktrees(&mut summaries).await;
     Json(summaries).into_response()
 }
 
@@ -295,6 +327,7 @@ struct LiveMeta {
     /// The agent this live session runs on, if any — fresher than the
     /// record, which is only rewritten on checkpoint.
     agent_driver: Option<String>,
+    needs_attention: bool,
 }
 
 async fn live_slot_metadata(state: &AppState) -> std::collections::HashMap<String, LiveMeta> {
@@ -306,6 +339,7 @@ async fn live_slot_metadata(state: &AppState) -> std::collections::HashMap<Strin
                 attached: slot.is_attached(),
                 running: slot.is_running().await,
                 background_mode: *slot.background_mode.read().await,
+                needs_attention: slot.needs_attention().await,
                 agent_driver: slot
                     .acp_launch
                     .lock()
@@ -333,6 +367,7 @@ async fn summarize_live(state: &AppState) -> Vec<SessionSummary> {
             .as_ref()
             .map(|p| p.driver_kind.clone());
         out.push(SessionSummary {
+            parent_id: None,
             id: id.clone(),
             model: sess.config().await.model,
             cwd: slot.cwd.read().await.display().to_string(),
@@ -353,6 +388,8 @@ async fn summarize_live(state: &AppState) -> Vec<SessionSummary> {
             usage: SessionUsageView::default(),
             forked_from: None,
             forked_at: None,
+            needs_attention: false,
+            launched_by: crate::agent_threads::launcher_of(&id),
         });
     }
     out
@@ -412,6 +449,128 @@ pub async fn get_session_history(
     Json(view).into_response()
 }
 
+/// The handful of fields a sidebar hover card needs: when the chat was
+/// last touched and how its last exchange ended.
+///
+/// A separate endpoint rather than a slice of `/history` on purpose —
+/// that one carries every message and every diff preview in the chat,
+/// which is hundreds of kilobytes for a long session and would be
+/// fetched on every hover. This reads the same record and answers in
+/// constant size.
+#[derive(Debug, Serialize)]
+pub struct SessionPreviewView {
+    pub id: String,
+    /// Last thing the *user* said, attachments stripped — what you were
+    /// doing. `None` for a session that has only assistant turns.
+    pub last_user: Option<String>,
+    /// Last thing the agent said, or the last tool call it made when it
+    /// said nothing.
+    pub last_assistant: Option<String>,
+    /// Tool name for the final turn when that turn was a tool call
+    /// rather than prose, so the card can say "Ran cargo test" instead of
+    /// showing nothing.
+    pub last_tool: Option<String>,
+    pub message_count: usize,
+    pub updated_at: u64,
+}
+
+pub async fn get_session_preview(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    let Some(store) = state.store.clone() else {
+        return err(StatusCode::BAD_REQUEST, "persistence disabled".to_string());
+    };
+    let record = match store.load(&SessionId::from(id.as_str())).await {
+        Ok(r) => r,
+        // A live slot the app never persisted (a chat that hasn't been
+        // flushed yet) has no record; the card simply shows less.
+        Err(e) => return err(StatusCode::NOT_FOUND, format!("load: {e}")),
+    };
+
+    // Walk backwards and take the first of each — cheap regardless of
+    // how long the chat is, and it never copies the whole transcript.
+    let mut last_user = None;
+    let mut last_assistant = None;
+    let mut last_tool = None;
+    for m in record.messages.iter().rev() {
+        if last_assistant.is_none() && m.role == mira_core::Role::Assistant {
+            let text = m.content.as_deref().unwrap_or("").trim();
+            if !text.is_empty() {
+                last_assistant = Some(text.chars().take(600).collect());
+            }
+        }
+        if last_user.is_none() && m.role == mira_core::Role::User {
+            let text = m.content.as_deref().unwrap_or("").trim();
+            if !text.is_empty() {
+                last_user = Some(text.chars().take(400).collect());
+            }
+        }
+        if last_tool.is_none() {
+            if let Some(call) = m.tool_calls.first() {
+                last_tool = Some(call.function.name.clone());
+            }
+        }
+        if last_user.is_some() && last_assistant.is_some() && last_tool.is_some() {
+            break;
+        }
+    }
+
+    // An agent's turns live in the sidecar, not the harness transcript.
+    // When the agent spoke last, its exchange is what the card shows.
+    let mut message_count = record.messages.len();
+    if let Some(path) = store.agent_log_path(&record.id) {
+        let lines = mira_acp::agent_sessions::read_lines(&path);
+        message_count += lines.iter().filter(|l| l.get("user").is_some()).count();
+        let last_user_line = lines.iter().rposition(|l| l.get("user").is_some());
+        let agent_newer = last_user_line.is_some_and(|i| {
+            let t = lines[i].get("t").and_then(|t| t.as_u64()).unwrap_or(0);
+            last_user.is_none() || t / 1000 >= record.updated_at
+        });
+        if let (true, Some(i)) = (agent_newer, last_user_line) {
+            last_user = lines[i]
+                .pointer("/user/text")
+                .and_then(|t| t.as_str())
+                .map(|t| t.trim().chars().take(400).collect());
+            let mut reply = String::new();
+            let mut tool = None;
+            for line in &lines[i + 1..] {
+                let Some(frame) = line.get("frame") else { continue };
+                match frame.get("type").and_then(|t| t.as_str()) {
+                    Some("acp_text") => {
+                        if let Some(t) = frame.get("text").and_then(|t| t.as_str()) {
+                            reply.push_str(t);
+                        }
+                    }
+                    Some("acp_tool_call") => {
+                        tool = frame
+                            .pointer("/call/title")
+                            .or_else(|| frame.pointer("/call/name"))
+                            .and_then(|t| t.as_str())
+                            .map(|t| t.chars().take(80).collect());
+                    }
+                    _ => {}
+                }
+            }
+            let reply = reply.trim();
+            last_assistant = (!reply.is_empty()).then(|| reply.chars().take(600).collect());
+            if tool.is_some() {
+                last_tool = tool;
+            }
+        }
+    }
+
+    Json(SessionPreviewView {
+        id: record.id.to_string(),
+        last_user,
+        last_assistant,
+        last_tool,
+        message_count,
+        updated_at: record.updated_at,
+    })
+    .into_response()
+}
+
 pub async fn load_session(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
@@ -450,6 +609,8 @@ pub async fn new_session(State(state): State<AppState>) -> Response {
     let prev_cfg = prev.config().await;
     let cwd = prev_slot.cwd.read().await.clone();
     let cfg = SessionConfig {
+        engine_instance: prev_cfg.engine_instance.clone(),
+        agent_approval_mode: mira_policy::Mode::Manual,
         model: prev_cfg.model.clone(),
         max_rounds: prev_cfg.max_rounds,
         temperature: prev_cfg.temperature,
@@ -484,6 +645,24 @@ pub async fn delete_session(
     AxumPath(id): AxumPath<String>,
 ) -> Response {
     let sid = SessionId::from(id.as_str());
+    let live_slot = state.slot(&sid).await;
+    let _dispatch = match &live_slot {
+        Some(s) => Some(s.engine.dispatch_lock.lock().await),
+        None => None,
+    };
+    let _start = match &live_slot {
+        Some(s) => Some(s.engine.start_lock.lock().await),
+        None => None,
+    };
+    if let Some(slot) = &live_slot {
+        slot.engine
+            .retired
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        crate::acp_session::stop_agent(slot).await;
+        slot.runtime_requests.close().await;
+        slot.message_queue.close().await;
+        state.session_activity.set(slot.id.to_string(),false);
+    }
 
     // Cascade: any persisted subagent transcripts belong to this parent.
     if let Some(store) = state.store.clone() {
@@ -502,6 +681,13 @@ pub async fn delete_session(
             }
         }
         if let Err(e) = store.delete(&sid).await {
+            if let Some(slot) = &live_slot {
+                slot.runtime_requests.reopen();
+                slot.message_queue.reopen();
+                slot.engine
+                    .retired
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+            }
             return err(StatusCode::INTERNAL_SERVER_ERROR, format!("delete: {e}"));
         }
     }
@@ -545,6 +731,8 @@ pub async fn delete_session(
             let prev_cfg = state.current_session().await.config().await;
             let cwd = state.current_cwd().await;
             let cfg = SessionConfig {
+                engine_instance: prev_cfg.engine_instance.clone(),
+                agent_approval_mode: mira_policy::Mode::Manual,
                 model: prev_cfg.model,
                 max_rounds: prev_cfg.max_rounds,
                 temperature: prev_cfg.temperature,
@@ -641,41 +829,42 @@ async fn build_ready_for_slot(slot: &crate::slot::SessionSlot, state: &AppState)
     crate::ws::build_ready(slot, state).await
 }
 
-fn summarize_record(
-    r: &SessionRecord,
+fn summarize_record(r: &SessionRecord, active_id: &str, live_meta: &std::collections::HashMap<String, LiveMeta>) -> SessionSummary {
+    let mut summary = summarize_metadata(&SessionListRecord::from(r), active_id, live_meta);
+    (summary.worktree_status, summary.worktree_branch) = cached_worktree_status(&r.cwd);
+    summary
+}
+
+fn summarize_metadata(
+    r: &SessionListRecord,
     active_id: &str,
     live_meta: &std::collections::HashMap<String, LiveMeta>,
 ) -> SessionSummary {
-    let first = r.first_user_message().map(|s| truncate(s, FIRST_MSG_TRUNC));
+    let first = r.first_user_message.as_deref().map(|s| truncate(s, FIRST_MSG_TRUNC));
     let id = r.id.to_string();
-    let (worktree_status, worktree_branch) = detect_worktree_status(&r.cwd);
     let live = live_meta.get(&id);
     SessionSummary {
-        id: id.clone(),
-        model: r.cfg.model.clone(),
+        parent_id: r.parent_id.as_ref().map(|id| id.to_string()),        id: id.clone(),
+        model: r.model.clone(),
         cwd: r.cwd.display().to_string(),
         created_at: r.created_at,
         updated_at: r.updated_at,
-        message_count: r.conversation().count(),
+        message_count: r.message_count,
         title: r.title.clone(),
         first_user_message: first,
         active: id == active_id,
         attached: live.map(|m| m.attached).unwrap_or(false),
         running: live.map(|m| m.running).unwrap_or(false),
         background_mode: live.map(|m| m.background_mode),
-        worktree_status,
-        worktree_branch,
+        worktree_status: None,
+        worktree_branch: None,
         pinned: r.pinned,
         archived: r.archived_at.is_some(),
         // Badge the engine the session runs on now: an agent it has left
         // for a provider no longer counts.
         agent_driver: match live {
             Some(m) => m.agent_driver.clone(),
-            None => r
-                .agent
-                .as_ref()
-                .filter(|a| a.active)
-                .map(|a| a.driver_kind.clone()),
+            None => r.agent_driver.clone(),
         },
         usage: SessionUsageView {
             prompt_tokens: r.usage.prompt_tokens,
@@ -685,6 +874,8 @@ fn summarize_record(
         },
         forked_from: r.forked_from.as_ref().map(|f| f.session_id.to_string()),
         forked_at: r.forked_from.as_ref().map(|f| f.at.clone()),
+        needs_attention: live.is_some_and(|m| m.needs_attention),
+        launched_by: crate::agent_threads::launcher_of(&id),
     }
 }
 
@@ -728,6 +919,49 @@ pub async fn fork_session(
         return err(StatusCode::INTERNAL_SERVER_ERROR, format!("save: {e}"));
     }
     Json(serde_json::json!({ "id": fork.id.to_string() })).into_response()
+}
+
+/// Shared folders are probed once, with bounded Git concurrency off the async
+/// executor. The short cache is independent of frequently updated chat metadata.
+async fn enrich_worktrees(summaries: &mut [SessionSummary]) {
+    use std::sync::{Arc, OnceLock};
+    static LIMIT: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    let limit = LIMIT.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)));
+    let folders: std::collections::HashSet<_> = summaries.iter().map(|summary| std::path::PathBuf::from(&summary.cwd)).collect();
+    let mut jobs = tokio::task::JoinSet::new();
+    for folder in folders {
+        let limit = limit.clone();
+        jobs.spawn(async move {
+            let _permit = limit.acquire_owned().await.ok()?;
+            tokio::task::spawn_blocking(move || {
+                let metadata = cached_worktree_status(&folder); (folder, metadata)
+            }).await.ok()
+        });
+    }
+    let mut metadata = std::collections::HashMap::new();
+    while let Some(result) = jobs.join_next().await {
+        if let Ok(Some((folder, value))) = result {metadata.insert(folder, value);}
+    }
+    for summary in summaries {
+        if let Some((status, branch)) = metadata.get(std::path::Path::new(&summary.cwd)) {
+            summary.worktree_status = *status; summary.worktree_branch = branch.clone();
+        }
+    }
+}
+fn cached_worktree_status(cwd: &std::path::Path) -> (Option<WorktreeMergeStatus>, Option<String>) {
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+    type Cache = std::collections::HashMap<std::path::PathBuf, (Instant, (Option<WorktreeMergeStatus>, Option<String>))>;
+    static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(Cache::new()));
+    if let Some((at, value)) = cache.lock().unwrap_or_else(|error| error.into_inner()).get(cwd) {
+        if at.elapsed() < Duration::from_secs(15) {return value.clone();}
+    }
+    let value = detect_worktree_status(cwd);
+    let mut cache = cache.lock().unwrap_or_else(|error| error.into_inner());
+    cache.retain(|_, (at, _)| at.elapsed() < Duration::from_secs(15));
+    if cache.len() < 1024 {cache.insert(cwd.to_path_buf(), (Instant::now(), value.clone()));}
+    value
 }
 
 fn detect_worktree_status(cwd: &std::path::Path) -> (Option<WorktreeMergeStatus>, Option<String>) {
@@ -993,4 +1227,56 @@ pub async fn set_background_mode_http(
         })
         .await;
     Json(serde_json::json!({ "id": id, "mode": body.mode })).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct RelationshipQuery { #[serde(default)] pub limit: Option<usize> }
+/// Direct parents are loaded by ID even when they have fallen out of the recent-chat list.
+pub async fn relationships(State(state): State<AppState>, AxumPath(id): AxumPath<String>, Query(query): Query<RelationshipQuery>) -> Response {
+    let Some(store) = state.store.clone() else { return Json(serde_json::json!({"current": null, "parent": null, "children": [], "has_more": false})).into_response(); };
+    let sid = SessionId::from(id.as_str());
+    let record = match store.load(&sid).await {
+        Ok(record) => record,
+        Err(mira_harness::StoreError::NotFound(_)) => return Json(serde_json::json!({"current": null, "parent": null, "children": [], "has_more": false})).into_response(),
+        Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    };
+    let parent_id = record.parent_id.clone().or_else(|| record.forked_from.as_ref().map(|fork| fork.session_id.clone()));
+    let parent = match parent_id { Some(id) => store.load(&id).await.ok(), None => None };
+    let limit = query.limit.unwrap_or(20).clamp(20, 200);
+    let mut children = match store.list_related(&sid, limit + 1).await { Ok(records) => records, Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()) };
+    let has_more = children.len() > limit; children.truncate(limit);
+    let active = state.active.read().await.to_string(); let live = live_slot_metadata(&state).await;
+    Json(serde_json::json!({ "current": summarize_record(&record, &active, &live), "parent": parent.as_ref().map(|record| summarize_record(record, &active, &live)), "children": children.iter().map(|record| summarize_record(record, &active, &live)).collect::<Vec<_>>(), "has_more": has_more })).into_response()
+}
+
+#[cfg(test)]
+mod metadata_tests {
+    use super::*;
+    #[test]
+    fn sidebar_metadata_preserves_counts_titles_engine_and_unicode_preview() {
+        let record = SessionListRecord {
+            id: SessionId::from("saved-chat"), cwd: "/project".into(), model: "model".into(),
+            created_at: 1, updated_at: 2, title: Some("Saved chat".into()),
+            first_user_message: Some("你好\nworld".into()), message_count: 123,
+            usage: Default::default(), parent_id: None, pinned: true, archived_at: None,
+            agent_driver: Some("codex".into()), forked_from: None,
+        };
+        let summary = summarize_metadata(&record, "saved-chat", &Default::default());
+        assert_eq!(summary.message_count, 123); assert_eq!(summary.title, record.title);
+        assert_eq!(summary.first_user_message.as_deref(), Some("你好 world"));
+        assert_eq!(summary.agent_driver.as_deref(), Some("codex"));
+        assert!(summary.active && summary.pinned); assert!(summary.worktree_status.is_none());
+    }
+    #[tokio::test]
+    async fn shared_non_worktree_folder_enrichment_preserves_all_rows() {
+        let record = SessionListRecord {
+            id: SessionId::from("saved-chat"), cwd: "/project".into(), model: "model".into(),
+            created_at: 1, updated_at: 2, title: None, first_user_message: None, message_count: 0,
+            usage: Default::default(), parent_id: None, pinned: false, archived_at: None,
+            agent_driver: None, forked_from: None,
+        };
+        let mut rows = (0..100).map(|_| summarize_metadata(&record, "", &Default::default())).collect::<Vec<_>>();
+        enrich_worktrees(&mut rows).await;
+        assert_eq!(rows.len(), 100); assert!(rows.iter().all(|row| row.worktree_status.is_none() && row.worktree_branch.is_none()));
+    }
 }

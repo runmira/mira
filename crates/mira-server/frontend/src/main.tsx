@@ -7,12 +7,14 @@ import { install as installNetLog } from './lib/netLog';
 import { hasHiddenTitleBar } from './lib/desktop';
 import { applyTheme, watchSystemTheme } from './lib/theme';
 import { applyAppearance } from './lib/appearance';
+import { installInputModality } from './lib/inputModality';
 import './styles.css';
 
 // Must run before the first render so the auth and onboarding gates are
 // themselves in the log — otherwise the pane opens showing an empty list
 // and the first few requests are missing.
 installNetLog();
+installInputModality();
 
 // Tell the stylesheet the native window is transparent and macOS is
 // painting vibrancy behind it, so it can drop the `body` background that

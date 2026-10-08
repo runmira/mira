@@ -955,6 +955,9 @@ mod tests {
             name: None,
             images: vec![],
             reasoning: vec![],
+            input_intent: None,
+            input_id: None,
+            created_at: None,
         }
     }
 
@@ -972,6 +975,7 @@ mod tests {
         let mut tool = msg(Role::Tool, "fn main() {}");
         tool.tool_call_id = Some("t1".into());
         tool.images = vec![ImageData {
+            source: None,
             media_type: "image/png".into(),
             data: "aGk=".into(),
         }];

@@ -24,6 +24,15 @@ pub enum Role {
 /// answers.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Message {
+    /// Wall-clock creation time for transcript display, in milliseconds.
+    /// Legacy history has no timestamp; do not invent one on deserialization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<u64>,
+    /// A steer continues the current visual turn; legacy messages omit this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_intent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_id: Option<String>,
     pub role: Role,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -78,6 +87,11 @@ pub struct ReasoningBlock {
     pub redacted: Option<String>,
 }
 
+fn message_now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default().as_millis().min(u64::MAX as u128) as u64
+}
+
 impl Message {
     pub fn system(content: impl Into<String>) -> Self {
         Self::text(Role::System, content)
@@ -101,6 +115,9 @@ impl Message {
             name: None,
             images: Vec::new(),
             reasoning: Vec::new(),
+            input_intent: None,
+            input_id: None,
+            created_at: Some(message_now_ms()),
         }
     }
 
@@ -114,6 +131,9 @@ impl Message {
             name: None,
             images: Vec::new(),
             reasoning: Vec::new(),
+            input_intent: None,
+            input_id: None,
+            created_at: Some(message_now_ms()),
         }
     }
 
@@ -133,6 +153,9 @@ impl Message {
             name: None,
             images: Vec::new(),
             reasoning: Vec::new(),
+            input_intent: None,
+            input_id: None,
+            created_at: Some(message_now_ms()),
         }
     }
 }
@@ -143,9 +166,26 @@ impl Message {
 /// the standard-alphabet base64 payload with no `data:` prefix — the shape
 /// both Anthropic's `image` block and OpenAI's data-URL `image_url` want.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageSource {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captured_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accessible_text: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImageData {
     pub media_type: String,
     pub data: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<ImageSource>,
 }
 
 impl ImageData {
@@ -153,6 +193,7 @@ impl ImageData {
         Self {
             media_type: "image/png".to_owned(),
             data: base64.into(),
+            source: None,
         }
     }
 
@@ -166,7 +207,7 @@ impl ImageData {
 ///
 /// `arguments` is a JSON string on the wire (OpenAI convention). We keep the
 /// same shape here so serialization is transparent; tool impls parse it.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: ToolCallId,
 
@@ -182,12 +223,21 @@ pub enum ToolCallKind {
     Function,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolCallFunction {
     pub name: String,
     /// JSON-encoded argument object. Kept as a string to match the wire and to
     /// preserve the exact bytes the model produced (useful for debugging).
     pub arguments: String,
+}
+
+impl ToolCallFunction {
+    pub fn new(name: impl Into<String>, arguments: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            arguments: arguments.into(),
+        }
+    }
 }
 
 impl ToolCall {

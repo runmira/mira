@@ -25,6 +25,10 @@ use tracing::{error, info, warn};
 /// every provider's per-request cap — cap in the harness so the frontend
 /// still sees the full result but the model only sees a preview.
 const TOOL_RESULT_HISTORY_CAP: usize = 4000;
+static STEER_GENERATION: AtomicU64 = AtomicU64::new(1);
+type SteerQueue = Vec<(Message, tokio::sync::oneshot::Sender<bool>)>;
+struct SteerInbox { generation: u64, pending: SteerQueue }
+
 
 /// When we truncate, how much of the cap goes to the tail. The head is
 /// usually most relevant (first lines of a diff, start of a file listing),
@@ -126,6 +130,11 @@ use crate::persist::{now_ms, now_secs, SessionRecord, SessionStore, TurnMeta, Us
 /// mutable state.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionConfig {
+    /// Mira-managed approval mode for external agents, persisted per chat.
+    #[serde(default)]
+    pub agent_approval_mode: mira_policy::Mode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_instance: Option<String>,
     pub model: String,
     /// Number of tool-call rounds allowed within one user turn. Guards
     /// against runaway loops (model calling itself forever).
@@ -279,6 +288,8 @@ const EXTRACTION_OUTPUT_TOKENS: u32 = 512;
 impl SessionConfig {
     pub fn new(model: impl Into<String>) -> Self {
         Self {
+            agent_approval_mode: mira_policy::Mode::Manual,
+            engine_instance: None,
             model: model.into(),
             max_rounds: default_max_rounds(),
             temperature: None,
@@ -351,6 +362,7 @@ pub struct Session {
     /// it; the loop's `tx.send` calls then fail as the channel closes and
     /// the frontend stops seeing new events.
     current_turn: Arc<Mutex<Option<AbortHandle>>>,
+    steer_inbox: Arc<StdMutex<Option<SteerInbox>>>,
     /// When set, this session was spawned as a subagent by another
     /// session (parent). Copied into every checkpoint so the sidebar can
     /// hide subagents from the primary chat list and delete flows can
@@ -515,6 +527,7 @@ impl Session {
             memory_retrieval: MemoryRetrievalConfig::default(),
             auto_extract: None,
             current_turn: Arc::new(Mutex::new(None)),
+            steer_inbox: Arc::new(StdMutex::new(None)),
             parent_id: None,
             forked_from: None,
             agent: Arc::new(Mutex::new(None)),
@@ -596,6 +609,7 @@ impl Session {
             memory_retrieval: MemoryRetrievalConfig::default(),
             auto_extract: None,
             current_turn: Arc::new(Mutex::new(None)),
+            steer_inbox: Arc::new(StdMutex::new(None)),
             parent_id: record.parent_id,
             forked_from: record.forked_from,
             agent: Arc::new(Mutex::new(record.agent)),
@@ -1000,9 +1014,18 @@ impl Session {
         checkpoint(self).await;
     }
 
-    /// Hot-swap the model. Applies to the next `send()` — an in-flight turn
-    /// finishes on the model it started with, since `run_loop` snapshots the
-    /// config at spawn time.
+    /// Save the chat's approval mode; ACP reads it for each permission request.
+    pub async fn set_agent_approval_mode(&self, mode: mira_policy::Mode) {
+        self.cfg.lock().await.agent_approval_mode = mode;
+        checkpoint(self).await;
+    }
+
+    pub async fn set_engine_instance(&self, instance: Option<String>) {
+        self.cfg.lock().await.engine_instance = instance;
+        checkpoint(self).await;
+    }
+
+    /// Hot-swap the model for the next turn.
     pub async fn set_model(&self, model: impl Into<String>) {
         self.cfg.lock().await.model = model.into();
     }
@@ -1105,6 +1128,39 @@ impl Session {
             .is_some_and(|h| !h.is_finished())
     }
 
+    /// Inject input at a model/tool boundary without cancelling executing
+    /// tools or opening a new turn. Acknowledge only once history contains it.
+    pub async fn steer(&self, text: String, images: Vec<mira_core::ImageData>) -> bool {
+        self.steer_with_id(text,images,None).await
+    }
+    pub async fn steer_with_id(&self, text:String, images:Vec<mira_core::ImageData>, input_id:Option<String>) -> bool {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut message = Message::user(text).with_images(images);
+        message.input_intent = Some("steer".into());
+        message.input_id=input_id;
+        {
+            let Ok(mut inbox) = self.steer_inbox.lock() else { return false; };
+            let Some(pending) = inbox.as_mut() else { return false; };
+            if pending.pending.len() >= 16 { return false; }
+            pending.pending.push((message, tx));
+        }
+        rx.await.unwrap_or(false)
+    }
+
+    async fn consume_steers(&self, generation: u64) -> bool {
+        let pending = self.steer_inbox.lock().ok()
+            .and_then(|mut inbox| inbox.as_mut().filter(|inbox| inbox.generation == generation).map(|inbox| std::mem::take(&mut inbox.pending))).unwrap_or_default();
+        if pending.is_empty() { return false; }
+        let mut replies = Vec::new();
+        {
+            let mut history = self.history.lock().await;
+            for (message, reply) in pending { history.push(message); replies.push(reply); }
+        }
+        checkpoint(self).await;
+        for reply in replies { let _ = reply.send(true); }
+        true
+    }
+
     /// Append a system note to the conversation (e.g. "the environment
     /// changed") so the model sees it on its next request, and persist.
     pub async fn push_note(&self, text: impl Into<String>) {
@@ -1133,6 +1189,10 @@ impl Session {
         user_input: impl Into<String>,
         images: Vec<mira_core::ImageData>,
     ) -> BoxStream<'static, HarnessEvent> {
+        self.send_with_images_and_id(user_input,images,None).await
+    }
+
+    pub async fn send_with_images_and_id(&self, user_input: impl Into<String>, images: Vec<mira_core::ImageData>, input_id: Option<String>) -> BoxStream<'static, HarnessEvent> {
         // Repair history before appending the new user turn. A prior
         // interrupt can abort the loop between `history.push(assistant_msg)`
         // (with tool_calls) and the matching `Message::tool(...)` push in
@@ -1172,10 +1232,9 @@ impl Session {
             }
             user_input = text;
         }
-        self.history
-            .lock()
-            .await
-            .push(Message::user(user_input).with_images(images));
+        let mut message = Message::user(user_input).with_images(images);
+        message.input_id = input_id;
+        self.history.lock().await.push(message);
         // Open a new turn timer; `run_loop` stamps `ended_at` on the way out.
         self.turns.lock().await.push(TurnMeta {
             started_at: now_ms(),
@@ -1192,7 +1251,9 @@ impl Session {
         // If a prior turn is still running (shouldn't happen with a
         // well-behaved UI but easy to hit while debugging), abort it —
         // otherwise two tasks race to mutate history.
-        let handle = tokio::spawn(async move { run_loop(this, cfg, tx).await });
+        let generation = STEER_GENERATION.fetch_add(1, Ordering::Relaxed);
+        *self.steer_inbox.lock().unwrap() = Some(SteerInbox { generation, pending: Vec::new() });
+        let handle = tokio::spawn(async move { run_loop(this, cfg, tx, generation).await });
         let mut slot = self.current_turn.lock().await;
         if let Some(prev) = slot.take() {
             prev.abort();
@@ -1274,6 +1335,7 @@ impl Session {
     /// `tokio::spawn` (fire-and-forget) so pressing Stop on the parent
     /// halts every layer of delegated work at once.
     pub async fn cancel(&self) -> bool {
+        if let Ok(mut inbox) = self.steer_inbox.lock() { *inbox = None; }
         // Fire the cooperative cancel first so tools observing the
         // token (bash, web_fetch) can clean up native resources
         // (kill child processes, close sockets) before the outer
@@ -1379,7 +1441,17 @@ const MAX_MISSED_CALL_RESCUES: usize = 2;
 /// patterns cheaply.
 const STUCK_LOOP_THRESHOLD: usize = 3;
 
-async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEvent>) {
+struct SteerInboxGuard(Arc<StdMutex<Option<SteerInbox>>>, u64);
+impl Drop for SteerInboxGuard {
+    fn drop(&mut self) {
+        if let Ok(mut inbox) = self.0.lock() {
+            if inbox.as_ref().is_some_and(|inbox| inbox.generation == self.1) { *inbox = None; }
+        }
+    }
+}
+
+async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEvent>, generation: u64) {
+    let _steer_guard = SteerInboxGuard(sess.steer_inbox.clone(), generation);
     // Park a clone of the current turn's tx into the shared progress
     // slot so tools that stream live output (bash's PTY reader) can
     // fan lines into this turn's event stream. Cleared in the guard
@@ -1476,6 +1548,7 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
         let mut consecutive_dupe_rounds: usize = 0;
 
         for round in 0..cfg.max_rounds {
+            sess.consume_steers(generation).await;
             info!(round, "harness: model turn");
 
             // Keep the conversation inside the context window: first by
@@ -1722,6 +1795,7 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
                         run_verify(&sess, &writes_at_turn_start, &tx).await
                     {
                         verify_attempts += 1;
+                        let _ = tx.send(HarnessEvent::Warning(format!("[retry] Verification failed: {}. Repair attempt {verify_attempts}/{MAX_VERIFY_ATTEMPTS}", check.name))).await;
                         // Inject the failure as a user message so the next
                         // model round sees it as fresh feedback (rather than
                         // as a tool_result which requires a matching call).
@@ -1747,6 +1821,7 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
                         .await;
                 }
 
+                if sess.consume_steers(generation).await { continue; }
                 round_outcome = RoundOutcome::CleanStop;
                 break;
             }

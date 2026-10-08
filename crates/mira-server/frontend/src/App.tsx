@@ -1,13 +1,33 @@
-import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { AnimatePresence } from 'framer-motion';
+import { UsageRecoveryCard, type RecoveryAction } from './components/UsageRecoveryCard';
+import {useBackgroundProcesses} from './lib/backgroundProcesses';
+import { QueueMutations } from './lib/queueMutations';
+import { applySessionActivity, type SessionActivityState, type SessionActivityUpdate } from './lib/sessionActivity';
+import { Collapse } from './components/ui/Collapse';
+import { turnActivity, groupByTurn, type Turn, type GroupItem } from './lib/turnActivity';
+export { groupAgentRuns } from './lib/turnActivity';
+import { ImageAttachmentDetails } from './components/ImageAttachmentDetails';
+import { ChatRelationships } from './components/ChatRelationships';
+import { WorkspaceSetupCard } from './components/WorkspaceSetupCard';
+import { SourceCitationNavigator } from './components/SourceCitationNavigator';
+import { updateExternalAgent } from './api';
+import { AssistantSelectionToolbar } from './components/AssistantSelectionToolbar';
+import { TurnChanges } from './components/TurnChanges';
+import { composeQuote, setAsidePassage } from './lib/attachBridge';
+import { VirtualTranscript, hasTranscriptPosition } from './components/VirtualTranscript';
+import { appendNativeText, boundedOutput, appendNativeToolOutput, applyNativeMetadata } from './lib/nativeStream';
+import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { AnimatePresence, motion } from 'framer-motion';
 import {
   RotateCw,
+  ListCollapse,
+  Redo2,
   ArrowDown,
   ChevronDown,
   Check,
   LoaderCircle,
   Copy,
   Info,
+  Bell,
   Lightbulb,
   Pencil,
   Palette,
@@ -25,10 +45,13 @@ import { cn } from './lib/utils';
 import { acpOptionsToDescriptors } from './lib/acpOptions';
 import { loadAgentCaps, loadInstanceConfigs, parseArgs, parseEnv, saveAgentCaps } from './lib/acpAgents';
 import { EngineMark } from './components/EnginePicker';
+import { AgentIcon, ProviderIcon } from './components/AgentIcon';
+import { HtmlRenderCard } from './components/HtmlRenderCard';
+import { SecretPrompt, type SecretRequest } from './components/SecretPrompt';
 import { prettyModel } from './lib/models';
 import type { UsageRingData } from './components/UsageRing';
 import { isAgentRequest } from './lib/agentRequest';
-import { agentCallToToolCall, agentToolResult, agentToolStatus } from './lib/agentTools';
+import { agentCallToToolCall, agentToolResult, agentToolStatus, boundAgentOutput } from './lib/agentTools';
 import type { AcpInstanceConfig } from './components/settings/AcpAgentsSection';
 import {
   getCustomKeybindingRules,
@@ -39,9 +62,9 @@ import {
 } from './lib/keybindings';
 import { applyReduceMotion, getBoolPref, PREF_KEYS } from './lib/prefs';
 import { connect, type WsClient, type WsStatus } from './ws';
-import { costUsd, formatDollars, shortNum } from './lib/usage';
+import { costUsd, ensureServerPricing, formatDollars, shortNum } from './lib/usage';
 import { forkSession, getContextBreakdown, previewCheckpoint, restoreCheckpoint, undoRestore, type MessageRef, type RestoreChange, type Restored } from './api';
-import { appendMemory, applyUndo, getBranchPr, getGitStatus, getSessionDiff, getSessionHistory, getSettings, gitCommit, gitPush, listCommands, listEngines, listSessions, listSkills, newSession, setSessionBackgroundMode, startReview, type BranchPrView, type EngineSnapshot, type GitStatusView, type SessionDiffView, type SkillView, type CommandInfo } from './api';
+import { appendMemory, applyUndo, getBranchPr, getGitStatus, getSessionDiff, getSessionHistory, getSettings, gitCommit, gitPush, listCommands, listEngines, listSessions, listSkills, newSession, putCwd, setSessionBackgroundMode, startReview, type BranchPrView, type EngineSnapshot, type GitStatusView, type SessionDiffView, type SkillView, type CommandInfo } from './api';
 import {
   ContextPanel,
   CONTEXT_PANEL_RESERVE,
@@ -53,7 +76,9 @@ import { SettingsSurface } from './components/Settings';
 import { PluginsPanel } from './components/Plugins';
 import { PullRequestPanel } from './components/PullRequestPanel';
 import { Sidebar, type MainView } from './components/Sidebar';
-import { hasHiddenTitleBar } from './lib/desktop';
+import { ProjectSwitcher } from './components/ProjectSwitcher';
+import { hasHiddenTitleBar, isDesktop, pickFolder } from './lib/desktop';
+import { basename } from './lib/utils';
 import { RightPanelButton } from './components/RightPanelButton';
 import { attachFilesToComposer, dataUrlToFile } from './lib/attachBridge';
 import { Tip } from './components/ui/Tip';
@@ -76,8 +101,9 @@ import {
   parseSentAttachments,
   SentAttachmentChip,
   type PendingApproval,
+  type QueuedComposerMessage,
 } from './components/Composer';
-import { SkillMentionText } from './components/SkillMention';
+import { UserRichText } from './components/UserRichText';
 import { FolderPicker } from './components/FolderPicker';
 import { AssistantContent } from './components/AssistantContent';
 import { ThoughtBlock } from './components/ThoughtBlock';
@@ -122,6 +148,52 @@ import { callForAttention } from './lib/attention';
 import { GetStarted } from './components/onboarding/GetStarted';
 
 const IS_MAC = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
+
+type InfoNotice = {
+  id: string;
+  kind: 'short' | 'persistent';
+  title: string;
+  body?: string | null;
+  meta?: string | null;
+  tone?: 'info' | 'success' | 'warning' | 'danger';
+  data?: unknown;
+  updateAgent?: string;
+};
+
+function noticeId(prefix = 'notice') {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function agentUpdateNotice(prev: AcpAgentStatus[], next: AcpAgentStatus[]): InfoNotice | null {
+  const byKind = new Map(prev.map((a) => [a.kind, a]));
+  for (const agent of next) {
+    const old = byKind.get(agent.kind);
+    if (!old) continue;
+    if (agent.cli_version && old.cli_version && agent.cli_version !== old.cli_version) {
+      return {
+        id: noticeId(`agent-${agent.kind}`),
+        kind: 'persistent',
+        tone: 'info',
+        title: `New ${agent.display_name} version available`,
+        body: `${old.cli_version} → ${agent.cli_version}`,
+        meta: 'External agent update',
+        updateAgent: ['codex', 'claude-code', 'opencode'].includes(agent.kind) ? agent.kind : undefined,
+        data: { agent },
+      };
+    }
+    if (old.state.state !== 'ready' && agent.state.state === 'ready') {
+      return {
+        id: noticeId(`agent-${agent.kind}`),
+        kind: 'short',
+        tone: 'success',
+        title: `${agent.display_name} is ready`,
+        meta: agent.auth ?? agent.transport ?? null,
+        data: { agent },
+      };
+    }
+  }
+  return null;
+}
 import { ToolCard, type ToolStatus } from './components/ToolCard';
 import { Thinking } from './components/Thinking';
 import {
@@ -146,6 +218,7 @@ import { SubagentPanel, type SubagentTab, type FilePanelTab } from './components
 import { TaskListPanel } from './components/TaskListPanel';
 import { GoalPanel } from './components/GoalPanel';
 import { categoryFor, countsByCategory, countsPhrase, ToolGroup } from './components/ToolGroup';
+import { EntryBoundary } from './components/EntryBoundary';
 import { SecondOpinion } from './components/SecondOpinion';
 import type {
   EnvironmentInfo,
@@ -174,6 +247,7 @@ import type {
   AcpToolCall,
   AgentPostureMapping,
   SessionEngine,
+  EngineRef,
   TurnMeta,
 } from './types';
 
@@ -201,8 +275,11 @@ export type SubagentStreamState = {
   pendingReview: null | { promptId: string; summary: string };
 };
 
+let toolActivitySequence = 0;
 type ToolEntry = {
+  activityAt?: number;
   kind: 'tool';
+  runtimeDelivery?: Extract<ServerMsg, { type: 'runtime_request_updated' }>['request']['delivery'];
   call: ToolCall;
   preview: DiffPreview | null;
   /** For a compound shell command awaiting approval: the parts that
@@ -246,13 +323,14 @@ type WarningEntry = { kind: 'warning'; text: string };
  *  summary behind a toggle when it's known (after a reload). */
 type CompactEntry = { kind: 'compact'; summarized: number | null; summary: string | null };
 type ErrorEntry = { kind: 'error'; text: string };
-type MsgEntry = { kind: 'msg'; msg: Message };
+type MsgEntry = { steerRequestId?: string; kind: 'msg'; msg: Message; nativeMessageId?: string; nativeCompleted?: boolean; nativePhase?: string };
 /** The model's reasoning before a reply / tool call. `live` while
  *  `reasoning` frames are still arriving; sealed by the next token,
  *  tool call or turn end. Times are epoch ms, null when restored from
  *  history (duration unknown). */
 type ThoughtEntry = {
   kind: 'thought';
+  native?: boolean;
   text: string;
   live: boolean;
   startedAt: number | null;
@@ -278,7 +356,15 @@ type GoalEntry = {
 type AcpPlanEntry = { kind: 'acp_plan'; entries: AcpPlanItem[] };
 /** Where the chat moved to another engine (provider ⇄ agent). A quiet
  *  divider, so a reader can tell which engine wrote what. */
-type EngineSwitchEntry = { kind: 'engine_switch'; engine: SessionEngine };
+/** A page an agent published with `html_render`. */
+type HtmlRenderEntry = { kind: 'html_render'; id: string; title: string; html: string };
+type EngineSwitchEntry = {
+  kind: 'engine_switch';
+  engine: SessionEngine;
+  /** The engine handing over, when known: the divider then reads as a
+   *  handoff (from → to) rather than just "switched to". */
+  from?: SessionEngine | null;
+};
 /** An external agent's turn: how long it took and what it spent. Not
  *  rendered — the turn's reply shows it in its hover row. Kept in the
  *  entries (rather than a map by turn number) so it stays with its turn
@@ -292,17 +378,19 @@ type TurnStatsEntry = {
   costUsd: number | null;
 };
 
-export type Entry =
+export type Entry = (
   | MsgEntry
   | ToolEntry
   | WarningEntry
+  | { kind: 'activity'; activityKind: string; title: string; detail: string }
   | ErrorEntry
   | GoalEntry
   | CompactEntry
   | ThoughtEntry
   | AcpPlanEntry
   | EngineSwitchEntry
-  | TurnStatsEntry;
+  | HtmlRenderEntry
+  | TurnStatsEntry) & { transcriptTurnIndex?: number; providerTurnIndex?: number };
 
 type TurnTiming = {
   startedAt: number;
@@ -369,6 +457,23 @@ function stripHookContext(content: string | null | undefined): string | null | u
  * and a switch to the agent by agent turns. Sidecars written before the
  * markers existed keep the old order: harness, then agent.
  */
+export function entriesForTranscriptPage(page: import('./types').TranscriptPage, previews?: Record<string, DiffPreview>): Entry[] {
+  const entries: Entry[] = [];
+  let offset = 0;
+  while (offset < page.items.length) {
+    const first = page.items[offset];
+    let end = offset + 1;
+    while (end < page.items.length && page.items[end].turn_index === first.turn_index && !!page.items[end].message === !!first.message) end++;
+    const block = page.items.slice(offset, end);
+    const rebuilt = first.message
+      ? historyToEntries(block.flatMap(item => item.message ? [item.message] : []), previews)
+      : interleaveReplay([], previews, block.flatMap(item => item.line ? [item.line] : []));
+    entries.push(...rebuilt.map(entry => ({ ...entry, transcriptTurnIndex: first.turn_index, providerTurnIndex: first.provider_turn_index })));
+    offset = end;
+  }
+  return entries;
+}
+
 export function interleaveReplay(
   history: Message[],
   previews: Record<string, DiffPreview> | undefined,
@@ -391,11 +496,16 @@ export function interleaveReplay(
     out.push(...historyToEntries(history.slice(from, to), previews));
     from = to;
     const toAgent = line.switch.to !== 'provider';
+    const fromRef = line.switch.from_engine;
+    const toRef = line.switch.to_engine;
     out.push({
       kind: 'engine_switch',
-      engine: toAgent
-        ? { kind: 'agent', driver: line.driver, display_name: line.driver, status: 'ready' }
-        : { kind: 'provider', display_name: 'provider', status: 'ready' },
+      engine: toRef
+        ? engineFromRef(toRef)
+        : toAgent
+          ? { kind: 'agent', driver: line.driver, display_name: line.driver, status: 'ready' }
+          : { kind: 'provider', display_name: 'provider', status: 'ready' },
+      from: fromRef ? engineFromRef(fromRef) : null,
     });
   }
   out.push(...replayAgentTranscript(segment));
@@ -403,8 +513,56 @@ export function interleaveReplay(
   return out;
 }
 
-/** The divider an engine switch leaves in the transcript. */
-function EngineSwitchDivider({ engine }: { engine: SessionEngine }) {
+function engineFromRef(ref: EngineRef): SessionEngine {
+  return {
+    kind: ref.kind,
+    driver: ref.driver ?? null,
+    instance: ref.instance ?? null,
+    display_name: ref.display_name,
+    model: ref.model ?? null,
+    status: 'ready',
+  };
+}
+
+/** An engine's name for the handoff label: the agent's name, or the
+ *  provider and model. */
+function engineLabel(engine: SessionEngine): string {
+  if (engine.kind === 'agent') return agentDisplayName(engine.driver ?? '', engine.display_name);
+  const provider = engine.display_name && !['Mira', 'provider'].includes(engine.display_name)
+    ? engine.display_name
+    : null;
+  return [provider, engine.model ? prettyModel(engine.model) : null].filter(Boolean).join(' · ') || 'Mira';
+}
+
+/** An engine's favicon: the agent's mark, or the provider's. */
+function EngineEndMark({ engine }: { engine: SessionEngine }) {
+  if (engine.kind === 'agent' && engine.driver) {
+    return <AgentIcon kind={engine.driver} name={engine.display_name} size="xs" tile={false} />;
+  }
+  return engine.instance
+    ? <ProviderIcon instance={engine.instance} name={engine.display_name} model={engine.model} size="xs" />
+    : <EngineMark engine={engine} model={engine.model} />;
+}
+
+/** The divider an engine switch leaves in the transcript: a handoff from
+ *  one engine to the other, with what carried over. */
+function EngineSwitchDivider({ engine, from }: { engine: SessionEngine; from?: SessionEngine | null }) {
+  if (from) {
+    return (
+      <div className="my-1 flex items-center gap-3 text-[11.5px] text-muted-foreground/60" role="separator">
+        <span className="h-px flex-1 bg-border/50" />
+        <span className="inline-flex min-w-0 items-center gap-1.5" title="The conversation so far was handed to the new engine">
+          <span className="text-muted-foreground/50">Context handoff</span>
+          <EngineEndMark engine={from} />
+          <span className="truncate">{engineLabel(from)}</span>
+          <span aria-hidden>→</span>
+          <EngineEndMark engine={engine} />
+          <span className="truncate">{engineLabel(engine)}</span>
+        </span>
+        <span className="h-px flex-1 bg-border/50" />
+      </div>
+    );
+  }
   const provider = engine.display_name && !['Mira', 'provider'].includes(engine.display_name)
     ? engine.display_name
     : null;
@@ -474,7 +632,7 @@ function addTurnUsage(entries: Entry[], f: Extract<ServerMsg, { type: 'acp_turn_
       ...s,
       // Prompt tokens include cached input, as everywhere else.
       usage: {
-        prompt_tokens: u.prompt_tokens + f.input_tokens + f.cached_input_tokens,
+        prompt_tokens: u.prompt_tokens + f.input_tokens,
         completion_tokens: u.completion_tokens + f.output_tokens,
         cached_input_tokens: u.cached_input_tokens + f.cached_input_tokens,
         rounds: u.rounds,
@@ -492,16 +650,47 @@ export function replayAgentTranscript(lines: AgentTranscriptLine[]): Entry[] {
     if (line.user) {
       out = [
         ...out,
-        { kind: 'msg', msg: { role: 'user', content: line.user.text } },
+        { kind: 'msg', msg: { role: 'user', created_at: line.t, content: line.user.text, images: line.user.attached_images, input_id:line.user.input_id, input_intent: line.user.input_intent } },
       ];
-      turnStartedAt = line.t;
+      if (!line.user.input_intent) turnStartedAt = line.t;
       continue;
     }
+    const beforeLength = out.length;
     const f = line.frame as ServerMsg | null | undefined;
     if (!f || typeof f !== 'object' || !('type' in f)) continue;
     switch ((f as ServerMsg).type) {
+      case 'tool_start': {
+        const msg = f as Extract<ServerMsg, { type: 'tool_start' }>;
+        out = upsertToolStart(out, msg.call);
+        out = updateTool(out, msg.call.id, entry => ({ ...entry, startedAt: line.t }));
+        break;
+      }
+      case 'tool_end': {
+        const msg = f as Extract<ServerMsg, { type: 'tool_end' }>;
+        out = attachToolResult(out, msg.result);
+        out = updateTool(out, msg.result.call_id, entry => {
+          const askUser = entry.call.function.name === 'ask_user' ? restoreAskUserFromCall(entry.call, msg.result) : undefined;
+          const plan = entry.call.function.name === 'plan' ? restorePlanFromCall(entry.call, msg.result) : undefined;
+          return { ...entry, ...(askUser ? { askUser } : {}), ...(plan ? { plan } : {}) };
+        });
+        break;
+      }
+      case 'stream_activity': {
+        const activity = f as Extract<ServerMsg, { type: 'stream_activity' }>;
+        out.push({ kind: 'activity', activityKind: activity.kind, title: activity.title, detail: activity.detail });
+        break;
+      }
+      case 'acp_message_metadata': {
+        const meta = f as Extract<ServerMsg, { type: 'acp_message_metadata' }>;
+        out = applyNativeMetadata(out, meta.message_id, meta.phase);
+        break;
+      }
+      case 'acp_text_snapshot':
+      case 'acp_tool_output_delta':
+        out = applyNativeFrame(out, f as NativeFrame);
+        break;
       case 'acp_text':
-        out = appendAcpText(out, (f as Extract<ServerMsg, { type: 'acp_text' }>).text);
+        out = appendAcpText(out, (f as Extract<ServerMsg, { type: 'acp_text' }>).text, (f as Extract<ServerMsg, { type: 'acp_text' }>).message_id);
         break;
       case 'acp_thought':
         out = appendAcpThought(out, (f as Extract<ServerMsg, { type: 'acp_thought' }>).text);
@@ -556,6 +745,11 @@ export function replayAgentTranscript(lines: AgentTranscriptLine[]): Entry[] {
         ];
         break;
       }
+      case 'html_render': {
+        const msg = f as Extract<ServerMsg, { type: 'html_render' }>;
+        out = [...out, { kind: 'html_render', id: msg.id, title: msg.title, html: msg.html }];
+        break;
+      }
       case 'acp_unmodelled':
         // Diagnostics, not conversation — see the live handler.
         break;
@@ -569,6 +763,11 @@ export function replayAgentTranscript(lines: AgentTranscriptLine[]): Entry[] {
         // State frames and session ephemera are handled by the caller, or
         // deliberately skipped — never rendered as transcript content.
         break;
+    }
+    // Persisted frame time owns replayed messages, not the current wall clock.
+    for (let i = beforeLength; i < out.length; i++) {
+      const entry = out[i];
+      if (entry.kind === 'msg') out[i] = { ...entry, msg: { ...entry.msg, created_at: line.t } };
     }
   }
   // Replayed thoughts have no real timing: rebuilding them stamped "now"
@@ -774,9 +973,12 @@ const MIN_STREAM_WIDTH = 560;
 export default function App() {
   const pingPrimedRef = useRef(false);
 
-  // Preload the file into browser cache on mount, and unlock audio playback
-  // on the first user gesture so subsequent play() calls are never blocked.
+  // Preload the remote price table so Usage shows dollars from the same
+  // authoritative rows the server renders, and prime audio playback on the
+  // first user gesture so subsequent play() calls are never blocked.
   useEffect(() => {
+    void ensureServerPricing();
+
     const a = new Audio('/ping.mp3');
     a.preload = 'auto';
 
@@ -799,8 +1001,16 @@ export default function App() {
   const playPing = useCallback(() => playTurnSound(), []);
 
   const [status, setStatus] = useState<WsStatus>('connecting');
+  const [sessionActivity, setSessionActivity] = useState<SessionActivityState | null>(null);
+  const sessionActivityRef=useRef<SessionActivityState|null>(null);
+  const activityTitlesRef=useRef(new Map<string,string>());
+  const [completedSessions,setCompletedSessions]=useState<ReadonlyMap<string,number>>(new Map());
   const [sessionId, setSessionId] = useState<string>('');
   const sessionIdRef = useRef('');
+  const [queuedBySession, setQueuedBySession] = useState<Map<string, QueuedComposerMessage[]>>(new Map());
+  const queuedBySessionRef = useRef(queuedBySession);
+  queuedBySessionRef.current = queuedBySession;
+  const pendingSteerRef = useRef(new Map<string, QueuedComposerMessage>());
   /** The session's own title (AI-written, or the agent's), once known; the
    *  header falls back to the first message until then. */
   const [sessionTitle, setSessionTitle] = useState<string | null>(null);
@@ -808,6 +1018,23 @@ export default function App() {
   const [mode, setMode] = useState<Mode>('manual');
   const [cwd, setCwd] = useState<string>('');
   const [entries, setEntries] = useState<Entry[]>([]);
+  const [historyCursor, setHistoryCursor] = useState<string | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const historyRequestRef = useRef<string | null>(null);
+  const historyPreviewsRef = useRef<Record<string, DiffPreview>>({});
+  const historyOffsetRef = useRef(0);
+  const providerTurnCursorRef = useRef(0);
+  const [turnDiffs, setTurnDiffs] = useState<import('./types').TurnDiffSummary[]>([]);
+  function loadOlderHistory() {
+    if (!historyCursor || historyLoading || !sessionIdRef.current) return;
+    const request_id = crypto.randomUUID();
+    historyRequestRef.current = request_id;
+    setHistoryLoading(true); setHistoryError(null);
+    wsRef.current?.send({ type: 'history', session_id: sessionIdRef.current, cursor: historyCursor, request_id });
+    window.setTimeout(() => { if (historyRequestRef.current === request_id) { historyRequestRef.current = null; setHistoryLoading(false); setHistoryError('Older messages could not be loaded. Try again.'); } }, 15000);
+  }
+
 
   // State an external ACP agent owns. Captured here rather than folded into
   // the transcript because it is configuration, not conversation — the
@@ -881,6 +1108,24 @@ export default function App() {
   /** Health of every known agent, refreshed on request. */
   const [acpAgents, setAcpAgents] = useState<AcpAgentStatus[]>([]);
   const [acpStatusPending, setAcpStatusPending] = useState(false);
+  const acpAgentsRef = useRef<AcpAgentStatus[]>([]);
+  const completedUpdatesRef = useRef(new Set<string>());
+  /** Small and persistent in-window notices for app-level state. */
+  const [infoNotices, setInfoNotices] = useState<InfoNotice[]>([]);
+  function pushInfoNotice(notice: InfoNotice) {
+    setInfoNotices((prev) => [
+      ...prev.filter((n) => !(notice.kind === 'persistent' && n.title === notice.title)),
+      notice,
+    ].slice(-5));
+    if (notice.kind === 'short') {
+      window.setTimeout(() => {
+        setInfoNotices((prev) => prev.filter((n) => n.id !== notice.id));
+      }, 3200);
+    }
+  }
+  function dismissInfoNotice(id: string) {
+    setInfoNotices((prev) => prev.filter((n) => n.id !== id));
+  }
   /** A startup failure, surfaced in the Agents panel. */
   const [acpError, setAcpError] = useState<string | null>(null);
   /** A mode picked in the picker, awaiting confirmation in the universal
@@ -902,11 +1147,14 @@ export default function App() {
     wsRef.current?.send({ type: 'acp_status' });
   }, []);
 
-  const startAcpAgent = useCallback((kind: string, cfg: AcpInstanceConfig, resume?: string | null, model?: string | null) => {
+  const startAcpAgent = useCallback((kind: string, cfg: AcpInstanceConfig, resume?: string | null, model?: string | null, instance?: string | null) => {
     setAcpError(null);
     wsRef.current?.send({
       type: 'acp_start',
       driver: kind,
+      // The configured engine (mira.yaml `engines:`) the pick maps to: the
+      // server takes its binary, home, env and display name from there.
+      instance: instance ?? null,
       binary_path: cfg.binaryPath || null,
       display_name: cfg.displayName || null,
       launch_args: parseArgs(cfg.launchArgs ?? ''),
@@ -927,6 +1175,35 @@ export default function App() {
     busyRef.current = false;
     setThinking(false);
     wsRef.current?.attach(id);
+  }
+
+  /** Point this chat at `path`. The server answers with the id of the
+   *  fresh slot it materialised for that folder, so the socket has to
+   *  follow it — otherwise it keeps forwarding the previous slot's
+   *  frames and the UI silently stays where it was. */
+  async function switchCwd(path: string) {
+    try {
+      const { session_id } = await putCwd(path);
+      if (session_id) attachSession(session_id);
+    } catch (e) {
+      setRestoreNote({ text: String((e as Error).message ?? e), error: true });
+    }
+  }
+
+  /** "Open folder…" — the OS panel where there is one.
+   *
+   *  A desktop build hands this to the platform, which knows about
+   *  recent places, tags and Cmd+Shift+G. The browser build has no such
+   *  panel, so it keeps the in-app browser dialog. On the desktop a
+   *  `null` answer is the user closing the panel, so nothing else opens
+   *  behind it. */
+  async function openProjectPicker() {
+    if (!isDesktop()) {
+      setPickerOpen(true);
+      return;
+    }
+    const picked = await pickFolder();
+    if (picked) await switchCwd(picked);
   }
   function forkAcpAgent() {
     wsRef.current?.send({ type: 'acp_fork' });
@@ -969,6 +1246,8 @@ export default function App() {
   const turnStartRef = useRef<number | null>(null);
   const [expandedTurns, setExpandedTurns] = useState<Set<number>>(new Set());
   const [busy, setBusy] = useState<boolean>(false);
+  const nativeWorkRef = useRef<Extract<ServerMsg, { type: 'runtime_work_updated' }>['work'][]>([]);
+  const nativeTurnsRef = useRef<Set<string>>(new Set());
   // Read by the frame handler, which is a long-lived closure: a frame that
   // arrives after the turn ended (a cancelled tool's result, a late
   // turn_complete) must not restart the working indicator.
@@ -1009,6 +1288,21 @@ export default function App() {
   // starting a chat / loading a session snaps back to 'chat' so the user
   // isn't stranded on a management screen when the model streams a reply.
   const [mainView, setMainView] = useState<MainView>('chat');
+  useEffect(() => {
+    if (mainView === 'chat') return;
+    const over = (event: DragEvent) => {
+      if (event.dataTransfer?.types.includes('Files')) event.preventDefault();
+    };
+    const drop = (event: DragEvent) => {
+      if (!event.dataTransfer?.files.length) return;
+      event.preventDefault();
+      attachFilesToComposer(Array.from(event.dataTransfer.files));
+      setMainView('chat');
+    };
+    window.addEventListener('dragover', over);
+    window.addEventListener('drop', drop);
+    return () => { window.removeEventListener('dragover', over); window.removeEventListener('drop', drop); };
+  }, [mainView]);
   // Settings is a first-class main view (not a dialog) — the sidebar
   // renders the section tabs while the surface fills the main pane.
   // `settingsSection` drives which section is shown; `settingsReturnTo`
@@ -1136,6 +1430,9 @@ export default function App() {
     try { localStorage.setItem('mira.terminal.open', v ? '1' : '0'); } catch { /* private mode */ }
   }, []);
   const keybindings = useKeybindings();
+  const chatShortcutRequest = useRef(0);
+  const shortcutEntriesRef = useRef(entries);
+  shortcutEntriesRef.current = entries;
 
   /** Live `when`-clause context for the keybinding engine. */
   function shortcutContext(): ShortcutMatchContext {
@@ -1146,7 +1443,7 @@ export default function App() {
       terminalFocus: !!ae?.closest('.xterm'),
       // `pendingApprovals` is declared below; this only runs on keydown,
       // long after the whole component body has initialized.
-      approvalOpen: pendingApprovals.length > 0,
+      approvalOpen: visibleApprovalRef.current != null,
       reviewOpen,
       settingsOpen: mainView === 'settings',
       isWeb: true,
@@ -1156,6 +1453,7 @@ export default function App() {
   }
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if(e.repeat || e.isComposing || (e.target as HTMLElement)?.closest('[data-keybinding-capture]')) return;
       const command = resolveShortcutCommand(e, keybindings, { context: shortcutContext() });
       if (command !== 'terminal.toggle') return;
       e.preventDefault();
@@ -1172,6 +1470,7 @@ export default function App() {
   // it's the one shortcut that has to work mid-sentence.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if(e.repeat || e.isComposing || (e.target as HTMLElement)?.closest('[data-keybinding-capture]')) return;
       const command = resolveShortcutCommand(e, keybindings, {
         context: { ...shortcutContext(), editableFocus: false },
       });
@@ -1184,6 +1483,8 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey, true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [keybindings]);
+  const backgroundProcesses=useBackgroundProcesses(sessionId,status==='open'&&mainView==='chat');
+  const [selectedProcess,setSelectedProcess]=useState<{session:string;id:number;nonce:number}|null>(null);
   const ctxFits = useContextPanelFits();
   // The chat column's width, for whether the open context panel sits
   // beside the transcript or over it.
@@ -1247,6 +1548,8 @@ export default function App() {
   // when the browser tab is visible.
   const [, setNowTick] = useState(0);
   const wsRef = useRef<WsClient | null>(null);
+  const [recoveryBySession, setRecoveryBySession] = useState<Record<string, import('./types').QueuedInput[]>>({});
+  const queueMutationsRef = useRef(new QueueMutations());
   const paneRef = useRef<HTMLDivElement | null>(null);
   // Plan payloads that arrived *before* their tool_start (race between the
   // interactive tool's direct broadcast and the harness→WS forwarder). We
@@ -1261,9 +1564,20 @@ export default function App() {
   const pendingAskUserRef = useRef<Map<string, AskUserProposal>>(new Map());
 
   useEffect(() => {
-    const c = connect(onMessage, setStatus);
+    const c = connect(onMessage, (nextStatus) => {
+      queueMutationsRef.current.setConnected(nextStatus === 'open');
+      if (nextStatus !== 'open') { flushNativeFrames(); flushTokens(); }
+      setStatus(nextStatus);
+    });
     wsRef.current = c;
-    return () => c.close();
+    return () => {
+      queueMutationsRef.current.setConnected(false);
+      c.close();
+      if (nativeRafRef.current != null) cancelAnimationFrame(nativeRafRef.current);
+      if (tokenRafRef.current != null) cancelAnimationFrame(tokenRafRef.current);
+      nativeFramesRef.current = [];
+      tokenBufRef.current = '';
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -1282,13 +1596,16 @@ export default function App() {
 
   // Follow new output only while the reader is at the bottom; scrolling
   // up to read back stops the follow and offers a jump-to-latest button.
-  const followRef = useRef(true);
+  const followRef = useRef(getBoolPref(PREF_KEYS.transcriptFollow, true));
+  const readingAnchorRef = useRef<number | null>(null);
   const [showJump, setShowJump] = useState(false);
+  const lastScrollInputRef = useRef(0);
+  const noteScrollInput = () => { lastScrollInputRef.current = Date.now(); };
   const jumpToLatest = useCallback(() => {
     followRef.current = true;
     setShowJump(false);
     const el = paneRef.current;
-    if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+    if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'instant' });
   }, []);
   const onPaneScroll = useCallback(() => {
     const el = paneRef.current;
@@ -1296,13 +1613,28 @@ export default function App() {
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
     // Settings → General → Transcript can disable auto-follow; the
     // jump-to-latest button still works (it re-arms follow explicitly).
-    followRef.current = atBottom && getBoolPref(PREF_KEYS.transcriptFollow, true);
+    if (Date.now() - lastScrollInputRef.current < 1000) followRef.current = atBottom && getBoolPref(PREF_KEYS.transcriptFollow, true);
     setShowJump(!atBottom);
   }, []);
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = paneRef.current;
-    if (el && followRef.current) el.scrollTop = el.scrollHeight;
+    if (!el) return;
+    if (readingAnchorRef.current != null) {
+      el.scrollTop = readingAnchorRef.current;
+      readingAnchorRef.current = null;
+    } else if (followRef.current) el.scrollTop = el.scrollHeight;
   }, [entries, thinking]);
+
+  useEffect(() => {
+    const pane = paneRef.current;
+    const column = pane?.querySelector('[data-transcript-column]');
+    if (!pane || !column) return;
+    const observer = new ResizeObserver(() => {
+      if (followRef.current) pane.scrollTop = pane.scrollHeight;
+    });
+    observer.observe(column);
+    return () => observer.disconnect();
+  }, [sessionId, entries.length === 0]);
 
   // Tick the live counter while a turn is in flight. Stopping the interval
   // as soon as `busy` clears avoids a needless setInterval that runs forever.
@@ -1315,16 +1647,28 @@ export default function App() {
   // Desktop notification when a turn finishes while the tab is hidden
   // (Settings → General → Notifications). Only fires if the user granted
   // permission; requesting happens from the settings row.
-  const prevBusyRef = useRef(busy);
   // Read from WS handlers, which close over the first render.
   const chatTitleRef = useRef<string | null>(null);
   chatTitleRef.current = sessionTitle ?? titleFromEntries(entries);
-  useEffect(() => {
-    const was = prevBusyRef.current;
-    prevBusyRef.current = busy;
-    if (!was || busy) return;
-    callForAttention('done', chatTitleRef.current);
-  }, [busy]);
+  function updateSessionActivity(update:SessionActivityUpdate) {
+    const previous=sessionActivityRef.current;
+    const next=applySessionActivity(previous,update);
+    if(next===previous)return;
+    sessionActivityRef.current=next;setSessionActivity(next);
+    if(!previous||!next||previous.epoch!==next.epoch)return;
+    const completed=[...previous.running].filter(id=>!next.running.has(id));
+    if(!completed.length)return;
+    setCompletedSessions(previous=>{
+      const records=new Map(previous);
+      for(const id of completed){records.delete(id);records.set(id,next.revision);}
+      while(records.size>500)records.delete(records.keys().next().value!);
+      return records;
+    });
+    for(const id of completed) {
+      const title=id===sessionIdRef.current?chatTitleRef.current:activityTitlesRef.current.get(id);
+      callForAttention('done',title ?? `Chat ${id.slice(0,8)}`,{sessionId:id,whileVisible:id!==sessionIdRef.current,onOpen:()=>{setMainView('chat');wsRef.current?.attach(id);}});
+    }
+  }
 
   // Apply the reduce-motion class on boot (Settings → General → Appearance).
   useEffect(() => {
@@ -1370,10 +1714,88 @@ export default function App() {
     };
   }
 
+  const nativeFramesRef = useRef<NativeFrame[]>([]);
+  const nativeRafRef = useRef<number | null>(null);
+  function flushNativeFrames() {
+    if (nativeRafRef.current != null) cancelAnimationFrame(nativeRafRef.current);
+    nativeRafRef.current = null;
+    const frames = nativeFramesRef.current;
+    nativeFramesRef.current = [];
+    if (frames.length) setEntries((entries) => frames.reduce(applyNativeFrame, entries));
+  }
   function onMessage(msg: ServerMsg) {
-    if (msg.type !== 'token') flushTokens();
+    if (['acp_text', 'acp_text_snapshot', 'acp_thought', 'acp_tool_call', 'acp_tool_call_update', 'acp_tool_output_delta'].includes(msg.type)) {
+      flushTokens();
+      nativeFramesRef.current.push(msg as NativeFrame);
+      // Hidden tabs throttle RAF: bound the backlog and keep replay current.
+      if (document.hidden || nativeFramesRef.current.length >= 256) flushNativeFrames();
+      else if (nativeRafRef.current == null) nativeRafRef.current = requestAnimationFrame(flushNativeFrames);
+      return;
+    }
+    flushNativeFrames();
+    handleMessage(msg);
+  }
+  function handleMessage(msg: ServerMsg) {
+    if (!['token', 'session_activity', 'session_activity_snapshot', 'queue_updated'].includes(msg.type)) flushTokens();
     switch (msg.type) {
+      case 'queue_mutation_result':
+        queueMutationsRef.current.receive(msg);
+        break;
+      case 'session_activity':
+        updateSessionActivity(msg);
+        break;
+      case 'session_activity_snapshot':
+        updateSessionActivity(msg);
+        break;
+      case 'turn_diffs': setTurnDiffs(msg.summaries); break;
+      case 'stream_activity':
+        setEntries(previous => [...previous, { kind: 'activity', activityKind: msg.kind, title: msg.title, detail: msg.detail }]);
+        break;
+      case 'acp_message_metadata':
+        setEntries(previous => applyNativeMetadata(previous, msg.message_id, msg.phase));
+        break;
+      case 'history_page': {
+        if (msg.session_id !== sessionIdRef.current || msg.request_id !== historyRequestRef.current) break;
+        historyRequestRef.current = null;
+        setHistoryLoading(false); setHistoryError(msg.error);
+        if (msg.page) {
+          const page = msg.page;
+          const pane = paneRef.current;
+          const beforeHeight = pane?.scrollHeight ?? 0;
+          const beforeTop = pane?.scrollTop ?? 0;
+          followRef.current = false;
+          historyOffsetRef.current = page.first_turn;
+          setHistoryCursor(page.next_cursor);
+          setEntries(previous => [...entriesForTranscriptPage(page, historyPreviewsRef.current), ...previous]);
+          requestAnimationFrame(() => { if (pane) { pane.scrollTop = beforeTop + pane.scrollHeight - beforeHeight; readingAnchorRef.current = pane.scrollTop; } });
+        }
+        break;
+      }
+      case 'queue_updated': {
+        setRecoveryBySession(prev => ({ ...prev, [msg.session_id]: msg.items.filter(item => item.recovery) }));
+        setQueuedForSession(msg.session_id, () => msg.items.filter(item => !item.recovery).map(item => ({
+          id: item.id, text: item.text, images: item.images,
+          fingerprint: item.fingerprint,
+          steering: item.dispatching && !item.error, error: item.error ?? undefined,
+        })));
+        break;
+      }
+      case 'queue_delivery': {
+        if (msg.session_id === sessionIdRef.current) sendNow(msg.item.text, msg.item.images, false, msg.item.id);
+        break;
+      }
       case 'ready': {
+        if (msg.session_activity) updateSessionActivity({snapshot:msg.session_activity});
+        if (msg.title) {activityTitlesRef.current.set(msg.session_id,msg.title);if(activityTitlesRef.current.size>1000)activityTitlesRef.current.delete(activityTitlesRef.current.keys().next().value!);}
+        setRecoveryBySession(prev => ({ ...prev, [msg.session_id]: (msg.queued_inputs ?? []).filter(item => item.recovery) }));
+        setQueuedForSession(msg.session_id, () => (msg.queued_inputs ?? []).filter(item => !item.recovery).map(item => ({
+          id: item.id, text: item.text, images: item.images,
+          fingerprint: item.fingerprint,
+          steering: item.dispatching && !item.error, error: item.error ?? undefined,
+        })));
+        pendingSteerRef.current.delete(msg.session_id);
+        if (msg.session_id === sessionIdRef.current && !followRef.current) readingAnchorRef.current = paneRef.current?.scrollTop ?? null;
+        else if (msg.session_id !== sessionIdRef.current) { readingAnchorRef.current = null; followRef.current = !hasTranscriptPosition(msg.session_id) && getBoolPref(PREF_KEYS.transcriptFollow, true); }
         agentTerminal.reset();
         setGitStatus(null);
         setSessionDiff({ added: 0, removed: 0, files: [] });
@@ -1431,8 +1853,18 @@ export default function App() {
           }
         }
         // Provider and agent turns interleave in the order they happened.
-        const readyEntries = historyToEntries(msg.history, msg.previews);
-        setEntries(interleaveReplay(msg.history, msg.previews, msg.agent_transcript ?? []));
+        historyRequestRef.current = null;
+        setHistoryLoading(false); setHistoryError(null);
+        historyPreviewsRef.current = msg.previews ?? {};
+        setTurnDiffs(msg.turn_diffs ?? []);
+        setHistoryCursor(msg.transcript_page?.next_cursor ?? null);
+        historyOffsetRef.current = msg.transcript_page?.first_turn ?? 0;
+        providerTurnCursorRef.current = msg.turns?.length ?? msg.history.filter(message => message.role === 'user' && message.input_intent !== 'steer').length;
+        const readyEntries = msg.transcript_page ? entriesForTranscriptPage(msg.transcript_page, msg.previews) : historyToEntries(msg.history, msg.previews);
+        setEntries((msg.runtime_requests ?? []).reduce(
+          (entries, request) => upsertRuntimeQuestion(entries, request),
+          msg.transcript_page ? readyEntries : interleaveReplay(msg.history, msg.previews, msg.agent_transcript ?? []),
+        ));
         // Seed subagent state from history so the ContextPanel shows agents
         // on session reload (live subagent_started frames don't replay).
         setSubagentState(() => {
@@ -1469,6 +1901,8 @@ export default function App() {
         setGoal(msg.goal ?? null);
         // Opened mid-turn: show Stop and the working indicator until the
         // turn's end arrives, instead of an idle composer over a live reply.
+        nativeWorkRef.current = msg.runtime_work ?? [];
+        nativeTurnsRef.current.clear();
         setBusy(!!msg.running);
         busyRef.current = !!msg.running;
         setThinking(!!msg.running);
@@ -1479,6 +1913,8 @@ export default function App() {
         // failure; the palette just shows built-in commands.
         listSkills().then(setSkills).catch(() => setSkills([]));
         listCommands().then(setCommands).catch(() => setCommands([]));
+        listEngines().then((v) => setEngines(v.engines)).catch(() => {});
+        requestAcpStatus();
         // Each session (and worktree) has its own environment; ask for it.
         setEnvSwitching(null);
         wsRef.current?.send({ type: 'environment' });
@@ -1507,6 +1943,24 @@ export default function App() {
         tokenBufRef.current += msg.text;
         if (tokenRafRef.current == null) tokenRafRef.current = requestAnimationFrame(drainTokens);
         break;
+      case 'steer_result': {
+        const pending = pendingSteerRef.current.get(msg.session_id);
+        if (pending?.id === msg.request_id) {
+          pendingSteerRef.current.delete(msg.session_id);
+          setQueuedForSession(msg.session_id, items => msg.error
+            ? items.map(item => item.id === msg.request_id ? { ...item, steering: false, error: msg.error ?? undefined } : item)
+            : items.filter(item => item.id !== msg.request_id));
+        }
+        if (msg.session_id !== sessionIdRef.current) break;
+        if (!busyRef.current) window.setTimeout(drainQueuedMessage, 0);
+        setEntries(entries => {
+          const index = entries.findIndex(entry => entry.kind === 'msg' && entry.steerRequestId === msg.request_id);
+          if (!msg.message) return index < 0 ? entries : entries.filter((_, i) => i !== index);
+          const entry: Entry = { kind: 'msg', msg: msg.message, steerRequestId: msg.request_id };
+          return index < 0 ? [...sealThought(entries), entry] : entries.map((previous, i) => i === index ? entry : previous);
+        });
+        break;
+      }
       case 'approval_request':
         setThinking(false);
         clearThinkingIdle();
@@ -1587,6 +2041,7 @@ export default function App() {
         // Close out the most recent turn's timing.
         setTurnTimings((prev) => stampLastTurn(prev, Date.now()));
         setSidebarRefresh((n) => n + 1);
+        window.setTimeout(drainQueuedMessage, 0);
         break;
       }
       case 'environment_status':
@@ -1651,6 +2106,7 @@ export default function App() {
         // Agent install/auth state can move under us (an adapter was
         // installed, a CLI signed in) — refresh the engine list.
         listEngines().then((v) => setEngines(v.engines)).catch(() => {});
+        requestAcpStatus();
         break;
       case 'skills_reloaded':
         // A skill file appeared / changed / vanished. Refetch the
@@ -1693,6 +2149,9 @@ export default function App() {
         });
         break;
       case 'session_title_updated':
+        activityTitlesRef.current.delete(msg.session_id);
+        activityTitlesRef.current.set(msg.session_id,msg.title);
+        if(activityTitlesRef.current.size>1000)activityTitlesRef.current.delete(activityTitlesRef.current.keys().next().value!);
         // Nickname landed on disk — refresh the sidebar so the row label
         // switches from the first-user-message fallback to the AI title,
         // and retitle the header when it is this chat's.
@@ -1928,7 +2387,9 @@ export default function App() {
       case 'prompt_resolved':
         // Answered in another window (or tab, or device): close this copy
         // with the same answer instead of leaving it waiting.
-        if (msg.kind === 'ask_user') {
+        if (msg.kind === 'secret') {
+          setSecretRequests((prev) => prev.filter((r) => r.promptId !== msg.prompt_id));
+        } else if (msg.kind === 'ask_user') {
           const decision: AskUserDecision = msg.cancelled
             ? { cancelled: true }
             : { cancelled: false, answers: msg.answers ?? [] };
@@ -1943,6 +2404,23 @@ export default function App() {
           );
         }
         break;
+      case 'runtime_request_updated':
+        setEntries((prev) => upsertRuntimeQuestion(prev, msg.request));
+        break;
+      case 'runtime_turn_updated':
+        if (msg.turn.running) {
+          nativeTurnsRef.current.add(msg.turn.native_turn_id);
+          setBusy(true); busyRef.current = true; setThinking(true);
+        } else { nativeTurnsRef.current.delete(msg.turn.native_turn_id); }
+        break;
+      case 'runtime_work_updated': {
+        const active = ['pending', 'running', 'waiting'].includes(msg.work.status);
+        nativeWorkRef.current = nativeWorkRef.current.filter((w) => w.id !== msg.work.id);
+        if (active) nativeWorkRef.current.push(msg.work);
+        const running = active || nativeTurnsRef.current.size > 0 || nativeWorkRef.current.length > 0;
+        setBusy(running); busyRef.current = running;
+        break;
+      }
       case 'ask_user_request':
         // Same race-guard pattern as plan_request — attach immediately when
         // the tool_start already landed; stash otherwise.
@@ -1960,7 +2438,7 @@ export default function App() {
 
       // -------- ACP (external agent) --------
       case 'acp_text':
-        setEntries((prev) => appendAcpText(prev, msg.text));
+        setEntries((prev) => appendAcpText(prev, msg.text, msg.message_id));
         break;
       case 'acp_thought':
         setEntries((prev) => appendAcpThought(prev, msg.text));
@@ -1991,8 +2469,9 @@ export default function App() {
         // turn that was running here (a Stop already settled the composer,
         // and its confirmation shouldn't chime).
         if (busyRef.current) playPing();
-        setBusy(false);
-        busyRef.current = false;
+        const nativeStillWorking = nativeTurnsRef.current.size > 0 || nativeWorkRef.current.length > 0;
+        setBusy(nativeStillWorking);
+        busyRef.current = nativeStillWorking;
         setThinking(false);
         clearThinkingIdle();
         acpStopRef.current = null;
@@ -2028,6 +2507,7 @@ export default function App() {
             },
           ];
         });
+        window.setTimeout(drainQueuedMessage, 0);
         break;
       case 'acp_privileged_mode_confirmation':
         // The server refused without an acknowledgement. Show what the mode
@@ -2052,6 +2532,31 @@ export default function App() {
         ]);
         setPendingAcpMode(null);
         break;
+      case 'browser_active':
+        // An agent is driving Mira's browser through the tool server.
+        setBrowserPing((n) => n + 1);
+        break;
+      case 'engines_changed':
+        // mira.yaml changed and the server rebuilt its engines: pickers
+        // show new instances and keys without a restart.
+        void listEngines().then((view) => setEngines(view.engines)).catch(() => {});
+        break;
+      case 'html_render':
+        setEntries((prev) =>
+          prev.some((e) => e.kind === 'html_render' && e.id === msg.id)
+            ? prev
+            : [...prev, { kind: 'html_render', id: msg.id, title: msg.title, html: msg.html }],
+        );
+        break;
+      case 'secret_request':
+        playPing();
+        callForAttention('question', chatTitleRef.current);
+        setSecretRequests((prev) =>
+          prev.some((r) => r.promptId === msg.prompt_id)
+            ? prev
+            : [...prev, { promptId: msg.prompt_id, name: msg.name, reason: msg.reason, dotenv: msg.dotenv }],
+        );
+        break;
       case 'acp_unmodelled':
         // Logged, not shown. Printing the agent's raw JSON into the chat
         // buried answers under diagnostics ("ACP system: {…}"), and a
@@ -2062,18 +2567,30 @@ export default function App() {
       // State the agent owns rather than transcript content. Captured so it
       // is available to the model/mode pickers, and logged so none of it is
       // invisible while that wiring lands.
-      case 'acp_modes':
+      case 'acp_modes': {
         // State, not a ref: these drive the picker and mode row, so the
         // transcript must re-render when they arrive.
-        setAcpModes({ current: msg.current, available: msg.available, postures: msg.postures });
-        if (capsDriverRef.current) {
-          saveAgentCaps(capsDriverRef.current, { modes: { current: msg.current, available: msg.available } });
+        // Frames carry their driver (server-stamped); late frames from a
+        // stopped agent must neither overwrite the live state nor pollute
+        // another driver's "last seen" cache (OpenCode showing Claude
+        // models). Unstamped frames keep the old behaviour.
+        const modesDriver = msg.driver ?? capsDriverRef.current;
+        if (modesDriver) {
+          saveAgentCaps(modesDriver, { modes: { current: msg.current, available: msg.available } });
+        }
+        if (!msg.driver || msg.driver === capsDriverRef.current) {
+          setAcpModes({ current: msg.current, available: msg.available, postures: msg.postures });
         }
         break;
-      case 'acp_config_options':
-        setAcpConfig(msg.options);
-        if (capsDriverRef.current) saveAgentCaps(capsDriverRef.current, { config: msg.options });
+      }
+      case 'acp_config_options': {
+        const configDriver = msg.driver ?? capsDriverRef.current;
+        if (configDriver) saveAgentCaps(configDriver, { config: msg.options });
+        if (!msg.driver || msg.driver === capsDriverRef.current) {
+          setAcpConfig(msg.options);
+        }
         break;
+      }
       case 'acp_commands':
         setAcpCommands(msg.names);
         break;
@@ -2116,18 +2633,23 @@ export default function App() {
           (prev.kind !== next.kind ||
             (next.kind === 'agent' ? prev.driver !== next.driver : false));
         if (moved) {
-          setEntries((es) => [...es, { kind: 'engine_switch', engine: next }]);
+          setEntries((es) => [...es, { kind: 'engine_switch', engine: next, from: prev }]);
         }
         // The sidebar badges each chat by its engine.
         if (moved || prev?.model !== next.model) setSidebarRefresh((n) => n + 1);
         applyEngine(next);
         break;
       }
-      case 'acp_agent_status':
+      case 'acp_agent_status': {
+        const notice = agentUpdateNotice(acpAgentsRef.current, msg.agents);
+        acpAgentsRef.current = msg.agents;
         setAcpAgents(msg.agents);
         setAcpStatusPending(false);
+        if (notice && (!notice.updateAgent || !completedUpdatesRef.current.has(notice.updateAgent))) pushInfoNotice(notice);
+        completedUpdatesRef.current.clear();
         console.debug('[acp] agent status', msg.agents.map((a) => `${a.display_name}:${a.state.state}`));
         break;
+      }
 
       default: {
         // A frame type this build does not know about. Logged rather than
@@ -2139,6 +2661,19 @@ export default function App() {
         break;
       }
     }
+  }
+
+  /** Answer an agent's secret prompt. `null` declines. The value goes only
+   *  to the server, which stores it privately; it is not kept here. */
+  function replyToSecret(promptId: string, value: string | null) {
+    wsRef.current?.send({
+      type: 'prompt_response',
+      prompt_id: promptId,
+      kind: 'secret',
+      value,
+      cancelled: value == null,
+    });
+    setSecretRequests((prev) => prev.filter((r) => r.promptId !== promptId));
   }
 
   function replyToPlan(callId: string, approved: boolean, steps?: PlanStep[], note?: string) {
@@ -2175,7 +2710,7 @@ export default function App() {
         cancelled: false,
       });
     }
-    setEntries((prev) => recordAskUserDecision(prev, callId, decision));
+    if (!callId.startsWith('async-')) setEntries((prev) => recordAskUserDecision(prev, callId, decision));
   }
 
   /** Answer a subagent's review-required prompt. Clears `pendingReview`
@@ -2264,6 +2799,7 @@ export default function App() {
   // Always-allow buttons render inline on the pending tool card in
   // the transcript. Kept oldest-first — the top of the queue is what
   // the Y/N global shortcut targets.
+  const visibleApprovalRef = useRef<string | null>(null);
   const pendingApprovals = useMemo<PendingApproval[]>(
     () =>
       entries
@@ -2354,23 +2890,8 @@ export default function App() {
   // Plan proposal waiting for the user to approve/cancel. Rendered in
   // the Composer rather than inline so the interactive card doesn't
   // scroll away in a long transcript.
-  const pendingPlan = useMemo(() => {
-    const e = entries.find(
-      (e): e is Extract<Entry, { kind: 'tool' }> =>
-        e.kind === 'tool' && !!e.plan && e.plan.decision === null,
-    );
-    return e ? { callId: e.call.id, proposal: e.plan!.proposal } : null;
-  }, [entries]);
-
-  // ask_user proposal waiting for answers. Same pattern as pendingPlan.
-  const pendingAskUser = useMemo(() => {
-    const e = entries.find(
-      (e): e is Extract<Entry, { kind: 'tool' }> =>
-        e.kind === 'tool' && !!e.askUser && e.askUser.decision === null,
-    );
-    return e ? { callId: e.call.id, proposal: e.askUser!.proposal } : null;
-  }, [entries]);
-
+  const pendingPlans = useMemo(() => entries.flatMap(e => e.kind === 'tool' && e.plan?.decision === null ? [{callId:e.call.id, proposal:e.plan.proposal}] : []), [entries]);
+  const pendingQuestions = useMemo(() => entries.flatMap(e => e.kind === 'tool' && e.askUser?.decision === null ? [{callId:e.call.id, proposal:e.askUser.proposal}] : []), [entries]);
   // Global approval shortcuts for the first pending approval, resolved
   // through the keybinding engine (Settings → Keybindings). Rebinds when
   // the head-of-queue call changes so back-to-back approvals each
@@ -2380,6 +2901,8 @@ export default function App() {
   useEffect(() => {
     if (!firstPendingCallId) return;
     function onKey(e: KeyboardEvent) {
+      const visibleCallId = visibleApprovalRef.current;
+      if (!visibleCallId) return;
       const t = e.target as HTMLElement | null;
       if (t) {
         const tag = t.tagName;
@@ -2389,12 +2912,12 @@ export default function App() {
       const command = resolveShortcutCommand(e, keybindings, { context: shortcutContext() });
       if (command === 'approval.accept') {
         e.preventDefault();
-        decideApproval(firstPendingCallId, true);
+        decideApproval(visibleCallId, true);
         return;
       }
       if (command === 'approval.reject') {
         e.preventDefault();
-        decideApproval(firstPendingCallId, false);
+        decideApproval(visibleCallId, false);
         return;
       }
       // Legacy fallback: plain y/n (any case) still decides, unless the
@@ -2407,7 +2930,7 @@ export default function App() {
           );
           if (!customized) {
             e.preventDefault();
-            decideApproval(firstPendingCallId, lower === 'y');
+            decideApproval(visibleCallId, lower === 'y');
           }
         }
       }
@@ -2416,7 +2939,78 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, [firstPendingCallId, keybindings]);
 
-  function onSend(text: string, images?: { media_type: string; data: string }[]) {
+  function queuedFor(id = sessionIdRef.current) {
+    return queuedBySession.get(id) ?? [];
+  }
+
+  function setQueuedForSession(
+    id: string,
+    update: (items: QueuedComposerMessage[]) => QueuedComposerMessage[],
+  ) {
+    setQueuedBySession((prev) => {
+      const next = new Map(prev);
+      const items = update(next.get(id) ?? []);
+      if (items.length === 0) next.delete(id);
+      else next.set(id, items);
+      return next;
+    });
+  }
+
+  function queueMessage(text: string, images?: { media_type: string; data: string }[]) {
+    const id = sessionIdRef.current;
+    if (!id) return;
+    const item: QueuedComposerMessage = {
+      id: crypto.randomUUID(),
+      text,
+      images,
+    };
+    setQueuedForSession(id, (items) => [...items, item]);
+    wsRef.current?.send({ type: 'queue_input', session_id: id, id: item.id, text, images });
+  }
+
+  function removeQueuedMessage(id: string) {
+    const session = sessionIdRef.current;
+    if (!session) return;
+    wsRef.current?.send({ type: 'remove_queued_input', session_id: session, id });
+  }
+
+  function editQueuedMessage(item: QueuedComposerMessage, text: string) {
+    return queueMutationsRef.current.request({
+      type: 'edit_queued_input', session_id: sessionIdRef.current, id: item.id,
+      fingerprint: item.fingerprint ?? '', text, images: item.images,
+    }, message => { if (!wsRef.current?.sendImmediate(message)) throw new Error('Reconnect before changing queued messages.'); });
+  }
+
+  function changeRecovery(id: string, action: RecoveryAction) {
+    return queueMutationsRef.current.request({ type: 'update_limit_recovery', session_id: sessionIdRef.current, id, action }, message => {
+      if (!wsRef.current?.sendImmediate(message)) throw new Error('Reconnect before changing recovery.');
+    });
+  }
+  function reorderQueuedMessage(id: string, beforeId: string | null) {
+    return queueMutationsRef.current.request({
+      type: 'reorder_queued_input', session_id: sessionIdRef.current, id, before_id: beforeId,
+    }, message => { if (!wsRef.current?.sendImmediate(message)) throw new Error('Reconnect before changing queued messages.'); });
+  }
+
+  function steerQueuedMessage(id: string) {
+    const session = sessionIdRef.current;
+    if (!session || pendingSteerRef.current.has(session)) return;
+    const picked = queuedBySessionRef.current.get(session)?.find(item => item.id === id);
+    if (!picked) return;
+    if (!busyRef.current) {
+      // The server outbox will dispatch when the foreground turn releases.
+      drainQueuedMessage();
+      return;
+    }
+    flushNativeFrames(); flushTokens();
+    pendingSteerRef.current.set(session, picked);
+    setQueuedForSession(session, items => items.map(item => item.id === id ? { ...item, steering: true, error: undefined } : item));
+    followRef.current = true;
+    setEntries(entries => [...sealThought(entries), { kind: 'msg', steerRequestId: id, msg: { role: 'user', created_at: Date.now(), content: picked.text, images: picked.images, input_intent: 'steer' } }]);
+    wsRef.current?.send({ type: 'steer', request_id: id, text: picked.text, images: picked.images });
+  }
+
+  function sendNow(text: string, images?: { media_type: string; data: string }[], transmit = true, inputId?: string) {
     // Belt-and-suspenders — the composer isn't visible on non-chat views,
     // but a keyboard-driven send would still land the message and it should
     // pull the user back to the transcript.
@@ -2431,8 +3025,10 @@ export default function App() {
     const now = Date.now();
     turnStartRef.current = now;
     setEntries((prev) => {
-      const next: Entry[] = [...prev, { kind: 'msg', msg: { role: 'user', content: text, images } }];
-      const turnIndex = countUserMessages(next) - 1;
+      if (inputId && prev.some(entry => entry.kind === 'msg' && entry.msg.input_id === inputId)) return prev;
+      const providerIndex = engineRef.current?.kind === 'provider' ? providerTurnCursorRef.current++ : undefined;
+      const next: Entry[] = [...prev, { kind: 'msg', providerTurnIndex: providerIndex, transcriptTurnIndex: countUserMessages(prev) + historyOffsetRef.current, msg: { role: 'user', created_at: Date.now(), content: text, images, input_id:inputId } }];
+      const turnIndex = providerIndex ?? countUserMessages(next) - 1 + historyOffsetRef.current;
       startTurnUsage(turnIndex);
       setTurnTimings((tt) => {
         const clone = new Map(tt);
@@ -2449,7 +3045,20 @@ export default function App() {
     // conversation so far if it just took over), otherwise to the
     // provider. One message type, so a prompt can never go to the wrong
     // engine because this client's view lagged the server's.
-    wsRef.current?.send({ type: 'send', text, images });
+    if (transmit) wsRef.current?.send({ type: 'send', text, images });
+  }
+
+  function onSend(text: string, images?: { media_type: string; data: string }[]) {
+    if (busyRef.current) {
+      queueMessage(text, images);
+      return;
+    }
+    sendNow(text, images);
+  }
+
+  function drainQueuedMessage() {
+    // Server-owned outboxes dispatch without a connected browser. Ready
+    // restores their state; terminal frames only update local presentation.
   }
 
   /** Edit & resend (or retry, with the same text) the user message at
@@ -2523,9 +3132,9 @@ export default function App() {
     setShowJump(false);
     const next: Entry[] = [
       ...entries.slice(0, userIdx),
-      { kind: 'msg', msg: { role: 'user', content: text, images: target.msg.images } },
+      { kind: 'msg', transcriptTurnIndex: target.transcriptTurnIndex, providerTurnIndex: target.providerTurnIndex, msg: { role: 'user', created_at: Date.now(), content: text, images: target.msg.images } },
     ];
-    const turnIndex = countUserMessages(next) - 1;
+    const turnIndex = target.providerTurnIndex ?? countUserMessages(next) - 1 + historyOffsetRef.current;
     startTurnUsage(turnIndex);
     setTurnUsage((prev) => new Map([...prev].filter(([i]) => i < turnIndex)));
     setEntries(next);
@@ -2649,18 +3258,82 @@ export default function App() {
   }
 
   // Global app shortcuts, resolved through the keybinding engine
-  // (Settings → Keybindings). Never fires while typing — single-key and
-  // mod bindings alike yield to inputs, textareas and editable regions.
+  // Modified app actions work from the composer; bare keys yield to editing.
+  // Recording fields, dialogs, composition, and repeated keys retain ownership.
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
+      if (e.defaultPrevented || e.repeat || e.isComposing) return;
       const t = e.target as HTMLElement | null;
+      if (t?.closest('[data-keybinding-capture]') || document.querySelector('[role=dialog]')) return;
       if (t) {
         const tag = t.tagName;
-        if (tag === 'INPUT' || tag === 'TEXTAREA' || t.isContentEditable) return;
+        if ((tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t.isContentEditable) && !e.metaKey && !e.ctrlKey) return;
       }
       const command = resolveShortcutCommand(e, keybindings, { context: shortcutContext() });
       if (!command) return;
+      if (command.startsWith('panel.slot')) {
+        const id=[...agentTabs,...fileTabs.map(tab=>tab.id),...toolTabs.map(tab=>tab.id)][Number(command.at(-1))-1];
+        if(id){e.preventDefault();setMainView('chat');setActiveAgentTab(id);}return;
+      }
+      if (command.startsWith('chat.slot')) {
+        e.preventDefault();
+        const request=++chatShortcutRequest.current;const origin=sessionIdRef.current;
+        void listSessions({all:true}).then(chats=>{
+          if(request!==chatShortcutRequest.current||origin!==sessionIdRef.current)return;
+          const chat=chats.filter(chat=>!chat.parent_id).sort((a,b)=>b.updated_at-a.updated_at)[Number(command.at(-1))-1];
+          if(chat){setMainView('chat');attachSession(chat.id);}
+        }).catch(error=>setEntries(prev=>[...prev,{kind:'error',text:`Could not switch chats: ${error.message}`}])) ;return;
+      }
       switch (command) {
+        case 'panel.tests': case 'panel.activity': case 'panel.devices': case 'panel.whiteboard': case 'panel.aside': case 'panel.devtools':
+          e.preventDefault(); setMainView('chat'); openToolPane(command.slice(6) as ToolPaneKind); break;
+        case 'panel.next': case 'panel.previous': {
+          const tabs=[...agentTabs,...fileTabs.map(tab=>tab.id),...toolTabs.map(tab=>tab.id)];
+          if (!tabs.length) return;
+          e.preventDefault(); setMainView('chat');
+          const found=tabs.indexOf(activeAgentTab ?? '');
+          const index=found>=0?found:(command==='panel.next'?-1:0);
+          setActiveAgentTab(tabs[(index+(command==='panel.next'?1:tabs.length-1))%tabs.length]);
+          break;
+        }
+        case 'panel.closeTab':
+          if (!activeAgentTab) return;
+          e.preventDefault(); closeAnyTab(activeAgentTab); break;
+        case 'chat.bottom': case 'chat.top':
+          if (mainView!=='chat') return;
+          e.preventDefault(); paneRef.current?.scrollTo({top:command==='chat.top'?0:paneRef.current.scrollHeight,behavior:'auto'}); break;
+        case 'composer.attach':
+          e.preventDefault(); setMainView('chat');
+          requestAnimationFrame(()=>document.querySelector<HTMLInputElement>('[data-composer-attachments]')?.click()); break;
+        case 'composer.focus':
+          e.preventDefault();
+          setMainView('chat');
+          requestAnimationFrame(() => document.querySelector<HTMLElement>('.mention-input[contenteditable=true]')?.focus());
+          break;
+        case 'chat.stop':
+          if (mainView !== 'chat' || !busyRef.current) return;
+          e.preventDefault();
+          wsRef.current?.send({type:'interrupt'});
+          setBusy(false); busyRef.current=false; setThinking(false);
+          break;
+        case 'panel.files': case 'panel.processes': case 'panel.browser':
+          e.preventDefault();
+          setMainView('chat');
+          if(command === 'panel.files') setPanelFilePickerOpen(true);
+          else openToolPane(command === 'panel.processes' ? 'processes' : 'browser');
+          break;
+        case 'panel.close':
+          e.preventDefault(); closeSubagentPanel(); break;
+        case 'settings.shortcuts':
+          e.preventDefault(); openSettings(); setSettingsSection('keybindings'); break;
+        case 'chat.copyResponse': case 'chat.copyCode': {
+          if (mainView !== 'chat') return;
+          const responses=shortcutEntriesRef.current.filter((entry):entry is MsgEntry => entry.kind==='msg'&&entry.msg.role==='assistant'&&!!entry.msg.content).map(entry=>entry.msg.content!);
+          const blocks=responses.flatMap(text=>Array.from(text.matchAll(/```[^\n]*\n([\s\S]*?)```/g),match=>match[1]));
+          const text=command==='chat.copyCode'?blocks.at(-1):responses.at(-1);
+          if (text) { e.preventDefault(); void navigator.clipboard.writeText(text).catch(() => setEntries(prev => [...prev,{kind:'error',text:'Could not copy to the clipboard.'}])); }
+          break;
+        }
         case 'chat.new':
           e.preventDefault();
           void onNewChat();
@@ -2685,7 +3358,7 @@ export default function App() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [keybindings, mainView]);
+  }, [keybindings, mainView, agentTabs, fileTabs, toolTabs, activeAgentTab]);
 
   /** Everything ⌘K can do. Each entry runs exactly what its button or
    *  shortcut does, so the palette never drifts from the rest of the app. */
@@ -2741,6 +3414,7 @@ export default function App() {
     // Backend list for the pickers — native providers + external agents
     // with health + catalogs. Failures degrade to an empty list.
     listEngines().then((v) => setEngines(v.engines)).catch(() => {});
+    requestAcpStatus();
     if (v.default_mode) setMode(v.default_mode as Mode);
   };
 
@@ -2756,7 +3430,7 @@ export default function App() {
   // or accepting it retires it.
   const [secondOpinionSeen, setSecondOpinionSeen] = useState<Set<string>>(() => new Set());
   const lastTurnIdx = turns.length - 1;
-  const secondOpinionKey = `${sessionId}:${lastTurnIdx}`;
+  const secondOpinionKey = `${sessionId}:${turns[lastTurnIdx]?.user?.transcriptTurnIndex ?? lastTurnIdx + historyOffsetRef.current}`;
   const lastTurnEdited = useMemo(() => {
     const last = turns[turns.length - 1];
     return !!last?.body.some((e) => {
@@ -2783,7 +3457,7 @@ export default function App() {
           e.kind === 'msg' && e.msg.role === 'assistant' && !!(e.msg.content ?? '').trim(),
       );
       out.push({
-        id: `turn-${i}`,
+        id: `turn-${turn.user?.transcriptTurnIndex ?? i + historyOffsetRef.current}`,
         userText: text.trim(),
         assistantText: assistant && assistant.kind === 'msg' ? (assistant.msg.content ?? null) : null,
       });
@@ -2799,7 +3473,7 @@ export default function App() {
     turns.forEach((turn, i) => {
       if (turn.user?.kind !== 'msg' || turn.user.msg.role !== 'user') return;
       out.push({
-        id: `turn-${i}`,
+        id: `turn-${turn.user?.transcriptTurnIndex ?? i + historyOffsetRef.current}`,
         userIdx: entries.indexOf(turn.user),
         text: parseSentAttachments(turn.user.msg.content ?? '').text.trim(),
         body: turn.body,
@@ -2812,7 +3486,7 @@ export default function App() {
     const pane = paneRef.current;
     if (!pane) return;
     const node = pane.querySelector(`[data-minimap-id="${id}"]`);
-    if (!(node instanceof HTMLElement)) return;
+    if (!(node instanceof HTMLElement)) { followRef.current = false; window.dispatchEvent(new CustomEvent('mira:transcript-jump', { detail: id })); return; }
     const delta = node.getBoundingClientRect().top - pane.getBoundingClientRect().top;
     pane.scrollTo({ top: pane.scrollTop + delta - 12, behavior: 'smooth' });
   }, []);
@@ -2820,7 +3494,7 @@ export default function App() {
   // it's open; the collapsed pill floats over the corner.
   const ctxHasContent =
     ctxFits &&
-    contextPanelHasContent({
+    contextPanelHasContent({processes:backgroundProcesses.processes,
       tasks,
       gitStatus,
       sessionDiff,
@@ -2999,8 +3673,15 @@ export default function App() {
   // browser calls must not pop the pane — and once per turn, so closing the
   // pane sticks until the next message.
   const browserShownFor = useRef<string | null>(null);
+  // Bumped by `browser_active`: an agent called a browser tool, whatever
+  // name its harness gave it.
+  const [browserPing, setBrowserPing] = useState(0);
+  // Secrets agents asked for, waiting on the user (shown above the composer).
+  const [secretRequests, setSecretRequests] = useState<SecretRequest[]>([]);
+  const browserPingSeen = useRef(0);
   useEffect(() => {
-    let live = false;
+    let live = browserPing !== browserPingSeen.current;
+    browserPingSeen.current = browserPing;
     let turnStart = -1;
     for (let i = entries.length - 1; i >= 0; i--) {
       const e = entries[i];
@@ -3018,7 +3699,7 @@ export default function App() {
     browserShownFor.current = turn;
     if (getBoolPref(PREF_KEYS.browserAutoOpen, true)) openToolPane('browser');
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [entries]);
+  }, [entries, browserPing]);
 
   function closeAnyTab(id: string) {
     if (agentTabs.includes(id)) closeAgentTab(id);
@@ -3084,6 +3765,12 @@ export default function App() {
       )}
       style={{ gridTemplateColumns: `${sidebarCol} minmax(0,1fr) ${rightCol}` }}
     >
+      <InfoNoticeHost notices={infoNotices.filter(notice => notice.kind === 'short')} onDismiss={dismissInfoNotice} onAgentUpdated={kind => {
+        completedUpdatesRef.current.add(kind);
+        requestAcpStatus();
+        void listEngines().then(view => setEngines(view.engines)).catch(() => {});
+        pushInfoNotice({ id: noticeId('updated'), kind: 'short', tone: 'success', title: 'Agent update complete' });
+      }} />
       {/* overflow-hidden clips sidebar content when the grid column animates to 0 */}
       <div className="overflow-hidden">
         <Sidebar
@@ -3091,6 +3778,8 @@ export default function App() {
           cwd={cwd}
           activeSessionId={sessionId}
           activeBusy={busy}
+          runningSessions={sessionActivity?.running ?? null}
+          completedSessions={completedSessions}
           refreshKey={sidebarRefresh}
           activeView={mainView}
           onNavigate={setMainView}
@@ -3099,13 +3788,14 @@ export default function App() {
             await onNewChat();
           }}
           onOpenSettings={() => openSettings()}
-          onOpenPicker={() => setPickerOpen(true)}
+          onOpenPicker={() => void openProjectPicker()}
           onSessionLoaded={() => { /* Ready broadcast refreshes + jumps to chat */ }}
           onAttachSession={(id) => attachSession(id)}
           onSetBackgroundMode={async (id, mode) => {
             await setSessionBackgroundMode(id, mode);
             setSidebarRefresh((n) => n + 1);
           }}
+          activePr={branchPr}
           settingsSection={settingsSection}
           onSettingsSectionChange={setSettingsSection}
           onExitSettings={exitSettings}
@@ -3116,6 +3806,9 @@ export default function App() {
           so the chat column reads as pulled toward the sidebar without
           touching it. The right panel keeps the full 8px on its outer edge. */}
       <main className="flex min-h-0 min-w-0 flex-col py-2 pl-0.5 pr-2">
+        {/* The main chat surface is the app's base surface, not a card: it
+            keeps the flat theme background (pure black in dark) so the
+            composer and cards inside it are what read as elevated. */}
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-border bg-background">
         {mainView === 'chat' && (
           <>
@@ -3157,7 +3850,7 @@ export default function App() {
                   // different kind of control because it was both shorter
                   // than its neighbours and the only fully-pill shape in the
                   // row.
-                  className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg border border-border/60 bg-secondary/40 px-2 text-[12.5px] text-muted-foreground transition-colors hover:border-border hover:bg-secondary hover:text-foreground"
+                  className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg border border-border/60 elev-card dark:bg-secondary/40 px-2 text-[12.5px] text-muted-foreground transition-colors hover:border-border dark:hover:bg-secondary hover:text-foreground"
                 >
                   <span className="font-mono text-green-400/80">+{sessionDiff.added}</span>
                   <span className="font-mono text-red-400/80">−{sessionDiff.removed}</span>
@@ -3185,10 +3878,10 @@ export default function App() {
                   aria-label="Toggle terminal"
                   aria-pressed={terminalOpen}
                   className={cn(
-                    'flex h-8 shrink-0 items-center rounded-lg px-1.5 transition-colors',
+                    'flex h-8 shrink-0 items-center rounded-lg border border-transparent px-1.5 transition-colors',
                     terminalOpen
                       ? 'border-mira-blue/50 bg-mira-blue/10 text-foreground'
-                      : 'bg-secondary/40 text-muted-foreground hover:bg-secondary hover:text-foreground',
+                      : 'elev-card dark:border-border/60 dark:bg-secondary/40 text-muted-foreground hover:bg-secondary hover:text-foreground',
                   )}
                 >
                   <span className="inline-flex size-6 items-center justify-center overflow-hidden rounded-md bg-fg/[0.04] ring-1 ring-fg/10">
@@ -3211,7 +3904,7 @@ export default function App() {
                   paddingTop: ctxPill ? 52 : 16,
                 }}
                 ref={paneRef}
-                onScroll={onPaneScroll}
+                onScroll={onPaneScroll} onWheel={noteScrollInput} onTouchMove={noteScrollInput} onKeyDown={noteScrollInput} onPointerDown={noteScrollInput} onPointerMove={(e) => { if (e.buttons) noteScrollInput(); }}
               >
                 {/* Agents bring their own login, so a chat on one needs no provider. */}
                 {configured === false && !acpDriver && isEmpty && (
@@ -3241,11 +3934,14 @@ export default function App() {
                   </div>
                 )}
 
+                <div className="mx-auto max-w-3xl"><WorkspaceSetupCard /><ChatRelationships key={sessionId} sessionId={sessionId} refreshKey={sidebarRefresh} onOpen={attachSession} /></div>
                 {isEmpty ? (
                   configured === false && !acpDriver ? null : <EmptyState
                     cwd={cwd}
                     onPrompt={(text) => onSend(text)}
                     onOpenSession={(id) => attachSession(id)}
+                    onSwitchProject={(path) => void switchCwd(path)}
+                    onNewProject={() => void openProjectPicker()}
                   />
                 ) : (
                   <div data-transcript-column className="mx-auto flex max-w-3xl flex-col gap-2">
@@ -3259,17 +3955,28 @@ export default function App() {
                       />
                     )}
                     {tasks.length > 0 && <TaskListPanel tasks={tasks} />}
+                    <SourceCitationNavigator pane={paneRef} sessionId={sessionId} hasOlder={!!historyCursor} loading={historyLoading} loadOlder={loadOlderHistory} historyError={historyError} onOpenSession={attachSession} />
+                    <AssistantSelectionToolbar
+                      pane={paneRef}
+                      sessionId={sessionId}
+                      onQuote={(text, turn, href) => composeQuote({ text, turn, href })}
+                      onAskAside={(text) => { setAsidePassage(text); setMainView('chat'); openToolPane('aside'); }}
+                    />
+                    {historyCursor && <button className="mx-auto py-3 text-xs text-muted-foreground" disabled={historyLoading} onClick={loadOlderHistory}>{historyLoading ? 'Loading older messages…' : 'Load older messages'}</button>}
+                    {historyError && <p role="alert" className="text-xs text-destructive">{historyError}</p>}
                     <MessageActionsContext.Provider value={messageActions}>
+                      <VirtualTranscript pane={paneRef} identity={sessionId ?? "new"} hasOlder={!!historyCursor} onNeedOlder={loadOlderHistory}>
                       {turns.map((turn, i) => (
+                      <EntryBoundary key={turn.user ? `${sessionId}:turn-${turn.user.transcriptTurnIndex ?? i + historyOffsetRef.current}` : `${sessionId}:preamble-${i}`}>
                       <TurnView
-                        key={`turn-${i}`}
-                        minimapId={`turn-${i}`}
+                        diffSummary={turn.user?.kind === 'msg' ? turnDiffs.find(summary => summary.text === (turn.user?.kind === 'msg' ? turn.user.msg.content : null) && summary.occurrence === turns.slice(i + 1).filter(other => other.user?.kind === 'msg' && other.user.msg.content === summary.text).length) : undefined}
+                        minimapId={`turn-${turn.user?.transcriptTurnIndex ?? i + historyOffsetRef.current}`}
                         turn={turn}
-                        timing={turnTimings.get(i) ?? null}
-                        usage={turnUsage.get(i) ?? null}
-                        model={turnModels.get(i) ?? model}
-                        index={i}
-                        expanded={expandedTurns.has(i)}
+                        timing={turnTimings.get(turn.user?.providerTurnIndex ?? i + historyOffsetRef.current) ?? null}
+                        usage={turnUsage.get(turn.user?.providerTurnIndex ?? i + historyOffsetRef.current) ?? null}
+                        model={turnModels.get(turn.user?.providerTurnIndex ?? i + historyOffsetRef.current) ?? model}
+                        index={turn.user?.transcriptTurnIndex ?? i + historyOffsetRef.current}
+                        expanded={expandedTurns.has(turn.user?.transcriptTurnIndex ?? i + historyOffsetRef.current)}
                         onToggle={stableToggleTurn}
                         onDecide={stableDecide}
                         onPlanReply={stablePlanReply}
@@ -3281,9 +3988,14 @@ export default function App() {
                         mode={mode}
                         onSetMode={stableSetMode}
                         approvalViaDialog={false}
-                        offscreenOk={i < turns.length - 3}
+                        recovery={i === turns.length - 1 ? recoveryBySession[sessionId]?.at(-1) : undefined}
+                        recoveryDisabled={status !== 'open' || busy}
+                        onRecoveryAction={changeRecovery}
+                        offscreenOk={false}
                       />
+                      </EntryBoundary>
                     ))}
+                    </VirtualTranscript>
                     </MessageActionsContext.Provider>
                     {showSecondOpinion && (
                       <SecondOpinion
@@ -3340,6 +4052,10 @@ export default function App() {
                   key="ctx"
                   sessionTitle={sessionTitle ?? titleFromEntries(entries)}
                   tasks={tasks}
+                  processes={backgroundProcesses.processes}
+                  stoppingProcesses={new Set([...backgroundProcesses.stopping].filter(key=>key.startsWith(`${sessionId}:`)).map(key=>Number(key.split(':').at(-1))))}
+                  onOpenProcess={(id)=>{setSelectedProcess({session:sessionId,id,nonce:Date.now()});openToolPane('processes');}}
+                  onStopProcess={backgroundProcesses.stop}
                   subagentState={subagentState}
                   entries={entries}
                   gitStatus={gitStatus}
@@ -3409,6 +4125,12 @@ export default function App() {
               usage={usage}
               rateLimit={rateLimit}
               onSend={onSend}
+              onQueueMessage={queueMessage}
+              queuedMessages={queuedFor(sessionId)}
+              onRemoveQueuedMessage={removeQueuedMessage}
+              onEditQueuedMessage={editQueuedMessage}
+              onReorderQueuedMessage={reorderQueuedMessage}
+              onSteerQueuedMessage={steerQueuedMessage}
               onSetMode={onSetMode}
               onSetModel={onSetModel}
               engine={engine}
@@ -3433,7 +4155,11 @@ export default function App() {
                 // The agent's saved setup (Settings → Agents) travels with
                 // the pick, so its paths, env and effort apply.
                 const cfg = loadInstanceConfigs()[driver] ?? { enabled: true };
-                startAcpAgent(driver, { ...cfg, launchArgs: cfg.launchArgs ?? '', env: cfg.env ?? '', enabled: true }, null, m);
+                // Prefer the engine instance named after the driver (its
+                // default), else the only external instance of that driver.
+                const external = (engines ?? []).filter((e) => e.flavor === 'external' && e.driver === driver);
+                const instance = (external.find((e) => e.instance === driver) ?? (external.length === 1 ? external[0] : undefined))?.instance ?? null;
+                startAcpAgent(driver, { ...cfg, launchArgs: cfg.launchArgs ?? '', env: cfg.env ?? '', enabled: true }, null, m, instance);
               }}
               onConfigureAgents={openAgentSettings}
               sessionId={sessionId}
@@ -3451,7 +4177,7 @@ export default function App() {
                 setPendingAcpMode({ modeId: opt.modeId });
               }}
               agentDriving={acpDriver != null}
-              onOpenPicker={() => setPickerOpen(true)}
+              onOpenPicker={() => void openProjectPicker()}
               onCwdSwitched={(_path, id) => { if (id) attachSession(id); }}
               environment={environment}
               environments={environments}
@@ -3461,7 +4187,7 @@ export default function App() {
                 wsRef.current?.send({ type: 'environment', target });
               }}
               onInterrupt={() => {
-                wsRef.current?.send({ type: 'interrupt' });
+      wsRef.current?.send({ type: 'interrupt' });
                 // Settle the composer now; the server's turn end follows
                 // (within a few seconds even for an agent that never says).
                 setBusy(false);
@@ -3491,8 +4217,15 @@ export default function App() {
               onAllowAllPending={() => {
                 for (const a of pendingApprovals) decideApproval(a.callId, true, 'once');
               }}
-              pendingPlan={pendingPlan}
-              pendingAskUser={pendingAskUser}
+              onActiveApprovalChange={callId => { visibleApprovalRef.current = callId; }}
+              pendingApprovals={pendingApprovals}
+              pendingPlans={pendingPlans}
+              pendingQuestions={pendingQuestions}
+              notices={[
+                ...(status !== 'open' ? [{id:'connection', kind:'connection' as const, title:'Reconnecting to Mira', content:<p role="status" className="px-3 pb-2 text-[12px] text-muted-foreground">Your draft is kept here. Sending and decisions are available when the connection returns.</p>}] : []),
+                ...secretRequests.map(request => ({ id:`secret:${request.promptId}`, kind:'question' as const, title:`An agent needs ${request.name}`, content:<SecretPrompt request={request} onReply={replyToSecret} /> })),
+                ...infoNotices.filter(notice => notice.kind === 'persistent').map(notice => ({ id:notice.id, kind:'update' as const, title:notice.title, detail:notice.body ?? undefined, content:<InfoNoticeHost inline notices={[notice]} onDismiss={dismissInfoNotice} onAgentUpdated={kind => { completedUpdatesRef.current.add(kind); requestAcpStatus(); void listEngines().then(view => setEngines(view.engines)).catch(() => {}); }} /> })),
+              ]}
               onDecide={(callId, allow, scope) => decideApproval(callId, allow, scope)}
               onPlanReply={replyToPlan}
               onAskUserReply={replyToAskUser}
@@ -3594,6 +4327,7 @@ export default function App() {
                 {
                   id: 'confirm',
                   label: `Switch to ${label}`,
+                  mode: opt?.posture.key === 'auto' ? 'edit' : opt?.posture.key === 'yolo' ? 'yolo' : undefined,
                   primary: true,
                   destructive: opt?.posture.key === 'yolo',
                 },
@@ -3626,7 +4360,7 @@ export default function App() {
               case 'aside':
                 return <AsidePane sessionId={sessionId} entries={entries} agentBusy={busy} />;
               case 'processes':
-                return <ProcessesPane sessionId={sessionId} onPreview={() => openToolPane('devices')} />;
+                return <ProcessesPane key={sessionId} sessionId={sessionId} selectedProcess={selectedProcess?.session===sessionId?selectedProcess:undefined} onPreview={() => openToolPane('devices')} />;
               case 'tests':
                 return <TestsPane sessionId={sessionId} cwd={cwd ?? ''} />;
               case 'activity':
@@ -3849,20 +4583,34 @@ function appendToken(prevRaw: Entry[], text: string): Entry[] {
     };
     return [...prev.slice(0, -1), updated];
   }
-  return [...prev, { kind: 'msg', msg: { role: 'assistant', content: text } }];
+  return [...prev, { kind: 'msg', msg: { role: 'assistant', content: text, created_at: Date.now() } }];
 }
 
 /** An agent's reply text. It is the turn's answer like Mira's own, so it
  *  becomes the same assistant message — same rendering, same copy action,
  *  same place in a collapsed turn. */
-function appendAcpText(prev: Entry[], text: string): Entry[] {
-  return appendToken(prev, text);
+type NativeFrame = Extract<ServerMsg, { type: 'acp_text' | 'acp_text_snapshot' | 'acp_thought' | 'acp_tool_call' | 'acp_tool_call_update' | 'acp_tool_output_delta' }>;
+function applyNativeFrame(entries: Entry[], frame: NativeFrame): Entry[] {
+  switch (frame.type) {
+    case 'acp_text': return appendAcpText(entries, frame.text, frame.message_id);
+    case 'acp_text_snapshot': return appendNativeText(sealThought(entries), frame.text, frame.message_id, true);
+    case 'acp_thought': return appendAcpThought(entries, frame.text);
+    case 'acp_tool_call': case 'acp_tool_call_update': return upsertAcpTool(entries, frame.call);
+    case 'acp_tool_output_delta': return appendNativeToolOutput(entries, frame.id, frame.text);
+  }
+}
+
+function appendAcpText(prev: Entry[], text: string, messageId?: string | null): Entry[] {
+  if (!text) return prev;
+  if (!messageId) return appendToken(prev, text);
+  return appendNativeText(sealThought(prev), text, messageId);
 }
 
 /** An agent's thinking, as Mira's own thought block. */
 function appendAcpThought(prev: Entry[], text: string): Entry[] {
   if (!text) return prev;
-  return appendReasoning(prev, text);
+  const next = appendReasoning(prev, text);
+  return next.map((e, i) => i === next.length - 1 && e.kind === 'thought' ? { ...e, native: true } : e);
 }
 
 /**
@@ -3904,6 +4652,7 @@ const AGENT_PROMPT_TOOLS = new Set(['AskUserQuestion', 'ExitPlanMode']);
  *  merges onto the call already recorded — empty fields never blank what
  *  is there — and the Mira view is rebuilt from the merged call. */
 function upsertAcpTool(prevRaw: Entry[], call: AcpToolCall): Entry[] {
+  call = boundAgentOutput(call);
   const prev = sealThought(prevRaw);
   const idx = prev.findIndex((e) => e.kind === 'tool' && e.agentCall?.id === call.id);
   let merged: AcpToolCall = call;
@@ -3924,8 +4673,12 @@ function upsertAcpTool(prevRaw: Entry[], call: AcpToolCall): Entry[] {
     call: agentCallToToolCall(merged),
     preview: null,
     status: agentToolStatus(merged),
-    result: agentToolResult(merged),
+    result: (() => {
+      const result = agentToolResult(merged);
+      return result ? { ...result, content: boundedOutput('', result.content || prior?.result?.content || '') } : prior?.result ?? null;
+    })(),
     agentCall: merged,
+    activityAt: ++toolActivitySequence,
     // Updates rebuild the entry from the agent's merged call; that call
     // carries no Mira-side state, so accumulated fields would be lost on
     // every progress frame unless carried across here.
@@ -3942,8 +4695,8 @@ function upsertAcpTool(prevRaw: Entry[], call: AcpToolCall): Entry[] {
 function upsertToolStart(prevRaw: Entry[], call: ToolCall): Entry[] {
   const prev = sealThought(prevRaw);
   const existing = prev.findIndex((e) => e.kind === 'tool' && e.call.id === call.id);
-  if (existing >= 0) return prev;
-  return [...prev, { kind: 'tool', call, preview: null, status: 'running', result: null, startedAt: Date.now() }];
+  if (existing >= 0) return updateTool(prev, call.id, entry => ({ ...entry, status: 'running', startedAt: entry.startedAt ?? Date.now() }));
+  return [...prev, { kind: 'tool', call, preview: null, status: 'running', result: null, startedAt: Date.now(), activityAt: ++toolActivitySequence }];
 }
 
 function attachToolResult(prev: Entry[], result: ToolResult): Entry[] {
@@ -3978,7 +4731,7 @@ function updateTool(prev: Entry[], callId: string, f: (t: ToolEntry) => ToolEntr
   for (let i = prev.length - 1; i >= 0; i--) {
     const e = prev[i];
     if (e.kind === 'tool' && e.call.id === callId) {
-      return [...prev.slice(0, i), f(e), ...prev.slice(i + 1)];
+      return [...prev.slice(0, i), { ...f(e), activityAt: ++toolActivitySequence }, ...prev.slice(i + 1)];
     }
   }
   return prev;
@@ -3991,6 +4744,7 @@ function appendProgressLine(prev: Entry[], callId: string, line: string): Entry[
       const updated: ToolEntry = {
         ...e,
         progressLines: [...(e.progressLines ?? []), line],
+        activityAt: ++toolActivitySequence,
       };
       return [...prev.slice(0, i), updated, ...prev.slice(i + 1)];
     }
@@ -4069,7 +4823,7 @@ function recordAskUserDecision(
 function countUserMessages(entries: Entry[]): number {
   let n = 0;
   for (const e of entries) {
-    if (e.kind === 'msg' && e.msg.role === 'user') n++;
+    if (e.kind === 'msg' && e.msg.role === 'user' && e.msg.input_intent !== 'steer') n++;
   }
   return n;
 }
@@ -4132,7 +4886,7 @@ function goalActivity(entries: Entry[]): string {
     if (e.kind === 'tool' && e.status === 'complete' && !e.result?.is_error) {
       return `Ran ${e.call.function.name}`;
     }
-    if (e.kind === 'msg' && e.msg.role === 'assistant' && (e.msg.content ?? '').trim()) {
+    if (e.kind === 'msg' && e.msg.role === 'assistant' && e.nativePhase !== 'commentary' && (e.msg.content ?? '').trim()) {
       const line = (e.msg.content ?? '').trim().split('\n')[0];
       return line.length > 90 ? line.slice(0, 90) + '…' : line;
     }
@@ -4164,30 +4918,6 @@ function titleFromEntries(entries: Entry[]): string {
 
 /* ---------- turn grouping ---------- */
 
-type Turn = {
-  /** The user's message that opened this turn. `null` for any pre-user
-   *  entries (e.g. a system-emitted warning before the first send). */
-  user: Entry | null;
-  /** Everything after `user` up to the next user message. */
-  body: Entry[];
-};
-
-function groupByTurn(entries: Entry[]): Turn[] {
-  const turns: Turn[] = [];
-  let current: Turn = { user: null, body: [] };
-  for (const e of entries) {
-    if (e.kind === 'msg' && e.msg.role === 'user') {
-      // Close previous turn if it had anything.
-      if (current.user || current.body.length) turns.push(current);
-      current = { user: e, body: [] };
-    } else {
-      current.body.push(e);
-    }
-  }
-  if (current.user || current.body.length) turns.push(current);
-  return turns;
-}
-
 /* ---------- turn renderer ---------- */
 
 /** Same turn content: the same entries, by identity. Entries are replaced,
@@ -4213,9 +4943,13 @@ const TurnView = memo(TurnViewImpl, (prev, next) => {
 type TurnViewProps = Parameters<typeof TurnViewImpl>[0];
 
 function TurnViewImpl({
-  turn, timing: timingProp, usage: usageProp, model: modelProp, index, expanded, isActive, onToggle, onDecide, onPlanReply, onAskUserReply, onOpenAgent, onOpenFile, skills, mode, onSetMode, minimapId, approvalViaDialog, offscreenOk = false,
+  turn, diffSummary, recovery, recoveryDisabled, onRecoveryAction, timing: timingProp, usage: usageProp, model: modelProp, index, expanded, isActive, onToggle, onDecide, onPlanReply, onAskUserReply, onOpenAgent, onOpenFile, skills, mode, onSetMode, minimapId, approvalViaDialog, offscreenOk = false,
 }: {
   turn: Turn;
+  recovery?: import('./types').QueuedInput;
+  recoveryDisabled?: boolean;
+  onRecoveryAction?: (id: string, action: RecoveryAction) => Promise<void>;
+  diffSummary?: import('./types').TurnDiffSummary;
   /** Position in the transcript; what `onToggle` is called with. */
   index: number;
   /** Not one of the latest turns: the browser may skip laying it out while
@@ -4252,6 +4986,7 @@ function TurnViewImpl({
    *  the unified dialog, not on the cards. */
   approvalViaDialog?: boolean;
 }) {
+  const messageActions = useContext(MessageActionsContext);
   // An agent turn carries its own stats; they win over the per-index
   // maps, which only line up with Mira's own turns.
   const own = turn.body.find((e): e is TurnStatsEntry => e.kind === 'turn_stats');
@@ -4266,15 +5001,10 @@ function TurnViewImpl({
   // assistant text hide behind the "Worked for" chip when collapsed.
   // The stats entry is data, not content: it mustn't count as work done.
   const body = useMemo(() => turn.body.filter((e) => e.kind !== 'turn_stats'), [turn.body]);
-  const finalIdx = findFinalAssistantIndex(body);
-  const intermediateRaw = finalIdx >= 0 ? body.slice(0, finalIdx) : body;
-  const finalEntry = finalIdx >= 0 ? body[finalIdx] : null;
-  const trailing = finalIdx >= 0 ? body.slice(finalIdx + 1) : [];
-
-  // Fold consecutive `agent` tool entries into a single group so a parallel
-  // spawn ("N agents working") reads as one bar instead of N loud cards.
-  // Non-agent entries pass through unchanged.
-  const intermediate = useMemo(() => groupAgentRuns(intermediateRaw), [intermediateRaw]);
+  const nativeTurn = own != null || body.some((e) => (e.kind === 'msg' && e.nativeMessageId != null) || (e.kind === 'tool' && e.agentCall != null) || (e.kind === 'thought' && e.native));
+  const { intermediateRaw, intermediate, finalEntry, trailing } = useMemo(
+    () => turnActivity(body, nativeTurn && !isActive), [body, nativeTurn, isActive],
+  );
 
   // While a turn is in flight, force the intermediate section open so
   // in-progress tool calls (esp. pending approval bubbles) stay visible.
@@ -4342,6 +5072,16 @@ function TurnViewImpl({
     return countsPhrase(countsByCategory(calls));
   }, [turn.body]);
 
+  const renderActivity = (item: GroupItem, i: number, section: string) => {
+    if (item.kind === 'agent-group') {
+      return <div key={`${section}-a-${item.entries[0].call.id}`} className="flex justify-start"><AgentGroup entries={item.entries} onOpen={onOpenAgent} /></div>;
+    }
+    if (item.kind === 'tool-group') {
+      return <div key={`${section}-g-${item.entries[0].call.id}`} className="flex justify-start"><ToolGroup entries={item.entries} onOpenFile={onOpenFile} /></div>;
+    }
+    return <EntryView key={`${section}-i-${i}`} showAssistantActions={!nativeTurn} streaming={isActive} entry={item.entry} onDecide={onDecide} onPlanReply={onPlanReply} onAskUserReply={onAskUserReply} onOpenAgent={onOpenAgent} approvalViaDialog={approvalViaDialog} onOpenFile={onOpenFile} skills={skills} mode={mode} onSetMode={onSetMode} />;
+  };
+
   return (
     <div
       data-minimap-id={minimapId ?? undefined}
@@ -4354,6 +5094,7 @@ function TurnViewImpl({
       {turn.user && <EntryView entry={turn.user} onDecide={onDecide} onPlanReply={onPlanReply} onAskUserReply={onAskUserReply} onOpenAgent={onOpenAgent} approvalViaDialog={approvalViaDialog} onOpenFile={onOpenFile} skills={skills} mode={mode} onSetMode={onSetMode} />}
 
       {showWorkedChip && (
+        <div className="w-full border-b border-border/70 pb-2">
         <WorkedForChip
           durationMs={durationMs!}
           active={isActive && timing?.endedAt == null}
@@ -4363,43 +5104,10 @@ function TurnViewImpl({
           onToggle={() => onToggle(index)}
           activity={activitySummary}
         />
+        </div>
       )}
 
-      {(effectivelyExpanded || !showWorkedChip) && intermediate.map((item, i) => {
-        if (item.kind === 'agent-group') {
-          return (
-            <div key={`t-a-${i}`} className="flex justify-start">
-              <AgentGroup
-                entries={item.entries.map((e) => ({
-                  call: e.call,
-                  status: e.status,
-                  result: e.result,
-                }))}
-                onOpen={onOpenAgent}
-              />
-            </div>
-          );
-        }
-        if (item.kind === 'tool-group') {
-          return (
-            <div key={`t-g-${i}`} className="flex justify-start">
-              <ToolGroup
-                entries={item.entries.map((e) => ({
-                  call: e.call,
-                  preview: e.preview,
-                  status: e.status,
-                  result: e.result,
-                  progressLines: e.progressLines,
-                }))}
-                onOpenFile={onOpenFile}
-              />
-            </div>
-          );
-        }
-        return (
-          <EntryView key={`t-i-${i}`} entry={item.entry} onDecide={onDecide} onPlanReply={onPlanReply} onAskUserReply={onAskUserReply} onOpenAgent={onOpenAgent} approvalViaDialog={approvalViaDialog} onOpenFile={onOpenFile} skills={skills} mode={mode} onSetMode={onSetMode} />
-        );
-      })}
+      {intermediate.length > 0 && <Collapse open={effectivelyExpanded || !showWorkedChip}><div className="flex min-w-0 flex-col gap-2">{intermediate.map((item, i) => renderActivity(item, i, 'work'))}</div></Collapse>}
 
       {finalEntry && (
         <TurnStatsContext.Provider
@@ -4409,105 +5117,16 @@ function TurnViewImpl({
               : null
           }
         >
-          <EntryView entry={finalEntry} onDecide={onDecide} onPlanReply={onPlanReply} onAskUserReply={onAskUserReply} onOpenAgent={onOpenAgent} approvalViaDialog={approvalViaDialog} onOpenFile={onOpenFile} skills={skills} mode={mode} onSetMode={onSetMode} />
+          <EntryView showAssistantActions={!nativeTurn || !isActive} streaming={isActive} entry={finalEntry} onDecide={onDecide} onPlanReply={onPlanReply} onAskUserReply={onAskUserReply} onOpenAgent={onOpenAgent} approvalViaDialog={approvalViaDialog} onOpenFile={onOpenFile} skills={skills} mode={mode} onSetMode={onSetMode} />
         </TurnStatsContext.Provider>
       )}
-      {trailing.map((e, i) => (
-        <EntryView key={`t-t-${i}`} entry={e} onDecide={onDecide} onPlanReply={onPlanReply} onAskUserReply={onAskUserReply} onOpenAgent={onOpenAgent} approvalViaDialog={approvalViaDialog} onOpenFile={onOpenFile} skills={skills} mode={mode} onSetMode={onSetMode} />
-      ))}
+      {trailing.map((item, i) => renderActivity(item, i, 'trailing'))}
+      {recovery && onRecoveryAction && <UsageRecoveryCard key={recovery.id} item={recovery} disabled={!!recoveryDisabled} onAction={onRecoveryAction} />}
+      {diffSummary && <TurnChanges summary={diffSummary} onOpenFile={path => onOpenFile(path, null)} busy={messageActions?.busy} onUndo={turn.user && messageActions ? () => messageActions.restore(turn.user!) : undefined} />}
     </div>
   );
 }
 
-/** Item produced by `groupAgentRuns`: either a single passthrough entry,
- *  a run of `>=2` consecutive `agent` tool entries folded into a group,
- *  or a run of `>=2` consecutive same-name non-agent tool entries folded
- *  into a group (e.g. three `read_file`s → one "Read × 3" chip).
- *  A run of length 1 stays as a single entry — the individual card is
- *  enough on its own without the group chrome. */
-export type GroupItem =
-  | { kind: 'entry'; entry: Entry }
-  | { kind: 'agent-group'; entries: (Entry & { kind: 'tool' })[] }
-  | { kind: 'tool-group'; entries: (Entry & { kind: 'tool' })[] };
-
-/** Types that render as their own cards (agent, delegate, plan, ask_user) —
- *  never fold into a generic tool-group. Agent has its own AgentGroup path;
- *  delegate gets the cross-engine hand-off card; plan and ask_user each swap
- *  in for the tool row when their proposal attaches, so grouping would hide
- *  the interactive card. */
-const SPECIAL_TOOLS = new Set(['agent', 'delegate_task', 'plan', 'ask_user']);
-
-export function groupAgentRuns(entries: Entry[]): GroupItem[] {
-  const out: GroupItem[] = [];
-  let i = 0;
-  while (i < entries.length) {
-    const e = entries[i];
-
-    // Agent run: consume all consecutive `agent` entries into a single
-    // AgentGroup regardless of individual state (pending is auto-approved
-    // anyway since AgentTool is Pure).
-    if (isAgentEntry(e)) {
-      const run: (Entry & { kind: 'tool' })[] = [];
-      while (i < entries.length && isAgentEntry(entries[i])) {
-        run.push(entries[i] as Entry & { kind: 'tool' });
-        i++;
-      }
-      out.push(
-        run.length >= 2
-          ? { kind: 'agent-group', entries: run }
-          : { kind: 'entry', entry: run[0] },
-      );
-      continue;
-    }
-
-    // Generic tool run: any consecutive tool entries, none pending. Mixing
-    // tool names is fine — ToolGroup renders a "Working/Worked" umbrella
-    // with per-entry verbs in the preview when the run isn't homogeneous.
-    // Pending calls must render individually so the approval UI is visible
-    // and unmissable — folding them into a group would hide the y/n prompt.
-    if (isGroupableTool(e)) {
-      const run: (Entry & { kind: 'tool' })[] = [];
-      while (i < entries.length && isGroupableTool(entries[i])) {
-        run.push(entries[i] as Entry & { kind: 'tool' });
-        i++;
-      }
-      out.push(
-        run.length >= 2
-          ? { kind: 'tool-group', entries: run }
-          : { kind: 'entry', entry: run[0] },
-      );
-      continue;
-    }
-
-    out.push({ kind: 'entry', entry: e });
-    i++;
-  }
-  return out;
-}
-
-function isAgentEntry(e: Entry): boolean {
-  return e.kind === 'tool' && e.call.function.name === 'agent';
-}
-
-/** A tool entry is groupable when it isn't a special one-off renderer
- *  (agent/delegate/plan) and isn't currently awaiting user approval. */
-function isGroupableTool(e: Entry): boolean {
-  if (e.kind !== 'tool') return false;
-  if (isDelegateTaskName(e.call.function.name)) return false;
-  if (SPECIAL_TOOLS.has(e.call.function.name)) return false;
-  if (e.status === 'pending') return false;
-  return true;
-}
-
-function findFinalAssistantIndex(body: Entry[]): number {
-  for (let i = body.length - 1; i >= 0; i--) {
-    const e = body[i];
-    if (e.kind === 'msg' && e.msg.role === 'assistant' && (e.msg.content ?? '').trim()) {
-      return i;
-    }
-  }
-  return -1;
-}
 
 function WorkedForChip({
   durationMs, active, waitingForUser, expanded, locked, onToggle, activity,
@@ -4563,12 +5182,13 @@ function WorkedForChip({
       type="button"
       onClick={locked ? undefined : onToggle}
       disabled={locked}
+      aria-expanded={expanded}
       title={locked ? 'Auto-expanded while in progress' : undefined}
       // `group` so the trailing caret can key off hover state via
       // `group-hover:*` — hidden until the row is hovered or already
       // expanded, so a collapsed transcript stays quiet.
       className={cn(
-        'group flex w-fit items-center gap-1.5 rounded-md px-2 py-1 text-[13px] font-semibold transition-colors',
+        'group flex w-fit items-center gap-1.5 rounded-md py-1 text-[14px] font-semibold leading-5 transition-colors',
         // Idle: muted grey. Hover/active/expanded: full contrast.
         isActive || expanded ? 'text-foreground/90' : 'text-muted-foreground/70',
         locked ? 'cursor-default opacity-80' : 'hover:bg-accent/40 hover:text-foreground',
@@ -4640,12 +5260,20 @@ function EmptyState({
   cwd,
   onPrompt,
   onOpenSession,
+  onSwitchProject,
+  onNewProject,
 }: {
   cwd: string;
   onPrompt: (text: string) => void;
   onOpenSession: (id: string) => void;
+  /** Point this chat at another folder. Starts a fresh session there. */
+  onSwitchProject: (path: string) => void;
+  /** "New project" — the platform folder panel on the desktop build. */
+  onNewProject: () => void;
 }) {
   const [recent, setRecent] = useState<SessionSummary[]>([]);
+  const [switcherOpen, setSwitcherOpen] = useState(false);
+  const project = basename(cwd) || 'this folder';
   useEffect(() => {
     listSessions()
       .then((all) =>
@@ -4666,8 +5294,20 @@ function EmptyState({
         className="size-11 rounded-full object-contain opacity-90"
         draggable={false}
       />
+      {/* The project name is part of the sentence, and clicking it is how
+          you change it: a dotted underline says "this is a control"
+          without needing a control to look like. */}
       <h2 className="mt-4 text-[19px] font-medium tracking-tight text-foreground">
-        What should we build today?
+        What should we build in{' '}
+        <button
+          type="button"
+          onClick={() => setSwitcherOpen(true)}
+          title={`${cwd} — switch project`}
+          className="underline decoration-dotted decoration-1 underline-offset-[5px] transition-colors hover:text-mira-blue"
+        >
+          {project}
+        </button>
+        ?
       </h2>
       <p className="mt-1.5 max-w-[46ch] text-center text-[13px] leading-relaxed text-muted-foreground">
         Ask Mira anything, or pick up where you left off in this folder.
@@ -4683,7 +5323,7 @@ function EmptyState({
             key={p}
             type="button"
             onClick={() => onPrompt(p)}
-            className="rounded-full border border-border/70 bg-fg/[0.03] px-3 py-1.5 text-[12.5px] text-muted-foreground backdrop-blur-sm transition-colors hover:border-border hover:bg-fg/[0.07] hover:text-foreground"
+            className="rounded-full border border-border/70 elev-card dark:bg-fg/[0.03] px-3 py-1.5 text-[12.5px] text-muted-foreground transition-colors hover:border-border dark:hover:bg-fg/[0.07] hover:text-foreground"
           >
             {p}
           </button>
@@ -4714,6 +5354,14 @@ function EmptyState({
           </div>
         </div>
       )}
+
+      <ProjectSwitcher
+        open={switcherOpen}
+        onClose={() => setSwitcherOpen(false)}
+        cwd={cwd}
+        onPicked={onSwitchProject}
+        onNewProject={onNewProject}
+      />
     </div>
   );
 }
@@ -4752,8 +5400,11 @@ function EntryView({
   onSetMode,
   onAskUserReply,
   approvalViaDialog,
+  showAssistantActions = true, streaming = false,
 }: {
   entry: Entry;
+  showAssistantActions?: boolean;
+  streaming?: boolean;
   onDecide: (callId: string, allow: boolean, scope?: ApprovalScope) => void;
   onPlanReply: (callId: string, approved: boolean, steps?: PlanStep[], note?: string) => void;
   onOpenAgent: (callId: string) => void;
@@ -4790,6 +5441,7 @@ function EntryView({
         const images = entry.msg.images ?? [];
         return (
           <div className="flex flex-col items-end gap-1.5">
+            {entry.msg.input_intent === 'steer' && <span title="Additional input for the current turn" className="inline-flex items-center gap-1 text-xs text-muted-foreground"><Redo2 size={12} aria-hidden="true" /> Steer</span>}
             {attachments.length > 0 && (
               <div className="flex max-w-[78%] flex-wrap justify-end gap-1.5">
                 {attachments.map((a, i) => (
@@ -4800,19 +5452,18 @@ function EntryView({
             {images.length > 0 && (
               <div className="flex max-w-[78%] flex-wrap justify-end gap-1.5">
                 {images.map((img, i) => (
-                  <img
-                    key={i}
+                  <div key={i} className="flex flex-col gap-1"><img
                     src={`data:${img.media_type};base64,${img.data}`}
                     alt="attached image"
                     onClick={() => actions?.openImage(`data:${img.media_type};base64,${img.data}`)}
                     className="max-h-40 max-w-[240px] cursor-zoom-in rounded-xl border border-border object-cover"
-                  />
+                  /><ImageAttachmentDetails image={img} /></div>
                 ))}
               </div>
             )}
             {text.trim() && (
               <UserMessage entry={entry} text={text} raw={content ?? ''}>
-                <SkillMentionText text={text} roster={skills ?? []} />
+                <UserRichText text={text} roster={skills ?? []} />
               </UserMessage>
             )}
           </div>
@@ -4821,8 +5472,8 @@ function EntryView({
       return (
         <div className="group/msg flex justify-start">
           <div className="max-w-[90%]">
-            <AssistantContent text={content ?? ''} onOpenFile={onOpenFile} />
-            <AssistantActions entry={entry} text={content ?? ''} />
+            <div data-assistant-message><AssistantContent streaming={streaming && !entry.nativeCompleted} text={content ?? ''} onOpenFile={onOpenFile} /></div>
+            {showAssistantActions ? <AssistantActions entry={entry} text={content ?? ''} /> : <div className="mt-1 flex opacity-0 transition-opacity group-hover/msg:opacity-100 focus-within:opacity-100"><MessageTime entry={entry} /></div>}
           </div>
         </div>
       );
@@ -4881,6 +5532,7 @@ function EntryView({
         }
         return (
           <div className="flex justify-start">
+            <div>
             <AskUserCard
               proposal={entry.askUser.proposal}
               decision={entry.askUser.decision}
@@ -4891,6 +5543,12 @@ function EntryView({
                 onAskUserReply?.(entry.call.id, { cancelled: true })
               }
             />
+            {entry.runtimeDelivery && entry.runtimeDelivery !== 'cancelled' && (
+              <p className="mt-1 text-xs text-muted-foreground" role="status">
+                {entry.runtimeDelivery === 'queued' ? 'Answers saved; waiting to send.' : entry.runtimeDelivery === 'dispatching' ? 'Answers saved; delivery has not been confirmed.' : entry.runtimeDelivery === 'delivered' ? 'Answers sent.' : ''}
+              </p>
+            )}
+            </div>
           </div>
         );
       }
@@ -4939,6 +5597,12 @@ function EntryView({
             </div>
           </div>
         );
+      }
+      if (entry.agentCall) {
+        return <div className="flex justify-start"><ToolGroup entries={[{
+          call: entry.call, preview: entry.preview, status: entry.status,
+          result: entry.result, progressLines: entry.progressLines,
+        }]} onOpenFile={onOpenFile} /></div>;
       }
       return (
         <div className="flex justify-start">
@@ -4990,9 +5654,13 @@ function EntryView({
         </div>
       );
     case 'engine_switch':
-      return <EngineSwitchDivider engine={entry.engine} />;
+      return <EngineSwitchDivider engine={entry.engine} from={entry.from} />;
+    case 'html_render':
+      return <HtmlRenderCard title={entry.title} html={entry.html} />;
     case 'turn_stats':
       return null;
+    case 'activity':
+      return <details className="rounded-md border border-border/50 px-3 py-2 text-xs text-muted-foreground"><summary>{entry.title}</summary>{entry.detail && <p className="mt-2 whitespace-pre-wrap">{entry.detail}</p>}</details>;
     case 'warning':
       return <StatusLine text={entry.text} />;
     case 'error':
@@ -5049,7 +5717,8 @@ function CompactDivider({ entry }: { entry: CompactEntry }) {
     <div className="flex flex-col gap-2 py-1">
       <div className="flex items-center gap-3 text-[11.5px] text-muted-foreground">
         <span className="h-px flex-1 bg-border/70" />
-        <span className="shrink-0">
+        <span className="inline-flex shrink-0 items-center gap-1.5">
+          <ListCollapse aria-hidden="true" className="size-3.5 shrink-0" />
           Conversation compacted{detail}
           {entry.summary && (
             <>
@@ -5094,14 +5763,11 @@ function GoalTranscriptChip({ entry }: { entry: GoalEntry }) {
   return (
     <div className="flex justify-start">
       <div className="w-full max-w-2xl py-1.5">
-        <div className="flex items-baseline gap-2">
+        <div className="flex items-center gap-2 leading-5">
           <Target
             fill="currentColor"
             className={cn(
-              // Baseline-align the icon with the headline text — the
-              // `translate-y-[1px]` nudges it visually onto the x-height
-              // instead of floating above the cap-line.
-              'size-3.5 shrink-0 translate-y-[1px]',
+              'size-3.5 shrink-0',
               tint.icon,
             )}
           />
@@ -5265,6 +5931,14 @@ function CopyButton({ text, align }: { text: string; align?: 'start' | 'center' 
   );
 }
 
+function MessageTime({ entry }: { entry: Entry }) {
+  const timestamp = entry.kind === 'msg' ? entry.msg.created_at : undefined;
+  if (timestamp == null || !Number.isFinite(timestamp)) return null;
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return null;
+  return <time dateTime={date.toISOString()} title={date.toLocaleString()} className="mx-1.5 text-[11px] tabular-nums text-muted-foreground">{date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time>;
+}
+
 function AssistantActions({ entry, text }: { entry: Entry; text: string }) {
   const actions = useContext(MessageActionsContext);
   const stats = useContext(TurnStatsContext);
@@ -5272,6 +5946,7 @@ function AssistantActions({ entry, text }: { entry: Entry; text: string }) {
   if (!text.trim()) return null;
   return (
     <div className="mt-1 flex items-center gap-0.5 opacity-0 transition-opacity group-hover/msg:opacity-100 focus-within:opacity-100">
+      <MessageTime entry={entry} />
       <CopyButton text={text} align="start" />
       {actions && (
         <ActionButton
@@ -5360,10 +6035,15 @@ function UserMessage({
 
   return (
     <div className="group/msg flex max-w-[78%] flex-col items-end">
-      <div className="whitespace-pre-wrap break-words rounded-2xl rounded-br-md bg-secondary px-4 py-2.5 text-[14.5px]">
+      {/* The sent message gets the same card treatment as the composer:
+          a white, softly-shadowed card in light mode (and the filled
+          bubble it always was in dark). One card language for "your
+          words" wherever they sit in the UI. */}
+      <div className="whitespace-pre-wrap break-words rounded-2xl rounded-br-md border border-border/60 elev-card dark:bg-secondary px-4 py-2.5 text-[14.5px]">
         {children}
       </div>
       <div className="mt-1 flex items-center gap-0.5 opacity-0 transition-opacity group-hover/msg:opacity-100 focus-within:opacity-100">
+        <MessageTime entry={entry} />
         <CopyButton text={text} align="end" />
         {actions && (
           <ActionButton
@@ -5403,6 +6083,89 @@ function UserMessage({
       </div>
     </div>
   );
+}
+
+function InfoNoticeHost({ notices, onDismiss, onAgentUpdated, inline = false }: { inline?: boolean; notices: InfoNotice[]; onDismiss: (id: string) => void; onAgentUpdated: (kind: string) => void }) {
+  const [updating, setUpdating] = useState<string | null>(null);
+  const [updateErrors, setUpdateErrors] = useState<Record<string, string>>({});
+  async function update(notice: InfoNotice) {
+    if (!notice.updateAgent || updating) return;
+    setUpdating(notice.id);
+    setUpdateErrors(previous => ({ ...previous, [notice.id]: '' }));
+    try {
+      await updateExternalAgent(notice.updateAgent);
+      onAgentUpdated(notice.updateAgent);
+      onDismiss(notice.id);
+    } catch (error) {
+      setUpdateErrors(previous => ({ ...previous, [notice.id]: error instanceof Error ? error.message : 'Update failed. Try again.' }));
+    } finally { setUpdating(null); }
+  }
+  const short = notices.filter((n) => n.kind === 'short').slice(-1);
+  const persistent = notices.filter((n) => n.kind === 'persistent');
+  return (
+    <>
+      <div className="pointer-events-none fixed left-1/2 top-4 z-[80] flex -translate-x-1/2 flex-col items-center gap-2">
+        <AnimatePresence initial={false}>
+          {short.map((notice) => (
+            <motion.div
+              key={notice.id}
+              layout
+              initial={{ opacity: 0, y: -18, scale: 0.96 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: -16, scale: 0.98 }}
+              transition={{ type: 'spring', stiffness: 520, damping: 36, mass: 0.8 }}
+              className="pointer-events-auto flex max-w-[min(34rem,calc(100vw-2rem))] items-center gap-2 rounded-full border border-border/65 bg-white/95 px-3.5 py-2 text-[13px] text-foreground shadow-[0_16px_45px_-28px_rgba(15,23,42,0.55)] backdrop-blur-xl dark:border-fg/[0.08] dark:bg-secondary/95"
+            >
+              <NoticeIcon tone={notice.tone} />
+              <span className="min-w-0 truncate font-medium">{notice.title}</span>
+              {notice.meta && <span className="hidden text-muted-foreground sm:inline">· {notice.meta}</span>}
+              <button type="button" onClick={() => onDismiss(notice.id)} className="ml-1 rounded-full p-0.5 text-muted-foreground transition-colors hover:bg-fg/[0.06] hover:text-foreground" aria-label="Dismiss notification">
+                <X className="size-3.5" />
+              </button>
+            </motion.div>
+          ))}
+        </AnimatePresence>
+      </div>
+      <div className={inline ? "mx-1 mb-1 flex flex-col gap-2" : "pointer-events-none fixed right-4 top-4 z-[79] flex w-[min(24rem,calc(100vw-2rem))] flex-col gap-2"}>
+        <AnimatePresence initial={false}>
+          {persistent.map((notice) => (
+            <motion.div
+              key={notice.id}
+              layout
+              initial={{ opacity: 0, x: 28, scale: 0.98 }}
+              animate={{ opacity: 1, x: 0, scale: 1 }}
+              exit={{ opacity: 0, x: 28, scale: 0.98 }}
+              transition={{ type: 'spring', stiffness: 430, damping: 34, mass: 0.9 }}
+              className="pointer-events-auto overflow-hidden rounded-2xl border border-border/65 bg-white/96 p-3.5 text-foreground shadow-[0_18px_55px_-30px_rgba(15,23,42,0.55)] backdrop-blur-xl dark:border-fg/[0.08] dark:bg-secondary/95"
+            >
+              <div className="flex items-start gap-3">
+                <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-xl bg-fg/[0.05] text-muted-foreground ring-1 ring-border/60 dark:bg-fg/[0.06] dark:ring-fg/[0.08]">
+                  <NoticeIcon tone={notice.tone} />
+                </span>
+                <div className="min-w-0 flex-1">
+                  {notice.meta && <div className="mb-0.5 text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground/65">{notice.meta}</div>}
+                  <div className="text-[13.5px] font-semibold leading-5">{notice.title}</div>
+                  {notice.body && <div className="mt-1 text-[12.5px] leading-5 text-muted-foreground">{notice.body}</div>}
+                  {notice.updateAgent && <button type="button" disabled={!!updating} onClick={() => void update(notice)} className="mt-2 rounded-md bg-foreground px-3 py-1.5 text-xs font-medium text-background hover:opacity-90 disabled:opacity-50">{updating === notice.id ? 'Updating…' : 'Update now'}</button>}
+                  {updateErrors[notice.id] && <p role="alert" className="mt-2 text-xs text-red-400">{updateErrors[notice.id]}</p>}
+                </div>
+                <button type="button" onClick={() => onDismiss(notice.id)} className="rounded-md p-1 text-muted-foreground/70 transition-colors hover:bg-fg/[0.06] hover:text-foreground" aria-label="Dismiss notification">
+                  <X className="size-3.5" />
+                </button>
+              </div>
+            </motion.div>
+          ))}
+        </AnimatePresence>
+      </div>
+    </>
+  );
+}
+
+function NoticeIcon({ tone = 'info' }: { tone?: InfoNotice['tone'] }) {
+  if (tone === 'success') return <Check className="size-4 text-emerald-500" />;
+  if (tone === 'warning') return <ShieldAlert className="size-4 text-amber-500" />;
+  if (tone === 'danger') return <ShieldAlert className="size-4 text-destructive" />;
+  return <Bell className="size-4 text-mira-blue" />;
 }
 
 /* ------------------------------------------------------------------ */
@@ -5480,4 +6243,18 @@ function StatusLine({ text, tone }: { text: string; tone?: StatusTone }) {
       </span>
     </div>
   );
+}
+
+function upsertRuntimeQuestion(prev: Entry[], record: Extract<ServerMsg, { type: 'runtime_request_updated' }>['request']): Entry[] {
+  const proposal: AskUserProposal = { questions: record.request.questions.map((q) => ({ question: q.question, header: q.header, multi_select: false, options: q.options.map((label) => ({ label, recommended: false })) })) };
+  const decision: AskUserDecision | null = record.response
+    ? record.response.cancelled ? { cancelled: true } : { cancelled: false, answers: record.response.answers }
+    : null;
+  const index = prev.findIndex((e) => e.kind === 'tool' && e.call.id === record.id);
+  const entry: ToolEntry = {
+    kind: 'tool', call: { id: record.id, type: 'function', function: { name: 'ask_user', arguments: JSON.stringify(proposal) } },
+    preview: null, status: 'complete', result: null, runtimeDelivery: record.delivery, askUser: { proposal, decision },
+  };
+  if (index < 0) return [...prev, entry];
+  return [...prev.slice(0, index), entry, ...prev.slice(index + 1)];
 }

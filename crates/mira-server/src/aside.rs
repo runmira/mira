@@ -163,8 +163,8 @@ pub async fn ask(
         send(serde_json::json!({"type":"done"})).await;
     });
 
-    let stream = tokio_stream::wrappers::ReceiverStream::new(rx)
-        .map(Ok::<_, std::convert::Infallible>);
+    let stream =
+        tokio_stream::wrappers::ReceiverStream::new(rx).map(Ok::<_, std::convert::Infallible>);
     Response::builder()
         .header(header::CONTENT_TYPE, "application/x-ndjson")
         .header(header::CACHE_CONTROL, "no-cache")

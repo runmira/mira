@@ -46,6 +46,9 @@ pub enum AgentState {
 /// Everything the settings list shows for one agent.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentStatus {
+    /// Account-level catalog, available before opening an agent chat.
+    #[serde(default)]
+    pub models: Vec<crate::appserver::CodexModel>,
     pub kind: String,
     /// Driver's own name, or the instance override.
     pub display_name: String,
@@ -90,12 +93,41 @@ pub async fn probe(
     cfg: &DriverConfig,
     mode: PermissionMode,
 ) -> AgentStatus {
+    probe_with_catalog(driver, cfg, mode, true).await
+}
+
+/// The background-sweep probe: everything [`probe`] learns without opening
+/// an authenticated catalog session.
+///
+/// Opening a provider session can start MCP servers, run hooks, or launch
+/// a login browser, so background health checks must not do it: no
+/// app-server handshake, no `account/read`, no `model/list`. The ACP
+/// `initialize` handshake stays — it opens no session (see
+/// `probe_initialize`) and answers nothing — as do the CLI's own
+/// side-effect-free reads (`--version`, `auth status`, `models`). A chat
+/// start or an explicit catalog refresh runs the full probe and fills in
+/// the rest.
+pub async fn probe_background(
+    driver: &dyn AcpDriver,
+    cfg: &DriverConfig,
+    mode: PermissionMode,
+) -> AgentStatus {
+    probe_with_catalog(driver, cfg, mode, false).await
+}
+
+async fn probe_with_catalog(
+    driver: &dyn AcpDriver,
+    cfg: &DriverConfig,
+    mode: PermissionMode,
+    catalog: bool,
+) -> AgentStatus {
     let program = cfg.binary_path.clone().unwrap_or_else(|| {
         std::path::PathBuf::from(driver.binary_names().first().copied().unwrap_or(""))
     });
     let launch: LaunchConfig = driver.resolve(cfg, mode, program);
 
     let mut status = AgentStatus {
+        models: Vec::new(),
         kind: driver.kind().to_string(),
         display_name: cfg
             .display_name
@@ -156,26 +188,28 @@ pub async fn probe(
             }
             // App-server agents get an account-level probe: the handshake
             // names who is signed in, which a bare `--version` cannot.
-            if driver.native_flavor() == Some(crate::native::NativeFlavor::CodexAppServer) {
-                let prog = driver
-                    .underlying_cli_names()
-                    .first()
-                    .map(std::path::PathBuf::from)
-                    .unwrap_or_default();
-                // Resolved absolutely: a bare `codex` is unfindable to a
-                // child with a cleared environment, and the probe spawns one.
-                let found = crate::which::resolve_for_spawn(&prog);
-                if found.is_absolute() {
+            // Explicit contexts only (chat start, catalog refresh): the
+            // handshake opens an authenticated session, which background
+            // sweeps must not do.
+            if catalog
+                && driver.native_flavor() == Some(crate::native::NativeFlavor::CodexAppServer)
+            {
+                // Probe the same binary, home and environment as the chat.
+                // Otherwise a configured account gets the ambient account's catalog.
+                if let Some(native_launch) =
+                    crate::process::build_native_launch(driver, cfg, mode, &launch.program, None)
+                {
                     // Same budget as the ACP handshake: a wedged app-server
                     // must not stall the sweep past the driver's ceiling.
                     if let Some(probe) = tokio::time::timeout(
                         driver.probe_timeout(),
-                        crate::appserver::probe_handshake(&found),
+                        crate::appserver::probe_handshake(&native_launch),
                     )
                     .await
                     .ok()
                     .flatten()
                     {
+                        status.models = probe.models;
                         status.version = Some(probe.user_agent);
                         let mut bits = Vec::new();
                         if let Some(e) = probe.email {
@@ -196,6 +230,7 @@ pub async fn probe(
                 status.version = status.cli_version.clone();
             }
             status.transport = crate::driver::Transport::Native;
+            fill_cli_models(&mut status, driver).await;
             // Installed but signed out isn't ready: every message would come
             // back "Not logged in". Say so where the user can act on it.
             if status.auth.as_deref() == Some(NOT_SIGNED_IN) {
@@ -263,6 +298,7 @@ pub async fn probe(
             status.version = info.version;
             status.auth = summarize_auth(&info.auth_ids);
             status.auth_method_ids = info.auth_ids;
+            fill_cli_models(&mut status, driver).await;
         }
     }
     status
@@ -304,6 +340,7 @@ async fn probe_initialize(
         // itself, and `session/new` can fail for reasons unrelated to health.
         cwd: None,
         mira_mcp: None,
+        resume_session_id: None,
     })
     .await
     .map_err(|e| match e {
@@ -323,6 +360,34 @@ async fn probe_initialize(
 
     agent.shutdown().await;
     Ok(info)
+}
+
+/// Account-level model catalog from the agent's own CLI, when it has
+/// one (OpenCode: `opencode models`, one `provider/model` per line).
+/// ACP itself has no "list models" verb, so this is what keeps the
+/// picker from being empty before the first chat.
+async fn fill_cli_models(status: &mut AgentStatus, driver: &dyn AcpDriver) {
+    let args = driver.cli_models_args();
+    if args.is_empty() {
+        return;
+    }
+    let Some(bin) = driver.underlying_cli_names().first().copied() else {
+        return;
+    };
+    if let Some(raw) = run_cli(bin, args).await {
+        let models: Vec<crate::appserver::CodexModel> = raw
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && l.contains('/'))
+            .map(|l| crate::appserver::CodexModel {
+                value: l.to_string(),
+                label: l.to_string(),
+            })
+            .collect();
+        if !models.is_empty() {
+            status.models = models;
+        }
+    }
 }
 
 /// Fill in what the *agent's own CLI* can tell us, independently of whether
@@ -385,6 +450,7 @@ async fn fill_cli_status(status: &mut AgentStatus, driver: &dyn AcpDriver) {
             status.auth = Some(label);
         }
     }
+    fill_cli_models(status, driver).await;
 }
 
 /// Run the CLI and capture stdout, with a short ceiling so a hung CLI cannot
@@ -441,7 +507,10 @@ const NOT_SIGNED_IN: &str = "Not signed in";
 fn signed_out_reason(driver: &dyn AcpDriver) -> String {
     let login = driver.login_command();
     if login.is_empty() {
-        format!("{} isn't signed in. Sign in, then check again.", driver.display_name())
+        format!(
+            "{} isn't signed in. Sign in, then check again.",
+            driver.display_name()
+        )
     } else {
         format!(
             "{} isn't signed in. Run `{login}` in a terminal, then check again.",
@@ -513,6 +582,74 @@ fn summarize_auth(ids: &[String]) -> Option<String> {
             .collect::<Vec<_>>()
             .join(", ")
     ))
+}
+
+/// Whether a turn is billed to a metered API key or covered by a plan.
+///
+/// The distinction matters more than the dollar figure it sits next to: a
+/// Max/Plus subscriber pays a flat subscription, so an API-equivalent
+/// estimate of their usage is not money spent. Where an agent signs in
+/// with a plan we can say so; where it holds a key we can say that too.
+/// Everything else (an ambient login, a proxy we can't see) stays
+/// [`Billing::Unknown`] rather than being guessed at.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Billing {
+    /// Metered: a key the user configured, or a plan's usage pool.
+    Api,
+    /// Covered by a subscription — no per-token charge to the user.
+    Subscription,
+    /// We can't tell from what the agent reported.
+    #[default]
+    Unknown,
+}
+
+impl Billing {
+    /// Classify from the auth method ids an agent advertised at
+    /// `initialize`, plus whether this instance was given a key.
+    ///
+    /// A key is decisive: it bills by the token, whatever else the agent
+    /// also advertises. Otherwise a plan-shaped method id means a
+    /// subscription. `claude.ai` and `chatgpt` are the everyday ones;
+    /// `oauth-personal` is Google's account login, which for Gemini is
+    /// normally a plan, and is left unknown because it can equally be
+    /// billed per token.
+    pub fn classify(has_api_key: bool, auth_method_ids: &[String]) -> Self {
+        if has_api_key {
+            return Billing::Api;
+        }
+        if auth_method_ids.iter().any(|id| {
+            matches!(
+                id.as_str(),
+                "claude.ai" | "chatgpt" | "chatgpt-login" | "cursor_login" | "grok.com"
+            )
+        }) {
+            return Billing::Subscription;
+        }
+        Billing::Unknown
+    }
+}
+
+impl Billing {
+    /// Classify from a probe's human-readable auth summary.
+    ///
+    /// The native transports never advertise method ids on the wire, so
+    /// this is how their subscription logins are recognised: the probe
+    /// already asked the agent's own CLI (`claude auth status`) and got
+    /// back a phrase like "Claude subscription · a@b.com". An account that
+    /// signed in with a key says so instead, and a proxy we can't see
+    /// stays unknown.
+    pub fn from_auth_summary(summary: &str) -> Self {
+        let s = summary.to_ascii_lowercase();
+        // A key in the summary is decisive, same as a configured one.
+        if s.contains("api key") || s.contains("api_key") {
+            return Billing::Api;
+        }
+        if s.contains("subscription") || s.contains("claude.ai") || s.contains("chatgpt") {
+            return Billing::Subscription;
+        }
+        Billing::Unknown
+    }
 }
 
 fn friendly_auth_id(id: &str) -> String {
@@ -648,6 +785,41 @@ mod tests {
     }
 
     #[test]
+    fn billing_from_a_probe_summary_recognises_a_plan_login() {
+        use Billing::*;
+        // What `claude auth status` produces for a subscriber.
+        assert_eq!(
+            Billing::from_auth_summary("Claude subscription · a@b.com"),
+            Subscription
+        );
+        // A key signs differently.
+        assert_eq!(Billing::from_auth_summary("API key"), Api);
+        // An account we can't classify stays unknown.
+        assert_eq!(Billing::from_auth_summary("some-proxy"), Unknown);
+        assert_eq!(Billing::from_auth_summary(""), Unknown);
+    }
+
+    #[test]
+    fn billing_follows_the_key_then_the_advertised_login() {
+        use Billing::*;
+        // A key decides it, even alongside a plan-shaped method.
+        assert_eq!(Billing::classify(true, &["claude.ai".to_string()]), Api);
+        // Plan logins with no key: covered by the subscription.
+        assert_eq!(
+            Billing::classify(false, &["claude.ai".to_string()]),
+            Subscription
+        );
+        assert_eq!(
+            Billing::classify(false, &["chatgpt".to_string(), "api-key".to_string()]),
+            Subscription
+        );
+        // A key-only login is metered.
+        assert_eq!(Billing::classify(false, &["api-key".to_string()]), Unknown);
+        // Nothing advertised: we don't guess.
+        assert_eq!(Billing::classify(false, &[]), Unknown);
+    }
+
+    #[test]
     fn an_auth_summary_is_human_readable() {
         assert_eq!(summarize_auth(&[]), None);
         assert_eq!(
@@ -705,12 +877,63 @@ mod tests {
 
     #[tokio::test]
     async fn opencode_and_codex_probe_independently() {
-        for d in [&OpenCodeDriver as &dyn AcpDriver, &CodexDriver] {
-            let status = probe(d, &never_installed(), PermissionMode::Ask).await;
+        // OpenCode has no native path: a missing adapter is always
+        // NotFound, on every machine.
+        let status = probe(&OpenCodeDriver, &never_installed(), PermissionMode::Ask).await;
+        assert!(
+            matches!(status.state, AgentState::NotFound { .. }),
+            "{status:?}"
+        );
+        // Codex has a native CLI path: with no `codex` answering
+        // `--version` the missing adapter is NotFound; with one, the
+        // native branch correctly reports the CLI instead.
+        if run_cli("codex", &["--version"]).await.is_none() {
+            let status = probe(&CodexDriver, &never_installed(), PermissionMode::Ask).await;
             assert!(
                 matches!(status.state, AgentState::NotFound { .. }),
                 "{status:?}"
             );
+        }
+    }
+
+    /// Background sweeps must not open authenticated catalog sessions: no
+    /// app-server handshake, so no handshake models or handshake auth, on
+    /// any machine state. (With no `codex` CLI this is NotFound either
+    /// way; with one it is version-based Ready — both without a catalog.)
+    #[tokio::test]
+    async fn background_probe_never_carries_a_handshake_catalog() {
+        let status =
+            probe_background(&CodexDriver, &DriverConfig::default(), PermissionMode::Ask).await;
+        assert!(
+            status.models.is_empty(),
+            "background must not run model/list: {status:?}"
+        );
+        assert!(
+            status.auth.is_none(),
+            "background must not run account/read: {status:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn background_probe_reports_absence_like_the_full_probe() {
+        // Absent binaries: both depths agree, quickly, having spawned
+        // nothing (the binary path cannot exist).
+        for d in crate::drivers::all() {
+            let cfg = DriverConfig {
+                binary_path: Some("/nonexistent/mira-background-probe".into()),
+                ..Default::default()
+            };
+            let bg = probe_background(d.as_ref(), &cfg, PermissionMode::Ask).await;
+            // A native CLI found on PATH still answers `--version` in both
+            // depths; absence is what must agree.
+            let full = probe(d.as_ref(), &cfg, PermissionMode::Ask).await;
+            if matches!(bg.state, AgentState::NotFound { .. }) {
+                assert!(
+                    matches!(full.state, AgentState::NotFound { .. }),
+                    "{} disagrees: background {bg:?} vs full {full:?}",
+                    d.kind()
+                );
+            }
         }
     }
 }

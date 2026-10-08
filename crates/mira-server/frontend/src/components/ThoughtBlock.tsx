@@ -1,12 +1,15 @@
+import { StreamFade } from './StreamFade';
+import { useTranscriptDisclosure } from './TranscriptDisclosure';
 import { useEffect, useRef, useState } from 'react';
 import { Brain, ChevronDown } from 'lucide-react';
 import { Markdown } from './Markdown';
+import { Collapse } from './ui/Collapse';
 import { cn } from '@/lib/utils';
 
 /**
  * The model's reasoning as a collapsible transcript section.
  *
- *   live     → "Thinking… 4s"  open, streaming text in a short scroller
+ *   live     → "Thinking… 4s" with a compact preview; expand to read
  *   settled  → "Thought for 4s ⌄"  collapsed; click to read the whole thing
  *
  * Fed either by structured `reasoning` frames (Anthropic extended
@@ -26,10 +29,10 @@ export function ThoughtBlock({
   startedAt?: number | null;
   endedAt?: number | null;
 }) {
-  const [open, setOpen] = useState(live);
+  const [open, setOpen] = useTranscriptDisclosure(`thought:${startedAt ?? content.slice(0, 64)}`);
   // Fold away once thinking ends, unless the reader opened / closed it
   // themselves in the meantime.
-  const touched = useRef(false);
+  const touched = useRef(open);
   useEffect(() => {
     if (!live && !touched.current) setOpen(false);
   }, [live]);
@@ -76,10 +79,11 @@ export function ThoughtBlock({
         }}
         disabled={!body}
         aria-expanded={open}
-        className="group inline-flex items-center gap-1.5 rounded px-1 py-0.5 text-[12.5px] text-muted-foreground transition-colors hover:text-foreground disabled:cursor-default"
+        className="group inline-flex max-w-full items-center gap-1.5 rounded px-2 py-1 text-[13px] leading-5 text-muted-foreground transition-colors hover:text-foreground disabled:cursor-default"
       >
         <Brain className={cn('size-3.5 shrink-0', live && 'animate-pulse text-mira-purple')} />
-        <span className={cn('font-medium', live && 'text-foreground/80')}>{label}</span>
+        <span className={cn('shrink-0 font-normal', live && 'text-foreground/80')}>{label}</span>
+        {!open && body && <span className="max-w-[min(60ch,55vw)] truncate font-normal leading-5 text-muted-foreground/70">{body.replace(/[#*_`]/g, '').replace(/\s+/g, ' ')}</span>}
         {live && dur && <span className="font-mono text-[11px] text-muted-foreground/70">{dur}</span>}
         {body && (
           <ChevronDown
@@ -91,20 +95,20 @@ export function ThoughtBlock({
           />
         )}
       </button>
-      {open && body && (
+      <Collapse open={open && !!body}>
         <div
           ref={bodyRef}
           onScroll={live ? onScroll : undefined}
           className={cn(
-            'thought ml-[7px] mt-1 animate-fade-in border-l-2 border-border pl-3 text-[13px] leading-relaxed text-muted-foreground',
+            'thought ml-[7px] mt-1 border-l-2 border-border pl-3 text-[13px] leading-relaxed text-muted-foreground',
             // Fade the top edge so older lines read as scrolling away.
             live &&
               'max-h-40 overflow-y-auto [mask-image:linear-gradient(to_bottom,transparent,black_2rem)]',
           )}
         >
-          <Markdown text={body} />
+          <StreamFade streaming={live} revision={body ?? ''}><Markdown text={body ?? ''} /></StreamFade>
         </div>
-      )}
+      </Collapse>
     </div>
   );
 }

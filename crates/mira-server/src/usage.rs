@@ -16,6 +16,7 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use mira_acp::status::Billing;
 use mira_harness::{SessionRecord, UsageTotals};
 use serde::{Deserialize, Serialize};
 
@@ -46,10 +47,20 @@ pub struct UsageRow {
     /// for Mira's own turns.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
+    /// The engine instance that ran them (`codex-work`, or the driver
+    /// kind for the default instance). Lets the client tell two accounts
+    /// apart when they share a driver.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
     /// The agent's own cost estimate, when it reports one. The client
     /// prices everything else from its table.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
+    /// How these turns are billed. An API-equivalent dollar figure on a
+    /// subscription row is not money spent, so the client says which it
+    /// is rather than summing everything into one total.
+    #[serde(default)]
+    pub billing: Billing,
 }
 
 fn day_of(secs: u64) -> String {
@@ -114,7 +125,12 @@ pub fn rows_for(rec: &SessionRecord, since_day: &str) -> Vec<UsageRow> {
             completion_tokens: u.completion_tokens,
             cached_input_tokens: u.cached_input_tokens,
             agent: None,
+            instance: None,
             cost_usd: None,
+            // Mira's own turns are a provider call, so they're metered
+            // whenever the provider prices per token. A local endpoint
+            // costs nothing, but that's the client's table to know.
+            billing: Billing::Api,
         })
         .collect()
 }
@@ -136,6 +152,7 @@ pub fn agent_rows(
         session_id: String,
         day: String,
         agent: String,
+        instance: String,
         model: String,
     }
     #[derive(Default)]
@@ -143,6 +160,7 @@ pub fn agent_rows(
         cwd: String,
         totals: UsageTotals,
         cost: Option<f64>,
+        billing: Option<Billing>,
     }
 
     let mut by_key: BTreeMap<Key, Sum> = BTreeMap::new();
@@ -155,6 +173,7 @@ pub fn agent_rows(
             session_id: r.session_id.clone(),
             day,
             agent: r.driver.clone(),
+            instance: r.instance.clone(),
             model: r.model.clone(),
         };
         let sum = by_key.entry(key).or_insert_with(|| Sum {
@@ -169,6 +188,14 @@ pub fn agent_rows(
         if let Some(c) = r.cost_usd {
             sum.cost = Some(sum.cost.unwrap_or(0.0) + c);
         }
+        // Rows from one agent session share a classification. Keep the
+        // most specific one seen, so an old unknown row next to a new
+        // classified one doesn't hide what we now know.
+        sum.billing = match (sum.billing, r.billing) {
+            (None, b) => Some(b),
+            (Some(Billing::Unknown), b) => Some(b),
+            (a, _) => a,
+        };
     }
     by_key
         .into_iter()
@@ -182,9 +209,121 @@ pub fn agent_rows(
             completion_tokens: sum.totals.completion_tokens,
             cached_input_tokens: sum.totals.cached_input_tokens,
             agent: Some(k.agent),
+            instance: Some(k.instance),
             cost_usd: sum.cost,
+            billing: sum.billing.unwrap_or_default(),
         })
         .collect()
+}
+
+/// One agent's own accounting, rolled up per (day, model).
+#[derive(Serialize, Debug, PartialEq)]
+pub struct ExternalUsageRow {
+    /// Which agent's store this came from.
+    pub agent: String,
+    pub model: String,
+    /// UTC date, `YYYY-MM-DD`.
+    pub day: String,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub cached_input_tokens: u64,
+    /// Turn records the roll-up consumed — the honest "how much did we
+    /// read" figure behind the totals.
+    pub turns: usize,
+}
+
+/// Aggregate an agent's own transcript accounting into per-(day, model)
+/// rows. Pure, so the aggregation is testable without a home directory.
+pub fn external_usage_rows(
+    rows: &[mira_acp::history_import::NativeUsageRow],
+) -> Vec<ExternalUsageRow> {
+    /// (agent, day, model) → the totals, plus how many turns produced them.
+    #[derive(Default, PartialEq, Eq, PartialOrd, Ord)]
+    struct Key {
+        agent: String,
+        day: String,
+        model: String,
+    }
+    #[derive(Default)]
+    struct Sum {
+        prompt: u64,
+        completion: u64,
+        cached: u64,
+        turns: usize,
+    }
+    let mut by_key: BTreeMap<Key, Sum> = BTreeMap::new();
+    for r in rows {
+        // An unreadable timestamp leaves the day empty; it can't be placed
+        // on a calendar, so it is not reported as if it were a real day.
+        if r.day.is_empty() {
+            continue;
+        }
+        let sum = by_key
+            .entry(Key {
+                agent: r.source.label().to_string(),
+                day: r.day.clone(),
+                model: r.model.clone(),
+            })
+            .or_default();
+        sum.prompt = sum.prompt.saturating_add(r.input_tokens);
+        sum.completion = sum.completion.saturating_add(r.output_tokens);
+        sum.cached = sum.cached.saturating_add(r.cached_input_tokens);
+        sum.turns += 1;
+    }
+    by_key
+        .into_iter()
+        .map(|(k, sum)| ExternalUsageRow {
+            agent: k.agent,
+            model: k.model,
+            day: k.day,
+            prompt_tokens: sum.prompt,
+            completion_tokens: sum.completion,
+            cached_input_tokens: sum.cached,
+            turns: sum.turns,
+        })
+        .collect()
+}
+
+/// `GET /api/usage/external` — token usage from the agents' own stores.
+///
+/// Deliberately its own endpoint rather than more rows on `/api/usage`:
+/// these turns belong to no Mira session, so they have no chat to open,
+/// no project, and (for Codex) not even a model name. Folding them into
+/// the session rows would let them distort per-chat and per-project
+/// totals. Read-only and cheap enough to call on demand; the scan is
+/// capped per agent.
+pub async fn get_external_usage(Query(q): Query<UsageQuery>) -> Json<Vec<ExternalUsageRow>> {
+    let days = q.days.clamp(1, 366);
+    let since = (chrono::Utc::now().date_naive() - chrono::Days::new(u64::from(days) - 1))
+        .format("%Y-%m-%d")
+        .to_string();
+    let mut all = Vec::new();
+    for source in [
+        mira_acp::history_import::Source::ClaudeCode,
+        mira_acp::history_import::Source::Codex,
+    ] {
+        let Some(home) = mira_acp::history_import::source_home(source) else {
+            continue;
+        };
+        all.extend(mira_acp::history_import::native_usage_rows(
+            source,
+            &home,
+            since.as_str(),
+        ));
+    }
+    Json(external_usage_rows(&all))
+}
+
+pub async fn get_pricing() -> Json<mira_ai::PricingSnapshot> {
+    // Refresh on read, not on the request hot path of every chat: the
+    // fetch only fires when the cache is stale (once a day) or when this
+    // is the first read after a failed warm-up.
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        mira_ai::ensure_pricing(),
+    )
+    .await;
+    Json(mira_ai::pricing_snapshot())
 }
 
 pub async fn get_usage(State(state): State<AppState>, Query(q): Query<UsageQuery>) -> Response {
@@ -285,5 +424,152 @@ mod tests {
         assert!(rows_for(&rec, "2025-09-26")
             .iter()
             .all(|r| r.day == "2025-09-26"));
+    }
+
+    fn nat(
+        source: mira_acp::history_import::Source,
+        model: &str,
+        day: &str,
+        input: u64,
+        cached: u64,
+        out: u64,
+    ) -> mira_acp::history_import::NativeUsageRow {
+        mira_acp::history_import::NativeUsageRow {
+            source,
+            model: model.to_string(),
+            file_id: "f".to_string(),
+            day: day.to_string(),
+            input_tokens: input,
+            cached_input_tokens: cached,
+            output_tokens: out,
+        }
+    }
+
+    #[test]
+    fn external_rows_group_by_agent_day_and_model() {
+        use mira_acp::history_import::Source;
+        let rows = vec![
+            nat(
+                Source::ClaudeCode,
+                "claude-sonnet-4-6",
+                "2026-10-04",
+                100,
+                60,
+                10,
+            ),
+            nat(
+                Source::ClaudeCode,
+                "claude-sonnet-4-6",
+                "2026-10-04",
+                50,
+                20,
+                5,
+            ),
+            // Same model, different day: its own row.
+            nat(
+                Source::ClaudeCode,
+                "claude-sonnet-4-6",
+                "2026-10-03",
+                10,
+                0,
+                1,
+            ),
+            // Same day, different agent: its own row.
+            nat(Source::Codex, "unknown-codex", "2026-10-04", 7, 3, 2),
+        ];
+        let out = external_usage_rows(&rows);
+        assert_eq!(out.len(), 3, "got {out:?}");
+        let claude = out
+            .iter()
+            .find(|r| r.day == "2026-10-04" && r.agent == "Claude Code")
+            .unwrap();
+        assert_eq!(claude.prompt_tokens, 150);
+        assert_eq!(claude.cached_input_tokens, 80);
+        assert_eq!(claude.completion_tokens, 15);
+        assert_eq!(claude.turns, 2);
+        let codex = out.iter().find(|r| r.agent == "Codex").unwrap();
+        assert_eq!((codex.prompt_tokens, codex.turns), (7, 1));
+    }
+
+    #[test]
+    fn a_subscription_row_is_labelled_so_the_client_can_say_so() {
+        use mira_acp::history_import::Source;
+        use mira_acp::status::Billing;
+        // One agent session's rows all carry its classification, and the
+        // row says so even though the dollar figure is API-equivalent.
+        let rec = SessionRecord {
+            id: "s1".into(),
+            cwd: "/p".into(),
+            cfg: mira_harness::SessionConfig::new("claude-opus-4-7"),
+            messages: vec![],
+            archived: vec![],
+            created_at: 0,
+            updated_at: 0,
+            title: Some("t".into()),
+            turns: vec![],
+            usage: Default::default(),
+            parent_id: None,
+            tasks: vec![],
+            goal: None,
+            previews: Default::default(),
+            pinned: false,
+            archived_at: None,
+            agent: None,
+            forked_from: None,
+        };
+        let ledger = vec![crate::agent_spend::SpendRow {
+            ts: 1_788_000_000,
+            session_id: "s1".into(),
+            cwd: "/p".into(),
+            driver: "claude-code".into(),
+            instance: "claude-code".into(),
+            model: "claude-opus-4-7".into(),
+            input_tokens: 100,
+            output_tokens: 10,
+            cached_input_tokens: 50,
+            cost_usd: Some(0.25),
+            billing: Billing::Subscription,
+        }];
+        let rows = agent_rows(&ledger, &[rec], "2000-01-01");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].billing, Billing::Subscription);
+        assert!(rows[0].cost_usd.is_some(), "the estimate is still reported");
+        let _ = Source::ClaudeCode; // keep the import meaningful for readers
+    }
+
+    #[test]
+    fn a_mixture_keeps_the_most_specific_billing_it_saw() {
+        use mira_acp::status::Billing;
+        let row = |billing: Billing, cost: f64| crate::agent_spend::SpendRow {
+            ts: 1_788_000_000,
+            session_id: "s1".into(),
+            cwd: "/p".into(),
+            driver: "codex".into(),
+            instance: "codex".into(),
+            model: "gpt-5".into(),
+            input_tokens: 10,
+            output_tokens: 1,
+            cached_input_tokens: 0,
+            cost_usd: Some(cost),
+            billing,
+        };
+        // A row written before the field existed (unknown) next to one we
+        // classified: the classification wins, so the client can say it.
+        let rows = agent_rows(
+            &[row(Billing::Unknown, 0.1), row(Billing::Subscription, 0.2)],
+            &[],
+            "2000-01-01",
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].billing, Billing::Subscription);
+    }
+
+    #[test]
+    fn external_rows_drop_records_without_a_day() {
+        // A turn we can't place on a calendar is not reported as if it
+        // were a real day of spending.
+        use mira_acp::history_import::Source;
+        let rows = vec![nat(Source::ClaudeCode, "claude-sonnet-4-6", "", 900, 0, 9)];
+        assert!(external_usage_rows(&rows).is_empty());
     }
 }

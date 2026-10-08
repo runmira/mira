@@ -25,6 +25,10 @@ tauri-build = { version = "2", features = [] }
 #                     the sidebar. Excludes Mac App Store distribution.
 tauri = { version = "2", features = ["unstable", "macos-private-api"] }
 tauri-plugin-deep-link = "2"
+# Native folder/file panels. The project's own picker is a web dialog;
+# the OS one is what people expect from a desktop app (and it can jump
+# to a recent place, tag a path, or type one with Cmd+Shift+G).
+tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 # In-app updates: per-channel feed, signed bundles (see scripts/macos-signing.sh updater-key).

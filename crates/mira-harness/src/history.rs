@@ -595,6 +595,9 @@ mod tests {
             name: None,
             images: Vec::new(),
             reasoning: Vec::new(),
+            input_intent: None,
+            input_id: None,
+            created_at: None,
         }
     }
 
@@ -614,6 +617,9 @@ mod tests {
             name: None,
             images: Vec::new(),
             reasoning: Vec::new(),
+            input_intent: None,
+            input_id: None,
+            created_at: None,
         }
     }
 

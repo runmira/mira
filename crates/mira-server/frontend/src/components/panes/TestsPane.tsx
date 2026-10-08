@@ -24,6 +24,7 @@ import { composeText } from '@/lib/attachBridge';
 import { postNdjson, sessionQuery } from '@/lib/ndjson';
 import { liveCounts, parseTestOutput, type TestFailure } from '@/lib/testParse';
 import { cn } from '@/lib/utils';
+import { Collapse } from '../ui/Collapse';
 import { PaneBar, PaneButton, PaneEmpty } from './paneUi';
 
 type Suggestion = { command: string; label: string };
@@ -380,11 +381,11 @@ function FailureCard({ failure: f, onFix }: { failure: TestFailure; onFix: () =>
           Fix this
         </button>
       </div>
-      {open && f.detail.length > 0 && (
+      <Collapse open={open && f.detail.length > 0}>
         <pre className="max-h-56 overflow-auto border-t border-red-500/15 bg-background/50 px-3 py-2 font-mono text-[11.5px] leading-[1.55] text-foreground/85">
           {f.detail.join('\n')}
         </pre>
-      )}
+      </Collapse>
     </div>
   );
 }

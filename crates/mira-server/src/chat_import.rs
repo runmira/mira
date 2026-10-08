@@ -254,9 +254,13 @@ pub struct ImportRequest {
 
 #[derive(Serialize, Default)]
 struct ImportResult {
+    /// Chats that became a new Mira chat, in request order.
     imported: Vec<String>,
-    /// Already in Mira.
-    skipped: usize,
+    /// Chats already in Mira, mapped to the chat they became. Listing the
+    /// id (rather than only counting the skips) is what lets a client that
+    /// re-sends a selection land on the existing chat instead of hunting
+    /// for it in the sidebar.
+    existing: Vec<String>,
     failed: Vec<String>,
 }
 
@@ -294,6 +298,7 @@ fn transcript_lines(chat: &HistorySession) -> Vec<serde_json::Value> {
                 t,
                 ServerMsg::AcpText {
                     text: m.text.clone(),
+                    message_id: None,
                 },
             )),
         }
@@ -341,6 +346,9 @@ async fn import_one(
         archived_at: None,
         agent: Some(AgentSessionMeta {
             driver_kind: chat.source.driver_kind().to_string(),
+            // Imports always land on the default instance, whose id is
+            // its driver kind — recorded cursors below agree.
+            instance: None,
             model: chat.model.clone(),
             active: true,
             launch: None,
@@ -394,8 +402,8 @@ pub async fn import(State(state): State<AppState>, Json(req): Json<ImportRequest
             continue;
         };
         let key = ledger_key(source, &r.id);
-        if ledger.contains_key(&key) {
-            result.skipped += 1;
+        if let Some(mira_id) = ledger.get(&key) {
+            result.existing.push(mira_id.clone());
             continue;
         }
         let Some(found) = by_key.get(&key) else {

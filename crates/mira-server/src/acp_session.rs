@@ -33,8 +33,13 @@ const MAX_ACP_READ_BYTES: usize = 1024 * 1024;
 
 /// The agent a slot is currently driving, if any.
 pub struct SlotAgent {
+    pub opencode_control: Option<crate::opencode_control::OpenCodeControl>,
+    lease: std::sync::Mutex<Option<crate::runtime_admission::RuntimeLease>>,
     /// The driver it was started from, for diagnostics and restart.
     pub driver_kind: String,
+    /// The engine instance it runs as. Cursor records, spend rows and
+    /// engine frames route by this, not by kind.
+    pub instance: String,
     /// The driver's own name, for user-facing messages.
     pub display_name: String,
     /// The resolved launch, with secrets redacted — safe to log.
@@ -81,7 +86,11 @@ impl SlotAgent {
     /// pump, so callers must not also emit a turn-end frame.
     pub async fn cancel_current_turn(&self) {
         if let Some(agent) = self.agent().await {
-            let _ = agent.cancel().await;
+            if self.driver_kind == "grok" {
+                // Grok's soft interrupt leaves background subagents alive.
+                // Explicit Stop owns the entire runtime and its terminals.
+                self.stop().await;
+            } else { let _ = agent.cancel().await; }
         }
     }
 
@@ -95,6 +104,7 @@ impl SlotAgent {
         }
         // And take its terminals down: they are separate processes.
         self.terminals.shutdown();
+        self.lease.lock().unwrap_or_else(|e| e.into_inner()).take();
     }
 }
 
@@ -148,13 +158,15 @@ pub async fn start_agent(
         if native.permission_mode.is_none() {
             native.permission_mode = params.mode_id.clone();
         }
-        // A slot with a recorded cursor resumes it: the agent session
-        // outlives Mira restarts this way instead of starting blank each
-        // time. Explicit overrides (import resume, fork) always win.
-        if native.resume.is_none() {
-            if let Some(cur) = mira_acp::agent_sessions::read(&slot.id.to_string(), driver.kind()) {
-                native.resume = Some(cur.agent_session_id);
-            }
+    }
+    // A slot with a recorded cursor resumes it: the agent session
+    // outlives Mira restarts this way instead of starting blank each
+    // time. Explicit overrides (import resume, fork) always win. This is
+    // transport-agnostic: native CLIs take `--resume`, ACP agents take
+    // `session/resume` (OpenCode advertises it) via the same field.
+    if native.resume.is_none() {
+        if let Some(cur) = mira_acp::agent_sessions::read(&slot.id.to_string(), &params.instance) {
+            native.resume = Some(cur.agent_session_id);
         }
     }
     // Mira's browser, as an MCP server: Claude Code drives the same browser
@@ -163,16 +175,17 @@ pub async fn start_agent(
     // which is Mira's approval card.
     if matches!(transport, Transport::Native) && driver.kind() == "claude-code" {
         driver_cfg.launch_args.push("--mcp-config".into());
-        driver_cfg
-            .launch_args
-            .push(crate::browser::agent_mcp_config(state.local_port, &slot.id.to_string()).to_string());
+        driver_cfg.launch_args.push(
+            crate::browser::agent_mcp_config(state.local_port, &slot.id.to_string()).to_string(),
+        );
         // Looking (snapshots, screenshots, process output) doesn't need an
         // approval each time; anything that acts still asks.
-        driver_cfg
-            .launch_args
-            .push(format!("--allowedTools={}", crate::browser::claude_allowed_tools()));
+        driver_cfg.launch_args.push(format!(
+            "--allowedTools={}",
+            crate::browser::claude_allowed_tools()
+        ));
     }
-    let launch: LaunchConfig = match transport {
+    let mut launch: LaunchConfig = match transport {
         Transport::Native => {
             let mut l =
                 mira_acp::process::build_native_launch(driver, &driver_cfg, mode, &program, None)
@@ -186,6 +199,10 @@ pub async fn start_agent(
         }
         _ => driver.resolve(&driver_cfg, mode, program.clone()),
     };
+    let opencode_control = if driver.kind() == "opencode" && matches!(transport, Transport::Acp)
+        && crate::opencode_control::OpenCodeControl::supported(&launch).await {
+        Some(crate::opencode_control::OpenCodeControl::configure(&mut launch)?)
+    } else { None };
     if !mira_acp::process::looks_installed(&launch) {
         return Err(format!(
             "{} is not installed (looked for `{}`)",
@@ -221,14 +238,33 @@ pub async fn start_agent(
                 session_id: slot.id.to_string(),
                 cwd: repo_root.to_string_lossy().into_owned(),
                 driver: params.driver_kind.clone(),
+                instance: params.instance.clone(),
                 fallback_model: params
                     .model
                     .clone()
                     .unwrap_or_else(|| params.driver_kind.clone()),
+                // Decided now, from what we know before the agent starts.
+                // A configured key is decisive; otherwise the plan the
+                // agent advertises over ACP decides, and anything we can't
+                // read stays unknown rather than being assumed.
+                billing: mira_acp::status::Billing::classify(params.cfg.api_key.is_some(), &[]),
             },
         ),
         None => AcpEventPort::new(slot.events_tx.clone()),
     };
+    events.set_driver(&params.driver_kind);
+
+    // Restored native modes also configure the host gate: older sessions
+    // persisted the runtime picker independently of agent_approval_mode.
+    if params.driver_kind == "codex" && matches!(transport, Transport::Native) {
+        let runtime = native
+            .permission_mode
+            .as_deref()
+            .unwrap_or_else(|| mira_acp::appserver::mode_for_permission(params.mode));
+        if let Some(mode) = codex_approval_mode(runtime) {
+            set_agent_approval_mode(slot, mode).await;
+        }
+    }
 
     // A native agent has no ACP ports to bind — it runs in its own process and
     // asks the host its questions through one gate. Tool permissions answer
@@ -255,8 +291,18 @@ pub async fn start_agent(
     // processes never hold this session's permissions at once and the old
     // one's exit is recorded as intentional.
     stop_agent(slot).await;
+    let lease = crate::runtime_admission::AGENT_ADMISSION.acquire(&params.driver_kind)?;
+    events.bind_runtime(slot, &params.instance, &params.driver_kind);
 
-    let native_overrides = matches!(transport, Transport::Native).then_some(native);
+    // Native transports always need their overrides (model, mode, resume);
+    // ACP transports only need the resume cursor — `session/resume` rather
+    // than `session/new`. Pass it through whenever one is set so an idle
+    // reaper restart or a Mira restart re-adopts the same agent session.
+    let native_overrides = if matches!(transport, Transport::Native) || native.resume.is_some() {
+        Some(native)
+    } else {
+        None
+    };
     let agent = match start_acp_agent_with_ports(
         driver,
         &driver_cfg,
@@ -285,6 +331,28 @@ pub async fn start_agent(
 
     let stopping = Arc::new(AtomicBool::new(false));
 
+    // How this agent's spend is billed, now that the agent is up and has
+    // told us how it authenticates. ACP agents advertise their methods;
+    // the native transports don't, so those fall back to the last probe's
+    // summary of who the CLI is signed in as. A configured key outranks
+    // both, and `refine_billing` won't downgrade past it.
+    let has_key = driver_cfg.api_key.as_ref().is_some_and(|k| !k.is_empty());
+    let advertised = agent.advertised_auth_method_ids();
+    let billing = if !advertised.is_empty() {
+        mira_acp::status::Billing::classify(has_key, &advertised)
+    } else {
+        crate::engines_api::cached_auth_summary(&params.instance)
+            .map(|summary| {
+                if has_key {
+                    mira_acp::status::Billing::Api
+                } else {
+                    mira_acp::status::Billing::from_auth_summary(&summary)
+                }
+            })
+            .unwrap_or(mira_acp::status::Billing::classify(has_key, &[]))
+    };
+    events.refine_billing(billing);
+
     // Native agents deliver events on their own channels rather than through
     // the ACP host, so forward both onto the same wire the client already
     // reads. Without this the transcript stays empty and the turn never ends.
@@ -295,7 +363,7 @@ pub async fn start_agent(
         let warn = slot.events_tx.clone();
         let agent_handle = agent.clone();
         let slot_id = slot.id.to_string();
-        let driver_kind = driver.kind().to_string();
+        let instance = params.instance.clone();
         let stopping = stopping.clone();
         let weak_slot = Arc::downgrade(slot);
         let state_c = state.clone();
@@ -303,12 +371,30 @@ pub async fn start_agent(
             loop {
                 tokio::select! {
                     biased;
-                    Some(e) = evs.recv() => port.emit(e).await,
+                    Some(e) = evs.recv() => {
+                        if stopping.load(Ordering::SeqCst) { break; }
+                        if let Some(slot) = weak_slot.upgrade() {
+                            if let mira_acp::events::MiraEvent::Limits { windows } = &e.event {
+                                *slot.message_queue.limit_reset.lock().unwrap_or_else(|e| e.into_inner()) = windows.iter().filter(|w| w.utilization >= 1.0).filter_map(|w| w.resets_at).filter(|at| *at > 0).max().map(|at| (at as u64).saturating_mul(1000));
+                            }
+                        }
+                        port.emit(e).await;
+                    },
                     Some(end) = ends.recv() => {
+                        if stopping.load(Ordering::SeqCst) { break; }
+                        let end_owner = weak_slot.upgrade();
+                        let _end_dispatch = match &end_owner { Some(slot) => Some(slot.engine.input_dispatch.lock().await), None => None };
+                        if let Some(slot) = &end_owner {
+                            slot.engine.agent_in_turn.store(false, Ordering::SeqCst);
+                            slot.publish_activity();
+                        }
                         // A usage limit is a real outcome, not a crash. Its
                         // context rides on the turn-end frame itself: sending
                         // a warning as well produced two transcript lines for
                         // one fact, and the pair read as if two things failed.
+                        if end.stop_reason == "rate_limited" {
+                            if let Some(slot) = weak_slot.upgrade() { crate::message_queue::offer_recovery(&slot, end.rate_limited.as_deref()).await; }
+                        }
                         match end.rate_limited.clone() {
                             Some(reset) => {
                                 let _ = warn.send(ServerMsg::acp_turn_end_with(
@@ -324,7 +410,7 @@ pub async fn start_agent(
                         if let Some(sid) = agent_handle.session_id().await {
                             mira_acp::agent_sessions::record(
                                 &slot_id,
-                                &driver_kind,
+                                &instance,
                                 &sid,
                             );
                         }
@@ -368,7 +454,10 @@ pub async fn start_agent(
 
     let agent_files_dir = agent.attachments_dir();
     let handle = Arc::new(SlotAgent {
+        opencode_control,
+        lease: std::sync::Mutex::new(Some(lease)),
         driver_kind: driver.kind().to_string(),
+        instance: params.instance.clone(),
         display_name: params.display_name(),
         launch: launch.redacted(),
         agent_files_dir,
@@ -381,6 +470,17 @@ pub async fn start_agent(
     // too, so two agents never share a session's permissions.
     if let Some(prev) = slot.acp_agent.write().await.replace(handle.clone()) {
         prev.stop().await;
+    }
+    // ACP agents report their session id synchronously at `session/new`
+    // (or keep it across `session/resume`), so record the cursor now:
+    // the next start — after the idle reaper or a Mira restart — resumes
+    // this same agent session instead of opening a blank one. Native
+    // agents record per-turn in their event pump; ACP ids never change
+    // mid-process, so once per start is enough.
+    if let Some(agent) = handle.agent().await {
+        if let Some(sid) = agent.session_id().await {
+            mira_acp::agent_sessions::record(&slot.id.to_string(), &handle.instance, &sid);
+        }
     }
     ensure_transcript_logger(state, slot);
     Ok(handle)
@@ -420,7 +520,10 @@ fn ensure_transcript_logger(state: &AppState, slot: &Arc<SessionSlot>) {
             let Some(slot) = weak_slot.upgrade() else {
                 break;
             };
-            slot.engine.touch();
+            if slot.engine.retired.load(Ordering::SeqCst) {
+                slot.engine.logger_started.store(false, Ordering::SeqCst);
+                break;
+            }
             // A title the agent reports for its session becomes the row's
             // name — it knows what the conversation is about.
             if let ServerMsg::AcpSessionInfo {
@@ -441,12 +544,17 @@ fn ensure_transcript_logger(state: &AppState, slot: &Arc<SessionSlot>) {
                     }
                 }
             }
-            if crate::session_engine::observe_frame(&slot.engine, &msg) {
+            let model_changed = {
+                let launch = slot.acp_launch.lock().await;
+                crate::session_engine::observe_frame(&slot.engine, &msg, launch.as_ref().map(|params| params.driver_kind.as_str()))
+            };
+            if model_changed {
                 crate::session_engine::publish(&state, &slot).await;
             }
             if !is_transcript_frame(&msg) {
                 continue;
             }
+            slot.engine.touch();
             // Only while an agent is this session's engine: provider turns
             // live in the harness history, not the sidecar.
             let driver_kind = match slot.acp_launch.lock().await.as_ref() {
@@ -468,6 +576,209 @@ fn ensure_transcript_logger(state: &AppState, slot: &Arc<SessionSlot>) {
     });
 }
 
+fn native_permission_call(
+    p: &mira_acp::native::NativePermission,
+    id: mira_core::ToolCallId,
+) -> mira_core::ToolCall {
+    let (name, arguments) = native_permission_tool_view(p);
+    mira_core::ToolCall {
+        id,
+        kind: mira_core::ToolCallKind::Function,
+        function: mira_core::ToolCallFunction {
+            name,
+            arguments: arguments.to_string(),
+        },
+    }
+}
+
+fn native_permission_tool_view(
+    p: &mira_acp::native::NativePermission,
+) -> (String, serde_json::Value) {
+    let lower = p.tool_name.to_ascii_lowercase();
+    if lower == "shell" || lower == "bash" {
+        let command = p
+            .input
+            .get("command")
+            .and_then(|v| v.as_str())
+            .or_else(|| p.input.as_str())
+            .or_else(|| p.reason.as_deref())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if !command.is_empty() {
+            return (
+                "bash".to_string(),
+                serde_json::json!({ "command": command }),
+            );
+        }
+    }
+
+    if lower == "apply_patch" || lower == "patch" || lower == "file_change" {
+        let path = p
+            .input
+            .get("path")
+            .or_else(|| p.input.get("file"))
+            .or_else(|| p.input.get("filePath"))
+            .or_else(|| p.input.get("file_path"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let patch = p
+            .input
+            .get("patch")
+            .or_else(|| p.input.get("diff"))
+            .or_else(|| p.input.get("changes"))
+            .and_then(|v| v.as_str())
+            .or_else(|| p.reason.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        if let Some(patch) = patch {
+            let mut args = serde_json::Map::new();
+            if let Some(path) = path {
+                args.insert("path".to_string(), serde_json::Value::String(path));
+            }
+            args.insert("patch".to_string(), serde_json::Value::String(patch));
+            return ("apply_patch".to_string(), serde_json::Value::Object(args));
+        }
+        if let Some(path) = path {
+            return (
+                "apply_patch".to_string(),
+                serde_json::json!({ "path": path }),
+            );
+        }
+    }
+
+    // An MCP server's confirmation through Codex: say who asks and what.
+    if p.tool_name == "mcp_elicitation" {
+        let server = p.input.get("serverName").and_then(|v| v.as_str()).unwrap_or("MCP server");
+        let message = p.input.get("message").and_then(|v| v.as_str()).unwrap_or("").trim();
+        return (
+            format!("mcp: {server}"),
+            serde_json::json!({
+                "tool_call_id": p.tool_use_id.clone().unwrap_or_else(|| p.request_id.clone()),
+                "title": if message.is_empty() { server.to_string() } else { format!("{server}: {message}") },
+                "input": { "server": server, "message": message },
+                "reason": p.reason,
+                "source": "native",
+            }),
+        );
+    }
+
+    let display_input = if p.input.as_object().is_some_and(|o| !o.is_empty()) {
+        p.input.clone()
+    } else if let Some(text) = p.input.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        serde_json::json!({ "value": text })
+    } else if let Some(reason) = p.reason.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        serde_json::json!({ "reason": reason })
+    } else {
+        serde_json::json!({})
+    };
+
+    (
+        format!("{}: {}", p.tool_name, p.tool_name),
+        serde_json::json!({
+            "tool_call_id": p.tool_use_id.clone().unwrap_or_else(|| p.request_id.clone()),
+            "title": p.tool_name,
+            "input": display_input,
+            "reason": p.reason,
+            "source": "native",
+        }),
+    )
+}
+
+/// Record a session-scoped standing grant, de-duplicated. Mira's own rule
+/// for the call shape — what stops the repeat asks without ever handing
+/// the agent a persistent grant.
+fn record_standing_approval(
+    slot: &Arc<SessionSlot>,
+    rule: &crate::session_engine::StandingApproval,
+) {
+    if let Ok(mut m) = slot.engine.standing_approvals.lock() {
+        if !m.contains(rule) {
+            m.push(rule.clone());
+        }
+    }
+}
+
+/// Codex's native picker and Mira's host gate must describe one posture.
+pub(crate) fn codex_approval_mode(mode: &str) -> Option<mira_policy::Mode> {
+    match mode {
+        "plan" => Some(mira_policy::Mode::Plan),
+        "approval-required" => Some(mira_policy::Mode::Manual),
+        "auto-accept-edits" => Some(mira_policy::Mode::Auto),
+        "auto" => Some(mira_policy::Mode::Edit),
+        "full-access" => Some(mira_policy::Mode::Yolo),
+        _ => None,
+    }
+}
+
+/// Apply the persisted chat posture and wake permissions that were already
+/// waiting. A native runtime restart must not leave the current turn parked.
+pub(crate) async fn set_agent_approval_mode(slot: &Arc<SessionSlot>, mode: mira_policy::Mode) {
+    slot.session.read().await.set_agent_approval_mode(mode).await;
+    slot.engine.approval_mode_changed.notify_waiters();
+}
+
+async fn approve_native_tool(slot: &Arc<SessionSlot>, tool: &str, call: &mira_core::ToolCall) -> bool {
+    let (allow, automatic) = wait_native_approval(
+        slot.approver.approve(call, Decision::Ask),
+        &slot.engine.approval_mode_changed,
+        || async { slot.session.read().await.config().await.agent_approval_mode },
+        tool,
+    ).await;
+    if automatic && crate::approver::resolve(&slot.pending, &call.id.to_string(), true).await.is_some() {
+        let _ = slot.events_tx.send(ServerMsg::ToolEnd {
+            result: mira_core::ToolResult::ok(call.id.clone(), "Allowed by the chat approval mode"),
+        });
+    }
+    allow
+}
+
+async fn wait_native_approval<F, C, M>(
+    approval: F, changes: &tokio::sync::Notify, mut current_mode: C, tool: &str,
+) -> (bool, bool)
+where
+    F: std::future::Future<Output = bool>,
+    C: FnMut() -> M,
+    M: std::future::Future<Output = mira_policy::Mode>,
+{
+    tokio::pin!(approval);
+    loop {
+        // Register before reading state: a mode change between the check and
+        // entering the wait must not strand an already-pending permission.
+        let changed = changes.notified();
+        tokio::pin!(changed);
+        changed.as_mut().enable();
+        if auto_approve_native_permission(current_mode().await, tool) {
+            return (true, true);
+        }
+        tokio::select! {
+            allow = &mut approval => return (allow, false),
+            _ = &mut changed => {},
+        }
+    }
+}
+
+/// Native permissions use the same per-chat posture as ACP, without a
+/// persistent agent grant. Questions and plan decisions always remain interactive.
+fn auto_approve_native_permission(mode: mira_policy::Mode, tool: &str) -> bool {
+    let tool = tool.to_ascii_lowercase();
+    if matches!(
+        tool.as_str(),
+        "askuserquestion" | "request_user_input" | "exitplanmode"
+    ) {
+        return false;
+    }
+    match mode {
+        mira_policy::Mode::Edit | mira_policy::Mode::Yolo => true,
+        mira_policy::Mode::Auto => matches!(
+            tool.as_str(),
+            "apply_patch" | "patch" | "file_change" | "edit" | "write" | "multiedit" | "notebookedit"
+        ),
+        _ => false,
+    }
+}
+
 /// Answer one request from a native agent.
 ///
 /// Three kinds of request arrive through the same gate, and each gets the
@@ -477,8 +788,10 @@ fn ensure_transcript_logger(state: &AppState, slot: &Arc<SessionSlot>) {
 /// * `ExitPlanMode` — the agent's plan, shown as Mira's plan card. Approving
 ///   lets the agent leave plan mode and build; rejecting says why.
 /// * anything else — a tool permission, through the session's approver.
-///   "Allow for this session" / "Always" become permission rules the agent
-///   adopts, so it stops asking about the same thing.
+///   "Allow for this session" becomes Mira's own standing rule for the
+///   call shape (the agent keeps getting one-shot answers); "Always" is
+///   session-scoped the same way — Mira never writes the agent's settings
+///   files to make a grant stick.
 async fn decide_native_permission(
     slot: &Arc<SessionSlot>,
     p: mira_acp::native::NativePermission,
@@ -486,26 +799,33 @@ async fn decide_native_permission(
     use mira_acp::native::PermissionDecision;
     slot.engine.touch();
     match p.tool_name.as_str() {
-        "AskUserQuestion" => ask_agent_questions(slot, &p).await,
+        "AskUserQuestion" | "request_user_input" => ask_agent_questions(slot, &p).await,
         "ExitPlanMode" => review_agent_plan(slot, &p).await,
+        "mcp_elicitation" if elicitation_has_form(&p.input) || is_url_elicitation(&p.input) => {
+            codex_elicitation(slot, &p).await
+        }
         _ => {
+            // Re-read for every request: selecting Auto everything takes
+            // effect immediately, and returning to Ask restores the gate.
+            let mode = slot.session.read().await.config().await.agent_approval_mode;
+            if auto_approve_native_permission(mode, &p.tool_name) {
+                return PermissionDecision { allow: true, ..Default::default() };
+            }
             let call_id = mira_core::ToolCallId::new();
-            let call = mira_core::ToolCall {
-                id: call_id.clone(),
-                kind: mira_core::ToolCallKind::Function,
-                function: mira_core::ToolCallFunction {
-                    name: format!("{}: {}", p.tool_name, p.tool_name),
-                    arguments: serde_json::json!({
-                        "tool_call_id": p.tool_use_id.clone().unwrap_or_else(|| p.request_id.clone()),
-                        "title": p.tool_name,
-                        "input": p.input,
-                        "reason": p.reason,
-                        "source": "native",
-                    })
-                    .to_string(),
-                },
-            };
-            let allow = slot.approver.approve(&call, Decision::Ask).await;
+            let call = native_permission_call(&p, call_id.clone());
+            let (view_name, view_args) = native_permission_tool_view(&p);
+            // A standing session grant answers before anyone is asked —
+            // same rule book as the ACP path, same one-shot reply.
+            if let Ok(m) = slot.engine.standing_approvals.lock() {
+                if crate::session_engine::standing_allows(&m, &view_name, &view_args) {
+                    return PermissionDecision {
+                        allow: true,
+                        updated_permissions: Vec::new(),
+                        ..Default::default()
+                    };
+                }
+            }
+            let allow = approve_native_tool(slot, &p.tool_name, &call).await;
             let scope = slot
                 .engine
                 .approval_scopes
@@ -519,8 +839,13 @@ async fn decide_native_permission(
                     ..Default::default()
                 };
             }
+            let standing = || crate::session_engine::StandingApproval {
+                tool: view_name.clone(),
+                target: crate::session_engine::standing_target(&view_name, &view_args),
+            };
             let updated_permissions = match scope {
                 Some(crate::protocol::ApprovalScope::Session) => {
+                    record_standing_approval(slot, &standing());
                     mira_acp::native::session_permission_updates(
                         &p.tool_name,
                         &p.suggestions,
@@ -528,7 +853,18 @@ async fn decide_native_permission(
                     )
                 }
                 Some(crate::protocol::ApprovalScope::Always) => {
-                    mira_acp::native::session_permission_updates(&p.tool_name, &p.suggestions, true)
+                    // Session-scoped like everything else here: persisting
+                    // (`localSettings`) would write the agent's own config
+                    // files, giving one chat's approval a life beyond Mira.
+                    record_standing_approval(slot, &standing());
+                    let _ = slot.events_tx.send(ServerMsg::Warning {
+                        text: "allowed for this session: Mira won't ask again, and the agent's own settings are untouched".into(),
+                    });
+                    mira_acp::native::session_permission_updates(
+                        &p.tool_name,
+                        &p.suggestions,
+                        false,
+                    )
                 }
                 _ => Vec::new(),
             };
@@ -654,13 +990,23 @@ async fn ask_agent_questions(
         };
         let mut map = serde_json::Map::new();
         let mut summary = Vec::new();
-        for (q, a) in questions.iter().zip(answers.iter()) {
+        for ((q, raw_question), a) in questions.iter().zip(raw.iter()).zip(answers.iter()) {
             let text = match &a.custom {
                 Some(c) if !c.trim().is_empty() => c.trim().to_string(),
                 _ => a.picked.join(", "),
             };
             summary.push(format!("{}: {}", q.question, text));
-            map.insert(q.question.clone(), serde_json::Value::String(text));
+            if p.tool_name == "request_user_input" {
+                if let Some(id) = raw_question.get("id").and_then(|v| v.as_str()) {
+                    let values = match &a.custom {
+                        Some(c) if !c.trim().is_empty() => vec![c.trim().to_string()],
+                        _ => a.picked.clone(),
+                    };
+                    map.insert(id.to_string(), serde_json::json!({ "answers": values }));
+                }
+            } else {
+                map.insert(q.question.clone(), serde_json::Value::String(text));
+            }
         }
         (
             PermissionDecision {
@@ -701,24 +1047,28 @@ fn form_fields(message: &str, schema: &serde_json::Value) -> Vec<FormField> {
         return Vec::new();
     };
     let s = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
-    let choices_of = |list: Option<&serde_json::Value>| -> Vec<(serde_json::Value, String, Option<String>)> {
-        list.and_then(|l| l.as_array())
-            .map(|l| {
-                l.iter()
-                    .filter_map(|o| match o {
-                        serde_json::Value::String(v) => Some((o.clone(), v.clone(), None)),
-                        _ => {
-                            let value = o.get("const")?.clone();
-                            let label = s(o, "title").unwrap_or_else(|| {
-                                value.as_str().map(str::to_string).unwrap_or_else(|| value.to_string())
-                            });
-                            Some((value, label, s(o, "description")))
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
+    let choices_of =
+        |list: Option<&serde_json::Value>| -> Vec<(serde_json::Value, String, Option<String>)> {
+            list.and_then(|l| l.as_array())
+                .map(|l| {
+                    l.iter()
+                        .filter_map(|o| match o {
+                            serde_json::Value::String(v) => Some((o.clone(), v.clone(), None)),
+                            _ => {
+                                let value = o.get("const")?.clone();
+                                let label = s(o, "title").unwrap_or_else(|| {
+                                    value
+                                        .as_str()
+                                        .map(str::to_string)
+                                        .unwrap_or_else(|| value.to_string())
+                                });
+                                Some((value, label, s(o, "description")))
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
     let mut out = Vec::new();
     for (key, prop) in props {
         // A free-text twin is folded into the field it belongs to.
@@ -730,10 +1080,18 @@ fn form_fields(message: &str, schema: &serde_json::Value) -> Vec<FormField> {
         let ty = s(prop, "type").unwrap_or_default();
         let (kind, choices) = if ty == "array" {
             let items = prop.get("items").cloned().unwrap_or_default();
-            let c = choices_of(items.get("anyOf").or(items.get("oneOf")).or(items.get("enum")));
+            let c = choices_of(
+                items
+                    .get("anyOf")
+                    .or(items.get("oneOf"))
+                    .or(items.get("enum")),
+            );
             (FieldKind::Multi, c)
         } else if prop.get("oneOf").is_some() || prop.get("enum").is_some() {
-            (FieldKind::Choice, choices_of(prop.get("oneOf").or(prop.get("enum"))))
+            (
+                FieldKind::Choice,
+                choices_of(prop.get("oneOf").or(prop.get("enum"))),
+            )
         } else if ty == "boolean" {
             (
                 FieldKind::Boolean,
@@ -752,13 +1110,22 @@ fn form_fields(message: &str, schema: &serde_json::Value) -> Vec<FormField> {
         let question = description
             .clone()
             .or_else(|| title.clone())
-            .unwrap_or_else(|| if message.is_empty() { key.clone() } else { message.to_string() });
+            .unwrap_or_else(|| {
+                if message.is_empty() {
+                    key.clone()
+                } else {
+                    message.to_string()
+                }
+            });
         let custom_key = format!("{key}_custom");
         out.push(FormField {
             key: key.clone(),
             custom_key: props.contains_key(&custom_key).then_some(custom_key),
             kind,
-            choices: choices.iter().map(|(v, l, _)| (v.clone(), l.clone())).collect(),
+            choices: choices
+                .iter()
+                .map(|(v, l, _)| (v.clone(), l.clone()))
+                .collect(),
             question: AskUserQuestion {
                 question,
                 // The title is the short topic when there's a sentence too.
@@ -789,7 +1156,12 @@ fn form_content(
         let picked: Vec<Value> = a
             .picked
             .iter()
-            .filter_map(|l| f.choices.iter().find(|(_, label)| label == l).map(|(v, _)| v.clone()))
+            .filter_map(|l| {
+                f.choices
+                    .iter()
+                    .find(|(_, label)| label == l)
+                    .map(|(v, _)| v.clone())
+            })
             .collect();
         let typed = a.custom.as_deref().map(str::trim).filter(|t| !t.is_empty());
         match f.kind {
@@ -873,12 +1245,67 @@ pub(crate) async fn ask_elicitation(
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                (ElicitationReply::Accept(form_content(&fields, &r.answers)), summary)
+                (
+                    ElicitationReply::Accept(form_content(&fields, &r.answers)),
+                    summary,
+                )
             }
             _ => (ElicitationReply::Cancel, "dismissed".to_string()),
         }
     })
     .await
+}
+
+fn is_url_elicitation(params: &serde_json::Value) -> bool {
+    params.get("mode").and_then(|m| m.as_str()) == Some("url")
+}
+
+/// Whether an MCP elicitation asks for fields, rather than a bare yes/no.
+fn elicitation_has_form(params: &serde_json::Value) -> bool {
+    params
+        .get("requestedSchema")
+        .and_then(|s| s.get("properties"))
+        .and_then(|p| p.as_object())
+        .is_some_and(|p| !p.is_empty())
+}
+
+/// An MCP server's request through Codex, answered on Mira's form card. A
+/// bare confirmation never gets here: it goes through the normal approval
+/// path, so it is asked (or auto-approved by posture) like any tool call
+/// rather than accepted silently.
+async fn codex_elicitation(
+    slot: &SessionSlot,
+    p: &mira_acp::native::NativePermission,
+) -> mira_acp::native::PermissionDecision {
+    use mira_acp::host::{ElicitationReply, ElicitationRequest};
+    use mira_acp::native::PermissionDecision;
+    if is_url_elicitation(&p.input) {
+        return PermissionDecision {
+            allow: false,
+            message: Some("Opening a link for an MCP server isn't supported in Mira yet.".into()),
+            ..Default::default()
+        };
+    }
+    let server = p.input.get("serverName").and_then(|v| v.as_str()).unwrap_or("An MCP server");
+    let message = p.input.get("message").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let req = ElicitationRequest {
+        session_id: String::new(),
+        tool_call_id: p.tool_use_id.clone(),
+        message: if message.is_empty() { format!("{server} needs some details") } else { format!("{server}: {message}") },
+        schema: p.input.get("requestedSchema").cloned().unwrap_or_default(),
+    };
+    match ask_elicitation(slot, &req).await {
+        ElicitationReply::Accept(content) => PermissionDecision {
+            allow: true,
+            updated_input: Some(serde_json::json!({ "content": content })),
+            ..Default::default()
+        },
+        ElicitationReply::Decline | ElicitationReply::Cancel => PermissionDecision {
+            allow: false,
+            message: Some("The user declined.".into()),
+            ..Default::default()
+        },
+    }
 }
 
 /// `ExitPlanMode` → Mira's plan card.
@@ -1061,6 +1488,11 @@ fn describe(e: &StartError) -> String {
 /// record keeps so a reload routes back to the same agent.
 #[derive(Clone, Debug)]
 pub struct AcpLaunchParams {
+    /// Engine instance this session runs on (`codex-work`, or the driver
+    /// kind for the default instance). Routing is by instance, never by
+    /// kind: two instances of one driver must not share resume cursors,
+    /// spend rows, or processes even when the rest matches.
+    pub instance: String,
     pub driver_kind: String,
     pub cfg: DriverConfig,
     pub mode: PermissionMode,
@@ -1073,13 +1505,32 @@ pub struct AcpLaunchParams {
 
 impl AcpLaunchParams {
     pub fn new(driver_kind: impl Into<String>, cfg: DriverConfig) -> Self {
+        let driver_kind = driver_kind.into();
+        // The default instance of a driver *is* its kind — the same rule
+        // the registry uses — so kind-only callers keep routing exactly
+        // where they always did.
+        let instance = driver_kind.clone();
         AcpLaunchParams {
-            driver_kind: driver_kind.into(),
+            instance,
+            driver_kind,
             cfg,
             mode: PermissionMode::Ask,
             model: None,
             mode_id: None,
         }
+    }
+
+    /// Params for a registry instance: the id travels with the launch so
+    /// everything downstream (cursors, spend, engine frames, reload)
+    /// routes by instance.
+    pub fn for_instance(
+        instance: impl Into<String>,
+        driver_kind: impl Into<String>,
+        cfg: DriverConfig,
+    ) -> Self {
+        let mut p = AcpLaunchParams::new(driver_kind, cfg);
+        p.instance = instance.into();
+        p
     }
 
     /// The name to show: the user's override, else the driver's own.
@@ -1094,8 +1545,11 @@ impl AcpLaunchParams {
     /// Same agent, launched the same way — a running process for `self`
     /// can serve `other` without a restart. The model is left out: it is
     /// applied separately and must not cost the user their agent process.
+    /// The instance is in: two instances may share every other field while
+    /// billing different accounts, and then they must not share a process.
     pub fn same_agent(&self, other: &AcpLaunchParams) -> bool {
-        self.driver_kind == other.driver_kind
+        self.instance == other.instance
+            && self.driver_kind == other.driver_kind
             && self.cfg.binary_path == other.cfg.binary_path
             && self.cfg.home_path == other.cfg.home_path
             && self.cfg.launch_args == other.cfg.launch_args
@@ -1120,6 +1574,7 @@ impl AcpLaunchParams {
             .filter(|(k, _)| !secret.contains(*k))
             .collect();
         serde_json::json!({
+            "instance": self.instance,
             "display_name": self.cfg.display_name,
             "binary_path": self.cfg.binary_path,
             "home_path": self.cfg.home_path,
@@ -1136,6 +1591,9 @@ impl AcpLaunchParams {
     pub fn from_meta(meta: &mira_harness::persist::AgentSessionMeta) -> Self {
         let v = meta.launch.clone().unwrap_or(serde_json::Value::Null);
         let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
+        let instance = s("instance")
+            .or_else(|| meta.instance.clone())
+            .unwrap_or_else(|| meta.driver_kind.clone());
         let cfg = DriverConfig {
             enabled: true,
             display_name: s("display_name"),
@@ -1164,6 +1622,7 @@ impl AcpLaunchParams {
             ..Default::default()
         };
         AcpLaunchParams {
+            instance,
             driver_kind: meta.driver_kind.clone(),
             cfg,
             mode: PermissionMode::Ask,
@@ -1177,33 +1636,63 @@ impl AcpLaunchParams {
 ///
 /// Precedence, most specific wins:
 /// 1. `instance` — an engine registry entry (`mira.yaml`'s `engines:`),
-///    handed in already resolved as `(driver kind, config)`.
+///    handed in already resolved.
 /// 2. The slot's recorded launch params — the settings the previous
 ///    chat ran with — when the client named that same driver or named
 ///    none at all. This is what makes "new chat, same agent" work.
-/// 3. A bare driver kind with default config — the legacy path.
+/// 3. A bare driver kind with default config — the legacy path, routed
+///    at that kind's default instance.
 ///
 /// `Err` when there is nothing to start from.
 pub fn resolve_start_params(
     recorded: Option<AcpLaunchParams>,
-    instance: Option<(String, DriverConfig)>,
+    instance: Option<InstanceStart>,
     driver: Option<&str>,
-) -> Result<(String, DriverConfig), String> {
-    if let Some((kind, cfg)) = instance {
-        return Ok((kind, cfg));
+) -> Result<ResolvedAgentStart, String> {
+    if let Some(inst) = instance {
+        return Ok(ResolvedAgentStart {
+            instance: inst.instance,
+            kind: inst.kind,
+            cfg: inst.cfg,
+        });
     }
     if let Some(rec) = &recorded {
         let same = driver.is_none_or(|d| d == rec.driver_kind);
         if same {
-            return Ok((rec.driver_kind.clone(), rec.cfg.clone()));
+            return Ok(ResolvedAgentStart {
+                instance: rec.instance.clone(),
+                kind: rec.driver_kind.clone(),
+                cfg: rec.cfg.clone(),
+            });
         }
     }
     match driver {
-        Some(d) => Ok((d.to_string(), DriverConfig::default())),
+        Some(d) => Ok(ResolvedAgentStart {
+            instance: d.to_string(),
+            kind: d.to_string(),
+            cfg: DriverConfig::default(),
+        }),
         None => Err("no agent is configured for this session — pick one in the \
                      model picker's Agent tab"
             .to_string()),
     }
+}
+
+/// A registry instance handed to [`resolve_start_params`] already
+/// resolved: its id, its driver kind, and its launch config.
+pub struct InstanceStart {
+    pub instance: String,
+    pub kind: String,
+    pub cfg: DriverConfig,
+}
+
+/// What an `AcpStart` resolved to: the instance to route by, the driver
+/// to launch, and the config to launch it with.
+#[derive(Debug)]
+pub struct ResolvedAgentStart {
+    pub instance: String,
+    pub kind: String,
+    pub cfg: DriverConfig,
 }
 
 /// One recorded turn, for the revert picker: number, time, opening words,
@@ -1266,6 +1755,15 @@ pub async fn restart_native_agent(
     slot: &Arc<SessionSlot>,
     overrides: mira_acp::native::NativeOverrides,
 ) -> Result<Arc<SlotAgent>, String> {
+    let _dispatch = slot.engine.dispatch_lock.lock().await;
+    restart_native_agent_locked(state, slot, overrides).await
+}
+
+async fn restart_native_agent_locked(
+    state: &AppState,
+    slot: &Arc<SessionSlot>,
+    overrides: mira_acp::native::NativeOverrides,
+) -> Result<Arc<SlotAgent>, String> {
     let _guard = slot.engine.start_lock.lock().await;
     let params = {
         let mut launch = slot.acp_launch.lock().await;
@@ -1294,9 +1792,24 @@ pub async fn restart_native_agent(
     if overrides.resume.is_none() {
         overrides.resume = sid;
     }
+    // Work the old process owns dies with it; tell the agent once it's back.
+    let doomed: Vec<_> = slot
+        .engine
+        .activity
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .work_snapshot()
+        .into_iter()
+        .filter(|w| w.status.is_active())
+        .collect();
     *slot.engine.phase.lock().await = crate::session_engine::AgentPhase::Starting;
     crate::session_engine::publish(state, slot).await;
     let result = start_agent(state, slot, &params, Some(overrides)).await;
+    if result.is_ok() {
+        if let Some(note) = crate::session_engine::restart_note(&doomed) {
+            crate::session_engine::note_for_agent(slot, note).await;
+        }
+    }
     *slot.engine.phase.lock().await = match &result {
         Ok(_) => crate::session_engine::AgentPhase::Idle,
         Err(e) => crate::session_engine::AgentPhase::Failed(e.clone()),
@@ -1315,7 +1828,13 @@ fn is_transcript_frame(msg: &ServerMsg) -> bool {
     use ServerMsg::*;
     matches!(
         msg,
-        AcpText { .. }
+        ToolStart { .. }
+            | ToolEnd { .. }
+            | StreamActivity { .. }
+            | AcpMessageMetadata { .. }
+            | AcpText { .. }
+            | AcpTextSnapshot { .. }
+            | AcpToolOutputDelta { .. }
             | AcpThought { .. }
             | AcpToolCall { .. }
             | AcpToolCallUpdate { .. }
@@ -1330,6 +1849,7 @@ fn is_transcript_frame(msg: &ServerMsg) -> bool {
             | AcpTurnEnd { .. }
             | AcpUnmodelled { .. }
             | AcpModeChanged { .. }
+            | HtmlRender { .. }
             | Warning { .. }
             | Error { .. }
     )
@@ -1349,6 +1869,7 @@ pub async fn revert_agent_turn(
     slot: &std::sync::Arc<SessionSlot>,
     turn: u64,
 ) -> Result<String, String> {
+    let _dispatch = slot.engine.dispatch_lock.lock().await;
     if turn < 1 {
         return Err("turn numbers start at 1".to_string());
     }
@@ -1389,7 +1910,7 @@ pub async fn revert_agent_turn(
     // exactly what was just left behind.
     if let Some(params) = slot.acp_launch.lock().await.clone() {
         if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
-            mira_acp::agent_sessions::remove_in(&home, &slot.id.to_string(), &params.driver_kind);
+            mira_acp::agent_sessions::remove_in(&home, &slot.id.to_string(), &params.instance);
         }
     }
 
@@ -1399,7 +1920,8 @@ pub async fn revert_agent_turn(
     // revert to one user action instead of two.
     stop_agent(slot).await;
     let handle =
-        restart_native_agent(state, slot, mira_acp::native::NativeOverrides::default()).await?;
+        restart_native_agent_locked(state, slot, mira_acp::native::NativeOverrides::default())
+            .await?;
     Ok(format!(
         "{}; restarted {}",
         notes.join("; "),
@@ -1411,6 +1933,16 @@ pub async fn revert_agent_turn(
 pub async fn stop_agent(slot: &Arc<SessionSlot>) -> bool {
     // The chat's tool-server token stays: the next agent here reuses it
     // (it ends when the chat is deleted, or goes unused for 12 h).
+    slot.engine.generation.fetch_add(1, Ordering::SeqCst);
+    slot.engine.agent_in_turn.store(false, Ordering::SeqCst);
+    let cancelled=slot.engine.activity.lock().unwrap_or_else(|e|e.into_inner()).cancel_work();
+    for work in cancelled {let _=slot.events_tx.send(crate::protocol::ServerMsg::RuntimeWorkUpdated {work});}
+    *slot
+        .engine
+        .activity
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Default::default();
+    slot.publish_activity();
     match slot.acp_agent.write().await.take() {
         Some(prev) => {
             prev.stop().await;
@@ -1428,7 +1960,10 @@ mod privilege_tests {
     /// A `SlotAgent` with only the fields the mode check reads.
     fn agent(kind: &str) -> Arc<SlotAgent> {
         Arc::new(SlotAgent {
+            opencode_control: None,
+            lease: std::sync::Mutex::new(None),
             driver_kind: kind.to_string(),
+            instance: kind.to_string(),
             display_name: kind.to_string(),
             launch: String::new(),
             agent_files_dir: None,
@@ -1565,8 +2100,14 @@ mod privilege_tests {
         let content = form_content(
             &f,
             &[
-                AskUserAnswer { picked: vec![], custom: Some("Both, carefully".into()) },
-                AskUserAnswer { picked: vec!["Web".into(), "iOS".into()], custom: None },
+                AskUserAnswer {
+                    picked: vec![],
+                    custom: Some("Both, carefully".into()),
+                },
+                AskUserAnswer {
+                    picked: vec!["Web".into(), "iOS".into()],
+                    custom: None,
+                },
             ],
         );
         assert_eq!(content["q0_custom"], "Both, carefully");
@@ -1574,7 +2115,16 @@ mod privilege_tests {
         assert_eq!(content["q1"], serde_json::json!(["web", "ios"]));
         let picked = form_content(
             &f,
-            &[AskUserAnswer { picked: vec!["Patch".into()], custom: None }, AskUserAnswer { picked: vec![], custom: None }],
+            &[
+                AskUserAnswer {
+                    picked: vec!["Patch".into()],
+                    custom: None,
+                },
+                AskUserAnswer {
+                    picked: vec![],
+                    custom: None,
+                },
+            ],
         );
         assert_eq!(picked["q0"], "Patch");
         assert!(picked.get("q1").is_none());
@@ -1608,7 +2158,8 @@ mod resolve_start_tests {
     use super::*;
 
     fn recorded(kind: &str) -> AcpLaunchParams {
-        AcpLaunchParams::new(
+        AcpLaunchParams::for_instance(
+            kind,
             kind,
             DriverConfig {
                 display_name: Some("Codex (work)".to_string()),
@@ -1616,6 +2167,14 @@ mod resolve_start_tests {
                 ..Default::default()
             },
         )
+    }
+
+    fn instance_start(instance: &str, kind: &str, cfg: DriverConfig) -> InstanceStart {
+        InstanceStart {
+            instance: instance.to_string(),
+            kind: kind.to_string(),
+            cfg,
+        }
     }
 
     #[test]
@@ -1647,6 +2206,7 @@ mod resolve_start_tests {
 
         let back = AcpLaunchParams::from_meta(&mira_harness::persist::AgentSessionMeta {
             driver_kind: "claude-code".into(),
+            instance: None,
             model: None,
             active: true,
             launch: Some(persisted),
@@ -1685,31 +2245,35 @@ mod resolve_start_tests {
     fn a_new_session_inherits_the_previous_sessions_settings() {
         // No driver, no instance: the bare `AcpStart` the UI sends for a
         // fresh chat resolves to exactly what the last chat ran.
-        let (kind, cfg) = resolve_start_params(Some(recorded("codex")), None, None).unwrap();
-        assert_eq!(kind, "codex");
-        assert_eq!(cfg.display_name.as_deref(), Some("Codex (work)"));
+        let r = resolve_start_params(Some(recorded("codex")), None, None).unwrap();
+        assert_eq!(r.kind, "codex");
+        assert_eq!(r.instance, "codex");
+        assert_eq!(r.cfg.display_name.as_deref(), Some("Codex (work)"));
         assert_eq!(
-            cfg.home_path.as_deref(),
+            r.cfg.home_path.as_deref(),
             Some(std::path::Path::new("/tmp/codex-home"))
         );
     }
 
     #[test]
     fn naming_the_same_driver_still_uses_the_recorded_settings() {
-        let (kind, cfg) =
-            resolve_start_params(Some(recorded("codex")), None, Some("codex")).unwrap();
-        assert_eq!(kind, "codex");
-        assert_eq!(cfg.display_name.as_deref(), Some("Codex (work)"));
+        let r = resolve_start_params(Some(recorded("codex")), None, Some("codex")).unwrap();
+        assert_eq!(r.kind, "codex");
+        assert_eq!(r.instance, "codex");
+        assert_eq!(r.cfg.display_name.as_deref(), Some("Codex (work)"));
     }
 
     #[test]
     fn naming_a_different_driver_starts_that_driver_fresh() {
         // The user picked a different agent in the picker: last chat's
         // config must not leak into it.
-        let (kind, cfg) =
-            resolve_start_params(Some(recorded("codex")), None, Some("claude-code")).unwrap();
-        assert_eq!(kind, "claude-code");
-        assert_eq!(cfg.display_name, None, "fresh driver gets a default config");
+        let r = resolve_start_params(Some(recorded("codex")), None, Some("claude-code")).unwrap();
+        assert_eq!(r.kind, "claude-code");
+        assert_eq!(r.instance, "claude-code");
+        assert_eq!(
+            r.cfg.display_name, None,
+            "fresh driver gets a default config"
+        );
     }
 
     #[test]
@@ -1718,14 +2282,25 @@ mod resolve_start_tests {
             display_name: Some("From registry".to_string()),
             ..Default::default()
         };
-        let (kind, cfg) = resolve_start_params(
+        let r = resolve_start_params(
             Some(recorded("codex")),
-            Some(("codex-work".to_string(), cfg)),
+            Some(instance_start("codex-work", "codex", cfg)),
             Some("codex"),
         )
         .unwrap();
-        assert_eq!(kind, "codex-work");
-        assert_eq!(cfg.display_name.as_deref(), Some("From registry"));
+        assert_eq!(r.kind, "codex");
+        assert_eq!(r.instance, "codex-work");
+        assert_eq!(r.cfg.display_name.as_deref(), Some("From registry"));
+    }
+
+    #[test]
+    fn a_bare_driver_routes_at_its_default_instance() {
+        // Legacy path: no instance id anywhere, so the instance *is* the
+        // kind. Cursors and spend keyed by instance keep working because
+        // the key is unchanged.
+        let r = resolve_start_params(None, None, Some("grok")).unwrap();
+        assert_eq!(r.kind, "grok");
+        assert_eq!(r.instance, "grok");
     }
 
     #[test]
@@ -1733,7 +2308,152 @@ mod resolve_start_tests {
         let e = resolve_start_params(None, None, None).unwrap_err();
         assert!(e.contains("no agent is configured"), "{e}");
         // And a bare driver still works the legacy way.
-        let (kind, _) = resolve_start_params(None, None, Some("grok")).unwrap();
-        assert_eq!(kind, "grok");
+        let r = resolve_start_params(None, None, Some("grok")).unwrap();
+        assert_eq!(r.kind, "grok");
+    }
+
+    #[test]
+    fn same_agent_compares_instances_not_just_config() {
+        // Two instances may share every launch field while billing
+        // different accounts: sharing a process would cross the streams.
+        let mut a = recorded("codex");
+        a.instance = "codex".into();
+        let mut b = recorded("codex");
+        b.instance = "codex-work".into();
+        assert!(
+            !a.same_agent(&b),
+            "different instances must not share a process"
+        );
+        b.instance = "codex".into();
+        assert!(a.same_agent(&b), "same instance still reuses the process");
+    }
+
+    #[test]
+    fn instance_survives_a_reload_without_its_secrets() {
+        let mut p = AcpLaunchParams::for_instance(
+            "codex-work",
+            "codex",
+            DriverConfig {
+                home_path: Some(std::path::PathBuf::from("/tmp/codex-home")),
+                api_key: Some("sk-secret".into()),
+                ..Default::default()
+            },
+        );
+        p.model = Some("gpt-5".into());
+        let back = AcpLaunchParams::from_meta(&mira_harness::persist::AgentSessionMeta {
+            driver_kind: "codex".into(),
+            instance: None,
+            model: None,
+            active: true,
+            launch: Some(p.to_persisted()),
+        });
+        assert_eq!(back.instance, "codex-work");
+        assert_eq!(back.driver_kind, "codex");
+        // And a record from before instances existed reloads at the
+        // default instance, which is the kind.
+        let legacy = AcpLaunchParams::from_meta(&mira_harness::persist::AgentSessionMeta {
+            driver_kind: "codex".into(),
+            instance: None,
+            model: None,
+            active: true,
+            launch: None,
+        });
+        assert_eq!(legacy.instance, "codex");
+    }
+}
+
+#[cfg(test)]
+mod native_permission_view_tests {
+    use super::*;
+
+    fn perm(tool: &str, input: serde_json::Value) -> mira_acp::native::NativePermission {
+        mira_acp::native::NativePermission {
+            request_id: "r".into(),
+            tool_name: tool.into(),
+            input,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_command_resumes_when_chat_switches_to_auto_everything() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let automatic = AtomicBool::new(false);
+        let changes = tokio::sync::Notify::new();
+        let wait = wait_native_approval(std::future::pending(), &changes,
+            || std::future::ready(if automatic.load(Ordering::SeqCst) {
+                mira_policy::Mode::Edit
+            } else { mira_policy::Mode::Auto }), "Bash");
+        tokio::pin!(wait);
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(10), &mut wait).await.is_err());
+        automatic.store(true, Ordering::SeqCst);
+        changes.notify_waiters();
+        assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(1), wait).await.unwrap(), (true, true));
+    }
+
+    #[tokio::test]
+    async fn automatic_posture_keeps_questions_interactive() {
+        let changes = tokio::sync::Notify::new();
+        assert_eq!(wait_native_approval(std::future::ready(false), &changes,
+            || std::future::ready(mira_policy::Mode::Edit), "request_user_input").await, (false, false));
+    }
+
+    #[test]
+    fn codex_picker_and_host_gate_have_the_same_posture() {
+        use mira_policy::Mode;
+        assert_eq!(codex_approval_mode("auto"), Some(Mode::Edit));
+        assert_eq!(codex_approval_mode("auto-accept-edits"), Some(Mode::Auto));
+        assert_eq!(codex_approval_mode("approval-required"), Some(Mode::Manual));
+        assert_eq!(codex_approval_mode("plan"), Some(Mode::Plan));
+        assert_eq!(codex_approval_mode("full-access"), Some(Mode::Yolo));
+        assert_eq!(codex_approval_mode("unknown"), None);
+    }
+
+    #[test]
+    fn native_modes_gate_actions_but_never_answer_questions_or_plans() {
+        use mira_policy::Mode;
+        for tool in ["shell", "Bash", "apply_patch", "Edit", "Write", "permission", "unknown"] {
+            assert!(!auto_approve_native_permission(Mode::Manual, tool));
+            assert!(!auto_approve_native_permission(Mode::Plan, tool));
+            assert!(auto_approve_native_permission(Mode::Edit, tool));
+            assert!(auto_approve_native_permission(Mode::Yolo, tool));
+        }
+        for tool in ["apply_patch", "patch", "file_change", "Edit", "Write", "MultiEdit", "NotebookEdit"] {
+            assert!(auto_approve_native_permission(Mode::Auto, tool));
+        }
+        for tool in ["shell", "Bash", "permission", "unknown"] {
+            assert!(!auto_approve_native_permission(Mode::Auto, tool));
+        }
+        for mode in [Mode::Manual, Mode::Auto, Mode::Edit, Mode::Yolo] {
+            for tool in ["AskUserQuestion", "request_user_input", "ExitPlanMode"] {
+                assert!(!auto_approve_native_permission(mode, tool));
+            }
+        }
+    }
+
+    #[test]
+    fn shell_string_input_renders_as_command() {
+        let (_name, args) =
+            native_permission_tool_view(&perm("shell", serde_json::json!("ls -la")));
+        assert_eq!(args, serde_json::json!({ "command": "ls -la" }));
+    }
+
+    #[test]
+    fn patch_metadata_only_does_not_render_protocol_json() {
+        let p = mira_acp::native::NativePermission {
+            request_id: "r".into(),
+            tool_name: "apply_patch".into(),
+            input: serde_json::json!({ "threadId": "t", "turnId": "u", "itemId": "i" }),
+            reason: Some("*** Begin Patch\n*** Update File: README.md\n*** End Patch".into()),
+            ..Default::default()
+        };
+        let (name, args) = native_permission_tool_view(&p);
+        assert_eq!(name, "apply_patch");
+        assert!(args.get("threadId").is_none());
+        assert!(args
+            .get("patch")
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .contains("README.md"));
     }
 }

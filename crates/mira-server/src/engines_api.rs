@@ -42,8 +42,7 @@ struct ExternalCache {
 static EXTERNAL: Mutex<Option<ExternalCache>> = Mutex::new(None);
 /// Results of the sweep in progress, by instance, so each agent shows its
 /// real state as soon as its own probe ends.
-static PARTIAL: Mutex<Option<std::collections::HashMap<String, EngineSnapshot>>> =
-    Mutex::new(None);
+static PARTIAL: Mutex<Option<std::collections::HashMap<String, EngineSnapshot>>> = Mutex::new(None);
 static REFRESH_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Serialize)]
@@ -74,7 +73,7 @@ pub async fn list_engines(
                 .into_response()
         }
     };
-    let engines = state.engines.clone();
+    let engines = state.engines.current();
 
     let mut out = Vec::new();
 
@@ -120,18 +119,17 @@ pub async fn list_engines(
         }
         None => {
             spawn_refresh(state);
-            let partial = PARTIAL.lock().ok().and_then(|g| g.clone()).unwrap_or_default();
-            out.extend(
-                engines
-                    .instances()
-                    .filter(|i| !i.is_native())
-                    .map(|i| {
-                        partial
-                            .get(i.id.as_str())
-                            .cloned()
-                            .unwrap_or_else(|| presence_only(i))
-                    }),
-            );
+            let partial = PARTIAL
+                .lock()
+                .ok()
+                .and_then(|g| g.clone())
+                .unwrap_or_default();
+            out.extend(engines.instances().filter(|i| !i.is_native()).map(|i| {
+                partial
+                    .get(i.id.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| presence_only(i))
+            }));
             false
         }
     };
@@ -174,12 +172,18 @@ fn presence_only(inst: &mira_engine::EngineInstance) -> EngineSnapshot {
         auth: None,
         install_hint: None,
         launch: None,
+        credential_note: None,
     }
 }
 
 /// Probe every external instance off the request path and cache the
 /// result. One at a time — a fleet of Node-based agents starting
 /// concurrently is exactly the jank the probe design avoids.
+///
+/// Background depth only: the sweep learns presence, version and CLI auth
+/// without opening an authenticated catalog session (no app-server
+/// handshake, no `account/read`). A chat start or an explicit catalog
+/// refresh runs the full probe.
 fn spawn_refresh(state: AppState) {
     if REFRESH_IN_FLIGHT.swap(true, Ordering::SeqCst) {
         return;
@@ -203,12 +207,15 @@ fn spawn_refresh(state: AppState) {
         // hold the flag (and the cache) hostage.
         match tokio::time::timeout(
             Duration::from_secs(300),
-            state.engines.snapshot_externals_with(|snap| {
-                if let Ok(mut p) = PARTIAL.lock() {
-                    p.get_or_insert_with(Default::default)
-                        .insert(snap.instance.to_string(), snap.clone());
-                }
-            }),
+            state.engines.current().snapshot_externals_with(
+                |snap| {
+                    if let Ok(mut p) = PARTIAL.lock() {
+                        p.get_or_insert_with(Default::default)
+                            .insert(snap.instance.to_string(), snap.clone());
+                    }
+                },
+                mira_engine::registry::ProbeDepth::Background,
+            ),
         )
         .await
         {
@@ -224,9 +231,14 @@ fn spawn_refresh(state: AppState) {
                 // Keep what finished, and say so for the rest — leaving them
                 // on "checking…" reads as a hang that never ends.
                 tracing::warn!("external engine probe sweep timed out");
-                let partial = PARTIAL.lock().ok().and_then(|g| g.clone()).unwrap_or_default();
+                let partial = PARTIAL
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.clone())
+                    .unwrap_or_default();
                 let snapshots = state
                     .engines
+                    .current()
                     .instances()
                     .filter(|i| !i.is_native())
                     .map(|i| {
@@ -250,6 +262,65 @@ fn spawn_refresh(state: AppState) {
             }
         }
     });
+}
+
+/// The last probed auth summary for an instance, from the cached sweep.
+///
+/// Native transports (Claude's CLI, Codex's app-server) don't advertise
+/// auth methods on the wire, so their billing classification comes from
+/// this instead — the probe already asked the agent's own CLI who it's
+/// signed in as. `None` when the sweep hasn't run or the agent reports
+/// nothing, which callers read as unknown.
+pub fn cached_auth_summary(instance: &str) -> Option<String> {
+    EXTERNAL
+        .lock()
+        .ok()?
+        .as_ref()?
+        .snapshots
+        .iter()
+        .find(|s| s.instance.as_str() == instance)
+        .and_then(|s| s.auth.clone())
+}
+
+fn external_models_cached(instance: &str) -> Option<Vec<mira_ai::ModelInfo>> {
+    if let Some(models) = EXTERNAL
+        .lock()
+        .ok()
+        .and_then(|g| {
+            let hit = g.as_ref()?;
+            if hit.at.elapsed() >= EXTERNAL_TTL {
+                return None;
+            }
+            hit.snapshots
+                .iter()
+                .find(|s| s.instance.as_str() == instance)
+                .map(|s| s.models.clone())
+        })
+        .filter(|m| !m.is_empty())
+    {
+        return Some(models);
+    }
+    PARTIAL
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref()?.get(instance).map(|s| s.models.clone()))
+        .filter(|m| !m.is_empty())
+}
+
+fn remember_external_snapshot(snapshot: EngineSnapshot) {
+    if let Ok(mut partial) = PARTIAL.lock() {
+        partial
+            .get_or_insert_with(Default::default)
+            .insert(snapshot.instance.to_string(), snapshot.clone());
+    }
+    if let Ok(mut cache) = EXTERNAL.lock() {
+        let hit = cache.get_or_insert_with(|| ExternalCache {
+            at: Instant::now(),
+            snapshots: Vec::new(),
+        });
+        hit.snapshots.retain(|s| s.instance != snapshot.instance);
+        hit.snapshots.push(snapshot);
+    }
 }
 
 /// Per-instance catalogs for providers other than the active one.
@@ -282,6 +353,35 @@ pub async fn instance_models(
     if let Some(models) = instance_catalog_cached(&instance) {
         return Json(json!({ "models": models })).into_response();
     }
+    if let Some(inst) = state.engines.current().get(instance.as_str()) {
+        if !inst.is_native() {
+            if let Some(models) = external_models_cached(instance.as_str()) {
+                return Json(json!({ "models": models })).into_response();
+            }
+            return match tokio::time::timeout(
+                Duration::from_secs(75),
+                state.engines.current().snapshot_external(instance.as_str()),
+            )
+            .await
+            {
+                Ok(Some(snapshot)) => {
+                    remember_external_snapshot(snapshot.clone());
+                    Json(json!({ "models": snapshot.models })).into_response()
+                }
+                Ok(None) => (
+                    axum::http::StatusCode::NOT_FOUND,
+                    Json(json!({ "error": format!("unknown engine instance `{}`", instance) })),
+                )
+                    .into_response(),
+                Err(_) => (
+                    axum::http::StatusCode::GATEWAY_TIMEOUT,
+                    Json(json!({ "error": format!("model probe for `{}` timed out", instance) })),
+                )
+                    .into_response(),
+            };
+        }
+    }
+
     let cfg = mira_config::MiraConfig::load_global().unwrap_or_default();
     let provider = match mira_engine::native::build_native_provider(&cfg, &instance) {
         Ok(p) => p,

@@ -3,10 +3,11 @@
 //! `from_config` derives the instance set; `snapshot_native` and
 //! `snapshot_external` turn one instance into an [`EngineSnapshot`].
 //! Native probes are cheap (config reads, no spawn) and safe to run
-//! inline on a request path. External probes launch the agent and
-//! complete an `initialize` handshake — callers run those in the
-//! background and serve the last known result (see the server's
-//! engines API for the cache).
+//! inline on a request path. External probes come in two depths: the
+//! background sweep learns what it can without opening an authenticated
+//! catalog session, while an explicit refresh runs the full probe.
+//! Callers run those in the background and serve the last known result
+//! (see the server's engines API for the cache).
 
 use std::collections::BTreeMap;
 
@@ -22,6 +23,16 @@ use crate::snapshot::{EngineFlavor, EngineSnapshot, EngineState};
 #[derive(Clone, Debug, Default)]
 pub struct EngineRegistry {
     instances: BTreeMap<EngineId, EngineInstance>,
+}
+
+/// How far an external probe may go.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProbeDepth {
+    /// Background sweep: detection without an authenticated catalog
+    /// session (no app-server handshake, no `account/read`).
+    Background,
+    /// Explicit refresh or chat start: the full probe including catalog.
+    Full,
 }
 
 impl EngineRegistry {
@@ -91,6 +102,7 @@ impl EngineRegistry {
             auth: None,
             install_hint: None,
             launch: None,
+            credential_note: None,
         })
     }
 
@@ -98,6 +110,22 @@ impl EngineRegistry {
     /// handshake. Expensive (spawns a process); run it off the request
     /// path and cache.
     pub async fn snapshot_external(&self, id: &str) -> Option<EngineSnapshot> {
+        self.snapshot_external_with_depth(id, ProbeDepth::Full)
+            .await
+    }
+
+    /// The background-sweep variant: no authenticated catalog session.
+    /// See [`mira_acp::status::probe_background`].
+    pub async fn snapshot_external_background(&self, id: &str) -> Option<EngineSnapshot> {
+        self.snapshot_external_with_depth(id, ProbeDepth::Background)
+            .await
+    }
+
+    pub async fn snapshot_external_with_depth(
+        &self,
+        id: &str,
+        depth: ProbeDepth,
+    ) -> Option<EngineSnapshot> {
         let inst = self.instances.get(id)?;
         if inst.is_native() {
             return None;
@@ -124,15 +152,43 @@ impl EngineRegistry {
                 auth: None,
                 install_hint: None,
                 launch: None,
+                credential_note: None,
             });
         };
         let cfg = driver_config_for(inst);
-        let mut status =
-            mira_acp::probe(d.as_ref(), &cfg, mira_acp::driver::PermissionMode::Ask).await;
+        let mut status = match depth {
+            ProbeDepth::Full => {
+                mira_acp::probe(d.as_ref(), &cfg, mira_acp::driver::PermissionMode::Ask).await
+            }
+            ProbeDepth::Background => {
+                mira_acp::status::probe_background(
+                    d.as_ref(),
+                    &cfg,
+                    mira_acp::driver::PermissionMode::Ask,
+                )
+                .await
+            }
+        };
         // An instance-level display override wins over the driver's own.
         if let Some(name) = &inst.display_name {
             status.display_name = name.clone();
         }
+        // The probe already fetched the account-level catalog (Codex:
+        // `model/list`). Carry it so the picker can show real rows instead
+        // of "its model list appears once it has started". Previously this
+        // was dropped (`models: Vec::new()`), so external rows never listed
+        // models until a chat started one.
+        let models: Vec<ModelInfo> = status
+            .models
+            .iter()
+            .map(|m| ModelInfo {
+                id: m.value.clone(),
+                display_name: Some(m.label.clone()),
+                owned_by: None,
+                context_length: None,
+                capabilities: None,
+            })
+            .collect();
         Some(EngineSnapshot {
             instance: inst.id.clone(),
             driver: inst.driver.clone(),
@@ -146,12 +202,39 @@ impl EngineRegistry {
                 }
                 mira_acp::status::AgentState::Failed { reason } => EngineState::Failed { reason },
             },
-            models: Vec::new(),
+            models,
             default_model: inst.model.clone(),
             auth: status.auth.clone(),
             install_hint: status.install_hint.clone(),
             launch: Some(status.launch.clone()),
+            credential_note: self.credential_sharing_note(inst),
         })
+    }
+
+    /// Warn when two enabled instances of one driver would sign in as one
+    /// account: same driver and same credential boundary means nothing
+    /// separates them, however different the rest of their config is.
+    /// Returns the picker-facing note, if any.
+    fn credential_sharing_note(&self, inst: &EngineInstance) -> Option<String> {
+        if inst.is_native() || !inst.enabled {
+            return None;
+        }
+        let d = mira_acp::drivers::by_kind(inst.driver.as_str())?;
+        let mine = d.credential_boundary(&driver_config_for(inst));
+        let others: Vec<String> = self
+            .instances
+            .values()
+            .filter(|o| o.id != inst.id && !o.is_native() && o.enabled && o.driver == inst.driver)
+            .filter(|o| {
+                mira_acp::drivers::by_kind(o.driver.as_str())
+                    .is_some_and(|od| od.credential_boundary(&driver_config_for(o)) == mine)
+            })
+            .map(|o| o.display_name.clone().unwrap_or_else(|| o.id.to_string()))
+            .collect();
+        if others.is_empty() {
+            return None;
+        }
+        Some(format!("shares credentials with {}", others.join(", ")))
     }
 
     /// Probe every external instance. Each probe is slow, so a few
@@ -159,14 +242,18 @@ impl EngineRegistry {
     /// simultaneously is the jank the cap avoids. A per-instance ceiling
     /// keeps one wedged agent from stalling the whole sweep.
     pub async fn snapshot_externals(&self) -> Vec<EngineSnapshot> {
-        self.snapshot_externals_with(|_| {}).await
+        self.snapshot_externals_with(|_| {}, ProbeDepth::Full).await
     }
 
     /// [`Self::snapshot_externals`], reporting each agent as soon as its
     /// probe ends — so a picker can show Claude Code ready while a slower
     /// agent is still starting, instead of "checking…" for the whole sweep.
     /// The common agents go first.
-    pub async fn snapshot_externals_with<F>(&self, on_each: F) -> Vec<EngineSnapshot>
+    pub async fn snapshot_externals_with<F>(
+        &self,
+        on_each: F,
+        depth: ProbeDepth,
+    ) -> Vec<EngineSnapshot>
     where
         F: Fn(&EngineSnapshot) + Sync,
     {
@@ -187,7 +274,12 @@ impl EngineRegistry {
         let on_each = &on_each;
         stream::iter(ids.into_iter().map(|(id, _)| id))
             .map(move |id| async move {
-                let snap = match tokio::time::timeout(PER_INSTANCE_CEILING, self.snapshot_external(&id)).await {
+                let snap = match tokio::time::timeout(
+                    PER_INSTANCE_CEILING,
+                    self.snapshot_external_with_depth(&id, depth),
+                )
+                .await
+                {
                     Ok(snap) => snap,
                     Err(_) => {
                         // A wedged probe must still say something: vanishing
@@ -213,6 +305,7 @@ impl EngineRegistry {
                             auth: None,
                             install_hint: None,
                             launch: None,
+                            credential_note: None,
                         })
                     }
                 };
@@ -323,5 +416,40 @@ mod tests {
         let inst = reg.get("myfork").unwrap();
         assert_eq!(inst.driver.as_str(), "no-such-driver");
         assert_eq!(inst.display_name.as_deref(), None);
+    }
+
+    #[test]
+    fn two_default_instances_of_one_driver_share_credentials() {
+        // `codex` and `codex-work` with no home and no key resolve to the
+        // same ambient boundary: one account wearing two names.
+        let c = cfg("default_provider: openai\n\
+             engines:\n  codex-work:\n    driver: codex\n");
+        let reg = EngineRegistry::from_config(&c);
+        let note = reg
+            .credential_sharing_note(reg.get("codex-work").unwrap())
+            .expect("sharing must be reported");
+        assert!(note.contains("Codex"), "{note}");
+        // ...unless the second instance brings its own credentials.
+        let c = cfg("default_provider: openai\n\
+             engines:\n  codex-work:\n    driver: codex\n    config:\n      home_path: /tmp/codex-work\n");
+        let reg = EngineRegistry::from_config(&c);
+        assert!(reg
+            .credential_sharing_note(reg.get("codex-work").unwrap())
+            .is_none());
+        assert!(reg
+            .credential_sharing_note(reg.get("codex").unwrap())
+            .is_none());
+    }
+
+    #[test]
+    fn sharing_ignores_disabled_instances_and_other_drivers() {
+        let c = cfg("default_provider: openai\n\
+             engines:\n  codex-work:\n    driver: codex\n    enabled: false\n");
+        let reg = EngineRegistry::from_config(&c);
+        assert!(
+            reg.credential_sharing_note(reg.get("codex").unwrap())
+                .is_none(),
+            "a switched-off instance shares nothing"
+        );
     }
 }

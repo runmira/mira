@@ -316,18 +316,19 @@ impl AcpPermissions {
 
 /// Project a yes/no decision onto the agent's own option ids.
 ///
+/// Always the narrowest expression first: a one-off grant or refusal, not
+/// a standing change. A persistent option is picked only when nothing
+/// one-shot expresses the decision — for example the agent offered only
+/// "always allow" and the user said yes to this call. Session-wide
+/// repetition is Mira's own standing rule (kept on the slot), never a
+/// persistent grant handed to the agent: some agents persist those
+/// project-wide, which would widen one approval far past the chat.
+///
 /// Returns `None` when the agent offered nothing that expresses the
 /// decision — for example it offered only "always allow" and the user said
 /// no. The caller then answers `Cancelled`, which tells the agent to unwind
 /// the turn instead of retrying against a wall.
-fn choose_option(req: &PermissionRequest, allowed: bool, widen: bool) -> Option<String> {
-    // "Allow for this chat": the agent's standing grant, when it offers one,
-    // so it stops asking about the same thing.
-    if allowed && widen {
-        if let Some(o) = req.options.iter().find(|o| o.is_allow() && o.is_persistent()) {
-            return Some(o.option_id.clone());
-        }
-    }
+fn choose_option(req: &PermissionRequest, allowed: bool) -> Option<String> {
     let pick = |once: bool| -> Option<String> {
         req.options
             .iter()
@@ -380,6 +381,40 @@ impl PermissionPort for AcpPermissions {
         // command, an edit as a diff — the same cards Mira's own tools get.
         let call = permission_call(req);
 
+        // Read on every request so a mode switch never needs an agent restart.
+        let mode = match self.slot() {
+            Some(slot) => slot.session.read().await.config().await.agent_approval_mode,
+            None => mira_policy::Mode::Manual,
+        };
+        if auto_approve_permission(mode, req) {
+            // Never grant a persistent option automatically: switching back
+            // to Ask must still route subsequent requests through Mira.
+            if let Some(option) = req
+                .options
+                .iter()
+                .find(|o| o.is_allow() && !o.is_persistent())
+            {
+                return Ok(Some(option.option_id.clone()));
+            }
+            return Ok(None);
+        }
+        // A standing session grant answers before anyone is asked: the
+        // user already approved this exact call shape, and the agent is
+        // still answered one-shot — its own settings are never written.
+        if let Some(slot) = self.slot() {
+            let args: serde_json::Value =
+                serde_json::from_str(&call.function.arguments).unwrap_or(serde_json::Value::Null);
+            let tool = call.function.name.clone();
+            let standing = slot
+                .engine
+                .standing_approvals
+                .lock()
+                .ok()
+                .map(|m| crate::session_engine::standing_allows(&m, &tool, &args));
+            if standing == Some(true) {
+                return Ok(choose_option(req, true));
+            }
+        }
         let allowed = self.approver.approve(&call, Decision::Ask).await;
         let scope = self.slot().and_then(|s| {
             s.engine
@@ -388,11 +423,49 @@ impl PermissionPort for AcpPermissions {
                 .ok()
                 .and_then(|mut m| m.remove(&call.id.to_string()))
         });
-        let widen = matches!(
-            scope,
-            Some(crate::protocol::ApprovalScope::Session | crate::protocol::ApprovalScope::Always)
-        );
-        let chosen = choose_option(req, allowed, widen);
+        if allowed {
+            // "Allow for this session" (and "always", which for agent calls
+            // is session-scoped: Mira never writes the agent's settings
+            // files) becomes Mira's own standing rule. The agent keeps
+            // getting one-shot answers, so a grant the agent would persist
+            // project-wide can never slip through a session approval.
+            if let Some(scope) = scope.filter(|s| {
+                matches!(
+                    s,
+                    crate::protocol::ApprovalScope::Session
+                        | crate::protocol::ApprovalScope::Always
+                )
+            }) {
+                let args: serde_json::Value = serde_json::from_str(&call.function.arguments)
+                    .unwrap_or(serde_json::Value::Null);
+                let rule = crate::session_engine::StandingApproval {
+                    tool: call.function.name.clone(),
+                    target: crate::session_engine::standing_target(&call.function.name, &args),
+                };
+                let always = matches!(scope, crate::protocol::ApprovalScope::Always);
+                if let Some(slot) = self.slot() {
+                    if let Ok(mut m) = slot.engine.standing_approvals.lock() {
+                        if !m.contains(&rule) {
+                            m.push(rule.clone());
+                        }
+                    }
+                    let _ = slot.events_tx.send(crate::protocol::ServerMsg::Warning {
+                        text: if always {
+                            format!(
+                                "allowed for this session ({}): Mira won't ask again, and the agent's own settings are untouched",
+                                rule.target,
+                            )
+                        } else {
+                            format!(
+                                "allowed for this session ({}): Mira won't ask again",
+                                rule.target,
+                            )
+                        },
+                    });
+                }
+            }
+        }
+        let chosen = choose_option(req, allowed);
         if chosen.is_none() {
             tracing::info!(
                 tool_call_id = %req.tool_call_id,
@@ -409,6 +482,15 @@ impl PermissionPort for AcpPermissions {
             Some(slot) => Ok(crate::acp_session::ask_elicitation(&slot, req).await),
             None => Ok(ElicitationReply::Cancel),
         }
+    }
+}
+
+/// Unknown actions stay interactive in Auto edits; use ACP's structured kind.
+fn auto_approve_permission(mode: mira_policy::Mode, req: &PermissionRequest) -> bool {
+    match mode {
+        mira_policy::Mode::Edit | mira_policy::Mode::Yolo => true,
+        mira_policy::Mode::Auto => matches!(req.kind, Some(mira_acp::events::AcpToolKind::Edit)),
+        _ => false,
     }
 }
 
@@ -440,9 +522,7 @@ fn permission_call(req: &PermissionRequest) -> mira_core::ToolCall {
     let path = get(&["path", "filePath", "file_path", "filepath", "file"])
         .or_else(|| req.locations.first().cloned());
 
-    let (name, args) = if let Some(cmd) = get(&["command", "cmd"])
-        .filter(|_| is_kind("Execute"))
-    {
+    let (name, args) = if let Some(cmd) = get(&["command", "cmd"]).filter(|_| is_kind("Execute")) {
         ("bash".to_string(), serde_json::json!({ "command": cmd }))
     } else if let (Some(path), Some(old), Some(new)) = (
         path.clone().filter(|_| is_kind("Edit")),
@@ -763,6 +843,36 @@ mod tests {
     // ---- permissions ----
 
     #[test]
+    fn chat_approval_modes_gate_each_action_kind() {
+        use mira_acp::events::AcpToolKind;
+        use mira_policy::Mode;
+        for kind in [
+            Some(AcpToolKind::Edit),
+            Some(AcpToolKind::Execute),
+            Some(AcpToolKind::Fetch),
+            None,
+        ] {
+            let req = PermissionRequest {
+                session_id: "chat-a".into(),
+                tool_call_id: "call".into(),
+                title: "edit".into(),
+                kind,
+                options: vec![],
+                raw_input: None,
+                locations: vec![],
+            };
+            assert!(!auto_approve_permission(Mode::Manual, &req));
+            assert_eq!(
+                auto_approve_permission(Mode::Auto, &req),
+                kind == Some(AcpToolKind::Edit)
+            );
+            assert!(auto_approve_permission(Mode::Edit, &req));
+            // A later request uses the new mode, with no cached grant.
+            assert!(!auto_approve_permission(Mode::Manual, &req));
+        }
+    }
+
+    #[test]
     fn approving_prefers_the_narrowest_grant() {
         use mira_acp::events::{AcpPermissionOptionKind as Kind, PermissionChoice};
         let r = PermissionRequest {
@@ -785,7 +895,7 @@ mod tests {
             raw_input: None,
             locations: Vec::new(),
         };
-        assert_eq!(choose_option(&r, true, false).as_deref(), Some("once"));
+        assert_eq!(choose_option(&r, true).as_deref(), Some("once"));
     }
 
     #[test]
@@ -804,11 +914,15 @@ mod tests {
             raw_input: None,
             locations: Vec::new(),
         };
-        assert_eq!(choose_option(&r, true, false).as_deref(), Some("always"));
+        assert_eq!(choose_option(&r, true).as_deref(), Some("always"));
     }
 
     #[test]
-    fn allow_for_this_chat_takes_the_agents_standing_grant() {
+    fn session_scope_never_takes_the_agents_standing_grant() {
+        // "Allow for this session" is Mira's own standing rule, kept on
+        // the slot: the agent is always answered one-shot. Handing it a
+        // persistent option would let agents that persist those
+        // project-wide widen one approval past the chat.
         use mira_acp::events::{AcpPermissionOptionKind as Kind, PermissionChoice};
         let opt = |id: &str, kind| PermissionChoice {
             option_id: id.into(),
@@ -828,10 +942,9 @@ mod tests {
             raw_input: None,
             locations: Vec::new(),
         };
-        assert_eq!(choose_option(&r, true, true).as_deref(), Some("always"));
-        assert_eq!(choose_option(&r, true, false).as_deref(), Some("once"));
-        // Widening never turns a "no" into a standing anything.
-        assert_eq!(choose_option(&r, false, true).as_deref(), Some("reject"));
+        assert_eq!(choose_option(&r, true).as_deref(), Some("once"));
+        // A "no" still prefers the one-off rejection.
+        assert_eq!(choose_option(&r, false).as_deref(), Some("reject"));
     }
 
     #[test]
@@ -850,7 +963,7 @@ mod tests {
             raw_input: None,
             locations: Vec::new(),
         };
-        assert_eq!(choose_option(&r, false, false), None);
+        assert_eq!(choose_option(&r, false), None);
     }
 
     #[test]
@@ -873,7 +986,7 @@ mod tests {
             raw_input: None,
             locations: Vec::new(),
         };
-        assert_eq!(choose_option(&r, false, false).as_deref(), Some("no"));
+        assert_eq!(choose_option(&r, false).as_deref(), Some("no"));
     }
 
     #[test]
@@ -887,8 +1000,8 @@ mod tests {
             raw_input: None,
             locations: Vec::new(),
         };
-        assert_eq!(choose_option(&r, true, false), None);
-        assert_eq!(choose_option(&r, false, false), None);
+        assert_eq!(choose_option(&r, true), None);
+        assert_eq!(choose_option(&r, false), None);
     }
 
     #[test]
@@ -908,7 +1021,7 @@ mod tests {
                 raw_input: None,
                 locations: Vec::new(),
             };
-            assert_eq!(choose_option(&r, true, false).as_deref(), Some(id));
+            assert_eq!(choose_option(&r, true).as_deref(), Some(id));
         }
     }
 
@@ -970,19 +1083,36 @@ mod tests {
 /// the session's existing broadcast channel, so an external agent's output
 /// reaches the frontend by the same path as Mira's own.
 pub struct AcpEventPort {
+    runtime: std::sync::Mutex<
+        Option<(
+            std::sync::Weak<crate::slot::SessionSlot>,
+            String,
+            String,
+            u64,
+        )>,
+    >,
+
     events: tokio::sync::broadcast::Sender<ServerMsg>,
     /// Where the agent's spend reports are booked, for the Usage page.
     spend: Option<SpendBooking>,
+    /// Which agent this port serves, stamped onto modes/config frames so
+    /// the client attributes "last seen" capabilities to the right driver.
+    driver: std::sync::Mutex<Option<String>>,
 }
 
 /// Books spend reports in the order they arrive. Reports are running
 /// totals, so order matters: a newer total booked before an older one
 /// would read as a reset and be counted twice.
 struct SpendBooking {
-    queue: tokio::sync::mpsc::UnboundedSender<(Option<String>, Vec<mira_acp::events::ModelSpend>)>,
+    queue: tokio::sync::mpsc::Sender<(Option<String>, Vec<mira_acp::events::ModelSpend>)>,
     /// The agent's current model, from its config options — what to file a
     /// report under when the agent doesn't name one (Codex, ACP cost).
     model: std::sync::Mutex<Option<String>>,
+    /// How this agent is billed. Starts from what the instance's config
+    /// said and is refined once the agent has advertised its auth methods
+    /// (see [`AcpEventPort::refine_billing`]), which is the only moment a
+    /// subscription login becomes visible.
+    billing: std::sync::Arc<std::sync::Mutex<mira_acp::status::Billing>>,
 }
 
 /// The spend a report added, as one frame for the client (summed across
@@ -1012,9 +1142,40 @@ fn turn_usage(rows: &[crate::agent_spend::SpendRow]) -> Option<ServerMsg> {
 impl AcpEventPort {
     pub fn new(events: tokio::sync::broadcast::Sender<ServerMsg>) -> Arc<Self> {
         Arc::new(AcpEventPort {
+            runtime: std::sync::Mutex::new(None),
             events,
             spend: None,
+            driver: std::sync::Mutex::new(None),
         })
+    }
+
+    pub fn for_slot(slot: &Arc<crate::slot::SessionSlot>) -> Arc<Self> {
+        let port = Self::new(slot.events_tx.clone());
+        port.bind_runtime(slot, "", "");
+        port
+    }
+    pub fn bind_runtime(&self, slot: &Arc<crate::slot::SessionSlot>, instance: &str, driver: &str) {
+        *self.runtime.lock().unwrap_or_else(|e| e.into_inner()) = Some((
+            Arc::downgrade(slot),
+            instance.into(),
+            driver.into(),
+            slot.engine
+                .generation
+                .load(std::sync::atomic::Ordering::SeqCst),
+        ));
+    }
+    fn runtime_owner(&self) -> Option<(Arc<crate::slot::SessionSlot>, String, String)> {
+        let binding = self.runtime.lock().ok()?.clone()?;
+        let slot = binding.0.upgrade()?;
+        if slot
+            .engine
+            .generation
+            .load(std::sync::atomic::Ordering::SeqCst)
+            != binding.3
+        {
+            return None;
+        }
+        Some((slot, binding.1, binding.2))
     }
 
     /// A port that also books the agent's spend reports to `ledger`.
@@ -1023,14 +1184,21 @@ impl AcpEventPort {
         ledger: crate::agent_spend::SpendLedger,
         who: crate::agent_spend::Spender,
     ) -> Arc<Self> {
-        let (queue, mut rx) = tokio::sync::mpsc::unbounded_channel::<(
-            Option<String>,
-            Vec<mira_acp::events::ModelSpend>,
-        )>();
+        let (queue, mut rx) =
+            tokio::sync::mpsc::channel::<(Option<String>, Vec<mira_acp::events::ModelSpend>)>(64);
         let events_bg = events.clone();
+        // Shared with the port so a later refinement reaches the reports
+        // booked after it, without rebuilding the spender.
+        let billing = std::sync::Arc::new(std::sync::Mutex::new(who.billing));
+        let billing_bg = billing.clone();
         tokio::spawn(async move {
             while let Some((session, models)) = rx.recv().await {
-                let (ledger, who) = (ledger.clone(), who.clone());
+                let (ledger, mut who) = (ledger.clone(), who.clone());
+                // The live classification wins over the one we guessed at
+                // construction time.
+                if let Ok(b) = billing_bg.lock() {
+                    who.billing = *b;
+                }
                 // File I/O off the runtime, one report at a time.
                 let rows = tokio::task::spawn_blocking(move || {
                     ledger.record(&who, session.as_deref(), &models)
@@ -1044,12 +1212,42 @@ impl AcpEventPort {
             }
         });
         Arc::new(AcpEventPort {
+            runtime: std::sync::Mutex::new(None),
             events,
             spend: Some(SpendBooking {
                 queue,
                 model: std::sync::Mutex::new(None),
+                billing,
             }),
+            driver: std::sync::Mutex::new(None),
         })
+    }
+
+    /// Sharpen how this agent's spend is billed, once the agent has told
+    /// us how it authenticates. Only ever replaces an
+    /// [`mira_acp::status::Billing::Unknown`] reading: a configured API key
+    /// outranks anything the agent advertises, so this can't downgrade a
+    /// metered instance to "subscription".
+    pub fn refine_billing(&self, billing: mira_acp::status::Billing) {
+        let Some(spend) = self.spend.as_ref() else {
+            return;
+        };
+        if billing == mira_acp::status::Billing::Unknown {
+            return;
+        }
+        if let Ok(mut cur) = spend.billing.lock() {
+            if *cur == mira_acp::status::Billing::Unknown {
+                *cur = billing;
+            }
+        }
+    }
+
+    /// Remember which agent this port serves. Called once per agent start;
+    /// the value is stamped onto modes/config frames.
+    pub fn set_driver(&self, driver: &str) {
+        if let Ok(mut d) = self.driver.lock() {
+            *d = Some(driver.to_string());
+        }
     }
 
     /// Book a spend report; anything else becomes a frame.
@@ -1082,15 +1280,35 @@ impl AcpEventPort {
                             m
                         })
                         .collect();
-                    let _ = booking.queue.send((session.clone(), models));
+                    let _ = booking.queue.try_send((session.clone(), models));
                     return;
                 }
                 _ => {}
             }
         }
         if let Some(msg) = ServerMsg::from_acp(event) {
-            self.push(msg);
+            self.push(self.stamp_driver(msg));
         }
+    }
+
+    /// Stamp the port's driver onto modes/config frames, so the client can
+    /// attribute "last seen" capabilities to the agent that reported them
+    /// rather than whichever agent drives the session now. Late frames
+    /// from a stopped agent otherwise pollute the new agent's cached list
+    /// (e.g. OpenCode showing Claude models).
+    fn stamp_driver(&self, mut msg: ServerMsg) -> ServerMsg {
+        let driver = self.driver.lock().ok().and_then(|d| d.clone());
+        let Some(driver) = driver else {
+            return msg;
+        };
+        match &mut msg {
+            ServerMsg::AcpModes { driver: d, .. }
+            | ServerMsg::AcpConfigOptions { driver: d, .. } => {
+                *d = Some(driver);
+            }
+            _ => {}
+        }
+        msg
     }
 
     /// Forward a native agent's event onto the wire.
@@ -1099,6 +1317,89 @@ impl AcpEventPort {
     /// reaches the client, a native agent is indistinguishable from an ACP
     /// one.
     pub async fn emit(&self, event: NormalizedEvent) {
+        use mira_acp::events::MiraEvent;
+        if self.runtime.lock().map(|r| r.is_some()).unwrap_or(true)
+            && self.runtime_owner().is_none()
+        {
+            return;
+        }
+        if let Some((slot, instance, driver)) = self.runtime_owner() {
+            slot.engine.touch();
+            match &event.event {
+                MiraEvent::Limits { windows } => {
+                    *slot.message_queue.limit_reset.lock().unwrap_or_else(|e|e.into_inner()) = windows.iter().filter(|w| w.utilization >= 1.0).filter_map(|w| w.resets_at).filter(|at| *at > 0).max().map(|at| (at as u64).saturating_mul(1000));
+                }
+                MiraEvent::RuntimeRequest(request) => {
+                    if !slot.runtime_requests.is_persistent() {
+                        self.push(ServerMsg::Error { text: "asynchronous agent questions require readable session persistence; this request was not saved".into() });
+                        return;
+                    }
+                    match slot
+                        .runtime_requests
+                        .insert(&instance, &driver, request.clone())
+                        .await
+                    {
+                        Ok(request) => self.push(ServerMsg::RuntimeRequestUpdated { request }),
+                        Err(e) => self.push(ServerMsg::Error {
+                            text: format!("could not save agent questions: {e}"),
+                        }),
+                    }
+                    return;
+                }
+                MiraEvent::RuntimeWork(work) => {
+                    slot.engine
+                        .activity
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .work(work);
+                    slot.publish_activity();
+                }
+                MiraEvent::RuntimeTurn(turn) => {
+                    slot.engine
+                        .activity
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .turn(turn);
+                    if turn.running {
+                        slot.engine
+                            .agent_in_turn
+                            .store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    slot.publish_activity();
+                }
+                // Codex switches mode itself when the user approves its plan
+                // (plan → the mode it builds in). Follow it, so the approval
+                // posture and a later restart agree with what the agent runs.
+                MiraEvent::Modes { current, .. } if driver == "codex" => {
+                    if let Some(mode) = crate::acp_session::codex_approval_mode(current) {
+                        crate::acp_session::set_agent_approval_mode(&slot, mode).await;
+                    }
+                    if let Some(launch) = slot.acp_launch.lock().await.as_mut() {
+                        launch.mode_id = Some(current.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let (Some(booking), MiraEvent::Spend { session, models }) = (&self.spend, &event.event) {
+            let current = booking
+                .model
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone();
+            let models = models
+                .iter()
+                .cloned()
+                .map(|mut model| {
+                    if model.model.is_empty() {
+                        model.model = current.clone().unwrap_or_default();
+                    }
+                    model
+                })
+                .collect();
+            let _ = booking.queue.send((session.clone(), models)).await;
+            return;
+        }
         self.route(event);
     }
 
@@ -1122,13 +1423,52 @@ impl EventPort for AcpEventPort {
     async fn emit(&self, event: NormalizedEvent) {
         // Retain provenance for anything unmodelled before it becomes a frame,
         // so a vendor extension is greppable in the logs.
-        self.route(event);
+        AcpEventPort::emit(self, event).await;
     }
 }
 
 impl AcpEventPort {
     /// Announce the end of a turn.
     pub fn turn_ended(&self, stop_reason: &str) {
+        if self.runtime.lock().map(|r| r.is_some()).unwrap_or(true)
+            && self.runtime_owner().is_none()
+        {
+            return;
+        }
+        if let Some((slot, _, _)) = self.runtime_owner() {
+            if stop_reason == "agent_exited" {
+                let cancelled=slot.engine.activity.lock().unwrap_or_else(|e|e.into_inner()).cancel_work();
+                for work in cancelled { self.push(ServerMsg::RuntimeWorkUpdated {work}); }
+            }
+            if matches!(
+                stop_reason,
+                "cancelled" | "agent_exited" | "error" | "answer_delivery_failed"
+            ) {
+                let ended = slot
+                    .engine
+                    .activity
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .end_turns();
+                for turn in ended {
+                    self.push(ServerMsg::RuntimeTurnUpdated { turn });
+                }
+            }
+            slot.engine
+                .agent_in_turn
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            slot.publish_activity();
+        }
+        if let Some((slot, _, _)) = self.runtime_owner() {
+            if let Ok(cwd) = slot.cwd.try_read() {
+                let cwd = cwd.clone();
+                let id = slot.id.to_string();
+                if let Some(tree) = crate::checkpoints::pending_tree(&cwd, &id) {
+                    let events = slot.events_tx.clone();
+                    tokio::task::spawn_blocking(move || { crate::checkpoints::finish(&cwd, &id, &tree); let _ = events.send(ServerMsg::TurnDiffs { summaries: crate::checkpoints::turn_diffs(&cwd, &id) }); });
+                }
+            }
+        }
         self.push(ServerMsg::acp_turn_end(stop_reason));
     }
 }
@@ -1153,7 +1493,9 @@ mod event_tests {
                 session_id: "chat".into(),
                 cwd: "/p".into(),
                 driver: "codex".into(),
+                instance: "codex".into(),
                 fallback_model: "codex".into(),
+                billing: mira_acp::status::Billing::Api,
             },
         );
         let ev = |event| NormalizedEvent {
@@ -1227,6 +1569,43 @@ mod event_tests {
             event: e,
         })
         .expect("every ACP event maps to a frame")
+    }
+
+    #[tokio::test]
+    async fn caps_frames_carry_their_driver_for_cache_attribution() {
+        // Late frames from a stopped agent must not pollute another
+        // driver's "last seen" cache (OpenCode showing Claude models).
+        let (tx, mut rx) = tokio::sync::broadcast::channel(16);
+        let port = AcpEventPort::new(tx);
+        port.set_driver("opencode");
+        port.emit(NormalizedEvent {
+            source: EventSource::Acp {
+                variant: "x".into(),
+            },
+            event: MiraEvent::ConfigOptions { options: vec![] },
+        })
+        .await;
+        match rx.try_recv().expect("a frame") {
+            ServerMsg::AcpConfigOptions { driver, .. } => {
+                assert_eq!(driver.as_deref(), Some("opencode"))
+            }
+            other => panic!("expected config options, got {other:?}"),
+        }
+        // No driver set (e.g. ad-hoc ports): frames stay unstamped and
+        // the client keeps its previous attribution behaviour.
+        let (tx, mut rx) = tokio::sync::broadcast::channel(16);
+        let port = AcpEventPort::new(tx);
+        port.emit(NormalizedEvent {
+            source: EventSource::Acp {
+                variant: "x".into(),
+            },
+            event: MiraEvent::ConfigOptions { options: vec![] },
+        })
+        .await;
+        match rx.try_recv().expect("a frame") {
+            ServerMsg::AcpConfigOptions { driver, .. } => assert!(driver.is_none()),
+            other => panic!("expected config options, got {other:?}"),
+        }
     }
 
     fn empty_state() -> ToolCallState {
@@ -1498,7 +1877,11 @@ mod permission_call_tests {
 
     #[test]
     fn a_command_shows_as_bash() {
-        let c = permission_call(&req("date", serde_json::json!({ "command": "date", "description": "x" }), &[]));
+        let c = permission_call(&req(
+            "date",
+            serde_json::json!({ "command": "date", "description": "x" }),
+            &[],
+        ));
         assert_eq!(c.function.name, "bash");
         assert_eq!(args(&c), serde_json::json!({ "command": "date" }));
     }
@@ -1512,14 +1895,22 @@ mod permission_call_tests {
         ));
         assert_eq!(c.function.name, "edit_file");
         assert_eq!(args(&c)["path"], "/r/a.rs");
-        let w = permission_call(&req("Write", serde_json::json!({ "content": "hi" }), &["/r/new.md"]));
+        let w = permission_call(&req(
+            "Write",
+            serde_json::json!({ "content": "hi" }),
+            &["/r/new.md"],
+        ));
         assert_eq!(w.function.name, "write_file");
         assert_eq!(args(&w)["path"], "/r/new.md");
     }
 
     #[test]
     fn anything_else_keeps_its_title_and_input_without_plumbing() {
-        let c = permission_call(&req("Fetch docs", serde_json::json!({ "url": "https://x.dev" }), &[]));
+        let c = permission_call(&req(
+            "Fetch docs",
+            serde_json::json!({ "url": "https://x.dev" }),
+            &[],
+        ));
         assert_eq!(c.function.name, "Fetch docs");
         let a = args(&c);
         assert_eq!(a["url"], "https://x.dev");

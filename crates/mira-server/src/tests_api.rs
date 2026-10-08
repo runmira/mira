@@ -101,7 +101,11 @@ fn suggestions(dir: &FsPath) -> Vec<Suggestion> {
             .unwrap_or("");
         // npm init's placeholder isn't a test suite.
         if !script.is_empty() && !script.contains("no test specified") {
-            let cmd = if pm == "npm" { "npm test" } else { &format!("{pm} test") as &str };
+            let cmd = if pm == "npm" {
+                "npm test"
+            } else {
+                &format!("{pm} test") as &str
+            };
             push(cmd, &format!("{runner} ({pm})"));
         } else if dep("vitest") {
             push("npx vitest run", "Vitest");
@@ -178,17 +182,27 @@ pub async fn run(
             Ok(c) => c,
             Err(e) => {
                 let _ = tx
-                    .send(line(serde_json::json!({"type":"line","text":format!("couldn't start: {e}")})))
+                    .send(line(
+                        serde_json::json!({"type":"line","text":format!("couldn't start: {e}")}),
+                    ))
                     .await;
-                let _ = tx.send(line(serde_json::json!({"type":"exit","code":-1}))).await;
+                let _ = tx
+                    .send(line(serde_json::json!({"type":"exit","code":-1})))
+                    .await;
                 return;
             }
         };
         let pgid = child.id();
         let (ltx, mut lrx) = mpsc::channel::<String>(256);
         for pipe in [
-            child.stdout.take().map(|p| Box::new(p) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
-            child.stderr.take().map(|p| Box::new(p) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
+            child
+                .stdout
+                .take()
+                .map(|p| Box::new(p) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
+            child
+                .stderr
+                .take()
+                .map(|p| Box::new(p) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
         ]
         .into_iter()
         .flatten()
@@ -231,7 +245,9 @@ pub async fn run(
             return;
         }
         let code = child.wait().await.ok().and_then(|s| s.code()).unwrap_or(-1);
-        let _ = tx.send(line(serde_json::json!({"type":"exit","code":code}))).await;
+        let _ = tx
+            .send(line(serde_json::json!({"type":"exit","code":code})))
+            .await;
     });
 
     let stream = futures::StreamExt::map(tokio_stream::wrappers::ReceiverStream::new(rx), |s| {

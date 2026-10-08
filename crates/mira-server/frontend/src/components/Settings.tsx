@@ -48,6 +48,7 @@ import {
   Terminal,
   Wrench,
   Globe2,
+  Timer,
 } from 'lucide-react';
 import {
   getSettings,
@@ -65,10 +66,11 @@ import { UsageSection } from './UsageSection';
 import { ChartColumn } from 'lucide-react';
 import { HooksSection } from './Hooks';
 import { KeybindingsSection } from './settings/KeybindingsSettings';
+import { Collapse } from './ui/Collapse';
 import { AcpAgentsSection, type AcpInstanceConfig } from './settings/AcpAgentsSection';
 import { SubagentsSection } from './settings/SubagentsSection';
 import { ImportChats } from './ImportChats';
-import type { AcpAgentStatus } from '../types';
+import type { AcpAgentStatus, SessionsSettings } from '../types';
 import { applyReduceMotion, PREF_KEYS, useBoolPref, useStringPref } from '@/lib/prefs';
 import { useTheme, useThemePref, type ThemePref } from '@/lib/theme';
 import { ACCENT_SWATCH, ACCENTS, setAccent, setUiScale, useAccent, useUiScale, type UiScale } from '@/lib/appearance';
@@ -206,7 +208,7 @@ export const SETTINGS_SECTIONS: {
   { id: 'memory',      label: 'Memory',      icon: Brain },
   { id: 'skills',      label: 'Skills',      icon: Sparkle },
   { id: 'hooks',       label: 'Hooks',       icon: Zap },
-  { id: 'keybindings', label: 'Keybindings', icon: Keyboard },
+  { id: 'keybindings', label: 'Keyboard shortcuts', icon: Keyboard },
   { id: 'search',      label: 'Search & keys', icon: Search },
   { id: 'integrations', label: 'Integrations', icon: Plug },
   { id: 'about',       label: 'About',       icon: Info },
@@ -695,6 +697,26 @@ function GeneralSection({
   const [notifyTurnDone, setNotifyTurnDone] = useBoolPref(PREF_KEYS.notifyTurnDone, false);
   const [turnSound, setTurnSound] = useBoolPref(PREF_KEYS.turnSound, true);
   const [browserAutoOpen, setBrowserAutoOpen] = useBoolPref(PREF_KEYS.browserAutoOpen, true);
+  // Server-side: these act with no window open, so they live in Mira's
+  // config rather than this browser's storage.
+  const [sessionsCfg, setSessionsCfg] = useState<SessionsSettings | null>(null);
+  const [sessionsError, setSessionsError] = useState<string | null>(null);
+  useEffect(() => {
+    getSettings()
+      .then((v) => setSessionsCfg(v.sessions ?? { auto_resume_after_limit: false, keep_awake_while_running: false }))
+      .catch((e) => setSessionsError(String((e as Error).message ?? e)));
+  }, []);
+  function setSessionsFlag(key: keyof SessionsSettings, value: boolean) {
+    const prev = sessionsCfg;
+    setSessionsCfg((c) => (c ? { ...c, [key]: value } : c));
+    setSessionsError(null);
+    putSettings({ sessions: { [key]: value } })
+      .then((v) => v.sessions && setSessionsCfg(v.sessions))
+      .catch((e) => {
+        setSessionsCfg(prev);
+        setSessionsError(String((e as Error).message ?? e));
+      });
+  }
   const [preferredEditor, setPreferredEditor] = useStringPref(PREF_KEYS.preferredEditor, '');
   const [editorOptions, setEditorOptions] = useState<{ value: string; label: string; icon?: React.ReactNode }[]>([]);
   const [notifyState, setNotifyState] = useState(() =>
@@ -855,6 +877,36 @@ function GeneralSection({
             </>
           }
         />
+      </TSection>
+
+      <TSection
+        icon={<Timer className="size-3.5" />}
+        title="Running sessions"
+        description="What chats do while they run on their own. Saved in Mira's config, so it applies even with this window closed."
+      >
+        <TRow
+          title="Auto resume after a limit resets"
+          description="When a chat stops on a usage limit, pick it up again automatically once the limit resets, instead of waiting for you to press Resume."
+          control={
+            <TSwitch
+              checked={sessionsCfg?.auto_resume_after_limit ?? false}
+              onChange={(v) => setSessionsFlag('auto_resume_after_limit', v)}
+              label="Auto resume after a limit resets"
+            />
+          }
+        />
+        <TRow
+          title="Keep the screen awake while a session runs"
+          description="Stops the display and the computer from sleeping while any chat is working. Released as soon as nothing is running. macOS and Linux."
+          control={
+            <TSwitch
+              checked={sessionsCfg?.keep_awake_while_running ?? false}
+              onChange={(v) => setSessionsFlag('keep_awake_while_running', v)}
+              label="Keep the screen awake while a session runs"
+            />
+          }
+        />
+        {sessionsError && <p className="px-1 text-[12px] text-destructive">{sessionsError}</p>}
       </TSection>
 
       <TSection
@@ -2443,7 +2495,7 @@ function ImportChatsCard() {
           </button>
         )}
       </div>
-      {open && (
+      <Collapse open={open}>
         <div className="mt-4">
           <ImportChats
             onDone={() => {
@@ -2452,7 +2504,7 @@ function ImportChatsCard() {
             }}
           />
         </div>
-      )}
+      </Collapse>
     </div>
   );
 }

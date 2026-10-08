@@ -14,10 +14,12 @@
   "permissions": [
     "core:default",
     "core:event:default",
+    "dialog:allow-open",
     "allow-open-external",
     "allow-check-update",
     "allow-install-update",
     "allow-restart-app",
+    "allow-capture-screenshot",
     "core:webview:allow-create-webview",
     "core:webview:allow-webview-close",
     "core:webview:allow-webview-show",

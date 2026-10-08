@@ -37,6 +37,7 @@ import type { ToolStatus } from './ToolCard';
 import { AgentIcon } from './AgentIcon';
 import { Markdown } from './Markdown';
 import { cn } from '@/lib/utils';
+import { Collapse } from './ui/Collapse';
 
 /* ---------- engine presentation ---------- */
 
@@ -209,7 +210,7 @@ export function DelegateCard({
         <StatusMark status={status} isError={isError} />
       </div>
 
-      {expanded && (
+      <Collapse open={expanded}>
         <DelegatePanel
           engine={engine}
           prompt={prompt}
@@ -218,7 +219,7 @@ export function DelegateCard({
           stage={stage}
           steps={live}
         />
-      )}
+      </Collapse>
     </div>
   );
 }
@@ -435,7 +436,7 @@ function ActivityLog({ steps, active }: { steps: DelegateStep[]; active: boolean
     <ol className="space-y-0.5 rounded-lg border border-border/40 bg-background/40 px-2 py-1.5">
       {tail.map((s, i) => (
         <li key={i} className="flex items-start gap-2 text-[12px] leading-snug">
-          <span className="mt-[3px] grid size-3 shrink-0 place-items-center text-muted-foreground/50">
+          <span className="grid h-[18px] w-3 shrink-0 place-items-center text-muted-foreground/50">
             <StepIcon kind={s.kind} />
           </span>
           <span className="min-w-0 flex-1 truncate text-foreground/80" title={s.text}>

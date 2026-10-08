@@ -366,7 +366,7 @@ export function BrowserPane() {
           value={draft || url}
           onChange={(e) => setDraft(e.target.value)}
           placeholder="Search or enter address"
-          className="min-w-0 flex-1 rounded-md border border-border/60 bg-transparent px-2 py-0.5 text-[12px] text-foreground outline-none transition-colors placeholder:text-muted-foreground/60 focus:border-border"
+          className="min-w-0 flex-1 rounded-md border border-border/60 elev-card dark:bg-transparent px-2 py-0.5 text-[12px] text-foreground outline-none transition-colors placeholder:text-muted-foreground/60 focus:border-border"
         />
 
         <IconBtn

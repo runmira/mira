@@ -37,9 +37,9 @@ if (typeof document !== 'undefined') {
 
 /** Tell a user who's looking elsewhere that a chat wants them.
  *  `title` names the chat, so several running chats stay distinguishable. */
-export function callForAttention(kind: AttentionKind, title?: string | null) {
-  if (typeof document === 'undefined' || !document.hidden) return;
-  if (!marked) {
+export function callForAttention(kind: AttentionKind, title?: string | null, options?: {sessionId?:string;onOpen?:()=>void;whileVisible?:boolean}) {
+  if (typeof document === 'undefined' || (!document.hidden && !options?.whileVisible)) return;
+  if (document.hidden && !marked) {
     marked = true;
     document.title = MARK + document.title;
   }
@@ -50,11 +50,12 @@ export function callForAttention(kind: AttentionKind, title?: string | null) {
       body: BODY[kind],
       // One notification per chat and kind: a burst of approvals replaces
       // itself instead of stacking up.
-      tag: `mira-${kind}-${title ?? ''}`,
+      tag: `mira-${kind}-${options?.sessionId ?? title ?? ''}`,
       silent: false,
     });
     n.onclick = () => {
       window.focus();
+      options?.onOpen?.();
       n.close();
     };
   } catch {

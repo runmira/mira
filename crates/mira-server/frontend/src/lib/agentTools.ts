@@ -9,8 +9,17 @@
  * itself — one transcript, whichever engine wrote it.
  */
 import type { AcpToolCall, ToolCall, ToolResult } from '../types';
+import { boundedOutput, MAX_TOOL_OUTPUT } from './nativeStream';
 
 type Args = Record<string, unknown>;
+
+/** Mira's `browser_*` tool names → the `browser` tool's actions. */
+const BROWSER_VERB_ACTIONS: Record<string, string> = {
+  open: 'navigate',
+  press: 'key',
+  resize: 'set_viewport',
+  tabs: 'list_tabs',
+};
 
 const str = (v: unknown): string | undefined => (typeof v === 'string' && v ? v : undefined);
 
@@ -24,6 +33,13 @@ export function agentToolAsMira(call: AcpToolCall): { name: string; args: Args }
     | undefined;
 
   switch (name) {
+    case 'Computer':
+    case 'computer':
+    case 'computer_use':
+      return { name: 'computer', args: input };
+    case 'Browser':
+    case 'browser':
+      return { name: 'browser', args: input };
     case 'Bash':
       return { name: 'bash', args: { command: input.command, description: input.description } };
     case 'BashOutput':
@@ -71,6 +87,14 @@ export function agentToolAsMira(call: AcpToolCall): { name: string; args: Args }
       return { name: 'browser', args: input };
   }
 
+  // Mira's single-purpose browser tools, however the harness prefixes them
+  // (`browser_open`, `mcp__mira__browser_open`, `mira/browser_open`).
+  const verb = /(?:^|__|[./])browser_([a-z_]+)$/.exec(name)?.[1];
+  if (verb) {
+    const action = BROWSER_VERB_ACTIONS[verb] ?? verb;
+    return { name: 'browser', args: { action, ...input } };
+  }
+
   // ACP adapters describe tools by kind rather than name.
   switch (call.kind) {
     case 'read':
@@ -114,4 +138,17 @@ export function agentToolResult(call: AcpToolCall): ToolResult | null {
     .join('\n');
   const raw = typeof call.raw_output === 'string' ? call.raw_output : '';
   return { call_id: call.id, content: text || raw, is_error: call.status === 'failed' };
+}
+
+/** Bound display-only stdout retained on a tool, preserving structured diffs. */
+export function boundAgentOutput(call: AcpToolCall): AcpToolCall {
+  let budget = MAX_TOOL_OUTPUT;
+  const content = [...(call.content ?? [])].reverse().map((block) => {
+    if (block.type !== 'content') return block;
+    const bounded = budget === 0 ? '' : block.text.length > budget ? '[Earlier output truncated]\n' + block.text.slice(-budget) : block.text;
+    budget = Math.max(0, budget - block.text.length);
+    return { ...block, text: bounded };
+  }).reverse();
+  const raw = typeof call.raw_output === 'string' ? call.raw_output : call.raw_output == null ? null : JSON.stringify(call.raw_output);
+  return { ...call, content, raw_output: raw && raw.length > MAX_TOOL_OUTPUT ? boundedOutput('', raw) : call.raw_output };
 }
