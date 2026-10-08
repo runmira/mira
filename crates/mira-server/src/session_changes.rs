@@ -85,10 +85,9 @@ fn head(cwd: &Path) -> String {
 }
 
 /// The working tree under `cwd` as a tree object, without touching the
-/// user's index. Seeded from a copy of the real index so unchanged files
-/// aren't re-hashed.
+/// user's index. Seeded from HEAD with fresh stat information so same-size
+/// edits made within a filesystem timestamp tick are still re-hashed.
 pub fn snapshot_tree(cwd: &Path) -> Option<String> {
-    let index = git_path(cwd, "index")?;
     // Unique per call: the diff and review endpoints often snapshot at once.
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -96,12 +95,16 @@ pub fn snapshot_tree(cwd: &Path) -> Option<String> {
         cwd,
         &format!("mira-snapshot-{}-{n}.index", std::process::id()),
     )?;
-    if index.exists() {
-        std::fs::copy(&index, &tmp).ok()?;
-    }
+    // Copying the real index gives it a newer mtime, defeating Git's racy
+    // timestamp detection and potentially hiding a recent same-size edit.
     let tree = run(git(cwd)
         .env("GIT_INDEX_FILE", &tmp)
-        .args(["add", "-A", "--", "."]))
+        .args(["read-tree", &head(cwd)]))
+    .and_then(|_| {
+        run(git(cwd)
+            .env("GIT_INDEX_FILE", &tmp)
+            .args(["add", "-A", "--", "."]))
+    })
     .and_then(|_| run(git(cwd).env("GIT_INDEX_FILE", &tmp).arg("write-tree")))
     .map(|s| s.trim().to_string());
     let _ = std::fs::remove_file(&tmp);
@@ -355,9 +358,22 @@ mod tests {
     #[test]
     fn paths_are_relative_to_a_subfolder_cwd() {
         let d = repo();
+        // Model filesystems where ctime cannot distinguish rapid writes.
+        sh(d.path(), &["config", "core.trustctime", "false"]);
         let sub = d.path().join("sub");
         ensure_baseline(&sub, S);
+        let modified = std::fs::metadata(sub.join("mod.rs"))
+            .unwrap()
+            .modified()
+            .unwrap();
         std::fs::write(sub.join("mod.rs"), "fn c() {}\n").unwrap();
+        // Reproduce a same-size edit within one filesystem timestamp tick.
+        std::fs::File::options()
+            .write(true)
+            .open(sub.join("mod.rs"))
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
         std::fs::write(d.path().join("a.txt"), "outside the cwd\n").unwrap();
         let files = changed_files(&sub, S, &[]);
         assert_eq!(
