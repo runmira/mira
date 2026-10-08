@@ -41,6 +41,7 @@ import {
   Download,
 } from 'lucide-react';
 import { cn } from './lib/utils';
+import { imageSrc } from './lib/images';
 import { acpOptionsToDescriptors } from './lib/acpOptions';
 import { loadAgentCaps, migrateLegacyAgentConfigs, saveAgentCaps } from './lib/acpAgents';
 import { EngineMark } from './components/EnginePicker';
@@ -5577,9 +5578,10 @@ function EntryView({
               <div className="flex max-w-[78%] flex-wrap justify-end gap-1.5">
                 {images.map((img, i) => (
                   <div key={i} className="flex flex-col gap-1"><img
-                    src={`data:${img.media_type};base64,${img.data}`}
+                    src={imageSrc(img)}
+                    loading="lazy"
                     alt="attached image"
-                    onClick={() => actions?.openImage(`data:${img.media_type};base64,${img.data}`)}
+                    onClick={() => actions?.openImage(imageSrc(img))}
                     className="max-h-40 max-w-[240px] cursor-zoom-in rounded-xl border border-border object-cover"
                   /><ImageAttachmentDetails image={img} /></div>
                 ))}

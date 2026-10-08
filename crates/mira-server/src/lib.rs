@@ -460,6 +460,10 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
             get(sessions::get_session_history),
         )
         .route(
+            "/api/sessions/:id/images/:key",
+            get(sessions::get_session_image),
+        )
+        .route(
             "/api/sessions/:id/preview",
             get(sessions::get_session_preview),
         )

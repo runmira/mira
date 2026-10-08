@@ -2,6 +2,7 @@ import { BranchElbow } from './BranchElbow';
 import { ActivityShimmer } from './ActivityShimmer';
 import { useTranscriptDisclosure } from './TranscriptDisclosure';
 import { useMemo, useState } from 'react';
+import { imageSrc } from '../lib/images';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Tip } from './ui/Tip';
 import {
@@ -567,7 +568,8 @@ function CompactToolRow({
             <img
               key={i}
               className="tool-screenshot"
-              src={`data:${img.media_type};base64,${img.data}`}
+              src={imageSrc(img)}
+              loading="lazy"
               alt="Screenshot returned by the tool"
               style={{ maxWidth: '100%', borderRadius: 6, marginTop: 8, display: 'block' }}
             />
