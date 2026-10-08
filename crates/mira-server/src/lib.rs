@@ -62,7 +62,6 @@ mod message_queue;
 mod models;
 mod oauth;
 mod opencode_control;
-pub mod pairing;
 pub mod plugins;
 mod processes;
 pub mod protocol;
@@ -394,25 +393,14 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
     oauth::refresh::boot_rehydrate(&state).await;
     oauth::refresh::spawn(state.clone());
 
-    let devices = Arc::new(pairing::Devices::load(pairing::Devices::default_path()));
-    let router = build_router(state, cfg.static_dir.clone(), devices);
+    let router = build_router(state, cfg.static_dir.clone());
     info!(addr = %cfg.bind, "mira serve: listening");
 
-    // Peer addresses feed the pairing guard's "is this local?" check.
-    axum::serve(
-        listener,
-        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .await
-    .context("axum serve")?;
+    axum::serve(listener, router).await.context("axum serve")?;
     Ok(())
 }
 
-fn build_router(
-    state: AppState,
-    static_dir: Option<PathBuf>,
-    devices: Arc<pairing::Devices>,
-) -> Router {
+fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
     let mut router = Router::new()
         .route("/ws", get(ws::ws_handler))
         .route("/ws/terminal", get(terminal::terminal_ws))
@@ -697,27 +685,7 @@ fn build_router(
         router.route("/", get(inline_index))
     };
 
-    // Device pairing: its own routes, and a guard in front of everything
-    // that only lets in this machine and paired devices (see pairing.rs).
-    let pairing_routes = Router::new()
-        .route("/api/pairing/me", get(pairing::me))
-        .route("/api/pairing/devices", get(pairing::list))
-        .route("/api/pairing/code", post(pairing::open_pairing))
-        .route("/api/pairing/pair", post(pairing::pair))
-        .route(
-            "/api/pairing/devices/:id",
-            axum::routing::delete(pairing::revoke),
-        )
-        .with_state(devices.clone());
-
-    router
-        .with_state(state)
-        .merge(pairing_routes)
-        .layer(axum::middleware::from_fn_with_state(
-            devices,
-            pairing::guard,
-        ))
-        .layer(TraceLayer::new_for_http())
+    router.with_state(state).layer(TraceLayer::new_for_http())
 }
 
 async fn embedded_fallback(uri: axum::http::Uri) -> axum::response::Response {
