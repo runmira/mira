@@ -59,3 +59,5 @@ base64        = "0.22"
 # pure-Rust fancy-regex engine so we don't pull the C++ oniguruma dep.
 syntect       = { version = "5", default-features = false, features = ["default-fancy"] }
 tempfile      = "3"
+# `mira update` verifies release tarballs against their published SHA-256.
+sha2          = "0.10"

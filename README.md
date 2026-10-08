@@ -51,6 +51,30 @@ git clone https://github.com/runmira/mira && cd mira
 cargo install --path crates/mira-cli
 ```
 
+**Run in the background** — keep the web UI up without a terminal or the
+desktop app open. It starts at login and restarts if it exits (launchd on
+macOS, systemd on Linux):
+
+```bash
+mira service install     # --port 8787 --host 127.0.0.1 by default
+mira service status
+mira service uninstall
+```
+
+The service gets your shell's `PATH` (so `claude`, `codex` and `git`
+resolve) but no other environment variables — keep API keys in
+`~/.mira/mira.yaml`. On Linux, `loginctl enable-linger $USER` keeps it
+running while you're logged out.
+
+**Update:**
+
+```bash
+mira update              # latest release, checksum-verified; --check to just look
+```
+
+Script installs update in place; Homebrew installs run `brew upgrade`. A
+running service is restarted onto the new version.
+
 ## Quickstart
 
 Two ways to talk to Mira. Both share the same harness, the same session
