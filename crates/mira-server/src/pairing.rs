@@ -490,7 +490,6 @@ pub async fn list(State(devices): State<Arc<Devices>>) -> Response {
     Json(serde_json::json!({
         "devices": devices.list(),
         "pairing_expires_at": devices.open_code_expiry(),
-        "addresses": addresses().await,
     }))
     .into_response()
 }
@@ -523,7 +522,8 @@ pub async fn pair(
 ) -> Response {
     match devices.pair(&body.code, &body.name) {
         Ok((device, token)) => {
-            // Secure when the page came over HTTPS (tailscale serve sets
+            // Secure when the page came over HTTPS (remote access through
+            // Cloudflare, or tailscale serve, set
             // X-Forwarded-Proto); HttpOnly so page scripts can't read it.
             let secure = header(&headers, "x-forwarded-proto") == Some("https");
             let cookie = format!(
@@ -567,38 +567,6 @@ pub async fn revoke(
     } else {
         StatusCode::NOT_FOUND.into_response()
     }
-}
-
-/// Where other devices might reach this machine: its Tailscale name and
-/// addresses, when the Tailscale CLI is available. Best effort.
-pub async fn addresses() -> serde_json::Value {
-    let candidates = [
-        "tailscale",
-        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
-    ];
-    for bin in candidates {
-        let out = tokio::process::Command::new(bin)
-            .args(["status", "--json"])
-            .output();
-        let Ok(Ok(out)) = tokio::time::timeout(Duration::from_secs(3), out).await else {
-            continue;
-        };
-        if !out.status.success() {
-            continue;
-        }
-        let Ok(status) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
-            continue;
-        };
-        let me = &status["Self"];
-        return serde_json::json!({
-            "tailscale": {
-                "dns_name": me["DNSName"].as_str().map(|s| s.trim_end_matches('.')),
-                "ips": me["TailscaleIPs"],
-                "online": me["Online"],
-            }
-        });
-    }
-    serde_json::json!({ "tailscale": null })
 }
 
 #[cfg(test)]

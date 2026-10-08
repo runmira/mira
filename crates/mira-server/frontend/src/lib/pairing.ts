@@ -2,7 +2,7 @@
  * Device pairing (server side: crates/mira-server/src/pairing.rs).
  *
  * The computer running Mira is always trusted. Any other device — a phone
- * or laptop reaching it over Tailscale — pairs once with a code opened in
+ * or laptop reaching it through remote access — pairs once with a code opened in
  * Settings → Devices, and from then on sends an HttpOnly cookie the server
  * set; nothing here handles the token itself.
  */
@@ -20,16 +20,9 @@ export type PairingStatus = {
   device?: PairedDevice;
 };
 
-export type TailscaleInfo = {
-  dns_name: string | null;
-  ips: string[] | null;
-  online: boolean | null;
-};
-
 export type DevicesView = {
   devices: PairedDevice[];
   pairing_expires_at: number | null;
-  addresses: { tailscale: TailscaleInfo | null };
 };
 
 async function errorText(r: Response, fallback: string): Promise<string> {
