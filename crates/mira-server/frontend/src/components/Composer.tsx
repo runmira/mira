@@ -55,6 +55,7 @@ import { customToCommand, filterCommands, groupCommands, originIconSrc, slashSta
 import type { CommandInfo, Origin } from '../api';
 import { MentionInput, type MentionInputHandle } from './MentionInput';
 import { cn } from '@/lib/utils';
+import { useIsPhone } from '../lib/mobile';
 import { draftKey } from '../lib/composerDrafts';
 import { cachedDraft, changeRichDraft, clearRichDraft, restoreRichDraft, type RichDraft } from '../lib/richComposerDrafts';
 import { ATTACH_FILE_EVENT, COMPOSE_QUOTE_EVENT, COMPOSE_TEXT_EVENT, registerAttachmentIntake, type ComposerQuote } from '@/lib/attachBridge';
@@ -303,6 +304,7 @@ export function Composer({
       current: (current ? (Object.keys(MIRA_MODE_TO_POSTURE) as Mode[]).find((m) => MIRA_MODE_TO_POSTURE[m] === current.posture.key) : null) ?? null,
     };
   }, [agentDriving, acpModes_modes, acpCurrentMode, onPickAgentMode, engine?.driver]);
+  const phone = useIsPhone();
   const [text, setText] = useState(() => cachedDraft(draftKey(sessionId)).text);
   const [attachments, setAttachmentState] = useState<Attachment[]>(() => cachedDraft(draftKey(sessionId)).attachments);
   const [images, setImageState] = useState<ImageData[]>(() => cachedDraft(draftKey(sessionId)).images);
@@ -758,7 +760,7 @@ export function Composer({
   useEffect(() => { onActiveApprovalChange?.(pendingApproval?.callId ?? null); return () => onActiveApprovalChange?.(null); }, [pendingApproval?.callId, onActiveApprovalChange]);
 
   return (
-    <div className="flex flex-col items-center gap-1.5 px-4 pb-4 pt-2">
+    <div className="flex flex-col items-center gap-1.5 px-4 pb-4 pt-2 max-md:px-2 max-md:pb-2">
       {draftError && <p role="alert" className="w-full max-w-3xl px-2 text-[12px] text-amber-700 dark:text-amber-400">{draftError}</p>}
       <QueuedMessageStack
         key={sessionId ?? 'unsaved'}
@@ -954,6 +956,8 @@ export function Composer({
                     ? "Describe what 'done' looks like — mira will loop until it's met."
                     : planActive
                       ? 'Describe your task to generate a plan…'
+                      : phone
+                      ? 'Ask mira anything'
                       : 'Ask mira anything · @ for files · / for commands'
               }
               disabled={disabled}
@@ -1013,7 +1017,12 @@ export function Composer({
               finally { if (textOwner.current === owner) setAttachLoading(false); }
             }} />
 
-            <SlashButton onClick={() => updateText(text.startsWith('/') || text.startsWith('@') ? text : '/' + text)} />
+            {/* At phone width the row keeps only what's used from a phone:
+                typing "/" still opens commands, and projects are in the
+                sidebar drawer. */}
+            <span className="contents max-md:hidden">
+              <SlashButton onClick={() => updateText(text.startsWith('/') || text.startsWith('@') ? text : '/' + text)} />
+            </span>
 
             <EnginePicker
               open={modelPopOpen}
@@ -1037,9 +1046,11 @@ export function Composer({
               onAgentReverted={onAgentReverted}
             />
 
-            <ProjectChip cwd={cwd} onClick={onOpenPicker} />
+            <span className="contents max-md:hidden">
+              <ProjectChip cwd={cwd} onClick={onOpenPicker} />
+            </span>
 
-            <span className="flex-1" />
+            <span className="flex-1 max-md:min-w-1" />
 
             {agentDriving && agentPicker ? (
               /* One picker for both systems: it lists the agent's postures
@@ -1060,7 +1071,7 @@ export function Composer({
               <button
                 type="button"
                 onClick={onInterrupt}
-                className="flex size-8 items-center justify-center rounded-full bg-mira-error text-mira-on-accent transition-colors hover:brightness-110"
+                className="flex size-8 shrink-0 items-center justify-center rounded-full bg-mira-error text-mira-on-accent transition-colors hover:brightness-110 touch:size-10"
                 title="Stop"
                 aria-label="Stop"
               >
@@ -1070,7 +1081,7 @@ export function Composer({
               <button
                 type="submit"
                 disabled={disabled || (!text.trim() && attachments.length === 0 && images.length === 0 && quotes.length === 0)}
-                className="flex size-8 items-center justify-center rounded-full bg-foreground text-background transition-opacity hover:opacity-90 disabled:opacity-35"
+                className="flex size-8 shrink-0 items-center justify-center rounded-full bg-foreground text-background transition-opacity hover:opacity-90 disabled:opacity-35 touch:size-10"
                 title={busy ? 'Queue message' : (cmdEnterSend ? 'Send (⌘/Ctrl+Enter)' : 'Send (Enter)')}
                 aria-label={busy ? 'Queue message' : 'Send'}
               >
@@ -1566,14 +1577,15 @@ function ModePicker({
           // lines ("Ask each time" → "Ask each\ntime") and vertically
           // bloat the whole toolbar.
           className={cn(
-            'inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-1.5 text-[12.5px] leading-none transition-colors',
+            'inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-1.5 text-[12.5px] leading-none transition-colors touch:p-2.5',
             mode === 'edit' || mode === 'yolo' ? 'text-orange-600 dark:text-orange-400 hover:text-orange-600 dark:hover:text-orange-400' : 'text-muted-foreground',
             disabled ? 'cursor-default opacity-80' : 'hover:bg-mira-elev2',
             !disabled && mode !== 'edit' && mode !== 'yolo' && 'hover:text-foreground',
           )}
         >
           <ApprovalModeIcon mode={mode} />
-          <span className="block leading-none">{label}</span>
+          {/* Icon only on a phone; the menu names every mode. */}
+          <span className="block leading-none max-md:sr-only">{label}</span>
         </button>
       </PopoverTrigger>
       <PopoverContent className="w-64 p-1.5" align="start">
@@ -2007,7 +2019,9 @@ function ComposerContextDock({
   return (
     <m.div
       layout
-      className="-mb-3 w-full max-w-3xl px-4 sm:px-5"
+      // Environment, usage and worktree: desk-side controls, and on a phone
+      // the height is better spent on the transcript.
+      className="-mb-3 w-full max-w-3xl px-4 sm:px-5 max-md:hidden"
       initial={{ opacity: 0, y: 4 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.18, ease: [0.4, 0, 0.2, 1] }}
@@ -2447,12 +2461,12 @@ function EmbeddedPlanCard({
         />
         <div className="flex items-center justify-end gap-1.5">
           <span className="mr-auto text-[11px] text-muted-foreground/80">
-            {dirty ? 'Approve will run the edited plan' : '⌘↵ to approve'}
+            {dirty ? 'Approve will run the edited plan' : <span className="touch:hidden">⌘↵ to approve</span>}
           </span>
           <button
             type="button"
             onClick={() => onCancel(note)}
-            className="rounded-full bg-fg/[0.04] ring-1 ring-fg/[0.08] px-4 py-1.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
+            className="rounded-full bg-fg/[0.04] ring-1 ring-fg/[0.08] px-4 py-1.5 text-[11.5px] font-medium touch:px-5 touch:py-2.5 touch:text-[13.5px] text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
           >
             Cancel
           </button>
@@ -2461,7 +2475,7 @@ function EmbeddedPlanCard({
             onClick={() => onApprove(steps)}
             disabled={!canApprove}
             className={cn(
-              'inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-[11.5px] font-semibold transition-all',
+              'inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-[11.5px] font-semibold touch:px-5 touch:py-2.5 touch:text-[13.5px] transition-all',
               canApprove
                 ? 'bg-foreground text-background hover:brightness-95'
                 : 'cursor-not-allowed bg-secondary/60 text-muted-foreground',
@@ -2745,7 +2759,7 @@ function EmbeddedAskUserCard({
           <button
             type="button"
             onClick={() => { setDir(-1); setIdx((i) => Math.max(0, i - 1)); }}
-            className="inline-flex items-center gap-1 rounded-full bg-fg/[0.04] ring-1 ring-fg/[0.08] px-4 py-1.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
+            className="inline-flex items-center gap-1 rounded-full bg-fg/[0.04] ring-1 ring-fg/[0.08] px-4 py-1.5 text-[11.5px] font-medium touch:px-5 touch:py-2.5 touch:text-[13.5px] text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
           >
             <PhArrowLeft className="size-3" strokeWidth={2.5} />
             Back
@@ -2756,7 +2770,7 @@ function EmbeddedAskUserCard({
         <button
           type="button"
           onClick={onCancel}
-          className="ml-auto rounded-full bg-fg/[0.04] ring-1 ring-fg/[0.08] px-4 py-1.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
+          className="ml-auto rounded-full bg-fg/[0.04] ring-1 ring-fg/[0.08] px-4 py-1.5 text-[11.5px] font-medium touch:px-5 touch:py-2.5 touch:text-[13.5px] text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
         >
           Skip
         </button>
@@ -2765,7 +2779,7 @@ function EmbeddedAskUserCard({
           onClick={advance}
           disabled={!currentReady}
           className={cn(
-            'inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-[11.5px] font-semibold transition-all',
+            'inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-[11.5px] font-semibold touch:px-5 touch:py-2.5 touch:text-[13.5px] transition-all',
             currentReady
               ? 'bg-foreground text-background hover:brightness-95'
               : 'cursor-not-allowed bg-secondary/60 text-muted-foreground',
@@ -3049,7 +3063,7 @@ function EmbeddedApprovalCard({
         <textarea aria-label="Permission rule patterns" value={ruleDraft ?? approval.rulePreview?.rules.join('\n') ?? ''} onChange={event => setRuleDraft(event.target.value)} className="w-full rounded-md border border-border bg-background p-2 font-mono text-xs" rows={3} />
         <div className="flex justify-end gap-2"><button type="button" onClick={() => { setEditingRule(false); onRuleEditorCancel?.(); }} className="rounded-full px-4 py-2 text-xs font-medium hover:bg-secondary">Cancel</button><button type="button" disabled={!rules.length || !approval.rulePreview || (!!agent && !!approval.rulePreview.error)} onClick={() => onDecide(true, 'always', rules)} className="rounded-full bg-mira-blue px-4 py-2 text-xs font-medium text-mira-on-accent disabled:opacity-40">Save rule & allow</button></div>
       </div>}
-      <div className="px-1.5 pb-1.5 text-right text-[10.5px] text-muted-foreground/60">
+      <div className="px-1.5 pb-1.5 text-right text-[10.5px] text-muted-foreground/60 touch:hidden">
         <kbd className="rounded bg-secondary/70 px-1 py-0.5 font-mono text-[10px]">y</kbd> allow ·{' '}
         <kbd className="rounded bg-secondary/70 px-1 py-0.5 font-mono text-[10px]">n</kbd> deny
       </div>

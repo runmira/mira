@@ -5,6 +5,7 @@
  */
 import { useMemo } from 'react';
 import { PREF_KEYS, useBoolPref, useStringPref } from './prefs';
+import { useIsPhone } from './mobile';
 
 export type DiffInline = 'word' | 'char' | 'none';
 export type DiffMarkers = 'bars' | 'classic' | 'none';
@@ -16,9 +17,11 @@ export function useDiffOptions() {
   const [markers] = useStringPref(PREF_KEYS.diffMarkers, 'bars');
   const [lineNumbers] = useBoolPref(PREF_KEYS.diffLineNumbers, true);
   const [tint] = useBoolPref(PREF_KEYS.diffTint, true);
+  // Side by side leaves ~20 characters a side on a phone.
+  const phone = useIsPhone();
   return useMemo(
     () => ({
-      diffStyle: layout === 'split' ? ('split' as const) : ('unified' as const),
+      diffStyle: layout === 'split' && !phone ? ('split' as const) : ('unified' as const),
       overflow: wrap ? ('wrap' as const) : ('scroll' as const),
       // `word-alt` is the renderer's word mode that also joins nearby
       // changed words, which reads better than plain `word`.
@@ -27,6 +30,6 @@ export function useDiffOptions() {
       disableLineNumbers: !lineNumbers,
       disableBackground: !tint,
     }),
-    [layout, wrap, inline, markers, lineNumbers, tint],
+    [layout, phone, wrap, inline, markers, lineNumbers, tint],
   );
 }

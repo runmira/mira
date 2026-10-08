@@ -1,5 +1,8 @@
 /** @type {import('tailwindcss').Config} */
 export default {
+  // Hover styles only where hovering exists, so a tap doesn't leave a
+  // control stuck in its hover state on a phone.
+  future: { hoverOnlyWhenSupported: true },
   darkMode: 'class',
   content: ['./index.html', './src/**/*.{ts,tsx}'],
   theme: {
@@ -130,5 +133,9 @@ export default {
       },
     },
   },
-  plugins: [],
+  plugins: [
+    // `touch:` — a finger, not a mouse: bigger targets, no keyboard hints.
+    // Phones and tablets alike; layout itself keys off width (`max-md:`).
+    ({ addVariant }) => addVariant('touch', '@media (hover: none) and (pointer: coarse)'),
+  ],
 };
