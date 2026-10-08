@@ -1,11 +1,14 @@
+import { BranchElbow } from './BranchElbow';
+import { ActivityShimmer } from './ActivityShimmer';
+import { useTranscriptDisclosure } from './TranscriptDisclosure';
 import { useMemo, useState } from 'react';
+import { AnimatePresence, motion } from 'framer-motion';
 import { Tip } from './ui/Tip';
 import {
   ChevronDown,
   Check,
   LoaderCircle,
   FileText,
-  Play,
   X,
 } from 'lucide-react';
 import type { ApprovalScope, DiffLine, DiffPreview, Mode, ToolCall, ToolResult } from '../types';
@@ -103,6 +106,8 @@ type Props = {
    *  "awaiting approval" state, but renders no buttons, so there is exactly
    *  one place to answer. */
   decisionsViaDialog?: boolean;
+  /** A singleton command group already owns the disclosure header. */
+  detailsOnly?: boolean;
 };
 
 /** Two shapes:
@@ -111,7 +116,7 @@ type Props = {
  *                  shortcut is bound at the App level so it fires no
  *                  matter which card is on screen.
  *  - anything else → compact row, click to expand args + result. */
-export function ToolCard({ call, preview, status, result, onDecide, mode: _mode, onSetMode: _onSetMode, onOpenFile, progressLines, decisionsViaDialog }: Props) {
+export function ToolCard({ call, preview, status, result, onDecide, mode: _mode, onSetMode: _onSetMode, onOpenFile, progressLines, decisionsViaDialog, detailsOnly = false }: Props) {
   if (status === 'pending') {
     return (
       <PendingApprovalCard
@@ -123,7 +128,7 @@ export function ToolCard({ call, preview, status, result, onDecide, mode: _mode,
       />
     );
   }
-  return <CompactToolRow call={call} status={status} result={result} preview={preview} onOpenFile={onOpenFile} progressLines={progressLines} />;
+  return <CompactToolRow call={call} status={status} result={result} preview={preview} onOpenFile={onOpenFile} progressLines={progressLines} detailsOnly={detailsOnly} />;
 }
 
 /* ---------- pending approval ---------- */
@@ -136,6 +141,8 @@ function PendingApprovalCard({
   onDecide: (allow: boolean, scope?: ApprovalScope) => void;
   onOpenFile?: (path: string, diff: DiffPreview | null) => void;
   decisionsViaDialog?: boolean;
+  /** A singleton command group already owns the disclosure header. */
+  detailsOnly?: boolean;
 }) {
   // Pending = about to run → use the present-continuous verb ("Reading",
   // "Running", "Editing") so the header reads as a proposal, not a receipt.
@@ -146,7 +153,7 @@ function PendingApprovalCard({
   const isDiffTool = call.function.name in DIFF_CARD_TOOLS;
 
   return (
-    <div className="flex w-full max-w-[78%] flex-col gap-2 rounded-2xl border border-border/40 bg-card/80 p-3.5 backdrop-blur">
+    <div className="flex w-full max-w-[78%] flex-col gap-2 rounded-2xl border border-border/40 elev-card dark:bg-card/80 dark:backdrop-blur p-3.5">
       <div className="flex items-center gap-2 font-mono text-[12.5px]">
         <span className="text-mira-tool">{summary.icon}</span>
         <span className="font-medium text-foreground">
@@ -174,9 +181,7 @@ function PendingApprovalCard({
           {preview.lines.map((line, i) => <DiffRow key={i} line={line} />)}
         </div>
       ) : (
-        <pre className="m-0 max-h-[22vh] overflow-auto whitespace-pre-wrap rounded-md bg-background/60 px-3 py-2 font-mono text-xs text-muted-foreground">
-          {prettyArgs}
-        </pre>
+        <ReadableArgsBlock tool={call.function.name} argsText={call.function.arguments} fallback={prettyArgs} />
       )}
 
       {/* Buttons: Deny — Allow (primary) — caret opens a scope menu.
@@ -226,9 +231,13 @@ function PendingApprovalCard({
             </button>
           </Tip>
         </div>
+        <AnimatePresence initial={false}>
         {scopeMenuOpen && (
-          <div
-            className="absolute right-0 top-full z-20 mt-1 flex min-w-[220px] flex-col rounded-md border border-border/40 bg-popover p-1 shadow-lg"
+          <motion.div
+            initial={{ opacity: 0, y: -4, scale: 0.98 }}
+            animate={{ opacity: 1, y: 0, scale: 1, transition: { duration: 0.13 } }}
+            exit={{ opacity: 0, y: -4, scale: 0.98, transition: { duration: 0.1 } }}
+            className="absolute right-0 top-full z-20 mt-1 flex min-w-[220px] origin-top-right flex-col rounded-md border border-border/40 bg-popover p-1 shadow-lg"
             onMouseLeave={() => setScopeMenuOpen(false)}
           >
             <ScopeMenuItem
@@ -241,8 +250,9 @@ function PendingApprovalCard({
               hint="Also save the rule to ~/.mira/mira.yaml — persists across restarts."
               onClick={() => { setScopeMenuOpen(false); onDecide(true, 'always'); }}
             />
-          </div>
+          </motion.div>
         )}
+        </AnimatePresence>
       </div>
       <div className="text-right text-[10.5px] text-muted-foreground/60">
         <kbd className="rounded bg-secondary/70 px-1 py-0.5 font-mono text-[10px]">y</kbd> allow · <kbd className="rounded bg-secondary/70 px-1 py-0.5 font-mono text-[10px]">n</kbd> deny
@@ -251,6 +261,94 @@ function PendingApprovalCard({
       )}
     </div>
   );
+}
+
+
+function ReadableArgsBlock({
+  tool,
+  argsText,
+  fallback,
+  maxHeight = '22vh',
+}: {
+  tool: string;
+  argsText: string;
+  fallback?: string;
+  maxHeight?: string;
+}) {
+  const args = safeParse(argsText);
+  if (tool === 'bash' && typeof args?.command === 'string') {
+    return <CommandBlock command={String(args.command)} />;
+  }
+
+  const rows = readableArgRows(tool, args);
+  if (rows.length > 0) {
+    return (
+      <div className="rounded-md border border-border/35 bg-mira-elev1/45 px-3 py-2 text-[12.5px]">
+        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1.5">
+          {rows.map((row) => (
+            <div key={row.label} className="contents">
+              <dt className="select-none text-muted-foreground/65">{row.label}</dt>
+              <dd className="min-w-0 break-words font-mono text-foreground/85">{row.value}</dd>
+            </div>
+          ))}
+        </dl>
+      </div>
+    );
+  }
+
+  const text = fallback ?? prettyPrint(argsText);
+  if (!text.trim() || text.trim() === '{}') return null;
+  return (
+    <pre
+      className="m-0 overflow-auto whitespace-pre-wrap rounded-md bg-background/55 px-3 py-2 font-mono text-xs text-muted-foreground"
+      style={{ maxHeight }}
+    >
+      {text}
+    </pre>
+  );
+}
+
+function readableArgRows(tool: string, args: any): { label: string; value: string }[] {
+  if (!args || typeof args !== 'object') return [];
+  const rows: { label: string; value: string }[] = [];
+  const add = (label: string, value: unknown) => {
+    if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'boolean') return;
+    const text = String(value).trim();
+    if (!text) return;
+    rows.push({ label, value: text });
+  };
+  switch (tool) {
+    case 'read_file':
+    case 'write_file':
+    case 'edit_file':
+    case 'rustfmt':
+      add('file', args.path ?? args.file_path);
+      if (tool === 'write_file' && typeof args.content === 'string') add('content', summarizeText(args.content));
+      return rows;
+    case 'web_fetch':
+      add('url', args.url);
+      return rows;
+    case 'web_search':
+      add('query', args.query);
+      return rows;
+    case 'grep':
+      add('pattern', args.pattern);
+      add('path', args.path);
+      add('glob', args.glob);
+      return rows;
+    case 'glob':
+      add('pattern', args.pattern);
+      add('path', args.path);
+      return rows;
+    default:
+      add('target', args.path ?? args.file_path ?? args.url ?? args.query ?? args.pattern);
+      return rows;
+  }
+}
+
+function summarizeText(text: string): string {
+  const one = text.replace(/\s+/g, ' ').trim();
+  return one.length > 120 ? `${one.slice(0, 120)}…` : one;
 }
 
 function ScopeMenuItem({
@@ -277,7 +375,7 @@ function ScopeMenuItem({
 /* ---------- compact row (running / complete / denied) ---------- */
 
 function CompactToolRow({
-  call, status, result, preview, onOpenFile, progressLines,
+  call, status, result, preview, onOpenFile, progressLines, detailsOnly = false,
 }: {
   call: ToolCall;
   status: ToolStatus;
@@ -285,8 +383,9 @@ function CompactToolRow({
   preview: DiffPreview | null;
   onOpenFile?: (path: string, diff: DiffPreview | null) => void;
   progressLines?: string[];
+  detailsOnly?: boolean;
 }) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useTranscriptDisclosure(`tool:${call.id}`, detailsOnly);
   const summary = useMemo(() => summarize(call, status), [call, status]);
 
   const isDiffCardTool = call.function.name in DIFF_CARD_TOOLS;
@@ -330,25 +429,28 @@ function CompactToolRow({
   // patterns) stay as plain mono text — a pill around a shell
   // command would look strange.
   const targetIsPath = isPathishTool(call.function.name);
+  const completedCommand = call.function.name === 'bash' && status === 'complete';
 
   return (
     <div className="w-full max-w-[78%]">
       {/* Use div+role instead of <button> so the filename chip (also a
           button) doesn't trigger the "nested interactive content" HTML
           violation that causes browsers to hoist or swallow the inner click. */}
-      <div
+      {!detailsOnly && <div
         role="button"
         tabIndex={0}
         onClick={() => setExpanded((v) => !v)}
         onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setExpanded((v) => !v); }}
-        className="group flex w-full min-w-0 cursor-pointer items-center gap-1.5 rounded-md px-1 py-0.5 text-left text-[13px] transition-colors hover:bg-accent/40"
+        className={cn("group relative flex w-full min-w-0 cursor-pointer items-center gap-1.5 rounded-md px-1 py-0.5 text-left text-[13px] transition-colors hover:bg-accent/40", completedCommand && "pl-4")}
       >
+        {completedCommand && <BranchElbow className="left-0 top-0" />}
+        <span aria-hidden="true" className="inline-flex size-3.5 shrink-0 items-center justify-center text-muted-foreground">{summary.icon}</span>
         {/* The verb and the +/- stats never shrink; the target does. A
             single truncating span cut the whole line to "Edited…" in a
             narrow transcript, hiding the file chip but leaving it
             clickable. */}
         <span className="flex min-w-0 flex-1 items-center">
-          <span className="shrink-0 text-muted-foreground">{summary.verb}</span>
+          <ActivityShimmer active={status === 'running'} className="shrink-0">{summary.verb}</ActivityShimmer>
           {summary.target && (
             isDiffCardTool && onOpenFile ? (
               // Filename chip: click opens the file panel (with diff if available).
@@ -388,7 +490,7 @@ function CompactToolRow({
           )}
         />
         <StatusMark status={status} />
-      </div>
+      </div>}
 
       {/* Live output panel — visible whenever the tool has streamed lines,
           even before or after the result lands. Shows a compact tail by
@@ -401,8 +503,14 @@ function CompactToolRow({
         />
       )}
 
-      {expanded && (
-        <div className="ml-6 mb-1.5 mt-1 flex animate-fade-in flex-col gap-1.5">
+      <AnimatePresence initial={false}>
+        {expanded && (
+        <motion.div
+          initial={{ height: 0, opacity: 0 }}
+          animate={{ height: 'auto', opacity: 1, transition: { duration: 0.16 } }}
+          exit={{ height: 0, opacity: 0, transition: { duration: 0.12 } }}
+          className="ml-6 mb-1.5 mt-1 flex flex-col gap-1.5 overflow-hidden"
+        >
           {isDiffCardTool && effectiveDiff && (
             <DiffCard
               filePath={filePath}
@@ -428,7 +536,7 @@ function CompactToolRow({
               its output because the output IS the point there. */}
           {result &&
             !(call.function.name in RESULT_SUPPRESSED) && (
-              <ResultBlock content={result.content} isError={result.is_error ?? false} />
+              <ResultBlock stateKey={call.id} content={result.content} isError={result.is_error ?? false} live={status === 'running'} />
             )}
           {result?.images?.map((img, i) => (
             <img
@@ -439,8 +547,9 @@ function CompactToolRow({
               style={{ maxWidth: '100%', borderRadius: 6, marginTop: 8, display: 'block' }}
             />
           ))}
-        </div>
-      )}
+        </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
@@ -658,12 +767,12 @@ function reconstructDiff(tool: string, args: any): DiffLine[] | null {
  * still reads calmly during a run where a few tool calls fail;
  * "show all" toggles the tail past the first N lines.
  */
-function ResultBlock({ content, isError }: { content: string; isError: boolean }) {
-  const [showAll, setShowAll] = useState(false);
+function ResultBlock({ content, isError, live = false, stateKey }: { content: string; isError: boolean; live?: boolean; stateKey: string }) {
+  const [showAll, setShowAll] = useTranscriptDisclosure(`output:${stateKey}`);
   const lines = content.split('\n');
   const CAP = 6;
   const overflow = lines.length > CAP;
-  const shown = showAll ? content : lines.slice(0, CAP).join('\n');
+  const shown = showAll ? content : (live ? lines.slice(-CAP) : lines.slice(0, CAP)).join('\n');
 
   return (
     <div
@@ -678,8 +787,9 @@ function ResultBlock({ content, isError }: { content: string; isError: boolean }
           isError ? 'text-rose-200/90' : 'text-foreground/80',
         )}
       >
+        {!showAll && overflow && live ? `… ${lines.length - CAP} earlier lines\n` : ''}
         {shown}
-        {!showAll && overflow ? `\n… ${lines.length - CAP} more lines` : ''}
+        {!showAll && overflow && !live ? `\n… ${lines.length - CAP} more lines` : ''}
       </pre>
       {overflow && (
         <div className="flex items-center justify-end border-t border-border/30 bg-mira-elev1/70 px-2 py-1">
@@ -740,27 +850,12 @@ function summarize(
   const active = status === 'pending' || status === 'running';
   const verb = active ? info.verbCont : info.verbPast;
   const Icon = info.Icon;
-  const icon =
-    call.function.name in KNOWN
-      ? <Icon className="size-3.5" />
-      : <Play className="size-3.5" />;
+  const icon = <Icon aria-hidden="true" className="size-3.5 shrink-0" />;
 
   const args = safeParse(call.function.arguments);
   const target = pickTarget(call.function.name, args);
   return { verb, target, icon };
 }
-
-/** Tools with a specific `infoFor` entry — kept in sync with ToolGroup so
- *  the icon fallback triggers for genuinely unknown names only. */
-const KNOWN: Record<string, true> = {
-  read_file: true, write_file: true, edit_file: true, grep: true, glob: true,
-  find_symbol: true, find_references: true, find_callers: true, bash: true, rustfmt: true, web_fetch: true, web_search: true,
-  task_create: true, task_update: true, task_list: true, task_get: true,
-  git_diff: true, git_status: true, git_log: true, git_commit: true,
-  memory_read: true, memory_search: true, memory_append: true, memory_edit: true,
-  memory_remember: true,
-  skill: true, ask_user: true, plan: true, agent: true,
-};
 
 /** Per-tool target extractor. Uses the argument key most useful to a
  *  human skimming the row — the file path, the command, the query — so
@@ -904,7 +999,7 @@ function LiveOutputPanel({
   return (
     <div
       className={cn(
-        'ml-6 mt-0.5 rounded-md border font-mono text-[11.5px] leading-[1.55]',
+        'ml-6 mt-0.5 rounded-md border font-mono text-[11.5px] leading-[1.55] transition-[max-height] duration-200',
         'border-border/30 bg-[#f6f7f9] dark:bg-[#1a1b1e]',
         expanded ? 'max-h-[40vh]' : 'max-h-[8rem]',
         'overflow-auto',

@@ -37,6 +37,14 @@ pub enum ApprovalScope {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMsg {
+    SyncActivity,
+    QueueInput { session_id: String, id: String, text: String, #[serde(default)] images: Vec<mira_core::ImageData> },
+    UpdateLimitRecovery { session_id: String, request_id: String, id: String, action: String },
+    RemoveQueuedInput { session_id: String, id: String },
+    EditQueuedInput { session_id: String, request_id: String, id: String, fingerprint: String, text: String, #[serde(default)] images: Vec<mira_core::ImageData> },
+    ReorderQueuedInput { session_id: String, request_id: String, id: String, before_id: Option<String> },
+    Steer { request_id: String, text: String, #[serde(default)] images: Vec<mira_core::ImageData> },
+    History { session_id: String, cursor: String, request_id: String },
     /// Start a new user turn.
     Send {
         text: String,
@@ -276,8 +284,20 @@ pub enum ClientMsg {
 // connection; boxing it would only add churn at every construction site.
 #[allow(clippy::large_enum_variant)]
 pub enum ServerMsg {
+    SessionActivity { epoch:String, revision:u64, session_id:String, running:bool },
+    SessionActivitySnapshot { snapshot:crate::session_activity::ActivitySnapshot },
+    QueueUpdated { session_id: String, items: Vec<crate::message_queue::QueuedInput> },
+    QueueDelivery { session_id: String, item: crate::message_queue::QueuedInput },
+    QueueMutationResult { session_id: String, request_id: String, error: Option<String> },
+    SteerResult { session_id: String, request_id: String, message: Option<Message>, error: Option<String> },
     /// Emitted once when the socket opens, with the session's current state.
+    HistoryPage { session_id: String, request_id: String, page: Option<crate::transcript_history::TranscriptPage>, error: Option<String> },
+    TurnDiffs { summaries: Vec<crate::checkpoints::TurnDiffSummary> },
     Ready {
+        queued_inputs: Vec<crate::message_queue::QueuedInput>,
+        session_activity:crate::session_activity::ActivitySnapshot,
+        turn_diffs: Vec<crate::checkpoints::TurnDiffSummary>,
+        transcript_page: crate::transcript_history::TranscriptPage,
         session_id: String,
         model: String,
         mode: Mode,
@@ -350,6 +370,8 @@ pub enum ServerMsg {
         /// shows Stop and the working indicator until it ends.
         #[serde(default)]
         running: bool,
+        runtime_requests: Vec<crate::runtime_requests::RequestRecord>,
+        runtime_work: Vec<mira_acp::runtime::RuntimeWork>,
     },
     /// The session's engine changed: a provider or agent was picked, an
     /// agent started, failed, or exited. Sent on every transition so the
@@ -358,16 +380,24 @@ pub enum ServerMsg {
         engine: crate::session_engine::SessionEngine,
     },
     /// Fragment of assistant text.
-    Token { text: String },
+    Token {
+        text: String,
+    },
     /// Fragment of the model's reasoning ("thinking"), streamed before
     /// the text / tool calls it leads to. Clients render it in a
     /// collapsible "Thinking" section; the finished blocks also ride on
     /// the assistant message's `reasoning` field in session snapshots.
-    Reasoning { text: String },
+    Reasoning {
+        text: String,
+    },
     /// Tool call dispatched (already policy-approved).
-    ToolStart { call: ToolCall },
+    ToolStart {
+        call: ToolCall,
+    },
     /// Tool call finished with a result.
-    ToolEnd { result: ToolResult },
+    ToolEnd {
+        result: ToolResult,
+    },
     /// Model turn complete — may be followed by another turn if tools ran.
     TurnComplete,
     /// User turn fully complete — waiting for next user input.
@@ -386,7 +416,9 @@ pub enum ServerMsg {
         needs: Vec<String>,
     },
     /// Non-fatal warning surfaced to the UI.
-    Warning { text: String },
+    Warning {
+        text: String,
+    },
     /// Where the session's tools run, and what it could switch to.
     EnvironmentStatus {
         status: mira_compute::EnvironmentStatus,
@@ -394,7 +426,9 @@ pub enum ServerMsg {
     },
     /// One line of progress from an environment switch (upload, setup
     /// script output, merge).
-    EnvironmentProgress { text: String },
+    EnvironmentProgress {
+        text: String,
+    },
     /// An environment switch finished. On failure `error` is set and the
     /// session stayed where it was.
     EnvironmentSwitched {
@@ -411,7 +445,10 @@ pub enum ServerMsg {
     /// The renderer routes lines by `call_id` under the matching
     /// pending tool card so the user sees progress before the final
     /// `ToolEnd` frame lands.
-    ToolProgress { call_id: String, line: String },
+    ToolProgress {
+        call_id: String,
+        line: String,
+    },
     /// Diff preview computed for an `edit_file` / `write_file` call.
     /// Fires whether or not the call was approval-gated so live UIs
     /// always have the real diff, not just the reconstruction. Also
@@ -439,14 +476,20 @@ pub enum ServerMsg {
         instance: Option<String>,
     },
     /// Mode changed (echoes SetMode).
-    ModeChanged { mode: Mode },
+    ModeChanged {
+        mode: Mode,
+    },
     /// A protocol-level error (bad input, unknown call_id, etc.).
-    Error { text: String },
+    Error {
+        text: String,
+    },
 
     /// A `mira review` run started. Every subsequent `ReviewProgress` / `ReviewResult`
     /// / `ReviewError` frame with this `run_id` belongs to it — the frontend
     /// filters on it so overlapping runs don't scramble each other's UI.
-    ReviewStarted { run_id: String },
+    ReviewStarted {
+        run_id: String,
+    },
     /// Streaming progress event from an in-flight review.
     ReviewProgress {
         run_id: String,
@@ -458,12 +501,18 @@ pub enum ServerMsg {
         findings: Vec<Finding>,
     },
     /// Review aborted with an error (bad diff, provider failure, etc.).
-    ReviewError { run_id: String, text: String },
+    ReviewError {
+        run_id: String,
+        text: String,
+    },
 
     /// A session's AI-generated nickname landed on disk. Frontend uses this
     /// to refresh the sidebar so the newly-titled row replaces the
     /// first-user-message fallback without waiting for the next `done`.
-    SessionTitleUpdated { session_id: String, title: String },
+    SessionTitleUpdated {
+        session_id: String,
+        title: String,
+    },
 
     /// A session's background-mode was changed. Confirms `SetBackgroundMode`.
     BackgroundModeChanged {
@@ -475,12 +524,16 @@ pub enum ServerMsg {
     /// a turn finishes on a slot with zero attached clients, so the sidebar
     /// can drop the "running" indicator even though nobody's tab is
     /// receiving the per-turn `Done` frame.
-    SessionBackgroundIdle { session_id: String },
+    SessionBackgroundIdle {
+        session_id: String,
+    },
 
     /// Same idea for the running-transition — emitted on the SLOT's own
     /// channel when a turn kicks off, so if a client attaches mid-turn
     /// it can pick up the "still running" indicator without polling.
-    SessionBackgroundRunning { session_id: String },
+    SessionBackgroundRunning {
+        session_id: String,
+    },
 
     /// Per-round + running-total token usage from the provider. Emitted at
     /// the end of every provider round the moment a usage trailer arrives;
@@ -509,17 +562,23 @@ pub enum ServerMsg {
     /// `.mira/episodic.jsonl`. Emitted only when `count > 0`; the UI can
     /// render a small "mira remembered N things" chip to make cross-session
     /// memory writes visible.
-    MemoryLearned { count: usize },
+    MemoryLearned {
+        count: usize,
+    },
 
     /// The harness rolled up N older non-system messages into a single
     /// summary before the current round's model call. UI can render a
     /// "compacted N turns" chip for transparency.
-    Compacted { messages_removed: usize },
+    Compacted {
+        messages_removed: usize,
+    },
 
     /// A `/goal` was set on this session. Emitted immediately after
     /// `SetGoal` so the UI can flip its state without waiting for the
     /// next turn.
-    GoalSet { goal: Goal },
+    GoalSet {
+        goal: Goal,
+    },
     /// The session's standing goal was cleared (by the user or the
     /// UI). Emitted whether or not a turn is running.
     GoalCleared,
@@ -554,6 +613,15 @@ pub enum ServerMsg {
     /// The model called the `ask_user` tool with a batch of clarifying
     /// questions. Client renders the question card and answers with
     /// `ClientMsg::PromptResponse` carrying an `AskUser { … }` variant.
+    RuntimeRequestUpdated {
+        request: crate::runtime_requests::RequestRecord,
+    },
+    RuntimeWorkUpdated {
+        work: mira_acp::runtime::RuntimeWork,
+    },
+    RuntimeTurnUpdated {
+        turn: mira_acp::runtime::RuntimeTurn,
+    },
     AskUserRequest {
         prompt_id: String,
         proposal: AskUserProposal,
@@ -645,7 +713,9 @@ pub enum ServerMsg {
     /// the AgentTool's `ToolEnd` frame. This exists purely so the panel
     /// can flip its status pill from "working" to "done" without waiting
     /// for the parent to update the same call id.
-    SubagentDone { parent_call_id: String },
+    SubagentDone {
+        parent_call_id: String,
+    },
     /// A subagent posted an entry to the parent session's shared
     /// scratchpad via the `scratchpad_note` tool. Peers spawned from the
     /// same session share one pad so parallel researchers can see each
@@ -676,6 +746,31 @@ pub enum ServerMsg {
         text: String,
     },
 
+    /// An agent used Mira's browser through the tool server. Lets the
+    /// client show the browser pane however the agent names its tools.
+    BrowserActive,
+    /// `mira.yaml` changed and the engine registry was rebuilt: refetch
+    /// `GET /api/engines`.
+    EnginesChanged,
+    /// An agent asked for a secret (an API key, a token). The client shows a
+    /// private input and answers with a `secret` prompt response; the value
+    /// goes to a file only the agent's commands read, never the transcript.
+    SecretRequest {
+        prompt_id: String,
+        name: String,
+        reason: String,
+        /// A project file the value will also be written to, when asked.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dotenv: Option<String>,
+    },
+    /// A self-contained HTML page an agent published to the chat (a chart,
+    /// table or mockup). Rendered sandboxed, above the agent's reply.
+    HtmlRender {
+        id: String,
+        title: String,
+        html: String,
+    },
+
     // -------- ACP (external agent) event forwarding --------
     //
     // Same shape as the subagent family above: distinct variants rather than
@@ -685,9 +780,26 @@ pub enum ServerMsg {
     // point has to know what an ACP session update looks like.
     /// A fragment of the external agent's reply. Chunks arrive as they are
     /// produced, so the UI appends rather than replaces.
-    AcpText { text: String },
-    /// A fragment of the agent's internal reasoning.
-    AcpThought { text: String },
+    AcpText {
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
+    },
+    /// Authoritative completed prose, replacing the streamed partial message.
+    AcpMessageMetadata { message_id: String, phase: String },
+    StreamActivity { kind: String, title: String, detail: String },
+    AcpTextSnapshot {
+        message_id: String,
+        text: String,
+    },
+    /// Incremental tool stdout/stderr.
+    AcpToolOutputDelta {
+        id: String,
+        text: String,
+    },
+    AcpThought {
+        text: String,
+    },
     /// The agent started a tool call. The normalized state is forwarded
     /// whole, because it carries diff and terminal content that a bare
     /// `ToolCall` has no place for.
@@ -711,14 +823,24 @@ pub enum ServerMsg {
         available: Vec<mira_acp::events::SessionModeView>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         postures: Vec<mira_engine::PostureMapping>,
+        /// Which agent reported this, so the client attributes cached
+        /// capabilities to the right driver. Late frames from a previous
+        /// agent must not pollute another's "last seen" list.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        driver: Option<String>,
     },
     /// Config options. ACP has no set-model method — the model selector *is*
     /// a `configOptions` entry with `category: "model"`.
     AcpConfigOptions {
         options: Vec<mira_acp::events::SessionConfigView>,
+        /// Which agent reported this. See `AcpModes.driver`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        driver: Option<String>,
     },
     /// Slash commands the agent advertises.
-    AcpCommands { names: Vec<String> },
+    AcpCommands {
+        names: Vec<String>,
+    },
     /// What an external agent's turn spent since its last report: tokens
     /// and, when the agent estimates it, cost. Deltas — a turn can report
     /// several times (Codex does), and the client adds them up. Saved with
@@ -761,7 +883,10 @@ pub enum ServerMsg {
     /// Surfaced rather than dropped. ACP's own spec under-documents
     /// `SessionUpdate`, and real agents send vendor extensions, so a silent
     /// gap here is indistinguishable from a hang in the UI.
-    AcpUnmodelled { method: String, reason: String },
+    AcpUnmodelled {
+        method: String,
+        reason: String,
+    },
     /// The agent's session mode changed.
     ///
     /// Emitted for every change, not just privileged ones: a mode change is
@@ -822,9 +947,15 @@ impl ServerMsg {
         use mira_acp::events::{EventSource, MiraEvent};
         let event = ev.event;
         Some(match event {
-            MiraEvent::AssistantText { text, .. } => Self::AcpText { text },
+            MiraEvent::MessageMetadata { message_id, phase } => Self::AcpMessageMetadata { message_id, phase },
+            MiraEvent::Activity { kind, title, detail } => Self::StreamActivity { kind, title, detail },
+            MiraEvent::AssistantText { text, message_id } => Self::AcpText { text, message_id },
+            MiraEvent::AssistantSnapshot { message_id, text } => {
+                Self::AcpTextSnapshot { message_id, text }
+            }
+            MiraEvent::ToolOutputDelta { id, text } => Self::AcpToolOutputDelta { id, text },
             MiraEvent::AgentThought { text, .. } => Self::AcpThought { text },
-            MiraEvent::UserText { text, .. } => Self::AcpText { text },
+            MiraEvent::UserText { text, message_id } => Self::AcpText { text, message_id },
             MiraEvent::ToolCall(call) => Self::AcpToolCall { call },
             MiraEvent::ToolCallUpdate(call) => Self::AcpToolCallUpdate { call },
             MiraEvent::Plan { entries } => Self::AcpPlan { entries },
@@ -842,12 +973,18 @@ impl ServerMsg {
                     current,
                     available,
                     postures,
+                    driver: None,
                 }
             }
-            MiraEvent::ConfigOptions { options } => Self::AcpConfigOptions { options },
+            MiraEvent::ConfigOptions { options } => Self::AcpConfigOptions {
+                options,
+                driver: None,
+            },
             MiraEvent::Commands { names } => Self::AcpCommands { names },
             MiraEvent::Limits { windows } => Self::AcpLimits { windows },
-            MiraEvent::Spend { .. } => return None,
+            MiraEvent::Spend { .. } | MiraEvent::RuntimeRequest(_) => return None,
+            MiraEvent::RuntimeWork(work) => Self::RuntimeWorkUpdated { work },
+            MiraEvent::RuntimeTurn(turn) => Self::RuntimeTurnUpdated { turn },
             MiraEvent::Usage { used, size, cost } => Self::AcpUsage {
                 used,
                 size,
@@ -896,6 +1033,7 @@ impl ServerMsg {
             HarnessEvent::ToolEnd(result) => Self::ToolEnd { result },
             HarnessEvent::TurnComplete => Self::TurnComplete,
             HarnessEvent::Done => Self::Done,
+            HarnessEvent::Warning(text) if text.starts_with("[retry]") => Self::StreamActivity { kind: "retry".into(), title: "Retrying verification".into(), detail: text.trim_start_matches("[retry]").trim().into() },
             HarnessEvent::Warning(text) => Self::Warning { text },
             HarnessEvent::Usage {
                 round,
@@ -939,6 +1077,29 @@ impl ServerMsg {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_message_identity_survives_wire_and_legacy_replay() {
+        use mira_acp::events::{EventSource, MiraEvent, NormalizedEvent};
+        let frame = ServerMsg::from_acp(NormalizedEvent {
+            source: EventSource::Acp {
+                variant: "agent_message_chunk".into(),
+            },
+            event: MiraEvent::AssistantText {
+                message_id: Some("native-message".into()),
+                text: "hello".into(),
+            },
+        })
+        .unwrap();
+        let value = serde_json::to_value(frame).unwrap();
+        assert_eq!(value["message_id"], "native-message");
+        let legacy = serde_json::to_value(ServerMsg::AcpText {
+            text: "old".into(),
+            message_id: None,
+        })
+        .unwrap();
+        assert_eq!(legacy, serde_json::json!({"type":"acp_text","text":"old"}));
+    }
 
     #[test]
     fn rate_limits_reach_the_web_ui_as_rate_limit_frames() {

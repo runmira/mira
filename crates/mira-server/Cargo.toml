@@ -8,6 +8,7 @@ description  = "HTTP/WebSocket server that fronts a Mira session for browser or 
 
 [dependencies]
 base64       = "0.22"
+sha2         = "0.10"
 mira-core    = { workspace = true }
 mira-cloud    = { workspace = true }
 mira-ai      = { workspace = true }

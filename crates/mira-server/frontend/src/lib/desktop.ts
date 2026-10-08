@@ -106,6 +106,33 @@ export async function openExternal(url: string): Promise<void> {
   }
 }
 
+/**
+ * The OS folder panel. `null` when there isn't one to show — cancelled,
+ * or a browser build with no native panel behind it, where the caller
+ * falls back to its own dialog.
+ *
+ * Uses the dialog plugin's own command rather than a wrapper so the
+ * panel keeps its native behaviour (recent places, tags, Cmd+Shift+G).
+ */
+export async function pickFolder(title = 'Choose project folder'): Promise<string | null> {
+  if (!window.__TAURI__) return null;
+  try {
+    const picked = await window.__TAURI__.core.invoke('plugin:dialog|open', {
+      options: { directory: true, multiple: false, title },
+    });
+    // The plugin answers a single string here (multiple: false), but it
+    // types the result as string | string[] | null — normalise both so a
+    // future `multiple` can't leak an array into a cwd.
+    if (typeof picked === 'string' && picked) return picked;
+    if (Array.isArray(picked) && typeof picked[0] === 'string') return picked[0];
+    return null;
+  } catch {
+    // A closed panel rejects in some Tauri versions; that is a cancel,
+    // not a failure worth surfacing.
+    return null;
+  }
+}
+
 /** Calls `cb` with each `mira[-channel]://auth-callback?...` URL the app receives. */
 export async function onAuthCallback(cb: (url: URL) => void): Promise<Unlisten> {
   if (!window.__TAURI__) return () => {};
@@ -116,4 +143,10 @@ export async function onAuthCallback(cb: (url: URL) => void): Promise<Unlisten> 
       /* not a URL; ignore */
     }
   });
+}
+
+export async function captureNativeScreenshot(): Promise<File | null | undefined> {
+  if (!window.__TAURI__ || !/Mac/.test(navigator.platform)) return undefined;
+  const bytes = await window.__TAURI__.core.invoke('capture_screenshot') as number[] | null;
+  return bytes ? new File([new Uint8Array(bytes)], 'Screenshot.png', { type: 'image/png' }) : null;
 }

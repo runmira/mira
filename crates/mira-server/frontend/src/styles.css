@@ -2,6 +2,24 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Right-panel chrome follows the sidebar wash in light mode and the
+   composer's secondary surface in dark mode. Active tabs share the
+   composer's white card, subtle ring, and shadow. */
+.right-panel-header {
+  background: hsl(var(--secondary) / 0.85);
+}
+.right-panel-tab-active {
+  background: hsl(var(--secondary) / 0.85);
+  box-shadow: 0 0 0 1px hsl(var(--border) / 0.55), 0 14px 36px -28px rgba(0, 0, 0, 0.8);
+}
+:root[data-theme='light'] .right-panel-header {
+  background: hsl(var(--panel));
+}
+:root[data-theme='light'] .right-panel-tab-active {
+  background: #fff;
+  box-shadow: 0 0 0 1px hsl(var(--border) / 0.55), 0 12px 30px -26px rgba(15, 23, 42, 0.55);
+}
+
 /* shadcn/ui zinc dark palette — canonical values. Tailwind reads these via
    `hsl(var(--…))` in tailwind.config.js. */
 @layer base {
@@ -112,6 +130,11 @@
     --float-card: rgba(28, 28, 30, 0.92);
     --float-card-solid: #1c1c1e;
     --float-shadow: 0 12px 40px rgba(0, 0, 0, 0.45), 0 2px 8px rgba(0, 0, 0, 0.3);
+
+    /* "Elevated card" for in-flow panels (composer, plugin cards, main
+       chat surface…). Card fill + a soft lift. Dark barely needs the
+       lift — borders carry it — so the token is subtler there. */
+    --elev-shadow: 0 2px 6px rgba(0, 0, 0, 0.25), 0 10px 28px rgba(0, 0, 0, 0.3);
   }
 
   /* Light. Same token names, light values; everything reading tokens
@@ -183,6 +206,11 @@
     --float-card: rgba(255, 255, 255, 0.92);
     --float-card-solid: #ffffff;
     --float-shadow: 0 12px 40px rgba(15, 17, 26, 0.12), 0 2px 8px rgba(15, 17, 26, 0.06);
+
+    /* In light mode the card itself is white while the window wash
+       behind it is a pale grey — so a soft grey shadow is what lifts
+       it off the page. */
+    --elev-shadow: 0 1px 2px rgba(15, 17, 26, 0.05), 0 10px 30px rgba(15, 17, 26, 0.08);
   }
 
   /* Accent color (Settings → Appearance; lib/appearance.ts). Blue is the
@@ -249,6 +277,7 @@
   }
 
   body {
+    font-size: 16px;
     @apply bg-background text-foreground antialiased;
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
     /* Inter 4.x variable font carries an opsz (optical size) axis — auto
@@ -289,6 +318,17 @@
   }
   *::-webkit-scrollbar-thumb:hover { background: hsl(0 0% 100% / 0.22); background-clip: padding-box; }
   *::-webkit-scrollbar-corner { background: transparent; }
+}
+
+/* Elevated card for in-flow panels: theme-aware shadow + the card
+   fill. The white/grey contrast carries the card look that light
+   mode otherwise lacks; dark mode gets the token's subtler shadow. */
+/* Elevated card: in light mode a white card with a soft shadow. Dark
+   mode keeps cards border-defined, so this class is a no-op there —
+   each call site carries the original dark fill via `dark:` instead. */
+:root[data-theme='light'] .elev-card {
+  background-color: hsl(var(--card));
+  box-shadow: var(--elev-shadow);
 }
 
 /* ================================================================
@@ -954,3 +994,49 @@
 :root[data-theme='light'] .md-diff-error { border-top-color: #e1e4e8; color: #cf222e; }
 :root[data-theme='light'] .diff-line.add { color: #116329; }
 :root[data-theme='light'] .diff-line.del { color: #a40e26; }
+
+::highlight(mira-citation) { background: rgba(77, 136, 255, .32); color: inherit; }
+/* The reply a citation jump landed in: one soft pulse. */
+@keyframes citation-flash {
+  0% { box-shadow: 0 0 0 0 rgba(77, 136, 255, 0); }
+  25% { box-shadow: 0 0 0 6px rgba(77, 136, 255, .18); }
+  100% { box-shadow: 0 0 0 0 rgba(77, 136, 255, 0); }
+}
+.citation-flash { border-radius: 10px; animation: citation-flash 1.2s ease-out 1; }
+@media (prefers-reduced-motion: reduce) { .citation-flash { animation: none; } }
+
+:root { --mira-font-scale: 0.86; }
+:root[data-theme='light'] { --activity-shimmer-base: #525866; --activity-shimmer-band: #a5abb6; }
+
+.activity-shimmer {
+  display: inline-block;
+  background-image: linear-gradient(90deg, var(--activity-shimmer-base, hsl(var(--muted-foreground))) 0%, var(--activity-shimmer-base, hsl(var(--muted-foreground))) 38%, var(--activity-shimmer-band, hsl(var(--foreground))) 50%, var(--activity-shimmer-base, hsl(var(--muted-foreground))) 62%, var(--activity-shimmer-base, hsl(var(--muted-foreground))) 100%);
+  background-size: 200% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+}
+.reduce-motion .activity-shimmer { animation: none; background: none; color: hsl(var(--muted-foreground)); }
+@media (prefers-reduced-motion: reduce), (forced-colors: active) {
+  .activity-shimmer { animation: none; background: none; color: hsl(var(--muted-foreground)); }
+}
+
+.stream-text-reveal { position: absolute; pointer-events: none; animation: stream-text-reveal 180ms ease-out both; }
+@keyframes stream-text-reveal { from { opacity: 0.85; } to { opacity: 0; } }
+@media (prefers-reduced-motion: reduce), (forced-colors: active) { .stream-text-reveal { display: none; } }
+
+/* Focus rings are for keyboard users. After a click, a menu or dialog that
+   focuses its first item (so arrow keys work) shouldn't draw a ring around
+   it; WebKit draws one anyway. See lib/inputModality.ts. */
+:root[data-input='pointer'] :focus,
+:root[data-input='pointer'] :focus-visible {
+  outline: none;
+}
+/* Same for the Tailwind ring buttons draw on focus. Text fields keep
+   theirs: it marks where typing goes. */
+:root[data-input='pointer'] button:focus-visible,
+:root[data-input='pointer'] [role='menuitem']:focus-visible,
+:root[data-input='pointer'] [role='option']:focus-visible {
+  --tw-ring-shadow: 0 0 #0000;
+  --tw-ring-offset-shadow: 0 0 #0000;
+}

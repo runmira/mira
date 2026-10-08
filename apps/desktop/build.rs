@@ -8,6 +8,7 @@ fn main() {
             "check_update",
             "install_update",
             "restart_app",
+            "capture_screenshot",
         ]),
     ))
     .expect("failed to run tauri-build");

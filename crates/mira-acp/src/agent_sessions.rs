@@ -22,7 +22,12 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AgentCursor {
     pub mira_session: String,
-    pub driver_kind: String,
+    /// The engine instance that drove it (`codex-work`, or the driver kind
+    /// for the default instance). Stored under this name since instances
+    /// arrived; older files used `driver_kind`, which reads back as the
+    /// same value because a default instance id *is* its driver kind.
+    #[serde(default, alias = "driver_kind")]
+    pub instance: String,
     pub agent_session_id: String,
     pub updated_at: u64,
 }
@@ -38,10 +43,13 @@ fn store_path(home: &Path) -> PathBuf {
     home.join(".mira/agent-cursors.json")
 }
 
-/// One cursor per (session, driver): two agents alternating in one session
-/// must not overwrite each other's resume point.
-fn key(mira_session: &str, driver_kind: &str) -> String {
-    format!("{mira_session}\0{driver_kind}")
+/// One cursor per (session, instance): two engines alternating in one
+/// session must not overwrite each other's resume point. The instance id
+/// is what separates `codex` from `codex-work` even though both are the
+/// same driver kind — routing by kind alone would resume the wrong
+/// account's conversation.
+fn key(mira_session: &str, instance: &str) -> String {
+    format!("{mira_session}\0{instance}")
 }
 
 fn read_all(home: &Path) -> BTreeMap<String, AgentCursor> {
@@ -62,13 +70,13 @@ pub fn agent_session_ids_in(home: &Path) -> std::collections::HashSet<String> {
 
 /// Record where an agent session left off. Overwrites any previous cursor
 /// for the Mira session: there is exactly one agent per slot.
-pub fn record_in(home: &Path, mira_session: &str, driver_kind: &str, agent_session_id: &str) {
+pub fn record_in(home: &Path, mira_session: &str, instance: &str, agent_session_id: &str) {
     let mut all = read_all(home);
     all.insert(
-        key(mira_session, driver_kind),
+        key(mira_session, instance),
         AgentCursor {
             mira_session: mira_session.to_string(),
-            driver_kind: driver_kind.to_string(),
+            instance: instance.to_string(),
             agent_session_id: agent_session_id.to_string(),
             updated_at: now_secs(),
         },
@@ -81,23 +89,23 @@ pub fn record_in(home: &Path, mira_session: &str, driver_kind: &str, agent_sessi
     }
 }
 
-/// The recorded cursor for a Mira session and driver.
-pub fn read_in(home: &Path, mira_session: &str, driver_kind: &str) -> Option<AgentCursor> {
-    read_all(home).remove(&key(mira_session, driver_kind))
+/// The recorded cursor for a Mira session and engine instance.
+pub fn read_in(home: &Path, mira_session: &str, instance: &str) -> Option<AgentCursor> {
+    read_all(home).remove(&key(mira_session, instance))
 }
 
 /// Production wrappers, rooted at `$HOME`.
-pub fn record(mira_session: &str, driver_kind: &str, agent_session_id: &str) {
+pub fn record(mira_session: &str, instance: &str, agent_session_id: &str) {
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-        record_in(&home, mira_session, driver_kind, agent_session_id);
+        record_in(&home, mira_session, instance, agent_session_id);
     }
 }
 
 /// Forget a cursor. Used when history is deliberately ended (revert):
 /// keeping it would resurrect the exact session just left behind.
-pub fn remove_in(home: &Path, mira_session: &str, driver_kind: &str) {
+pub fn remove_in(home: &Path, mira_session: &str, instance: &str) {
     let mut all = read_all(home);
-    if all.remove(&key(mira_session, driver_kind)).is_some() {
+    if all.remove(&key(mira_session, instance)).is_some() {
         let _ = std::fs::write(
             store_path(home),
             serde_json::to_string_pretty(&all).unwrap_or_default(),
@@ -105,16 +113,16 @@ pub fn remove_in(home: &Path, mira_session: &str, driver_kind: &str) {
     }
 }
 
-pub fn remove(mira_session: &str, driver_kind: &str) {
+pub fn remove(mira_session: &str, instance: &str) {
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-        remove_in(&home, mira_session, driver_kind);
+        remove_in(&home, mira_session, instance);
     }
 }
 
-pub fn read(mira_session: &str, driver_kind: &str) -> Option<AgentCursor> {
+pub fn read(mira_session: &str, instance: &str) -> Option<AgentCursor> {
     std::env::var_os("HOME")
         .map(PathBuf::from)
-        .and_then(|home| read_in(&home, mira_session, driver_kind))
+        .and_then(|home| read_in(&home, mira_session, instance))
 }
 
 /// A session from the agent's own history, resumable via its id.
@@ -296,11 +304,11 @@ mod tests {
     }
 
     #[test]
-    fn cursors_are_keyed_by_session_and_driver() {
+    fn cursors_are_keyed_by_session_and_instance() {
         let (_d, home) = tmp();
         record_in(&home, "s1", "claude-code", "abc");
         record_in(&home, "s1", "codex", "th-9");
-        // Same session, different drivers: neither clobbers the other.
+        // Same session, different instances: neither clobbers the other.
         assert_eq!(
             read_in(&home, "s1", "claude-code")
                 .unwrap()
@@ -316,14 +324,51 @@ mod tests {
     }
 
     #[test]
+    fn two_instances_of_one_driver_keep_separate_cursors() {
+        // `codex` and `codex-work` are the same driver kind with different
+        // credential homes. Keying by kind would resume one's conversation
+        // in the other's account.
+        let (_d, home) = tmp();
+        record_in(&home, "s1", "codex", "ambient-sid");
+        record_in(&home, "s1", "codex-work", "work-sid");
+        assert_eq!(
+            read_in(&home, "s1", "codex").unwrap().agent_session_id,
+            "ambient-sid"
+        );
+        assert_eq!(
+            read_in(&home, "s1", "codex-work").unwrap().agent_session_id,
+            "work-sid"
+        );
+    }
+
+    #[test]
+    fn pre_instance_cursor_files_still_read() {
+        // Cursors written before instances existed used `driver_kind`; a
+        // default instance id *is* its driver kind, so they come back as
+        // the default instance's cursor rather than vanishing.
+        let (_d, home) = tmp();
+        std::fs::create_dir_all(home.join(".mira")).unwrap();
+        // The map key joins session and kind with NUL, which cannot
+        // appear raw in JSON text, so the file on disk escapes it.
+        std::fs::write(
+            home.join(".mira/agent-cursors.json"),
+            r#"{"s1\u0000codex":{"mira_session":"s1","driver_kind":"codex","agent_session_id":"old-sid","updated_at":1}}"#,
+        )
+        .unwrap();
+        let c = read_in(&home, "s1", "codex").unwrap();
+        assert_eq!(c.agent_session_id, "old-sid");
+        assert_eq!(c.instance, "codex");
+    }
+
+    #[test]
     fn cursors_round_trip_per_session() {
         let (_d, home) = tmp();
         assert!(read_in(&home, "s1", "claude-code").is_none());
         record_in(&home, "s1", "claude-code", "abc");
         let c = read_in(&home, "s1", "claude-code").unwrap();
         assert_eq!(c.agent_session_id, "abc");
-        assert_eq!(c.driver_kind, "claude-code");
-        // Re-recording replaces: one cursor per (session, driver).
+        assert_eq!(c.instance, "claude-code");
+        // Re-recording replaces: one cursor per (session, instance).
         record_in(&home, "s1", "claude-code", "def");
         assert_eq!(
             read_in(&home, "s1", "claude-code")

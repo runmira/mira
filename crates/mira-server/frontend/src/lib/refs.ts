@@ -53,6 +53,11 @@ function parseKeys(raw: string): string[] | null {
     return k ? [...sym[1], k] : null;
   }
   const parts = s.split(/\s*[+-]\s*/).filter(Boolean);
+  // Separator-only spans (`+`, `-`, `+ -`) split into nothing — there is
+  // no key to read, so bail before indexing below. (This used to throw
+  // on `parts[parts.length - 1]`, white-screening any chat containing an
+  // inline `+`.)
+  if (parts.length === 0) return null;
   if (parts.length === 1) {
     const named = NAMED_KEYS[parts[0].toLowerCase()];
     return named && parts[0][0] === parts[0][0].toUpperCase() ? [named] : null;
@@ -150,4 +155,27 @@ export function prettyUrl(href: string): UrlLabel | null {
   }
   const path = parts.join('/');
   return { label: middle(path ? `${host}/${path}` : host, 56), kind: 'page' };
+}
+
+/** Agent-generated local server URLs sometimes wrap an absolute workspace
+ * path. Treat only known filesystem roots on loopback hosts as file links;
+ * ordinary localhost routes and remote URLs remain browser links. */
+export function parseWorkspaceFileLink(href: string): { path: string; line: number | null } | null {
+  let ref = href;
+  if (/^https?:\/\//i.test(href)) {
+    try {
+      const url = new URL(href);
+      if (!['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) || url.search) return null;
+      ref = decodeURIComponent(url.pathname) + url.hash;
+      if (!/^\/(Users|home|Volumes|tmp|private|var|opt|workspace|workspaces)\//.test(ref)) return null;
+    } catch { return null; }
+  } else if (/^[a-z][a-z0-9+.-]*:/i.test(href) && !/^\/?[A-Za-z]:[\\/]/.test(href)) {
+    return null;
+  }
+  const hash = /#L(\d+)(?:[-:]L?\d+)?$/.exec(ref);
+  if (hash) ref = ref.slice(0, hash.index);
+  if (/[#?]/.test(ref)) return null;
+  const file = splitFileRef(ref);
+  if (!/\.[\w]{1,8}$/.test(file.path) && !/(?:^|\/)(Makefile|Dockerfile|LICENSE|README)$/.test(file.path)) return null;
+  return { path: file.path, line: hash ? Number(hash[1]) || null : file.line };
 }

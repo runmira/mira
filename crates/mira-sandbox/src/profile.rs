@@ -623,4 +623,36 @@ mod safe_child_env_tests {
             assert!(seen.insert(*k), "{k} listed twice");
         }
     }
+
+    #[test]
+    fn the_allowlist_carries_no_credentials() {
+        // The allowlist IS the ambient-deny mechanism for agent spawns:
+        // anything inherited here reaches every agent, so no credential
+        // variable may ever be added to it. An agent that bills to an
+        // ambient key cannot be scoped, audited, or run as a second
+        // identity — keys arrive only through the instance's own config.
+        for k in safe_child_env() {
+            let upper = k.to_ascii_uppercase();
+            for banned in [
+                "KEY",
+                "TOKEN",
+                "SECRET",
+                "GOOGLE_",
+                "AWS_",
+                "AZURE_",
+                "ANTHROPIC_",
+                "OPENAI_",
+                "CODEX_",
+                "XAI_",
+                "CURSOR_",
+                "GEMINI_",
+                "OAUTH",
+            ] {
+                assert!(
+                    !upper.contains(banned),
+                    "{k} looks like a credential and must not be inheritable"
+                );
+            }
+        }
+    }
 }

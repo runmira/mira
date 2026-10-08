@@ -1,3 +1,4 @@
+import { ActivityShimmer } from './ActivityShimmer';
 import { useEffect, useMemo, useState } from 'react';
 import miraLogo from '../assets/mira-logo.png';
 
@@ -41,20 +42,7 @@ export function Thinking() {
         draggable={false}
         className="size-4 shrink-0 rounded-full object-contain animate-[spin_3s_linear_infinite]"
       />
-      <span
-        // Gradient text: a bright band travels through the muted-grey base.
-        // `bg-clip-text` + `text-transparent` lets the moving gradient show
-        // through the glyphs. `background-size: 200%` gives the shimmer
-        // enough runway to feel like a sweep, not a flash.
-        className="animate-text-shimmer inline-block bg-clip-text text-transparent"
-        style={{
-          backgroundImage:
-            'linear-gradient(90deg, hsl(0 0% 100% / 0.28) 0%, hsl(0 0% 100% / 0.28) 40%, hsl(0 0% 100% / 0.95) 50%, hsl(0 0% 100% / 0.28) 60%, hsl(0 0% 100% / 0.28) 100%)',
-          backgroundSize: '200% 100%',
-        }}
-      >
-        {label}
-      </span>
+      <ActivityShimmer active>{label}</ActivityShimmer>
     </div>
   );
 }

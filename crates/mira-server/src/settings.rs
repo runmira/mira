@@ -65,6 +65,24 @@ pub struct SettingsView {
     /// Cross-session memory runtime knobs. Kept in the same view so a UI
     /// panel can render all memory-related controls without a second fetch.
     pub memory: MemoryView,
+    /// Background behaviour of running chats.
+    pub sessions: SessionsView,
+}
+
+/// Effective `sessions.*` (defaults applied).
+#[derive(Debug, Serialize)]
+pub struct SessionsView {
+    pub auto_resume_after_limit: bool,
+    pub keep_awake_while_running: bool,
+}
+
+/// `sessions` patch: absent = leave alone.
+#[derive(Debug, Deserialize)]
+pub struct SessionsUpdate {
+    #[serde(default)]
+    pub auto_resume_after_limit: Option<bool>,
+    #[serde(default)]
+    pub keep_awake_while_running: Option<bool>,
 }
 
 /// Effective (defaults applied) view of `memory.*` for the UI. Every field
@@ -123,6 +141,8 @@ pub struct SettingsUpdate {
     /// `None` = reset to default (removes the yaml override).
     #[serde(default)]
     pub memory: Option<MemoryUpdate>,
+    #[serde(default)]
+    pub sessions: Option<SessionsUpdate>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -213,6 +233,7 @@ pub async fn put_settings(
     // process env so tools that check std::env pick them up on the very
     // next call — no restart needed.
     mira_config::export_keys_to_env(&cfg);
+    crate::keep_awake::set_enabled(cfg.sessions.keep_awake());
 
     // Rebuild the default provider from the fresh config and refresh
     // the pool row for it. If the config still isn't complete, fall
@@ -220,7 +241,26 @@ pub async fn put_settings(
     // instead of the last known (possibly bad) provider silently
     // continuing.
     let provider = build_provider(&cfg);
+    let active_slot = state.active_slot().await;
+    let active_is_native = active_slot.acp_launch.lock().await.is_none();
     if let Some(name) = cfg.default_provider.clone() {
+        if active_is_native {
+            active_slot
+                .native_provider
+                .register(&name, provider.clone());
+            active_slot.native_provider.activate(&name);
+            *active_slot
+                .selection
+                .instance
+                .write()
+                .expect("selection lock poisoned") = Some(name.clone());
+            active_slot
+                .session
+                .read()
+                .await
+                .set_engine_instance(Some(name.clone()))
+                .await;
+        }
         state.provider.register(&name, provider);
         // Selecting a provider in settings is also a selection of the
         // engine instance that wraps it.
@@ -234,6 +274,9 @@ pub async fn put_settings(
             *inst = Some(name);
         }
     } else {
+        if active_is_native {
+            active_slot.native_provider.set(provider.clone());
+        }
         state.provider.set(provider);
     }
     // Drop the models cache — the active provider has a different
@@ -256,6 +299,12 @@ pub async fn put_settings(
         *small = cfg.small_model.clone().filter(|m| !m.trim().is_empty());
     }
 
+    *active_slot
+        .selection
+        .small_model
+        .write()
+        .expect("selection lock poisoned") = cfg.small_model.clone();
+
     // Deliberately NOT force-resetting the session's model here. This
     // handler used to set_model(default_model) on every save, clobbering
     // whatever the user had picked in the picker. The model now changes
@@ -265,6 +314,11 @@ pub async fn put_settings(
         let model = model.trim();
         if !model.is_empty() {
             state.current_session().await.set_model(model).await;
+            *active_slot
+                .selection
+                .model
+                .write()
+                .expect("selection lock poisoned") = Some(model.to_owned());
             {
                 let mut m = state
                     .selection
@@ -361,6 +415,10 @@ fn view_from(cfg: &MiraConfig, configured: bool) -> SettingsView {
             inject_context: cfg.memory.inject_context(),
             extractor_model: cfg.memory.extractor_model().map(str::to_owned),
         },
+        sessions: SessionsView {
+            auto_resume_after_limit: cfg.sessions.auto_resume(),
+            keep_awake_while_running: cfg.sessions.keep_awake(),
+        },
     }
 }
 
@@ -410,6 +468,14 @@ fn apply(cfg: &mut MiraConfig, u: SettingsUpdate) {
             } else {
                 cfg.keys.insert(ku.name, value);
             }
+        }
+    }
+    if let Some(su) = u.sessions {
+        if let Some(v) = su.auto_resume_after_limit {
+            cfg.sessions.auto_resume_after_limit = v.then_some(true);
+        }
+        if let Some(v) = su.keep_awake_while_running {
+            cfg.sessions.keep_awake_while_running = v.then_some(true);
         }
     }
     if let Some(mu) = u.memory {

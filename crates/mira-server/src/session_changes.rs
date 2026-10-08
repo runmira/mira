@@ -252,7 +252,7 @@ pub fn stats_against_head(cwd: &Path, paths: &[String]) -> Vec<ChangedFile> {
 
 /// `git diff --numstat -z` without renames: `added\tremoved\tpath\0`, with
 /// `-` counts for binary files.
-fn parse_numstat_z(s: &str) -> Vec<ChangedFile> {
+pub(crate) fn parse_numstat_z(s: &str) -> Vec<ChangedFile> {
     split_z(s)
         .filter_map(|rec| {
             let mut it = rec.splitn(3, '\t');

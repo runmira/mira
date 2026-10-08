@@ -17,12 +17,14 @@ import hljs from 'highlight.js';
 import { parseDiffFromFile } from '@pierre/diffs';
 import type { DiffLine, DiffPreview } from '../types';
 import { browse } from '../api';
+import { Collapse } from './ui/Collapse';
 import { readFile } from '../api';
 import { cn } from '@/lib/utils';
 import { openInEditor } from '@/lib/editors';
 import { useFileIcons } from '@/lib/fileIcons';
 import { StyledDiffCodeView } from './diffs/StyledDiffCodeView';
 import { useDiffOptions } from '../lib/diffPrefs';
+import { Markdown } from './Markdown';
 
 export type FilePanelTab = {
   id: string;
@@ -49,7 +51,7 @@ const EXT_TO_LANG: Record<string, string> = {
   html: 'xml', htm: 'xml', xml: 'xml', svg: 'xml',
   json: 'json', json5: 'json', jsonc: 'json',
   yaml: 'yaml', yml: 'yaml', toml: 'ini',
-  md: 'markdown', mdx: 'markdown',
+  md: 'markdown', markdown: 'markdown', mdx: 'markdown',
   sh: 'bash', bash: 'bash', zsh: 'bash', fish: 'bash',
   ps1: 'powershell', bat: 'dos', cmd: 'dos',
   sql: 'sql', graphql: 'graphql', gql: 'graphql',
@@ -336,7 +338,7 @@ function DirNode({
                 {folderIconFor(basename(e.path), isOpen, folderIcon)}
                 <span className="min-w-0 truncate">{e.name}</span>
               </button>
-              {isOpen && (
+              <Collapse open={isOpen}>
                 <DirNode
                   path={e.path}
                   depth={depth + 1}
@@ -345,7 +347,7 @@ function DirNode({
                   onOpenDir={onOpenDir}
                   onSelectFile={onSelectFile}
                 />
-              )}
+              </Collapse>
             </div>
           );
         }
@@ -547,7 +549,7 @@ type Props = {
   cwd: string;
   /** When provided, clicking a file in the explorer opens it as a new
    *  tab in the panel rather than replacing the current view. */
-  onOpenFile?: (path: string, diff: DiffPreview | null) => void;
+  onOpenFile?: (path: string, diff: DiffPreview | null, line?: number | null) => void;
 };
 
 export function FilePanelBody({ tab, cwd, onOpenFile }: Props) {
@@ -559,6 +561,11 @@ export function FilePanelBody({ tab, cwd, onOpenFile }: Props) {
   const [viewDiff, setViewDiff] = useState<DiffPreview | null>(tab.diff);
   // Explorer closed by default.
   const [treeVisible, setTreeVisible] = useState(false);
+  const [markdownView, setMarkdownView] = useState<'preview' | 'source'>(tab.line ? 'source' : 'preview');
+
+  useEffect(() => {
+    setMarkdownView(tab.line ? 'source' : 'preview');
+  }, [viewPath, tab.line, tab.reveal]);
 
   // Follow the tab, including a diff handed to a tab that is already open:
   // re-opening a file from an edit (after it was opened from a read) used
@@ -589,9 +596,9 @@ export function FilePanelBody({ tab, cwd, onOpenFile }: Props) {
   const ext  = extFrom(viewPath);
   const meta = LANG_META[lang];
 
-  function handleSelectFile(path: string) {
+  function handleSelectFile(path: string, line?: number | null) {
     if (onOpenFile) {
-      onOpenFile(path, null);
+      onOpenFile(path, null, line);
     } else {
       setViewPath(path);
       setViewDiff(null);
@@ -602,8 +609,8 @@ export function FilePanelBody({ tab, cwd, onOpenFile }: Props) {
     <div className="flex h-full min-w-0 flex-col overflow-hidden" style={{ background: BG }}>
       {/* VS Code-style header */}
       <div
-        className="flex h-9 shrink-0 items-center gap-2 border-b px-3"
-        style={{ background: 'var(--fp-header)', borderColor: 'var(--fp-border)' }}
+        className="right-panel-header flex h-9 shrink-0 items-center gap-2 border-b px-3"
+        style={{ borderColor: 'var(--fp-border)' }}
       >
         <button
           type="button"
@@ -617,6 +624,25 @@ export function FilePanelBody({ tab, cwd, onOpenFile }: Props) {
         <div className="min-w-0 flex-1 overflow-hidden">
           <Breadcrumb path={viewPath} cwd={cwd} />
         </div>
+
+        {lang === 'markdown' && !viewDiff && (
+          <div className="flex shrink-0 items-center gap-0.5 rounded bg-fg/5 p-0.5" role="group" aria-label="Markdown view">
+            {(['preview', 'source'] as const).map((view) => (
+              <button
+                key={view}
+                type="button"
+                aria-pressed={markdownView === view}
+                onClick={() => setMarkdownView(view)}
+                className={cn(
+                  'rounded px-2 py-1 text-[11px] transition-colors',
+                  markdownView === view ? 'bg-fg/10 text-foreground' : 'text-muted-foreground hover:text-foreground',
+                )}
+              >
+                {view === 'preview' ? 'Preview' : 'Source'}
+              </button>
+            ))}
+          </div>
+        )}
 
         {meta ? (
           <span
@@ -677,7 +703,25 @@ export function FilePanelBody({ tab, cwd, onOpenFile }: Props) {
           ) : loadError ? (
             <div className="p-4 font-mono text-[12px] text-destructive">{loadError}</div>
           ) : content !== null ? (
-            <CodeViewer content={content} lang={lang} line={tab.line} reveal={tab.reveal} />
+            lang === 'markdown' && markdownView === 'preview' ? (
+              <div className="h-full overflow-auto bg-background p-6 text-[14px] leading-7">
+                <div className="mx-auto max-w-4xl [&_img]:max-w-full">
+                  <Markdown
+                    text={content}
+                    document
+                    onOpenFile={(path, _diff, line) => {
+                      const base = viewPath.startsWith('/') ? viewPath : `${cwd}/${viewPath}`;
+                      const fileUrl = new URL('file:///');
+                      fileUrl.pathname = base;
+                      const resolved = new URL(path, fileUrl);
+                      handleSelectFile(decodeURIComponent(resolved.pathname), line);
+                    }}
+                  />
+                </div>
+              </div>
+            ) : (
+              <CodeViewer content={content} lang={lang} line={tab.line} reveal={tab.reveal} />
+            )
           ) : null}
         </div>
       </div>

@@ -115,10 +115,17 @@ refreshes the channel's latest disk image there under a fixed name
 (`Mira-arm64.dmg`, `Mira-beta-arm64.dmg`, `Mira-alpha-arm64.dmg`), which
 the landing page's download links point at.
 
-The update popup shows the `## Highlights` section of
-`releases/vX.Y.Z.md` (the version without its `-alpha.N`), so write that
-section first: one `- **Title.** one line` per item. The GitHub release
-gets the whole file.
+The update popup shows the `## Highlights` section of the build's release
+notes, so write that section first: one `- **Title.** one line` per item.
+The GitHub release gets the whole file. Notes are looked up in order:
+
+1. `releases/vX.Y.Z-alpha.N.md` — this exact build. Write one for every
+   prerelease, covering what changed since the previous one.
+2. `releases/vX.Y.Z.md` — the version's shared notes, used when there is
+   no exact file (and for the stable build).
+
+Before this, every prerelease used `vX.Y.Z.md`, so the update popup kept
+showing the first alpha's highlights no matter what later alphas changed.
 
 One-time setup on a Mac: `scripts/macos-signing.sh setup` (Apple),
 `scripts/macos-signing.sh updater-key` (update signing), then
@@ -128,4 +135,4 @@ Local builds: `scripts/build-desktop.sh --channel alpha --version
 
 ## Past releases
 
-Notes live in this folder: [`v0.6.1.md`](./v0.6.1.md), [`v0.6.0.md`](./v0.6.0.md), [`v0.4.0.md`](./v0.4.0.md), [`v0.3.9.md`](./v0.3.9.md), [`v0.3.8.md`](./v0.3.8.md).
+Notes live in this folder: [`v0.6.1-alpha.8.md`](./v0.6.1-alpha.8.md), [`v0.6.1.md`](./v0.6.1.md), [`v0.6.0.md`](./v0.6.0.md), [`v0.4.0.md`](./v0.4.0.md), [`v0.3.9.md`](./v0.3.9.md), [`v0.3.8.md`](./v0.3.8.md).

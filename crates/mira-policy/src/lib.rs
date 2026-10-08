@@ -59,6 +59,7 @@ pub struct PolicyConfig {
 }
 
 /// Compiled policy: parsed rules plus a mode.
+#[derive(Clone)]
 pub struct Policy {
     mode: Mode,
     allow: Vec<Rule>,

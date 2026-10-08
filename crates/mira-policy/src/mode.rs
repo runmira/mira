@@ -117,6 +117,9 @@ const OBSERVATION_VERBS: &[&str] = &[
     "snapshot",
     "get_text",
     "list_tabs",
+    "wait_for",
+    "hover",
+    "color_scheme",
 ];
 
 fn is_observation(target: &str) -> bool {

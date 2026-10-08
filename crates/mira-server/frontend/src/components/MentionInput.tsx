@@ -1,5 +1,6 @@
 import { useEffect, useRef, type KeyboardEvent, type ClipboardEvent } from 'react';
 import { cn } from '@/lib/utils';
+import { parseComposerCitations, type ComposerCitationSegment } from '../lib/sourceCitations';
 import { parseSkillMentions } from './SkillMention';
 import type { PaletteSkill } from './commands';
 
@@ -157,7 +158,15 @@ export function MentionInput({
       return;
     }
     const text = e.clipboardData.getData('text/plain');
-    document.execCommand('insertText', false, text);
+    if (parseComposerCitations(text).some((segment) => segment.kind === 'citation')) {
+      const fragment = document.createElement('div');
+      rebuild(fragment, text, rosterRef.current);
+      // Only DOM-created text and chip nodes enter this HTML; pasted markup
+      // is never interpreted. Keep browser undo and caret behavior intact.
+      document.execCommand('insertHTML', false, fragment.innerHTML);
+    } else {
+      document.execCommand('insertText', false, text);
+    }
     // The insertText hits the DOM synchronously; onInput will fire and
     // sync state. No manual serialize call needed.
   }
@@ -195,6 +204,10 @@ function serialize(root: HTMLElement): string {
       return;
     }
     if (!(n instanceof HTMLElement)) return;
+    if (n.dataset.citation) {
+      out += n.dataset.citation;
+      return;
+    }
     if (n.dataset.skill) {
       out += `@skill:${n.dataset.skill}`;
       return;
@@ -217,17 +230,33 @@ function serialize(root: HTMLElement): string {
  *  don't collapse them. */
 function rebuild(root: HTMLElement, text: string, roster: PaletteSkill[]) {
   root.innerHTML = '';
-  for (const seg of parseSkillMentions(text)) {
-    if (seg.kind === 'skill') {
-      root.appendChild(buildChipEl(seg.name, roster));
+  for (const reference of parseComposerCitations(text)) {
+    if (reference.kind === 'citation') {
+      root.appendChild(buildCitationChip(reference));
       continue;
     }
-    const parts = seg.text.split('\n');
-    parts.forEach((line, i) => {
-      if (i > 0) root.appendChild(document.createElement('br'));
-      if (line.length > 0) root.appendChild(document.createTextNode(line));
-    });
+    for (const seg of parseSkillMentions(reference.text)) {
+      if (seg.kind === 'skill') {
+        root.appendChild(buildChipEl(seg.name, roster));
+        continue;
+      }
+      const parts = seg.text.split('\n');
+      parts.forEach((line, i) => {
+        if (i > 0) root.appendChild(document.createElement('br'));
+        if (line.length > 0) root.appendChild(document.createTextNode(line));
+      });
+    }
   }
+}
+
+function buildCitationChip(reference: Extract<ComposerCitationSegment, { kind: 'citation' }>): HTMLSpanElement {
+  const el = document.createElement('span');
+  el.dataset.citation = reference.raw;
+  el.contentEditable = 'false';
+  el.className = 'inline-flex items-center rounded bg-primary/10 px-1.5 text-primary';
+  el.title = reference.citation.quote;
+  el.textContent = reference.label;
+  return el;
 }
 
 /** Build one chip element. Inline-block, non-editable, colour taken

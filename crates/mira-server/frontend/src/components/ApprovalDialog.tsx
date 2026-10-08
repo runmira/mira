@@ -1,12 +1,28 @@
 import type { ReactNode } from 'react';
-import { AlertTriangle, ShieldQuestion } from 'lucide-react';
+import { AlertTriangle, ShieldQuestion, ShieldCheck, FileCheck2, ClipboardList, Zap, Check, CheckCheck, X, Undo2 } from 'lucide-react';
+import type { Mode } from '../types';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
+
+const MODE_ICONS = { manual: ShieldQuestion, auto: FileCheck2, edit: ShieldCheck, yolo: Zap, plan: ClipboardList };
+export function ApprovalModeIcon({ mode, className = 'size-3.5 shrink-0' }: { mode: Mode; className?: string }) {
+  const Icon = MODE_ICONS[mode];
+  return <Icon aria-hidden="true" className={className} />;
+}
+
+function ApprovalChoiceIcon({ id }: { id: string }) {
+  const Icon = /deny|cancel|reject|dismiss/.test(id) ? X
+    : /restore|undo/.test(id) ? Undo2
+    : id === 'all' ? CheckCheck
+    : /always|session/.test(id) ? ShieldCheck : Check;
+  return <Icon aria-hidden="true" className="size-3.5 shrink-0" />;
+}
 
 /** One thing the user can decide. */
 export type ApprovalChoice = {
   id: string;
   label: string;
+  mode?: Mode;
   /** One-line explanation under the label, for choices that need it (e.g.
    *  what a permission posture actually grants). */
   hint?: string;
@@ -80,11 +96,13 @@ export function ApprovalChoices({
           <Button
             variant={c.destructive ? 'destructive' : c.primary ? 'default' : 'ghost'}
             size={size}
+            className={c.mode === 'edit' || c.mode === 'yolo' ? 'bg-orange-600 text-white hover:bg-orange-700 dark:bg-orange-400 dark:text-orange-950 dark:hover:bg-orange-300' : undefined}
             disabled={c.disabled}
             title={c.title}
             onClick={() => onChoose(c.id)}
           >
-            {c.label}
+            {c.mode ? <ApprovalModeIcon mode={c.mode} /> : <ApprovalChoiceIcon id={c.id} />}
+            <span className="leading-none">{c.label}</span>
             {c.kbd && (
               <kbd
                 className={
@@ -132,12 +150,12 @@ export function ApprovalDialog({
             )}
           </div>
         )}
-        <div className="flex items-start gap-2 text-[15px] font-semibold">
+        <div className="flex items-start gap-2 text-[15px] font-semibold leading-5">
           <Icon
             className={
               tone === 'consequential'
-                ? 'mt-0.5 size-4 shrink-0 text-mira-warn'
-                : 'mt-0.5 size-4 shrink-0 text-mira-tool'
+                ? 'mt-0.5 block size-4 shrink-0 text-mira-warn'
+                : 'mt-0.5 block size-4 shrink-0 text-mira-tool'
             }
           />
           <span className="min-w-0">{request.title}</span>

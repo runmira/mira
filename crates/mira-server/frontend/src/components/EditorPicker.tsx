@@ -112,7 +112,7 @@ export function EditorPicker({ cwd, onOpenSettings }: { cwd: string; onOpenSetti
           type="button"
           title={current ? `Open in ${current.name}` : 'Open in an editor'}
           aria-label="Open session folder in an editor"
-          className="group flex h-8 shrink-0 items-center gap-1 rounded-lg border border-border/60 bg-secondary/40 py-1 pl-1 pr-1.5 transition-colors hover:border-border hover:bg-secondary"
+          className="group flex h-8 shrink-0 items-center gap-1 rounded-lg border border-border/60 elev-card dark:bg-secondary/40 py-1 pl-1 pr-1.5 transition-colors hover:border-border dark:hover:bg-secondary"
         >
           <span className="inline-flex size-6 items-center justify-center overflow-hidden rounded-md bg-fg/[0.04] ring-1 ring-fg/10">
             {current ? (

@@ -10,6 +10,7 @@ publish = false
 [dependencies]
 uuid = { workspace = true }
 mira-sandbox = { workspace = true }
+mira-core = { workspace = true }
 agent-client-protocol = "2"
 anyhow = "1"
 async-trait = "0.1"

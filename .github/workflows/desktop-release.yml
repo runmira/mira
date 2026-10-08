@@ -23,7 +23,7 @@ name: Desktop release
 # which installed apps poll, and the channel's latest disk image there
 # under a fixed name (Mira-arm64.dmg, Mira-beta-arm64.dmg,
 # Mira-alpha-arm64.dmg), which the landing page links to. The update popup shows the `## Highlights`
-# of releases/vX.Y.Z.md.
+# of releases/vX.Y.Z-pre.N.md when that file exists, else releases/vX.Y.Z.md.
 
 on:
   push:
@@ -62,8 +62,13 @@ jobs:
             *-beta*) channel=beta ;;
             *) channel=stable ;;
           esac
-          notes="releases/v${version%%-*}.md"
-          [ -f "$notes" ] || { echo "::error::missing $notes (release notes for ${version%%-*})"; exit 1; }
+          # Notes for this exact build (releases/v0.6.1-alpha.8.md) win over
+          # the version's shared notes (releases/v0.6.1.md). Without the
+          # exact file every prerelease of a version showed the first one's
+          # highlights in the update popup.
+          notes="releases/v${version}.md"
+          [ -f "$notes" ] || notes="releases/v${version%%-*}.md"
+          [ -f "$notes" ] || { echo "::error::missing releases/v${version}.md or releases/v${version%%-*}.md"; exit 1; }
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
           echo "notes=$notes" >> "$GITHUB_OUTPUT"

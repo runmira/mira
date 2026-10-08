@@ -41,8 +41,8 @@ export function RightPanelButton({
     cn(
       'flex h-8 items-center text-muted-foreground transition-colors',
       active
-        ? 'bg-secondary/70 text-foreground'
-        : 'bg-secondary/40 hover:bg-secondary hover:text-foreground',
+        ? 'bg-fg/[0.08] dark:bg-secondary/70 text-foreground'
+        : 'bg-transparent hover:bg-fg/[0.06] dark:hover:bg-secondary hover:text-foreground',
     );
 
   return (
@@ -52,7 +52,7 @@ export function RightPanelButton({
     // an outer stroke on the seam.
     <div
       ref={wrap}
-      className="relative flex items-center overflow-hidden rounded-lg border border-border/60"
+      className="relative flex items-center overflow-hidden rounded-lg border border-border/60 elev-card dark:bg-secondary/40"
     >
       <button
         type="button"
@@ -60,11 +60,11 @@ export function RightPanelButton({
         title="Open the right panel"
         className={cn(
           shell(open),
-          'gap-1.5 border-r border-border/60 px-1.5 text-[12.5px]',
+          'gap-1.5 border-r border-border/60 px-1.5 text-[12.5px] leading-none',
         )}
       >
-        <PanelRight className="size-3.5" />
-        <span className="hidden lg:inline">
+        <PanelRight className="block size-3.5 shrink-0" />
+        <span className="hidden leading-none lg:block">
           {open && activeKind ? TOOL_PANE_DEFS[activeKind].title : 'Panel'}
         </span>
       </button>

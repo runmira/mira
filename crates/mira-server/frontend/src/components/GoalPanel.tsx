@@ -12,6 +12,7 @@ import {
   ChevronDown,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { Collapse } from './ui/Collapse';
 import type { Goal, GoalStatus } from '../types';
 
 type Props = {
@@ -130,7 +131,7 @@ export function GoalPanel({ goal, busy, activity, onClear, onRestart }: Props) {
           </div>
         </div>
 
-        {expanded && (
+        <Collapse open={expanded}>
           <>
             {/* Goal condition — the contract. Whitespace preserved so
                 multi-line goals read cleanly. Slightly larger text than the
@@ -244,7 +245,7 @@ export function GoalPanel({ goal, busy, activity, onClear, onRestart }: Props) {
               </button>
             </div>
           </>
-        )}
+        </Collapse>
       </div>
     </div>
   );

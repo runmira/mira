@@ -20,8 +20,9 @@
 
 use agent_client_protocol::schema::v1::{
     ClientCapabilities, ContentBlock, ElicitationCapabilities, ElicitationFormCapabilities,
-    InitializeRequest, InitializeResponse, NewSessionRequest,
-    NewSessionResponse, PromptRequest, PromptResponse, StopReason,
+    InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse,
+    NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, ResumeSessionRequest,
+    ResumeSessionResponse, StopReason,
 };
 use agent_client_protocol::schema::ProtocolVersion;
 use serde_json::{json, Value};
@@ -41,6 +42,40 @@ pub enum SessionError {
     VersionMismatch { got: u16, want: u16 },
     #[error("acp: {0}")]
     Other(String),
+}
+
+/// True when the agent answered with a bare "-32603 Internal error".
+///
+/// Codex's ACP layer reports a resume/load failure on an unknown
+/// session id exactly like this: the underlying app-server message
+/// never reaches the error's message field. OpenCode says "session not
+/// found"; Codex just says "Internal error". Treat it as a miss too,
+/// otherwise every stored Codex cursor fails startup.
+pub fn is_remote_internal_error(e: &SessionError) -> bool {
+    match e {
+        SessionError::Conn(ConnError::Remote { code, message }) => {
+            *code == -32603 && message.to_lowercase().contains("internal error")
+        }
+        _ => false,
+    }
+}
+
+/// True when `e` is a confirmed "no such session" from the agent.
+///
+/// OpenCode answers `session/resume` with code `-32602` + "session not
+/// found: ses_…". Only that case falls back to a fresh `session/new`;
+/// any other error propagates so a live thread never silently resets to
+/// an empty session.
+pub fn is_session_not_found(e: &SessionError) -> bool {
+    let msg = match e {
+        SessionError::Conn(ConnError::Remote { message, .. }) => message,
+        SessionError::Other(m) => m,
+        _ => return false,
+    };
+    let lower = msg.to_lowercase();
+    lower.contains("session not found")
+        || lower.contains("no such session")
+        || lower.contains("not found")
 }
 
 /// What the client advertises at `initialize`.
@@ -92,6 +127,14 @@ impl MiraMcp {
         format!("Bearer {}", self.token)
     }
 }
+
+/// Header an agent's MCP config sends to Mira's tool server naming which tool
+/// set it needs. Absent means everything.
+pub const MIRA_TOOL_PROFILE_HEADER: &str = "X-Mira-Tool-Profile";
+
+/// Codex's profile: it has its own shell, patch, search and plan tools, so
+/// Mira's copies only compete with them. It keeps the rest.
+pub const CODEX_TOOL_PROFILE: &str = "codex";
 
 /// The env var `mira mcp-bridge` reads its token from — a token in argv
 /// would show up in process listings.
@@ -156,6 +199,15 @@ struct SessionState {
     /// The mode the agent is currently in, and the ones it offers. These
     /// arrive with `session/new`, not `initialize`.
     current_mode: Option<String>,
+    /// Whether the agent advertised `sessionCapabilities.resume`
+    /// (`session/resume`). OpenCode does; it resumes without replaying
+    /// history. Checked before attempting a resume so agents without it
+    /// get a straight `session/new`.
+    resume_supported: bool,
+    /// Whether the agent advertised top-level `loadSession`
+    /// (`session/load`). Fallback when `resume` is absent.
+    load_supported: bool,
+    image_supported: bool,
     /// What the agent said about itself at `initialize`. Kept because it is
     /// the only place an agent's own name and version are available, and
     /// most adapters advertise no auth methods at all.
@@ -190,6 +242,16 @@ impl AcpSession {
     /// means initialization is in flight.
     pub fn is_initialized(&self) -> Option<bool> {
         self.state.try_lock().ok().map(|guard| guard.initialized)
+    }
+
+    pub fn runtime_capabilities(&self) -> crate::runtime::RuntimeCapabilities {
+        let state = self.state.try_lock().ok();
+        crate::runtime::RuntimeCapabilities {
+            image_input:state.as_ref().is_some_and(|s|s.image_supported), cancellation:true,
+            live_mode_switch:state.as_ref().is_some_and(|s|s.current_mode.is_some()),
+            live_model_switch:state.as_ref().is_some_and(|s|s.config_options.iter().any(|o|o["category"] == "model")),
+            ..Default::default()
+        }
     }
 
     pub fn session_id(&self) -> Option<String> {
@@ -259,14 +321,33 @@ impl AcpSession {
             let mut st = self.state.lock().await;
             st.initialized = true;
             st.mcp_http = res.agent_capabilities.mcp_capabilities.http;
+            st.image_supported = res.agent_capabilities.prompt_capabilities.image;
             st.version = res.agent_info.as_ref().map(|i| i.version.clone());
             st.auth_method_ids = res
                 .auth_methods
                 .iter()
                 .map(|m| m.id().to_string())
                 .collect();
+            st.load_supported = res.agent_capabilities.load_session;
+            st.resume_supported = res.agent_capabilities.session_capabilities.resume.is_some();
         }
         Ok(res)
+    }
+
+    /// Whether the agent advertised `session/resume`.
+    pub fn supports_resume(&self) -> bool {
+        self.state
+            .try_lock()
+            .map(|g| g.resume_supported)
+            .unwrap_or(false)
+    }
+
+    /// Whether the agent advertised `session/load`.
+    pub fn supports_load(&self) -> bool {
+        self.state
+            .try_lock()
+            .map(|g| g.load_supported)
+            .unwrap_or(false)
     }
 
     /// Offer the agent Mira's tool server (by URL) at the next `session/new`.
@@ -287,8 +368,65 @@ impl AcpSession {
         let mut req = NewSessionRequest::new(cwd);
         req.additional_directories = additional_directories;
         let mut params = serde_json::to_value(req).unwrap_or(json!({}));
-        // Mira's tools (its browser, background processes), as an MCP server
-        // the agent connects to — only when it says it can take one over HTTP.
+        self.inject_mira_mcp(&mut params).await;
+        let res: NewSessionResponse = self.conn.request("session/new", params).await?;
+        *self.session_id.lock().await = Some(res.session_id.to_string());
+        self.apply_session_state(res.config_options.as_ref(), res.modes.as_ref())
+            .await;
+        Ok(res)
+    }
+
+    /// Resume an existing agent session (`session/resume`).
+    ///
+    /// Re-adopting the session id IS the resume: the agent loads its own
+    /// history (OpenCode reads its SQLite store) and the conversation
+    /// continues. Only "session not found" falls back to `session/new`;
+    /// transport/auth errors propagate so a live thread never silently.
+    pub async fn resume_session(
+        &self,
+        session_id: &str,
+        cwd: &std::path::Path,
+        additional_directories: Vec<std::path::PathBuf>,
+    ) -> Result<ResumeSessionResponse, SessionError> {
+        if !self.state.lock().await.initialized {
+            return Err(SessionError::NotInitialized);
+        }
+        let mut req = ResumeSessionRequest::new(session_id.to_string(), cwd);
+        req.additional_directories = additional_directories;
+        let mut params = serde_json::to_value(req).unwrap_or(json!({}));
+        self.inject_mira_mcp(&mut params).await;
+        let res: ResumeSessionResponse = self.conn.request("session/resume", params).await?;
+        *self.session_id.lock().await = Some(session_id.to_string());
+        self.apply_session_state(res.config_options.as_ref(), res.modes.as_ref())
+            .await;
+        Ok(res)
+    }
+
+    /// Load an existing agent session (`session/load`), replaying history.
+    /// Fallback when `resume` is unadvertised but `loadSession` is.
+    pub async fn load_session(
+        &self,
+        session_id: &str,
+        cwd: &std::path::Path,
+        additional_directories: Vec<std::path::PathBuf>,
+    ) -> Result<LoadSessionResponse, SessionError> {
+        if !self.state.lock().await.initialized {
+            return Err(SessionError::NotInitialized);
+        }
+        let mut req = LoadSessionRequest::new(session_id.to_string(), cwd);
+        req.additional_directories = additional_directories;
+        let mut params = serde_json::to_value(req).unwrap_or(json!({}));
+        self.inject_mira_mcp(&mut params).await;
+        let res: LoadSessionResponse = self.conn.request("session/load", params).await?;
+        *self.session_id.lock().await = Some(session_id.to_string());
+        self.apply_session_state(res.config_options.as_ref(), res.modes.as_ref())
+            .await;
+        Ok(res)
+    }
+
+    /// Mira's tools (its browser, background processes), as an MCP server
+    /// the agent connects to — only when it says it can take one over HTTP.
+    async fn inject_mira_mcp(&self, params: &mut serde_json::Value) {
         let entry = {
             let st = self.state.lock().await;
             st.mira_mcp
@@ -298,26 +436,31 @@ impl AcpSession {
         if let (Some(entry), Some(obj)) = (entry, params.as_object_mut()) {
             obj.insert("mcpServers".into(), json!([entry]));
         }
-        let res: NewSessionResponse = self.conn.request("session/new", params).await?;
-        *self.session_id.lock().await = Some(res.session_id.to_string());
-        {
-            let mut st = self.state.lock().await;
-            if let Some(opts) = &res.config_options {
-                st.config_options = opts
-                    .iter()
-                    .filter_map(|o| serde_json::to_value(o).ok())
-                    .collect();
-            }
-            if let Some(modes) = &res.modes {
-                st.modes = modes
-                    .available_modes
-                    .iter()
-                    .filter_map(|m| serde_json::to_value(m).ok())
-                    .collect();
-                st.current_mode = Some(modes.current_mode_id.to_string());
-            }
+    }
+
+    /// Record config options / modes from a `session/new|resume|load`
+    /// response, so the picker and `set_mode` see the resumed session's
+    /// values rather than a blank slate.
+    async fn apply_session_state(
+        &self,
+        config_options: Option<&Vec<agent_client_protocol::schema::v1::SessionConfigOption>>,
+        modes: Option<&agent_client_protocol::schema::v1::SessionModeState>,
+    ) {
+        let mut st = self.state.lock().await;
+        if let Some(opts) = config_options {
+            st.config_options = opts
+                .iter()
+                .filter_map(|o| serde_json::to_value(o).ok())
+                .collect();
         }
-        Ok(res)
+        if let Some(modes) = modes {
+            st.modes = modes
+                .available_modes
+                .iter()
+                .filter_map(|m| serde_json::to_value(m).ok())
+                .collect();
+            st.current_mode = Some(modes.current_mode_id.to_string());
+        }
     }
 
     /// Step 3. Runs a full prompt turn to completion.
@@ -590,16 +733,25 @@ mod tests {
 
     #[test]
     fn mira_tools_go_over_http_or_through_the_stdio_bridge() {
-        let m = MiraMcp { url: "http://127.0.0.1:1/mcp".into(), token: "tok".into() };
+        let m = MiraMcp {
+            url: "http://127.0.0.1:1/mcp".into(),
+            token: "tok".into(),
+        };
         let http = mira_mcp_entry(&m, true, None).unwrap();
         assert_eq!(http["type"], "http");
         assert_eq!(http["url"], m.url);
-        assert_eq!(http["headers"], json!([{ "name": "Authorization", "value": "Bearer tok" }]));
+        assert_eq!(
+            http["headers"],
+            json!([{ "name": "Authorization", "value": "Bearer tok" }])
+        );
         let stdio = mira_mcp_entry(&m, false, Some("/bin/mira".into())).unwrap();
         assert!(stdio.get("type").is_none(), "stdio entries are untagged");
         assert_eq!(stdio["command"], "/bin/mira");
         assert_eq!(stdio["args"], json!(["mcp-bridge", m.url]));
-        assert_eq!(stdio["env"], json!([{ "name": MIRA_MCP_TOKEN_ENV, "value": "tok" }]));
+        assert_eq!(
+            stdio["env"],
+            json!([{ "name": MIRA_MCP_TOKEN_ENV, "value": "tok" }])
+        );
         assert!(!stdio.to_string().contains("Bearer"), "no token in argv");
         assert!(mira_mcp_entry(&m, false, None).is_none());
     }
@@ -748,6 +900,57 @@ mod tests {
         let (current, available) = r.sess.modes();
         assert_eq!(current.as_deref(), Some("ask"));
         assert_eq!(available.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn resume_session_readopts_the_stored_id() {
+        // Re-adopting the session id IS the resume: the agent loads its
+        // own history, so the follow-up continues the same conversation.
+        let mut r = rig(ClientCaps::default()).await;
+        let w = tokio::spawn({
+            let s = r.sess.clone();
+            async move { s.initialize().await }
+        });
+        let f = r.next_frame().await;
+        r.reply(f["id"].clone(), init_ok()).await;
+        w.await.unwrap().expect("init");
+
+        let w = tokio::spawn({
+            let s = r.sess.clone();
+            async move {
+                s.resume_session("ses_abc123", std::path::Path::new("/repo"), Vec::new())
+                    .await
+            }
+        });
+        let f = r.next_frame().await;
+        assert_eq!(f["method"], "session/resume");
+        assert_eq!(f["params"]["sessionId"], "ses_abc123");
+        assert_eq!(f["params"]["cwd"], "/repo");
+        r.reply(f["id"].clone(), json!({})).await;
+        w.await.unwrap().expect("resume");
+        assert_eq!(r.sess.session_id().as_deref(), Some("ses_abc123"));
+    }
+
+    #[test]
+    fn only_a_confirmed_not_found_falls_back_to_a_fresh_session() {
+        use crate::conn::ConnError;
+        // OpenCode's answer for a stale cursor.
+        let gone = SessionError::Conn(ConnError::Remote {
+            code: -32602,
+            message: "Invalid params: session not found: ses_dead".into(),
+        });
+        assert!(is_session_not_found(&gone));
+        // Anything else propagates so a live thread never silently resets
+        // to an empty session.
+        let denied = SessionError::Conn(ConnError::Remote {
+            code: -32600,
+            message: "unauthorized".into(),
+        });
+        assert!(!is_session_not_found(&denied));
+        assert!(!is_session_not_found(&SessionError::Conn(
+            ConnError::Closed
+        )));
+        assert!(!is_session_not_found(&SessionError::NotInitialized));
     }
 
     #[tokio::test]

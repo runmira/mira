@@ -54,7 +54,8 @@ impl Tool for BrowserTool {
                         "enum": [
                             "navigate", "back", "forward", "reload", "snapshot", "screenshot",
                             "click", "type", "key", "scroll", "evaluate",
-                            "list_tabs", "new_tab", "switch_tab", "close_tab", "wait", "close"
+                            "list_tabs", "new_tab", "switch_tab", "close_tab", "wait", "close",
+                            "hover", "select", "upload", "drag", "dialog", "wait_for", "color_scheme"
                         ]
                     },
                     "url": {"type": "string", "description": "For navigate / new_tab."},
@@ -65,7 +66,7 @@ impl Tool for BrowserTool {
                         "description": "[x, y] in the latest screenshot, for click."
                     },
                     "double": {"type": "boolean", "description": "Double-click."},
-                    "text": {"type": "string", "description": "Text to type."},
+                    "text": {"type": "string", "description": "Text to type; for wait_for, text to wait for; for dialog, a prompt's answer."},
                     "clear": {"type": "boolean", "description": "Clear the field before typing."},
                     "submit": {"type": "boolean", "description": "Press Enter after typing."},
                     "key": {"type": "string", "description": "Key or chord: \"Enter\", \"Escape\", \"ctrl+a\"."},
@@ -73,7 +74,17 @@ impl Tool for BrowserTool {
                     "amount": {"type": "integer", "minimum": 1, "description": "Scroll steps. Default 3."},
                     "expression": {"type": "string", "description": "JavaScript to evaluate in the page; the result is returned as JSON."},
                     "index": {"type": "integer", "minimum": 0, "description": "Tab index from list_tabs."},
-                    "duration": {"type": "number", "description": "Seconds to wait (max 30)."}
+                    "duration": {"type": "number", "description": "Seconds to wait (max 30)."},
+                    "values": {"type": "array", "items": {"type": "string"}, "description": "For select: option values or visible labels."},
+                    "files": {"type": "array", "items": {"type": "string"}, "description": "For upload: absolute file paths."},
+                    "from_ref": {"type": "string", "description": "For drag: the element to pick up."},
+                    "from_selector": {"type": "string"},
+                    "to_ref": {"type": "string", "description": "For drag: where to drop it."},
+                    "to_selector": {"type": "string"},
+                    "accept": {"type": "boolean", "description": "For dialog: accept (true) or dismiss (false) the open alert/confirm/prompt. Other actions report an open dialog instead of acting."},
+                    "gone": {"type": "boolean", "description": "For wait_for: wait for the text/selector to disappear."},
+                    "timeout": {"type": "number", "description": "For wait_for: seconds, default 10, max 30."},
+                    "scheme": {"type": "string", "enum": ["light", "dark", "auto"], "description": "For color_scheme."}
                 },
                 "required": ["action"]
             }),

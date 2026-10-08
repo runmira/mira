@@ -34,12 +34,21 @@ pub struct SpendRow {
     pub cwd: String,
     /// Agent kind (`claude`, `codex`).
     pub driver: String,
+    /// Engine instance that spent it. Defaults on read for rows written
+    /// before the field existed (then it was always the driver kind).
+    #[serde(default)]
+    pub instance: String,
     pub model: String,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cached_input_tokens: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
+    /// Whether this was metered or covered by a plan. Rows written before
+    /// the field existed read back as unknown, which is the honest reading
+    /// for a ledger that never recorded it.
+    #[serde(default)]
+    pub billing: mira_acp::status::Billing,
 }
 
 /// Serialises ledger writes across every session in the process.
@@ -71,9 +80,13 @@ impl SpendLedger {
         totals: &[ModelSpend],
     ) -> Vec<SpendRow> {
         let _guard = WRITE.lock().unwrap_or_else(|p| p.into_inner());
+        // Keyed by instance, not kind: two instances may drive agent
+        // sessions with colliding ids (shared home, different accounts
+        // over time), and kind-keying would fold one's spend into the
+        // other's running total.
         let key = format!(
             "{}:{}",
-            who.driver,
+            who.instance,
             agent_session
                 .filter(|s| !s.is_empty())
                 .unwrap_or(&who.session_id)
@@ -101,11 +114,13 @@ impl SpendLedger {
                 session_id: who.session_id.clone(),
                 cwd: who.cwd.clone(),
                 driver: who.driver.clone(),
+                instance: who.instance.clone(),
                 model,
                 input_tokens: d.input_tokens,
                 output_tokens: d.output_tokens,
                 cached_input_tokens: d.cached_input_tokens,
                 cost_usd: d.cost_usd,
+                billing: who.billing,
             });
         }
         if let Err(e) = self.persist(&state, &rows) {
@@ -131,13 +146,21 @@ impl SpendLedger {
     }
 
     /// Every row from `since` (unix seconds) on. A torn last line from a
-    /// crash mid-write is skipped, not fatal.
+    /// crash mid-write is skipped, not fatal. Rows written before the
+    /// instance field existed come back routed at their driver kind, which
+    /// is what their default instance id was.
     pub fn rows_since(&self, since: u64) -> Vec<SpendRow> {
         let Ok(text) = std::fs::read_to_string(self.dir.join(LEDGER)) else {
             return Vec::new();
         };
         text.lines()
             .filter_map(|l| serde_json::from_str::<SpendRow>(l).ok())
+            .map(|mut r| {
+                if r.instance.is_empty() {
+                    r.instance = r.driver.clone();
+                }
+                r
+            })
             .filter(|r| r.ts >= since)
             .collect()
     }
@@ -149,8 +172,14 @@ pub struct Spender {
     pub session_id: String,
     pub cwd: String,
     pub driver: String,
+    /// Engine instance being driven. The dedupe key and the ledger row
+    /// route by this: kind-routing would merge two accounts' spend.
+    pub instance: String,
     /// Model to file a report under when the agent doesn't name one.
     pub fallback_model: String,
+    /// How this agent's turns are billed, decided once at start from the
+    /// instance's key and the auth methods the agent advertised.
+    pub billing: mira_acp::status::Billing,
 }
 
 /// Agent-session key → model → last running total seen.
@@ -209,7 +238,9 @@ mod tests {
             session_id: "mira-1".into(),
             cwd: "/p".into(),
             driver: "claude".into(),
+            instance: "claude-code".into(),
             fallback_model: "claude".into(),
+            billing: mira_acp::status::Billing::Unknown,
         }
     }
 
@@ -239,6 +270,62 @@ mod tests {
         l.record(&who(), Some("cc-1"), &[spend("opus", 500, 50, 2.0)]);
         let r = l.record(&who(), Some("cc-1"), &[spend("opus", 40, 4, 0.1)]);
         assert_eq!((r[0].input_tokens, r[0].output_tokens), (40, 4));
+    }
+
+    /// The audit T3-style attribution needs: a parent turn and the child
+    /// it delegated to are separate agent sessions, so their spend is
+    /// booked separately — and neither is double counted, because the
+    /// dedupe key is the agent's own session, not the chat.
+    #[test]
+    fn a_parent_and_its_delegated_child_book_separately() {
+        use super::Spender;
+        use mira_acp::status::Billing::Subscription;
+        let dir = tempfile::tempdir().unwrap();
+        let l = SpendLedger::at(dir.path());
+        let parent = Spender {
+            session_id: "chat".into(),
+            cwd: "/p".into(),
+            driver: "claude-code".into(),
+            instance: "claude-code".into(),
+            fallback_model: "opus".into(),
+            billing: mira_acp::status::Billing::Subscription,
+        };
+        let mut child = parent.clone();
+        child.session_id = "child-1".into();
+        // The parent reports its own turn, the child its own, each with
+        // its own agent session id.
+        let a = l.record(&parent, Some("parent-sid"), &[spend("opus", 100, 10, 0.5)]);
+        let b = l.record(&child, Some("child-sid"), &[spend("opus", 40, 4, 0.2)]);
+        assert_eq!(a[0].input_tokens, 100);
+        assert_eq!(b[0].input_tokens, 40);
+        assert_eq!(a[0].session_id, "chat");
+        assert_eq!(b[0].session_id, "child-1");
+        // Both rows say the same thing about how they're billed.
+        assert_eq!(a[0].billing, Subscription);
+        assert_eq!(b[0].billing, Subscription);
+        // Re-reporting the parent's total adds nothing, even though the
+        // child has since reported too.
+        let again = l.record(&parent, Some("parent-sid"), &[spend("opus", 140, 14, 0.7)]);
+        assert_eq!(again[0].input_tokens, 40, "only the parent's increment");
+        assert_eq!(again[0].session_id, "chat", "the child is not folded in");
+        assert_eq!(l.rows_since(0).len(), 3);
+    }
+
+    /// Two chats resuming the *same* agent session (one via history
+    /// import, one opened by hand) report overlapping running totals.
+    /// Keyed by the agent's own session, the overlap is booked once.
+    #[test]
+    fn two_chats_on_one_agent_session_count_the_overlap_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let l = SpendLedger::at(dir.path());
+        let mut other = who();
+        other.session_id = "other-chat".into();
+        let a = l.record(&who(), Some("shared-sid"), &[spend("opus", 100, 10, 0.5)]);
+        assert_eq!(a[0].input_tokens, 100);
+        // The second chat sees the same total: no new spend, and no row
+        // attributed to it.
+        let b = l.record(&other, Some("shared-sid"), &[spend("opus", 100, 10, 0.5)]);
+        assert!(b.is_empty(), "overlapping totals must not double count");
     }
 
     #[test]

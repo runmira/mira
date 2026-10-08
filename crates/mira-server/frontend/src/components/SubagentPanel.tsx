@@ -110,7 +110,7 @@ export function SubagentPanel({ tabs, fileTabs, toolTabs, onWhiteboardSend, onOp
       />
       {/* tab strip — h-11 matches the main pane's header so the two
           dividers line up exactly across the vertical border. */}
-      <div className="flex h-11 shrink-0 items-center gap-1 border-b border-border/60 pl-2 pr-1.5">
+      <div className="right-panel-header flex h-11 shrink-0 items-center gap-1 border-b border-border/60 pl-2 pr-1.5">
         <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           {tabs.map((t) => (
             <TabCapsule
@@ -218,7 +218,7 @@ function TabCapsule({
       className={cn(
         'group inline-flex cursor-pointer items-center gap-1.5 rounded px-2.5 py-1 text-[12.5px] transition-colors',
         active
-          ? 'bg-secondary text-foreground'
+          ? 'right-panel-tab-active text-foreground'
           : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground',
       )}
     >
@@ -269,7 +269,7 @@ function FileTabCapsule({
       className={cn(
         'group inline-flex cursor-pointer items-center gap-1.5 rounded px-2.5 py-1 text-[12.5px] transition-colors',
         active
-          ? 'bg-secondary text-foreground'
+          ? 'right-panel-tab-active text-foreground'
           : 'text-muted-foreground hover:bg-accent/50 hover:text-foreground',
       )}
     >
@@ -337,7 +337,7 @@ function ToolTabCapsule({
       className={cn(
         'group inline-flex shrink-0 cursor-pointer whitespace-nowrap items-center gap-1.5 rounded px-2.5 py-1 text-[12.5px] transition-colors',
         active
-          ? 'bg-fg/[0.1] text-foreground'
+          ? 'right-panel-tab-active text-foreground'
           : 'text-muted-foreground hover:bg-fg/[0.05] hover:text-foreground',
       )}
     >

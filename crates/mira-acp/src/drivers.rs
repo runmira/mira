@@ -472,18 +472,16 @@ impl AcpDriver for CodexDriver {
     }
 
     fn binary_names(&self) -> &'static [&'static str] {
-        &["codex-acp"]
+        &["codex"]
     }
 
-    /// The adapter bundles a compatible Codex, so there is no separate CLI
-    /// to install — but the package name moved, and the old one is
-    /// deprecated.
+    /// Codex app-server is provided by the Codex CLI itself.
     fn login_command(&self) -> &'static str {
         "codex login"
     }
 
     fn install_hint(&self) -> &'static str {
-        "npm install -g @agentclientprotocol/codex-acp"
+        "Install Codex CLI or ChatGPT Desktop's bundled Codex CLI"
     }
 
     /// `codex` is the agent; the adapter is a separate install. The CLI
@@ -500,12 +498,11 @@ impl AcpDriver for CodexDriver {
         Some(crate::native::NativeFlavor::CodexAppServer)
     }
 
-    /// Native when the CLI is present, the adapter otherwise. The app-server
-    /// path is UNVERIFIED against real Codex (it is not installed where this
-    /// was written), and that is stated on the transport, the driver and the
-    /// status — not hidden in a comment.
+    /// Codex must use its app-server interface. The ACP adapter path does not
+    /// expose Codex's native request-user-input / plan items and can reject
+    /// Mira's model changes with stale rollout errors.
     fn transport(&self) -> crate::driver::Transport {
-        crate::driver::Transport::Auto
+        crate::driver::Transport::Native
     }
 
     fn auth_shape(&self) -> AuthShape {
@@ -535,6 +532,14 @@ impl AcpDriver for CodexDriver {
 
     fn home_env_var(&self) -> Option<&'static str> {
         Some("CODEX_HOME")
+    }
+
+    /// Codex's probe is a full app-server handshake plus `account/read` plus
+    /// a paged `model/list` — three sequential JSON-RPC round-trips against a
+    /// runtime that cold-starts. The 12s default budget times out mid-catalog,
+    /// leaving the picker with an empty model list even though Codex works.
+    fn probe_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(45)
     }
 
     /// `agent-full-access` turns off Codex's own sandbox for the rest of the
@@ -631,7 +636,7 @@ mod new_driver_tests {
     fn codex_launches_the_adapter_with_no_subcommand() {
         let cfg = resolve(&CodexDriver, PermissionMode::Ask);
         assert!(cfg.args.is_empty(), "got {:?}", cfg.args);
-        assert_eq!(CodexDriver.binary_names(), &["codex-acp"]);
+        assert_eq!(CodexDriver.binary_names(), &["codex"]);
     }
 
     #[test]
@@ -790,6 +795,15 @@ impl AcpDriver for OpenCodeDriver {
         &["opencode"]
     }
 
+    /// `opencode models` prints one `provider/model` per line — the
+    /// catalog the account can actually run. This is the only listing
+    /// OpenCode exposes before a chat starts, and the ACP
+    /// config-options path never delivers one, so the picker depends
+    /// on it.
+    fn cli_models_args(&self) -> &'static [&'static str] {
+        &["models"]
+    }
+
     fn auth_shape(&self) -> AuthShape {
         // Sign-in happens in the agent's own process (`opencode auth login`)
         // and is surfaced as an ACP auth method, so no key is supplied here.
@@ -814,21 +828,14 @@ impl AcpDriver for OpenCodeDriver {
     /// (`OPENCODE_CONFIG_CONTENT`, layered over the user's own) sets the
     /// rules Mira's mode means; anything set to `ask` comes back as
     /// `session/request_permission`, which is Mira's approval card.
-    fn permission_env(&self, mode: PermissionMode) -> Vec<(String, String)> {
-        let rules = match mode {
-            PermissionMode::Ask => serde_json::json!({
-                "edit": "ask",
-                "bash": "ask",
-                "webfetch": "ask",
-            }),
-            PermissionMode::AcceptEdits => serde_json::json!({
-                "edit": "allow",
-                "bash": "ask",
-                "webfetch": "ask",
-            }),
-            // OpenCode's own default is already "allow".
-            PermissionMode::Auto => return Vec::new(),
-        };
+    fn permission_env(&self, _mode: PermissionMode) -> Vec<(String, String)> {
+        // Keep the agent asking throughout its lifetime. Mira applies the
+        // chat's current mode when each request arrives.
+        let rules = serde_json::json!({
+            "edit": "ask",
+            "bash": "ask",
+            "webfetch": "ask",
+        });
         vec![(
             "OPENCODE_CONFIG_CONTENT".to_string(),
             serde_json::json!({ "permission": rules }).to_string(),
@@ -868,9 +875,15 @@ mod opencode_tests {
         assert_eq!(content["permission"]["edit"], "ask");
         assert_eq!(content["permission"]["bash"], "ask");
         let edits = OpenCodeDriver.resolve(&ask, PermissionMode::AcceptEdits, PathBuf::from("bin"));
-        assert!(edits.env["OPENCODE_CONFIG_CONTENT"].contains(r#""edit":"allow""#));
+        assert_eq!(
+            edits.env["OPENCODE_CONFIG_CONTENT"],
+            cfg.env["OPENCODE_CONFIG_CONTENT"]
+        );
         let auto = OpenCodeDriver.resolve(&ask, PermissionMode::Auto, PathBuf::from("bin"));
-        assert!(!auto.env.contains_key("OPENCODE_CONFIG_CONTENT"));
+        assert_eq!(
+            auto.env["OPENCODE_CONFIG_CONTENT"],
+            cfg.env["OPENCODE_CONFIG_CONTENT"]
+        );
     }
 
     #[test]
@@ -1023,7 +1036,7 @@ mod binary_name_tests {
         // Unlike Claude, Codex's bin is `codex-acp` in both the old and new
         // packages. Pinned so a future "fix" does not rename it to match the
         // package by mistake.
-        assert_eq!(CodexDriver.binary_names(), &["codex-acp"]);
+        assert_eq!(CodexDriver.binary_names(), &["codex"]);
     }
 
     #[test]

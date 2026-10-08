@@ -33,6 +33,10 @@ type Row = {
   agent?: string | null;
   /** The agent's own cost estimate, used instead of the price table. */
   cost_usd?: number | null;
+  /** How these turns are billed. A subscription row's dollar figure is
+   *  API-equivalent, not money spent, so it is never summed into the
+   *  metered total. */
+  billing?: 'api' | 'subscription' | 'unknown' | null;
 };
 
 const AGENT_NAMES: Record<string, string> = { claude: 'Claude Code', codex: 'Codex' };
@@ -42,7 +46,15 @@ function modelLabel(r: Row): string {
   return r.agent ? `${r.model} · ${AGENT_NAMES[r.agent] ?? r.agent}` : r.model;
 }
 
-type Agg = { input: number; output: number; cost: number; unpriced: boolean };
+type Agg = {
+  input: number;
+  output: number;
+  /** Metered spend: the money actually attributable to API calls. */
+  cost: number;
+  /** API-equivalent spend covered by a plan. Real cost: none. */
+  covered: number;
+  unpriced: boolean;
+};
 
 const RANGES = [7, 30, 90] as const;
 const BAR = '#7aa2f7'; // mira-blue — one series, one hue
@@ -61,11 +73,14 @@ function aggregate<K>(rows: Row[], key: (r: Row) => K): Map<K, Agg> {
   const m = new Map<K, Agg>();
   for (const r of rows) {
     const k = key(r);
-    const a = m.get(k) ?? { input: 0, output: 0, cost: 0, unpriced: false };
+    const a = m.get(k) ?? { input: 0, output: 0, cost: 0, covered: 0, unpriced: false };
     a.input += r.prompt_tokens;
     a.output += r.completion_tokens;
     const c = rowCost(r);
     if (c == null) a.unpriced = true;
+    // A subscription row's figure is an API-equivalent estimate, so it is
+    // kept apart from metered spend rather than added to it.
+    else if (r.billing === 'subscription') a.covered += c;
     else a.cost += c;
     m.set(k, a);
   }
@@ -74,8 +89,9 @@ function aggregate<K>(rows: Row[], key: (r: Row) => K): Map<K, Agg> {
 
 /** Cost text: never "$0.00" for tokens we couldn't price. */
 function costLabel(a: Agg): string {
-  if (a.cost > 0) return formatDollars(a.cost) + (a.unpriced ? '+' : '');
-  return a.unpriced ? '—' : formatDollars(0);
+  const metered = a.cost > 0 ? formatDollars(a.cost) : a.unpriced ? '—' : formatDollars(0);
+  // Plan-covered usage is shown alongside, never inside, the total.
+  return a.covered > 0 ? `${metered} (+${formatDollars(a.covered)} on your plan)` : metered;
 }
 
 function daysBetween(since: string, n: number): string[] {
@@ -252,7 +268,9 @@ export function UsageSection() {
                 </div>
                 <div className="mt-1.5 text-[11.5px] text-muted-foreground">
                   {heroIsCost
-                    ? total.unpriced ? 'some models unpriced — see footnote' : 'across all models and projects'
+                    ? total.covered > 0
+                      ? `${formatDollars(total.covered)} more ran on a subscription — covered by your plan, not billed`
+                      : total.unpriced ? 'some models unpriced — see footnote' : 'across all models and projects'
                     : 'no priced models in this range'}
                 </div>
               </div>

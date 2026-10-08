@@ -1,6 +1,13 @@
-import { useMemo, useState } from 'react';
+import { PREF_KEYS, useBoolPref } from '../lib/prefs';
+import { ActivityShimmer } from './ActivityShimmer';
+import { plainToolAction, latestToolEntry, completedToolSummary, toolActivityKind } from '../lib/toolActivity';
+import { useTranscriptDisclosure } from './TranscriptDisclosure';
+import { useEffect, useMemo } from 'react';
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import {
   Brain,
+  Wrench,
+  ListCollapse,
   ChevronDown,
   MessageCircleMore,
   CircleCheck,
@@ -22,6 +29,18 @@ import {
 import type { DiffPreview, ToolCall, ToolResult } from '../types';
 import { ToolCard, type ToolStatus } from './ToolCard';
 import { cn } from '@/lib/utils';
+
+/** Staggered row entrance, mirroring ContextPanel's progress items:
+ *  each expanded ToolCard slides in 4px from the left, fading, with a
+ *  small delay relative to its position in the run. */
+const itemVariants = {
+  hidden: { opacity: 0, x: -4 },
+  visible: (i: number) => ({
+    opacity: 1,
+    x: 0,
+    transition: { duration: 0.16, delay: i * 0.035 },
+  }),
+};
 
 /** Flat modern chip for a run of consecutive tool calls — no card border,
  *  no background box. Single row:
@@ -51,15 +70,27 @@ export function ToolGroup({
     status: ToolStatus;
     result: ToolResult | null;
     progressLines?: string[];
+    activityAt?: number;
   }[];
   onOpenFile?: (path: string, diff: DiffPreview | null) => void;
 }) {
-  const [expanded, setExpanded] = useState(false);
+  const systemReducedMotion = useReducedMotion();
+  const [preferReducedMotion] = useBoolPref(PREF_KEYS.reduceMotion, false);
+  const reduceMotion = systemReducedMotion || preferReducedMotion;
+  const [expanded, setExpanded] = useTranscriptDisclosure(`tools:${entries[0]?.call.id}`);
 
+  const [parallel, setParallel] = useTranscriptDisclosure(`parallel:${entries[0]?.call.id}`);
   const running = entries.filter((e) => e.status === 'running').length;
-  const errored = entries.filter((e) => e.result?.is_error === true).length;
+  const errored = entries.filter((e) => e.result?.is_error === true || e.status === 'denied').length;
   const done = entries.length - running - errored;
   const anyActive = running > 0;
+  useEffect(() => { if (running > 1 && !parallel) setParallel(true); }, [running, parallel]);
+  const latest = latestToolEntry(entries);
+  const lastAction = anyActive
+    ? (latest ? plainToolAction(latest.call, latest.status === 'running') : 'Working')
+    : completedToolSummary(entries);
+  const GroupIcon = infoFor((anyActive ? latest : entries[0])?.call.function.name ?? '').Icon;
+
 
   // Homogeneous run → use the tool's own verb + inline target list.
   // Heterogeneous run → Exploring/Working umbrella + categorized counts
@@ -93,25 +124,32 @@ export function ToolGroup({
     <div className="w-full max-w-[78%]">
       <button
         type="button"
+        aria-expanded={expanded}
         onClick={() => setExpanded((v) => !v)}
-        className="group flex w-full min-w-0 items-center gap-1.5 rounded-md px-2 py-1 text-left text-[13px] transition-colors hover:bg-accent/40"
+        className={cn("group relative flex w-full min-w-0 items-center gap-1.5 rounded-md px-2 py-1 text-left text-[13px] leading-5 transition-colors hover:bg-accent/40")}
       >
-        <span className="shrink-0 text-muted-foreground">{header.verb}</span>
-        {homogeneous && <CountBadge n={entries.length} />}
+        <GroupIcon aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" />
+        {entries.length > 1 ? <>
+          <span className="min-w-0 flex-1 overflow-hidden" title={lastAction}>
+            <AnimatePresence initial={false} mode="popLayout"><motion.span key={lastAction} initial={{ opacity: 0, y: 4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }} transition={{ duration: reduceMotion ? 0 : 0.18, ease: 'easeOut' }} className="block truncate"><ActivityShimmer active={anyActive}>{lastAction}</ActivityShimmer></motion.span></AnimatePresence>
+          </span>
+          <ActivityShimmer active={anyActive} className="shrink-0 text-[11px]">{parallel ? 'Parallel tools' : 'Tools'}</ActivityShimmer><CountBadge n={entries.length} />
+        </> : <><ActivityShimmer active={anyActive} className="shrink-0">{header.verb}</ActivityShimmer>
         <span
           className={cn(
-            'min-w-0 flex-1 truncate text-[12.5px]',
+            'min-w-0 flex-1 truncate text-[13px] leading-5',
+            anyActive && 'activity-shimmer animate-text-shimmer',
             // Homogeneous keeps the mono target-list look; heterogeneous
             // uses the tighter categorised phrase which reads better in
             // the UI's default sans-serif.
             homogeneous
-              ? 'font-mono text-[12px] text-muted-foreground/85'
+              ? 'text-muted-foreground/85'
               : 'text-foreground/85',
           )}
           title={trailingText.title}
         >
           {trailingText.text}
-        </span>
+        </span></>}
         <ChevronDown
           strokeWidth={2.5}
           className={cn(
@@ -123,22 +161,38 @@ export function ToolGroup({
         <StatusCluster running={running} done={done} errored={errored} />
       </button>
 
-      {expanded && (
-        <div className="ml-6 mt-0.5 flex flex-col gap-0.5 border-l border-border/40 pl-3">
-          {entries.map((e) => (
-            <ToolCard
+      <AnimatePresence initial={false}>
+        {expanded && (
+        <motion.div
+          initial={{ height: 0, opacity: 0 }}
+          animate={{ height: 'auto', opacity: 1, transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.22, 1, 0.36, 1] } }}
+          exit={{ height: 0, opacity: 0, transition: { duration: reduceMotion ? 0 : 0.18, ease: 'easeInOut' } }}
+          className="ml-6 mt-0.5 flex flex-col gap-0.5 overflow-hidden border-l border-border/40 pl-3"
+        >
+          {entries.map((e, i) => (
+            <motion.div
               key={e.call.id}
-              call={e.call}
-              preview={e.preview}
-              status={e.status}
-              result={e.result}
-              progressLines={e.progressLines}
-              onDecide={() => {}}
-              onOpenFile={onOpenFile}
-            />
+              custom={i}
+              variants={itemVariants}
+              initial="hidden"
+              animate="visible"
+              transition={reduceMotion ? { duration: 0, delay: 0 } : undefined}
+            >
+              <ToolCard
+                detailsOnly={entries.length === 1 && e.call.function.name === 'bash'}
+                call={e.call}
+                preview={e.preview}
+                status={e.status}
+                result={e.result}
+                progressLines={e.progressLines}
+                onDecide={() => {}}
+                onOpenFile={onOpenFile}
+              />
+            </motion.div>
           ))}
-        </div>
-      )}
+        </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
@@ -372,7 +426,7 @@ type ToolInfo = {
   /** Present-continuous verb, used while the call is in-flight
    *  ("Reading foo.rs"). Matches Codex's Searching/Searched pattern. */
   verbCont: string;
-  Icon: React.ComponentType<{ className?: string }>;
+  Icon: React.ComponentType<{ className?: string; 'aria-hidden'?: boolean | 'true' | 'false' }>;
 };
 
 /** Friendly label + icon per tool name. Extend as we add tools; unknown
@@ -418,13 +472,26 @@ export function infoFor(name: string): ToolInfo {
     case 'todo_write':      return { verbPast: 'Updated todos', verbCont: 'Updating todos', Icon: ClipboardList };
     case 'tool_search':     return { verbPast: 'Looked up tools', verbCont: 'Looking up tools', Icon: Search };
     default: {
-      // MCP tools arrive as `mcp__<server>__<tool>`: say which, readably.
-      const mcp = name.match(/^mcp__([^_]+(?:_[^_]+)*)__(.+)$/);
-      if (mcp) {
-        const label = `${mcp[1]} · ${mcp[2].replace(/_/g, ' ')}`;
-        return { verbPast: `Used ${label}`, verbCont: `Using ${label}`, Icon: Sparkle };
-      }
-      return { verbPast: name, verbCont: name, Icon: FileText };
+      const kind = toolActivityKind(name);
+      const fallback: Record<ReturnType<typeof toolActivityKind>, ToolInfo> = {
+        read: { verbPast:'Read',verbCont:'Reading',Icon:FileText },
+        search: { verbPast:'Searched',verbCont:'Searching',Icon:Search },
+        web_search: { verbPast:'Searched the web',verbCont:'Searching the web',Icon:Search },
+        edit: { verbPast:'Edited',verbCont:'Editing',Icon:NotebookPen },
+        write: { verbPast:'Wrote',verbCont:'Writing',Icon:FilePlus },
+        run: { verbPast:'Ran',verbCont:'Running',Icon:Terminal },
+        web: { verbPast:'Opened',verbCont:'Opening',Icon:Globe },
+        git: { verbPast:'Reviewed',verbCont:'Reviewing',Icon:GitBranch },
+        agent: { verbPast:'Worked with agents',verbCont:'Working with agents',Icon:Users },
+        memory: { verbPast:'Used memory',verbCont:'Using memory',Icon:Brain },
+        task: { verbPast:'Managed tasks',verbCont:'Managing tasks',Icon:ClipboardList },
+        plan: { verbPast:'Updated the plan',verbCont:'Planning',Icon:ClipboardList },
+        question: { verbPast:'Asked',verbCont:'Asking',Icon:MessageCircleMore },
+        compact: { verbPast:'Compacted context',verbCont:'Compacting context',Icon:ListCollapse },
+        skill: { verbPast:'Used skills',verbCont:'Using skills',Icon:Sparkle },
+        other: { verbPast:`Used ${name.replace(/[_/.-]+/g, ' ')}`,verbCont:`Using ${name.replace(/[_/.-]+/g, ' ')}`,Icon:Wrench },
+      };
+      return fallback[kind];
     }
   }
 }

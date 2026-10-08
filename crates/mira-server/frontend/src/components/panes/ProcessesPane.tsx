@@ -20,26 +20,15 @@ import {
   X,
 } from 'lucide-react';
 import { composeText } from '@/lib/attachBridge';
+import {stopBackgroundProcess, type BackgroundProcess} from '@/lib/backgroundProcesses';
 import { openExternal } from '@/lib/desktop';
 import { sessionQuery } from '@/lib/ndjson';
 import { setPreviewUrl } from '@/lib/previewUrl';
 import { cn } from '@/lib/utils';
+import { Collapse } from '../ui/Collapse';
 import { PaneBar, PaneEmpty, PaneIconButton, PaneSection, StatusDot } from './paneUi';
 
-type Proc = {
-  id: number;
-  command: string;
-  cwd: string;
-  call_id: string;
-  pid: number | null;
-  running: boolean;
-  exit_code: number | null;
-  stopped: boolean;
-  elapsed_secs: number;
-  ports: number[];
-  url: string | null;
-  last_line: string | null;
-};
+type Proc = BackgroundProcess;
 
 type Port = {
   port: number;
@@ -66,8 +55,10 @@ async function post(url: string, body: unknown = {}) {
 export function ProcessesPane({
   sessionId,
   onPreview,
+  selectedProcess,
 }: {
   sessionId: string;
+  selectedProcess?:{id:number;nonce:number};
   /** Open Device preview (the URL is already set). */
   onPreview: () => void;
 }) {
@@ -78,6 +69,14 @@ export function ProcessesPane({
   const [busy, setBusy] = useState<string | null>(null);
   const [showApps, setShowApps] = useState(false);
   const q = sessionQuery(sessionId);
+  const selectedRow=useRef<HTMLDivElement|null>(null);
+  const revealedSelection=useRef<number|null>(null);
+  useEffect(()=>{if(selectedProcess)setOpen(selectedProcess.id);},[selectedProcess]);
+  useEffect(()=>{
+    if(selectedProcess && selectedRow.current && revealedSelection.current!==selectedProcess.nonce){
+      selectedRow.current.scrollIntoView({block:'nearest'});revealedSelection.current=selectedProcess.nonce;
+    }
+  },[selectedProcess,data]);
 
   const refresh = useCallback(async () => {
     try {
@@ -173,14 +172,13 @@ export function ProcessesPane({
             ) : (
               <div className="flex flex-col gap-1.5 px-2">
                 {procs.map((p) => (
-                  <ProcessRow
-                    key={p.id}
+                  <div key={p.id} ref={p.id===selectedProcess?.id?selectedRow:undefined}><ProcessRow
                     proc={p}
                     q={q}
                     expanded={open === p.id}
                     onToggle={() => setOpen(open === p.id ? null : p.id)}
                     busy={busy?.endsWith(`:${p.id}`) ?? false}
-                    onStop={() => void act(`stop:${p.id}`, () => post(`/api/processes/${p.id}/stop${q}`))}
+                    onStop={() => void act(`stop:${p.id}`, () => stopBackgroundProcess(sessionId,p.id))}
                     onRestart={() =>
                       void act(`restart:${p.id}`, async () => {
                         const r = (await post(`/api/processes/${p.id}/restart${q}`)) as { id?: number };
@@ -194,7 +192,7 @@ export function ProcessesPane({
                       })
                     }
                     onPreview={preview}
-                  />
+                  /></div>
                 ))}
               </div>
             )}
@@ -351,7 +349,9 @@ function ProcessRow({
           )}
         </div>
       </div>
-      {expanded && <ProcessLog id={p.id} q={q} command={p.command} running={p.running} />}
+      <Collapse open={expanded}>
+        <ProcessLog id={p.id} q={q} command={p.command} running={p.running} />
+      </Collapse>
     </div>
   );
 }

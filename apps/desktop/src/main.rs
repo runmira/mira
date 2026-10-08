@@ -106,6 +106,7 @@ fn main() {
             focus_main(app);
         }))
         .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Server(Mutex::new(None)))
@@ -113,7 +114,8 @@ fn main() {
             open_external,
             check_update,
             install_update,
-            restart_app
+            restart_app,
+            capture_screenshot
         ])
         .setup(|app| {
             #[cfg(any(windows, target_os = "linux"))]
@@ -170,6 +172,8 @@ fn build_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         // set would show "Mira" twice — once as the system title and once in
         // the app's own sidebar header.
         .title("")
+        // Let the webview deliver OS files to the shared DOM attachment intake.
+        .disable_drag_drop_handler()
         .inner_size(1280.0, 840.0)
         .min_inner_size(760.0, 520.0)
         .initialization_script(INIT_SCRIPT.replace("__CHANNEL__", CHANNEL));
@@ -549,4 +553,31 @@ fn login_shell_env() -> Vec<(String, String)> {
 #[cfg(not(unix))]
 fn login_shell_env() -> Vec<(String, String)> {
     Vec::new()
+}
+
+/// The OS owns region selection and its capture permission prompt. No arbitrary path or command comes from the page.
+#[tauri::command]
+async fn capture_screenshot() -> Result<Option<Vec<u8>>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        static CAPTURE: Mutex<()> = Mutex::new(());
+        tauri::async_runtime::spawn_blocking(|| {
+            let _guard = CAPTURE.try_lock().map_err(|_| "A screen capture is already open".to_owned())?;
+            let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|e| e.to_string())?.as_nanos();
+            let dir = std::env::temp_dir().join(format!("mira-capture-{}-{nonce}", std::process::id()));
+            std::fs::create_dir(&dir).map_err(|e| e.to_string())?;
+            let file = dir.join("capture.png");
+            let result = (|| {
+                let status = Command::new("/usr/sbin/screencapture").args(["-i", "-x", "-t", "png"]).arg(&file).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().map_err(|e| e.to_string())?;
+                if !status.success() || !file.exists() { return Ok(None); }
+                let size = std::fs::metadata(&file).map_err(|e| e.to_string())?.len();
+                if size > 16 * 1024 * 1024 { return Err("Capture exceeds 16 MB; select a smaller area".into()); }
+                std::fs::read(&file).map(Some).map_err(|e| e.to_string())
+            })();
+            let _ = std::fs::remove_dir_all(&dir);
+            result
+        }).await.map_err(|e| e.to_string())?
+    }
+    #[cfg(not(target_os = "macos"))]
+    { Err("Native region capture is unavailable on this platform".into()) }
 }

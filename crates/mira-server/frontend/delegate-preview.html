@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="en"><head><meta charset="UTF-8" /><title>Delegation card preview</title>
+<script>
+  // TEMPORARY harness (not shipped). ?theme=light|dark forces the preference.
+  var t = new URLSearchParams(location.search).get('theme');
+  if (t) localStorage.setItem('mira.theme', t);
+  var pref = localStorage.getItem('mira.theme') || 'system';
+  var light = pref === 'light' || (pref !== 'dark' && matchMedia('(prefers-color-scheme: light)').matches);
+  document.documentElement.dataset.theme = light ? 'light' : 'dark';
+  document.documentElement.classList.toggle('dark', !light);
+</script></head>
+<body><div id="root"></div><script type="module" src="/src/delegatePreview.tsx"></script></body></html>

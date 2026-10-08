@@ -165,6 +165,62 @@ pub enum BrowserAction {
         #[serde(default)]
         duration: Option<f64>,
     },
+    /// Move the pointer over an element without clicking (menus, tooltips).
+    Hover {
+        #[serde(default, rename = "ref")]
+        element: Option<String>,
+        #[serde(default)]
+        selector: Option<String>,
+    },
+    /// Pick options in a `<select>`, by value or visible label.
+    Select {
+        values: Vec<String>,
+        #[serde(default, rename = "ref")]
+        element: Option<String>,
+        #[serde(default)]
+        selector: Option<String>,
+    },
+    /// Put local files into an `<input type=file>`.
+    Upload {
+        files: Vec<String>,
+        #[serde(default, rename = "ref")]
+        element: Option<String>,
+        #[serde(default)]
+        selector: Option<String>,
+    },
+    /// Press on one element and release on another.
+    Drag {
+        #[serde(rename = "from_ref", default)]
+        from_element: Option<String>,
+        #[serde(default)]
+        from_selector: Option<String>,
+        #[serde(rename = "to_ref", default)]
+        to_element: Option<String>,
+        #[serde(default)]
+        to_selector: Option<String>,
+    },
+    /// Answer the open `alert` / `confirm` / `prompt` / `beforeunload`.
+    Dialog {
+        accept: bool,
+        #[serde(default)]
+        text: Option<String>,
+    },
+    /// Wait until text or an element appears (or, with `gone`, disappears).
+    WaitFor {
+        #[serde(default)]
+        text: Option<String>,
+        #[serde(default)]
+        selector: Option<String>,
+        #[serde(default)]
+        gone: bool,
+        /// Seconds, up to 30.
+        #[serde(default)]
+        timeout: Option<f64>,
+    },
+    /// Emulate `prefers-color-scheme`: `light`, `dark`, or `auto` to clear.
+    ColorScheme {
+        scheme: String,
+    },
     Close,
 }
 
@@ -192,6 +248,13 @@ impl BrowserAction {
             Self::SwitchTab { .. } => "switch_tab",
             Self::CloseTab { .. } => "close_tab",
             Self::Wait { .. } => "wait",
+            Self::Hover { .. } => "hover",
+            Self::Select { .. } => "select",
+            Self::Upload { .. } => "upload",
+            Self::Drag { .. } => "drag",
+            Self::Dialog { .. } => "dialog",
+            Self::WaitFor { .. } => "wait_for",
+            Self::ColorScheme { .. } => "color_scheme",
             Self::Close => "close",
         }
     }
@@ -217,6 +280,12 @@ impl BrowserAction {
             Self::Key { key } => key.clone(),
             Self::Evaluate { expression } => expression.clone(),
             Self::Scroll { direction, .. } => direction.clone().unwrap_or_else(|| "down".into()),
+            Self::Hover { element, selector } | Self::Select { element, selector, .. } => {
+                element.clone().or_else(|| selector.clone()).unwrap_or_default()
+            }
+            // The files are what a rule should see: uploading reads them.
+            Self::Upload { files, .. } => files.join(","),
+            Self::Dialog { accept, .. } => if *accept { "accept" } else { "dismiss" }.into(),
             _ => String::new(),
         };
         if detail.is_empty() {
@@ -267,6 +336,18 @@ struct Session {
     current: String,
     /// CSS pixels per model pixel, from the latest screenshot.
     css_per_px: Option<f64>,
+    /// A JavaScript dialog blocking a page. While one is open the page
+    /// runs no script, so every other action would hang until it timed out.
+    dialog: std::sync::Arc<std::sync::Mutex<Option<OpenDialog>>>,
+}
+
+/// An open `alert` / `confirm` / `prompt` / `beforeunload`.
+#[derive(Clone, Debug)]
+struct OpenDialog {
+    /// The flat session of the page showing it.
+    session: String,
+    kind: String,
+    message: String,
 }
 
 impl Drop for Session {
@@ -605,6 +686,7 @@ fn spawn_pump(
     live: tokio::sync::broadcast::Sender<LiveEvent>,
     last_frame: std::sync::Arc<std::sync::Mutex<Option<LiveEvent>>>,
     last_url: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    dialog: std::sync::Arc<std::sync::Mutex<Option<OpenDialog>>>,
 ) -> tokio::task::JoinHandle<()> {
     let mut rx = cdp.subscribe();
     tokio::spawn(async move {
@@ -644,6 +726,21 @@ fn spawn_pump(
                         *f = Some(frame.clone());
                     }
                     let _ = live.send(frame);
+                }
+                Some("Page.javascriptDialogOpening") => {
+                    let p = &ev["params"];
+                    if let Ok(mut d) = dialog.lock() {
+                        *d = Some(OpenDialog {
+                            session: ev["sessionId"].as_str().unwrap_or_default().to_owned(),
+                            kind: p["type"].as_str().unwrap_or("alert").to_owned(),
+                            message: p["message"].as_str().unwrap_or_default().to_owned(),
+                        });
+                    }
+                }
+                Some("Page.javascriptDialogClosed") => {
+                    if let Ok(mut d) = dialog.lock() {
+                        *d = None;
+                    }
                 }
                 Some("Page.frameNavigated") => {
                     let frame = &ev["params"]["frame"];
@@ -710,7 +807,8 @@ async fn start(
     let cdp = std::sync::Arc::new(cdp);
     let live_seed = live.clone();
     let last_url_seed = last_url.clone();
-    let pump = spawn_pump(cdp.clone(), live, last_frame, last_url);
+    let dialog = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let pump = spawn_pump(cdp.clone(), live, last_frame, last_url, dialog.clone());
     let targets = page_targets(&cdp).await?;
     let current = match targets.first() {
         Some(t) => t.clone(),
@@ -731,6 +829,7 @@ async fn start(
         attached: HashMap::new(),
         current,
         css_per_px: None,
+        dialog,
     };
     attach(&mut sess).await?;
     // A viewer who connects now should see where the browser already is —
@@ -783,6 +882,13 @@ async fn attach(sess: &mut Session) -> Result<String, BrowserError> {
         .ok_or_else(|| BrowserError::Protocol("attachToTarget returned no sessionId".into()))?
         .to_owned();
     sess.attached.insert(sess.current.clone(), sid.clone());
+    // Page events are how an open dialog becomes visible. Bounded: a
+    // background tab can be slow to answer.
+    let _ = tokio::time::timeout(
+        Duration::from_secs(2),
+        sess.cdp.call(Some(&sid), "Page.enable", json!({})),
+    )
+    .await;
     Ok(sid)
 }
 
@@ -1123,6 +1229,16 @@ async fn run(
         text,
         screenshot: None,
     };
+    let open_dialog = sess.dialog.lock().ok().and_then(|d| d.clone());
+    if let Some(d) = &open_dialog {
+        if !matches!(action, A::Dialog { .. } | A::Screenshot | A::ListTabs) {
+            return Err(BrowserError::Page(format!(
+                "a {} dialog is open and blocks the page: {:?}. Answer it with the dialog \
+                 action (accept true/false) first.",
+                d.kind, d.message
+            )));
+        }
+    }
     match action {
         A::Navigate { url } => {
             let url = normalize_url(url);
@@ -1381,7 +1497,216 @@ async fn run(
             tokio::time::sleep(Duration::from_secs_f64(secs)).await;
             with_snapshot(sess, format!("Waited {secs}s.")).await
         }
+        A::Hover { element, selector } => {
+            let (x, y) = element_center(sess, element.as_deref(), selector.as_deref()).await?;
+            page_call(
+                sess,
+                "Input.dispatchMouseEvent",
+                json!({ "type": "mouseMoved", "x": x, "y": y }),
+            )
+            .await?;
+            let what = element.clone().or_else(|| selector.clone()).unwrap_or_default();
+            with_snapshot(sess, format!("Hovering over {what}.")).await
+        }
+        A::Select {
+            values,
+            element,
+            selector,
+        } => {
+            let css = target_css(element.as_deref(), selector.as_deref())?;
+            let js = format!(
+                "(function(sel, wanted){{ const el=document.querySelector(sel); \
+                 if(!el) return 'missing'; if(el.tagName!=='SELECT') return 'not a select'; \
+                 const picked=[]; for(const o of el.options){{ \
+                   const hit=wanted.includes(o.value)||wanted.includes(o.label.trim()); \
+                   if(hit&&(el.multiple||!picked.length)){{ o.selected=true; picked.push(o.label.trim()); }} \
+                   else if(el.multiple||hit) o.selected=hit; }} \
+                 if(!picked.length) return 'no option matches; options: '+[...el.options].map(o=>o.label.trim()).join(', '); \
+                 el.dispatchEvent(new Event('input',{{bubbles:true}})); \
+                 el.dispatchEvent(new Event('change',{{bubbles:true}})); \
+                 return 'ok:'+picked.join(', '); }})({}, {})",
+                serde_json::to_string(&css).expect("string encodes"),
+                serde_json::to_string(values).expect("strings encode"),
+            );
+            let v = eval(sess, &js).await?;
+            match v.as_str().unwrap_or("missing") {
+                ok if ok.starts_with("ok:") => {
+                    with_snapshot(sess, format!("Selected {}.", &ok[3..])).await
+                }
+                "missing" => Err(BrowserError::Page(format!(
+                    "no element matches {css} (take a fresh snapshot; refs change when the page does)"
+                ))),
+                other => Err(BrowserError::Page(other.to_owned())),
+            }
+        }
+        A::Upload {
+            files,
+            element,
+            selector,
+        } => {
+            if files.is_empty() {
+                return Err(BrowserError::InvalidArgs("give at least one file".into()));
+            }
+            let mut paths = Vec::with_capacity(files.len());
+            for f in files {
+                let p = std::path::Path::new(f);
+                if !p.is_absolute() || !p.is_file() {
+                    return Err(BrowserError::InvalidArgs(format!(
+                        "{f} is not an absolute path to an existing file"
+                    )));
+                }
+                paths.push(f.clone());
+            }
+            let css = target_css(element.as_deref(), selector.as_deref())?;
+            let sid = attach(sess).await?;
+            let found = sess
+                .cdp
+                .call(
+                    Some(&sid),
+                    "Runtime.evaluate",
+                    json!({ "expression": format!(
+                        "document.querySelector({})",
+                        serde_json::to_string(&css).expect("string encodes")
+                    ) }),
+                )
+                .await?;
+            let object = found["result"]["objectId"].as_str().ok_or_else(|| {
+                BrowserError::Page(format!(
+                    "no element matches {css} (take a fresh snapshot; refs change when the page does)"
+                ))
+            })?;
+            sess.cdp
+                .call(
+                    Some(&sid),
+                    "DOM.setFileInputFiles",
+                    json!({ "files": paths, "objectId": object }),
+                )
+                .await?;
+            with_snapshot(sess, format!("Attached {} file(s).", paths.len())).await
+        }
+        A::Drag {
+            from_element,
+            from_selector,
+            to_element,
+            to_selector,
+        } => {
+            let (x0, y0) =
+                element_center(sess, from_element.as_deref(), from_selector.as_deref()).await?;
+            let (x1, y1) =
+                element_center(sess, to_element.as_deref(), to_selector.as_deref()).await?;
+            let mouse = |kind: &str, x: f64, y: f64| {
+                json!({ "type": kind, "x": x, "y": y, "button": "left", "buttons": 1, "clickCount": 1 })
+            };
+            page_call(sess, "Input.dispatchMouseEvent", mouse("mousePressed", x0, y0)).await?;
+            // Intermediate moves: drag libraries wait for a threshold.
+            for i in 1..=8 {
+                let t = f64::from(i) / 8.0;
+                page_call(
+                    sess,
+                    "Input.dispatchMouseEvent",
+                    mouse("mouseMoved", x0 + (x1 - x0) * t, y0 + (y1 - y0) * t),
+                )
+                .await?;
+                tokio::time::sleep(Duration::from_millis(16)).await;
+            }
+            page_call(sess, "Input.dispatchMouseEvent", mouse("mouseReleased", x1, y1)).await?;
+            with_snapshot(sess, "Dragged.".into()).await
+        }
+        A::Dialog { accept, text } => {
+            let Some(d) = open_dialog else {
+                return Ok(text_only("No dialog is open.".into()));
+            };
+            let mut params = json!({ "accept": accept });
+            if let Some(t) = text {
+                params["promptText"] = json!(t);
+            }
+            sess.cdp
+                .call(Some(&d.session), "Page.handleJavaScriptDialog", params)
+                .await?;
+            if let Ok(mut open) = sess.dialog.lock() {
+                *open = None;
+            }
+            let verb = if *accept { "Accepted" } else { "Dismissed" };
+            with_snapshot(sess, format!("{verb} the {} dialog ({:?}).", d.kind, d.message)).await
+        }
+        A::WaitFor {
+            text,
+            selector,
+            gone,
+            timeout,
+        } => {
+            let check = match (text, selector) {
+                (Some(t), _) => format!(
+                    "(document.body && document.body.innerText.includes({}))",
+                    serde_json::to_string(t).expect("string encodes")
+                ),
+                (None, Some(sel)) => format!(
+                    "!!document.querySelector({})",
+                    serde_json::to_string(sel).expect("string encodes")
+                ),
+                (None, None) => {
+                    return Err(BrowserError::InvalidArgs("give `text` or `selector`".into()))
+                }
+            };
+            let what = text.clone().or_else(|| selector.clone()).unwrap_or_default();
+            let secs = timeout.unwrap_or(10.0).clamp(0.5, 30.0);
+            let deadline = tokio::time::Instant::now() + Duration::from_secs_f64(secs);
+            loop {
+                // Mid-navigation the context can vanish; that is "not yet".
+                let present = eval(sess, &check).await.ok().and_then(|v| v.as_bool());
+                if present.is_some_and(|p| p != *gone) {
+                    let state = if *gone { "is gone" } else { "appeared" };
+                    return with_snapshot(sess, format!("{what:?} {state}.")).await;
+                }
+                if sess.dialog.lock().map(|d| d.is_some()).unwrap_or(false) {
+                    return Err(BrowserError::Page(
+                        "a dialog opened while waiting; answer it with the dialog action".into(),
+                    ));
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    let state = if *gone { "still there" } else { "did not appear" };
+                    return Err(BrowserError::Page(format!("{what:?} {state} after {secs}s.")));
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+        A::ColorScheme { scheme } => {
+            let value = match scheme.as_str() {
+                "light" | "dark" => scheme.as_str(),
+                "auto" | "" => "",
+                other => {
+                    return Err(BrowserError::InvalidArgs(format!(
+                        "unknown scheme `{other}`; use light, dark or auto"
+                    )))
+                }
+            };
+            page_call(
+                sess,
+                "Emulation.setEmulatedMedia",
+                json!({ "features": [{ "name": "prefers-color-scheme", "value": value }] }),
+            )
+            .await?;
+            Ok(text_only(if value.is_empty() {
+                "Color scheme follows the system again.".into()
+            } else {
+                format!("Page now prefers the {value} color scheme.")
+            }))
+        }
         A::Close => unreachable!("handled in Browser::execute"),
+    }
+}
+
+/// The CSS selector for a snapshot ref or a selector, as `element_center` reads them.
+fn target_css(element: Option<&str>, selector: Option<&str>) -> Result<String, BrowserError> {
+    match (element, selector) {
+        (Some(r), _) => {
+            valid_ref(r)?;
+            Ok(format!("[data-mira-ref=\"{r}\"]"))
+        }
+        (None, Some(s)) => Ok(s.to_owned()),
+        (None, None) => Err(BrowserError::InvalidArgs(
+            "give `ref` (from a snapshot) or `selector`".into(),
+        )),
     }
 }
 

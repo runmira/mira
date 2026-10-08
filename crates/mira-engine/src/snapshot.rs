@@ -78,6 +78,11 @@ pub struct EngineSnapshot {
     /// agents only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch: Option<String>,
+    /// Set when another enabled instance of the same driver resolves to
+    /// the same credential boundary: the two sign in as one account
+    /// however different the rest of their config is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_note: Option<String>,
 }
 
 impl EngineSnapshot {

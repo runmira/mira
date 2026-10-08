@@ -1,12 +1,16 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { ComposerNoticeStack, type ComposerNotice } from './ComposerNoticeStack';
+import { captureScreenshot } from '../lib/screenCapture';
+import { ImageAttachmentDetails } from './ImageAttachmentDetails';
+import { reportWorkspaceSetup, type WorkspaceSetup } from './WorkspaceSetupCard';
+import { useEffect, useLayoutEffect, useId, useMemo, useRef, useState } from 'react';
 import { ImageLightbox } from './ImageLightbox';
-import { AnimatePresence, motion } from 'framer-motion';
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import {
   ArrowUp,
   Camera,
-  Circle,
   Cloud,
   Copy,
+  CornerDownRight,
   File as FileIcon,
   Folder,
   GitBranch,
@@ -14,6 +18,7 @@ import {
   Link,
   Loader,
   Monitor,
+  MoreHorizontal,
   Paperclip,
   Plus,
   Square,
@@ -36,7 +41,7 @@ import { PREF_KEYS, useBoolPref } from '../lib/prefs';
 import type { ApprovalScope, AskUserAnswer, AskUserProposal, DiffLine, DiffPreview, EnvironmentInfo, EnvironmentStatus, Goal, Mode, PlanProposal, PlanStep, RateLimitReading, ToolCall, UsageTotals } from '../types';
 import type { AcpConfigOption, AcpSessionMode, SessionEngine } from '../types';
 import type { AskUserDecision } from './AskUserCard';
-import { ApprovalChoices } from './ApprovalDialog';
+import { ApprovalChoices, ApprovalModeIcon } from './ApprovalDialog';
 import type { AcpAgentStatus } from '../types';
 import { EnginePicker } from './EnginePicker';
 import { UsageRing, type UsageRingData } from './UsageRing';
@@ -50,8 +55,13 @@ import { customToCommand, filterCommands, groupCommands, originIconSrc, slashSta
 import type { CommandInfo, Origin } from '../api';
 import { MentionInput, type MentionInputHandle } from './MentionInput';
 import { cn } from '@/lib/utils';
-import { ATTACH_FILE_EVENT, COMPOSE_TEXT_EVENT } from '@/lib/attachBridge';
+import { draftKey } from '../lib/composerDrafts';
+import { cachedDraft, changeRichDraft, clearRichDraft, restoreRichDraft, type RichDraft } from '../lib/richComposerDrafts';
+import { ATTACH_FILE_EVENT, COMPOSE_QUOTE_EVENT, COMPOSE_TEXT_EVENT, registerAttachmentIntake, type ComposerQuote } from '@/lib/attachBridge';
+import { QuoteCard, quoteMarkdown } from './QuoteCard';
 import { shortcutLabelForCommand, useKeybindings } from '@/lib/keybindings';
+import { Dialog, DialogContent, DialogTitle, DialogDescription } from './ui/dialog';
+import { ChevronDown, GripVertical } from 'lucide-react';
 
 const MODES: { value: Mode; label: string; desc: string }[] = [
   { value: 'plan',   label: 'Plan only',       desc: 'Reads and searches. No edits, no commands.' },
@@ -78,6 +88,12 @@ type Props = {
   /** The provider's latest rate-limit reading, when it reports one. */
   rateLimit?: RateLimitReading | null;
   onSend: (text: string, images?: ImageData[]) => void;
+  onQueueMessage?: (text: string, images?: ImageData[]) => void;
+  queuedMessages?: QueuedComposerMessage[];
+  onRemoveQueuedMessage?: (id: string) => void;
+  onEditQueuedMessage?: (item: QueuedComposerMessage, text: string) => Promise<void>;
+  onReorderQueuedMessage?: (id: string, beforeId: string | null) => Promise<void>;
+  onSteerQueuedMessage?: (id: string) => void;
   onSetMode: (m: Mode) => void;
   onSetModel: (m: string, instance?: string | null) => void;
   /** What drives this session, from the server. The picker and the mode
@@ -159,6 +175,11 @@ type Props = {
   /** Context, limits and spend for the usage ring. */
   usageRing?: UsageRingData | null;
   pendingApproval?: PendingApproval | null;
+  pendingApprovals?: PendingApproval[];
+  onActiveApprovalChange?: (callId: string | null) => void;
+  pendingPlans?: { callId: string; proposal: PlanProposal }[];
+  pendingQuestions?: { callId: string; proposal: AskUserProposal }[];
+  notices?: ComposerNotice[];
   /** How many approvals are waiting, including the one shown. */
   pendingApprovalCount?: number;
   /** Allow every waiting request once. */
@@ -187,7 +208,15 @@ export type PendingApproval = {
 
 type Attachment = { path: string; content: string; bytes: number };
 /** An image the model will see: base64 without the `data:` prefix. */
-export type ImageData = { media_type: string; data: string };
+export type ImageData = import('../types').ImageAttachment;
+export type QueuedComposerMessage = {
+  fingerprint?: string;
+  steering?: boolean;
+  error?: string;
+  id: string;
+  text: string;
+  images?: ImageData[];
+};
 
 /** Longest edge sent to the model. Bigger screenshots are scaled down —
  *  providers downscale anyway, and it keeps the payload small. */
@@ -195,15 +224,37 @@ const IMAGE_MAX_EDGE = 1568;
 
 /** Read an image file, scaled down to IMAGE_MAX_EDGE, as base64. */
 async function readImage(file: File): Promise<ImageData> {
-  const bitmap = await createImageBitmap(file);
-  const scale = Math.min(1, IMAGE_MAX_EDGE / Math.max(bitmap.width, bitmap.height));
-  const canvas = document.createElement('canvas');
-  canvas.width = Math.round(bitmap.width * scale);
-  canvas.height = Math.round(bitmap.height * scale);
-  canvas.getContext('2d')!.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-  const media_type = file.type === 'image/jpeg' ? 'image/jpeg' : 'image/png';
-  const url = canvas.toDataURL(media_type, 0.9);
-  return { media_type, data: url.slice(url.indexOf(',') + 1) };
+  let image: ImageBitmap | HTMLImageElement;
+  let objectUrl: string | undefined;
+  try {
+    image = await createImageBitmap(file);
+  } catch {
+    // Older desktop webviews cannot decode every format through ImageBitmap.
+    objectUrl = URL.createObjectURL(file);
+    const element = new Image();
+    image = await new Promise<HTMLImageElement>((resolve, reject) => {
+      element.onload = () => resolve(element);
+      element.onerror = () => { URL.revokeObjectURL(objectUrl!); reject(new Error('This image could not be decoded.')); };
+      element.src = objectUrl!;
+    });
+  }
+  try {
+    const width = image instanceof HTMLImageElement ? image.naturalWidth : image.width;
+    const height = image instanceof HTMLImageElement ? image.naturalHeight : image.height;
+    const scale = Math.min(1, IMAGE_MAX_EDGE / Math.max(width, height));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(width * scale));
+    canvas.height = Math.max(1, Math.round(height * scale));
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('Image processing is unavailable.');
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    const media_type = file.type === 'image/jpeg' ? 'image/jpeg' : 'image/png';
+    const url = canvas.toDataURL(media_type, 0.9);
+    return { media_type, data: url.slice(url.indexOf(',') + 1), source: { name: file.name, width: canvas.width, height: canvas.height, ...(file as File & { source?: import('../types').ImageSource }).source } };
+  } finally {
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
+    if ('close' in image) image.close();
+  }
 }
 
 /** Cap on how many bytes we'll inline from a single OS-picked file. Larger
@@ -213,23 +264,30 @@ async function readImage(file: File): Promise<ImageData> {
 const NATIVE_ATTACH_MAX_BYTES = 256 * 1024;
 
 
+const AGENT_APPROVAL_MODES = MODES.filter((m) => ['manual', 'auto', 'edit'].includes(m.value)).map((m) => ({
+  ...m,
+  desc: m.value === 'edit' ? 'Approve every agent permission request.'
+    : m.value === 'manual' ? 'Ask before every edit, command and web fetch.'
+    : 'Auto-approve edits. Commands and web fetches ask.',
+}));
+
 export function Composer({
   disabled, busy, mode, model, providerName, cwd,
   environment, environments, envSwitching, onSwitchEnvironment,
-  onSend, onSetMode, onSetModel, onSetModelOption, onAcpModes, onAcpCurrentMode, onPickAgentMode, agentDriving, onOpenPicker, onCwdSwitched, onInterrupt, onNewChat, onOpenSettings, onRunReview, onSetGoal, onClearGoal, onCompact, goal, onRemember, onUndo,
+  onSend, onQueueMessage, queuedMessages = [], onRemoveQueuedMessage, onEditQueuedMessage, onReorderQueuedMessage, onSteerQueuedMessage, onSetMode, onSetModel, onSetModelOption, onAcpModes, onAcpCurrentMode, onPickAgentMode, agentDriving, onOpenPicker, onCwdSwitched, onInterrupt, onNewChat, onOpenSettings, onRunReview, onSetGoal, onClearGoal, onCompact, goal, onRemember, onUndo,
   engine, engines, agents, agentsChecking, onCheckAgents, agentConfig, agentDescriptors, onPickProvider, onPickAgent, onConfigureAgents, sessionId, onAgentCompact, onAgentFork, onAgentReverted,
   skills, commands,
-  usageRing, pendingApproval, pendingApprovalCount = 0, onAllowAllPending, pendingPlan, pendingAskUser, onDecide, onPlanReply, onAskUserReply,
+  usageRing, pendingApproval: fallbackApproval, pendingApprovals, onActiveApprovalChange, pendingPlans, pendingQuestions, notices = [], pendingApprovalCount = 0, onAllowAllPending, pendingPlan: fallbackPlan, pendingAskUser: fallbackQuestion, onDecide, onPlanReply, onAskUserReply,
 }: Props) {
   const acpModes_modes = onAcpModes ?? null;
   const acpCurrentMode = onAcpCurrentMode ?? null;
-  // The agent's posture spectrum expressed as Mira modes, so the one picker
-  // drives either system. Only postures the agent actually has are listed —
-  // offering the full five to an agent with three modes would be a lie.
+  // Use native permission modes when available. OpenCode's build/plan modes
+  // describe its workflow; it and agents without permission modes use Mira's
+  // three per-chat approval modes instead.
   const agentPicker = useMemo(() => {
     if (!agentDriving || !acpModes_modes || !onPickAgentMode) return null;
     const mapped = mapPosturesToModes(acpModes_modes, acpCurrentMode);
-    if (mapped.length === 0) return null;
+    if (engine?.driver === 'opencode' || !mapped.some((o) => o.posture.key !== 'plan')) return null;
     const byKey = new Map(mapped.map((o) => [o.posture.key, o]));
     const modes = (Object.keys(MIRA_MODE_TO_POSTURE) as Mode[]).flatMap((m) => {
       const opt = byKey.get(MIRA_MODE_TO_POSTURE[m]);
@@ -240,23 +298,24 @@ export function Composer({
       modes: MODES.filter((d) => modes.some((x) => x.mode === d.value)),
       current: (current ? (Object.keys(MIRA_MODE_TO_POSTURE) as Mode[]).find((m) => MIRA_MODE_TO_POSTURE[m] === current.posture.key) : null) ?? null,
     };
-  }, [agentDriving, acpModes_modes, acpCurrentMode, onPickAgentMode]);
-  const [text, setText] = useState('');
-  const [attachments, setAttachments] = useState<Attachment[]>([]);
-  const [images, setImages] = useState<ImageData[]>([]);
+  }, [agentDriving, acpModes_modes, acpCurrentMode, onPickAgentMode, engine?.driver]);
+  const [text, setText] = useState(() => cachedDraft(draftKey(sessionId)).text);
+  const [attachments, setAttachmentState] = useState<Attachment[]>(() => cachedDraft(draftKey(sessionId)).attachments);
+  const [images, setImageState] = useState<ImageData[]>(() => cachedDraft(draftKey(sessionId)).images);
+  const [draftError, setDraftError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   const [preview, setPreview] = useState<string | null>(null);
   // Send mode (Settings → General → Composer). When on, plain Enter
   // inserts a newline and only Cmd/Ctrl+Enter sends.
   const [cmdEnterSend] = useBoolPref(PREF_KEYS.composerCmdEnter, false);
 
-  async function addImages(files: File[]) {
+  async function addImages(files: File[], owner = textOwner.current) {
     setAttachError(null);
     try {
       const read = await Promise.all(files.map(readImage));
-      setImages((prev) => [...prev, ...read]);
+      setImages((prev) => [...prev, ...read], owner);
     } catch (e) {
-      setAttachError(`couldn't read image: ${(e as Error).message}`);
+      if (textOwner.current === owner) setAttachError(`couldn't read image: ${(e as Error).message}`);
     }
   }
   const [attachError, setAttachError] = useState<string | null>(null);
@@ -284,6 +343,7 @@ export function Composer({
    *  rebuilt; the input's `onChange` handler then re-syncs React state
    *  so callers don't need to `setText(next)` themselves. */
   function updateText(next: string) {
+    persistText(next);
     if (mentionRef.current) {
       mentionRef.current.setText(next);
     } else {
@@ -292,6 +352,81 @@ export function Composer({
       setText(next);
     }
   }
+
+  /* ---------- per-session drafts ----------
+   *
+   * Switching chats used to wipe whatever was half-typed: one
+   * contenteditable input, one `text` state, and nothing tying it to
+   * the session it belongs to.
+   *
+   * Two values make that safe, and the gap between them is the whole
+   * bug:
+   *
+   *   `draftKeyFor` — the session on screen right now.
+   *   `textOwner`   — the session `text` actually belongs to.
+   *
+   * On a switch they differ for exactly one render. So the draft is
+   * written from the mutation sites (every write to the composer goes
+   * through `persistText`) rather than from an effect on `text`: an
+   * effect would run once more in the switching render with the *old*
+   * text and the *new* key, silently replacing one chat's draft with
+   * another's. `textOwner` is re-pointed by the restore before any
+   * write can happen, so every write lands on the right session.
+   */
+  const draftKeyFor = draftKey(sessionId);
+  const textOwner = useRef(draftKeyFor);
+
+  const restoringDraft = useRef(false);
+  const draftState = useRef<RichDraft>(cachedDraft(draftKeyFor));
+  function applyDraft(key: string, next: RichDraft, immediate = false) {
+    changeRichDraft(key, next, immediate);
+    if (textOwner.current !== key) return;
+    draftState.current = next;
+  }
+  function persistText(next: string) {
+    const key = textOwner.current;
+    applyDraft(key, { ...draftState.current, text: next });
+  }
+  function setAttachments(value: Attachment[] | ((prev: Attachment[]) => Attachment[]), key = textOwner.current) {
+    const previous = key === textOwner.current ? draftState.current : cachedDraft(key);
+    const next = { ...previous, attachments: typeof value === 'function' ? value(previous.attachments) : value };
+    applyDraft(key, next, true);
+    if (textOwner.current === key) setAttachmentState(next.attachments);
+  }
+  function setImages(value: ImageData[] | ((prev: ImageData[]) => ImageData[]), key = textOwner.current) {
+    const previous = key === textOwner.current ? draftState.current : cachedDraft(key);
+    const next = { ...previous, images: typeof value === 'function' ? value(previous.images) : value };
+    applyDraft(key, next, true);
+    if (textOwner.current === key) setImageState(next.images);
+  }
+  useLayoutEffect(() => {
+    let alive = true;
+    textOwner.current = draftKeyFor;
+    const local = cachedDraft(draftKeyFor);
+    draftState.current = local;
+    setText(local.text); setAttachmentState(local.attachments); setImageState(local.images);
+    restoringDraft.current = true;
+    mentionRef.current?.setText(local.text);
+    restoringDraft.current = false;
+    setDraftError(null); setAttachError(null); setAttachLoading(false); setPreview(null);
+    void restoreRichDraft(draftKeyFor).then(stored => {
+      if (!alive || textOwner.current !== draftKeyFor) return;
+      draftState.current = stored;
+      setText(stored.text); setAttachmentState(stored.attachments); setImageState(stored.images);
+      restoringDraft.current = true;
+      mentionRef.current?.setText(stored.text);
+      restoringDraft.current = false;
+    });
+    return () => { alive = false; };
+  }, [draftKeyFor]);
+  useEffect(() => {
+    const listener = (event: Event) => {
+      const detail = (event as CustomEvent<{key: string; error: string | null}>).detail;
+      if (detail.key === textOwner.current) setDraftError(detail.error);
+    };
+    window.addEventListener('mira:draft-storage', listener);
+    return () => window.removeEventListener('mira:draft-storage', listener);
+  }, []);
   // Hidden `<input type="file">` — programmatically clicked by both the
   // `/files` slash command and the `+` menu's "Attach file…" so the OS
   // opens its native file-open dialog. Same list on both paths.
@@ -428,6 +563,7 @@ export function Composer({
   }
 
   async function attachFile(path: string) {
+    const owner = textOwner.current;
     setAttachError(null);
     setAttachLoading(true);
     try {
@@ -436,11 +572,11 @@ export function Composer({
       setAttachments((prev) => [
         ...prev.filter((a) => a.path !== f.path),
         { path: f.path, content: f.content, bytes: f.bytes },
-      ]);
+      ], owner);
     } catch (e) {
-      setAttachError(String((e as Error).message));
+      if (textOwner.current === owner) setAttachError(String((e as Error).message));
     } finally {
-      setAttachLoading(false);
+      if (textOwner.current === owner) setAttachLoading(false);
     }
   }
 
@@ -449,12 +585,12 @@ export function Composer({
    *  still get a chip but the inlined content is a short placeholder so
    *  the model at least sees "here's a file called foo.mp4 (14.2 MB)"
    *  even when we can't ship the bytes. */
-  async function attachNativeFile(file: File) {
+  async function attachNativeFile(file: File, owner = textOwner.current) {
     setAttachError(null);
     setAttachLoading(true);
     try {
-      if (/^image\/(png|jpeg|gif|webp)$/.test(file.type)) {
-        await addImages([file]);
+      if (/^image\/(png|jpeg|gif|webp)$/.test(file.type) || /\.(png|jpe?g|gif|webp)$/i.test(file.name)) {
+        await addImages([file], owner);
         return;
       }
       const isBinary = looksBinary(file);
@@ -471,20 +607,39 @@ export function Composer({
         // De-dupe by filename (client-side files have no path).
         ...prev.filter((a) => a.path !== file.name),
         { path: file.name, content, bytes: file.size },
-      ]);
+      ], owner);
     } catch (e) {
-      setAttachError(String((e as Error).message));
+      if (textOwner.current === owner) setAttachError(String((e as Error).message));
     } finally {
-      setAttachLoading(false);
+      if (textOwner.current === owner) setAttachLoading(false);
     }
   }
 
   async function attachNativeFiles(files: FileList | null) {
+    const owner = textOwner.current;
     if (!files || files.length === 0) return;
     for (const f of Array.from(files)) {
-      await attachNativeFile(f);
+      await attachNativeFile(f, owner);
     }
   }
+
+  useEffect(() => {
+    const over = (event: DragEvent) => {
+      if (!event.dataTransfer?.types.includes('Files')) return;
+      event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; setDragging(true);
+    };
+    const drop = (event: DragEvent) => {
+      if (!event.dataTransfer?.files.length) return;
+      event.preventDefault(); setDragging(false);
+      void attachNativeFiles(event.dataTransfer.files);
+    };
+    const leave = (event: DragEvent) => { if (!event.relatedTarget) setDragging(false); };
+    window.addEventListener('dragover', over);
+    window.addEventListener('drop', drop);
+    window.addEventListener('dragleave', leave);
+    window.addEventListener('dragend', leave);
+    return () => { window.removeEventListener('dragover', over); window.removeEventListener('drop', drop); window.removeEventListener('dragleave', leave); window.removeEventListener('dragend', leave); };
+  }, []);
 
   // Out-of-band attachment intake. The whiteboard pane's "Send" produces a
   // PNG in the right panel, far from this component, and threading an
@@ -496,8 +651,9 @@ export function Composer({
       const file = (e as CustomEvent<File>).detail;
       if (file instanceof File) void attachNativeFile(file);
     }
+    const unregister = registerAttachmentIntake(file => { void attachNativeFile(file); });
     window.addEventListener(ATTACH_FILE_EVENT, onAttach);
-    return () => window.removeEventListener(ATTACH_FILE_EVENT, onAttach);
+    return () => { unregister(); window.removeEventListener(ATTACH_FILE_EVENT, onAttach); };
   }, []);
 
   // A pane handing over a prompt (see `composeText`). Appended, so it
@@ -517,13 +673,28 @@ export function Composer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Quoted passages wait above the input as cards, not as markdown in the
+  // text; they're written into the message when it's sent.
+  const [quotes, setQuotes] = useState<ComposerQuote[]>([]);
+  useEffect(() => {
+    function onQuote(e: Event) {
+      const q = (e as CustomEvent<ComposerQuote>).detail;
+      if (!q?.text) return;
+      setQuotes((prev) => (prev.some((p) => p.href === q.href) ? prev : [...prev, q]));
+      requestAnimationFrame(() => mentionRef.current?.focus());
+    }
+    window.addEventListener(COMPOSE_QUOTE_EVENT, onQuote);
+    return () => window.removeEventListener(COMPOSE_QUOTE_EVENT, onQuote);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   function removeAttachment(path: string) {
     setAttachments((prev) => prev.filter((a) => a.path !== path));
   }
 
   function submit() {
     const trimmed = text.trim();
-    if ((!trimmed && attachments.length === 0 && images.length === 0) || disabled || busy) return;
+    if ((!trimmed && attachments.length === 0 && images.length === 0 && quotes.length === 0) || disabled) return;
 
     // If the user typed a full `/foo bar` command and hit Enter, execute
     // the command instead of sending it as a chat message. Control
@@ -545,45 +716,85 @@ export function Composer({
       return;
     }
 
-    const body = attachments.length > 0 ? renderAttachments(attachments, cwd) + '\n\n' + trimmed : trimmed;
-    onSend(body, images.length > 0 ? images : undefined);
+    const quoted = quotes.map(quoteMarkdown).join('') + trimmed;
+    const body = attachments.length > 0 ? renderAttachments(attachments, cwd) + '\n\n' + quoted : quoted;
+    if (busy && onQueueMessage) onQueueMessage(body, images.length > 0 ? images : undefined);
+    else if (busy) return;
+    else onSend(body, images.length > 0 ? images : undefined);
     updateText('');
-    setAttachments([]);
-    setImages([]);
+    clearRichDraft(textOwner.current);
+    draftState.current = { text: '', attachments: [], images: [] };
+    setAttachmentState([]);
+    setImageState([]);
+    setQuotes([]);
     setAttachError(null);
     setSlashFeedback(null);
   }
 
   const modeLabel = MODES.find((m) => m.value === mode)?.label ?? mode;
 
-  // Which interactive prompt (if any) is currently waiting for the user.
-  // ask_user takes priority (most interactive), then plan, then approval.
-  const activePromptKind: 'ask_user' | 'plan' | 'approval' | null =
-    pendingAskUser ? 'ask_user'
-    : pendingPlan ? 'plan'
-    : pendingApproval ? 'approval'
-    : null;
+  // Keep every pending request addressable. Selecting a notice does not
+  // dismiss it, approve it, or discard the ordinary composer draft.
+  const approvals = pendingApprovals ?? (fallbackApproval ? [fallbackApproval] : []);
+  const plans = pendingPlans ?? (fallbackPlan ? [fallbackPlan] : []);
+  const questions = pendingQuestions ?? (fallbackQuestion ? [fallbackQuestion] : []);
+  const noticeItems: ComposerNotice[] = [
+    ...questions.map(item => ({ id: `question:${item.callId}`, kind: 'question' as const, title: 'Answer a question', detail: item.proposal.questions[0]?.question })),
+    ...plans.map(item => ({ id: `plan:${item.callId}`, kind: 'plan' as const, title: 'Review the proposed plan' })),
+    ...approvals.map(item => ({ id: `approval:${item.callId}`, kind: 'approval' as const, title: 'Permission requested', detail: item.call.function.name })),
+    ...notices,
+  ];
+  const [selectedNotice, setSelectedNotice] = useState<string | null>(null);
+  const selected = noticeItems.find(item => item.id === selectedNotice) ?? noticeItems[0];
+  const pendingAskUser = questions.find(item => selected?.id === `question:${item.callId}`);
+  const pendingPlan = plans.find(item => selected?.id === `plan:${item.callId}`);
+  const pendingApproval = approvals.find(item => selected?.id === `approval:${item.callId}`);
+  const activePromptKind = pendingAskUser ? 'ask_user' : pendingPlan ? 'plan' : pendingApproval ? 'approval' : null;
+  useEffect(() => { onActiveApprovalChange?.(pendingApproval?.callId ?? null); return () => onActiveApprovalChange?.(null); }, [pendingApproval?.callId, onActiveApprovalChange]);
 
   return (
     <div className="flex flex-col items-center gap-1.5 px-4 pb-4 pt-2">
+      {draftError && <p role="alert" className="w-full max-w-3xl px-2 text-[12px] text-amber-700 dark:text-amber-400">{draftError}</p>}
+      <QueuedMessageStack
+        key={sessionId ?? 'unsaved'}
+        items={queuedMessages}
+        onEdit={onEditQueuedMessage}
+        onReorder={onReorderQueuedMessage}
+        canSteer={!disabled && !!busy && (engine?.capabilities?.steering === 'native' || engine?.capabilities?.steering === 'safe_boundary')}
+        onRemove={onRemoveQueuedMessage}
+        onSteer={onSteerQueuedMessage}
+
+      />
+      <ComposerContextDock
+        environment={environment ?? null}
+        environments={environments ?? []}
+        envSwitching={envSwitching ?? null}
+        envDisabled={busy || disabled}
+        onSwitchEnvironment={onSwitchEnvironment}
+        usageRing={usageRing}
+        cwd={cwd}
+        onCwdSwitched={onCwdSwitched}
+      />
       <form
         className={cn(
-          'relative w-full max-w-3xl flex flex-col gap-1.5 rounded-[22px] border border-border bg-secondary/60 p-2.5 transition-colors',
-          dragging && 'border-mira-blue/60 bg-mira-blue/[0.06]',
+          'relative w-full max-w-3xl flex flex-col gap-1.5 rounded-[22px] bg-white shadow-[0_12px_30px_-26px_rgba(15,23,42,0.55)] ring-1 ring-border/55 backdrop-blur-xl p-2.5 transition-colors dark:bg-secondary/85 dark:shadow-[0_14px_36px_-28px_rgba(0,0,0,0.8)]',
+          dragging && 'bg-mira-blue/[0.06] ring-1 ring-mira-blue/45',
         )}
         onSubmit={(e) => { e.preventDefault(); submit(); }}
-        onDragOver={(e) => {
+        onDragOverCapture={(e) => {
           if (!e.dataTransfer.types.includes('Files')) return;
           e.preventDefault();
+          e.stopPropagation();
           setDragging(true);
         }}
-        onDragLeave={(e) => {
+        onDragLeaveCapture={(e) => {
           if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragging(false);
         }}
-        onDrop={(e) => {
+        onDropCapture={(e) => {
           setDragging(false);
           if (e.dataTransfer.files.length === 0) return;
           e.preventDefault();
+          e.stopPropagation();
           void attachNativeFiles(e.dataTransfer.files);
         }}
       >
@@ -592,6 +803,8 @@ export function Composer({
             Drop files or images to attach
           </div>
         )}
+        {selected && <ComposerNoticeStack items={noticeItems} selected={selected.id} onSelect={setSelectedNotice} />}
+        {notices.map(notice => <div key={notice.id} hidden={selected?.id !== notice.id}>{notice.content}</div>)}
         <ImageLightbox src={preview} onClose={() => setPreview(null)} />
         {(planActive || goal || goalComposing) && (
           <div className="flex flex-wrap items-center gap-1.5 px-1.5 pt-0.5">
@@ -612,7 +825,7 @@ export function Composer({
                   alt=""
                   onClick={() => setPreview(`data:${img.media_type};base64,${img.data}`)}
                   className="size-14 cursor-zoom-in rounded-lg border border-border object-cover"
-                />
+                /><ImageAttachmentDetails image={img} />
                 <button
                   type="button"
                   aria-label="Remove image"
@@ -622,6 +835,14 @@ export function Composer({
                   ×
                 </button>
               </div>
+            ))}
+          </div>
+        )}
+
+        {!activePromptKind && quotes.length > 0 && (
+          <div className="flex flex-col gap-1.5 px-1.5 pt-1">
+            {quotes.map((q) => (
+              <QuoteCard key={q.id} quote={q} onRemove={() => setQuotes((prev) => prev.filter((p) => p.id !== q.id))} />
             ))}
           </div>
         )}
@@ -639,44 +860,13 @@ export function Composer({
           </div>
         )}
 
-        {/* Interactive prompt panel (plan / ask_user / approval) — replaces the
-            text input with the relevant dialog, animated from height 0. */}
-        <AnimatePresence initial={false}>
-          {activePromptKind && (
-            <motion.div
-              key={activePromptKind}
-              initial={{ opacity: 0, height: 0 }}
-              animate={{ opacity: 1, height: 'auto' }}
-              exit={{ opacity: 0, height: 0 }}
-              transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
-              style={{ overflow: 'hidden' }}
-            >
-              {activePromptKind === 'plan' && pendingPlan && onPlanReply && (
-                <EmbeddedPlanCard
-                  proposal={pendingPlan.proposal}
-                  onApprove={(steps) => onPlanReply(pendingPlan.callId, true, steps)}
-                  onCancel={(note) => onPlanReply(pendingPlan.callId, false, undefined, note || undefined)}
-                />
-              )}
-              {activePromptKind === 'ask_user' && pendingAskUser && onAskUserReply && (
-                <EmbeddedAskUserCard
-                  asker={engine?.kind === 'agent' ? engine.display_name : 'Mira'}
-                  proposal={pendingAskUser.proposal}
-                  onSubmit={(answers) => onAskUserReply(pendingAskUser.callId, { cancelled: false, answers })}
-                  onCancel={() => onAskUserReply(pendingAskUser.callId, { cancelled: true })}
-                />
-              )}
-              {activePromptKind === 'approval' && pendingApproval && onDecide && (
-                <EmbeddedApprovalCard
-                  approval={pendingApproval}
-                  queued={pendingApprovalCount}
-                  onAllowAll={onAllowAllPending}
-                  onDecide={(allow, scope) => onDecide(pendingApproval.callId, allow, scope)}
-                />
-              )}
-            </motion.div>
-          )}
-        </AnimatePresence>
+        {/* Keep unsent answers and edited plans mounted when switching notices. */}
+        {plans.map(plan => <motion.div key={`plan:${plan.callId}`} hidden={pendingPlan?.callId !== plan.callId} initial={false} animate={{opacity:pendingPlan?.callId === plan.callId ? 1 : 0}} transition={{duration:.15}}>
+          {onPlanReply && <EmbeddedPlanCard proposal={plan.proposal} onApprove={steps => onPlanReply(plan.callId, true, steps)} onCancel={note => onPlanReply(plan.callId, false, undefined, note || undefined)} />}
+        </motion.div>)}
+        {questions.map(question => <motion.div key={`question:${question.callId}`} hidden={pendingAskUser?.callId !== question.callId} initial={false} animate={{opacity:pendingAskUser?.callId === question.callId ? 1 : 0}} transition={{duration:.15}}>
+          {onAskUserReply && <EmbeddedAskUserCard asker={engine?.kind === 'agent' ? engine.display_name : 'Mira'} proposal={question.proposal} onSubmit={answers => onAskUserReply(question.callId, {cancelled:false,answers})} onCancel={() => onAskUserReply(question.callId, {cancelled:true})} />}
+        </motion.div>)}
 
         {!activePromptKind && (
           <div className="relative">
@@ -684,7 +874,7 @@ export function Composer({
               handleRef={mentionRef}
               onPasteImages={(files) => void addImages(files)}
               value={text}
-              onChange={(next) => { setText(next); setSlashFeedback(null); }}
+              onChange={(next) => { setText(next); if (!restoringDraft.current) persistText(next); setSlashFeedback(null); }}
               onKeyDown={(e) => {
                 // Palette is open → arrows navigate, Enter picks, Esc closes.
                 if (paletteVisible && paletteMatches.length > 0) {
@@ -802,9 +992,20 @@ export function Composer({
           </div>
         )}
 
-        {!activePromptKind && (
+        {/* Bottom slot: the approval card when one is pending (where the
+            model picker used to sit), the toolbar otherwise. */}
+        {approvals.map(approval => <div key={`approval:${approval.callId}`} hidden={pendingApproval?.callId !== approval.callId}>
+          {onDecide && <EmbeddedApprovalCard approval={approval} queued={pendingApprovalCount} onAllowAll={onAllowAllPending} onDecide={(allow, scope) => onDecide(approval.callId, allow, scope)} />}
+        </div>)}
+        {(!activePromptKind && (
           <div className="flex items-center gap-1.5 px-1">
-            <AttachMenu onAttachFile={openNativeFiles} loading={attachLoading} />
+            <AttachMenu onAttachFile={openNativeFiles} loading={attachLoading} onScreenshot={async () => {
+              const owner = textOwner.current;
+              setAttachLoading(true); setAttachError(null);
+              try { const file = await captureScreenshot(); if (file) await attachNativeFile(file, owner); }
+              catch (error) { if (textOwner.current === owner) setAttachError(error instanceof Error ? error.message : String(error)); }
+              finally { if (textOwner.current === owner) setAttachLoading(false); }
+            }} />
 
             <SlashButton onClick={() => updateText(text.startsWith('/') || text.startsWith('@') ? text : '/' + text)} />
 
@@ -844,15 +1045,12 @@ export function Composer({
                 onPick={(m) => onPickAgentMode?.(m)}
                 modes={agentPicker.modes.length > 0 ? agentPicker.modes : undefined}
               />
-            ) : !agentDriving ? (
-              <ModePicker mode={mode} label={modeLabel} onPick={onSetMode} />
-            ) : null}
-            {/* The agent's own mode lives here, next to Mira's — not inside
-                the model picker. Changing what the agent may do without
-                asking is a decision, so it opens the universal approval
-                dialog rather than switching silently. */}
+            ) : (
+              <ModePicker mode={mode} label={modeLabel} onPick={onSetMode}
+                modes={agentDriving ? AGENT_APPROVAL_MODES : undefined} />
+            )}
 
-            {busy ? (
+            {busy && !text.trim() && attachments.length === 0 && images.length === 0 && quotes.length === 0 ? (
               <button
                 type="button"
                 onClick={onInterrupt}
@@ -865,37 +1063,18 @@ export function Composer({
             ) : (
               <button
                 type="submit"
-                disabled={disabled || (!text.trim() && attachments.length === 0 && images.length === 0)}
+                disabled={disabled || (!text.trim() && attachments.length === 0 && images.length === 0 && quotes.length === 0)}
                 className="flex size-8 items-center justify-center rounded-full bg-foreground text-background transition-opacity hover:opacity-90 disabled:opacity-35"
-                title={cmdEnterSend ? 'Send (⌘/Ctrl+Enter)' : 'Send (Enter)'}
-                aria-label="Send"
+                title={busy ? 'Queue message' : (cmdEnterSend ? 'Send (⌘/Ctrl+Enter)' : 'Send (Enter)')}
+                aria-label={busy ? 'Queue message' : 'Send'}
               >
                 <ArrowUp className="size-4" />
               </button>
             )}
           </div>
+        )
         )}
       </form>
-
-      {/* Footer strip under the composer — usage + worktree only. The
-       *  approval pill used to live here; it moved onto the pending
-       *  tool card in the transcript so approvals sit next to the
-       *  diff/args they act on and don't jump around as the transcript
-       *  grows. Global Y/N shortcut is bound at the App level. */}
-      <div className="w-full max-w-3xl flex items-center gap-2 px-3">
-        <EnvironmentChip
-          status={environment ?? null}
-          environments={environments ?? []}
-          switching={envSwitching ?? null}
-          disabled={busy || disabled}
-          onSwitch={onSwitchEnvironment}
-        />
-        <span className="flex-1" />
-        {/* Below the composer, not in it: the input row has no room to
-            spare in a narrow layout. */}
-        {usageRing && <UsageRing data={usageRing} />}
-        <WorktreeChip cwd={cwd} onCwdSwitched={onCwdSwitched} />
-      </div>
 
       <FilePicker
         open={filePickerOpen}
@@ -910,6 +1089,7 @@ export function Composer({
        *  focus ring) so keyboard users don't stumble into it. */}
       <input
         ref={fileInputRef}
+        data-composer-attachments=""
         type="file"
         multiple
         aria-hidden
@@ -1054,8 +1234,8 @@ function displayName(cmd: SlashCommand): string {
 /* ---------- attach menu (+) ---------- */
 
 function AttachMenu({
-  onAttachFile, loading,
-}: { onAttachFile: () => void; loading: boolean }) {
+  onAttachFile, loading, onScreenshot,
+}: { onAttachFile: () => void; loading: boolean; onScreenshot: () => Promise<void> }) {
   const [open, setOpen] = useState(false);
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -1086,8 +1266,9 @@ function AttachMenu({
           <MenuButton
             icon={<Camera className="size-3.5" />}
             label="Screenshot"
-            hint="Needs a vision model"
-            disabled
+            hint="Capture a screen region or window"
+            onClick={() => { setOpen(false); void onScreenshot(); }}
+            disabled={loading}
           />
           <MenuButton
             icon={<Link className="size-3.5" />}
@@ -1379,12 +1560,14 @@ function ModePicker({
           // lines ("Ask each time" → "Ask each\ntime") and vertically
           // bloat the whole toolbar.
           className={cn(
-            'inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-1.5 text-[12.5px] text-muted-foreground transition-colors',
-            disabled ? 'cursor-default opacity-80' : 'hover:bg-mira-elev2 hover:text-foreground',
+            'inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-1.5 text-[12.5px] leading-none transition-colors',
+            mode === 'edit' || mode === 'yolo' ? 'text-orange-600 dark:text-orange-400 hover:text-orange-600 dark:hover:text-orange-400' : 'text-muted-foreground',
+            disabled ? 'cursor-default opacity-80' : 'hover:bg-mira-elev2',
+            !disabled && mode !== 'edit' && mode !== 'yolo' && 'hover:text-foreground',
           )}
         >
-          <Circle className="size-3 shrink-0" />
-          <span>{label}</span>
+          <ApprovalModeIcon mode={mode} />
+          <span className="block leading-none">{label}</span>
         </button>
       </PopoverTrigger>
       <PopoverContent className="w-64 p-1.5" align="start">
@@ -1403,8 +1586,8 @@ function ModePicker({
               )}
               onClick={() => { onPick(m.value); setOpen(false); }}
             >
-              <span className="text-[13px]">{m.label}{m.value === mode && ' ✓'}</span>
-              <span className="text-[11.5px] text-muted-foreground">{m.desc}</span>
+              <span className={cn("flex items-center gap-2 text-[13px] leading-none", (m.value === 'edit' || m.value === 'yolo') && "text-orange-600 dark:text-orange-400")}><ApprovalModeIcon mode={m.value} /><span>{m.label}</span>{m.value === mode && <PhCheck aria-hidden="true" className="ml-auto size-3.5 shrink-0" />}</span>
+              <span className={cn("ml-[22px] mt-1 text-[11.5px]", m.value === 'edit' || m.value === 'yolo' ? "text-orange-600 dark:text-orange-400" : "text-muted-foreground")}>{m.desc}</span>
             </button>
           ))}
         </div>
@@ -1461,6 +1644,229 @@ function SlashButton({ onClick }: { onClick: () => void }) {
     >
       <SlashGlyph className="size-4" />
     </button>
+  );
+}
+
+function QueuedMessageStack({
+  items,
+  onRemove,
+  onSteer,
+  onEdit,
+  onReorder,
+  canSteer = true,
+}: {
+  items: QueuedComposerMessage[];
+  canSteer?: boolean;
+  onRemove?: (id: string) => void;
+  onSteer?: (id: string) => void;
+  onEdit?: (item: QueuedComposerMessage, text: string) => Promise<void>;
+  onReorder?: (id: string, beforeId: string | null) => Promise<void>;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [editing, setEditing] = useState<QueuedComposerMessage | null>(null);
+  const [editText, setEditText] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [moving, setMoving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [editError, setEditError] = useState<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
+  const dragId = useRef<string | null>(null);
+  const armedId = useRef<string | null>(null);
+  const listId = useId();
+  const reduceMotion = useReducedMotion();
+  const editable = (item: QueuedComposerMessage) => !item.steering && !item.error && !!item.fingerprint;
+  async function move(id: string, beforeId: string | null) {
+    if (!onReorder || moving || saving) return;
+    setMoving(true); setError(null);
+    try { await onReorder(id, beforeId); }
+    catch (error) { setError(error instanceof Error ? error.message : 'Could not reorder the queue.'); }
+    finally { setMoving(false); }
+  }
+  async function save() {
+    if (!editing || !onEdit || saving) return;
+    const parsed = parseSentAttachments(editing.text);
+    const prefix = parsed.attachments.length ? editing.text.slice(0, editing.text.length - parsed.text.length) : '';
+    setSaving(true); setEditError(null);
+    try { await onEdit(editing, prefix + editText); setEditing(null); }
+    catch (error) { setEditError(error instanceof Error ? error.message : 'Could not save this edit.'); }
+    finally { setSaving(false); }
+  }
+  if (items.length === 0 && !editing) return null;
+  const shown = expanded ? items : items.slice(0, 4);
+  const extra = items.length - shown.length;
+  return (
+    <>
+    {items.length > 0 && <motion.div
+      layout
+      className="-mb-3 w-full max-w-3xl px-7 sm:px-8"
+      initial={{ opacity: 0, y: reduceMotion ? 0 : 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: 8 }}
+      transition={{ duration: reduceMotion ? 0 : 0.18, ease: [0.4, 0, 0.2, 1] }}
+    >
+      <div className="overflow-hidden rounded-t-[18px] rounded-b-none border border-b-0 border-border/55 bg-white pb-4 pt-1.5 shadow-[0_8px_24px_-22px_rgba(15,23,42,0.45)] dark:border-fg/[0.055] dark:bg-secondary/85 dark:shadow-[0_10px_28px_-24px_rgba(0,0,0,0.75)] backdrop-blur-xl">
+        <div id={listId} role="list" aria-label="Queued messages" className="max-h-64 overflow-y-auto">
+        <AnimatePresence initial={false}>
+          {shown.map((item, index) => (
+            <motion.div
+              layout={!reduceMotion}
+              key={item.id}
+              initial={{ opacity: 0, height: 0, y: 6 }}
+              animate={{ opacity: 1, height: 'auto', y: 0 }}
+              exit={{ opacity: 0, height: 0, y: -4 }}
+              transition={{ duration: reduceMotion ? 0 : 0.18, ease: [0.4, 0, 0.2, 1] }}
+              role="listitem"
+              draggable={!!onReorder && editable(item) && !moving && !saving}
+              onDragStartCapture={event => {
+                if (armedId.current !== item.id) { event.preventDefault(); return; }
+                dragId.current = item.id;
+                event.dataTransfer.setData('application/x-mira-queued-message', item.id);
+                event.dataTransfer.effectAllowed = 'move';
+              }}
+              onDragOver={event => {
+                if (!dragId.current || dragId.current === item.id || !editable(item)) return;
+                event.preventDefault(); event.dataTransfer.dropEffect = 'move'; setDropTarget(item.id);
+              }}
+              onDrop={event => {
+                const id = dragId.current;
+                if (!id || id === item.id || !editable(item)) return;
+                event.preventDefault(); dragId.current = null; armedId.current = null; setDropTarget(null);
+                void move(id, item.id);
+              }}
+              onDragEndCapture={() => { dragId.current = null; armedId.current = null; setDropTarget(null); }}
+              className={cn('flex min-w-0 items-center gap-2 px-3.5 py-1.5 text-[13px]', dropTarget === item.id && 'ring-1 ring-inset ring-mira-blue')}
+            >
+              {onReorder && editable(item) ? <button type="button" aria-label="Drag to reorder queued message" title="Drag to reorder; use the options menu to move with the keyboard" disabled={moving || saving} onPointerDown={() => { armedId.current = item.id; }} onPointerUp={() => { armedId.current = null; }} className="flex size-5 shrink-0 cursor-grab items-center justify-center text-muted-foreground/70 active:cursor-grabbing"><GripVertical className="size-3.5" /></button> : <CornerDownRight className="size-3.5 shrink-0 text-muted-foreground/55" />}
+              <QueuedThumb item={item} />
+              <span className="min-w-0 flex-1 truncate text-foreground/90">
+                {queueTitle(item)}{item.error && <span role="status" className="ml-2 text-xs text-muted-foreground" title={item.error}>{item.error}</span>}
+              </span>
+              <button
+                type="button"
+                onPointerDown={(e) => e.preventDefault()}
+                disabled={item.steering || !!item.error || !canSteer || saving || moving}
+                onClick={() => onSteer?.(item.id)}
+                className="inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-muted-foreground transition-colors hover:bg-fg/[0.06] hover:text-foreground"
+                title={canSteer ? "Send as input to the active turn" : "Steering is unavailable; this message will run after the current turn"}
+              >
+                <CornerDownRight className="size-3.5" />
+                <span>{item.steering ? 'Sending…' : 'Steer'}</span>
+              </button>
+              <button
+                type="button"
+                onPointerDown={(e) => e.preventDefault()}
+                onClick={() => onRemove?.(item.id)}
+                disabled={item.steering || saving || moving}
+                aria-label="Remove queued message"
+                className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground/80 transition-colors hover:bg-fg/[0.06] hover:text-foreground"
+              >
+                <Trash className="size-3.5" />
+              </button>
+              {!item.steering && <QueuedMessageMenu
+                item={item}
+                onEdit={editable(item) && onEdit && !saving && !moving ? item => { setEditing(item); setEditText(parseSentAttachments(item.text).text); setEditError(null); } : undefined}
+                onMoveUp={index > 0 && editable(item) && editable(items[index - 1]) && onReorder && !moving && !saving ? () => void move(item.id, items[index - 1].id) : undefined}
+                onMoveDown={index < items.length - 1 && editable(item) && editable(items[index + 1]) && onReorder && !moving && !saving ? () => void move(item.id, items[index + 2]?.id ?? null) : undefined}
+                onRemove={saving || moving ? undefined : onRemove}
+              />}
+            </motion.div>
+          ))}
+        </AnimatePresence>
+        </div>
+        {items.length > 4 && <button type="button" aria-expanded={expanded} aria-controls={listId} onClick={() => setExpanded(value => !value)} className="flex w-full items-center gap-1.5 px-10 py-1 text-left text-[12px] text-muted-foreground hover:text-foreground">{expanded ? 'Show fewer messages' : `Show ${extra} more queued`}<ChevronDown className={cn('size-3 transition-transform', expanded && 'rotate-180')} /></button>}
+        {error && <p role="alert" className="px-4 py-1 text-xs text-destructive">{error}</p>}
+      </div>
+    </motion.div>}
+    <Dialog open={!!editing} onOpenChange={open => { if (!open && !saving) setEditing(null); }}>
+      <DialogContent onEscapeKeyDown={event => { if (saving) event.preventDefault(); }} onPointerDownOutside={event => { if (saving) event.preventDefault(); }}>
+        <DialogTitle>Edit queued message</DialogTitle>
+        <DialogDescription>The original stays in the queue until your changes are saved.</DialogDescription>
+        <textarea aria-label="Queued message text" value={editText} onChange={event => setEditText(event.target.value)} disabled={saving} className="min-h-32 w-full resize-y rounded-lg border border-border bg-background p-3 text-[13px] outline-none focus:ring-1 focus:ring-mira-blue" />
+        {editing && <div className="flex items-center gap-2 text-xs text-muted-foreground"><QueuedThumb item={editing} />{editing.images?.length ? `${editing.images.length} image attachment${editing.images.length === 1 ? '' : 's'} retained` : parseSentAttachments(editing.text).attachments.map(file => file.filename).join(', ')}</div>}
+        {editError && <p role="alert" className="text-xs text-destructive">{editError}</p>}
+        <div className="flex justify-end gap-2"><button type="button" disabled={saving} onClick={() => setEditing(null)} className="rounded-md px-3 py-1.5 text-[13px] hover:bg-secondary">Cancel</button><button type="button" disabled={saving || (!editText.trim() && !editing?.images?.length && !parseSentAttachments(editing?.text ?? '').attachments.length)} onClick={() => void save()} className="rounded-md bg-primary px-3 py-1.5 text-[13px] text-primary-foreground disabled:opacity-50">{saving ? 'Saving…' : 'Save changes'}</button></div>
+      </DialogContent>
+    </Dialog>
+    </>
+  );
+}
+
+function queueTitle(item: QueuedComposerMessage) {
+  const { text, attachments } = parseSentAttachments(item.text);
+  const prose = text.replace(/\s+/g, ' ').trim();
+  if (prose) return prose;
+  const n = item.images?.length ?? 0;
+  if (n) return n === 1 ? 'Image attachment' : `${n} image attachments`;
+  if (attachments.length) return attachments.length === 1 ? attachments[0].filename : `${attachments.length} file attachments`;
+  return 'Queued message';
+}
+
+function QueuedThumb({ item }: { item: QueuedComposerMessage }) {
+  const first = item.images?.[0];
+  if (first) {
+    return (
+      <img
+        src={`data:${first.media_type};base64,${first.data}`}
+        alt=""
+        className="size-7 shrink-0 rounded-md object-cover ring-1 ring-fg/[0.08]"
+        draggable={false}
+      />
+    );
+  }
+  const attachments = parseSentAttachments(item.text).attachments;
+  if (!attachments.length) return null;
+  return <span title={attachments.map(file => file.filename).join(', ')} className="flex size-7 shrink-0 items-center justify-center rounded-md bg-fg/[0.06] text-muted-foreground"><FileIcon className="size-3.5" /></span>;
+}
+
+function QueuedMessageMenu({
+  item,
+  onEdit,
+  onRemove,
+  onMoveUp,
+  onMoveDown,
+}: {
+  item: QueuedComposerMessage;
+  onEdit?: (item: QueuedComposerMessage) => void;
+  onRemove?: (id: string) => void;
+  onMoveUp?: () => void;
+  onMoveDown?: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          aria-label="Queued message options"
+          className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground/70 transition-colors hover:bg-fg/[0.06] hover:text-foreground"
+          title="Queued message options"
+        >
+          <MoreHorizontal className="size-3.5" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent className="w-44 p-1.5" align="end">
+        {onMoveUp && <MenuButton icon={<PhArrowUp className="size-3.5" />} label="Move up" onClick={() => { setOpen(false); onMoveUp(); }} />}
+        {onMoveDown && <MenuButton icon={<PhArrowDown className="size-3.5" />} label="Move down" onClick={() => { setOpen(false); onMoveDown(); }} />}
+        {onEdit && <MenuButton
+          icon={<PenLine className="size-3.5" />}
+          label="Edit"
+          hint="Keep its place in the queue"
+          onClick={() => {
+            setOpen(false);
+            onEdit?.(item);
+          }}
+        />}
+        <MenuButton
+          icon={<Trash className="size-3.5" />}
+          label="Remove"
+          hint="Cancel this queued message"
+          onClick={() => {
+            setOpen(false);
+            onRemove?.(item.id);
+          }}
+        />
+      </PopoverContent>
+    </Popover>
   );
 }
 
@@ -1571,6 +1977,50 @@ function GoalChip({ goal, onClear }: { goal: Goal; onClear: () => void }) {
  * doesn't lie by showing "$0.00" before the first turn.
  */
 /** The limit closest to running out, with the share left (0–1). */
+
+
+function ComposerContextDock({
+  environment,
+  environments,
+  envSwitching,
+  envDisabled,
+  onSwitchEnvironment,
+  usageRing,
+  cwd,
+  onCwdSwitched,
+}: {
+  environment: EnvironmentStatus | null;
+  environments: EnvironmentInfo[];
+  envSwitching: string | null;
+  envDisabled: boolean;
+  onSwitchEnvironment?: (target: string) => void;
+  usageRing?: UsageRingData | null;
+  cwd: string;
+  onCwdSwitched?: (path: string, sessionId?: string) => void;
+}) {
+  return (
+    <motion.div
+      layout
+      className="-mb-3 w-full max-w-3xl px-4 sm:px-5"
+      initial={{ opacity: 0, y: 4 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.18, ease: [0.4, 0, 0.2, 1] }}
+    >
+      <div className="flex min-h-10 items-center gap-2 rounded-t-[18px] rounded-b-none border border-b-0 border-border/55 bg-white px-3 pb-4 pt-1.5 shadow-[0_8px_24px_-22px_rgba(15,23,42,0.45)] dark:border-fg/[0.055] dark:bg-secondary/85 dark:shadow-[0_10px_28px_-24px_rgba(0,0,0,0.75)] backdrop-blur-xl">
+        <EnvironmentChip
+          status={environment}
+          environments={environments}
+          switching={envSwitching}
+          disabled={envDisabled}
+          onSwitch={onSwitchEnvironment}
+        />
+        <span className="min-w-4 flex-1" />
+        {usageRing && <UsageRing data={usageRing} />}
+        <WorktreeChip cwd={cwd} onCwdSwitched={onCwdSwitched} />
+      </div>
+    </motion.div>
+  );
+}
 
 /* ---------- environment chip (local ↔ remote environments) ---------- */
 
@@ -1725,36 +2175,33 @@ function WorktreeChip({
     }
   }
 
-  async function createAndSwitch() {
-    const branch = newBranch.trim();
-    if (!branch) return;
-    setBusy(true);
+  const setupSequence = useRef(0);
+  async function prepareWorkspace(branch: string, existingPath?: string) {
+    if (!branch.trim() || busy) return;
+    const sequence = ++setupSequence.current;
+    const setup: WorkspaceSetup = { id: `workspace-${Date.now()}-${sequence}`, branch, phase: 'creating', startedAt: Date.now() };
+    let cancelled = false;
+    let createdPath = existingPath;
+    let stage: 'creating' | 'opening' = existingPath ? 'opening' : 'creating';
+    const report = (phase: WorkspaceSetup['phase'], error?: string) => reportWorkspaceSetup({ ...setup, phase, error, failedStage: phase === 'failed' ? stage : undefined,
+      cancel: phase === 'creating' ? () => { cancelled = true; report('cancelled'); } : undefined,
+      workLocally: phase === 'creating' ? () => { cancelled = true; report('cancelled'); } : phase === 'failed' ? () => { void switchTo(cwd); report('cancelled'); } : undefined,
+      retry: phase === 'failed' ? () => void prepareWorkspace(branch, createdPath) : undefined,
+    });
+    setBusy(true); setLoadError(null); setOpen(false); report(stage);
     try {
-      const wt = await createWorktree(branch);
-      setNewBranch('');
-      await switchTo(wt.path);
-    } catch (e) {
-      setLoadError(String((e as Error).message));
-    } finally {
-      setBusy(false);
-    }
+      createdPath ??= (await createWorktree(branch)).path;
+      if (cancelled || sequence !== setupSequence.current) return;
+      stage = 'opening'; report('opening');
+      const { session_id } = await putCwd(createdPath);
+      onCwdSwitched?.(createdPath, session_id); setNewBranch(''); report('done');
+      await refresh();
+    } catch (error) {
+      if (!cancelled && sequence === setupSequence.current) { const message = error instanceof Error ? error.message : String(error); setLoadError(message); report('failed', message); }
+    } finally { if (sequence === setupSequence.current) setBusy(false); }
   }
-
-  /** Click-through for an existing (or remote-only) branch in the
-   *  "Switch to branch" list. Reuses the same `createWorktree` →
-   *  `switchTo` path as the "New worktree" input; the backend picks
-   *  between checkout-existing, create-tracking, and create-fresh. */
-  async function createAndSwitchTo(branch: string) {
-    setBusy(true);
-    try {
-      const wt = await createWorktree(branch);
-      await switchTo(wt.path);
-    } catch (e) {
-      setLoadError(String((e as Error).message));
-    } finally {
-      setBusy(false);
-    }
-  }
+  async function createAndSwitch() { await prepareWorkspace(newBranch.trim()); }
+  async function createAndSwitchTo(branch: string) { await prepareWorkspace(branch); }
 
   const label = status?.in_repo
     ? (status.branch ?? 'detached')
@@ -2326,6 +2773,71 @@ function EmbeddedAskUserCard({
   );
 }
 
+
+function ApprovalDetails({ tool, args, fallback }: { tool: string; args: Record<string, unknown> | null; fallback: string }) {
+  const command = typeof args?.command === 'string' ? args.command : null;
+  if (command) {
+    return (
+      <pre className="m-0 max-h-[22vh] overflow-auto rounded-md border border-border/35 bg-mira-elev1/45 px-3 py-2 font-mono text-[12px] leading-relaxed">
+        {command.replace(/\\n/g, '\n').split('\n').map((line, i) => (
+          <div key={i} className="flex gap-2 whitespace-pre-wrap break-all">
+            <span className="shrink-0 select-none text-muted-foreground/60">{i === 0 ? '$' : ' '}</span>
+            <span className="text-foreground/90">{line || ' '}</span>
+          </div>
+        ))}
+      </pre>
+    );
+  }
+  const rows = approvalRows(tool, args);
+  if (rows.length > 0) {
+    return (
+      <div className="rounded-md border border-border/35 bg-mira-elev1/45 px-3 py-2 text-[12.5px]">
+        <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1.5">
+          {rows.map((row) => (
+            <div key={row.label} className="contents">
+              <dt className="select-none text-muted-foreground/65">{row.label}</dt>
+              <dd className="min-w-0 break-words font-mono text-foreground/85">{row.value}</dd>
+            </div>
+          ))}
+        </dl>
+      </div>
+    );
+  }
+  return (
+    <pre className="m-0 max-h-[22vh] overflow-auto whitespace-pre-wrap rounded-md bg-background/55 px-3 py-2 font-mono text-xs text-muted-foreground">
+      {fallback}
+    </pre>
+  );
+}
+
+function approvalRows(tool: string, args: Record<string, unknown> | null): { label: string; value: string }[] {
+  if (!args) return [];
+  const rows: { label: string; value: string }[] = [];
+  const add = (label: string, value: unknown) => {
+    if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'boolean') return;
+    const text = String(value).trim();
+    if (text) rows.push({ label, value: text.length > 160 ? `${text.slice(0, 160)}…` : text });
+  };
+  const lower = tool.toLowerCase();
+  if (lower.includes('edit') || lower.includes('write') || lower.includes('file')) {
+    add('file', args.path ?? args.file_path ?? args.filePath ?? args.file);
+    return rows;
+  }
+  if (lower.includes('fetch')) add('url', args.url);
+  if (lower.includes('search') || lower.includes('grep')) add('query', args.query ?? args.pattern);
+  add('target', args.path ?? args.file_path ?? args.url ?? args.query ?? args.pattern);
+  return rows;
+}
+
+function safeJson(text: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(text || '{}');
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Tool approval rendered directly inside the Composer. */
 function EmbeddedApprovalCard({
   approval,
@@ -2432,9 +2944,7 @@ function EmbeddedApprovalCard({
             })}
           </ol>
         ) : (
-          <pre className="m-0 max-h-[22vh] overflow-auto whitespace-pre-wrap rounded-md bg-background/60 px-3 py-2 font-mono text-xs text-muted-foreground">
-            {prettyArgs}
-          </pre>
+          <ApprovalDetails tool={agent ? agent.tool : call.function.name} args={agent ? agent.input : safeJson(call.function.arguments)} fallback={prettyArgs} />
         )}
       </div>
 

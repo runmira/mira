@@ -69,6 +69,22 @@ impl PermissionMode {
     }
 }
 
+/// Where an instance's credentials come from. Two instances sharing one
+/// of these are the same account wearing two names — see
+/// [`AcpDriver::credential_boundary`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CredentialBoundary {
+    /// `home_path` (or `env`) points at its own directory.
+    ExplicitHome(PathBuf),
+    /// An API key is configured; named by the env var that carries it.
+    ApiKey(String),
+    /// The driver's isolated default (`Antigravity`'s profile dir).
+    DefaultHome(PathBuf),
+    /// Whatever the agent finds on its own: the ambient login, shared by
+    /// every instance that lands here.
+    Ambient,
+}
+
 /// Whether the agent can run without an interactive sign-in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AuthShape {
@@ -275,6 +291,16 @@ pub trait AcpDriver: Send + Sync {
         &["--version"]
     }
 
+    /// Arguments that make the underlying CLI print its model catalog.
+    ///
+    /// ACP has no "list models" verb, so this is how a driver whose CLI
+    /// does have one (OpenCode: `opencode models`) gets its picker
+    /// populated before any chat starts. Empty means there isn't one,
+    /// and the model list stays chat-scoped via config options.
+    fn cli_models_args(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     /// Arguments that make the underlying CLI print auth status as JSON.
     ///
     /// Empty means "this CLI has no such command", and auth is then not
@@ -365,6 +391,32 @@ pub trait AcpDriver: Send + Sync {
     /// that way rather than by flags. Explicit user `env` still wins.
     fn permission_env(&self, _mode: PermissionMode) -> Vec<(String, String)> {
         Vec::new()
+    }
+
+    /// Where this instance's credentials live, for telling instances apart.
+    ///
+    /// Two enabled instances of one driver that resolve to the same
+    /// boundary sign in as the same account however different the rest of
+    /// their config is — there is nothing else separating them. The order
+    /// is precedence: an explicit home wins (it redirects file-based
+    /// logins too), then an explicit API key, then the driver's isolated
+    /// default, and only last the ambient stores.
+    fn credential_boundary(&self, cfg: &DriverConfig) -> CredentialBoundary {
+        if let Some(home) = cfg.home_path.clone() {
+            return CredentialBoundary::ExplicitHome(home);
+        }
+        if cfg.api_key.as_ref().is_some_and(|k| !k.is_empty()) {
+            let var = self
+                .api_key_env_vars()
+                .first()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "api_key".to_string());
+            return CredentialBoundary::ApiKey(var);
+        }
+        if let Some(home) = self.default_home() {
+            return CredentialBoundary::DefaultHome(home);
+        }
+        CredentialBoundary::Ambient
     }
 
     /// Resolve a user config into a concrete launch.
@@ -524,5 +576,40 @@ mod tests {
         assert!(PermissionMode::Auto.requires_explicit_opt_in());
         assert!(!PermissionMode::AcceptEdits.requires_explicit_opt_in());
         assert!(!PermissionMode::Ask.requires_explicit_opt_in());
+    }
+
+    #[test]
+    fn credential_boundary_prefers_the_most_specific_credential() {
+        // Explicit home wins over everything: it redirects file-based
+        // logins as well as keys.
+        let mut c = base_cfg();
+        c.home_path = Some(PathBuf::from("/tmp/home"));
+        c.api_key = Some("sk-x".into());
+        assert_eq!(
+            Fake.credential_boundary(&c),
+            CredentialBoundary::ExplicitHome(PathBuf::from("/tmp/home"))
+        );
+        // Then an explicit key.
+        let mut c = base_cfg();
+        c.api_key = Some("sk-x".into());
+        assert_eq!(
+            Fake.credential_boundary(&c),
+            CredentialBoundary::ApiKey("FAKE_API_KEY".to_string())
+        );
+        // Then the driver's isolated default, else ambient.
+        assert_eq!(
+            Fake.credential_boundary(&base_cfg()),
+            CredentialBoundary::Ambient
+        );
+    }
+
+    #[test]
+    fn two_default_instances_share_the_ambient_boundary() {
+        // The fact the registry warns about: two instances with no
+        // home and no key resolve identically, so they are one account.
+        assert_eq!(
+            Fake.credential_boundary(&base_cfg()),
+            Fake.credential_boundary(&base_cfg())
+        );
     }
 }

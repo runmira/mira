@@ -71,7 +71,7 @@ export function MarketplacesTab({
           <h3 className="mb-2.5 text-[11.5px] font-semibold uppercase tracking-wider text-muted-foreground/60">
             Added
           </h3>
-          <ul className="flex flex-col divide-y divide-border/50 overflow-hidden rounded-2xl border border-border/60 bg-fg/[0.08] shadow-sm shadow-shade/20">
+          <ul className="flex flex-col divide-y divide-border/50 overflow-hidden rounded-2xl border border-border/60 elev-card dark:bg-fg/[0.08]">
             {data.marketplaces.map((m) => (
               <MarketplaceRow
                 key={m.name}
@@ -98,7 +98,7 @@ export function MarketplacesTab({
                 type="button"
                 disabled={!!busy}
                 onClick={() => submit(s.source)}
-                className="flex items-center gap-3.5 rounded-xl border border-border/60 bg-fg/[0.08] px-4 py-3.5 text-left shadow-sm shadow-shade/20 transition-all hover:border-border/75 hover:bg-fg/[0.11] hover:shadow-md hover:shadow-shade/40 disabled:opacity-60"
+                className="flex items-center gap-3.5 rounded-xl border border-border/60 elev-card dark:bg-fg/[0.08] px-4 py-3.5 text-left transition-all hover:border-border/75 hover:shadow-md dark:hover:bg-fg/[0.11] disabled:opacity-60"
               >
                 <Avatar name={s.name} size="sm" src={marketplaceIconSrc(s.source)} />
                 <div className="min-w-0 flex-1">

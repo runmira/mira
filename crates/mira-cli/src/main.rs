@@ -210,7 +210,10 @@ async fn main() -> Result<()> {
         // Evals run many sessions; keep their per-round logs quiet.
         // Evals and the stdio bridge stay quiet (the bridge's stdout is
         // protocol; its stderr is an agent's log).
-        init_tracing(false, matches!(cmd, Command::Eval(_) | Command::McpBridge(_)));
+        init_tracing(
+            false,
+            matches!(cmd, Command::Eval(_) | Command::McpBridge(_)),
+        );
         return match cmd {
             Command::Init(args) => init::run(&cli, args).await,
             Command::Doctor(args) => doctor::run(&cli, args).await,

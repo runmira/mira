@@ -37,7 +37,10 @@ pub mod typesafe;
 pub use event::{ChatEvent, FinishReason, TokenUsage};
 pub use factory::build_chat_provider;
 pub use null::NullProvider;
-pub use pricing::{cost_usd, price_for};
+pub use pricing::{
+    cost_usd, ensure_pricing, price_for, pricing_snapshot, ModelPrice, PricingRow, PricingSnapshot,
+    PricingSource,
+};
 pub use provider::{ChatProvider, ChatRequest, ModelInfo, ProviderError, ResponseFormat};
 pub use ratelimit::{Bucket, RateLimit};
 pub use retry::{RetryPolicy, Retrying};

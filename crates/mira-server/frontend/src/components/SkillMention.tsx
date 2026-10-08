@@ -142,32 +142,6 @@ export function SkillChip({
   );
 }
 
-/** Render text with `@skill:<name>` tokens replaced by chips. Preserves
- *  whitespace exactly so it can drop into a `whitespace-pre-wrap`
- *  container without ruining line breaks. */
-export function SkillMentionText({
-  text,
-  roster,
-  chipSize = 'md',
-}: {
-  text: string;
-  roster: PaletteRoster[];
-  chipSize?: 'sm' | 'md';
-}) {
-  const segs = parseSkillMentions(text);
-  return (
-    <>
-      {segs.map((s, i) =>
-        s.kind === 'text' ? (
-          <span key={i}>{s.text}</span>
-        ) : (
-          <SkillChip key={i} name={s.name} roster={roster} size={chipSize} />
-        ),
-      )}
-    </>
-  );
-}
-
 /* ---------- palette ---------- */
 
 type Palette = {

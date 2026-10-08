@@ -202,7 +202,11 @@ export type AgentCaps = {
   modes?: { current: string; available: AcpSessionMode[] };
 };
 
-const CAPS_KEY = 'mira.acp.caps.v1';
+const CAPS_KEY = 'mira.acp.caps.v2';
+// v2: v1 attributed late frames from a stopped agent to whichever driver
+// was current (`capsDriverRef`), so one agent's models could land in
+// another's cache (OpenCode showing Claude models). Frames are now
+// driver-stamped server-side; the bump drops any polluted v1 entries.
 
 export function loadAgentCaps(driver: string): AgentCaps {
   try {

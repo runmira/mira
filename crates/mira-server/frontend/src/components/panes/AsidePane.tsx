@@ -8,10 +8,10 @@
  * switching tabs or chats and coming back finds it where you left it.
  */
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import { ArrowUp, Check, Copy, CornerDownLeft, MessageCircleQuestion, Square, Trash2 } from 'lucide-react';
+import { ArrowUp, Check, Copy, CornerDownLeft, MessageCircleQuestion, Quote, Square, Trash2, X } from 'lucide-react';
 import type { Entry } from '../../App';
 import { Markdown } from '../Markdown';
-import { composeText } from '@/lib/attachBridge';
+import { composeText, getAsidePassage, setAsidePassage, subscribeAsidePassage } from '@/lib/attachBridge';
 import { postNdjson, sessionQuery } from '@/lib/ndjson';
 import { cn } from '@/lib/utils';
 import { PaneBar, PaneIconButton } from './paneUi';
@@ -61,6 +61,12 @@ export function AsidePane({
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const stick = useRef(true);
+  // A passage from the chat ("Ask in side chat"): asked about with the next
+  // question, then cleared.
+  const passage = useSyncExternalStore(subscribeAsidePassage, getAsidePassage);
+  useEffect(() => {
+    if (passage) requestAnimationFrame(() => inputRef.current?.focus());
+  }, [passage]);
 
   // Follow the answer as it streams, unless the user scrolled up to read.
   useEffect(() => {
@@ -76,8 +82,12 @@ export function AsidePane({
   const digest = useMemo(() => clientDigest(entries), [entries]);
 
   async function ask(text: string) {
-    const question = text.trim();
-    if (!question || streaming) return;
+    const typed = text.trim();
+    if ((!typed && !passage) || streaming) return;
+    const question = passage
+      ? `About this passage from the chat:\n${passage.trim().split('\n').map((l) => `> ${l}`).join('\n')}\n\n${typed || 'Explain this.'}`
+      : typed;
+    setAsidePassage(null);
     const history = getThread(key).filter((t) => !t.error && !t.pending);
     const base: Turn[] = [...history, { role: 'user', content: question }];
     setThread(key, [...base, { role: 'assistant', content: '', pending: true }]);
@@ -190,12 +200,30 @@ export function AsidePane({
       </div>
 
       <div className="shrink-0 border-t border-border/60 p-2.5">
+        {passage && (
+          <div className="relative mb-2 flex items-start gap-2 rounded-lg border border-border/70 bg-fg/[0.03] py-1.5 pl-2.5 pr-7">
+            <span aria-hidden className="absolute inset-y-1.5 left-0 w-[3px] rounded-full bg-mira-blue/60" />
+            <Quote className="mt-0.5 size-3 shrink-0 text-mira-blue/80" aria-hidden />
+            <span className="min-w-0">
+              <span className="block text-[10.5px] font-medium uppercase tracking-wide text-muted-foreground/70">About this passage</span>
+              <span className="line-clamp-3 text-[12.5px] leading-snug text-foreground/85">{passage}</span>
+            </span>
+            <button
+              type="button"
+              aria-label="Remove passage"
+              onClick={() => setAsidePassage(null)}
+              className="absolute right-1.5 top-1.5 flex size-5 items-center justify-center rounded text-muted-foreground/70 hover:bg-fg/[0.08] hover:text-foreground"
+            >
+              <X className="size-3.5" />
+            </button>
+          </div>
+        )}
         <div className="flex items-end gap-2 rounded-xl border border-border/70 bg-background/60 px-3 py-2 transition-colors focus-within:border-mira-blue/50">
           <textarea
             ref={inputRef}
             value={input}
             rows={1}
-            placeholder="Ask aside…"
+            placeholder={passage ? 'Ask about this passage…' : 'Ask aside…'}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
@@ -219,7 +247,7 @@ export function AsidePane({
               type="button"
               title="Ask (Enter)"
               onClick={() => void ask(input)}
-              disabled={!input.trim()}
+              disabled={!input.trim() && !passage}
               className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-mira-blue text-mira-on-accent transition-opacity disabled:opacity-30"
             >
               <ArrowUp className="size-4" />

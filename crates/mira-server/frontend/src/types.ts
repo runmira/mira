@@ -1,3 +1,5 @@
+export type ImageSource = { name: string; window?: string; captured_at?: string; width?: number; height?: number; accessible_text?: string };
+export type ImageAttachment = { media_type: string; data: string; source?: ImageSource };
 // Wire types — mirror crates/mira-server/src/protocol.rs.
 
 export type Mode = 'plan' | 'manual' | 'auto' | 'edit' | 'yolo';
@@ -17,7 +19,7 @@ export type ToolResult = {
   // asking the client to re-parse `content`.
   data?: unknown;
   // Screenshots from the `computer` / `browser` tools (base64, no prefix).
-  images?: { media_type: string; data: string }[];
+  images?: ImageAttachment[];
 };
 
 export type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'deleted';
@@ -43,6 +45,8 @@ export type ReasoningBlock = {
 };
 
 export type Message = {
+  created_at?: number;
+  input_id?: string; input_intent?: 'steer';
   role: Role;
   content?: string | null;
   tool_calls?: ToolCall[];
@@ -50,7 +54,7 @@ export type Message = {
   name?: string | null;
   reasoning?: ReasoningBlock[];
   /** Images on a user message (pasted screenshots). */
-  images?: { media_type: string; data: string }[];
+  images?: ImageAttachment[];
 };
 
 export type DiffKind = 'edit' | 'overwrite' | 'create';
@@ -232,6 +236,7 @@ export type AcpAgentState =
 
 /** One row in the agent list. */
 export type AcpAgentStatus = {
+  models?: { value: string; label: string }[];
   kind: string;
   display_name: string;
   state: AcpAgentState;
@@ -262,17 +267,38 @@ export type AgentTranscriptLine = {
   t: number;
   driver: string;
   frame?: unknown;
-  user?: { text: string; images: number };
+  user?: { text: string; images: number; attached_images?: ImageAttachment[]; input_id?: string; input_intent?: 'steer' };
   /** Written when the session switched provider → agent: the harness
    *  history up to `harness_len` happened before this point. Lets replay
    *  interleave the two histories in order. */
-  switch?: { harness_len: number; to?: 'agent' | 'provider' };
+  switch?: {
+    harness_len: number;
+    to?: 'agent' | 'provider';
+    /** The engines on each side, for the handoff label. Absent on
+     *  markers written before handoffs were labelled. */
+    from_engine?: EngineRef;
+    to_engine?: EngineRef;
+  };
+};
+
+/** One side of an engine handoff, as a switch marker records it. */
+export type EngineRef = {
+  kind: 'provider' | 'agent';
+  driver?: string | null;
+  instance?: string | null;
+  display_name: string;
+  model?: string | null;
 };
 
 /** What drives a session — one of Mira's providers, or an external agent —
  *  and where it is in its lifecycle. Pushed by the server on every change;
  *  the composer renders from this alone. */
 export type SessionEngine = {
+  capabilities?: { asynchronous_questions: boolean; background_work: boolean; native_goals: boolean;
+    steering: 'unavailable' | 'native' | 'safe_boundary'; image_input: boolean;
+    live_model_switch: boolean; live_mode_switch: boolean; native_fork: boolean;
+    native_rollback: boolean; native_snapshot: boolean; cancellation: boolean;
+    stop_behavior: 'current_turn' | 'runtime' };
   kind: 'provider' | 'agent';
   /** Provider: engine instance id (`anthropic`, `openrouter`, …). */
   instance?: string | null;
@@ -353,7 +379,8 @@ export type AskUserResponse = {
 export type PromptResponse =
   | ({ kind: 'plan' } & PlanResponse)
   | ({ kind: 'subagent_review' } & SubagentReviewResponse)
-  | ({ kind: 'ask_user' } & AskUserResponse);
+  | ({ kind: 'ask_user' } & AskUserResponse)
+  | { kind: 'secret'; value?: string | null; cancelled: boolean };
 
 export type TokenUsage = {
   prompt_tokens: number;
@@ -399,10 +426,42 @@ export type EnvironmentStatus = {
 
 export type EnvironmentInfo = { name: string; backend: string; description: string };
 
+export type RuntimeWork = { id: string; native_thread_id: string | null; kind: 'goal' | 'task' | 'subagent'; status: 'pending' | 'running' | 'waiting' | 'paused' | 'completed' | 'failed' | 'cancelled'; title: string | null };
+export type RuntimeRequestRecord = {
+  id: string; instance: string; driver: string;
+  request: { native_id: string; native_thread_id: string; native_turn_id: string | null; questions: { id: string; question: string; header: string | null; options: string[]; required: boolean }[]; response_capability: 'message' | 'live_rpc' };
+  delivery: 'pending' | 'queued' | 'dispatching' | 'delivered' | 'cancelled';
+  response: { answers: AskUserAnswer[]; cancelled: boolean } | null;
+  message: string | null;
+};
+
+export type TranscriptPage = { items: { message?: Message; line?: AgentTranscriptLine; turn_index: number; provider_turn_index?: number }[]; next_cursor: string | null; total_turns: number; first_turn: number };
+
+export type TurnDiffSummary = { text: string; occurrence: number; files: { path: string; added: number; removed: number; binary: boolean }[] };
+
+export interface QueuedInput {
+  recovery?: { created_at: number; reset_at: number | null; scheduled_at: number | null; snoozed: boolean };
+  id: string; text: string; images: ImageAttachment[]; engine: string | null;
+  dispatching: boolean; error: string | null;
+  fingerprint?: string;
+}
 export type ServerMsg =
-  | { type: 'ready'; session_id: string; model: string; mode: Mode; cwd: string; history: Message[]; turns?: TurnMeta[]; usage?: UsageTotals; tasks?: TaskItem[]; goal?: Goal | null; previews?: Record<string, DiffPreview>; agent_transcript?: AgentTranscriptLine[]; agent_driver?: string | null; agent_kind?: string | null; instance?: string | null; agent_configured?: string | null; engine?: SessionEngine | null; title?: string | null; running?: boolean }
+  | { type: 'session_activity'; epoch: string; revision: number; session_id: string; running: boolean }
+  | { type: 'session_activity_snapshot'; snapshot: import('./lib/sessionActivity').SessionActivitySnapshot }
+  | { type: 'queue_updated'; session_id: string; items: QueuedInput[] }
+  | { type: 'queue_delivery'; session_id: string; item: QueuedInput }
+  | { type: 'queue_mutation_result'; session_id: string; request_id: string; error: string | null }
+  | { type: 'steer_result'; session_id: string; request_id: string; message: Message | null; error: string | null }
+  | { type: 'turn_diffs'; summaries: TurnDiffSummary[] }
+  | { type: 'acp_message_metadata'; message_id: string; phase: string }
+  | { type: 'stream_activity'; kind: string; title: string; detail: string }
+  | { type: 'history_page'; session_id: string; request_id: string; page: TranscriptPage | null; error: string | null }
+  | { type: 'ready'; session_activity?: import('./lib/sessionActivity').SessionActivitySnapshot; queued_inputs?: QueuedInput[]; turn_diffs?: TurnDiffSummary[]; transcript_page?: TranscriptPage; session_id: string; model: string; mode: Mode; cwd: string; history: Message[]; turns?: TurnMeta[]; usage?: UsageTotals; tasks?: TaskItem[]; goal?: Goal | null; previews?: Record<string, DiffPreview>; agent_transcript?: AgentTranscriptLine[]; agent_driver?: string | null; agent_kind?: string | null; instance?: string | null; agent_configured?: string | null; engine?: SessionEngine | null; title?: string | null; running?: boolean; runtime_requests?: RuntimeRequestRecord[]; runtime_work?: RuntimeWork[] }
   /** The session's engine changed: picked, starting, ready, failed, exited. */
   | { type: 'session_engine'; engine: SessionEngine }
+  | { type: 'runtime_request_updated'; request: RuntimeRequestRecord }
+  | { type: 'runtime_work_updated'; work: RuntimeWork }
+  | { type: 'runtime_turn_updated'; turn: { native_thread_id: string; native_turn_id: string; running: boolean } }
   | { type: 'token'; text: string }
   | { type: 'reasoning'; text: string }
   | { type: 'tool_start'; call: ToolCall }
@@ -442,7 +501,7 @@ export type ServerMsg =
   | {
       type: 'prompt_resolved';
       prompt_id: string;
-      kind: 'ask_user' | 'plan' | 'subagent_review';
+      kind: 'ask_user' | 'plan' | 'subagent_review' | 'secret';
       answers?: AskUserAnswer[];
       cancelled?: boolean;
       approved?: boolean;
@@ -473,13 +532,15 @@ export type ServerMsg =
   // -------- ACP (external agent) frames --------
   // Distinct variants rather than a wrapped envelope, so this file
   // pattern-matches by `type` the same way it already does for subagents.
-  | { type: 'acp_text'; text: string }
+  | { type: 'acp_text'; text: string; message_id?: string | null }
+  | { type: 'acp_text_snapshot'; text: string; message_id: string }
+  | { type: 'acp_tool_output_delta'; text: string; id: string }
   | { type: 'acp_thought'; text: string }
   | { type: 'acp_tool_call'; call: AcpToolCall }
   | { type: 'acp_tool_call_update'; call: AcpToolCall }
   | { type: 'acp_plan'; entries: AcpPlanItem[] }
-  | { type: 'acp_modes'; current: string; available: AcpSessionMode[]; postures?: AgentPostureMapping[] }
-  | { type: 'acp_config_options'; options: AcpConfigOption[] }
+  | { type: 'acp_modes'; current: string; available: AcpSessionMode[]; postures?: AgentPostureMapping[]; driver?: string | null }
+  | { type: 'acp_config_options'; options: AcpConfigOption[]; driver?: string | null }
   | { type: 'acp_commands'; names: string[] }
   | { type: 'acp_usage'; used: number; size: number; cost: { amount: number; currency: string } | null }
   | { type: 'acp_turn_usage'; model: string; input_tokens: number; output_tokens: number; cached_input_tokens: number; cost_usd?: number | null }
@@ -492,6 +553,14 @@ export type ServerMsg =
     /** Something this build does not model. Surfaced as a warning rather
    *  than dropped: a silent gap is indistinguishable from a hung agent. */
   | { type: 'acp_unmodelled'; method: string; reason: string }
+  /** An agent called one of Mira's browser tools: show the browser pane. */
+  | { type: 'browser_active' }
+  /** The engine registry was rebuilt from mira.yaml: refetch /api/engines. */
+  | { type: 'engines_changed' }
+  /** An agent asked for a secret: show a private input. */
+  | { type: 'secret_request'; prompt_id: string; name: string; reason: string; dotenv?: string | null }
+  /** A self-contained page an agent published to the chat. */
+  | { type: 'html_render'; id: string; title: string; html: string }
   /** An external agent was brought up, or failed to be. `error` is
    *  user-facing: "grok isn't installed" rather than an opaque code. */
   | { type: 'acp_agent_started'; kind: string; display_name: string; launch: string; error?: string | null }
@@ -532,7 +601,15 @@ export type ScratchpadEntry = {
 export type ApprovalScope = 'once' | 'session' | 'always';
 
 export type ClientMsg =
-  | { type: 'send'; text: string; images?: { media_type: string; data: string }[] }
+  | { type: 'update_limit_recovery'; session_id: string; request_id: string; id: string; action: 'schedule' | 'retry' | 'cancel' | 'snooze' | 'show' | 'dismiss' }
+  | {type:'sync_activity'}
+  | { type: 'queue_input'; session_id: string; id: string; text: string; images?: ImageAttachment[] }
+  | { type: 'remove_queued_input'; session_id: string; id: string }
+  | { type: 'edit_queued_input'; session_id: string; request_id: string; id: string; fingerprint: string; text: string; images?: ImageAttachment[] }
+  | { type: 'reorder_queued_input'; session_id: string; request_id: string; id: string; before_id: string | null }
+  | { type: 'steer'; request_id: string; text: string; images?: ImageAttachment[] }
+  | { type: 'history'; session_id: string; cursor: string; request_id: string }
+  | { type: 'send'; text: string; images?: ImageAttachment[] }
   | { type: 'resend'; original: string; occurrence: number; text: string }
   | { type: 'approve'; call_id: string; allow: boolean; scope?: ApprovalScope }
   | ({ type: 'prompt_response'; prompt_id: string } & PromptResponse)
@@ -564,7 +641,7 @@ export type ClientMsg =
   /** Ask the agent to compact its context (native transports only). */
   | { type: 'acp_compact'; focus?: string | null }
   /** Send a turn to the running agent. */
-  | { type: 'acp_prompt'; text: string; images?: { media_type: string; data: string }[] }
+  | { type: 'acp_prompt'; text: string; images?: ImageAttachment[] }
   /** Stop the agent and release its terminals. */
   | { type: 'acp_stop' }
   /** Ask what every known agent's health is. */
@@ -619,6 +696,7 @@ export type SettingsView = {
   configured: boolean;
   config_path: string;
   memory: MemoryView;
+  sessions?: SessionsSettings;
 };
 
 /** Effective (defaults applied) memory-runtime knobs. Every field is the
@@ -672,11 +750,20 @@ export type SettingsUpdate = {
   providers?: ProviderUpdate[];
   keys?: KeyUpdate[];
   memory?: MemoryUpdate;
+  sessions?: Partial<SessionsSettings>;
+};
+
+/** How running chats behave in the background. Saved in Mira's global
+ *  config, so they apply with no window open. */
+export type SessionsSettings = {
+  auto_resume_after_limit: boolean;
+  keep_awake_while_running: boolean;
 };
 
 export type WorktreeMergeStatus = 'merged' | 'unmerged';
 
 export type SessionSummary = {
+  parent_id?: string | null;
   id: string;
   model: string;
   cwd: string;
@@ -719,4 +806,9 @@ export type SessionSummary = {
   /** Running token totals across the session's turns. Omitted (or all-zero)
    *  for empty sessions that haven't hit the provider yet. */
   usage?: UsageTotals;
+  /** Waiting on the user: an approval, a question, a plan or a secret. */
+  needs_attention?: boolean;
+  /** The chat that launched this one with `thread_launch`; the sidebar
+   *  nests it there. */
+  launched_by?: string | null;
 };
