@@ -667,14 +667,6 @@ async fn dispatch(
         ClientMsg::AcpStart {
             instance,
             driver,
-            binary_path,
-            display_name,
-            launch_args,
-            env,
-            api_key,
-            home_path,
-            effort,
-            setting_sources,
             resume,
             model,
         } => {
@@ -688,10 +680,26 @@ async fn dispatch(
             // inherited from the previous chat — used when the client
             // names the same driver or none at all, which is how a new
             // chat starts the same agent with the same config; then the
-            // legacy bare-driver-with-defaults path. The per-field
-            // overrides the client sends layer on top of whatever base
-            // resolved.
+            // legacy bare-driver-with-defaults path.
+            //
+            // The settings themselves always come from the engine registry
+            // (mira.yaml), never the client (#79). A pick that names only a
+            // driver uses the instance named after it, and a restart of the
+            // recorded agent re-reads its instance, so a key changed in
+            // Settings applies to the next start without a new chat.
             let recorded = slot.acp_launch.lock().await.clone();
+            let same_driver_as_recorded = recorded
+                .as_ref()
+                .is_some_and(|r| driver.as_deref().is_none_or(|d| d == r.driver_kind));
+            let instance = instance
+                .or_else(|| {
+                    if same_driver_as_recorded {
+                        recorded.as_ref().map(|r| r.instance.clone())
+                    } else {
+                        driver.clone()
+                    }
+                })
+                .filter(|id| state.engines.current().external_driver_config(id).is_some());
             let instance_cfg = instance.as_deref().and_then(|id| {
                 state.engines.current().external_driver_config(id).map(|c| {
                     let kind = state
@@ -707,9 +715,6 @@ async fn dispatch(
                     }
                 })
             });
-            let same_driver_as_recorded = recorded
-                .as_ref()
-                .is_some_and(|r| driver.as_deref().is_none_or(|d| d == r.driver_kind));
             let resolved = match crate::acp_session::resolve_start_params(
                 recorded.clone(),
                 instance_cfg,
@@ -728,30 +733,6 @@ async fn dispatch(
             };
             let base_kind = resolved.kind;
             let mut cfg = resolved.cfg;
-            if display_name.is_some() {
-                cfg.display_name = display_name;
-            }
-            if binary_path.is_some() {
-                cfg.binary_path = binary_path.map(std::path::PathBuf::from);
-            }
-            if !launch_args.is_empty() {
-                cfg.launch_args = launch_args;
-            }
-            if !env.is_empty() {
-                cfg.env.extend(env);
-            }
-            if api_key.is_some() {
-                cfg.api_key = api_key;
-            }
-            if home_path.is_some() {
-                cfg.home_path = home_path.map(std::path::PathBuf::from);
-            }
-            if effort.is_some() {
-                cfg.effort = effort;
-            }
-            if setting_sources.is_some() {
-                cfg.setting_sources = setting_sources;
-            }
             cfg.enabled = true;
             if mira_acp::drivers::by_kind(&base_kind).is_none() {
                 let _ = slot.events_tx.send(ServerMsg::AcpAgentStarted {

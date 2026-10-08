@@ -26,7 +26,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertCircle, Check, ChevronDown, Loader2, RefreshCw, Settings2 } from 'lucide-react';
 import { listInstanceModels, listModels, type EngineSnapshot, type ModelInfo, type OptionDescriptor } from '../api';
 import type { AcpAgentStatus, AcpConfigOption, SessionEngine } from '../types';
-import { agentModelChoices, describeAgentStatus, loadAgentCaps, loadInstanceConfigs } from '../lib/acpAgents';
+import { agentModelChoices, describeAgentStatus, loadAgentCaps } from '../lib/acpAgents';
 import {
   CODING_MATCHERS,
   formatCtx,
@@ -143,9 +143,10 @@ export function EnginePicker(props: EnginePickerProps) {
     const seen = new Set<string>();
     for (const a of agents ?? []) {
       seen.add(a.kind);
-      const cfg = loadInstanceConfigs()[a.kind];
-      if (cfg && cfg.enabled === false && engine?.driver !== a.kind) continue;
-      items.push({ key: `agent:${a.kind}`, kind: 'agent', driver: a.kind, name: cfg?.displayName || a.display_name, status: a });
+      // Name and on/off come from the agent's engine (Settings → Agents).
+      const row = engines?.find((e) => e.flavor === 'external' && e.instance === a.kind);
+      if (row && !row.enabled && engine?.driver !== a.kind) continue;
+      items.push({ key: `agent:${a.kind}`, kind: 'agent', driver: a.kind, name: row?.display_name || a.display_name, status: a });
     }
     // The session's agent is listed even before the first health probe.
     if (isAgent && engine?.driver && !seen.has(engine.driver)) {

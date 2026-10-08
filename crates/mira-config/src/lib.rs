@@ -690,6 +690,10 @@ impl MiraConfig {
 
     /// Serialize the global config back to `~/.mira/mira.yaml`, creating
     /// parent dirs if needed. Returns the path written.
+    ///
+    /// The file holds API keys, so it is written owner-only (0600 on Unix)
+    /// and replaced atomically: a temp file next to it, then a rename, so a
+    /// reader (the config watcher) never sees half a file.
     pub fn save_global(&self) -> Result<PathBuf> {
         let path = global_path();
         if let Some(parent) = path.parent() {
@@ -697,7 +701,8 @@ impl MiraConfig {
                 .with_context(|| format!("mkdir {}", parent.display()))?;
         }
         let yaml = serde_yaml::to_string(self).context("serialize config")?;
-        std::fs::write(&path, yaml).with_context(|| format!("write {}", path.display()))?;
+        write_private(&path, yaml.as_bytes())
+            .with_context(|| format!("write {}", path.display()))?;
         Ok(path)
     }
 
@@ -804,6 +809,42 @@ pub fn global_path() -> PathBuf {
         .unwrap_or_default()
         .join(".mira")
         .join("mira.yaml")
+}
+
+/// Write `bytes` to `path` readable by the owner only, replacing it
+/// atomically. An existing file that was world-readable is tightened too,
+/// since the rename swaps in the new file's permissions.
+pub fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let tmp = path.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let result = (|| {
+        let mut f = opts.open(&tmp)?;
+        // `mode` only applies when the file is created; a stale temp file
+        // left by a crash keeps its old bits, so set them explicitly.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// Ephemeral cross-restart state — separate from [`MiraConfig`] because
@@ -1053,6 +1094,30 @@ pub fn pretty_provider_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn write_private_is_owner_only_and_tightens_existing_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("mira-cfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mira.yaml");
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        write_private(&path, b"api_key: sk-test").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "api_key: sk-test");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn empty_files_yield_default() {

@@ -151,10 +151,9 @@ pub enum ClientMsg {
     /// already running.
     AcpStart {
         /// Start a configured engine instance (a key from
-        /// `GET /api/engines`) instead of naming a driver by hand —
-        /// its display name, binary, env and launch args come from
-        /// `mira.yaml`'s `engines:` block. When set, the per-field
-        /// overrides below layer on top of the instance config.
+        /// `GET /api/engines`). Its binary, env, key and launch args come
+        /// from `mira.yaml`'s `engines:` block, never from the client
+        /// (#79): the browser holds no agent secrets.
         #[serde(default)]
         instance: Option<String>,
         /// Driver slug, e.g. `"claude-code"`, `"codex"`, `"grok"`.
@@ -164,33 +163,9 @@ pub enum ClientMsg {
         /// one ran, with the same config, by sending no fields at all.
         #[serde(default)]
         driver: Option<String>,
-        /// Overrides the driver's default binary path.
-        #[serde(default)]
-        binary_path: Option<String>,
-        /// Overrides the driver's display name for this instance.
-        #[serde(default)]
-        display_name: Option<String>,
-        /// Extra CLI arguments, appended verbatim.
-        #[serde(default)]
-        launch_args: Vec<String>,
-        /// Per-instance environment.
-        #[serde(default)]
-        env: std::collections::BTreeMap<String, String>,
-        /// API key, for agents that take one.
-        #[serde(default)]
-        api_key: Option<String>,
-        /// Per-instance home / config directory.
-        #[serde(default)]
-        home_path: Option<String>,
         /// Resume this agent session id instead of starting blank (import).
         #[serde(default)]
         resume: Option<String>,
-        /// Effort level, for agents that take one (`claude --effort`).
-        #[serde(default)]
-        effort: Option<String>,
-        /// Setting sources, for agents that take them.
-        #[serde(default)]
-        setting_sources: Option<String>,
         /// The agent model to run, picked alongside the agent in the model
         /// picker. Applied at launch (native transports) or as the model
         /// config option once the agent is up (ACP), and remembered for

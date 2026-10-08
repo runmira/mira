@@ -47,6 +47,7 @@ mod devices;
 mod editors;
 mod embedded;
 pub mod engines_api;
+mod engine_settings;
 mod engines_reload;
 pub mod extensions;
 mod file;
@@ -518,6 +519,10 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route(
             "/api/engines/:instance/models",
             get(engines_api::instance_models),
+        )
+        .route(
+            "/api/engines/:instance/settings",
+            get(engine_settings::get_settings).put(engine_settings::put_settings),
         )
         .route("/api/import/scan", get(chat_import::scan))
         .route("/api/import", axum::routing::post(chat_import::import))

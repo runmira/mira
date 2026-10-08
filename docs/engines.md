@@ -71,11 +71,19 @@ second account never falls back to the first one's key. Errors name the
 layer to fix: `engine anthropic-work (engines.anthropic-work.config) has no
 api_key`.
 
-**External `config`**: `binary_path`, `launch_args`, `env`, `api_key`,
+**External `config`**: `binary_path`, `launch_args`, `env`, `api_key` or
+`api_key_env` (a variable in Mira's environment to read the key from),
 `home_path` (the agent's own config home: a separate account), `effort`,
 `setting_sources`, `auto_compact_after`. Agents launched by Mira don't
 inherit API keys from your shell; a key reaches an agent only through its
 own settings.
+
+Settings → Agents edits this same block. Keys live only in `mira.yaml`,
+which Mira writes readable by you alone (`0600`): the app shows a masked
+copy of a key, and of any `env` value whose name contains `key`, `token`,
+`secret` or `password`, and never sends the real value to the browser.
+Older builds kept agent keys in the browser's storage; the first launch of
+this one moves them into `mira.yaml` and deletes them there.
 
 Changes to `mira.yaml` apply **without a restart**: Mira watches the file,
 rebuilds its engines, picks up new instances and keys, and tells open
@@ -200,3 +208,24 @@ has stable aliases (Claude Code: `opus`, `sonnet`, `haiku`, `fable`), and
   as the same account get a warning in the picker.
 - **Providers**: one native instance per account, each with its own key, as
   in `anthropic-work` above.
+
+## `GET/PUT /api/engines/:instance/settings`
+
+An external agent's `engines:` entry, for Settings → Agents. Native
+instances answer `400`: their keys are provider settings.
+
+```json
+{ "instance": "codex", "driver": "codex", "enabled": true,
+  "home_path": "~/.codex-work", "launch_args": [],
+  "env": [ { "key": "CODEX_PROFILE", "value": "work" },
+           { "key": "GITHUB_TOKEN", "masked": "ghp_…abcd" } ],
+  "has_api_key": true, "api_key_masked": "sk-p…wxyz",
+  "api_key_vars": ["CODEX_API_KEY", "OPENAI_API_KEY"] }
+```
+
+`PUT` takes any subset of `display_name`, `enabled`, `binary_path`,
+`home_path`, `launch_args`, `env`, `effort`, `setting_sources`, `api_key`,
+`api_key_env`. An empty string clears a field. `env` replaces the whole
+set, and a `null` value keeps that variable's stored value (how a masked
+secret survives an edit of the others). The change applies to the next
+agent start at once.

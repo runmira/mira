@@ -7,7 +7,6 @@
 //! `.prompt_caching`). Everything else lives in the yaml only — `edit`
 //! opens it in `$EDITOR` for those.
 
-use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -111,7 +110,7 @@ fn edit(local: bool) -> Result<()> {
     if !p.exists() {
         // Seed the file so `$EDITOR` opens something rather than an
         // empty buffer for a path it might refuse to create.
-        std::fs::write(&p, "").with_context(|| format!("create {}", p.display()))?;
+        mira_config::write_private(&p, b"").with_context(|| format!("create {}", p.display()))?;
     }
     let editor = std::env::var("EDITOR")
         .or_else(|_| std::env::var("VISUAL"))
@@ -162,13 +161,8 @@ fn set(key: &str, value: &str, local: bool) -> Result<()> {
         std::fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
     }
     let yaml = serde_yaml::to_string(&cfg).context("serialize config")?;
-    let tmp = p.with_extension("yaml.tmp");
-    let mut f = std::fs::File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
-    f.write_all(yaml.as_bytes())
-        .with_context(|| format!("write {}", tmp.display()))?;
-    f.sync_all().ok();
-    std::fs::rename(&tmp, &p)
-        .with_context(|| format!("rename {} -> {}", tmp.display(), p.display()))?;
+    mira_config::write_private(&p, yaml.as_bytes())
+        .with_context(|| format!("write {}", p.display()))?;
     eprintln!("set {key} in {}", p.display());
     Ok(())
 }

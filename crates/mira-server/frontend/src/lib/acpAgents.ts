@@ -6,45 +6,121 @@
  * later is a data change rather than a UI change. The health description
  * and the instance-config storage live here too, because two surfaces now
  * read them: Settings → Agents (full config) and the sidebar (select).
+ * The config itself lives on the server (`/api/engines/:id/settings`).
  */
 import type { AcpAgentStatus, AcpConfigOption, AcpSessionMode } from '../types';
 import { CLAUDE_MARK } from './models';
+import type { AgentSettings, AgentSettingsPatch } from '../api';
 
-/** Per-agent instance config, as stored in localStorage. */
-export type AcpInstanceConfig = {
+/** What older builds kept per agent in `localStorage`, API key included
+ *  (#79). Only read now, to move it to the server once. */
+type LegacyInstanceConfig = {
   displayName?: string;
   binaryPath?: string;
   homePath?: string;
   launchArgs?: string;
-  /** Newline-separated `KEY=value` pairs. */
   env?: string;
   apiKey?: string;
-  enabled: boolean;
-  /** Effort level, for agents that take one (`claude --effort`). */
+  enabled?: boolean;
   effort?: string;
-  /** Setting sources, for agents that take them. */
   settingSources?: string;
 };
 
-const STORAGE_KEY = 'mira.acp.instances.v1';
+const LEGACY_STORAGE_KEY = 'mira.acp.instances.v1';
 
-export function loadInstanceConfigs(): Record<string, AcpInstanceConfig> {
+/**
+ * Move agent setups saved by older builds out of `localStorage` and into
+ * the server's mira.yaml, then delete them from the browser.
+ *
+ * Each agent is removed from the blob only once the server has it, so a
+ * failed save (server down, bad config file) is retried on the next load
+ * instead of losing the key. Fields already set on the server win: this
+ * fills gaps, it never overwrites. Returns the agents it moved.
+ */
+export async function migrateLegacyAgentConfigs(
+  put: (instance: string, patch: AgentSettingsPatch) => Promise<unknown>,
+  get: (instance: string) => Promise<AgentSettings>,
+): Promise<string[]> {
+  let all: Record<string, LegacyInstanceConfig>;
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return {};
-    return JSON.parse(raw) as Record<string, AcpInstanceConfig>;
+    const raw = localStorage.getItem(LEGACY_STORAGE_KEY);
+    if (!raw) return [];
+    all = JSON.parse(raw) as Record<string, LegacyInstanceConfig>;
   } catch {
-    // A corrupt blob must not break Settings; the user just gets defaults.
-    return {};
+    // Unreadable: nothing recoverable in it, and it may hold a key.
+    try {
+      localStorage.removeItem(LEGACY_STORAGE_KEY);
+    } catch {
+      /* storage blocked */
+    }
+    return [];
+  }
+  const moved: string[] = [];
+  for (const [instance, cfg] of Object.entries(all)) {
+    try {
+      const current = await get(instance);
+      const patch = legacyPatch(cfg, current);
+      if (Object.keys(patch).length > 0) await put(instance, patch);
+      delete all[instance];
+      moved.push(instance);
+    } catch {
+      // Unknown agent on this build: nothing to move it to, so drop it
+      // rather than keep a key in the browser forever.
+      if (await isUnknown(get, instance)) delete all[instance];
+    }
+  }
+  try {
+    if (Object.keys(all).length === 0) localStorage.removeItem(LEGACY_STORAGE_KEY);
+    else localStorage.setItem(LEGACY_STORAGE_KEY, JSON.stringify(all));
+  } catch {
+    /* storage blocked */
+  }
+  return moved;
+}
+
+async function isUnknown(get: (instance: string) => Promise<AgentSettings>, instance: string): Promise<boolean> {
+  try {
+    await get(instance);
+    return false;
+  } catch (e) {
+    return /unknown engine instance/.test(String(e));
   }
 }
 
-export function saveInstanceConfigs(cfg: Record<string, AcpInstanceConfig>) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
-  } catch {
-    /* private mode / quota — still works for this session */
+/** The fields of an old browser-side setup that the server doesn't have yet. */
+export function legacyPatch(cfg: LegacyInstanceConfig, current: AgentSettings): AgentSettingsPatch {
+  const patch: AgentSettingsPatch = {};
+  const fill = <K extends keyof AgentSettingsPatch>(key: K, value: AgentSettingsPatch[K] | undefined, has: boolean) => {
+    if (value !== undefined && value !== '' && !has) patch[key] = value;
+  };
+  fill('display_name', cfg.displayName?.trim(), !!current.display_name);
+  fill('binary_path', cfg.binaryPath?.trim(), !!current.binary_path);
+  fill('home_path', cfg.homePath?.trim(), !!current.home_path);
+  fill('effort', cfg.effort, !!current.effort);
+  fill('setting_sources', cfg.settingSources?.trim(), !!current.setting_sources);
+  fill('api_key', cfg.apiKey?.trim(), current.has_api_key || !!current.api_key_env);
+  const args = parseArgs(cfg.launchArgs ?? '');
+  if (args.length > 0 && current.launch_args.length === 0) patch.launch_args = args;
+  const env = parseEnv(cfg.env ?? '');
+  const missing = Object.keys(env).filter((k) => !current.env.some((e) => e.key === k));
+  if (missing.length > 0) {
+    // Send the whole set: stored ones as `null` (keep), new ones in full.
+    patch.env = Object.fromEntries([
+      ...current.env.map((e) => [e.key, null] as const),
+      ...missing.map((k) => [k, env[k]] as const),
+    ]);
   }
+  if (cfg.enabled === false && current.enabled) patch.enabled = false;
+  return patch;
+}
+
+/** Launch args as one editable line that reads back through `parseArgs`
+ *  unchanged: args with spaces are quoted (with whichever quote they
+ *  don't contain, since `parseArgs` has no escapes). */
+export function argsToText(args: string[]): string {
+  return args
+    .map((a) => (a === '' || /\s/.test(a) || /^['"]/.test(a) ? (a.includes('"') ? `'${a}'` : `"${a}"`) : a))
+    .join(' ');
 }
 
 export type AgentHealthTone = 'ok' | 'warn' | 'error';

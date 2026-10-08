@@ -621,20 +621,12 @@ export type ClientMsg =
   /** Bring an external agent up for this session, replacing any running one. */
   | {
       type: 'acp_start';
-      /** Engine instance from `GET /api/engines` — its config comes from
-       *  mira.yaml's `engines:` block; the fields below layer on top. */
+      /** Engine instance from `GET /api/engines`. Its setup (binary, env,
+       *  key) lives in mira.yaml on the server; the client sends none. */
       instance?: string | null;
       /** Omit (or send the session's configured kind) to start with the
        *  launch settings inherited from the previous chat. */
       driver?: string | null;
-      binary_path?: string | null;
-      display_name?: string | null;
-      launch_args?: string[];
-      env?: Record<string, string>;
-      api_key?: string | null;
-      home_path?: string | null;
-      effort?: string | null;
-      setting_sources?: string | null;
       resume?: string | null;
       /** Agent model picked alongside the agent; remembered for restarts. */
       model?: string | null;

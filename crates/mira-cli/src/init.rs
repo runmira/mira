@@ -197,7 +197,7 @@ fn write_config(cfg: &MiraConfig, path: &std::path::Path) -> Result<PathBuf> {
         std::fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
     }
     let yaml = serde_yaml::to_string(cfg).context("serialize config")?;
-    std::fs::write(path, yaml).with_context(|| format!("write {}", path.display()))?;
+    mira_config::write_private(path, yaml.as_bytes()).with_context(|| format!("write {}", path.display()))?;
     Ok(path.to_path_buf())
 }
 
