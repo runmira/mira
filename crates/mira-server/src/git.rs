@@ -1517,13 +1517,26 @@ mod commit_tests {
 }
 
 #[derive(Deserialize)]
-pub struct TurnFileDiffRequest { pub text: String, #[serde(default)] pub occurrence: usize, pub path: String }
+pub struct TurnFileDiffRequest {
+    pub text: String,
+    #[serde(default)]
+    pub occurrence: usize,
+    pub path: String,
+}
 pub async fn turn_file_diff(
-    State(state): State<AppState>, axum::extract::Path(id): axum::extract::Path<String>, Json(req): Json<TurnFileDiffRequest>,
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(req): Json<TurnFileDiffRequest>,
 ) -> Response {
-    let Some(slot) = state.slot_str(&id).await else { return err(StatusCode::NOT_FOUND, "chat is not loaded".into()); };
+    let Some(slot) = state.slot_str(&id).await else {
+        return err(StatusCode::NOT_FOUND, "chat is not loaded".into());
+    };
     let cwd = slot.cwd.read().await.clone();
-    match tokio::task::spawn_blocking(move || crate::checkpoints::turn_file_diff(&cwd, &id, &req.text, req.occurrence, &req.path)).await {
+    match tokio::task::spawn_blocking(move || {
+        crate::checkpoints::turn_file_diff(&cwd, &id, &req.text, req.occurrence, &req.path)
+    })
+    .await
+    {
         Ok(Ok(diff)) => Json(diff).into_response(),
         Ok(Err(error)) => err(StatusCode::BAD_REQUEST, error),
         Err(error) => err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),

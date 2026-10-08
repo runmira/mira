@@ -53,6 +53,10 @@ pub struct TokenUsage {
     /// provider doesn't report it.
     #[serde(default)]
     pub cached_input_tokens: u32,
+    /// Portion of `prompt_tokens` written to the prompt cache (Anthropic,
+    /// Bedrock), billed at a premium. `0` when not reported.
+    #[serde(default)]
+    pub cache_write_tokens: u32,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

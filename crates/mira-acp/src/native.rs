@@ -266,11 +266,31 @@ pub fn map_line_with(v: &Value, models: Option<&[NativeModel]>) -> Vec<NativeAct
         Some("system") => {
             let subtype = v.get("subtype").and_then(|s| s.as_str()).unwrap_or("");
             tracing::debug!(subtype, "native: system notice");
-            if matches!(subtype, "api_retry" | "retry" | "session_recovery" | "workspace_error") {
-                return vec![NativeAction::Event(NormalizedEvent { source: EventSource::Acp { variant: subtype.into() }, event: MiraEvent::Activity {
-                    kind: subtype.into(), title: if subtype.contains("retry") { "Retrying request" } else if subtype == "workspace_error" { "Workspace setup failed" } else { "Recovering session" }.into(),
-                    detail: v.get("message").and_then(Value::as_str).unwrap_or("").into(),
-                } })];
+            if matches!(
+                subtype,
+                "api_retry" | "retry" | "session_recovery" | "workspace_error"
+            ) {
+                return vec![NativeAction::Event(NormalizedEvent {
+                    source: EventSource::Acp {
+                        variant: subtype.into(),
+                    },
+                    event: MiraEvent::Activity {
+                        kind: subtype.into(),
+                        title: if subtype.contains("retry") {
+                            "Retrying request"
+                        } else if subtype == "workspace_error" {
+                            "Workspace setup failed"
+                        } else {
+                            "Recovering session"
+                        }
+                        .into(),
+                        detail: v
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .into(),
+                    },
+                })];
             }
             Vec::new()
         }
@@ -537,31 +557,49 @@ fn context_tokens(usage: &Value) -> Option<u64> {
 impl StreamState {
     pub fn map(&mut self, v: &Value, models: Option<&[NativeModel]>) -> Vec<NativeAction> {
         use crate::runtime::*;
-        let event = |event| NativeAction::Event(NormalizedEvent {
-            source: EventSource::Acp { variant: "runtime_lifecycle".into() }, event
-        });
+        let event = |event| {
+            NativeAction::Event(NormalizedEvent {
+                source: EventSource::Acp {
+                    variant: "runtime_lifecycle".into(),
+                },
+                event,
+            })
+        };
         if v["type"] == "system" && v["subtype"] == "background_tasks_changed" {
-            let Some(tasks) = v["tasks"].as_array() else { return vec![]; };
+            let Some(tasks) = v["tasks"].as_array() else {
+                return vec![];
+            };
             let mut next = std::collections::HashMap::new();
             for task in tasks {
                 let frame = json!({"type":"system","subtype":"task_started",
                     "task_id":task["task_id"],"task_type":task["task_type"],
                     "description":task["description"],"session_id":v["session_id"]});
-                if let Some(work) = native_background_work(&frame) { next.insert(work.id.clone(),work); }
+                if let Some(work) = native_background_work(&frame) {
+                    next.insert(work.id.clone(), work);
+                }
             }
             let mut out = vec![];
             for (id, old) in &self.background {
-                if !next.contains_key(id) { let mut ended = old.clone(); ended.status = WorkStatus::Completed; out.push(event(MiraEvent::RuntimeWork(ended))); }
+                if !next.contains_key(id) {
+                    let mut ended = old.clone();
+                    ended.status = WorkStatus::Completed;
+                    out.push(event(MiraEvent::RuntimeWork(ended)));
+                }
             }
             for work in next.values() {
-                if self.background.get(&work.id) != Some(work) { out.push(event(MiraEvent::RuntimeWork(work.clone()))); }
+                if self.background.get(&work.id) != Some(work) {
+                    out.push(event(MiraEvent::RuntimeWork(work.clone())));
+                }
             }
             self.background = next;
             return out;
         }
         if let Some(work) = native_background_work(v) {
-            if work.status.is_active() { self.background.insert(work.id.clone(),work.clone()); }
-            else { self.background.remove(&work.id); }
+            if work.status.is_active() {
+                self.background.insert(work.id.clone(), work.clone());
+            } else {
+                self.background.remove(&work.id);
+            }
             return vec![event(MiraEvent::RuntimeWork(work))];
         }
         let root = v.get("parent_tool_use_id").is_none_or(Value::is_null);
@@ -569,16 +607,22 @@ impl StreamState {
         if root && self.runtime_turn.is_none() && v["type"] == "system" && v["subtype"] == "init" {
             if let Some(sid) = v["session_id"].as_str() {
                 self.turn_sequence += 1;
-                let turn = RuntimeTurn { native_thread_id:sid.into(),
-                    native_turn_id:format!("claude:{}",self.turn_sequence), running:true };
+                let turn = RuntimeTurn {
+                    native_thread_id: sid.into(),
+                    native_turn_id: format!("claude:{}", self.turn_sequence),
+                    running: true,
+                };
                 lifecycle.push(event(MiraEvent::RuntimeTurn(turn.clone())));
                 self.runtime_turn = Some(turn);
             }
         }
         if root && v["type"] == "result" {
-            if let Some(mut turn) = self.runtime_turn.take() { turn.running=false; lifecycle.push(event(MiraEvent::RuntimeTurn(turn))); }
+            if let Some(mut turn) = self.runtime_turn.take() {
+                turn.running = false;
+                lifecycle.push(event(MiraEvent::RuntimeTurn(turn)));
+            }
         }
-        lifecycle.extend(self.map_inner(v,models));
+        lifecycle.extend(self.map_inner(v, models));
         lifecycle
     }
 
@@ -633,7 +677,7 @@ impl StreamState {
                             .is_some_and(|m| self.streamed.contains(&(m.clone(), kind)))
                     })
                     .collect();
-                if !sub && mid.is_some() {
+                if let (false, Some(message_id)) = (sub, mid.clone()) {
                     let text = v
                         .get("message")
                         .and_then(|m| m.get("content"))
@@ -652,23 +696,30 @@ impl StreamState {
                             source: EventSource::Acp {
                                 variant: "agent_message_snapshot".into(),
                             },
-                            event: MiraEvent::AssistantSnapshot {
-                                message_id: mid.unwrap(),
-                                text,
-                            },
+                            event: MiraEvent::AssistantSnapshot { message_id, text },
                         }));
                     }
                 }
                 events
             }
             Some("result") => {
-                if sub { return Vec::new(); }
+                if sub {
+                    return Vec::new();
+                }
                 self.streamed.clear();
                 self.current = None;
                 let mut out = Vec::new();
                 if let Some(message_id) = self.last_text_message.take() {
                     if v.get("is_error").and_then(Value::as_bool) != Some(true) {
-                        out.push(NativeAction::Event(NormalizedEvent { source: EventSource::Acp { variant: "message_metadata".into() }, event: MiraEvent::MessageMetadata { message_id, phase: "final_answer".into() } }));
+                        out.push(NativeAction::Event(NormalizedEvent {
+                            source: EventSource::Acp {
+                                variant: "message_metadata".into(),
+                            },
+                            event: MiraEvent::MessageMetadata {
+                                message_id,
+                                phase: "final_answer".into(),
+                            },
+                        }));
                     }
                 }
                 // Context fill and cost, for the composer's usage ring. The
@@ -749,7 +800,9 @@ impl StreamState {
                     self.streamed.insert((m.clone(), kind));
                 }
                 let message_id = self.current.clone();
-                if kind == "text" { self.last_text_message = message_id.clone(); }
+                if kind == "text" {
+                    self.last_text_message = message_id.clone();
+                }
                 let text = text.to_string();
                 vec![NativeAction::Event(NormalizedEvent {
                     source: EventSource::Acp {
@@ -1122,6 +1175,7 @@ impl AgentHandle {
                 image_input: true,
                 live_model_switch: true,
                 live_mode_switch: true,
+                native_rollback: true,
                 cancellation: true,
                 ..Default::default()
             },
@@ -1254,11 +1308,15 @@ impl AgentHandle {
                 Ok(Some(out.stop_reason_wire()))
             }
             AgentHandle::AppServer(a) => {
-                a.prompt_with_images(text, images).await.map_err(|e| e.to_string())?;
+                a.prompt_with_images(text, images)
+                    .await
+                    .map_err(|e| e.to_string())?;
                 Ok(None)
             }
             AgentHandle::Native(n) => {
-                n.user_input(text, images, None).await.map_err(|e| e.to_string())?;
+                n.user_input(text, images, None)
+                    .await
+                    .map_err(|e| e.to_string())?;
                 Ok(None)
             }
         }
@@ -1291,6 +1349,16 @@ impl AgentHandle {
                 a.set_mode(mode_id).await;
                 Ok(())
             }
+        }
+    }
+
+    /// Rewind the agent's own conversation by `prompts` user prompts, when
+    /// its transport can (Codex app-server). `None` means it can't, and the
+    /// caller falls back to restarting the agent fresh.
+    pub async fn rewind(&self, prompts: usize) -> Option<Result<(), String>> {
+        match self {
+            AgentHandle::AppServer(a) => Some(a.rewind(prompts).await.map_err(|e| e.to_string())),
+            _ => None,
         }
     }
 
@@ -1775,14 +1843,29 @@ impl NativeAgent {
     }
 
     /// Native priority input keeps the current stream and background workers alive.
-    pub async fn steer(&self, id: &str, text: &str, images: &[mira_core::ImageData]) -> Result<(), NativeError> {
-        uuid::Uuid::parse_str(id).map_err(|_|NativeError::Other("Steering requires a stable UUID input ID".into()))?;
+    pub async fn steer(
+        &self,
+        id: &str,
+        text: &str,
+        images: &[mira_core::ImageData],
+    ) -> Result<(), NativeError> {
+        uuid::Uuid::parse_str(id)
+            .map_err(|_| NativeError::Other("Steering requires a stable UUID input ID".into()))?;
         self.user_input(text, images, Some(id)).await
     }
 
-    async fn user_input(&self, text: &str, images: &[mira_core::ImageData], steer_id: Option<&str>) -> Result<(), NativeError> {
-        let sid = self.session_id().await.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        self.write_line(&claude_user_input(&sid, text, images, steer_id)).await
+    async fn user_input(
+        &self,
+        text: &str,
+        images: &[mira_core::ImageData],
+        steer_id: Option<&str>,
+    ) -> Result<(), NativeError> {
+        let sid = self
+            .session_id()
+            .await
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        self.write_line(&claude_user_input(&sid, text, images, steer_id))
+            .await
     }
 
     /// Answer a permission request.
@@ -2234,10 +2317,19 @@ done
     fn successful_results_identify_the_final_message() {
         let mut stream = StreamState::default();
         stream.map(&json!({"type":"assistant","message":{"id":"answer","content":[{"type":"text","text":"done"}]}}), None);
-        let actions = stream.map(&json!({"type":"result","subtype":"success","is_error":false}), None);
+        let actions = stream.map(
+            &json!({"type":"result","subtype":"success","is_error":false}),
+            None,
+        );
         assert!(actions.iter().any(|action| matches!(action, NativeAction::Event(NormalizedEvent { event: MiraEvent::MessageMetadata { message_id, phase }, .. }) if message_id == "answer" && phase == "final_answer")));
         let next = stream.map(&json!({"type":"result","subtype":"success"}), None);
-        assert!(!next.iter().any(|action| matches!(action, NativeAction::Event(NormalizedEvent { event: MiraEvent::MessageMetadata { .. }, .. }))));
+        assert!(!next.iter().any(|action| matches!(
+            action,
+            NativeAction::Event(NormalizedEvent {
+                event: MiraEvent::MessageMetadata { .. },
+                ..
+            })
+        )));
     }
 
     #[test]
@@ -2723,11 +2815,18 @@ done
     }
 }
 
-fn claude_user_input(sid: &str, text: &str, images: &[mira_core::ImageData], steer_id: Option<&str>) -> Value {
+fn claude_user_input(
+    sid: &str,
+    text: &str,
+    images: &[mira_core::ImageData],
+    steer_id: Option<&str>,
+) -> Value {
     let mut content = vec![json!({"type":"text", "text":text})];
-    content.extend(images.iter().map(|image| json!({"type":"image", "source":{
-        "type":"base64", "media_type":image.media_type, "data":image.data
-    }})));
+    content.extend(images.iter().map(|image| {
+        json!({"type":"image", "source":{
+            "type":"base64", "media_type":image.media_type, "data":image.data
+        }})
+    }));
     let mut input = json!({"type":"user", "message":{"role":"user", "content":content},
         "parent_tool_use_id":null, "session_id":sid});
     if let Some(id) = steer_id {
@@ -2764,7 +2863,14 @@ fn native_background_work(v: &Value) -> Option<crate::runtime::RuntimeWork> {
             .get("session_id")
             .and_then(Value::as_str)
             .map(str::to_owned),
-        kind: if matches!(v["task_type"].as_str(),Some("local_agent" | "agent" | "subagent")) { WorkKind::Subagent } else { WorkKind::Task },
+        kind: if matches!(
+            v["task_type"].as_str(),
+            Some("local_agent" | "agent" | "subagent")
+        ) {
+            WorkKind::Subagent
+        } else {
+            WorkKind::Task
+        },
         status,
         title: v
             .get("description")
@@ -2807,32 +2913,81 @@ mod native_input_lifecycle_tests {
     use super::*;
     #[test]
     fn steering_is_priority_input_with_real_image_blocks() {
-        let input=claude_user_input("session","follow up",&[mira_core::ImageData {media_type:"image/png".into(),data:"aGVsbG8=".into(),source:None}],Some("request"));
-        assert_eq!(input["priority"],"now");assert_eq!(input["uuid"],"request");
-        assert_eq!(input["message"]["content"][1]["source"]["type"],"base64");
-        assert_eq!(input["message"]["content"][1]["source"]["media_type"],"image/png");
-        assert!(claude_user_input("s","normal",&[],None).get("priority").is_none());
+        let input = claude_user_input(
+            "session",
+            "follow up",
+            &[mira_core::ImageData {
+                media_type: "image/png".into(),
+                data: "aGVsbG8=".into(),
+                source: None,
+            }],
+            Some("request"),
+        );
+        assert_eq!(input["priority"], "now");
+        assert_eq!(input["uuid"], "request");
+        assert_eq!(input["message"]["content"][1]["source"]["type"], "base64");
+        assert_eq!(
+            input["message"]["content"][1]["source"]["media_type"],
+            "image/png"
+        );
+        assert!(claude_user_input("s", "normal", &[], None)
+            .get("priority")
+            .is_none());
     }
     #[test]
     fn roster_reconciliation_removes_finished_work_and_ignores_malformed_rosters() {
-        let mut stream=StreamState::default();let mut activity=crate::runtime::RuntimeActivity::default();
-        let frames=[json!({"type":"system","subtype":"background_tasks_changed","session_id":"s","tasks":[{"task_id":"one","task_type":"local_bash"}]}),
-                    json!({"type":"system","subtype":"background_tasks_changed","tasks":null})];
-        for frame in frames {for action in stream.map(&frame,None) { if let NativeAction::Event(NormalizedEvent {event:MiraEvent::RuntimeWork(work),..})=action {activity.work(&work);} }}
+        let mut stream = StreamState::default();
+        let mut activity = crate::runtime::RuntimeActivity::default();
+        let frames = [
+            json!({"type":"system","subtype":"background_tasks_changed","session_id":"s","tasks":[{"task_id":"one","task_type":"local_bash"}]}),
+            json!({"type":"system","subtype":"background_tasks_changed","tasks":null}),
+        ];
+        for frame in frames {
+            for action in stream.map(&frame, None) {
+                if let NativeAction::Event(NormalizedEvent {
+                    event: MiraEvent::RuntimeWork(work),
+                    ..
+                }) = action
+                {
+                    activity.work(&work);
+                }
+            }
+        }
         assert!(activity.has_pending_work());
-        for action in stream.map(&json!({"type":"system","subtype":"background_tasks_changed","tasks":[]}),None) {
-            if let NativeAction::Event(NormalizedEvent {event:MiraEvent::RuntimeWork(work),..})=action {activity.work(&work);}
+        for action in stream.map(
+            &json!({"type":"system","subtype":"background_tasks_changed","tasks":[]}),
+            None,
+        ) {
+            if let NativeAction::Event(NormalizedEvent {
+                event: MiraEvent::RuntimeWork(work),
+                ..
+            }) = action
+            {
+                activity.work(&work);
+            }
         }
         assert!(!activity.has_pending_work());
     }
     #[test]
     fn idle_notification_does_not_open_a_turn_but_root_init_does() {
-        let mut stream=StreamState::default();
+        let mut stream = StreamState::default();
         let notification=stream.map(&json!({"type":"system","subtype":"task_notification","task_id":"one","status":"completed"}),None);
-        assert!(!notification.iter().any(|a|matches!(a,NativeAction::Event(NormalizedEvent {event:MiraEvent::RuntimeTurn(_),..}))));
-        let wake=stream.map(&json!({"type":"system","subtype":"init","session_id":"s"}),None);
+        assert!(!notification.iter().any(|a| matches!(
+            a,
+            NativeAction::Event(NormalizedEvent {
+                event: MiraEvent::RuntimeTurn(_),
+                ..
+            })
+        )));
+        let wake = stream.map(
+            &json!({"type":"system","subtype":"init","session_id":"s"}),
+            None,
+        );
         assert!(wake.iter().any(|a|matches!(a,NativeAction::Event(NormalizedEvent {event:MiraEvent::RuntimeTurn(t),..}) if t.running)));
-        let end=stream.map(&json!({"type":"result","subtype":"success","session_id":"s"}),None);
+        let end = stream.map(
+            &json!({"type":"result","subtype":"success","session_id":"s"}),
+            None,
+        );
         assert!(end.iter().any(|a|matches!(a,NativeAction::Event(NormalizedEvent {event:MiraEvent::RuntimeTurn(t),..}) if !t.running)));
     }
 }

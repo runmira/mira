@@ -61,7 +61,9 @@ fn redact_protocol_value(value: &Value) -> Value {
                 .collect(),
         ),
         Value::Array(items) => Value::Array(items.iter().map(redact_protocol_value).collect()),
-        Value::String(text) if text.starts_with("data:image/") => Value::String("[attached image]".into()),
+        Value::String(text) if text.starts_with("data:image/") => {
+            Value::String("[attached image]".into())
+        }
         _ => value.clone(),
     }
 }
@@ -157,7 +159,11 @@ pub fn policy_for_mode(mode: &str) -> (&'static str, &'static str) {
 
 /// The Codex collaboration mode a runtime mode turns on.
 fn collaboration_mode_for(mode: &str) -> &'static str {
-    if mode == "plan" { "plan" } else { "default" }
+    if mode == "plan" {
+        "plan"
+    } else {
+        "default"
+    }
 }
 
 fn approvals_reviewer_for_mode(mode: &str) -> &'static str {
@@ -270,6 +276,8 @@ You are running inside Mira. The `mira` MCP server adds what your own tools cann
 - `delegate_task` hands a self-contained task to another engine and returns its answer.
 - Secrets: when you need an API key or token, call `request_secret`. The user enters it privately and you get a file path to read it from; never ask for secrets in chat.
 - Visuals: when a chart, table, diagram or mockup says more than prose, publish a self-contained page with `html_render`. It shows above your reply, so don't restate it.
+- Mobile: `device_list`, `device_open`, `device_screenshot`, `device_open_url`, `device_install`, `device_launch` and `device_tap`/`device_swipe`/`device_type`/`device_key` drive iOS Simulators and Android Emulators the user can watch.
+- To show a browser flow working, wrap it in `browser_record_start` / `browser_record_stop`; the recording appears in the chat.
 
 Tool names may carry a harness prefix such as `mcp__mira__ask_user`. If a Mira tool fails, say so rather than pretending it ran.";
 
@@ -286,11 +294,16 @@ fn codex_additional_context(mira_tools: bool) -> Option<Value> {
 
 fn codex_prompt_input(text: &str, images: &[mira_core::ImageData]) -> Value {
     let mut input = Vec::new();
-    if !text.trim().is_empty() { input.push(json!({"type": "text", "text": text})); }
-    for image in images { input.push(json!({"type": "image", "url": image.data_url()})); }
+    if !text.trim().is_empty() {
+        input.push(json!({"type": "text", "text": text}));
+    }
+    for image in images {
+        input.push(json!({"type": "image", "url": image.data_url()}));
+    }
     json!(input)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn turn_start_params(
     thread_id: &str,
     text: &str,
@@ -572,25 +585,91 @@ pub fn map_notification(method: &str, p: &Value) -> Vec<AppServerAction> {
             }
         }
 
-        "mcpServer/startupStatus/updated" if p.get("name").and_then(Value::as_str) == Some("mira") && p.get("status").and_then(Value::as_str) == Some("failed") => vec![AppServerAction::Event(NormalizedEvent {
-            source: variant("mcp"), event: MiraEvent::Activity { kind: "tools".into(), title: "Mira tools unavailable".into(), detail: p.get("error").and_then(Value::as_str).unwrap_or("The Mira tool server failed to start. Reconnect this agent to retry.").into() },
-        })],
+        "mcpServer/startupStatus/updated"
+            if p.get("name").and_then(Value::as_str) == Some("mira")
+                && p.get("status").and_then(Value::as_str) == Some("failed") =>
+        {
+            vec![AppServerAction::Event(NormalizedEvent {
+                source: variant("mcp"),
+                event: MiraEvent::Activity {
+                    kind: "tools".into(),
+                    title: "Mira tools unavailable".into(),
+                    detail: p
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .unwrap_or(
+                            "The Mira tool server failed to start. Reconnect this agent to retry.",
+                        )
+                        .into(),
+                },
+            })]
+        }
         "turn/completed" => {
             let turn = p.get("turn").unwrap_or(p);
-            let failed = turn.get("status").and_then(Value::as_str) == Some("failed") || turn.get("error").is_some_and(|e| !e.is_null());
-            let error = turn.get("error").map(Value::to_string).unwrap_or_default().to_lowercase();
-            let limited = ["usagelimit", "usage_limit", "ratelimit", "rate_limit", "rate limit"].iter().any(|s| error.contains(s));
-            vec![AppServerAction::TurnEnded { stop_reason: if limited { "rate_limited" } else if failed { "error" } else if turn.get("status").and_then(Value::as_str) == Some("interrupted") { "cancelled" } else { "completed" }.into(), is_error: failed }]
-        },
+            let failed = turn.get("status").and_then(Value::as_str) == Some("failed")
+                || turn.get("error").is_some_and(|e| !e.is_null());
+            let error = turn
+                .get("error")
+                .map(Value::to_string)
+                .unwrap_or_default()
+                .to_lowercase();
+            let limited = [
+                "usagelimit",
+                "usage_limit",
+                "ratelimit",
+                "rate_limit",
+                "rate limit",
+            ]
+            .iter()
+            .any(|s| error.contains(s));
+            vec![AppServerAction::TurnEnded {
+                stop_reason: if limited {
+                    "rate_limited"
+                } else if failed {
+                    "error"
+                } else if turn.get("status").and_then(Value::as_str) == Some("interrupted") {
+                    "cancelled"
+                } else {
+                    "completed"
+                }
+                .into(),
+                is_error: failed,
+            }]
+        }
         "turn/aborted" => vec![AppServerAction::TurnEnded {
             stop_reason: "cancelled".to_string(),
             is_error: true,
         }],
-        "error" if p.get("willRetry").or_else(|| p.get("will_retry")).and_then(Value::as_bool) == Some(true) => vec![AppServerAction::Event(NormalizedEvent {
-            source: variant("retry"), event: MiraEvent::Activity { kind: "retry".into(), title: "Retrying request".into(), detail: p.pointer("/error/message").and_then(Value::as_str).unwrap_or("The provider will retry this request.").into() },
-        })],
+        "error"
+            if p.get("willRetry")
+                .or_else(|| p.get("will_retry"))
+                .and_then(Value::as_bool)
+                == Some(true) =>
+        {
+            vec![AppServerAction::Event(NormalizedEvent {
+                source: variant("retry"),
+                event: MiraEvent::Activity {
+                    kind: "retry".into(),
+                    title: "Retrying request".into(),
+                    detail: p
+                        .pointer("/error/message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("The provider will retry this request.")
+                        .into(),
+                },
+            })]
+        }
         "error" => vec![AppServerAction::TurnEnded {
-            stop_reason: if p.to_string().to_lowercase().contains("usagelimit") || p.to_string().to_lowercase().contains("usage_limit") || p.to_string().to_lowercase().contains("rate_limit") || p.to_string().to_lowercase().contains("rate limit") { "rate_limited" } else { "error" }.to_string(),
+            stop_reason: if p.to_string().to_lowercase().contains("usagelimit")
+                || p.to_string().to_lowercase().contains("usage_limit")
+                || p.to_string().to_lowercase().contains("rate_limit")
+                || p.to_string().to_lowercase().contains("rate limit")
+            {
+                "rate_limited"
+            } else {
+                "error"
+            }
+            .to_string(),
             is_error: true,
         }],
 
@@ -894,8 +973,22 @@ fn map_item(i: &Value, started: bool) -> Vec<AppServerAction> {
     let itype = i.get("type").and_then(Value::as_str).unwrap_or("");
     // Mira emits these tools with its own approval/prompt IDs. Rendering the
     // app-server's wrapper too would duplicate every workspace call and card.
-    if itype == "mcpToolCall" && i.get("server").and_then(Value::as_str) == Some("mira")
-        && matches!(i.get("tool").and_then(Value::as_str), Some("ask_user" | "plan" | "read_file" | "write_file" | "edit_file" | "grep" | "glob" | "bash")) {
+    if itype == "mcpToolCall"
+        && i.get("server").and_then(Value::as_str) == Some("mira")
+        && matches!(
+            i.get("tool").and_then(Value::as_str),
+            Some(
+                "ask_user"
+                    | "plan"
+                    | "read_file"
+                    | "write_file"
+                    | "edit_file"
+                    | "grep"
+                    | "glob"
+                    | "bash"
+            )
+        )
+    {
         return vec![];
     }
     match itype {
@@ -932,7 +1025,14 @@ fn map_item(i: &Value, started: bool) -> Vec<AppServerAction> {
                     event: MiraEvent::ToolCall(ToolCallState {
                         id: id.to_string(),
                         title: title.to_string(),
-                        name: Some(if itype == "mcpToolCall" { tool_name } else { itype }.to_string()),
+                        name: Some(
+                            if itype == "mcpToolCall" {
+                                tool_name
+                            } else {
+                                itype
+                            }
+                            .to_string(),
+                        ),
                         kind: Some(kind),
                         status: ToolCallStatus::InProgress,
                         content: Vec::new(),
@@ -969,7 +1069,14 @@ fn map_item(i: &Value, started: bool) -> Vec<AppServerAction> {
                     event: MiraEvent::ToolCallUpdate(ToolCallState {
                         id: id.to_string(),
                         title: title.to_string(),
-                        name: Some(if itype == "mcpToolCall" { tool_name } else { itype }.to_string()),
+                        name: Some(
+                            if itype == "mcpToolCall" {
+                                tool_name
+                            } else {
+                                itype
+                            }
+                            .to_string(),
+                        ),
                         kind: Some(kind),
                         status: if failed {
                             ToolCallStatus::Failed
@@ -998,7 +1105,13 @@ fn map_item(i: &Value, started: bool) -> Vec<AppServerAction> {
                 },
             })];
             if let Some(phase) = i.get("phase").and_then(Value::as_str) {
-                events.push(AppServerAction::Event(NormalizedEvent { source: variant("message_metadata"), event: MiraEvent::MessageMetadata { message_id: id.into(), phase: phase.into() } }));
+                events.push(AppServerAction::Event(NormalizedEvent {
+                    source: variant("message_metadata"),
+                    event: MiraEvent::MessageMetadata {
+                        message_id: id.into(),
+                        phase: phase.into(),
+                    },
+                }));
             }
             events
         }
@@ -1407,6 +1520,33 @@ struct TurnContext {
     service_tier: Option<String>,
     /// Whether Mira's tool server is attached to this thread.
     mira_tools: bool,
+    /// Codex turns each user prompt produced, oldest first, this process. A
+    /// prompt is one turn, plus one per plan follow-up (build or revise).
+    /// What a rewind needs to turn "undo N messages" into "revert N turns".
+    prompt_turns: std::sync::Mutex<Vec<u32>>,
+    /// Turns that already ended, newest last (bounded). A fast turn can end
+    /// before its `turn/start` reply is read; marking it active then would
+    /// leave Mira thinking a finished turn still runs.
+    ended_turns: std::sync::Mutex<std::collections::VecDeque<String>>,
+    /// The model's context window as Codex last reported it.
+    context_window: std::sync::atomic::AtomicU64,
+}
+
+impl TurnContext {
+    fn note_ended(&self, turn: &str) {
+        let mut ended = self.ended_turns.lock().unwrap_or_else(|e| e.into_inner());
+        ended.push_back(turn.to_string());
+        while ended.len() > 32 {
+            ended.pop_front();
+        }
+    }
+    fn has_ended(&self, turn: &str) -> bool {
+        self.ended_turns
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|t| t == turn)
+    }
 }
 
 impl TurnContext {
@@ -1458,17 +1598,20 @@ async fn start_turn(
     conn: &crate::conn::Connection,
     params: Value,
     active_turn: &Mutex<Option<String>>,
+    turns: &TurnContext,
 ) -> Result<(), NativeError> {
     protocol_log("out", "turn/start", &params);
-    let res: Value = tokio::time::timeout(CALL_TIMEOUT, conn.request::<Value>("turn/start", params))
-        .await
-        .map_err(|_| NativeError::Other("turn/start timed out".to_string()))?
-        .map_err(|e| NativeError::Other(e.to_string()))?;
+    let res: Value =
+        tokio::time::timeout(CALL_TIMEOUT, conn.request::<Value>("turn/start", params))
+            .await
+            .map_err(|_| NativeError::Other("turn/start timed out".to_string()))?
+            .map_err(|e| NativeError::Other(e.to_string()))?;
     protocol_log("in", "turn/start", &res);
     if let Some(id) = res
         .get("turn")
         .and_then(|t| t.get("id"))
         .and_then(Value::as_str)
+        .filter(|id| !turns.has_ended(id))
     {
         *active_turn.lock().await = Some(id.to_string());
     }
@@ -1487,7 +1630,9 @@ fn plan_follow_up(decision: &crate::native::PermissionDecision) -> Option<String
             .and_then(Value::as_str)
             .filter(|p| !p.trim().is_empty());
         return Some(match edited {
-            Some(plan) => format!("The user approved this plan, as edited. Implement it.\n\n{plan}"),
+            Some(plan) => {
+                format!("The user approved this plan, as edited. Implement it.\n\n{plan}")
+            }
             None => "The user approved the plan. Implement it.".to_string(),
         });
     }
@@ -1498,6 +1643,7 @@ fn plan_follow_up(decision: &crate::native::PermissionDecision) -> Option<String
 }
 
 /// Review plans one at a time, as Codex finishes them.
+#[allow(clippy::too_many_arguments)]
 async fn review_plans(
     conn: crate::conn::Connection,
     mut rx: mpsc::Receiver<PlanReview>,
@@ -1529,9 +1675,22 @@ async fn review_plans(
         }
         let tid = thread_id.lock().await.clone().unwrap_or_default();
         let params = turns.params(&tid, &text, &[]).await;
-        if let Err(e) = start_turn(&conn, params, &active_turn).await {
-            tracing::warn!("codex: could not continue after plan review: {e}");
-            let _ = end_tx.send(review.end).await;
+        match start_turn(&conn, params, &active_turn, &turns).await {
+            Ok(()) => {
+                // The follow-up belongs to the prompt that asked for the plan.
+                if let Some(last) = turns
+                    .prompt_turns
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .last_mut()
+                {
+                    *last += 1;
+                }
+            }
+            Err(e) => {
+                tracing::warn!("codex: could not continue after plan review: {e}");
+                let _ = end_tx.send(review.end).await;
+            }
         }
     }
 }
@@ -1576,7 +1735,11 @@ impl crate::conn::AgentCallback for Callbacks {
                 "item/completed" => {
                     let item = params.get("item").unwrap_or(&Value::Null);
                     if item.get("type").and_then(Value::as_str) == Some("plan") {
-                        if let Some(text) = item.get("text").and_then(Value::as_str).filter(|t| !t.trim().is_empty()) {
+                        if let Some(text) = item
+                            .get("text")
+                            .and_then(Value::as_str)
+                            .filter(|t| !t.trim().is_empty())
+                        {
                             *self.proposed_plan.lock().await = text.to_string();
                         }
                     }
@@ -1602,16 +1765,31 @@ impl crate::conn::AgentCallback for Callbacks {
                         *root = Some(tid);
                     }
                 }
-                AppServerAction::Event(e) => {
+                AppServerAction::Event(mut e) => {
                     // Child narration belongs to the child's thread; only
                     // its normalized lifecycle contributes to root ownership.
+                    // Its spend still counts: a subagent's tokens are real
+                    // usage, booked under the child thread's own id.
                     if !belongs_to_root
                         && !matches!(
                             &e.event,
-                            MiraEvent::RuntimeTurn(_) | MiraEvent::RuntimeWork(_)
+                            MiraEvent::RuntimeTurn(_)
+                                | MiraEvent::RuntimeWork(_)
+                                | MiraEvent::Spend { .. }
                         )
                     {
                         continue;
+                    }
+                    // Codex sometimes omits the context window on an update;
+                    // keep the last known one rather than reporting a
+                    // window of zero (which the ring can't draw).
+                    if let MiraEvent::Usage { size, .. } = &mut e.event {
+                        let known = &self.turns.context_window;
+                        if *size == 0 {
+                            *size = known.load(std::sync::atomic::Ordering::Relaxed);
+                        } else {
+                            known.store(*size, std::sync::atomic::Ordering::Relaxed);
+                        }
                     }
                     let _ = self.tx.send(e).await;
                 }
@@ -1623,6 +1801,9 @@ impl crate::conn::AgentCallback for Callbacks {
                         continue;
                     }
                     *self.active_turn.lock().await = None;
+                    if let Some(id) = params.pointer("/turn/id").and_then(Value::as_str) {
+                        self.turns.note_ended(id);
+                    }
                     let end = TurnEnd {
                         stop_reason,
                         is_error,
@@ -1634,7 +1815,13 @@ impl crate::conn::AgentCallback for Callbacks {
                         && !plan.trim().is_empty()
                         && self.turns.in_plan_mode().await
                     {
-                        let _ = self.plan_review.send(PlanReview { markdown: plan, end }).await;
+                        let _ = self
+                            .plan_review
+                            .send(PlanReview {
+                                markdown: plan,
+                                end,
+                            })
+                            .await;
                         continue;
                     }
                     let _ = self.end_tx.send(end).await;
@@ -1669,6 +1856,7 @@ impl crate::conn::AgentCallback for Callbacks {
                 .get("turn")
                 .and_then(|t| t.get("id"))
                 .and_then(Value::as_str)
+                .filter(|id| !self.turns.has_ended(id))
             {
                 *self.active_turn.lock().await = Some(tid.to_string());
             }
@@ -1724,12 +1912,20 @@ impl AppServerAgent {
             model: current_model.clone(),
             mode: Mutex::new(runtime_mode.to_string()),
             build_mode: Mutex::new(
-                if runtime_mode == "plan" { "approval-required" } else { runtime_mode }.to_string(),
+                if runtime_mode == "plan" {
+                    "approval-required"
+                } else {
+                    runtime_mode
+                }
+                .to_string(),
             ),
             cwd: cwd.clone(),
             effort: None,
             service_tier: None,
             mira_tools: mira_mcp.is_some(),
+            prompt_turns: std::sync::Mutex::new(Vec::new()),
+            ended_turns: Default::default(),
+            context_window: Default::default(),
         });
         let (plan_tx, plan_rx) = mpsc::channel(4);
         let events_tx = tx.clone();
@@ -1924,13 +2120,140 @@ impl AppServerAgent {
         self.prompt_with_images(text, &[]).await
     }
 
-    pub async fn prompt_with_images(&self, text: &str, images: &[mira_core::ImageData]) -> Result<(), NativeError> {
+    pub async fn prompt_with_images(
+        &self,
+        text: &str,
+        images: &[mira_core::ImageData],
+    ) -> Result<(), NativeError> {
         let tid = self
             .session_id()
             .await
             .ok_or_else(|| NativeError::Other("no codex thread yet".to_string()))?;
         let params = self.turns.params(&tid, text, images).await;
-        start_turn(self.process.conn(), params, &self.active_turn).await
+        start_turn(self.process.conn(), params, &self.active_turn, &self.turns).await?;
+        self.turns
+            .prompt_turns
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(1);
+        Ok(())
+    }
+
+    /// How many Codex turns the last `prompts` user prompts produced. Prompts
+    /// from before this process started count one turn each.
+    fn turns_for_prompts(&self, prompts: usize) -> u32 {
+        let counts = self
+            .turns
+            .prompt_turns
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let known = prompts.min(counts.len());
+        let tracked: u32 = counts[counts.len() - known..].iter().sum();
+        tracked + (prompts - known) as u32
+    }
+
+    /// Rewind Codex's own thread to before the last `prompts` user prompts,
+    /// so it forgets them instead of starting over. Codex 0.156+ reverts to a
+    /// boundary turn found in its paged history (`thread/revert`); older
+    /// versions take a count (`thread/rollback`).
+    pub async fn rewind(&self, prompts: usize) -> Result<(), NativeError> {
+        if prompts == 0 {
+            return Ok(());
+        }
+        if self.active_turn.lock().await.is_some() {
+            return Err(NativeError::Other(
+                "Codex is mid-turn; stop it before undoing".into(),
+            ));
+        }
+        let tid = self
+            .session_id()
+            .await
+            .ok_or_else(|| NativeError::Other("no codex thread".into()))?;
+        let num_turns = self.turns_for_prompts(prompts);
+        let conn = self.process.conn();
+        let call = |method: &'static str, params: Value| async move {
+            protocol_log("out", method, &params);
+            let res = tokio::time::timeout(CALL_TIMEOUT, conn.request::<Value>(method, params))
+                .await
+                .map_err(|_| NativeError::Other(format!("{method} timed out")))?
+                .map_err(|e| NativeError::Other(e.to_string()));
+            if let Ok(v) = &res {
+                protocol_log("in", method, v);
+            }
+            res
+        };
+
+        // The boundary: the num_turns-th newest turn. Reverting before it
+        // removes it and everything after.
+        let mut remaining = num_turns;
+        let mut before: Option<String> = None;
+        let mut cursor: Option<String> = None;
+        let mut pages = 0;
+        let listed = loop {
+            pages += 1;
+            let page = match call(
+                "thread/turns/list",
+                json!({
+                    "threadId": tid,
+                    "cursor": cursor,
+                    "limit": remaining.min(100),
+                    "sortDirection": "desc",
+                    "itemsView": "summary",
+                }),
+            )
+            .await
+            {
+                Ok(p) => p,
+                Err(e) => break Err(e),
+            };
+            for turn in page
+                .get("data")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                if let Some(id) = turn.get("id").and_then(Value::as_str) {
+                    before = Some(id.to_string());
+                    remaining -= 1;
+                    if remaining == 0 {
+                        break;
+                    }
+                }
+            }
+            cursor = page
+                .get("nextCursor")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            if remaining == 0 || cursor.is_none() || pages > 50 {
+                break Ok(());
+            }
+        };
+        let reverted = match (listed, before) {
+            (Ok(()), Some(before)) => {
+                call(
+                    "thread/revert",
+                    json!({ "threadId": tid, "beforeTurnId": before }),
+                )
+                .await
+            }
+            // A Codex without paged history or revert: the count form.
+            _ => {
+                call(
+                    "thread/rollback",
+                    json!({ "threadId": tid, "numTurns": num_turns }),
+                )
+                .await
+            }
+        };
+        reverted?;
+        let mut counts = self
+            .turns
+            .prompt_turns
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let keep = counts.len().saturating_sub(prompts);
+        counts.truncate(keep);
+        Ok(())
     }
 
     /// Switch the runtime mode. Codex takes approval policy, sandbox and
@@ -1945,7 +2268,11 @@ impl AppServerAgent {
         self.steer_with_images(text, &[]).await
     }
 
-    pub async fn steer_with_images(&self, text: &str, images: &[mira_core::ImageData]) -> Result<(), NativeError> {
+    pub async fn steer_with_images(
+        &self,
+        text: &str,
+        images: &[mira_core::ImageData],
+    ) -> Result<(), NativeError> {
         let thread_id = self
             .session_id()
             .await
@@ -1981,7 +2308,27 @@ impl AppServerAgent {
         } else {
             model
         };
+        let changed = *self.model.lock().await != next;
         *self.model.lock().await = next.to_string();
+        if changed {
+            // The last reading was the old model's context against the old
+            // model's window. Until the new model reports, the ring shows
+            // unknown rather than a stale number (t3 does the same).
+            self.turns
+                .context_window
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            let _ = self
+                .events_tx
+                .send(NormalizedEvent {
+                    source: variant("usage"),
+                    event: MiraEvent::Usage {
+                        used: 0,
+                        size: 0,
+                        cost: None,
+                    },
+                })
+                .await;
+        }
     }
 
     pub async fn cancel(&self) -> Result<(), NativeError> {
@@ -2071,7 +2418,8 @@ mod tests {
         let own = json!({"id":"mcp-1","type":"mcpToolCall","server":"mira","tool":"read_file"});
         assert!(map_item(&own, true).is_empty());
         assert!(map_item(&own, false).is_empty());
-        let browser = json!({"id":"mcp-2","type":"mcpToolCall","server":"mira","tool":"browser_snapshot"});
+        let browser =
+            json!({"id":"mcp-2","type":"mcpToolCall","server":"mira","tool":"browser_snapshot"});
         assert!(!map_item(&browser, true).is_empty());
         let other = json!({"id":"mcp-3","type":"mcpToolCall","server":"other","tool":"read_file"});
         assert!(!map_item(&other, true).is_empty());
@@ -2079,18 +2427,37 @@ mod tests {
 
     #[test]
     fn failed_completion_preserves_usage_limit_and_mcp_failure() {
-        let actions = map_notification("turn/completed", &json!({"turn":{"status":"failed","error":{"codexErrorInfo":"usageLimitExceeded"}}}));
-        assert!(matches!(&actions[0], AppServerAction::TurnEnded { stop_reason, is_error: true } if stop_reason == "rate_limited"));
-        let actions = map_notification("mcpServer/startupStatus/updated", &json!({"name":"mira","status":"failed","error":"Connection refused"}));
-        assert!(matches!(&actions[0], AppServerAction::Event(NormalizedEvent { event: MiraEvent::Activity { title, detail, .. }, .. }) if title == "Mira tools unavailable" && detail == "Connection refused"));
+        let actions = map_notification(
+            "turn/completed",
+            &json!({"turn":{"status":"failed","error":{"codexErrorInfo":"usageLimitExceeded"}}}),
+        );
+        assert!(
+            matches!(&actions[0], AppServerAction::TurnEnded { stop_reason, is_error: true } if stop_reason == "rate_limited")
+        );
+        let actions = map_notification(
+            "mcpServer/startupStatus/updated",
+            &json!({"name":"mira","status":"failed","error":"Connection refused"}),
+        );
+        assert!(
+            matches!(&actions[0], AppServerAction::Event(NormalizedEvent { event: MiraEvent::Activity { title, detail, .. }, .. }) if title == "Mira tools unavailable" && detail == "Connection refused")
+        );
     }
 
     #[test]
     fn codex_images_are_native_inputs_even_without_text() {
         let image = mira_core::ImageData::png("YWJj");
-        assert_eq!(codex_prompt_input("", &[image.clone()]), json!([{"type":"image", "url":"data:image/png;base64,YWJj"}]));
-        assert_eq!(codex_prompt_input("look", &[image]), json!([{"type":"text","text":"look"}, {"type":"image","url":"data:image/png;base64,YWJj"}]));
-        assert_eq!(codex_prompt_input("text", &[]), json!([{"type":"text","text":"text"}]));
+        assert_eq!(
+            codex_prompt_input("", std::slice::from_ref(&image)),
+            json!([{"type":"image", "url":"data:image/png;base64,YWJj"}])
+        );
+        assert_eq!(
+            codex_prompt_input("look", &[image]),
+            json!([{"type":"text","text":"look"}, {"type":"image","url":"data:image/png;base64,YWJj"}])
+        );
+        assert_eq!(
+            codex_prompt_input("text", &[]),
+            json!([{"type":"text","text":"text"}])
+        );
     }
 
     fn v(s: &str) -> Value {
@@ -2193,10 +2560,17 @@ mod tests {
 
     #[test]
     fn retryable_errors_do_not_end_the_turn() {
-        let actions = map_notification("error", &json!({"willRetry":true,"error":{"message":"provider busy"}}));
-        assert!(!actions.iter().any(|action| matches!(action, AppServerAction::TurnEnded { .. })));
+        let actions = map_notification(
+            "error",
+            &json!({"willRetry":true,"error":{"message":"provider busy"}}),
+        );
+        assert!(!actions
+            .iter()
+            .any(|action| matches!(action, AppServerAction::TurnEnded { .. })));
         assert!(actions.iter().any(|action| matches!(action, AppServerAction::Event(NormalizedEvent { event: MiraEvent::Activity { kind, .. }, .. }) if kind == "retry")));
-        assert!(map_notification("error", &json!({"willRetry":false})).iter().any(|action| matches!(action, AppServerAction::TurnEnded { is_error:true, .. })));
+        assert!(map_notification("error", &json!({"willRetry":false}))
+            .iter()
+            .any(|action| matches!(action, AppServerAction::TurnEnded { is_error: true, .. })));
     }
 
     #[test]
@@ -2286,7 +2660,8 @@ mod tests {
             Some(&mcp),
         );
         assert_eq!(params["model"], "gpt-5-codex");
-        for key in ["mcp_servers.mira"] {
+        {
+            let key = "mcp_servers.mira";
             let mira = &params["config"][key];
             assert_eq!(mira["url"], "http://127.0.0.1:7777/mcp");
             assert_eq!(mira["http_headers"]["Authorization"], "Bearer secret-token");
@@ -2314,7 +2689,9 @@ mod tests {
                 "read-only",
                 "user",
                 None,
-                None, "approval-required", false
+                None,
+                "approval-required",
+                false
             )["threadId"],
             "t"
         );
@@ -2327,7 +2704,9 @@ mod tests {
             "read-only",
             "user",
             None,
-            None, "approval-required", false
+            None,
+            "approval-required",
+            false,
         );
         assert_eq!(turn["input"], json!([{ "type": "text", "text": "hello" }]));
         assert_eq!(turn["model"], "gpt-5-codex");
@@ -2356,7 +2735,9 @@ mod tests {
                 "workspace-write",
                 "auto_review",
                 Some("high"),
-                Some("priority"), "approval-required", false
+                Some("priority"),
+                "approval-required",
+                false
             )["model"],
             DEFAULT_CODEX_MODEL
         );
@@ -2403,7 +2784,10 @@ mod tests {
         let params = json!({ "permissions": { "network": { "enabled": true },
             "fileSystem": { "write": ["/tmp/project"] } }, "threadId": "t" });
         let allow = approval_response("item/permissions/requestApproval", &params, &true.into());
-        assert_eq!(allow, json!({ "permissions": params["permissions"], "scope": "turn" }));
+        assert_eq!(
+            allow,
+            json!({ "permissions": params["permissions"], "scope": "turn" })
+        );
         let deny = approval_response("item/permissions/requestApproval", &params, &false.into());
         assert_eq!(deny, json!({ "permissions": {}, "scope": "turn" }));
         assert!(allow.get("decision").is_none());
@@ -2487,7 +2871,10 @@ mod tests {
             "approval-required"
         );
         assert_eq!(mode_for_permission(PermissionMode::Auto), "auto");
-        assert_eq!(mode_for_permission(PermissionMode::AcceptEdits), "auto-accept-edits");
+        assert_eq!(
+            mode_for_permission(PermissionMode::AcceptEdits),
+            "auto-accept-edits"
+        );
         assert_eq!(mode_views().len(), 5);
     }
 
@@ -2562,12 +2949,23 @@ done
     #[test]
     fn plan_mode_uses_codexs_own_plan_prompt_and_stays_read_only() {
         let turn = turn_start_params(
-            "t", "plan it", Some("gpt-5"), None, "on-request", "read-only", "user", None, None,
-            "plan", true,
+            "t",
+            "plan it",
+            Some("gpt-5"),
+            None,
+            "on-request",
+            "read-only",
+            "user",
+            None,
+            None,
+            "plan",
+            true,
         );
         assert_eq!(turn["collaborationMode"]["mode"], "plan");
         assert!(
-            turn["collaborationMode"]["settings"].get("developer_instructions").is_none(),
+            turn["collaborationMode"]["settings"]
+                .get("developer_instructions")
+                .is_none(),
             "plan mode must leave Codex's built-in plan prompt in charge"
         );
         assert_eq!(turn["sandboxPolicy"]["type"], "readOnly");
@@ -2578,12 +2976,26 @@ done
     #[test]
     fn mira_tool_guidance_rides_on_additional_context_not_the_mode_prompt() {
         let with = turn_start_params(
-            "t", "hi", None, None, "untrusted", "read-only", "user", None, None,
-            "approval-required", true,
+            "t",
+            "hi",
+            None,
+            None,
+            "untrusted",
+            "read-only",
+            "user",
+            None,
+            None,
+            "approval-required",
+            true,
         );
-        let ctx = with["additionalContext"]["mira_tools"]["value"].as_str().unwrap();
+        let ctx = with["additionalContext"]["mira_tools"]["value"]
+            .as_str()
+            .unwrap();
         assert!(ctx.contains("ask_user") && ctx.contains("browser_open"));
-        assert_eq!(with["additionalContext"]["mira_tools"]["kind"], "application");
+        assert_eq!(
+            with["additionalContext"]["mira_tools"]["kind"],
+            "application"
+        );
         // The mode prompt carries mode rules only: newer models drop it.
         let mode_text = with["collaborationMode"]["settings"]["developer_instructions"]
             .as_str()
@@ -2591,15 +3003,27 @@ done
         assert!(!mode_text.contains("Mira"), "{mode_text}");
         // No tool server, no claim about its tools.
         let without = turn_start_params(
-            "t", "hi", None, None, "untrusted", "read-only", "user", None, None,
-            "approval-required", false,
+            "t",
+            "hi",
+            None,
+            None,
+            "untrusted",
+            "read-only",
+            "user",
+            None,
+            None,
+            "approval-required",
+            false,
         );
         assert!(without.get("additionalContext").is_none());
     }
 
     #[test]
     fn codex_tags_its_tool_server_connection() {
-        let mcp = crate::session::MiraMcp { url: "http://127.0.0.1:1/mcp".into(), token: "t".into() };
+        let mcp = crate::session::MiraMcp {
+            url: "http://127.0.0.1:1/mcp".into(),
+            token: "t".into(),
+        };
         let config = codex_thread_config(Some(&mcp));
         assert_eq!(
             config["mcp_servers.mira"]["http_headers"][crate::session::MIRA_TOOL_PROFILE_HEADER],
@@ -2611,10 +3035,20 @@ done
     fn mcp_elicitations_are_answered_in_mcps_own_shape() {
         use crate::native::PermissionDecision;
         let m = "mcpServer/elicitation/request";
-        let params = json!({ "serverName": "linear", "message": "Pick a team", "requestedSchema": {} });
-        assert_eq!(permission_from_request(m, "r", &params).unwrap().tool_name, "mcp_elicitation");
-        assert_eq!(approval_response(m, &params, &PermissionDecision::from(false)), json!({ "action": "decline" }));
-        assert_eq!(approval_response(m, &params, &PermissionDecision::from(true)), json!({ "action": "accept" }));
+        let params =
+            json!({ "serverName": "linear", "message": "Pick a team", "requestedSchema": {} });
+        assert_eq!(
+            permission_from_request(m, "r", &params).unwrap().tool_name,
+            "mcp_elicitation"
+        );
+        assert_eq!(
+            approval_response(m, &params, &PermissionDecision::from(false)),
+            json!({ "action": "decline" })
+        );
+        assert_eq!(
+            approval_response(m, &params, &PermissionDecision::from(true)),
+            json!({ "action": "accept" })
+        );
         let filled = PermissionDecision {
             allow: true,
             updated_input: Some(json!({ "content": { "team": "ENG" } })),
@@ -2640,7 +3074,9 @@ done
         assert!(edited.ends_with("1. Do the thing"));
         let revise = plan_follow_up(&PermissionDecision {
             allow: false,
-            message: Some("The user rejected the plan: too big. Revise it and propose again.".into()),
+            message: Some(
+                "The user rejected the plan: too big. Revise it and propose again.".into(),
+            ),
             ..Default::default()
         });
         assert!(revise.unwrap().contains("too big"));
@@ -2650,6 +3086,76 @@ done
             ..Default::default()
         });
         assert!(dismissed.is_none());
+    }
+
+    #[tokio::test]
+    async fn undo_rewinds_codexs_own_thread_to_the_right_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("codex");
+        let log = dir.path().join("calls.log");
+        std::fs::write(
+            &path,
+            format!(
+                r##"#!/bin/sh
+id_of() {{ printf '%s' "$1" | sed -E 's/^\{{"jsonrpc":"2\.0","id":([0-9]+),.*/\1/'; }}
+n=0
+while IFS= read -r line; do
+  id=$(id_of "$line")
+  case "$line" in
+    *'"method":"thread/start"'*) echo "{{\"id\":$id,\"result\":{{\"threadId\":\"th-1\"}}}}" ;;
+    *'"method":"turn/start"'*)
+      n=$((n+1))
+      echo "{{\"id\":$id,\"result\":{{\"turn\":{{\"id\":\"tu-$n\"}}}}}}"
+      echo "{{\"method\":\"turn/completed\",\"params\":{{\"turn\":{{\"id\":\"tu-$n\",\"status\":\"completed\"}}}}}}" ;;
+    *'"method":"thread/turns/list"'*)
+      echo turns/list >> '{log}'
+      echo "{{\"id\":$id,\"result\":{{\"data\":[{{\"id\":\"tu-2\"}},{{\"id\":\"tu-1\"}}],\"nextCursor\":null}}}}" ;;
+    *'"method":"thread/revert"'*)
+      case "$line" in *'"beforeTurnId":"tu-2"'*) echo revert:tu-2 >> '{log}' ;; *) echo revert:other >> '{log}' ;; esac
+      echo "{{\"id\":$id,\"result\":{{}}}}" ;;
+    *'"id":'*) echo "{{\"id\":$id,\"result\":{{}}}}" ;;
+  esac
+done
+"##,
+                log = log.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let cfg = LaunchConfig {
+            program: path,
+            args: vec!["app-server".to_string()],
+            env: Default::default(),
+            secret_env: Vec::new(),
+            env_deny: Vec::new(),
+        };
+        let gate: PermissionGate =
+            Arc::new(|_| Box::pin(async { crate::native::PermissionDecision::from(true) }));
+        let agent = AppServerAgent::start(&cfg, "auto", None, None, None, gate, None)
+            .await
+            .unwrap();
+        let mut ends = agent.turn_end.lock().unwrap().take().unwrap();
+        for text in ["first", "second"] {
+            agent.prompt(text).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(10), ends.recv())
+                .await
+                .unwrap();
+        }
+        // Undo the last message: one Codex turn, so revert before tu-2.
+        agent.rewind(1).await.expect("rewind");
+        assert_eq!(
+            std::fs::read_to_string(&log)
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
+            ["turns/list", "revert:tu-2"]
+        );
+        assert_eq!(agent.turns_for_prompts(1), 1, "one prompt left");
+        agent.shutdown().await;
     }
 
     #[tokio::test]
@@ -2723,13 +3229,19 @@ done
             .unwrap();
         assert_eq!(end.stop_reason, "completed");
         assert_eq!(
-            std::fs::read_to_string(&turns_log).unwrap().lines().collect::<Vec<_>>(),
+            std::fs::read_to_string(&turns_log)
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
             ["plan", "build"]
         );
         let asked = asked.lock().await;
         assert_eq!(asked.len(), 1);
         assert_eq!(asked[0].tool_name, "ExitPlanMode");
-        assert!(asked[0].input["plan"].as_str().unwrap().contains("Write code"));
+        assert!(asked[0].input["plan"]
+            .as_str()
+            .unwrap()
+            .contains("Write code"));
         // Approval returns to the mode chosen before planning.
         let mut back_to = None;
         while let Ok(e) = events.try_recv() {
@@ -2845,7 +3357,9 @@ done
             "workspace-write",
             "never-ask",
             Some("medium"),
-            None, "approval-required", false
+            None,
+            "approval-required",
+            false,
         );
         let frame = serde_json::json!({
             "jsonrpc": "2.0", "id": 7, "method": "turn/start", "params": params,
@@ -3009,6 +3523,78 @@ mod runtime_tests {
 mod thread_isolation_tests {
     use super::*;
     use crate::conn::AgentCallback;
+
+    fn callbacks(tx: mpsc::Sender<NormalizedEvent>) -> Callbacks {
+        Callbacks {
+            tx,
+            end_tx: mpsc::channel(4).0,
+            thread_id: Arc::new(Mutex::new(Some("root".to_owned()))),
+            active_turn: Default::default(),
+            goal_active: Default::default(),
+            rate_limits: Default::default(),
+            items: Default::default(),
+            models: Default::default(),
+            gate: Arc::new(|_| Box::pin(async { Default::default() })),
+            turns: Arc::new(TurnContext {
+                model: Default::default(),
+                mode: Mutex::new("auto".into()),
+                build_mode: Mutex::new("auto".into()),
+                cwd: None,
+                effort: None,
+                service_tier: None,
+                mira_tools: false,
+                prompt_turns: Default::default(),
+                ended_turns: Default::default(),
+                context_window: Default::default(),
+            }),
+            proposed_plan: Default::default(),
+            plan_review: mpsc::channel(1).0,
+        }
+    }
+
+    #[tokio::test]
+    async fn context_usage_keeps_its_window_and_subagent_spend_counts() {
+        let (tx, mut events) = mpsc::channel(32);
+        let cb = callbacks(tx);
+        let usage = |thread: &str, used: u64, window: Option<u64>| {
+            let mut u = json!({ "last": { "totalTokens": used }, "total": { "inputTokens": used, "outputTokens": 10, "cachedInputTokens": 0 } });
+            if let Some(w) = window {
+                u["modelContextWindow"] = json!(w);
+            }
+            json!({ "threadId": thread, "tokenUsage": u })
+        };
+        cb.on_notification(
+            "thread/tokenUsage/updated",
+            usage("root", 1000, Some(272_000)),
+        )
+        .await;
+        cb.on_notification("thread/tokenUsage/updated", usage("root", 2000, None))
+            .await;
+        cb.on_notification(
+            "thread/tokenUsage/updated",
+            usage("child", 500, Some(272_000)),
+        )
+        .await;
+        let mut sizes = Vec::new();
+        let mut spend_sessions = Vec::new();
+        while let Ok(e) = events.try_recv() {
+            match e.event {
+                MiraEvent::Usage { used, size, .. } => sizes.push((used, size)),
+                MiraEvent::Spend { session, .. } => {
+                    spend_sessions.push(session.unwrap_or_default())
+                }
+                _ => {}
+            }
+        }
+        // The second update had no window: the last known one carries over.
+        // The child's context never reaches the ring.
+        assert_eq!(sizes, [(1000, 272_000), (2000, 272_000)]);
+        // But its spend does, under its own thread.
+        assert!(
+            spend_sessions.contains(&"child".to_string()),
+            "{spend_sessions:?}"
+        );
+    }
     #[tokio::test]
     async fn child_threads_cannot_redirect_or_finish_the_root_turn() {
         let (tx, mut events) = mpsc::channel(16);
@@ -3033,6 +3619,9 @@ mod thread_isolation_tests {
                 effort: None,
                 service_tier: None,
                 mira_tools: false,
+                prompt_turns: Default::default(),
+                ended_turns: Default::default(),
+                context_window: Default::default(),
             }),
             proposed_plan: Default::default(),
             plan_review: mpsc::channel(1).0,

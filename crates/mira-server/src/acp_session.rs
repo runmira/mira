@@ -90,7 +90,9 @@ impl SlotAgent {
                 // Grok's soft interrupt leaves background subagents alive.
                 // Explicit Stop owns the entire runtime and its terminals.
                 self.stop().await;
-            } else { let _ = agent.cancel().await; }
+            } else {
+                let _ = agent.cancel().await;
+            }
         }
     }
 
@@ -199,10 +201,16 @@ pub async fn start_agent(
         }
         _ => driver.resolve(&driver_cfg, mode, program.clone()),
     };
-    let opencode_control = if driver.kind() == "opencode" && matches!(transport, Transport::Acp)
-        && crate::opencode_control::OpenCodeControl::supported(&launch).await {
-        Some(crate::opencode_control::OpenCodeControl::configure(&mut launch)?)
-    } else { None };
+    let opencode_control = if driver.kind() == "opencode"
+        && matches!(transport, Transport::Acp)
+        && crate::opencode_control::OpenCodeControl::supported(&launch).await
+    {
+        Some(crate::opencode_control::OpenCodeControl::configure(
+            &mut launch,
+        )?)
+    } else {
+        None
+    };
     if !mira_acp::process::looks_installed(&launch) {
         return Err(format!(
             "{} is not installed (looked for `{}`)",
@@ -546,7 +554,11 @@ fn ensure_transcript_logger(state: &AppState, slot: &Arc<SessionSlot>) {
             }
             let model_changed = {
                 let launch = slot.acp_launch.lock().await;
-                crate::session_engine::observe_frame(&slot.engine, &msg, launch.as_ref().map(|params| params.driver_kind.as_str()))
+                crate::session_engine::observe_frame(
+                    &slot.engine,
+                    &msg,
+                    launch.as_ref().map(|params| params.driver_kind.as_str()),
+                )
             };
             if model_changed {
                 crate::session_engine::publish(&state, &slot).await;
@@ -601,7 +613,7 @@ fn native_permission_tool_view(
             .get("command")
             .and_then(|v| v.as_str())
             .or_else(|| p.input.as_str())
-            .or_else(|| p.reason.as_deref())
+            .or(p.reason.as_deref())
             .unwrap_or("")
             .trim()
             .to_string();
@@ -628,7 +640,7 @@ fn native_permission_tool_view(
             .or_else(|| p.input.get("diff"))
             .or_else(|| p.input.get("changes"))
             .and_then(|v| v.as_str())
-            .or_else(|| p.reason.as_deref())
+            .or(p.reason.as_deref())
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
@@ -650,8 +662,17 @@ fn native_permission_tool_view(
 
     // An MCP server's confirmation through Codex: say who asks and what.
     if p.tool_name == "mcp_elicitation" {
-        let server = p.input.get("serverName").and_then(|v| v.as_str()).unwrap_or("MCP server");
-        let message = p.input.get("message").and_then(|v| v.as_str()).unwrap_or("").trim();
+        let server = p
+            .input
+            .get("serverName")
+            .and_then(|v| v.as_str())
+            .unwrap_or("MCP server");
+        let message = p
+            .input
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
         return (
             format!("mcp: {server}"),
             serde_json::json!({
@@ -715,18 +736,31 @@ pub(crate) fn codex_approval_mode(mode: &str) -> Option<mira_policy::Mode> {
 /// Apply the persisted chat posture and wake permissions that were already
 /// waiting. A native runtime restart must not leave the current turn parked.
 pub(crate) async fn set_agent_approval_mode(slot: &Arc<SessionSlot>, mode: mira_policy::Mode) {
-    slot.session.read().await.set_agent_approval_mode(mode).await;
+    slot.session
+        .read()
+        .await
+        .set_agent_approval_mode(mode)
+        .await;
     slot.engine.approval_mode_changed.notify_waiters();
 }
 
-async fn approve_native_tool(slot: &Arc<SessionSlot>, tool: &str, call: &mira_core::ToolCall) -> bool {
+async fn approve_native_tool(
+    slot: &Arc<SessionSlot>,
+    tool: &str,
+    call: &mira_core::ToolCall,
+) -> bool {
     let (allow, automatic) = wait_native_approval(
         slot.approver.approve(call, Decision::Ask),
         &slot.engine.approval_mode_changed,
         || async { slot.session.read().await.config().await.agent_approval_mode },
         tool,
-    ).await;
-    if automatic && crate::approver::resolve(&slot.pending, &call.id.to_string(), true).await.is_some() {
+    )
+    .await;
+    if automatic
+        && crate::approver::resolve(&slot.pending, &call.id.to_string(), true)
+            .await
+            .is_some()
+    {
         let _ = slot.events_tx.send(ServerMsg::ToolEnd {
             result: mira_core::ToolResult::ok(call.id.clone(), "Allowed by the chat approval mode"),
         });
@@ -735,7 +769,10 @@ async fn approve_native_tool(slot: &Arc<SessionSlot>, tool: &str, call: &mira_co
 }
 
 async fn wait_native_approval<F, C, M>(
-    approval: F, changes: &tokio::sync::Notify, mut current_mode: C, tool: &str,
+    approval: F,
+    changes: &tokio::sync::Notify,
+    mut current_mode: C,
+    tool: &str,
 ) -> (bool, bool)
 where
     F: std::future::Future<Output = bool>,
@@ -773,7 +810,13 @@ fn auto_approve_native_permission(mode: mira_policy::Mode, tool: &str) -> bool {
         mira_policy::Mode::Edit | mira_policy::Mode::Yolo => true,
         mira_policy::Mode::Auto => matches!(
             tool.as_str(),
-            "apply_patch" | "patch" | "file_change" | "edit" | "write" | "multiedit" | "notebookedit"
+            "apply_patch"
+                | "patch"
+                | "file_change"
+                | "edit"
+                | "write"
+                | "multiedit"
+                | "notebookedit"
         ),
         _ => false,
     }
@@ -809,7 +852,10 @@ async fn decide_native_permission(
             // effect immediately, and returning to Ask restores the gate.
             let mode = slot.session.read().await.config().await.agent_approval_mode;
             if auto_approve_native_permission(mode, &p.tool_name) {
-                return PermissionDecision { allow: true, ..Default::default() };
+                return PermissionDecision {
+                    allow: true,
+                    ..Default::default()
+                };
             }
             let call_id = mira_core::ToolCallId::new();
             let call = native_permission_call(&p, call_id.clone());
@@ -1286,12 +1332,25 @@ async fn codex_elicitation(
             ..Default::default()
         };
     }
-    let server = p.input.get("serverName").and_then(|v| v.as_str()).unwrap_or("An MCP server");
-    let message = p.input.get("message").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let server = p
+        .input
+        .get("serverName")
+        .and_then(|v| v.as_str())
+        .unwrap_or("An MCP server");
+    let message = p
+        .input
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
     let req = ElicitationRequest {
         session_id: String::new(),
         tool_call_id: p.tool_use_id.clone(),
-        message: if message.is_empty() { format!("{server} needs some details") } else { format!("{server}: {message}") },
+        message: if message.is_empty() {
+            format!("{server} needs some details")
+        } else {
+            format!("{server}: {message}")
+        },
         schema: p.input.get("requestedSchema").cloned().unwrap_or_default(),
     };
     match ask_elicitation(slot, &req).await {
@@ -1892,6 +1951,34 @@ pub async fn revert_agent_turn(
         .next()
         .map(str::to_string);
 
+    // An agent that can rewind its own conversation (Codex) forgets the
+    // reverted prompts and keeps the rest; anything else restarts fresh.
+    // Prompts to undo: this agent's user messages from `turn` on, minus
+    // steers (those joined a running turn rather than starting one).
+    let driver = slot
+        .acp_launch
+        .lock()
+        .await
+        .as_ref()
+        .map(|p| p.driver_kind.clone());
+    let prompts = lines
+        .iter()
+        .filter(|l| l.get("user").is_some())
+        .skip(turn as usize - 1)
+        .filter(|l| l.pointer("/user/input_intent").and_then(|v| v.as_str()) != Some("steer"))
+        .filter(|l| {
+            driver.is_none() || l.get("driver").and_then(|d| d.as_str()) == driver.as_deref()
+        })
+        .count();
+    let live = match slot.acp_agent.read().await.clone() {
+        Some(h) => h.agent().await,
+        None => None,
+    };
+    let rewind = match live {
+        Some(agent) => agent.rewind(prompts).await,
+        None => None,
+    };
+
     let mut notes = Vec::new();
     if let Some(hash) = hash.as_deref() {
         let cwd = slot.cwd.read().await.clone();
@@ -1906,6 +1993,17 @@ pub async fn revert_agent_turn(
 
     mira_acp::snapshot::truncate_from_turn(&path, turn)
         .map_err(|e| format!("could not truncate transcript: {e}"))?;
+    match rewind {
+        Some(Ok(())) => {
+            notes.push(format!(
+                "rewound the agent's own thread by {prompts} message{}",
+                if prompts == 1 { "" } else { "s" }
+            ));
+            return Ok(notes.join("; "));
+        }
+        Some(Err(e)) => notes.push(format!("couldn't rewind the agent ({e})")),
+        None => {}
+    }
     // The cursor points at the pre-revert session; keeping it would resume
     // exactly what was just left behind.
     if let Some(params) = slot.acp_launch.lock().await.clone() {
@@ -1935,8 +2033,17 @@ pub async fn stop_agent(slot: &Arc<SessionSlot>) -> bool {
     // (it ends when the chat is deleted, or goes unused for 12 h).
     slot.engine.generation.fetch_add(1, Ordering::SeqCst);
     slot.engine.agent_in_turn.store(false, Ordering::SeqCst);
-    let cancelled=slot.engine.activity.lock().unwrap_or_else(|e|e.into_inner()).cancel_work();
-    for work in cancelled {let _=slot.events_tx.send(crate::protocol::ServerMsg::RuntimeWorkUpdated {work});}
+    let cancelled = slot
+        .engine
+        .activity
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .cancel_work();
+    for work in cancelled {
+        let _ = slot
+            .events_tx
+            .send(crate::protocol::ServerMsg::RuntimeWorkUpdated { work });
+    }
     *slot
         .engine
         .activity
@@ -2380,22 +2487,47 @@ mod native_permission_view_tests {
         use std::sync::atomic::{AtomicBool, Ordering};
         let automatic = AtomicBool::new(false);
         let changes = tokio::sync::Notify::new();
-        let wait = wait_native_approval(std::future::pending(), &changes,
-            || std::future::ready(if automatic.load(Ordering::SeqCst) {
-                mira_policy::Mode::Edit
-            } else { mira_policy::Mode::Auto }), "Bash");
+        let wait = wait_native_approval(
+            std::future::pending(),
+            &changes,
+            || {
+                std::future::ready(if automatic.load(Ordering::SeqCst) {
+                    mira_policy::Mode::Edit
+                } else {
+                    mira_policy::Mode::Auto
+                })
+            },
+            "Bash",
+        );
         tokio::pin!(wait);
-        assert!(tokio::time::timeout(std::time::Duration::from_millis(10), &mut wait).await.is_err());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut wait)
+                .await
+                .is_err()
+        );
         automatic.store(true, Ordering::SeqCst);
         changes.notify_waiters();
-        assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(1), wait).await.unwrap(), (true, true));
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), wait)
+                .await
+                .unwrap(),
+            (true, true)
+        );
     }
 
     #[tokio::test]
     async fn automatic_posture_keeps_questions_interactive() {
         let changes = tokio::sync::Notify::new();
-        assert_eq!(wait_native_approval(std::future::ready(false), &changes,
-            || std::future::ready(mira_policy::Mode::Edit), "request_user_input").await, (false, false));
+        assert_eq!(
+            wait_native_approval(
+                std::future::ready(false),
+                &changes,
+                || std::future::ready(mira_policy::Mode::Edit),
+                "request_user_input"
+            )
+            .await,
+            (false, false)
+        );
     }
 
     #[test]
@@ -2412,13 +2544,29 @@ mod native_permission_view_tests {
     #[test]
     fn native_modes_gate_actions_but_never_answer_questions_or_plans() {
         use mira_policy::Mode;
-        for tool in ["shell", "Bash", "apply_patch", "Edit", "Write", "permission", "unknown"] {
+        for tool in [
+            "shell",
+            "Bash",
+            "apply_patch",
+            "Edit",
+            "Write",
+            "permission",
+            "unknown",
+        ] {
             assert!(!auto_approve_native_permission(Mode::Manual, tool));
             assert!(!auto_approve_native_permission(Mode::Plan, tool));
             assert!(auto_approve_native_permission(Mode::Edit, tool));
             assert!(auto_approve_native_permission(Mode::Yolo, tool));
         }
-        for tool in ["apply_patch", "patch", "file_change", "Edit", "Write", "MultiEdit", "NotebookEdit"] {
+        for tool in [
+            "apply_patch",
+            "patch",
+            "file_change",
+            "Edit",
+            "Write",
+            "MultiEdit",
+            "NotebookEdit",
+        ] {
             assert!(auto_approve_native_permission(Mode::Auto, tool));
         }
         for tool in ["shell", "Bash", "permission", "unknown"] {

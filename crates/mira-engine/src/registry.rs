@@ -25,6 +25,30 @@ pub struct EngineRegistry {
     instances: BTreeMap<EngineId, EngineInstance>,
 }
 
+/// A native instance's prompt-caching mode, for the engines API (#89).
+fn caching_mode(cfg: &MiraConfig, name: &str) -> String {
+    let settings = crate::native::native_settings(cfg, name);
+    let base_url = settings
+        .entry
+        .base_url
+        .clone()
+        .or_else(|| mira_config::default_base_url_for(&settings.preset).map(str::to_owned))
+        .unwrap_or_default();
+    if mira_config::prompt_caching_enabled(
+        &settings.preset,
+        &base_url,
+        settings.entry.prompt_caching,
+    ) {
+        "markers".into()
+    } else if mira_config::caching_capability(&settings.preset, &base_url)
+        == mira_config::CachingCapability::Automatic
+    {
+        "automatic".into()
+    } else {
+        "off".into()
+    }
+}
+
 /// How far an external probe may go.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProbeDepth {
@@ -103,6 +127,8 @@ impl EngineRegistry {
             install_hint: None,
             launch: None,
             credential_note: None,
+            prompt_caching: Some(caching_mode(cfg, name)),
+            agent: None,
         })
     }
 
@@ -153,6 +179,8 @@ impl EngineRegistry {
                 install_hint: None,
                 launch: None,
                 credential_note: None,
+                prompt_caching: None,
+                agent: None,
             });
         };
         let cfg = driver_config_for(inst);
@@ -195,7 +223,7 @@ impl EngineRegistry {
             flavor: EngineFlavor::External,
             display_name: status.display_name.clone(),
             enabled: inst.enabled,
-            state: match status.state {
+            state: match status.state.clone() {
                 mira_acp::status::AgentState::Ready => EngineState::Ready,
                 mira_acp::status::AgentState::NotFound { looked_for } => {
                     EngineState::NotFound { looked_for }
@@ -208,6 +236,8 @@ impl EngineRegistry {
             install_hint: status.install_hint.clone(),
             launch: Some(status.launch.clone()),
             credential_note: self.credential_sharing_note(inst),
+            prompt_caching: None,
+            agent: Some(status),
         })
     }
 
@@ -306,6 +336,8 @@ impl EngineRegistry {
                             install_hint: None,
                             launch: None,
                             credential_note: None,
+                            prompt_caching: None,
+                            agent: None,
                         })
                     }
                 };

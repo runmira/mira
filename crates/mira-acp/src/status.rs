@@ -367,6 +367,7 @@ async fn probe_initialize(
 /// ACP itself has no "list models" verb, so this is what keeps the
 /// picker from being empty before the first chat.
 async fn fill_cli_models(status: &mut AgentStatus, driver: &dyn AcpDriver) {
+    fill_known_models(status, driver);
     let args = driver.cli_models_args();
     if args.is_empty() {
         return;
@@ -387,6 +388,20 @@ async fn fill_cli_models(status: &mut AgentStatus, driver: &dyn AcpDriver) {
         if !models.is_empty() {
             status.models = models;
         }
+    }
+}
+
+/// The driver's stable aliases, when the probe found no catalog of its own.
+fn fill_known_models(status: &mut AgentStatus, driver: &dyn AcpDriver) {
+    if status.models.is_empty() {
+        status.models = driver
+            .known_models()
+            .iter()
+            .map(|(value, label)| crate::appserver::CodexModel {
+                value: (*value).to_string(),
+                label: (*label).to_string(),
+            })
+            .collect();
     }
 }
 
@@ -665,6 +680,20 @@ fn friendly_auth_id(id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn claude_code_lists_its_aliases_before_a_session() {
+        use crate::drivers::ClaudeCodeDriver;
+        let values: Vec<_> = ClaudeCodeDriver
+            .known_models()
+            .iter()
+            .map(|(v, _)| *v)
+            .collect();
+        assert!(
+            values.contains(&"opus") && values.contains(&"sonnet"),
+            "{values:?}"
+        );
+    }
     use crate::drivers::ClaudeCodeDriver;
 
     #[test]

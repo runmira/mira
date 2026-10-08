@@ -280,9 +280,13 @@ impl BrowserAction {
             Self::Key { key } => key.clone(),
             Self::Evaluate { expression } => expression.clone(),
             Self::Scroll { direction, .. } => direction.clone().unwrap_or_else(|| "down".into()),
-            Self::Hover { element, selector } | Self::Select { element, selector, .. } => {
-                element.clone().or_else(|| selector.clone()).unwrap_or_default()
-            }
+            Self::Hover { element, selector }
+            | Self::Select {
+                element, selector, ..
+            } => element
+                .clone()
+                .or_else(|| selector.clone())
+                .unwrap_or_default(),
             // The files are what a rule should see: uploading reads them.
             Self::Upload { files, .. } => files.join(","),
             Self::Dialog { accept, .. } => if *accept { "accept" } else { "dismiss" }.into(),
@@ -648,7 +652,8 @@ async fn sync_screencast_inner(sess: &mut Session) {
         .call(
             Some(&sid),
             "Page.startScreencast",
-            json!({ "format": "jpeg", "quality": 70, "maxWidth": max_w, "maxHeight": max_h, "everyNthFrame": 1 }),
+            // Quality 90: at 70, JPEG smeared small text in the live view.
+            json!({ "format": "jpeg", "quality": 90, "maxWidth": max_w, "maxHeight": max_h, "everyNthFrame": 1 }),
         )
         .await;
     if started.is_ok() {
@@ -1266,19 +1271,39 @@ async fn run(
         } => {
             // `action` is borrowed, so the scalars arrive as references.
             let (w, h) = (*width, *height);
-            // Width 0 is CDP's "clear the override" sentinel; passing the
-            // whole thing through is what returns the page to its real size.
-            page_call(
-                sess,
-                "Emulation.setDeviceMetricsOverride",
-                json!({
-                    "width": w,
-                    "height": h,
-                    "deviceScaleFactor": 1,
-                    "mobile": mobile,
-                }),
-            )
-            .await?;
+            if w == 0 {
+                // Back to the real size: with someone watching that's the
+                // live view's size and pixel density, else no override.
+                match sess.view {
+                    Some(v) => {
+                        page_call(
+                            sess,
+                            "Emulation.setDeviceMetricsOverride",
+                            json!({ "width": v.width, "height": v.height, "deviceScaleFactor": v.scale, "mobile": false }),
+                        )
+                        .await?;
+                    }
+                    None => {
+                        page_call(sess, "Emulation.clearDeviceMetricsOverride", json!({})).await?;
+                    }
+                }
+            } else {
+                // Keep the watcher's pixel density: forcing 1 rendered every
+                // later frame at half resolution on a Retina screen (blurry),
+                // and stuck until the pane was resized. 0 = the device's own.
+                let scale = sess.view.map(|v| v.scale).unwrap_or(0.0);
+                page_call(
+                    sess,
+                    "Emulation.setDeviceMetricsOverride",
+                    json!({
+                        "width": w,
+                        "height": h,
+                        "deviceScaleFactor": scale,
+                        "mobile": mobile,
+                    }),
+                )
+                .await?;
+            }
             if w == 0 {
                 Ok(text_only("Viewport override cleared.".into()))
             } else {
@@ -1505,7 +1530,10 @@ async fn run(
                 json!({ "type": "mouseMoved", "x": x, "y": y }),
             )
             .await?;
-            let what = element.clone().or_else(|| selector.clone()).unwrap_or_default();
+            let what = element
+                .clone()
+                .or_else(|| selector.clone())
+                .unwrap_or_default();
             with_snapshot(sess, format!("Hovering over {what}.")).await
         }
         A::Select {
@@ -1594,10 +1622,13 @@ async fn run(
                 element_center(sess, from_element.as_deref(), from_selector.as_deref()).await?;
             let (x1, y1) =
                 element_center(sess, to_element.as_deref(), to_selector.as_deref()).await?;
-            let mouse = |kind: &str, x: f64, y: f64| {
-                json!({ "type": kind, "x": x, "y": y, "button": "left", "buttons": 1, "clickCount": 1 })
-            };
-            page_call(sess, "Input.dispatchMouseEvent", mouse("mousePressed", x0, y0)).await?;
+            let mouse = |kind: &str, x: f64, y: f64| json!({ "type": kind, "x": x, "y": y, "button": "left", "buttons": 1, "clickCount": 1 });
+            page_call(
+                sess,
+                "Input.dispatchMouseEvent",
+                mouse("mousePressed", x0, y0),
+            )
+            .await?;
             // Intermediate moves: drag libraries wait for a threshold.
             for i in 1..=8 {
                 let t = f64::from(i) / 8.0;
@@ -1609,7 +1640,12 @@ async fn run(
                 .await?;
                 tokio::time::sleep(Duration::from_millis(16)).await;
             }
-            page_call(sess, "Input.dispatchMouseEvent", mouse("mouseReleased", x1, y1)).await?;
+            page_call(
+                sess,
+                "Input.dispatchMouseEvent",
+                mouse("mouseReleased", x1, y1),
+            )
+            .await?;
             with_snapshot(sess, "Dragged.".into()).await
         }
         A::Dialog { accept, text } => {
@@ -1627,7 +1663,11 @@ async fn run(
                 *open = None;
             }
             let verb = if *accept { "Accepted" } else { "Dismissed" };
-            with_snapshot(sess, format!("{verb} the {} dialog ({:?}).", d.kind, d.message)).await
+            with_snapshot(
+                sess,
+                format!("{verb} the {} dialog ({:?}).", d.kind, d.message),
+            )
+            .await
         }
         A::WaitFor {
             text,
@@ -1645,10 +1685,15 @@ async fn run(
                     serde_json::to_string(sel).expect("string encodes")
                 ),
                 (None, None) => {
-                    return Err(BrowserError::InvalidArgs("give `text` or `selector`".into()))
+                    return Err(BrowserError::InvalidArgs(
+                        "give `text` or `selector`".into(),
+                    ))
                 }
             };
-            let what = text.clone().or_else(|| selector.clone()).unwrap_or_default();
+            let what = text
+                .clone()
+                .or_else(|| selector.clone())
+                .unwrap_or_default();
             let secs = timeout.unwrap_or(10.0).clamp(0.5, 30.0);
             let deadline = tokio::time::Instant::now() + Duration::from_secs_f64(secs);
             loop {
@@ -1664,8 +1709,14 @@ async fn run(
                     ));
                 }
                 if tokio::time::Instant::now() >= deadline {
-                    let state = if *gone { "still there" } else { "did not appear" };
-                    return Err(BrowserError::Page(format!("{what:?} {state} after {secs}s.")));
+                    let state = if *gone {
+                        "still there"
+                    } else {
+                        "did not appear"
+                    };
+                    return Err(BrowserError::Page(format!(
+                        "{what:?} {state} after {secs}s."
+                    )));
                 }
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }

@@ -93,6 +93,17 @@ pub async fn run(session: Session, skills: SkillHandle) -> Result<()> {
                     );
                     stdout.write_all(msg.as_bytes()).await?;
                 }
+                HarnessEvent::Compacting { tokens_before } => {
+                    let msg = format!(
+                        "\n[context] compacting ~{}k tokens…\n",
+                        tokens_before / 1000
+                    );
+                    stdout.write_all(msg.as_bytes()).await?;
+                }
+                HarnessEvent::CompactionFailed { error } => {
+                    let msg = format!("\n[context] couldn't compact ({error}); continuing with the full history\n");
+                    stdout.write_all(msg.as_bytes()).await?;
+                }
                 HarnessEvent::GoalSet { goal } => {
                     let msg = format!("\n[goal] set: {}\n", goal.condition);
                     stdout.write_all(msg.as_bytes()).await?;

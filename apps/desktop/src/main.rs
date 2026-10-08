@@ -562,22 +562,43 @@ async fn capture_screenshot() -> Result<Option<Vec<u8>>, String> {
     {
         static CAPTURE: Mutex<()> = Mutex::new(());
         tauri::async_runtime::spawn_blocking(|| {
-            let _guard = CAPTURE.try_lock().map_err(|_| "A screen capture is already open".to_owned())?;
-            let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|e| e.to_string())?.as_nanos();
-            let dir = std::env::temp_dir().join(format!("mira-capture-{}-{nonce}", std::process::id()));
+            let _guard = CAPTURE
+                .try_lock()
+                .map_err(|_| "A screen capture is already open".to_owned())?;
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|e| e.to_string())?
+                .as_nanos();
+            let dir =
+                std::env::temp_dir().join(format!("mira-capture-{}-{nonce}", std::process::id()));
             std::fs::create_dir(&dir).map_err(|e| e.to_string())?;
             let file = dir.join("capture.png");
             let result = (|| {
-                let status = Command::new("/usr/sbin/screencapture").args(["-i", "-x", "-t", "png"]).arg(&file).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().map_err(|e| e.to_string())?;
-                if !status.success() || !file.exists() { return Ok(None); }
+                let status = Command::new("/usr/sbin/screencapture")
+                    .args(["-i", "-x", "-t", "png"])
+                    .arg(&file)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .map_err(|e| e.to_string())?;
+                if !status.success() || !file.exists() {
+                    return Ok(None);
+                }
                 let size = std::fs::metadata(&file).map_err(|e| e.to_string())?.len();
-                if size > 16 * 1024 * 1024 { return Err("Capture exceeds 16 MB; select a smaller area".into()); }
+                if size > 16 * 1024 * 1024 {
+                    return Err("Capture exceeds 16 MB; select a smaller area".into());
+                }
                 std::fs::read(&file).map(Some).map_err(|e| e.to_string())
             })();
             let _ = std::fs::remove_dir_all(&dir);
             result
-        }).await.map_err(|e| e.to_string())?
+        })
+        .await
+        .map_err(|e| e.to_string())?
     }
     #[cfg(not(target_os = "macos"))]
-    { Err("Native region capture is unavailable on this platform".into()) }
+    {
+        Err("Native region capture is unavailable on this platform".into())
+    }
 }

@@ -197,6 +197,7 @@ impl ChatProvider for OpenAiCompatible {
                         prompt_tokens: u.prompt_tokens,
                         completion_tokens: u.completion_tokens,
                         cached_input_tokens: cached,
+                        cache_write_tokens: 0,
                     };
                     if tx.send(Ok(ChatEvent::Usage(usage))).await.is_err() {
                         return;

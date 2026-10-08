@@ -249,20 +249,21 @@ export function EnginePicker(props: EnginePickerProps) {
   const descriptors: OptionDescriptor[] = isAgent
     ? (agentDescriptors ?? [])
     : (currentInfo?.capabilities?.option_descriptors ?? []);
-  const [options, setOptions] = useState<Record<string, string>>(() => loadModelOptions(currentModel ?? ''));
+  const optionsInstance = !isAgent ? (engine?.instance ?? null) : null;
+  const [options, setOptions] = useState<Record<string, string>>(() => loadModelOptions(currentModel ?? '', optionsInstance));
   useEffect(() => {
     // On a provider model change, re-apply that model's remembered options
     // so the next turn runs with them rather than the previous model's.
     if (isAgent || !currentModel) return;
-    const next = loadModelOptions(currentModel);
+    const next = loadModelOptions(currentModel, optionsInstance);
     setOptions(next);
     for (const [id, value] of Object.entries(next)) onSetModelOption(id, value);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentModel, isAgent]);
+  }, [currentModel, isAgent, optionsInstance]);
   function pickOption(id: string, value: string) {
     const next = { ...options, [id]: value };
     setOptions(next);
-    if (!isAgent && currentModel) saveModelOptions(currentModel, next);
+    if (!isAgent && currentModel) saveModelOptions(currentModel, next, optionsInstance);
     onSetModelOption(id, value);
   }
 

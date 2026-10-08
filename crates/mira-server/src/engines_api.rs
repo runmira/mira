@@ -173,6 +173,8 @@ fn presence_only(inst: &mira_engine::EngineInstance) -> EngineSnapshot {
         install_hint: None,
         launch: None,
         credential_note: None,
+        prompt_caching: None,
+        agent: None,
     }
 }
 

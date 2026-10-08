@@ -491,7 +491,10 @@ export type ServerMsg =
   | { type: 'usage'; round: TokenUsage; totals: UsageTotals; context_window?: number | null; compact_at?: number | null }
   | { type: 'rate_limit'; rate_limit: RateLimit; summary: string | null }
   | { type: 'memory_learned'; count: number }
-  | { type: 'compacted'; messages_removed: number }
+  | { type: 'compacted'; messages_removed: number; tokens_before?: number | null; tokens_after?: number | null }
+  /** Compaction started (`manual` or `auto`). */
+  | { type: 'compacting'; trigger: string; tokens_before?: number | null }
+  | { type: 'compaction_failed'; error: string }
   | { type: 'goal_set'; goal: Goal }
   | { type: 'goal_cleared' }
   | { type: 'goal_progress'; iteration: number; max_iterations: number; status: GoalStatus; reason?: string | null }
@@ -613,7 +616,7 @@ export type ClientMsg =
   | { type: 'resend'; original: string; occurrence: number; text: string }
   | { type: 'approve'; call_id: string; allow: boolean; scope?: ApprovalScope }
   | ({ type: 'prompt_response'; prompt_id: string } & PromptResponse)
-  | { type: 'set_model'; model: string; instance?: string | null }
+  | { type: 'set_model'; model: string; instance?: string | null; options?: Record<string, string> }
   // -------- external ACP agents --------
   /** Bring an external agent up for this session, replacing any running one. */
   | {

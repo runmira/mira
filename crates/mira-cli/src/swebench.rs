@@ -278,6 +278,7 @@ async fn run_one(
             rec.cost_usd = mira_ai::cost_usd(
                 &settings.model,
                 mira_ai::TokenUsage {
+                    cache_write_tokens: 0,
                     prompt_tokens: tokens_in.min(u32::MAX as u64) as u32,
                     completion_tokens: tokens_out.min(u32::MAX as u64) as u32,
                     cached_input_tokens: 0,

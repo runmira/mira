@@ -27,8 +27,10 @@ use tracing::{error, info, warn};
 const TOOL_RESULT_HISTORY_CAP: usize = 4000;
 static STEER_GENERATION: AtomicU64 = AtomicU64::new(1);
 type SteerQueue = Vec<(Message, tokio::sync::oneshot::Sender<bool>)>;
-struct SteerInbox { generation: u64, pending: SteerQueue }
-
+struct SteerInbox {
+    generation: u64,
+    pending: SteerQueue,
+}
 
 /// When we truncate, how much of the cap goes to the tail. The head is
 /// usually most relevant (first lines of a diff, start of a file listing),
@@ -1131,33 +1133,60 @@ impl Session {
     /// Inject input at a model/tool boundary without cancelling executing
     /// tools or opening a new turn. Acknowledge only once history contains it.
     pub async fn steer(&self, text: String, images: Vec<mira_core::ImageData>) -> bool {
-        self.steer_with_id(text,images,None).await
+        self.steer_with_id(text, images, None).await
     }
-    pub async fn steer_with_id(&self, text:String, images:Vec<mira_core::ImageData>, input_id:Option<String>) -> bool {
+    pub async fn steer_with_id(
+        &self,
+        text: String,
+        images: Vec<mira_core::ImageData>,
+        input_id: Option<String>,
+    ) -> bool {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let mut message = Message::user(text).with_images(images);
         message.input_intent = Some("steer".into());
-        message.input_id=input_id;
+        message.input_id = input_id;
         {
-            let Ok(mut inbox) = self.steer_inbox.lock() else { return false; };
-            let Some(pending) = inbox.as_mut() else { return false; };
-            if pending.pending.len() >= 16 { return false; }
+            let Ok(mut inbox) = self.steer_inbox.lock() else {
+                return false;
+            };
+            let Some(pending) = inbox.as_mut() else {
+                return false;
+            };
+            if pending.pending.len() >= 16 {
+                return false;
+            }
             pending.pending.push((message, tx));
         }
         rx.await.unwrap_or(false)
     }
 
     async fn consume_steers(&self, generation: u64) -> bool {
-        let pending = self.steer_inbox.lock().ok()
-            .and_then(|mut inbox| inbox.as_mut().filter(|inbox| inbox.generation == generation).map(|inbox| std::mem::take(&mut inbox.pending))).unwrap_or_default();
-        if pending.is_empty() { return false; }
+        let pending = self
+            .steer_inbox
+            .lock()
+            .ok()
+            .and_then(|mut inbox| {
+                inbox
+                    .as_mut()
+                    .filter(|inbox| inbox.generation == generation)
+                    .map(|inbox| std::mem::take(&mut inbox.pending))
+            })
+            .unwrap_or_default();
+        if pending.is_empty() {
+            return false;
+        }
         let mut replies = Vec::new();
         {
             let mut history = self.history.lock().await;
-            for (message, reply) in pending { history.push(message); replies.push(reply); }
+            for (message, reply) in pending {
+                history.push(message);
+                replies.push(reply);
+            }
         }
         checkpoint(self).await;
-        for reply in replies { let _ = reply.send(true); }
+        for reply in replies {
+            let _ = reply.send(true);
+        }
         true
     }
 
@@ -1189,10 +1218,15 @@ impl Session {
         user_input: impl Into<String>,
         images: Vec<mira_core::ImageData>,
     ) -> BoxStream<'static, HarnessEvent> {
-        self.send_with_images_and_id(user_input,images,None).await
+        self.send_with_images_and_id(user_input, images, None).await
     }
 
-    pub async fn send_with_images_and_id(&self, user_input: impl Into<String>, images: Vec<mira_core::ImageData>, input_id: Option<String>) -> BoxStream<'static, HarnessEvent> {
+    pub async fn send_with_images_and_id(
+        &self,
+        user_input: impl Into<String>,
+        images: Vec<mira_core::ImageData>,
+        input_id: Option<String>,
+    ) -> BoxStream<'static, HarnessEvent> {
         // Repair history before appending the new user turn. A prior
         // interrupt can abort the loop between `history.push(assistant_msg)`
         // (with tool_calls) and the matching `Message::tool(...)` push in
@@ -1252,7 +1286,10 @@ impl Session {
         // well-behaved UI but easy to hit while debugging), abort it —
         // otherwise two tasks race to mutate history.
         let generation = STEER_GENERATION.fetch_add(1, Ordering::Relaxed);
-        *self.steer_inbox.lock().unwrap() = Some(SteerInbox { generation, pending: Vec::new() });
+        *self.steer_inbox.lock().unwrap() = Some(SteerInbox {
+            generation,
+            pending: Vec::new(),
+        });
         let handle = tokio::spawn(async move { run_loop(this, cfg, tx, generation).await });
         let mut slot = self.current_turn.lock().await;
         if let Some(prev) = slot.take() {
@@ -1335,7 +1372,9 @@ impl Session {
     /// `tokio::spawn` (fire-and-forget) so pressing Stop on the parent
     /// halts every layer of delegated work at once.
     pub async fn cancel(&self) -> bool {
-        if let Ok(mut inbox) = self.steer_inbox.lock() { *inbox = None; }
+        if let Ok(mut inbox) = self.steer_inbox.lock() {
+            *inbox = None;
+        }
         // Fire the cooperative cancel first so tools observing the
         // token (bash, web_fetch) can clean up native resources
         // (kill child processes, close sockets) before the outer
@@ -1445,12 +1484,22 @@ struct SteerInboxGuard(Arc<StdMutex<Option<SteerInbox>>>, u64);
 impl Drop for SteerInboxGuard {
     fn drop(&mut self) {
         if let Ok(mut inbox) = self.0.lock() {
-            if inbox.as_ref().is_some_and(|inbox| inbox.generation == self.1) { *inbox = None; }
+            if inbox
+                .as_ref()
+                .is_some_and(|inbox| inbox.generation == self.1)
+            {
+                *inbox = None;
+            }
         }
     }
 }
 
-async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEvent>, generation: u64) {
+async fn run_loop(
+    sess: Session,
+    cfg: SessionConfig,
+    tx: mpsc::Sender<HarnessEvent>,
+    generation: u64,
+) {
     let _steer_guard = SteerInboxGuard(sess.steer_inbox.clone(), generation);
     // Park a clone of the current turn's tx into the shared progress
     // slot so tools that stream live output (bash's PTY reader) can
@@ -1574,6 +1623,9 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
                     )
                 };
                 if before {
+                    let tokens_before =
+                        crate::history::estimated_tokens(&sess.history.lock().await);
+                    let _ = tx.send(HarnessEvent::Compacting { tokens_before }).await;
                     match sess.compact_inner("auto", None, &tx).await {
                         Ok(n) => {
                             let _ = tx
@@ -1584,6 +1636,11 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
                         }
                         Err(e) => {
                             warn!(error = %e, "compaction failed; continuing with full history");
+                            let _ = tx
+                                .send(HarnessEvent::CompactionFailed {
+                                    error: e.to_string(),
+                                })
+                                .await;
                         }
                     }
                 }
@@ -1821,7 +1878,9 @@ async fn run_loop(sess: Session, cfg: SessionConfig, tx: mpsc::Sender<HarnessEve
                         .await;
                 }
 
-                if sess.consume_steers(generation).await { continue; }
+                if sess.consume_steers(generation).await {
+                    continue;
+                }
                 round_outcome = RoundOutcome::CleanStop;
                 break;
             }
