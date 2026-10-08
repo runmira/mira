@@ -1059,3 +1059,18 @@
 @media (prefers-reduced-motion: reduce) {
   .compaction-sweep, .compaction-fold { animation: none; }
 }
+
+/* Device pairing: a wrong code shakes the boxes; success pops the check. */
+@keyframes mira-shake {
+  0%, 100% { transform: translateX(0); }
+  20%, 60% { transform: translateX(-6px); }
+  40%, 80% { transform: translateX(6px); }
+}
+@keyframes mira-pop {
+  0% { transform: scale(0.6); opacity: 0; }
+  70% { transform: scale(1.08); opacity: 1; }
+  100% { transform: scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  [class*="animate-[mira-shake"], [class*="animate-[mira-pop"] { animation: none !important; }
+}
