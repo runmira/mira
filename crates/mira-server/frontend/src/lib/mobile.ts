@@ -2,7 +2,7 @@
 // sidebar is a slide-out drawer and the right panel a full-screen sheet.
 // See App.tsx and the `max-md:` / `touch:` classes in components.
 
-import { useSyncExternalStore } from 'react';
+import { useEffect, useSyncExternalStore, type RefObject } from 'react';
 
 const PHONE = '(max-width: 767px)';
 
@@ -44,4 +44,50 @@ export function trackVisibleViewport() {
   vv.addEventListener('resize', update);
   vv.addEventListener('scroll', update);
   update();
+}
+
+const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"]), [contenteditable="true"]';
+
+/**
+ * A modal panel's focus handling, for one that isn't a Radix dialog (the
+ * phone sidebar drawer): while `open`, focus moves into `ref`, Tab stays
+ * inside it and Escape anywhere calls `onClose`; on close, focus goes back
+ * to what had it before.
+ */
+export function useModalFocus(open: boolean, ref: RefObject<HTMLElement | null>, onClose: () => void) {
+  useEffect(() => {
+    const panel = ref.current;
+    if (!open || !panel) return;
+    const previous = document.activeElement as HTMLElement | null;
+    const focusables = () => Array.from(panel.querySelectorAll<HTMLElement>(FOCUSABLE)).filter((el) => el.offsetParent !== null);
+    (focusables()[0] ?? panel).focus({ preventScroll: true });
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onClose();
+        return;
+      }
+      if (e.key !== 'Tab') return;
+      const items = focusables();
+      if (items.length === 0) {
+        e.preventDefault();
+        return;
+      }
+      const first = items[0];
+      const last = items[items.length - 1];
+      const active = document.activeElement;
+      if (e.shiftKey && (active === first || !panel.contains(active))) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && (active === last || !panel.contains(active))) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      previous?.focus?.({ preventScroll: true });
+    };
+  }, [open, ref, onClose]);
 }

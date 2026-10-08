@@ -73,7 +73,7 @@ import {
 } from './lazyViews';
 import { Sidebar, type MainView } from './components/Sidebar';
 import { hasHiddenTitleBar, isDesktop, pickFolder } from './lib/desktop';
-import { useIsPhone } from './lib/mobile';
+import { useIsPhone, useModalFocus } from './lib/mobile';
 import { RightPanelButton } from './components/RightPanelButton';
 import { attachFilesToComposer, dataUrlToFile } from './lib/attachBridge';
 import type { ActivityTurn } from './components/panes/ActivityPane';
@@ -186,6 +186,15 @@ function useStableCallback<A extends unknown[], R>(fn: (...args: A) => R): (...a
 /** Narrowest the transcript should get before the open context panel
  *  stops taking its own column and floats over the stream instead. */
 const MIN_STREAM_WIDTH = 560;
+
+/** Header titles for the pages besides chat, on a phone. */
+const PAGE_TITLES: Record<MainView, string> = {
+  chat: 'Chat',
+  plugins: 'Plugins',
+  'pull-request': 'Pull request',
+  scheduled: 'Scheduled',
+  settings: 'Settings',
+};
 
 export default function App() {
   const pingPrimedRef = useRef(false);
@@ -650,8 +659,10 @@ export default function App() {
   const phone = useIsPhone();
   const [drawerOpen, setDrawerOpen] = useState(false);
   const toggleSidebar = () => (phone ? setDrawerOpen((v) => !v) : setSidebarOpen((v) => !v));
-  const closeDrawer = () => setDrawerOpen(false);
+  const closeDrawer = useCallback(() => setDrawerOpen(false), []);
   const drawerTouchX = useRef<number | null>(null);
+  const drawerRef = useRef<HTMLDivElement | null>(null);
+  useModalFocus(phone && drawerOpen, drawerRef, closeDrawer);
   // Right-side panel: `agentTabs` is the ordered list of open agent call_ids;
   // `fileTabs` is the ordered list of open file viewer tabs; `toolTabs` holds
   // the utility panes (browser / whiteboard / devtools, one of each);
@@ -2689,7 +2700,7 @@ export default function App() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [keybindings, mainView, agentTabs, fileTabs, toolTabs, activeAgentTab]);
+  }, [keybindings, mainView, agentTabs, fileTabs, toolTabs, activeAgentTab, phone]);
 
   /** Everything ⌘K can do. Each entry runs exactly what its button or
    *  shortcut does, so the palette never drifts from the rest of the app. */
@@ -3170,11 +3181,14 @@ export default function App() {
             )}
           />
           <div
-            role="dialog"
-            aria-modal="true"
+            ref={drawerRef}
+            // A dialog only while open: the app's shortcuts stand down
+            // whenever a dialog is on screen.
+            role={drawerOpen ? 'dialog' : undefined}
+            aria-modal={drawerOpen ? 'true' : undefined}
             aria-label="Sidebar"
+            tabIndex={-1}
             inert={!drawerOpen}
-            onKeyDown={(e) => { if (e.key === 'Escape') closeDrawer(); }}
             // Swipe left to close, like any drawer.
             onTouchStart={(e) => { drawerTouchX.current = e.touches[0].clientX; }}
             onTouchEnd={(e) => {
@@ -3204,6 +3218,21 @@ export default function App() {
             keeps the flat theme background (pure black in dark) so the
             composer and cards inside it are what read as elevated. */}
         <div className={cn('flex min-h-0 flex-1 flex-col overflow-hidden bg-background', !phone && 'rounded-xl border border-border')}>
+        {/* The chat view has its own header with the drawer button; the
+            other pages need one too, or a phone has no way back. */}
+        {phone && mainView !== 'chat' && (
+          <div className="flex h-11 shrink-0 items-center gap-2 border-b border-border/60 px-2">
+            <button
+              type="button"
+              onClick={toggleSidebar}
+              aria-label="Open sidebar"
+              className="shrink-0 rounded p-2.5 text-foreground/70 transition-colors hover:bg-accent hover:text-foreground"
+            >
+              <PanelLeft className="size-4" />
+            </button>
+            <span className="min-w-0 flex-1 truncate text-[13.5px] text-foreground">{PAGE_TITLES[mainView]}</span>
+          </div>
+        )}
         {mainView === 'chat' && (
           <>
             {/* Drag region: with the native title bar hidden this row is

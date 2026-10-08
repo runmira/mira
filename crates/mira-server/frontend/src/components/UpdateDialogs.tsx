@@ -413,6 +413,19 @@ const CLI_COMMANDS = [
 /** The CLI behind a browser can't update itself from a page: copy and run. */
 function CliFooter({ onLater }: { onLater: () => void }) {
   const [copied, setCopied] = useState<string | null>(null);
+  const [copyFailed, setCopyFailed] = useState(false);
+  const copy = async (command: string) => {
+    try {
+      await navigator.clipboard.writeText(command);
+      setCopyFailed(false);
+      setCopied(command);
+      setTimeout(() => setCopied(null), 1400);
+    } catch {
+      // Denied, or no clipboard (an insecure origin): the command is
+      // still on screen to copy by hand.
+      setCopyFailed(true);
+    }
+  };
   return (
     <div className="flex flex-col gap-2.5 px-7 py-5">
       <p className="text-[12px] text-muted-foreground">Run one of these, then restart <code className="font-mono text-foreground/80">mira serve</code>:</p>
@@ -420,19 +433,19 @@ function CliFooter({ onLater }: { onLater: () => void }) {
         <button
           key={c.command}
           type="button"
-          onClick={() =>
-            void navigator.clipboard.writeText(c.command).then(() => {
-              setCopied(c.command);
-              setTimeout(() => setCopied(null), 1400);
-            })
-          }
+          onClick={() => void copy(c.command)}
           className="group flex items-center gap-3 rounded-lg border border-fg/[0.08] bg-shade/[0.2] px-3 py-2 text-left transition-colors hover:border-fg/[0.16]"
         >
           <span className="w-24 shrink-0 text-[11.5px] text-muted-foreground">{c.label}</span>
-          <code className="min-w-0 flex-1 truncate font-mono text-[12px] text-foreground/90">{c.command}</code>
+          <code className="min-w-0 flex-1 select-all truncate font-mono text-[12px] text-foreground/90">{c.command}</code>
           {copied === c.command ? <Check className="size-3.5 text-emerald-500" /> : <Copy className="size-3.5 text-muted-foreground group-hover:text-foreground" />}
         </button>
       ))}
+      {copyFailed && (
+        <p role="alert" className="text-[12px] text-amber-700 dark:text-amber-400">
+          Couldn't copy to the clipboard. Select the command and copy it yourself.
+        </p>
+      )}
       <div className="flex justify-end">
         <button
           type="button"

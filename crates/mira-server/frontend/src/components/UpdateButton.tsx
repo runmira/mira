@@ -8,8 +8,9 @@
 import { useState } from 'react';
 import { ArrowDownToLine, Loader2 } from 'lucide-react';
 import { useAppUpdate } from '../lib/updates';
-import { lazyNamed, preloadOnIntent, useLatch } from '../lib/lazy';
+import { lazyNamed, preloadOnIntent, retryFailedLazyLoads, useLatch } from '../lib/lazy';
 import { LazyBoundary } from './LazyBoundary';
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from './ui/dialog';
 
 const UpdateDialogs = lazyNamed(() => import('./UpdateDialogs'), 'UpdateDialogs');
 
@@ -18,6 +19,8 @@ export function UpdateButton() {
   const [open, setOpen] = useState(false);
   // Mounted from the first open on, so closing still animates.
   const shown = useLatch(open);
+  // Remounts the boundary on Retry, clearing its error.
+  const [attempt, setAttempt] = useState(0);
   const update = u.update;
   const tip = update
     ? `Mira ${update.version} is available`
@@ -53,7 +56,34 @@ export function UpdateButton() {
         </span>
       </div>
       {shown && (
-        <LazyBoundary>
+        <LazyBoundary
+          key={attempt}
+          // The popup's code didn't download: say so in a popup that can be
+          // closed, not as a card stuck in the sidebar footer.
+          errorFallback={
+            <Dialog open={open} onOpenChange={setOpen}>
+              <DialogContent className="max-w-sm">
+                <DialogTitle>Couldn't load updates</DialogTitle>
+                <DialogDescription>Check the connection to the Mira server, then try again.</DialogDescription>
+                <div className="flex justify-end gap-2">
+                  <button type="button" onClick={() => setOpen(false)} className="h-9 rounded-lg px-3.5 text-[13px] text-muted-foreground hover:bg-fg/[0.05] hover:text-foreground">
+                    Close
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      retryFailedLazyLoads();
+                      setAttempt((n) => n + 1);
+                    }}
+                    className="h-9 rounded-lg border border-border px-3.5 text-[13px] text-foreground hover:bg-secondary"
+                  >
+                    Retry
+                  </button>
+                </div>
+              </DialogContent>
+            </Dialog>
+          }
+        >
           <UpdateDialogs u={u} open={open} onOpenChange={setOpen} />
         </LazyBoundary>
       )}
