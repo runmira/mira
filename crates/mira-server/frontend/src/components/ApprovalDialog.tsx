@@ -91,13 +91,15 @@ export function ApprovalChoices({
   return (
     // Wraps rather than overflows: in a narrow composer (side panel open)
     // a fixed row clipped the leftmost choice — usually "Deny".
-    <div className="flex flex-wrap items-center justify-end gap-1.5">
+    // With a finger, a grid of full-width buttons: easy to hit, and the
+    // primary choice can't end up as a small pill on its own line.
+    <div className="flex flex-wrap items-center justify-end gap-1.5 touch:grid touch:grid-cols-2 touch:gap-2">
       {choices.map((c) => (
-        <div key={c.id} className="flex flex-col items-end gap-0.5">
+        <div key={c.id} className="flex flex-col items-end gap-0.5 touch:items-stretch">
           <Button
             variant={c.destructive ? 'destructive' : c.primary ? 'default' : 'ghost'}
             size={size}
-            className={cn('rounded-full px-4', !c.primary && !c.destructive && 'bg-fg/[0.04] ring-1 ring-fg/[0.08]', c.mode === 'edit' || c.mode === 'yolo' ? 'bg-orange-600 text-white hover:bg-orange-700 dark:bg-orange-400 dark:text-orange-950 dark:hover:bg-orange-300' : undefined)}
+            className={cn('rounded-full px-4 touch:h-11 touch:w-full touch:text-[14px]', !c.primary && !c.destructive && 'bg-fg/[0.04] ring-1 ring-fg/[0.08]', c.mode === 'edit' || c.mode === 'yolo' ? 'bg-orange-600 text-white hover:bg-orange-700 dark:bg-orange-400 dark:text-orange-950 dark:hover:bg-orange-300' : undefined)}
             disabled={c.disabled}
             title={c.title}
             onClick={() => onChoose(c.id)}
@@ -107,7 +109,7 @@ export function ApprovalChoices({
             {c.kbd && (
               <kbd
                 className={
-                  'ml-1.5 rounded border px-1 font-sans text-[10px] leading-4 ' +
+                  'ml-1.5 rounded border px-1 font-sans text-[10px] leading-4 touch:hidden ' +
                   (c.primary ? 'border-current/30 opacity-70' : 'border-border/70 text-muted-foreground')
                 }
               >

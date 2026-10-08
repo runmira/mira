@@ -104,7 +104,7 @@ export function SubagentPanel({ tabs, fileTabs, toolTabs, onWhiteboardSend, onOp
     <aside className="relative flex h-full min-w-0 flex-col overflow-hidden bg-transparent">
       {/* Left-edge drag handle — 5px wide, invisible until hovered */}
       <div
-        className="absolute left-0 top-0 z-20 h-full w-[5px] cursor-col-resize transition-colors hover:bg-mira-blue/30 active:bg-mira-blue/50"
+        className="absolute left-0 top-0 z-20 h-full w-[5px] cursor-col-resize max-md:hidden transition-colors hover:bg-mira-blue/30 active:bg-mira-blue/50"
         onMouseDown={onResizeStart}
         title="Drag to resize panel"
       />
@@ -156,7 +156,8 @@ export function SubagentPanel({ tabs, fileTabs, toolTabs, onWhiteboardSend, onOp
           type="button"
           onClick={onClose}
           title="Close panel"
-          className="shrink-0 rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          aria-label="Close panel"
+          className="shrink-0 rounded-md p-1.5 touch:p-2.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
         >
           <X className="size-4" />
         </button>

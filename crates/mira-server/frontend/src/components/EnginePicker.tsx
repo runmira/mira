@@ -297,7 +297,7 @@ export function EnginePicker(props: EnginePickerProps) {
           <button
             type="button"
             title={isAgent ? `${engine?.display_name}${currentModel ? ` · ${currentModel}` : ''}` : currentModel ?? ''}
-            className="inline-flex max-w-[22rem] items-center gap-1.5 rounded-md px-2 py-1.5 text-foreground transition-colors hover:bg-fg/[0.04]"
+            className="inline-flex min-w-0 max-w-[22rem] items-center gap-1.5 rounded-md px-2 py-1.5 text-foreground transition-colors hover:bg-fg/[0.04] touch:py-2.5"
           >
             {/* Every child sits in the same 16px line box — icon, labels,
                 status and chevron — so they share one centre line. The
@@ -317,7 +317,7 @@ export function EnginePicker(props: EnginePickerProps) {
                 <span className="min-w-0 truncate text-[12.5px] font-semibold leading-none">{triggerLabel}</span>
               )}
               {optionSummary && (
-                <span className="shrink-0 text-[11.5px] font-medium leading-none text-muted-foreground/80">{optionSummary}</span>
+                <span className="shrink-0 text-[11.5px] font-medium leading-none text-muted-foreground/80 max-md:hidden">{optionSummary}</span>
               )}
             </span>
             <EngineStatusGlyph engine={engine} />

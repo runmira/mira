@@ -73,6 +73,7 @@ import {
 } from './lazyViews';
 import { Sidebar, type MainView } from './components/Sidebar';
 import { hasHiddenTitleBar, isDesktop, pickFolder } from './lib/desktop';
+import { useIsPhone, useModalFocus } from './lib/mobile';
 import { RightPanelButton } from './components/RightPanelButton';
 import { attachFilesToComposer, dataUrlToFile } from './lib/attachBridge';
 import type { ActivityTurn } from './components/panes/ActivityPane';
@@ -185,6 +186,15 @@ function useStableCallback<A extends unknown[], R>(fn: (...args: A) => R): (...a
 /** Narrowest the transcript should get before the open context panel
  *  stops taking its own column and floats over the stream instead. */
 const MIN_STREAM_WIDTH = 560;
+
+/** Header titles for the pages besides chat, on a phone. */
+const PAGE_TITLES: Record<MainView, string> = {
+  chat: 'Chat',
+  plugins: 'Plugins',
+  'pull-request': 'Pull request',
+  scheduled: 'Scheduled',
+  settings: 'Settings',
+};
 
 export default function App() {
   const pingPrimedRef = useRef(false);
@@ -644,6 +654,15 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(() => {
     try { return localStorage.getItem('mira.sidebar.open') !== '0'; } catch { return true; }
   });
+  // At phone width there's room for one column: the sidebar becomes a
+  // drawer over the chat, closed by default and after every pick in it.
+  const phone = useIsPhone();
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const toggleSidebar = () => (phone ? setDrawerOpen((v) => !v) : setSidebarOpen((v) => !v));
+  const closeDrawer = useCallback(() => setDrawerOpen(false), []);
+  const drawerTouchX = useRef<number | null>(null);
+  const drawerRef = useRef<HTMLDivElement | null>(null);
+  useModalFocus(phone && drawerOpen, drawerRef, closeDrawer);
   // Right-side panel: `agentTabs` is the ordered list of open agent call_ids;
   // `fileTabs` is the ordered list of open file viewer tabs; `toolTabs` holds
   // the utility panes (browser / whiteboard / devtools, one of each);
@@ -2667,7 +2686,7 @@ export default function App() {
           break;
         case 'sidebar.toggle':
           e.preventDefault();
-          setSidebarOpen((v) => !v);
+          toggleSidebar();
           break;
         case 'settings.toggle':
           e.preventDefault();
@@ -2681,7 +2700,7 @@ export default function App() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [keybindings, mainView, agentTabs, fileTabs, toolTabs, activeAgentTab]);
+  }, [keybindings, mainView, agentTabs, fileTabs, toolTabs, activeAgentTab, phone]);
 
   /** Everything ⌘K can do. Each entry runs exactly what its button or
    *  shortcut does, so the palette never drifts from the rest of the app. */
@@ -2701,7 +2720,7 @@ export default function App() {
     { id: 'changes', group: 'Chat', label: 'Review changes', icon: FileDiff, shortcut: keyFor('review.toggle'), keywords: ['diff', 'git'], run: () => setReviewOpen(true) },
     { id: 'context', group: 'Chat', label: "What's in the context window", icon: Brain, keywords: ['tokens', 'compact', 'inspector'], run: () => setInspectOpen(true) },
     { id: 'review', group: 'Chat', label: 'Ask Iris to review the changes', icon: ScanSearch, keywords: ['code review', 'second opinion', 'reviewer'], run: () => void runReview('') },
-    { id: 'sidebar', group: 'View', label: 'Toggle sidebar', icon: PanelLeftClose, shortcut: keyFor('sidebar.toggle'), run: () => setSidebarOpen((v) => !v) },
+    { id: 'sidebar', group: 'View', label: 'Toggle sidebar', icon: PanelLeftClose, shortcut: keyFor('sidebar.toggle'), run: toggleSidebar },
     { id: 'terminal', group: 'View', label: 'Toggle terminal', icon: SquareTerminal, shortcut: keyFor('terminal.toggle'), run: () => setTerminal(!terminalOpen) },
     { id: 'browser', group: 'View', label: 'Open browser', icon: Globe2, keywords: ['chrome', 'web'], run: () => { setMainView('chat'); openToolPane('browser'); } },
     { id: 'whiteboard', group: 'View', label: 'Open whiteboard', icon: Pencil, keywords: ['sketch', 'draw'], run: () => { setMainView('chat'); openToolPane('whiteboard'); } },
@@ -3071,6 +3090,58 @@ export default function App() {
   const sidebarCol = sidebarOpen ? '300px' : '0px';
   const rightCol = panelOpen ? `${rightPanelWidth}px` : '0px';
 
+  const sidebar = (
+    <Sidebar
+      status={status}
+      cwd={cwd}
+      activeSessionId={sessionId}
+      activeBusy={busy}
+      runningSessions={sessionActivity?.running ?? null}
+      completedSessions={completedSessions}
+      refreshKey={sidebarRefresh}
+      activeView={mainView}
+      onNavigate={(view) => {
+        closeDrawer();
+        setMainView(view);
+      }}
+      onNewChat={async () => {
+        closeDrawer();
+        setMainView('chat');
+        await onNewChat();
+      }}
+      onOpenSettings={() => {
+        closeDrawer();
+        openSettings();
+      }}
+      onOpenPicker={() => {
+        closeDrawer();
+        void openProjectPicker();
+      }}
+      onSessionLoaded={() => {
+        // Ready broadcast refreshes + jumps to chat.
+        closeDrawer();
+      }}
+      onAttachSession={(id) => {
+        closeDrawer();
+        attachSession(id);
+      }}
+      onSetBackgroundMode={async (id, mode) => {
+        await setSessionBackgroundMode(id, mode);
+        setSidebarRefresh((n) => n + 1);
+      }}
+      activePr={branchPr}
+      settingsSection={settingsSection}
+      onSettingsSectionChange={(section) => {
+        closeDrawer();
+        setSettingsSection(section);
+      }}
+      onExitSettings={() => {
+        closeDrawer();
+        exitSettings();
+      }}
+    />
+  );
+
   return (
     <div
       // Window wash ( `--color-sidebar`): the sidebar
@@ -3082,10 +3153,16 @@ export default function App() {
       // translucent tint over the vibrancy, and the main and right columns
       // stay opaque panels so body text never sits on wallpaper.
       className={cn(
-        'grid h-screen grid-rows-1 transition-[grid-template-columns] duration-150',
-        hiddenTitleBar ? 'bg-transparent' : 'bg-panel',
+        'grid grid-rows-1',
+        phone ? 'bg-background' : 'h-screen transition-[grid-template-columns] duration-150',
+        !phone && (hiddenTitleBar ? 'bg-transparent' : 'bg-panel'),
       )}
-      style={{ gridTemplateColumns: `${sidebarCol} minmax(0,1fr) ${rightCol}` }}
+      style={
+        phone
+          ? // The visible viewport, so the composer sits above the keyboard.
+            { gridTemplateColumns: 'minmax(0,1fr)', height: 'var(--app-height, 100dvh)' }
+          : { gridTemplateColumns: `${sidebarCol} minmax(0,1fr) ${rightCol}` }
+      }
     >
       <InfoNoticeHost notices={infoNotices.filter(notice => notice.kind === 'short')} onDismiss={dismissInfoNotice} onAgentUpdated={kind => {
         completedUpdatesRef.current.add(kind);
@@ -3093,45 +3170,69 @@ export default function App() {
         void listEngines().then(view => setEngines(view.engines)).catch(() => {});
         pushInfoNotice({ id: noticeId('updated'), kind: 'short', tone: 'success', title: 'Agent update complete' });
       }} />
-      {/* overflow-hidden clips sidebar content when the grid column animates to 0 */}
-      <div className="overflow-hidden">
-        <Sidebar
-          status={status}
-          cwd={cwd}
-          activeSessionId={sessionId}
-          activeBusy={busy}
-          runningSessions={sessionActivity?.running ?? null}
-          completedSessions={completedSessions}
-          refreshKey={sidebarRefresh}
-          activeView={mainView}
-          onNavigate={setMainView}
-          onNewChat={async () => {
-            setMainView('chat');
-            await onNewChat();
-          }}
-          onOpenSettings={() => openSettings()}
-          onOpenPicker={() => void openProjectPicker()}
-          onSessionLoaded={() => { /* Ready broadcast refreshes + jumps to chat */ }}
-          onAttachSession={(id) => attachSession(id)}
-          onSetBackgroundMode={async (id, mode) => {
-            await setSessionBackgroundMode(id, mode);
-            setSidebarRefresh((n) => n + 1);
-          }}
-          activePr={branchPr}
-          settingsSection={settingsSection}
-          onSettingsSectionChange={setSettingsSection}
-          onExitSettings={exitSettings}
-        />
-      </div>
+      {phone ? (
+        <>
+          <div
+            aria-hidden
+            onClick={closeDrawer}
+            className={cn(
+              'fixed inset-0 z-40 bg-black/50 transition-opacity duration-200',
+              drawerOpen ? 'opacity-100' : 'pointer-events-none opacity-0',
+            )}
+          />
+          <div
+            ref={drawerRef}
+            // A dialog only while open: the app's shortcuts stand down
+            // whenever a dialog is on screen.
+            role={drawerOpen ? 'dialog' : undefined}
+            aria-modal={drawerOpen ? 'true' : undefined}
+            aria-label="Sidebar"
+            tabIndex={-1}
+            inert={!drawerOpen}
+            // Swipe left to close, like any drawer.
+            onTouchStart={(e) => { drawerTouchX.current = e.touches[0].clientX; }}
+            onTouchEnd={(e) => {
+              const start = drawerTouchX.current;
+              drawerTouchX.current = null;
+              if (start != null && start - e.changedTouches[0].clientX > 60) closeDrawer();
+            }}
+            className={cn(
+              'pt-safe pb-safe fixed left-0 top-0 z-50 flex w-[min(86vw,320px)] flex-col overflow-hidden bg-panel shadow-2xl transition-transform duration-200 ease-out',
+              drawerOpen ? 'translate-x-0' : '-translate-x-full',
+            )}
+            style={{ height: 'var(--app-height, 100dvh)' }}
+          >
+            {sidebar}
+          </div>
+        </>
+      ) : (
+        // overflow-hidden clips sidebar content when the grid column animates to 0
+        <div className="overflow-hidden">{sidebar}</div>
+      )}
 
       {/* Gutters are asymmetric: 2px on the sidebar edge vs 8px elsewhere,
           so the chat column reads as pulled toward the sidebar without
           touching it. The right panel keeps the full 8px on its outer edge. */}
-      <main className="flex min-h-0 min-w-0 flex-col py-2 pl-0.5 pr-2">
+      <main className={cn('flex min-h-0 min-w-0 flex-col', phone ? 'pt-safe px-safe' : 'py-2 pl-0.5 pr-2')}>
         {/* The main chat surface is the app's base surface, not a card: it
             keeps the flat theme background (pure black in dark) so the
             composer and cards inside it are what read as elevated. */}
-        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-border bg-background">
+        <div className={cn('flex min-h-0 flex-1 flex-col overflow-hidden bg-background', !phone && 'rounded-xl border border-border')}>
+        {/* The chat view has its own header with the drawer button; the
+            other pages need one too, or a phone has no way back. */}
+        {phone && mainView !== 'chat' && (
+          <div className="flex h-11 shrink-0 items-center gap-2 border-b border-border/60 px-2">
+            <button
+              type="button"
+              onClick={toggleSidebar}
+              aria-label="Open sidebar"
+              className="shrink-0 rounded p-2.5 text-foreground/70 transition-colors hover:bg-accent hover:text-foreground"
+            >
+              <PanelLeft className="size-4" />
+            </button>
+            <span className="min-w-0 flex-1 truncate text-[13.5px] text-foreground">{PAGE_TITLES[mainView]}</span>
+          </div>
+        )}
         {mainView === 'chat' && (
           <>
             {/* Drag region: with the native title bar hidden this row is
@@ -3139,7 +3240,7 @@ export default function App() {
                 least one or the window can't be dragged at all. */}
             <div
               data-tauri-drag-region
-              className="flex h-11 shrink-0 items-center gap-3 border-b border-border/60 px-4"
+              className="flex h-11 shrink-0 items-center gap-3 border-b border-border/60 px-4 max-md:gap-2 max-md:px-2"
             >
               {/* `data-tauri-drag-region` matches ancestors, so anything
                   interactive inside the header would drag the window on
@@ -3147,11 +3248,12 @@ export default function App() {
               <button
                 data-tauri-drag-region="false"
                 type="button"
-                onClick={() => setSidebarOpen((v) => !v)}
-                title={sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
+                onClick={toggleSidebar}
+                title={phone ? 'Open sidebar' : sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
+                aria-label={phone ? 'Open sidebar' : sidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
                 className={cn(
-                  'shrink-0 rounded p-1.5 transition-colors',
-                  sidebarOpen
+                  'shrink-0 rounded p-1.5 transition-colors touch:p-2.5',
+                  sidebarOpen || phone
                     ? 'text-foreground/70 hover:bg-accent hover:text-foreground'
                     : 'text-muted-foreground/50 hover:bg-accent hover:text-foreground',
                 )}
@@ -3189,6 +3291,9 @@ export default function App() {
                   onOpenPane={openToolPane}
                 />
                 </div>
+                {/* Opening a local editor or a terminal means nothing from a
+                    phone; the right panel's panes still work there. */}
+                {!phone && <>
                 <EditorPicker
                   cwd={cwd}
                   onOpenSettings={() => {
@@ -3217,15 +3322,16 @@ export default function App() {
                   Toggle terminal <span className="tooltip-tag">{shortcutLabelForCommand(keybindings, 'terminal.toggle') ?? (IS_MAC ? '⌘J' : 'Ctrl+J')}</span>
                 </span>
                 </div>
+                </>}
               </div>
             </div>
 
             {/* Transcript — full width, panel floats above it */}
             <div className="relative flex-1 min-h-0" ref={chatColRef}>
               <div
-                className="absolute inset-0 overflow-y-auto px-5 pb-5 transition-[padding] duration-200"
+                className="absolute inset-0 overflow-y-auto overscroll-contain px-5 pb-5 transition-[padding] duration-200 max-md:px-3"
                 style={{
-                  paddingRight: ctxReserve ? CONTEXT_PANEL_RESERVE + 12 : 20,
+                  paddingRight: ctxReserve ? CONTEXT_PANEL_RESERVE + 12 : phone ? 12 : 20,
                   paddingTop: ctxPill ? 52 : 16,
                 }}
                 ref={paneRef}
@@ -3413,7 +3519,7 @@ export default function App() {
             </div>
 
             <div
-              className="shrink-0 transition-[padding-right] duration-200"
+              className="pb-safe shrink-0 transition-[padding-right] duration-200"
               style={{ paddingRight: ctxReserve ? CONTEXT_PANEL_RESERVE : 0 }}
             >
             {restoreNote && (
@@ -3582,7 +3688,7 @@ export default function App() {
               }
             />
             </div>
-            {terminalOpen && (
+            {terminalOpen && !phone && (
               <LazyBoundary>
                 <TerminalPanel onClose={() => setTerminal(false)} />
               </LazyBoundary>
@@ -3686,8 +3792,13 @@ export default function App() {
         );
       })()}
       {panelOpen && (
-        <div className="min-h-0 min-w-0 py-2 pr-2">
-          <div className="h-full overflow-hidden rounded-xl border border-border bg-background">
+        <div
+          // On a phone the panel is a full-screen sheet over the chat; its
+          // close button returns there.
+          className={phone ? 'pt-safe pb-safe px-safe fixed left-0 right-0 top-0 z-40 flex flex-col bg-background' : 'min-h-0 min-w-0 py-2 pr-2'}
+          style={phone ? { height: 'var(--app-height, 100dvh)' } : undefined}
+        >
+          <div className={phone ? 'min-h-0 flex-1 overflow-hidden' : 'h-full overflow-hidden rounded-xl border border-border bg-background'}>
         <LazyBoundary>
         <SubagentPanel
           tabs={subagentTabs}

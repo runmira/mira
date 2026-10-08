@@ -1064,12 +1064,13 @@ function SessionRow({
       {/* Single far-right slot. Status circle sits underneath the row
        *  menu — both share the same absolute box so the layout never
        *  shifts when the menu appears on hover. Space is reserved even
-       *  when the menu is hidden. Hidden while selecting. */}
+       *  when the menu is hidden. Hidden while selecting. With a finger
+       *  there's no hover to swap them, so they sit side by side. */}
       {!selecting && (
-        <div className="relative flex size-5 items-center justify-center">
+        <div className="relative flex size-5 items-center justify-center touch:w-auto touch:gap-1">
           <span
             className={cn(
-              'absolute inset-0 flex items-center justify-center transition-opacity',
+              'absolute inset-0 flex items-center justify-center transition-opacity touch:static touch:size-5',
               'group-hover:opacity-0',
             )}
           >
@@ -1082,7 +1083,7 @@ function SessionRow({
           </span>
           <span
             className={cn(
-              'absolute inset-0 flex items-center justify-center opacity-0 transition-opacity',
+              'absolute inset-0 flex items-center justify-center opacity-0 transition-opacity touch:static touch:size-7',
               'group-hover:opacity-100 focus-within:opacity-100',
             )}
           >
@@ -1681,7 +1682,7 @@ function RowMenu({ items }: { items: RowMenuItem[] }) {
           aria-label="Row menu"
           onClick={(e) => e.stopPropagation()}
           className={cn(
-            'shrink-0 rounded-sm p-0.5 text-muted-foreground/60 transition-opacity hover:bg-fg/[0.05] hover:text-foreground',
+            'shrink-0 rounded-sm p-0.5 text-muted-foreground/60 transition-opacity hover:bg-fg/[0.05] hover:text-foreground touch:p-1.5',
             open ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus:opacity-100',
           )}
         >

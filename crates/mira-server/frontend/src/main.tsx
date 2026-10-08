@@ -10,6 +10,7 @@ import { hasHiddenTitleBar } from './lib/desktop';
 import { applyTheme, watchSystemTheme } from './lib/theme';
 import { applyAppearance } from './lib/appearance';
 import { installInputModality } from './lib/inputModality';
+import { trackVisibleViewport } from './lib/mobile';
 import './styles.css';
 
 // Must run before the first render so the auth and onboarding gates are
@@ -31,6 +32,7 @@ if (hasHiddenTitleBar()) {
 applyTheme();
 watchSystemTheme();
 applyAppearance();
+trackVisibleViewport();
 
 // Lucide icons size via `size` prop or tailwind size-* classes (which set
 // width/height in CSS and override the SVG's own width attr).
