@@ -1040,3 +1040,22 @@
   --tw-ring-shadow: 0 0 #0000;
   --tw-ring-offset-shadow: 0 0 #0000;
 }
+
+/* Compaction card: a soft sweep across the card while the summary is
+   written, and the fold icon breathing. */
+@keyframes compaction-sweep {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+.compaction-sweep {
+  background: linear-gradient(90deg, transparent 0%, rgba(77, 136, 255, .10) 45%, rgba(77, 136, 255, .18) 50%, rgba(77, 136, 255, .10) 55%, transparent 100%);
+  animation: compaction-sweep 2.2s ease-in-out infinite;
+}
+@keyframes compaction-fold {
+  0%, 100% { transform: scaleY(1); opacity: 1; }
+  50% { transform: scaleY(.7); opacity: .65; }
+}
+.compaction-fold { animation: compaction-fold 1.4s ease-in-out infinite; transform-origin: center; }
+@media (prefers-reduced-motion: reduce) {
+  .compaction-sweep, .compaction-fold { animation: none; }
+}

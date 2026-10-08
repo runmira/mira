@@ -72,6 +72,11 @@ pub enum HarnessEvent {
     /// into a single synthetic summary before this round's model call.
     /// Fired at most once per round, at the point history was rewritten.
     Compacted { messages_removed: usize },
+    /// Compaction is starting (before the summary call), with the history's
+    /// estimated size, so a UI can show it in progress.
+    Compacting { tokens_before: usize },
+    /// Compaction failed; the turn continues with the full history.
+    CompactionFailed { error: String },
     /// A `/goal` was set on the session. Emitted immediately when the
     /// user sets or replaces the standing goal — even outside a
     /// running turn, so the UI can flip its state right away.

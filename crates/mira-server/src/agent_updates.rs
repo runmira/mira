@@ -1,5 +1,10 @@
 //! Explicit, allowlisted CLI updates. No shell or client-supplied arguments.
-use axum::{extract::Path, http::StatusCode, response::{IntoResponse, Response}, Json};
+use axum::{
+    extract::Path,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    Json,
+};
 use serde_json::json;
 use std::time::Duration;
 
@@ -15,18 +20,40 @@ fn command(kind: &str) -> Option<(&'static str, &'static str)> {
 pub async fn update(Path(kind): Path<String>) -> Response {
     static UPDATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let Some((binary, argument)) = command(&kind) else {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error":"This agent does not support updating from Mira."}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"This agent does not support updating from Mira."})),
+        )
+            .into_response();
     };
     let Ok(_guard) = UPDATE.try_lock() else {
-        return (StatusCode::CONFLICT, Json(json!({"error":"An agent update is already running. Try again when it finishes."}))).into_response();
+        return (
+            StatusCode::CONFLICT,
+            Json(
+                json!({"error":"An agent update is already running. Try again when it finishes."}),
+            ),
+        )
+            .into_response();
     };
-    let resolved = tokio::task::spawn_blocking(move || mira_acp::which::resolve(binary)).await.ok().flatten();
+    let resolved = tokio::task::spawn_blocking(move || mira_acp::which::resolve(binary))
+        .await
+        .ok()
+        .flatten();
     let Some(resolved) = resolved else {
-        return (StatusCode::NOT_FOUND, Json(json!({"error":format!("{binary} is not installed.")}))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error":format!("{binary} is not installed.")})),
+        )
+            .into_response();
     };
     let mut process = tokio::process::Command::new(resolved);
-    process.arg(argument).stdin(std::process::Stdio::null()).kill_on_drop(true);
-    if let Some(path) = mira_acp::which::effective_path() { process.env("PATH", path); }
+    process
+        .arg(argument)
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true);
+    if let Some(path) = mira_acp::which::effective_path() {
+        process.env("PATH", path);
+    }
     match tokio::time::timeout(Duration::from_secs(180), process.output()).await {
         Ok(Ok(output)) if output.status.success() => Json(json!({"updated":true})).into_response(),
         Ok(Ok(output)) => {
@@ -40,14 +67,16 @@ pub async fn update(Path(kind): Path<String>) -> Response {
     }
 }
 
-#[cfg(test)] mod tests {
+#[cfg(test)]
+mod tests {
     use super::*;
     #[tokio::test]
     async fn unsupported_updates_return_an_error_without_starting_a_process() {
         let response = update(Path("not-a-driver".into())).await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
-    #[test] fn updates_only_accept_known_drivers_and_fixed_arguments() {
+    #[test]
+    fn updates_only_accept_known_drivers_and_fixed_arguments() {
         assert_eq!(command("codex"), Some(("codex", "update")));
         assert_eq!(command("claude-code"), Some(("claude", "update")));
         assert_eq!(command("opencode"), Some(("opencode", "upgrade")));

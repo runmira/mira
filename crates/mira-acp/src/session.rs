@@ -247,9 +247,12 @@ impl AcpSession {
     pub fn runtime_capabilities(&self) -> crate::runtime::RuntimeCapabilities {
         let state = self.state.try_lock().ok();
         crate::runtime::RuntimeCapabilities {
-            image_input:state.as_ref().is_some_and(|s|s.image_supported), cancellation:true,
-            live_mode_switch:state.as_ref().is_some_and(|s|s.current_mode.is_some()),
-            live_model_switch:state.as_ref().is_some_and(|s|s.config_options.iter().any(|o|o["category"] == "model")),
+            image_input: state.as_ref().is_some_and(|s| s.image_supported),
+            cancellation: true,
+            live_mode_switch: state.as_ref().is_some_and(|s| s.current_mode.is_some()),
+            live_model_switch: state
+                .as_ref()
+                .is_some_and(|s| s.config_options.iter().any(|o| o["category"] == "model")),
             ..Default::default()
         }
     }

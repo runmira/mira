@@ -41,7 +41,9 @@ fn secrets_dir(state: &AppState, slot: &SessionSlot) -> Option<PathBuf> {
 /// folder — for Mira's own secrets folder, never for a project directory.
 fn write_private(path: &Path, value: &str, lock_dir: bool) -> std::io::Result<()> {
     use std::io::Write;
-    let dir = path.parent().ok_or_else(|| std::io::Error::other("no parent"))?;
+    let dir = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("no parent"))?;
     std::fs::create_dir_all(dir)?;
     #[cfg(unix)]
     {
@@ -67,7 +69,10 @@ fn write_private(path: &Path, value: &str, lock_dir: bool) -> std::io::Result<()
 /// Set `NAME=value` in a dotenv file, replacing an existing line.
 fn upsert_dotenv(path: &Path, name: &str, value: &str) -> std::io::Result<()> {
     let existing = std::fs::read_to_string(path).unwrap_or_default();
-    let quoted = if value.chars().any(|c| c.is_whitespace() || "#\"'$`\\".contains(c)) {
+    let quoted = if value
+        .chars()
+        .any(|c| c.is_whitespace() || "#\"'$`\\".contains(c))
+    {
         format!("'{}'", value.replace('\'', "'\\''"))
     } else {
         value.to_string()
@@ -77,7 +82,12 @@ fn upsert_dotenv(path: &Path, name: &str, value: &str) -> std::io::Result<()> {
     let mut out: Vec<String> = existing
         .lines()
         .map(|l| {
-            let key = l.trim_start().trim_start_matches("export ").split('=').next().unwrap_or("");
+            let key = l
+                .trim_start()
+                .trim_start_matches("export ")
+                .split('=')
+                .next()
+                .unwrap_or("");
             if key.trim() == name {
                 found = true;
                 line.clone()
@@ -95,7 +105,11 @@ fn upsert_dotenv(path: &Path, name: &str, value: &str) -> std::io::Result<()> {
 /// A project-relative dotenv path, kept inside the project.
 async fn dotenv_path(slot: &SessionSlot, rel: &str) -> Result<PathBuf, String> {
     let rel = Path::new(rel);
-    if rel.is_absolute() || rel.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+    if rel.is_absolute()
+        || rel
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
         return Err("`dotenv` must be a path inside the project, like .env.local".into());
     }
     let name = rel.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -107,12 +121,24 @@ async fn dotenv_path(slot: &SessionSlot, rel: &str) -> Result<PathBuf, String> {
 }
 
 /// `request_secret`: ask the user privately, store the answer, say where.
-pub async fn request_secret(state: &AppState, slot: &SessionSlot, args: &Value) -> Result<String, String> {
-    let name = args.get("name").and_then(Value::as_str).unwrap_or("").trim();
+pub async fn request_secret(
+    state: &AppState,
+    slot: &SessionSlot,
+    args: &Value,
+) -> Result<String, String> {
+    let name = args
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
     if !valid_name(name) {
         return Err("`name` must look like an environment variable: STRIPE_SECRET_KEY".into());
     }
-    let reason = args.get("reason").and_then(Value::as_str).unwrap_or("").trim();
+    let reason = args
+        .get("reason")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
     if reason.is_empty() {
         return Err("say in `reason` what the secret is for".into());
     }
@@ -129,7 +155,10 @@ pub async fn request_secret(state: &AppState, slot: &SessionSlot, args: &Value) 
 
     let prompt_id = format!("secret-{}", uuid::Uuid::new_v4().simple());
     let (tx, rx) = tokio::sync::oneshot::channel();
-    slot.prompt_pending.lock().await.insert(prompt_id.clone(), tx);
+    slot.prompt_pending
+        .lock()
+        .await
+        .insert(prompt_id.clone(), tx);
     let _ = slot.events_tx.send(ServerMsg::SecretRequest {
         prompt_id: prompt_id.clone(),
         name: name.to_string(),
@@ -145,7 +174,9 @@ pub async fn request_secret(state: &AppState, slot: &SessionSlot, args: &Value) 
         Err(_) => return Err("The user didn't answer the secret prompt.".into()),
     };
     let Some(value) = value else {
-        return Ok(format!("The user declined to provide {name}. Don't ask again unless they bring it up."));
+        return Ok(format!(
+            "The user declined to provide {name}. Don't ask again unless they bring it up."
+        ));
     };
     let path = dir.join(name);
     write_private(&path, &value, true).map_err(|e| format!("could not store the secret: {e}"))?;
@@ -157,7 +188,9 @@ pub async fn request_secret(state: &AppState, slot: &SessionSlot, args: &Value) 
     );
     if let (Some(target), Some(rel)) = (dotenv_target, dotenv) {
         upsert_dotenv(&target, name, &value).map_err(|e| format!("could not write {rel}: {e}"))?;
-        text.push_str(&format!(" It was also set in {rel}; make sure that file is git-ignored."));
+        text.push_str(&format!(
+            " It was also set in {rel}; make sure that file is git-ignored."
+        ));
     }
     Ok(text)
 }
@@ -169,7 +202,10 @@ pub fn html_render(slot: &SessionSlot, args: &Value) -> Result<String, String> {
         return Err("`html` is empty".into());
     }
     if html.len() > MAX_HTML_BYTES {
-        return Err(format!("the page is {} KB; the limit is 2 MB", html.len() / 1024));
+        return Err(format!(
+            "the page is {} KB; the limit is 2 MB",
+            html.len() / 1024
+        ));
     }
     let title = args
         .get("title")
@@ -211,6 +247,9 @@ mod tests {
         std::fs::write(&p, "A=1\nexport KEY=old\n").unwrap();
         upsert_dotenv(&p, "KEY", "new value").unwrap();
         upsert_dotenv(&p, "B", "x").unwrap();
-        assert_eq!(std::fs::read_to_string(&p).unwrap(), "A=1\nKEY='new value'\nB=x\n");
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            "A=1\nKEY='new value'\nB=x\n"
+        );
     }
 }

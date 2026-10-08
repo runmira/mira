@@ -203,23 +203,38 @@ impl SessionSlot {
     }
 
     pub async fn is_foreground_running(&self) -> bool {
-        self.engine.agent_in_turn.load(Ordering::SeqCst) || self.engine.provider_in_turn.load(Ordering::SeqCst)
+        self.engine.agent_in_turn.load(Ordering::SeqCst)
+            || self.engine.provider_in_turn.load(Ordering::SeqCst)
     }
     pub fn publish_activity(&self) {
         // Serialize computing and publishing, so a delayed completion cannot
         // overwrite a concurrently started foreground or background task.
-        let _publish = self.engine.activity_publish.lock().unwrap_or_else(|e|e.into_inner());
+        let _publish = self
+            .engine
+            .activity_publish
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let running = self.engine.agent_in_turn.load(Ordering::SeqCst)
             || self.engine.provider_in_turn.load(Ordering::SeqCst)
-            || self.engine.activity.lock().unwrap_or_else(|e|e.into_inner()).has_pending_work();
-        self.session_activity.set(self.id.to_string(),running);
+            || self
+                .engine
+                .activity
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .has_pending_work();
+        self.session_activity.set(self.id.to_string(), running);
         self.engine.activity_changed.notify_waiters();
         self.engine.activity_changed.notify_one();
     }
     pub async fn is_running(&self) -> bool {
-        self.is_foreground_running().await || self.engine.activity.lock().unwrap_or_else(|e|e.into_inner()).has_pending_work()
+        self.is_foreground_running().await
+            || self
+                .engine
+                .activity
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .has_pending_work()
     }
-
 }
 
 /// RAII counter for attached WS clients. On construction, bumps the slot's
@@ -468,14 +483,15 @@ pub async fn build_slot(
         crate::session_engine::EngineRuntime::default()
     };
     let runtime_requests = crate::runtime_requests::RequestStore::open(
-        deps.store
-            .as_ref()
-            .and_then(|s| s.runtime_state_path(&id)),
+        deps.store.as_ref().and_then(|s| s.runtime_state_path(&id)),
     )
     .await;
-    let message_queue = crate::message_queue::MessageQueue::open(deps.store.as_ref().and_then(|s|s.queue_state_path(&id))).await;
+    let message_queue = crate::message_queue::MessageQueue::open(
+        deps.store.as_ref().and_then(|s| s.queue_state_path(&id)),
+    )
+    .await;
     Arc::new(SessionSlot {
-        session_activity:deps.session_activity.clone(),
+        session_activity: deps.session_activity.clone(),
         id,
         session: Arc::new(RwLock::new(session)),
         native_provider,

@@ -28,50 +28,51 @@
 
 pub mod acp_host;
 pub mod acp_session;
-pub mod agent_spend;
 mod agent_secrets;
+pub mod agent_spend;
 mod agent_threads;
+mod agent_updates;
 mod agent_worktree;
-mod engines_reload;
-mod keep_awake;
 pub mod approver;
 mod aside;
 mod browse;
 mod browser;
+mod browser_recording;
 mod chat_import;
 pub mod checkpoints;
 mod context_api;
 mod cwd;
 mod delegate;
+mod devices;
 mod editors;
 mod embedded;
 pub mod engines_api;
+mod engines_reload;
 pub mod extensions;
 mod file;
 mod git;
 mod github_connect;
 pub mod hooks_api;
 pub mod interactive;
+mod keep_awake;
 pub mod mcp;
 mod memory;
+mod message_queue;
 mod models;
 mod oauth;
+mod opencode_control;
 pub mod plugins;
 mod processes;
 pub mod protocol;
 pub mod provider;
 mod pull_requests;
 mod review;
+mod runtime_admission;
+mod runtime_requests;
+mod session_activity;
 pub mod session_changes;
 pub mod session_engine;
-mod runtime_requests;
-mod transcript_history;
-mod runtime_admission;
-mod opencode_control;
-mod message_queue;
-mod session_activity;
 mod sessions;
-mod agent_updates;
 mod settings;
 mod skills;
 pub mod slot;
@@ -80,6 +81,7 @@ mod subagents_api;
 mod terminal;
 mod tests_api;
 mod title;
+mod transcript_history;
 mod undo;
 mod unfurl;
 mod usage;
@@ -232,6 +234,14 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
     let default_instance = boot_engines
         .default_native_instance(&engine_cfg)
         .map(|i| i.id.to_string());
+    // Every native instance id, so a background model written
+    // `instance:model` routes there (#83).
+    swappable.set_known_instances(
+        boot_engines
+            .instances()
+            .filter(|i| i.is_native())
+            .map(|i| i.id.to_string()),
+    );
     for inst in boot_engines.instances().filter(|i| i.is_native()) {
         let id = inst.id.as_str();
         if Some(id) == default_instance.as_deref() {
@@ -289,7 +299,7 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
     slots.insert(initial_id.clone(), initial_slot);
 
     let state = AppState {
-        slot_loads:Arc::new(std::sync::Mutex::new(HashMap::new())),
+        slot_loads: Arc::new(std::sync::Mutex::new(HashMap::new())),
         session_activity,
         runtime_retries: Arc::new(crate::runtime_requests::RetryQueue::default()),
         slots: Arc::new(RwLock::new(slots)),
@@ -399,7 +409,10 @@ fn build_router(state: AppState, static_dir: Option<PathBuf>) -> Router {
         .route("/api/version", get(version))
         .route("/api/aside", post(aside::ask))
         .route("/api/sessions/:id/fork", post(sessions::fork_session))
-        .route("/api/sessions/:id/relationships", get(sessions::relationships))
+        .route(
+            "/api/sessions/:id/relationships",
+            get(sessions::relationships),
+        )
         .route("/api/sessions/:id/turn-diff", post(git::turn_file_diff))
         .route(
             "/api/processes",

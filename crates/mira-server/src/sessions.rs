@@ -34,8 +34,8 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use mira_config::RuntimeState;
 use mira_core::SessionId;
-use mira_harness::{SessionConfig, SessionRecord};
 use mira_harness::persist::SessionListRecord;
+use mira_harness::{SessionConfig, SessionRecord};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
@@ -230,8 +230,20 @@ pub async fn list_sessions(State(state): State<AppState>, Query(q): Query<ListQu
         let live: Vec<SessionSummary> = summarize_live(&state).await;
         return Json(live).into_response();
     };
-    let cwd = if q.all || q.archived {None} else {Some(state.current_cwd().await)};
-    let records = match store.list_metadata(cwd.as_deref(), q.archived, q.include_children, if q.all || q.archived {200} else {50}).await {
+    let cwd = if q.all || q.archived {
+        None
+    } else {
+        Some(state.current_cwd().await)
+    };
+    let records = match store
+        .list_metadata(
+            cwd.as_deref(),
+            q.archived,
+            q.include_children,
+            if q.all || q.archived { 200 } else { 50 },
+        )
+        .await
+    {
         Ok(records) => records,
         Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("list: {error}")),
     };
@@ -258,7 +270,11 @@ pub async fn list_sessions(State(state): State<AppState>, Query(q): Query<ListQu
     // adding them there listed every open chat as "Untitled", dated 1970.
     let known_ids: std::collections::HashSet<String> =
         summaries.iter().map(|s| s.id.clone()).collect();
-    let live_slots = if q.archived { Vec::new() } else { state.list_slots().await };
+    let live_slots = if q.archived {
+        Vec::new()
+    } else {
+        state.list_slots().await
+    };
     for slot in live_slots {
         let id = slot.id.to_string();
         if known_ids.contains(&id) {
@@ -535,7 +551,9 @@ pub async fn get_session_preview(
             let mut reply = String::new();
             let mut tool = None;
             for line in &lines[i + 1..] {
-                let Some(frame) = line.get("frame") else { continue };
+                let Some(frame) = line.get("frame") else {
+                    continue;
+                };
                 match frame.get("type").and_then(|t| t.as_str()) {
                     Some("acp_text") => {
                         if let Some(t) = frame.get("text").and_then(|t| t.as_str()) {
@@ -661,7 +679,7 @@ pub async fn delete_session(
         crate::acp_session::stop_agent(slot).await;
         slot.runtime_requests.close().await;
         slot.message_queue.close().await;
-        state.session_activity.set(slot.id.to_string(),false);
+        state.session_activity.set(slot.id.to_string(), false);
     }
 
     // Cascade: any persisted subagent transcripts belong to this parent.
@@ -829,7 +847,11 @@ async fn build_ready_for_slot(slot: &crate::slot::SessionSlot, state: &AppState)
     crate::ws::build_ready(slot, state).await
 }
 
-fn summarize_record(r: &SessionRecord, active_id: &str, live_meta: &std::collections::HashMap<String, LiveMeta>) -> SessionSummary {
+fn summarize_record(
+    r: &SessionRecord,
+    active_id: &str,
+    live_meta: &std::collections::HashMap<String, LiveMeta>,
+) -> SessionSummary {
     let mut summary = summarize_metadata(&SessionListRecord::from(r), active_id, live_meta);
     (summary.worktree_status, summary.worktree_branch) = cached_worktree_status(&r.cwd);
     summary
@@ -840,11 +862,15 @@ fn summarize_metadata(
     active_id: &str,
     live_meta: &std::collections::HashMap<String, LiveMeta>,
 ) -> SessionSummary {
-    let first = r.first_user_message.as_deref().map(|s| truncate(s, FIRST_MSG_TRUNC));
+    let first = r
+        .first_user_message
+        .as_deref()
+        .map(|s| truncate(s, FIRST_MSG_TRUNC));
     let id = r.id.to_string();
     let live = live_meta.get(&id);
     SessionSummary {
-        parent_id: r.parent_id.as_ref().map(|id| id.to_string()),        id: id.clone(),
+        parent_id: r.parent_id.as_ref().map(|id| id.to_string()),
+        id: id.clone(),
         model: r.model.clone(),
         cwd: r.cwd.display().to_string(),
         created_at: r.created_at,
@@ -927,40 +953,60 @@ async fn enrich_worktrees(summaries: &mut [SessionSummary]) {
     use std::sync::{Arc, OnceLock};
     static LIMIT: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
     let limit = LIMIT.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)));
-    let folders: std::collections::HashSet<_> = summaries.iter().map(|summary| std::path::PathBuf::from(&summary.cwd)).collect();
+    let folders: std::collections::HashSet<_> = summaries
+        .iter()
+        .map(|summary| std::path::PathBuf::from(&summary.cwd))
+        .collect();
     let mut jobs = tokio::task::JoinSet::new();
     for folder in folders {
         let limit = limit.clone();
         jobs.spawn(async move {
             let _permit = limit.acquire_owned().await.ok()?;
             tokio::task::spawn_blocking(move || {
-                let metadata = cached_worktree_status(&folder); (folder, metadata)
-            }).await.ok()
+                let metadata = cached_worktree_status(&folder);
+                (folder, metadata)
+            })
+            .await
+            .ok()
         });
     }
     let mut metadata = std::collections::HashMap::new();
     while let Some(result) = jobs.join_next().await {
-        if let Ok(Some((folder, value))) = result {metadata.insert(folder, value);}
+        if let Ok(Some((folder, value))) = result {
+            metadata.insert(folder, value);
+        }
     }
     for summary in summaries {
         if let Some((status, branch)) = metadata.get(std::path::Path::new(&summary.cwd)) {
-            summary.worktree_status = *status; summary.worktree_branch = branch.clone();
+            summary.worktree_status = *status;
+            summary.worktree_branch = branch.clone();
         }
     }
 }
 fn cached_worktree_status(cwd: &std::path::Path) -> (Option<WorktreeMergeStatus>, Option<String>) {
     use std::sync::{Mutex, OnceLock};
     use std::time::{Duration, Instant};
-    type Cache = std::collections::HashMap<std::path::PathBuf, (Instant, (Option<WorktreeMergeStatus>, Option<String>))>;
+    type Cache = std::collections::HashMap<
+        std::path::PathBuf,
+        (Instant, (Option<WorktreeMergeStatus>, Option<String>)),
+    >;
     static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(Cache::new()));
-    if let Some((at, value)) = cache.lock().unwrap_or_else(|error| error.into_inner()).get(cwd) {
-        if at.elapsed() < Duration::from_secs(15) {return value.clone();}
+    if let Some((at, value)) = cache
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(cwd)
+    {
+        if at.elapsed() < Duration::from_secs(15) {
+            return value.clone();
+        }
     }
     let value = detect_worktree_status(cwd);
     let mut cache = cache.lock().unwrap_or_else(|error| error.into_inner());
     cache.retain(|_, (at, _)| at.elapsed() < Duration::from_secs(15));
-    if cache.len() < 1024 {cache.insert(cwd.to_path_buf(), (Instant::now(), value.clone()));}
+    if cache.len() < 1024 {
+        cache.insert(cwd.to_path_buf(), (Instant::now(), value.clone()));
+    }
     value
 }
 
@@ -1230,22 +1276,50 @@ pub async fn set_background_mode_http(
 }
 
 #[derive(Deserialize)]
-pub struct RelationshipQuery { #[serde(default)] pub limit: Option<usize> }
+pub struct RelationshipQuery {
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
 /// Direct parents are loaded by ID even when they have fallen out of the recent-chat list.
-pub async fn relationships(State(state): State<AppState>, AxumPath(id): AxumPath<String>, Query(query): Query<RelationshipQuery>) -> Response {
-    let Some(store) = state.store.clone() else { return Json(serde_json::json!({"current": null, "parent": null, "children": [], "has_more": false})).into_response(); };
+pub async fn relationships(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Query(query): Query<RelationshipQuery>,
+) -> Response {
+    let Some(store) = state.store.clone() else {
+        return Json(
+            serde_json::json!({"current": null, "parent": null, "children": [], "has_more": false}),
+        )
+        .into_response();
+    };
     let sid = SessionId::from(id.as_str());
     let record = match store.load(&sid).await {
         Ok(record) => record,
-        Err(mira_harness::StoreError::NotFound(_)) => return Json(serde_json::json!({"current": null, "parent": null, "children": [], "has_more": false})).into_response(),
+        Err(mira_harness::StoreError::NotFound(_)) => return Json(
+            serde_json::json!({"current": null, "parent": null, "children": [], "has_more": false}),
+        )
+        .into_response(),
         Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
     };
-    let parent_id = record.parent_id.clone().or_else(|| record.forked_from.as_ref().map(|fork| fork.session_id.clone()));
-    let parent = match parent_id { Some(id) => store.load(&id).await.ok(), None => None };
+    let parent_id = record.parent_id.clone().or_else(|| {
+        record
+            .forked_from
+            .as_ref()
+            .map(|fork| fork.session_id.clone())
+    });
+    let parent = match parent_id {
+        Some(id) => store.load(&id).await.ok(),
+        None => None,
+    };
     let limit = query.limit.unwrap_or(20).clamp(20, 200);
-    let mut children = match store.list_related(&sid, limit + 1).await { Ok(records) => records, Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()) };
-    let has_more = children.len() > limit; children.truncate(limit);
-    let active = state.active.read().await.to_string(); let live = live_slot_metadata(&state).await;
+    let mut children = match store.list_related(&sid, limit + 1).await {
+        Ok(records) => records,
+        Err(error) => return err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    };
+    let has_more = children.len() > limit;
+    children.truncate(limit);
+    let active = state.active.read().await.to_string();
+    let live = live_slot_metadata(&state).await;
     Json(serde_json::json!({ "current": summarize_record(&record, &active, &live), "parent": parent.as_ref().map(|record| summarize_record(record, &active, &live)), "children": children.iter().map(|record| summarize_record(record, &active, &live)).collect::<Vec<_>>(), "has_more": has_more })).into_response()
 }
 
@@ -1255,28 +1329,54 @@ mod metadata_tests {
     #[test]
     fn sidebar_metadata_preserves_counts_titles_engine_and_unicode_preview() {
         let record = SessionListRecord {
-            id: SessionId::from("saved-chat"), cwd: "/project".into(), model: "model".into(),
-            created_at: 1, updated_at: 2, title: Some("Saved chat".into()),
-            first_user_message: Some("你好\nworld".into()), message_count: 123,
-            usage: Default::default(), parent_id: None, pinned: true, archived_at: None,
-            agent_driver: Some("codex".into()), forked_from: None,
+            id: SessionId::from("saved-chat"),
+            cwd: "/project".into(),
+            model: "model".into(),
+            created_at: 1,
+            updated_at: 2,
+            title: Some("Saved chat".into()),
+            first_user_message: Some("你好\nworld".into()),
+            message_count: 123,
+            usage: Default::default(),
+            parent_id: None,
+            pinned: true,
+            archived_at: None,
+            agent_driver: Some("codex".into()),
+            forked_from: None,
         };
         let summary = summarize_metadata(&record, "saved-chat", &Default::default());
-        assert_eq!(summary.message_count, 123); assert_eq!(summary.title, record.title);
+        assert_eq!(summary.message_count, 123);
+        assert_eq!(summary.title, record.title);
         assert_eq!(summary.first_user_message.as_deref(), Some("你好 world"));
         assert_eq!(summary.agent_driver.as_deref(), Some("codex"));
-        assert!(summary.active && summary.pinned); assert!(summary.worktree_status.is_none());
+        assert!(summary.active && summary.pinned);
+        assert!(summary.worktree_status.is_none());
     }
     #[tokio::test]
     async fn shared_non_worktree_folder_enrichment_preserves_all_rows() {
         let record = SessionListRecord {
-            id: SessionId::from("saved-chat"), cwd: "/project".into(), model: "model".into(),
-            created_at: 1, updated_at: 2, title: None, first_user_message: None, message_count: 0,
-            usage: Default::default(), parent_id: None, pinned: false, archived_at: None,
-            agent_driver: None, forked_from: None,
+            id: SessionId::from("saved-chat"),
+            cwd: "/project".into(),
+            model: "model".into(),
+            created_at: 1,
+            updated_at: 2,
+            title: None,
+            first_user_message: None,
+            message_count: 0,
+            usage: Default::default(),
+            parent_id: None,
+            pinned: false,
+            archived_at: None,
+            agent_driver: None,
+            forked_from: None,
         };
-        let mut rows = (0..100).map(|_| summarize_metadata(&record, "", &Default::default())).collect::<Vec<_>>();
+        let mut rows = (0..100)
+            .map(|_| summarize_metadata(&record, "", &Default::default()))
+            .collect::<Vec<_>>();
         enrich_worktrees(&mut rows).await;
-        assert_eq!(rows.len(), 100); assert!(rows.iter().all(|row| row.worktree_status.is_none() && row.worktree_branch.is_none()));
+        assert_eq!(rows.len(), 100);
+        assert!(rows
+            .iter()
+            .all(|row| row.worktree_status.is_none() && row.worktree_branch.is_none()));
     }
 }

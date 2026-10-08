@@ -311,6 +311,7 @@ struct StreamState {
     /// Cached-input tokens (read from the prompt cache). Anthropic
     /// reports this separately from the "creation" number.
     cached_input_tokens: u32,
+    cache_write_tokens: u32,
     /// Completion tokens from `message_delta`.
     completion_tokens: u32,
     /// Whether we saw any usage numbers at all. Determines whether we
@@ -424,10 +425,14 @@ impl StreamState {
         // input_tokens on Anthropic *excludes* cached-read tokens.
         // TokenUsage.prompt_tokens is defined as the total, with
         // cached_input_tokens a subset — reconstruct that shape.
+        // Cache writes are excluded from input_tokens too: count them in
+        // the total and track them for pricing.
         let cached = u.cache_read_input_tokens.unwrap_or(0);
+        let written = u.cache_creation_input_tokens.unwrap_or(0);
         let input = u.input_tokens.unwrap_or(0);
-        self.prompt_tokens = Some(input + cached);
+        self.prompt_tokens = Some(input + cached + written);
         self.cached_input_tokens = cached;
+        self.cache_write_tokens = written;
         self.usage_seen |= u.input_tokens.is_some()
             || u.cache_read_input_tokens.is_some()
             || u.cache_creation_input_tokens.is_some();
@@ -469,6 +474,7 @@ impl StreamState {
             prompt_tokens: self.prompt_tokens.unwrap_or(0),
             completion_tokens: self.completion_tokens,
             cached_input_tokens: self.cached_input_tokens,
+            cache_write_tokens: self.cache_write_tokens,
         })
     }
 }

@@ -19,7 +19,6 @@ import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffec
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   RotateCw,
-  ListCollapse,
   Redo2,
   ArrowDown,
   ChevronDown,
@@ -47,8 +46,9 @@ import { loadAgentCaps, loadInstanceConfigs, parseArgs, parseEnv, saveAgentCaps 
 import { EngineMark } from './components/EnginePicker';
 import { AgentIcon, ProviderIcon } from './components/AgentIcon';
 import { HtmlRenderCard } from './components/HtmlRenderCard';
+import { CompactionCard, type CompactionEntry } from './components/CompactionCard';
 import { SecretPrompt, type SecretRequest } from './components/SecretPrompt';
-import { prettyModel } from './lib/models';
+import { loadModelOptions, prettyModel } from './lib/models';
 import type { UsageRingData } from './components/UsageRing';
 import { isAgentRequest } from './lib/agentRequest';
 import { agentCallToToolCall, agentToolResult, agentToolStatus, boundAgentOutput } from './lib/agentTools';
@@ -321,7 +321,7 @@ type ToolEntry = {
 type WarningEntry = { kind: 'warning'; text: string };
 /** Where compaction summarized the conversation: a divider, with the
  *  summary behind a toggle when it's known (after a reload). */
-type CompactEntry = { kind: 'compact'; summarized: number | null; summary: string | null };
+type CompactEntry = CompactionEntry;
 type ErrorEntry = { kind: 'error'; text: string };
 type MsgEntry = { steerRequestId?: string; kind: 'msg'; msg: Message; nativeMessageId?: string; nativeCompleted?: boolean; nativePhase?: string };
 /** The model's reasoning before a reply / tool call. `live` while
@@ -472,6 +472,19 @@ export function entriesForTranscriptPage(page: import('./types').TranscriptPage,
     offset = end;
   }
   return entries;
+}
+
+/** Close the newest running compaction card (or add a finished one, when
+ *  the start was missed: a reload mid-compaction, an older server). */
+function finishCompaction(prev: Entry[], patch: Partial<CompactionEntry>): Entry[] {
+  const i = prev.map((e) => e.kind === 'compact' && e.state === 'running').lastIndexOf(true);
+  const done = { endedAt: Date.now(), ...patch };
+  if (i < 0) {
+    return [...prev, { kind: 'compact', summarized: null, summary: null, ...done } as Entry];
+  }
+  const next = prev.slice();
+  next[i] = { ...(prev[i] as CompactionEntry), ...done };
+  return next;
 }
 
 export function interleaveReplay(
@@ -805,7 +818,7 @@ export function historyToEntries(
     if (m.role === 'user') {
       const summary = compactionSummary(m.content);
       if (summary != null) {
-        entries.push({ kind: 'compact', summarized: null, summary });
+        entries.push({ kind: 'compact', state: 'done', summarized: null, summary });
       } else {
         // Prompt hooks append a `<hook-context>` block for the model; show
         // only what the user typed.
@@ -1109,6 +1122,22 @@ export default function App() {
   const [acpAgents, setAcpAgents] = useState<AcpAgentStatus[]>([]);
   const [acpStatusPending, setAcpStatusPending] = useState(false);
   const acpAgentsRef = useRef<AcpAgentStatus[]>([]);
+  // The agent list, from the engines list: one row per agent driver (its
+  // default instance), with the full status the server probed. Agent update
+  // notices compare against the previous list, as they did for `acp_status`.
+  useEffect(() => {
+    if (!engines) return;
+    const next = engines
+      .filter((e) => e.flavor === 'external' && e.agent && e.instance === e.driver)
+      .map((e) => e.agent as AcpAgentStatus);
+    if (next.length === 0) return;
+    const notice = acpAgentsRef.current.length > 0 ? agentUpdateNotice(acpAgentsRef.current, next) : null;
+    acpAgentsRef.current = next;
+    setAcpAgents(next);
+    if (notice && (!notice.updateAgent || !completedUpdatesRef.current.has(notice.updateAgent))) pushInfoNotice(notice);
+    completedUpdatesRef.current.clear();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [engines]);
   const completedUpdatesRef = useRef(new Set<string>());
   /** Small and persistent in-window notices for app-level state. */
   const [infoNotices, setInfoNotices] = useState<InfoNotice[]>([]);
@@ -1141,10 +1170,31 @@ export default function App() {
     return acpAgents.find((a) => a.kind === acpDriver)?.display_name ?? acpDriver;
   }, [acpDriver, acpAgents]);
 
-  /** Probe every agent. Off the render path because it spawns processes. */
+  /** Read the engines list. Right after the server starts, agent rows are
+   *  placeholders until its background probe lands (`fresh: false`), so
+   *  look again a few times rather than showing them as unknown. */
+  const loadEngines = useCallback(() => {
+    let tries = 0;
+    const load = () => {
+      void listEngines()
+        .then((v) => {
+          setEngines(v.engines);
+          if (!v.fresh && ++tries < 6) window.setTimeout(load, 2500);
+        })
+        .catch(() => {});
+    };
+    load();
+  }, []);
+
+  /** Agent health comes from one place: `GET /api/engines` (#85). This
+   *  forces the server to probe every agent again, for the explicit
+   *  "check agents" actions; normal loads read the cached list. */
   const requestAcpStatus = useCallback(() => {
     setAcpStatusPending(true);
-    wsRef.current?.send({ type: 'acp_status' });
+    void listEngines(true)
+      .then((v) => setEngines(v.engines))
+      .catch(() => {})
+      .finally(() => setAcpStatusPending(false));
   }, []);
 
   const startAcpAgent = useCallback((kind: string, cfg: AcpInstanceConfig, resume?: string | null, model?: string | null, instance?: string | null) => {
@@ -1214,6 +1264,11 @@ export default function App() {
     setBusy(true);
     busyRef.current = true;
     setThinking(true);
+    // Agents compact inside their own process and only end the turn, so the
+    // card runs from here until that turn ends.
+    setEntries((prev) => [...prev, {
+      kind: 'compact', state: 'running', trigger: 'agent', startedAt: Date.now(), summarized: null, summary: null,
+    }]);
     wsRef.current?.send({ type: 'acp_compact', focus: focus?.trim() || null });
   }
 
@@ -1913,8 +1968,7 @@ export default function App() {
         // failure; the palette just shows built-in commands.
         listSkills().then(setSkills).catch(() => setSkills([]));
         listCommands().then(setCommands).catch(() => setCommands([]));
-        listEngines().then((v) => setEngines(v.engines)).catch(() => {});
-        requestAcpStatus();
+        loadEngines();
         // Each session (and worktree) has its own environment; ask for it.
         setEnvSwitching(null);
         wsRef.current?.send({ type: 'environment' });
@@ -2105,8 +2159,7 @@ export default function App() {
         setExtensionsVersion((n) => n + 1);
         // Agent install/auth state can move under us (an adapter was
         // installed, a CLI signed in) — refresh the engine list.
-        listEngines().then((v) => setEngines(v.engines)).catch(() => {});
-        requestAcpStatus();
+        loadEngines();
         break;
       case 'skills_reloaded':
         // A skill file appeared / changed / vanished. Refetch the
@@ -2190,12 +2243,26 @@ export default function App() {
           },
         ]);
         break;
+      case 'compacting':
+        // One card per compaction: a running one already showing (the agent
+        // path adds its own) isn't doubled.
+        setEntries((prev) =>
+          prev.some((e) => e.kind === 'compact' && e.state === 'running')
+            ? prev
+            : [...prev, {
+                kind: 'compact', state: 'running', trigger: msg.trigger === 'auto' ? 'auto' : 'manual',
+                startedAt: Date.now(), summarized: null, summary: null, tokensBefore: msg.tokens_before ?? null,
+              }],
+        );
+        break;
       case 'compacted':
-        setEntries((prev) => [
-          // The "summarizing…" note from /compact is done.
-          ...prev.filter((e) => !(e.kind === 'warning' && e.text === '[context] summarizing the conversation…')),
-          { kind: 'compact', summarized: msg.messages_removed, summary: null },
-        ]);
+        setEntries((prev) => finishCompaction(prev, {
+          state: 'done', summarized: msg.messages_removed,
+          tokensBefore: msg.tokens_before ?? undefined, tokensAfter: msg.tokens_after ?? null,
+        }));
+        break;
+      case 'compaction_failed':
+        setEntries((prev) => finishCompaction(prev, { state: 'failed', error: msg.error }));
         break;
       case 'goal_set':
         setGoal(msg.goal);
@@ -2459,6 +2526,10 @@ export default function App() {
         });
         break;
       case 'acp_turn_end':
+        // An agent compaction ends with its turn.
+        setEntries((prev) => prev.some((e) => e.kind === 'compact' && e.state === 'running' && e.trigger === 'agent')
+          ? finishCompaction(prev, isSuccessfulAcpStop(msg.stop_reason) ? { state: 'done' } : { state: 'failed', error: describeAcpStop(msg.stop_reason) })
+          : prev);
         // End the turn. This is the only place an external agent's turn can
         // be declared over — the prompt is fire-and-forget, so unlike the
         // harness there is no surrounding await to imply completion. Without
@@ -2640,16 +2711,11 @@ export default function App() {
         applyEngine(next);
         break;
       }
-      case 'acp_agent_status': {
-        const notice = agentUpdateNotice(acpAgentsRef.current, msg.agents);
-        acpAgentsRef.current = msg.agents;
-        setAcpAgents(msg.agents);
+      case 'acp_agent_status':
+        // A probe ran on the server: the engines list has the fresh result.
         setAcpStatusPending(false);
-        if (notice && (!notice.updateAgent || !completedUpdatesRef.current.has(notice.updateAgent))) pushInfoNotice(notice);
-        completedUpdatesRef.current.clear();
-        console.debug('[acp] agent status', msg.agents.map((a) => `${a.display_name}:${a.state.state}`));
+        loadEngines();
         break;
-      }
 
       default: {
         // A frame type this build does not know about. Logged rather than
@@ -2844,8 +2910,10 @@ export default function App() {
         seven_day_sonnet: 'Weekly · Sonnet',
       };
       return {
-        used: acpUsage?.used ?? null,
-        window: acpUsage?.size ?? null,
+        // A size of 0 means "not known yet" (e.g. just after a model
+        // switch): show the ring as unknown, not as a 0-token window.
+        used: acpUsage && acpUsage.size > 0 ? acpUsage.used : null,
+        window: acpUsage && acpUsage.size > 0 ? acpUsage.size : null,
         compactAt: null,
         tokens: null,
         costUsd: acpUsage?.cost && acpUsage.cost.currency === 'USD' ? acpUsage.cost.amount : null,
@@ -3206,7 +3274,8 @@ export default function App() {
       wsRef.current?.send({ type: 'acp_set_config_option', option_id: acpModelOption?.id ?? 'model', value: m });
       return;
     }
-    wsRef.current?.send({ type: 'set_model', model: m, instance: instance ?? null });
+    // The model's remembered options travel with the switch (#85).
+    wsRef.current?.send({ type: 'set_model', model: m, instance: instance ?? null, options: loadModelOptions(m, instance ?? null) });
   }
   function onSetModelOption(id: string, value: string) {
     // With an ACP agent driving the session, the option ids are the *agent's*
@@ -3237,8 +3306,8 @@ export default function App() {
   }
 
   function onCompact(focus: string) {
+    // The server announces it (`compacting`), which shows the card.
     wsRef.current?.send({ type: 'compact', focus: focus || null });
-    setEntries((prev) => [...prev, { kind: 'warning', text: '[context] summarizing the conversation…' }]);
   }
 
   async function onNewChat() {
@@ -3413,8 +3482,7 @@ export default function App() {
     if (v.default_model) setModel(v.default_model);
     // Backend list for the pickers — native providers + external agents
     // with health + catalogs. Failures degrade to an empty list.
-    listEngines().then((v) => setEngines(v.engines)).catch(() => {});
-    requestAcpStatus();
+    loadEngines();
     if (v.default_mode) setMode(v.default_mode as Mode);
   };
 
@@ -4142,7 +4210,7 @@ export default function App() {
               agentDescriptors={acpDescriptors}
               onSetModelOption={onSetModelOption}
               onPickProvider={(instance, m) => {
-                wsRef.current?.send({ type: 'set_model', model: m, instance: instance ?? null });
+                wsRef.current?.send({ type: 'set_model', model: m, instance: instance ?? null, options: loadModelOptions(m, instance ?? null) });
               }}
               onPickAgent={(driver, m) => {
                 // Already this chat's agent: only the model can change, and
@@ -5668,7 +5736,7 @@ function EntryView({
     case 'goal':
       return <GoalTranscriptChip entry={entry} />;
     case 'compact':
-      return <CompactDivider entry={entry} />;
+      return <CompactionCard entry={entry} />;
     case 'thought':
       return (
         <div className="flex justify-start">
@@ -5706,43 +5774,6 @@ function EntryView({
   }
 }
 
-/** "Conversation compacted" line across the transcript. Everything above
- *  it is still shown, but the model now has the summary instead. */
-function CompactDivider({ entry }: { entry: CompactEntry }) {
-  const [open, setOpen] = useState(false);
-  const detail = entry.summarized != null
-    ? ` · ${entry.summarized} earlier message${entry.summarized === 1 ? '' : 's'} summarized`
-    : '';
-  return (
-    <div className="flex flex-col gap-2 py-1">
-      <div className="flex items-center gap-3 text-[11.5px] text-muted-foreground">
-        <span className="h-px flex-1 bg-border/70" />
-        <span className="inline-flex shrink-0 items-center gap-1.5">
-          <ListCollapse aria-hidden="true" className="size-3.5 shrink-0" />
-          Conversation compacted{detail}
-          {entry.summary && (
-            <>
-              {' · '}
-              <button
-                type="button"
-                onClick={() => setOpen((v) => !v)}
-                className="underline decoration-dotted underline-offset-2 hover:text-foreground"
-              >
-                {open ? 'hide summary' : 'show summary'}
-              </button>
-            </>
-          )}
-        </span>
-        <span className="h-px flex-1 bg-border/70" />
-      </div>
-      {open && entry.summary && (
-        <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-border/60 bg-muted/30 px-3 py-2 font-sans text-[12.5px] leading-relaxed text-foreground/85">
-          {entry.summary}
-        </pre>
-      )}
-    </div>
-  );
-}
 
 /** Goal lifecycle events in the transcript.
  *

@@ -171,9 +171,23 @@ export function BrowserPane() {
     const ro = new ResizeObserver(report);
     ro.observe(el);
     report();
+    // Moving the window to a screen with a different pixel density doesn't
+    // resize the pane, but the frames must follow it or they blur.
+    let dpr: MediaQueryList | null = null;
+    const watchDpr = () => {
+      dpr?.removeEventListener('change', onDpr);
+      dpr = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+      dpr.addEventListener('change', onDpr);
+    };
+    function onDpr() {
+      report();
+      watchDpr();
+    }
+    watchDpr();
     return () => {
       clearTimeout(t);
       ro.disconnect();
+      dpr?.removeEventListener('change', onDpr);
     };
   }, [mode, send]);
 

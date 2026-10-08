@@ -1,3 +1,4 @@
+import type { AcpAgentStatus } from './types';
 import type { BackgroundMode, ExternalAgentSession, SessionSummary, SettingsUpdate, SettingsView } from './types';
 
 export async function getSettings(): Promise<SettingsView> {
@@ -302,6 +303,11 @@ export type EngineSnapshot = {
   auth?: string | null;
   install_hint?: string | null;
   launch?: string | null;
+  /** Native rows: `markers`, `automatic` or `off`. */
+  prompt_caching?: string | null;
+  /** External rows: the agent's full status (versions, transport, sign-in
+   *  methods). The app's agent list is built from this. */
+  agent?: AcpAgentStatus | null;
 };
 
 export type EngineListView = {

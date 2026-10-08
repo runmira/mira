@@ -29,6 +29,7 @@ import { AlertCircle, Check, Loader2, RefreshCw, Terminal } from 'lucide-react';
 import type { AcpAgentStatus } from '../../types';
 import { AgentHistoryImport } from './AgentHistoryImport';
 import { AgentIcon } from '../AgentIcon';
+import { openExternal } from '@/lib/desktop';
 import { PrivateText, redactEmails } from '../PrivateText';
 import {
   describeAgentStatus,
@@ -169,9 +170,23 @@ function HowAgentsWork() {
           <p className="mt-1.5 text-[11.5px] leading-relaxed text-muted-foreground/80">{s.body}</p>
         </li>
       ))}
+      <li className="sm:col-span-3 text-[11.5px] text-muted-foreground/80">
+        Second accounts, a separate agent home, background models on another provider:{' '}
+        <button
+          type="button"
+          onClick={() => openExternal(ENGINES_DOC)}
+          className="text-foreground/85 underline decoration-dotted underline-offset-2 hover:text-foreground"
+        >
+          the engines guide
+        </button>
+        .
+      </li>
     </ol>
   );
 }
+
+/** Configuring engines: `engines:` in mira.yaml, accounts, background models. */
+const ENGINES_DOC = 'https://github.com/runmira/mira/blob/main/docs/engines.md';
 
 /**
  * One agent's full detail: status, config, start, history import.

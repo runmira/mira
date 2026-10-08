@@ -23,7 +23,9 @@ pub mod tool;
 pub use builtin::background::BackgroundProcessStore;
 pub use context::ToolContext;
 pub use guard::{AppliedUndo, FileGuard, GuardError, UndoEntry, UndoOp};
-pub use preview::{compute_preview, preview_between, DiffHunk, DiffKind, DiffLine, DiffPreview, DiffRow};
+pub use preview::{
+    compute_preview, preview_between, DiffHunk, DiffKind, DiffLine, DiffPreview, DiffRow,
+};
 pub use prompt::{
     AskUserAnswer, AskUserOption, AskUserProposal, AskUserQuestion, AskUserResponse, AskUserTool,
     PlanProposal, PlanResponse, PlanStep, PlanTool, PromptChannel, PromptRequest, PromptResponse,

@@ -35,13 +35,18 @@ async fn watch(state: AppState) -> anyhow::Result<()> {
     // Watch the folder, not the file: editors save by replacing it. Only
     // events naming the config count; the same folder holds files Mira
     // rewrites constantly (state.yaml).
-    let mut watcher: RecommendedWatcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-        if let Ok(ev) = res {
-            if ev.paths.iter().any(|p| p.file_name().map(|n| n.to_os_string()) == name) {
-                let _ = tx.send(());
+    let mut watcher: RecommendedWatcher =
+        notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            if let Ok(ev) = res {
+                if ev
+                    .paths
+                    .iter()
+                    .any(|p| p.file_name().map(|n| n.to_os_string()) == name)
+                {
+                    let _ = tx.send(());
+                }
             }
-        }
-    })?;
+        })?;
     watcher.watch(&dir, RecursiveMode::NonRecursive)?;
     while rx.recv().await.is_some() {
         tokio::time::sleep(Duration::from_millis(400)).await;
@@ -65,7 +70,10 @@ pub async fn reload(state: &AppState) {
     };
     let next = mira_engine::EngineRegistry::from_config(&cfg);
     let native = |r: &mira_engine::EngineRegistry| -> HashSet<String> {
-        r.instances().filter(|i| i.is_native()).map(|i| i.id.to_string()).collect()
+        r.instances()
+            .filter(|i| i.is_native())
+            .map(|i| i.id.to_string())
+            .collect()
     };
     let before = native(&state.engines.current());
     let after = native(&next);
@@ -93,6 +101,9 @@ pub async fn reload(state: &AppState) {
     for gone in before.difference(&after) {
         pools.iter().for_each(|pool| pool.unregister(gone));
     }
+    for pool in &pools {
+        pool.set_known_instances(after.iter().cloned());
+    }
     let default = next.default_native_instance(&cfg).map(|i| i.id.to_string());
     state.engines.replace(next);
 
@@ -108,7 +119,11 @@ pub async fn reload(state: &AppState) {
         }
         if let Some(def) = &default {
             if slot.native_provider.activate(def) {
-                *slot.selection.instance.write().expect("selection lock poisoned") = Some(def.clone());
+                *slot
+                    .selection
+                    .instance
+                    .write()
+                    .expect("selection lock poisoned") = Some(def.clone());
             }
         }
         let _ = slot.events_tx.send(ServerMsg::Warning {
@@ -118,10 +133,19 @@ pub async fn reload(state: &AppState) {
             ),
         });
     }
-    let global = state.selection.instance.read().expect("selection lock poisoned").clone();
+    let global = state
+        .selection
+        .instance
+        .read()
+        .expect("selection lock poisoned")
+        .clone();
     if let (Some(current), Some(def)) = (global, &default) {
         if !after.contains(&current) && state.provider.activate(def) {
-            *state.selection.instance.write().expect("selection lock poisoned") = Some(def.clone());
+            *state
+                .selection
+                .instance
+                .write()
+                .expect("selection lock poisoned") = Some(def.clone());
         }
     }
     tracing::info!(instances = after.len(), "engines reloaded from mira.yaml");

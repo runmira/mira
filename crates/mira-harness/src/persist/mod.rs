@@ -288,15 +288,32 @@ pub struct SessionListRecord {
 impl From<&SessionRecord> for SessionListRecord {
     fn from(record: &SessionRecord) -> Self {
         Self {
-            id: record.id.clone(), cwd: record.cwd.clone(), model: record.cfg.model.clone(),
-            created_at: record.created_at, updated_at: record.updated_at, title: record.title.clone(),
-            first_user_message: record.first_user_message().map(|text| text.chars().take(512).collect()),
-            message_count: record.conversation().count(), usage: record.usage,
-            parent_id: record.parent_id.clone(), pinned: record.pinned, archived_at: record.archived_at,
-            agent_driver: record.agent.as_ref().filter(|agent| agent.active).map(|agent| agent.driver_kind.clone()),
+            id: record.id.clone(),
+            cwd: record.cwd.clone(),
+            model: record.cfg.model.clone(),
+            created_at: record.created_at,
+            updated_at: record.updated_at,
+            title: record.title.clone(),
+            first_user_message: record
+                .first_user_message()
+                .map(|text| text.chars().take(512).collect()),
+            message_count: record.conversation().count(),
+            usage: record.usage,
+            parent_id: record.parent_id.clone(),
+            pinned: record.pinned,
+            archived_at: record.archived_at,
+            agent_driver: record
+                .agent
+                .as_ref()
+                .filter(|agent| agent.active)
+                .map(|agent| agent.driver_kind.clone()),
             forked_from: record.forked_from.clone(),
         }
     }
+}
+
+fn is_zero_u64(n: &u64) -> bool {
+    *n == 0
 }
 
 /// Running token totals for a whole session. Grows monotonically; individual
@@ -309,6 +326,9 @@ pub struct UsageTotals {
     pub completion_tokens: u64,
     #[serde(default)]
     pub cached_input_tokens: u64,
+    /// Prompt tokens written to the prompt cache (priced at a premium).
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub cache_write_tokens: u64,
     /// Number of provider rounds we've seen a usage report for. May be
     /// smaller than the total number of turns if the provider omits usage on
     /// some responses.
@@ -328,6 +348,7 @@ impl UsageTotals {
             prompt_tokens: c(self.prompt_tokens),
             completion_tokens: c(self.completion_tokens),
             cached_input_tokens: c(self.cached_input_tokens),
+            cache_write_tokens: c(self.cache_write_tokens),
         }
     }
 
@@ -336,6 +357,7 @@ impl UsageTotals {
         self.prompt_tokens += u.prompt_tokens as u64;
         self.completion_tokens += u.completion_tokens as u64;
         self.cached_input_tokens += u.cached_input_tokens as u64;
+        self.cache_write_tokens += u.cache_write_tokens as u64;
         self.rounds = self.rounds.saturating_add(1);
     }
 
@@ -393,17 +415,42 @@ pub trait SessionStore: Send + Sync {
     /// (see `SessionRecord::archived_at`) are excluded.
     async fn list_all(&self, limit: usize) -> Result<Vec<SessionRecord>, StoreError>;
     /// List only sidebar metadata. Other stores retain the full-record fallback.
-    async fn list_metadata(&self, cwd: Option<&std::path::Path>, archived: bool, include_children: bool, limit: usize) -> Result<Vec<SessionListRecord>, StoreError> {
-        let records = if archived { self.list_archived(usize::MAX).await? }
-            else if let Some(cwd) = cwd { self.list_recent(cwd, usize::MAX).await? }
-            else { self.list_all(usize::MAX).await? };
-        Ok(records.iter().filter(|record| include_children || record.parent_id.is_none()).take(limit).map(SessionListRecord::from).collect())
+    async fn list_metadata(
+        &self,
+        cwd: Option<&std::path::Path>,
+        archived: bool,
+        include_children: bool,
+        limit: usize,
+    ) -> Result<Vec<SessionListRecord>, StoreError> {
+        let records = if archived {
+            self.list_archived(usize::MAX).await?
+        } else if let Some(cwd) = cwd {
+            self.list_recent(cwd, usize::MAX).await?
+        } else {
+            self.list_all(usize::MAX).await?
+        };
+        Ok(records
+            .iter()
+            .filter(|record| include_children || record.parent_id.is_none())
+            .take(limit)
+            .map(SessionListRecord::from)
+            .collect())
     }
 
     /// Direct child chats (forks and delegated agents), across all ages and folders.
-    async fn list_related(&self, parent: &SessionId, limit: usize) -> Result<Vec<SessionRecord>, StoreError> {
+    async fn list_related(
+        &self,
+        parent: &SessionId,
+        limit: usize,
+    ) -> Result<Vec<SessionRecord>, StoreError> {
         let mut records = self.list_all(usize::MAX).await?;
-        records.retain(|record| record.parent_id.as_ref() == Some(parent) || record.forked_from.as_ref().is_some_and(|fork| &fork.session_id == parent));
+        records.retain(|record| {
+            record.parent_id.as_ref() == Some(parent)
+                || record
+                    .forked_from
+                    .as_ref()
+                    .is_some_and(|fork| &fork.session_id == parent)
+        });
         records.truncate(limit);
         Ok(records)
     }
@@ -417,7 +464,9 @@ pub trait SessionStore: Send + Sync {
     /// Provider runtime ledger sidecar. Its extension deliberately does
     /// not match session JSON so listing chats never parses request ledgers.
     /// Stores may enumerate pending input outboxes without loading transcripts.
-    async fn queued_sessions(&self) -> Result<Vec<SessionId>, StoreError> { Ok(Vec::new()) }
+    async fn queued_sessions(&self) -> Result<Vec<SessionId>, StoreError> {
+        Ok(Vec::new())
+    }
 
     fn queue_state_path(&self, id: &SessionId) -> Option<std::path::PathBuf> {
         self.agent_log_path(id).map(|p| p.with_extension("queue"))

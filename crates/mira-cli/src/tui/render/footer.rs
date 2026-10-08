@@ -190,6 +190,7 @@ fn format_usage_spans(state: &TuiState) -> Vec<Span<'static>> {
     if let Some(dollars) = mira_ai::cost_usd(
         &state.model,
         mira_ai::TokenUsage {
+            cache_write_tokens: 0,
             prompt_tokens: u.prompt_tokens.min(u32::MAX as u64) as u32,
             completion_tokens: u.completion_tokens.min(u32::MAX as u64) as u32,
             cached_input_tokens: u.cached_input_tokens.min(u32::MAX as u64) as u32,

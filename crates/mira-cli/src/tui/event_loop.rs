@@ -769,6 +769,17 @@ async fn handle_harness_event(
         HarnessEvent::Compacted { messages_removed } => {
             state.push_compacted(messages_removed);
         }
+        HarnessEvent::Compacting { tokens_before } => {
+            state.push_info(format!(
+                "[context] compacting ~{}k tokens…",
+                tokens_before / 1000
+            ));
+        }
+        HarnessEvent::CompactionFailed { error } => {
+            state.push_warning(format!(
+                "[context] couldn't compact ({error}); continuing with the full history"
+            ));
+        }
         HarnessEvent::GoalSet { goal } => {
             state.push_info(format!("[goal] set: {}", goal.condition));
             state.goal = Some(goal);
@@ -868,6 +879,7 @@ async fn handle_harness_event(
                 let cost = mira_ai::cost_usd(
                     &state.model,
                     mira_ai::TokenUsage {
+                        cache_write_tokens: 0,
                         prompt_tokens: usage
                             .prompt_tokens
                             .saturating_sub(base.prompt_tokens)
@@ -1000,6 +1012,7 @@ pub(crate) fn current_cost_usd(state: &TuiState) -> Option<f64> {
     mira_ai::cost_usd(
         &state.model,
         mira_ai::TokenUsage {
+            cache_write_tokens: 0,
             prompt_tokens: u.prompt_tokens.min(u32::MAX as u64) as u32,
             completion_tokens: u.completion_tokens.min(u32::MAX as u64) as u32,
             cached_input_tokens: u.cached_input_tokens.min(u32::MAX as u64) as u32,

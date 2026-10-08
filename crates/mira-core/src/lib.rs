@@ -17,7 +17,6 @@ pub use message::{
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json;
 
     // =========================================================================
     // ID type tests
@@ -301,7 +300,7 @@ mod tests {
             is_error: true,
             data: Some(serde_json::json!({"key": "value"})),
             images: vec![ImageData {
-            source: None,
+                source: None,
                 media_type: "image/png".to_string(),
                 data: "base64".to_string(),
             }],
@@ -330,14 +329,14 @@ mod tests {
     #[test]
     fn tool_result_ok_constructor() {
         let result = ToolResult::ok(ToolCallId::from("call_123"), "success");
-        assert_eq!(result.is_error, false);
+        assert!(!result.is_error);
         assert_eq!(result.content, "success");
     }
 
     #[test]
     fn tool_result_err_constructor() {
         let result = ToolResult::err(ToolCallId::from("call_123"), "failed");
-        assert_eq!(result.is_error, true);
+        assert!(result.is_error);
         assert_eq!(result.content, "failed");
     }
 

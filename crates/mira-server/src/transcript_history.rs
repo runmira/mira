@@ -2,7 +2,7 @@
 //! Cursors validate their prefix, so append-only live work remains compatible
 //! while a rewind/rewrite cannot silently splice incompatible history.
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::hash::{Hash, Hasher};
 
 #[derive(Clone, Debug, Serialize)]
@@ -20,7 +20,9 @@ pub fn interleave(messages: &[mira_core::Message], lines: &[Value]) -> Vec<Value
     let mut provider_turn = None;
     let mut push_messages = |out: &mut Vec<Value>, start: usize, end: usize| {
         for message in &messages[start..end] {
-            if message.role == mira_core::Role::User && message.input_intent.as_deref() != Some("steer") {
+            if message.role == mira_core::Role::User
+                && message.input_intent.as_deref() != Some("steer")
+            {
                 provider_turn = Some(provider_turn.map_or(0, |n| n + 1));
             }
             out.push(json!({"message":message,"provider_turn_index":provider_turn}));
@@ -53,8 +55,14 @@ pub fn interleave(messages: &[mira_core::Message], lines: &[Value]) -> Vec<Value
     for item in &mut out {
         let user = item.pointer("/message/role").and_then(Value::as_str) == Some("user")
             || item.pointer("/line/user").is_some();
-        let steer = item.pointer("/message/input_intent").and_then(Value::as_str) == Some("steer")
-            || item.pointer("/line/user/input_intent").and_then(Value::as_str) == Some("steer");
+        let steer = item
+            .pointer("/message/input_intent")
+            .and_then(Value::as_str)
+            == Some("steer")
+            || item
+                .pointer("/line/user/input_intent")
+                .and_then(Value::as_str)
+                == Some("steer");
         if user && !steer {
             if seen_user {
                 turn += 1;
@@ -138,13 +146,25 @@ mod tests {
     fn steering_keeps_provider_and_native_messages_in_the_existing_turn() {
         let mut steer = mira_core::Message::user("continue differently");
         steer.input_intent = Some("steer".into());
-        let messages = vec![mira_core::Message::user("first"), steer, mira_core::Message::assistant("done"), mira_core::Message::user("next")];
+        let messages = vec![
+            mira_core::Message::user("first"),
+            steer,
+            mira_core::Message::assistant("done"),
+            mira_core::Message::user("next"),
+        ];
         let items = interleave(&messages, &[]);
-        assert_eq!(items[1]["turn_index"], 0); assert_eq!(items[1]["provider_turn_index"], 0);
-        assert_eq!(items[3]["turn_index"], 1); assert_eq!(items[3]["provider_turn_index"], 1);
-        let native = vec![json!({"user":{"text":"first"}}), json!({"user":{"text":"steer","input_intent":"steer"}}), json!({"user":{"text":"next"}})];
+        assert_eq!(items[1]["turn_index"], 0);
+        assert_eq!(items[1]["provider_turn_index"], 0);
+        assert_eq!(items[3]["turn_index"], 1);
+        assert_eq!(items[3]["provider_turn_index"], 1);
+        let native = vec![
+            json!({"user":{"text":"first"}}),
+            json!({"user":{"text":"steer","input_intent":"steer"}}),
+            json!({"user":{"text":"next"}}),
+        ];
         let items = interleave(&[], &native);
-        assert_eq!(items[1]["turn_index"], 0); assert_eq!(items[2]["turn_index"], 1);
+        assert_eq!(items[1]["turn_index"], 0);
+        assert_eq!(items[2]["turn_index"], 1);
     }
 
     #[test]
