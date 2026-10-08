@@ -6,7 +6,8 @@
  * import from here instead, so the renderer loads with the first diff on
  * screen; until then the change shows as plain +/- text at the same size.
  */
-import { Suspense, type ComponentProps } from 'react';
+import type { ComponentProps } from 'react';
+import { LazyBoundary } from '../LazyBoundary';
 import type { DiffLine } from '../../types';
 import { lazyNamed } from '@/lib/lazy';
 import { cn } from '@/lib/utils';
@@ -30,17 +31,19 @@ function PlainDiff({ lines, maxHeight = '50vh', className }: { lines: DiffLine[]
 }
 
 export function InlineDiff(props: ComponentProps<typeof InlineDiffImpl>) {
+  const plain = <PlainDiff lines={props.lines} maxHeight={props.maxHeight} className={props.className} />;
   return (
-    <Suspense fallback={<PlainDiff lines={props.lines} maxHeight={props.maxHeight} className={props.className} />}>
+    // If the renderer can't load, the plain diff stays.
+    <LazyBoundary fallback={plain} errorFallback={plain}>
       <InlineDiffImpl {...props} />
-    </Suspense>
+    </LazyBoundary>
   );
 }
 
 export function TurnSnapshotDiff(props: ComponentProps<typeof TurnSnapshotDiffImpl>) {
   return (
-    <Suspense fallback={<p role="status" className="px-4 py-2 text-xs text-muted-foreground">Loading turn diff…</p>}>
+    <LazyBoundary fallback={<p role="status" className="px-4 py-2 text-xs text-muted-foreground">Loading turn diff…</p>}>
       <TurnSnapshotDiffImpl {...props} />
-    </Suspense>
+    </LazyBoundary>
   );
 }

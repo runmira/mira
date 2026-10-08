@@ -1,14 +1,41 @@
-import { lazy, useEffect, useState, type ComponentType } from 'react';
+import { createElement, lazy, useEffect, useState, type ComponentType } from 'react';
+
+/** Resets for lazy components whose chunk failed to load. */
+const failed = new Set<() => void>();
+
+/**
+ * Let lazy components whose download failed try again on their next
+ * render. `React.lazy` caches a rejected load for good, so each one swaps
+ * in a fresh `lazy()`. Called by `LazyBoundary`'s Retry.
+ */
+export function retryFailedLazyLoads(): void {
+  for (const reset of failed) reset();
+  failed.clear();
+}
 
 /**
  * `React.lazy` for a named export, so heavy views can live in their own
- * chunk without a default export (issue #72).
+ * chunk without a default export (issue #72). A failed download is
+ * retryable (see `retryFailedLazyLoads`); render inside a `LazyBoundary`.
  */
 export function lazyNamed<M, K extends keyof M>(
   load: () => Promise<M>,
   name: K,
 ): M[K] extends ComponentType<any> ? M[K] : never {
-  return lazy(() => load().then((m) => ({ default: m[name] as ComponentType<any> }))) as any;
+  const make = () =>
+    lazy(() =>
+      load().then(
+        (m) => ({ default: m[name] as ComponentType<any> }),
+        (e) => {
+          failed.add(() => (current = make()));
+          throw e;
+        },
+      ),
+    );
+  let current = make();
+  const Lazy = (props: any) => createElement(current, props);
+  Lazy.displayName = `Lazy(${String(name)})`;
+  return Lazy as any;
 }
 
 /** `true` from the first render where `on` is true, onwards. For lazy views

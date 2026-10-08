@@ -15,7 +15,7 @@ import { TurnChanges } from './components/TurnChanges';
 import { composeQuote, setAsidePassage } from './lib/attachBridge';
 import { VirtualTranscript, hasTranscriptPosition } from './components/VirtualTranscript';
 import { appendNativeText, boundedOutput, appendNativeToolOutput, applyNativeMetadata } from './lib/nativeStream';
-import { createContext, memo, Suspense, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   RotateCw,
@@ -72,6 +72,7 @@ import {
 } from './components/ContextPanel';
 import { extractAgentId } from './components/AgentCard';
 import { lazyNamed, useLatch } from './lib/lazy';
+import { LazyBoundary } from './components/LazyBoundary';
 // Views that aren't on screen at first load get their own chunks (issue #72).
 const SettingsSurface = lazyNamed(() => import('./components/Settings'), 'SettingsSurface');
 const PluginsPanel = lazyNamed(() => import('./components/Plugins'), 'PluginsPanel');
@@ -4132,7 +4133,7 @@ export default function App() {
               <TimelineMinimap items={minimapItems} paneRef={paneRef} onSelect={jumpToMinimapTurn} />
               <ImageLightbox src={lightbox} onClose={() => setLightbox(null)} />
               {reviewMounted && (
-                <Suspense fallback={null}>
+                <LazyBoundary>
                   <ReviewChanges
                     open={reviewOpen}
                     onClose={() => {
@@ -4143,7 +4144,7 @@ export default function App() {
                     onChanged={refreshRepo}
                     focusPath={reviewFocus}
                   />
-                </Suspense>
+                </LazyBoundary>
               )}
 
               {showJump && (
@@ -4364,32 +4365,32 @@ export default function App() {
             />
             </div>
             {terminalOpen && (
-              <Suspense fallback={null}>
+              <LazyBoundary>
                 <TerminalPanel onClose={() => setTerminal(false)} />
-              </Suspense>
+              </LazyBoundary>
             )}
           </>
         )}
 
         {mainView === 'plugins' && (
           <div className="flex-1 min-h-0 overflow-y-auto">
-            <Suspense fallback={null}>
+            <LazyBoundary>
               <PluginsPanel version={extensionsVersion} />
-            </Suspense>
+            </LazyBoundary>
           </div>
         )}
 
         {mainView === 'pull-request' && (
-          <Suspense fallback={null}>
+          <LazyBoundary>
             <PullRequestPanel
               onOpenSettings={() => openSettings()}
               onReviewPr={runPrReview}
             />
-          </Suspense>
+          </LazyBoundary>
         )}
         {mainView === 'scheduled' && <ComingSoon label="Scheduled" />}
         {mainView === 'settings' && (
-          <Suspense fallback={null}>
+          <LazyBoundary>
             <SettingsSurface
               section={settingsSection}
               onSectionChange={setSettingsSection}
@@ -4404,7 +4405,7 @@ export default function App() {
               onAcpRefresh={requestAcpStatus}
               onAcpStart={startAcpAgent}
             />
-          </Suspense>
+          </LazyBoundary>
         )}
         </div>
       </main>
@@ -4469,7 +4470,7 @@ export default function App() {
       {panelOpen && (
         <div className="min-h-0 min-w-0 py-2 pr-2">
           <div className="h-full overflow-hidden rounded-xl border border-border bg-background">
-        <Suspense fallback={null}>
+        <LazyBoundary>
         <SubagentPanel
           tabs={subagentTabs}
           fileTabs={fileTabs}
@@ -4513,7 +4514,7 @@ export default function App() {
           onResizeStart={handlePanelResizeStart}
           onOpenFile={openFileTab}
         />
-        </Suspense>
+        </LazyBoundary>
           </div>
         </div>
       )}

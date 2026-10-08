@@ -116,6 +116,17 @@ export function markdownLanguages(): Record<string, LanguageFn> {
   return { ...common, ...extra };
 }
 
+/** Fence aliases for the on-demand grammars loaded so far, for
+ *  rehype-highlight's `aliases` option. Its lowlight instance only learns
+ *  the aliases a grammar declares itself, not the ones in `LAZY_ALIASES`. */
+export function markdownAliases(): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const [alias, file] of Object.entries(LAZY_ALIASES)) {
+    if (extra[file]) (out[file] ??= []).push(alias);
+  }
+  return out;
+}
+
 /**
  * Load any of `names` that aren't registered yet. Returns a counter that
  * bumps whenever a new grammar lands, for use as a memo dependency so the

@@ -46,8 +46,11 @@ const ONE_LINER_MAX = 80;
  *  a reasonably-shaped inline $..$ (no spaces right inside, no digits
  *  immediately after the closing $ so "$5 and $10" stays prose). */
 /** ``` / ~~~ fence info strings — the only code rehype-highlight touches
- *  (`detect: false`), so the highlighter loads only when one is present. */
-const FENCE_LANG_RE = /^ {0,3}(?:`{3,}|~{3,})[ \t]*([\w+#.-]+)/gm;
+ *  (`detect: false`), so the highlighter loads only when one is present.
+ *  Fences can sit inside blockquotes and list items (`> ```js`, `- ```go`),
+ *  so those prefixes are allowed; a false positive only loads the
+ *  highlighter early, a miss leaves a block unhighlighted. */
+const FENCE_LANG_RE = /^[ \t]*(?:(?:>|[-*+]|\d{1,9}[.)])[ \t]*)*(?:`{3,}|~{3,})[ \t]*([\w+#.-]+)/gm;
 
 function fenceLanguages(text: string): string[] {
   const out = new Set<string>();
@@ -159,7 +162,12 @@ export function Markdown({ text, onOpenFile, document = false }: Props) {
     if (html) plugins.push(html.default);
     plugins.push([rehypeSanitize, SANITIZE_SCHEMA]);
     if (katex) plugins.push([katex.default, { strict: false }]);
-    if (hl) plugins.push([hl.rehypeHighlight, { detect: false, ignoreMissing: true, languages: hl.markdownLanguages() }]);
+    if (hl) {
+      plugins.push([
+        hl.rehypeHighlight,
+        { detect: false, ignoreMissing: true, languages: hl.markdownLanguages(), aliases: hl.markdownAliases() },
+      ]);
+    }
     return plugins;
     // `grammars` bumps when an on-demand language lands.
     // eslint-disable-next-line react-hooks/exhaustive-deps
