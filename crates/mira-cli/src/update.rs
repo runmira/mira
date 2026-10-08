@@ -41,9 +41,12 @@ enum InstallKind {
 fn install_kind(exe: &Path, cargo_home: Option<&Path>) -> InstallKind {
     let s = exe.to_string_lossy();
     // `cargo install` (any --root) records what it installed next to bin/.
-    let cargo_records = exe.parent().and_then(Path::parent).is_some_and(|root| {
-        root.join(".crates.toml").exists() || root.join(".crates2.json").exists()
-    });
+    // Those records list every tool installed into that root, so only count
+    // them if they list a `mira` binary.
+    let cargo_records = exe
+        .parent()
+        .and_then(Path::parent)
+        .is_some_and(cargo_installed_mira);
     if s.contains("/Cellar/") {
         InstallKind::Homebrew
     } else if cargo_records
@@ -56,6 +59,37 @@ fn install_kind(exe: &Path, cargo_home: Option<&Path>) -> InstallKind {
     } else {
         InstallKind::Standalone
     }
+}
+
+/// Do cargo's install records in `root` list a `mira` binary?
+fn cargo_installed_mira(root: &Path) -> bool {
+    // .crates2.json: { "installs": { "<pkg> <ver> (<src>)": { "bins": [..] } } }
+    if let Ok(text) = std::fs::read_to_string(root.join(".crates2.json")) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+            let listed = v["installs"].as_object().is_some_and(|installs| {
+                installs.values().any(|i| {
+                    i["bins"]
+                        .as_array()
+                        .is_some_and(|bins| bins.iter().any(|b| b == "mira"))
+                })
+            });
+            if listed {
+                return true;
+            }
+        }
+    }
+    // .crates.toml: `"<pkg> <ver> (<src>)" = ["bin", …]` under [v1].
+    std::fs::read_to_string(root.join(".crates.toml")).is_ok_and(|text| {
+        text.lines().any(|line| {
+            line.rsplit_once('=').is_some_and(|(_, bins)| {
+                bins.trim()
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .split(',')
+                    .any(|b| b.trim().trim_matches('"') == "mira")
+            })
+        })
+    })
 }
 
 /// `v0.5.2` / `0.5.2` → `[0, 5, 2]`; pre-release suffixes are ignored.
@@ -457,7 +491,33 @@ mod tests {
         std::fs::create_dir(root.path().join("bin")).unwrap();
         let exe = root.path().join("bin/mira");
         assert_eq!(install_kind(&exe, None), InstallKind::Standalone);
-        std::fs::write(root.path().join(".crates2.json"), "{}").unwrap();
+
+        // Records for *other* tools in the same root don't make mira a cargo build.
+        std::fs::write(
+            root.path().join(".crates.toml"),
+            "[v1]\n\"ripgrep 14.1.0 (registry+https://github.com/rust-lang/crates.io-index)\" = [\"rg\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join(".crates2.json"),
+            r#"{"installs":{"ripgrep 14.1.0 (registry)":{"bins":["rg"]}}}"#,
+        )
+        .unwrap();
+        assert_eq!(install_kind(&exe, None), InstallKind::Standalone);
+
+        // Either record listing mira does.
+        std::fs::write(
+            root.path().join(".crates.toml"),
+            "[v1]\n\"mira-cli 0.5.2 (path+file:///src/mira/crates/mira-cli)\" = [\"mira\"]\n",
+        )
+        .unwrap();
+        assert_eq!(install_kind(&exe, None), InstallKind::Cargo);
+        std::fs::remove_file(root.path().join(".crates.toml")).unwrap();
+        std::fs::write(
+            root.path().join(".crates2.json"),
+            r#"{"installs":{"mira-cli 0.5.2 (path)":{"bins":["mira"]}}}"#,
+        )
+        .unwrap();
         assert_eq!(install_kind(&exe, None), InstallKind::Cargo);
         // A custom CARGO_HOME, without records.
         assert_eq!(
