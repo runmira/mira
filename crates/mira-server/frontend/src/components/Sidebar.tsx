@@ -37,6 +37,7 @@ import type { BackgroundMode, SessionSummary } from '../types';
 import type { WsStatus } from '../ws';
 import { parseSentAttachments } from './Composer';
 import { SETTINGS_SECTIONS, type SettingsSectionId } from './settings/sections';
+import { PluginsPanel, PullRequestPanel } from '../lazyViews';
 
 import { UserCard } from './UserCard';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
@@ -491,6 +492,7 @@ export function Sidebar({
             icon={<GitBranch className="size-3.5" />}
             active={activeView === 'pull-request'}
             onClick={() => onNavigate('pull-request')}
+            onIntent={PullRequestPanel.preload}
           >
             Pull request
           </NavItem>
@@ -498,6 +500,7 @@ export function Sidebar({
             icon={<Puzzle className="size-3.5" />}
             active={activeView === 'plugins'}
             onClick={() => onNavigate('plugins')}
+            onIntent={PluginsPanel.preload}
           >
             Plugins
           </NavItem>
@@ -1504,7 +1507,7 @@ function SidebarFolderIcon({
 /* ---------- little helpers ---------- */
 
 function NavItem({
-  icon, disabled, active, onClick, children,
+  icon, disabled, active, onClick, onIntent, children,
 }: {
   icon: React.ReactNode;
   disabled?: boolean;
@@ -1512,12 +1515,16 @@ function NavItem({
    *  gets the same accent treatment as an active session row. */
   active?: boolean;
   onClick?: () => void;
+  /** Hover/focus: preload whatever the click opens. */
+  onIntent?: () => void;
   children: React.ReactNode;
 }) {
   return (
     <button
       disabled={disabled}
       onClick={onClick}
+      onPointerEnter={onIntent}
+      onFocus={onIntent}
       title={disabled ? 'Not implemented yet' : undefined}
       className={cn(
         'flex w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left text-[14.5px] transition-colors',
