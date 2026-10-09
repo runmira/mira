@@ -1,0 +1,813 @@
+/* Elevated card for in-flow panels: theme-aware shadow + the card
+   fill. The white/grey contrast carries the card look that light
+   mode otherwise lacks; dark mode gets the token's subtler shadow. */
+/* Elevated card: in light mode a white card with a soft shadow. Dark
+   mode keeps cards border-defined, so this class is a no-op there —
+   each call site carries the original dark fill via `dark:` instead. */
+:root[data-theme='light'] .elev-card {
+  background-color: hsl(var(--card));
+  box-shadow: var(--elev-shadow);
+}
+
+/* ================================================================
+   Markdown (Tokyo Night vibe — trendy purple/cyan palette)
+   ================================================================ */
+/* Marquee used by session-row sublines. Two identical copies of the
+   subline sit inside a `.marquee-track` and animate leftward by exactly
+   50% (== the width of one copy) so the loop seams invisibly. Playback
+   is gated behind `group-hover` in the markup — `animation-play-state`
+   defaults to paused via the `[animation-play-state:paused]` utility so
+   rows at rest stay perfectly still. */
+@keyframes marquee {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+.md {
+  color: hsl(var(--foreground));
+  /* Inherit typography from the container so a `text-[13px]` wrapper
+     really renders at 13px. Previously .md hard-set 15px/1.72/+0.005em,
+     which made every markdown island (PR body, subagent output, assistant
+     replies) feel like a separate document. Now it reads as the surrounding
+     UI text, and callers can override with a font-size utility on the
+     `.md` element when they want a specific size. */
+  font-family: inherit;
+  font-size: inherit;
+  line-height: 1.6;
+  letter-spacing: -0.011em;
+}
+
+/* Model thinking: everything reads grey so it's never mistaken for the
+   answer — headings, bold, links and code included. */
+.thought .md,
+.thought .md strong,
+.thought .md h1,
+.thought .md h2,
+.thought .md h3,
+.thought .md h4,
+.thought .md h5,
+.thought .md th,
+.thought .md a,
+.thought .md blockquote strong,
+.thought .md ol > li::marker {
+  color: hsl(var(--muted-foreground));
+}
+.thought .md {
+  font-size: 13px;
+}
+/* Headings inside thinking are just emphasis, not document structure. */
+.thought .md h1,
+.thought .md h2,
+.thought .md h3,
+.thought .md h4,
+.thought .md h5 {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 0.6rem 0 0.3rem;
+  padding: 0;
+  border: 0;
+}
+.thought .md :not(pre) > code {
+  color: hsl(var(--muted-foreground));
+  background: hsl(0 0% 100% / 0.04);
+}
+.thought .md-code {
+  opacity: 0.7;
+}
+
+.md p {
+  margin: 0 0 0.85rem;
+}
+.md p:last-child {
+  margin-bottom: 0;
+}
+
+.md strong {
+  color: #fff;
+  font-weight: 600;
+}
+.md em {
+  font-style: italic;
+}
+.md del {
+  color: hsl(var(--muted-foreground));
+}
+
+.md h1,
+.md h2,
+.md h3,
+.md h4,
+.md h5 {
+  font-weight: 600;
+  line-height: 1.3;
+  color: #fff;
+  letter-spacing: -0.01em;
+  margin: 1.4rem 0 0.7rem;
+}
+.md > h1:first-child,
+.md > h2:first-child,
+.md > h3:first-child {
+  margin-top: 0;
+}
+.md h1 {
+  font-size: 1.5rem;
+  padding-bottom: 0.35rem;
+  border-bottom: 1px solid hsl(var(--border));
+}
+.md h2 {
+  font-size: 1.25rem;
+  padding-bottom: 0.3rem;
+  border-bottom: 1px solid hsl(var(--border));
+}
+.md h3 {
+  font-size: 1.1rem;
+  color: #c0caf5;
+}
+.md h4 {
+  font-size: 1rem;
+  color: #a9b1d6;
+}
+
+.md ul,
+.md ol {
+  padding-left: 1.55rem;
+  margin: 0 0 0.85rem;
+}
+.md ul {
+  list-style: none;
+  padding-left: 1.2rem;
+}
+.md ul > li {
+  position: relative;
+}
+.md ul > li::before {
+  content: '';
+  position: absolute;
+  left: -1rem;
+  top: 0.68em;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #7aa2f7;
+}
+.md ol > li::marker {
+  color: #bb9af7;
+  font-weight: 600;
+}
+.md li {
+  margin: 0.28rem 0;
+}
+.md li > p {
+  margin: 0;
+}
+.md li > ul,
+.md li > ol {
+  margin: 0.25rem 0 0.35rem;
+}
+
+.md input[type='checkbox'] {
+  margin-right: 0.4rem;
+  accent-color: #7aa2f7;
+  transform: translateY(1px);
+}
+
+.md blockquote {
+  position: relative;
+  border-left: 3px solid #bb9af7;
+  background: linear-gradient(90deg, rgba(187, 154, 247, 0.06), transparent 60%);
+  color: hsl(var(--muted-foreground));
+  margin: 0 0 0.9rem;
+  padding: 0.5rem 0.9rem;
+  border-radius: 0 6px 6px 0;
+}
+.md blockquote p {
+  margin: 0.25rem 0;
+}
+.md blockquote strong {
+  color: #bb9af7;
+}
+
+.md hr {
+  border: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, hsl(var(--border)), transparent);
+  margin: 1.3rem 0;
+}
+
+.md a {
+  color: #7dcfff;
+  text-decoration: none;
+  border-bottom: 1px solid rgba(125, 207, 255, 0.35);
+  transition: border-color 0.1s ease;
+}
+.md a:hover {
+  border-bottom-color: #7dcfff;
+}
+
+.md table {
+  border-collapse: separate;
+  border-spacing: 0;
+  margin: 0.5rem 0 1rem;
+  font-size: 13.5px;
+  width: 100%;
+  overflow: hidden;
+  border-radius: 8px;
+  border: 1px solid hsl(var(--border));
+}
+.md th,
+.md td {
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+  border-bottom: 1px solid hsl(var(--border));
+}
+.md tr:last-child td {
+  border-bottom: 0;
+}
+.md th {
+  background: #1f2335;
+  color: #c0caf5;
+  font-weight: 600;
+  font-size: 12.5px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+.md tbody tr:nth-child(even) td {
+  background: rgba(122, 162, 247, 0.03);
+}
+.md tbody tr:hover td {
+  background: rgba(122, 162, 247, 0.06);
+}
+
+.md kbd {
+  background: hsl(var(--secondary));
+  border: 1px solid hsl(var(--border));
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 0.05rem 0.4rem;
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+  font-size: 0.85em;
+  color: #c0caf5;
+}
+
+.md-inline {
+  background: rgba(187, 154, 247, 0.12);
+  color: #f7768e;
+  padding: 0.13rem 0.4rem;
+  border-radius: 5px;
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+  font-size: 0.85em;
+  border: 1px solid rgba(187, 154, 247, 0.15);
+  white-space: nowrap;
+}
+.md-inline-fenced {
+  background: rgba(125, 207, 255, 0.1);
+  color: #7dcfff;
+  border-color: rgba(125, 207, 255, 0.22);
+}
+
+.md-code {
+  background: #282c34;
+  border: 1px solid #3e4452;
+  border-radius: 10px;
+  margin: 0.8rem 0 1rem;
+  overflow: hidden;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.28);
+}
+.md-code-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.45rem 0.85rem;
+  border-bottom: 1px solid #3e4452;
+  background: linear-gradient(180deg, #21252b 0%, #282c34 100%);
+}
+.md-code-head::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #e06c75;
+  box-shadow:
+    14px 0 0 #e5c07b,
+    28px 0 0 #98c379;
+  margin-right: 30px;
+}
+.md-code-lang {
+  color: #61afef;
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+  font-size: 11px;
+  text-transform: lowercase;
+  letter-spacing: 0.03em;
+  flex: 1;
+  font-weight: 500;
+}
+.md-code-copy {
+  color: hsl(var(--muted-foreground));
+  font-size: 11px;
+  padding: 0.2rem 0.6rem;
+  border-radius: 5px;
+  border: 1px solid transparent;
+  background: transparent;
+  cursor: pointer;
+  transition: all 0.1s ease;
+}
+.md-code-copy:hover {
+  background: rgba(97, 175, 239, 0.12);
+  border-color: rgba(97, 175, 239, 0.3);
+  color: #abb2bf;
+}
+.md-code pre {
+  margin: 0;
+  padding: 0.9rem 1.05rem;
+  overflow-x: auto;
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.md-code code {
+  background: transparent;
+  color: inherit;
+  padding: 0;
+}
+/* hljs's `pre code.hljs { padding: 1em }` would push code below the line-number gutter. */
+.md-code pre code.hljs {
+  padding: 0;
+}
+.md-code-body {
+  position: relative;
+  display: flex;
+  overflow: hidden;
+  font-size: 13px;
+}
+.md-code-body pre {
+  flex: 1;
+  min-width: 0;
+}
+.md-code-gutter {
+  flex-shrink: 0;
+  padding: 0.9rem 0 0.9rem 0.8rem;
+  text-align: right;
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+  line-height: 1.6;
+  color: hsl(var(--muted-foreground) / 0.45);
+  user-select: none;
+}
+.md-code-gutter + pre {
+  padding-left: 0.9rem;
+}
+.md-code-collapsed::after {
+  content: '';
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 3rem;
+  background: linear-gradient(to bottom, transparent, #282c34);
+  pointer-events: none;
+}
+.md-code-more {
+  display: block;
+  width: 100%;
+  padding: 0.4rem;
+  font-size: 12px;
+  color: hsl(var(--muted-foreground));
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+.md-code-more:hover {
+  color: hsl(var(--foreground));
+}
+
+/* ================================================================
+   Diff (used inside tool cards for edit_file / write_file previews)
+   ================================================================ */
+.diff {
+  background: hsl(var(--background));
+  border: 1px solid hsl(var(--border));
+  border-radius: 6px;
+  padding: 0.5rem 0.6rem;
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  max-height: 50vh;
+  overflow: auto;
+}
+.diff.compact {
+  max-height: 24vh;
+}
+.diff-line {
+  display: flex;
+  gap: 0.4rem;
+}
+.diff-line .prefix {
+  width: 1ch;
+  color: hsl(var(--muted-foreground));
+}
+.diff-line .text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  flex: 1;
+}
+.diff-line.add {
+  background: rgba(120, 200, 100, 0.1);
+  color: #b6e29a;
+}
+.diff-line.del {
+  background: rgba(240, 100, 120, 0.1);
+  color: #f7a5b0;
+}
+.diff-line.ctx {
+  color: hsl(var(--muted-foreground));
+}
+.diff-line.hunk {
+  color: hsl(var(--muted-foreground));
+  text-align: center;
+  padding: 0.15rem 0;
+}
+
+/* ================================================================
+   Mention composer (contenteditable input with inline skill chips)
+   ================================================================
+
+   A `<div contenteditable>` styled to feel like the composer textarea
+   it replaced. Inline skill mentions render as `.mention-chip` spans
+   (rendered by MentionInput.tsx via `document.createElement`) so the
+   user sees the chip while typing rather than a raw `@skill:foo`
+   token. The parent Composer tracks the canonical text (with tokens)
+   as state, syncing from the DOM on every `input` event. */
+
+.mention-input {
+  min-height: 1.7rem;
+  width: 100%;
+  max-height: 12rem;
+  overflow-y: auto;
+  padding: 0.375rem 0.625rem;
+  font-size: 0.875rem;
+  line-height: 1.5;
+  outline: none;
+  white-space: pre-wrap;
+  word-break: break-word;
+  cursor: text;
+  color: hsl(var(--foreground));
+}
+
+/* Placeholder — visible only when the field is truly empty. `:empty`
+   matches when there are no child nodes at all, so a stray text node
+   from Chrome (e.g. after clearing) still shows placeholder only when
+   the field really is empty. */
+.mention-input:empty::before {
+  content: attr(data-placeholder);
+  color: hsl(var(--muted-foreground) / 0.6);
+  pointer-events: none;
+}
+
+/* Firefox sometimes leaves a bogus `<br>` when the field is otherwise
+   empty. Treat "just a <br>" the same as empty for placeholder
+   purposes. */
+.mention-input:has(> br:only-child):not(:focus)::before {
+  content: attr(data-placeholder);
+  color: hsl(var(--muted-foreground) / 0.6);
+  pointer-events: none;
+}
+
+/* Naked "icon + label" render — no background, no border, no padding
+   chrome. Reads as an inline word tinted with the skill's accent
+   colour rather than a chunky UI pill. Colour is set by the palette
+   classes emitted from `paletteClasses`; `mention-chip-icon`
+   inherits via `fill: currentColor`. */
+.mention-chip {
+  display: inline;
+  margin: 0 0.05rem;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  line-height: 1.35;
+  vertical-align: baseline;
+  user-select: none;
+  cursor: default;
+  white-space: nowrap;
+}
+
+/* Leading sparkle. Matches the `<Sparkle fill="currentColor">` from the
+   sent-bubble `SkillChip` so both places render identically. The
+   negative `vertical-align` optically centres the icon on the label's
+   x-height instead of leaving it perched on the baseline. */
+.mention-chip-icon {
+  display: inline;
+  width: 0.9em;
+  height: 0.9em;
+  margin-right: 0.25rem;
+  vertical-align: -0.125em;
+  fill: currentColor;
+}
+
+/* Reduce motion (Settings → General → Appearance). Kills animation and
+   transitions app-wide while keeping state changes instant. */
+.reduce-motion *,
+.reduce-motion *::before,
+.reduce-motion *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+}
+
+/* A line revealed in the file viewer: a brief brighter pulse, then the
+   steady highlight. */
+@keyframes mira-line-flash {
+  0% {
+    background: rgba(122, 162, 247, 0.32);
+  }
+  100% {
+    background: rgba(122, 162, 247, 0.13);
+  }
+}
+.mira-line-flash {
+  animation: mira-line-flash 0.9s ease-out;
+}
+
+/* ---------- Rich references (RichRefs.tsx) ---------- */
+/* Chips are links or buttons but must not pick up the prose link rule. */
+.md a.md-ref,
+.md .md-ref,
+.md a.not-prose {
+  border-bottom: 0;
+}
+.md button.md-ref {
+  font: inherit;
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+  font-size: 0.85em;
+}
+.md-key {
+  display: inline-block;
+  min-width: 1.45em;
+  padding: 0.02rem 0.38rem;
+  border-radius: 5px;
+  border: 1px solid hsl(var(--border));
+  border-bottom-width: 2px;
+  background: linear-gradient(180deg, hsl(0 0% 100% / 0.07), hsl(0 0% 100% / 0.02));
+  color: #c0caf5;
+  font-family:
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    sans-serif;
+  font-size: 0.78em;
+  font-weight: 600;
+  line-height: 1.5;
+  text-align: center;
+  box-shadow: 0 1px 0 hsl(0 0% 0% / 0.4);
+}
+.md a.md-link {
+  white-space: normal;
+}
+
+/* ---------- Diff blocks ---------- */
+.md-diff .md-code-head {
+  gap: 0.6rem;
+}
+.md-diff-body {
+  margin: 0;
+  padding: 0.45rem 0;
+  overflow-x: auto;
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+.md-diff-line {
+  padding: 0 0.9rem;
+  white-space: pre;
+  min-width: max-content;
+}
+.md-diff-line.add {
+  background: rgba(158, 206, 106, 0.11);
+  color: #b9e08f;
+  box-shadow: inset 2px 0 0 rgba(158, 206, 106, 0.7);
+}
+.md-diff-line.del {
+  background: rgba(247, 118, 142, 0.1);
+  color: #f7a3b3;
+  box-shadow: inset 2px 0 0 rgba(247, 118, 142, 0.7);
+}
+.md-diff-line.hunk {
+  color: #bb9af7;
+  background: rgba(187, 154, 247, 0.07);
+}
+.md-diff-line.file {
+  color: #7f88b0;
+  font-weight: 600;
+}
+.md-diff-line.ctx {
+  color: #a9b1d6;
+}
+.md-diff-apply {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.1rem 0.55rem;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #1a1b26;
+  background: #9ece6a;
+  transition:
+    filter 0.12s ease,
+    opacity 0.12s ease;
+}
+.md-diff-apply:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+.md-diff-apply:disabled {
+  cursor: default;
+}
+.md-diff-apply.checking,
+.md-diff-apply.applying {
+  background: hsl(0 0% 100% / 0.08);
+  color: #7f88b0;
+}
+.md-diff-apply.cannot {
+  background: transparent;
+  color: #7f88b0;
+  font-weight: 500;
+}
+.md-diff-apply.applied {
+  background: rgba(158, 206, 106, 0.15);
+  color: #9ece6a;
+}
+.md-diff-error {
+  padding: 0.4rem 0.9rem;
+  border-top: 1px solid #3e4452;
+  color: #f7768e;
+  font-size: 12px;
+}
+
+/* ---------- Callouts: > [!NOTE] ---------- */
+.md-callout {
+  --c: 122, 162, 247;
+  margin: 0 0 0.9rem;
+  padding: 0.55rem 0.9rem 0.6rem;
+  border-radius: 8px;
+  border: 1px solid rgba(var(--c), 0.25);
+  border-left: 3px solid rgb(var(--c));
+  background: linear-gradient(90deg, rgba(var(--c), 0.09), rgba(var(--c), 0.03));
+}
+.md-callout.tip {
+  --c: 158, 206, 106;
+}
+.md-callout.important {
+  --c: 187, 154, 247;
+}
+.md-callout.warning {
+  --c: 224, 175, 104;
+}
+.md-callout.caution {
+  --c: 247, 118, 142;
+}
+.md-callout-title {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.2rem;
+  color: rgb(var(--c));
+  font-size: 12.5px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}
+.md-callout-body > :last-child {
+  margin-bottom: 0;
+}
+.md-callout-body p {
+  margin: 0.2rem 0;
+}
+
+/* ---------- Tables ---------- */
+.md-table {
+  margin: 0.5rem 0 1rem;
+}
+.md-table-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0 0.15rem 0.3rem;
+  font-size: 11px;
+  color: hsl(var(--muted-foreground));
+}
+.md-table-bar button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 5px;
+  color: hsl(var(--muted-foreground));
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+.md-table-bar button:hover {
+  background: hsl(0 0% 100% / 0.06);
+  color: hsl(var(--foreground));
+}
+.md-table-scroll {
+  max-height: 28rem;
+  overflow: auto;
+  border-radius: 8px;
+  border: 1px solid hsl(var(--border));
+}
+.md-table-scroll table {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  overflow: visible;
+}
+/* The header stays in view while a long table scrolls under it. */
+.md-table-scroll th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.md-th-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  color: inherit;
+}
+.md-th-sort:hover {
+  color: #fff;
+}
+
+/* ---------- Collapsible sections: <details> ---------- */
+.md details {
+  margin: 0 0 0.9rem;
+  border: 1px solid hsl(var(--border));
+  border-radius: 8px;
+  background: hsl(0 0% 100% / 0.02);
+}
+.md details > summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 0.45rem 0.8rem;
+  color: #c0caf5;
+  font-weight: 600;
+  font-size: 13px;
+  user-select: none;
+}
+.md details > summary::-webkit-details-marker {
+  display: none;
+}
+.md details > summary::before {
+  content: '';
+  display: inline-block;
+  width: 0.4rem;
+  height: 0.4rem;
+  margin-right: 0.55rem;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: translateY(-2px) rotate(-45deg);
+  transition: transform 0.15s ease;
+  opacity: 0.6;
+}
+.md details[open] > summary::before {
+  transform: translateY(-3px) rotate(45deg);
+}
+.md details[open] > summary {
+  border-bottom: 1px solid hsl(var(--border));
+}
+.md details > :not(summary) {
+  margin-left: 0.8rem;
+  margin-right: 0.8rem;
+}
+.md details > :nth-child(2) {
+  margin-top: 0.6rem;
+}
+.md details > :last-child {
+  margin-bottom: 0.7rem;
+}
+
+/* Site icon before a link: a small light tile, so dark favicons show, sat
+   on the text's middle rather than its baseline. */
+.md-favicon {
+  display: inline-grid;
+  place-items: center;
+  width: 15px;
+  height: 15px;
+  margin-right: 0.3rem;
+  border-radius: 4px;
+  background: #e6e9f2;
+  vertical-align: -2px;
+}
+.md-favicon img {
+  width: 11px;
+  height: 11px;
+  border-radius: 2px;
+}
+.md-link-glyph {
+  display: inline-block;
+  width: 0.85em;
+  height: 0.85em;
+  margin-right: 0.25rem;
+  vertical-align: -0.1em;
+  opacity: 0.75;
+}

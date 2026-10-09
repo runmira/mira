@@ -1,29 +1,7 @@
-import type { AcpAgentStatus } from './types';
-import type { BackgroundMode, ExternalAgentSession, SessionSummary, SettingsUpdate, SettingsView } from './types';
-
-export async function getSettings(): Promise<SettingsView> {
-  const r = await fetch('/api/settings');
-  if (!r.ok) throw new Error(`settings GET ${r.status}`);
-  return (await r.json()) as SettingsView;
-}
-
-export async function putSettings(update: SettingsUpdate): Promise<SettingsView> {
-  const r = await fetch('/api/settings', {
-    method: 'PUT',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(update),
-  });
-  if (!r.ok) {
-    let msg = `settings PUT ${r.status}`;
-    try {
-      const j = await r.json();
-      if (j.error) msg += `: ${j.error}`;
-    } catch { /* ignore */ }
-    throw new Error(msg);
-  }
-  return (await r.json()) as SettingsView;
-}
-
+import { Origin } from './api/plugins';
+import { readError } from './api/pullRequests';
+import { jsonOrThrow, post } from './api/request';
+import type { BackgroundMode, ExternalAgentSession, SessionSummary } from './types';
 export async function listSessions(
   opts: { all?: boolean; archived?: boolean; includeChildren?: boolean } = {},
 ): Promise<SessionSummary[]> {
@@ -57,7 +35,9 @@ export async function setSessionFlags(
     try {
       const j = await r.json();
       if (j.error) msg += `: ${j.error}`;
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
     throw new Error(msg);
   }
 }
@@ -87,7 +67,9 @@ export async function getSessionHistory(id: string): Promise<SessionHistoryView>
     try {
       const j = await r.json();
       if (j.error) msg += `: ${j.error}`;
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
     throw new Error(msg);
   }
   return (await r.json()) as SessionHistoryView;
@@ -100,7 +82,9 @@ export async function loadSession(id: string): Promise<void> {
     try {
       const j = await r.json();
       if (j.error) msg += `: ${j.error}`;
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
     throw new Error(msg);
   }
 }
@@ -115,10 +99,7 @@ export async function newSession(): Promise<{ id: string }> {
  *  already materialized (persisted-but-not-open sessions have no slot,
  *  so nothing to gate). Callers typically attach first and set mode
  *  right after, or hit this after the slot is known to be live. */
-export async function setSessionBackgroundMode(
-  id: string,
-  mode: BackgroundMode,
-): Promise<void> {
+export async function setSessionBackgroundMode(id: string, mode: BackgroundMode): Promise<void> {
   const r = await fetch(`/api/sessions/${encodeURIComponent(id)}/background`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -129,7 +110,9 @@ export async function setSessionBackgroundMode(
     try {
       const j = await r.json();
       if (j.error) msg += `: ${j.error}`;
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
     throw new Error(msg);
   }
 }
@@ -158,7 +141,9 @@ export async function startReview(args: ReviewStartArgs): Promise<{ run_id: stri
     try {
       const j = await r.json();
       if (j.error) msg += `: ${j.error}`;
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
     throw new Error(msg);
   }
   return (await r.json()) as { run_id: string };
@@ -171,13 +156,18 @@ export async function deleteSession(id: string): Promise<void> {
     try {
       const j = await r.json();
       if (j.error) msg += `: ${j.error}`;
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
     throw new Error(msg);
   }
 }
 
 /** Manual rename: set the session's title to `title`. Empty clears it. */
-export async function renameSession(id: string, title: string): Promise<{ id: string; title: string }> {
+export async function renameSession(
+  id: string,
+  title: string,
+): Promise<{ id: string; title: string }> {
   const r = await fetch(`/api/sessions/${encodeURIComponent(id)}/title`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
@@ -188,7 +178,9 @@ export async function renameSession(id: string, title: string): Promise<{ id: st
     try {
       const j = await r.json();
       if (j.error) msg += `: ${j.error}`;
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
     throw new Error(msg);
   }
   return (await r.json()) as { id: string; title: string };
@@ -205,7 +197,9 @@ export async function regenerateSessionTitle(id: string): Promise<{ id: string; 
     try {
       const j = await r.json();
       if (j.error) msg += `: ${j.error}`;
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
     throw new Error(msg);
   }
   return (await r.json()) as { id: string; title: string };
@@ -219,7 +213,11 @@ export type BrowseView = {
   truncated: boolean;
 };
 
-export async function browse(path?: string, showHidden = false, includeFiles = false): Promise<BrowseView> {
+export async function browse(
+  path?: string,
+  showHidden = false,
+  includeFiles = false,
+): Promise<BrowseView> {
   const params = new URLSearchParams();
   if (path) params.set('path', path);
   if (showHidden) params.set('show_hidden', 'true');
@@ -230,7 +228,9 @@ export async function browse(path?: string, showHidden = false, includeFiles = f
     try {
       const j = await r.json();
       if (j.error) msg += `: ${j.error}`;
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
     throw new Error(msg);
   }
   return (await r.json()) as BrowseView;
@@ -278,123 +278,6 @@ export async function listModels(): Promise<ModelListView> {
   return (await r.json()) as ModelListView;
 }
 
-// ---- engines (unified backend list: native providers + external agents) ----
-
-export type EngineState =
-  | { state: 'ready' }
-  | { state: 'not_configured'; reason: string }
-  | { state: 'not_found'; looked_for: string }
-  | { state: 'failed'; reason: string }
-  | { state: 'unavailable'; reason: string };
-
-export type EngineFlavor = 'native' | 'external';
-
-/** One backend row from `GET /api/engines` — health, auth summary, and
- *  (when known) the model catalog, in the same shape for every flavor. */
-export type EngineSnapshot = {
-  instance: string;
-  driver: string;
-  flavor: EngineFlavor;
-  display_name: string;
-  enabled: boolean;
-  state: EngineState;
-  models?: ModelInfo[];
-  default_model?: string | null;
-  auth?: string | null;
-  install_hint?: string | null;
-  launch?: string | null;
-  /** Native rows: `markers`, `automatic` or `off`. */
-  prompt_caching?: string | null;
-  /** External rows: the agent's full status (versions, transport, sign-in
-   *  methods). The app's agent list is built from this. */
-  agent?: AcpAgentStatus | null;
-};
-
-export type EngineListView = {
-  engines: EngineSnapshot[];
-  active_instance?: string | null;
-  active_model?: string | null;
-  /** False on the first hit after boot: external rows are presence-only
-   *  placeholders until the background probe lands. */
-  fresh: boolean;
-};
-
-/** One provider instance's own model catalog (not the active one's). */
-export async function listInstanceModels(instance: string): Promise<ModelInfo[]> {
-  const r = await fetch(`/api/engines/${encodeURIComponent(instance)}/models`);
-  const body = (await r.json().catch(() => ({}))) as { models?: ModelInfo[]; error?: string };
-  if (!r.ok) throw new Error(body.error ?? `models for ${instance}: ${r.status}`);
-  return body.models ?? [];
-}
-
-/** One `env` entry of an agent's setup. Secret-looking values come back
- *  masked only; the real value never reaches the browser. */
-export type AgentEnvVar = { key: string; value?: string; masked?: string };
-
-/** An external agent's setup, stored on the server in mira.yaml (#79). */
-export type AgentSettings = {
-  instance: string;
-  driver: string;
-  display_name?: string;
-  enabled: boolean;
-  binary_path?: string;
-  home_path?: string;
-  launch_args: string[];
-  env: AgentEnvVar[];
-  effort?: string;
-  setting_sources?: string;
-  has_api_key: boolean;
-  api_key_masked?: string;
-  api_key_env?: string;
-  /** Variables the agent reads a key from; empty when it only signs in
-   *  through its own CLI. */
-  api_key_vars: string[];
-};
-
-/** A partial update: absent fields stay, `''` clears. In `env`, `null`
- *  keeps that variable's stored (masked) value. */
-export type AgentSettingsPatch = {
-  display_name?: string;
-  enabled?: boolean;
-  binary_path?: string;
-  home_path?: string;
-  launch_args?: string[];
-  env?: Record<string, string | null>;
-  effort?: string;
-  setting_sources?: string;
-  api_key?: string;
-  api_key_env?: string;
-};
-
-async function agentSettingsRequest(instance: string, init?: RequestInit): Promise<AgentSettings> {
-  const r = await fetch(`/api/engines/${encodeURIComponent(instance)}/settings`, init);
-  const body = (await r.json().catch(() => ({}))) as AgentSettings & { error?: string };
-  if (!r.ok) throw new Error(body.error ?? `agent settings ${r.status}`);
-  return body;
-}
-
-export function getAgentSettings(instance: string): Promise<AgentSettings> {
-  return agentSettingsRequest(instance);
-}
-
-export function putAgentSettings(instance: string, patch: AgentSettingsPatch): Promise<AgentSettings> {
-  return agentSettingsRequest(instance, {
-    method: 'PUT',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(patch),
-  });
-}
-
-export async function listEngines(refresh = false): Promise<EngineListView> {
-  const r = await fetch(`/api/engines${refresh ? '?refresh=1' : ''}`);
-  if (!r.ok) {
-    // No engines info is a degraded picker, not a broken app: native
-    // model picking still works through /api/models.
-    return { engines: [], fresh: false };
-  }
-  return (await r.json()) as EngineListView;
-}
-
 export type SkillView = {
   name: string;
   description: string;
@@ -422,7 +305,9 @@ export type SkillsResponse = { skills: SkillView[] };
 export type AgentTurn = { turn: number; t: number; first_text: string; snapshot: boolean };
 
 export async function listAgentTurns(sessionId: string): Promise<AgentTurn[]> {
-  const r = await fetch(`/api/acp/turns?session=${encodeURIComponent(sessionId)}`, { cache: 'no-store' });
+  const r = await fetch(`/api/acp/turns?session=${encodeURIComponent(sessionId)}`, {
+    cache: 'no-store',
+  });
   if (!r.ok) throw new Error(`turns GET ${r.status}`);
   return (await r.json()) as AgentTurn[];
 }
@@ -438,7 +323,9 @@ export async function revertAgentTurn(sessionId: string, turn: number): Promise<
     try {
       const j = await r.json();
       if (j.error) msg += `: ${j.error}`;
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
     throw new Error(msg);
   }
   return (await r.json()) as { note: string };
@@ -515,14 +402,18 @@ export type FileView = { path: string; bytes: number; content: string };
 /** Read a text file. `view` is for the file viewer, which allows larger
  *  files than attaching one to a message does. */
 export async function readFile(path: string, opts?: { view?: boolean }): Promise<FileView> {
-  const r = await fetch(`/api/file?path=${encodeURIComponent(path)}${opts?.view ? '&purpose=view' : ''}`);
+  const r = await fetch(
+    `/api/file?path=${encodeURIComponent(path)}${opts?.view ? '&purpose=view' : ''}`,
+  );
   if (!r.ok) {
     let msg = `Couldn't read the file (HTTP ${r.status}).`;
     try {
       const j = await r.json();
       // The server's message is written for people; show it as is.
       if (j.error) msg = j.error;
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
     throw new Error(msg);
   }
   return (await r.json()) as FileView;
@@ -696,7 +587,8 @@ export type MessageRef = { text: string; occurrence: number };
 
 /** What restoring the files to before a message would change. */
 export async function previewCheckpoint(ref: MessageRef): Promise<RestoreChange[]> {
-  return (await checkpointCall<{ changes: RestoreChange[] }>('/api/checkpoints/preview', ref)).changes;
+  return (await checkpointCall<{ changes: RestoreChange[] }>('/api/checkpoints/preview', ref))
+    .changes;
 }
 
 /** Put the files back the way they were before a message. */
@@ -707,7 +599,9 @@ export function restoreCheckpoint(ref: MessageRef): Promise<Restored> {
 /** "Fork from here": a new chat with this one's history through the
  *  given message's turn. Resolves to the new chat's id. */
 export async function forkSession(sessionId: string, ref: MessageRef): Promise<string> {
-  return (await checkpointCall<{ id: string }>(`/api/sessions/${encodeURIComponent(sessionId)}/fork`, ref)).id;
+  return (
+    await checkpointCall<{ id: string }>(`/api/sessions/${encodeURIComponent(sessionId)}/fork`, ref)
+  ).id;
 }
 
 /** Undo a restore. */
@@ -724,7 +618,12 @@ export async function revertFile(path: string): Promise<void> {
   });
   if (!r.ok) {
     let msg = `revert ${r.status}`;
-    try { const j = await r.json(); if (j.error) msg += `: ${j.error}`; } catch { /* ignore */ }
+    try {
+      const j = await r.json();
+      if (j.error) msg += `: ${j.error}`;
+    } catch {
+      /* ignore */
+    }
     throw new Error(msg);
   }
 }
@@ -733,7 +632,12 @@ export async function gitPush(): Promise<void> {
   const r = await fetch('/api/git/push', { method: 'POST' });
   if (!r.ok) {
     let msg = `git push ${r.status}`;
-    try { const j = await r.json(); if (j.error) msg += `: ${j.error}`; } catch { /* ignore */ }
+    try {
+      const j = await r.json();
+      if (j.error) msg += `: ${j.error}`;
+    } catch {
+      /* ignore */
+    }
     throw new Error(msg);
   }
 }
@@ -767,12 +671,18 @@ export async function gitCommit(req: CommitRequest): Promise<void> {
   });
   if (!r.ok) {
     let msg = `git commit ${r.status}`;
-    try { const j = await r.json(); if (j.error) msg += `: ${j.error}`; } catch { /* ignore */ }
+    try {
+      const j = await r.json();
+      if (j.error) msg += `: ${j.error}`;
+    } catch {
+      /* ignore */
+    }
     throw new Error(msg);
   }
 }
 
 export type UndoOp = 'overwrite' | 'create';
+
 export type AppliedUndo = { seq: number; path: string; op: UndoOp };
 
 export async function applyUndo(count: number): Promise<{ applied: AppliedUndo[] }> {
@@ -786,7 +696,9 @@ export async function applyUndo(count: number): Promise<{ applied: AppliedUndo[]
     try {
       const j = await r.json();
       if (j.error) msg += `: ${j.error}`;
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
     throw new Error(msg);
   }
   return (await r.json()) as { applied: AppliedUndo[] };
@@ -794,7 +706,10 @@ export async function applyUndo(count: number): Promise<{ applied: AppliedUndo[]
 
 export type MemoryScope = 'user' | 'project';
 
-export async function appendMemory(scope: MemoryScope, text: string): Promise<{ path: string; bytes: number }> {
+export async function appendMemory(
+  scope: MemoryScope,
+  text: string,
+): Promise<{ path: string; bytes: number }> {
   const r = await fetch('/api/memory/append', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -805,13 +720,18 @@ export async function appendMemory(scope: MemoryScope, text: string): Promise<{ 
     try {
       const j = await r.json();
       if (j.error) msg += `: ${j.error}`;
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
     throw new Error(msg);
   }
   return (await r.json()) as { path: string; bytes: number };
 }
 
-export async function createWorktree(branch: string, base?: string): Promise<{ path: string; branch: string }> {
+export async function createWorktree(
+  branch: string,
+  base?: string,
+): Promise<{ path: string; branch: string }> {
   const r = await fetch('/api/git/worktree', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -822,484 +742,12 @@ export async function createWorktree(branch: string, base?: string): Promise<{ p
     try {
       const j = await r.json();
       if (j.error) msg += `: ${j.error}`;
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
     throw new Error(msg);
   }
   return (await r.json()) as { path: string; branch: string };
-}
-
-/* ---------- MCP servers + plugins ---------- */
-
-/** Throw with the server's `{ error }` message when a request fails. */
-async function jsonOrThrow<T>(r: Response, what: string): Promise<T> {
-  if (!r.ok) {
-    let msg = `${what} failed (${r.status})`;
-    try {
-      const j = await r.json();
-      if (j.error) msg = j.error;
-    } catch { /* ignore */ }
-    throw new Error(msg);
-  }
-  return (await r.json()) as T;
-}
-
-async function post<T>(url: string, body: unknown, what: string): Promise<T> {
-  const r = await fetch(url, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body ?? {}),
-  });
-  return jsonOrThrow<T>(r, what);
-}
-
-/** A server entry in `.mcp.json` shape. */
-export type McpServerConfig =
-  | {
-      type?: 'stdio';
-      command: string;
-      args?: string[];
-      env?: Record<string, string>;
-      cwd?: string | null;
-    }
-  | {
-      type?: 'http' | 'sse';
-      url: string;
-      headers?: Record<string, string>;
-      auth?: string | null;
-      oauth?: { clientId?: string; clientSecret?: string; scopes?: string[] } | null;
-    };
-
-export type McpScope =
-  | { kind: 'user' }
-  | { kind: 'project' }
-  | { kind: 'local' }
-  | { kind: 'plugin'; plugin: string };
-
-export type McpStatus =
-  | { state: 'connecting' }
-  | { state: 'connected' }
-  | { state: 'needs_auth' }
-  | { state: 'needs_approval' }
-  | { state: 'rejected' }
-  | { state: 'disabled' }
-  | { state: 'needs_setup'; variables: string[] }
-  | { state: 'failed'; message: string };
-
-export type McpToolView = { name: string; remote_name: string; description: string; read_only: boolean; enabled: boolean };
-
-/** How MCP tools reach the model. */
-export type ToolLoading = 'all' | 'on_demand' | 'auto';
-export type McpPromptView = {
-  name: string;
-  description: string | null;
-  arguments: { name: string; description: string | null; required: boolean }[];
-};
-export type McpResourceView = { uri: string; name: string; description: string | null; mime_type: string | null };
-
-export type McpServerView = {
-  name: string;
-  scope: McpScope;
-  transport: 'stdio' | 'http' | 'sse';
-  target: string;
-  source: string | null;
-  status: McpStatus;
-  tools: McpToolView[];
-  resources: McpResourceView[];
-  prompts: McpPromptView[];
-  server_name: string | null;
-  server_version: string | null;
-  instructions: string | null;
-  can_sign_in: boolean;
-  signed_in: boolean;
-  /** `${VAR}`s in the definition with no value. */
-  missing_vars: string[];
-  log_path: string | null;
-  config: McpServerConfig;
-};
-
-export type McpProblem = { source: string; server: string | null; message: string };
-
-export type McpListView = {
-  servers: McpServerView[];
-  problems: McpProblem[];
-  user_config_path: string;
-  project: string | null;
-  /** Names of saved `${VAR}` values (never the values). */
-  saved_variables: string[];
-  tool_loading: ToolLoading;
-  /** Whether tools go through search_mcp_tools / call_mcp_tool right now. */
-  tools_on_demand: boolean;
-};
-
-export type WriteScope = 'user' | 'project' | 'local';
-
-export async function listMcp(): Promise<McpListView> {
-  return jsonOrThrow(await fetch('/api/mcp', { cache: 'no-store' }), 'Loading MCP servers');
-}
-
-export function saveMcpServer(req: {
-  name: string;
-  scope: WriteScope;
-  config: McpServerConfig;
-  replaces?: { name: string; scope: WriteScope } | null;
-}): Promise<McpListView> {
-  return post('/api/mcp/servers', req, 'Saving the server');
-}
-
-export async function deleteMcpServer(name: string, scope: WriteScope): Promise<McpListView> {
-  const r = await fetch(`/api/mcp/servers/${encodeURIComponent(name)}?scope=${scope}`, { method: 'DELETE' });
-  return jsonOrThrow(r, 'Removing the server');
-}
-
-const mcpUrl = (name: string, action: string) => `/api/mcp/servers/${encodeURIComponent(name)}/${action}`;
-
-export const reconnectMcp = (name: string) => post<McpListView>(mcpUrl(name, 'reconnect'), {}, 'Reconnecting');
-export const setMcpEnabled = (name: string, enabled: boolean) =>
-  post<McpListView>(mcpUrl(name, 'enabled'), { enabled }, enabled ? 'Enabling' : 'Disabling');
-export const setMcpApproval = (name: string, approve: boolean) =>
-  post<McpListView>(mcpUrl(name, 'approval'), { approve }, approve ? 'Approving' : 'Rejecting');
-export const signInMcp = (name: string) => post<{ url: string }>(mcpUrl(name, 'sign-in'), {}, 'Starting sign-in');
-/** Save (or with an empty value, remove) a `${VAR}` value used by server
- *  definitions, like a plugin's `GITHUB_PERSONAL_ACCESS_TOKEN`. */
-export const setMcpVariable = (name: string, value: string | null) =>
-  post<McpListView>('/api/mcp/variables', { name, value }, 'Saving the token');
-export const setMcpToolEnabled = (tool: string, enabled: boolean) =>
-  post<McpListView>('/api/mcp/tools/enabled', { tool, enabled }, enabled ? 'Enabling the tool' : 'Disabling the tool');
-export const setMcpToolLoading = (mode: ToolLoading) =>
-  post<McpListView>('/api/mcp/tool-loading', { mode }, 'Changing tool loading');
-export const signOutMcp = (name: string) => post<McpListView>(mcpUrl(name, 'sign-out'), {}, 'Signing out');
-
-/** Where a command or skill comes from, for grouping it in palettes. */
-export type Origin = {
-  kind: 'plugin' | 'mcp' | 'user' | 'project';
-  /** Groups items from the same place (`plugin:notion`, `mcp:linear`). */
-  key: string;
-  /** "Notion", "Commit commands". */
-  label: string;
-  icon_url: string | null;
-  homepage: string | null;
-};
-
-export type CommandInfo = {
-  name: string;
-  description: string;
-  argument_hint: string | null;
-  /** `user`, `project`, `plugin:<name>` or `mcp:<server>`. */
-  source: string;
-  /** A Markdown command, or an MCP server's prompt. */
-  kind: 'command' | 'prompt';
-  origin: Origin;
-};
-
-export async function listCommands(): Promise<CommandInfo[]> {
-  return jsonOrThrow(await fetch('/api/commands', { cache: 'no-store' }), 'Loading commands');
-}
-
-export type MarketplaceView = {
-  name: string;
-  source: string;
-  kind: 'github' | 'git' | 'directory' | 'url';
-  description: string | null;
-  owner: string | null;
-  plugin_count: number;
-  path: string;
-  updated_at: number;
-  error: string | null;
-};
-
-export type CatalogEntry = {
-  id: string;
-  name: string;
-  display_name: string | null;
-  icon_url: string | null;
-  marketplace: string;
-  description: string | null;
-  version: string | null;
-  author: string | null;
-  category: string | null;
-  tags: string[];
-  keywords: string[];
-  homepage: string | null;
-  source: string;
-  installable: boolean;
-  installed: boolean;
-  enabled: boolean;
-  installed_version: string | null;
-};
-
-export type InstalledPluginView = {
-  id: string;
-  name: string;
-  display_name: string | null;
-  marketplace: string;
-  version: string;
-  description: string | null;
-  author: string | null;
-  enabled: boolean;
-  path: string;
-  updated_at: number;
-  commands: string[];
-  agents: string[];
-  skills: string[];
-  mcp_servers: string[];
-  hooks: string[];
-  lsp_servers: string[];
-  problems: string[];
-};
-
-export type PluginsOverview = {
-  marketplaces: MarketplaceView[];
-  catalog: CatalogEntry[];
-  installed: InstalledPluginView[];
-  suggested_marketplaces: { source: string; name: string; description: string }[];
-};
-
-export type PluginComponents = {
-  commands: string[];
-  agents: string[];
-  skill_dirs: string[];
-  skills: string[];
-  hooks: string[];
-  mcp_server_names: string[];
-  lsp_servers: string[];
-  problems: string[];
-};
-
-export type PluginDetail = CatalogEntry & {
-  license: string | null;
-  repository: string | null;
-  components: PluginComponents | null;
-  command_names: string[];
-  agent_names: string[];
-  readme: string | null;
-  path: string | null;
-};
-
-export async function getPlugins(): Promise<PluginsOverview> {
-  return jsonOrThrow(await fetch('/api/plugins', { cache: 'no-store' }), 'Loading plugins');
-}
-
-export async function getPluginDetail(id: string): Promise<PluginDetail> {
-  return jsonOrThrow(
-    await fetch(`/api/plugins/detail/${encodeURIComponent(id)}`, { cache: 'no-store' }),
-    'Loading the plugin',
-  );
-}
-
-export const installPlugin = (id: string) => post<PluginsOverview>('/api/plugins/install', { id }, 'Installing');
-export const uninstallPlugin = (id: string) =>
-  post<PluginsOverview>(`/api/plugins/${encodeURIComponent(id)}/uninstall`, {}, 'Uninstalling');
-export const setPluginEnabled = (id: string, enabled: boolean) =>
-  post<PluginsOverview>(`/api/plugins/${encodeURIComponent(id)}/enabled`, { enabled }, enabled ? 'Enabling' : 'Disabling');
-export const addMarketplace = (source: string) =>
-  post<PluginsOverview>('/api/plugins/marketplaces', { source }, 'Adding the marketplace');
-export const updateMarketplace = (name: string) =>
-  post<PluginsOverview>(`/api/plugins/marketplaces/${encodeURIComponent(name)}/update`, {}, 'Updating the marketplace');
-export async function removeMarketplace(name: string): Promise<PluginsOverview> {
-  const r = await fetch(`/api/plugins/marketplaces/${encodeURIComponent(name)}`, { method: 'DELETE' });
-  return jsonOrThrow(r, 'Removing the marketplace');
-}
-
-/* ---------- pull requests ---------- */
-
-export type PullRequestSummary = {
-  number: number;
-  title: string;
-  state: string;
-  draft: boolean;
-  author: string;
-  author_avatar: string | null;
-  head_ref: string;
-  base_ref: string;
-  html_url: string;
-  created_at: string;
-  updated_at: string;
-  additions: number | null;
-  deletions: number | null;
-  changed_files: number | null;
-  review_decision: string | null;
-  comment_count: number;
-  requested_reviewers: string[];
-};
-
-export type RepoGroup = {
-  owner: string;
-  repo: string;
-  project_label: string;
-  cwd: string;
-  prs: PullRequestSummary[];
-};
-
-export type RepoError = {
-  owner: string;
-  repo: string;
-  cwd: string;
-  message: string;
-};
-
-export type PullRequestListView = {
-  authenticated_user: string | null;
-  repos: RepoGroup[];
-  errors: RepoError[];
-};
-
-export type CheckRunView = {
-  name: string;
-  status: string;
-  conclusion: string | null;
-  url: string | null;
-};
-
-export type ReviewView = {
-  author: string;
-  author_avatar: string | null;
-  state: string;
-  body: string;
-  submitted_at: string | null;
-};
-
-export type CommentView = {
-  author: string;
-  author_avatar: string | null;
-  body: string;
-  created_at: string;
-};
-
-export type TimelineEventView = {
-  kind: string;
-  actor: string | null;
-  message: string;
-  at: string | null;
-};
-
-export type CommitView = {
-  sha: string;
-  message: string;
-  author: string | null;
-};
-
-export type PullRequestDetailView = {
-  summary: PullRequestSummary;
-  body: string;
-  mergeable: boolean | null;
-  mergeable_state: string | null;
-  merged: boolean;
-  check_status: string | null;
-  checks: CheckRunView[];
-  reviews: ReviewView[];
-  comments: CommentView[];
-  timeline: TimelineEventView[];
-  commits: CommitView[];
-};
-
-export type FileChangeView = {
-  filename: string;
-  status: string;
-  additions: number;
-  deletions: number;
-  patch: string | null;
-  raw_url: string | null;
-};
-
-export type PullRequestFilesView = { files: FileChangeView[] };
-
-async function readError(r: Response, prefix: string): Promise<string> {
-  let msg = `${prefix} ${r.status}`;
-  try {
-    const j = await r.json();
-    if (j?.error) msg += `: ${j.error}`;
-  } catch { /* ignore */ }
-  return msg;
-}
-
-export async function listPullRequests(): Promise<PullRequestListView> {
-  const r = await fetch('/api/prs', { cache: 'no-store' });
-  if (!r.ok) throw new Error(await readError(r, 'prs GET'));
-  return (await r.json()) as PullRequestListView;
-}
-
-export async function getPullRequest(
-  owner: string,
-  repo: string,
-  number: number,
-): Promise<PullRequestDetailView> {
-  const r = await fetch(
-    `/api/prs/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${number}`,
-    { cache: 'no-store' },
-  );
-  if (!r.ok) throw new Error(await readError(r, 'pr GET'));
-  return (await r.json()) as PullRequestDetailView;
-}
-
-export async function getPullRequestFiles(
-  owner: string,
-  repo: string,
-  number: number,
-): Promise<PullRequestFilesView> {
-  const r = await fetch(
-    `/api/prs/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${number}/files`,
-    { cache: 'no-store' },
-  );
-  if (!r.ok) throw new Error(await readError(r, 'pr files GET'));
-  return (await r.json()) as PullRequestFilesView;
-}
-
-export async function postPullRequestComment(
-  owner: string,
-  repo: string,
-  number: number,
-  body: string,
-): Promise<CommentView> {
-  const r = await fetch(
-    `/api/prs/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${number}/comments`,
-    {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ body }),
-    },
-  );
-  if (!r.ok) throw new Error(await readError(r, 'comment POST'));
-  return (await r.json()) as CommentView;
-}
-
-export type ReviewEvent = 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
-
-export async function submitPullRequestReview(
-  owner: string,
-  repo: string,
-  number: number,
-  event: ReviewEvent,
-  body?: string,
-): Promise<ReviewView> {
-  const r = await fetch(
-    `/api/prs/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${number}/reviews`,
-    {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ event, body }),
-    },
-  );
-  if (!r.ok) throw new Error(await readError(r, 'review POST'));
-  return (await r.json()) as ReviewView;
-}
-
-export type MergeMethod = 'merge' | 'squash' | 'rebase';
-
-export async function mergePullRequest(
-  owner: string,
-  repo: string,
-  number: number,
-  method: MergeMethod,
-): Promise<void> {
-  const r = await fetch(
-    `/api/prs/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${number}/merge`,
-    {
-      method: 'PUT',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ method }),
-    },
-  );
-  if (!r.ok) throw new Error(await readError(r, 'merge PUT'));
 }
 
 export async function putCwd(path: string): Promise<{ session_id?: string }> {
@@ -1313,7 +761,9 @@ export async function putCwd(path: string): Promise<{ session_id?: string }> {
     try {
       const j = await r.json();
       if (j.error) msg += `: ${j.error}`;
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
     throw new Error(msg);
   }
   // Server returns { path, home, session_id? }. Return just the id so
@@ -1396,76 +846,130 @@ export async function saveHooks(rules: HookRule[]): Promise<HooksView> {
   return jsonOrThrow<HooksView>(r, 'Saving hooks');
 }
 
-/* ---------- Importing chats from other coding agents ---------- */
-
-export type ImportSource = 'claude-code' | 'codex';
-
-export type ImportChat = {
-  source: ImportSource;
-  id: string;
-  title: string;
-  model: string | null;
-  messages: number;
-  /** Unix ms. */
-  updated_at: number | null;
-  /** The Mira chat it already became, if imported. */
-  imported_as: string | null;
-  /** Run by a program (a test suite, a script, another app driving the
-   *  agent), not typed by a person. */
-  automated: boolean;
-};
-
-export type ImportProject = {
-  path: string;
-  name: string;
-  /** `owner/name` from the git remote. */
-  repo: string | null;
-  is_git: boolean;
-  exists: boolean;
-  last_active: number | null;
-  chats: ImportChat[];
-};
-
-export type ImportScan = {
-  sources: { id: ImportSource; label: string; found: boolean; chats: number }[];
-  projects: ImportProject[];
-};
-
-/** Other agents' chats on this computer, grouped by project. */
-export async function scanImportableChats(fresh = false): Promise<ImportScan> {
-  const r = await fetch(`/api/import/scan${fresh ? '?fresh=true' : ''}`);
-  if (!r.ok) throw new Error(`scan ${r.status}`);
-  return (await r.json()) as ImportScan;
-}
-
-/** Bring chats into Mira; each becomes a chat on its agent that resumes. */
-export async function importChats(
-  chats: { source: ImportSource; id: string }[],
-): Promise<{ imported: string[]; existing: string[]; failed: string[] }> {
-  const r = await fetch('/api/import', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ chats }),
-  });
-  const j = (await r.json().catch(() => ({}))) as { imported?: string[]; existing?: string[]; failed?: string[]; error?: string };
-  if (!r.ok) throw new Error(j.error ?? `import ${r.status}`);
-  return { imported: j.imported ?? [], existing: j.existing ?? [], failed: j.failed ?? [] };
-}
-
 export function updateExternalAgent(kind: string): Promise<{ updated: boolean }> {
   return post(`/api/acp/agents/${encodeURIComponent(kind)}/update`, {}, 'Updating agent');
 }
 
-export async function getTurnFileDiff(session: string, text: string, occurrence: number, path: string, signal?: AbortSignal): Promise<import('./types').DiffPreview & { before: string; after: string }> {
-  const response = await fetch(`/api/sessions/${encodeURIComponent(session)}/turn-diff`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text, occurrence, path }), signal });
+export async function getTurnFileDiff(
+  session: string,
+  text: string,
+  occurrence: number,
+  path: string,
+  signal?: AbortSignal,
+): Promise<import('./types').DiffPreview & { before: string; after: string }> {
+  const response = await fetch(`/api/sessions/${encodeURIComponent(session)}/turn-diff`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text, occurrence, path }),
+    signal,
+  });
   const body = await response.json();
   if (!response.ok) throw new Error(body.error ?? 'Could not load this turn’s diff');
   return body;
 }
 
-export type ChatRelationshipView = { current: SessionSummary | null; parent: SessionSummary | null; children: SessionSummary[]; has_more: boolean };
-export async function getChatRelationships(session: string, limit = 20, signal?: AbortSignal): Promise<ChatRelationshipView> {
-  const response = await fetch(`/api/sessions/${encodeURIComponent(session)}/relationships?limit=${limit}`, { cache: 'no-store', signal });
+export type ChatRelationshipView = {
+  current: SessionSummary | null;
+  parent: SessionSummary | null;
+  children: SessionSummary[];
+  has_more: boolean;
+};
+
+export async function getChatRelationships(
+  session: string,
+  limit = 20,
+  signal?: AbortSignal,
+): Promise<ChatRelationshipView> {
+  const response = await fetch(
+    `/api/sessions/${encodeURIComponent(session)}/relationships?limit=${limit}`,
+    { cache: 'no-store', signal },
+  );
   if (!response.ok) throw new Error('Could not load related chats');
   return response.json();
 }
+
+export {
+  getAgentSettings,
+  listEngines,
+  listInstanceModels,
+  putAgentSettings,
+  type AgentEnvVar,
+  type AgentSettings,
+  type AgentSettingsPatch,
+  type EngineFlavor,
+  type EngineListView,
+  type EngineSnapshot,
+  type EngineState,
+} from './api/agents';
+export {
+  importChats,
+  scanImportableChats,
+  type ImportChat,
+  type ImportProject,
+  type ImportScan,
+  type ImportSource,
+} from './api/imports';
+export {
+  addMarketplace,
+  deleteMcpServer,
+  getPluginDetail,
+  getPlugins,
+  installPlugin,
+  listCommands,
+  listMcp,
+  reconnectMcp,
+  removeMarketplace,
+  saveMcpServer,
+  setMcpApproval,
+  setMcpEnabled,
+  setMcpToolEnabled,
+  setMcpToolLoading,
+  setMcpVariable,
+  setPluginEnabled,
+  signInMcp,
+  signOutMcp,
+  uninstallPlugin,
+  updateMarketplace,
+  type CatalogEntry,
+  type CommandInfo,
+  type InstalledPluginView,
+  type MarketplaceView,
+  type McpListView,
+  type McpProblem,
+  type McpPromptView,
+  type McpResourceView,
+  type McpScope,
+  type McpServerConfig,
+  type McpServerView,
+  type McpStatus,
+  type McpToolView,
+  type Origin,
+  type PluginComponents,
+  type PluginDetail,
+  type PluginsOverview,
+  type ToolLoading,
+  type WriteScope,
+} from './api/plugins';
+export {
+  getPullRequest,
+  getPullRequestFiles,
+  listPullRequests,
+  mergePullRequest,
+  postPullRequestComment,
+  submitPullRequestReview,
+  type CheckRunView,
+  type CommentView,
+  type CommitView,
+  type FileChangeView,
+  type MergeMethod,
+  type PullRequestDetailView,
+  type PullRequestFilesView,
+  type PullRequestListView,
+  type PullRequestSummary,
+  type RepoError,
+  type RepoGroup,
+  type ReviewEvent,
+  type ReviewView,
+  type TimelineEventView,
+} from './api/pullRequests';
+export { getSettings, putSettings } from './api/settings';

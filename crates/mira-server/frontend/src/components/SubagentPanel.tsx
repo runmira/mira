@@ -1,28 +1,24 @@
+import { useFileIcons } from '@/lib/fileIcons';
+import { cn } from '@/lib/utils';
+import { CircleAlert, File as FileIcon, Info, LoaderCircle, X } from 'lucide-react';
 import { useMemo, useState } from 'react';
-import { ChevronRight, CircleAlert, File as FileIcon, Info, LoaderCircle, X } from 'lucide-react';
-import type { Entry } from '../transcript/entries';
 import { groupAgentRuns } from '../lib/turnActivity';
+import type { Entry } from '../transcript/entries';
 import type { DiffPreview, ToolCall, ToolResult } from '../types';
-import type { ToolStatus } from './ToolCard';
-import { AssistantContent } from './AssistantContent';
-import { Markdown } from './Markdown';
 import { extractPrompt, faceStateFor, stripAgentIdMarker, useSubagentIdentity } from './AgentCard';
-import { SubagentFace } from './SubagentFace';
-import { ToolCard } from './ToolCard';
-import { ToolGroup } from './ToolGroup';
 import { DelegateCard, isDelegateTaskName } from './DelegateCard';
 import { FilePanelBody, type FilePanelTab } from './FilePanel';
-import { PanelNewTabButton } from './RightPanelButton';
-import { useFileIcons } from '@/lib/fileIcons';
 import { PanelLauncher } from './PanelLauncher';
+import { PanelNewTabButton } from './RightPanelButton';
+import { SubagentFace } from './SubagentFace';
+import type { ToolStatus } from './ToolCard';
+import { ToolCard } from './ToolCard';
+import { ToolGroup } from './ToolGroup';
 import { BrowserPane } from './panes/BrowserPane';
 import { DevToolsPane } from './panes/DevToolsPane';
 import { WhiteboardPane } from './panes/WhiteboardPane';
 import { TOOL_PANE_DEFS, type ToolPaneTab } from './panes/toolPanes';
-import { cn } from '@/lib/utils';
-
-export type { FilePanelTab };
-
+import { ReviewCard, SubagentResult } from './subagents/StructuredResult';
 /** Right-side pane that shows one or more subagents in detail. Opens
  *  when the user clicks an AgentCard row in the transcript and adds a
  *  tab; further clicks add more tabs. Tabs are dismissible; when the
@@ -86,15 +82,29 @@ type Props = {
   onOpenFile?: (path: string, diff: DiffPreview | null) => void;
 };
 
-export function SubagentPanel({ tabs, fileTabs, toolTabs, onWhiteboardSend, onOpenPane, onBrowseFile, renderPane, activeCallId, cwd, onSelectTab, onCloseTab, onClose, onReview, onResizeStart, onOpenFile }: Props) {
+export function SubagentPanel({
+  tabs,
+  fileTabs,
+  toolTabs,
+  onWhiteboardSend,
+  onOpenPane,
+  onBrowseFile,
+  renderPane,
+  activeCallId,
+  cwd,
+  onSelectTab,
+  onCloseTab,
+  onClose,
+  onReview,
+  onResizeStart,
+  onOpenFile,
+}: Props) {
   if (tabs.length === 0 && fileTabs.length === 0 && toolTabs.length === 0) return null;
 
   // Fall back to first available tab when nothing is explicitly active.
   const effectiveActiveId =
     activeCallId ??
-    (tabs.length > 0
-      ? tabs[0].callId
-      : (fileTabs[0]?.id ?? toolTabs[0]?.id ?? null));
+    (tabs.length > 0 ? tabs[0].callId : (fileTabs[0]?.id ?? toolTabs[0]?.id ?? null));
   const effectiveAgent = tabs.find((t) => t.callId === effectiveActiveId);
   const effectiveFile = fileTabs.find((t) => t.id === effectiveActiveId);
   const effectiveTool = toolTabs.find((t) => t.id === effectiveActiveId);
@@ -181,9 +191,7 @@ export function SubagentPanel({ tabs, fileTabs, toolTabs, onWhiteboardSend, onOp
           ) : effectiveTool.kind === 'browser' ? (
             <BrowserPane />
           ) : effectiveTool.kind === 'whiteboard' ? (
-            <WhiteboardPane
-              onSendToChat={(png) => onWhiteboardSend?.(png)}
-            />
+            <WhiteboardPane onSendToChat={(png) => onWhiteboardSend?.(png)} />
           ) : effectiveTool.kind === 'devtools' ? (
             <DevToolsPane />
           ) : null
@@ -203,7 +211,10 @@ export function SubagentPanel({ tabs, fileTabs, toolTabs, onWhiteboardSend, onOp
  *  inactive is transparent with hover feedback. Icon + color come from
  *  the agent's identity so tabs are visually distinct at a glance. */
 function TabCapsule({
-  tab, active, onSelect, onClose,
+  tab,
+  active,
+  onSelect,
+  onClose,
 }: {
   tab: SubagentTab;
   active: boolean;
@@ -254,7 +265,10 @@ function TabCapsule({
 /** Rectangular tab for a file viewer window. Shows the short filename + close
  *  button. Breadcrumb detail lives inside the `FilePanelBody` header. */
 function FileTabCapsule({
-  tab, active, onSelect, onClose,
+  tab,
+  active,
+  onSelect,
+  onClose,
 }: {
   tab: FilePanelTab;
   active: boolean;
@@ -279,9 +293,7 @@ function FileTabCapsule({
           and a `.md` tab are distinguishable at a glance. Falls back to the
           old glyph while the icon chunk loads. */}
       <TabFileIcon name={shortName} className="size-3.5" />
-      <span className={cn('font-medium font-mono', active && 'text-foreground')}>
-        {shortName}
-      </span>
+      <span className={cn('font-medium font-mono', active && 'text-foreground')}>{shortName}</span>
       <button
         type="button"
         aria-label="Close tab"
@@ -306,14 +318,7 @@ function TabFileIcon({ name, className }: { name: string; className?: string }) 
   const { fileIcon } = useFileIcons();
   const dataUri = fileIcon(name);
   if (dataUri) {
-    return (
-      <img
-        src={dataUri}
-        alt=""
-        className={cn('shrink-0', className)}
-        draggable={false}
-      />
-    );
+    return <img src={dataUri} alt="" className={cn('shrink-0', className)} draggable={false} />;
   }
   return <FileIcon className={cn('shrink-0 text-muted-foreground/70', className)} />;
 }
@@ -321,7 +326,10 @@ function TabFileIcon({ name, className }: { name: string; className?: string }) 
 /** Utility-pane tab. Same capsule geometry as the file tab but carries a
  *  kind icon instead of a file glyph. */
 function ToolTabCapsule({
-  tab, active, onSelect, onClose,
+  tab,
+  active,
+  onSelect,
+  onClose,
 }: {
   tab: ToolPaneTab;
   active: boolean;
@@ -342,12 +350,7 @@ function ToolTabCapsule({
           : 'text-muted-foreground hover:bg-fg/[0.05] hover:text-foreground',
       )}
     >
-      <span
-        className={cn(
-          'shrink-0',
-          active ? 'text-foreground/90' : 'text-muted-foreground/70',
-        )}
-      >
+      <span className={cn('shrink-0', active ? 'text-foreground/90' : 'text-muted-foreground/70')}>
         {def.icon}
       </span>
       <span className="font-medium">{tab.title}</span>
@@ -385,9 +388,7 @@ function TabBody({
   const prompt = extractPrompt(tab.call.function.arguments);
   // Strip the `[mira-agent-id:X]\n` marker before displaying — it's an
   // internal handle for reload hydration, not user-facing text.
-  const summary = tab.result?.content
-    ? stripAgentIdMarker(tab.result.content).trim()
-    : '';
+  const summary = tab.result?.content ? stripAgentIdMarker(tab.result.content).trim() : '';
   const isError = tab.result?.is_error === true;
   const isRunning = tab.status === 'running' || tab.status === 'pending';
   const [infoOpen, setInfoOpen] = useState(false);
@@ -420,7 +421,7 @@ function TabBody({
               : 'text-muted-foreground hover:bg-accent hover:text-foreground',
           )}
         >
-          <Info className="size-4" fill={infoOpen ? "currentColor" : "none"} />
+          <Info className="size-4" fill={infoOpen ? 'currentColor' : 'none'} />
         </button>
         <div className="ml-auto">
           <StatusPill status={tab.status} isError={isError} />
@@ -431,13 +432,11 @@ function TabBody({
         <div className="rounded-lg border border-border/60 bg-card/40 p-4">
           <div className="mb-2 flex items-center gap-2">
             <Info className="size-4" style={{ color: identity.color }} fill="currentColor" />
-            <span className="text-[13px] font-medium text-foreground">
-              About {identity.name}
-            </span>
+            <span className="text-[13px] font-medium text-foreground">About {identity.name}</span>
           </div>
           <p className="mb-3 text-[12px] leading-relaxed text-muted-foreground">
-            A bounded subagent spawned by the parent — cold context, its own
-            tools, and one summary back to the parent when done.
+            A bounded subagent spawned by the parent — cold context, its own tools, and one summary
+            back to the parent when done.
           </p>
           <div className="mb-1.5 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground/70">
             Task
@@ -452,12 +451,8 @@ function TabBody({
         <ReviewCard
           review={tab.pendingReview}
           identityTextClass="text-foreground"
-          onApprove={(note) =>
-            onReview(tab.callId, tab.pendingReview!.promptId, true, note)
-          }
-          onDeny={(note) =>
-            onReview(tab.callId, tab.pendingReview!.promptId, false, note)
-          }
+          onApprove={(note) => onReview(tab.callId, tab.pendingReview!.promptId, true, note)}
+          onDeny={(note) => onReview(tab.callId, tab.pendingReview!.promptId, false, note)}
         />
       )}
 
@@ -589,7 +584,9 @@ function SubagentEntryView({ entry }: { entry: Entry }) {
           preview={entry.preview}
           status={entry.status}
           result={entry.result}
-          onDecide={() => { /* subagents auto-approve — no user gate here */ }}
+          onDecide={() => {
+            /* subagents auto-approve — no user gate here */
+          }}
         />
       );
     case 'warning': {
@@ -615,11 +612,7 @@ function SubagentEntryView({ entry }: { entry: Entry }) {
       );
     }
     case 'error':
-      return (
-        <div className="font-mono text-[11.5px] text-destructive">
-          error: {entry.text}
-        </div>
-      );
+      return <div className="font-mono text-[11.5px] text-destructive">error: {entry.text}</div>;
   }
 }
 
@@ -654,440 +647,4 @@ function StatusPill({ status, isError }: { status: ToolStatus; isError: boolean 
   }
 }
 
-/* ---------- structured-result rendering ---------- */
-
-/** Renders a subagent's final response. Agents like `explore`, `reviewer`,
- *  and `sentinel` return JSON that matches their `response_schema` — dumping
- *  the raw JSON blob into the markdown renderer just displays braces and
- *  escaped quotes, so try to parse first and lay out known fields nicely.
- *  Falls back to plain markdown when the text isn't structured (e.g. the
- *  `coder`/`documenter` types, or free-form models that ignored the schema).
- *
- *  Models routinely wrap the required JSON in a ```json``` fence and
- *  prefix a sentence of prose ("Final answer:"). We split the two so
- *  the prose still reads as prose and the fenced JSON gets the
- *  structured view instead of being dumped as a code block. */
-function SubagentResult({ text }: { text: string }) {
-  const split = useMemo(() => extractStructured(text), [text]);
-  if (!split) return <AssistantContent text={text} />;
-  return (
-    <div className="flex flex-col gap-3">
-      {split.prose && <AssistantContent text={split.prose} />}
-      <StructuredView data={split.data} />
-    </div>
-  );
-}
-
-/** Try three shapes, in order, and return the first that parses to a
- *  recognisable structured result:
- *   1. The whole text is a bare `{ ... }` object.
- *   2. The text ends with a ```json ...``` fenced block; the prose
- *      before the fence is preserved and rendered above the parsed view.
- *   3. The text contains an inline `{ ... }` block we can extract.
- *  Returns `null` when nothing structured could be salvaged — the
- *  caller falls back to the plain markdown renderer. */
-function extractStructured(
-  text: string,
-): { data: StructuredResult; prose: string } | null {
-  const raw = text.trim();
-
-  // Case 1 — bare JSON object.
-  if (raw.startsWith('{') && raw.endsWith('}')) {
-    const parsed = tryParseStructured(raw);
-    if (parsed) return { data: parsed, prose: '' };
-  }
-
-  // Case 2 — fenced ```json ... ``` (or plain ``` ... ``` where the
-  // body happens to be JSON). Take the LAST fence in the text so a
-  // model that quotes a JSON snippet mid-reasoning and then emits
-  // the real final answer still wins.
-  const fenceRe = /```(?:json)?\s*\n?([\s\S]*?)\n?```/gi;
-  let lastMatch: RegExpExecArray | null = null;
-  let m: RegExpExecArray | null;
-  while ((m = fenceRe.exec(raw)) !== null) {
-    lastMatch = m;
-  }
-  if (lastMatch) {
-    const body = lastMatch[1].trim();
-    if (body.startsWith('{') && body.endsWith('}')) {
-      const parsed = tryParseStructured(body);
-      if (parsed) {
-        const before = raw.slice(0, lastMatch.index).trim();
-        const after = raw.slice(lastMatch.index + lastMatch[0].length).trim();
-        // Prose is anything outside the fence. Prefer whichever side
-        // has content; if both do, keep both joined by a paragraph
-        // break so the shape reads naturally.
-        const prose = [before, after].filter(Boolean).join('\n\n');
-        return { data: parsed, prose };
-      }
-    }
-  }
-
-  // Case 3 — an inline `{ ... }` block somewhere in the text (last
-  // resort — handles models that emit prose + a bare object without
-  // a fence).
-  const openIdx = raw.indexOf('{');
-  const closeIdx = raw.lastIndexOf('}');
-  if (openIdx >= 0 && closeIdx > openIdx) {
-    const body = raw.slice(openIdx, closeIdx + 1);
-    const parsed = tryParseStructured(body);
-    if (parsed) {
-      const before = raw.slice(0, openIdx).trim();
-      const after = raw.slice(closeIdx + 1).trim();
-      const prose = [before, after].filter(Boolean).join('\n\n');
-      return { data: parsed, prose };
-    }
-  }
-
-  return null;
-}
-
-type StructuredResult = {
-  /** Free-form prose field — `summary` (explore) or `notes` (sentinel). */
-  narrative?: { label: string; text: string };
-  /** Enum-like conclusion field — `verdict` from reviewer/sentinel. */
-  verdict?: { label: string; value: string; tone: 'ok' | 'warn' | 'bad' };
-  /** Boolean flags like `mission_creep` — rendered as a colored chip. */
-  flags?: { label: string; value: boolean }[];
-  /** Arrays of citation-shaped items: findings / issues / unrelated_changes. */
-  items?: { label: string; entries: StructuredItem[] };
-  /** Any additional top-level fields we don't have a rich renderer for.
-   *  Rendered as a plain key/value list so nothing gets silently dropped. */
-  extras?: { key: string; value: unknown }[];
-};
-
-type StructuredItem = {
-  path?: string;
-  line?: number;
-  severity?: string;
-  summary?: string;
-  suggestion?: string;
-  note?: string;
-  reason?: string;
-};
-
-const NARRATIVE_KEYS = ['summary', 'notes'];
-const ITEM_KEYS = ['findings', 'issues', 'unrelated_changes'];
-const VERDICT_TONE: Record<string, 'ok' | 'warn' | 'bad'> = {
-  ok: 'ok',
-  on_brief: 'ok',
-  concerning: 'warn',
-  changes_requested: 'warn',
-  off_brief: 'bad',
-};
-
-/** Try to interpret `text` as one of the known subagent response schemas.
- *  Returns null when the text isn't valid JSON or doesn't look structured
- *  — the caller renders it as plain markdown in that case. */
-function tryParseStructured(text: string): StructuredResult | null {
-  const trimmed = text.trim();
-  if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) return null;
-  let obj: unknown;
-  try {
-    obj = JSON.parse(trimmed);
-  } catch {
-    return null;
-  }
-  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
-  const record = obj as Record<string, unknown>;
-
-  const out: StructuredResult = {};
-  const consumed = new Set<string>();
-
-  for (const key of NARRATIVE_KEYS) {
-    const v = record[key];
-    if (typeof v === 'string' && v.trim()) {
-      out.narrative = { label: key, text: v };
-      consumed.add(key);
-      break;
-    }
-  }
-
-  if (typeof record.verdict === 'string' && record.verdict) {
-    const value = record.verdict;
-    out.verdict = { label: 'verdict', value, tone: VERDICT_TONE[value] ?? 'warn' };
-    consumed.add('verdict');
-  }
-
-  const flags: { label: string; value: boolean }[] = [];
-  for (const [k, v] of Object.entries(record)) {
-    if (typeof v === 'boolean') {
-      flags.push({ label: k, value: v });
-      consumed.add(k);
-    }
-  }
-  if (flags.length > 0) out.flags = flags;
-
-  for (const key of ITEM_KEYS) {
-    const v = record[key];
-    if (Array.isArray(v) && v.length > 0) {
-      out.items = { label: key, entries: v.map(coerceItem) };
-      consumed.add(key);
-      break;
-    } else if (Array.isArray(v)) {
-      // Empty array — mark consumed so it doesn't spill into `extras`, and
-      // remember it so the view can show a "no findings" line.
-      out.items = { label: key, entries: [] };
-      consumed.add(key);
-      break;
-    }
-  }
-
-  const extras: { key: string; value: unknown }[] = [];
-  for (const [k, v] of Object.entries(record)) {
-    if (consumed.has(k)) continue;
-    if (v === null || v === undefined) continue;
-    extras.push({ key: k, value: v });
-  }
-  if (extras.length > 0) out.extras = extras;
-
-  // If nothing was interpreted (unknown JSON shape), let the caller fall
-  // back to markdown so we don't produce an empty box.
-  if (!out.narrative && !out.verdict && !out.items && !out.flags && !out.extras) {
-    return null;
-  }
-  return out;
-}
-
-function coerceItem(raw: unknown): StructuredItem {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    return { note: String(raw) };
-  }
-  const r = raw as Record<string, unknown>;
-  const pick = (k: string): string | undefined =>
-    typeof r[k] === 'string' ? (r[k] as string) : undefined;
-  return {
-    path: pick('path'),
-    line: typeof r.line === 'number' ? (r.line as number) : undefined,
-    severity: pick('severity'),
-    summary: pick('summary'),
-    suggestion: pick('suggestion'),
-    note: pick('note'),
-    reason: pick('reason'),
-  };
-}
-
-function StructuredView({ data }: { data: StructuredResult }) {
-  return (
-    <div className="flex flex-col gap-3">
-      {data.verdict && <VerdictPill verdict={data.verdict} />}
-      {data.narrative && (
-        <div className="md">
-          <Markdown text={data.narrative.text} />
-        </div>
-      )}
-      {data.flags && data.flags.length > 0 && (
-        <div className="flex flex-wrap gap-1.5">
-          {data.flags.map((f) => (
-            <span
-              key={f.label}
-              className={cn(
-                'rounded-full bg-secondary/70 px-2 py-0.5 text-[11px]',
-                f.value ? 'text-amber-300' : 'text-muted-foreground',
-              )}
-            >
-              {humanize(f.label)}: {f.value ? 'yes' : 'no'}
-            </span>
-          ))}
-        </div>
-      )}
-      {data.items && <ItemsSection label={data.items.label} entries={data.items.entries} />}
-      {data.extras && data.extras.length > 0 && <ExtrasBlock extras={data.extras} />}
-    </div>
-  );
-}
-
-function VerdictPill({ verdict }: { verdict: NonNullable<StructuredResult['verdict']> }) {
-  const toneText =
-    verdict.tone === 'ok'
-      ? 'text-emerald-400'
-      : verdict.tone === 'warn'
-        ? 'text-amber-300'
-        : 'text-destructive';
-  return (
-    <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
-      <span className="text-[10.5px] font-semibold uppercase tracking-wider">
-        {humanize(verdict.label)}
-      </span>
-      <span
-        className={cn(
-          'rounded-full bg-secondary/70 px-2 py-0.5 text-[11.5px] font-medium',
-          toneText,
-        )}
-      >
-        {humanize(verdict.value)}
-      </span>
-    </div>
-  );
-}
-
-function ItemsSection({ label, entries }: { label: string; entries: StructuredItem[] }) {
-  return (
-    <div className="flex flex-col gap-2">
-      <div className="text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">
-        {humanize(label)} {entries.length > 0 && <span className="text-muted-foreground/60">({entries.length})</span>}
-      </div>
-      {entries.length === 0 ? (
-        <div className="text-[12.5px] text-muted-foreground/70">None reported.</div>
-      ) : (
-        <div className="flex flex-col gap-1.5">
-          {entries.map((it, i) => (
-            <ItemRow key={i} item={it} />
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function ItemRow({ item }: { item: StructuredItem }) {
-  const where = item.path
-    ? item.line != null
-      ? `${item.path}:${item.line}`
-      : item.path
-    : null;
-  const body = item.summary ?? item.note ?? item.reason ?? '';
-  return (
-    <div className="rounded-xl bg-secondary/40 p-2.5">
-      <div className="flex items-center gap-2">
-        {item.severity && (
-          <span
-            className={cn(
-              'rounded px-1.5 py-0.5 text-[10.5px] font-semibold uppercase tracking-wider',
-              severityClass(item.severity),
-            )}
-          >
-            {item.severity}
-          </span>
-        )}
-        {body && <span className="text-[13px] text-foreground/90">{body}</span>}
-      </div>
-      {where && (
-        <div className="mt-1 flex items-center gap-1 font-mono text-[11.5px] text-muted-foreground/80">
-          <ChevronRight className="size-3" />
-          <span className="truncate">{where}</span>
-        </div>
-      )}
-      {item.suggestion && (
-        <div className="mt-1.5 rounded-md bg-background/60 px-2 py-1 text-[12px] text-foreground/80">
-          <span className="mr-1 font-semibold text-emerald-400">suggestion:</span>
-          {item.suggestion}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function severityClass(sev: string): string {
-  // Fill-only variants — no borders. Tone is carried by the label
-  // text; the background stays a subtle neutral tint of the same hue
-  // so the pill still scans by color without shouting.
-  switch (sev.toLowerCase()) {
-    case 'critical':
-      return 'bg-destructive/15 text-destructive';
-    case 'major':
-    case 'high':
-      return 'bg-amber-500/15 text-amber-300';
-    case 'minor':
-    case 'medium':
-      return 'bg-mira-blue/15 text-mira-blue';
-    default:
-      return 'bg-secondary/70 text-muted-foreground';
-  }
-}
-
-/** Renders anything the schema-aware view didn't recognize as key/value
- *  rows. Prevents silent data loss when a subagent's schema drifts from
- *  the shapes we know about. */
-function ExtrasBlock({ extras }: { extras: { key: string; value: unknown }[] }) {
-  return (
-    <div className="flex flex-col gap-1 border-t border-border/50 pt-2">
-      {extras.map(({ key, value }) => (
-        <div key={key} className="text-[12.5px]">
-          <span className="text-muted-foreground">{humanize(key)}:</span>{' '}
-          <span className="font-mono text-foreground/85 break-all">{formatExtra(value)}</span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function formatExtra(v: unknown): string {
-  if (typeof v === 'string') return v;
-  try {
-    return JSON.stringify(v);
-  } catch {
-    return String(v);
-  }
-}
-
-function humanize(s: string): string {
-  return s.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
-}
-
-/** Approve/Deny card the SubagentPanel renders when a review-required
- *  child has produced its final summary and is blocked on human input.
- *  Approve returns the summary to the parent (optionally with a note
- *  prepended); Deny turns the tool result into an error whose body is
- *  the note. The card is dismissed as soon as the user picks either
- *  side — App.tsx clears `pendingReview` locally, and the backend's
- *  tool_end lands moments later with the resolved result. */
-function ReviewCard({
-  review,
-  identityTextClass,
-  onApprove,
-  onDeny,
-}: {
-  review: { promptId: string; summary: string };
-  identityTextClass: string;
-  onApprove: (note?: string) => void;
-  onDeny: (note?: string) => void;
-}) {
-  const [note, setNote] = useState('');
-
-  return (
-    <div className="overflow-hidden rounded-2xl border border-border/40 bg-card/80 backdrop-blur">
-      <div className="flex items-center gap-2 px-4 pt-3.5 pb-3">
-        <Info className={cn('size-3.5', identityTextClass)} fill="currentColor" />
-        <span className="text-[12.5px] font-semibold tracking-tight text-foreground">
-          Review required
-        </span>
-        <span className="ml-auto rounded-full bg-secondary/70 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.11em] text-muted-foreground">
-          awaiting decision
-        </span>
-      </div>
-      <div className="border-t border-border/30 px-4 py-3">
-        <p className="mb-2.5 text-[12px] leading-relaxed text-muted-foreground">
-          The subagent finished and is waiting for you to approve its summary
-          before the parent gets it. Deny to send back an error instead.
-        </p>
-        <div className="mb-3 max-h-[36vh] overflow-y-auto whitespace-pre-wrap rounded-xl bg-secondary/40 px-3 py-2 text-[13px] leading-relaxed text-foreground/85">
-          {review.summary || '(empty summary)'}
-        </div>
-        <textarea
-          value={note}
-          onChange={(e) => setNote(e.target.value)}
-          placeholder="Optional note (prepended on approve, sent as reason on deny)"
-          rows={2}
-          className="w-full resize-none rounded-md bg-secondary/50 px-2.5 py-1.5 text-[12px] leading-relaxed outline-none placeholder:text-muted-foreground/50 focus:bg-secondary/70"
-        />
-      </div>
-      <div className="flex items-center justify-end gap-1.5 border-t border-border/30 bg-background/30 px-4 py-2.5">
-        <button
-          type="button"
-          onClick={() => onDeny(note.trim() ? note.trim() : undefined)}
-          className="rounded-md px-2.5 py-1.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
-        >
-          Deny
-        </button>
-        <button
-          type="button"
-          onClick={() => onApprove(note.trim() ? note.trim() : undefined)}
-          className="inline-flex items-center gap-1.5 rounded-full bg-foreground px-3.5 py-1.5 text-[11.5px] font-semibold text-background transition-all hover:brightness-95"
-        >
-          Approve
-        </button>
-      </div>
-    </div>
-  );
-}
+export type { FilePanelTab };
