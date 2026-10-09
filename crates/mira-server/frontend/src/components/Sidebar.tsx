@@ -7,12 +7,18 @@ import {
   ArrowLeft,
   ChevronDown,
   ChevronRight,
+  CheckCheck,
   CircleAlert,
   CircleCheck,
   Circle,
   Ellipsis,
   Folder,
   GitBranch,
+  GitMerge,
+  GitPullRequest,
+  GitPullRequestClosed,
+  GitPullRequestDraft,
+  History,
   Loader,
   Pencil,
   PenLine,
@@ -21,10 +27,10 @@ import {
   Puzzle,
   Search,
   Sparkles,
+  Split,
   Timer,
   Trash2,
   X,
-  GitFork,
 } from 'lucide-react';
 import {
   deleteSession,
@@ -34,7 +40,9 @@ import {
   renameSession,
   setSessionFlags,
 } from '../api';
-import type { BackgroundMode, SessionSummary } from '../types';
+import type { BackgroundMode, SessionPr, SessionSummary } from '../types';
+import { isSettled, settledOrder } from '../lib/settled';
+import { openExternal } from '@/lib/desktop';
 import type { WsStatus } from '../ws';
 import { parseSentAttachments } from './Composer';
 import { SETTINGS_SECTIONS, type SettingsSectionId } from './settings/sections';
@@ -119,7 +127,12 @@ type Props = {
 };
 
 const COLLAPSED_KEY = 'mira.sidebar.collapsed-projects';
+const RECENTS_OPEN_KEY = 'mira.sidebar.recents-open';
+const SETTLED_OPEN_KEY = 'mira.sidebar.settled-open';
 const PER_GROUP_LIMIT = 5;
+const RECENTS_LIMIT = 5;
+/** The settled shelf is history: a page at a time. */
+const SETTLED_PAGE = 10;
 
 export function Sidebar({
   status, cwd, activeSessionId, activeBusy, refreshKey, activeView, onNavigate,
@@ -169,6 +182,11 @@ export function Sidebar({
   // has text so a match is never hidden behind a collapsed folder.
   const [query, setQuery] = useState('');
   const searching = query.trim().length > 0;
+  // The two shelves around the project list, each remembered across
+  // reloads: Recents starts open, Settled (history) starts closed.
+  const [recentsOpen, setRecentsOpen] = useState(() => loadFlag(RECENTS_OPEN_KEY, true));
+  const [settledOpen, setSettledOpen] = useState(() => loadFlag(SETTLED_OPEN_KEY, false));
+  const [settledShown, setSettledShown] = useState(SETTLED_PAGE);
 
   useEffect(() => {
     // Fetch all non-archived sessions across every folder — grouped
@@ -202,6 +220,15 @@ export function Sidebar({
     return () => window.clearInterval(id);
   }, [anyRunning]);
 
+  // A PR merges on GitHub, not here: while any chat has one open, look
+  // again every minute so its row (and the Settled shelf) catch up.
+  const anyOpenPr = sessions.some((s) => s.pr?.state === 'open' || s.pr?.state === 'draft');
+  useEffect(() => {
+    if (!anyOpenPr) return;
+    const id = window.setInterval(refresh, 60_000);
+    return () => window.clearInterval(id);
+  }, [anyOpenPr]);
+
   // Chats that finished while you were looking at something else get a
   // dot until you open them. Remembered across reloads.
   const [unread, setUnread] = useState<Set<string>>(() => loadUnread());
@@ -234,7 +261,7 @@ export function Sidebar({
 
   /** Flip one session's pin/archive flag and refresh. Errors surface in
    *  the same slot as fetch errors. */
-  async function flagSession(id: string, flags: { pinned?: boolean; archived?: boolean }) {
+  async function flagSession(id: string, flags: { pinned?: boolean; archived?: boolean; settled?: boolean }) {
     try {
       await setSessionFlags(id, flags);
       setError(null);
@@ -289,9 +316,22 @@ export function Sidebar({
     refresh();
   }
 
+  // Settled chats leave their folders for the shelf at the bottom — except
+  // while searching, which looks everywhere at once.
+  const { live, settled } = useMemo(() => {
+    const live: SessionSummary[] = [];
+    const settled: SessionSummary[] = [];
+    for (const s of sessions) (isSettled(s) ? settled : live).push(s);
+    settled.sort(settledOrder);
+    return { live, settled };
+  }, [sessions]);
+  const recents = useMemo(
+    () => [...live].sort((a, b) => b.updated_at - a.updated_at).slice(0, RECENTS_LIMIT),
+    [live],
+  );
   const groups = useMemo(
-    () => groupByCwd(searching ? sessions.filter((s) => matchesQuery(s, query)) : sessions, cwd),
-    [sessions, cwd, query, searching],
+    () => groupByCwd(searching ? sessions.filter((s) => matchesQuery(s, query)) : live, cwd),
+    [sessions, live, cwd, query, searching],
   );
 
   async function pickSession(id: string) {
@@ -369,6 +409,37 @@ export function Sidebar({
       persistCollapsed(next);
       return next;
     });
+  }
+
+  function toggleShelf(key: string, set: (fn: (v: boolean) => boolean) => void) {
+    set((v) => {
+      saveFlag(key, !v);
+      return !v;
+    });
+  }
+
+  /** A row outside the folder tree (Recents, Settled): no forks under it. */
+  function flatRow(s: SessionSummary, where: string) {
+    return (
+      <SessionRow
+        key={`${where}-${s.id}`}
+        session={s}
+        settled={where === 'settled'}
+        active={s.id === activeSessionId && activeView === 'chat'}
+        activeBusy={runningSessions == null && activeBusy}
+        unread={unread.has(s.id)}
+        selecting={selecting}
+        checked={selected.has(s.id)}
+        onToggleSelect={() => toggleSelected(s.id)}
+        onPeek={(rect) => setPeek(rect ? { session: s, rect } : null)}
+        onPick={() => pickSession(s.id)}
+        onRename={() => setRenaming(s)}
+        onDelete={() => removeSession(s.id)}
+        onPin={(p) => void flagSession(s.id, { pinned: p })}
+        onArchive={() => void flagSession(s.id, { archived: true })}
+        onSettle={(v) => void flagSession(s.id, { settled: v })}
+      />
+    );
   }
 
   function toggleShowMore(key: string) {
@@ -516,6 +587,20 @@ export function Sidebar({
             Scheduled
           </NavItem>
         </nav>
+
+        {!searching && recents.length > 0 && (
+          <div className="mt-4 flex flex-col gap-0.5 px-0.5">
+            <ShelfHeader
+              icon={<History className="size-3 shrink-0" />}
+              label="Recents"
+              open={recentsOpen}
+              onToggle={() => toggleShelf(RECENTS_OPEN_KEY, setRecentsOpen)}
+            />
+            <Collapse open={recentsOpen}>
+              <div className="flex flex-col gap-0.5 pl-1">{recents.map((s) => flatRow(s, 'recent'))}</div>
+            </Collapse>
+          </div>
+        )}
 
         <div className="mt-4 flex flex-col gap-1 px-0.5">
           <div className="flex items-center justify-between px-2.5 py-1">
@@ -696,6 +781,7 @@ export function Sidebar({
                         onDelete={() => removeSession(s.id)}
                         onPin={(p) => void flagSession(s.id, { pinned: p })}
                         onArchive={() => void flagSession(s.id, { archived: true })}
+                        onSettle={(v) => void flagSession(s.id, { settled: v })}
                         onSetBackgroundMode={
                           onSetBackgroundMode
                             ? (mode) => onSetBackgroundMode(s.id, mode).catch((e) => setError(String(e.message ?? e)))
@@ -752,29 +838,46 @@ export function Sidebar({
             );
           })}
 
+          {/* Settled: chats whose work is done — their PR merged or closed,
+              or the user put them away. Out of the folders, still a click
+              away; writing to one brings it back. */}
+          {!searching && settled.length > 0 && (
+            <div className="mt-4 flex flex-col gap-0.5 px-0.5">
+              <ShelfHeader
+                icon={<CheckCheck className="size-3 shrink-0" />}
+                label="Settled"
+                count={settled.length}
+                open={settledOpen}
+                onToggle={() => toggleShelf(SETTLED_OPEN_KEY, setSettledOpen)}
+              />
+              <Collapse open={settledOpen}>
+                <div className="flex flex-col gap-0.5 pl-1">
+                  {settled.slice(0, settledShown).map((s) => flatRow(s, 'settled'))}
+                  {settled.length > settledShown && (
+                    <button
+                      onClick={() => setSettledShown((n) => n + SETTLED_PAGE * 2)}
+                      className="px-2 py-1 text-left text-[12.5px] text-muted-foreground/80 transition-colors hover:text-foreground"
+                    >
+                      Show {Math.min(settled.length - settledShown, SETTLED_PAGE * 2)} more
+                    </button>
+                  )}
+                </div>
+              </Collapse>
+            </div>
+          )}
+
           {/* Archived view (issue #58) — sessions hidden from the main
               list live here. Clicking a row opens it; Restore puts it back
               in its folder; Delete is permanent. */}
           {!selecting && !searching && (
             <div className="mt-4 flex flex-col gap-0.5 px-0.5">
-              <button
-                type="button"
-                onClick={() => setShowArchived((v) => !v)}
-                className="flex items-center gap-1.5 rounded-md px-2 py-1 text-[11.5px] font-semibold uppercase tracking-wider text-muted-foreground/80 transition-colors hover:bg-fg/[0.05] hover:text-foreground"
-              >
-                {showArchived ? (
-                  <ChevronDown className="size-3 shrink-0 text-muted-foreground/60" />
-                ) : (
-                  <ChevronRight className="size-3 shrink-0 text-muted-foreground/60" />
-                )}
-                <Archive className="size-3 shrink-0" />
-                Archived
-                {archived !== null && archived.length > 0 && (
-                  <span className="rounded-full bg-secondary/80 px-1.5 text-[10.5px] font-medium normal-case tracking-normal text-muted-foreground">
-                    {archived.length}
-                  </span>
-                )}
-              </button>
+              <ShelfHeader
+                icon={<Archive className="size-3 shrink-0" />}
+                label="Archived"
+                count={archived?.length || undefined}
+                open={showArchived}
+                onToggle={() => setShowArchived((v) => !v)}
+              />
               {showArchived && (
                 <div className="flex flex-col gap-0.5 pl-1">
                   {archived === null && <Empty>Loading…</Empty>}
@@ -805,7 +908,7 @@ export function Sidebar({
         <LazyBoundary>
           <SessionPeek
             target={peek}
-            pr={peek && peek.session.id === activeSessionId ? activePr ?? null : null}
+            pr={peek ? peek.session.pr ?? (peek.session.id === activeSessionId ? activePr ?? null : null) : null}
             onDismiss={() => setPeek(null)}
           />
         </LazyBoundary>
@@ -913,6 +1016,8 @@ function SessionRow({
   onSetBackgroundMode,
   onPin,
   onArchive,
+  settled = false,
+  onSettle,
   selecting = false,
   checked = false,
   onToggleSelect,
@@ -948,6 +1053,9 @@ function SessionRow({
   onPin?: (pinned: boolean) => void;
   /** Optional archive action — wires the row menu's Archive item. */
   onArchive?: () => void;
+  /** Sits on the Settled shelf; the menu offers to take it back out. */
+  settled?: boolean;
+  onSettle?: (settled: boolean) => void;
   /** Bulk-select mode: rows toggle a checkbox instead of opening. */
   selecting?: boolean;
   checked?: boolean;
@@ -1005,59 +1113,57 @@ function SessionRow({
           {checked ? <CircleCheck className="size-4" /> : <Circle className="size-3.5" />}
         </span>
       )}
-      {/* One centre line for everything in the row. The icon is a 16px box
-       *  — the height of the label's line — so it can't sit above or below
-       *  the text the way a taller badge on a baseline row did. */}
-      <span className="flex min-w-0 items-center gap-2 text-left">
-        {!selecting &&
-          (depth > 0 && !launched ? (
-            <GitFork className="size-3.5 shrink-0 text-mira-blue/70" aria-label="Fork" />
-          ) : (
-            <EngineBadge session={session} />
-          ))}
-        <span
-          className={cn(
-            'min-w-0 flex-1 truncate leading-4',
-            depth > 0 ? 'text-[13px]' : 'text-[13.5px]',
-            active && !selecting
-              ? 'font-semibold text-foreground'
-              : depth > 0
-                ? 'text-foreground/80'
-                : 'font-medium text-foreground/90',
-          )}
-        >
-          {depth > 0 && !launched ? forkLabel(session) : sessionLabel(session)}
-        </span>
-        {/* Just the mark: the title gets the width, the branch is on hover
-            and in the peek. */}
-        {!selecting && session.worktree_branch && session.worktree_status !== 'merged' && (
-          <span className="flex shrink-0 text-muted-foreground/60" title={`Worktree branch ${session.worktree_branch}`}>
-            <GitBranch className="size-3" aria-label={`Branch ${session.worktree_branch}`} />
-          </span>
+      {/* Fixed columns so every row lines up with the next: leading icon,
+       *  title (a fork count hugs the title text), git mark, time. Each
+       *  column keeps its width when empty, so the marks and times of a
+       *  whole list sit on the same vertical lines. */}
+      <span className="grid min-w-0 grid-cols-[16px_minmax(0,1fr)_16px_24px] items-center gap-2 text-left">
+        {selecting ? (
+          <span />
+        ) : depth > 0 && !launched ? (
+          // A fork of the chat above: a split, not a git glyph, so it
+          // can't be read as a merge or a branch.
+          <Split className="size-3.5 shrink-0 rotate-90 justify-self-center text-mira-blue/70" aria-label="Fork" />
+        ) : (
+          <EngineBadge session={session} />
         )}
-        {!selecting && forkCount > 0 && (
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              onToggleForks?.();
-            }}
-            title={`${forksOpen ? 'Hide' : 'Show'} ${forkCount} fork${forkCount === 1 ? '' : 's'} and thread${forkCount === 1 ? '' : 's'}`}
+        <span className="flex min-w-0 items-center gap-1.5">
+          <span
             className={cn(
-              'inline-flex h-4 shrink-0 items-center gap-0.5 rounded-full px-1.5 text-[10.5px] font-medium tabular-nums transition-colors',
-              forksOpen
-                ? 'bg-mira-blue/12 text-mira-blue hover:bg-mira-blue/20'
-                : 'bg-fg/[0.07] text-muted-foreground hover:bg-fg/[0.12] hover:text-foreground',
+              'min-w-0 truncate leading-4',
+              depth > 0 ? 'text-[13px]' : 'text-[13.5px]',
+              active && !selecting
+                ? 'font-semibold text-foreground'
+                : depth > 0
+                  ? 'text-foreground/80'
+                  : 'font-medium text-foreground/90',
             )}
           >
-            <GitFork className="size-2.5" />
-            {forkCount}
-          </button>
-        )}
-        {!selecting && session.pinned && (
-          <Pin className="size-3 shrink-0 rotate-45 text-mira-blue/70" aria-label="Pinned" />
-        )}
-        <span className="shrink-0 text-[10.5px] leading-4 tabular-nums text-muted-foreground/50">
+            {depth > 0 && !launched ? forkLabel(session) : sessionLabel(session)}
+          </span>
+          {!selecting && forkCount > 0 && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onToggleForks?.();
+              }}
+              title={`${forksOpen ? 'Hide' : 'Show'} ${forkCount} fork${forkCount === 1 ? '' : 's'} and thread${forkCount === 1 ? '' : 's'}`}
+              className={cn(
+                'inline-flex h-4 shrink-0 items-center gap-0.5 rounded-full px-1.5 text-[10.5px] font-medium tabular-nums transition-colors',
+                forksOpen
+                  ? 'bg-mira-blue/12 text-mira-blue hover:bg-mira-blue/20'
+                  : 'bg-fg/[0.07] text-muted-foreground hover:bg-fg/[0.12] hover:text-foreground',
+              )}
+            >
+              <Split className="size-2.5 rotate-90" />
+              {forkCount}
+            </button>
+          )}
+        </span>
+        {/* Just the mark: the details are on hover and in the peek. */}
+        <span className="flex justify-center">{!selecting && <GitMark session={session} />}</span>
+        <span className="text-right text-[10.5px] leading-4 tabular-nums text-muted-foreground/50">
           {timeAgo(session.updated_at)}
         </span>
       </span>
@@ -1077,7 +1183,6 @@ function SessionRow({
             <SessionStatus
               running={running}
               unread={unread}
-              merged={session.worktree_status === 'merged'}
               waiting={!active && session.needs_attention === true}
             />
           </span>
@@ -1095,6 +1200,8 @@ function SessionRow({
                 onSetBackgroundMode,
                 onPin,
                 onArchive,
+                settled,
+                onSettle,
               })}
             />
           </span>
@@ -1122,6 +1229,60 @@ function EngineBadge({ session }: { session: SessionSummary }) {
   );
 }
 
+/** Where the chat's work stands in git, as one small mark: its PR (merged
+ *  in colour, open / draft / closed in grey, each with its own glyph), or
+ *  without one, its worktree branch. Clicking a PR opens it. */
+function GitMark({ session }: { session: SessionSummary }) {
+  const pr = session.pr;
+  if (pr) {
+    const { Icon, tone, label } = PR_MARK[pr.state];
+    return (
+      // A link-role span, not a button: archived rows are buttons
+      // themselves, and buttons don't nest.
+      <span
+        role="link"
+        tabIndex={0}
+        onClick={(e) => {
+          e.stopPropagation();
+          void openExternal(pr.url);
+        }}
+        onKeyDown={(e) => {
+          if (e.key !== 'Enter') return;
+          e.stopPropagation();
+          e.preventDefault();
+          void openExternal(pr.url);
+        }}
+        title={`PR #${pr.number} · ${label}: ${pr.title}`}
+        aria-label={`Pull request ${pr.number}, ${label}`}
+        className={cn('flex shrink-0 cursor-pointer rounded-sm transition-opacity hover:opacity-80', tone)}
+      >
+        <Icon className="size-3.5" />
+      </span>
+    );
+  }
+  if (!session.worktree_branch) return null;
+  const merged = session.worktree_status === 'merged';
+  return (
+    <span
+      className={cn('flex shrink-0', merged ? 'text-violet-500 dark:text-violet-400' : 'text-muted-foreground/60')}
+      title={merged ? `Branch ${session.worktree_branch}, merged into main` : `Worktree branch ${session.worktree_branch}`}
+    >
+      {merged ? (
+        <GitMerge className="size-3.5" aria-label="Branch merged" />
+      ) : (
+        <GitBranch className="size-3" aria-label={`Branch ${session.worktree_branch}`} />
+      )}
+    </span>
+  );
+}
+
+const PR_MARK: Record<SessionPr['state'], { Icon: typeof GitMerge; tone: string; label: string }> = {
+  merged: { Icon: GitMerge, tone: 'text-violet-500 dark:text-violet-400', label: 'merged' },
+  open: { Icon: GitPullRequest, tone: 'text-muted-foreground/70', label: 'open' },
+  draft: { Icon: GitPullRequestDraft, tone: 'text-muted-foreground/50', label: 'draft' },
+  closed: { Icon: GitPullRequestClosed, tone: 'text-muted-foreground/50', label: 'closed without merging' },
+};
+
 function agentName(kind: string): string {
   const known: Record<string, string> = {
     'claude-code': 'Claude Code', codex: 'Codex', cursor: 'Cursor', grok: 'Grok',
@@ -1130,10 +1291,10 @@ function agentName(kind: string): string {
   return known[kind] ?? kind;
 }
 
-/** The right-side status affordance. Priority: running (spinner) > merged
- *  (green check) > idle (empty circle outline). Matches Codex's row-status
- *  ring — quiet by default, expressive when there's a state worth noting. */
-function SessionStatus({ running, unread, merged, waiting = false }: { running: boolean; unread: boolean; merged: boolean; waiting?: boolean }) {
+/** The right-side status affordance. Priority: waiting on you > unread >
+ *  running (spinner) > idle (empty circle outline). Where the work landed
+ *  (branch, PR, merged) is the git mark beside the title, not this. */
+function SessionStatus({ running, unread, waiting = false }: { running: boolean; unread: boolean; waiting?: boolean }) {
   // Waiting on you beats everything: it's the one state that stalls
   // without you.
   if (waiting) {
@@ -1172,17 +1333,6 @@ function SessionStatus({ running, unread, merged, waiting = false }: { running: 
       </span>
     );
   }
-  if (merged) {
-    return (
-      <span
-        className="inline-flex size-4 items-center justify-center text-emerald-500"
-        title="Merged"
-        aria-label="merged"
-      >
-        <CircleCheck className="size-4" />
-      </span>
-    );
-  }
   return (
     <span
       className="inline-flex size-4 items-center justify-center text-muted-foreground/40"
@@ -1213,12 +1363,18 @@ function ArchivedRow({
         active ? 'bg-fg/[0.1] text-foreground' : 'text-foreground/70 hover:bg-fg/[0.05] hover:text-foreground',
       )}
     >
-      <button type="button" onClick={onOpen} className="flex min-w-0 items-center gap-2 text-left" title="Open">
+      <button
+        type="button"
+        onClick={onOpen}
+        className="grid min-w-0 grid-cols-[16px_minmax(0,1fr)_16px_24px] items-center gap-2 text-left"
+        title="Open"
+      >
         <EngineBadge session={session} />
-        <span className="min-w-0 flex-1 truncate text-[13px] leading-4 font-medium">
+        <span className="truncate text-[13px] leading-4 font-medium">
           {sessionLabel(session)}
         </span>
-        <span className="shrink-0 text-[10.5px] tabular-nums text-muted-foreground/50">
+        <span className="flex justify-center"><GitMark session={session} /></span>
+        <span className="text-right text-[10.5px] tabular-nums text-muted-foreground/50">
           {timeAgo(session.updated_at)}
         </span>
       </button>
@@ -1477,6 +1633,51 @@ function persistCollapsed(set: Set<string>) {
   catch { /* private-mode etc; ignore */ }
 }
 
+function loadFlag(key: string, fallback: boolean): boolean {
+  try {
+    const v = localStorage.getItem(key);
+    return v === null ? fallback : v === '1';
+  } catch { return fallback; }
+}
+
+function saveFlag(key: string, value: boolean) {
+  try { localStorage.setItem(key, value ? '1' : '0'); }
+  catch { /* private-mode etc; ignore */ }
+}
+
+/** A collapsible shelf's heading: Recents, Settled, Archived. */
+function ShelfHeader({
+  icon, label, count, open, onToggle,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  count?: number;
+  open: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-expanded={open}
+      className="flex items-center gap-1.5 rounded-md px-2 py-1 text-[11.5px] font-semibold uppercase tracking-wider text-muted-foreground/80 transition-colors hover:bg-fg/[0.05] hover:text-foreground"
+    >
+      {open ? (
+        <ChevronDown className="size-3 shrink-0 text-muted-foreground/60" />
+      ) : (
+        <ChevronRight className="size-3 shrink-0 text-muted-foreground/60" />
+      )}
+      {icon}
+      {label}
+      {count != null && count > 0 && (
+        <span className="rounded-full bg-secondary/80 px-1.5 text-[10.5px] font-medium normal-case tracking-normal text-muted-foreground">
+          {count}
+        </span>
+      )}
+    </button>
+  );
+}
+
 /** Themed folder icon for a project row, falling back to the lucide glyph
  *  while the icon set loads. */
 function SidebarFolderIcon({
@@ -1608,6 +1809,8 @@ function backgroundMenuItems(args: {
   onSetBackgroundMode?: (mode: BackgroundMode) => void;
   onPin?: (pinned: boolean) => void;
   onArchive?: () => void;
+  settled?: boolean;
+  onSettle?: (settled: boolean) => void;
 }): RowMenuItem[] {
   const items: RowMenuItem[] = [
     {
@@ -1621,6 +1824,13 @@ function backgroundMenuItems(args: {
       label: args.session.pinned ? 'Unpin session' : 'Pin session',
       icon: args.session.pinned ? <PinOff className="size-3.5" /> : <Pin className="size-3.5" />,
       onSelect: () => args.onPin!(!args.session.pinned),
+    });
+  }
+  if (args.onSettle) {
+    items.push({
+      label: args.settled ? 'Move back to project' : 'Settle',
+      icon: args.settled ? <ArchiveRestore className="size-3.5" /> : <CheckCheck className="size-3.5" />,
+      onSelect: () => args.onSettle!(!args.settled),
     });
   }
   if (args.onArchive) {

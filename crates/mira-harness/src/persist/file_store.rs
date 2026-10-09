@@ -366,6 +366,7 @@ mod tests {
             previews: Default::default(),
             pinned: false,
             archived_at: None,
+            settle: Default::default(),
             agent: None,
             forked_from: None,
         }

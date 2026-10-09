@@ -38,10 +38,12 @@ const SESSIONS: SessionSummary[] = [
   chat({
     id: 'waiting', title: 'Add Stripe webhooks', agent_driver: 'claude-code', updated_at: ago(6),
     needs_attention: true, worktree_branch: 'feature/stripe-webhooks', worktree_status: 'unmerged',
+    pr: { number: 431, title: 'Stripe webhooks', url: 'https://github.com/example/mira/pull/431', state: 'open' },
   }),
   chat({
     id: 'thread-1', title: 'Webhook retries + backoff', agent_driver: 'codex', model: 'gpt-5-codex', updated_at: ago(4),
     launched_by: 'waiting', worktree_branch: 'feature/webhook-retries', worktree_status: 'unmerged',
+    pr: { number: 433, title: 'Webhook retries', url: 'https://github.com/example/mira/pull/433', state: 'draft' },
   }),
   chat({ id: 'thread-2', title: 'Docs for the webhook endpoint', launched_by: 'waiting', updated_at: ago(20), needs_attention: true }),
   chat({ id: 'unread', title: 'Audit MCP elicitation replies', agent_driver: 'codex', model: 'gpt-5-codex', updated_at: ago(45) }),
@@ -50,6 +52,22 @@ const SESSIONS: SessionSummary[] = [
     id: 'merged', title: 'Remove dead delegate code', updated_at: ago(DAY + 120),
     worktree_branch: 'chore/dead-delegate', worktree_status: 'merged',
   }),
+  chat({
+    id: 'pr-merged', title: 'Usage ring cache share', updated_at: ago(DAY + 300),
+    worktree_branch: 'fix/token-usage', worktree_status: 'unmerged',
+    pr: { number: 175, title: 'Token usage', url: 'https://github.com/example/mira/pull/175', state: 'merged', closed_at: ago(DAY) },
+  }),
+  chat({
+    id: 'pr-closed', title: 'Try a denser composer', updated_at: ago(DAY * 3),
+    worktree_branch: 'exp/composer', worktree_status: 'unmerged',
+    pr: { number: 160, title: 'Denser composer', url: 'https://github.com/example/mira/pull/160', state: 'closed', closed_at: ago(DAY * 2) },
+  }),
+  chat({
+    id: 'pr-reopened', title: 'Evals follow-up', updated_at: ago(10),
+    worktree_branch: 'evals/more', worktree_status: 'unmerged',
+    pr: { number: 176, title: 'Evals', url: 'https://github.com/example/mira/pull/176', state: 'merged', closed_at: ago(DAY) },
+  }),
+  chat({ id: 'settled-by-hand', title: 'Answer the pricing question', updated_at: ago(DAY * 2), settled_at: ago(DAY) }),
   chat({ id: 'week', title: 'Investigate the flaky worktree test', updated_at: ago(DAY * 4), model: 'gpt-5' }),
   chat({ id: 'older', title: 'Initial project setup', updated_at: ago(DAY * 40) }),
   chat({ id: 'older-2', title: 'Try the ACP adapter for Grok', agent_driver: 'grok', updated_at: ago(DAY * 70) }),
@@ -140,7 +158,10 @@ function Preview() {
           <li><b>Fix Codex plan mode handoff</b>: running</li>
           <li><b>Audit MCP elicitation replies</b>: finished while you were away (unread dot)</li>
           <li><b>Sidebar redesign</b>: the open chat, with a fork under it</li>
-          <li><b>Remove dead delegate code</b>: merged worktree</li>
+          <li><b>Recents</b>: the five latest chats across folders</li>
+          <li><b>Settled</b> (bottom, collapsed): PR merged, PR closed, branch merged, settled by hand</li>
+          <li><b>Evals follow-up</b>: PR merged but you wrote to it since, so it stays in its folder</li>
+          <li>PR marks: open and draft in grey, merged in colour; forks use the split mark</li>
           <li><b>Release checklist</b>: pinned · date sections · “Show more” past 5 chats</li>
           <li><b>landing</b>: collapsed folder showing its waiting count</li>
           <li>Hover any row for the peek; type in Search; open Archived at the bottom</li>

@@ -345,6 +345,7 @@ async fn import_one(
         previews: Default::default(),
         pinned: false,
         archived_at: None,
+        settle: Default::default(),
         agent: Some(AgentSessionMeta {
             driver_kind: chat.source.driver_kind().to_string(),
             // Imports always land on the default instance, whose id is

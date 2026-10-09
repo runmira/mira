@@ -407,6 +407,8 @@ pub struct Session {
     /// Web-sidebar archive stamp (`None` = live). Same checkpoint story
     /// as `pinned` — the record must never lose a flag mid-conversation.
     archived_at: Arc<Mutex<Option<u64>>>,
+    /// The sidebar's settle marks. Same checkpoint story as `pinned`.
+    settle: Arc<Mutex<crate::persist::SettleMarks>>,
     /// The current turn's event sender, when a turn is active. Long-
     /// running tools (bash today, others later) route live output
     /// through the [`ToolProgressSink`] attached to `tool_ctx`; that
@@ -546,6 +548,7 @@ impl Session {
             goal: Arc::new(Mutex::new(None)),
             pinned: Arc::new(Mutex::new(false)),
             archived_at: Arc::new(Mutex::new(None)),
+            settle: Arc::default(),
             progress_slot,
             hooks: None,
             previews: Arc::new(Mutex::new(HashMap::new())),
@@ -632,6 +635,7 @@ impl Session {
             goal: Arc::new(Mutex::new(record.goal)),
             pinned: Arc::new(Mutex::new(record.pinned)),
             archived_at: Arc::new(Mutex::new(record.archived_at)),
+            settle: Arc::new(Mutex::new(record.settle)),
             progress_slot,
             hooks: None,
             previews: Arc::new(Mutex::new(record.previews)),
@@ -976,13 +980,23 @@ impl Session {
     /// [`SessionRecord::archived_at`]). The server's flags endpoint writes
     /// the record *and* syncs the live slot through [`Session::set_sidebar_flags`]
     /// so the next checkpoint re-stamps the flags instead of wiping them.
-    pub async fn sidebar_flags(&self) -> (bool, Option<u64>) {
-        (*self.pinned.lock().await, *self.archived_at.lock().await)
+    pub async fn sidebar_flags(&self) -> (bool, Option<u64>, crate::persist::SettleMarks) {
+        (
+            *self.pinned.lock().await,
+            *self.archived_at.lock().await,
+            *self.settle.lock().await,
+        )
     }
 
-    pub async fn set_sidebar_flags(&self, pinned: bool, archived_at: Option<u64>) {
+    pub async fn set_sidebar_flags(
+        &self,
+        pinned: bool,
+        archived_at: Option<u64>,
+        settle: crate::persist::SettleMarks,
+    ) {
         *self.pinned.lock().await = pinned;
         *self.archived_at.lock().await = archived_at;
+        *self.settle.lock().await = settle;
     }
 
     /// Expose the session's undo/conflict guard. `None` when the FileGuard
@@ -2754,6 +2768,7 @@ async fn checkpoint(sess: &Session) {
         goal: sess.goal.lock().await.clone(),
         pinned: *sess.pinned.lock().await,
         archived_at: *sess.archived_at.lock().await,
+        settle: *sess.settle.lock().await,
         previews: sess.previews.lock().await.clone(),
     };
     if let Err(e) = store.save(&record).await {

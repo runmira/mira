@@ -412,6 +412,7 @@ mod tests {
             goal: None,
             previews: Default::default(),
             archived_at: None,
+            settle: Default::default(),
             agent: None,
             forked_from: None,
             pinned: false,
@@ -521,6 +522,7 @@ mod tests {
             previews: Default::default(),
             pinned: false,
             archived_at: None,
+            settle: Default::default(),
             agent: None,
             forked_from: None,
         };

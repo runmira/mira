@@ -89,6 +89,15 @@ pub struct SessionSummary {
     /// default list (`?archived=true` returns only these).
     #[serde(default)]
     pub archived: bool,
+    /// The user's "Settled" choice (epoch secs), for the sidebar to weigh
+    /// against the chat's activity and its PR.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settled_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unsettled_at: Option<u64>,
+    /// The worktree branch's pull request on GitHub, when it has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pr: Option<crate::session_prs::SessionPr>,
     #[serde(skip_serializing_if = "SessionUsageView::is_empty")]
     pub usage: SessionUsageView,
     /// Made with "Fork from here": the chat it branched off (the sidebar
@@ -317,6 +326,9 @@ pub async fn list_sessions(State(state): State<AppState>, Query(q): Query<ListQu
             worktree_branch: None,
             pinned: false,
             archived: false,
+            settled_at: None,
+            unsettled_at: None,
+            pr: None,
             agent_driver: slot
                 .acp_launch
                 .lock()
@@ -400,6 +412,9 @@ async fn summarize_live(state: &AppState) -> Vec<SessionSummary> {
             worktree_branch: None,
             pinned: false,
             archived: false,
+            settled_at: None,
+            unsettled_at: None,
+            pr: None,
             agent_driver,
             usage: SessionUsageView::default(),
             forked_from: None,
@@ -861,6 +876,9 @@ pub struct SetFlagsRequest {
     pub pinned: Option<bool>,
     /// `true` archives (stamped with the current time), `false` restores.
     pub archived: Option<bool>,
+    /// `true` puts the chat on the "Settled" shelf, `false` takes it back
+    /// out (and keeps it out of automatic settling until something newer).
+    pub settled: Option<bool>,
 }
 
 pub async fn set_session_flags(
@@ -889,6 +907,9 @@ pub async fn set_session_flags(
             None
         };
     }
+    if let Some(settled) = body.settled {
+        record.settle = mira_harness::persist::SettleMarks::set(settled);
+    }
     if let Err(e) = store.save(&record).await {
         return err(StatusCode::INTERNAL_SERVER_ERROR, format!("save: {e}"));
     }
@@ -900,7 +921,7 @@ pub async fn set_session_flags(
             slot.session
                 .read()
                 .await
-                .set_sidebar_flags(record.pinned, record.archived_at)
+                .set_sidebar_flags(record.pinned, record.archived_at, record.settle)
                 .await;
         }
     }
@@ -909,6 +930,8 @@ pub async fn set_session_flags(
         "id": id,
         "pinned": record.pinned,
         "archived": record.archived_at.is_some(),
+        "settled_at": record.settle.settled_at,
+        "unsettled_at": record.settle.unsettled_at,
     }))
     .into_response()
 }
@@ -925,7 +948,8 @@ fn summarize_record(
     live_meta: &std::collections::HashMap<String, LiveMeta>,
 ) -> SessionSummary {
     let mut summary = summarize_metadata(&SessionListRecord::from(r), active_id, live_meta);
-    (summary.worktree_status, summary.worktree_branch) = cached_worktree_status(&r.cwd);
+    let info = cached_worktree_status(&r.cwd);
+    (summary.worktree_status, summary.worktree_branch) = (info.status, info.branch);
     summary
 }
 
@@ -958,6 +982,9 @@ fn summarize_metadata(
         worktree_branch: None,
         pinned: r.pinned,
         archived: r.archived_at.is_some(),
+        settled_at: r.settle.settled_at,
+        unsettled_at: r.settle.unsettled_at,
+        pr: None,
         // Badge the engine the session runs on now: an agent it has left
         // for a provider no longer counts.
         agent_driver: match live {
@@ -1035,8 +1062,13 @@ async fn enrich_worktrees(summaries: &mut [SessionSummary]) {
         jobs.spawn(async move {
             let _permit = limit.acquire_owned().await.ok()?;
             tokio::task::spawn_blocking(move || {
-                let metadata = cached_worktree_status(&folder);
-                (folder, metadata)
+                let info = cached_worktree_status(&folder);
+                let pr = info
+                    .repo
+                    .as_deref()
+                    .zip(info.branch.as_deref())
+                    .and_then(|(repo, branch)| crate::session_prs::lookup(repo, branch));
+                (folder, (info, pr))
             })
             .await
             .ok()
@@ -1049,19 +1081,26 @@ async fn enrich_worktrees(summaries: &mut [SessionSummary]) {
         }
     }
     for summary in summaries {
-        if let Some((status, branch)) = metadata.get(std::path::Path::new(&summary.cwd)) {
-            summary.worktree_status = *status;
-            summary.worktree_branch = branch.clone();
+        if let Some((info, pr)) = metadata.get(std::path::Path::new(&summary.cwd)) {
+            summary.worktree_status = info.status;
+            summary.worktree_branch = info.branch.clone();
+            summary.pr = pr.clone();
         }
     }
 }
-fn cached_worktree_status(cwd: &std::path::Path) -> (Option<WorktreeMergeStatus>, Option<String>) {
+/// A worktree chat's branch, whether it is in main yet, and the primary
+/// checkout it belongs to. All `None` outside Mira's worktrees.
+#[derive(Debug, Clone, Default)]
+struct WorktreeInfo {
+    status: Option<WorktreeMergeStatus>,
+    branch: Option<String>,
+    repo: Option<std::path::PathBuf>,
+}
+
+fn cached_worktree_status(cwd: &std::path::Path) -> WorktreeInfo {
     use std::sync::{Mutex, OnceLock};
     use std::time::{Duration, Instant};
-    type Cache = std::collections::HashMap<
-        std::path::PathBuf,
-        (Instant, (Option<WorktreeMergeStatus>, Option<String>)),
-    >;
+    type Cache = std::collections::HashMap<std::path::PathBuf, (Instant, WorktreeInfo)>;
     static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(Cache::new()));
     if let Some((at, value)) = cache
@@ -1082,7 +1121,7 @@ fn cached_worktree_status(cwd: &std::path::Path) -> (Option<WorktreeMergeStatus>
     value
 }
 
-fn detect_worktree_status(cwd: &std::path::Path) -> (Option<WorktreeMergeStatus>, Option<String>) {
+fn detect_worktree_status(cwd: &std::path::Path) -> WorktreeInfo {
     if !cwd
         .components()
         .zip(cwd.components().skip(1))
@@ -1097,15 +1136,15 @@ fn detect_worktree_status(cwd: &std::path::Path) -> (Option<WorktreeMergeStatus>
                 && !c.is_empty()
         })
     {
-        return (None, None);
+        return WorktreeInfo::default();
     }
     if !cwd.is_dir() {
-        return (None, None);
+        return WorktreeInfo::default();
     }
 
     let branch = match git_output(cwd, &["symbolic-ref", "--quiet", "--short", "HEAD"]) {
         Some(b) if !b.is_empty() => b,
-        _ => return (None, None),
+        _ => return WorktreeInfo::default(),
     };
 
     let common_dir = match git_output(
@@ -1113,11 +1152,21 @@ fn detect_worktree_status(cwd: &std::path::Path) -> (Option<WorktreeMergeStatus>
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
     ) {
         Some(s) => std::path::PathBuf::from(s),
-        None => return (None, Some(branch)),
+        None => {
+            return WorktreeInfo {
+                branch: Some(branch),
+                ..Default::default()
+            }
+        }
     };
     let primary = match common_dir.parent() {
         Some(p) => p.to_path_buf(),
-        None => return (None, Some(branch)),
+        None => {
+            return WorktreeInfo {
+                branch: Some(branch),
+                ..Default::default()
+            }
+        }
     };
 
     let base = ["main", "master"]
@@ -1125,10 +1174,17 @@ fn detect_worktree_status(cwd: &std::path::Path) -> (Option<WorktreeMergeStatus>
         .copied()
         .find(|b| branch_exists(&primary, b));
     let Some(base) = base else {
-        return (None, Some(branch));
+        return WorktreeInfo {
+            branch: Some(branch),
+            repo: Some(primary),
+            ..Default::default()
+        };
     };
     if branch == base {
-        return (None, Some(branch));
+        return WorktreeInfo {
+            branch: Some(branch),
+            ..Default::default()
+        };
     }
 
     let status = if is_ancestor(&primary, &branch, base) {
@@ -1136,7 +1192,11 @@ fn detect_worktree_status(cwd: &std::path::Path) -> (Option<WorktreeMergeStatus>
     } else {
         WorktreeMergeStatus::Unmerged
     };
-    (Some(status), Some(branch))
+    WorktreeInfo {
+        status: Some(status),
+        branch: Some(branch),
+        repo: Some(primary),
+    }
 }
 
 fn git_output(cwd: &std::path::Path, args: &[&str]) -> Option<String> {
@@ -1413,6 +1473,7 @@ mod metadata_tests {
             parent_id: None,
             pinned: true,
             archived_at: None,
+            settle: Default::default(),
             agent_driver: Some("codex".into()),
             forked_from: None,
         };
@@ -1439,6 +1500,7 @@ mod metadata_tests {
             parent_id: None,
             pinned: false,
             archived_at: None,
+            settle: Default::default(),
             agent_driver: None,
             forked_from: None,
         };
