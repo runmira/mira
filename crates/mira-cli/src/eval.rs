@@ -589,8 +589,8 @@ fn print_summary(outcomes: &[TaskOutcome]) {
     );
     println!("{}", "-".repeat(84));
     for o in outcomes {
-        let name = if o.name.len() > 32 {
-            format!("{}…", &o.name[..31])
+        let name = if o.name.chars().count() > 32 {
+            format!("{}…", o.name.chars().take(31).collect::<String>())
         } else {
             o.name.clone()
         };
