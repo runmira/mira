@@ -4,6 +4,6 @@ prompt: |
   Don't change any files. End your answer with one line in exactly this form:
   `ANSWER: <hours> hours, <file path>, <constant name>`
 fixture: 11-find-code-fixture
-expect_grep: "ANSWER: 12 hours, (app/)?session\\.py, SESSION_TTL_SECONDS"
+expect_grep: "(?m)^ANSWER: 12 hours, (app/)?session\\.py, SESSION_TTL_SECONDS(?:\\r?\\n)?\\z"
 verify: diff -r -x __pycache__ "$EVAL_FIXTURE/app" app
 timeout_secs: 120
