@@ -376,6 +376,7 @@ async fn drive_turn_usage(session: Session, prompt: &str) -> Result<(String, Usa
     let mut stream = session.send(prompt.to_owned()).await;
     let mut text = String::new();
     let mut usage = UsageTotals::default();
+    let mut warnings: Vec<String> = Vec::new();
     // TurnComplete fires at the end of every model round (including
     // the final one). We keep the accumulated text — clearing on the
     // next round's first Token — so at Done we hold the last round's
@@ -394,9 +395,16 @@ async fn drive_turn_usage(session: Session, prompt: &str) -> Result<(String, Usa
                 round_just_finished = true;
             }
             HarnessEvent::Usage { round, .. } => usage.add_round(round),
+            HarnessEvent::Warning(w) => warnings.push(w),
             HarnessEvent::Done => break,
             _ => {}
         }
+    }
+    // No model round at all: the turn ended before reaching the model (a
+    // provider error such as a bad key, a blocked prompt). Say why instead
+    // of grading an empty run.
+    if usage.rounds == 0 && text.is_empty() && !warnings.is_empty() {
+        bail!("no reply from the model: {}", warnings.join(" | "));
     }
     Ok((text, usage))
 }
