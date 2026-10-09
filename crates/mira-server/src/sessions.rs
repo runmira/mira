@@ -110,6 +110,10 @@ pub struct SessionSummary {
     /// Only known for chats loaded in memory.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub needs_attention: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attention_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
     /// The chat that launched this one with `thread_launch`, so the sidebar
     /// can nest it there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -338,7 +342,9 @@ pub async fn list_sessions(State(state): State<AppState>, Query(q): Query<ListQu
             usage: SessionUsageView::default(),
             forked_from: None,
             forked_at: None,
-            needs_attention: false,
+            needs_attention: slot.needs_attention().await,
+            attention_reason: attention_reason(&slot).await,
+            failure_reason: failure_reason(&slot).await,
             launched_by: crate::agent_threads::launcher_of(&id),
         });
     }
@@ -356,6 +362,54 @@ struct LiveMeta {
     /// record, which is only rewritten on checkpoint.
     agent_driver: Option<String>,
     needs_attention: bool,
+    attention_reason: Option<String>,
+    failure_reason: Option<String>,
+}
+
+async fn attention_reason(slot: &crate::slot::SessionSlot) -> Option<String> {
+    let approvals = slot.pending.lock().await.len();
+    if approvals > 0 {
+        return Some(format!(
+            "Approve {approvals} action{}",
+            if approvals == 1 { "" } else { "s" }
+        ));
+    }
+    let requests = slot.runtime_requests.snapshot().await;
+    if let Some(request) = requests
+        .iter()
+        .find(|r| r.delivery == crate::runtime_requests::Delivery::Pending)
+    {
+        return request
+            .request
+            .questions
+            .first()
+            .map(|q| q.question.chars().take(120).collect())
+            .or_else(|| Some("Answer a question".into()));
+    }
+    if !slot.prompt_pending.lock().await.is_empty() {
+        return Some("Review a request".into());
+    }
+    None
+}
+
+async fn failure_reason(slot: &crate::slot::SessionSlot) -> Option<String> {
+    let failure = slot
+        .engine
+        .sidebar_failure
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    if failure.is_some() {
+        return failure;
+    }
+    if let crate::session_engine::AgentPhase::Failed(error) = &*slot.engine.phase.lock().await {
+        return Some(error.chars().take(160).collect());
+    }
+    slot.message_queue
+        .snapshot()
+        .await
+        .into_iter()
+        .find_map(|item| item.error)
 }
 
 async fn live_slot_metadata(state: &AppState) -> std::collections::HashMap<String, LiveMeta> {
@@ -368,6 +422,8 @@ async fn live_slot_metadata(state: &AppState) -> std::collections::HashMap<Strin
                 running: slot.is_running().await,
                 background_mode: *slot.background_mode.read().await,
                 needs_attention: slot.needs_attention().await,
+                attention_reason: attention_reason(&slot).await,
+                failure_reason: failure_reason(&slot).await,
                 agent_driver: slot
                     .acp_launch
                     .lock()
@@ -419,7 +475,9 @@ async fn summarize_live(state: &AppState) -> Vec<SessionSummary> {
             usage: SessionUsageView::default(),
             forked_from: None,
             forked_at: None,
-            needs_attention: false,
+            needs_attention: slot.needs_attention().await,
+            attention_reason: attention_reason(&slot).await,
+            failure_reason: failure_reason(&slot).await,
             launched_by: crate::agent_threads::launcher_of(&id),
         });
     }
@@ -1000,6 +1058,8 @@ fn summarize_metadata(
         forked_from: r.forked_from.as_ref().map(|f| f.session_id.to_string()),
         forked_at: r.forked_from.as_ref().map(|f| f.at.clone()),
         needs_attention: live.is_some_and(|m| m.needs_attention),
+        attention_reason: live.and_then(|m| m.attention_reason.clone()),
+        failure_reason: live.and_then(|m| m.failure_reason.clone()),
         launched_by: crate::agent_threads::launcher_of(&id),
     }
 }
@@ -1484,6 +1544,30 @@ mod metadata_tests {
         assert_eq!(summary.agent_driver.as_deref(), Some("codex"));
         assert!(summary.active && summary.pinned);
         assert!(summary.worktree_status.is_none());
+        assert!(summary.attention_reason.is_none());
+        assert!(summary.failure_reason.is_none());
+        let live = std::collections::HashMap::from([(
+            "saved-chat".into(),
+            LiveMeta {
+                attached: false,
+                running: true,
+                background_mode: BackgroundMode::Deny,
+                agent_driver: Some("codex".into()),
+                needs_attention: true,
+                attention_reason: Some("Approve 3 actions".into()),
+                failure_reason: Some("Retry the failed turn".into()),
+            },
+        )]);
+        let summary = summarize_metadata(&record, "saved-chat", &live);
+        assert!(summary.needs_attention);
+        assert_eq!(
+            summary.attention_reason.as_deref(),
+            Some("Approve 3 actions")
+        );
+        assert_eq!(
+            summary.failure_reason.as_deref(),
+            Some("Retry the failed turn")
+        );
     }
     #[tokio::test]
     async fn shared_non_worktree_folder_enrichment_preserves_all_rows() {

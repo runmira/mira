@@ -1,3 +1,6 @@
+import { m, useReducedMotion } from 'framer-motion';
+import { PREF_KEYS, useBoolPref } from '../lib/prefs';
+import { matchesSidebar, rowStatus, settledPeriod, type SidebarFilter } from '../lib/sidebar';
 import { BranchElbow } from './BranchElbow';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { LazyBoundary } from './LazyBoundary';
@@ -130,7 +133,12 @@ const COLLAPSED_KEY = 'mira.sidebar.collapsed-projects';
 const RECENTS_OPEN_KEY = 'mira.sidebar.recents-open';
 const SETTLED_OPEN_KEY = 'mira.sidebar.settled-open';
 const PER_GROUP_LIMIT = 5;
-const RECENTS_LIMIT = 5;
+const RECENTS_LIMIT = 3;
+const SHOW_MORE_KEY = 'mira.sidebar.expanded-projects';
+const FORKS_KEY = 'mira.sidebar.hidden-forks';
+const SCROLL_KEY = 'mira.sidebar.scroll';
+const NEEDS_MORE_KEY = 'mira.sidebar.needs-more';
+const RECENTS_MORE_KEY = 'mira.sidebar.recents-more';
 /** The settled shelf is history: a page at a time. */
 const SETTLED_PAGE = 10;
 
@@ -149,15 +157,16 @@ export function Sidebar({
   const [error, setError] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(() => loadCollapsed());
   // Chats whose forks are folded away (the fork pill on the row).
-  const [forksHidden, setForksHidden] = useState<Set<string>>(() => new Set());
+  const [forksHidden, setForksHidden] = useState<Set<string>>(() => loadSet(FORKS_KEY));
   const toggleForks = (id: string) =>
     setForksHidden((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
+      saveSet(FORKS_KEY, next);
       return next;
     });
-  const [showMore, setShowMore] = useState<Set<string>>(() => new Set());
+  const [showMore, setShowMore] = useState<Set<string>>(() => loadSet(SHOW_MORE_KEY));
   const [renaming, setRenaming] = useState<SessionSummary | null>(null);
   // Pin/archive/bulk actions bump this so the list refetches without
   // waiting for the App to change `refreshKey`.
@@ -178,12 +187,43 @@ export function Sidebar({
   const [peek, setPeek] = useState<PeekTarget | null>(null);
   // Hover card chunk loads on the first hover, then stays mounted.
   const peekMounted = useLatch(peek !== null);
+  const livePeek = useMemo(() => peek ? {
+    ...peek, session: sessions.find((s) => s.id === peek.session.id) ?? peek.session,
+  } : null, [peek, sessions]);
   // Sidebar search: filters every folder at once, and opens them while it
   // has text so a match is never hidden behind a collapsed folder.
   const [query, setQuery] = useState('');
-  const searching = query.trim().length > 0;
+  const [filter, setFilter] = useState<SidebarFilter>('all');
+  const searching = query.trim().length > 0 || filter !== 'all';
+  const [needsMore, setNeedsMore] = useState(() => loadFlag(NEEDS_MORE_KEY, false));
+  const [recentsMore, setRecentsMore] = useState(() => loadFlag(RECENTS_MORE_KEY, false));
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const projectsToolbarRef = useRef<HTMLDivElement>(null);
+  const [hasScrolled, setHasScrolled] = useState(false);
+  const [projectsPinned, setProjectsPinned] = useState(false);
+  const savedScroll = useRef(loadScroll());
+  const scrollRestored = useRef(false);
+  useEffect(() => {
+    if (activeView === 'settings') { scrollRestored.current = false; return; }
+    const node = scrollRef.current;
+    if (!node || scrollRestored.current || sessions.length === 0) return;
+    // Wait for collapsible sections to reach their final height.
+    const id = window.setTimeout(() => {
+      node.scrollTop = savedScroll.current;
+      scrollRestored.current = true;
+    }, 280);
+    return () => window.clearTimeout(id);
+  }, [sessions.length, activeView]);
+
   // The two shelves around the project list, each remembered across
   // reloads: Recents starts open, Settled (history) starts closed.
+  useEffect(() => {
+    const node = scrollRef.current;
+    if (!node || !scrollRestored.current) return;
+    node.scrollTop = searching ? 0 : savedScroll.current;
+  }, [searching]);
+
   const [recentsOpen, setRecentsOpen] = useState(() => loadFlag(RECENTS_OPEN_KEY, true));
   const [settledOpen, setSettledOpen] = useState(() => loadFlag(SETTLED_OPEN_KEY, false));
   const [settledShown, setSettledShown] = useState(SETTLED_PAGE);
@@ -237,11 +277,14 @@ export function Sidebar({
   useEffect(() => {
     const next = new Set(unread);
     let changed = false;
+    let newCompletion = false;
     for(const [id,revision] of completedSessions){
       if(seenCompletions.current.get(id)===revision)continue;
       seenCompletions.current.set(id,revision);
+      newCompletion = true;
       if(id!==activeSessionId&&!next.has(id)){next.add(id);changed=true;}
     }
+    if (newCompletion) refresh();
     while(seenCompletions.current.size>500)seenCompletions.current.delete(seenCompletions.current.keys().next().value!);
     for (const s of sessions) {
       if (s.running) continue;
@@ -269,6 +312,16 @@ export function Sidebar({
       setError(String((e as Error).message));
     }
     refresh();
+  }
+
+  async function changeBackgroundMode(id: string, mode: BackgroundMode) {
+    try {
+      await onSetBackgroundMode?.(id, mode);
+      setSessions((prev) => prev.map((s) => s.id === id ? { ...s, background_mode: mode } : s));
+      setError(null);
+    } catch (e) {
+      setError(String((e as Error).message));
+    }
   }
 
   function toggleSelectMode() {
@@ -316,22 +369,29 @@ export function Sidebar({
     refresh();
   }
 
+  const [arrangedSessions, setArrangedSessions] = useState<SessionSummary[]>([]);
+  useEffect(() => {
+    if (!peek) setArrangedSessions(sessions);
+  }, [sessions, peek]);
+  const currentSession = (s: SessionSummary) => sessions.find((current) => current.id === s.id) ?? s;
+  const needsYou = arrangedSessions.filter((s) => s.needs_attention || s.failure_reason)
+    .sort((a, b) => b.updated_at - a.updated_at);
   // Settled chats leave their folders for the shelf at the bottom — except
   // while searching, which looks everywhere at once.
   const { live, settled } = useMemo(() => {
     const live: SessionSummary[] = [];
     const settled: SessionSummary[] = [];
-    for (const s of sessions) (isSettled(s) ? settled : live).push(s);
+    for (const s of arrangedSessions) (isSettled(s) ? settled : live).push(s);
     settled.sort(settledOrder);
     return { live, settled };
-  }, [sessions]);
+  }, [arrangedSessions]);
   const recents = useMemo(
-    () => [...live].sort((a, b) => b.updated_at - a.updated_at).slice(0, RECENTS_LIMIT),
-    [live],
+    () => [...live].sort((a, b) => b.updated_at - a.updated_at).filter((s) => !s.needs_attention && !s.failure_reason).slice(0, recentsMore ? 8 : RECENTS_LIMIT),
+    [live, recentsMore],
   );
   const groups = useMemo(
-    () => groupByCwd(searching ? sessions.filter((s) => matchesQuery(s, query)) : live, cwd),
-    [sessions, live, cwd, query, searching],
+    () => groupByCwd(searching ? arrangedSessions.filter((s) => matchesSidebar(s, query, filter)) : live, cwd),
+    [arrangedSessions, live, cwd, query, searching, filter],
   );
 
   async function pickSession(id: string) {
@@ -423,8 +483,8 @@ export function Sidebar({
     return (
       <SessionRow
         key={`${where}-${s.id}`}
-        session={s}
-        settled={where === 'settled'}
+        session={currentSession(s)}
+        settled={isSettled(currentSession(s))}
         active={s.id === activeSessionId && activeView === 'chat'}
         activeBusy={runningSessions == null && activeBusy}
         unread={unread.has(s.id)}
@@ -440,7 +500,7 @@ export function Sidebar({
         onSettle={(v) => void flagSession(s.id, { settled: v })}
         onSetBackgroundMode={
           onSetBackgroundMode
-            ? (mode) => onSetBackgroundMode(s.id, mode).catch((e) => setError(String(e.message ?? e)))
+            ? (mode) => void changeBackgroundMode(s.id, mode)
             : undefined
         }
       />
@@ -451,6 +511,7 @@ export function Sidebar({
     setShowMore((prev) => {
       const next = new Set(prev);
       if (next.has(key)) next.delete(key); else next.add(key);
+      saveSet(SHOW_MORE_KEY, next);
       return next;
     });
   }
@@ -549,7 +610,7 @@ export function Sidebar({
                   className={cn(
                     'flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[13.5px] transition-colors',
                     active
-                      ? 'bg-fg/[0.1] text-foreground'
+                      ? 'sidebar-active bg-fg/[0.1] text-foreground'
                       : 'text-foreground/80 hover:bg-fg/[0.05] hover:text-foreground',
                   )}
                 >
@@ -562,12 +623,23 @@ export function Sidebar({
         </div>
         </div>
       ) : (
-      <div className="min-h-0 flex-1">
-      <div className="h-full overflow-y-auto px-1.5 pb-2">
+      <div className="flex min-h-0 flex-1 flex-col">
+      <div className="relative z-30 shrink-0 bg-panel px-2 pb-1">
+        <NavItem icon={<PenLine className="size-3.5" />} onClick={onNewChat}>
+          New thread
+        </NavItem>
+        {hasScrolled && !projectsPinned && <span aria-hidden className="sidebar-scroll-fade" />}
+      </div>
+      <div ref={scrollRef} onScroll={(e) => {
+        const node = e.currentTarget;
+        setPeek(null);
+        setHasScrolled(node.scrollTop > 0);
+        setProjectsPinned(!!projectsToolbarRef.current && projectsToolbarRef.current.getBoundingClientRect().top <= node.getBoundingClientRect().top + 1);
+        if (!scrollRestored.current || searching) return;
+        savedScroll.current = node.scrollTop;
+        try { localStorage.setItem(SCROLL_KEY, String(node.scrollTop)); } catch { /* optional storage */ }
+      }} className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-2 [overflow-anchor:none]">
         <nav className="flex flex-col gap-0.5 px-0.5">
-          <NavItem icon={<PenLine className="size-3.5" />} onClick={onNewChat}>
-            New thread
-          </NavItem>
           <NavItem
             icon={<GitBranch className="size-3.5" />}
             active={activeView === 'pull-request'}
@@ -593,6 +665,24 @@ export function Sidebar({
           </NavItem>
         </nav>
 
+        {!searching && needsYou.length > 0 && (
+          <div className="mt-4 flex flex-col gap-0.5 px-0.5">
+            <div className="flex items-center gap-1.5 px-2 py-1 text-[11.5px] font-semibold text-amber-700 dark:text-amber-400">
+              <CircleAlert className="size-3" /> Needs you
+              <span className="ml-auto text-[10.5px] tabular-nums opacity-70">{needsYou.length}</span>
+            </div>
+            <div className="flex flex-col gap-0.5 pl-1">
+              {(needsMore ? needsYou : needsYou.slice(0, 2)).map((s) => flatRow(s, 'attention'))}
+              {needsYou.length > 2 && (
+                <button type="button" onClick={() => { saveFlag(NEEDS_MORE_KEY, !needsMore); setNeedsMore(!needsMore); }}
+                  className="px-2 py-1 text-left text-[11px] text-muted-foreground hover:text-foreground">
+                  {needsMore ? 'Show less' : `View ${needsYou.length - 2} more chats`}
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
         {!searching && recents.length > 0 && (
           <div className="mt-4 flex flex-col gap-0.5 px-0.5">
             <ShelfHeader
@@ -602,21 +692,32 @@ export function Sidebar({
               onToggle={() => toggleShelf(RECENTS_OPEN_KEY, setRecentsOpen)}
             />
             <Collapse open={recentsOpen}>
-              <div className="flex flex-col gap-0.5 pl-1">{recents.map((s) => flatRow(s, 'recent'))}</div>
+              <div className="flex flex-col gap-0.5 pl-1">
+                {recents.map((s) => flatRow(s, 'recent'))}
+                {live.filter((s) => !s.needs_attention && !s.failure_reason).length > RECENTS_LIMIT && (
+                  <button type="button" onClick={() => {
+                    saveFlag(RECENTS_MORE_KEY, !recentsMore); setRecentsMore(!recentsMore);
+                  }} className="px-2 py-1 text-left text-[11px] text-muted-foreground hover:text-foreground">
+                    {recentsMore ? 'Show less' : 'More recent chats'}
+                  </button>
+                )}
+              </div>
             </Collapse>
           </div>
         )}
 
         <div className="mt-4 flex flex-col gap-1 px-0.5">
-          <div className="flex items-center justify-between px-2.5 py-1">
-            <div className="text-[11.5px] font-semibold uppercase tracking-wider text-muted-foreground/80">
+          <div ref={projectsToolbarRef} className="sticky top-0 z-20 -mx-0.5 bg-panel px-0.5 pb-1">
+          <div className="mb-1 flex items-center justify-between px-2 py-1.5">
+            <div className="flex items-center gap-2 text-[14px] font-semibold tracking-tight text-foreground">
+              <Folder className="size-3.5 text-muted-foreground" aria-hidden />
               Projects
             </div>
             {!selecting && groups.length > 0 && (
               <button
                 type="button"
                 onClick={toggleSelectMode}
-                className="text-[11.5px] font-medium text-muted-foreground/80 transition-colors hover:text-foreground"
+                className="sidebar-select rounded-full border border-border/60 px-2.5 py-1 text-[11px] font-medium text-foreground/75 transition-colors hover:bg-fg/[0.05] hover:text-foreground"
               >
                 Select
               </button>
@@ -624,28 +725,47 @@ export function Sidebar({
           </div>
 
           {!selecting && (sessions.length > 0 || searching) && (
-            <label className="mx-1 mb-1 flex items-center gap-2 rounded-lg border border-border/60 bg-shade/10 px-2 py-1 text-[12.5px] focus-within:border-border">
-              <Search className="size-3.5 shrink-0 text-muted-foreground/70" aria-hidden />
+            <label className="sidebar-search mx-1 mb-1 flex items-center gap-1.5 rounded-xl border border-border/60 px-1.5 py-1.5 text-[12px] transition-shadow focus-within:ring-2 focus-within:ring-mira-blue/15">
+              <button type="button" aria-label="Focus chat search" onClick={() => searchRef.current?.focus()}
+                className="flex size-6 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-fg/[0.05] hover:text-foreground">
+                <Search className="size-3.5" aria-hidden />
+              </button>
               {/* Plain text, not type=search: that adds the browser's own
                   clear button beside ours. */}
               <input
+                ref={searchRef}
                 type="text"
                 enterKeyHint="search"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 onKeyDown={(e) => { if (e.key === 'Escape') setQuery(''); }}
-                placeholder="Search chats"
+                placeholder="Search chats, branches, PRs"
                 aria-label="Search chats"
                 className="min-w-0 flex-1 bg-transparent text-foreground outline-none placeholder:text-muted-foreground/60"
               />
-              {searching && (
-                <button type="button" onClick={() => setQuery('')} aria-label="Clear search" className="text-muted-foreground/70 hover:text-foreground">
+              {query && (
+                <button type="button" onClick={() => setQuery('')} aria-label="Clear search" className="flex size-6 shrink-0 items-center justify-center rounded-full text-muted-foreground/70 transition-colors hover:bg-fg/[0.06] hover:text-foreground">
                   <X className="size-3.5" />
                 </button>
               )}
             </label>
           )}
 
+          {!selecting && sessions.length > 0 && (
+            <div className="mx-1 mb-2 flex gap-1" aria-label="Filter chats">
+              {(['all', 'running', 'waiting', 'settled'] as SidebarFilter[]).map((value) => (
+                <button type="button" key={value} aria-pressed={filter === value}
+                  onClick={() => setFilter(value)}
+                  className={cn('rounded-full px-2 py-1 text-[10.5px] transition-colors',
+                    filter === value ? 'sidebar-active bg-fg/[0.08] font-medium text-foreground' : 'text-muted-foreground hover:bg-fg/[0.04] hover:text-foreground')}>
+                  {{ all: 'All', running: 'Working', waiting: 'Needs you', settled: 'Settled' }[value]}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {projectsPinned && <span aria-hidden className="sidebar-scroll-fade" />}
+          </div>
           {selecting && (
             <div className="sticky top-0 z-10 flex items-center gap-1 rounded-lg border border-border/70 bg-mira-elev1/95 px-2.5 py-1.5 shadow-sm backdrop-blur">
               <span className="text-[12px] font-medium text-foreground">
@@ -708,6 +828,7 @@ export function Sidebar({
                   <button
                     type="button"
                     onClick={() => toggleCollapsed(g.cwd)}
+                    aria-expanded={!isCollapsed}
                     className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
                   >
                     {isCollapsed ? (
@@ -761,7 +882,7 @@ export function Sidebar({
                         return (
                           <div key={s.id} className="flex flex-col gap-0.5">
                             <SessionRow
-                        session={s}
+                        session={currentSession(s)}
                         depth={depth}
                         forkedFromLabel={labelOf(s.forked_from)}
                         forkCount={node.forks.length}
@@ -786,11 +907,11 @@ export function Sidebar({
                         onDelete={() => removeSession(s.id)}
                         onPin={(p) => void flagSession(s.id, { pinned: p })}
                         onArchive={() => void flagSession(s.id, { archived: true })}
-                        settled={isSettled(s)}
+                        settled={isSettled(currentSession(s))}
                         onSettle={(v) => void flagSession(s.id, { settled: v })}
                         onSetBackgroundMode={
                           onSetBackgroundMode
-                            ? (mode) => onSetBackgroundMode(s.id, mode).catch((e) => setError(String(e.message ?? e)))
+                            ? (mode) => void changeBackgroundMode(s.id, mode)
                             : undefined
                         }
                       />
@@ -858,7 +979,14 @@ export function Sidebar({
               />
               <Collapse open={settledOpen}>
                 <div className="flex flex-col gap-0.5 pl-1">
-                  {settled.slice(0, settledShown).map((s) => flatRow(s, 'settled'))}
+                  {settled.slice(0, settledShown).map((s, i, rows) => (
+                    <div key={s.id}>
+                      {(i === 0 || settledPeriod(s) !== settledPeriod(rows[i - 1])) && (
+                        <div className="px-2 pb-1 pt-2 text-[10.5px] font-medium text-muted-foreground/60">{settledPeriod(s)}</div>
+                      )}
+                      {flatRow(s, 'settled')}
+                    </div>
+                  ))}
                   {settled.length > settledShown && (
                     <button
                       onClick={() => setSettledShown((n) => n + SETTLED_PAGE * 2)}
@@ -913,7 +1041,7 @@ export function Sidebar({
       {peekMounted && (
         <LazyBoundary>
           <SessionPeek
-            target={peek}
+            target={livePeek}
             pr={peek ? peek.session.pr ?? (peek.session.id === activeSessionId ? activePr ?? null : null) : null}
             onDismiss={() => setPeek(null)}
           />
@@ -1073,8 +1201,11 @@ function SessionRow({
   // case is what makes multi-session actually visible — you can leave a
   // tab, watch a different session, and this row keeps its spinner.
   const running = (active && activeBusy) || session.running === true;
+  const detail = rowStatus({ ...session, running }, unread);
+  const systemReducedMotion = useReducedMotion();
+  const [preferReducedMotion] = useBoolPref(PREF_KEYS.reduceMotion, false);
   return (
-    <div
+    <m.div layout="position" transition={{ layout: { duration: systemReducedMotion || preferReducedMotion ? 0 : 0.16 } }}
       // Hover tooltip prefers the cleaned-up label (no `## Attached
       // files` markdown blob) so an attachment-only turn still hovers
       // sensibly. Falls back to session id when everything is empty.
@@ -1095,6 +1226,8 @@ function SessionRow({
       // Leaving the row hands the sidebar a null target; the card's own
       // short linger means sliding straight onto the next row doesn't
       // make it blink.
+      onFocus={(e) => { if (e.target === e.currentTarget) onPeek?.(e.currentTarget.getBoundingClientRect()); }}
+      onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) onPeek?.(null); }}
       onMouseLeave={onPeek && !selecting ? () => onPeek(null) : undefined}
       onKeyDown={(e) => {
         if (e.target !== e.currentTarget) return;
@@ -1104,14 +1237,14 @@ function SessionRow({
         else onPick();
       }}
       className={cn(
-        'group grid w-full cursor-pointer items-center gap-1.5 rounded-lg px-2 py-2 transition-colors',
+        'group grid w-full cursor-pointer items-center gap-1.5 rounded-lg px-2 py-1.5 transition-colors',
         selecting ? 'grid-cols-[auto_1fr_auto] cursor-pointer' : 'grid-cols-[1fr_auto]',
         selecting && checked
-          ? 'bg-fg/[0.1] text-foreground'
+          ? 'sidebar-active bg-fg/[0.1] text-foreground'
           // Same active treatment as the nav items (New thread / PR /
           // Plugins / Scheduled): 10% white band, full foreground.
           : active
-            ? 'bg-fg/[0.1] text-foreground'
+            ? 'sidebar-active bg-fg/[0.1] text-foreground'
             : 'text-foreground/90 hover:bg-fg/[0.05] hover:text-foreground',
       )}
     >
@@ -1134,6 +1267,7 @@ function SessionRow({
         ) : (
           <EngineBadge session={session} />
         )}
+        <span className="min-w-0">
         <span className="flex min-w-0 items-center gap-1.5">
           <span
             className={cn(
@@ -1168,6 +1302,26 @@ function SessionRow({
             </button>
           )}
         </span>
+        {!selecting && (
+          <span className="mt-0.5 flex min-w-0 items-center gap-1 text-[10.5px] leading-[15px]">
+            <span title={session.failure_reason || detail.label} className={cn(detail.tone === 'attention' ? 'min-w-0 truncate' : 'shrink-0',
+              detail.tone === 'attention' ? 'text-amber-700 dark:text-amber-400'
+              : detail.tone === 'error' ? 'text-red-600 dark:text-red-400'
+              : detail.tone === 'working' || detail.tone === 'result' ? 'text-mira-blue' : 'text-muted-foreground/75')}>
+              {detail.label}
+            </span>
+            {detail.tone !== 'attention' && (
+              <>
+                <span className="shrink-0 text-muted-foreground/35">·</span>
+                <span className="truncate text-muted-foreground/60" title={session.worktree_branch || session.cwd}>
+                  {session.worktree_branch || basename(session.cwd)}
+                </span>
+              </>
+            )}
+          </span>
+        )}
+        </span>
+
         {/* Just the mark: the details are on hover and in the peek. */}
         <span className="flex justify-center">{!selecting && <GitMark session={session} />}</span>
         <span className="text-right text-[10.5px] leading-4 tabular-nums text-muted-foreground/50">
@@ -1190,7 +1344,8 @@ function SessionRow({
             <SessionStatus
               running={running}
               unread={unread}
-              waiting={!active && session.needs_attention === true}
+              waiting={session.needs_attention === true}
+              failed={!!session.failure_reason}
             />
           </span>
           <span
@@ -1214,7 +1369,7 @@ function SessionRow({
           </span>
         </div>
       )}
-    </div>
+    </m.div>
   );
 }
 
@@ -1299,9 +1454,9 @@ function agentName(kind: string): string {
 }
 
 /** The right-side status affordance. Priority: waiting on you > unread >
- *  running (spinner) > idle (empty circle outline). Where the work landed
+ *  running (spinner); idle rows have no badge. Where the work landed
  *  (branch, PR, merged) is the git mark beside the title, not this. */
-function SessionStatus({ running, unread, waiting = false }: { running: boolean; unread: boolean; waiting?: boolean }) {
+function SessionStatus({ running, unread, waiting = false, failed = false }: { running: boolean; unread: boolean; waiting?: boolean; failed?: boolean }) {
   // Waiting on you beats everything: it's the one state that stalls
   // without you.
   if (waiting) {
@@ -1314,6 +1469,9 @@ function SessionStatus({ running, unread, waiting = false }: { running: boolean;
         <CircleAlert className="size-3.5" />
       </span>
     );
+  }
+  if (failed && !running) {
+    return <CircleAlert className="size-3.5 text-red-600 dark:text-red-400" aria-label="needs a retry" />;
   }
   if (unread && !running) {
     return (
@@ -1340,14 +1498,7 @@ function SessionStatus({ running, unread, waiting = false }: { running: boolean;
       </span>
     );
   }
-  return (
-    <span
-      className="inline-flex size-4 items-center justify-center text-muted-foreground/40"
-      aria-label="idle"
-    >
-      <Circle className="size-3.5" />
-    </span>
-  );
+  return null;
 }
 
 /* ---------- archived row + bulk delete confirm ---------- */
@@ -1367,7 +1518,7 @@ function ArchivedRow({
     <div
       className={cn(
         'group grid w-full grid-cols-[1fr_auto] items-center gap-1.5 rounded-lg px-2 py-1.5 transition-colors',
-        active ? 'bg-fg/[0.1] text-foreground' : 'text-foreground/70 hover:bg-fg/[0.05] hover:text-foreground',
+        active ? 'sidebar-active bg-fg/[0.1] text-foreground' : 'text-foreground/70 hover:bg-fg/[0.05] hover:text-foreground',
       )}
     >
       <button
@@ -1592,14 +1743,6 @@ function groupByCwd(sessions: SessionSummary[], currentCwd: string): Group[] {
   return groups;
 }
 
-/** Search: title, first message, folder and branch, case-insensitive. */
-function matchesQuery(s: SessionSummary, query: string): boolean {
-  const q = query.trim().toLowerCase();
-  if (!q) return true;
-  return [sessionLabel(s), s.first_user_message, s.worktree_branch, basename(s.cwd), s.agent_driver]
-    .some((field) => (field ?? '').toLowerCase().includes(q));
-}
-
 /** Which period a row falls in, for the date sections. Pinned chats sit
  *  at the top of their folder, so they get their own section. */
 function dateSection(s: SessionSummary): string {
@@ -1625,6 +1768,19 @@ function basename(p: string): string {
 }
 
 /* ---------- collapsed-state persistence ---------- */
+
+function loadSet(key: string): Set<string> {
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem(key) || '[]');
+    return new Set(Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : []);
+  } catch { return new Set(); }
+}
+function saveSet(key: string, value: Set<string>) {
+  try { localStorage.setItem(key, JSON.stringify([...value])); } catch { /* optional storage */ }
+}
+function loadScroll(): number {
+  try { return Math.max(0, Number(localStorage.getItem(SCROLL_KEY)) || 0); } catch { return 0; }
+}
 
 function loadCollapsed(): Set<string> {
   try {
@@ -1748,7 +1904,7 @@ function NavItem({
         disabled
           ? 'text-muted-foreground/40 cursor-not-allowed'
           : active
-            ? 'bg-fg/[0.1] text-foreground'
+            ? 'sidebar-active bg-fg/[0.1] text-foreground'
             : 'text-foreground hover:bg-fg/[0.05]',
       )}
     >
@@ -1800,12 +1956,14 @@ type RowMenuItem = {
   /** Optional check-mark rendered on the right — used by radio-style
    *  sub-items so the current background mode reads at a glance. */
   checked?: boolean;
-  onSelect: () => void | Promise<void>;
+  description?: string;
+  children?: RowMenuItem[];
+  onSelect?: () => void | Promise<void>;
 };
 
 /** RowMenu items for a session row. Renders rename + pin/archive (when
  *  wired) + delete plus, when the caller wired a background-mode handler,
- *  three radio-style items for the current per-slot policy. The three
+ *  a submenu of three choices for the current per-slot policy. The three
  *  modes always render (rather than hiding when the slot isn't loaded) so
  *  the user can see the choice; clicking on a persisted-but-not-loaded
  *  row 404s — callers should typically attach first. */
@@ -1850,17 +2008,20 @@ function backgroundMenuItems(args: {
   if (args.onSetBackgroundMode) {
     const current = args.session.background_mode ?? null;
     const modes: Array<{ mode: BackgroundMode; label: string; desc: string }> = [
-      { mode: 'deny', label: 'Background: Auto-deny', desc: 'Safe default — approvals silently fail if you leave.' },
-      { mode: 'auto_approve', label: 'Background: Auto-approve', desc: 'Trust this session to keep going without you.' },
-      { mode: 'park', label: 'Background: Wait for me', desc: 'Park approvals until you re-attach.' },
+      { mode: 'deny', label: 'Auto-deny', desc: 'Deny tool approvals while you are away.' },
+      { mode: 'auto_approve', label: 'Auto-approve', desc: 'Allow tool approvals while you are away.' },
+      { mode: 'park', label: 'Wait for me', desc: 'Hold tool approvals until you return.' },
     ];
-    for (const m of modes) {
-      items.push({
+    items.push({
+      label: 'Background mode',
+      icon: <Timer className="size-3.5" />,
+      children: modes.map((m) => ({
         label: m.label,
+        description: m.desc,
         checked: current === m.mode,
         onSelect: () => args.onSetBackgroundMode!(m.mode),
-      });
-    }
+      })),
+    });
   }
   items.push({
     label: 'Delete session',
@@ -1872,6 +2033,43 @@ function backgroundMenuItems(args: {
   return items;
 }
 
+function RowSubmenu({ item, onPick }: { item: RowMenuItem; onPick: (item: RowMenuItem) => void }) {
+  const [open, setOpen] = useState(false);
+  const trigger = useRef<HTMLButtonElement>(null);
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button ref={trigger} type="button" onKeyDown={(e) => {
+          if (e.key === 'ArrowRight') { e.preventDefault(); setOpen(true); }
+        }} className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] text-foreground transition-colors hover:bg-fg/[0.05]">
+          <span className="shrink-0 text-muted-foreground">{item.icon}</span>
+          <span className="flex-1">{item.label}</span>
+          <ChevronRight className="size-3.5 text-muted-foreground" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent side="right" align="start" sideOffset={8} className="sidebar-menu w-60 p-1"
+        aria-label={item.label} onClick={(e) => e.stopPropagation()} onKeyDown={(e) => {
+          if (e.key === 'ArrowLeft') {
+            e.preventDefault(); e.stopPropagation(); setOpen(false); trigger.current?.focus();
+          }
+        }}>
+        <div className="px-2 pb-1 pt-1.5 text-[10.5px] font-medium text-muted-foreground">When you leave this chat</div>
+        {item.children?.map((child) => (
+          <button type="button" key={child.label} aria-pressed={child.checked}
+            onClick={() => { setOpen(false); onPick(child); }}
+            className="flex w-full items-start gap-2 rounded-lg px-2 py-2 text-left transition-colors hover:bg-fg/[0.05]">
+            <span className="min-w-0 flex-1">
+              <span className="block text-[12.5px] font-medium text-foreground">{child.label}</span>
+              <span className="mt-0.5 block text-[10.5px] leading-4 text-muted-foreground">{child.description}</span>
+            </span>
+            {child.checked && <CircleCheck className="mt-0.5 size-3.5 shrink-0 text-mira-blue" />}
+          </button>
+        ))}
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 function RowMenu({ items }: { items: RowMenuItem[] }) {
   const [open, setOpen] = useState(false);
   const [confirming, setConfirming] = useState<RowMenuItem | null>(null);
@@ -1881,7 +2079,7 @@ function RowMenu({ items }: { items: RowMenuItem[] }) {
       setConfirming(item);
     } else {
       setOpen(false);
-      void item.onSelect();
+      void item.onSelect?.();
     }
   }
 
@@ -1907,7 +2105,7 @@ function RowMenu({ items }: { items: RowMenuItem[] }) {
         </button>
       </PopoverTrigger>
       <PopoverContent
-        className="w-56 p-1"
+        className="sidebar-menu w-56 p-1"
         align="end"
         // Prevent the enclosing row's onClick from firing when the user
         // clicks anywhere inside the menu popover.
@@ -1930,7 +2128,7 @@ function RowMenu({ items }: { items: RowMenuItem[] }) {
                   const item = confirming;
                   setConfirming(null);
                   setOpen(false);
-                  await item.onSelect();
+                  await item.onSelect?.();
                 }}
                 className={cn(
                   'rounded-md px-2 py-1 text-[12px] font-medium',
@@ -1945,7 +2143,9 @@ function RowMenu({ items }: { items: RowMenuItem[] }) {
           </div>
         ) : (
           <div className="flex flex-col">
-            {items.map((it, i) => (
+            {items.map((it, i) => it.children ? (
+              <RowSubmenu key={it.label} item={it} onPick={pick} />
+            ) : (
               <button
                 key={i}
                 type="button"

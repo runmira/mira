@@ -16,7 +16,7 @@ const AFTER_MERGE_SLACK = 15 * 60;
  *  A chat that is running or waiting on you is never settled; neither is a
  *  pinned one, unless the user settled it by hand. */
 export function isSettled(s: SessionSummary): boolean {
-  if (s.running || s.needs_attention) return false;
+  if (s.running || s.needs_attention || s.failure_reason) return false;
   const activity = s.updated_at ?? 0;
   if (s.settled_at != null) return activity <= s.settled_at;
   if (s.pinned) return false;

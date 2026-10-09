@@ -1832,6 +1832,11 @@ pub(crate) async fn send_input(
     session.set_sidebar_flags(pinned, archived_at, settle).await;
     drop(session);
 
+    *slot
+        .engine
+        .sidebar_failure
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = None;
     before_prompt(slot, &text, None).await;
     if slot.acp_launch.lock().await.is_some() {
         prompt_agent(state, slot, text, images, input_id).await;
@@ -2327,6 +2332,11 @@ async fn spawn_turn(
             let frame = ServerMsg::from_harness(evt);
             crate::message_queue::observe_limits(&slot_for_task, &frame);
             if let ServerMsg::Error { text } = &frame {
+                *slot_for_task
+                    .engine
+                    .sidebar_failure
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = Some(text.chars().take(160).collect());
                 let lower = text.to_lowercase();
                 if lower.contains("rate limit")
                     || lower.contains("rate_limit")

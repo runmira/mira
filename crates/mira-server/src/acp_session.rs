@@ -560,6 +560,13 @@ fn ensure_transcript_logger(state: &AppState, slot: &Arc<SessionSlot>) {
                 slot.engine.logger_started.store(false, Ordering::SeqCst);
                 break;
             }
+            if let ServerMsg::Error { text } = &msg {
+                *slot
+                    .engine
+                    .sidebar_failure
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = Some(text.chars().take(160).collect());
+            }
             // A title the agent reports for its session becomes the row's
             // name — it knows what the conversation is about.
             if let ServerMsg::AcpSessionInfo {

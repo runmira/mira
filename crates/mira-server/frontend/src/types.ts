@@ -823,6 +823,8 @@ export type SessionSummary = {
   usage?: UsageTotals;
   /** Waiting on the user: an approval, a question, a plan or a secret. */
   needs_attention?: boolean;
+  attention_reason?: string | null;
+  failure_reason?: string | null;
   /** The chat that launched this one with `thread_launch`; the sidebar
    *  nests it there. */
   launched_by?: string | null;

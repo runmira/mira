@@ -104,6 +104,8 @@ pub struct Handoff {
 /// Per-slot engine runtime. Lives on [`SessionSlot`].
 #[derive(Default)]
 pub struct EngineRuntime {
+    /// Latest foreground failure, cleared when the user retries.
+    pub sidebar_failure: std::sync::Mutex<Option<String>>,
     pub generation: std::sync::atomic::AtomicU64,
     pub retired: AtomicBool,
     pub activity: std::sync::Mutex<mira_acp::runtime::RuntimeActivity>,

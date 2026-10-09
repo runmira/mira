@@ -5,6 +5,7 @@
  * archived list. The API is mocked in this page; nothing reaches a server.
  * Open /sidebar-preview.html on the Vite dev server.
  */
+import { LazyMotion, domMax } from 'framer-motion';
 import React, { useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import './styles.css';
@@ -37,7 +38,7 @@ const SESSIONS: SessionSummary[] = [
   chat({ id: 'running', title: 'Fix Codex plan mode handoff', agent_driver: 'codex', model: 'gpt-5-codex', updated_at: ago(1) }),
   chat({
     id: 'waiting', title: 'Add Stripe webhooks', agent_driver: 'claude-code', updated_at: ago(6),
-    needs_attention: true, worktree_branch: 'feature/stripe-webhooks', worktree_status: 'unmerged',
+    needs_attention: true, attention_reason: 'Approve 3 commands', worktree_branch: 'feature/stripe-webhooks', worktree_status: 'unmerged',
     pr: { number: 431, title: 'Stripe webhooks', url: 'https://github.com/example/mira/pull/431', state: 'open' },
   }),
   chat({
@@ -76,6 +77,8 @@ const SESSIONS: SessionSummary[] = [
   chat({ id: 'faunly-1', title: 'Onboarding flow bugs', cwd: FAUNLY, updated_at: ago(DAY * 9), agent_driver: 'opencode' }),
   chat({ id: 'faunly-2', title: '', first_user_message: 'Why does the map crash on Android?', cwd: FAUNLY, updated_at: ago(DAY * 12) }),
 ];
+
+SESSIONS.push(chat({ id: 'failed', title: 'Deploy webhook worker', failure_reason: 'Deployment was rejected: missing environment variable', updated_at: ago(4) }));
 
 const ARCHIVED: SessionSummary[] = [
   chat({ id: 'arch-1', title: 'Old auth experiment', archived: true, updated_at: ago(DAY * 20) }),
@@ -122,8 +125,11 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
 // Seed the sidebar's own remembered state: one unread chat, one collapsed
 // folder (to show its waiting count).
 try {
-  localStorage.setItem('mira.sidebar.unread', JSON.stringify(['unread']));
-  localStorage.setItem('mira.sidebar.collapsed-projects', JSON.stringify([LANDING]));
+  if (!localStorage.getItem('mira.sidebar.preview-seeded')) {
+    localStorage.setItem('mira.sidebar.unread', JSON.stringify(['unread']));
+    localStorage.setItem('mira.sidebar.collapsed-projects', JSON.stringify([LANDING]));
+    localStorage.setItem('mira.sidebar.preview-seeded', '1');
+  }
 } catch { /* private mode */ }
 
 function Preview() {
@@ -147,6 +153,10 @@ function Preview() {
           onOpenPicker={() => {}}
           onSessionLoaded={() => {}}
           onAttachSession={setActive}
+          onSetBackgroundMode={async (id, mode) => {
+            const session = SESSIONS.find((s) => s.id === id);
+            if (session) session.background_mode = mode;
+          }}
           activePr={{ number: 412, title: 'Sidebar: needs-you badges, search, threads' }}
         />
       </div>
@@ -158,7 +168,7 @@ function Preview() {
           <li><b>Fix Codex plan mode handoff</b>: running</li>
           <li><b>Audit MCP elicitation replies</b>: finished while you were away (unread dot)</li>
           <li><b>Sidebar redesign</b>: the open chat, with a fork under it</li>
-          <li><b>Recents</b>: the five latest chats across folders</li>
+          <li><b>Recents</b>: three chats by default, expandable</li>
           <li><b>Settled</b> (bottom, collapsed): PR merged, PR closed, branch merged, settled by hand</li>
           <li><b>Evals follow-up</b>: PR merged but you wrote to it since, so it stays in its folder</li>
           <li>PR marks: open and draft in grey, merged in colour; forks use the split mark</li>
@@ -166,7 +176,11 @@ function Preview() {
           <li><b>landing</b>: collapsed folder showing its waiting count</li>
           <li>Hover any row for the peek; type in Search; open Archived at the bottom</li>
         </ul>
-        <p className="mt-4">Theme: <button className="underline" onClick={() => document.documentElement.classList.toggle('dark')}>toggle dark class</button></p>
+        <p className="mt-4">Theme: <button className="underline" onClick={() => (() => {
+          const light = document.documentElement.dataset.theme !== 'light';
+          document.documentElement.dataset.theme = light ? 'light' : 'dark';
+          document.documentElement.classList.toggle('dark', !light);
+        })()}>Toggle light / dark</button></p>
       </section>
     </main>
   );
@@ -174,6 +188,8 @@ function Preview() {
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <Preview />
+    <LazyMotion features={domMax}>
+      <Preview />
+    </LazyMotion>
   </React.StrictMode>,
 );
