@@ -9,6 +9,52 @@ Two ways to put a number on how well Mira works:
   agents. Each task is a real GitHub issue in a real Python project;
   the fix counts only if the project's hidden tests pass.
 
+## Quick checks
+
+```bash
+mira --provider anthropic --model claude-haiku-4-5 eval     # every task
+mira eval --task python                                     # names containing "python"
+```
+
+With an agent's own CLI instead of Mira's harness, on its subscription
+(no API key):
+
+```bash
+mira eval --agent claude --agent-model haiku                # Claude Code, `claude -p`
+```
+
+Claude Code runs with only the task folder's settings, so your own hooks,
+plugins and MCP servers stay out of the results.
+
+Each task in `evals/tasks/` is a YAML file: a `prompt`, an optional
+`fixture` folder copied into a fresh temp directory first, and how it's
+graded:
+
+- `verify`: a shell command run in that directory afterwards; exit 0 is a
+  pass. `EVAL_FIXTURE` points at the untouched fixture, so a check can
+  also make sure the agent didn't change what it shouldn't
+  (`git diff --no-index --quiet "$EVAL_FIXTURE/legacy.py" legacy.py`).
+- `expect_grep`: a regex the final answer must match.
+
+The summary shows tokens, the share of input served from the provider's
+prompt cache, and cost (for priced models). Cache share is the number to
+watch when changing how Mira builds its prompts: a drop means something
+started invalidating the cache.
+
+| Task | Checks |
+| --- | --- |
+| `01-explain` | A plain answer, no tools |
+| `02-write-hello` | Creating a file |
+| `03-rust-fix` | Fixing a compile error |
+| `04-failing-test` | Fixing code to pass a test |
+| `05-rename-symbol` | Renaming a method and every call |
+| `06-multi-file` | A rename across several files |
+| `07-python-bug` | Fixing two bugs without touching the tests |
+| `08-implement-stubs` | Reading and implementing four functions (many read-then-edit rounds) |
+| `09-scoped-change` | Changing one function and leaving other code alone |
+| `10-config-edit` | Editing JSON precisely |
+| `11-find-code` | Finding an answer in code, read-only, in a fixed format |
+
 ## SWE-bench
 
 ### What you need
