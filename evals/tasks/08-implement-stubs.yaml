@@ -3,5 +3,5 @@ prompt: |
   The `textkit` package has four functions that raise NotImplementedError.
   Implement each one as its docstring describes, so `python3 -m unittest` passes.
 fixture: 08-implement-stubs-fixture
-verify: python3 -m unittest -q 2>&1
+verify: python3 -m unittest -q 2>&1 && git diff --no-index --quiet "$EVAL_FIXTURE/test_textkit.py" test_textkit.py
 timeout_secs: 300
