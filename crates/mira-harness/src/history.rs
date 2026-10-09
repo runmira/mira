@@ -125,10 +125,17 @@ const IMAGE_PRUNED_NOTE: &str = "[screenshot omitted from history — a newer on
 /// The prompt as the user typed it: drops the `<hook-context>` and
 /// `<memory-context>` blocks added for the model, so UIs (titles,
 /// sidebars, transcripts) and edit-matching see only the user's words.
+///
+/// Generated context blocks follow a specific pattern: they are preceded by
+/// `\n\n` and the opening tag is followed by `\n`. This distinguishes them
+/// from literal user-authored markers (e.g., a user typing "Check <hook-context>
+/// usage") which should remain visible in the transcript.
 pub fn strip_hook_context(text: &str) -> &str {
-    let cut = ["<hook-context>", "<memory-context>"]
+    // Generated blocks are always: \n\n<tag>\n...content...\n</tag>
+    // Look for the separator pattern to distinguish from user-authored markers.
+    let cut = ["\n\n<hook-context>\n", "\n\n<memory-context>\n"]
         .iter()
-        .filter_map(|tag| text.find(tag))
+        .filter_map(|marker| text.find(marker))
         .min();
     match cut {
         Some(i) => text[..i].trim_end(),
@@ -1068,8 +1075,31 @@ mod tests {
 
     #[test]
     fn strip_hook_context_keeps_only_the_prompt() {
+        // Generated blocks (preceded by \n\n, tag followed by \n) are stripped.
         let stored = "fix it\n\n<hook-context>\nbe educational\n</hook-context>";
         assert_eq!(strip_hook_context(stored), "fix it");
         assert_eq!(strip_hook_context("plain"), "plain");
+
+        // User-authored markers (not matching the generated pattern) are preserved.
+        // Marker without \n\n prefix:
+        assert_eq!(
+            strip_hook_context("Check <hook-context> usage in the docs"),
+            "Check <hook-context> usage in the docs"
+        );
+        // Marker with only single \n prefix:
+        assert_eq!(
+            strip_hook_context("Line 1\n<memory-context> is special"),
+            "Line 1\n<memory-context> is special"
+        );
+        // Marker without \n after opening tag:
+        assert_eq!(
+            strip_hook_context("See\n\n<hook-context>inline marker</hook-context>"),
+            "See\n\n<hook-context>inline marker</hook-context>"
+        );
+        // User text after a literal marker pattern should be preserved:
+        assert_eq!(
+            strip_hook_context("Before <memory-context>\nAfter the marker"),
+            "Before <memory-context>\nAfter the marker"
+        );
     }
 }
