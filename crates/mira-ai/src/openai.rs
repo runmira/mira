@@ -115,6 +115,7 @@ impl ChatProvider for OpenAiCompatible {
     ) -> Result<BoxStream<'static, Result<ChatEvent, ProviderError>>, ProviderError> {
         let google = is_google_endpoint(&self.cfg.base_url);
         let body = WireRequest::from_request(&request, self.cfg.prompt_caching, google);
+        let body = request_body(&body, self.cfg.prompt_caching)?;
         let url = format!(
             "{}/chat/completions",
             self.cfg.base_url.trim_end_matches('/')
@@ -370,10 +371,9 @@ impl<'a> WireRequest<'a> {
         // Strip `"off"` (Mira UI sentinel) so we send *no* field for it —
         // OpenAI rejects unknown values with a 400 rather than ignoring.
         let effort = req.reasoning_effort.as_deref().filter(|v| *v != "off");
-        // Only the *first* system message gets the cache-control breakpoint.
-        // The harness may inject a second system message (the live memory
-        // block); leaving it unmarked keeps it out of the cached prefix so
-        // mid-session edits don't invalidate what's cached upstream.
+        // Only the *first* system message (the system prompt) gets a
+        // cache-control breakpoint here; the conversation's own breakpoints
+        // are added in `request_body`.
         let mut first_system_seen = false;
         let mut messages = Vec::with_capacity(req.messages.len());
         // Chat Completions tool messages are text-only. Images a tool
@@ -438,6 +438,49 @@ impl<'a> WireRequest<'a> {
             stream_options: StreamOptions {
                 include_usage: true,
             },
+        }
+    }
+}
+
+/// The request as sent: with caching on, plus cache breakpoints on the
+/// conversation (see [`mark_message_breakpoints`]).
+fn request_body(body: &WireRequest<'_>, prompt_caching: bool) -> Result<Value, ProviderError> {
+    let mut json = serde_json::to_value(body)
+        .map_err(|e| ProviderError::Config(format!("serializing request: {e}")))?;
+    if prompt_caching {
+        mark_message_breakpoints(&mut json);
+    }
+    Ok(json)
+}
+
+/// Cache the conversation, not just the system prompt: a breakpoint on the
+/// last user or tool message, and one on the user message before it.
+///
+/// Providers that take Anthropic-style markers through this API (Anthropic's
+/// own compat endpoint, and gateways such as OpenRouter for Claude and
+/// Gemini models) cache everything up to a breakpoint. With only the system
+/// prompt marked, the whole conversation was re-sent at full price every
+/// request. A marker needs the content-parts shape, so plain text becomes a
+/// single text part.
+fn mark_message_breakpoints(json: &mut Value) {
+    let Some(messages) = json["messages"].as_array_mut() else {
+        return;
+    };
+    let markable = |m: &Value| matches!(m["role"].as_str(), Some("user" | "tool"));
+    let Some(last) = (0..messages.len()).rev().find(|&i| markable(&messages[i])) else {
+        return;
+    };
+    let previous_user = (0..last).rev().find(|&i| messages[i]["role"] == "user");
+    for i in std::iter::once(last).chain(previous_user) {
+        let content = &mut messages[i]["content"];
+        if let Some(text) = content.as_str().filter(|t| !t.is_empty()) {
+            *content = serde_json::json!([{ "type": "text", "text": text }]);
+        }
+        if let Some(part) = content
+            .as_array_mut()
+            .and_then(|parts| parts.iter_mut().rev().find(|p| p["type"] == "text"))
+        {
+            part["cache_control"] = serde_json::json!({ "type": "ephemeral" });
         }
     }
 }
@@ -528,8 +571,7 @@ impl<'a> WireMessage<'a> {
         // Mark the (first) system prompt with cache_control when caching is on.
         // Anthropic caches the prefix up to (and including) this breakpoint —
         // which covers tools + system, the biggest static chunk of every turn.
-        // A second system message (the harness's live memory block) is left
-        // unmarked so its per-round churn doesn't invalidate the cache.
+        // Later system messages (notes mid-conversation) stay unmarked.
         // A user turn with pasted images goes out as text + image parts.
         if m.role == mira_core::Role::User && !m.images.is_empty() {
             let mut parts = Vec::new();
@@ -863,6 +905,59 @@ mod tests {
         assert!(json.contains(r#""content":"SYS""#));
         assert!(!json.contains("cache_control"));
         assert!(!json.contains(r#""type":"text""#));
+    }
+
+    #[test]
+    fn caching_marks_the_last_tool_result_and_the_user_message_before_it() {
+        use mira_core::message::ToolCallFunction;
+        let req = ChatRequest {
+            messages: vec![
+                Message::system("SYS"),
+                Message::user("one"),
+                Message::assistant("a"),
+                Message::user("two"),
+                Message::assistant_calls(vec![ToolCall {
+                    id: ToolCallId::from("c1".to_owned()),
+                    kind: ToolCallKind::Function,
+                    function: ToolCallFunction {
+                        name: "ls".into(),
+                        arguments: "{}".into(),
+                    },
+                }]),
+                Message::tool(ToolCallId::from("c1".to_owned()), "out"),
+            ],
+            ..base_req()
+        };
+        let body = WireRequest::from_request(&req, true, false);
+        let json = request_body(&body, true).unwrap();
+        let msgs = json["messages"].as_array().unwrap();
+        let marked: Vec<usize> = (0..msgs.len())
+            .filter(|&i| {
+                msgs[i]["content"]
+                    .as_array()
+                    .is_some_and(|p| p.iter().any(|b| b.get("cache_control").is_some()))
+            })
+            .collect();
+        // The system prompt (0), the user message before the last one (3)
+        // and the last tool result (5).
+        assert_eq!(marked, vec![0, 3, 5]);
+        assert_eq!(msgs[5]["content"][0]["text"], "out");
+        assert_eq!(msgs[1]["content"], "one");
+    }
+
+    #[test]
+    fn caching_off_leaves_messages_as_text() {
+        let req = ChatRequest {
+            messages: vec![
+                Message::user("one"),
+                Message::assistant("a"),
+                Message::user("two"),
+            ],
+            ..base_req()
+        };
+        let body = WireRequest::from_request(&req, false, false);
+        let text = request_body(&body, false).unwrap().to_string();
+        assert!(!text.contains("cache_control"));
     }
 
     #[test]

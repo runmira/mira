@@ -406,6 +406,7 @@ mod tests {
             ],
             // 30/3 of this came before per-turn tracking.
             usage: totals(180, 18),
+            file_calls_done: Vec::new(),
             parent_id: None,
             tasks: vec![],
             goal: None,
@@ -513,6 +514,7 @@ mod tests {
             title: Some("t".into()),
             turns: vec![],
             usage: Default::default(),
+            file_calls_done: Vec::new(),
             parent_id: None,
             tasks: vec![],
             goal: None,

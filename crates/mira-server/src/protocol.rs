@@ -618,6 +618,12 @@ pub enum ServerMsg {
         /// Where auto-compaction kicks in, in tokens.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         compact_at: Option<u64>,
+        /// Why this request was billed without the prompt cache when it
+        /// should have been reused (a changed message, model or tools; an
+        /// expired cache). Always sent, `null` included, so a later request
+        /// that did reuse the cache clears an earlier warning.
+        #[serde(default)]
+        cache_miss: Option<String>,
     },
 
     /// The provider's rate limits after the latest request, from its
@@ -1147,11 +1153,13 @@ impl ServerMsg {
                 totals,
                 context_window,
                 compact_at,
+                cache_miss,
             } => Self::Usage {
                 round,
                 totals,
                 context_window: Some(context_window),
                 compact_at: Some(compact_at),
+                cache_miss,
             },
             HarnessEvent::RateLimit(rate_limit) => Self::RateLimit {
                 summary: rate_limit.summary(),

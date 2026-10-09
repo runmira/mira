@@ -146,7 +146,7 @@ impl ChatProvider for Anthropic {
                  Use a tool-based extractor for strict structured output."
             );
         }
-        let body = WireRequest::build(&request, self.cfg.prompt_caching)?;
+        let body = request_body(&request, self.cfg.prompt_caching)?;
         let url = format!("{}/messages", self.cfg.base_url.trim_end_matches('/'));
 
         debug!(model = %request.model, tools = request.tools.len(), "anthropic messages request");
@@ -679,16 +679,71 @@ impl<'a> WireRequest<'a> {
     }
 }
 
-/// Hoist every `Role::System` message out of the message list and into
-/// the top-level `system` field. When prompt caching is on, the *first*
+/// Most `cache_control` breakpoints Anthropic accepts in one request.
+const MAX_CACHE_BREAKPOINTS: usize = 4;
+
+/// The request as sent: [`WireRequest`] plus, with caching on, cache
+/// breakpoints on the conversation itself (see [`mark_message_breakpoints`]).
+fn request_body(req: &ChatRequest, prompt_caching: bool) -> Result<Value, ProviderError> {
+    let body = WireRequest::build(req, prompt_caching)?;
+    let mut json = serde_json::to_value(&body)
+        .map_err(|e| ProviderError::Config(format!("serializing request: {e}")))?;
+    if prompt_caching {
+        mark_message_breakpoints(&mut json);
+    }
+    Ok(json)
+}
+
+/// Cache the conversation, not just the static prefix: a breakpoint on
+/// the last message, and one on the user message before it.
+///
+/// Anthropic caches everything up to a breakpoint, and on the next
+/// request finds the longest cached prefix by looking back from each
+/// breakpoint. Without these, every request re-sent the whole
+/// conversation at full price; with them, a turn pays full price only for
+/// what's new since the last request. The second breakpoint keeps that
+/// working when one round adds more blocks than the lookback covers.
+/// Uses whatever the system and tools breakpoints leave of the four
+/// allowed.
+fn mark_message_breakpoints(json: &mut Value) {
+    let used = usize::from(json["system"].is_array())
+        + usize::from(json["tools"].as_array().is_some_and(|t| !t.is_empty()));
+    let budget = MAX_CACHE_BREAKPOINTS.saturating_sub(used).min(2);
+    let Some(messages) = json["messages"].as_array_mut() else {
+        return;
+    };
+    let Some(last) = messages.len().checked_sub(1) else {
+        return;
+    };
+    let previous_user = (0..last).rev().find(|&i| messages[i]["role"] == "user");
+    let targets = std::iter::once(last).chain(previous_user).take(budget);
+    for i in targets {
+        // The last block that can carry a breakpoint: thinking blocks can't.
+        if let Some(block) = messages[i]["content"].as_array_mut().and_then(|blocks| {
+            blocks
+                .iter_mut()
+                .rev()
+                .find(|b| !matches!(b["type"].as_str(), Some("thinking" | "redacted_thinking")))
+        }) {
+            block["cache_control"] = serde_json::json!({ "type": "ephemeral" });
+        }
+    }
+}
+
+/// Hoist the leading `Role::System` messages (the system prompt) into the
+/// top-level `system` field. When prompt caching is on, the *first*
 /// non-empty system block gets a `cache_control: ephemeral` breakpoint
-/// so Anthropic caches the fat static prefix (system + tools). Later
-/// system messages — like the harness's live-memory block — stay
-/// unmarked so their per-round churn doesn't invalidate that cache.
+/// so Anthropic caches the fat static prefix (system + tools).
+///
+/// Only the leading ones: a system message further down (a note such as
+/// "the environment changed") goes into the conversation where it was
+/// written ([`build_messages`]). Hoisted, it would sit in front of every
+/// message, and adding one would invalidate the cache for the whole
+/// conversation.
 fn build_system<'a>(messages: &'a [Message], prompt_caching: bool) -> Option<WireSystem<'a>> {
     let systems: Vec<&'a str> = messages
         .iter()
-        .filter(|m| matches!(m.role, Role::System))
+        .take_while(|m| matches!(m.role, Role::System))
         .filter_map(|m| m.content.as_deref())
         .filter(|s| !s.is_empty())
         .collect();
@@ -737,10 +792,25 @@ fn build_messages(
     // followed by user(tool_result) — a bare tool message can't stand
     // alone.
     let mut pending_tool_results: Vec<WireContentBlock<'_>> = Vec::new();
+    // The system prompt itself went to `system` (see `build_system`).
+    let leading_system = messages
+        .iter()
+        .take_while(|m| matches!(m.role, Role::System))
+        .count();
 
-    for msg in messages {
+    for msg in &messages[leading_system..] {
         match msg.role {
-            Role::System => {}
+            Role::System => {
+                // A note written mid-conversation: tell the model where it
+                // happened, as user content (after any tool results it
+                // follows, which must lead that user message).
+                let Some(text) = msg.content.as_deref().filter(|t| !t.is_empty()) else {
+                    continue;
+                };
+                let mut content = std::mem::take(&mut pending_tool_results);
+                content.push(WireContentBlock::Text { text });
+                push_user(&mut out, content);
+            }
             Role::Tool => {
                 let call_id = msg.tool_call_id.as_ref().ok_or_else(|| {
                     ProviderError::Config("tool message missing tool_call_id".into())
@@ -765,10 +835,7 @@ fn build_messages(
                     // Anthropic rejects empty content arrays; skip.
                     continue;
                 }
-                out.push(WireMessage {
-                    role: "user",
-                    content,
-                });
+                push_user(&mut out, content);
             }
             Role::Assistant => {
                 // Any tool_results buffered up to this point belong to
@@ -833,6 +900,18 @@ fn build_messages(
         });
     }
     Ok(out)
+}
+
+/// Append user content, joining it to the previous message when that one
+/// is also the user's (a note right before a prompt), so turns alternate.
+fn push_user<'a>(out: &mut Vec<WireMessage<'a>>, content: Vec<WireContentBlock<'a>>) {
+    match out.last_mut() {
+        Some(last) if last.role == "user" => last.content.extend(content),
+        _ => out.push(WireMessage {
+            role: "user",
+            content,
+        }),
+    }
 }
 
 fn build_tools<'a>(tools: &'a [ToolSpec], prompt_caching: bool) -> Vec<WireTool<'a>> {
@@ -1074,6 +1153,81 @@ mod tests {
         assert_eq!(sys[0]["text"], "PREFIX");
         assert_eq!(sys[0]["cache_control"]["type"], "ephemeral");
         assert!(sys[1].get("cache_control").is_none() || sys[1]["cache_control"].is_null());
+    }
+
+    #[test]
+    fn a_mid_conversation_system_note_stays_in_place() {
+        let req = req_with(vec![
+            Message::system("SYS"),
+            Message::user("first"),
+            Message::assistant("ok"),
+            Message::system("The environment changed."),
+            Message::user("second"),
+        ]);
+        let json = request_body(&req, true).unwrap();
+        // Only the leading system message is the system prompt...
+        let sys = json["system"].as_array().unwrap();
+        assert_eq!(sys.len(), 1);
+        assert_eq!(sys[0]["text"], "SYS");
+        // ...and the note joins the next user message, where it happened.
+        let msgs = json["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[2]["role"], "user");
+        assert_eq!(msgs[2]["content"][0]["text"], "The environment changed.");
+        assert_eq!(msgs[2]["content"][1]["text"], "second");
+    }
+
+    #[test]
+    fn caching_marks_the_last_message_and_the_user_message_before_it() {
+        let req = req_with(vec![
+            Message::system("SYS"),
+            Message::user("one"),
+            Message::assistant("a"),
+            Message::user("two"),
+            Message::assistant("b"),
+            Message::user("three"),
+        ]);
+        let json = request_body(&req, true).unwrap();
+        let msgs = json["messages"].as_array().unwrap();
+        let marked: Vec<usize> = (0..msgs.len())
+            .filter(|&i| {
+                msgs[i]["content"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|b| b.get("cache_control").is_some())
+            })
+            .collect();
+        assert_eq!(marked, vec![2, 4]);
+        assert_eq!(msgs[4]["content"][0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn message_breakpoints_fit_in_four_with_system_and_tools() {
+        let mut req = req_with(vec![
+            Message::system("SYS"),
+            Message::user("one"),
+            Message::assistant("a"),
+            Message::user("two"),
+        ]);
+        req.tools = vec![ToolSpec {
+            name: "t".into(),
+            description: "d".into(),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
+        let text = request_body(&req, true).unwrap().to_string();
+        assert_eq!(text.matches("cache_control").count(), 4);
+    }
+
+    #[test]
+    fn caching_off_marks_no_messages() {
+        let req = req_with(vec![
+            Message::user("one"),
+            Message::assistant("a"),
+            Message::user("two"),
+        ]);
+        let text = request_body(&req, false).unwrap().to_string();
+        assert!(!text.contains("cache_control"));
     }
 
     #[test]

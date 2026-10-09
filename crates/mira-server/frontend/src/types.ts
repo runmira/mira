@@ -492,7 +492,7 @@ export type ServerMsg =
   | { type: 'background_mode_changed'; session_id: string; mode: BackgroundMode }
   | { type: 'session_background_idle'; session_id: string }
   | { type: 'session_background_running'; session_id: string }
-  | { type: 'usage'; round: TokenUsage; totals: UsageTotals; context_window?: number | null; compact_at?: number | null }
+  | { type: 'usage'; round: TokenUsage; totals: UsageTotals; context_window?: number | null; compact_at?: number | null; cache_miss?: string | null }
   | { type: 'rate_limit'; rate_limit: RateLimit; summary: string | null }
   | { type: 'memory_learned'; count: number }
   | { type: 'compacted'; messages_removed: number; tokens_before?: number | null; tokens_after?: number | null }

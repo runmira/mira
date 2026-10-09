@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use mira_ai::TokenUsage;
-use mira_core::{Message, SessionId};
+use mira_core::{Message, SessionId, ToolCallId};
 use mira_tools::DiffPreview;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -59,6 +59,11 @@ pub struct SessionRecord {
     /// doesn't report usage).
     #[serde(default, skip_serializing_if = "UsageTotals::is_zero")]
     pub usage: UsageTotals,
+    /// Read, write and edit calls that completed successfully, so after a
+    /// resume they still supersede earlier reads of the same file (see
+    /// `history::stub_superseded_reads`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_calls_done: Vec<ToolCallId>,
     /// Set when this session was spawned as a subagent by another session.
     /// Points at the parent's id so the sidebar can hide it from the
     /// primary chat list (subagents aren't user-facing conversations)
@@ -234,6 +239,7 @@ impl SessionRecord {
             )),
             turns,
             usage: UsageTotals::default(),
+            file_calls_done: self.file_calls_done.clone(),
             parent_id: None,
             tasks: self.tasks.clone(),
             goal: None,
@@ -524,6 +530,7 @@ mod fork_tests {
                 prompt_tokens: 9,
                 ..Default::default()
             },
+            file_calls_done: Vec::new(),
             parent_id: None,
             tasks: Vec::new(),
             goal: None,

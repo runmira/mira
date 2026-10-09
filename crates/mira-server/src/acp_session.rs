@@ -31,6 +31,9 @@ use mira_policy::Decision;
 /// How large a single ACP file read may be.
 const MAX_ACP_READ_BYTES: usize = 1024 * 1024;
 
+/// Claude Code's switch for loading MCP tool definitions on demand.
+const CLAUDE_TOOL_SEARCH_ENV: &str = "ENABLE_TOOL_SEARCH";
+
 /// The agent a slot is currently driving, if any.
 pub struct SlotAgent {
     pub opencode_control: Option<crate::opencode_control::OpenCodeControl>,
@@ -202,6 +205,13 @@ pub async fn start_agent(
             crate::browser::claude_allowed_tools()
         ));
     }
+    // Claude Code's tool search: MCP tool definitions (Mira's browser,
+    // process and thread tools, and the user's own servers) load when a
+    // task needs them instead of riding on every request. Left alone if
+    // the user set it either way.
+    let claude_tool_search = matches!(transport, Transport::Native)
+        && driver.kind() == "claude-code"
+        && std::env::var_os(CLAUDE_TOOL_SEARCH_ENV).is_none();
     let mut launch: LaunchConfig = match transport {
         Transport::Native => {
             let mut l =
@@ -212,6 +222,9 @@ pub async fn start_agent(
             l.env = acp.env;
             l.secret_env = acp.secret_env;
             l.args.extend(driver_cfg.launch_args.clone());
+            if claude_tool_search && !l.env.contains_key(CLAUDE_TOOL_SEARCH_ENV) {
+                l.env.insert(CLAUDE_TOOL_SEARCH_ENV.into(), "true".into());
+            }
             l
         }
         _ => driver.resolve(&driver_cfg, mode, program.clone()),

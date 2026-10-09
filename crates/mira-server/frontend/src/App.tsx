@@ -685,6 +685,8 @@ export default function App() {
   const [reviewPanelOpen, setReviewPanelOpen] = useState(false);
   const [reviewState, setReviewState] = useState<ReviewState | null>(null);
   const [usage, setUsage] = useState<UsageTotals | null>(null);
+  // Why the provider's prompt cache last went unused, for the usage popover.
+  const [cacheMiss, setCacheMiss] = useState<string | null>(null);
   const [rateLimit, setRateLimit] = useState<RateLimitReading | null>(null);
   const [gitStatus, setGitStatus] = useState<GitStatusView | null>(null);
   const [sessionDiff, setSessionDiff] = useState<SessionDiffView>({ added: 0, removed: 0, files: [] });
@@ -1206,6 +1208,7 @@ export default function App() {
         setTurnModels(rebuildTurnModels(msg.turns ?? []));
         setExpandedTurns(new Set());
         setUsage(msg.usage ?? null);
+        setCacheMiss(null);
         setRateLimit(null);
         setTasks(msg.tasks ?? []);
         setGoal(msg.goal ?? null);
@@ -1492,6 +1495,7 @@ export default function App() {
       case 'usage':
         setUsage(msg.totals);
         usageRef.current = msg.totals;
+        setCacheMiss(msg.cache_miss ?? null);
         if (msg.context_window) {
           setProviderContext({
             used: msg.round.prompt_tokens + msg.round.completion_tokens,
@@ -2219,13 +2223,14 @@ export default function App() {
         ? { prompt: usage.prompt_tokens, completion: usage.completion_tokens, cached: usage.cached_input_tokens }
         : null,
       costUsd: usage ? costUsd(model, usage) : null,
+      cacheMiss,
       limitsTitle: limits.length ? 'Provider rate limits' : null,
       limits,
       onCompact: () => onCompact(''),
       onInspect: () => setInspectOpen(true),
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [acpDriver, acpUsage, acpLimits, engine, rateLimit, providerContext, usage, model]);
+  }, [acpDriver, acpUsage, acpLimits, engine, rateLimit, providerContext, usage, model, cacheMiss]);
 
   // Plan proposal waiting for the user to approve/cancel. Rendered in
   // the Composer rather than inline so the interactive card doesn't

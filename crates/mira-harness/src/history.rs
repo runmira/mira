@@ -101,6 +101,19 @@ const SUPERSEDING_TOOLS: &[&str] = &["read_file", "write_file", "edit_file"];
 /// session of screenshots on every request.
 pub const KEEP_RECENT_IMAGES: usize = 3;
 
+/// Screenshots are dropped in batches of this many, not one per new
+/// screenshot: dropping one rewrites an older message, which costs the
+/// provider's cached prefix from that message on.
+pub const IMAGE_PRUNE_BATCH: usize = 3;
+
+/// Superseded `read_file` results are stubbed only once they add up to
+/// this much (about 20k tokens), all at once. Stubbing rewrites older
+/// messages, and each rewrite means the provider re-reads everything after
+/// it at full price; stubbing after every edit (reading a file, then
+/// editing it, is the commonest thing an agent does) cost far more than
+/// the context it saved.
+pub const STUB_SUPERSEDED_MIN_CHARS: usize = 80_000;
+
 /// Note appended to a tool result whose images were pruned.
 const IMAGE_PRUNED_NOTE: &str = "[screenshot omitted from history — a newer one supersedes it]";
 
@@ -109,13 +122,67 @@ const IMAGE_PRUNED_NOTE: &str = "[screenshot omitted from history — a newer on
 /// survive); its text gains a short note so the transcript still reads
 /// coherently. Idempotent: already-pruned messages have no images left
 /// and are skipped.
-/// The prompt as the user typed it: drops the `<hook-context>` block
-/// that prompt hooks append for the model, so UIs (titles, sidebars,
-/// transcripts) and edit-matching see only the user's words.
+/// Blocks Mira appends to a prompt for the model, as
+/// `\n\n<tag>\n…\n</tag>` at its very end: prompt hooks' context, then the
+/// turn's memory.
+const ADDED_BLOCKS: [&str; 2] = ["hook-context", "memory-context"];
+
+/// A stored prompt split into what the user typed and the blocks appended
+/// to it for the model (tag, body), innermost last. Only blocks at the very
+/// end, in exactly the appended form, count: the same tag written anywhere
+/// in the user's own text is theirs.
+fn split_added_blocks(text: &str) -> (&str, Vec<(&'static str, &str)>) {
+    let mut user = text;
+    let mut blocks = Vec::new();
+    'peel: loop {
+        let trimmed = user.trim_end();
+        for tag in ADDED_BLOCKS {
+            let (open, close) = (format!("\n\n<{tag}>\n"), format!("\n</{tag}>"));
+            let Some(inner) = trimmed.strip_suffix(close.as_str()) else {
+                continue;
+            };
+            if let Some(i) = inner.rfind(open.as_str()) {
+                blocks.push((tag, &inner[i + open.len()..]));
+                user = &trimmed[..i];
+                continue 'peel;
+            }
+        }
+        break;
+    }
+    if blocks.is_empty() {
+        (text, blocks)
+    } else {
+        (user.trim_end(), blocks)
+    }
+}
+
+/// The prompt as the user typed it: drops the `<hook-context>` and
+/// `<memory-context>` blocks appended for the model, so UIs (titles,
+/// sidebars, transcripts), edit-matching and memory itself see only the
+/// user's words.
 pub fn strip_hook_context(text: &str) -> &str {
-    match text.find("<hook-context>") {
-        Some(i) => text[..i].trim_end(),
-        None => text,
+    split_added_blocks(text).0
+}
+
+/// What a turn's memory says when memory was cleared since the last one.
+pub const NO_MEMORY: &str =
+    "No saved memory applies now; disregard memory given earlier in this conversation.";
+
+/// The `<memory-context>` block appended to a prompt, if any.
+pub fn memory_context(text: &str) -> Option<&str> {
+    split_added_blocks(text)
+        .1
+        .into_iter()
+        .find_map(|(tag, body)| (tag == "memory-context").then_some(body))
+}
+
+/// [`prune_old_images`], but only once [`IMAGE_PRUNE_BATCH`] more than
+/// `keep` image-bearing messages have built up, so older messages are
+/// rewritten every few screenshots instead of on each one.
+pub fn prune_old_images_in_batches(history: &mut [Message], keep: usize) {
+    let with_images = history.iter().filter(|m| !m.images.is_empty()).count();
+    if with_images > keep + IMAGE_PRUNE_BATCH {
+        prune_old_images(history, keep);
     }
 }
 
@@ -138,64 +205,74 @@ pub fn prune_old_images(history: &mut [Message], keep: usize) {
     }
 }
 
-/// Walk back through `history` and stub any prior `read_file` results
-/// whose call targeted the same `path`. No-op when `tool_name` isn't
-/// in `SUPERSEDING_TOOLS` or `path` is empty.
-///
-/// - `history` is mutated in place.
-/// - `just_appended_call_id` identifies the call we just handled; we
-///   never touch its result.
-pub fn dedup_reads_for_path(
+/// Stub every `read_file` result whose file was read again, written or
+/// edited later, but only when together they come to at least `min_chars`
+/// (see [`STUB_SUPERSEDED_MIN_CHARS`]). Only calls in `done` (completed
+/// successfully) supersede: a failed edit, or one later in the same reply
+/// that hasn't run yet, leaves the read the model is working from alone.
+/// Returns how many were stubbed.
+pub fn stub_superseded_reads(
     history: &mut [Message],
-    just_appended_call_id: &ToolCallId,
-    tool_name: &str,
-    path: &str,
-) {
-    if !SUPERSEDING_TOOLS.contains(&tool_name) || path.is_empty() {
-        return;
+    min_chars: usize,
+    done: &std::collections::HashSet<ToolCallId>,
+) -> usize {
+    // Each call, in order: (call id, tool, path).
+    let calls: Vec<(ToolCallId, String, String)> = history
+        .iter()
+        .filter(|m| m.role == Role::Assistant)
+        .flat_map(|m| m.tool_calls.iter())
+        .filter(|tc| SUPERSEDING_TOOLS.contains(&tc.function.name.as_str()))
+        .filter_map(|tc| {
+            path_from_args(&tc.function.arguments)
+                .map(|p| (tc.id.clone(), tc.function.name.clone(), p))
+        })
+        .collect();
+    let superseded: Vec<ToolCallId> = calls
+        .iter()
+        .enumerate()
+        .filter(|(i, (_, tool, path))| {
+            tool == STUBBABLE_TOOL
+                && calls[i + 1..]
+                    .iter()
+                    .any(|(id, _, later)| later == path && done.contains(id))
+        })
+        .map(|(_, (id, _, _))| id.clone())
+        .collect();
+    if superseded.is_empty() {
+        return 0;
     }
-    // First pass: collect call_ids of prior `read_file` calls for the
-    // same path. We look on the assistant messages (which carry the
-    // ToolCall structs with name + arguments); the tool result
-    // messages we'll mutate don't carry that info.
-    let mut prior_read_call_ids: Vec<ToolCallId> = Vec::new();
-    for msg in history.iter() {
-        if msg.role != Role::Assistant {
-            continue;
-        }
-        for tc in &msg.tool_calls {
-            if tc.id == *just_appended_call_id {
-                continue;
-            }
-            if tc.function.name != STUBBABLE_TOOL {
-                continue;
-            }
-            if let Some(p) = path_from_args(&tc.function.arguments) {
-                if p == path {
-                    prior_read_call_ids.push(tc.id.clone());
-                }
-            }
-        }
+    let stubbable = |m: &Message| {
+        m.role == Role::Tool
+            && m.tool_call_id
+                .as_ref()
+                .is_some_and(|id| superseded.contains(id))
+            && m.content
+                .as_deref()
+                .is_some_and(|c| !is_stub(c) && c != CLEARED_TOOL_RESULT)
+    };
+    let reclaimable: usize = history
+        .iter()
+        .filter(|m| stubbable(m))
+        .filter_map(|m| m.content.as_deref())
+        .map(str::len)
+        .sum();
+    if reclaimable < min_chars {
+        return 0;
     }
-    if prior_read_call_ids.is_empty() {
-        return;
+    let mut stubbed = 0;
+    for m in history.iter_mut() {
+        if !stubbable(m) {
+            continue;
+        }
+        let path = calls
+            .iter()
+            .find(|(id, _, _)| m.tool_call_id.as_ref() == Some(id))
+            .map(|(_, _, p)| p.clone())
+            .unwrap_or_default();
+        m.content = Some(stub_content(&path));
+        stubbed += 1;
     }
-    // Second pass: stub the matching tool results in-place.
-    for msg in history.iter_mut() {
-        if msg.role != Role::Tool {
-            continue;
-        }
-        let Some(id) = &msg.tool_call_id else {
-            continue;
-        };
-        if !prior_read_call_ids.iter().any(|x| x == id) {
-            continue;
-        }
-        if msg.content.as_deref().is_some_and(is_stub) {
-            continue;
-        }
-        msg.content = Some(stub_content(path));
-    }
+    stubbed
 }
 
 /// Pull the `path` argument out of a serialized JSON tool-call args
@@ -653,7 +730,7 @@ mod tests {
     }
 
     #[test]
-    fn dedup_stubs_prior_read_of_same_path() {
+    fn superseded_read_of_same_path_is_stubbed() {
         let mut h = vec![
             Message::system("s"),
             Message::user("u1"),
@@ -663,13 +740,14 @@ mod tests {
             assistant_reads("c2", "src/foo.rs"),
             tool_result("c2", "second read content..."),
         ];
-        dedup_reads_for_path(&mut h, &cid("c2"), "read_file", "src/foo.rs");
+        let done = all_done(&h);
+        stub_superseded_reads(&mut h, 0, &done);
         assert!(is_stub(h[3].content.as_deref().unwrap()));
         assert_eq!(h[6].content.as_deref().unwrap(), "second read content...");
     }
 
     #[test]
-    fn dedup_leaves_other_paths_alone() {
+    fn reads_of_other_paths_are_left_alone() {
         let mut h = vec![
             Message::system("s"),
             Message::user("u1"),
@@ -678,12 +756,13 @@ mod tests {
             assistant_reads("c2", "src/bar.rs"),
             tool_result("c2", "bar content"),
         ];
-        dedup_reads_for_path(&mut h, &cid("c2"), "read_file", "src/bar.rs");
+        let done = all_done(&h);
+        stub_superseded_reads(&mut h, 0, &done);
         assert_eq!(h[3].content.as_deref().unwrap(), "foo content");
     }
 
     #[test]
-    fn dedup_writes_supersede_prior_reads() {
+    fn writes_supersede_prior_reads() {
         let mut h = vec![
             Message::system("s"),
             Message::user("u1"),
@@ -692,12 +771,13 @@ mod tests {
             assistant_writes("c2", "src/foo.rs"),
             tool_result("c2", "wrote 3 bytes"),
         ];
-        dedup_reads_for_path(&mut h, &cid("c2"), "write_file", "src/foo.rs");
+        let done = all_done(&h);
+        stub_superseded_reads(&mut h, 0, &done);
         assert!(is_stub(h[3].content.as_deref().unwrap()));
     }
 
     #[test]
-    fn dedup_is_idempotent_on_stubbed() {
+    fn stubbing_is_idempotent() {
         let mut h = vec![
             Message::system("s"),
             Message::user("u1"),
@@ -706,8 +786,120 @@ mod tests {
             assistant_reads("c2", "src/foo.rs"),
             tool_result("c2", "fresh content"),
         ];
-        dedup_reads_for_path(&mut h, &cid("c2"), "read_file", "src/foo.rs");
+        let done = all_done(&h);
+        assert_eq!(stub_superseded_reads(&mut h, 0, &done), 0);
         assert_eq!(h[3].content.as_deref().unwrap(), stub_content("src/foo.rs"));
+    }
+
+    /// Every call in `h`, as if each completed successfully.
+    fn all_done(h: &[Message]) -> std::collections::HashSet<ToolCallId> {
+        h.iter()
+            .flat_map(|m| m.tool_calls.iter().map(|c| c.id.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn only_completed_calls_supersede_a_read() {
+        let big = "x".repeat(100_000);
+        let mut h = vec![
+            Message::user("u1"),
+            assistant_reads("c1", "src/foo.rs"),
+            tool_result("c1", &big),
+            assistant_writes("c2", "src/foo.rs"),
+            tool_result("c2", "error: permission denied"),
+        ];
+        // The write failed (or hasn't run): the read is still what the
+        // model has of that file.
+        let none = std::collections::HashSet::new();
+        assert_eq!(stub_superseded_reads(&mut h, 0, &none), 0);
+        assert_eq!(h[2].content.as_deref(), Some(big.as_str()));
+        let done = std::collections::HashSet::from([cid("c2")]);
+        assert_eq!(stub_superseded_reads(&mut h, 0, &done), 1);
+    }
+
+    #[test]
+    fn memory_context_is_hidden_and_readable() {
+        let stored = "fix it\n\n<hook-context>\nbe kind\n</hook-context>\n\n<memory-context>\nuses pnpm\n</memory-context>";
+        assert_eq!(strip_hook_context(stored), "fix it");
+        assert_eq!(memory_context(stored), Some("uses pnpm"));
+        assert_eq!(
+            strip_hook_context("ok\n\n<memory-context>\nm\n</memory-context>"),
+            "ok"
+        );
+        assert_eq!(memory_context("plain"), None);
+    }
+
+    #[test]
+    fn a_tag_the_user_typed_is_theirs() {
+        // Written in the message, not appended: nothing is hidden.
+        let typed = "what does <memory-context> do? and </memory-context>";
+        assert_eq!(strip_hook_context(typed), typed);
+        assert_eq!(memory_context(typed), None);
+        // Typed, and then memory appended: only the appended block goes.
+        let stored =
+            "explain <memory-context> please\n\n<memory-context>\nuses pnpm\n</memory-context>";
+        assert_eq!(
+            strip_hook_context(stored),
+            "explain <memory-context> please"
+        );
+        assert_eq!(memory_context(stored), Some("uses pnpm"));
+    }
+
+    #[test]
+    fn superseded_reads_wait_until_there_is_enough_to_reclaim() {
+        let big = "x".repeat(30_000);
+        let mut h = vec![
+            Message::user("u1"),
+            assistant_reads("c1", "src/foo.rs"),
+            tool_result("c1", &big),
+            assistant_writes("c2", "src/foo.rs"),
+            tool_result("c2", "wrote"),
+        ];
+        // 30k characters superseded: under the batch size, nothing changes,
+        // so the cached prefix survives the edit.
+        let done = all_done(&h);
+        assert_eq!(
+            stub_superseded_reads(&mut h, STUB_SUPERSEDED_MIN_CHARS, &done),
+            0
+        );
+        assert_eq!(h[2].content.as_deref(), Some(big.as_str()));
+        // Enough superseded reads to be worth it: stubbed together.
+        h.extend([
+            assistant_reads("c3", "src/bar.rs"),
+            tool_result("c3", &big),
+            assistant_reads("c4", "src/baz.rs"),
+            tool_result("c4", &big),
+            assistant_writes("c5", "src/bar.rs"),
+            tool_result("c5", "wrote"),
+            assistant_writes("c6", "src/baz.rs"),
+            tool_result("c6", "wrote"),
+        ]);
+        let done = all_done(&h);
+        assert_eq!(
+            stub_superseded_reads(&mut h, STUB_SUPERSEDED_MIN_CHARS, &done),
+            3
+        );
+        assert!(is_stub(h[2].content.as_deref().unwrap()));
+        assert!(h[2].content.as_deref().unwrap().contains("src/foo.rs"));
+    }
+
+    #[test]
+    fn screenshots_are_dropped_in_batches() {
+        let img = || vec![mira_core::ImageData::png("AAAA")];
+        let mut h: Vec<Message> = (0..KEEP_RECENT_IMAGES + IMAGE_PRUNE_BATCH)
+            .map(|i| tool_result(&format!("s{i}"), "shot").with_images(img()))
+            .collect();
+        prune_old_images_in_batches(&mut h, KEEP_RECENT_IMAGES);
+        assert!(
+            h.iter().all(|m| !m.images.is_empty()),
+            "not yet a full batch"
+        );
+        h.push(tool_result("last", "shot").with_images(img()));
+        prune_old_images_in_batches(&mut h, KEEP_RECENT_IMAGES);
+        assert_eq!(
+            h.iter().filter(|m| !m.images.is_empty()).count(),
+            KEEP_RECENT_IMAGES
+        );
     }
 
     /// Fails every request for `tiny`; summarizes for anything else.

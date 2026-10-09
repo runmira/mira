@@ -359,6 +359,7 @@ mod tests {
             title: None,
             turns: Vec::new(),
             usage: Default::default(),
+            file_calls_done: Vec::new(),
             parent_id: None,
             tasks: Vec::new(),
             goal: None,

@@ -136,6 +136,11 @@ pub const MIRA_TOOL_PROFILE_HEADER: &str = "X-Mira-Tool-Profile";
 /// Mira's copies only compete with them. It keeps the rest.
 pub const CODEX_TOOL_PROFILE: &str = "codex";
 
+/// Claude Code's profile: it has its own file, search and shell tools
+/// (Read, Write, Edit, Grep, Glob, Bash). Listing Mira's copies beside them
+/// added their definitions to every request for nothing.
+pub const CLAUDE_CODE_TOOL_PROFILE: &str = "claude-code";
+
 /// The env var `mira mcp-bridge` reads its token from — a token in argv
 /// would show up in process listings.
 pub const MIRA_MCP_TOKEN_ENV: &str = "MIRA_MCP_TOKEN";

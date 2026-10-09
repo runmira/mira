@@ -338,6 +338,7 @@ async fn import_one(
         title: Some(chat.title.clone()),
         turns: vec![],
         usage: Default::default(),
+        file_calls_done: Vec::new(),
         parent_id: None,
         tasks: vec![],
         goal: None,

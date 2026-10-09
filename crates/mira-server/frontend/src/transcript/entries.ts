@@ -219,10 +219,26 @@ export function compactionSummary(content: string | null | undefined): string | 
   return body.replace(/^\s*This session continues[^\n]*\n+/, '').trim();
 }
 
-/** Drop the `<hook-context>` block prompt hooks append to a message. */
+/** Drop the blocks appended to a prompt for the model: prompt hooks'
+ *  `<hook-context>` and the turn's `<memory-context>`. Only blocks at the
+ *  very end, in exactly the appended form (`\n\n<tag>\n…\n</tag>`), count:
+ *  the same tag typed anywhere in the user's own text is theirs. Mirrors
+ *  `strip_hook_context` in mira-harness. */
 export function stripHookContext(content: string | null | undefined): string | null | undefined {
-  const i = content?.indexOf('<hook-context>') ?? -1;
-  return i >= 0 ? content!.slice(0, i).trimEnd() : content;
+  if (!content) return content;
+  let user = content;
+  let peeled = false;
+  for (;;) {
+    const trimmed = user.trimEnd();
+    const tag = ['hook-context', 'memory-context'].find((t) => {
+      const close = `\n</${t}>`;
+      return trimmed.endsWith(close) && trimmed.slice(0, -close.length).lastIndexOf(`\n\n<${t}>\n`) >= 0;
+    });
+    if (!tag) break;
+    user = trimmed.slice(0, trimmed.slice(0, -`\n</${tag}>`.length).lastIndexOf(`\n\n<${tag}>\n`));
+    peeled = true;
+  }
+  return peeled ? user.trimEnd() : content;
 }
 
 /** Close the newest running compaction card (or add a finished one, when
