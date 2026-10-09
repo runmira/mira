@@ -154,3 +154,70 @@ async fn dropping_a_result_shrinks_the_next_request() {
 
     assert!(sess.drop_tool_result("nope").await.is_err());
 }
+
+#[tokio::test]
+async fn concurrent_title_and_resume_checkpoints_preserve_both_changes() {
+    use mira_harness::persist::{file_store::FileStore, SessionStore, SettleMarks};
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Arc::new(FileStore::at(tmp.path().join("sessions")).unwrap());
+    let sess = Session::new(
+        SessionConfig::new("test-model"),
+        "sys",
+        Arc::new(Scripted::default()),
+        Arc::new(Registry::new()),
+        Arc::new(Mutex::new(
+            Policy::from_config(&PolicyConfig::default()).unwrap(),
+        )),
+        Arc::new(AutoApprover { approve_asks: true }),
+        ToolContext::new(
+            tmp.path(),
+            Arc::new(mira_sandbox::Sandbox::default_scrubbed()),
+        ),
+    )
+    .with_store(store.clone());
+    sess.save_now().await;
+    let settle = SettleMarks::set(false);
+    tokio::join!(sess.set_title("Generated title"), async {
+        sess.set_sidebar_flags(false, None, settle).await;
+        sess.save_now().await;
+    });
+    let saved = store.load(&sess.id).await.unwrap();
+    assert_eq!(saved.title.as_deref(), Some("Generated title"));
+    assert_eq!(saved.settle, settle);
+}
+
+#[tokio::test]
+async fn explicit_checkpoint_reports_disk_write_failure() {
+    use mira_harness::persist::file_store::FileStore;
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Arc::new(FileStore::at(tmp.path().join("sessions")).unwrap());
+    let sess = Session::new(
+        SessionConfig::new("test-model"),
+        "sys",
+        Arc::new(Scripted::default()),
+        Arc::new(Registry::new()),
+        Arc::new(Mutex::new(
+            Policy::from_config(&PolicyConfig::default()).unwrap(),
+        )),
+        Arc::new(AutoApprover { approve_asks: true }),
+        ToolContext::new(
+            tmp.path(),
+            Arc::new(mira_sandbox::Sandbox::default_scrubbed()),
+        ),
+    )
+    .with_store(store.clone());
+    sess.try_save_now().await.unwrap();
+    std::fs::remove_dir_all(tmp.path().join("sessions")).unwrap();
+    std::fs::write(tmp.path().join("sessions"), "blocked store directory").unwrap();
+    assert!(sess.try_save_now().await.is_err());
+    let previous = sess.sidebar_flags().await;
+    assert!(sess
+        .save_sidebar_flags(
+            true,
+            Some(123),
+            mira_harness::persist::SettleMarks::set(true)
+        )
+        .await
+        .is_err());
+    assert_eq!(sess.sidebar_flags().await, previous);
+}

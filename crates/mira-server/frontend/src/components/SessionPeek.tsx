@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { AnimatePresence, m } from 'framer-motion';
 import {
   Bot,
@@ -14,6 +14,7 @@ import {
   User,
   Wrench,
 } from 'lucide-react';
+import { rowStatus } from '../lib/sidebar';
 import type { SessionSummary } from '../types';
 
 /**
@@ -61,7 +62,7 @@ export type PeekTarget = {
 };
 
 /** The PR Mira already knows about, if any. */
-export type PeekPr = { number: number; title?: string };
+export type PeekPr = { number: number; title?: string; state?: string };
 
 export function SessionPeek({
   target,
@@ -109,18 +110,20 @@ export function SessionPeek({
   // Fetch the transcript tail once per row. Cached for the life of the
   // component so sliding back over a row you already looked at is
   // instant and costs nothing.
-  const cache = useRef(new Map<string, Preview>());
+  const cache = useRef(new Map<string, { preview: Preview; revision: string; at: number }>());
   useEffect(() => {
     if (!shown) return;
     const id = shown.session.id;
+    const revision = `${shown.session.updated_at}:${shown.session.message_count}`;
     const hit = cache.current.get(id);
-    if (hit) {
-      setPreview(hit);
+    setPreview(null);
+    if (hit && hit.revision === revision && (!shown.session.running || Date.now() - hit.at < 4000)) {
+      setPreview(hit.preview);
       return;
     }
     let live = true;
     void fetch(`/api/sessions/${encodeURIComponent(id)}/preview`, { cache: 'no-store' })
-      .then((r) => (r.ok ? r.json() : null))
+      .then((r) => { if (!r.ok) throw new Error('Preview unavailable'); return r.json(); })
       .then((v: {
         last_user?: string | null;
         last_assistant?: string | null;
@@ -134,10 +137,11 @@ export function SessionPeek({
           lastTool: v.last_tool ?? null,
           messageCount: v.message_count ?? 0,
         };
-        cache.current.set(id, p);
+        cache.current.set(id, { preview: p, revision, at: Date.now() });
+        if (cache.current.size > 100) cache.current.delete(cache.current.keys().next().value!);
         setPreview(p);
       })
-      .catch(() => { /* a chat with no record yet simply shows less */ });
+      .catch(() => { if (live) setPreview({ lastUser: null, lastAssistant: null, lastTool: null, messageCount: 0 }); });
     return () => {
       live = false;
     };
@@ -145,9 +149,17 @@ export function SessionPeek({
 
   // Card geometry: beside the row, vertically centred on it, flipped to
   // the other side and clamped so it never leaves the window.
+  const cardRef = useRef<HTMLDivElement>(null);
+  const [cardHeight, setCardHeight] = useState(230);
+  useLayoutEffect(() => {
+    if (!cardRef.current) return;
+    const observer = new ResizeObserver(([entry]) => setCardHeight(entry.contentRect.height));
+    observer.observe(cardRef.current);
+    return () => observer.disconnect();
+  }, [shown?.session.id]);
   const place = useCallback((rect: DOMRect) => {
-    const CARD_W = 340;
-    const CARD_H = 230;
+    const CARD_W = Math.min(340, window.innerWidth - 24);
+    const CARD_H = cardHeight;
     const gap = 10;
     const left = rect.right + gap + CARD_W <= window.innerWidth
       ? rect.right + gap
@@ -157,9 +169,11 @@ export function SessionPeek({
       Math.max(12, window.innerHeight - CARD_H - 12),
     );
     return { left, top };
-  }, []);
+  }, [cardHeight]);
 
   const session = shown?.session;
+  const cardPr = session?.pr ?? (shown?.session.id === target?.session.id ? pr : null);
+  const detail = session ? rowStatus(session) : null;
   const agent = session?.agent_driver ?? null;
   const engineName = agent ? agentLabel(agent) : prettyModel(session?.model ?? '');
 
@@ -172,7 +186,7 @@ export function SessionPeek({
           animate={{ opacity: 1, x: 0, scale: 1 }}
           exit={{ opacity: 0, x: -4, scale: 0.99 }}
           transition={{ duration: 0.14, ease: [0.22, 0.61, 0.36, 1] }}
-          className="pointer-events-none fixed z-50 w-[340px]"
+          ref={cardRef} className="pointer-events-none fixed z-50 w-[340px] max-w-[calc(100vw-24px)]"
           style={place(shown.rect)}
         >
           <div className="overflow-hidden rounded-xl border border-border bg-popover text-left shadow-xl shadow-shade/25">
@@ -192,17 +206,17 @@ export function SessionPeek({
                 )}
                 <Meta icon={Folder} title={session.cwd}>{basename(session.cwd)}</Meta>
               </div>
-              {(session.needs_attention || session.running) && (
+              {(session.needs_attention || session.running || session.failure_reason) && (
                 <div
                   className={
-                    session.needs_attention
+                    (session.needs_attention || session.failure_reason)
                       ? 'mt-2 inline-flex items-center gap-1.5 rounded-md bg-amber-500/12 px-2 py-0.5 text-[11px] font-medium text-amber-700 dark:text-amber-400'
                       : 'mt-2 inline-flex items-center gap-1.5 rounded-md bg-mira-blue/10 px-2 py-0.5 text-[11px] font-medium text-mira-blue'
                   }
                 >
-                  {session.needs_attention ? (
+                  {session.needs_attention || session.failure_reason ? (
                     <>
-                      <CircleAlert className="size-3" /> Waiting on you
+                      <CircleAlert className="size-3" /> {detail?.label}
                     </>
                   ) : (
                     <>
@@ -213,6 +227,11 @@ export function SessionPeek({
               )}
             </div>
 
+            {session.failure_reason && (
+              <div className="line-clamp-2 px-3.5 pb-2 text-[11px] leading-4 text-red-600 dark:text-red-400">
+                {session.failure_reason}
+              </div>
+            )}
             {/* The last exchange. */}
             <div className="space-y-2 border-t border-border/60 bg-fg/[0.02] px-3.5 py-2.5">
               {preview?.lastUser || preview?.lastAssistant ? (
@@ -229,12 +248,12 @@ export function SessionPeek({
                   )}
                 </>
               ) : (
-                <div className="text-[12px] text-muted-foreground/70">{preview ? 'No messages yet' : 'Loading…'}</div>
+                <div className="text-[12px] text-muted-foreground/70">{preview ? 'No preview available yet' : 'Loading…'}</div>
               )}
             </div>
 
             {/* Facts: size, last tool, branch, PR. */}
-            {(preview?.messageCount || preview?.lastTool || session.worktree_branch || pr) && (
+            {(preview?.messageCount || preview?.lastTool || session.worktree_branch || cardPr) && (
               <div className="flex items-center gap-3 border-t border-border/60 px-3.5 py-2 text-[11px] text-muted-foreground">
                 {preview && preview.messageCount > 0 && (
                   <Meta icon={MessagesSquare} title="Messages">{preview.messageCount}</Meta>
@@ -254,7 +273,7 @@ export function SessionPeek({
                 {/* A PR chip only for the chat Mira already knows the PR of
                     (the open one): a GitHub call per hovered row would put
                     the network in front of a glance. */}
-                {pr && <PrChip pr={pr} />}
+                {cardPr && <PrChip pr={cardPr} />}
               </div>
             )}
           </div>
@@ -290,7 +309,7 @@ function Line({ icon: I, label, children }: { icon: Icon; label: string; childre
  *  rather than a fetch of its own. */
 function PrChip({ pr }: { pr: PeekPr }) {
   return (
-    <span className="inline-flex items-center gap-1 text-mira-purple" title={pr.title}>
+    <span className="inline-flex items-center gap-1 text-muted-foreground" title={pr.title}>
       <GitPullRequest className="size-3" aria-hidden />
       #{pr.number}
     </span>
@@ -319,7 +338,7 @@ function prettyModel(model: string): string {
 /* ---------- small helpers ---------- */
 
 function sessionLabel(s: SessionSummary): string {
-  const raw = (s.title ?? s.first_user_message ?? '').trim();
+  const raw = (s.title?.trim() || s.first_user_message || '').trim();
   if (!raw) return 'Untitled';
   return raw.length > 120 ? `${raw.slice(0, 120)}…` : raw;
 }

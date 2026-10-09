@@ -45,7 +45,7 @@ export async function listSessions(
  *  both flags persist on the server record and survive restarts. */
 export async function setSessionFlags(
   id: string,
-  flags: { pinned?: boolean; archived?: boolean },
+  flags: { pinned?: boolean; archived?: boolean; settled?: boolean },
 ): Promise<void> {
   const r = await fetch(`/api/sessions/${encodeURIComponent(id)}/flags`, {
     method: 'PUT',

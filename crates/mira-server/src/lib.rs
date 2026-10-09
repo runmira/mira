@@ -75,6 +75,7 @@ mod runtime_requests;
 mod session_activity;
 pub mod session_changes;
 pub mod session_engine;
+mod session_prs;
 mod sessions;
 mod settings;
 mod skills;

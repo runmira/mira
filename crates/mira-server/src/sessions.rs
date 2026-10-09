@@ -89,6 +89,15 @@ pub struct SessionSummary {
     /// default list (`?archived=true` returns only these).
     #[serde(default)]
     pub archived: bool,
+    /// The user's "Settled" choice (epoch secs), for the sidebar to weigh
+    /// against the chat's activity and its PR.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settled_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unsettled_at: Option<u64>,
+    /// The worktree branch's pull request on GitHub, when it has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pr: Option<crate::session_prs::SessionPr>,
     #[serde(skip_serializing_if = "SessionUsageView::is_empty")]
     pub usage: SessionUsageView,
     /// Made with "Fork from here": the chat it branched off (the sidebar
@@ -101,6 +110,10 @@ pub struct SessionSummary {
     /// Only known for chats loaded in memory.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub needs_attention: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attention_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
     /// The chat that launched this one with `thread_launch`, so the sidebar
     /// can nest it there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -317,6 +330,9 @@ pub async fn list_sessions(State(state): State<AppState>, Query(q): Query<ListQu
             worktree_branch: None,
             pinned: false,
             archived: false,
+            settled_at: None,
+            unsettled_at: None,
+            pr: None,
             agent_driver: slot
                 .acp_launch
                 .lock()
@@ -326,7 +342,9 @@ pub async fn list_sessions(State(state): State<AppState>, Query(q): Query<ListQu
             usage: SessionUsageView::default(),
             forked_from: None,
             forked_at: None,
-            needs_attention: false,
+            needs_attention: slot.needs_attention().await,
+            attention_reason: attention_reason(&slot).await,
+            failure_reason: failure_reason(&slot).await,
             launched_by: crate::agent_threads::launcher_of(&id),
         });
     }
@@ -344,6 +362,54 @@ struct LiveMeta {
     /// record, which is only rewritten on checkpoint.
     agent_driver: Option<String>,
     needs_attention: bool,
+    attention_reason: Option<String>,
+    failure_reason: Option<String>,
+}
+
+async fn attention_reason(slot: &crate::slot::SessionSlot) -> Option<String> {
+    let approvals = slot.pending.lock().await.len();
+    if approvals > 0 {
+        return Some(format!(
+            "Approve {approvals} action{}",
+            if approvals == 1 { "" } else { "s" }
+        ));
+    }
+    let requests = slot.runtime_requests.snapshot().await;
+    if let Some(request) = requests
+        .iter()
+        .find(|r| r.delivery == crate::runtime_requests::Delivery::Pending)
+    {
+        return request
+            .request
+            .questions
+            .first()
+            .map(|q| q.question.chars().take(120).collect())
+            .or_else(|| Some("Answer a question".into()));
+    }
+    if !slot.prompt_pending.lock().await.is_empty() {
+        return Some("Review a request".into());
+    }
+    None
+}
+
+async fn failure_reason(slot: &crate::slot::SessionSlot) -> Option<String> {
+    let failure = slot
+        .engine
+        .sidebar_failure
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    if failure.is_some() {
+        return failure;
+    }
+    if let crate::session_engine::AgentPhase::Failed(error) = &*slot.engine.phase.lock().await {
+        return Some(error.chars().take(160).collect());
+    }
+    slot.message_queue
+        .snapshot()
+        .await
+        .into_iter()
+        .find_map(|item| item.error)
 }
 
 async fn live_slot_metadata(state: &AppState) -> std::collections::HashMap<String, LiveMeta> {
@@ -356,6 +422,8 @@ async fn live_slot_metadata(state: &AppState) -> std::collections::HashMap<Strin
                 running: slot.is_running().await,
                 background_mode: *slot.background_mode.read().await,
                 needs_attention: slot.needs_attention().await,
+                attention_reason: attention_reason(&slot).await,
+                failure_reason: failure_reason(&slot).await,
                 agent_driver: slot
                     .acp_launch
                     .lock()
@@ -400,11 +468,16 @@ async fn summarize_live(state: &AppState) -> Vec<SessionSummary> {
             worktree_branch: None,
             pinned: false,
             archived: false,
+            settled_at: None,
+            unsettled_at: None,
+            pr: None,
             agent_driver,
             usage: SessionUsageView::default(),
             forked_from: None,
             forked_at: None,
-            needs_attention: false,
+            needs_attention: slot.needs_attention().await,
+            attention_reason: attention_reason(&slot).await,
+            failure_reason: failure_reason(&slot).await,
             launched_by: crate::agent_threads::launcher_of(&id),
         });
     }
@@ -861,6 +934,9 @@ pub struct SetFlagsRequest {
     pub pinned: Option<bool>,
     /// `true` archives (stamped with the current time), `false` restores.
     pub archived: Option<bool>,
+    /// `true` puts the chat on the "Settled" shelf, `false` takes it back
+    /// out (and keeps it out of automatic settling until something newer).
+    pub settled: Option<bool>,
 }
 
 pub async fn set_session_flags(
@@ -879,6 +955,17 @@ pub async fn set_session_flags(
         Ok(r) => r,
         Err(e) => return err(StatusCode::NOT_FOUND, format!("load: {e}")),
     };
+    let live = state
+        .list_slots()
+        .await
+        .into_iter()
+        .find(|slot| slot.id.to_string() == id);
+    if let Some(slot) = &live {
+        let (pinned, archived_at, settle) = slot.session.read().await.sidebar_flags().await;
+        record.pinned = pinned;
+        record.archived_at = archived_at;
+        record.settle = settle;
+    }
     if let Some(pinned) = body.pinned {
         record.pinned = pinned;
     }
@@ -889,26 +976,27 @@ pub async fn set_session_flags(
             None
         };
     }
-    if let Err(e) = store.save(&record).await {
-        return err(StatusCode::INTERNAL_SERVER_ERROR, format!("save: {e}"));
+    if let Some(settled) = body.settled {
+        record.settle = mira_harness::persist::SettleMarks::set(settled);
     }
-    // Mirror onto the live slot (if one exists) — checkpoints run after
-    // every turn and would otherwise overwrite the record with the
-    // session's stale in-memory flags.
-    for slot in state.list_slots().await {
-        if slot.id.to_string() == id {
-            slot.session
-                .read()
-                .await
-                .set_sidebar_flags(record.pinned, record.archived_at)
-                .await;
+    if let Some(slot) = live {
+        let session = slot.session.read().await;
+        if let Err(e) = session
+            .save_sidebar_flags(record.pinned, record.archived_at, record.settle)
+            .await
+        {
+            return err(StatusCode::INTERNAL_SERVER_ERROR, format!("save: {e}"));
         }
+    } else if let Err(e) = store.save(&record).await {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, format!("save: {e}"));
     }
     info!(%id, pinned = record.pinned, archived = record.archived_at.is_some(), "session flags updated");
     Json(serde_json::json!({
         "id": id,
         "pinned": record.pinned,
         "archived": record.archived_at.is_some(),
+        "settled_at": record.settle.settled_at,
+        "unsettled_at": record.settle.unsettled_at,
     }))
     .into_response()
 }
@@ -925,7 +1013,8 @@ fn summarize_record(
     live_meta: &std::collections::HashMap<String, LiveMeta>,
 ) -> SessionSummary {
     let mut summary = summarize_metadata(&SessionListRecord::from(r), active_id, live_meta);
-    (summary.worktree_status, summary.worktree_branch) = cached_worktree_status(&r.cwd);
+    let info = cached_worktree_status(&r.cwd);
+    (summary.worktree_status, summary.worktree_branch) = (info.status, info.branch);
     summary
 }
 
@@ -958,6 +1047,9 @@ fn summarize_metadata(
         worktree_branch: None,
         pinned: r.pinned,
         archived: r.archived_at.is_some(),
+        settled_at: r.settle.settled_at,
+        unsettled_at: r.settle.unsettled_at,
+        pr: None,
         // Badge the engine the session runs on now: an agent it has left
         // for a provider no longer counts.
         agent_driver: match live {
@@ -973,6 +1065,8 @@ fn summarize_metadata(
         forked_from: r.forked_from.as_ref().map(|f| f.session_id.to_string()),
         forked_at: r.forked_from.as_ref().map(|f| f.at.clone()),
         needs_attention: live.is_some_and(|m| m.needs_attention),
+        attention_reason: live.and_then(|m| m.attention_reason.clone()),
+        failure_reason: live.and_then(|m| m.failure_reason.clone()),
         launched_by: crate::agent_threads::launcher_of(&id),
     }
 }
@@ -1035,8 +1129,13 @@ async fn enrich_worktrees(summaries: &mut [SessionSummary]) {
         jobs.spawn(async move {
             let _permit = limit.acquire_owned().await.ok()?;
             tokio::task::spawn_blocking(move || {
-                let metadata = cached_worktree_status(&folder);
-                (folder, metadata)
+                let info = cached_worktree_status(&folder);
+                let pr = info
+                    .repo
+                    .as_deref()
+                    .zip(info.branch.as_deref())
+                    .and_then(|(repo, branch)| crate::session_prs::lookup(repo, branch));
+                (folder, (info, pr))
             })
             .await
             .ok()
@@ -1049,19 +1148,26 @@ async fn enrich_worktrees(summaries: &mut [SessionSummary]) {
         }
     }
     for summary in summaries {
-        if let Some((status, branch)) = metadata.get(std::path::Path::new(&summary.cwd)) {
-            summary.worktree_status = *status;
-            summary.worktree_branch = branch.clone();
+        if let Some((info, pr)) = metadata.get(std::path::Path::new(&summary.cwd)) {
+            summary.worktree_status = info.status;
+            summary.worktree_branch = info.branch.clone();
+            summary.pr = pr.clone();
         }
     }
 }
-fn cached_worktree_status(cwd: &std::path::Path) -> (Option<WorktreeMergeStatus>, Option<String>) {
+/// A worktree chat's branch, whether it is in main yet, and the primary
+/// checkout it belongs to. All `None` outside Mira's worktrees.
+#[derive(Debug, Clone, Default)]
+struct WorktreeInfo {
+    status: Option<WorktreeMergeStatus>,
+    branch: Option<String>,
+    repo: Option<std::path::PathBuf>,
+}
+
+fn cached_worktree_status(cwd: &std::path::Path) -> WorktreeInfo {
     use std::sync::{Mutex, OnceLock};
     use std::time::{Duration, Instant};
-    type Cache = std::collections::HashMap<
-        std::path::PathBuf,
-        (Instant, (Option<WorktreeMergeStatus>, Option<String>)),
-    >;
+    type Cache = std::collections::HashMap<std::path::PathBuf, (Instant, WorktreeInfo)>;
     static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(Cache::new()));
     if let Some((at, value)) = cache
@@ -1082,7 +1188,7 @@ fn cached_worktree_status(cwd: &std::path::Path) -> (Option<WorktreeMergeStatus>
     value
 }
 
-fn detect_worktree_status(cwd: &std::path::Path) -> (Option<WorktreeMergeStatus>, Option<String>) {
+fn detect_worktree_status(cwd: &std::path::Path) -> WorktreeInfo {
     if !cwd
         .components()
         .zip(cwd.components().skip(1))
@@ -1097,15 +1203,15 @@ fn detect_worktree_status(cwd: &std::path::Path) -> (Option<WorktreeMergeStatus>
                 && !c.is_empty()
         })
     {
-        return (None, None);
+        return WorktreeInfo::default();
     }
     if !cwd.is_dir() {
-        return (None, None);
+        return WorktreeInfo::default();
     }
 
     let branch = match git_output(cwd, &["symbolic-ref", "--quiet", "--short", "HEAD"]) {
         Some(b) if !b.is_empty() => b,
-        _ => return (None, None),
+        _ => return WorktreeInfo::default(),
     };
 
     let common_dir = match git_output(
@@ -1113,11 +1219,21 @@ fn detect_worktree_status(cwd: &std::path::Path) -> (Option<WorktreeMergeStatus>
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
     ) {
         Some(s) => std::path::PathBuf::from(s),
-        None => return (None, Some(branch)),
+        None => {
+            return WorktreeInfo {
+                branch: Some(branch),
+                ..Default::default()
+            }
+        }
     };
     let primary = match common_dir.parent() {
         Some(p) => p.to_path_buf(),
-        None => return (None, Some(branch)),
+        None => {
+            return WorktreeInfo {
+                branch: Some(branch),
+                ..Default::default()
+            }
+        }
     };
 
     let base = ["main", "master"]
@@ -1125,10 +1241,17 @@ fn detect_worktree_status(cwd: &std::path::Path) -> (Option<WorktreeMergeStatus>
         .copied()
         .find(|b| branch_exists(&primary, b));
     let Some(base) = base else {
-        return (None, Some(branch));
+        return WorktreeInfo {
+            branch: Some(branch),
+            repo: Some(primary),
+            ..Default::default()
+        };
     };
     if branch == base {
-        return (None, Some(branch));
+        return WorktreeInfo {
+            branch: Some(branch),
+            ..Default::default()
+        };
     }
 
     let status = if is_ancestor(&primary, &branch, base) {
@@ -1136,7 +1259,11 @@ fn detect_worktree_status(cwd: &std::path::Path) -> (Option<WorktreeMergeStatus>
     } else {
         WorktreeMergeStatus::Unmerged
     };
-    (Some(status), Some(branch))
+    WorktreeInfo {
+        status: Some(status),
+        branch: Some(branch),
+        repo: Some(primary),
+    }
 }
 
 fn git_output(cwd: &std::path::Path, args: &[&str]) -> Option<String> {
@@ -1413,6 +1540,7 @@ mod metadata_tests {
             parent_id: None,
             pinned: true,
             archived_at: None,
+            settle: Default::default(),
             agent_driver: Some("codex".into()),
             forked_from: None,
         };
@@ -1423,6 +1551,30 @@ mod metadata_tests {
         assert_eq!(summary.agent_driver.as_deref(), Some("codex"));
         assert!(summary.active && summary.pinned);
         assert!(summary.worktree_status.is_none());
+        assert!(summary.attention_reason.is_none());
+        assert!(summary.failure_reason.is_none());
+        let live = std::collections::HashMap::from([(
+            "saved-chat".into(),
+            LiveMeta {
+                attached: false,
+                running: true,
+                background_mode: BackgroundMode::Deny,
+                agent_driver: Some("codex".into()),
+                needs_attention: true,
+                attention_reason: Some("Approve 3 actions".into()),
+                failure_reason: Some("Retry the failed turn".into()),
+            },
+        )]);
+        let summary = summarize_metadata(&record, "saved-chat", &live);
+        assert!(summary.needs_attention);
+        assert_eq!(
+            summary.attention_reason.as_deref(),
+            Some("Approve 3 actions")
+        );
+        assert_eq!(
+            summary.failure_reason.as_deref(),
+            Some("Retry the failed turn")
+        );
     }
     #[tokio::test]
     async fn shared_non_worktree_folder_enrichment_preserves_all_rows() {
@@ -1439,6 +1591,7 @@ mod metadata_tests {
             parent_id: None,
             pinned: false,
             archived_at: None,
+            settle: Default::default(),
             agent_driver: None,
             forked_from: None,
         };
