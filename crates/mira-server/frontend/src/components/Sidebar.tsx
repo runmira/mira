@@ -64,13 +64,8 @@ export function Sidebar(props: Props) {
   } = props;
   const {
     hiddenTitleBar,
-    hasScrolled,
-    projectsPinned,
     scrollRef,
     setPeek,
-    setHasScrolled,
-    setProjectsPinned,
-    projectsToolbarRef,
     scrollRestored,
     searching,
     savedScroll,
@@ -248,25 +243,16 @@ export function Sidebar(props: Props) {
           </div>
         ) : (
           <div className="flex min-h-0 flex-1 flex-col">
-            <div className="relative z-30 shrink-0 bg-panel px-2 pb-1">
+            <div className={cn('relative z-30 shrink-0 px-2 pb-1', !hiddenTitleBar && 'bg-panel')}>
               <NavItem icon={<PenLine className="size-3.5" />} onClick={onNewChat}>
                 New thread
               </NavItem>
-              {hasScrolled && !projectsPinned && (
-                <span aria-hidden className="sidebar-scroll-fade" />
-              )}
             </div>
             <div
               ref={scrollRef}
               onScroll={(e) => {
                 const node = e.currentTarget;
                 setPeek(null);
-                setHasScrolled(node.scrollTop > 0);
-                setProjectsPinned(
-                  !!projectsToolbarRef.current &&
-                    projectsToolbarRef.current.getBoundingClientRect().top <=
-                      node.getBoundingClientRect().top + 1,
-                );
                 if (!scrollRestored.current || searching) return;
                 savedScroll.current = node.scrollTop;
                 try {
@@ -362,8 +348,10 @@ export function Sidebar(props: Props) {
 
               <div className="mt-4 flex flex-col gap-1 px-0.5">
                 <div
-                  ref={projectsToolbarRef}
-                  className="sticky top-0 z-20 -mx-0.5 bg-panel px-0.5 pb-1"
+                  // On the desktop the sidebar is the window's vibrancy, and no
+                  // fill matches it, so the toolbar scrolls with the list there
+                  // instead of pinning over it with a slab of solid panel.
+                  className={cn('-mx-0.5 px-0.5 pb-1', !hiddenTitleBar && 'sticky top-0 z-20 bg-panel')}
                 >
                   <div className="mb-1 flex items-center justify-between px-2 py-1.5">
                     <div className="flex items-center gap-2 text-[14px] font-semibold tracking-tight text-foreground">
@@ -483,7 +471,6 @@ export function Sidebar(props: Props) {
                       </div>
                     </div>
                   )}
-                  {projectsPinned && <span aria-hidden className="sidebar-scroll-fade" />}
                 </div>
 
                 {listError && (

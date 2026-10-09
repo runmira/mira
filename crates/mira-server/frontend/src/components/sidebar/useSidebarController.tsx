@@ -145,12 +145,6 @@ export function useSidebarController({
 
   const searchRef = useRef<HTMLInputElement>(null);
 
-  const projectsToolbarRef = useRef<HTMLDivElement>(null);
-
-  const [hasScrolled, setHasScrolled] = useState(false);
-
-  const [projectsPinned, setProjectsPinned] = useState(false);
-
   const savedScroll = useRef(loadScroll());
 
   const scrollRestored = useRef(false);
@@ -537,13 +531,8 @@ export function useSidebarController({
   }
   return {
     hiddenTitleBar,
-    hasScrolled,
-    projectsPinned,
     scrollRef,
     setPeek,
-    setHasScrolled,
-    setProjectsPinned,
-    projectsToolbarRef,
     scrollRestored,
     searching,
     savedScroll,
