@@ -14,8 +14,8 @@ export function matchesSidebar(s: SessionSummary, query: string, filter: Sidebar
 
 export function rowStatus(s: SessionSummary, unread = false): { label: string; tone: 'attention' | 'error' | 'working' | 'result' | 'quiet' } {
   if (s.needs_attention) return { label: s.attention_reason || 'Waiting for you', tone: 'attention' };
-  if (s.running) return { label: 'Working', tone: 'working' };
   if (s.failure_reason) return { label: 'Needs a retry', tone: 'error' };
+  if (s.running) return { label: 'Working', tone: 'working' };
   if (unread) {
     const label = s.pr?.state === 'open' ? 'PR ready' : s.pr?.state === 'draft' ? 'Draft PR ready'
       : s.pr?.state === 'merged' ? 'PR merged' : 'Finished';

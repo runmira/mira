@@ -126,8 +126,12 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
 // folder (to show its waiting count).
 try {
   if (!localStorage.getItem('mira.sidebar.preview-seeded')) {
-    localStorage.setItem('mira.sidebar.unread', JSON.stringify(['unread']));
-    localStorage.setItem('mira.sidebar.collapsed-projects', JSON.stringify([LANDING]));
+    if (localStorage.getItem('mira.sidebar.unread') === null) {
+      localStorage.setItem('mira.sidebar.unread', JSON.stringify(['unread']));
+    }
+    if (localStorage.getItem('mira.sidebar.collapsed-projects') === null) {
+      localStorage.setItem('mira.sidebar.collapsed-projects', JSON.stringify([LANDING]));
+    }
     localStorage.setItem('mira.sidebar.preview-seeded', '1');
   }
 } catch { /* private mode */ }

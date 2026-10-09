@@ -409,6 +409,7 @@ pub struct Session {
     archived_at: Arc<Mutex<Option<u64>>>,
     /// The sidebar's settle marks. Same checkpoint story as `pinned`.
     settle: Arc<Mutex<crate::persist::SettleMarks>>,
+    checkpoint_lock: Arc<Mutex<()>>,
     /// The current turn's event sender, when a turn is active. Long-
     /// running tools (bash today, others later) route live output
     /// through the [`ToolProgressSink`] attached to `tool_ctx`; that
@@ -549,6 +550,7 @@ impl Session {
             pinned: Arc::new(Mutex::new(false)),
             archived_at: Arc::new(Mutex::new(None)),
             settle: Arc::default(),
+            checkpoint_lock: Arc::default(),
             progress_slot,
             hooks: None,
             previews: Arc::new(Mutex::new(HashMap::new())),
@@ -636,6 +638,7 @@ impl Session {
             pinned: Arc::new(Mutex::new(record.pinned)),
             archived_at: Arc::new(Mutex::new(record.archived_at)),
             settle: Arc::new(Mutex::new(record.settle)),
+            checkpoint_lock: Arc::default(),
             progress_slot,
             hooks: None,
             previews: Arc::new(Mutex::new(record.previews)),
@@ -2742,6 +2745,7 @@ fn rewind_index(hist: &[Message], text: &str, occurrence: usize) -> Option<usize
 
 async fn checkpoint(sess: &Session) {
     let Some(store) = &sess.store else { return };
+    let _checkpoint = sess.checkpoint_lock.lock().await;
     let file_calls_done: Vec<_> = sess
         .file_calls_done
         .lock()

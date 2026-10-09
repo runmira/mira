@@ -241,9 +241,11 @@ export function Sidebar({
 
   useEffect(() => {
     if (!showArchived) return;
+    let cancelled = false;
     listSessions({ all: true, archived: true })
-      .then((s) => { setArchived(s); setError(null); })
-      .catch((e) => setError(String(e.message ?? e)));
+      .then((s) => { if (!cancelled) { setArchived(s); setError(null); } })
+      .catch((e) => { if (!cancelled) setError(String(e.message ?? e)); });
+    return () => { cancelled = true; };
   }, [showArchived, refreshKey, localVersion]);
 
   const refresh = () => setLocalVersion((n) => n + 1);
@@ -325,6 +327,7 @@ export function Sidebar({
   }
 
   function toggleSelectMode() {
+    setPeek(null);
     setSelecting((v) => !v);
     setSelected(new Set());
   }
@@ -1210,7 +1213,7 @@ function SessionRow({
       // Leaving the row hands the sidebar a null target; the card's own
       // short linger means sliding straight onto the next row doesn't
       // make it blink.
-      onFocus={(e) => { if (e.target === e.currentTarget) onPeek?.(e.currentTarget.getBoundingClientRect()); }}
+      onFocus={(e) => { if (!selecting && e.target === e.currentTarget) onPeek?.(e.currentTarget.getBoundingClientRect()); }}
       onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) onPeek?.(null); }}
       onMouseLeave={onPeek && !selecting ? () => onPeek(null) : undefined}
       onKeyDown={(e) => {

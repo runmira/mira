@@ -1,6 +1,6 @@
 //! The pull request behind each worktree chat, for the sidebar.
 //!
-//! One paginated GitHub request per repository covers every branch in it, and the answer
+//! A branch-specific GitHub query avoids downloading repository history. Its answer
 //! is kept for a minute. A stale answer is served while a fresh one is
 //! fetched in the background, so a sidebar refresh only ever waits on GitHub
 //! the first time it sees a repository, and then for a few seconds at most.
@@ -47,8 +47,8 @@ struct Entry {
     fetching: bool,
 }
 
-fn cache() -> &'static Mutex<HashMap<PathBuf, Entry>> {
-    static CACHE: OnceLock<Mutex<HashMap<PathBuf, Entry>>> = OnceLock::new();
+fn cache() -> &'static Mutex<HashMap<(PathBuf, String), Entry>> {
+    static CACHE: OnceLock<Mutex<HashMap<(PathBuf, String), Entry>>> = OnceLock::new();
     CACHE.get_or_init(Default::default)
 }
 
@@ -59,15 +59,18 @@ pub fn lookup(repo: &Path, branch: &str) -> Option<SessionPr> {
     loop {
         let answered = {
             let mut entries = cache().lock().unwrap_or_else(|e| e.into_inner());
-            let entry = entries.entry(repo.to_path_buf()).or_default();
+            let entry = entries
+                .entry((repo.to_path_buf(), branch.to_string()))
+                .or_default();
             let stale = entry.at.is_none_or(|at| at.elapsed() >= FRESH);
             if stale && !entry.fetching {
                 entry.fetching = true;
                 let repo = repo.to_path_buf();
+                let branch = branch.to_string();
                 std::thread::spawn(move || {
-                    let prs = Arc::new(fetch(&repo));
+                    let prs = Arc::new(fetch(&repo, &branch));
                     let mut entries = cache().lock().unwrap_or_else(|e| e.into_inner());
-                    let entry = entries.entry(repo).or_default();
+                    let entry = entries.entry((repo, branch)).or_default();
                     *entry = Entry {
                         at: Some(Instant::now()),
                         prs,
@@ -105,18 +108,23 @@ struct GhPr {
     closed_at: Option<String>,
 }
 
-/// Every PR in the repository, by branch. Empty when `gh` is missing,
+/// Recent PRs for the requested branch only. Empty when `gh` is missing,
 /// signed out or offline: the sidebar just shows no PR.
-fn fetch(repo: &Path) -> HashMap<String, SessionPr> {
+fn fetch(repo: &Path, branch: &str) -> HashMap<String, SessionPr> {
     let out = std::process::Command::new("gh")
         .current_dir(repo)
         .env("GH_PROMPT_DISABLED", "1")
         .args([
-            "api",
-            "repos/{owner}/{repo}/pulls?state=all&sort=created&direction=desc&per_page=100",
-            "--paginate",
-            "--jq",
-            r#"map({number, title, url: .html_url, state: (if .merged_at then "MERGED" else (.state | ascii_upcase) end), isDraft: .draft, headRefName: .head.ref, isCrossRepository: (.head.repo.full_name != .base.repo.full_name), mergedAt: .merged_at, closedAt: .closed_at})"#,
+            "pr",
+            "list",
+            "--state",
+            "all",
+            "--head",
+            branch,
+            "--limit",
+            "100",
+            "--json",
+            "number,title,url,state,isDraft,headRefName,isCrossRepository,mergedAt,closedAt",
         ])
         .output();
     match out {
@@ -126,7 +134,7 @@ fn fetch(repo: &Path) -> HashMap<String, SessionPr> {
 }
 
 fn by_branch(json: &[u8]) -> HashMap<String, SessionPr> {
-    // With --paginate, gh emits one JSON array per page.
+    // Accept a JSON array or concatenated arrays from paginated callers.
     let pages = serde_json::Deserializer::from_slice(json).into_iter::<Vec<GhPr>>();
     let mut prs = Vec::new();
     for page in pages {

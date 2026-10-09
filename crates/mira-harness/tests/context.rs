@@ -154,3 +154,34 @@ async fn dropping_a_result_shrinks_the_next_request() {
 
     assert!(sess.drop_tool_result("nope").await.is_err());
 }
+
+#[tokio::test]
+async fn concurrent_title_and_resume_checkpoints_preserve_both_changes() {
+    use mira_harness::persist::{file_store::FileStore, SessionStore, SettleMarks};
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Arc::new(FileStore::at(tmp.path().join("sessions")).unwrap());
+    let sess = Session::new(
+        SessionConfig::new("test-model"),
+        "sys",
+        Arc::new(Scripted::default()),
+        Arc::new(Registry::new()),
+        Arc::new(Mutex::new(
+            Policy::from_config(&PolicyConfig::default()).unwrap(),
+        )),
+        Arc::new(AutoApprover { approve_asks: true }),
+        ToolContext::new(
+            tmp.path(),
+            Arc::new(mira_sandbox::Sandbox::default_scrubbed()),
+        ),
+    )
+    .with_store(store.clone());
+    sess.save_now().await;
+    let settle = SettleMarks::set(false);
+    tokio::join!(sess.set_title("Generated title"), async {
+        sess.set_sidebar_flags(false, None, settle).await;
+        sess.save_now().await;
+    });
+    let saved = store.load(&sess.id).await.unwrap();
+    assert_eq!(saved.title.as_deref(), Some("Generated title"));
+    assert_eq!(saved.settle, settle);
+}

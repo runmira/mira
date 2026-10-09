@@ -1818,18 +1818,8 @@ pub(crate) async fn send_input(
     let session = slot.session.read().await;
     let (pinned, archived_at, _) = session.sidebar_flags().await;
     let settle = mira_harness::persist::SettleMarks::set(false);
-    if let Some(store) = &state.store {
-        let mut record = store
-            .load(&slot.id)
-            .await
-            .map_err(|e| format!("load: {e}"))?;
-        record.settle = settle;
-        store
-            .save(&record)
-            .await
-            .map_err(|e| format!("save: {e}"))?;
-    }
     session.set_sidebar_flags(pinned, archived_at, settle).await;
+    session.save_now().await;
     drop(session);
 
     *slot
@@ -2029,13 +2019,17 @@ async fn prompt_agent(
                     .map(str::trim)
                     .find(|l| !l.is_empty())
                     .map(|l| l.chars().take(300).collect::<String>());
-                let _ = events.send(ServerMsg::Error {
-                    text: match (explain_agent_error(&e), said) {
-                        (Some(why), _) => why,
-                        (None, Some(said)) => format!("agent turn failed: {e}. It said: {said}"),
-                        (None, None) => format!("agent turn failed: {e}"),
-                    },
-                });
+                let text = match (explain_agent_error(&e), said) {
+                    (Some(why), _) => why,
+                    (None, Some(said)) => format!("agent turn failed: {e}. It said: {said}"),
+                    (None, None) => format!("agent turn failed: {e}"),
+                };
+                *recovery_slot
+                    .engine
+                    .sidebar_failure
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = Some(text.chars().take(160).collect());
+                let _ = events.send(ServerMsg::Error { text });
                 // Nothing else will end this turn: the prompt never landed.
                 turn_port.turn_ended("error");
             }

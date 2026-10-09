@@ -31,11 +31,13 @@ test('filters keep waiting work out of Working and failures out of Settled', () 
   assert.equal(matchesSidebar(failed, '', 'settled'), false);
 });
 
-test('one primary status prioritizes attention, running, failure, and unread results', () => {
+test('one primary status prioritizes attention, failure, running, and unread results', () => {
   assert.deepEqual(rowStatus({ ...chat, running: true, needs_attention: true, attention_reason: 'Approve 3 actions' }, true),
     { label: 'Approve 3 actions', tone: 'attention' });
   assert.equal(rowStatus({ ...chat, running: true }, true).label, 'Working');
   assert.equal(rowStatus({ ...chat, failure_reason: 'Error' }, true).label, 'Needs a retry');
+  assert.deepEqual(rowStatus({ ...chat, running: true, failure_reason: 'Error' }),
+    { label: 'Needs a retry', tone: 'error' });
   assert.equal(rowStatus(chat, true).label, 'PR ready');
   assert.equal(rowStatus({ ...chat, pr: null }, true).label, 'Finished');
   assert.equal(rowStatus(chat).label, 'PR open');
