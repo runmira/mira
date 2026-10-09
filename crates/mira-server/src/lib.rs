@@ -928,8 +928,18 @@ pub fn system_prompt(cwd: &std::path::Path, registry: &Registry) -> String {
         cwd = cwd.display(),
     );
 
-    base
+    // Orientation in a large repository (see `mira_tools::repo_map`). Built
+    // once, when the session starts, so it stays part of the cached prefix.
+    match mira_tools::repo_map::prompt_section_for(cwd, REPO_MAP_WAIT) {
+        Some(map) => format!("{base}\n\n{map}"),
+        None => base,
+    }
 }
+
+/// How long a new session waits for the repository map. A first build of
+/// a big repository that takes longer finishes in the background, for the
+/// next session.
+const REPO_MAP_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 fn first_sentence(s: &str) -> String {
     let s = s.trim();

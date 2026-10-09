@@ -17,6 +17,7 @@ pub mod preview;
 pub mod prompt;
 pub mod registry;
 pub mod remote;
+pub mod repo_map;
 pub mod tasks;
 pub mod tool;
 

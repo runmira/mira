@@ -20,6 +20,7 @@ pub mod glob;
 pub mod grep;
 pub mod memory;
 pub mod read;
+pub mod repo_map;
 pub(crate) mod rg;
 pub mod rustfmt;
 pub mod skill;
@@ -53,6 +54,7 @@ pub fn register_core(reg: &mut Registry) {
     reg.register(find_callers::FindCallers);
     reg.register(ast_grep::AstGrep);
     reg.register(file_outline::FileOutline);
+    reg.register(repo_map::RepoMapTool);
     reg.register(git::GitStatus);
     reg.register(git::GitDiff);
     reg.register(git::GitLog);
