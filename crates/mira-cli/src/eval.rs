@@ -28,7 +28,7 @@ use clap::Args;
 use futures::StreamExt;
 use mira_ai::build_chat_provider;
 use mira_core::ToolCall;
-use mira_harness::{Approver, HarnessEvent, Session, SessionConfig};
+use mira_harness::{Approver, HarnessEvent, Session, SessionConfig, UsageTotals};
 use mira_policy::{Decision, Mode, Policy, PolicyConfig};
 use mira_sandbox::Sandbox;
 use mira_tools::{builtin, Registry, ToolContext};
@@ -98,7 +98,25 @@ struct TaskOutcome {
     reason: String,
     tokens_in: u64,
     tokens_out: u64,
+    /// Input tokens served from the provider's prompt cache.
+    cached_tokens: u64,
+    /// Input tokens written to the prompt cache (billed at a premium).
+    cache_write_tokens: u64,
+    /// What the task cost, when the model's price is known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cost_usd: Option<f64>,
     duration_secs: f64,
+}
+
+impl TaskOutcome {
+    /// Share of input tokens served from the prompt cache.
+    fn cache_share(&self) -> f64 {
+        if self.tokens_in == 0 {
+            0.0
+        } else {
+            self.cached_tokens as f64 / self.tokens_in as f64
+        }
+    }
 }
 
 /// Auto-approve every gated call. Only used inside evals — we already
@@ -154,12 +172,17 @@ pub async fn run(cli: &crate::Cli, args: EvalArgs) -> Result<()> {
         let outcome = run_task(&spec, &path, provider.clone(), &settings, &args).await;
         // Progress goes to stderr so `--json` on stdout stays parseable.
         eprintln!(
-            "[{}] {} ({:.1}s, {}→{} tok) — {}",
+            "[{}] {} ({:.1}s, {}→{} tok, {:.0}% from cache{}) — {}",
             if outcome.pass { "PASS" } else { "FAIL" },
             outcome.name,
             outcome.duration_secs,
             outcome.tokens_in,
             outcome.tokens_out,
+            outcome.cache_share() * 100.0,
+            outcome
+                .cost_usd
+                .map(|c| format!(", ${c:.4}"))
+                .unwrap_or_default(),
             outcome.reason,
         );
         outcomes.push(outcome);
@@ -228,15 +251,22 @@ async fn run_task(
     let name = spec.name.clone().unwrap_or_else(|| "?".into());
     let start = Instant::now();
     let timeout_secs = args.timeout_secs.unwrap_or(spec.timeout_secs);
+    let fixture = spec
+        .fixture
+        .as_ref()
+        .map(|f| task_path.parent().unwrap_or(Path::new(".")).join(f));
     match run_task_inner(spec, task_path, provider, settings, timeout_secs).await {
-        Ok((final_text, tokens_in, tokens_out, work_dir)) => {
-            let (pass, reason) = evaluate(spec, &final_text, &work_dir);
+        Ok((final_text, usage, work_dir)) => {
+            let (pass, reason) = evaluate(spec, &final_text, &work_dir, fixture.as_deref());
             TaskOutcome {
                 name,
                 pass,
                 reason,
-                tokens_in,
-                tokens_out,
+                tokens_in: usage.prompt_tokens,
+                tokens_out: usage.completion_tokens,
+                cached_tokens: usage.cached_input_tokens,
+                cache_write_tokens: usage.cache_write_tokens,
+                cost_usd: mira_ai::pricing::cost_usd(&settings.model, usage.as_token_usage()),
                 duration_secs: start.elapsed().as_secs_f64(),
             }
         }
@@ -246,6 +276,9 @@ async fn run_task(
             reason: format!("runner error: {e:#}"),
             tokens_in: 0,
             tokens_out: 0,
+            cached_tokens: 0,
+            cache_write_tokens: 0,
+            cost_usd: None,
             duration_secs: start.elapsed().as_secs_f64(),
         },
     }
@@ -257,7 +290,7 @@ async fn run_task_inner(
     provider: Arc<dyn mira_ai::ChatProvider>,
     settings: &crate::ResolvedSettings,
     timeout_secs: u64,
-) -> Result<(String, u64, u64, PathBuf)> {
+) -> Result<(String, UsageTotals, PathBuf)> {
     // Fresh tempdir per task. `keep` intentionally not called — TempDir
     // drops (and its cleanup fires) at scope exit.
     let tmp = tempfile::tempdir().context("create tempdir")?;
@@ -270,8 +303,8 @@ async fn run_task_inner(
     }
 
     let session = unattended_session(&work_dir, provider, settings, None)?;
-    let turn = drive_turn(session, &spec.prompt);
-    let (final_text, tokens_in, tokens_out) =
+    let turn = drive_turn_usage(session, &spec.prompt);
+    let (final_text, usage) =
         match tokio::time::timeout(Duration::from_secs(timeout_secs), turn).await {
             Ok(r) => r?,
             Err(_) => bail!("timed out after {timeout_secs}s"),
@@ -282,7 +315,7 @@ async fn run_task_inner(
     // (into_path) so the caller can inspect and the drop happens
     // only after the outcome is scored.
     let kept = tmp.keep();
-    Ok((final_text, tokens_in, tokens_out, kept))
+    Ok((final_text, usage, kept))
 }
 
 /// A session working in `work_dir` with nobody to ask: core tools, yolo
@@ -333,10 +366,16 @@ pub(crate) fn unattended_session(
 /// Send `prompt` and wait for the turn: the last round's text, and
 /// input / output tokens.
 pub(crate) async fn drive_turn(session: Session, prompt: &str) -> Result<(String, u64, u64)> {
+    let (text, usage) = drive_turn_usage(session, prompt).await?;
+    Ok((text, usage.prompt_tokens, usage.completion_tokens))
+}
+
+/// [`drive_turn`], with the turn's full token usage (cache reads and
+/// writes included).
+async fn drive_turn_usage(session: Session, prompt: &str) -> Result<(String, UsageTotals)> {
     let mut stream = session.send(prompt.to_owned()).await;
     let mut text = String::new();
-    let mut tokens_in = 0u64;
-    let mut tokens_out = 0u64;
+    let mut usage = UsageTotals::default();
     // TurnComplete fires at the end of every model round (including
     // the final one). We keep the accumulated text — clearing on the
     // next round's first Token — so at Done we hold the last round's
@@ -354,18 +393,23 @@ pub(crate) async fn drive_turn(session: Session, prompt: &str) -> Result<(String
             HarnessEvent::TurnComplete => {
                 round_just_finished = true;
             }
-            HarnessEvent::Usage { round, .. } => {
-                tokens_in += round.prompt_tokens as u64;
-                tokens_out += round.completion_tokens as u64;
-            }
+            HarnessEvent::Usage { round, .. } => usage.add_round(round),
             HarnessEvent::Done => break,
             _ => {}
         }
     }
-    Ok((text, tokens_in, tokens_out))
+    Ok((text, usage))
 }
 
-fn evaluate(spec: &TaskSpec, final_text: &str, work_dir: &Path) -> (bool, String) {
+/// Score a finished task. `verify` runs in the task's directory with
+/// `EVAL_FIXTURE` set to the untouched fixture, so it can check what the
+/// agent shouldn't have changed.
+fn evaluate(
+    spec: &TaskSpec,
+    final_text: &str,
+    work_dir: &Path,
+    fixture: Option<&Path>,
+) -> (bool, String) {
     if let Some(pat) = &spec.expect_grep {
         let re = match Regex::new(&format!("(?i){pat}")) {
             Ok(r) => r,
@@ -379,11 +423,17 @@ fn evaluate(spec: &TaskSpec, final_text: &str, work_dir: &Path) -> (bool, String
         }
     }
     if let Some(cmd) = &spec.verify {
-        let out = std::process::Command::new("bash")
-            .arg("-lc")
-            .arg(cmd)
-            .current_dir(work_dir)
-            .output();
+        let mut command = std::process::Command::new("bash");
+        command.arg("-lc").arg(cmd).current_dir(work_dir);
+        if let Some(fixture) = fixture {
+            command.env(
+                "EVAL_FIXTURE",
+                fixture
+                    .canonicalize()
+                    .unwrap_or_else(|_| fixture.to_owned()),
+            );
+        }
+        let out = command.output();
         match out {
             Ok(o) if o.status.success() => {}
             Ok(o) => {
@@ -426,28 +476,46 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 fn print_summary(outcomes: &[TaskOutcome]) {
     println!();
     println!(
-        "{:<40} {:>6} {:>10} {:>10} {:>8}",
-        "task", "result", "tok in", "tok out", "time"
+        "{:<32} {:>6} {:>9} {:>8} {:>7} {:>9} {:>7}",
+        "task", "result", "tok in", "tok out", "cached", "cost", "time"
     );
-    println!("{}", "-".repeat(78));
+    println!("{}", "-".repeat(84));
     for o in outcomes {
-        let name = if o.name.len() > 40 {
-            format!("{}…", &o.name[..39])
+        let name = if o.name.len() > 32 {
+            format!("{}…", &o.name[..31])
         } else {
             o.name.clone()
         };
         println!(
-            "{:<40} {:>6} {:>10} {:>10} {:>7.1}s",
+            "{:<32} {:>6} {:>9} {:>8} {:>6.0}% {:>9} {:>6.1}s",
             name,
             if o.pass { "PASS" } else { "FAIL" },
             o.tokens_in,
             o.tokens_out,
+            o.cache_share() * 100.0,
+            o.cost_usd
+                .map(|c| format!("${c:.4}"))
+                .unwrap_or_else(|| "?".into()),
             o.duration_secs,
         );
     }
     let pass = outcomes.iter().filter(|o| o.pass).count();
+    let tokens_in: u64 = outcomes.iter().map(|o| o.tokens_in).sum();
+    let cached: u64 = outcomes.iter().map(|o| o.cached_tokens).sum();
+    let cost: Option<f64> = outcomes.iter().map(|o| o.cost_usd).sum();
     println!();
-    println!("{}/{} passed", pass, outcomes.len());
+    println!(
+        "{}/{} passed · {:.0}% of input from cache{}",
+        pass,
+        outcomes.len(),
+        if tokens_in == 0 {
+            0.0
+        } else {
+            cached as f64 * 100.0 / tokens_in as f64
+        },
+        cost.map(|c| format!(" · ${c:.4} total"))
+            .unwrap_or_default()
+    );
     for o in outcomes.iter().filter(|o| !o.pass) {
         println!("  ✗ {}: {}", o.name, o.reason);
     }

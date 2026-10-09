@@ -1,0 +1,15 @@
+name: config-edit
+prompt: |
+  In `package.json`: bump the version to the next minor version, and add a
+  `test` script that runs `vitest run`. Keep everything else as it is.
+fixture: 10-config-edit-fixture
+verify: |
+  python3 -c '
+  import json
+  p = json.load(open("package.json"))
+  assert p["version"] == "1.5.0", p["version"]
+  assert p["scripts"] == {"build": "vite build", "dev": "vite", "test": "vitest run"}, p["scripts"]
+  assert p["dependencies"] == {"react": "^19.0.0"}
+  assert p["name"] == "demo-app"
+  '
+timeout_secs: 120

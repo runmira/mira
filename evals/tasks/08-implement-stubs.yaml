@@ -1,0 +1,7 @@
+name: implement-stubs
+prompt: |
+  The `textkit` package has four functions that raise NotImplementedError.
+  Implement each one as its docstring describes, so `python3 -m unittest` passes.
+fixture: 08-implement-stubs-fixture
+verify: python3 -m unittest -q 2>&1
+timeout_secs: 300
