@@ -1,3 +1,4 @@
+import { ErrorNotice } from './ErrorNotice';
 import { m, useReducedMotion } from 'framer-motion';
 import { PREF_KEYS, useBoolPref } from '../lib/prefs';
 import { matchesSidebar, rowStatus, settledPeriod, type SidebarFilter } from '../lib/sidebar';
@@ -154,6 +155,10 @@ export function Sidebar({
   const [storedSessions, setSessions] = useState<SessionSummary[]>([]);
   const sessions = useMemo(() => runningSessions == null ? storedSessions
     : storedSessions.map(session => ({...session, running:runningSessions.has(session.id)})), [storedSessions,runningSessions]);
+  const [listError, setListError] = useState<string | null>(null);
+  const [archivedError, setArchivedError] = useState<string | null>(null);
+  const [listLoading, setListLoading] = useState(false);
+  const [archivedLoading, setArchivedLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(() => loadCollapsed());
   // Chats whose forks are folded away (the fork pill on the row).
@@ -233,18 +238,22 @@ export function Sidebar({
     // in-memory below. The server excludes archived ones here; they come
     // through the separate archived fetch when the user opens that view.
     let cancelled = false;
+    setListLoading(true);
     listSessions({ all: true })
-      .then((s) => { if (!cancelled) {setSessions(s); setError(null);} })
-      .catch((e) => {if (!cancelled) setError(String(e.message ?? e));});
+      .then((s) => { if (!cancelled) {setSessions(s); setListError(null);} })
+      .catch((e) => {if (!cancelled) setListError(String(e.message ?? e));})
+      .finally(() => { if (!cancelled) setListLoading(false); });
     return () => {cancelled = true;};
   }, [refreshKey, localVersion]);
 
   useEffect(() => {
     if (!showArchived) return;
     let cancelled = false;
+    setArchivedLoading(true);
     listSessions({ all: true, archived: true })
-      .then((s) => { if (!cancelled) { setArchived(s); setError(null); } })
-      .catch((e) => { if (!cancelled) setError(String(e.message ?? e)); });
+      .then((s) => { if (!cancelled) { setArchived(s); setArchivedError(null); } })
+      .catch((e) => { if (!cancelled) setArchivedError(String(e.message ?? e)); })
+      .finally(() => { if (!cancelled) setArchivedLoading(false); });
     return () => { cancelled = true; };
   }, [showArchived, refreshKey, localVersion]);
 
@@ -804,8 +813,9 @@ export function Sidebar({
           {projectsPinned && <span aria-hidden className="sidebar-scroll-fade" />}
           </div>
 
-          {error && <Empty>error: {error}</Empty>}
-          {!error && groups.length === 0 && <Empty>{searching ? 'No chats match' : 'No saved chats yet'}</Empty>}
+          {listError && <ErrorNotice title="Couldn't load chats" description="Check that Mira is running, then try again." details={listError} pending={listLoading} onRetry={refresh} />}
+          {error && <ErrorNotice title="Couldn't complete this action" description="Refresh the list to check its current state before trying the action again." details={error} retryLabel="Refresh chats" onRetry={() => { setError(null); refresh(); }} />}
+          {!error && !listError && !listLoading && groups.length === 0 && <Empty>{searching ? 'No chats match' : 'No saved chats yet'}</Empty>}
 
           {groups.map((g) => {
             const isCollapsed = !searching && collapsed.has(g.cwd);
@@ -1011,10 +1021,11 @@ export function Sidebar({
                 open={showArchived}
                 onToggle={() => setShowArchived((v) => !v)}
               />
+              {showArchived && archivedError && <ErrorNotice title="Couldn't load archived chats" description="Try again when Mira is connected." details={archivedError} pending={archivedLoading} onRetry={refresh} />}
               {showArchived && (
                 <div className="flex flex-col gap-0.5 pl-1">
-                  {archived === null && <Empty>Loading…</Empty>}
-                  {archived !== null && archived.length === 0 && <Empty>Nothing archived</Empty>}
+                  {archived === null && !archivedError && <Empty>Loading…</Empty>}
+                  {archived !== null && archived.length === 0 && !archivedError && !archivedLoading && <Empty>Nothing archived</Empty>}
                   {archived?.map((s) => (
                     <ArchivedRow
                       key={s.id}
