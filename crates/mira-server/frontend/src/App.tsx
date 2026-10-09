@@ -1848,6 +1848,7 @@ export default function App() {
             {
               kind: 'error',
               text: `${describeAcpStop(stopped)}${detail}`,
+              responseFailure: true,
             },
           ];
         });

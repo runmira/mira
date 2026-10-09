@@ -1,3 +1,5 @@
+import type { Entry } from '../transcript/entries';
+
 export function isProviderLimitFailure(text: string): boolean {
   return /rate.?limit|usage limit|quota|429/.test(text.toLowerCase());
 }
@@ -11,4 +13,14 @@ export function chatFailure(text: string): { title: string; description: string;
   if (/timed out|timeout/.test(lower)) return { title: 'The response timed out', description: 'The provider stopped responding. You can retry this message when the connection is ready.', settings: false };
   if (/stream error|connection|network|fetch|socket|econn/.test(lower)) return { title: 'The response was interrupted', description: 'The connection ended before the response finished. Any partial answer remains above.', settings: false };
   return { title: 'The request could not finish', description: 'Review any work already completed before retrying this message.', settings: true };
+}
+
+/** Only explicit failed-turn events authorize resending a user prompt. */
+export function isResponseFailure(entry: Entry): boolean {
+  return (entry.kind === 'warning' && isFatalChatWarning(entry.text))
+    || (entry.kind === 'error' && entry.responseFailure === true);
+}
+
+export function failedTurnPrompt(user: Entry | null): Extract<Entry, { kind: 'msg' }> | null {
+  return user?.kind === 'msg' && user.msg.role === 'user' && user.msg.input_intent !== 'steer' ? user : null;
 }

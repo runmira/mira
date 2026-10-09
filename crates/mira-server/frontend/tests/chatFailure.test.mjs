@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import ts from 'typescript';
 const source = ts.transpileModule(readFileSync(new URL('../src/lib/chatFailure.ts', import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.ESNext } }).outputText;
-const { chatFailure, isFatalChatWarning, isProviderLimitFailure } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+const { chatFailure, isFatalChatWarning, isProviderLimitFailure, isResponseFailure, failedTurnPrompt } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 
 test('ordinary warnings remain transcript notes; native failures get recovery', () => {
   for (const text of ['provider error: rejected', 'stream error: reset', 'stream timed out after 300s']) assert.equal(isFatalChatWarning(text), true);
@@ -18,4 +18,19 @@ test('auth failures direct users to connection settings, transient errors explai
 test('existing provider-limit recovery only replaces limit notices', () => {
   for (const text of ['provider error: 429', 'usage limit reached', 'rate_limit exceeded', 'quota exceeded']) assert.equal(isProviderLimitFailure(text), true);
   assert.equal(isProviderLimitFailure('stream error: connection reset'), false);
+});
+
+test('action errors cannot authorize message retry, even if their text sounds fatal', () => {
+  assert.equal(isResponseFailure({kind:'error',text:'new chat: network error'}), false);
+  assert.equal(isResponseFailure({kind:'error',text:'new chat: provider error: 401'}), false);
+  assert.equal(isResponseFailure({kind:'warning',text:'stream error: reset'}), true);
+  assert.equal(isResponseFailure({kind:'error',text:'Agent stopped',responseFailure:true}), true);
+});
+test('failed-turn retry targets the opening prompt rather than steering input', () => {
+  const opening = {kind:'msg',msg:{role:'user',content:'Original task'}};
+  const steer = {kind:'msg',msg:{role:'user',content:'Added instructions',input_intent:'steer'}};
+  assert.equal(failedTurnPrompt(opening), opening);
+  assert.equal(failedTurnPrompt(steer), null);
+  assert.equal(failedTurnPrompt(null), null);
+  assert.equal(failedTurnPrompt({kind:'msg',msg:{role:'assistant',content:'Answer'}}), null);
 });
