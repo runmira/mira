@@ -22,6 +22,9 @@ export type UsageRingData = {
   /** Where the chat is summarized automatically, when Mira manages it. */
   compactAt: number | null;
   tokens: { prompt: number; completion: number; cached: number } | null;
+  /** Why the provider's prompt cache last went unused when it should have
+   *  been reused (a rewritten message, a model or tool change, expiry). */
+  cacheMiss?: string | null;
   costUsd: number | null;
   limitsTitle: string | null;
   limits: UsageLimit[];
@@ -178,13 +181,18 @@ export function UsageRing({ data }: { data: UsageRingData }) {
           <div className="flex items-center justify-between gap-2 px-3.5 py-2.5 text-[12px] text-muted-foreground">
             <span className="font-mono tabular-nums">
               {data.tokens
-                ? `↑${shortNum(data.tokens.prompt)} ↓${shortNum(data.tokens.completion)}${data.tokens.cached ? ` · ${shortNum(data.tokens.cached)} cached` : ''}`
+                ? `↑${shortNum(data.tokens.prompt)} ↓${shortNum(data.tokens.completion)}${data.tokens.cached ? ` · ${Math.round((data.tokens.cached / Math.max(data.tokens.prompt, 1)) * 100)}% from cache` : ''}`
                 : 'This session'}
             </span>
             {data.costUsd != null && (
               <span className="font-mono font-semibold tabular-nums text-emerald-400">{formatDollars(data.costUsd)}</span>
             )}
           </div>
+        )}
+        {data.cacheMiss && (
+          <p className="border-t border-border/50 px-3.5 py-2 text-[11.5px] text-amber-700 dark:text-amber-400">
+            Last request paid full price: {data.cacheMiss}.
+          </p>
         )}
       </PopoverContent>
     </Popover>

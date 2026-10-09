@@ -60,6 +60,19 @@ async fn run(program: &PathBuf, args: &[&str], timeout: Duration) -> Result<Vec<
     }
 }
 
+/// Whether this machine has any device to drive: iOS Simulators (Xcode's
+/// simulator runtime set up) or the Android SDK's tools. Checked once.
+pub fn available() -> bool {
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        let simulators = xcrun().is_some()
+            && std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .is_some_and(|h| h.join("Library/Developer/CoreSimulator/Devices").is_dir());
+        simulators || adb().is_some() || emulator().is_some()
+    })
+}
+
 fn xcrun() -> Option<PathBuf> {
     cfg!(target_os = "macos")
         .then(|| PathBuf::from("/usr/bin/xcrun"))

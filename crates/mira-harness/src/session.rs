@@ -325,6 +325,9 @@ pub struct Session {
     /// Tool results before this index in `history` are cleared in what's
     /// sent to the model (see `history::clear_old_tool_results`).
     cleared_before: Arc<Mutex<usize>>,
+    /// The memory chosen for each turn, attached to that turn's prompt in
+    /// what's sent (see `build_request_messages`).
+    memory_blocks: Arc<Mutex<Vec<MemoryAttachment>>>,
     /// Human-readable nickname. Generated post-hoc by the server after the
     /// first assistant reply; the harness itself only reads + persists it.
     title: Arc<Mutex<Option<String>>>,
@@ -429,6 +432,9 @@ pub struct Session {
     /// The last request's size estimate and the provider's count for it,
     /// which calibrate the context breakdown (see `crate::context`).
     calibration: Arc<std::sync::Mutex<crate::context::Calibration>>,
+    /// Spots requests that should have been served from the provider's
+    /// cache and weren't (see `cache_watch`).
+    cache_watch: Arc<std::sync::Mutex<crate::cache_watch::CacheWatch>>,
 }
 
 /// Build the sandbox this session starts with, derived from the policy's
@@ -513,6 +519,7 @@ impl Session {
             history: Arc::new(Mutex::new(vec![Message::system(system_prompt)])),
             archived: Arc::new(Mutex::new(Vec::new())),
             cleared_before: Arc::new(Mutex::new(0)),
+            memory_blocks: Arc::new(Mutex::new(Vec::new())),
             title: Arc::new(Mutex::new(None)),
             turns: Arc::new(Mutex::new(Vec::new())),
             usage: Arc::new(Mutex::new(UsageTotals::default())),
@@ -543,6 +550,7 @@ impl Session {
             previews: Arc::new(Mutex::new(HashMap::new())),
             current_cancel: Arc::new(Mutex::new(None)),
             calibration: Arc::default(),
+            cache_watch: Arc::default(),
         }
     }
 
@@ -595,6 +603,7 @@ impl Session {
             history: Arc::new(Mutex::new(record.messages)),
             archived: Arc::new(Mutex::new(record.archived)),
             cleared_before: Arc::new(Mutex::new(0)),
+            memory_blocks: Arc::new(Mutex::new(Vec::new())),
             title: Arc::new(Mutex::new(record.title)),
             turns: Arc::new(Mutex::new(record.turns)),
             usage: Arc::new(Mutex::new(record.usage)),
@@ -625,6 +634,7 @@ impl Session {
             previews: Arc::new(Mutex::new(record.previews)),
             current_cancel: Arc::new(Mutex::new(None)),
             calibration: Arc::default(),
+            cache_watch: Arc::default(),
         }
     }
 
@@ -1673,6 +1683,7 @@ async fn run_loop(
                     estimated: crate::context::estimate_request(&req.messages, &req.tools),
                     reported: None,
                 };
+            let print = crate::cache_watch::RequestPrint::of(&req);
             let mut stream = match sess.provider.stream(req).await {
                 Ok(s) => s,
                 Err(e) => {
@@ -1761,12 +1772,21 @@ async fn run_loop(
                             let window =
                                 crate::history::context_window_with(&cfg.model, cfg.context_window)
                                     as u64;
+                            let cache_miss = sess
+                                .cache_watch
+                                .lock()
+                                .unwrap_or_else(|p| p.into_inner())
+                                .observe(print.clone(), &round);
+                            if let Some(why) = &cache_miss {
+                                tracing::info!(session = %sess.id, "prompt cache missed: {why}");
+                            }
                             let _ = tx
                                 .send(HarnessEvent::Usage {
                                     round,
                                     totals,
                                     context_window: window,
                                     compact_at: crate::history::auto_compact_at(window),
+                                    cache_miss,
                                 })
                                 .await;
                         }
@@ -2541,21 +2561,20 @@ async fn dispatch_call(sess: &Session, call: ToolCall, tx: &mpsc::Sender<Harness
         // most recent few are worth resending. Older ones collapse to a
         // text note so the model still knows one was taken.
         if has_images {
-            crate::history::prune_old_images(&mut history, crate::history::KEEP_RECENT_IMAGES);
+            crate::history::prune_old_images_in_batches(
+                &mut history,
+                crate::history::KEEP_RECENT_IMAGES,
+            );
         }
-        // Dedup: if this was a read / write / edit for a specific path,
-        // collapse any older `read_file` result targeting the same path
-        // to a short stub. Same-lock scope so the walk sees exactly the
-        // history we just pushed into.
-        if ok {
-            if let Some(path) = crate::history::path_from_args(&call.function.arguments) {
-                crate::history::dedup_reads_for_path(
-                    &mut history,
-                    &call.id,
-                    &call.function.name,
-                    &path,
-                );
-            }
+        // Older `read_file` results superseded by a later read, write or
+        // edit of the same file collapse to a short stub, in batches (see
+        // `STUB_SUPERSEDED_MIN_CHARS`). Same-lock scope so the walk sees
+        // exactly the history we just pushed into.
+        if ok && crate::history::path_from_args(&call.function.arguments).is_some() {
+            crate::history::stub_superseded_reads(
+                &mut history,
+                crate::history::STUB_SUPERSEDED_MIN_CHARS,
+            );
         }
     }
     let _ = tx.send(HarnessEvent::ToolEnd(result)).await;
@@ -3162,6 +3181,33 @@ pub struct DroppedResult {
     pub tokens: u64,
 }
 
+/// Memory chosen for one turn: which prompt it goes with (its index in
+/// `history` and a hash of it, so a prompt compaction moved or removed no
+/// longer matches), and the block, or `None` when it would only repeat an
+/// earlier one.
+struct MemoryAttachment {
+    at: usize,
+    prompt: u64,
+    block: Option<String>,
+}
+
+fn prompt_hash(m: &Message) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    m.content.hash(&mut h);
+    h.finish()
+}
+
+/// What's sent to the model: `history` with old tool results cleared, and
+/// memory attached to the prompts.
+///
+/// Memory is chosen once per turn, when its prompt is first sent, and
+/// rides on that prompt as `<memory-context>`. It used to be re-chosen on
+/// every request and put right after the system prompt, where any change
+/// in what was chosen made the provider re-read the whole conversation at
+/// full price. Attached to the turn's prompt and never changed after, it
+/// only ever adds to the end of what's cached, and a later turn repeats it
+/// only when the selection changed.
 async fn build_request_messages(sess: &Session) -> Vec<Message> {
     let mut msgs = {
         let history = sess.history.lock().await;
@@ -3171,42 +3217,60 @@ async fn build_request_messages(sess: &Session) -> Vec<Message> {
     let Some(snap) = sess.memory_snapshot.as_ref() else {
         return msgs;
     };
-    // Retrieval: build a query from the recent conversation so scored
-    // selection can weight relevant entries above stale ones. When
-    // retrieval is off, pass `None` and the snapshot falls back to the
-    // legacy dump-everything shape.
-    let query = if sess.memory_retrieval.enabled {
-        Some(build_memory_query(
-            &msgs,
-            sess.memory_retrieval.token_budget,
-        ))
-    } else {
-        None
-    };
-    let Some(block) = snap.render(query.as_ref()).await else {
+    let Some(prompt_at) = msgs
+        .iter()
+        .rposition(|m| m.role == Role::User && !crate::history::is_summary(m))
+    else {
         return msgs;
     };
-    // Find the first system message and insert the memory block right
-    // after it. If there is no system message (shouldn't happen in
-    // practice — `Session::new` always seeds one — but the code is
-    // defensive) fall back to prepending.
-    let insert_at = msgs
+    let matches = |a: &MemoryAttachment, msgs: &[Message]| {
+        msgs.get(a.at)
+            .is_some_and(|m| m.role == Role::User && prompt_hash(m) == a.prompt)
+    };
+    let mut blocks = sess.memory_blocks.lock().await;
+    let prompt = prompt_hash(&msgs[prompt_at]);
+    if !blocks
         .iter()
-        .position(|m| matches!(m.role, Role::System))
-        .map(|i| i + 1)
-        .unwrap_or(0);
-    msgs.insert(insert_at, Message::system(block));
+        .any(|a| a.at == prompt_at && a.prompt == prompt)
+    {
+        // Retrieval: build a query from the recent conversation so scored
+        // selection can weight relevant entries above stale ones. When
+        // retrieval is off, pass `None` and the snapshot falls back to the
+        // legacy dump-everything shape.
+        let query = if sess.memory_retrieval.enabled {
+            Some(build_memory_query(
+                &msgs,
+                sess.memory_retrieval.token_budget,
+            ))
+        } else {
+            None
+        };
+        let block = snap.render(query.as_ref()).await;
+        let current = blocks
+            .iter()
+            .rev()
+            .find(|a| a.block.is_some() && matches(a, &msgs))
+            .and_then(|a| a.block.clone());
+        blocks.push(MemoryAttachment {
+            at: prompt_at,
+            prompt,
+            block: block.filter(|b| Some(b) != current.as_ref()),
+        });
+    }
+    for a in blocks.iter() {
+        let Some(block) = &a.block else { continue };
+        if !matches(a, &msgs) {
+            continue;
+        }
+        let m = &mut msgs[a.at];
+        let text = m.content.take().unwrap_or_default();
+        m.content = Some(format!(
+            "{text}\n\n<memory-context>\n{block}\n</memory-context>"
+        ));
+    }
     msgs
 }
 
-/// Build a retrieval query from the tail of the conversation. Weighted
-/// toward the most-recent user message (that's what the model is about
-/// to act on) plus a small slice of the preceding assistant/tool turns
-/// for topical context. Deliberately cheap — no tokenisation here; the
-/// scorer does that itself.
-///
-/// Cap on total query length keeps IDF calculation snappy even when a
-/// tool result was gigantic in the last round.
 fn build_memory_query(msgs: &[Message], token_budget: usize) -> MemoryQuery {
     const QUERY_CHAR_CAP: usize = 4000;
     const QUERY_TAIL_MESSAGES: usize = 6;
