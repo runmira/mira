@@ -604,7 +604,9 @@ impl Session {
             history: Arc::new(Mutex::new(record.messages)),
             archived: Arc::new(Mutex::new(record.archived)),
             cleared_before: Arc::new(Mutex::new(0)),
-            file_calls_done: Arc::default(),
+            file_calls_done: Arc::new(StdMutex::new(
+                record.file_calls_done.iter().cloned().collect(),
+            )),
             title: Arc::new(Mutex::new(record.title)),
             turns: Arc::new(Mutex::new(record.turns)),
             usage: Arc::new(Mutex::new(record.usage)),
@@ -2726,6 +2728,13 @@ fn rewind_index(hist: &[Message], text: &str, occurrence: usize) -> Option<usize
 
 async fn checkpoint(sess: &Session) {
     let Some(store) = &sess.store else { return };
+    let file_calls_done: Vec<_> = sess
+        .file_calls_done
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .cloned()
+        .collect();
     let record = SessionRecord {
         id: sess.id.clone(),
         cwd: sess.tool_ctx.cwd.clone(),
@@ -2737,6 +2746,7 @@ async fn checkpoint(sess: &Session) {
         title: sess.title.lock().await.clone(),
         turns: sess.turns.lock().await.clone(),
         usage: *sess.usage.lock().await,
+        file_calls_done,
         parent_id: sess.parent_id.clone(),
         forked_from: sess.forked_from.clone(),
         agent: sess.agent.lock().await.clone(),
@@ -3168,7 +3178,10 @@ fn parse_extraction_bullets(text: &str) -> Vec<String> {
 fn format_round_for_extraction(msgs: &[Message]) -> String {
     let mut out = String::new();
     for m in msgs {
-        let content = match m.content.as_deref() {
+        // A prompt without the memory and hook context attached to it, so
+        // the extractor doesn't learn saved memory again (or spend its input
+        // budget on it).
+        let content = match m.content.as_deref().map(crate::history::strip_hook_context) {
             Some(c) if !c.trim().is_empty() => c,
             _ => continue,
         };
@@ -3266,7 +3279,9 @@ fn build_memory_query(msgs: &[Message], token_budget: usize) -> MemoryQuery {
         let Some(body) = m.content.as_deref() else {
             continue;
         };
-        let trimmed = body.trim();
+        // Not the memory (or hook context) already attached to a prompt:
+        // scoring memory against itself favours what was chosen before.
+        let trimmed = crate::history::strip_hook_context(body).trim();
         if trimmed.is_empty() {
             continue;
         }

@@ -122,29 +122,58 @@ const IMAGE_PRUNED_NOTE: &str = "[screenshot omitted from history — a newer on
 /// survive); its text gains a short note so the transcript still reads
 /// coherently. Idempotent: already-pruned messages have no images left
 /// and are skipped.
-/// The prompt as the user typed it: drops the `<hook-context>` and
-/// `<memory-context>` blocks added for the model, so UIs (titles,
-/// sidebars, transcripts) and edit-matching see only the user's words.
-pub fn strip_hook_context(text: &str) -> &str {
-    let cut = ["<hook-context>", "<memory-context>"]
-        .iter()
-        .filter_map(|tag| text.find(tag))
-        .min();
-    match cut {
-        Some(i) => text[..i].trim_end(),
-        None => text,
+/// Blocks Mira appends to a prompt for the model, as
+/// `\n\n<tag>\n…\n</tag>` at its very end: prompt hooks' context, then the
+/// turn's memory.
+const ADDED_BLOCKS: [&str; 2] = ["hook-context", "memory-context"];
+
+/// A stored prompt split into what the user typed and the blocks appended
+/// to it for the model (tag, body), innermost last. Only blocks at the very
+/// end, in exactly the appended form, count: the same tag written anywhere
+/// in the user's own text is theirs.
+fn split_added_blocks(text: &str) -> (&str, Vec<(&'static str, &str)>) {
+    let mut user = text;
+    let mut blocks = Vec::new();
+    'peel: loop {
+        let trimmed = user.trim_end();
+        for tag in ADDED_BLOCKS {
+            let (open, close) = (format!("\n\n<{tag}>\n"), format!("\n</{tag}>"));
+            let Some(inner) = trimmed.strip_suffix(close.as_str()) else {
+                continue;
+            };
+            if let Some(i) = inner.rfind(open.as_str()) {
+                blocks.push((tag, &inner[i + open.len()..]));
+                user = &trimmed[..i];
+                continue 'peel;
+            }
+        }
+        break;
     }
+    if blocks.is_empty() {
+        (text, blocks)
+    } else {
+        (user.trim_end(), blocks)
+    }
+}
+
+/// The prompt as the user typed it: drops the `<hook-context>` and
+/// `<memory-context>` blocks appended for the model, so UIs (titles,
+/// sidebars, transcripts), edit-matching and memory itself see only the
+/// user's words.
+pub fn strip_hook_context(text: &str) -> &str {
+    split_added_blocks(text).0
 }
 
 /// What a turn's memory says when memory was cleared since the last one.
 pub const NO_MEMORY: &str =
     "No saved memory applies now; disregard memory given earlier in this conversation.";
 
-/// The `<memory-context>` block a prompt carries, if any.
+/// The `<memory-context>` block appended to a prompt, if any.
 pub fn memory_context(text: &str) -> Option<&str> {
-    let start = text.find("<memory-context>\n")? + "<memory-context>\n".len();
-    let end = text[start..].find("\n</memory-context>")?;
-    Some(&text[start..start + end])
+    split_added_blocks(text)
+        .1
+        .into_iter()
+        .find_map(|(tag, body)| (tag == "memory-context").then_some(body))
 }
 
 /// [`prune_old_images`], but only once [`IMAGE_PRUNE_BATCH`] more than
@@ -798,6 +827,22 @@ mod tests {
             "ok"
         );
         assert_eq!(memory_context("plain"), None);
+    }
+
+    #[test]
+    fn a_tag_the_user_typed_is_theirs() {
+        // Written in the message, not appended: nothing is hidden.
+        let typed = "what does <memory-context> do? and </memory-context>";
+        assert_eq!(strip_hook_context(typed), typed);
+        assert_eq!(memory_context(typed), None);
+        // Typed, and then memory appended: only the appended block goes.
+        let stored =
+            "explain <memory-context> please\n\n<memory-context>\nuses pnpm\n</memory-context>";
+        assert_eq!(
+            strip_hook_context(stored),
+            "explain <memory-context> please"
+        );
+        assert_eq!(memory_context(stored), Some("uses pnpm"));
     }
 
     #[test]
