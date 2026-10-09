@@ -16,6 +16,16 @@ mira --provider anthropic --model claude-haiku-4-5 eval     # every task
 mira eval --task python                                     # names containing "python"
 ```
 
+With an agent's own CLI instead of Mira's harness, on its subscription
+(no API key):
+
+```bash
+mira eval --agent claude --agent-model haiku                # Claude Code, `claude -p`
+```
+
+Claude Code runs with only the task folder's settings, so your own hooks,
+plugins and MCP servers stay out of the results.
+
 Each task in `evals/tasks/` is a YAML file: a `prompt`, an optional
 `fixture` folder copied into a fresh temp directory first, and how it's
 graded:

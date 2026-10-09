@@ -61,6 +61,24 @@ pub struct EvalArgs {
     /// `timeout_secs`. Useful for capping cost in CI.
     #[arg(long)]
     pub timeout_secs: Option<u64>,
+
+    /// Run the tasks with an agent's own CLI instead of Mira's harness, on
+    /// that agent's sign-in (a subscription, no API key): `claude` runs
+    /// Claude Code headless (`claude -p`).
+    #[arg(long, value_enum)]
+    pub agent: Option<EvalAgent>,
+
+    /// The model for `--agent`, as that agent names it (`haiku`, `sonnet`).
+    /// Defaults to the agent's own default.
+    #[arg(long, requires = "agent")]
+    pub agent_model: Option<String>,
+}
+
+/// Agents `mira eval --agent` can run the tasks with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum EvalAgent {
+    /// Claude Code (`claude -p`).
+    Claude,
 }
 
 #[derive(Debug, Deserialize)]
@@ -255,8 +273,8 @@ async fn run_task(
         .fixture
         .as_ref()
         .map(|f| task_path.parent().unwrap_or(Path::new(".")).join(f));
-    match run_task_inner(spec, task_path, provider, settings, timeout_secs).await {
-        Ok((final_text, usage, work_dir)) => {
+    match run_task_inner(spec, task_path, provider, settings, args, timeout_secs).await {
+        Ok((final_text, usage, reported_cost, work_dir)) => {
             let (pass, reason) = evaluate(spec, &final_text, &work_dir, fixture.as_deref());
             TaskOutcome {
                 name,
@@ -266,7 +284,9 @@ async fn run_task(
                 tokens_out: usage.completion_tokens,
                 cached_tokens: usage.cached_input_tokens,
                 cache_write_tokens: usage.cache_write_tokens,
-                cost_usd: mira_ai::pricing::cost_usd(&settings.model, usage.as_token_usage()),
+                cost_usd: reported_cost.or_else(|| {
+                    mira_ai::pricing::cost_usd(&settings.model, usage.as_token_usage())
+                }),
                 duration_secs: start.elapsed().as_secs_f64(),
             }
         }
@@ -289,8 +309,9 @@ async fn run_task_inner(
     task_path: &Path,
     provider: Arc<dyn mira_ai::ChatProvider>,
     settings: &crate::ResolvedSettings,
+    args: &EvalArgs,
     timeout_secs: u64,
-) -> Result<(String, UsageTotals, PathBuf)> {
+) -> Result<(String, UsageTotals, Option<f64>, PathBuf)> {
     // Fresh tempdir per task. `keep` intentionally not called — TempDir
     // drops (and its cleanup fires) at scope exit.
     let tmp = tempfile::tempdir().context("create tempdir")?;
@@ -302,20 +323,99 @@ async fn run_task_inner(
             .with_context(|| format!("copy fixture {}", src.display()))?;
     }
 
-    let session = unattended_session(&work_dir, provider, settings, None)?;
-    let turn = drive_turn_usage(session, &spec.prompt);
-    let (final_text, usage) =
-        match tokio::time::timeout(Duration::from_secs(timeout_secs), turn).await {
+    let timeout = Duration::from_secs(timeout_secs);
+    let (final_text, usage, reported_cost) = if let Some(agent) = args.agent {
+        run_with_agent(
+            agent,
+            args.agent_model.as_deref(),
+            &spec.prompt,
+            &work_dir,
+            timeout,
+        )
+        .await?
+    } else {
+        let session = unattended_session(&work_dir, provider, settings, None)?;
+        let turn = drive_turn_usage(session, &spec.prompt);
+        let (text, usage) = match tokio::time::timeout(timeout, turn).await {
             Ok(r) => r?,
             Err(_) => bail!("timed out after {timeout_secs}s"),
         };
+        (text, usage, None)
+    };
 
     // Return `work_dir` explicitly — verify commands run there. We
     // must keep `tmp` alive until the verify pass completes; leak
     // (into_path) so the caller can inspect and the drop happens
     // only after the outcome is scored.
     let kept = tmp.keep();
-    Ok((final_text, usage, kept))
+    Ok((final_text, usage, reported_cost, kept))
+}
+
+/// One task with an agent's own CLI, in `work_dir`, unattended: the final
+/// answer, the tokens it reported, and the cost it reported.
+///
+/// Claude Code runs with only the task directory's settings
+/// (`--setting-sources project`), so the user's own hooks, plugins and MCP
+/// servers don't change results or add cost, and with permission checks
+/// off, as Mira's own runs are: the task directory is a throwaway copy.
+async fn run_with_agent(
+    agent: EvalAgent,
+    model: Option<&str>,
+    prompt: &str,
+    work_dir: &Path,
+    timeout: Duration,
+) -> Result<(String, UsageTotals, Option<f64>)> {
+    match agent {
+        EvalAgent::Claude => {
+            let mut cmd = tokio::process::Command::new("claude");
+            cmd.arg("-p")
+                .arg(prompt)
+                .args(["--output-format", "json"])
+                .args(["--permission-mode", "bypassPermissions"])
+                .args(["--setting-sources", "project"])
+                .arg("--no-session-persistence");
+            if let Some(model) = model {
+                cmd.args(["--model", model]);
+            }
+            cmd.current_dir(work_dir)
+                .stdin(std::process::Stdio::null())
+                .kill_on_drop(true);
+            let out = match tokio::time::timeout(timeout, cmd.output()).await {
+                Ok(out) => out.context("run `claude` (is Claude Code installed and signed in?)")?,
+                Err(_) => bail!("timed out after {}s", timeout.as_secs()),
+            };
+            let result: serde_json::Value =
+                serde_json::from_slice(&out.stdout).with_context(|| {
+                    let err = String::from_utf8_lossy(&out.stderr);
+                    format!(
+                        "`claude` gave no result (exit {}): {}",
+                        out.status.code().unwrap_or(-1),
+                        err.lines().last().unwrap_or("")
+                    )
+                })?;
+            Ok(claude_result(&result))
+        }
+    }
+}
+
+/// The answer, usage and cost from `claude -p --output-format json`.
+fn claude_result(result: &serde_json::Value) -> (String, UsageTotals, Option<f64>) {
+    let usage = &result["usage"];
+    let n = |key: &str| usage[key].as_u64().unwrap_or(0);
+    let cached = n("cache_read_input_tokens");
+    let written = n("cache_creation_input_tokens");
+    let totals = UsageTotals {
+        prompt_tokens: n("input_tokens") + cached + written,
+        completion_tokens: n("output_tokens"),
+        cached_input_tokens: cached,
+        cache_write_tokens: written,
+        rounds: result["num_turns"].as_u64().unwrap_or(1) as u32,
+    };
+    (
+        result["result"].as_str().unwrap_or_default().to_owned(),
+        totals,
+        result["total_cost_usd"].as_f64(),
+    )
 }
 
 /// A session working in `work_dir` with nobody to ask: core tools, yolo
@@ -526,5 +626,33 @@ fn print_summary(outcomes: &[TaskOutcome]) {
     );
     for o in outcomes.iter().filter(|o| !o.pass) {
         println!("  ✗ {}: {}", o.name, o.reason);
+    }
+}
+
+#[cfg(test)]
+mod agent_tests {
+    use super::*;
+
+    #[test]
+    fn claude_json_maps_to_usage_and_cost() {
+        let result = serde_json::json!({
+            "type": "result",
+            "result": "Done. ANSWER: 12 hours",
+            "num_turns": 3,
+            "total_cost_usd": 0.0123,
+            "usage": {
+                "input_tokens": 100,
+                "cache_read_input_tokens": 9_000,
+                "cache_creation_input_tokens": 900,
+                "output_tokens": 50
+            }
+        });
+        let (text, usage, cost) = claude_result(&result);
+        assert_eq!(text, "Done. ANSWER: 12 hours");
+        assert_eq!(usage.prompt_tokens, 10_000);
+        assert_eq!(usage.cached_input_tokens, 9_000);
+        assert_eq!(usage.cache_write_tokens, 900);
+        assert_eq!(usage.completion_tokens, 50);
+        assert_eq!(cost, Some(0.0123));
     }
 }
