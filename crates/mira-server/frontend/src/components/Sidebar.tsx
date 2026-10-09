@@ -1237,11 +1237,9 @@ function SessionRow({
           {checked ? <CircleCheck className="size-4" /> : <Circle className="size-3.5" />}
         </span>
       )}
-      {/* Fixed columns so every row lines up with the next: leading icon,
-       *  title (a fork count hugs the title text), git mark, time. Each
-       *  column keeps its width when empty, so the marks and times of a
-       *  whole list sit on the same vertical lines. */}
-      <span className="grid min-w-0 grid-cols-[16px_minmax(0,1fr)_16px_24px] items-center gap-2 text-left">
+      {/* Keep the title and git indicator on the first row, with
+       *  secondary context and the timestamp aligned below. */}
+      <span className="grid min-w-0 grid-cols-[16px_minmax(0,1fr)_24px] items-center gap-2 text-left">
         {selecting ? (
           <span />
         ) : depth > 0 && !launched ? (
@@ -1306,10 +1304,15 @@ function SessionRow({
         )}
         </span>
 
-        {/* Just the mark: the details are on hover and in the peek. */}
-        <span className="flex justify-center">{!selecting && <GitMark session={session} />}</span>
-        <span className="text-right text-[10.5px] leading-4 tabular-nums text-muted-foreground/50">
-          {timeAgo(session.updated_at)}
+        <span className="flex flex-col items-end self-start">
+          <span className="flex h-4 w-6 items-center justify-end">
+            {!selecting && <GitMark session={session} />}
+          </span>
+          {!selecting && (
+            <span className="mt-0.5 text-right text-[10.5px] leading-[15px] tabular-nums text-muted-foreground/50">
+              {timeAgo(session.updated_at)}
+            </span>
+          )}
         </span>
       </span>
       {/* Single far-right slot. Status circle sits underneath the row
