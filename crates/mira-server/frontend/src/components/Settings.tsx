@@ -1,3 +1,4 @@
+import { ErrorNotice } from './ErrorNotice';
 import React, { useEffect, useMemo, useState } from 'react';
 import { OAUTH_PROVIDERS, PROVIDER_FAVICON_DOMAIN, PROVIDER_PRESETS } from '../lib/providers';
 import { needsLightTile } from '../lib/models';
@@ -268,6 +269,8 @@ export function SettingsSurface({
   onAcpStart = () => {},
 }: SurfaceProps) {
   const [view, setView] = useState<SettingsView | null>(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const [loadingSettings, setLoadingSettings] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT);
   const [saving, setSaving] = useState(false);
@@ -298,13 +301,16 @@ export function SettingsSurface({
   // shouldn't re-hydrate on every section click — that would drop
   // in-progress edits when the user navigates away and back.
   useEffect(() => {
-    setLoadError(null);
-    setSaveError(null);
+    let cancelled = false;
+    setLoadingSettings(true);
     getSettings()
-      .then((v) => { setView(v); hydrate(v); })
-      .catch((e) => setLoadError(String(e.message ?? e)));
+      .then((v) => { if (!cancelled) { setView(v); hydrate(v); setLoadError(null); } })
+      .catch((e) => { if (!cancelled) setLoadError(String(e.message ?? e)); })
+      .finally(() => { if (!cancelled) setLoadingSettings(false); });
+    return () => { cancelled = true; };
+    // Only hydrate an initial successful load; retry is offered for failed loads.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [loadAttempt]);
 
   function hydrate(v: SettingsView) {
     const pName = v.default_provider ?? 'openrouter';
@@ -420,11 +426,8 @@ export function SettingsSurface({
           section === 'hooks' || section === 'keybindings' || section === 'skills' || section === 'agents' || section === 'subagents' ? 'max-w-5xl' :
           'max-w-2xl',
         )}>
-          {loadError && (
-            <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12.5px] text-destructive">
-              error: {loadError}
-            </div>
-          )}
+          {loadError && <ErrorNotice title="Couldn't load settings" description="Check that Mira is running, then try again. Local appearance preferences are still available." details={loadError} pending={loadingSettings} onRetry={() => setLoadAttempt(n => n + 1)} />}
+          {saveError && <ErrorNotice title="Couldn't save settings" description="Your edits are still here. Use Retry save below to try again." details={saveError} />}
           {!view && !loadError && (
             <div className="text-[12.5px] text-muted-foreground">loading…</div>
           )}
@@ -492,14 +495,14 @@ export function SettingsSurface({
       {view && (
         <div className="flex shrink-0 items-center justify-between border-t border-border/60 px-6 py-3">
           <div className="text-[11.5px] text-muted-foreground">
-            {saveError ? <span className="text-destructive">{saveError}</span>
+            {saveError ? <span className="text-destructive">Changes not saved</span>
               : dirty ? 'Unsaved changes'
               : 'Up to date'}
           </div>
           <div className="flex items-center gap-2">
             <Button variant="outline" onClick={onExit} disabled={saving}>Back to app</Button>
             <Button onClick={onSave} disabled={saving || !dirty}>
-              {saving ? 'Saving…' : 'Save'}
+              {saving ? 'Saving…' : saveError ? 'Retry save' : 'Save'}
             </Button>
           </div>
         </div>

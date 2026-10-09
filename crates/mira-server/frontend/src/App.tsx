@@ -1848,6 +1848,7 @@ export default function App() {
             {
               kind: 'error',
               text: `${describeAcpStop(stopped)}${detail}`,
+              responseFailure: true,
             },
           ];
         });
@@ -2505,6 +2506,7 @@ export default function App() {
   const stableOpenAgent = useStableCallback(openAgentTab);
   const stableOpenFile = useStableCallback(openFileTab);
   const stableSetMode = useStableCallback(onSetMode);
+  const stableFailureSettings = useStableCallback(() => { openSettings(); setSettingsSection(acpDriver ? 'agents' : 'provider'); });
   const editMessage = useStableCallback((entry: Entry, text: string) => onResend(entries.indexOf(entry), text));
   const restoreMessage = useStableCallback((entry: Entry) => void askRestore(entries.indexOf(entry)));
   const forkMessage = useStableCallback((entry: Entry) => void forkAt(entries.indexOf(entry)));
@@ -3426,6 +3428,8 @@ export default function App() {
                         onSetMode={stableSetMode}
                         approvalViaDialog={false}
                         recovery={i === turns.length - 1 ? recoveryBySession[sessionId]?.at(-1) : undefined}
+                        failureRetryEnabled={i === turns.length - 1 && !!turn.user}
+                        onFailureSettings={stableFailureSettings}
                         recoveryDisabled={status !== 'open' || busy}
                         onRecoveryAction={changeRecovery}
                         offscreenOk={false}
