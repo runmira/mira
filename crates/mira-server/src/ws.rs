@@ -1813,6 +1813,25 @@ pub(crate) async fn send_input(
         .supersede_recovery(input_id.as_deref())
         .await?;
     crate::message_queue::publish(slot).await;
+    // User input brings a chat back to its project. Persist this separately
+    // from turn-end activity, including for external-agent sessions.
+    let session = slot.session.read().await;
+    let (pinned, archived_at, _) = session.sidebar_flags().await;
+    let settle = mira_harness::persist::SettleMarks::set(false);
+    if let Some(store) = &state.store {
+        let mut record = store
+            .load(&slot.id)
+            .await
+            .map_err(|e| format!("load: {e}"))?;
+        record.settle = settle;
+        store
+            .save(&record)
+            .await
+            .map_err(|e| format!("save: {e}"))?;
+    }
+    session.set_sidebar_flags(pinned, archived_at, settle).await;
+    drop(session);
+
     before_prompt(slot, &text, None).await;
     if slot.acp_launch.lock().await.is_some() {
         prompt_agent(state, slot, text, images, input_id).await;

@@ -1,6 +1,6 @@
 //! The pull request behind each worktree chat, for the sidebar.
 //!
-//! One `gh pr list` per repository covers every branch in it, and the answer
+//! One paginated GitHub request per repository covers every branch in it, and the answer
 //! is kept for a minute. A stale answer is served while a fresh one is
 //! fetched in the background, so a sidebar refresh only ever waits on GitHub
 //! the first time it sees a repository, and then for a few seconds at most.
@@ -105,21 +105,18 @@ struct GhPr {
     closed_at: Option<String>,
 }
 
-/// Every recent PR in the repository, by branch. Empty when `gh` is missing,
+/// Every PR in the repository, by branch. Empty when `gh` is missing,
 /// signed out or offline: the sidebar just shows no PR.
 fn fetch(repo: &Path) -> HashMap<String, SessionPr> {
     let out = std::process::Command::new("gh")
         .current_dir(repo)
         .env("GH_PROMPT_DISABLED", "1")
         .args([
-            "pr",
-            "list",
-            "--state",
-            "all",
-            "--limit",
-            "100",
-            "--json",
-            "number,title,url,state,isDraft,headRefName,isCrossRepository,mergedAt,closedAt",
+            "api",
+            "repos/{owner}/{repo}/pulls?state=all&sort=created&direction=desc&per_page=100",
+            "--paginate",
+            "--jq",
+            r#"map({number, title, url: .html_url, state: (if .merged_at then "MERGED" else (.state | ascii_upcase) end), isDraft: .draft, headRefName: .head.ref, isCrossRepository: (.head.repo.full_name != .base.repo.full_name), mergedAt: .merged_at, closedAt: .closed_at})"#,
         ])
         .output();
     match out {
@@ -129,9 +126,15 @@ fn fetch(repo: &Path) -> HashMap<String, SessionPr> {
 }
 
 fn by_branch(json: &[u8]) -> HashMap<String, SessionPr> {
-    let Ok(prs) = serde_json::from_slice::<Vec<GhPr>>(json) else {
-        return HashMap::new();
-    };
+    // With --paginate, gh emits one JSON array per page.
+    let pages = serde_json::Deserializer::from_slice(json).into_iter::<Vec<GhPr>>();
+    let mut prs = Vec::new();
+    for page in pages {
+        let Ok(page) = page else {
+            return HashMap::new();
+        };
+        prs.extend(page);
+    }
     let mut out = HashMap::new();
     // `gh` lists newest first, so a branch's latest PR wins. A fork's
     // branch of the same name is someone else's work.
@@ -179,6 +182,20 @@ mod tests {
         assert_eq!(prs["feat/b"].state, PrState::Merged);
         assert_eq!(prs["feat/b"].closed_at, Some(1_790_899_200));
         assert!(!prs.contains_key("feat/c"));
+    }
+
+    #[test]
+    fn paginated_output_keeps_older_branches_and_newest_pr() {
+        let json = br#"[
+            {"number":101,"title":"New","url":"u101","state":"OPEN","headRefName":"same"}
+        ]
+        [
+            {"number":2,"title":"Old","url":"u2","state":"CLOSED","headRefName":"same"},
+            {"number":1,"title":"Still open","url":"u1","state":"OPEN","headRefName":"older"}
+        ]"#;
+        let prs = by_branch(json);
+        assert_eq!(prs["same"].number, 101);
+        assert_eq!(prs["older"].state, PrState::Open);
     }
 
     #[test]

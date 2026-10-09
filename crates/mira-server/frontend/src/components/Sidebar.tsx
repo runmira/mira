@@ -220,14 +220,14 @@ export function Sidebar({
     return () => window.clearInterval(id);
   }, [anyRunning]);
 
-  // A PR merges on GitHub, not here: while any chat has one open, look
-  // again every minute so its row (and the Settled shelf) catch up.
-  const anyOpenPr = sessions.some((s) => s.pr?.state === 'open' || s.pr?.state === 'draft');
+  // Refresh worktree PRs even before the first answer arrives, and after
+  // a PR closes: GitHub changes and slow initial fetches are not pushed.
+  const anyWorktree = sessions.some((s) => !!s.worktree_branch);
   useEffect(() => {
-    if (!anyOpenPr) return;
+    if (!anyWorktree) return;
     const id = window.setInterval(refresh, 60_000);
     return () => window.clearInterval(id);
-  }, [anyOpenPr]);
+  }, [anyWorktree]);
 
   // Chats that finished while you were looking at something else get a
   // dot until you open them. Remembered across reloads.
@@ -438,6 +438,11 @@ export function Sidebar({
         onPin={(p) => void flagSession(s.id, { pinned: p })}
         onArchive={() => void flagSession(s.id, { archived: true })}
         onSettle={(v) => void flagSession(s.id, { settled: v })}
+        onSetBackgroundMode={
+          onSetBackgroundMode
+            ? (mode) => onSetBackgroundMode(s.id, mode).catch((e) => setError(String(e.message ?? e)))
+            : undefined
+        }
       />
     );
   }
@@ -781,6 +786,7 @@ export function Sidebar({
                         onDelete={() => removeSession(s.id)}
                         onPin={(p) => void flagSession(s.id, { pinned: p })}
                         onArchive={() => void flagSession(s.id, { archived: true })}
+                        settled={isSettled(s)}
                         onSettle={(v) => void flagSession(s.id, { settled: v })}
                         onSetBackgroundMode={
                           onSetBackgroundMode
@@ -1091,6 +1097,7 @@ function SessionRow({
       // make it blink.
       onMouseLeave={onPeek && !selecting ? () => onPeek(null) : undefined}
       onKeyDown={(e) => {
+        if (e.target !== e.currentTarget) return;
         if (e.key !== 'Enter' && e.key !== ' ') return;
         e.preventDefault();
         if (selecting) onToggleSelect?.();
