@@ -981,10 +981,12 @@ pub async fn set_session_flags(
     }
     if let Some(slot) = live {
         let session = slot.session.read().await;
-        session
-            .set_sidebar_flags(record.pinned, record.archived_at, record.settle)
-            .await;
-        session.save_now().await;
+        if let Err(e) = session
+            .save_sidebar_flags(record.pinned, record.archived_at, record.settle)
+            .await
+        {
+            return err(StatusCode::INTERNAL_SERVER_ERROR, format!("save: {e}"));
+        }
     } else if let Err(e) = store.save(&record).await {
         return err(StatusCode::INTERNAL_SERVER_ERROR, format!("save: {e}"));
     }

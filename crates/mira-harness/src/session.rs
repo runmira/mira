@@ -1003,6 +1003,27 @@ impl Session {
         *self.settle.lock().await = settle;
     }
 
+    /// Save sidebar choices atomically with checkpoints; restore live flags on failure.
+    pub async fn save_sidebar_flags(
+        &self,
+        pinned: bool,
+        archived_at: Option<u64>,
+        settle: crate::persist::SettleMarks,
+    ) -> Result<(), crate::persist::StoreError> {
+        let _checkpoint = self.checkpoint_lock.lock().await;
+        let previous = self.sidebar_flags().await;
+        *self.pinned.lock().await = pinned;
+        *self.archived_at.lock().await = archived_at;
+        *self.settle.lock().await = settle;
+        let result = checkpoint_unlocked(self).await;
+        if result.is_err() {
+            *self.pinned.lock().await = previous.0;
+            *self.archived_at.lock().await = previous.1;
+            *self.settle.lock().await = previous.2;
+        }
+        result
+    }
+
     /// Expose the session's undo/conflict guard. `None` when the FileGuard
     /// failed to initialise (see the warn! in `new` / `resume_from`).
     pub fn file_guard(&self) -> Option<Arc<FileGuard>> {
@@ -1030,6 +1051,11 @@ impl Session {
     /// round) — e.g. before forking it, so the copy is current.
     pub async fn save_now(&self) {
         checkpoint(self).await;
+    }
+
+    /// Persist immediately and report write failures to interactive callers.
+    pub async fn try_save_now(&self) -> Result<(), crate::persist::StoreError> {
+        checkpoint_result(self).await
     }
 
     pub async fn set_title(&self, title: impl Into<String>) {
@@ -2745,8 +2771,20 @@ fn rewind_index(hist: &[Message], text: &str, occurrence: usize) -> Option<usize
 }
 
 async fn checkpoint(sess: &Session) {
-    let Some(store) = &sess.store else { return };
+    if let Err(e) = checkpoint_result(sess).await {
+        warn!(session = %sess.id, %e, "session checkpoint failed");
+    }
+}
+
+async fn checkpoint_result(sess: &Session) -> Result<(), crate::persist::StoreError> {
     let _checkpoint = sess.checkpoint_lock.lock().await;
+    checkpoint_unlocked(sess).await
+}
+
+async fn checkpoint_unlocked(sess: &Session) -> Result<(), crate::persist::StoreError> {
+    let Some(store) = &sess.store else {
+        return Ok(());
+    };
     let file_calls_done: Vec<_> = sess
         .file_calls_done
         .lock()
@@ -2776,9 +2814,7 @@ async fn checkpoint(sess: &Session) {
         settle: *sess.settle.lock().await,
         previews: sess.previews.lock().await.clone(),
     };
-    if let Err(e) = store.save(&record).await {
-        warn!(session = %sess.id, %e, "session checkpoint failed");
-    }
+    store.save(&record).await
 }
 
 /// Truncate a tool result to a size the model can safely re-ingest.
