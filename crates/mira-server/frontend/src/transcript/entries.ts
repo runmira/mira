@@ -3,34 +3,37 @@
  * server frames (tokens, tool calls/results, ACP agent frames, turn stats).
  * Split out of App.tsx; everything here is (prev, frame) => next.
  */
-import { type Turn } from '../lib/turnActivity';
-import { appendNativeText, boundedOutput, appendNativeToolOutput } from '../lib/nativeStream';
-import { type CompactionEntry } from '../components/CompactionCard';
-import { prettyModel } from '../lib/models';
-import { agentCallToToolCall, agentToolResult, agentToolStatus, boundAgentOutput } from '../lib/agentTools';
-import {
-  parseSentAttachments,
-} from '../components/Composer';
-import { type ToolStatus } from '../components/ToolCard';
 import { type AskUserDecision } from '../components/AskUserCard';
-import { isDelegateTaskName } from '../components/DelegateCard';
+import { type CompactionEntry } from '../components/CompactionCard';
+import { parseSentAttachments } from '../components/composer/attachments';
 import type { DelegateStep } from '../components/DelegateCard';
+import { type ToolStatus } from '../components/ToolCard';
+import {
+  agentCallToToolCall,
+  agentToolResult,
+  agentToolStatus,
+  boundAgentOutput,
+} from '../lib/agentTools';
+import { isDelegateTaskName } from '../lib/delegateTools';
+import { prettyModel } from '../lib/models';
+import { appendNativeText, appendNativeToolOutput, boundedOutput } from '../lib/nativeStream';
+import { type Turn } from '../lib/turnActivity';
 import type {
+  AcpPlanItem,
+  AcpToolCall,
   AskUserProposal,
   DiffPreview,
+  EngineRef,
   Message,
   PlanProposal,
   PlanStep,
   ServerMsg,
+  SessionEngine,
   TaskItem,
   ToolCall,
   ToolResult,
-  UsageTotals,
-  AcpPlanItem,
-  AcpToolCall,
-  SessionEngine,
-  EngineRef,
   TurnMeta,
+  UsageTotals,
 } from '../types';
 
 /** Live per-child state for the subagent panel — mirrors the shape of
@@ -110,7 +113,14 @@ export type CompactEntry = CompactionEntry;
 
 export type ErrorEntry = { kind: 'error'; text: string; responseFailure?: boolean };
 
-export type MsgEntry = { steerRequestId?: string; kind: 'msg'; msg: Message; nativeMessageId?: string; nativeCompleted?: boolean; nativePhase?: string };
+export type MsgEntry = {
+  steerRequestId?: string;
+  kind: 'msg';
+  msg: Message;
+  nativeMessageId?: string;
+  nativeCompleted?: boolean;
+  nativePhase?: string;
+};
 
 /** The model's reasoning before a reply / tool call. `live` while
  *  `reasoning` frames are still arriving; sealed by the next token,
@@ -183,7 +193,8 @@ export type Entry = (
   | AcpPlanEntry
   | EngineSwitchEntry
   | HtmlRenderEntry
-  | TurnStatsEntry) & { transcriptTurnIndex?: number; providerTurnIndex?: number };
+  | TurnStatsEntry
+) & { transcriptTurnIndex?: number; providerTurnIndex?: number };
 
 export type TurnTiming = {
   startedAt: number;
@@ -232,7 +243,9 @@ export function stripHookContext(content: string | null | undefined): string | n
     const trimmed = user.trimEnd();
     const tag = ['hook-context', 'memory-context'].find((t) => {
       const close = `\n</${t}>`;
-      return trimmed.endsWith(close) && trimmed.slice(0, -close.length).lastIndexOf(`\n\n<${t}>\n`) >= 0;
+      return (
+        trimmed.endsWith(close) && trimmed.slice(0, -close.length).lastIndexOf(`\n\n<${t}>\n`) >= 0
+      );
     });
     if (!tag) break;
     user = trimmed.slice(0, trimmed.slice(0, -`\n</${tag}>`.length).lastIndexOf(`\n\n<${tag}>\n`));
@@ -269,17 +282,25 @@ export function engineFromRef(ref: EngineRef): SessionEngine {
  *  provider and model. */
 export function engineLabel(engine: SessionEngine): string {
   if (engine.kind === 'agent') return agentDisplayName(engine.driver ?? '', engine.display_name);
-  const provider = engine.display_name && !['Mira', 'provider'].includes(engine.display_name)
-    ? engine.display_name
-    : null;
-  return [provider, engine.model ? prettyModel(engine.model) : null].filter(Boolean).join(' · ') || 'Mira';
+  const provider =
+    engine.display_name && !['Mira', 'provider'].includes(engine.display_name)
+      ? engine.display_name
+      : null;
+  return (
+    [provider, engine.model ? prettyModel(engine.model) : null].filter(Boolean).join(' · ') ||
+    'Mira'
+  );
 }
 
 /** A driver slug as its product name, for places with no health data. */
 export function agentDisplayName(driver: string, fallback: string): string {
   const known: Record<string, string> = {
-    'claude-code': 'Claude Code', codex: 'Codex', cursor: 'Cursor', grok: 'Grok',
-    opencode: 'OpenCode', antigravity: 'Antigravity',
+    'claude-code': 'Claude Code',
+    codex: 'Codex',
+    cursor: 'Cursor',
+    grok: 'Grok',
+    opencode: 'OpenCode',
+    antigravity: 'Antigravity',
   };
   return known[driver] ?? (fallback && fallback !== driver ? fallback : driver);
 }
@@ -296,9 +317,19 @@ export function turnStatsIndex(entries: Entry[]): number {
 }
 
 /** Update the current turn's stats, creating them if this is the first. */
-export function withTurnStats(entries: Entry[], update: (s: TurnStatsEntry) => TurnStatsEntry): Entry[] {
+export function withTurnStats(
+  entries: Entry[],
+  update: (s: TurnStatsEntry) => TurnStatsEntry,
+): Entry[] {
   const i = turnStatsIndex(entries);
-  const blank: TurnStatsEntry = { kind: 'turn_stats', startedAt: null, endedAt: null, usage: null, model: null, costUsd: null };
+  const blank: TurnStatsEntry = {
+    kind: 'turn_stats',
+    startedAt: null,
+    endedAt: null,
+    usage: null,
+    model: null,
+    costUsd: null,
+  };
   const cur = i >= 0 ? (entries[i] as TurnStatsEntry) : blank;
   const next = update(cur);
   if (i >= 0) return [...entries.slice(0, i), next, ...entries.slice(i + 1)];
@@ -317,9 +348,17 @@ export function withTurnStats(entries: Entry[], update: (s: TurnStatsEntry) => T
 }
 
 /** Add one usage report (a delta) to the current turn. */
-export function addTurnUsage(entries: Entry[], f: Extract<ServerMsg, { type: 'acp_turn_usage' }>): Entry[] {
+export function addTurnUsage(
+  entries: Entry[],
+  f: Extract<ServerMsg, { type: 'acp_turn_usage' }>,
+): Entry[] {
   return withTurnStats(entries, (s) => {
-    const u = s.usage ?? { prompt_tokens: 0, completion_tokens: 0, cached_input_tokens: 0, rounds: 0 };
+    const u = s.usage ?? {
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      cached_input_tokens: 0,
+      rounds: 0,
+    };
     return {
       ...s,
       // Prompt tokens include cached input, as everywhere else.
@@ -378,7 +417,11 @@ export function settleTools(prev: Entry[]): Entry[] {
       return {
         ...e,
         status: 'denied' as const,
-        result: e.result ?? { call_id: e.call.id, content: 'Not run — the turn ended before it was answered.', is_error: true },
+        result: e.result ?? {
+          call_id: e.call.id,
+          content: 'Not run — the turn ended before it was answered.',
+          is_error: true,
+        },
       };
     }
     if (e.status === 'running') {
@@ -386,7 +429,11 @@ export function settleTools(prev: Entry[]): Entry[] {
       return {
         ...e,
         status: 'complete' as const,
-        result: e.result ?? { call_id: e.call.id, content: 'Interrupted — the turn ended before this finished.', is_error: true },
+        result: e.result ?? {
+          call_id: e.call.id,
+          content: 'Interrupted — the turn ended before this finished.',
+          is_error: true,
+        },
       };
     }
     return e;
@@ -411,21 +458,41 @@ export function appendToken(prevRaw: Entry[], text: string): Entry[] {
     };
     return [...prev.slice(0, -1), updated];
   }
-  return [...prev, { kind: 'msg', msg: { role: 'assistant', content: text, created_at: Date.now() } }];
+  return [
+    ...prev,
+    { kind: 'msg', msg: { role: 'assistant', content: text, created_at: Date.now() } },
+  ];
 }
 
 /** An agent's reply text. It is the turn's answer like Mira's own, so it
  *  becomes the same assistant message — same rendering, same copy action,
  *  same place in a collapsed turn. */
-export type NativeFrame = Extract<ServerMsg, { type: 'acp_text' | 'acp_text_snapshot' | 'acp_thought' | 'acp_tool_call' | 'acp_tool_call_update' | 'acp_tool_output_delta' }>;
+export type NativeFrame = Extract<
+  ServerMsg,
+  {
+    type:
+      | 'acp_text'
+      | 'acp_text_snapshot'
+      | 'acp_thought'
+      | 'acp_tool_call'
+      | 'acp_tool_call_update'
+      | 'acp_tool_output_delta';
+  }
+>;
 
 export function applyNativeFrame(entries: Entry[], frame: NativeFrame): Entry[] {
   switch (frame.type) {
-    case 'acp_text': return appendAcpText(entries, frame.text, frame.message_id);
-    case 'acp_text_snapshot': return appendNativeText(sealThought(entries), frame.text, frame.message_id, true);
-    case 'acp_thought': return appendAcpThought(entries, frame.text);
-    case 'acp_tool_call': case 'acp_tool_call_update': return upsertAcpTool(entries, frame.call);
-    case 'acp_tool_output_delta': return appendNativeToolOutput(entries, frame.id, frame.text);
+    case 'acp_text':
+      return appendAcpText(entries, frame.text, frame.message_id);
+    case 'acp_text_snapshot':
+      return appendNativeText(sealThought(entries), frame.text, frame.message_id, true);
+    case 'acp_thought':
+      return appendAcpThought(entries, frame.text);
+    case 'acp_tool_call':
+    case 'acp_tool_call_update':
+      return upsertAcpTool(entries, frame.call);
+    case 'acp_tool_output_delta':
+      return appendNativeToolOutput(entries, frame.id, frame.text);
   }
 }
 
@@ -439,7 +506,9 @@ export function appendAcpText(prev: Entry[], text: string, messageId?: string | 
 export function appendAcpThought(prev: Entry[], text: string): Entry[] {
   if (!text) return prev;
   const next = appendReasoning(prev, text);
-  return next.map((e, i) => i === next.length - 1 && e.kind === 'thought' ? { ...e, native: true } : e);
+  return next.map((e, i) =>
+    i === next.length - 1 && e.kind === 'thought' ? { ...e, native: true } : e,
+  );
 }
 
 /**
@@ -495,7 +564,8 @@ export function upsertAcpTool(prevRaw: Entry[], call: AcpToolCall): Entry[] {
       (merged as Record<string, unknown>)[k] = v;
     }
   }
-  if (AGENT_PROMPT_TOOLS.has(merged.name ?? '')) return idx >= 0 ? prev.filter((_, i) => i !== idx) : prev;
+  if (AGENT_PROMPT_TOOLS.has(merged.name ?? ''))
+    return idx >= 0 ? prev.filter((_, i) => i !== idx) : prev;
   const prior = idx >= 0 ? (prev[idx] as ToolEntry) : null;
   const entry: Entry = {
     kind: 'tool',
@@ -504,7 +574,9 @@ export function upsertAcpTool(prevRaw: Entry[], call: AcpToolCall): Entry[] {
     status: agentToolStatus(merged),
     result: (() => {
       const result = agentToolResult(merged);
-      return result ? { ...result, content: boundedOutput('', result.content || prior?.result?.content || '') } : prior?.result ?? null;
+      return result
+        ? { ...result, content: boundedOutput('', result.content || prior?.result?.content || '') }
+        : (prior?.result ?? null);
     })(),
     agentCall: merged,
     activityAt: ++toolActivitySequence,
@@ -524,8 +596,24 @@ export function upsertAcpTool(prevRaw: Entry[], call: AcpToolCall): Entry[] {
 export function upsertToolStart(prevRaw: Entry[], call: ToolCall): Entry[] {
   const prev = sealThought(prevRaw);
   const existing = prev.findIndex((e) => e.kind === 'tool' && e.call.id === call.id);
-  if (existing >= 0) return updateTool(prev, call.id, entry => ({ ...entry, status: 'running', startedAt: entry.startedAt ?? Date.now() }));
-  return [...prev, { kind: 'tool', call, preview: null, status: 'running', result: null, startedAt: Date.now(), activityAt: ++toolActivitySequence }];
+  if (existing >= 0)
+    return updateTool(prev, call.id, (entry) => ({
+      ...entry,
+      status: 'running',
+      startedAt: entry.startedAt ?? Date.now(),
+    }));
+  return [
+    ...prev,
+    {
+      kind: 'tool',
+      call,
+      preview: null,
+      status: 'running',
+      result: null,
+      startedAt: Date.now(),
+      activityAt: ++toolActivitySequence,
+    },
+  ];
 }
 
 export function attachToolResult(prev: Entry[], result: ToolResult): Entry[] {
@@ -560,7 +648,11 @@ export function updateTool(prev: Entry[], callId: string, f: (t: ToolEntry) => T
   for (let i = prev.length - 1; i >= 0; i--) {
     const e = prev[i];
     if (e.kind === 'tool' && e.call.id === callId) {
-      return [...prev.slice(0, i), { ...f(e), activityAt: ++toolActivitySequence }, ...prev.slice(i + 1)];
+      return [
+        ...prev.slice(0, i),
+        { ...f(e), activityAt: ++toolActivitySequence },
+        ...prev.slice(i + 1),
+      ];
     }
   }
   return prev;
@@ -585,7 +677,12 @@ export function appendProgressLine(prev: Entry[], callId: string, line: string):
  *  match; when none is found (a provider that doesn't echo the spawning id)
  *  falls back to the most recent still-running `delegate_task`, so live
  *  activity is never dropped on the floor. */
-export function appendDelegateStep(prev: Entry[], callId: string, kind: string, text: string): Entry[] {
+export function appendDelegateStep(
+  prev: Entry[],
+  callId: string,
+  kind: string,
+  text: string,
+): Entry[] {
   const isDelegateRunning = (e: Entry) =>
     e.kind === 'tool' &&
     isDelegateTaskName(e.call.function.name) &&
@@ -631,7 +728,11 @@ export function recordPlanDecision(
   });
 }
 
-export function attachAskUserProposal(prev: Entry[], callId: string, proposal: AskUserProposal): Entry[] {
+export function attachAskUserProposal(
+  prev: Entry[],
+  callId: string,
+  proposal: AskUserProposal,
+): Entry[] {
   return updateTool(prev, callId, (t) => ({
     ...t,
     askUser: { proposal, decision: null },
@@ -657,7 +758,9 @@ export function countUserMessages(entries: Entry[]): number {
   return n;
 }
 
-export function rebuildTurnTimings(serverTurns: { started_at: number; ended_at?: number | null }[]): Map<number, TurnTiming> {
+export function rebuildTurnTimings(
+  serverTurns: { started_at: number; ended_at?: number | null }[],
+): Map<number, TurnTiming> {
   const out = new Map<number, TurnTiming>();
   serverTurns.forEach((t, i) => {
     out.set(i, {
@@ -687,7 +790,10 @@ export function rebuildTurnModels(serverTurns: TurnMeta[]): Map<number, string> 
   return out;
 }
 
-export function stampLastTurn(prev: Map<number, TurnTiming>, endedAt: number): Map<number, TurnTiming> {
+export function stampLastTurn(
+  prev: Map<number, TurnTiming>,
+  endedAt: number,
+): Map<number, TurnTiming> {
   // The `done` frame closes out the most recently started turn — find the
   // highest turn index that's still marked "in flight" and stamp it.
   let target = -1;
@@ -715,7 +821,12 @@ export function goalActivity(entries: Entry[]): string {
     if (e.kind === 'tool' && e.status === 'complete' && !e.result?.is_error) {
       return `Ran ${e.call.function.name}`;
     }
-    if (e.kind === 'msg' && e.msg.role === 'assistant' && e.nativePhase !== 'commentary' && (e.msg.content ?? '').trim()) {
+    if (
+      e.kind === 'msg' &&
+      e.msg.role === 'assistant' &&
+      e.nativePhase !== 'commentary' &&
+      (e.msg.content ?? '').trim()
+    ) {
       const line = (e.msg.content ?? '').trim().split('\n')[0];
       return line.length > 90 ? line.slice(0, 90) + '…' : line;
     }
@@ -753,18 +864,41 @@ export function titleFromEntries(entries: Entry[]): string {
  *  never mutated, so an untouched turn compares equal even though
  *  `groupByTurn` builds a fresh `Turn` object on every update. */
 export function sameTurn(a: Turn, b: Turn): boolean {
-  return a.user === b.user && a.body.length === b.body.length && a.body.every((e, i) => e === b.body[i]);
+  return (
+    a.user === b.user && a.body.length === b.body.length && a.body.every((e, i) => e === b.body[i])
+  );
 }
 
-export function upsertRuntimeQuestion(prev: Entry[], record: Extract<ServerMsg, { type: 'runtime_request_updated' }>['request']): Entry[] {
-  const proposal: AskUserProposal = { questions: record.request.questions.map((q) => ({ question: q.question, header: q.header, multi_select: false, options: q.options.map((label) => ({ label, recommended: false })) })) };
+export function upsertRuntimeQuestion(
+  prev: Entry[],
+  record: Extract<ServerMsg, { type: 'runtime_request_updated' }>['request'],
+): Entry[] {
+  const proposal: AskUserProposal = {
+    questions: record.request.questions.map((q) => ({
+      question: q.question,
+      header: q.header,
+      multi_select: false,
+      options: q.options.map((label) => ({ label, recommended: false })),
+    })),
+  };
   const decision: AskUserDecision | null = record.response
-    ? record.response.cancelled ? { cancelled: true } : { cancelled: false, answers: record.response.answers }
+    ? record.response.cancelled
+      ? { cancelled: true }
+      : { cancelled: false, answers: record.response.answers }
     : null;
   const index = prev.findIndex((e) => e.kind === 'tool' && e.call.id === record.id);
   const entry: ToolEntry = {
-    kind: 'tool', call: { id: record.id, type: 'function', function: { name: 'ask_user', arguments: JSON.stringify(proposal) } },
-    preview: null, status: 'complete', result: null, runtimeDelivery: record.delivery, askUser: { proposal, decision },
+    kind: 'tool',
+    call: {
+      id: record.id,
+      type: 'function',
+      function: { name: 'ask_user', arguments: JSON.stringify(proposal) },
+    },
+    preview: null,
+    status: 'complete',
+    result: null,
+    runtimeDelivery: record.delivery,
+    askUser: { proposal, decision },
   };
   if (index < 0) return [...prev, entry];
   return [...prev.slice(0, index), entry, ...prev.slice(index + 1)];

@@ -1,10 +1,9 @@
+import { CircleAlert, LoaderCircle } from 'lucide-react';
 import { useMemo } from 'react';
-import { LoaderCircle, CircleAlert } from 'lucide-react';
-import type { ToolCall, ToolResult } from '../types';
-import type { ToolStatus } from './ToolCard';
-import { SubagentFace, resolveFace, type FaceSpec, type FaceState } from './SubagentFace';
 import { personaName, useSubagents, type Subagent } from '../lib/subagents';
-
+import type { ToolCall, ToolResult } from '../types';
+import { SubagentFace, resolveFace, type FaceSpec, type FaceState } from './SubagentFace';
+import type { ToolStatus } from './ToolCard';
 /** Who a delegation went to: the subagent's persona name and face.
  *
  *  Taken from the call's own `type` — the subagent Mira actually chose —
@@ -31,9 +30,13 @@ export function typeOfCall(call: ToolCall): string | null {
   }
 }
 
-export function subagentIdentity(call: ToolCall, roster: Subagent[] | null | undefined, typeHint?: string | null): SubagentIdentity {
+export function subagentIdentity(
+  call: ToolCall,
+  roster: Subagent[] | null | undefined,
+  typeHint?: string | null,
+): SubagentIdentity {
   const type = typeHint ?? typeOfCall(call);
-  const s = type ? roster?.find((r) => r.name === type) ?? null : null;
+  const s = type ? (roster?.find((r) => r.name === type) ?? null) : null;
   const seed = type ?? call.id;
   const face = s?.face ?? null;
   return {
@@ -88,7 +91,13 @@ export function AgentCard({
       title={`Open ${name}'s work`}
       className="group flex w-full max-w-[78%] items-start gap-2.5 rounded-lg px-1 py-1 text-left text-[13.5px] transition-colors hover:bg-accent/40"
     >
-      <SubagentFace id={identity.seed} face={identity.face} size={26} state={faceStateFor(status, isError)} className="mt-0.5" />
+      <SubagentFace
+        id={identity.seed}
+        face={identity.face}
+        size={26}
+        state={faceStateFor(status, isError)}
+        className="mt-0.5"
+      />
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5">
           <span className="text-muted-foreground">Delegated to</span>
@@ -97,7 +106,9 @@ export function AgentCard({
           </span>
           <StatusIndicator status={status} isError={isError} />
         </div>
-        <div className="mt-0.5 truncate text-[12.5px] text-muted-foreground">{truncate(prompt, 140)}</div>
+        <div className="mt-0.5 truncate text-[12.5px] text-muted-foreground">
+          {truncate(prompt, 140)}
+        </div>
       </div>
     </button>
   );
@@ -132,7 +143,14 @@ export function AgentGroup({
   return (
     <div className="flex w-full max-w-[78%] flex-col gap-0.5">
       {entries.map((e, i) => (
-        <AgentCard key={e.call.id} call={e.call} status={e.status} result={e.result} onOpen={onOpen} label={identities[i]?.name} />
+        <AgentCard
+          key={e.call.id}
+          call={e.call}
+          status={e.status}
+          result={e.result}
+          onOpen={onOpen}
+          label={identities[i]?.name}
+        />
       ))}
       {footerLabel && (
         <div className="ml-1 mt-1 flex items-center gap-2 text-[12px] text-muted-foreground">
@@ -185,29 +203,10 @@ export function extractPrompt(argsJson: string): string {
   try {
     const parsed = JSON.parse(argsJson);
     if (typeof parsed?.prompt === 'string') return parsed.prompt;
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
   return argsJson;
-}
-
-/** The AgentTool prefixes every tool_result with `[mira-agent-id:XYZ]\n`
- *  so the frontend can look up the child's persisted session on reload.
- *  Kept as a plain marker rather than a JSON blob so it's readable if a
- *  model does see it and grep-able for debugging. */
-const AGENT_ID_MARKER = /^\[mira-agent-id:([^\]\n]+)\]\n?/;
-
-/** Pull the child session id out of a tool_result content. Returns null
- *  if the marker isn't present (e.g. tool errored out before the child
- *  session existed). */
-export function extractAgentId(content: string | null | undefined): string | null {
-  if (!content) return null;
-  const m = AGENT_ID_MARKER.exec(content);
-  return m ? m[1] : null;
-}
-
-/** Strip the marker from a tool_result content so it never leaks into
- *  the UI. Safe on strings without the marker — returns unchanged. */
-export function stripAgentIdMarker(content: string): string {
-  return content.replace(AGENT_ID_MARKER, '');
 }
 
 function truncate(s: string, n: number): string {
@@ -230,3 +229,5 @@ function footerFor(running: number, done: number, errored: number, count: number
   if (done > 0) return 'finished';
   return null;
 }
+
+export { extractAgentId, stripAgentIdMarker } from '../lib/agentIdentifiers';

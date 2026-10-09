@@ -1,0 +1,367 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Right-panel chrome follows the sidebar wash in light mode and the
+   composer's secondary surface in dark mode. Active tabs share the
+   composer's white card, subtle ring, and shadow. */
+.right-panel-header {
+  background: hsl(var(--secondary) / 0.85);
+}
+.right-panel-tab-active {
+  background: hsl(var(--secondary) / 0.85);
+  box-shadow:
+    0 0 0 1px hsl(var(--border) / 0.55),
+    0 14px 36px -28px rgba(0, 0, 0, 0.8);
+}
+:root[data-theme='light'] .right-panel-header {
+  background: hsl(var(--panel));
+}
+:root[data-theme='light'] .right-panel-tab-active {
+  background: #fff;
+  box-shadow:
+    0 0 0 1px hsl(var(--border) / 0.55),
+    0 12px 30px -26px rgba(15, 23, 42, 0.55);
+}
+
+/* shadcn/ui zinc dark palette — canonical values. Tailwind reads these via
+   `hsl(var(--…))` in tailwind.config.js. */
+@layer base {
+  :root {
+    /* These are the two surfaces the whole layout reads from: `--panel` is
+       the window wash behind everything, `--background` is the content
+       surface the chat column sits on.
+
+       They were only 4 points of lightness apart (#202020 vs #161616), which
+       is too close to read as distinct surfaces — and once the desktop build
+       tints the sidebar over macOS vibrancy, the two collapse into one flat
+       panel. The content surface is now near-black so it reads as "the black
+       area", and the wash stays clearly lighter, which is also what makes
+       the vibrancy legible through the sidebar. */
+    --background: 0 0% 4.7%;
+    --panel: 0 0% 13.5%;
+    --foreground: 0 0% 98%;
+
+    --card: 0 0% 13.5%;
+    --card-foreground: 0 0% 98%;
+
+    /* Popovers/dialogs float a step above the content surface, so they need
+       their own opaque value rather than the background wash. */
+    --popover: 0 0% 16.9%;
+    --popover-border: 0 0% 17.6%;
+    --popover-foreground: 0 0% 98%;
+
+    --primary: 0 0% 98%;
+    --primary-foreground: 240 5.9% 10%;
+
+    --secondary: 240 3.7% 15.9%;
+    --secondary-foreground: 0 0% 98%;
+
+    --muted: 240 3.7% 15.9%;
+    --muted-foreground: 240 5% 64.9%;
+
+    --accent: 240 3.7% 15.9%;
+    --accent-foreground: 0 0% 98%;
+
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 0 0% 98%;
+
+    /* Opaque, NOT `0 0% 100% / 0.1`. Every `border-border/NN` in the app
+       compiles to `hsl(var(--border) / NN)`, so baking alpha into the token
+       yields two slashes — invalid CSS, the browser drops the declaration
+       and border-color falls back to `currentColor`, i.e. near-white text.
+       That's what turned every hairline into a bright stroke. 17.6% is
+       10% white composited over the #161616 content surface, so it still
+        reads as a subtle hairline. */
+    --border: 0 0% 17.6%;
+    --input: 240 4% 18%;
+    --ring: 240 4.9% 83.9%;
+
+    --radius: 0.5rem;
+    /* Tooltip surface. Tooltips are lighter than both the content surface
+       and the popover so a hint never reads as an interactive panel. */
+    --tooltip: 0 0% 21.2%;
+    --tooltip-foreground: 0 0% 97.3%;
+    --tooltip-tag: 0 0% 24.3%;
+    --tooltip-tag-foreground: 0 0% 67.8%;
+
+    /* ---- diff-surface tokens (Pierre CodeView stylesheets) ----
+       Real colors (not bare HSL channels) because Pierre's shadow-DOM CSS
+       consumes them via var() + color-mix(). */
+    --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    --font-mono: ui-monospace, 'SFMono-Regular', 'SF Mono', Menlo, monospace;
+    --code-background: #0d0d12;
+    --code-foreground: #e4e4e7;
+    --diff-addition: #98c379;
+    --diff-deletion: #e06c75;
+    --diffs-addition-base: #98c379;
+    --diffs-deletion-base: #e06c75;
+    --diffs-modified-base: #7aa2f7;
+
+    /* Theme-aware overlays. `fg` is the "light on the surface" tint every
+       subtle hover, hairline and raised fill uses (`bg-fg/[0.04]`): white
+       on dark, near-black on light. `shade` is the recess/scrim tint
+       (`bg-shade/30`), weakened on light by --shade-k so a dark-mode inset
+       doesn't turn into a grey slab. Channels, for Tailwind's alpha. */
+    --fg-rgb: 255 255 255;
+    --shade-rgb: 0 0 0;
+    --shade-k: 1;
+
+    /* Mira's accents (tailwind `mira-*`), as channels so they can shift
+       per theme: pastel on dark, deeper on light so text stays legible. */
+    --mira-blue: 122 162 247;
+    --mira-purple: 187 154 247;
+    --mira-cyan: 125 207 255;
+    --mira-tool: 229 192 123;
+    --mira-error: 247 118 142;
+    --mira-user: 166 209 137;
+    --mira-bg: 19 20 23;
+    --mira-sidebar: 26 28 32;
+    --mira-elev1: 33 35 39;
+    --mira-elev2: 42 45 51;
+    --mira-border: 43 46 52;
+    /* Text on a filled accent (buttons): dark on the pastel blue. */
+    --mira-on-accent: 11 13 20;
+
+    /* File viewer (FilePanel): an editor's palette. */
+    --fp-code: #282c34;
+    --fp-gutter: #4b5263;
+    --fp-header: #0a0a0a;
+    --fp-tree: #050505;
+    --fp-border: #1e1e2e;
+    --fp-target: #c0caf5;
+    /* Floating cards over the transcript (context pill and panel). */
+    --float-card: rgba(28, 28, 30, 0.92);
+    --float-card-solid: #1c1c1e;
+    --float-shadow: 0 12px 40px rgba(0, 0, 0, 0.45), 0 2px 8px rgba(0, 0, 0, 0.3);
+
+    /* "Elevated card" for in-flow panels (composer, plugin cards, main
+       chat surface…). Card fill + a soft lift. Dark barely needs the
+       lift — borders carry it — so the token is subtler there. */
+    --elev-shadow: 0 2px 6px rgba(0, 0, 0, 0.25), 0 10px 28px rgba(0, 0, 0, 0.3);
+  }
+
+  /* Light. Same token names, light values; everything reading tokens
+     follows. Set on <html> by lib/theme.ts (and index.html, pre-paint). */
+  :root[data-theme='light'] {
+    --background: 0 0% 100%;
+    --panel: 220 14% 95.5%;
+    --foreground: 240 10% 9%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 240 10% 9%;
+
+    --popover: 0 0% 100%;
+    --popover-border: 240 6% 87%;
+    --popover-foreground: 240 10% 9%;
+
+    --primary: 240 6% 10%;
+    --primary-foreground: 0 0% 98%;
+    --secondary: 240 5% 94%;
+    --secondary-foreground: 240 6% 10%;
+    --muted: 240 5% 94%;
+    --muted-foreground: 240 4% 40%;
+    --accent: 240 5% 92.5%;
+    --accent-foreground: 240 6% 10%;
+    --destructive: 0 72% 45%;
+    --destructive-foreground: 0 0% 98%;
+
+    --border: 240 6% 88%;
+    --input: 240 6% 85%;
+    --ring: 240 6% 25%;
+
+    /* Tips follow the theme: a light card with dark text in light mode. */
+    --tooltip: 0 0% 100%;
+    --tooltip-foreground: 240 10% 12%;
+    --tooltip-tag: 240 5% 93%;
+    --tooltip-tag-foreground: 240 4% 38%;
+
+    --code-background: #f6f7f9;
+    --code-foreground: #24292f;
+    --diff-addition: #1a7f37;
+    --diff-deletion: #cf222e;
+    --diffs-addition-base: #1a7f37;
+    --diffs-deletion-base: #cf222e;
+    --diffs-modified-base: #3b5bdb;
+
+    --fg-rgb: 15 17 26;
+    --shade-rgb: 15 17 26;
+    --shade-k: 0.22;
+
+    --mira-blue: 59 91 219;
+    --mira-purple: 124 77 220;
+    --mira-cyan: 2 120 190;
+    --mira-tool: 168 104 0;
+    --mira-error: 207 34 46;
+    --mira-user: 46 125 50;
+    --mira-bg: 255 255 255;
+    --mira-sidebar: 244 245 247;
+    --mira-elev1: 246 247 249;
+    --mira-elev2: 236 238 242;
+    --mira-border: 225 228 234;
+    --mira-on-accent: 255 255 255;
+
+    --fp-code: #ffffff;
+    --fp-gutter: #a0a6b0;
+    --fp-header: #f6f7f9;
+    --fp-tree: #f6f7f9;
+    --fp-border: #e3e5ea;
+    --fp-target: #15171f;
+    --float-card: rgba(255, 255, 255, 0.92);
+    --float-card-solid: #ffffff;
+    --float-shadow: 0 12px 40px rgba(15, 17, 26, 0.12), 0 2px 8px rgba(15, 17, 26, 0.06);
+
+    /* In light mode the card itself is white while the window wash
+       behind it is a pale grey — so a soft grey shadow is what lifts
+       it off the page. */
+    --elev-shadow: 0 1px 2px rgba(15, 17, 26, 0.05), 0 10px 30px rgba(15, 17, 26, 0.08);
+  }
+
+  /* Accent color (Settings → Appearance; lib/appearance.ts). Blue is the
+     default and needs no attribute. Pastel on dark with dark text on it;
+     deeper on light with white text. */
+  :root[data-accent='violet'] {
+    --mira-blue: 167 139 250;
+  }
+  :root[data-theme='light'][data-accent='violet'] {
+    --mira-blue: 124 58 237;
+  }
+  :root[data-accent='teal'] {
+    --mira-blue: 45 212 191;
+  }
+  :root[data-theme='light'][data-accent='teal'] {
+    --mira-blue: 13 148 136;
+  }
+  :root[data-accent='green'] {
+    --mira-blue: 74 222 128;
+  }
+  :root[data-theme='light'][data-accent='green'] {
+    --mira-blue: 22 163 74;
+  }
+  :root[data-accent='orange'] {
+    --mira-blue: 251 146 60;
+  }
+  :root[data-theme='light'][data-accent='orange'] {
+    --mira-blue: 234 88 12;
+  }
+  :root[data-accent='pink'] {
+    --mira-blue: 244 114 182;
+  }
+  :root[data-theme='light'][data-accent='pink'] {
+    --mira-blue: 219 39 119;
+  }
+
+  * {
+    @apply border-border;
+  }
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  /* Tooltip appearance, in one place. Every tooltip in the app is a
+     hand-rolled span (we have no radix tooltip dep), so the visual spec used
+     to be re-typed per call site and drifted. This class owns the look:
+     surface, hairline, radius, padding, type scale, and the fade. Call sites
+     keep only their own positioning and the opacity trigger. */
+  .tooltip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    width: fit-content;
+    max-width: 20rem;
+    border-radius: var(--radius);
+    border: 1px solid hsl(var(--border));
+    background-color: hsl(var(--tooltip));
+    padding: 0.375rem 0.75rem;
+    font-size: 12px;
+    line-height: 1rem;
+    color: hsl(var(--tooltip-foreground));
+    box-shadow: 0 8px 24px -6px rgb(0 0 0 / 0.55);
+  }
+  :root[data-theme='light'] .tooltip {
+    box-shadow:
+      0 1px 2px rgb(0 0 0 / 0.06),
+      0 8px 24px -8px rgb(0 0 0 / 0.18);
+  }
+
+  /* Stacked variant for tooltips that hold rows (the usage chart) instead of
+     a single label. Same surface and border, vertical flow. */
+  .tooltip-stack {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.25rem;
+    white-space: normal;
+  }
+
+  /* Shortcut hint trailing a tooltip label. */
+  .tooltip-tag {
+    border-radius: calc(var(--radius) - 2px);
+    background-color: hsl(var(--tooltip-tag));
+    padding: 0.0625rem 0.3125rem;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    line-height: 1rem;
+    color: hsl(var(--tooltip-tag-foreground));
+  }
+
+  body {
+    font-size: 16px;
+    @apply bg-background text-foreground antialiased;
+    font-family:
+      'Inter',
+      -apple-system,
+      BlinkMacSystemFont,
+      'Segoe UI',
+      system-ui,
+      sans-serif;
+    /* Inter 4.x variable font carries an opsz (optical size) axis — auto
+       lets the browser pick sturdier glyphs for small text and the
+       tighter Display cut for large headings, like moonjar-style sites. */
+    font-optical-sizing: auto;
+    font-weight: 400;
+    letter-spacing: -0.011em;
+  }
+
+  /* The desktop build sets a transparent window and lets macOS paint
+     vibrancy behind it, marking the document with
+     `data-mira-chrome="translucent"`. The rule above paints `bg-background`
+     on `body`, which fills the entire window and hides that material no
+     matter how transparent the React root and sidebar are — so the root
+     elements have to go transparent too. Content surfaces (the chat panel,
+     the right pane) stay opaque on their own, which is what keeps body
+     text off the wallpaper. */
+  html[data-mira-chrome='translucent'],
+  html[data-mira-chrome='translucent'] body {
+    background: transparent;
+  }
+
+  /* Subtle scrollbars — macOS overlays default to nearly invisible on
+     pitch-black, and Chrome's dark auto-track is worse. Applied globally
+     so sidebar, transcript, code blocks, dropdowns all match. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(0 0% 100% / 0.12) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: hsl(0 0% 100% / 0.1);
+    border: 2px solid transparent;
+    background-clip: padding-box;
+    border-radius: 8px;
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    background: hsl(0 0% 100% / 0.22);
+    background-clip: padding-box;
+  }
+  *::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+}
