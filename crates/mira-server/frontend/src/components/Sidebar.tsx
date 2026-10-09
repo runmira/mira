@@ -814,10 +814,7 @@ export function Sidebar({
             // more than one period.
             const sections = new Set(visible.map((r) => dateSection(r.session))).size > 1;
             const overflow = roots.length - visible.length;
-            const labelOf = (id: string | null | undefined) => {
-              const p = g.sessions.find((x) => x.id === id);
-              return p ? sessionLabel(p) : undefined;
-            };
+
 
             return (
               <div key={g.cwd} className="flex flex-col">
@@ -884,7 +881,6 @@ export function Sidebar({
                             <SessionRow
                         session={currentSession(s)}
                         depth={depth}
-                        forkedFromLabel={labelOf(s.forked_from)}
                         forkCount={node.forks.length}
                         forksOpen={!forksHidden.has(s.id)}
                         onToggleForks={() => toggleForks(s.id)}
@@ -1135,7 +1131,6 @@ function forkLabel(s: SessionSummary): string {
 function SessionRow({
   session,
   depth = 0,
-  forkedFromLabel,
   forkCount = 0,
   forksOpen = true,
   onToggleForks,
@@ -1160,7 +1155,6 @@ function SessionRow({
   /** Fork nesting level: 0 for a chat, 1 for a fork of it, … */
   depth?: number;
   /** The label of the chat this one was forked from, for the tooltip. */
-  forkedFromLabel?: string;
   /** How many chats were forked from this one, and whether they show. */
   forkCount?: number;
   forksOpen?: boolean;
@@ -1206,16 +1200,6 @@ function SessionRow({
   const [preferReducedMotion] = useBoolPref(PREF_KEYS.reduceMotion, false);
   return (
     <m.div layout="position" transition={{ layout: { duration: systemReducedMotion || preferReducedMotion ? 0 : 0.16 } }}
-      // Hover tooltip prefers the cleaned-up label (no `## Attached
-      // files` markdown blob) so an attachment-only turn still hovers
-      // sensibly. Falls back to session id when everything is empty.
-      title={
-        selecting
-          ? undefined
-          : session.forked_from
-            ? `${sessionLabel(session) || session.id}\nForked from “${forkedFromLabel ?? 'another chat'}” at “${session.forked_at ?? ''}”`
-            : sessionLabel(session) || session.id
-      }
       role={selecting ? 'checkbox' : 'button'}
       tabIndex={0}
       aria-checked={selecting ? checked : undefined}
@@ -1304,7 +1288,7 @@ function SessionRow({
         </span>
         {!selecting && (
           <span className="mt-0.5 flex min-w-0 items-center gap-1 text-[10.5px] leading-[15px]">
-            <span title={session.failure_reason || detail.label} className={cn(detail.tone === 'attention' ? 'min-w-0 truncate' : 'shrink-0',
+            <span className={cn(detail.tone === 'attention' ? 'min-w-0 truncate' : 'shrink-0',
               detail.tone === 'attention' ? 'text-amber-700 dark:text-amber-400'
               : detail.tone === 'error' ? 'text-red-600 dark:text-red-400'
               : detail.tone === 'working' || detail.tone === 'result' ? 'text-mira-blue' : 'text-muted-foreground/75')}>
@@ -1313,7 +1297,7 @@ function SessionRow({
             {detail.tone !== 'attention' && (
               <>
                 <span className="shrink-0 text-muted-foreground/35">·</span>
-                <span className="truncate text-muted-foreground/60" title={session.worktree_branch || session.cwd}>
+                <span className="truncate text-muted-foreground/60">
                   {session.worktree_branch || basename(session.cwd)}
                 </span>
               </>
