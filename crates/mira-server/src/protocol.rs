@@ -620,8 +620,9 @@ pub enum ServerMsg {
         compact_at: Option<u64>,
         /// Why this request was billed without the prompt cache when it
         /// should have been reused (a changed message, model or tools; an
-        /// expired cache).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        /// expired cache). Always sent, `null` included, so a later request
+        /// that did reuse the cache clears an earlier warning.
+        #[serde(default)]
         cache_miss: Option<String>,
     },
 

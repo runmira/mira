@@ -191,7 +191,7 @@ export function UsageRing({ data }: { data: UsageRingData }) {
         )}
         {data.cacheMiss && (
           <p className="border-t border-border/50 px-3.5 py-2 text-[11.5px] text-amber-700 dark:text-amber-400">
-            Last request paid full price: {data.cacheMiss}.
+            The last request reused little of the prompt cache: {data.cacheMiss}.
           </p>
         )}
       </PopoverContent>

@@ -1495,7 +1495,7 @@ export default function App() {
       case 'usage':
         setUsage(msg.totals);
         usageRef.current = msg.totals;
-        if (msg.cache_miss) setCacheMiss(msg.cache_miss);
+        setCacheMiss(msg.cache_miss ?? null);
         if (msg.context_window) {
           setProviderContext({
             used: msg.round.prompt_tokens + msg.round.completion_tokens,

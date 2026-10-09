@@ -122,14 +122,29 @@ const IMAGE_PRUNED_NOTE: &str = "[screenshot omitted from history — a newer on
 /// survive); its text gains a short note so the transcript still reads
 /// coherently. Idempotent: already-pruned messages have no images left
 /// and are skipped.
-/// The prompt as the user typed it: drops the `<hook-context>` block
-/// that prompt hooks append for the model, so UIs (titles, sidebars,
-/// transcripts) and edit-matching see only the user's words.
+/// The prompt as the user typed it: drops the `<hook-context>` and
+/// `<memory-context>` blocks added for the model, so UIs (titles,
+/// sidebars, transcripts) and edit-matching see only the user's words.
 pub fn strip_hook_context(text: &str) -> &str {
-    match text.find("<hook-context>") {
+    let cut = ["<hook-context>", "<memory-context>"]
+        .iter()
+        .filter_map(|tag| text.find(tag))
+        .min();
+    match cut {
         Some(i) => text[..i].trim_end(),
         None => text,
     }
+}
+
+/// What a turn's memory says when memory was cleared since the last one.
+pub const NO_MEMORY: &str =
+    "No saved memory applies now; disregard memory given earlier in this conversation.";
+
+/// The `<memory-context>` block a prompt carries, if any.
+pub fn memory_context(text: &str) -> Option<&str> {
+    let start = text.find("<memory-context>\n")? + "<memory-context>\n".len();
+    let end = text[start..].find("\n</memory-context>")?;
+    Some(&text[start..start + end])
 }
 
 /// [`prune_old_images`], but only once [`IMAGE_PRUNE_BATCH`] more than
@@ -163,8 +178,15 @@ pub fn prune_old_images(history: &mut [Message], keep: usize) {
 
 /// Stub every `read_file` result whose file was read again, written or
 /// edited later, but only when together they come to at least `min_chars`
-/// (see [`STUB_SUPERSEDED_MIN_CHARS`]). Returns how many were stubbed.
-pub fn stub_superseded_reads(history: &mut [Message], min_chars: usize) -> usize {
+/// (see [`STUB_SUPERSEDED_MIN_CHARS`]). Only calls in `done` (completed
+/// successfully) supersede: a failed edit, or one later in the same reply
+/// that hasn't run yet, leaves the read the model is working from alone.
+/// Returns how many were stubbed.
+pub fn stub_superseded_reads(
+    history: &mut [Message],
+    min_chars: usize,
+    done: &std::collections::HashSet<ToolCallId>,
+) -> usize {
     // Each call, in order: (call id, tool, path).
     let calls: Vec<(ToolCallId, String, String)> = history
         .iter()
@@ -180,7 +202,10 @@ pub fn stub_superseded_reads(history: &mut [Message], min_chars: usize) -> usize
         .iter()
         .enumerate()
         .filter(|(i, (_, tool, path))| {
-            tool == STUBBABLE_TOOL && calls[i + 1..].iter().any(|(_, _, later)| later == path)
+            tool == STUBBABLE_TOOL
+                && calls[i + 1..]
+                    .iter()
+                    .any(|(id, _, later)| later == path && done.contains(id))
         })
         .map(|(_, (id, _, _))| id.clone())
         .collect();
@@ -686,7 +711,8 @@ mod tests {
             assistant_reads("c2", "src/foo.rs"),
             tool_result("c2", "second read content..."),
         ];
-        stub_superseded_reads(&mut h, 0);
+        let done = all_done(&h);
+        stub_superseded_reads(&mut h, 0, &done);
         assert!(is_stub(h[3].content.as_deref().unwrap()));
         assert_eq!(h[6].content.as_deref().unwrap(), "second read content...");
     }
@@ -701,7 +727,8 @@ mod tests {
             assistant_reads("c2", "src/bar.rs"),
             tool_result("c2", "bar content"),
         ];
-        stub_superseded_reads(&mut h, 0);
+        let done = all_done(&h);
+        stub_superseded_reads(&mut h, 0, &done);
         assert_eq!(h[3].content.as_deref().unwrap(), "foo content");
     }
 
@@ -715,7 +742,8 @@ mod tests {
             assistant_writes("c2", "src/foo.rs"),
             tool_result("c2", "wrote 3 bytes"),
         ];
-        stub_superseded_reads(&mut h, 0);
+        let done = all_done(&h);
+        stub_superseded_reads(&mut h, 0, &done);
         assert!(is_stub(h[3].content.as_deref().unwrap()));
     }
 
@@ -729,8 +757,47 @@ mod tests {
             assistant_reads("c2", "src/foo.rs"),
             tool_result("c2", "fresh content"),
         ];
-        assert_eq!(stub_superseded_reads(&mut h, 0), 0);
+        let done = all_done(&h);
+        assert_eq!(stub_superseded_reads(&mut h, 0, &done), 0);
         assert_eq!(h[3].content.as_deref().unwrap(), stub_content("src/foo.rs"));
+    }
+
+    /// Every call in `h`, as if each completed successfully.
+    fn all_done(h: &[Message]) -> std::collections::HashSet<ToolCallId> {
+        h.iter()
+            .flat_map(|m| m.tool_calls.iter().map(|c| c.id.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn only_completed_calls_supersede_a_read() {
+        let big = "x".repeat(100_000);
+        let mut h = vec![
+            Message::user("u1"),
+            assistant_reads("c1", "src/foo.rs"),
+            tool_result("c1", &big),
+            assistant_writes("c2", "src/foo.rs"),
+            tool_result("c2", "error: permission denied"),
+        ];
+        // The write failed (or hasn't run): the read is still what the
+        // model has of that file.
+        let none = std::collections::HashSet::new();
+        assert_eq!(stub_superseded_reads(&mut h, 0, &none), 0);
+        assert_eq!(h[2].content.as_deref(), Some(big.as_str()));
+        let done = std::collections::HashSet::from([cid("c2")]);
+        assert_eq!(stub_superseded_reads(&mut h, 0, &done), 1);
+    }
+
+    #[test]
+    fn memory_context_is_hidden_and_readable() {
+        let stored = "fix it\n\n<hook-context>\nbe kind\n</hook-context>\n\n<memory-context>\nuses pnpm\n</memory-context>";
+        assert_eq!(strip_hook_context(stored), "fix it");
+        assert_eq!(memory_context(stored), Some("uses pnpm"));
+        assert_eq!(
+            strip_hook_context("ok\n\n<memory-context>\nm\n</memory-context>"),
+            "ok"
+        );
+        assert_eq!(memory_context("plain"), None);
     }
 
     #[test]
@@ -745,7 +812,11 @@ mod tests {
         ];
         // 30k characters superseded: under the batch size, nothing changes,
         // so the cached prefix survives the edit.
-        assert_eq!(stub_superseded_reads(&mut h, STUB_SUPERSEDED_MIN_CHARS), 0);
+        let done = all_done(&h);
+        assert_eq!(
+            stub_superseded_reads(&mut h, STUB_SUPERSEDED_MIN_CHARS, &done),
+            0
+        );
         assert_eq!(h[2].content.as_deref(), Some(big.as_str()));
         // Enough superseded reads to be worth it: stubbed together.
         h.extend([
@@ -758,7 +829,11 @@ mod tests {
             assistant_writes("c6", "src/baz.rs"),
             tool_result("c6", "wrote"),
         ]);
-        assert_eq!(stub_superseded_reads(&mut h, STUB_SUPERSEDED_MIN_CHARS), 3);
+        let done = all_done(&h);
+        assert_eq!(
+            stub_superseded_reads(&mut h, STUB_SUPERSEDED_MIN_CHARS, &done),
+            3
+        );
         assert!(is_stub(h[2].content.as_deref().unwrap()));
         assert!(h[2].content.as_deref().unwrap().contains("src/foo.rs"));
     }

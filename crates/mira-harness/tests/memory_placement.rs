@@ -85,7 +85,8 @@ struct Memory {
 impl MemorySnapshot for Memory {
     async fn render(&self, _query: Option<&MemoryQuery>) -> Option<String> {
         self.renders.fetch_add(1, Ordering::SeqCst);
-        Some(self.text.lock().unwrap().clone())
+        let text = self.text.lock().unwrap().clone();
+        (!text.is_empty()).then_some(text)
     }
 }
 
@@ -132,17 +133,19 @@ async fn memory_rides_on_each_turns_prompt_and_never_changes_the_prefix() {
     let _: Vec<_> = sess.send("second").await.collect().await;
     *memory.text.lock().unwrap() = "uses pnpm; deploys on Fridays".into();
     let _: Vec<_> = sess.send("third").await.collect().await;
+    memory.text.lock().unwrap().clear();
+    let _: Vec<_> = sess.send("fourth").await.collect().await;
 
-    let seen = provider.seen.lock().unwrap();
-    assert_eq!(seen.len(), 6, "two requests per turn");
+    let seen = provider.seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 8, "two requests per turn");
     // Chosen once per turn, not once per request.
-    assert_eq!(memory.renders.load(Ordering::SeqCst), 3);
+    assert_eq!(memory.renders.load(Ordering::SeqCst), 4);
     // Every request extends the one before it: nothing already sent changes.
     for pair in seen.windows(2) {
         let (before, after) = (shape(&pair[0].messages), shape(&pair[1].messages));
         assert_eq!(before, after[..before.len()], "a sent message changed");
     }
-    let last = &seen[5].messages;
+    let last = &seen[7].messages;
     // Never in the system prompt.
     assert!(last
         .iter()
@@ -152,12 +155,23 @@ async fn memory_rides_on_each_turns_prompt_and_never_changes_the_prefix() {
         .iter()
         .filter(|m| m.role == Role::User && !mentions(m, "seen"))
         .collect();
-    assert_eq!(prompts.len(), 3);
-    // On the first prompt; not repeated while unchanged; again once it changed.
+    assert_eq!(prompts.len(), 4);
+    // On the first prompt; not repeated while unchanged; again once it
+    // changed; and once cleared, a note that it no longer applies.
     assert!(mentions(
         prompts[0],
         "<memory-context>\nuses pnpm\n</memory-context>"
     ));
     assert!(!mentions(prompts[1], "<memory-context>"));
     assert!(mentions(prompts[2], "deploys on Fridays"));
+    assert!(mentions(prompts[3], mira_harness::history::NO_MEMORY));
+    // Stored with the conversation (so saved and resumed with it), while
+    // the transcript shows only what the user typed.
+    let transcript = sess.transcript().await;
+    let first = transcript.iter().find(|m| m.role == Role::User).unwrap();
+    assert!(mentions(first, "<memory-context>"));
+    assert_eq!(
+        mira_harness::history::strip_hook_context(first.content.as_deref().unwrap()),
+        "first"
+    );
 }

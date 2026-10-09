@@ -219,10 +219,13 @@ export function compactionSummary(content: string | null | undefined): string | 
   return body.replace(/^\s*This session continues[^\n]*\n+/, '').trim();
 }
 
-/** Drop the `<hook-context>` block prompt hooks append to a message. */
+/** Drop the blocks added to a prompt for the model: prompt hooks'
+ *  `<hook-context>` and the turn's `<memory-context>`. */
 export function stripHookContext(content: string | null | undefined): string | null | undefined {
-  const i = content?.indexOf('<hook-context>') ?? -1;
-  return i >= 0 ? content!.slice(0, i).trimEnd() : content;
+  const cuts = ['<hook-context>', '<memory-context>']
+    .map((tag) => content?.indexOf(tag) ?? -1)
+    .filter((i) => i >= 0);
+  return cuts.length ? content!.slice(0, Math.min(...cuts)).trimEnd() : content;
 }
 
 /** Close the newest running compaction card (or add a finished one, when

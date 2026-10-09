@@ -325,9 +325,10 @@ pub struct Session {
     /// Tool results before this index in `history` are cleared in what's
     /// sent to the model (see `history::clear_old_tool_results`).
     cleared_before: Arc<Mutex<usize>>,
-    /// The memory chosen for each turn, attached to that turn's prompt in
-    /// what's sent (see `build_request_messages`).
-    memory_blocks: Arc<Mutex<Vec<MemoryAttachment>>>,
+    /// Read, write and edit calls that completed successfully: only those
+    /// supersede an earlier read of the same file (see
+    /// `history::stub_superseded_reads`).
+    file_calls_done: Arc<StdMutex<std::collections::HashSet<mira_core::ToolCallId>>>,
     /// Human-readable nickname. Generated post-hoc by the server after the
     /// first assistant reply; the harness itself only reads + persists it.
     title: Arc<Mutex<Option<String>>>,
@@ -519,7 +520,7 @@ impl Session {
             history: Arc::new(Mutex::new(vec![Message::system(system_prompt)])),
             archived: Arc::new(Mutex::new(Vec::new())),
             cleared_before: Arc::new(Mutex::new(0)),
-            memory_blocks: Arc::new(Mutex::new(Vec::new())),
+            file_calls_done: Arc::default(),
             title: Arc::new(Mutex::new(None)),
             turns: Arc::new(Mutex::new(Vec::new())),
             usage: Arc::new(Mutex::new(UsageTotals::default())),
@@ -603,7 +604,7 @@ impl Session {
             history: Arc::new(Mutex::new(record.messages)),
             archived: Arc::new(Mutex::new(record.archived)),
             cleared_before: Arc::new(Mutex::new(0)),
-            memory_blocks: Arc::new(Mutex::new(Vec::new())),
+            file_calls_done: Arc::default(),
             title: Arc::new(Mutex::new(record.title)),
             turns: Arc::new(Mutex::new(record.turns)),
             usage: Arc::new(Mutex::new(record.usage)),
@@ -1276,6 +1277,7 @@ impl Session {
             }
             user_input = text;
         }
+        let user_input = self.with_turn_memory(user_input).await;
         let mut message = Message::user(user_input).with_images(images);
         message.input_id = input_id;
         self.history.lock().await.push(message);
@@ -1321,6 +1323,58 @@ impl Session {
             obj.extend(more);
         }
         input
+    }
+
+    /// The prompt with this turn's memory attached as `<memory-context>`.
+    ///
+    /// Memory is chosen once, when the turn starts, and stored on the prompt
+    /// itself, so every request in the conversation sends exactly what was
+    /// sent before plus what's new, which is what keeps the provider's prompt
+    /// cache valid. (It used to be re-chosen on every request and put right
+    /// after the system prompt, where any change made the provider re-read the
+    /// whole conversation at full price.) Stored on the message, it's saved
+    /// and resumed with it, and a rewound turn takes its memory with it. A
+    /// turn only carries memory when it differs from the last one sent, and
+    /// says so when memory was cleared.
+    async fn with_turn_memory(&self, prompt: String) -> String {
+        let Some(snap) = self.memory_snapshot.as_ref() else {
+            return prompt;
+        };
+        let (previous, query) = {
+            let history = self.history.lock().await;
+            let previous = history
+                .iter()
+                .rev()
+                .filter(|m| m.role == Role::User)
+                .find_map(|m| {
+                    m.content
+                        .as_deref()
+                        .and_then(crate::history::memory_context)
+                })
+                .map(str::to_owned);
+            // Retrieval: build a query from the recent conversation so scored
+            // selection can weight relevant entries above stale ones. When
+            // retrieval is off, pass `None` and the snapshot falls back to the
+            // legacy dump-everything shape.
+            let query = self.memory_retrieval.enabled.then(|| {
+                let mut recent = history.clone();
+                recent.push(Message::user(prompt.clone()));
+                build_memory_query(&recent, self.memory_retrieval.token_budget)
+            });
+            (previous, query)
+        };
+        let block = match (snap.render(query.as_ref()).await, previous) {
+            (Some(now), Some(before)) if now == before => None,
+            (Some(now), _) => Some(now),
+            (None, Some(before)) if before != crate::history::NO_MEMORY => {
+                Some(crate::history::NO_MEMORY.to_owned())
+            }
+            (None, _) => None,
+        };
+        match block {
+            Some(block) => format!("{prompt}\n\n<memory-context>\n{block}\n</memory-context>"),
+            None => prompt,
+        }
     }
 
     /// SessionStart (first message only) and UserPromptSubmit. Returns
@@ -2571,9 +2625,15 @@ async fn dispatch_call(sess: &Session, call: ToolCall, tx: &mpsc::Sender<Harness
         // `STUB_SUPERSEDED_MIN_CHARS`). Same-lock scope so the walk sees
         // exactly the history we just pushed into.
         if ok && crate::history::path_from_args(&call.function.arguments).is_some() {
+            let mut done = sess
+                .file_calls_done
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            done.insert(call.id.clone());
             crate::history::stub_superseded_reads(
                 &mut history,
                 crate::history::STUB_SUPERSEDED_MIN_CHARS,
+                &done,
             );
         }
     }
@@ -3181,94 +3241,12 @@ pub struct DroppedResult {
     pub tokens: u64,
 }
 
-/// Memory chosen for one turn: which prompt it goes with (its index in
-/// `history` and a hash of it, so a prompt compaction moved or removed no
-/// longer matches), and the block, or `None` when it would only repeat an
-/// earlier one.
-struct MemoryAttachment {
-    at: usize,
-    prompt: u64,
-    block: Option<String>,
-}
-
-fn prompt_hash(m: &Message) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    m.content.hash(&mut h);
-    h.finish()
-}
-
-/// What's sent to the model: `history` with old tool results cleared, and
-/// memory attached to the prompts.
-///
-/// Memory is chosen once per turn, when its prompt is first sent, and
-/// rides on that prompt as `<memory-context>`. It used to be re-chosen on
-/// every request and put right after the system prompt, where any change
-/// in what was chosen made the provider re-read the whole conversation at
-/// full price. Attached to the turn's prompt and never changed after, it
-/// only ever adds to the end of what's cached, and a later turn repeats it
-/// only when the selection changed.
+/// What's sent to the model: `history` with old tool results cleared.
+/// (Memory rides on each turn's prompt; see `Session::with_turn_memory`.)
 async fn build_request_messages(sess: &Session) -> Vec<Message> {
-    let mut msgs = {
-        let history = sess.history.lock().await;
-        let before = *sess.cleared_before.lock().await;
-        crate::history::clear_old_tool_results(&history, before)
-    };
-    let Some(snap) = sess.memory_snapshot.as_ref() else {
-        return msgs;
-    };
-    let Some(prompt_at) = msgs
-        .iter()
-        .rposition(|m| m.role == Role::User && !crate::history::is_summary(m))
-    else {
-        return msgs;
-    };
-    let matches = |a: &MemoryAttachment, msgs: &[Message]| {
-        msgs.get(a.at)
-            .is_some_and(|m| m.role == Role::User && prompt_hash(m) == a.prompt)
-    };
-    let mut blocks = sess.memory_blocks.lock().await;
-    let prompt = prompt_hash(&msgs[prompt_at]);
-    if !blocks
-        .iter()
-        .any(|a| a.at == prompt_at && a.prompt == prompt)
-    {
-        // Retrieval: build a query from the recent conversation so scored
-        // selection can weight relevant entries above stale ones. When
-        // retrieval is off, pass `None` and the snapshot falls back to the
-        // legacy dump-everything shape.
-        let query = if sess.memory_retrieval.enabled {
-            Some(build_memory_query(
-                &msgs,
-                sess.memory_retrieval.token_budget,
-            ))
-        } else {
-            None
-        };
-        let block = snap.render(query.as_ref()).await;
-        let current = blocks
-            .iter()
-            .rev()
-            .find(|a| a.block.is_some() && matches(a, &msgs))
-            .and_then(|a| a.block.clone());
-        blocks.push(MemoryAttachment {
-            at: prompt_at,
-            prompt,
-            block: block.filter(|b| Some(b) != current.as_ref()),
-        });
-    }
-    for a in blocks.iter() {
-        let Some(block) = &a.block else { continue };
-        if !matches(a, &msgs) {
-            continue;
-        }
-        let m = &mut msgs[a.at];
-        let text = m.content.take().unwrap_or_default();
-        m.content = Some(format!(
-            "{text}\n\n<memory-context>\n{block}\n</memory-context>"
-        ));
-    }
-    msgs
+    let history = sess.history.lock().await;
+    let before = *sess.cleared_before.lock().await;
+    crate::history::clear_old_tool_results(&history, before)
 }
 
 fn build_memory_query(msgs: &[Message], token_budget: usize) -> MemoryQuery {

@@ -136,7 +136,10 @@ fn explain(before: &RequestPrint, now: &RequestPrint, idle: Duration) -> String 
 fn message_hash(m: &Message) -> u64 {
     hash_one(&(
         &m.content,
-        m.images.len(),
+        m.images
+            .iter()
+            .map(|i| (i.media_type.as_str(), hash_one(&i.data)))
+            .collect::<Vec<_>>(),
         m.tool_call_id.as_ref().map(|id| id.as_str().to_owned()),
         m.tool_calls
             .iter()
