@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 
 const { outputText } = ts.transpileModule(
-  readFileSync(new URL('./entries.ts', import.meta.url), 'utf8'),
+  readFileSync(new URL('../lib/stripHookContext.ts', import.meta.url), 'utf8'),
   { compilerOptions: { module: ts.ModuleKind.ESNext } },
 );
 const { stripHookContext } = await import(
