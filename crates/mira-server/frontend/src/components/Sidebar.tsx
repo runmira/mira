@@ -210,11 +210,11 @@ export function Sidebar({
     if (!node || scrollRestored.current || sessions.length === 0) return;
     // Wait for collapsible sections to reach their final height.
     const id = window.setTimeout(() => {
-      node.scrollTop = savedScroll.current;
+      node.scrollTop = searching ? 0 : savedScroll.current;
       scrollRestored.current = true;
     }, 280);
     return () => window.clearTimeout(id);
-  }, [sessions.length, activeView]);
+  }, [sessions.length, activeView, searching]);
 
   // The two shelves around the project list, each remembered across
   // reloads: Recents starts open, Settled (history) starts closed.
@@ -377,7 +377,7 @@ export function Sidebar({
     if (!peek) setArrangedSessions(sessions);
   }, [sessions, peek]);
   const currentSession = (s: SessionSummary) => sessions.find((current) => current.id === s.id) ?? s;
-  const needsYou = arrangedSessions.filter((s) => s.needs_attention || s.failure_reason)
+  const needsYou = sessions.filter((s) => s.needs_attention || s.failure_reason)
     .sort((a, b) => b.updated_at - a.updated_at);
   // Settled chats leave their folders for the shelf at the bottom — except
   // while searching, which looks everywhere at once.
@@ -767,10 +767,8 @@ export function Sidebar({
             </div>
           )}
 
-          {projectsPinned && <span aria-hidden className="sidebar-scroll-fade" />}
-          </div>
           {selecting && (
-            <div className="sticky top-0 z-10 flex items-center gap-1 rounded-lg border border-border/70 bg-mira-elev1/95 px-2.5 py-1.5 shadow-sm backdrop-blur">
+            <div className="flex items-center gap-1 rounded-lg border border-border/70 bg-panel px-2.5 py-1.5 shadow-sm">
               <span className="text-[12px] font-medium text-foreground">
                 {selected.size} selected
               </span>
@@ -803,6 +801,8 @@ export function Sidebar({
               </div>
             </div>
           )}
+          {projectsPinned && <span aria-hidden className="sidebar-scroll-fade" />}
+          </div>
 
           {error && <Empty>error: {error}</Empty>}
           {!error && groups.length === 0 && <Empty>{searching ? 'No chats match' : 'No saved chats yet'}</Empty>}

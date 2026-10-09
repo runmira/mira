@@ -997,6 +997,7 @@ impl Session {
         archived_at: Option<u64>,
         settle: crate::persist::SettleMarks,
     ) {
+        let _checkpoint = self.checkpoint_lock.lock().await;
         *self.pinned.lock().await = pinned;
         *self.archived_at.lock().await = archived_at;
         *self.settle.lock().await = settle;

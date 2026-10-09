@@ -1842,6 +1842,52 @@ pub(crate) async fn send_input(
 /// does: picked once, serving every turn, in as many concurrent sessions
 /// as the user opens. The opt-out is `AcpStop` (or picking a native
 /// engine in the model picker), which clears the config.
+fn sidebar_turn_failure(frame: &ServerMsg) -> Option<&str> {
+    match frame {
+        ServerMsg::Error { text } => Some(text),
+        ServerMsg::Warning { text } if mira_harness::is_fatal_warning(text) => Some(text),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod sidebar_failure_tests {
+    use super::*;
+
+    #[test]
+    fn only_fatal_native_warnings_and_errors_mark_the_turn_failed() {
+        for text in [
+            "provider error: rejected",
+            "stream error: broken",
+            "stream timed out after 300s",
+        ] {
+            let frame = ServerMsg::Warning { text: text.into() };
+            assert_eq!(sidebar_turn_failure(&frame), Some(text));
+        }
+        assert_eq!(
+            sidebar_turn_failure(&ServerMsg::Warning {
+                text: "[hook] blocked".into()
+            }),
+            None
+        );
+        assert_eq!(
+            sidebar_turn_failure(&ServerMsg::Error {
+                text: "failed".into()
+            }),
+            Some("failed")
+        );
+    }
+}
+
+fn record_prompt_failure(slot: &SessionSlot, text: String) {
+    *slot
+        .engine
+        .sidebar_failure
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(text.chars().take(160).collect());
+    let _ = slot.events_tx.send(ServerMsg::Error { text });
+}
+
 async fn prompt_agent(
     state: &AppState,
     slot: &Arc<SessionSlot>,
@@ -1866,16 +1912,14 @@ async fn prompt_agent(
     let handle = match crate::session_engine::ensure_agent(state, slot).await {
         Ok(h) => h,
         Err(e) => {
-            let _ = slot.events_tx.send(ServerMsg::Error { text: e });
+            record_prompt_failure(slot, e);
             // The client marked the turn busy when it sent; end it.
             crate::acp_host::AcpEventPort::for_slot(slot).turn_ended("start_failed");
             return;
         }
     };
     let Some(agent) = handle.agent().await else {
-        let _ = slot.events_tx.send(ServerMsg::Error {
-            text: "the external agent has stopped".into(),
-        });
+        record_prompt_failure(slot, "the external agent has stopped".into());
         crate::acp_host::AcpEventPort::for_slot(slot).turn_ended("agent_exited");
         return;
     };
@@ -1963,19 +2007,17 @@ async fn prompt_agent(
                     }
                 }
                 Err(e) => {
-                    let _ = slot.events_tx.send(ServerMsg::Error {
-                        text: format!("could not stage attachments: {e}"),
-                    });
+                    record_prompt_failure(slot, format!("could not stage attachments: {e}"));
                     crate::acp_host::AcpEventPort::for_slot(slot).turn_ended("attachments_failed");
                     return;
                 }
             },
             None => {
-                let _ = slot.events_tx.send(ServerMsg::Error {
-                    text:
-                        "this agent was started without an attachments dir, so images were not sent"
-                            .into(),
-                });
+                record_prompt_failure(
+                    slot,
+                    "this agent was started without an attachments dir, so images were not sent"
+                        .into(),
+                );
                 crate::acp_host::AcpEventPort::for_slot(slot).turn_ended("attachments_failed");
                 return;
             }
@@ -2325,7 +2367,7 @@ async fn spawn_turn(
         while let Some(evt) = stream.next().await {
             let frame = ServerMsg::from_harness(evt);
             crate::message_queue::observe_limits(&slot_for_task, &frame);
-            if let ServerMsg::Error { text } = &frame {
+            if let Some(text) = sidebar_turn_failure(&frame) {
                 *slot_for_task
                     .engine
                     .sidebar_failure

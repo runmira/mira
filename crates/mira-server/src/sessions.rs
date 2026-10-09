@@ -955,6 +955,17 @@ pub async fn set_session_flags(
         Ok(r) => r,
         Err(e) => return err(StatusCode::NOT_FOUND, format!("load: {e}")),
     };
+    let live = state
+        .list_slots()
+        .await
+        .into_iter()
+        .find(|slot| slot.id.to_string() == id);
+    if let Some(slot) = &live {
+        let (pinned, archived_at, settle) = slot.session.read().await.sidebar_flags().await;
+        record.pinned = pinned;
+        record.archived_at = archived_at;
+        record.settle = settle;
+    }
     if let Some(pinned) = body.pinned {
         record.pinned = pinned;
     }
@@ -968,20 +979,14 @@ pub async fn set_session_flags(
     if let Some(settled) = body.settled {
         record.settle = mira_harness::persist::SettleMarks::set(settled);
     }
-    if let Err(e) = store.save(&record).await {
+    if let Some(slot) = live {
+        let session = slot.session.read().await;
+        session
+            .set_sidebar_flags(record.pinned, record.archived_at, record.settle)
+            .await;
+        session.save_now().await;
+    } else if let Err(e) = store.save(&record).await {
         return err(StatusCode::INTERNAL_SERVER_ERROR, format!("save: {e}"));
-    }
-    // Mirror onto the live slot (if one exists) — checkpoints run after
-    // every turn and would otherwise overwrite the record with the
-    // session's stale in-memory flags.
-    for slot in state.list_slots().await {
-        if slot.id.to_string() == id {
-            slot.session
-                .read()
-                .await
-                .set_sidebar_flags(record.pinned, record.archived_at, record.settle)
-                .await;
-        }
     }
     info!(%id, pinned = record.pinned, archived = record.archived_at.is_some(), "session flags updated");
     Json(serde_json::json!({
