@@ -22,7 +22,7 @@
 pub mod approver;
 mod components;
 pub(crate) mod event_loop;
-mod ext_slash;
+pub(crate) mod ext_slash;
 pub(crate) mod inline_term;
 mod input;
 mod markdown;

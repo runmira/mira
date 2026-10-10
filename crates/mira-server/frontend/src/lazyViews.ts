@@ -24,4 +24,5 @@ export const ContextInspector = lazyNamed(() => import('./components/ContextInsp
 export const CommandPalette = lazyNamed(() => import('./components/CommandPalette'), 'CommandPalette');
 export const FolderPicker = lazyNamed(() => import('./components/FolderPicker'), 'FolderPicker');
 export const GoalPanel = lazyNamed(() => import('./components/GoalPanel'), 'GoalPanel');
+export const ReportProblem = lazyNamed(() => import('./components/ReportProblem'), 'ReportProblem');
 export const SessionPeek = lazyNamed(() => import('./components/SessionPeek'), 'SessionPeek');

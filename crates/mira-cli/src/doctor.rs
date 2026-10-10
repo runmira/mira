@@ -5,6 +5,10 @@
 //! permissions, skill discovery, MCP entries, memory files. With
 //! `--ping`, also makes a live `list_models()` call to prove the
 //! provider is actually reachable with the resolved key.
+//!
+//! `--bundle` also packs the results with version, config, logs and
+//! (optionally) a session into a zip for a bug report; `--crashes` walks
+//! through saved crash reports one at a time.
 
 use std::path::{Path, PathBuf};
 
@@ -19,9 +23,28 @@ pub struct DoctorArgs {
     /// resolved provider to prove the base URL + API key actually work.
     #[arg(long)]
     ping: bool,
+    /// Also write a zip for a bug report: version, platform, these checks,
+    /// config and recent logs, with keys and tokens removed. Nothing is
+    /// sent; you look it over and attach it yourself.
+    #[arg(long)]
+    bundle: bool,
+    /// Include a chat in the bundle: a session id, or `last` for the most
+    /// recent one. It holds your conversation, so it's left out by default.
+    #[arg(long, value_name = "ID", requires = "bundle")]
+    session: Option<String>,
+    /// Where to write the bundle. Default: ~/Downloads (or this folder).
+    #[arg(long, value_name = "PATH", requires = "bundle")]
+    out: Option<PathBuf>,
+    /// Review saved crash reports (see `diagnostics.crash_reports`) and
+    /// choose, one by one, whether to open a GitHub issue with each.
+    #[arg(long, conflicts_with_all = ["bundle", "ping"])]
+    crashes: bool,
 }
 
 pub async fn run(cli: &crate::Cli, args: DoctorArgs) -> Result<()> {
+    if args.crashes {
+        return review_crashes();
+    }
     let cwd = std::env::current_dir().context("read cwd")?;
 
     let mut report = Report::new();
@@ -40,6 +63,10 @@ pub async fn run(cli: &crate::Cli, args: DoctorArgs) -> Result<()> {
         Err(e) => {
             report.fail("merged config", format!("{e:#}"));
             report.print();
+            // A broken config is exactly when a bundle helps most.
+            if args.bundle {
+                write_bundle(&args, &cwd, &MiraConfig::default(), &report)?;
+            }
             return Ok(());
         }
     };
@@ -218,6 +245,132 @@ pub async fn run(cli: &crate::Cli, args: DoctorArgs) -> Result<()> {
     }
 
     report.print();
+    if args.bundle {
+        write_bundle(&args, &cwd, &cfg, &report)?;
+    }
+    Ok(())
+}
+
+fn write_bundle(args: &DoctorArgs, cwd: &Path, cfg: &MiraConfig, report: &Report) -> Result<()> {
+    let session_id = match args.session.as_deref() {
+        Some("last") => Some(last_session().context("no saved sessions to include")?),
+        Some(id) if mira_diagnostics::bundle::is_session_id(id) => Some(id.to_string()),
+        Some(id) => anyhow::bail!("`{id}` isn't a session id"),
+        None => None,
+    };
+    let mut opts = mira_diagnostics::BundleOptions::new(
+        mira_diagnostics::Redactor::from_env_and_config(cfg),
+        "cli",
+    );
+    opts.cwd = Some(cwd.to_path_buf());
+    opts.session_id = session_id.clone();
+    opts.extra.push(mira_diagnostics::BundleFile::new(
+        "doctor.txt",
+        report.render(),
+    ));
+    let bundle = mira_diagnostics::Bundle::collect(opts);
+    if let Some(id) = &session_id {
+        if !bundle.files.iter().any(|f| f.name.starts_with("session/")) {
+            anyhow::bail!("no saved session `{id}`");
+        }
+    }
+
+    let path = match &args.out {
+        Some(p) if p.is_dir() => p.join(mira_diagnostics::Bundle::file_name()),
+        Some(p) => p.clone(),
+        None => default_bundle_dir(cwd).join(mira_diagnostics::Bundle::file_name()),
+    };
+    let zip = bundle.to_zip().context("build zip")?;
+    mira_config::write_private(&path, &zip).with_context(|| format!("write {}", path.display()))?;
+
+    println!("\nDiagnostics bundle (keys and tokens removed):");
+    for f in &bundle.files {
+        let size = mira_diagnostics::bundle::human(f.contents.len() as u64);
+        match &f.note {
+            Some(note) => println!("  {:<44} {size:>8}  ({note})", f.name),
+            None => println!("  {:<44} {size:>8}", f.name),
+        }
+    }
+    println!("\nWrote {}", path.display());
+    println!("Nothing was sent. Look through it, then attach it to an issue:");
+    println!("  {}", mira_diagnostics::ISSUES_URL);
+    if session_id.is_none() {
+        println!("(To include a chat, add `--session last` or `--session <id>`.)");
+    }
+    Ok(())
+}
+
+/// ~/Downloads when it exists, so the zip doesn't land inside a repo.
+fn default_bundle_dir(cwd: &Path) -> PathBuf {
+    std::env::var_os("HOME")
+        .map(|h| PathBuf::from(h).join("Downloads"))
+        .filter(|d| d.is_dir())
+        .unwrap_or_else(|| cwd.to_path_buf())
+}
+
+fn last_session() -> Option<String> {
+    let dir = mira_diagnostics::mira_dir().join("sessions");
+    std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let id = name.strip_suffix(".json")?.to_string();
+            let modified = e.metadata().and_then(|m| m.modified()).ok()?;
+            Some((modified, id))
+        })
+        .max()
+        .map(|(_, id)| id)
+}
+
+/// Show each unreviewed crash report in full and ask about it. Answering
+/// marks it reviewed, so it isn't brought up again.
+fn review_crashes() -> Result<()> {
+    use std::io::{BufRead, IsTerminal, Write};
+
+    let on = MiraConfig::load_global()
+        .map(|c| c.diagnostics.crash_reports())
+        .unwrap_or(false);
+    let pending = mira_diagnostics::crash::pending();
+    if pending.is_empty() {
+        println!("No new crash reports.");
+        if !on {
+            println!("Crash reports are off. Turn them on with:");
+            println!("  mira config set diagnostics.crash_reports true");
+        }
+        return Ok(());
+    }
+    if !std::io::stdin().is_terminal() {
+        for r in &pending {
+            println!("{}", r.path.display());
+        }
+        return Ok(());
+    }
+    let stdin = std::io::stdin();
+    for (i, r) in pending.iter().enumerate() {
+        println!(
+            "── crash report {} of {} · {}\n",
+            i + 1,
+            pending.len(),
+            r.path.display()
+        );
+        println!("{}", r.contents.trim_end());
+        print!("\nThis is everything that would go in the issue. Open a GitHub issue with it? [y/N/q] ");
+        std::io::stdout().flush().ok();
+        let mut answer = String::new();
+        stdin.lock().read_line(&mut answer)?;
+        match answer.trim().to_ascii_lowercase().as_str() {
+            "y" | "yes" => {
+                crate::tui::ext_slash::open_browser(&r.issue_url());
+                println!("Opened in your browser. Nothing is sent until you submit it there.");
+            }
+            "q" | "quit" => return Ok(()),
+            _ => {}
+        }
+        r.mark_reviewed()
+            .with_context(|| format!("mark {} reviewed", r.path.display()))?;
+        println!();
+    }
     Ok(())
 }
 
@@ -312,6 +465,12 @@ impl Report {
     }
 
     fn print(&self) {
+        print!("{}", self.render());
+    }
+
+    fn render(&self) -> String {
+        use std::fmt::Write;
+        let mut out = String::new();
         let width = self.rows.iter().map(|r| r.label.len()).max().unwrap_or(0);
         for r in &self.rows {
             let mark = match r.level {
@@ -320,7 +479,13 @@ impl Report {
                 Level::Fail => "FAIL",
                 Level::Info => "    ",
             };
-            println!("[{mark}] {:<width$}  {}", r.label, r.detail, width = width);
+            let _ = writeln!(
+                out,
+                "[{mark}] {:<width$}  {}",
+                r.label,
+                r.detail,
+                width = width
+            );
         }
         let (fails, warns) = self
             .rows
@@ -330,12 +495,13 @@ impl Report {
                 Level::Warn => (f, w + 1),
                 _ => (f, w),
             });
-        if fails > 0 {
-            println!("\n{fails} check(s) failed, {warns} warning(s).");
+        let _ = if fails > 0 {
+            writeln!(out, "\n{fails} check(s) failed, {warns} warning(s).")
         } else if warns > 0 {
-            println!("\nAll critical checks passed. {warns} warning(s).");
+            writeln!(out, "\nAll critical checks passed. {warns} warning(s).")
         } else {
-            println!("\nAll checks passed.");
-        }
+            writeln!(out, "\nAll checks passed.")
+        };
+        out
     }
 }

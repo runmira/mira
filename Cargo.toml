@@ -36,6 +36,7 @@ mira-cloud    = { path = "crates/mira-cloud",    version = "0.6.1" }
 mira-mcp      = { path = "crates/mira-mcp",      version = "0.6.1" }
 mira-plugins  = { path = "crates/mira-plugins",  version = "0.6.1" }
 mira-engine   = { path = "crates/mira-engine",   version = "0.6.1" }
+mira-diagnostics = { path = "crates/mira-diagnostics", version = "0.6.1" }
 
 # Async runtime
 tokio           = { version = "1.40", features = ["macros", "rt-multi-thread", "process", "fs", "io-util", "io-std", "sync", "signal", "time"] }

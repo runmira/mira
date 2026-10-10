@@ -23,6 +23,7 @@ import {
   History,
   X,
   Download,
+  Bug,
 } from 'lucide-react';
 import { cn } from './lib/utils';
 import { acpOptionsToDescriptors } from './lib/acpOptions';
@@ -62,6 +63,7 @@ import {
   GetStarted,
   GoalPanel,
   ImportChats,
+  ReportProblem,
   PluginsPanel,
   ProcessesPane,
   PullRequestPanel,
@@ -576,6 +578,14 @@ export default function App() {
   }, []);
   /** "Bring chats from other agents", from ⌘K. */
   const [importOpen, setImportOpen] = useState(false);
+  /** "Report a problem" (issue #156), from ⌘K or Settings → About. */
+  const [reportOpen, setReportOpen] = useState(false);
+  const reportOpenMounted = useLatch(reportOpen);
+  useEffect(() => {
+    const onReport = () => setReportOpen(true);
+    window.addEventListener('mira:report-problem', onReport);
+    return () => window.removeEventListener('mira:report-problem', onReport);
+  }, []);
   // File picker opened from the right panel's "+" menu — distinct from the
   // folder picker, which switches the session's cwd.
   const [panelFilePickerOpen, setPanelFilePickerOpen] = useState(false);
@@ -2741,6 +2751,7 @@ export default function App() {
     { id: 's-provider', group: 'Settings', label: 'Providers & API keys', icon: Plug, run: goSettings('provider') },
     { id: 's-agents', group: 'Settings', label: 'External agents', icon: Bot, keywords: ['claude code', 'codex'], run: goSettings('agents') },
     { id: 'import-chats', group: 'Chat', label: 'Import chats from Claude Code or Codex', icon: Download, keywords: ['history', 'migrate', 'bring'], run: () => setImportOpen(true) },
+    { id: 'report-problem', group: 'Help', label: 'Report a problem', icon: Bug, keywords: ['bug', 'diagnostics', 'logs', 'crash', 'issue', 'feedback'], run: () => setReportOpen(true) },
     { id: 's-subagents', group: 'Settings', label: 'Subagents', icon: Smile, keywords: ['scout', 'iris', 'atlas', 'bolt', 'quill', 'sentry', 'faces'], run: goSettings('subagents') },
     { id: 's-usage', group: 'Settings', label: 'Usage & cost', icon: ChartColumn, keywords: ['tokens', 'spend', 'limits'], run: goSettings('usage') },
     { id: 's-memory', group: 'Settings', label: 'Memory', icon: Brain, run: goSettings('memory') },
@@ -3875,6 +3886,16 @@ export default function App() {
           )}
         </DialogContent>
       </Dialog>
+      {reportOpenMounted && (
+        <LazyBoundary>
+          <ReportProblem
+            open={reportOpen}
+            onOpenChange={setReportOpen}
+            sessionId={sessionId || undefined}
+            chatTitle={chatTitleRef.current ?? undefined}
+          />
+        </LazyBoundary>
+      )}
       {inspectOpenMounted && (
         <LazyBoundary>
           <ContextInspector

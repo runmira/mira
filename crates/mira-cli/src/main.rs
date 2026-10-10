@@ -210,6 +210,10 @@ enum Command {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    // Opt-in (`diagnostics.crash_reports`); saves a local file, sends nothing.
+    if let Ok(global) = mira_config::MiraConfig::load_global() {
+        mira_diagnostics::crash::install_panic_hook(&global);
+    }
 
     // Subcommand branch — every non-default command short-circuits
     // before we build the session, provider, and tools.
@@ -290,6 +294,12 @@ async fn main() -> Result<()> {
     // read them via their existing env-var conventions without extra
     // plumbing. Yaml never overwrites a shell-set env value.
     mira_config::export_keys_to_env(&cfg);
+    if !headless {
+        let crashes = mira_diagnostics::crash::pending().len();
+        if crashes > 0 {
+            eprintln!("mira: {crashes} new crash report(s). Review with `mira doctor --crashes`.");
+        }
+    }
 
     // --- resolve settings across CLI / env / config / defaults
     let settings = resolve_settings(&cli, &cfg)?;
@@ -332,7 +342,7 @@ async fn main() -> Result<()> {
     swappable.register(&settings.provider_name, provider.clone());
     let mut boot_engine = settings.provider_name.clone();
     if let Ok(runtime) = mira_config::RuntimeState::load() {
-        if let Some(last) = runtime.last_engine {
+        if let Some(last) = restorable_engine(&cli, runtime.last_engine) {
             if engines.get(&last).is_some() && swappable.activate(&last) {
                 boot_engine = last;
             }
@@ -524,8 +534,9 @@ async fn main() -> Result<()> {
     // `last_engine` from an earlier `/engine` switch). Adopt its model
     // override when it pins one, so the session doesn't run a model id
     // from the old provider. Without an override the current model
-    // carries over — the same fallback the server applies.
-    if boot_engine != settings.provider_name {
+    // carries over — the same fallback the server applies. An explicit
+    // `--model` always wins.
+    if boot_engine != settings.provider_name && cli.model.is_none() {
         if let Some(m) = engines.get(&boot_engine).and_then(|i| i.model.clone()) {
             sess_cfg.model = m;
         }
@@ -815,6 +826,12 @@ pub(crate) fn resolve_settings(cli: &Cli, cfg: &MiraConfig) -> Result<ResolvedSe
     })
 }
 
+/// The `last_engine` to restore at boot. An explicit `--provider` pins
+/// the engine, so the saved one only applies when it's absent.
+fn restorable_engine(cli: &Cli, last_engine: Option<String>) -> Option<String> {
+    last_engine.filter(|_| cli.provider.is_none())
+}
+
 fn default_base_url_for(name: &str) -> Option<String> {
     mira_config::default_base_url_for(name).map(|s| s.to_owned())
 }
@@ -1028,5 +1045,20 @@ pub(crate) async fn register_computer_use(registry: &mut Registry, cli: &Cli, cf
         {
             mira_browser::managed::prefetch();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_flag_skips_last_engine_restore() {
+        let last = || Some("openrouter".to_owned());
+        let cli = Cli::try_parse_from(["mira", "--provider", "anthropic", "-p", "hi"]).unwrap();
+        assert_eq!(restorable_engine(&cli, last()), None);
+
+        let cli = Cli::try_parse_from(["mira", "-p", "hi"]).unwrap();
+        assert_eq!(restorable_engine(&cli, last()), last());
     }
 }

@@ -4,7 +4,7 @@
 //! <value>`. Keys use dotted notation and target the whole-file scalars
 //! (`default_provider`, `default_model`, …) plus per-provider fields
 //! (`providers.<name>.base_url`, `.api_key`, `.api_key_env`,
-//! `.prompt_caching`). Everything else lives in the yaml only — `edit`
+//! `.prompt_caching`) and `diagnostics.crash_reports`. Everything else lives in the yaml only — `edit`
 //! opens it in `$EDITOR` for those.
 
 use std::path::PathBuf;
@@ -147,6 +147,9 @@ fn get(key: &str, local: bool) -> Result<()> {
 }
 
 fn set(key: &str, value: &str, local: bool) -> Result<()> {
+    if local && key.starts_with("diagnostics.") {
+        bail!("`{key}` is only read from the global config; drop --local");
+    }
     let p = target_path(local)?;
     let mut cfg = if p.exists() {
         let raw = std::fs::read_to_string(&p).with_context(|| format!("read {}", p.display()))?;
@@ -180,6 +183,7 @@ fn read_key(cfg: &MiraConfig, key: &str) -> Result<Option<String>> {
         "temperature" => Ok(cfg.temperature.map(|n| n.to_string())),
         "compactor_model" => Ok(cfg.compactor_model.clone()),
         "small_model" => Ok(cfg.small_model.clone()),
+        "diagnostics.crash_reports" => Ok(cfg.diagnostics.crash_reports.map(|b| b.to_string())),
         other => {
             let parts: Vec<&str> = other.splitn(3, '.').collect();
             if parts.len() == 3 && parts[0] == "providers" {
@@ -212,6 +216,7 @@ fn write_key(cfg: &mut MiraConfig, key: &str, value: &str) -> Result<()> {
         "temperature" => cfg.temperature = parse_opt_f32(value)?,
         "compactor_model" => cfg.compactor_model = some_or_clear(value),
         "small_model" => cfg.small_model = some_or_clear(value),
+        "diagnostics.crash_reports" => cfg.diagnostics.crash_reports = parse_opt_bool(value)?,
         other => {
             let parts: Vec<&str> = other.splitn(3, '.').collect();
             if parts.len() == 3 && parts[0] == "providers" {

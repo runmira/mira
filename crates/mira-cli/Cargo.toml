@@ -34,6 +34,7 @@ mira-mcp     = { workspace = true }
 mira-plugins = { workspace = true }
 mira-auth     = { workspace = true }
 mira-agents   = { workspace = true }
+mira-diagnostics = { workspace = true }
 
 async-trait        = { workspace = true }
 tokio              = { workspace = true }

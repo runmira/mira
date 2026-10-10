@@ -1,0 +1,19 @@
+[package]
+name         = "mira-diagnostics"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+description  = "Problem-report bundles and opt-in crash reports for Mira, with secrets removed."
+
+[dependencies]
+mira-config = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+serde_yaml  = { workspace = true }
+regex       = { workspace = true }
+chrono      = { workspace = true }
+zip         = { version = "4", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+tempfile = "3"

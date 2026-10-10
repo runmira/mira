@@ -105,6 +105,28 @@ pub struct MiraConfig {
     /// limits on resumes.
     #[serde(default, skip_serializing_if = "SessionsConfig::is_empty")]
     pub sessions: SessionsConfig,
+    /// Crash reports and problem reports. Only read from the global file.
+    #[serde(default, skip_serializing_if = "DiagnosticsConfig::is_empty")]
+    pub diagnostics: DiagnosticsConfig,
+}
+
+/// `diagnostics:` block. Mira sends nothing on its own; this only decides
+/// whether a crash leaves a report on disk for the user to review.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct DiagnosticsConfig {
+    /// Save a report under `~/.mira/crashes/` when Mira panics. Default off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crash_reports: Option<bool>,
+}
+
+impl DiagnosticsConfig {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+    pub fn crash_reports(&self) -> bool {
+        self.crash_reports.unwrap_or(false)
+    }
 }
 
 /// `sessions:` block. Both default off.
@@ -1246,6 +1268,16 @@ mod tests {
             !yaml.contains("sessions"),
             "an untouched config stays clean: {yaml}"
         );
+    }
+
+    #[test]
+    fn crash_reports_default_off_and_stay_global() {
+        assert!(!MiraConfig::default().diagnostics.crash_reports());
+        let on: MiraConfig = serde_yaml::from_str("diagnostics:\n  crash_reports: true\n").unwrap();
+        assert!(on.diagnostics.crash_reports());
+        // A repo's config can't switch it on: merge never copies it.
+        let merged = MiraConfig::default().merge(on);
+        assert!(!merged.diagnostics.crash_reports());
     }
 
     #[test]

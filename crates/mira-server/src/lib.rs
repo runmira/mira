@@ -44,6 +44,7 @@ mod context_api;
 mod cwd;
 mod delegate;
 mod devices;
+mod diagnostics;
 mod editors;
 mod embedded;
 mod engine_settings;
@@ -426,6 +427,9 @@ fn build_router(
         .route("/api/terminals/:id", axum::routing::delete(terminal::kill))
         .route("/api/health", get(health))
         .route("/api/version", get(version))
+        .route("/api/diagnostics", get(diagnostics::preview))
+        .route("/api/diagnostics/bundle", get(diagnostics::download))
+        .route("/api/diagnostics/save", post(diagnostics::save))
         .route("/api/aside", post(aside::ask))
         .route("/api/sessions/:id/fork", post(sessions::fork_session))
         .route(

@@ -2331,6 +2331,7 @@ dependencies = [
  "mira-computer",
  "mira-config",
  "mira-core",
+ "mira-diagnostics",
  "mira-engine",
  "mira-harness",
  "mira-mcp",
@@ -2443,6 +2444,20 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "uuid",
+]
+
+[[package]]
+name = "mira-diagnostics"
+version = "0.6.1"
+dependencies = [
+ "chrono",
+ "mira-config",
+ "regex",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "zip",
 ]
 
 [[package]]
@@ -2631,6 +2646,7 @@ dependencies = [
  "mira-compute",
  "mira-config",
  "mira-core",
+ "mira-diagnostics",
  "mira-engine",
  "mira-harness",
  "mira-mcp",

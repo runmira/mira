@@ -1778,6 +1778,15 @@ function AboutSection({ view }: { view: SettingsView }) {
           </div>
         }
       />
+      <TRow
+        title="Report a problem"
+        description="Save a bundle of version, settings and recent logs, with keys removed, to attach to a GitHub issue."
+        control={
+          <Button variant="outline" size="sm" onClick={() => window.dispatchEvent(new Event('mira:report-problem'))}>
+            <Bug className="size-3.5" /> Report a problem
+          </Button>
+        }
+      />
     </TSection>
   );
 }
