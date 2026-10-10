@@ -2226,7 +2226,7 @@ dependencies = [
 
 [[package]]
 name = "mira-acp"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -2245,7 +2245,7 @@ dependencies = [
 
 [[package]]
 name = "mira-agents"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "serde",
@@ -2256,7 +2256,7 @@ dependencies = [
 
 [[package]]
 name = "mira-ai"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2276,7 +2276,7 @@ dependencies = [
 
 [[package]]
 name = "mira-auth"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2294,7 +2294,7 @@ dependencies = [
 
 [[package]]
 name = "mira-browser"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "base64 0.22.1",
  "futures",
@@ -2312,7 +2312,7 @@ dependencies = [
 
 [[package]]
 name = "mira-cli"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2364,7 +2364,7 @@ dependencies = [
 
 [[package]]
 name = "mira-cloud"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "async-trait",
  "axum",
@@ -2391,7 +2391,7 @@ dependencies = [
 
 [[package]]
 name = "mira-compute"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "async-trait",
  "axum",
@@ -2414,7 +2414,7 @@ dependencies = [
 
 [[package]]
 name = "mira-computer"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2428,7 +2428,7 @@ dependencies = [
 
 [[package]]
 name = "mira-config"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "serde",
@@ -2438,7 +2438,7 @@ dependencies = [
 
 [[package]]
 name = "mira-core"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -2448,7 +2448,7 @@ dependencies = [
 
 [[package]]
 name = "mira-diagnostics"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "chrono",
  "mira-config",
@@ -2462,7 +2462,7 @@ dependencies = [
 
 [[package]]
 name = "mira-engine"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "async-trait",
  "futures",
@@ -2479,7 +2479,7 @@ dependencies = [
 
 [[package]]
 name = "mira-harness"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2505,7 +2505,7 @@ dependencies = [
 
 [[package]]
 name = "mira-mcp"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2535,7 +2535,7 @@ dependencies = [
 
 [[package]]
 name = "mira-memory"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "async-trait",
  "serde",
@@ -2548,7 +2548,7 @@ dependencies = [
 
 [[package]]
 name = "mira-plugins"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2568,7 +2568,7 @@ dependencies = [
 
 [[package]]
 name = "mira-policy"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "glob",
  "mira-core",
@@ -2581,7 +2581,7 @@ dependencies = [
 
 [[package]]
 name = "mira-pty"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "mira-sandbox",
@@ -2594,7 +2594,7 @@ dependencies = [
 
 [[package]]
 name = "mira-review"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2609,7 +2609,7 @@ dependencies = [
 
 [[package]]
 name = "mira-sandbox"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -2625,7 +2625,7 @@ dependencies = [
 
 [[package]]
 name = "mira-server"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2679,7 +2679,7 @@ dependencies = [
 
 [[package]]
 name = "mira-skills"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "serde",
@@ -2690,7 +2690,7 @@ dependencies = [
 
 [[package]]
 name = "mira-tools"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "anyhow",
  "async-trait",
