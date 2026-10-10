@@ -1810,6 +1810,21 @@ impl NativeAgent {
                         }
                     }
                 }
+                // The child is gone without a final `result` (crash, OOM,
+                // kill): the `result` that would have ended the turn never
+                // comes, so without this the turn's `ends` receiver pends
+                // forever and the composer spins with nothing reported.
+                // The pump treats `agent_exited` as a real outcome: warn,
+                // end the turn, drop the dead handle so the next prompt
+                // restarts the agent instead of writing into a closed pipe.
+                // Skipped on clean shutdown via `stopping` on the far side.
+                let _ = end_tx
+                    .send(TurnEnd {
+                        stop_reason: "agent_exited".to_string(),
+                        is_error: true,
+                        rate_limited: None,
+                    })
+                    .await;
             });
         }
 
@@ -2281,6 +2296,49 @@ done
         assert_eq!(asked[0].input["command"], "echo hi");
 
         agent.shutdown().await;
+    }
+
+    /// A child that dies mid-turn without a `result` (crash, OOM, kill)
+    /// must still resolve the turn: the reader announces `agent_exited`
+    /// instead of leaving `ends` pending forever, which surfaced as a
+    /// composer spinning with nothing reported.
+    #[tokio::test]
+    async fn a_child_dying_mid_turn_still_ends_the_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("claude");
+        std::fs::write(
+            &path,
+            "#!/bin/sh\necho '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"doomed-1\"}'\nread line\nexit 1\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let cfg = LaunchConfig {
+            program: path,
+            args: Vec::new(),
+            env: Default::default(),
+            secret_env: Vec::new(),
+            env_deny: Vec::new(),
+        };
+        let gate: PermissionGate =
+            Arc::new(|_p| Box::pin(async { PermissionDecision::from(true) }));
+        let agent = NativeAgent::start(&cfg, gate, None).await.expect("spawn");
+        let mut ends_rx = agent.turn_end.lock().unwrap().take().expect("turn end");
+
+        let sid = wait_for(|| async { agent.session_id().await.or(None) }, "session id").await;
+        assert_eq!(sid, "doomed-1");
+
+        // Starts the turn, then the process exits with no `result`.
+        agent.prompt("hello").await.unwrap();
+
+        let end = tokio::time::timeout(Duration::from_secs(20), ends_rx.recv())
+            .await
+            .expect("dying mid-turn must still end the turn within 20s")
+            .expect("turn end channel must stay open");
+        assert_eq!(end.stop_reason, "agent_exited");
     }
 
     /// The gate's answer is echoed back on stdin as `control_response`. If
