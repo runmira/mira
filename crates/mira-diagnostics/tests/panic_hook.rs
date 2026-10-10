@@ -23,7 +23,10 @@ fn panics_leave_a_redacted_report_only_when_turned_on() {
     let pending = mira_diagnostics::crash::pending();
     assert_eq!(pending.len(), 1);
     let report = &pending[0].contents;
-    assert!(report.contains("panic: failed with key «redacted»"), "{report}");
+    assert!(
+        report.contains("panic: failed with key «redacted»"),
+        "{report}"
+    );
     assert!(!report.contains("custom-secret-value-1234"));
     assert!(report.contains("backtrace:"));
 }

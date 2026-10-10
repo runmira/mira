@@ -241,9 +241,9 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
             }
         }
         if cfg.resume.is_none() && !user_pinned {
-            if let Some((id, kind)) = boot_engines.preferred_agent_at_boot(
-                |b| mira_acp::which::resolve(b).is_some(),
-            ) {
+            if let Some((id, kind)) =
+                boot_engines.preferred_agent_at_boot(|b| mira_acp::which::resolve(b).is_some())
+            {
                 *inst = Some(id.clone());
                 boot_agent = Some((id, kind));
             }
