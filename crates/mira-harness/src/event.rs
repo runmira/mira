@@ -58,6 +58,9 @@ pub enum HarnessEvent {
         context_window: u64,
         /// Where auto-compaction kicks in, in tokens.
         compact_at: u64,
+        /// Why this request wasn't served from the provider's prompt cache
+        /// when it should have been (see `cache_watch`).
+        cache_miss: Option<String>,
     },
     /// The provider's rate limits after this round's request, from its
     /// response headers. Only sent by providers that report them.

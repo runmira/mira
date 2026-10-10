@@ -1,3 +1,5 @@
+import { ErrorNotice } from '../ErrorNotice';
+import { chatFailure, isFatalChatWarning, isProviderLimitFailure, isResponseFailure, failedTurnPrompt } from '../../lib/chatFailure';
 /**
  * One user turn in the transcript: its entries plus the "worked for"
  * summary chip. Memoized so streaming into the last turn doesn't re-render
@@ -43,9 +45,11 @@ export const TurnView = memo(TurnViewImpl, (prev, next) => {
 export type TurnViewProps = Parameters<typeof TurnViewImpl>[0];
 
 export function TurnViewImpl({
-  turn, diffSummary, recovery, recoveryDisabled, onRecoveryAction, timing: timingProp, usage: usageProp, model: modelProp, index, expanded, isActive, onToggle, onDecide, onPlanReply, onAskUserReply, onOpenAgent, onOpenFile, skills, mode, onSetMode, minimapId, approvalViaDialog, offscreenOk = false,
+  turn, diffSummary, failureRetryEnabled = false, onFailureSettings, recovery, recoveryDisabled, onRecoveryAction, timing: timingProp, usage: usageProp, model: modelProp, index, expanded, isActive, onToggle, onDecide, onPlanReply, onAskUserReply, onOpenAgent, onOpenFile, skills, mode, onSetMode, minimapId, approvalViaDialog, offscreenOk = false,
 }: {
   turn: Turn;
+  failureRetryEnabled?: boolean;
+  onFailureSettings?: () => void;
   recovery?: import('../../types').QueuedInput;
   recoveryDisabled?: boolean;
   onRecoveryAction?: (id: string, action: RecoveryAction) => Promise<void>;
@@ -100,7 +104,15 @@ export function TurnViewImpl({
   // final answer; everything before it is intermediate. Tool cards + earlier
   // assistant text hide behind the "Worked for" chip when collapsed.
   // The stats entry is data, not content: it mustn't count as work done.
-  const body = useMemo(() => turn.body.filter((e) => e.kind !== 'turn_stats'), [turn.body]);
+  const failures = turn.body.filter((e): e is Extract<Entry, {kind: 'error' | 'warning'}> => e.kind === 'error' || (e.kind === 'warning' && isFatalChatWarning(e.text)));
+  const failure = failures.at(-1);
+  const responseFailed = failure ? isResponseFailure(failure) : false;
+  const openingPrompt = failedTurnPrompt(turn.user);
+  const canRetryFailure = failureRetryEnabled && responseFailed && !!openingPrompt && !!messageActions;
+  const failureInfo = failure ? responseFailed ? chatFailure(failure.text) : {
+    title: "Couldn't complete this action", description: 'Try the action again from its original control. Technical details may help explain what went wrong.', settings: false,
+  } : null;
+  const body = useMemo(() => turn.body.filter((e) => e.kind !== 'turn_stats' && e.kind !== 'error' && !(e.kind === 'warning' && isFatalChatWarning(e.text))), [turn.body]);
   const nativeTurn = own != null || body.some((e) => (e.kind === 'msg' && e.nativeMessageId != null) || (e.kind === 'tool' && e.agentCall != null) || (e.kind === 'thought' && e.native));
   const { intermediateRaw, intermediate, finalEntry, trailing } = useMemo(
     () => turnActivity(body, nativeTurn && !isActive), [body, nativeTurn, isActive],
@@ -221,6 +233,7 @@ export function TurnViewImpl({
         </TurnStatsContext.Provider>
       )}
       {trailing.map((item, i) => renderActivity(item, i, 'trailing'))}
+      {failure && failureInfo && (!recovery || !isProviderLimitFailure(failure.text)) && <ErrorNotice title={failureInfo.title} description={failureInfo.description + (canRetryFailure && recoveryDisabled ? ' Reconnect or wait for the active turn to finish before retrying.' : '')} details={failures.map(e => e.text).join('\n\n')} disabled={!!recoveryDisabled} retryLabel="Retry message" onRetry={canRetryFailure && openingPrompt && messageActions ? () => messageActions.edit(openingPrompt, openingPrompt.msg.content ?? '') : undefined} secondary={failureInfo.settings && onFailureSettings ? { label: 'Connection settings', onClick: onFailureSettings } : undefined} />}
       {recovery && onRecoveryAction && <UsageRecoveryCard key={recovery.id} item={recovery} disabled={!!recoveryDisabled} onAction={onRecoveryAction} />}
       {diffSummary && <TurnChanges summary={diffSummary} onOpenFile={path => onOpenFile(path, null)} busy={messageActions?.busy} onUndo={turn.user && messageActions ? () => messageActions.restore(turn.user!) : undefined} />}
     </div>

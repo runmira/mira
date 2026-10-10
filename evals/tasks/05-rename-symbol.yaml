@@ -4,5 +4,6 @@ prompt: |
   Rename this function to `lookup` while maintaining the same functionality. Update all usages of the function
   throughout the codebase.
 fixture: 05-rename-symbol-fixture
-verify: cargo test --quiet
+# The test calls `lookup`; any `get(` left in src means a usage was missed.
+verify: cargo test --quiet && ! grep -n 'fn get(\|\.get("' src/lib.rs
 timeout_secs: 300

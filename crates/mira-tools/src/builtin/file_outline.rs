@@ -98,6 +98,27 @@ impl Tool for FileOutline {
     }
 }
 
+/// Top-level definitions and their members in a source file, for the repo
+/// map: `(kind, name, line, container)`. Empty for unsupported languages.
+pub(crate) fn outline_source(
+    path: &Path,
+    src: &str,
+) -> Vec<(&'static str, String, u32, Option<String>)> {
+    Language::detect(path)
+        .map(|lang| {
+            outline(src, lang)
+                .into_iter()
+                .map(|s| (s.kind.as_str(), s.name, s.line, s.container))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether the outline understands this file's language.
+pub(crate) fn is_outlined(path: &Path) -> bool {
+    Language::detect(path).is_some()
+}
+
 // ---------- IR ----------
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

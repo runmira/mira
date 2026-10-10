@@ -184,7 +184,7 @@ export function replayAgentTranscript(lines: AgentTranscriptLine[]): Entry[] {
         const detail = msg.detail ? ` ${msg.detail}` : '';
         out = [
           ...sealed,
-          { kind: 'error', text: `${describeAcpStop(msg.stop_reason)}${detail}` },
+          { kind: 'error', text: `${describeAcpStop(msg.stop_reason)}${detail}`, responseFailure: true },
         ];
         break;
       }

@@ -374,12 +374,19 @@ pub fn agent_mcp(port: u16, session: &str, gate: McpGate) -> mira_acp::session::
 /// in Mira's Processes window.
 pub fn agent_mcp_config(port: u16, session: &str) -> Value {
     let m = agent_mcp(port, session, McpGate::Agent);
+    let mut headers = serde_json::Map::new();
+    headers.insert("Authorization".into(), m.authorization().into());
+    // Leaves out Mira's copies of tools Claude Code already has.
+    headers.insert(
+        mira_acp::session::MIRA_TOOL_PROFILE_HEADER.into(),
+        mira_acp::session::CLAUDE_CODE_TOOL_PROFILE.into(),
+    );
     serde_json::json!({
         "mcpServers": {
             "mira": {
                 "type": "http",
                 "url": m.url,
-                "headers": { "Authorization": m.authorization() },
+                "headers": headers,
             }
         }
     })
@@ -907,19 +914,20 @@ const SESSION_MCP_TOOLS: &[&str] = &[
 enum ToolProfile {
     All,
     Codex,
+    ClaudeCode,
 }
 
 impl ToolProfile {
     fn from_headers(headers: &axum::http::HeaderMap) -> Self {
-        let codex = headers
+        let profile = headers
             .get(mira_acp::session::MIRA_TOOL_PROFILE_HEADER)
             .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| {
-                v.trim()
-                    .eq_ignore_ascii_case(mira_acp::session::CODEX_TOOL_PROFILE)
-            });
-        if codex {
+            .map(str::trim)
+            .unwrap_or_default();
+        if profile.eq_ignore_ascii_case(mira_acp::session::CODEX_TOOL_PROFILE) {
             Self::Codex
+        } else if profile.eq_ignore_ascii_case(mira_acp::session::CLAUDE_CODE_TOOL_PROFILE) {
+            Self::ClaudeCode
         } else {
             Self::All
         }
@@ -931,12 +939,13 @@ impl ToolProfile {
         match self {
             Self::All => true,
             Self::Codex => session_tool == "ask_user",
+            Self::ClaudeCode => matches!(session_tool, "ask_user" | "plan"),
         }
     }
 
     fn instructions(self) -> &'static str {
         match self {
-            Self::All => "Mira's tools. The browser_* tools drive the browser the user \
+            Self::All | Self::ClaudeCode => "Mira's tools. The browser_* tools drive the browser the user \
                           watches live in Mira's browser pane (a dedicated profile, never the \
                           user's own): browser_open a URL, browser_snapshot to read it (with \
                           element refs), then browser_click / browser_type / browser_press; \
@@ -1138,7 +1147,11 @@ async fn mcp_one(
                     }
                 }
                 tools.extend(extra_agent_tools().into_iter().skip(1));
-                tools.extend(crate::devices::tool_specs());
+                // Only where there's a simulator or emulator to drive: each
+                // definition rides along on every request the agent makes.
+                if crate::devices::available() {
+                    tools.extend(crate::devices::tool_specs());
+                }
                 // Delegated chats run read-only and can't fan out.
                 if !slot.session.read().await.is_subagent() {
                     tools.extend(crate::agent_threads::tool_specs());
@@ -1446,6 +1459,30 @@ mod tool_profile_tests {
         assert_eq!(listed, [&"ask_user"]);
         assert!(SESSION_MCP_TOOLS.iter().all(|n| ToolProfile::All.lists(n)));
         assert!(!codex.instructions().contains("plan displays"));
+    }
+
+    #[test]
+    fn claude_code_is_not_shown_copies_of_its_own_tools() {
+        // Claude Code's launch config asks for its profile...
+        let cfg = agent_mcp_config(8787, "sess_profile");
+        let header = cfg["mcpServers"]["mira"]["headers"]
+            [mira_acp::session::MIRA_TOOL_PROFILE_HEADER]
+            .as_str()
+            .unwrap();
+        revoke_mcp_grants("sess_profile");
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            mira_acp::session::MIRA_TOOL_PROFILE_HEADER,
+            header.parse().unwrap(),
+        );
+        let claude = ToolProfile::from_headers(&headers);
+        assert_eq!(claude, ToolProfile::ClaudeCode);
+        // ...which keeps Mira's cards and drops what Claude Code already has.
+        let listed: Vec<_> = SESSION_MCP_TOOLS
+            .iter()
+            .filter(|n| claude.lists(n))
+            .collect();
+        assert_eq!(listed, [&"ask_user", &"plan"]);
     }
 }
 

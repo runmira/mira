@@ -19,6 +19,10 @@ use crate::instance::{instances_from_config, EngineInstance};
 use crate::native::{build_native_provider, missing_piece};
 use crate::snapshot::{EngineFlavor, EngineSnapshot, EngineState};
 
+/// External agent instances preferred for a fresh composer at boot, in
+/// order: the subscription CLIs most people already have installed.
+const BOOT_AGENT_PREFERENCE: &[&str] = &["claude-code", "codex"];
+
 /// Every configured backend, keyed by instance id.
 #[derive(Clone, Debug, Default)]
 pub struct EngineRegistry {
@@ -86,6 +90,33 @@ impl EngineRegistry {
             }
         }
         self.instances.values().find(|i| i.is_native() && i.enabled)
+    }
+
+    /// The external agent a fresh launch should open on: the first
+    /// preferred instance that exists, is enabled, and has a binary on
+    /// this machine. Presence is a caller-supplied PATH scan only (no
+    /// spawn), so boot never waits on a probe. Returns
+    /// (instance, driver).
+    pub fn preferred_agent_at_boot(
+        &self,
+        installed: impl Fn(&str) -> bool,
+    ) -> Option<(String, String)> {
+        for &id in BOOT_AGENT_PREFERENCE {
+            let inst = self.get(id)?;
+            if inst.is_native() || !inst.enabled {
+                continue;
+            }
+            let driver = mira_acp::drivers::by_kind(inst.driver.as_str())?;
+            let present = driver
+                .binary_names()
+                .iter()
+                .chain(driver.underlying_cli_names().iter())
+                .any(|b| installed(b));
+            if present {
+                return Some((inst.id.to_string(), inst.driver.to_string()));
+            }
+        }
+        None
     }
 
     /// Probe a native instance: configuration checks only, no network.
@@ -434,6 +465,27 @@ mod tests {
         let reg = EngineRegistry::from_config(&c);
         let inst = reg.default_native_instance(&c).unwrap();
         assert_eq!(inst.id.as_str(), "anthropic");
+    }
+
+    #[test]
+    fn boot_prefers_claude_then_codex_then_nothing() {
+        let reg = EngineRegistry::from_config(&MiraConfig::default());
+        // The default registry always carries both agent instances.
+        assert!(reg.get("claude-code").is_some());
+        assert!(reg.get("codex").is_some());
+        // Nothing installed → no preference; the provider default stands.
+        assert_eq!(reg.preferred_agent_at_boot(|_| false), None);
+        // Only a codex binary → codex.
+        let only_codex = |b: &str| b.contains("codex");
+        assert_eq!(
+            reg.preferred_agent_at_boot(only_codex).map(|(i, _)| i),
+            Some("codex".to_string())
+        );
+        // Both installed → claude-code wins.
+        assert_eq!(
+            reg.preferred_agent_at_boot(|_| true).map(|(i, _)| i),
+            Some("claude-code".to_string())
+        );
     }
 
     #[test]

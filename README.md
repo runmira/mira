@@ -186,10 +186,18 @@ Rate limits, overloads and dropped connections are retried with backoff
 ### Tools
 
 Built-in: `read_file`, `write_file`, `edit_file`, `bash`, `grep`, `glob`,
-`find_symbol`, `find_references`, `find_callers`, `git_status` /
+`find_symbol`, `find_references`, `find_callers`, `repo_map`, `git_status` /
 `git_diff` / `git_log` / `git_commit`, `rustfmt`, `web_fetch`,
 `web_search`, and a set of `memory_*` tools.
 Every call goes through the permission layer.
+
+**A map of the repository.** In a git repository with 25 or more source
+files, a session starts with a short map in its system prompt: the files
+whose definitions the rest of the code uses most, and those definitions,
+so the agent can go straight to the right file instead of spending turns
+grepping. `repo_map` shows any directory in more detail. The map is cached
+in `~/.mira/cache/repo-maps/` and only changed files are read again;
+`MIRA_REPO_MAP=0` turns the prompt section off.
 
 Extensible: any MCP server (`stdio`, `http` or `sse`, with OAuth
 sign-in) adds its own tools, and Claude Code plugins install as they

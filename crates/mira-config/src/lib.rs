@@ -677,6 +677,12 @@ pub fn caching_capability(name: &str, base_url: &str) -> CachingCapability {
     if name == "anthropic" || base_url.contains("anthropic.com") {
         return CachingCapability::AnthropicBlocks;
     }
+    // OpenRouter passes the same markers through to the models that need
+    // them (Claude, Gemini) and ignores them for models that cache on their
+    // own. Without them, Claude through OpenRouter was never cached.
+    if name == "openrouter" || base_url.contains("openrouter.ai") {
+        return CachingCapability::AnthropicBlocks;
+    }
     if matches!(
         name.as_str(),
         "openai" | "azure" | "azure-openai" | "deepseek" | "xai" | "groq"
@@ -1225,6 +1231,17 @@ mod tests {
         assert!(prompt_caching_enabled(
             "my-proxy",
             "https://api.anthropic.com/v1",
+            None
+        ));
+        // OpenRouter passes markers through to Claude and Gemini.
+        assert!(prompt_caching_enabled(
+            "openrouter",
+            "https://openrouter.ai/api/v1",
+            None
+        ));
+        assert!(prompt_caching_enabled(
+            "my-router",
+            "https://openrouter.ai/api/v1",
             None
         ));
         // A local llama.cpp server never does, unless asked.

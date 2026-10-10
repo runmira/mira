@@ -1,0 +1,504 @@
+/* Onboarding: each step eases in when it takes the stage. */
+@keyframes onb-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+    filter: blur(3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+    filter: none;
+  }
+}
+.onb-in {
+  animation: onb-in 420ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .onb-in {
+    animation: none;
+  }
+}
+
+/* ================================================================
+   Light theme overrides for the rules above that hard-code a dark
+   palette (replies, code, diffs). Kept in one block so the dark rules
+   stay exactly as they were.
+   ================================================================ */
+:root[data-theme='light'] {
+  scrollbar-color: rgb(15 17 26 / 0.18) transparent;
+}
+:root[data-theme='light'] *::-webkit-scrollbar-thumb {
+  background: rgb(15 17 26 / 0.14);
+  background-clip: padding-box;
+}
+:root[data-theme='light'] *::-webkit-scrollbar-thumb:hover {
+  background: rgb(15 17 26 / 0.28);
+  background-clip: padding-box;
+}
+
+:root[data-theme='light'] .thought .md :not(pre) > code {
+  background: rgb(15 17 26 / 0.05);
+}
+:root[data-theme='light'] .md strong,
+:root[data-theme='light'] .md h1,
+:root[data-theme='light'] .md h2 {
+  color: hsl(var(--foreground));
+}
+:root[data-theme='light'] .md h3 {
+  color: hsl(240 10% 18%);
+}
+:root[data-theme='light'] .md h4 {
+  color: hsl(240 6% 28%);
+}
+:root[data-theme='light'] .md ul > li::before {
+  background: rgb(var(--mira-blue));
+}
+:root[data-theme='light'] .md ol > li::marker,
+:root[data-theme='light'] .md blockquote strong {
+  color: rgb(var(--mira-purple));
+}
+:root[data-theme='light'] .md input[type='checkbox'] {
+  accent-color: rgb(var(--mira-blue));
+}
+:root[data-theme='light'] .md blockquote {
+  border-left-color: rgb(var(--mira-purple));
+  background: linear-gradient(90deg, rgb(var(--mira-purple) / 0.07), transparent 60%);
+}
+:root[data-theme='light'] .md a {
+  color: #0969da;
+  border-bottom-color: rgba(9, 105, 218, 0.3);
+}
+:root[data-theme='light'] .md a:hover {
+  border-bottom-color: #0969da;
+}
+:root[data-theme='light'] .md th {
+  background: #f3f4f7;
+  color: hsl(240 10% 18%);
+}
+:root[data-theme='light'] .md tbody tr:nth-child(even) td {
+  background: rgb(var(--mira-blue) / 0.03);
+}
+:root[data-theme='light'] .md tbody tr:hover td {
+  background: rgb(var(--mira-blue) / 0.06);
+}
+:root[data-theme='light'] .md kbd,
+:root[data-theme='light'] .md-key {
+  color: hsl(240 10% 18%);
+}
+:root[data-theme='light'] .md-key {
+  background: linear-gradient(180deg, #fff, #f3f4f7);
+  box-shadow: 0 1px 0 rgb(15 17 26 / 0.12);
+}
+:root[data-theme='light'] .md-inline {
+  background: rgba(207, 34, 46, 0.07);
+  color: #b42318;
+  border-color: rgba(207, 34, 46, 0.14);
+}
+:root[data-theme='light'] .md details {
+  background: rgb(15 17 26 / 0.015);
+}
+:root[data-theme='light'] .md details > summary {
+  color: hsl(240 10% 18%);
+}
+:root[data-theme='light'] .md-th-sort:hover {
+  color: hsl(var(--foreground));
+}
+:root[data-theme='light'] .md-table-bar button:hover {
+  background: rgb(15 17 26 / 0.05);
+}
+:root[data-theme='light'] .md-favicon {
+  background: #fff;
+  box-shadow: 0 0 0 1px rgb(15 17 26 / 0.08);
+}
+
+/* Code blocks: GitHub-like paper, Atom One Light tokens. */
+:root[data-theme='light'] .md-code {
+  background: #f6f8fa;
+  border-color: #e1e4e8;
+  box-shadow: 0 1px 2px rgba(15, 17, 26, 0.05);
+}
+:root[data-theme='light'] .md-code-head {
+  border-bottom-color: #e1e4e8;
+  background: linear-gradient(180deg, #fbfcfd 0%, #f6f8fa 100%);
+}
+:root[data-theme='light'] .md-code-lang {
+  color: #0969da;
+}
+:root[data-theme='light'] .md-code-copy:hover {
+  background: rgba(9, 105, 218, 0.08);
+  border-color: rgba(9, 105, 218, 0.25);
+  color: #24292f;
+}
+:root[data-theme='light'] .md-code-collapsed::after {
+  background: linear-gradient(to bottom, transparent, #f6f8fa);
+}
+:root[data-theme='light'] .md-code-more {
+  border-top-color: #e1e4e8;
+}
+:root[data-theme='light'] .hljs {
+  color: #383a42;
+  background: transparent;
+}
+:root[data-theme='light'] .hljs-comment,
+:root[data-theme='light'] .hljs-quote {
+  color: #a0a1a7;
+  font-style: italic;
+}
+:root[data-theme='light'] .hljs-doctag,
+:root[data-theme='light'] .hljs-keyword,
+:root[data-theme='light'] .hljs-formula {
+  color: #a626a4;
+}
+:root[data-theme='light'] .hljs-section,
+:root[data-theme='light'] .hljs-name,
+:root[data-theme='light'] .hljs-selector-tag,
+:root[data-theme='light'] .hljs-deletion,
+:root[data-theme='light'] .hljs-subst {
+  color: #e45649;
+}
+:root[data-theme='light'] .hljs-literal {
+  color: #0184bb;
+}
+:root[data-theme='light'] .hljs-string,
+:root[data-theme='light'] .hljs-regexp,
+:root[data-theme='light'] .hljs-addition,
+:root[data-theme='light'] .hljs-attribute,
+:root[data-theme='light'] .hljs-meta .hljs-string {
+  color: #50a14f;
+}
+:root[data-theme='light'] .hljs-attr,
+:root[data-theme='light'] .hljs-variable,
+:root[data-theme='light'] .hljs-template-variable,
+:root[data-theme='light'] .hljs-type,
+:root[data-theme='light'] .hljs-selector-class,
+:root[data-theme='light'] .hljs-selector-attr,
+:root[data-theme='light'] .hljs-selector-pseudo,
+:root[data-theme='light'] .hljs-number {
+  color: #986801;
+}
+:root[data-theme='light'] .hljs-symbol,
+:root[data-theme='light'] .hljs-bullet,
+:root[data-theme='light'] .hljs-link,
+:root[data-theme='light'] .hljs-meta,
+:root[data-theme='light'] .hljs-selector-id,
+:root[data-theme='light'] .hljs-title {
+  color: #4078f2;
+}
+:root[data-theme='light'] .hljs-built_in,
+:root[data-theme='light'] .hljs-title.class_,
+:root[data-theme='light'] .hljs-class .hljs-title {
+  color: #c18401;
+}
+
+/* Diff blocks in replies. */
+:root[data-theme='light'] .md-diff-line.add {
+  background: rgba(26, 127, 55, 0.09);
+  color: #116329;
+  box-shadow: inset 2px 0 0 rgba(26, 127, 55, 0.6);
+}
+:root[data-theme='light'] .md-diff-line.del {
+  background: rgba(207, 34, 46, 0.08);
+  color: #a40e26;
+  box-shadow: inset 2px 0 0 rgba(207, 34, 46, 0.6);
+}
+:root[data-theme='light'] .md-diff-line.hunk {
+  color: rgb(var(--mira-purple));
+  background: rgb(var(--mira-purple) / 0.06);
+}
+:root[data-theme='light'] .md-diff-line.file {
+  color: hsl(var(--muted-foreground));
+}
+:root[data-theme='light'] .md-diff-line.ctx {
+  color: #57606a;
+}
+:root[data-theme='light'] .md-diff-apply {
+  color: #fff;
+  background: #1a7f37;
+}
+:root[data-theme='light'] .md-diff-apply.checking,
+:root[data-theme='light'] .md-diff-apply.applying,
+:root[data-theme='light'] .md-diff-apply.cannot {
+  background: rgb(15 17 26 / 0.05);
+  color: hsl(var(--muted-foreground));
+}
+:root[data-theme='light'] .md-diff-apply.applied {
+  background: rgba(26, 127, 55, 0.1);
+  color: #1a7f37;
+}
+:root[data-theme='light'] .md-diff-error {
+  border-top-color: #e1e4e8;
+  color: #cf222e;
+}
+:root[data-theme='light'] .diff-line.add {
+  color: #116329;
+}
+:root[data-theme='light'] .diff-line.del {
+  color: #a40e26;
+}
+
+::highlight(mira-citation) {
+  background: rgba(77, 136, 255, 0.32);
+  color: inherit;
+}
+/* The reply a citation jump landed in: one soft pulse. */
+@keyframes citation-flash {
+  0% {
+    box-shadow: 0 0 0 0 rgba(77, 136, 255, 0);
+  }
+  25% {
+    box-shadow: 0 0 0 6px rgba(77, 136, 255, 0.18);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(77, 136, 255, 0);
+  }
+}
+.citation-flash {
+  border-radius: 10px;
+  animation: citation-flash 1.2s ease-out 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .citation-flash {
+    animation: none;
+  }
+}
+
+:root {
+  --mira-font-scale: 0.86;
+}
+:root[data-theme='light'] {
+  --activity-shimmer-base: #525866;
+  --activity-shimmer-band: #a5abb6;
+}
+
+.activity-shimmer {
+  display: inline-block;
+  background-image: linear-gradient(
+    90deg,
+    var(--activity-shimmer-base, hsl(var(--muted-foreground))) 0%,
+    var(--activity-shimmer-base, hsl(var(--muted-foreground))) 38%,
+    var(--activity-shimmer-band, hsl(var(--foreground))) 50%,
+    var(--activity-shimmer-base, hsl(var(--muted-foreground))) 62%,
+    var(--activity-shimmer-base, hsl(var(--muted-foreground))) 100%
+  );
+  background-size: 200% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+}
+.reduce-motion .activity-shimmer {
+  animation: none;
+  background: none;
+  color: hsl(var(--muted-foreground));
+}
+@media (prefers-reduced-motion: reduce), (forced-colors: active) {
+  .activity-shimmer {
+    animation: none;
+    background: none;
+    color: hsl(var(--muted-foreground));
+  }
+}
+
+.stream-text-reveal {
+  position: absolute;
+  pointer-events: none;
+  animation: stream-text-reveal 180ms ease-out both;
+}
+@keyframes stream-text-reveal {
+  from {
+    opacity: 0.85;
+  }
+  to {
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce), (forced-colors: active) {
+  .stream-text-reveal {
+    display: none;
+  }
+}
+
+/* Focus rings are for keyboard users. After a click, a menu or dialog that
+   focuses its first item (so arrow keys work) shouldn't draw a ring around
+   it; WebKit draws one anyway. See lib/inputModality.ts. */
+:root[data-input='pointer'] :focus,
+:root[data-input='pointer'] :focus-visible {
+  outline: none;
+}
+/* Same for the Tailwind ring buttons draw on focus. Text fields keep
+   theirs: it marks where typing goes. */
+:root[data-input='pointer'] button:focus-visible,
+:root[data-input='pointer'] [role='menuitem']:focus-visible,
+:root[data-input='pointer'] [role='option']:focus-visible {
+  --tw-ring-shadow: 0 0 #0000;
+  --tw-ring-offset-shadow: 0 0 #0000;
+}
+
+/* Compaction card: a soft sweep across the card while the summary is
+   written, and the fold icon breathing. */
+@keyframes compaction-sweep {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+.compaction-sweep {
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(77, 136, 255, 0.1) 45%,
+    rgba(77, 136, 255, 0.18) 50%,
+    rgba(77, 136, 255, 0.1) 55%,
+    transparent 100%
+  );
+  animation: compaction-sweep 2.2s ease-in-out infinite;
+}
+@keyframes compaction-fold {
+  0%,
+  100% {
+    transform: scaleY(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scaleY(0.7);
+    opacity: 0.65;
+  }
+}
+.compaction-fold {
+  animation: compaction-fold 1.4s ease-in-out infinite;
+  transform-origin: center;
+}
+@media (prefers-reduced-motion: reduce) {
+  .compaction-sweep,
+  .compaction-fold {
+    animation: none;
+  }
+}
+
+/* Device pairing: a wrong code shakes the boxes; success pops the check. */
+@keyframes mira-shake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  20%,
+  60% {
+    transform: translateX(-6px);
+  }
+  40%,
+  80% {
+    transform: translateX(6px);
+  }
+}
+@keyframes mira-pop {
+  0% {
+    transform: scale(0.6);
+    opacity: 0;
+  }
+  70% {
+    transform: scale(1.08);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  [class*='animate-[mira-shake'],
+  [class*='animate-[mira-pop'] {
+    animation: none !important;
+  }
+}
+
+/* ================================================================
+   Phones and touch (see lib/mobile.ts)
+   ================================================================ */
+@media (max-width: 767px) {
+  /* The app is sized to the visible viewport; the page itself never
+     scrolls or rubber-bands. */
+  html,
+  body {
+    overscroll-behavior: none;
+  }
+  /* iOS zooms into any field under 16px when it's focused, and stays
+     zoomed after. */
+  input:not([type='checkbox']):not([type='radio']):not([type='range']),
+  textarea,
+  select,
+  [contenteditable='true'] {
+    font-size: 16px !important;
+  }
+  /* Code reads better scrolled than wrapped at phone width. */
+  .diff-line {
+    min-width: max-content;
+  }
+  .diff-line .text {
+    white-space: pre;
+    word-break: normal;
+  }
+}
+@media (hover: none) {
+  html {
+    -webkit-tap-highlight-color: transparent;
+  }
+  /* Controls that appear on hover have no hover to appear on: show them.
+     Tooltips and other non-interactive reveals stay hidden. */
+  .opacity-0[class*='group-hover'][class*=':opacity-']:not(.tooltip):not(.pointer-events-none) {
+    opacity: 1;
+  }
+}
+/* Keep clear of notches and the home indicator (needs viewport-fit=cover
+   in index.html). The bottom inset goes while the keyboard is up: the
+   keyboard covers the home indicator anyway. */
+@layer utilities {
+  .pt-safe {
+    padding-top: env(safe-area-inset-top);
+  }
+  .pb-safe {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .px-safe {
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+}
+:root[data-keyboard] .pb-safe {
+  padding-bottom: 0;
+}
+
+.sidebar-search {
+  background: hsl(var(--secondary) / 0.6);
+}
+:root[data-theme='light'] .sidebar-search,
+:root[data-theme='light'] .sidebar-active {
+  background: #fff;
+  box-shadow:
+    0 0 0 1px hsl(var(--border) / 0.55),
+    0 12px 30px -26px rgba(15, 23, 42, 0.55);
+}
+:root[data-theme='light'] .sidebar-search {
+  border-color: transparent;
+}
+:root[data-theme='light'] .sidebar-active:hover {
+  background: #fff;
+}
+
+.sidebar-search:focus-within,
+:root[data-theme='light'] .sidebar-search:focus-within {
+  box-shadow:
+    0 0 0 2px rgb(var(--mira-blue) / 0.2),
+    0 12px 30px -26px rgba(15, 23, 42, 0.55);
+}
+
+:root[data-theme='light'] .sidebar-select {
+  background: #fff;
+  box-shadow: 0 1px 2px rgb(15 23 42 / 0.04);
+}
+
+:root[data-theme='light'] .sidebar-menu {
+  box-shadow:
+    0 0 0 1px hsl(var(--border) / 0.55),
+    0 12px 28px -12px rgb(15 23 42 / 0.18);
+}

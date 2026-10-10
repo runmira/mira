@@ -1,0 +1,7 @@
+name: multi-file-rename
+prompt: |
+  This Python project keeps its tax rate in `shop/settings.py` as `TAX`.
+  Rename it to `VAT_RATE` everywhere it's used, so `python3 -m unittest` passes.
+fixture: 06-multi-file-fixture
+verify: python3 -m unittest -q 2>&1 && ! grep -rn --include='*.py' '\bTAX\b' shop
+timeout_secs: 240

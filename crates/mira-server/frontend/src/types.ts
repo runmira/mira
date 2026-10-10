@@ -492,7 +492,7 @@ export type ServerMsg =
   | { type: 'background_mode_changed'; session_id: string; mode: BackgroundMode }
   | { type: 'session_background_idle'; session_id: string }
   | { type: 'session_background_running'; session_id: string }
-  | { type: 'usage'; round: TokenUsage; totals: UsageTotals; context_window?: number | null; compact_at?: number | null }
+  | { type: 'usage'; round: TokenUsage; totals: UsageTotals; context_window?: number | null; compact_at?: number | null; cache_miss?: string | null }
   | { type: 'rate_limit'; rate_limit: RateLimit; summary: string | null }
   | { type: 'memory_learned'; count: number }
   | { type: 'compacted'; messages_removed: number; tokens_before?: number | null; tokens_after?: number | null }
@@ -762,6 +762,15 @@ export type SessionsSettings = {
 
 export type WorktreeMergeStatus = 'merged' | 'unmerged';
 
+export type SessionPr = {
+  number: number;
+  title: string;
+  url: string;
+  state: 'open' | 'draft' | 'merged' | 'closed';
+  /** When it merged or closed, epoch seconds. */
+  closed_at?: number | null;
+};
+
 export type SessionSummary = {
   parent_id?: string | null;
   id: string;
@@ -800,6 +809,12 @@ export type SessionSummary = {
    *  message it was taken at. The sidebar nests it under that chat. */
   forked_from?: string | null;
   forked_at?: string | null;
+  /** The user's "Settled" choice, epoch seconds: put away as done, or
+   *  taken back out. See `isSettled` in the sidebar. */
+  settled_at?: number | null;
+  unsettled_at?: number | null;
+  /** The worktree branch's pull request, when it has one. */
+  pr?: SessionPr | null;
   /** True when the user archived this session. Archived sessions only
    *  appear in the sidebar's "Archived" view (`?archived=true`). */
   archived?: boolean;
@@ -808,6 +823,8 @@ export type SessionSummary = {
   usage?: UsageTotals;
   /** Waiting on the user: an approval, a question, a plan or a secret. */
   needs_attention?: boolean;
+  attention_reason?: string | null;
+  failure_reason?: string | null;
   /** The chat that launched this one with `thread_launch`; the sidebar
    *  nests it there. */
   launched_by?: string | null;

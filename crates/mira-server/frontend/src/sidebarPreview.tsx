@@ -5,6 +5,7 @@
  * archived list. The API is mocked in this page; nothing reaches a server.
  * Open /sidebar-preview.html on the Vite dev server.
  */
+import { LazyMotion, domMax } from 'framer-motion';
 import React, { useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import './styles.css';
@@ -37,11 +38,13 @@ const SESSIONS: SessionSummary[] = [
   chat({ id: 'running', title: 'Fix Codex plan mode handoff', agent_driver: 'codex', model: 'gpt-5-codex', updated_at: ago(1) }),
   chat({
     id: 'waiting', title: 'Add Stripe webhooks', agent_driver: 'claude-code', updated_at: ago(6),
-    needs_attention: true, worktree_branch: 'feature/stripe-webhooks', worktree_status: 'unmerged',
+    needs_attention: true, attention_reason: 'Approve 3 commands', worktree_branch: 'feature/stripe-webhooks', worktree_status: 'unmerged',
+    pr: { number: 431, title: 'Stripe webhooks', url: 'https://github.com/example/mira/pull/431', state: 'open' },
   }),
   chat({
     id: 'thread-1', title: 'Webhook retries + backoff', agent_driver: 'codex', model: 'gpt-5-codex', updated_at: ago(4),
     launched_by: 'waiting', worktree_branch: 'feature/webhook-retries', worktree_status: 'unmerged',
+    pr: { number: 433, title: 'Webhook retries', url: 'https://github.com/example/mira/pull/433', state: 'draft' },
   }),
   chat({ id: 'thread-2', title: 'Docs for the webhook endpoint', launched_by: 'waiting', updated_at: ago(20), needs_attention: true }),
   chat({ id: 'unread', title: 'Audit MCP elicitation replies', agent_driver: 'codex', model: 'gpt-5-codex', updated_at: ago(45) }),
@@ -50,6 +53,22 @@ const SESSIONS: SessionSummary[] = [
     id: 'merged', title: 'Remove dead delegate code', updated_at: ago(DAY + 120),
     worktree_branch: 'chore/dead-delegate', worktree_status: 'merged',
   }),
+  chat({
+    id: 'pr-merged', title: 'Usage ring cache share', updated_at: ago(DAY + 300),
+    worktree_branch: 'fix/token-usage', worktree_status: 'unmerged',
+    pr: { number: 175, title: 'Token usage', url: 'https://github.com/example/mira/pull/175', state: 'merged', closed_at: ago(DAY) },
+  }),
+  chat({
+    id: 'pr-closed', title: 'Try a denser composer', updated_at: ago(DAY * 3),
+    worktree_branch: 'exp/composer', worktree_status: 'unmerged',
+    pr: { number: 160, title: 'Denser composer', url: 'https://github.com/example/mira/pull/160', state: 'closed', closed_at: ago(DAY * 2) },
+  }),
+  chat({
+    id: 'pr-reopened', title: 'Evals follow-up', updated_at: ago(10),
+    worktree_branch: 'evals/more', worktree_status: 'unmerged',
+    pr: { number: 176, title: 'Evals', url: 'https://github.com/example/mira/pull/176', state: 'merged', closed_at: ago(DAY) },
+  }),
+  chat({ id: 'settled-by-hand', title: 'Answer the pricing question', updated_at: ago(DAY * 2), settled_at: ago(DAY) }),
   chat({ id: 'week', title: 'Investigate the flaky worktree test', updated_at: ago(DAY * 4), model: 'gpt-5' }),
   chat({ id: 'older', title: 'Initial project setup', updated_at: ago(DAY * 40) }),
   chat({ id: 'older-2', title: 'Try the ACP adapter for Grok', agent_driver: 'grok', updated_at: ago(DAY * 70) }),
@@ -58,6 +77,8 @@ const SESSIONS: SessionSummary[] = [
   chat({ id: 'faunly-1', title: 'Onboarding flow bugs', cwd: FAUNLY, updated_at: ago(DAY * 9), agent_driver: 'opencode' }),
   chat({ id: 'faunly-2', title: '', first_user_message: 'Why does the map crash on Android?', cwd: FAUNLY, updated_at: ago(DAY * 12) }),
 ];
+
+SESSIONS.push(chat({ id: 'failed', title: 'Deploy webhook worker', failure_reason: 'Deployment was rejected: missing environment variable', updated_at: ago(4) }));
 
 const ARCHIVED: SessionSummary[] = [
   chat({ id: 'arch-1', title: 'Old auth experiment', archived: true, updated_at: ago(DAY * 20) }),
@@ -104,8 +125,15 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
 // Seed the sidebar's own remembered state: one unread chat, one collapsed
 // folder (to show its waiting count).
 try {
-  localStorage.setItem('mira.sidebar.unread', JSON.stringify(['unread']));
-  localStorage.setItem('mira.sidebar.collapsed-projects', JSON.stringify([LANDING]));
+  if (!localStorage.getItem('mira.sidebar.preview-seeded')) {
+    if (localStorage.getItem('mira.sidebar.unread') === null) {
+      localStorage.setItem('mira.sidebar.unread', JSON.stringify(['unread']));
+    }
+    if (localStorage.getItem('mira.sidebar.collapsed-projects') === null) {
+      localStorage.setItem('mira.sidebar.collapsed-projects', JSON.stringify([LANDING]));
+    }
+    localStorage.setItem('mira.sidebar.preview-seeded', '1');
+  }
 } catch { /* private mode */ }
 
 function Preview() {
@@ -129,6 +157,10 @@ function Preview() {
           onOpenPicker={() => {}}
           onSessionLoaded={() => {}}
           onAttachSession={setActive}
+          onSetBackgroundMode={async (id, mode) => {
+            const session = SESSIONS.find((s) => s.id === id);
+            if (session) session.background_mode = mode;
+          }}
           activePr={{ number: 412, title: 'Sidebar: needs-you badges, search, threads' }}
         />
       </div>
@@ -140,12 +172,19 @@ function Preview() {
           <li><b>Fix Codex plan mode handoff</b>: running</li>
           <li><b>Audit MCP elicitation replies</b>: finished while you were away (unread dot)</li>
           <li><b>Sidebar redesign</b>: the open chat, with a fork under it</li>
-          <li><b>Remove dead delegate code</b>: merged worktree</li>
+          <li><b>Recents</b>: three chats by default, expandable</li>
+          <li><b>Settled</b> (bottom, collapsed): PR merged, PR closed, branch merged, settled by hand</li>
+          <li><b>Evals follow-up</b>: PR merged but you wrote to it since, so it stays in its folder</li>
+          <li>PR marks: open and draft in grey, merged in colour; forks use the split mark</li>
           <li><b>Release checklist</b>: pinned · date sections · “Show more” past 5 chats</li>
           <li><b>landing</b>: collapsed folder showing its waiting count</li>
           <li>Hover any row for the peek; type in Search; open Archived at the bottom</li>
         </ul>
-        <p className="mt-4">Theme: <button className="underline" onClick={() => document.documentElement.classList.toggle('dark')}>toggle dark class</button></p>
+        <p className="mt-4">Theme: <button className="underline" onClick={() => (() => {
+          const light = document.documentElement.dataset.theme !== 'light';
+          document.documentElement.dataset.theme = light ? 'light' : 'dark';
+          document.documentElement.classList.toggle('dark', !light);
+        })()}>Toggle light / dark</button></p>
       </section>
     </main>
   );
@@ -153,6 +192,8 @@ function Preview() {
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <Preview />
+    <LazyMotion features={domMax}>
+      <Preview />
+    </LazyMotion>
   </React.StrictMode>,
 );

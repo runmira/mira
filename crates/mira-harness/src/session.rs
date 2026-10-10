@@ -325,6 +325,10 @@ pub struct Session {
     /// Tool results before this index in `history` are cleared in what's
     /// sent to the model (see `history::clear_old_tool_results`).
     cleared_before: Arc<Mutex<usize>>,
+    /// Read, write and edit calls that completed successfully: only those
+    /// supersede an earlier read of the same file (see
+    /// `history::stub_superseded_reads`).
+    file_calls_done: Arc<StdMutex<std::collections::HashSet<mira_core::ToolCallId>>>,
     /// Human-readable nickname. Generated post-hoc by the server after the
     /// first assistant reply; the harness itself only reads + persists it.
     title: Arc<Mutex<Option<String>>>,
@@ -403,6 +407,9 @@ pub struct Session {
     /// Web-sidebar archive stamp (`None` = live). Same checkpoint story
     /// as `pinned` — the record must never lose a flag mid-conversation.
     archived_at: Arc<Mutex<Option<u64>>>,
+    /// The sidebar's settle marks. Same checkpoint story as `pinned`.
+    settle: Arc<Mutex<crate::persist::SettleMarks>>,
+    checkpoint_lock: Arc<Mutex<()>>,
     /// The current turn's event sender, when a turn is active. Long-
     /// running tools (bash today, others later) route live output
     /// through the [`ToolProgressSink`] attached to `tool_ctx`; that
@@ -429,6 +436,9 @@ pub struct Session {
     /// The last request's size estimate and the provider's count for it,
     /// which calibrate the context breakdown (see `crate::context`).
     calibration: Arc<std::sync::Mutex<crate::context::Calibration>>,
+    /// Spots requests that should have been served from the provider's
+    /// cache and weren't (see `cache_watch`).
+    cache_watch: Arc<std::sync::Mutex<crate::cache_watch::CacheWatch>>,
 }
 
 /// Build the sandbox this session starts with, derived from the policy's
@@ -513,6 +523,7 @@ impl Session {
             history: Arc::new(Mutex::new(vec![Message::system(system_prompt)])),
             archived: Arc::new(Mutex::new(Vec::new())),
             cleared_before: Arc::new(Mutex::new(0)),
+            file_calls_done: Arc::default(),
             title: Arc::new(Mutex::new(None)),
             turns: Arc::new(Mutex::new(Vec::new())),
             usage: Arc::new(Mutex::new(UsageTotals::default())),
@@ -538,11 +549,14 @@ impl Session {
             goal: Arc::new(Mutex::new(None)),
             pinned: Arc::new(Mutex::new(false)),
             archived_at: Arc::new(Mutex::new(None)),
+            settle: Arc::default(),
+            checkpoint_lock: Arc::default(),
             progress_slot,
             hooks: None,
             previews: Arc::new(Mutex::new(HashMap::new())),
             current_cancel: Arc::new(Mutex::new(None)),
             calibration: Arc::default(),
+            cache_watch: Arc::default(),
         }
     }
 
@@ -595,6 +609,9 @@ impl Session {
             history: Arc::new(Mutex::new(record.messages)),
             archived: Arc::new(Mutex::new(record.archived)),
             cleared_before: Arc::new(Mutex::new(0)),
+            file_calls_done: Arc::new(StdMutex::new(
+                record.file_calls_done.iter().cloned().collect(),
+            )),
             title: Arc::new(Mutex::new(record.title)),
             turns: Arc::new(Mutex::new(record.turns)),
             usage: Arc::new(Mutex::new(record.usage)),
@@ -620,11 +637,14 @@ impl Session {
             goal: Arc::new(Mutex::new(record.goal)),
             pinned: Arc::new(Mutex::new(record.pinned)),
             archived_at: Arc::new(Mutex::new(record.archived_at)),
+            settle: Arc::new(Mutex::new(record.settle)),
+            checkpoint_lock: Arc::default(),
             progress_slot,
             hooks: None,
             previews: Arc::new(Mutex::new(record.previews)),
             current_cancel: Arc::new(Mutex::new(None)),
             calibration: Arc::default(),
+            cache_watch: Arc::default(),
         }
     }
 
@@ -963,13 +983,45 @@ impl Session {
     /// [`SessionRecord::archived_at`]). The server's flags endpoint writes
     /// the record *and* syncs the live slot through [`Session::set_sidebar_flags`]
     /// so the next checkpoint re-stamps the flags instead of wiping them.
-    pub async fn sidebar_flags(&self) -> (bool, Option<u64>) {
-        (*self.pinned.lock().await, *self.archived_at.lock().await)
+    pub async fn sidebar_flags(&self) -> (bool, Option<u64>, crate::persist::SettleMarks) {
+        (
+            *self.pinned.lock().await,
+            *self.archived_at.lock().await,
+            *self.settle.lock().await,
+        )
     }
 
-    pub async fn set_sidebar_flags(&self, pinned: bool, archived_at: Option<u64>) {
+    pub async fn set_sidebar_flags(
+        &self,
+        pinned: bool,
+        archived_at: Option<u64>,
+        settle: crate::persist::SettleMarks,
+    ) {
+        let _checkpoint = self.checkpoint_lock.lock().await;
         *self.pinned.lock().await = pinned;
         *self.archived_at.lock().await = archived_at;
+        *self.settle.lock().await = settle;
+    }
+
+    /// Save sidebar choices atomically with checkpoints; restore live flags on failure.
+    pub async fn save_sidebar_flags(
+        &self,
+        pinned: bool,
+        archived_at: Option<u64>,
+        settle: crate::persist::SettleMarks,
+    ) -> Result<(), crate::persist::StoreError> {
+        let _checkpoint = self.checkpoint_lock.lock().await;
+        let previous = self.sidebar_flags().await;
+        *self.pinned.lock().await = pinned;
+        *self.archived_at.lock().await = archived_at;
+        *self.settle.lock().await = settle;
+        let result = checkpoint_unlocked(self).await;
+        if result.is_err() {
+            *self.pinned.lock().await = previous.0;
+            *self.archived_at.lock().await = previous.1;
+            *self.settle.lock().await = previous.2;
+        }
+        result
     }
 
     /// Expose the session's undo/conflict guard. `None` when the FileGuard
@@ -999,6 +1051,11 @@ impl Session {
     /// round) — e.g. before forking it, so the copy is current.
     pub async fn save_now(&self) {
         checkpoint(self).await;
+    }
+
+    /// Persist immediately and report write failures to interactive callers.
+    pub async fn try_save_now(&self) -> Result<(), crate::persist::StoreError> {
+        checkpoint_result(self).await
     }
 
     pub async fn set_title(&self, title: impl Into<String>) {
@@ -1266,6 +1323,7 @@ impl Session {
             }
             user_input = text;
         }
+        let user_input = self.with_turn_memory(user_input).await;
         let mut message = Message::user(user_input).with_images(images);
         message.input_id = input_id;
         self.history.lock().await.push(message);
@@ -1311,6 +1369,58 @@ impl Session {
             obj.extend(more);
         }
         input
+    }
+
+    /// The prompt with this turn's memory attached as `<memory-context>`.
+    ///
+    /// Memory is chosen once, when the turn starts, and stored on the prompt
+    /// itself, so every request in the conversation sends exactly what was
+    /// sent before plus what's new, which is what keeps the provider's prompt
+    /// cache valid. (It used to be re-chosen on every request and put right
+    /// after the system prompt, where any change made the provider re-read the
+    /// whole conversation at full price.) Stored on the message, it's saved
+    /// and resumed with it, and a rewound turn takes its memory with it. A
+    /// turn only carries memory when it differs from the last one sent, and
+    /// says so when memory was cleared.
+    async fn with_turn_memory(&self, prompt: String) -> String {
+        let Some(snap) = self.memory_snapshot.as_ref() else {
+            return prompt;
+        };
+        let (previous, query) = {
+            let history = self.history.lock().await;
+            let previous = history
+                .iter()
+                .rev()
+                .filter(|m| m.role == Role::User)
+                .find_map(|m| {
+                    m.content
+                        .as_deref()
+                        .and_then(crate::history::memory_context)
+                })
+                .map(str::to_owned);
+            // Retrieval: build a query from the recent conversation so scored
+            // selection can weight relevant entries above stale ones. When
+            // retrieval is off, pass `None` and the snapshot falls back to the
+            // legacy dump-everything shape.
+            let query = self.memory_retrieval.enabled.then(|| {
+                let mut recent = history.clone();
+                recent.push(Message::user(prompt.clone()));
+                build_memory_query(&recent, self.memory_retrieval.token_budget)
+            });
+            (previous, query)
+        };
+        let block = match (snap.render(query.as_ref()).await, previous) {
+            (Some(now), Some(before)) if now == before => None,
+            (Some(now), _) => Some(now),
+            (None, Some(before)) if before != crate::history::NO_MEMORY => {
+                Some(crate::history::NO_MEMORY.to_owned())
+            }
+            (None, _) => None,
+        };
+        match block {
+            Some(block) => format!("{prompt}\n\n<memory-context>\n{block}\n</memory-context>"),
+            None => prompt,
+        }
     }
 
     /// SessionStart (first message only) and UserPromptSubmit. Returns
@@ -1673,6 +1783,7 @@ async fn run_loop(
                     estimated: crate::context::estimate_request(&req.messages, &req.tools),
                     reported: None,
                 };
+            let print = crate::cache_watch::RequestPrint::of(&req);
             let mut stream = match sess.provider.stream(req).await {
                 Ok(s) => s,
                 Err(e) => {
@@ -1761,12 +1872,21 @@ async fn run_loop(
                             let window =
                                 crate::history::context_window_with(&cfg.model, cfg.context_window)
                                     as u64;
+                            let cache_miss = sess
+                                .cache_watch
+                                .lock()
+                                .unwrap_or_else(|p| p.into_inner())
+                                .observe(print.clone(), &round);
+                            if let Some(why) = &cache_miss {
+                                tracing::info!(session = %sess.id, "prompt cache missed: {why}");
+                            }
                             let _ = tx
                                 .send(HarnessEvent::Usage {
                                     round,
                                     totals,
                                     context_window: window,
                                     compact_at: crate::history::auto_compact_at(window),
+                                    cache_miss,
                                 })
                                 .await;
                         }
@@ -2541,21 +2661,26 @@ async fn dispatch_call(sess: &Session, call: ToolCall, tx: &mpsc::Sender<Harness
         // most recent few are worth resending. Older ones collapse to a
         // text note so the model still knows one was taken.
         if has_images {
-            crate::history::prune_old_images(&mut history, crate::history::KEEP_RECENT_IMAGES);
+            crate::history::prune_old_images_in_batches(
+                &mut history,
+                crate::history::KEEP_RECENT_IMAGES,
+            );
         }
-        // Dedup: if this was a read / write / edit for a specific path,
-        // collapse any older `read_file` result targeting the same path
-        // to a short stub. Same-lock scope so the walk sees exactly the
-        // history we just pushed into.
-        if ok {
-            if let Some(path) = crate::history::path_from_args(&call.function.arguments) {
-                crate::history::dedup_reads_for_path(
-                    &mut history,
-                    &call.id,
-                    &call.function.name,
-                    &path,
-                );
-            }
+        // Older `read_file` results superseded by a later read, write or
+        // edit of the same file collapse to a short stub, in batches (see
+        // `STUB_SUPERSEDED_MIN_CHARS`). Same-lock scope so the walk sees
+        // exactly the history we just pushed into.
+        if ok && crate::history::path_from_args(&call.function.arguments).is_some() {
+            let mut done = sess
+                .file_calls_done
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            done.insert(call.id.clone());
+            crate::history::stub_superseded_reads(
+                &mut history,
+                crate::history::STUB_SUPERSEDED_MIN_CHARS,
+                &done,
+            );
         }
     }
     let _ = tx.send(HarnessEvent::ToolEnd(result)).await;
@@ -2646,7 +2771,27 @@ fn rewind_index(hist: &[Message], text: &str, occurrence: usize) -> Option<usize
 }
 
 async fn checkpoint(sess: &Session) {
-    let Some(store) = &sess.store else { return };
+    if let Err(e) = checkpoint_result(sess).await {
+        warn!(session = %sess.id, %e, "session checkpoint failed");
+    }
+}
+
+async fn checkpoint_result(sess: &Session) -> Result<(), crate::persist::StoreError> {
+    let _checkpoint = sess.checkpoint_lock.lock().await;
+    checkpoint_unlocked(sess).await
+}
+
+async fn checkpoint_unlocked(sess: &Session) -> Result<(), crate::persist::StoreError> {
+    let Some(store) = &sess.store else {
+        return Ok(());
+    };
+    let file_calls_done: Vec<_> = sess
+        .file_calls_done
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .cloned()
+        .collect();
     let record = SessionRecord {
         id: sess.id.clone(),
         cwd: sess.tool_ctx.cwd.clone(),
@@ -2658,6 +2803,7 @@ async fn checkpoint(sess: &Session) {
         title: sess.title.lock().await.clone(),
         turns: sess.turns.lock().await.clone(),
         usage: *sess.usage.lock().await,
+        file_calls_done,
         parent_id: sess.parent_id.clone(),
         forked_from: sess.forked_from.clone(),
         agent: sess.agent.lock().await.clone(),
@@ -2665,11 +2811,10 @@ async fn checkpoint(sess: &Session) {
         goal: sess.goal.lock().await.clone(),
         pinned: *sess.pinned.lock().await,
         archived_at: *sess.archived_at.lock().await,
+        settle: *sess.settle.lock().await,
         previews: sess.previews.lock().await.clone(),
     };
-    if let Err(e) = store.save(&record).await {
-        warn!(session = %sess.id, %e, "session checkpoint failed");
-    }
+    store.save(&record).await
 }
 
 /// Truncate a tool result to a size the model can safely re-ingest.
@@ -3089,7 +3234,10 @@ fn parse_extraction_bullets(text: &str) -> Vec<String> {
 fn format_round_for_extraction(msgs: &[Message]) -> String {
     let mut out = String::new();
     for m in msgs {
-        let content = match m.content.as_deref() {
+        // A prompt without the memory and hook context attached to it, so
+        // the extractor doesn't learn saved memory again (or spend its input
+        // budget on it).
+        let content = match m.content.as_deref().map(crate::history::strip_hook_context) {
             Some(c) if !c.trim().is_empty() => c,
             _ => continue,
         };
@@ -3162,51 +3310,14 @@ pub struct DroppedResult {
     pub tokens: u64,
 }
 
+/// What's sent to the model: `history` with old tool results cleared.
+/// (Memory rides on each turn's prompt; see `Session::with_turn_memory`.)
 async fn build_request_messages(sess: &Session) -> Vec<Message> {
-    let mut msgs = {
-        let history = sess.history.lock().await;
-        let before = *sess.cleared_before.lock().await;
-        crate::history::clear_old_tool_results(&history, before)
-    };
-    let Some(snap) = sess.memory_snapshot.as_ref() else {
-        return msgs;
-    };
-    // Retrieval: build a query from the recent conversation so scored
-    // selection can weight relevant entries above stale ones. When
-    // retrieval is off, pass `None` and the snapshot falls back to the
-    // legacy dump-everything shape.
-    let query = if sess.memory_retrieval.enabled {
-        Some(build_memory_query(
-            &msgs,
-            sess.memory_retrieval.token_budget,
-        ))
-    } else {
-        None
-    };
-    let Some(block) = snap.render(query.as_ref()).await else {
-        return msgs;
-    };
-    // Find the first system message and insert the memory block right
-    // after it. If there is no system message (shouldn't happen in
-    // practice — `Session::new` always seeds one — but the code is
-    // defensive) fall back to prepending.
-    let insert_at = msgs
-        .iter()
-        .position(|m| matches!(m.role, Role::System))
-        .map(|i| i + 1)
-        .unwrap_or(0);
-    msgs.insert(insert_at, Message::system(block));
-    msgs
+    let history = sess.history.lock().await;
+    let before = *sess.cleared_before.lock().await;
+    crate::history::clear_old_tool_results(&history, before)
 }
 
-/// Build a retrieval query from the tail of the conversation. Weighted
-/// toward the most-recent user message (that's what the model is about
-/// to act on) plus a small slice of the preceding assistant/tool turns
-/// for topical context. Deliberately cheap — no tokenisation here; the
-/// scorer does that itself.
-///
-/// Cap on total query length keeps IDF calculation snappy even when a
-/// tool result was gigantic in the last round.
 fn build_memory_query(msgs: &[Message], token_budget: usize) -> MemoryQuery {
     const QUERY_CHAR_CAP: usize = 4000;
     const QUERY_TAIL_MESSAGES: usize = 6;
@@ -3224,7 +3335,9 @@ fn build_memory_query(msgs: &[Message], token_budget: usize) -> MemoryQuery {
         let Some(body) = m.content.as_deref() else {
             continue;
         };
-        let trimmed = body.trim();
+        // Not the memory (or hook context) already attached to a prompt:
+        // scoring memory against itself favours what was chosen before.
+        let trimmed = crate::history::strip_hook_context(body).trim();
         if trimmed.is_empty() {
             continue;
         }

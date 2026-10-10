@@ -28,7 +28,7 @@ use clap::Args;
 use futures::StreamExt;
 use mira_ai::build_chat_provider;
 use mira_core::ToolCall;
-use mira_harness::{Approver, HarnessEvent, Session, SessionConfig};
+use mira_harness::{Approver, HarnessEvent, Session, SessionConfig, UsageTotals};
 use mira_policy::{Decision, Mode, Policy, PolicyConfig};
 use mira_sandbox::Sandbox;
 use mira_tools::{builtin, Registry, ToolContext};
@@ -61,6 +61,24 @@ pub struct EvalArgs {
     /// `timeout_secs`. Useful for capping cost in CI.
     #[arg(long)]
     pub timeout_secs: Option<u64>,
+
+    /// Run the tasks with an agent's own CLI instead of Mira's harness, on
+    /// that agent's sign-in (a subscription, no API key): `claude` runs
+    /// Claude Code headless (`claude -p`).
+    #[arg(long, value_enum)]
+    pub agent: Option<EvalAgent>,
+
+    /// The model for `--agent`, as that agent names it (`haiku`, `sonnet`).
+    /// Defaults to the agent's own default.
+    #[arg(long, requires = "agent")]
+    pub agent_model: Option<String>,
+}
+
+/// Agents `mira eval --agent` can run the tasks with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum EvalAgent {
+    /// Claude Code (`claude -p`).
+    Claude,
 }
 
 #[derive(Debug, Deserialize)]
@@ -98,7 +116,25 @@ struct TaskOutcome {
     reason: String,
     tokens_in: u64,
     tokens_out: u64,
+    /// Input tokens served from the provider's prompt cache.
+    cached_tokens: u64,
+    /// Input tokens written to the prompt cache (billed at a premium).
+    cache_write_tokens: u64,
+    /// What the task cost, when the model's price is known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cost_usd: Option<f64>,
     duration_secs: f64,
+}
+
+impl TaskOutcome {
+    /// Share of input tokens served from the prompt cache.
+    fn cache_share(&self) -> f64 {
+        if self.tokens_in == 0 {
+            0.0
+        } else {
+            self.cached_tokens as f64 / self.tokens_in as f64
+        }
+    }
 }
 
 /// Auto-approve every gated call. Only used inside evals — we already
@@ -154,12 +190,17 @@ pub async fn run(cli: &crate::Cli, args: EvalArgs) -> Result<()> {
         let outcome = run_task(&spec, &path, provider.clone(), &settings, &args).await;
         // Progress goes to stderr so `--json` on stdout stays parseable.
         eprintln!(
-            "[{}] {} ({:.1}s, {}→{} tok) — {}",
+            "[{}] {} ({:.1}s, {}→{} tok, {:.0}% from cache{}) — {}",
             if outcome.pass { "PASS" } else { "FAIL" },
             outcome.name,
             outcome.duration_secs,
             outcome.tokens_in,
             outcome.tokens_out,
+            outcome.cache_share() * 100.0,
+            outcome
+                .cost_usd
+                .map(|c| format!(", ${c:.4}"))
+                .unwrap_or_default(),
             outcome.reason,
         );
         outcomes.push(outcome);
@@ -228,15 +269,24 @@ async fn run_task(
     let name = spec.name.clone().unwrap_or_else(|| "?".into());
     let start = Instant::now();
     let timeout_secs = args.timeout_secs.unwrap_or(spec.timeout_secs);
-    match run_task_inner(spec, task_path, provider, settings, timeout_secs).await {
-        Ok((final_text, tokens_in, tokens_out, work_dir)) => {
-            let (pass, reason) = evaluate(spec, &final_text, &work_dir);
+    let fixture = spec
+        .fixture
+        .as_ref()
+        .map(|f| task_path.parent().unwrap_or(Path::new(".")).join(f));
+    match run_task_inner(spec, task_path, provider, settings, args, timeout_secs).await {
+        Ok((final_text, usage, reported_cost, work_dir)) => {
+            let (pass, reason) = evaluate(spec, &final_text, &work_dir, fixture.as_deref());
             TaskOutcome {
                 name,
                 pass,
                 reason,
-                tokens_in,
-                tokens_out,
+                tokens_in: usage.prompt_tokens,
+                tokens_out: usage.completion_tokens,
+                cached_tokens: usage.cached_input_tokens,
+                cache_write_tokens: usage.cache_write_tokens,
+                cost_usd: reported_cost.or_else(|| {
+                    mira_ai::pricing::cost_usd(&settings.model, usage.as_token_usage())
+                }),
                 duration_secs: start.elapsed().as_secs_f64(),
             }
         }
@@ -246,6 +296,9 @@ async fn run_task(
             reason: format!("runner error: {e:#}"),
             tokens_in: 0,
             tokens_out: 0,
+            cached_tokens: 0,
+            cache_write_tokens: 0,
+            cost_usd: None,
             duration_secs: start.elapsed().as_secs_f64(),
         },
     }
@@ -256,8 +309,9 @@ async fn run_task_inner(
     task_path: &Path,
     provider: Arc<dyn mira_ai::ChatProvider>,
     settings: &crate::ResolvedSettings,
+    args: &EvalArgs,
     timeout_secs: u64,
-) -> Result<(String, u64, u64, PathBuf)> {
+) -> Result<(String, UsageTotals, Option<f64>, PathBuf)> {
     // Fresh tempdir per task. `keep` intentionally not called — TempDir
     // drops (and its cleanup fires) at scope exit.
     let tmp = tempfile::tempdir().context("create tempdir")?;
@@ -269,20 +323,99 @@ async fn run_task_inner(
             .with_context(|| format!("copy fixture {}", src.display()))?;
     }
 
-    let session = unattended_session(&work_dir, provider, settings, None)?;
-    let turn = drive_turn(session, &spec.prompt);
-    let (final_text, tokens_in, tokens_out) =
-        match tokio::time::timeout(Duration::from_secs(timeout_secs), turn).await {
+    let timeout = Duration::from_secs(timeout_secs);
+    let (final_text, usage, reported_cost) = if let Some(agent) = args.agent {
+        run_with_agent(
+            agent,
+            args.agent_model.as_deref(),
+            &spec.prompt,
+            &work_dir,
+            timeout,
+        )
+        .await?
+    } else {
+        let session = unattended_session(&work_dir, provider, settings, None)?;
+        let turn = drive_turn_usage(session, &spec.prompt);
+        let (text, usage) = match tokio::time::timeout(timeout, turn).await {
             Ok(r) => r?,
             Err(_) => bail!("timed out after {timeout_secs}s"),
         };
+        (text, usage, None)
+    };
 
     // Return `work_dir` explicitly — verify commands run there. We
     // must keep `tmp` alive until the verify pass completes; leak
     // (into_path) so the caller can inspect and the drop happens
     // only after the outcome is scored.
     let kept = tmp.keep();
-    Ok((final_text, tokens_in, tokens_out, kept))
+    Ok((final_text, usage, reported_cost, kept))
+}
+
+/// One task with an agent's own CLI, in `work_dir`, unattended: the final
+/// answer, the tokens it reported, and the cost it reported.
+///
+/// Claude Code runs with only the task directory's settings
+/// (`--setting-sources project`), so the user's own hooks, plugins and MCP
+/// servers don't change results or add cost, and with permission checks
+/// off, as Mira's own runs are: the task directory is a throwaway copy.
+async fn run_with_agent(
+    agent: EvalAgent,
+    model: Option<&str>,
+    prompt: &str,
+    work_dir: &Path,
+    timeout: Duration,
+) -> Result<(String, UsageTotals, Option<f64>)> {
+    match agent {
+        EvalAgent::Claude => {
+            let mut cmd = tokio::process::Command::new("claude");
+            cmd.arg("-p")
+                .arg(prompt)
+                .args(["--output-format", "json"])
+                .args(["--permission-mode", "bypassPermissions"])
+                .args(["--setting-sources", "project"])
+                .arg("--no-session-persistence");
+            if let Some(model) = model {
+                cmd.args(["--model", model]);
+            }
+            cmd.current_dir(work_dir)
+                .stdin(std::process::Stdio::null())
+                .kill_on_drop(true);
+            let out = match tokio::time::timeout(timeout, cmd.output()).await {
+                Ok(out) => out.context("run `claude` (is Claude Code installed and signed in?)")?,
+                Err(_) => bail!("timed out after {}s", timeout.as_secs()),
+            };
+            let result: serde_json::Value =
+                serde_json::from_slice(&out.stdout).with_context(|| {
+                    let err = String::from_utf8_lossy(&out.stderr);
+                    format!(
+                        "`claude` gave no result (exit {}): {}",
+                        out.status.code().unwrap_or(-1),
+                        err.lines().last().unwrap_or("")
+                    )
+                })?;
+            Ok(claude_result(&result))
+        }
+    }
+}
+
+/// The answer, usage and cost from `claude -p --output-format json`.
+fn claude_result(result: &serde_json::Value) -> (String, UsageTotals, Option<f64>) {
+    let usage = &result["usage"];
+    let n = |key: &str| usage[key].as_u64().unwrap_or(0);
+    let cached = n("cache_read_input_tokens");
+    let written = n("cache_creation_input_tokens");
+    let totals = UsageTotals {
+        prompt_tokens: n("input_tokens") + cached + written,
+        completion_tokens: n("output_tokens"),
+        cached_input_tokens: cached,
+        cache_write_tokens: written,
+        rounds: result["num_turns"].as_u64().unwrap_or(1) as u32,
+    };
+    (
+        result["result"].as_str().unwrap_or_default().to_owned(),
+        totals,
+        result["total_cost_usd"].as_f64(),
+    )
 }
 
 /// A session working in `work_dir` with nobody to ask: core tools, yolo
@@ -333,10 +466,17 @@ pub(crate) fn unattended_session(
 /// Send `prompt` and wait for the turn: the last round's text, and
 /// input / output tokens.
 pub(crate) async fn drive_turn(session: Session, prompt: &str) -> Result<(String, u64, u64)> {
+    let (text, usage) = drive_turn_usage(session, prompt).await?;
+    Ok((text, usage.prompt_tokens, usage.completion_tokens))
+}
+
+/// [`drive_turn`], with the turn's full token usage (cache reads and
+/// writes included).
+async fn drive_turn_usage(session: Session, prompt: &str) -> Result<(String, UsageTotals)> {
     let mut stream = session.send(prompt.to_owned()).await;
     let mut text = String::new();
-    let mut tokens_in = 0u64;
-    let mut tokens_out = 0u64;
+    let mut usage = UsageTotals::default();
+    let mut warnings: Vec<String> = Vec::new();
     // TurnComplete fires at the end of every model round (including
     // the final one). We keep the accumulated text — clearing on the
     // next round's first Token — so at Done we hold the last round's
@@ -354,18 +494,30 @@ pub(crate) async fn drive_turn(session: Session, prompt: &str) -> Result<(String
             HarnessEvent::TurnComplete => {
                 round_just_finished = true;
             }
-            HarnessEvent::Usage { round, .. } => {
-                tokens_in += round.prompt_tokens as u64;
-                tokens_out += round.completion_tokens as u64;
-            }
+            HarnessEvent::Usage { round, .. } => usage.add_round(round),
+            HarnessEvent::Warning(w) => warnings.push(w),
             HarnessEvent::Done => break,
             _ => {}
         }
     }
-    Ok((text, tokens_in, tokens_out))
+    // No model round at all: the turn ended before reaching the model (a
+    // provider error such as a bad key, a blocked prompt). Say why instead
+    // of grading an empty run.
+    if usage.rounds == 0 && text.is_empty() && !warnings.is_empty() {
+        bail!("no reply from the model: {}", warnings.join(" | "));
+    }
+    Ok((text, usage))
 }
 
-fn evaluate(spec: &TaskSpec, final_text: &str, work_dir: &Path) -> (bool, String) {
+/// Score a finished task. `verify` runs in the task's directory with
+/// `EVAL_FIXTURE` set to the untouched fixture, so it can check what the
+/// agent shouldn't have changed.
+fn evaluate(
+    spec: &TaskSpec,
+    final_text: &str,
+    work_dir: &Path,
+    fixture: Option<&Path>,
+) -> (bool, String) {
     if let Some(pat) = &spec.expect_grep {
         let re = match Regex::new(&format!("(?i){pat}")) {
             Ok(r) => r,
@@ -379,11 +531,17 @@ fn evaluate(spec: &TaskSpec, final_text: &str, work_dir: &Path) -> (bool, String
         }
     }
     if let Some(cmd) = &spec.verify {
-        let out = std::process::Command::new("bash")
-            .arg("-lc")
-            .arg(cmd)
-            .current_dir(work_dir)
-            .output();
+        let mut command = std::process::Command::new("bash");
+        command.arg("-lc").arg(cmd).current_dir(work_dir);
+        if let Some(fixture) = fixture {
+            command.env(
+                "EVAL_FIXTURE",
+                fixture
+                    .canonicalize()
+                    .unwrap_or_else(|_| fixture.to_owned()),
+            );
+        }
+        let out = command.output();
         match out {
             Ok(o) if o.status.success() => {}
             Ok(o) => {
@@ -426,29 +584,75 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 fn print_summary(outcomes: &[TaskOutcome]) {
     println!();
     println!(
-        "{:<40} {:>6} {:>10} {:>10} {:>8}",
-        "task", "result", "tok in", "tok out", "time"
+        "{:<32} {:>6} {:>9} {:>8} {:>7} {:>9} {:>7}",
+        "task", "result", "tok in", "tok out", "cached", "cost", "time"
     );
-    println!("{}", "-".repeat(78));
+    println!("{}", "-".repeat(84));
     for o in outcomes {
-        let name = if o.name.len() > 40 {
-            format!("{}…", &o.name[..39])
+        let name = if o.name.chars().count() > 32 {
+            format!("{}…", o.name.chars().take(31).collect::<String>())
         } else {
             o.name.clone()
         };
         println!(
-            "{:<40} {:>6} {:>10} {:>10} {:>7.1}s",
+            "{:<32} {:>6} {:>9} {:>8} {:>6.0}% {:>9} {:>6.1}s",
             name,
             if o.pass { "PASS" } else { "FAIL" },
             o.tokens_in,
             o.tokens_out,
+            o.cache_share() * 100.0,
+            o.cost_usd
+                .map(|c| format!("${c:.4}"))
+                .unwrap_or_else(|| "?".into()),
             o.duration_secs,
         );
     }
     let pass = outcomes.iter().filter(|o| o.pass).count();
+    let tokens_in: u64 = outcomes.iter().map(|o| o.tokens_in).sum();
+    let cached: u64 = outcomes.iter().map(|o| o.cached_tokens).sum();
+    let cost: Option<f64> = outcomes.iter().map(|o| o.cost_usd).sum();
     println!();
-    println!("{}/{} passed", pass, outcomes.len());
+    println!(
+        "{}/{} passed · {:.0}% of input from cache{}",
+        pass,
+        outcomes.len(),
+        if tokens_in == 0 {
+            0.0
+        } else {
+            cached as f64 * 100.0 / tokens_in as f64
+        },
+        cost.map(|c| format!(" · ${c:.4} total"))
+            .unwrap_or_default()
+    );
     for o in outcomes.iter().filter(|o| !o.pass) {
         println!("  ✗ {}: {}", o.name, o.reason);
+    }
+}
+
+#[cfg(test)]
+mod agent_tests {
+    use super::*;
+
+    #[test]
+    fn claude_json_maps_to_usage_and_cost() {
+        let result = serde_json::json!({
+            "type": "result",
+            "result": "Done. ANSWER: 12 hours",
+            "num_turns": 3,
+            "total_cost_usd": 0.0123,
+            "usage": {
+                "input_tokens": 100,
+                "cache_read_input_tokens": 9_000,
+                "cache_creation_input_tokens": 900,
+                "output_tokens": 50
+            }
+        });
+        let (text, usage, cost) = claude_result(&result);
+        assert_eq!(text, "Done. ANSWER: 12 hours");
+        assert_eq!(usage.prompt_tokens, 10_000);
+        assert_eq!(usage.cached_input_tokens, 9_000);
+        assert_eq!(usage.cache_write_tokens, 900);
+        assert_eq!(usage.completion_tokens, 50);
+        assert_eq!(cost, Some(0.0123));
     }
 }

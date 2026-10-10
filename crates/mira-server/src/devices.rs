@@ -60,6 +60,28 @@ async fn run(program: &PathBuf, args: &[&str], timeout: Duration) -> Result<Vec<
     }
 }
 
+/// Whether this machine has any device to drive: iOS Simulators (Xcode's
+/// simulator runtime set up) or the Android SDK's tools. A "yes" is kept;
+/// a "no" is checked again after a minute, so setting one up shows the
+/// tools to the next agent without restarting Mira.
+pub fn available() -> bool {
+    static CHECKED: std::sync::Mutex<Option<(bool, std::time::Instant)>> =
+        std::sync::Mutex::new(None);
+    let mut checked = CHECKED.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some((found, at)) = *checked {
+        if found || at.elapsed() < std::time::Duration::from_secs(60) {
+            return found;
+        }
+    }
+    let simulators = xcrun().is_some()
+        && std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .is_some_and(|h| h.join("Library/Developer/CoreSimulator/Devices").is_dir());
+    let found = simulators || adb().is_some() || emulator().is_some();
+    *checked = Some((found, std::time::Instant::now()));
+    found
+}
+
 fn xcrun() -> Option<PathBuf> {
     cfg!(target_os = "macos")
         .then(|| PathBuf::from("/usr/bin/xcrun"))

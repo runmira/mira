@@ -17,7 +17,7 @@
  * `Task`/`Agent` call is a different thing — a subagent inside that agent —
  * and folds into the ordinary tool rows (see `agentTools.ts`).
  */
-import { useEffect, useMemo, useState } from 'react';
+import { cn } from '@/lib/utils';
 import {
   ArrowRight,
   Check,
@@ -32,11 +32,11 @@ import {
   Sparkle,
   Terminal,
 } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
 import type { ToolCall, ToolResult } from '../types';
-import type { ToolStatus } from './ToolCard';
 import { AgentIcon } from './AgentIcon';
 import { Markdown } from './Markdown';
-import { cn } from '@/lib/utils';
+import type { ToolStatus } from './ToolCard';
 import { Collapse } from './ui/Collapse';
 
 /* ---------- engine presentation ---------- */
@@ -77,8 +77,7 @@ export function delegateEngine(id: string | null | undefined): DelegateEngine {
   const e = (id ?? '').trim() || 'mira';
   if (e === 'mira') return { id: 'mira', name: 'Mira', kind: 'mira' };
   const name =
-    AGENT_ENGINES[e] ??
-    e.replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+    AGENT_ENGINES[e] ?? e.replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
   return { id: e, name, kind: 'agent' };
 }
 
@@ -87,9 +86,7 @@ export function delegateEngine(id: string | null | undefined): DelegateEngine {
  *  is on the final segment. An agent's own `Task`/`Agent` call is mapped to
  *  `delegate` upstream and deliberately does *not* match — that is a
  *  subagent inside the agent, not this hand-off. */
-export function isDelegateTaskName(name: string): boolean {
-  return name === 'delegate_task' || name.endsWith('__delegate_task');
-}
+export { isDelegateTaskName } from '../lib/delegateTools';
 
 /** The brief and the engine a `delegate_task` call asked for. The brief is a
  *  single prose field, so it is rendered as prose, never as JSON. */
@@ -188,7 +185,9 @@ export function DelegateCard({
           {active && last ? (
             <span className="flex min-w-0 items-center gap-1.5 text-[11.5px] text-mira-blue">
               <LoaderCircle className="size-3 shrink-0 animate-spin" />
-              <span className="truncate" title={last.text}>{last.text}</span>
+              <span className="truncate" title={last.text}>
+                {last.text}
+              </span>
             </span>
           ) : (
             <StageChip stage={stage} isError={isError} active={active} />
@@ -269,7 +268,15 @@ function HandoffMarks({ engine, active }: { engine: DelegateEngine; active: bool
 
 /* ---------- stage chip / track ---------- */
 
-function StageChip({ stage, isError, active }: { stage: Stage; isError: boolean; active: boolean }) {
+function StageChip({
+  stage,
+  isError,
+  active,
+}: {
+  stage: Stage;
+  isError: boolean;
+  active: boolean;
+}) {
   if (isError) {
     return (
       <span className="inline-flex shrink-0 items-center gap-1 text-[11.5px] text-destructive">
@@ -281,7 +288,12 @@ function StageChip({ stage, isError, active }: { stage: Stage; isError: boolean;
   const label =
     stage === 'handoff' ? 'waiting to start' : stage === 'working' ? 'working' : 'answered';
   return (
-    <span className={cn('inline-flex shrink-0 items-center gap-1 text-[11.5px]', active ? 'text-mira-blue' : 'text-muted-foreground/70')}>
+    <span
+      className={cn(
+        'inline-flex shrink-0 items-center gap-1 text-[11.5px]',
+        active ? 'text-mira-blue' : 'text-muted-foreground/70',
+      )}
+    >
       {active && <LoaderCircle className="size-3 animate-spin" />}
       {label}
     </span>
@@ -320,7 +332,13 @@ function StageTrack({ stage, isError }: { stage: Stage; isError: boolean }) {
               <span
                 className={cn(
                   'truncate text-[11.5px]',
-                  done ? 'text-foreground/70' : live ? 'text-mira-blue' : failed ? 'text-destructive' : 'text-muted-foreground/50',
+                  done
+                    ? 'text-foreground/70'
+                    : live
+                      ? 'text-mira-blue'
+                      : failed
+                        ? 'text-destructive'
+                        : 'text-muted-foreground/50',
                 )}
               >
                 {s.label}
@@ -493,7 +511,12 @@ function Permission({
 }) {
   return (
     <li className="flex items-center gap-1.5">
-      <Icon className={cn('size-3 shrink-0', muted ? 'text-muted-foreground/40' : 'text-emerald-500/70')} />
+      <Icon
+        className={cn(
+          'size-3 shrink-0',
+          muted ? 'text-muted-foreground/40' : 'text-emerald-500/70',
+        )}
+      />
       <span className={cn(muted && 'text-muted-foreground/60')}>{text}</span>
     </li>
   );
@@ -502,7 +525,8 @@ function Permission({
 /* ---------- status ---------- */
 
 function StatusMark({ status, isError }: { status: ToolStatus; isError: boolean }) {
-  if (isError) return <CircleAlert className="size-3.5 shrink-0 text-destructive" fill="currentColor" />;
+  if (isError)
+    return <CircleAlert className="size-3.5 shrink-0 text-destructive" fill="currentColor" />;
   switch (status) {
     case 'running':
     case 'pending':

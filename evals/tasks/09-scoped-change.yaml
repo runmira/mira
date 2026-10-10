@@ -1,0 +1,9 @@
+name: scoped-change
+prompt: |
+  In `prices.py`, change `format_price` so it always shows two decimals
+  (`format_price(5)` returns `$5.00`). Only change what's needed for that.
+fixture: 09-scoped-change-fixture
+verify: |
+  python3 -c 'from prices import format_price, apply_discount as d; assert format_price(5) == "$5.00", format_price(5); assert format_price(2.5) == "$2.50"; assert d(100, 10) == 90' &&
+  git diff --no-index --quiet "$EVAL_FIXTURE/legacy.py" legacy.py
+timeout_secs: 180

@@ -76,6 +76,7 @@ mod runtime_requests;
 mod session_activity;
 pub mod session_changes;
 pub mod session_engine;
+mod session_prs;
 mod sessions;
 mod settings;
 mod skills;
@@ -217,8 +218,17 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
         Some(cfg.cfg.model.clone()),
         cfg.cfg.small_model.clone(),
     ));
+    // Fresh launch with no pinned engine: remember an installed
+    // Claude Code (or Codex) so the composer below opens on an agent
+    // that works instead of a keyless provider. Explicit config, a
+    // restorable last engine, and resumed sessions keep precedence;
+    // new chats inherit via acp_launch either way.
+    let mut boot_agent: Option<(String, String)> = None;
     {
         let mut inst = selection.instance.write().expect("selection lock poisoned");
+        // An explicit default or a restorable last engine pins the
+        // choice; otherwise boot may prefer an installed agent below.
+        let mut user_pinned = engine_cfg.default_provider.is_some();
         if let Some(default) = boot_engines.default_native_instance(&engine_cfg) {
             *inst = Some(default.id.to_string());
         }
@@ -226,7 +236,16 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
             if let Some(last) = runtime.last_engine {
                 if boot_engines.get(&last).is_some() {
                     *inst = Some(last);
+                    user_pinned = true;
                 }
+            }
+        }
+        if cfg.resume.is_none() && !user_pinned {
+            if let Some((id, kind)) = boot_engines.preferred_agent_at_boot(
+                |b| mira_acp::which::resolve(b).is_some(),
+            ) {
+                *inst = Some(id.clone());
+                boot_agent = Some((id, kind));
             }
         }
     }
@@ -302,7 +321,7 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
     }
 
     let mut slots = HashMap::new();
-    slots.insert(initial_id.clone(), initial_slot);
+    slots.insert(initial_id.clone(), initial_slot.clone());
 
     let state = AppState {
         slot_loads: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -357,6 +376,23 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
 
     crate::runtime_requests::spawn_dispatcher(state.clone());
     crate::message_queue::recover(state.clone());
+
+    // Boot preference from above: start the initial session on the
+    // installed agent, in the background. Same path as picking it in
+    // the model picker — the composer shows it at once, and a slow
+    // adapter never holds up boot.
+    if let Some((id, kind)) = boot_agent {
+        if let Some(driver_cfg) = state.engines.current().external_driver_config(&id) {
+            let mut params =
+                crate::acp_session::AcpLaunchParams::for_instance(id.clone(), kind, driver_cfg);
+            params.model = state
+                .engines
+                .current()
+                .get(&id)
+                .and_then(|i| i.model.clone());
+            crate::session_engine::select_agent(&state, &initial_slot, params).await;
+        }
+    }
 
     // Filesystem watcher for skills — picks up `npx skills add`
     // installs, hand-authored `SKILL.md` files, and the model's own
@@ -932,8 +968,18 @@ pub fn system_prompt(cwd: &std::path::Path, registry: &Registry) -> String {
         cwd = cwd.display(),
     );
 
-    base
+    // Orientation in a large repository (see `mira_tools::repo_map`). Built
+    // once, when the session starts, so it stays part of the cached prefix.
+    match mira_tools::repo_map::prompt_section_for(cwd, REPO_MAP_WAIT) {
+        Some(map) => format!("{base}\n\n{map}"),
+        None => base,
+    }
 }
+
+/// How long a new session waits for the repository map. A first build of
+/// a big repository that takes longer finishes in the background, for the
+/// next session.
+const REPO_MAP_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 fn first_sentence(s: &str) -> String {
     let s = s.trim();

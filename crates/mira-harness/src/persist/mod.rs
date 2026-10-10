@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use mira_ai::TokenUsage;
-use mira_core::{Message, SessionId};
+use mira_core::{Message, SessionId, ToolCallId};
 use mira_tools::DiffPreview;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -23,6 +23,41 @@ use thiserror::Error;
 use crate::session::SessionConfig;
 
 pub use file_store::FileStore;
+
+/// What the user did with the sidebar's "Settled" shelf, in epoch seconds.
+/// A chat also settles on its own (its PR merged or closed), so both
+/// directions are recorded: `settled_at` holds it there until the chat
+/// moves again, `unsettled_at` keeps it out until something newer happens.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettleMarks {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settled_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unsettled_at: Option<u64>,
+}
+
+impl SettleMarks {
+    pub fn is_empty(&self) -> bool {
+        self.settled_at.is_none() && self.unsettled_at.is_none()
+    }
+
+    /// The user's choice, stamped now: settling clears an earlier
+    /// un-settle and the other way round.
+    pub fn set(settled: bool) -> Self {
+        let now = Some(now_secs());
+        if settled {
+            Self {
+                settled_at: now,
+                unsettled_at: None,
+            }
+        } else {
+            Self {
+                settled_at: None,
+                unsettled_at: now,
+            }
+        }
+    }
+}
 
 /// A serialised session on disk.
 ///
@@ -59,6 +94,11 @@ pub struct SessionRecord {
     /// doesn't report usage).
     #[serde(default, skip_serializing_if = "UsageTotals::is_zero")]
     pub usage: UsageTotals,
+    /// Read, write and edit calls that completed successfully, so after a
+    /// resume they still supersede earlier reads of the same file (see
+    /// `history::stub_superseded_reads`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_calls_done: Vec<ToolCallId>,
     /// Set when this session was spawned as a subagent by another session.
     /// Points at the parent's id so the sidebar can hide it from the
     /// primary chat list (subagents aren't user-facing conversations)
@@ -98,6 +138,10 @@ pub struct SessionRecord {
     /// compaction-replaced messages.)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_at: Option<u64>,
+    /// Web-sidebar "Settled": when the user put the chat away as done, or
+    /// took it back out. Empty for chats the user never touched.
+    #[serde(default, skip_serializing_if = "SettleMarks::is_empty")]
+    pub settle: SettleMarks,
     /// An external agent drove (or drives) turns in this session. The agent's
     /// own transcript lives in the `<id>.agent.jsonl` sidecar, not in
     /// `messages` — see below. Absent for harness-only sessions.
@@ -234,12 +278,14 @@ impl SessionRecord {
             )),
             turns,
             usage: UsageTotals::default(),
+            file_calls_done: self.file_calls_done.clone(),
             parent_id: None,
             tasks: self.tasks.clone(),
             goal: None,
             previews,
             pinned: false,
             archived_at: None,
+            settle: SettleMarks::default(),
             agent: None,
             forked_from: Some(ForkPoint {
                 session_id: self.id.clone(),
@@ -282,6 +328,8 @@ pub struct SessionListRecord {
     pub parent_id: Option<SessionId>,
     pub pinned: bool,
     pub archived_at: Option<u64>,
+    #[serde(default)]
+    pub settle: SettleMarks,
     pub agent_driver: Option<String>,
     pub forked_from: Option<ForkPoint>,
 }
@@ -302,6 +350,7 @@ impl From<&SessionRecord> for SessionListRecord {
             parent_id: record.parent_id.clone(),
             pinned: record.pinned,
             archived_at: record.archived_at,
+            settle: record.settle,
             agent_driver: record
                 .agent
                 .as_ref()
@@ -524,12 +573,14 @@ mod fork_tests {
                 prompt_tokens: 9,
                 ..Default::default()
             },
+            file_calls_done: Vec::new(),
             parent_id: None,
             tasks: Vec::new(),
             goal: None,
             previews: HashMap::new(),
             pinned: true,
             archived_at: None,
+            settle: SettleMarks::default(),
             agent: None,
             forked_from: None,
         }
