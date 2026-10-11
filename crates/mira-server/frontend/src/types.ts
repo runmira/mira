@@ -557,6 +557,8 @@ export type ServerMsg =
   /** The agent's own stop reason, verbatim. `cancelled` and
    *  `max_tokens` must not render as a completed answer. */
   | { type: 'acp_turn_end'; stop_reason: string; detail?: string | null }
+  | { type: 'acp_prompt_committed'; record: unknown }
+  | { type: 'acp_failure'; code: string; message: string; retryable: boolean; reset_at: string | null }
     /** Something this build does not model. Surfaced as a warning rather
    *  than dropped: a silent gap is indistinguishable from a hung agent. */
   | { type: 'acp_unmodelled'; method: string; reason: string }

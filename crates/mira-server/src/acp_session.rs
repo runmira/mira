@@ -63,6 +63,9 @@ pub struct SlotAgent {
 }
 
 impl SlotAgent {
+    pub(crate) fn begin_stop(&self) {
+        self.stopping.store(true, Ordering::SeqCst);
+    }
     /// Why `mode_id` is privileged, or `None` if it is not.
     ///
     /// The driver is re-resolved from its kind rather than stored: every
@@ -100,7 +103,7 @@ impl SlotAgent {
     }
 
     pub async fn stop(&self) {
-        self.stopping.store(true, Ordering::SeqCst);
+        self.begin_stop();
         // Answer any permission the agent is blocked on *before* killing the
         // process, so it is not left waiting on a request that will never
         // arrive. The spec makes this a MUST on cancel.
@@ -530,7 +533,7 @@ pub async fn start_agent(
 /// agent start, so after a mode or model change each frame was written
 /// twice and replay doubled every reply. It also watches the agent's
 /// reported model, so the engine view names what is actually running.
-fn ensure_transcript_logger(state: &AppState, slot: &Arc<SessionSlot>) {
+pub(crate) fn ensure_transcript_logger(state: &AppState, slot: &Arc<SessionSlot>) {
     if slot.engine.logger_started.swap(true, Ordering::SeqCst) {
         return;
     }
@@ -538,20 +541,13 @@ fn ensure_transcript_logger(state: &AppState, slot: &Arc<SessionSlot>) {
         .store
         .as_ref()
         .and_then(|store| store.agent_log_path(&slot.id));
-    let mut rx = slot.events_tx.subscribe();
+    let mut ordered = capture_transcript_stream(slot.events_tx.subscribe());
     let weak_slot = Arc::downgrade(slot);
     let state = state.clone();
     tokio::spawn(async move {
         loop {
-            let msg = match rx.recv().await {
-                Ok(m) => m,
-                // Falling behind loses frames, not the logger: before, one
-                // burst ended persistence for the rest of the session.
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    tracing::warn!(skipped = n, "agent transcript logger lagged");
-                    continue;
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            let Some(msg) = ordered.recv().await else {
+                break;
             };
             let Some(slot) = weak_slot.upgrade() else {
                 break;
@@ -559,6 +555,12 @@ fn ensure_transcript_logger(state: &AppState, slot: &Arc<SessionSlot>) {
             if slot.engine.retired.load(Ordering::SeqCst) {
                 slot.engine.logger_started.store(false, Ordering::SeqCst);
                 break;
+            }
+            if let ServerMsg::AcpPromptCommitted { record } = &msg {
+                if let Some(path) = path.as_ref() {
+                    append_transcript_record(path.clone(), record.clone()).await;
+                }
+                continue;
             }
             // A title the agent reports for its session becomes the row's
             // name — it knows what the conversation is about.
@@ -610,10 +612,41 @@ fn ensure_transcript_logger(state: &AppState, slot: &Arc<SessionSlot>) {
                     "driver": driver_kind,
                     "frame": frame,
                 });
-                mira_acp::agent_sessions::append_line_to(path, &line);
+                append_transcript_record(path.clone(), line).await;
             }
         }
     });
+}
+
+fn capture_transcript_stream(
+    mut rx: tokio::sync::broadcast::Receiver<ServerMsg>,
+) -> tokio::sync::mpsc::UnboundedReceiver<ServerMsg> {
+    // Capture event order without awaiting metadata or disk. The worker below
+    // owns ordered persistence; slow appends cannot stall this receiver.
+    let (records, ordered) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(msg) => {
+                    if records.send(msg).is_err() {
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!(skipped = n, "agent transcript capture lagged")
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+    ordered
+}
+
+async fn append_transcript_record(path: std::path::PathBuf, record: serde_json::Value) {
+    let _ = tokio::task::spawn_blocking(move || {
+        mira_acp::agent_sessions::append_line_to(&path, &record)
+    })
+    .await;
 }
 
 fn native_permission_call(
@@ -1934,6 +1967,7 @@ fn is_transcript_frame(msg: &ServerMsg) -> bool {
             | AcpLimits { .. }
             | AcpSessionInfo { .. }
             | AcpTurnEnd { .. }
+            | AcpFailure { .. }
             | AcpUnmodelled { .. }
             | AcpModeChanged { .. }
             | HtmlRender { .. }
@@ -2631,5 +2665,43 @@ mod native_permission_view_tests {
             .and_then(|v| v.as_str())
             .unwrap()
             .contains("README.md"));
+    }
+}
+
+#[cfg(test)]
+mod ordered_transcript_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stalled_writer_preserves_questions_and_answers_past_broadcast_capacity() {
+        let (events, _) = tokio::sync::broadcast::channel(4);
+        let mut writer = capture_transcript_stream(events.subscribe());
+        let mut expected = vec![];
+        for index in 0..66 {
+            let frame = match index {
+                0 | 33 => ServerMsg::AcpPromptCommitted {
+                    record: serde_json::json!({"user":{"text":format!("question-{index}")}}),
+                },
+                _ => ServerMsg::AcpText {
+                    text: format!("answer-{index}"),
+                    message_id: None,
+                },
+            };
+            expected.push(serde_json::to_value(&frame).unwrap());
+            events.send(frame).unwrap();
+            // Let capture drain while the disk writer remains completely idle.
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                while writer.len() != expected.len() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("capture must not wait for the disk writer");
+        }
+        for expected in expected {
+            let stored = writer.recv().await.unwrap();
+            assert_eq!(serde_json::to_value(stored).unwrap(), expected);
+        }
+        assert!(writer.is_empty());
     }
 }

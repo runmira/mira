@@ -877,6 +877,16 @@ pub enum ServerMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message_id: Option<String>,
     },
+    /// Ordered input marker; the transcript writer stores this as a user record.
+    AcpPromptCommitted {
+        record: serde_json::Value,
+    },
+    AcpFailure {
+        code: String,
+        message: String,
+        retryable: bool,
+        reset_at: Option<String>,
+    },
     /// Authoritative completed prose, replacing the streamed partial message.
     AcpMessageMetadata {
         message_id: String,
@@ -1046,6 +1056,17 @@ impl ServerMsg {
         use mira_acp::events::{EventSource, MiraEvent};
         let event = ev.event;
         Some(match event {
+            MiraEvent::Failure {
+                code,
+                message,
+                retryable,
+                reset_at,
+            } => Self::AcpFailure {
+                code,
+                message,
+                retryable,
+                reset_at,
+            },
             MiraEvent::MessageMetadata { message_id, phase } => {
                 Self::AcpMessageMetadata { message_id, phase }
             }

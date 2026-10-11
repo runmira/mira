@@ -1,4 +1,5 @@
 import * as agentTerminal from '../lib/agentTerminal';
+import { appendAgentProgress } from '../lib/agentProgress';
 import {
   appendProgressLine,
   appendReasoning,
@@ -87,10 +88,7 @@ export function useTranscriptEvents(
         break;
 
       case 'stream_activity':
-        setEntries((previous) => [
-          ...previous,
-          { kind: 'activity', activityKind: msg.kind, title: msg.title, detail: msg.detail },
-        ]);
+        setEntries((previous) => appendAgentProgress(previous, msg));
         break;
 
       case 'reasoning':

@@ -24,6 +24,7 @@ thiserror = "2"
 # dozen lines of newline-delimited framing, so we own it instead.
 tokio = { version = "1", features = ["process", "io-util", "sync", "time", "rt", "macros"] }
 tracing = "0.1"
+libc = "0.2"
 chrono = { workspace = true }
 
 [dev-dependencies]

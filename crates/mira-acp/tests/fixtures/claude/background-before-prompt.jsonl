@@ -1,0 +1,7 @@
+{"direction":"outgoing","uuid":"prompt-1"}
+{"direction":"incoming","frame":{"type":"command_lifecycle","command_uuid":"prompt-1","state":"queued"}}
+{"direction":"incoming","frame":{"type":"assistant","message":{"id":"background-message","content":[{"type":"text","text":"Background wake output"}]}}}
+{"direction":"incoming","frame":{"type":"result","subtype":"success","is_error":false,"origin":{"kind":"task-notification"},"user_message_uuids":["background-1"]}}
+{"direction":"incoming","frame":{"type":"command_lifecycle","command_uuid":"prompt-1","state":"started"}}
+{"direction":"incoming","frame":{"type":"assistant","message":{"id":"prompt-message","content":[{"type":"text","text":"Your answer"}]}}}
+{"direction":"incoming","frame":{"type":"result","subtype":"success","is_error":false,"user_message_uuids":["prompt-1"]}}

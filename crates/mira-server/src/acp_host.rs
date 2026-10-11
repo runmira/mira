@@ -1366,6 +1366,14 @@ impl AcpEventPort {
                         .work(work);
                     slot.publish_activity();
                 }
+                MiraEvent::Failure { message, .. } => {
+                    *slot
+                        .engine
+                        .sidebar_failure
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()) =
+                        Some(message.chars().take(160).collect());
+                }
                 MiraEvent::RuntimeTurn(turn) => {
                     slot.engine
                         .activity

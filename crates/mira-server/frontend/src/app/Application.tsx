@@ -126,6 +126,7 @@ export function Application() {
       case 'acp_tool_call_update':
       case 'acp_plan':
       case 'acp_turn_end':
+      case 'acp_failure':
       case 'acp_privileged_mode_confirmation':
       case 'acp_mode_changed':
       case 'engines_changed':

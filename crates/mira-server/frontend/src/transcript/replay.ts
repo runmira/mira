@@ -4,6 +4,7 @@
  * server sends on load. Split out of App.tsx.
  */
 import { applyNativeMetadata } from '../lib/nativeStream';
+import { appendAgentProgress, agentFailureEntry, hasCurrentAgentFailure } from '../lib/agentProgress';
 import { type AskUserDecision } from '../components/AskUserCard';
 import type {
   AskUserProposal,
@@ -133,9 +134,12 @@ export function replayAgentTranscript(lines: AgentTranscriptLine[]): Entry[] {
       }
       case 'stream_activity': {
         const activity = f as Extract<ServerMsg, { type: 'stream_activity' }>;
-        out.push({ kind: 'activity', activityKind: activity.kind, title: activity.title, detail: activity.detail });
+        out = appendAgentProgress(out, activity);
         break;
       }
+      case 'acp_failure':
+        out.push(agentFailureEntry(f as Extract<ServerMsg, { type: 'acp_failure' }>));
+        break;
       case 'acp_message_metadata': {
         const meta = f as Extract<ServerMsg, { type: 'acp_message_metadata' }>;
         out = applyNativeMetadata(out, meta.message_id, meta.phase);
@@ -177,7 +181,7 @@ export function replayAgentTranscript(lines: AgentTranscriptLine[]): Entry[] {
         const started = turnStartedAt;
         out = withTurnStats(out, (s) => ({ ...s, startedAt: s.startedAt ?? started, endedAt: line.t }));
         const sealed = sealAcpThought(out);
-        if (isSuccessfulAcpStop(msg.stop_reason)) {
+        if (isSuccessfulAcpStop(msg.stop_reason) || hasCurrentAgentFailure(out)) {
           out = sealed;
           break;
         }

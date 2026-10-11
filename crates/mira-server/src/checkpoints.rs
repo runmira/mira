@@ -140,7 +140,20 @@ pub fn record(cwd: &Path, session: &str, text: &str, replaces: Option<(&str, usi
         return;
     };
     let lock = store_lock(&file);
-    let _guard = lock.lock().unwrap_or_else(|error| error.into_inner());
+    // Another snapshot may be running for this chat. Include lock contention
+    // in the prompt's budget, not just time spent inside Git.
+    let _guard = loop {
+        match lock.try_lock() {
+            Ok(guard) => break guard,
+            Err(std::sync::TryLockError::Poisoned(error)) => break error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if crate::session_changes::snapshot_budget_expired() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    };
     let Some(tree) = snapshot_tree(cwd) else {
         return;
     };

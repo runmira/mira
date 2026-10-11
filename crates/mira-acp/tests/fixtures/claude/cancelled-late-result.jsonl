@@ -1,0 +1,6 @@
+{"direction":"outgoing","uuid":"old-prompt"}
+{"direction":"cancel","uuid":"old-prompt"}
+{"direction":"outgoing","uuid":"new-prompt"}
+{"direction":"incoming","frame":{"type":"result","subtype":"success","is_error":false,"user_message_uuids":["old-prompt"]}}
+{"direction":"incoming","frame":{"type":"result","subtype":"success","is_error":false,"user_message_uuids":["new-prompt"]}}
+{"direction":"incoming","frame":{"type":"result","subtype":"success","is_error":false,"user_message_uuids":["new-prompt"]}}
