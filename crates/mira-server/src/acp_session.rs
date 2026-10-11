@@ -563,6 +563,24 @@ pub(crate) fn ensure_transcript_logger(state: &AppState, slot: &Arc<SessionSlot>
                 slot.engine.logger_started.store(false, Ordering::SeqCst);
                 break;
             }
+            // Input commitment only queues in memory; this listener owns the
+            // ordered disk writes so stalled storage never blocks Stop.
+            let inputs: Vec<_> = slot
+                .engine
+                .transcript_inputs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .drain(..)
+                .collect();
+            if let Some(path) = path.as_ref() {
+                for input in inputs {
+                    let path = path.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        mira_acp::agent_sessions::append_line_to(&path, &input)
+                    })
+                    .await;
+                }
+            }
             // A title the agent reports for its session becomes the row's
             // name — it knows what the conversation is about.
             if let ServerMsg::AcpSessionInfo {

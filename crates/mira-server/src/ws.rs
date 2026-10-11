@@ -251,7 +251,7 @@ async fn dispatch(
             let attach = attach.clone();
             let rx_swap = rx_swap.clone();
             tokio::spawn(async move {
-                let _settings = slot.engine.dispatch_lock.lock().await;
+                let _settings = slot.engine.settings_lock.lock().await;
                 dispatch_on_slot(cmd, &state, &attach, &rx_swap, &slot).await;
             });
             return;
@@ -269,6 +269,29 @@ async fn live_agent(
     let handle = slot.acp_agent.read().await.clone()?;
     let agent = handle.agent().await?;
     Some((handle, agent))
+}
+
+fn reserve_current_agent_turn(
+    engine: &crate::session_engine::EngineRuntime,
+    epoch: u64,
+    on_reserved: impl FnOnce(),
+) -> bool {
+    let _poll = engine.input_poll.lock().unwrap_or_else(|e| e.into_inner());
+    if engine.input_epoch.load(std::sync::atomic::Ordering::SeqCst) != epoch
+        || engine
+            .agent_in_turn
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_err()
+    {
+        return false;
+    }
+    on_reserved();
+    true
 }
 
 async fn poll_current_input<T>(
@@ -2042,6 +2065,33 @@ mod input_preparation_tests {
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
 
+    #[test]
+    fn foreground_reservation_rejects_a_second_prompt_while_preparing_files() {
+        let engine = EngineRuntime::default();
+        assert!(super::reserve_current_agent_turn(&engine, 0, || {}));
+        assert!(!super::reserve_current_agent_turn(&engine, 0, || panic!(
+            "second prompt started"
+        )));
+        engine.agent_in_turn.store(false, Ordering::SeqCst);
+        engine.input_epoch.fetch_add(1, Ordering::SeqCst);
+        assert!(!super::reserve_current_agent_turn(&engine, 0, || panic!(
+            "old prompt started"
+        )));
+        assert!(super::reserve_current_agent_turn(&engine, 1, || {}));
+    }
+
+    #[tokio::test]
+    async fn settings_serialization_does_not_hold_the_restart_lock() {
+        let engine = EngineRuntime::default();
+        let _settings = engine.settings_lock.lock().await;
+        let _restart = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            engine.dispatch_lock.lock(),
+        )
+        .await
+        .expect("restart must remain possible during setting dispatch");
+    }
+
     #[tokio::test]
     async fn cancellation_prevents_a_pending_dispatch_from_starting_io() {
         let engine = Arc::new(EngineRuntime::default());
@@ -2246,90 +2296,16 @@ async fn prompt_agent_at_epoch(
     }
     info!(session = %slot.id, startup_ms = starting.elapsed().as_millis() as u64, "agent ready for prompt");
 
+    // Reserve while dispatch_lock still excludes the next prompt. Preparation
+    // may await files, but another input must already see a foreground turn.
+    if !reserve_current_agent_turn(&slot.engine, epoch, || track_agent_turn(slot)) {
+        return;
+    }
     let state = state.clone();
     let slot = slot.clone();
     tokio::spawn(async move {
-        let commit = slot.engine.input_commit.lock().await;
-        if slot
-            .engine
-            .input_epoch
-            .load(std::sync::atomic::Ordering::SeqCst)
-            != epoch
-        {
-            return;
-        }
-
-        // The prompt belongs in the transcript sidecar too, or replay shows
-        // answers without their questions. Recorded here rather than in the
-        // pump because prompts never cross the event bus.
-        if let Some(path) = state
-            .store
-            .as_ref()
-            .and_then(|store| store.agent_log_path(&slot.id))
-        {
-            let line = serde_json::json!({
-                "t": mira_harness::persist::now_ms(),
-                "driver": handle.driver_kind,
-                "user": { "text": text, "images": images.len(), "attached_images":images, "input_id":input_id },
-            });
-            mira_acp::agent_sessions::append_line_to(&path, &line);
-        }
-        // Untitled sessions take the first prompt as their title at once, so
-        // the sidebar row reads as something; then the agent writes a proper
-        // one from it (Claude Code's own title generation) and replaces it.
-        {
-            let session = slot.session.read().await;
-            if session.title().await.is_none() {
-                let first: String = text.chars().take(80).collect();
-                if !first.trim().is_empty() {
-                    session.set_title(first).await;
-                    let session = session.clone();
-                    let agent = agent.clone();
-                    let state = state.clone();
-                    let description = text.clone();
-                    // Agents that can't title their own chat (Codex) get one from
-                    // Mira's own provider on its cheap model. No provider set up
-                    // means the first-prompt title simply stays.
-                    let provider = slot.native_provider.clone();
-                    tokio::spawn(async move {
-                        let title = match agent.generate_title(&description).await {
-                            Some(t) => Some(t),
-                            None => {
-                                let cfg = session.config().await;
-                                let users = vec![description.clone()];
-                                crate::title::generate(
-                                    &provider,
-                                    &cfg.background_model(None),
-                                    &users,
-                                )
-                                .await
-                                .ok()
-                                .filter(|t| !t.trim().is_empty())
-                            }
-                        };
-                        if let Some(title) = title {
-                            session.set_title(&title).await;
-                            state
-                                .broadcast_all(ServerMsg::SessionTitleUpdated {
-                                    session_id: session.id.to_string(),
-                                    title,
-                                })
-                                .await;
-                        }
-                    });
-                }
-            }
-        }
-
-        // Coming from a provider or another agent, or back from a restart, the
-        // agent gets what it missed in front of this prompt, so switching
-        // engines mid-conversation keeps the thread.
-        // The sidecar above records only what the user typed.
-        let mut text = match crate::session_engine::take_context_for_agent(&slot).await {
-            Some(context) => format!("{context}{text}"),
-            None => text,
-        };
-
+        let raw_text = text.clone();
+        let mut text = text;
         // Images get to the agent one of two ways: staged into its files
         // dir for agents that read the filesystem (native CLIs), named in
         // the prompt text; or as `image` content blocks inside the
@@ -2338,20 +2314,41 @@ async fn prompt_agent_at_epoch(
         let inline_images = agent.accepts_image_blocks();
         if !images.is_empty() && !inline_images {
             match handle.agent_files_dir.as_ref() {
-                Some(dir) => match stage_agent_images(dir, &images) {
-                    Ok(names) => {
-                        text.push_str("\n\nAttached images (open them to see):\n");
-                        for n in &names {
-                            text.push_str(&format!("- {n}\n"));
+                Some(dir) => {
+                    let staged = {
+                        let dir = dir.clone();
+                        let images = images.clone();
+                        let result =
+                            tokio::task::spawn_blocking(move || stage_agent_images(&dir, &images))
+                                .await;
+                        if slot
+                            .engine
+                            .input_epoch
+                            .load(std::sync::atomic::Ordering::SeqCst)
+                            != epoch
+                        {
+                            return;
+                        }
+                        result.unwrap_or_else(|e| Err(format!("attachment staging failed: {e}")))
+                    };
+                    match staged {
+                        Ok(names) => {
+                            text.push_str("\n\nAttached images (open them to see):\n");
+                            for n in &names {
+                                text.push_str(&format!("- {n}\n"));
+                            }
+                        }
+                        Err(e) => {
+                            record_prompt_failure(
+                                &slot,
+                                format!("could not stage attachments: {e}"),
+                            );
+                            crate::acp_host::AcpEventPort::for_slot(&slot)
+                                .turn_ended("attachments_failed");
+                            return;
                         }
                     }
-                    Err(e) => {
-                        record_prompt_failure(&slot, format!("could not stage attachments: {e}"));
-                        crate::acp_host::AcpEventPort::for_slot(&slot)
-                            .turn_ended("attachments_failed");
-                        return;
-                    }
-                },
+                }
                 None => {
                     record_prompt_failure(
                         &slot,
@@ -2363,6 +2360,98 @@ async fn prompt_agent_at_epoch(
             }
         }
 
+        let commit = slot.engine.input_commit.lock().await;
+        if slot
+            .engine
+            .input_epoch
+            .load(std::sync::atomic::Ordering::SeqCst)
+            != epoch
+        {
+            return;
+        }
+
+        // Coming from a provider or another agent, or back from a restart, the
+        // agent gets what it missed in front of this prompt, so switching
+        // engines mid-conversation keeps the thread.
+        // The sidecar above records only what the user typed.
+        let text = match crate::session_engine::take_context_for_agent(&slot).await {
+            Some(context) => format!("{context}{text}"),
+            None => text,
+        };
+
+        // The prompt belongs in the transcript sidecar too, or replay shows
+        // answers without their questions. Recorded here rather than in the
+        // pump because prompts never cross the event bus.
+        if state
+            .store
+            .as_ref()
+            .and_then(|store| store.agent_log_path(&slot.id))
+            .is_some()
+        {
+            let line = serde_json::json!({
+                "t": mira_harness::persist::now_ms(),
+                "driver": handle.driver_kind,
+                "user": { "text": raw_text, "images": images.len(), "attached_images":images, "input_id":input_id },
+            });
+            slot.engine
+                .transcript_inputs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push_back(line);
+        }
+        {
+            let slot = slot.clone();
+            let state = state.clone();
+            let agent = agent.clone();
+            tokio::spawn(async move {
+                // Untitled sessions take the first prompt as their title at once, so
+                // the sidebar row reads as something; then the agent writes a proper
+                // one from it (Claude Code's own title generation) and replaces it.
+                {
+                    let session = slot.session.read().await;
+                    if session.title().await.is_none() {
+                        let first: String = raw_text.chars().take(80).collect();
+                        if !first.trim().is_empty() {
+                            session.set_title(first).await;
+                            let session = session.clone();
+                            let agent = agent.clone();
+                            let state = state.clone();
+                            let description = raw_text.clone();
+                            // Agents that can't title their own chat (Codex) get one from
+                            // Mira's own provider on its cheap model. No provider set up
+                            // means the first-prompt title simply stays.
+                            let provider = slot.native_provider.clone();
+                            tokio::spawn(async move {
+                                let title = match agent.generate_title(&description).await {
+                                    Some(t) => Some(t),
+                                    None => {
+                                        let cfg = session.config().await;
+                                        let users = vec![description.clone()];
+                                        crate::title::generate(
+                                            &provider,
+                                            &cfg.background_model(None),
+                                            &users,
+                                        )
+                                        .await
+                                        .ok()
+                                        .filter(|t| !t.trim().is_empty())
+                                    }
+                                };
+                                if let Some(title) = title {
+                                    session.set_title(&title).await;
+                                    state
+                                        .broadcast_all(ServerMsg::SessionTitleUpdated {
+                                            session_id: session.id.to_string(),
+                                            title,
+                                        })
+                                        .await;
+                                }
+                            });
+                        }
+                    }
+                }
+            });
+        }
         // The turn blocks until the agent finishes, so it runs on its own
         // task: the WS reader must stay free to carry permission requests
         // and the cancel that a blocked turn would otherwise prevent.
@@ -2377,7 +2466,6 @@ async fn prompt_agent_at_epoch(
         }
         let events = slot.events_tx.clone();
         spawn_quiet_agent_watchdog(&events);
-        track_agent_turn(&slot);
         let turn_port = crate::acp_host::AcpEventPort::for_slot(&slot);
         let recovery_slot = slot.clone();
         let sent = std::time::Instant::now();
