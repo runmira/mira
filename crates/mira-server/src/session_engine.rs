@@ -114,6 +114,11 @@ pub struct EngineRuntime {
     pub input_dispatch: tokio::sync::Mutex<()>,
     /// Stop invalidates input still waiting for file snapshots or startup.
     pub input_epoch: std::sync::atomic::AtomicU64,
+    /// Serializes prompt metadata commitment with Stop.
+    pub input_commit: tokio::sync::Mutex<()>,
+    /// Covers each dispatch poll and the cancellation epoch transition.
+    pub input_poll: std::sync::Mutex<()>,
+    pub input_cancel: tokio::sync::Notify,
     pub activity_changed: tokio::sync::Notify,
     pub provider_in_turn: AtomicBool,
     pub provider_generation: std::sync::atomic::AtomicU64,

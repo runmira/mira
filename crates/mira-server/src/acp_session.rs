@@ -533,7 +533,7 @@ pub async fn start_agent(
 /// agent start, so after a mode or model change each frame was written
 /// twice and replay doubled every reply. It also watches the agent's
 /// reported model, so the engine view names what is actually running.
-fn ensure_transcript_logger(state: &AppState, slot: &Arc<SessionSlot>) {
+pub(crate) fn ensure_transcript_logger(state: &AppState, slot: &Arc<SessionSlot>) {
     if slot.engine.logger_started.swap(true, Ordering::SeqCst) {
         return;
     }

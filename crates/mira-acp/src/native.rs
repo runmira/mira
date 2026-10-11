@@ -1485,6 +1485,9 @@ impl AgentHandle {
 
 /// A running native agent.
 pub struct NativeAgent {
+    #[cfg(unix)]
+    process_group: std::sync::atomic::AtomicU32,
+    write_poisoned: Arc<std::sync::atomic::AtomicBool>,
     child: Arc<Mutex<tokio::process::Child>>,
     stdin: Arc<Mutex<tokio::process::ChildStdin>>,
     stderr: Arc<Mutex<Vec<String>>>,
@@ -1616,6 +1619,37 @@ pub enum NativeError {
     Other(String),
 }
 
+async fn write_protocol_line(
+    stdin: &Mutex<tokio::process::ChildStdin>,
+    poisoned: &std::sync::atomic::AtomicBool,
+    v: &Value,
+) -> Result<(), NativeError> {
+    let mut w = stdin.lock().await;
+    if poisoned.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(NativeError::StdinClosed);
+    }
+    // Cancellation after any byte has been written makes the line stream
+    // unusable. Fail closed before another caller can append to that line.
+    struct WriteGuard<'a>(&'a std::sync::atomic::AtomicBool, bool);
+    impl Drop for WriteGuard<'_> {
+        fn drop(&mut self) {
+            if !self.1 {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    }
+    let mut guard = WriteGuard(poisoned, false);
+    w.write_all(v.to_string().as_bytes())
+        .await
+        .map_err(|_| NativeError::StdinClosed)?;
+    w.write_all(b"\n")
+        .await
+        .map_err(|_| NativeError::StdinClosed)?;
+    w.flush().await.map_err(|_| NativeError::StdinClosed)?;
+    guard.1 = true;
+    Ok(())
+}
+
 impl NativeAgent {
     /// Spawn and start reading. Events arrive on [`Self::events`].
     pub async fn start(
@@ -1682,6 +1716,7 @@ impl NativeAgent {
             Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<Value>>>,
         > = Arc::default();
         let rate_limit: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let write_poisoned = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let prompts = Arc::new(std::sync::Mutex::new(
             crate::claude_protocol::PromptTracker::default(),
         ));
@@ -1725,6 +1760,8 @@ impl NativeAgent {
 
         // The child behind a lock before the reader starts, so the reader can
         // tell an idle agent from a dead one (see the loop below).
+        #[cfg(unix)]
+        let process_group = child.id().unwrap_or(0);
         let child = Arc::new(Mutex::new(child));
         // stdout: the line protocol. This loop is the whole native client.
         {
@@ -1740,6 +1777,7 @@ impl NativeAgent {
             // nobody can approve — which is the failure mode `--permission-
             // prompts host` is specifically there to avoid.
             let writer = stdin.clone();
+            let write_poisoned = write_poisoned.clone();
             let end_tx = end_tx.clone();
             // The child handle, so an idle timeout can tell "quiet" apart
             // from "dead" instead of assuming the worst.
@@ -1845,14 +1883,17 @@ impl NativeAgent {
                                     // behind the first.
                                     let gate = gate.clone();
                                     let writer = writer.clone();
+                                    let write_poisoned = write_poisoned.clone();
                                     tokio::spawn(async move {
                                         let decision = gate(p.clone()).await;
                                         let response =
                                             permission_response(&p.request_id, &decision, &p.input);
-                                        let mut w = writer.lock().await;
-                                        let _ = w.write_all(response.to_string().as_bytes()).await;
-                                        let _ = w.write_all(b"\n").await;
-                                        let _ = w.flush().await;
+                                        let _ = write_protocol_line(
+                                            &writer,
+                                            &write_poisoned,
+                                            &response,
+                                        )
+                                        .await;
                                     });
                                 }
                             }
@@ -1879,6 +1920,9 @@ impl NativeAgent {
         }
 
         Ok(Self {
+            #[cfg(unix)]
+            process_group: std::sync::atomic::AtomicU32::new(process_group),
+            write_poisoned,
             child,
             stdin,
             stderr: stderr_tail,
@@ -1969,14 +2013,7 @@ impl NativeAgent {
     }
 
     async fn write_line(&self, v: &Value) -> Result<(), NativeError> {
-        let mut w = self.stdin.lock().await;
-        w.write_all(v.to_string().as_bytes())
-            .await
-            .map_err(|_| NativeError::StdinClosed)?;
-        w.write_all(b"\n")
-            .await
-            .map_err(|_| NativeError::StdinClosed)?;
-        w.flush().await.map_err(|_| NativeError::StdinClosed)
+        write_protocol_line(&self.stdin, &self.write_poisoned, v).await
     }
 
     /// Send a control request. Each gets its own id, so answers never
@@ -2005,6 +2042,12 @@ impl NativeAgent {
         .await;
         if !matches!(written, Ok(Ok(()))) {
             self.replies.lock().await.remove(&id);
+            if self
+                .write_poisoned
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                self.shutdown().await;
+            }
             return match written {
                 Ok(Err(error)) => Err(error),
                 _ => Err(NativeError::Other(
@@ -2109,7 +2152,9 @@ impl NativeAgent {
         .await;
         let mut child = self.child.lock().await;
         #[cfg(unix)]
-        let process_group = child.id();
+        let process_group = self
+            .process_group
+            .swap(0, std::sync::atomic::Ordering::SeqCst);
         let exited = tokio::time::timeout(Duration::from_millis(800), child.wait())
             .await
             .map(|r| r.is_ok())
@@ -2121,10 +2166,10 @@ impl NativeAgent {
         // Commands and background workers inherit this dedicated group.
         // Close them even when the CLI exited gracefully first.
         #[cfg(unix)]
-        if let Some(pid) = process_group {
+        if process_group != 0 {
             // SAFETY: this child was spawned into its own process group.
             unsafe {
-                libc::kill(-(pid as i32), libc::SIGKILL);
+                libc::kill(-(process_group as i32), libc::SIGKILL);
             }
         }
     }
@@ -2221,6 +2266,51 @@ done"#).await;
             .is_err());
         assert!(agent.replies.lock().await.is_empty());
         agent.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn interrupted_large_write_closes_transport_before_later_messages() {
+        let (agent, _dir, _events) = protocol_agent("sleep 30").await;
+        let result = agent.ask(
+            json!({"subtype":"generate_session_title","description":"x".repeat(2 * 1024 * 1024)}),
+            Duration::from_millis(100),
+        ).await;
+        assert!(result.is_err());
+        assert!(agent
+            .write_poisoned
+            .load(std::sync::atomic::Ordering::SeqCst));
+        assert!(agent.prompt("next message").await.is_err());
+        assert!(agent.replies.lock().await.is_empty());
+        assert!(!is_alive(&agent.child).await);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shutdown_kills_background_group_after_the_reader_reaps_cli() {
+        let (cfg, dir) = protocol_cli(
+            r#"(sleep 1.2; touch "$1") >/dev/null 2>&1 &
+touch "$1.ready"
+exit 0"#,
+        );
+        let marker = dir.path().join("reaped-background-write");
+        let mut cfg = cfg;
+        cfg.args.push(marker.display().to_string());
+        let gate: PermissionGate =
+            Arc::new(|_| Box::pin(async { PermissionDecision::from(false) }));
+        let agent = NativeAgent::start(&cfg, gate, None).await.unwrap();
+        wait_for(
+            || async { (!is_alive(&agent.child).await).then_some(()) },
+            "CLI exited",
+        )
+        .await;
+        assert!(agent.child.lock().await.id().is_none());
+        agent.shutdown().await;
+        tokio::time::sleep(Duration::from_millis(1400)).await;
+        assert!(
+            !marker.exists(),
+            "reaping CLI must not lose its background process group"
+        );
     }
 
     #[cfg(unix)]

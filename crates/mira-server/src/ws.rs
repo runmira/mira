@@ -260,6 +260,43 @@ async fn dispatch(
     dispatch_on_slot(cmd, state, attach, rx_swap, &slot).await;
 }
 
+async fn live_agent(
+    slot: &SessionSlot,
+) -> Option<(
+    Arc<crate::acp_session::SlotAgent>,
+    mira_acp::native::AgentHandle,
+)> {
+    let handle = slot.acp_agent.read().await.clone()?;
+    let agent = handle.agent().await?;
+    Some((handle, agent))
+}
+
+async fn poll_current_input<T>(
+    engine: &crate::session_engine::EngineRuntime,
+    epoch: u64,
+    mut commit: Option<tokio::sync::MutexGuard<'_, ()>>,
+    future: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    tokio::pin!(future);
+    let cancelled = engine.input_cancel.notified();
+    tokio::pin!(cancelled);
+    std::future::poll_fn(|cx| {
+        let _poll = engine.input_poll.lock().unwrap_or_else(|e| e.into_inner());
+        if engine.input_epoch.load(std::sync::atomic::Ordering::SeqCst) != epoch {
+            return std::task::Poll::Ready(None);
+        }
+        // Register cancellation before polling transport I/O, including a
+        // pipe that never becomes writable again.
+        let _ = std::future::Future::poll(cancelled.as_mut(), cx);
+        let result = future.as_mut().poll(cx).map(Some);
+        // Prompt metadata and initiation form one commitment. Subsequent
+        // transport polls remain guarded so Stop can invalidate pending I/O.
+        commit.take();
+        result
+    })
+    .await
+}
+
 async fn dispatch_on_slot(
     cmd: ClientMsg,
     state: &AppState,
@@ -873,7 +910,8 @@ async fn dispatch_on_slot(
             mode_id,
             acknowledge_privileged,
         } => {
-            let Some(handle) = slot.acp_agent.read().await.clone() else {
+            let live = live_agent(&slot).await;
+            let Some((handle, agent)) = live else {
                 // Set up but not running yet: the mode is remembered and
                 // applied when the agent starts, like a model picked early.
                 let mut launch = slot.acp_launch.lock().await;
@@ -895,10 +933,6 @@ async fn dispatch_on_slot(
                 }
                 return;
             };
-            let Some(agent) = handle.agent().await else {
-                return;
-            };
-
             // A mode that grants more than Mira's own approval pipeline
             // would is a standing change to the agent's authority, so it
             // needs the user to have been told what it does. The client can
@@ -1013,7 +1047,8 @@ async fn dispatch_on_slot(
                 let launch = slot.acp_launch.lock().await;
                 launch.is_some() && option_id.to_ascii_lowercase().contains("model")
             };
-            let Some(handle) = slot.acp_agent.read().await.clone() else {
+            let live = live_agent(&slot).await;
+            let Some((handle, agent)) = live else {
                 if slot.acp_launch.lock().await.is_some() {
                     if is_model {
                         let params = {
@@ -1033,9 +1068,6 @@ async fn dispatch_on_slot(
                         text: "this session is not using an agent".into(),
                     });
                 }
-                return;
-            };
-            let Some(agent) = handle.agent().await else {
                 return;
             };
             // Same relaunch treatment for the model: a native agent takes
@@ -1349,9 +1381,18 @@ async fn dispatch_on_slot(
                 .await;
         }
         ClientMsg::Interrupt => {
-            slot.engine
-                .input_epoch
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            {
+                let _commit = slot.engine.input_commit.lock().await;
+                let _poll = slot
+                    .engine
+                    .input_poll
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                slot.engine
+                    .input_epoch
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                slot.engine.input_cancel.notify_waiters();
+            }
             // Which engine is serving decides what "stop" means. The
             // agent announces its own interrupted turn end through its
             // pump, so the native Done/warning pair is skipped when an
@@ -1918,6 +1959,9 @@ async fn send_input_at_epoch(
 ) -> Result<(), String> {
     let received = std::time::Instant::now();
     info!(session = %slot.id, "prompt received; preparing dispatch");
+    if slot.acp_launch.lock().await.is_some() {
+        crate::acp_session::ensure_transcript_logger(state, slot);
+    }
     let _ = slot.events_tx.send(ServerMsg::StreamActivity {
         kind: "prompt_preparing".into(),
         title: "Preparing your message".into(),
@@ -1997,6 +2041,55 @@ mod input_preparation_tests {
     use crate::session_engine::EngineRuntime;
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn cancellation_prevents_a_pending_dispatch_from_starting_io() {
+        let engine = Arc::new(EngineRuntime::default());
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (resume, wait) = tokio::sync::oneshot::channel();
+        let dispatch = {
+            let engine = engine.clone();
+            tokio::spawn(async move {
+                let commit = engine.input_commit.lock().await;
+                super::poll_current_input(&engine, 0, Some(commit), async {
+                    started.send(()).unwrap();
+                    wait.await.unwrap();
+                    panic!("cancelled dispatch performed I/O");
+                })
+                .await
+            })
+        };
+        ready.await.unwrap();
+        {
+            let _commit = engine.input_commit.lock().await;
+            let _poll = engine.input_poll.lock().unwrap();
+            engine.input_epoch.fetch_add(1, Ordering::SeqCst);
+            engine.input_cancel.notify_waiters();
+        }
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), dispatch)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            resume.send(()).is_err(),
+            "cancellation must drop pending transport I/O"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_commit_skips_metadata_and_context_consumption() {
+        let engine = EngineRuntime::default();
+        engine.input_epoch.fetch_add(1, Ordering::SeqCst);
+        let commit = engine.input_commit.lock().await;
+        assert!(super::poll_current_input(&engine, 0, Some(commit), async {
+            panic!("cancelled prompt consumed pending context");
+        })
+        .await
+        .is_none());
+    }
 
     #[tokio::test]
     async fn stop_during_preparation_prevents_delivery_and_allows_the_next_message() {
@@ -2153,125 +2246,11 @@ async fn prompt_agent_at_epoch(
     }
     info!(session = %slot.id, startup_ms = starting.elapsed().as_millis() as u64, "agent ready for prompt");
 
-    // The prompt belongs in the transcript sidecar too, or replay shows
-    // answers without their questions. Recorded here rather than in the
-    // pump because prompts never cross the event bus.
-    if let Some(path) = state
-        .store
-        .as_ref()
-        .and_then(|store| store.agent_log_path(&slot.id))
-    {
-        let line = serde_json::json!({
-            "t": mira_harness::persist::now_ms(),
-            "driver": handle.driver_kind,
-            "user": { "text": text, "images": images.len(), "attached_images":images, "input_id":input_id },
-        });
-        mira_acp::agent_sessions::append_line_to(&path, &line);
-    }
-    // Untitled sessions take the first prompt as their title at once, so
-    // the sidebar row reads as something; then the agent writes a proper
-    // one from it (Claude Code's own title generation) and replaces it.
-    {
-        let session = slot.session.read().await;
-        if session.title().await.is_none() {
-            let first: String = text.chars().take(80).collect();
-            if !first.trim().is_empty() {
-                session.set_title(first).await;
-                let session = session.clone();
-                let agent = agent.clone();
-                let state = state.clone();
-                let description = text.clone();
-                // Agents that can't title their own chat (Codex) get one from
-                // Mira's own provider on its cheap model. No provider set up
-                // means the first-prompt title simply stays.
-                let provider = slot.native_provider.clone();
-                tokio::spawn(async move {
-                    let title = match agent.generate_title(&description).await {
-                        Some(t) => Some(t),
-                        None => {
-                            let cfg = session.config().await;
-                            let users = vec![description.clone()];
-                            crate::title::generate(&provider, &cfg.background_model(None), &users)
-                                .await
-                                .ok()
-                                .filter(|t| !t.trim().is_empty())
-                        }
-                    };
-                    if let Some(title) = title {
-                        session.set_title(&title).await;
-                        state
-                            .broadcast_all(ServerMsg::SessionTitleUpdated {
-                                session_id: session.id.to_string(),
-                                title,
-                            })
-                            .await;
-                    }
-                });
-            }
-        }
-    }
-
-    // Coming from a provider or another agent, or back from a restart, the
-    // agent gets what it missed in front of this prompt, so switching
-    // engines mid-conversation keeps the thread.
-    // The sidecar above records only what the user typed.
-    let mut text = match crate::session_engine::take_context_for_agent(slot).await {
-        Some(context) => format!("{context}{text}"),
-        None => text,
-    };
-
-    // Images get to the agent one of two ways: staged into its files
-    // dir for agents that read the filesystem (native CLIs), named in
-    // the prompt text; or as `image` content blocks inside the
-    // `session/prompt` itself for ACP agents, which is the protocol's
-    // own media path and needs no filesystem round-trip.
-    let inline_images = agent.accepts_image_blocks();
-    if !images.is_empty() && !inline_images {
-        match handle.agent_files_dir.as_ref() {
-            Some(dir) => match stage_agent_images(dir, &images) {
-                Ok(names) => {
-                    text.push_str("\n\nAttached images (open them to see):\n");
-                    for n in &names {
-                        text.push_str(&format!("- {n}\n"));
-                    }
-                }
-                Err(e) => {
-                    record_prompt_failure(slot, format!("could not stage attachments: {e}"));
-                    crate::acp_host::AcpEventPort::for_slot(slot).turn_ended("attachments_failed");
-                    return;
-                }
-            },
-            None => {
-                record_prompt_failure(
-                    slot,
-                    "this agent was started without an attachments dir, so images were not sent"
-                        .into(),
-                );
-                crate::acp_host::AcpEventPort::for_slot(slot).turn_ended("attachments_failed");
-                return;
-            }
-        }
-    }
-
-    // The turn blocks until the agent finishes, so it runs on its own
-    // task: the WS reader must stay free to carry permission requests
-    // and the cancel that a blocked turn would otherwise prevent.
-    if slot
-        .engine
-        .input_epoch
-        .load(std::sync::atomic::Ordering::SeqCst)
-        != epoch
-    {
-        info!(session = %slot.id, "prompt cancelled before agent dispatch");
-        return;
-    }
-    let events = slot.events_tx.clone();
-    spawn_quiet_agent_watchdog(&events);
-    track_agent_turn(slot);
-    let turn_port = crate::acp_host::AcpEventPort::for_slot(slot);
-    let recovery_slot = slot.clone();
+    let state = state.clone();
+    let slot = slot.clone();
     tokio::spawn(async move {
-        if recovery_slot
+        let commit = slot.engine.input_commit.lock().await;
+        if slot
             .engine
             .input_epoch
             .load(std::sync::atomic::Ordering::SeqCst)
@@ -2279,12 +2258,139 @@ async fn prompt_agent_at_epoch(
         {
             return;
         }
+
+        // The prompt belongs in the transcript sidecar too, or replay shows
+        // answers without their questions. Recorded here rather than in the
+        // pump because prompts never cross the event bus.
+        if let Some(path) = state
+            .store
+            .as_ref()
+            .and_then(|store| store.agent_log_path(&slot.id))
+        {
+            let line = serde_json::json!({
+                "t": mira_harness::persist::now_ms(),
+                "driver": handle.driver_kind,
+                "user": { "text": text, "images": images.len(), "attached_images":images, "input_id":input_id },
+            });
+            mira_acp::agent_sessions::append_line_to(&path, &line);
+        }
+        // Untitled sessions take the first prompt as their title at once, so
+        // the sidebar row reads as something; then the agent writes a proper
+        // one from it (Claude Code's own title generation) and replaces it.
+        {
+            let session = slot.session.read().await;
+            if session.title().await.is_none() {
+                let first: String = text.chars().take(80).collect();
+                if !first.trim().is_empty() {
+                    session.set_title(first).await;
+                    let session = session.clone();
+                    let agent = agent.clone();
+                    let state = state.clone();
+                    let description = text.clone();
+                    // Agents that can't title their own chat (Codex) get one from
+                    // Mira's own provider on its cheap model. No provider set up
+                    // means the first-prompt title simply stays.
+                    let provider = slot.native_provider.clone();
+                    tokio::spawn(async move {
+                        let title = match agent.generate_title(&description).await {
+                            Some(t) => Some(t),
+                            None => {
+                                let cfg = session.config().await;
+                                let users = vec![description.clone()];
+                                crate::title::generate(
+                                    &provider,
+                                    &cfg.background_model(None),
+                                    &users,
+                                )
+                                .await
+                                .ok()
+                                .filter(|t| !t.trim().is_empty())
+                            }
+                        };
+                        if let Some(title) = title {
+                            session.set_title(&title).await;
+                            state
+                                .broadcast_all(ServerMsg::SessionTitleUpdated {
+                                    session_id: session.id.to_string(),
+                                    title,
+                                })
+                                .await;
+                        }
+                    });
+                }
+            }
+        }
+
+        // Coming from a provider or another agent, or back from a restart, the
+        // agent gets what it missed in front of this prompt, so switching
+        // engines mid-conversation keeps the thread.
+        // The sidecar above records only what the user typed.
+        let mut text = match crate::session_engine::take_context_for_agent(&slot).await {
+            Some(context) => format!("{context}{text}"),
+            None => text,
+        };
+
+        // Images get to the agent one of two ways: staged into its files
+        // dir for agents that read the filesystem (native CLIs), named in
+        // the prompt text; or as `image` content blocks inside the
+        // `session/prompt` itself for ACP agents, which is the protocol's
+        // own media path and needs no filesystem round-trip.
+        let inline_images = agent.accepts_image_blocks();
+        if !images.is_empty() && !inline_images {
+            match handle.agent_files_dir.as_ref() {
+                Some(dir) => match stage_agent_images(dir, &images) {
+                    Ok(names) => {
+                        text.push_str("\n\nAttached images (open them to see):\n");
+                        for n in &names {
+                            text.push_str(&format!("- {n}\n"));
+                        }
+                    }
+                    Err(e) => {
+                        record_prompt_failure(&slot, format!("could not stage attachments: {e}"));
+                        crate::acp_host::AcpEventPort::for_slot(&slot)
+                            .turn_ended("attachments_failed");
+                        return;
+                    }
+                },
+                None => {
+                    record_prompt_failure(
+                        &slot,
+                        "this agent was started without an attachments dir, so images were not sent".into(),
+                    );
+                    crate::acp_host::AcpEventPort::for_slot(&slot).turn_ended("attachments_failed");
+                    return;
+                }
+            }
+        }
+
+        // The turn blocks until the agent finishes, so it runs on its own
+        // task: the WS reader must stay free to carry permission requests
+        // and the cancel that a blocked turn would otherwise prevent.
+        if slot
+            .engine
+            .input_epoch
+            .load(std::sync::atomic::Ordering::SeqCst)
+            != epoch
+        {
+            info!(session = %slot.id, "prompt cancelled before agent dispatch");
+            return;
+        }
+        let events = slot.events_tx.clone();
+        spawn_quiet_agent_watchdog(&events);
+        track_agent_turn(&slot);
+        let turn_port = crate::acp_host::AcpEventPort::for_slot(&slot);
+        let recovery_slot = slot.clone();
         let sent = std::time::Instant::now();
-        info!(session = %recovery_slot.id, "dispatching prompt to external agent");
-        let outcome = if inline_images && !images.is_empty() {
-            agent.prompt_with_images(&text, &images).await
-        } else {
-            agent.prompt_text(&text).await
+        let outcome = poll_current_input(&slot.engine, epoch, Some(commit), async {
+            if inline_images && !images.is_empty() {
+                agent.prompt_with_images(&text, &images).await
+            } else {
+                agent.prompt_text(&text).await
+            }
+        })
+        .await;
+        let Some(outcome) = outcome else {
+            return;
         };
         info!(session = %recovery_slot.id, elapsed_ms = sent.elapsed().as_millis() as u64, "external agent prompt call returned");
         match outcome {
