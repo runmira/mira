@@ -113,8 +113,6 @@ pub struct EngineRuntime {
     pub dispatch_lock: tokio::sync::Mutex<()>,
     /// Serializes acknowledged setting changes independently of restarts.
     pub settings_lock: tokio::sync::Mutex<()>,
-    /// User sidecar records queued at commitment, drained before stream frames.
-    pub transcript_inputs: std::sync::Mutex<std::collections::VecDeque<serde_json::Value>>,
     pub input_dispatch: tokio::sync::Mutex<()>,
     /// Stop invalidates input still waiting for file snapshots or startup.
     pub input_epoch: std::sync::atomic::AtomicU64,

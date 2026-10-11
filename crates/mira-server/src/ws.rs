@@ -271,6 +271,17 @@ async fn live_agent(
     Some((handle, agent))
 }
 
+async fn is_current_agent(
+    slot: &SessionSlot,
+    expected: &Arc<crate::acp_session::SlotAgent>,
+) -> bool {
+    slot.acp_agent
+        .read()
+        .await
+        .as_ref()
+        .is_some_and(|current| Arc::ptr_eq(current, expected))
+}
+
 fn reserve_current_agent_turn(
     engine: &crate::session_engine::EngineRuntime,
     epoch: u64,
@@ -980,12 +991,6 @@ async fn dispatch_on_slot(
                 return;
             }
 
-            if handle.driver_kind == "codex" {
-                if let Some(mode) = crate::acp_session::codex_approval_mode(&mode_id) {
-                    crate::acp_session::set_agent_approval_mode(&slot, mode).await;
-                }
-            }
-
             // The choice is the session's, not just this process's: a later
             // restart for any reason keeps it.
             // Claude Code takes the change live over its control protocol;
@@ -1038,6 +1043,17 @@ async fn dispatch_on_slot(
                         text: format!("could not set agent mode: {e}"),
                     });
                     return;
+                }
+                // Selection and restart also own dispatch_lock. An old
+                // acknowledgement must never update a replacement's launch.
+                let _dispatch = slot.engine.dispatch_lock.lock().await;
+                if !is_current_agent(&slot, &handle).await {
+                    return;
+                }
+                if handle.driver_kind == "codex" {
+                    if let Some(mode) = crate::acp_session::codex_approval_mode(&mode_id) {
+                        crate::acp_session::set_agent_approval_mode(&slot, mode).await;
+                    }
                 }
                 let params = {
                     let mut launch = slot.acp_launch.lock().await;
@@ -1133,6 +1149,10 @@ async fn dispatch_on_slot(
                 let v = serde_json::Value::String(value.clone());
                 match agent.set_config_option(&option_id, v).await {
                     Ok(outcome) => {
+                        let _dispatch = slot.engine.dispatch_lock.lock().await;
+                        if !is_current_agent(&slot, &handle).await {
+                            return;
+                        }
                         if is_model {
                             let params = {
                                 let mut launch = slot.acp_launch.lock().await;
@@ -2393,11 +2413,9 @@ async fn prompt_agent_at_epoch(
                 "driver": handle.driver_kind,
                 "user": { "text": raw_text, "images": images.len(), "attached_images":images, "input_id":input_id },
             });
-            slot.engine
-                .transcript_inputs
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push_back(line);
+            let _ = slot
+                .events_tx
+                .send(ServerMsg::AcpPromptCommitted { record: line });
         }
         {
             let slot = slot.clone();
