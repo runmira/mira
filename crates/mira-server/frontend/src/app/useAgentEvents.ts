@@ -1,4 +1,5 @@
 import { listEngines } from '../api';
+import { agentFailureEntry, hasCurrentAgentFailure } from '../lib/agentProgress';
 import { saveAgentCaps } from '../lib/acpAgents';
 import { applyNativeMetadata } from '../lib/nativeStream';
 import {
@@ -135,6 +136,10 @@ export function useAgentEvents(
         });
         break;
 
+      case 'acp_failure':
+        setEntries((prev) => [...prev, agentFailureEntry(msg)]);
+        break;
+
       case 'acp_turn_end':
         // An agent compaction ends with its turn.
         setEntries((prev) =>
@@ -192,7 +197,7 @@ export function useAgentEvents(
         const stopped = msg.stop_reason;
         setEntries((prev) => {
           const sealed = settleTools(sealAcpThought(prev));
-          if (isSuccessfulAcpStop(stopped)) return sealed;
+          if (isSuccessfulAcpStop(stopped) || hasCurrentAgentFailure(sealed)) return sealed;
           const detail = msg.detail ? ` ${msg.detail}` : '';
           return [
             ...sealed,

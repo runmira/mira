@@ -22,7 +22,8 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
@@ -60,10 +61,97 @@ pub(crate) fn git(cwd: &Path) -> Command {
 }
 
 pub(crate) fn run(cmd: &mut Command) -> Option<String> {
+    if let Some(deadline) = SNAPSHOT_DEADLINE.get() {
+        return run_before(cmd, deadline);
+    }
     let out = cmd.output().ok()?;
     out.status
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+thread_local! {
+    static SNAPSHOT_DEADLINE: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// A shared budget for all Git commands in prompt preparation, rather than
+/// a fresh timeout per command. Never let an optional file snapshot gate input.
+pub(crate) fn with_snapshot_budget<T>(budget: Duration, f: impl FnOnce() -> T) -> T {
+    struct Reset(Option<Instant>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            SNAPSHOT_DEADLINE.set(self.0);
+        }
+    }
+    let deadline = Instant::now() + budget;
+    let _reset = Reset(SNAPSHOT_DEADLINE.replace(Some(deadline)));
+    f()
+}
+
+pub(crate) fn snapshot_budget_expired() -> bool {
+    SNAPSHOT_DEADLINE
+        .get()
+        .is_some_and(|deadline| Instant::now() >= deadline)
+}
+
+fn run_before(cmd: &mut Command, deadline: Instant) -> Option<String> {
+    if Instant::now() >= deadline {
+        return None;
+    }
+    // Git filters can spawn their own processes. Give this command its own
+    // group so expiry terminates filters too, before the prompt proceeds.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let output = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).map(|_| bytes)
+    });
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            _ => {
+                #[cfg(unix)]
+                // SAFETY: the child was spawned into its own process group;
+                // the negative PID targets only that command and its filters.
+                unsafe {
+                    libc::kill(-(child.id() as i32), libc::SIGKILL);
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+                tracing::warn!("prompt snapshot Git command exceeded its time budget");
+                return None;
+            }
+        }
+    };
+    // A filter inheriting stdout must not extend the budget after Git exits.
+    while !output.is_finished() {
+        if Instant::now() >= deadline {
+            #[cfg(unix)]
+            // SAFETY: as above, this is the command's dedicated process group.
+            unsafe {
+                libc::kill(-(child.id() as i32), libc::SIGKILL);
+            }
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let bytes = output.join().ok()?.ok()?;
+    status
+        .success()
+        .then(|| String::from_utf8_lossy(&bytes).into_owned())
 }
 
 pub(crate) fn git_path(cwd: &Path, what: &str) -> Option<PathBuf> {
@@ -117,6 +205,11 @@ pub fn snapshot_tree(cwd: &Path) -> Option<String> {
         run(git(cwd).env("GIT_INDEX_FILE", &tmp).arg("write-tree")).map(|s| s.trim().to_string())
     })();
     let _ = std::fs::remove_file(&tmp);
+    // A timed-out `git add` cannot release its temporary index lock itself.
+    // This index belongs only to this snapshot; the user's index is untouched.
+    let mut lock = tmp.as_os_str().to_os_string();
+    lock.push(".lock");
+    let _ = std::fs::remove_file(PathBuf::from(lock));
     tree.filter(|t| !t.is_empty())
 }
 
@@ -284,6 +377,72 @@ pub(crate) fn parse_numstat_z(s: &str) -> Vec<ChangedFile> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_budget_kills_slow_git_filters_on_repeated_messages() {
+        let d = repo();
+        let p = d.path();
+        std::fs::write(p.join(".gitattributes"), "*.slow filter=slow\n").unwrap();
+        sh(p, &["config", "filter.slow.clean", "sleep 30; cat"]);
+        sh(p, &["config", "filter.slow.required", "true"]);
+        std::fs::write(p.join("file.slow"), "input\n").unwrap();
+        let index = git_path(p, "index").unwrap();
+        let before = std::fs::read(&index).unwrap();
+        for _ in 0..2 {
+            let started = Instant::now();
+            let result = with_snapshot_budget(Duration::from_millis(200), || snapshot_tree(p));
+            assert!(result.is_none());
+            assert!(started.elapsed() < Duration::from_secs(2));
+            assert_eq!(std::fs::read(&index).unwrap(), before);
+            let leftovers: Vec<_> = std::fs::read_dir(index.parent().unwrap())
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("mira-snapshot-")
+                })
+                .collect();
+            assert!(
+                leftovers.is_empty(),
+                "temporary indexes must be removed after timeout"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn expired_snapshot_budget_skips_later_commands_and_is_scoped() {
+        let d = tempfile::tempdir().unwrap();
+        let marker = d.path().join("should-not-run");
+        with_snapshot_budget(Duration::ZERO, || {
+            assert!(run(Command::new("touch").arg(&marker)).is_none());
+        });
+        assert!(!marker.exists());
+        assert!(run(Command::new("touch").arg(&marker)).is_some());
+        assert!(marker.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_timeout_terminates_descendants_before_they_write() {
+        let d = tempfile::tempdir().unwrap();
+        let marker = d.path().join("late-write");
+        with_snapshot_budget(Duration::from_millis(100), || {
+            let mut command = Command::new("sh");
+            command
+                .args(["-c", "(sleep 0.4; touch \"$1\") & wait", "sh"])
+                .arg(&marker);
+            assert!(run(&mut command).is_none());
+        });
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(
+            !marker.exists(),
+            "filters must not keep writing after prompt dispatch"
+        );
+    }
 
     fn sh(dir: &Path, args: &[&str]) {
         let ok = Command::new("git")

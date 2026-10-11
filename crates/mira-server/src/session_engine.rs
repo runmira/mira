@@ -112,6 +112,8 @@ pub struct EngineRuntime {
     pub outbox_running: AtomicBool,
     pub dispatch_lock: tokio::sync::Mutex<()>,
     pub input_dispatch: tokio::sync::Mutex<()>,
+    /// Stop invalidates input still waiting for file snapshots or startup.
+    pub input_epoch: std::sync::atomic::AtomicU64,
     pub activity_changed: tokio::sync::Notify,
     pub provider_in_turn: AtomicBool,
     pub provider_generation: std::sync::atomic::AtomicU64,
@@ -479,7 +481,13 @@ pub async fn ensure_agent(
     state: &AppState,
     slot: &Arc<SessionSlot>,
 ) -> Result<Arc<SlotAgent>, String> {
-    let _guard = slot.engine.start_lock.lock().await;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    let _guard = tokio::time::timeout_at(deadline, slot.engine.start_lock.lock())
+        .await
+        .map_err(|_| {
+            "The external agent is still starting after 30 seconds. Retry or restart it."
+                .to_string()
+        })?;
     slot.engine.touch();
     if let Some(h) = slot.acp_agent.read().await.clone() {
         if h.agent().await.is_some() {
@@ -493,7 +501,12 @@ pub async fn ensure_agent(
     };
     *slot.engine.phase.lock().await = AgentPhase::Starting;
     publish(state, slot).await;
-    let result = crate::acp_session::start_agent(state, slot, &params, None).await;
+    let result = tokio::time::timeout_at(
+        deadline,
+        crate::acp_session::start_agent(state, slot, &params, None),
+    )
+    .await
+    .unwrap_or_else(|_| Err("The external agent did not start within 30 seconds. Check its sign-in and configuration, then retry.".into()));
     match &result {
         Ok(h) => {
             *slot.engine.phase.lock().await = AgentPhase::Idle;
@@ -520,7 +533,7 @@ pub async fn ensure_agent(
 
 /// Record the agent on the session, so the sidebar badges it and a reload
 /// routes back to it with the same settings.
-async fn remember_agent(slot: &SessionSlot, params: &AcpLaunchParams, active: bool) {
+pub(crate) async fn remember_agent(slot: &SessionSlot, params: &AcpLaunchParams, active: bool) {
     let session = slot.session.read().await;
     session
         .set_agent(mira_harness::persist::AgentSessionMeta {

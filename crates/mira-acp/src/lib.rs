@@ -22,6 +22,7 @@
 
 pub mod agent_sessions;
 pub mod appserver;
+mod claude_protocol;
 pub mod conn;
 pub mod driver;
 pub mod drivers;

@@ -63,6 +63,9 @@ pub struct SlotAgent {
 }
 
 impl SlotAgent {
+    pub(crate) fn begin_stop(&self) {
+        self.stopping.store(true, Ordering::SeqCst);
+    }
     /// Why `mode_id` is privileged, or `None` if it is not.
     ///
     /// The driver is re-resolved from its kind rather than stored: every
@@ -100,7 +103,7 @@ impl SlotAgent {
     }
 
     pub async fn stop(&self) {
-        self.stopping.store(true, Ordering::SeqCst);
+        self.begin_stop();
         // Answer any permission the agent is blocked on *before* killing the
         // process, so it is not left waiting on a request that will never
         // arrive. The spec makes this a MUST on cancel.
@@ -1934,6 +1937,7 @@ fn is_transcript_frame(msg: &ServerMsg) -> bool {
             | AcpLimits { .. }
             | AcpSessionInfo { .. }
             | AcpTurnEnd { .. }
+            | AcpFailure { .. }
             | AcpUnmodelled { .. }
             | AcpModeChanged { .. }
             | HtmlRender { .. }

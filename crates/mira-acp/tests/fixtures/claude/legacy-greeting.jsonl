@@ -1,0 +1,4 @@
+{"direction":"outgoing","uuid":"prompt-1"}
+{"direction":"incoming","frame":{"type":"system","subtype":"init","session_id":"session-1","model":"claude-opus-5-5","permissionMode":"default"}}
+{"direction":"incoming","frame":{"type":"assistant","message":{"id":"message-1","content":[{"type":"text","text":"Hi!"}]}}}
+{"direction":"incoming","frame":{"type":"result","subtype":"success","is_error":false}}

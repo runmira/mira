@@ -111,7 +111,7 @@ export type WarningEntry = { kind: 'warning'; text: string };
  *  summary behind a toggle when it's known (after a reload). */
 export type CompactEntry = CompactionEntry;
 
-export type ErrorEntry = { kind: 'error'; text: string; responseFailure?: boolean };
+export type ErrorEntry = { kind: 'error'; text: string; responseFailure?: boolean; failureCode?: string; retryable?: boolean; resetAt?: string | null };
 
 export type MsgEntry = {
   steerRequestId?: string;

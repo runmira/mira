@@ -54,6 +54,7 @@ use crate::events::{
 
 /// How long to wait for a line before assuming the CLI has gone quiet.
 const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
+const CONTROL_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Which agent's native line protocol we speak.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -266,6 +267,11 @@ pub fn map_line_with(v: &Value, models: Option<&[NativeModel]>) -> Vec<NativeAct
         Some("system") => {
             let subtype = v.get("subtype").and_then(|s| s.as_str()).unwrap_or("");
             tracing::debug!(subtype, "native: system notice");
+            if matches!(subtype, "api_retry" | "retry") {
+                return vec![NativeAction::Event(crate::claude_protocol::retry_activity(
+                    v,
+                ))];
+            }
             if matches!(
                 subtype,
                 "api_retry" | "retry" | "session_recovery" | "workspace_error"
@@ -402,19 +408,29 @@ pub fn map_line_with(v: &Value, models: Option<&[NativeModel]>) -> Vec<NativeAct
             })]
         }
 
-        Some("result") => vec![NativeAction::TurnEnded {
-            stop_reason: v
-                .get("subtype")
-                .and_then(Value::as_str)
-                .unwrap_or("end_turn")
-                .to_string(),
-            is_error: v.get("is_error").and_then(Value::as_bool).unwrap_or(false),
-        }],
+        Some("result") => {
+            let failure = crate::claude_protocol::result_failure(v);
+            let failed = failure.is_some();
+            let subtype = v["subtype"].as_str().unwrap_or("end_turn");
+            let stop_reason = if failed && v["api_error_status"] == 429 {
+                "rate_limited"
+            } else if failed && matches!(subtype, "success" | "end_turn") {
+                "error"
+            } else {
+                subtype
+            };
+            let mut out: Vec<_> = failure.into_iter().map(NativeAction::Event).collect();
+            out.push(NativeAction::TurnEnded {
+                stop_reason: stop_reason.into(),
+                is_error: failed || v.get("is_error").and_then(Value::as_bool).unwrap_or(false),
+            });
+            out
+        }
+        Some("command_lifecycle") => Vec::new(),
 
         // Answers to our own control requests (model, mode, interrupt).
-        // Success needs nothing; the change itself arrives as `system`
-        // status. A refusal is logged — the caller already reported the
-        // optimistic change, and the next `init` corrects it.
+        // Answers are normally consumed by the reader's pending-request map.
+        // Unexpected refusals remain visible in diagnostics.
         Some("control_response") => {
             let r = v.get("response").cloned().unwrap_or(Value::Null);
             if r.get("subtype").and_then(Value::as_str) == Some("error") {
@@ -1180,6 +1196,7 @@ impl AgentHandle {
                 ..Default::default()
             },
             Self::Native(_) => crate::runtime::RuntimeCapabilities {
+                stop_behavior: crate::runtime::StopBehavior::Runtime,
                 background_work: true,
                 native_fork: true,
                 steering: crate::runtime::SteeringCapability::Native,
@@ -1490,6 +1507,7 @@ pub struct NativeAgent {
     models: Option<Vec<NativeModel>>,
     /// Control requests awaiting their answer, by request id.
     replies: Arc<Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<Value>>>>,
+    prompts: Arc<std::sync::Mutex<crate::claude_protocol::PromptTracker>>,
 }
 
 /// The JSON we write back to answer a permission: Claude Code's
@@ -1622,6 +1640,8 @@ impl NativeAgent {
         // child is given a PATH that can find its own dependencies.
         let program = crate::which::resolve_for_spawn(&launch_cfg.program);
         let mut cmd = tokio::process::Command::new(&program);
+        #[cfg(unix)]
+        cmd.process_group(0);
         cmd.args(&launch_cfg.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1662,6 +1682,9 @@ impl NativeAgent {
             Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<Value>>>,
         > = Arc::default();
         let rate_limit: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let prompts = Arc::new(std::sync::Mutex::new(
+            crate::claude_protocol::PromptTracker::default(),
+        ));
         // The CLI's own known models, read once.
         let models: Option<Vec<NativeModel>> = Some(claude_models());
         let (tx, rx) = mpsc::channel(256);
@@ -1706,6 +1729,7 @@ impl NativeAgent {
         // stdout: the line protocol. This loop is the whole native client.
         {
             let session_id = session_id.clone();
+            let prompts = prompts.clone();
             let rate_limit = rate_limit.clone();
             let tx = tx.clone();
             let models = models.clone();
@@ -1760,56 +1784,82 @@ impl NativeAgent {
                             continue;
                         }
                     }
-                    for action in stream.map(&v, models.as_deref()) {
-                        match action {
-                            NativeAction::SessionId(sid) => {
-                                *session_id.lock().await = Some(sid);
-                            }
-                            NativeAction::Event(e) => {
-                                let _ = tx.send(e).await;
-                            }
-                            NativeAction::TurnEnded {
-                                stop_reason,
-                                is_error,
-                            } => {
-                                let was_limited = rate_limit.lock().await.take();
-                                let _ = end_tx
-                                    .send(TurnEnd {
-                                        stop_reason: if was_limited.is_some() && is_error {
-                                            "rate_limited".to_string()
-                                        } else {
-                                            stop_reason
-                                        },
-                                        is_error,
-                                        rate_limited: was_limited,
-                                    })
-                                    .await;
-                            }
-                            NativeAction::RateLimited { resets_at } => {
-                                *rate_limit.lock().await =
-                                    Some(resets_at.unwrap_or_else(|| "shortly".to_string()));
-                            }
-                            NativeAction::Permission(p) => {
-                                // Decided on its own task. Awaiting the user
-                                // here stalled the whole stream while an
-                                // approval card sat open — no text, no tool
-                                // updates, and a second request queued
-                                // behind the first.
-                                let gate = gate.clone();
-                                let writer = writer.clone();
-                                tokio::spawn(async move {
-                                    let decision = gate(p.clone()).await;
-                                    let response =
-                                        permission_response(&p.request_id, &decision, &p.input);
-                                    let mut w = writer.lock().await;
-                                    let _ = w.write_all(response.to_string().as_bytes()).await;
-                                    let _ = w.write_all(b"\n").await;
-                                    let _ = w.flush().await;
-                                });
+                    let (ours, frames, progress) =
+                        prompts.lock().unwrap_or_else(|e| e.into_inner()).route(&v);
+                    if let Some(progress) = progress {
+                        let _ = tx.send(progress).await;
+                    }
+                    if !ours {
+                        // A background wake or an earlier cancelled turn must
+                        // not clear this prompt's stream or end its busy state.
+                        if let Some(spend) = model_spend(&v) {
+                            let _ = tx
+                                .send(NormalizedEvent {
+                                    source: EventSource::Acp {
+                                        variant: "spend".into(),
+                                    },
+                                    event: MiraEvent::Spend {
+                                        session: v["session_id"].as_str().map(str::to_owned),
+                                        models: spend,
+                                    },
+                                })
+                                .await;
+                        }
+                        continue;
+                    }
+                    for frame in frames {
+                        for action in stream.map(&frame, models.as_deref()) {
+                            match action {
+                                NativeAction::SessionId(sid) => {
+                                    *session_id.lock().await = Some(sid);
+                                }
+                                NativeAction::Event(e) => {
+                                    let _ = tx.send(e).await;
+                                }
+                                NativeAction::TurnEnded {
+                                    stop_reason,
+                                    is_error,
+                                } => {
+                                    let was_limited = rate_limit.lock().await.take();
+                                    let _ = end_tx
+                                        .send(TurnEnd {
+                                            stop_reason: if was_limited.is_some() && is_error {
+                                                "rate_limited".to_string()
+                                            } else {
+                                                stop_reason
+                                            },
+                                            is_error,
+                                            rate_limited: was_limited,
+                                        })
+                                        .await;
+                                }
+                                NativeAction::RateLimited { resets_at } => {
+                                    *rate_limit.lock().await =
+                                        Some(resets_at.unwrap_or_else(|| "shortly".to_string()));
+                                }
+                                NativeAction::Permission(p) => {
+                                    // Decided on its own task. Awaiting the user
+                                    // here stalled the whole stream while an
+                                    // approval card sat open — no text, no tool
+                                    // updates, and a second request queued
+                                    // behind the first.
+                                    let gate = gate.clone();
+                                    let writer = writer.clone();
+                                    tokio::spawn(async move {
+                                        let decision = gate(p.clone()).await;
+                                        let response =
+                                            permission_response(&p.request_id, &decision, &p.input);
+                                        let mut w = writer.lock().await;
+                                        let _ = w.write_all(response.to_string().as_bytes()).await;
+                                        let _ = w.write_all(b"\n").await;
+                                        let _ = w.flush().await;
+                                    });
+                                }
                             }
                         }
                     }
                 }
+                replies.lock().await.clear();
                 // The child is gone without a final `result` (crash, OOM,
                 // kill): the `result` that would have ended the turn never
                 // comes, so without this the turn's `ends` receiver pends
@@ -1839,6 +1889,7 @@ impl NativeAgent {
             notify: tx,
             models,
             replies,
+            prompts,
         })
     }
 
@@ -1879,8 +1930,31 @@ impl NativeAgent {
             .session_id()
             .await
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        self.write_line(&claude_user_input(&sid, text, images, steer_id))
-            .await
+        let id = steer_id
+            .map(str::to_owned)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let mut input = claude_user_input(&sid, text, images, steer_id);
+        input["uuid"] = json!(id);
+        self.prompts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .sent(id.clone());
+        if let Err(error) = self.write_line(&input).await {
+            self.prompts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .forget(&id);
+            return Err(error);
+        }
+        let _ = self
+            .notify
+            .send(crate::claude_protocol::activity(
+                "prompt_sent",
+                "Sent to Claude",
+                String::new(),
+            ))
+            .await;
+        Ok(())
     }
 
     /// Answer a permission request.
@@ -1918,14 +1992,27 @@ impl NativeAgent {
 
     /// Send a control request and wait for its answer.
     async fn ask(&self, request: Value, timeout: Duration) -> Result<Value, NativeError> {
+        let deadline = tokio::time::Instant::now() + timeout;
         let id = format!("mira-{}", uuid::Uuid::new_v4());
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.replies.lock().await.insert(id.clone(), tx);
-        self.write_line(
-            &json!({ "type": "control_request", "request_id": id, "request": request }),
+        let written = tokio::time::timeout_at(
+            deadline,
+            self.write_line(
+                &json!({ "type": "control_request", "request_id": id, "request": request }),
+            ),
         )
-        .await?;
-        let reply = match tokio::time::timeout(timeout, rx).await {
+        .await;
+        if !matches!(written, Ok(Ok(()))) {
+            self.replies.lock().await.remove(&id);
+            return match written {
+                Ok(Err(error)) => Err(error),
+                _ => Err(NativeError::Other(
+                    "Claude did not accept the control request before its deadline".into(),
+                )),
+            };
+        }
+        let reply = match tokio::time::timeout_at(deadline, rx).await {
             Ok(Ok(v)) => v,
             _ => {
                 self.replies.lock().await.remove(&id);
@@ -1976,8 +2063,11 @@ impl NativeAgent {
     /// resume, nothing lost. (Verified against Claude Code 2.1: the next
     /// `init` reports the new model.)
     pub async fn set_model(&self, model: &str) -> Result<(), NativeError> {
-        self.control(json!({ "subtype": "set_model", "model": model }))
-            .await?;
+        self.ask(
+            json!({ "subtype": "set_model", "model": model }),
+            CONTROL_TIMEOUT,
+        )
+        .await?;
         if let Some(ev) = model_config_event(Some(model), self.models.as_deref()) {
             let _ = self.notify.send(ev).await;
         }
@@ -1986,8 +2076,11 @@ impl NativeAgent {
 
     /// Switch the running agent's permission mode, live.
     pub async fn set_permission_mode(&self, mode: &str) -> Result<(), NativeError> {
-        self.control(json!({ "subtype": "set_permission_mode", "mode": mode }))
-            .await?;
+        self.ask(
+            json!({ "subtype": "set_permission_mode", "mode": mode }),
+            CONTROL_TIMEOUT,
+        )
+        .await?;
         let _ = self.notify.send(modes_event(mode)).await;
         Ok(())
     }
@@ -2007,11 +2100,16 @@ impl NativeAgent {
 
     /// Stop the process. Drops stdin first so the CLI exits cleanly.
     pub async fn shutdown(&self) {
-        {
+        // A CLI which stops reading can leave a prompt holding this lock.
+        // Closing the process must remain possible even with a full stdin pipe.
+        let _ = tokio::time::timeout(Duration::from_millis(200), async {
             let mut w = self.stdin.lock().await;
             let _ = w.shutdown().await;
-        }
+        })
+        .await;
         let mut child = self.child.lock().await;
+        #[cfg(unix)]
+        let process_group = child.id();
         let exited = tokio::time::timeout(Duration::from_millis(800), child.wait())
             .await
             .map(|r| r.is_ok())
@@ -2020,12 +2118,148 @@ impl NativeAgent {
             let _ = child.start_kill();
             let _ = child.wait().await;
         }
+        // Commands and background workers inherit this dedicated group.
+        // Close them even when the CLI exited gracefully first.
+        #[cfg(unix)]
+        if let Some(pid) = process_group {
+            // SAFETY: this child was spawned into its own process group.
+            unsafe {
+                libc::kill(-(pid as i32), libc::SIGKILL);
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn protocol_cli(body: &str) -> (LaunchConfig, tempfile::TempDir) {
+        let (cfg, dir) = fake_cli();
+        std::fs::write(&cfg.program, format!("#!/bin/sh\n{body}\n")).unwrap();
+        (cfg, dir)
+    }
+
+    #[cfg(unix)]
+    async fn protocol_agent(
+        body: &str,
+    ) -> (
+        Arc<NativeAgent>,
+        tempfile::TempDir,
+        mpsc::Receiver<NormalizedEvent>,
+    ) {
+        let (cfg, dir) = protocol_cli(body);
+        let gate: PermissionGate =
+            Arc::new(|_| Box::pin(async { PermissionDecision::from(false) }));
+        let agent = Arc::new(NativeAgent::start(&cfg, gate, None).await.unwrap());
+        let mut events = agent.events.lock().unwrap().take().unwrap();
+        // Spawn metadata is distinct from confirmed runtime changes.
+        events.recv().await.unwrap();
+        events.recv().await.unwrap();
+        (agent, dir, events)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn model_changes_are_announced_only_after_confirmation() {
+        let (agent, _dir, mut events) = protocol_agent(r#"
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+  sleep 0.1
+  printf '{"type":"control_response","response":{"request_id":"%s","subtype":"success","response":{}}}\n' "$id"
+done"#).await;
+        let changing = {
+            let agent = agent.clone();
+            tokio::spawn(async move { agent.set_model("sonnet").await })
+        };
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), events.recv())
+                .await
+                .is_err()
+        );
+        changing.await.unwrap().unwrap();
+        let confirmed = events.recv().await.unwrap();
+        assert!(
+            matches!(confirmed.event, MiraEvent::ConfigOptions { options } if options[0].current.as_deref() == Some("sonnet"))
+        );
+        agent.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejected_settings_never_publish_an_optimistic_change() {
+        let (agent, _dir, mut events) = protocol_agent(r#"
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+  printf '{"type":"control_response","response":{"request_id":"%s","subtype":"error","error":"setting refused"}}\n' "$id"
+done"#).await;
+        assert!(agent
+            .set_model("sonnet")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("setting refused"));
+        assert!(agent.set_permission_mode("plan").await.is_err());
+        assert!(matches!(
+            events.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        agent.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn control_timeout_removes_the_pending_request() {
+        let (agent, _dir, _events) = protocol_agent("while IFS= read -r line; do :; done").await;
+        assert!(agent
+            .ask(
+                json!({"subtype":"set_model","model":"sonnet"}),
+                Duration::from_millis(30)
+            )
+            .await
+            .is_err());
+        assert!(agent.replies.lock().await.is_empty());
+        agent.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shutdown_does_not_wait_for_a_blocked_stdin_writer() {
+        let (agent, _dir, _events) = protocol_agent("while IFS= read -r line; do :; done").await;
+        let _blocked_writer = agent.stdin.lock().await;
+        tokio::time::timeout(Duration::from_secs(2), agent.shutdown())
+            .await
+            .expect("Stop must close the process even when stdin is locked");
+        assert!(!is_alive(&agent.child).await);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shutdown_terminates_background_commands_even_after_cli_exit() {
+        let (cfg, dir) = protocol_cli(
+            r#"
+(sleep 1.2; touch "$1") &
+touch "$1.ready"
+while IFS= read -r line; do :; done
+exit 0"#,
+        );
+        let marker = dir.path().join("late-background-write");
+        let mut cfg = cfg;
+        cfg.args.push(marker.display().to_string());
+        let gate: PermissionGate =
+            Arc::new(|_| Box::pin(async { PermissionDecision::from(false) }));
+        let agent = NativeAgent::start(&cfg, gate, None).await.unwrap();
+        wait_for(
+            || async { marker.with_extension("ready").exists().then_some(()) },
+            "background process started",
+        )
+        .await;
+        agent.shutdown().await;
+        assert!(!is_alive(&agent.child).await);
+        tokio::time::sleep(Duration::from_millis(1400)).await;
+        assert!(!marker.exists(), "background command outlived Stop");
+    }
 
     /// Poll until `pred` holds, so tests do not depend on scheduling order.
     async fn wait_for<F, Fut, T>(pred: F, what: &str) -> T
