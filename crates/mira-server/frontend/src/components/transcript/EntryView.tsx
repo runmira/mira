@@ -391,7 +391,12 @@ export function EntryView({
     case 'thought':
       return (
         <div className="flex justify-start">
-          <div className={cn('max-w-[90%]', STREAM_ROW_GUTTER)}>
+          {/* No gutter here: ThoughtBlock carries its own px-2, which is
+              the shared inset. Adding STREAM_ROW_GUTTER on top double-padded
+              it to 16px and broke the line. AssistantContent renders the
+              same block with no wrapper gutter, so this keeps them
+              aligned with each other. */}
+          <div className="max-w-[90%]">
             <ThoughtBlock
               content={entry.text}
               live={entry.live}

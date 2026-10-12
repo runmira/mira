@@ -452,7 +452,18 @@ function CompactToolRow({
             narrow transcript, hiding the file chip but leaving it
             clickable. */}
           <span className="flex min-w-0 flex-1 items-center">
-            <ActivityShimmer active={status === 'running'} className="shrink-0">
+            {/* The verb is a fixed-width column, so every target starts on
+                the same x. Variable verbs did two things at once: each row
+                hung its filename at a different offset, and because the verb
+                changes mid-turn (Read -> Reading -> Edited) the target beside
+                it slid sideways while the row was streaming. 8ch covers Ran,
+                Read, Edited, Searching, Running, Fetching, Listing and the
+                rest; the rare multi-word ones ("Finding callers") overflow
+                rather than pushing every other row's column out. */}
+            <ActivityShimmer
+              active={status === 'running'}
+              className="inline-block min-w-[8ch] shrink-0"
+            >
               {summary.verb}
             </ActivityShimmer>
             {summary.target &&

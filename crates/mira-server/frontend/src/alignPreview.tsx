@@ -12,6 +12,7 @@ import { useState } from 'react';
 import { ToolGroup } from './components/ToolGroup';
 import { ToolCard } from './components/ToolCard';
 import { EntryView, StatusLine } from './components/transcript/EntryView';
+import { ThoughtBlock } from './components/ThoughtBlock';
 import { WorkedForChip } from './components/transcript/TurnView';
 import { STREAM_ROW_GUTTER } from './lib/streamLayout';
 import { cn } from './lib/utils';
@@ -113,6 +114,9 @@ function App() {
         <div className="transcript-work">
           {msg('Wait — my test helper takes names but never uses them. Let me clean that up first.')}
         </div>
+
+        {/* thought cell — must land on the same gutter as every other row */}
+        <div className="flex justify-start"><div className="max-w-[90%]"><ThoughtBlock content="Checking how the queue worker gates on engine." live={false} /></div></div>
 
         {/* grouped tool run */}
         <ToolGroup entries={grouped} />
