@@ -22,19 +22,19 @@ export function quoteMarkdown(q: ComposerQuote): string {
  */
 export function QuoteCard({ quote, onRemove }: { quote: ComposerQuote; onRemove: () => void }) {
   return (
-    <div className="group relative flex min-w-0 max-w-full items-start gap-2 rounded-lg border border-border/70 bg-fg/[0.03] py-1.5 pl-2.5 pr-7 transition-colors hover:border-border hover:bg-fg/[0.05]">
+    <a
+      href={quote.href}
+      title="Show in chat"
+      className="group relative flex min-w-0 max-w-full items-start gap-2 rounded-lg border border-border/70 bg-fg/[0.03] py-1.5 pl-2.5 pr-7 no-underline transition-colors hover:border-border hover:bg-fg/[0.05]"
+    >
       <span aria-hidden className="absolute inset-y-1.5 left-0 w-[3px] rounded-full bg-mira-blue/60" />
       <Quote className="mt-0.5 size-3 shrink-0 text-mira-blue/80" aria-hidden />
-      <a
-        href={quote.href}
-        title="Show in chat"
-        className="min-w-0 flex-1 no-underline"
-      >
+      <span className="min-w-0 flex-1">
         <span className="block text-[10.5px] font-medium uppercase tracking-wide text-muted-foreground/70">
           {quoteSource(quote.turn)}
         </span>
         <span className="line-clamp-2 text-[12.5px] leading-snug text-foreground/85">{quote.text}</span>
-      </a>
+      </span>
       <button
         type="button"
         aria-label="Remove quote"
@@ -47,6 +47,6 @@ export function QuoteCard({ quote, onRemove }: { quote: ComposerQuote; onRemove:
       >
         <X className="size-3.5" />
       </button>
-    </div>
+    </a>
   );
 }
