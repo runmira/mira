@@ -1,14 +1,16 @@
 import { cn } from '@/lib/utils';
 import { AnimatePresence, m, useReducedMotion } from 'framer-motion';
 import { ChevronDown, CircleAlert, CircleCheck, LoaderCircle } from 'lucide-react';
-import { useEffect } from 'react';
+import { useEffect, useMemo } from 'react';
 import { PREF_KEYS, useBoolPref } from '../lib/prefs';
+import { STREAM_ROW_GUTTER } from '../lib/streamLayout';
 import { completedToolSummary, latestToolEntry, plainToolAction } from '../lib/toolActivity';
 import type { DiffPreview, ToolCall, ToolResult } from '../types';
 import { ActivityShimmer } from './ActivityShimmer';
 import { ToolCard, type ToolStatus } from './ToolCard';
 import { infoFor } from './tools/toolInfo';
 import { useTranscriptDisclosure } from './TranscriptDisclosure';
+import { diffStatFor } from './tools/ToolDiff';
 /** Staggered row entrance, mirroring ContextPanel's progress items:
  *  each expanded ToolCard slides in 4px from the left, fading, with a
  *  small delay relative to its position in the run. */
@@ -76,6 +78,23 @@ export function ToolGroup({
     : completedToolSummary(entries);
   const GroupIcon = infoFor((anyActive ? latest : entries[0])?.call.function.name ?? '').Icon;
 
+  /** Net lines touched by the whole run, summed across the calls in it.
+   *  Null when nothing in the group was an edit, so a run of reads or
+   *  searches doesn't grow a pointless `+0 -0`. */
+  const diffStat = useMemo(() => {
+    let adds = 0;
+    let dels = 0;
+    let any = false;
+    for (const e of entries) {
+      const stat = diffStatFor(e.call, e.preview);
+      if (!stat) continue;
+      any = true;
+      adds += stat.adds;
+      dels += stat.dels;
+    }
+    return any ? { adds, dels } : null;
+  }, [entries]);
+
   return (
     <div className="w-full">
       <button
@@ -83,14 +102,35 @@ export function ToolGroup({
         aria-expanded={expanded}
         onClick={() => setExpanded((v) => !v)}
         className={cn(
-          'group relative flex w-full min-w-0 items-center gap-1.5 rounded-md px-2 py-1 text-left text-[13px] font-medium text-muted-foreground leading-5 transition-colors hover:bg-accent/40',
+          'group relative flex w-full min-w-0 items-center gap-1.5 rounded-md py-1 text-left text-[13px] font-medium text-muted-foreground leading-5 transition-colors hover:bg-accent/40',
+          STREAM_ROW_GUTTER,
         )}
       >
         <GroupIcon aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" />
         <span className="min-w-0 flex-1 truncate" title={lastAction}>
           <ActivityShimmer active={anyActive}>{lastAction}</ActivityShimmer>
         </span>
-        {entries.length > 1 && <span className="shrink-0 text-[11px] text-muted-foreground">{entries.length} {parallel ? 'parallel calls' : 'calls'}</span>}
+        {/* Trailing metadata reads as one group: the run count and the
+            net line delta are the same kind of fact, so they share a
+            size, a weight and a middot join. The delta keeps its colour —
+            it is the one number on the row that says what actually
+            happened — but sits at the same optical weight as the count
+            beside it, so it reads as part of the row rather than a badge
+            dropped onto it. */}
+        {(entries.length > 1 || diffStat) && (
+          <span className="flex shrink-0 items-center gap-1.5 text-[12px] tabular-nums">
+            {entries.length > 1 && (
+              <span className="text-muted-foreground">{entries.length} {parallel ? 'parallel' : 'calls'}</span>
+            )}
+            {entries.length > 1 && diffStat && <span aria-hidden className="text-muted-foreground/40">·</span>}
+            {diffStat && (
+              <span>
+                <span className="text-emerald-400">+{diffStat.adds}</span>
+                <span className="ml-1 text-rose-400">−{diffStat.dels}</span>
+              </span>
+            )}
+          </span>
+        )}
         <ChevronDown
           strokeWidth={2.5}
           className={cn(

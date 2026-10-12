@@ -28,6 +28,7 @@ import { CompactionCard } from '../CompactionCard';
 import { prettyModel } from '../../lib/models';
 import { isAgentRequest } from '../../lib/agentRequest';
 import { getBoolPref, PREF_KEYS } from '../../lib/prefs';
+import { STREAM_ROW_GUTTER } from '../../lib/streamLayout';
 import { costUsd, formatDollars, shortNum } from '../../lib/usage';
 import { type SkillView } from '../../api';
 import { Tip } from '../ui/Tip';
@@ -72,7 +73,7 @@ export function EngineEndMark({ engine }: { engine: SessionEngine }) {
 export function EngineSwitchDivider({ engine, from }: { engine: SessionEngine; from?: SessionEngine | null }) {
   if (from) {
     return (
-      <div className="my-1 flex items-center gap-3 text-[11.5px] text-muted-foreground/60" role="separator">
+      <div className={cn('my-1 flex items-center gap-3 text-[11.5px] text-muted-foreground/60', STREAM_ROW_GUTTER)} role="separator">
         <span className="h-px flex-1 bg-border/50" />
         <span className="inline-flex min-w-0 items-center gap-1.5" title="The conversation so far was handed to the new engine">
           <span className="text-muted-foreground/50">Context handoff</span>
@@ -95,7 +96,7 @@ export function EngineSwitchDivider({ engine, from }: { engine: SessionEngine; f
       : [provider, engine.model ? prettyModel(engine.model) : null].filter(Boolean).join(' · ') ||
         'your provider';
   return (
-    <div className="my-1 flex items-center gap-3 text-[11.5px] text-muted-foreground/60" role="separator">
+    <div className={cn('my-1 flex items-center gap-3 text-[11.5px] text-muted-foreground/60', STREAM_ROW_GUTTER)} role="separator">
       <span className="h-px flex-1 bg-border/50" />
       <span className="inline-flex items-center gap-1.5">
         <EngineMark engine={engine} model={engine.model} />
@@ -189,7 +190,7 @@ export function EntryView({
       }
       return (
         <div className="group/msg flex justify-start">
-          <div className="max-w-[90%]">
+          <div className={cn('max-w-[90%]', STREAM_ROW_GUTTER)}>
             <div data-assistant-message><AssistantContent streaming={streaming && !entry.nativeCompleted} text={content ?? ''} onOpenFile={onOpenFile} /></div>
             {showAssistantActions ? <AssistantActions entry={entry} text={content ?? ''} /> : <div className="mt-1 flex opacity-0 transition-opacity group-hover/msg:opacity-100 focus-within:opacity-100"><MessageTime entry={entry} /></div>}
           </div>
@@ -343,7 +344,7 @@ export function EntryView({
       // the tool rows around it, not a separately labelled box.
       return (
         <div className="flex justify-start">
-          <div className="w-full max-w-[90%] px-1 py-0.5 text-[13px]">
+          <div className={cn('w-full max-w-[90%] py-0.5 text-[13px]', STREAM_ROW_GUTTER)}>
             <div className="mb-1.5 text-[12px] font-medium text-muted-foreground">Plan</div>
             <ul className="space-y-1">
               {entry.entries.map((item, i) => {
@@ -390,7 +391,7 @@ export function EntryView({
     case 'thought':
       return (
         <div className="flex justify-start">
-          <div className="max-w-[90%]">
+          <div className={cn('max-w-[90%]', STREAM_ROW_GUTTER)}>
             <ThoughtBlock
               content={entry.text}
               live={entry.live}
@@ -442,7 +443,7 @@ export function GoalTranscriptChip({ entry }: { entry: GoalEntry }) {
   const body = entry.reason ?? entry.condition ?? null;
   return (
     <div className="flex justify-start">
-      <div className="w-full max-w-2xl py-1.5">
+      <div className={cn('w-full max-w-2xl py-1.5', STREAM_ROW_GUTTER)}>
         <div className="flex items-center gap-2 leading-5">
           <Target
             fill="currentColor"
@@ -829,7 +830,7 @@ export function StatusLine({ text, tone }: { text: string; tone?: StatusTone }) 
     memory: <Sparkle className="size-3.5 text-violet-300/70" />,
   }[s.tone];
   return (
-    <div className="flex items-start gap-2 py-0.5 text-[12.5px] leading-5 text-muted-foreground">
+    <div className={cn('flex items-start gap-2 py-0.5 text-[12.5px] leading-5 text-muted-foreground', STREAM_ROW_GUTTER)}>
       <span className="flex h-5 shrink-0 items-center">{icon}</span>
       <span className="min-w-0 break-words">
         {withCode(s.text)}

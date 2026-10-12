@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { getBoolPref, PREF_KEYS } from '../../lib/prefs';
+import { STREAM_ROW_GUTTER } from '../../lib/streamLayout';
 import { type SkillView } from '../../api';
 import { type AskUserDecision } from '../AskUserCard';
 import { AgentGroup } from '../AgentCard';
@@ -206,7 +207,12 @@ export function TurnViewImpl({
       {turn.user && <EntryView entry={turn.user} onDecide={onDecide} onPlanReply={onPlanReply} onAskUserReply={onAskUserReply} onOpenAgent={onOpenAgent} approvalViaDialog={approvalViaDialog} onOpenFile={onOpenFile} skills={skills} mode={mode} onSetMode={onSetMode} />}
 
       {showWorkedChip && (
-        <div className="w-full border-b border-border/70 pb-2">
+        // The gutter lives on this wrapper, not on the chip or the rule.
+        // A `border-b` is drawn on the element's border box, so putting
+        // padding on the same element leaves the rule full-bleed at the
+        // column edge while every row under it sits 8px in. Nesting the
+        // rule inside a padded wrapper is what actually insets it.
+        <div className={cn('w-full', STREAM_ROW_GUTTER)}>
         <WorkedForChip
           durationMs={durationMs!}
           active={isActive && timing?.endedAt == null}
@@ -216,6 +222,7 @@ export function TurnViewImpl({
           onToggle={() => onToggle(index)}
           activity={activitySummary}
         />
+          <div aria-hidden className="mt-2 border-b border-border/70" />
         </div>
       )}
 
@@ -300,13 +307,16 @@ export function WorkedForChip({
       // `group-hover:*` — hidden until the row is hovered or already
       // expanded, so a collapsed transcript stays quiet.
       className={cn(
-        'group flex w-fit items-center gap-1.5 rounded-md py-1 text-[14px] font-semibold leading-5 transition-colors',
+        'group flex w-full items-center gap-1.5 rounded-md py-1 text-[14px] font-semibold leading-5 transition-colors',
+        // Horizontal gutter comes from the wrapper above, so the chip's
+        // hover background and text land on the same line as the rows
+        // below it. Adding it here too would double the inset.
         // Idle: muted grey. Hover/active/expanded: full contrast.
         isActive || expanded ? 'text-foreground/90' : 'text-muted-foreground/70',
         locked ? 'cursor-default opacity-80' : 'hover:bg-accent/40 hover:text-foreground',
       )}
     >
-      <span>{durationLabel}</span>
+      <span className="min-w-0 truncate">{durationLabel}</span>
       {activity && (
         // Middle-dot separator + un-bolded activity phrase so the
         // duration stays the primary read and the counts trail as a
@@ -325,7 +335,7 @@ export function WorkedForChip({
             </span>
             <span
               className={cn(
-                'font-normal',
+                'min-w-0 truncate font-normal',
                 isActive || expanded ? 'text-foreground/70' : 'text-muted-foreground/70',
               )}
             >
@@ -334,21 +344,27 @@ export function WorkedForChip({
           </>
         )
       )}
-      {dot && <span className={cn('size-1.5 animate-pulse rounded-full', dot)} />}
-      <ChevronDown
-        strokeWidth={2.5}
-        className={cn(
-          'size-3.5 transition-all',
-          // Caret adopts the row's text colour so it fades with the
-          // label instead of standing out against the muted grey.
-          isActive || expanded ? 'text-foreground/70' : 'text-muted-foreground/70',
-          !expanded && '-rotate-90',
-          // Hide when collapsed AND not hovered; always show when
-          // expanded (or hovered) so state is legible without
-          // needing a second visual language for open/closed.
-          !expanded && 'opacity-0 group-hover:opacity-100',
-        )}
-      />
+      {/* Status + caret share one right-hand rail, pushed to the edge by
+          `ml-auto`, so they land at the same x as the status icon on every
+          tool row above. The caret keeps its space even while faded out
+          (`opacity-0`, not `hidden`), so hovering never shifts the row. */}
+      <span className="ml-auto flex shrink-0 items-center gap-1.5">
+        {dot && <span className={cn('size-1.5 animate-pulse rounded-full', dot)} />}
+        <ChevronDown
+          strokeWidth={2.5}
+          className={cn(
+            'size-3.5 transition-all',
+            // Caret adopts the row's text colour so it fades with the
+            // label instead of standing out against the muted grey.
+            isActive || expanded ? 'text-foreground/70' : 'text-muted-foreground/70',
+            !expanded && '-rotate-90',
+            // Hide when collapsed AND not hovered; always show when
+            // expanded (or hovered) so state is legible without
+            // needing a second visual language for open/closed.
+            !expanded && 'opacity-0 group-hover:opacity-100',
+          )}
+        />
+      </span>
     </button>
   );
 }
