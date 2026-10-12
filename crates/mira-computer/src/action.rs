@@ -12,20 +12,20 @@ use crate::ComputerError;
 
 /// A point in the *model's* coordinate space — pixels of the most recent
 /// screenshot, not physical screen pixels. [`crate::Computer`] rescales.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Point {
     pub x: i32,
     pub y: i32,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MouseButton {
     Left,
     Right,
     Middle,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ScrollDirection {
     Up,
     Down,
@@ -34,7 +34,7 @@ pub enum ScrollDirection {
 }
 
 /// One parsed `computer` tool call.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ComputerAction {
     Screenshot,
     CursorPosition,

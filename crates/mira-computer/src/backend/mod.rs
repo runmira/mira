@@ -66,6 +66,59 @@ pub trait ComputerBackend: Send + Sync {
     async fn type_text(&self, text: &str) -> Result<(), ComputerError>;
     async fn key(&self, chord: &KeyChord, action: KeyAction) -> Result<(), ComputerError>;
     async fn cursor_position(&self) -> Result<Point, ComputerError>;
+    /// Atomic operations let remote backends use native background delivery.
+    async fn click(
+        &self,
+        button: MouseButton,
+        count: u8,
+        modifiers: Option<&KeyChord>,
+    ) -> Result<(), ComputerError> {
+        if let Some(chord) = modifiers {
+            self.key(chord, KeyAction::Down).await?;
+        }
+        let result = self.button(button, ButtonAction::Click(count)).await;
+        if let Some(chord) = modifiers {
+            let up = self.key(chord, KeyAction::Up).await;
+            return result.and(up);
+        }
+        result
+    }
+    async fn drag(&self, from: Point, to: Point) -> Result<(), ComputerError> {
+        self.mouse_move(from).await?;
+        self.button(MouseButton::Left, ButtonAction::Down).await?;
+        let result = async {
+            self.mouse_move(Point {
+                x: (from.x + to.x) / 2,
+                y: (from.y + to.y) / 2,
+            })
+            .await?;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            self.mouse_move(to).await
+        }
+        .await;
+        let release = self.button(MouseButton::Left, ButtonAction::Up).await;
+        result.and(release)
+    }
+    /// A plain scroll has no modifiers. Unsupported combinations fail before input.
+    async fn scroll_modified(
+        &self,
+        direction: ScrollDirection,
+        amount: u32,
+        modifiers: Option<&KeyChord>,
+    ) -> Result<(), ComputerError> {
+        if let Some(chord) = modifiers {
+            self.key(chord, KeyAction::Down).await?;
+        }
+        let result = self.scroll(direction, amount).await;
+        if let Some(chord) = modifiers {
+            let up = self.key(chord, KeyAction::Up).await;
+            return result.and(up);
+        }
+        result
+    }
+    async fn delivery_note(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Pick the backend for the current platform, or explain why there is

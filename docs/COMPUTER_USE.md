@@ -19,6 +19,47 @@ network, a sandbox, or a machine you cannot reach at all — and on a
 guest that supports it, deliver input without taking your pointer. See
 [Driving a remote machine](#driving-a-remote-machine-cua).
 
+## Pairing from Settings
+
+Desktop users can set this up in **Settings → Computer** without writing YAML
+or choosing an environment variable.
+
+1. On the computer to control, choose **Show pairing link**. Mira enables its
+   existing Remote access connection when needed; this requires signing in
+   to Mira. The link is single-use and expires after ten minutes.
+2. On the controlling computer, choose **Pair a computer**, paste that link,
+   check the computer's name and capabilities, and confirm.
+3. Select the paired computer and choose input delivery. For **Background
+   only**, choose an application window. Native macOS/X11 control supports
+   **Foreground**; background control requires a running CUA companion.
+4. Turn on **Allow computer use**. Pairing alone never enables it.
+
+Native foreground pairing does not require a CUA installation or CUA token.
+OS Screen Recording and Accessibility permissions are still required. The
+CUA path uses the local companion on loopback; optional advanced daemon
+credentials remain server-side.
+
+Each pairing gets its own computer-only credential, issued automatically.
+It cannot read Mira chats, files or settings. The controlling computer stores
+it in `~/.mira/computer-credentials.json` with owner-only permissions, outside
+YAML and browser storage. The target stores only token hashes. This is a
+private file store, not an OS keychain. Revoke a computer from **Computers
+with access** on the target. Unpairing from the controller revokes remotely
+before forgetting the credential, so that operation requires the target to
+be online. You can always turn off computer use while it is disconnected.
+
+Settings writes are local-only and wait for active chats to stop before
+changing targets. The selected window is identified by its id and epoch;
+closed or reused handles are refused. Input is serialized across clients.
+Unconfirmed delivery pauses input until an explicit reconnect; it is never
+a reason to repeat an action automatically. A failed follow-up screenshot
+reports that the action completed, rather than inviting a duplicate click.
+
+Mira providers and the Claude Code/Codex MCP bridge use the selected computer.
+The bridge keeps the optional tool discoverable for clients that cache tool
+lists, but disabled calls fail and every enabled call still passes Mira's
+computer permission policy. Subagents do not inherit it.
+
 ## Turning them on
 
 For one run:
@@ -77,8 +118,8 @@ only thing that changes is whose screen it is.
 computer:
   enabled: true
   cua:
-    endpoint: http://192.168.1.20:3211
-    token_env: CUA_ENV_TOKEN   # default; a token is required off-loopback
+    endpoint: https://computer.example
+    token_env: CUA_ENV_TOKEN   # advanced direct-daemon setup only
 ```
 
 Run the daemon on the target machine with
@@ -116,12 +157,22 @@ flag rather than a setting in `mira.yaml` on purpose: whether an agent
 may take your pointer is a decision about right now, not about the
 project, and a repo must not be able to grant it.
 
+Background mode requires a pinned application window. The backend uses
+atomic click/drag operations and native key chords. Split button/key down-up
+operations and modified background scrolling are refused rather than falling
+back to foreground. Settings is the supported way to choose a window.
+
 Under `background`, the guest reports a *limitation* rather than
 failing when it can only manage part of the surface — for example
 "pointer/key down-up pairs are not available; use click, drag, press
 or hotkey" — which `mira doctor` prints.
 
 ### Notes
+
+- **Transport.** Non-loopback connections require HTTPS. Direct-daemon URLs
+  must be origins without credentials, prefixes, query strings or fragments.
+  RPCs have deadlines; tokens are redacted from debug output. Pairing uses
+  Mira's HTTPS remote-access address rather than exposing the daemon.
 
 - **`cua` is global-file only.** A repo's `.mira/config.yaml` can
   tune `settle_ms` and `max_long_edge`, but it cannot redirect the
@@ -131,8 +182,8 @@ or hotkey" — which `mira doctor` prints.
   quietly fall back to your local desktop, because "the remote box was
   down so the agent clicked on my real screen" is not a fallback
   anyone wants.
-- **The primary display.** `computer` screenshots and drives the
-  guest's primary display. A cursor parked on a second monitor reads
+- **Capture scope.** With a selected window, `computer` captures and controls
+  that window. Otherwise it captures the guest's primary display. A cursor parked on a second monitor reads
   back clamped to the primary's edge rather than as a coordinate
   outside the screenshot.
 - **Coordinates are unchanged.** Model-space pixels, Retina scaling
@@ -210,7 +261,8 @@ Subagents never inherit `computer` or `browser`.
   (`mira_computer::ComputerBackend`) is where they would plug in. The
   cua backend does reach a Windows or Linux guest, but Mira itself
   still runs on macOS or Linux.
-- The cua backend implements `ComputerService` only. cua-spacesd also
+- The cua backend implements computer input, screenshots, capabilities and
+  window selection. cua-spacesd also
   serves processes, files, windows and streaming, which would be the
   natural way to close the "agent on a remote box can't run the code
   it writes" gap; none of it is wired up here.

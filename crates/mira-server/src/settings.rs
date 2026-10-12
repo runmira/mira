@@ -207,6 +207,7 @@ pub async fn put_settings(
     State(state): State<AppState>,
     Json(update): Json<SettingsUpdate>,
 ) -> Response {
+    let _computer_changes = state.computer.changes.lock().await;
     let mut cfg = match MiraConfig::load_global() {
         Ok(c) => c,
         Err(e) => {

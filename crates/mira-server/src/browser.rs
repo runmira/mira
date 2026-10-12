@@ -905,6 +905,7 @@ const SESSION_MCP_TOOLS: &[&str] = &[
     "grep",
     "glob",
     "bash",
+    "computer",
 ];
 
 /// Which tools an agent is shown. Codex has its own shell, patch, search and
@@ -938,8 +939,8 @@ impl ToolProfile {
     fn lists(self, session_tool: &str) -> bool {
         match self {
             Self::All => true,
-            Self::Codex => session_tool == "ask_user",
-            Self::ClaudeCode => matches!(session_tool, "ask_user" | "plan"),
+            Self::Codex => matches!(session_tool, "ask_user" | "computer"),
+            Self::ClaudeCode => matches!(session_tool, "ask_user" | "plan" | "computer"),
         }
     }
 
@@ -949,7 +950,9 @@ impl ToolProfile {
                           watches live in Mira's browser pane (a dedicated profile, never the \
                           user's own): browser_open a URL, browser_snapshot to read it (with \
                           element refs), then browser_click / browser_type / browser_press; \
-                          browser_screenshot to check visuals. run_background starts a \
+                          browser_screenshot to check visuals. The computer tool uses the computer selected in \
+                          Settings → Computer; it can be remote. Start with a screenshot. If disabled \
+                          or denied, ask the user to enable it; never silently use another computer. run_background starts a \
                           long-running command (a dev server, a watcher) the user can see, read \
                           and stop in Mira's Processes window; read_output and kill_background \
                           read and stop it. ask_user displays a question form and waits for the user; \
@@ -968,7 +971,9 @@ impl ToolProfile {
                             drive the browser the user watches live in Mira's browser pane: \
                             browser_open a URL, browser_snapshot to read it (with element refs), \
                             then browser_click / browser_type / browser_press; browser_screenshot \
-                            to check visuals. run_background starts a long-running command (a dev \
+                            to check visuals. The computer tool uses the computer selected in Settings → \
+                            Computer, which can be remote. If disabled or denied, do not use a \
+                            different computer. run_background starts a long-running command (a dev \
                             server, a watcher) the user can see and stop in Mira's Processes \
                             window; read_output and kill_background read and stop it. ask_user \
                             shows a question form and waits for the answer, for when \
@@ -1022,7 +1027,7 @@ async fn session_tool_result(
         return error("This chat has closed.");
     };
     let Some(tool) = slot.registry.get(name) else {
-        return error(&format!("The {name} tool is unavailable."));
+        return error(&format!("The {name} tool is unavailable. For computer use, enable it in Settings → Computer. Do not fall back to controlling a different machine."));
     };
     let call = mira_core::ToolCall {
         id: mira_core::ToolCallId::new(),
@@ -1144,6 +1149,11 @@ async fn mcp_one(
                     if let Some(tool) = slot.registry.get(name) {
                         let s = tool.spec();
                         tools.push(json!({ "name": s.name, "description": s.description, "inputSchema": s.parameters }));
+                    } else if name == "computer" {
+                        // Existing agents cache tool lists. Keep the optional capability discoverable,
+                        // but actual calls still require the enabled, live registry tool and policy.
+                        let s = mira_tools::builtin::computer::computer_spec(None);
+                        tools.push(json!({"name":s.name,"description":format!("Computer use is currently disabled. Enable it in Settings → Computer before calling. {}",s.description),"inputSchema":s.parameters}));
                     }
                 }
                 tools.extend(extra_agent_tools().into_iter().skip(1));
@@ -1456,7 +1466,7 @@ mod tool_profile_tests {
             .iter()
             .filter(|n| codex.lists(n))
             .collect();
-        assert_eq!(listed, [&"ask_user"]);
+        assert_eq!(listed, [&"ask_user", &"computer"]);
         assert!(SESSION_MCP_TOOLS.iter().all(|n| ToolProfile::All.lists(n)));
         assert!(!codex.instructions().contains("plan displays"));
     }
@@ -1482,7 +1492,7 @@ mod tool_profile_tests {
             .iter()
             .filter(|n| claude.lists(n))
             .collect();
-        assert_eq!(listed, [&"ask_user", &"plan"]);
+        assert_eq!(listed, [&"ask_user", &"plan", &"computer"]);
     }
 }
 

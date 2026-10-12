@@ -9,7 +9,11 @@ use std::path::{Path, PathBuf};
 
 /// The protos we compile, plus everything they import. See `proto/README.md`
 /// for why this subset.
-const PROTOS: &[&str] = &["cua/env/v1/computer.proto", "cua/env/v1/system.proto"];
+const PROTOS: &[&str] = &[
+    "cua/env/v1/computer.proto",
+    "cua/env/v1/system.proto",
+    "cua/env/v1/windows.proto",
+];
 
 fn main() {
     let root = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));

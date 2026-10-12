@@ -40,6 +40,7 @@ mod browser;
 mod browser_recording;
 mod chat_import;
 pub mod checkpoints;
+mod computer;
 mod context_api;
 mod cwd;
 mod delegate;
@@ -126,6 +127,7 @@ pub fn has_embedded_frontend() -> bool {
 /// slot, which is constructed inside `run` so its channels are wired
 /// consistently with the WsApprover / PromptChannel / AgentTool.
 pub struct ServerConfig {
+    pub computer_delivery: Option<mira_computer::Delivery>,
     pub cfg: SessionConfig,
     pub provider: Arc<dyn ChatProvider>,
     pub registry: Arc<Registry>,
@@ -177,7 +179,24 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
 
     // The base registry is the caller's registry — slot factories layer
     // PlanTool/AskUserTool/AgentTool on top per session.
-    let base_registry = cfg.registry.clone();
+    let mut computer_config = mira_config::MiraConfig::load_global()?.computer;
+    if cfg
+        .registry
+        .get("computer")
+        .is_some_and(|tool| matches!(tool.action(), mira_tools::Action::Computer))
+    {
+        computer_config.enabled = Some(true);
+    }
+    if let Some(delivery) = cfg.computer_delivery {
+        computer_config.delivery = Some(format!("{delivery:?}").to_lowercase());
+    }
+    let computer = crate::computer::runtime::Runtime::new(computer_config)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    let mut live_registry = (*cfg.registry).clone();
+    live_registry.remove("computer");
+    live_registry.add_source_first(computer.clone());
+    let base_registry = Arc::new(live_registry);
 
     // Cross-session scratchpad — shared across every slot's AgentTool.
     // Entries are keyed by parent session id inside, so a slot's peers see
@@ -341,6 +360,7 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
         extensions: cfg.extensions.clone(),
         skills: cfg.skills.clone(),
         pending_oauth: oauth::new_pending_store(),
+        computer,
         local_port,
         memory_runtime: cfg.memory_runtime.clone(),
         scratchpads,
@@ -760,6 +780,7 @@ fn build_router(
         )
         .with_state(devices.clone());
     // Remote access: reach this computer from anywhere (remote.rs).
+    let computer_routes = computer::routes(state.clone(), remote.clone());
     let remote_routes = Router::new()
         .route("/api/remote", get(remote::status))
         .route("/api/remote/enable", post(remote::enable))
@@ -770,6 +791,7 @@ fn build_router(
         .with_state(state)
         .merge(pairing_routes)
         .merge(remote_routes)
+        .merge(computer_routes)
         .layer(axum::middleware::from_fn_with_state(
             devices,
             pairing::guard,
