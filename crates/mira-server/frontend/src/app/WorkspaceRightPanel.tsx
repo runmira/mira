@@ -153,7 +153,7 @@ export function WorkspaceRightPanel(
                       case 'devices':
                         return <DevicesPane />;
                       case 'pr':
-                        // Keyed by tab: each PR keeps its own
+// Keyed by tab: each PR keeps its own
                         // summary/code selection when switching tabs.
                         return activePrTab ? (
                           <PrPane
