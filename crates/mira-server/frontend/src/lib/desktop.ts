@@ -39,7 +39,7 @@ interface TauriGlobal {
     // back from the async `getCurrent()`.
     getCurrent?: () => Promise<{ label: string }>;
     /** The current window, for appearance (`setTheme`). */
-    getCurrentWindow?: () => { setTheme?: (theme: 'light' | 'dark' | null) => Promise<void> };
+    getCurrentWindow?: () => { startDragging?: () => Promise<void>; setTheme?: (theme: 'light' | 'dark' | null) => Promise<void> };
   };
   /** App metadata (`core:app:default`). */
   app?: { getVersion?: () => Promise<string> };
@@ -149,4 +149,21 @@ export async function captureNativeScreenshot(): Promise<File | null | undefined
   if (!window.__TAURI__ || !/Mac/.test(navigator.platform)) return undefined;
   const bytes = await window.__TAURI__.core.invoke('capture_screenshot') as number[] | null;
   return bytes ? new File([new Uint8Array(bytes)], 'Screenshot.png', { type: 'image/png' }) : null;
+}
+
+/** Drag from empty desktop surfaces while preserving controls and selectable content. */
+export function installWindowDragging(): void {
+  if (!isDesktop()) return;
+  document.addEventListener('mousedown', (event) => {
+    if (event.button !== 0 || event.detail !== 1 || !(event.target instanceof Element)) return;
+    const target = event.target;
+    if (target.closest('button, a, input, textarea, select, label, summary, pre, code, [contenteditable], [role="button"], [role="menuitem"], [role="slider"], [role="tab"], [role="checkbox"], [role="radio"], [role="switch"], [role="combobox"], [role="textbox"], [role="option"], canvas, [data-tauri-drag-region], [data-no-window-drag]')) return;
+    if (target.closest('.xterm, .monaco-editor, svg, p, h1, h2, h3, h4, h5, h6, [role="dialog"], [role="menu"]')) return;
+    if ([...target.childNodes].some((node) => node.nodeType === Node.TEXT_NODE && node.textContent?.trim())) return;
+    const nativeWindow = window.__TAURI__?.window?.getCurrentWindow?.();
+    if (nativeWindow?.startDragging) {
+      event.preventDefault();
+      void nativeWindow.startDragging().catch((error) => console.warn('Window drag failed', error));
+    }
+  });
 }

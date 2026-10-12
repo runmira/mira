@@ -1,3 +1,4 @@
+import { LoadingScreen } from '../LoadingScreen';
 import { useEffect, useState } from 'react';
 import { LazyBoundary } from '../LazyBoundary';
 import { getSupabase } from '../../lib/supabase';
@@ -41,11 +42,7 @@ export function OnboardingGate({ children }: { children: React.ReactNode }) {
   }, [user?.id]);
 
   if (!user || status === 'loading') {
-    return (
-      <div className="flex h-screen items-center justify-center text-sm text-muted-foreground">
-        Loading…
-      </div>
-    );
+    return <LoadingScreen />;
   }
 
   if (status === 'error') {

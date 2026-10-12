@@ -6,7 +6,7 @@ import { AuthGate } from './components/AuthGate';
 import { OnboardingGate } from './components/onboarding/OnboardingGate';
 import { PairingGate } from './components/pairing/PairingGate';
 import { install as installNetLog } from './lib/netLog';
-import { hasHiddenTitleBar } from './lib/desktop';
+import { hasHiddenTitleBar, installWindowDragging } from './lib/desktop';
 import { applyTheme, watchSystemTheme } from './lib/theme';
 import { applyAppearance } from './lib/appearance';
 import { installInputModality } from './lib/inputModality';
@@ -18,6 +18,7 @@ import './styles.css';
 // and the first few requests are missing.
 installNetLog();
 installInputModality();
+installWindowDragging();
 
 // Tell the stylesheet the native window is transparent and macOS is
 // painting vibrancy behind it, so it can drop the `body` background that
