@@ -219,7 +219,7 @@ export function TurnViewImpl({
         </div>
       )}
 
-      {intermediate.length > 0 && <Collapse open={effectivelyExpanded || !showWorkedChip}><div className="flex min-w-0 flex-col gap-2">{intermediate.map((item, i) => renderActivity(item, i, 'work'))}</div></Collapse>}
+      {intermediate.length > 0 && <Collapse open={effectivelyExpanded || !showWorkedChip}><div className="transcript-work flex min-w-0 flex-col gap-2">{intermediate.map((item, i) => renderActivity(item, i, 'work'))}</div></Collapse>}
 
       {finalEntry && (
         <TurnStatsContext.Provider

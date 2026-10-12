@@ -15,7 +15,7 @@ repository and are generated into a Rust client by `../build.rs`.
 | Vendored at | `cua-spacesd` v0.5.3, `cua.env.v1` protocol version 1, revision 8 |
 
 Only the subset `mira-computer` needs is vendored: `common` and `computer`
-(the [`ComputerBackend`] implementation) plus `system`, which pulls in
+(the [`ComputerBackend`] implementation) plus `driver` for the visual agent cursor and `system`, which pulls in
 `diagnose`, `stream` and `windows` as imports. Everything else in
 `cua/env/v1` — filesystem, process, presence, teleport, tunnel — is left out.
 
@@ -30,7 +30,7 @@ alongside v1. When you refresh these files, re-run `cargo test -p mira-computer
 
 ```sh
 BASE=https://raw.githubusercontent.com/trycua/cua/main/libs/cua/proto/cua/env/v1
-for f in common computer diagnose stream system windows; do
+for f in common computer driver diagnose stream system windows; do
   curl -fsSL -o "proto/cua/env/v1/$f.proto" "$BASE/$f.proto"
 done
 ```

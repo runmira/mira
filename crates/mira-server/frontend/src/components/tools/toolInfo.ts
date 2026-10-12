@@ -155,6 +155,7 @@ export type ToolInfo = {
 /** Friendly label + icon per tool name. Extend as we add tools; unknown
  *  names fall back to the raw name so nothing goes invisible. */
 export function infoFor(name: string): ToolInfo {
+  if (name.startsWith("mcp__")) name = name.split("__").at(-1) ?? name;
   switch (name) {
     case 'read_file':
       return { verbPast: 'Read', verbCont: 'Reading', Icon: FileText };

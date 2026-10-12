@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 /// for why this subset.
 const PROTOS: &[&str] = &[
     "cua/env/v1/computer.proto",
+    "cua/env/v1/driver.proto",
     "cua/env/v1/system.proto",
     "cua/env/v1/windows.proto",
 ];

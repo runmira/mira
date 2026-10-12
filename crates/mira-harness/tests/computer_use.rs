@@ -76,7 +76,7 @@ impl Approver for Recorder {
 }
 
 #[tokio::test]
-async fn click_is_gated_in_yolo_and_screenshot_reaches_the_model() {
+async fn explicit_computer_approval_gates_yolo_and_screenshot_reaches_the_model() {
     let tmp = tempfile::tempdir().unwrap();
     let backend = Arc::new(MockBackend::new((800, 600), (800, 600)));
     let computer = Arc::new(Computer::new(
@@ -95,6 +95,7 @@ async fn click_is_gated_in_yolo_and_screenshot_reaches_the_model() {
     let approver = Arc::new(Recorder::default());
     let policy = Policy::from_config(&PolicyConfig {
         mode: Mode::Yolo,
+        ask: vec!["Computer(left_click)".into()],
         ..Default::default()
     })
     .unwrap();
@@ -114,7 +115,7 @@ async fn click_is_gated_in_yolo_and_screenshot_reaches_the_model() {
     let mut events = sess.send("look at the screen").await;
     while events.next().await.is_some() {}
 
-    // Yolo auto-allows the screenshot but still asks about the click.
+    // The explicit rule overrides Yolo for clicks; screenshots remain allowed.
     assert_eq!(*approver.asked.lock().unwrap(), vec!["c1".to_owned()]);
     // The denied click never reached the backend.
     assert!(backend.events().is_empty(), "{:?}", backend.events());

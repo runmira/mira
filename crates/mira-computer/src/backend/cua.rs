@@ -325,6 +325,9 @@ pub struct CuaBackend {
     computer: pb::computer_service_client::ComputerServiceClient<Channel>,
     system: pb::system_service_client::SystemServiceClient<Channel>,
     windows: pb::windows_service_client::WindowsServiceClient<Channel>,
+    driver: pb::driver_service_client::DriverServiceClient<Channel>,
+    cursor_session: String,
+    cursor_available: Mutex<Option<bool>>,
     window: Option<TargetWindow>,
     report: Mutex<Option<pb::DeliveryReport>>,
     geometry_changed: std::sync::atomic::AtomicBool,
@@ -399,6 +402,9 @@ impl CuaBackend {
                 .max_decoding_message_size(MAX_MESSAGE_BYTES)
                 .max_encoding_message_size(MAX_MESSAGE_BYTES),
             windows: pb::windows_service_client::WindowsServiceClient::new(channel.clone()),
+            driver: pb::driver_service_client::DriverServiceClient::new(channel.clone()),
+            cursor_session: format!("Mira-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]),
+            cursor_available: Mutex::new(None),
             window: opts.window.clone(),
             report: Mutex::new(None),
             geometry_changed: std::sync::atomic::AtomicBool::new(false),
@@ -476,8 +482,58 @@ impl CuaBackend {
         }
     }
 
+    /// The Driver window-scoped cursor is visual only, distinct from OS input.
+    async fn show_agent_cursor(&self, point: (f64, f64)) {
+        let mut available = self.cursor_available.lock().await;
+        if *available == Some(false) {
+            return;
+        }
+        let mut calls = Vec::new();
+        if available.is_none() {
+            calls.push((
+                "set_agent_cursor_enabled",
+                serde_json::json!({"session":self.cursor_session,"enabled":true}),
+            ));
+        }
+        calls.push(("move_cursor", serde_json::json!({"session":self.cursor_session,"scope":"window","x":point.0,"y":point.1})));
+        for (name, arguments) in calls {
+            let mut request = self.request(pb::CallToolRequest {
+                name: name.into(),
+                arguments_json: arguments.to_string(),
+                timeout: Some(prost_types::Duration {
+                    seconds: 1,
+                    nanos: 0,
+                }),
+            });
+            request.set_timeout(Duration::from_secs(1));
+            let result = tokio::time::timeout(
+                Duration::from_secs(1),
+                self.driver.clone().call_tool(request),
+            )
+            .await;
+            if !matches!(result, Ok(Ok(ref response)) if !response.get_ref().is_error) {
+                *available = Some(false);
+                tracing::warn!(
+                    "CUA agent cursor unavailable; desktop control continues without an overlay"
+                );
+                return;
+            }
+        }
+        *available = Some(true);
+    }
+
     async fn pointer(&self, action: pb::pointer_request::Action) -> Result<(), ComputerError> {
         self.check_input_target()?;
+        let position = match &action {
+            pb::pointer_request::Action::Click(c) => c.position.as_ref(),
+            pb::pointer_request::Action::Move(m) => m.position.as_ref(),
+            pb::pointer_request::Action::Drag(d) => d.to.as_ref(),
+            pb::pointer_request::Action::Scroll(s) => s.position.as_ref(),
+            _ => None,
+        };
+        if let Some(position) = position {
+            self.show_agent_cursor((position.x, position.y)).await;
+        }
         let mut client = self.computer.clone();
         let response = client
             .pointer(self.request(pb::PointerRequest {
@@ -776,6 +832,8 @@ impl ComputerBackend for CuaBackend {
         let global = g.to_global(p);
         if self.delivery == Delivery::Background.as_i32() {
             self.check_input_target()?;
+            self.show_agent_cursor((global.x as f64, global.y as f64))
+                .await;
             *self.pointer.lock().await = Some(p);
             *self.report.lock().await = Some(pb::DeliveryReport {
                 delivery: pb::Delivery::Background as i32,
@@ -964,16 +1022,22 @@ impl ComputerBackend for CuaBackend {
         result.and(release)
     }
     async fn delivery_note(&self) -> Option<String> {
+        let cursor_unavailable = *self.cursor_available.lock().await == Some(false);
         self.report.lock().await.take().map(|r| {
             format!(
-                "Input delivered in {}. Pointer moved: {}. Focus changed: {}.",
+                "Input delivered in {}. Pointer moved: {}. Focus changed: {}.{}",
                 if r.delivery == pb::Delivery::Background as i32 {
                     "the background"
                 } else {
                     "the foreground"
                 },
                 r.pointer_moved,
-                r.focus_changed
+                r.focus_changed,
+                if cursor_unavailable {
+                    " The guest does not provide a visible agent cursor."
+                } else {
+                    ""
+                }
             )
         })
     }

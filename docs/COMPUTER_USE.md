@@ -60,6 +60,11 @@ The bridge keeps the optional tool discoverable for clients that cache tool
 lists, but disabled calls fail and every enabled call still passes Mira's
 computer permission policy. Subagents do not inherit it.
 
+CUA input displays a separate **Mira agent cursor** through the companion's
+DriverService when supported. It uses overlay-only window scope and does not
+move your physical pointer. Older companions can still control the computer;
+tool results say when their visible cursor API is unavailable.
+
 ## Turning them on
 
 For one run:
@@ -219,13 +224,13 @@ Defaults when no rule matches:
 | | plan / manual | auto | edit / yolo |
 | --- | --- | --- | --- |
 | `computer` screenshot, zoom, cursor_position, wait | ask | allow | allow |
-| `computer` anything else | ask | ask | **ask** |
+| `computer` anything else | ask | ask | allow |
 | `browser` snapshot, screenshot, list_tabs, wait | allow | allow | allow |
 | `browser` anything else | ask | ask | allow |
 
-Desktop input **always asks, even in `yolo`**, unless an explicit
-`Computer(...)` allow rule covers it: a stray click can land on
-anything on your screen. Picking "allow for session" on an approval
+Desktop input follows **Auto everything** (`edit`) and `yolo`. Narrower
+presets ask unless an explicit `Computer(...)` allow rule covers it.
+Explicit deny rules still take precedence. Picking "allow for session" on an approval
 allows that whole verb (`Computer(left_click)`), not one pixel. For
 `browser navigate` it allows the whole site
 (`Browser(navigate:https://site/*)`).

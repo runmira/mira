@@ -30,7 +30,22 @@
       "binaries/mira"
     ],
     "macOS": {
-      "minimumSystemVersion": "11.0"
+      "minimumSystemVersion": "11.0",
+      "dmg": {
+        "background": "installer/background.png",
+        "windowSize": {
+          "width": 768,
+          "height": 512
+        },
+        "appPosition": {
+          "x": 220,
+          "y": 330
+        },
+        "applicationFolderPosition": {
+          "x": 550,
+          "y": 330
+        }
+      }
     }
   },
   "plugins": {

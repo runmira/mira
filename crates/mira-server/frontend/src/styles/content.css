@@ -811,3 +811,7 @@
   vertical-align: -0.1em;
   opacity: 0.75;
 }
+
+[data-assistant-message] .md { font-weight: 450; }
+.transcript-work [data-assistant-message] .md { color: hsl(var(--muted-foreground)); font-weight: 400; }
+.transcript-work [data-assistant-message] .md strong { color: inherit; font-weight: 500; }

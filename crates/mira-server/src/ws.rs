@@ -1922,8 +1922,7 @@ async fn apply_model_selection(
         .await;
     slot.session.read().await.set_model(&target_model).await;
     let mut s = RuntimeState::load().unwrap_or_default();
-    s.last_model = Some(target_model.clone());
-    s.last_engine = Some(target_instance.clone());
+    s.remember_engine(target_instance.clone(), Some(target_model.clone()));
     if let Err(e) = s.save() {
         warn!(%e, "state.yaml: save failed after model change");
     }

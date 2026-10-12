@@ -257,6 +257,30 @@ mod tests {
     }
 
     #[test]
+    fn auto_everything_computer_input_still_honors_explicit_deny() {
+        let p = Policy::from_config(&PolicyConfig {
+            mode: Mode::Edit,
+            deny: vec!["Computer(left_click)".into()],
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(
+            p.evaluate(&Request {
+                action: Action::Computer,
+                target: "left_click:10,20"
+            }),
+            Decision::Deny
+        );
+        assert_eq!(
+            p.evaluate(&Request {
+                action: Action::Computer,
+                target: "type:hello"
+            }),
+            Decision::Allow
+        );
+    }
+
+    #[test]
     fn a_denied_command_cannot_hide_behind_another() {
         let p = policy(&["Bash(ls:*)"], &["Bash(rm:*)"]);
         assert_eq!(bash(&p, "rm -rf x"), Decision::Deny);
