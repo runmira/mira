@@ -5,8 +5,10 @@ import { captureScreenshot } from '../lib/screenCapture';
 import { ComposerNoticeStack } from './ComposerNoticeStack';
 import { EnginePicker } from './EnginePicker';
 import { FilePicker } from './FilePicker';
-import { ImageAttachmentDetails } from './ImageAttachmentDetails';
+
 import { ImageLightbox } from './ImageLightbox';
+import { ImageAttachmentMeta } from './ImageAttachmentDetails';
+import { HoverCard } from './ui/hover-card';
 import { MentionInput } from './MentionInput';
 import { QuoteCard } from './QuoteCard';
 import {
@@ -228,25 +230,32 @@ export function Composer(props: Props) {
 
         {!activePromptKind && images.length > 0 && (
           <div className="flex flex-wrap gap-2 px-1.5 pt-1">
-            {images.map((img, i) => (
-              <div key={i} className="group relative">
-                <img
-                  src={`data:${img.media_type};base64,${img.data}`}
-                  alt=""
-                  onClick={() => setPreview(`data:${img.media_type};base64,${img.data}`)}
-                  className="size-14 cursor-zoom-in rounded-lg border border-border object-cover"
-                />
-                <ImageAttachmentDetails image={img} />
-                <button
-                  type="button"
-                  aria-label="Remove image"
-                  onClick={() => setImages((prev) => prev.filter((_, j) => j !== i))}
-                  className="absolute -right-1.5 -top-1.5 flex size-5 items-center justify-center rounded-full border border-border bg-background text-[11px] leading-none text-muted-foreground transition-opacity hover:text-foreground [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100"
-                >
-                  ×
-                </button>
-              </div>
-            ))}
+            {images.map((img, i) => {
+              const src = `data:${img.media_type};base64,${img.data}`;
+              const thumbnail = (
+                <img src={src} alt="" onClick={() => setPreview(src)} className="size-14 cursor-zoom-in rounded-lg border border-border object-cover" />
+              );
+              return (
+                <div key={i} className="group relative">
+                  {/* Captured-window name and OCR'd text stay reachable on
+                      hover/focus instead of sitting under the thumbnail,
+                      where they made the strip ragged and tall. Opens
+                      upward — the composer is pinned to the viewport
+                      bottom. Clicking still zooms. */}
+                  <HoverCard side="top" trigger={thumbnail}>
+                    <ImageAttachmentMeta image={img} />
+                  </HoverCard>
+                  <button
+                    type="button"
+                    aria-label="Remove image"
+                    onClick={() => setImages((prev) => prev.filter((_, j) => j !== i))}
+                    className="absolute -right-1.5 -top-1.5 flex size-5 items-center justify-center rounded-full border border-border bg-background text-[11px] leading-none text-muted-foreground transition-opacity hover:text-foreground [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100"
+                  >
+                    ×
+                  </button>
+                </div>
+              );
+            })}
           </div>
         )}
 
