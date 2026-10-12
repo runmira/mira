@@ -417,8 +417,7 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
                 crate::acp_session::AcpLaunchParams::for_instance(id.clone(), kind, driver_cfg);
             params.model = mira_config::RuntimeState::load()
                 .ok()
-                .filter(|r| r.last_engine.as_deref() == Some(id.as_str()))
-                .and_then(|r| r.last_model)
+                .and_then(|r| r.engine_models.get(&id).cloned())
                 .or_else(|| {
                     state
                         .engines

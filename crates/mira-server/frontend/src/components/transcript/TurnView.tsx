@@ -197,7 +197,7 @@ export function TurnViewImpl({
   return (
     <div
       data-minimap-id={minimapId ?? undefined}
-      className={cn("flex min-w-0 flex-col gap-2", isActive && "transcript-live")}
+      className="flex min-w-0 flex-col gap-2"
       // Long chats: skip layout and paint for older turns while they're off
       // screen. The browser remembers each one's last size, so scrolling and
       // the minimap's jumps stay accurate.

@@ -951,9 +951,25 @@ pub struct RuntimeState {
     /// registry — `anthropic`, `codex`, …). Restores whichever backend
     /// was serving the session, not just the model id on it.
     pub last_engine: Option<String>,
+    /// Model choices belong to an engine; provider Settings cannot overwrite them.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub engine_models: BTreeMap<String, String>,
 }
 
 impl RuntimeState {
+    pub fn remember_engine(&mut self, instance: String, model: Option<String>) {
+        match &model {
+            Some(model) => {
+                self.engine_models.insert(instance.clone(), model.clone());
+            }
+            None => {
+                self.engine_models.remove(&instance);
+            }
+        }
+        self.last_engine = Some(instance);
+        self.last_model = model;
+    }
+
     pub fn load() -> Result<Self> {
         let path = state_path();
         if !path.exists() {
@@ -1577,5 +1593,31 @@ mod model_alias_tests {
             r("openai/gpt-5-mini", "big-1", Some("tiny-1")),
             "openai/gpt-5-mini"
         );
+    }
+}
+
+#[cfg(test)]
+mod engine_model_state_tests {
+    use super::RuntimeState;
+    #[test]
+    fn provider_settings_cannot_replace_the_remembered_agent_model() {
+        let mut state = RuntimeState::default();
+        state.remember_engine("codex".into(), Some("gpt-5-codex".into()));
+        state.last_model = Some("claude-sonnet".into());
+        assert_eq!(
+            state.engine_models.get("codex").map(String::as_str),
+            Some("gpt-5-codex")
+        );
+        state.remember_engine("anthropic".into(), Some("claude-sonnet".into()));
+        assert_eq!(
+            state.engine_models.get("codex").map(String::as_str),
+            Some("gpt-5-codex")
+        );
+    }
+    #[test]
+    fn legacy_unscoped_model_is_not_used_for_an_agent() {
+        let state: RuntimeState =
+            serde_yaml::from_str("last_engine: codex\nlast_model: claude-sonnet\n").unwrap();
+        assert!(!state.engine_models.contains_key("codex"));
     }
 }
