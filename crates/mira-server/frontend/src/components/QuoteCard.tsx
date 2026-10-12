@@ -16,17 +16,19 @@ export function quoteMarkdown(q: ComposerQuote): string {
 }
 
 /**
- * A quoted passage waiting in the composer. Clicking it jumps to (and
- * highlights) the original in the chat; × drops it. It's a real citation
- * link underneath, so the transcript's citation navigator handles the jump.
+ * A quoted passage waiting in the composer. Clicking anywhere on the card
+ * jumps to (and highlights) the original in the chat; × drops it.
+ *
+ * The jump target is a stretched citation link covering the whole card, so
+ * the icon, text, and padding all navigate. The remove button sits *above*
+ * (and outside) that link: `SourceCitationNavigator` hijacks clicks inside
+ * a citation anchor at document-capture time, so a button nested in the
+ * link would jump instead of removing. Siblings keep both actions working
+ * with valid HTML (no nested interactives).
  */
 export function QuoteCard({ quote, onRemove }: { quote: ComposerQuote; onRemove: () => void }) {
   return (
-    <a
-      href={quote.href}
-      title="Show in chat"
-      className="group relative flex min-w-0 max-w-full items-start gap-2 rounded-lg border border-border/70 bg-fg/[0.03] py-1.5 pl-2.5 pr-7 no-underline transition-colors hover:border-border hover:bg-fg/[0.05]"
-    >
+    <div className="group relative flex min-w-0 max-w-full items-start gap-2 rounded-lg border border-border/70 bg-fg/[0.03] py-1.5 pl-2.5 pr-7 transition-colors hover:border-border hover:bg-fg/[0.05]">
       <span aria-hidden className="absolute inset-y-1.5 left-0 w-[3px] rounded-full bg-mira-blue/60" />
       <Quote className="mt-0.5 size-3 shrink-0 text-mira-blue/80" aria-hidden />
       <span className="min-w-0 flex-1">
@@ -35,6 +37,12 @@ export function QuoteCard({ quote, onRemove }: { quote: ComposerQuote; onRemove:
         </span>
         <span className="line-clamp-2 text-[12.5px] leading-snug text-foreground/85">{quote.text}</span>
       </span>
+      <a
+        href={quote.href}
+        title="Show in chat"
+        aria-label="Show in chat"
+        className="absolute inset-0 rounded-lg no-underline"
+      />
       <button
         type="button"
         aria-label="Remove quote"
@@ -43,10 +51,10 @@ export function QuoteCard({ quote, onRemove }: { quote: ComposerQuote; onRemove:
           e.stopPropagation();
           onRemove();
         }}
-        className="absolute right-1.5 top-1.5 flex size-5 items-center justify-center rounded text-muted-foreground/70 transition-colors hover:bg-fg/[0.08] hover:text-foreground"
+        className="absolute right-1.5 top-1.5 z-10 flex size-5 items-center justify-center rounded text-muted-foreground/70 transition-colors hover:bg-fg/[0.08] hover:text-foreground"
       >
         <X className="size-3.5" />
       </button>
-    </a>
+    </div>
   );
 }
