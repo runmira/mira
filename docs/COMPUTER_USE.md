@@ -131,7 +131,7 @@ mira doctor --computer
 ```
 
 ```
-✔ computer · cua endpoint      http://192.168.1.20:3211 (reachable)
+✔ computer · cua endpoint      http://127.0.0.1:3211 (reachable)
 ✔ computer · cua daemon        cua-spacesd 0.5.3 · cua.env.v1 1·8 on studio-mac
 ✔ computer · background input  supported
 ✔ computer · display           2560x1440 logical (2560x1440 physical)
