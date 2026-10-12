@@ -9,13 +9,10 @@ The channel's name sits on a coloured pill across the bottom of the mark, so
 side-by-side installs are told apart at a glance in the Dock. Re-run after
 changing the logo.
 
-Needs Pillow (`pip install pillow`); `.icns` uses macOS's `iconutil`.
+Needs Pillow (`pip install pillow`).
 """
 
-import shutil
-import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -84,16 +81,9 @@ def main() -> int:
         icon.resize((256, 256), Image.LANCZOS).save(
             out / "icon.ico", sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
         )
-        if shutil.which("iconutil"):
-            with tempfile.TemporaryDirectory() as tmp:
-                iconset = Path(tmp) / "icon.iconset"
-                iconset.mkdir()
-                for px in (16, 32, 128, 256, 512):
-                    icon.resize((px, px), Image.LANCZOS).save(iconset / f"icon_{px}x{px}.png")
-                    icon.resize((px * 2, px * 2), Image.LANCZOS).save(iconset / f"icon_{px}x{px}@2x.png")
-                subprocess.run(["iconutil", "-c", "icns", str(iconset), "-o", str(out / "icon.icns")], check=True)
-        else:
-            print(f"warning: no iconutil, skipped {channel}/icon.icns", file=sys.stderr)
+        # Pillow writes the PNG-backed ICNS sizes directly; this avoids
+        # iconutil rejecting generated iconsets on some macOS versions.
+        icon.save(out / "icon.icns", format="ICNS")
         print(f"wrote {out.relative_to(ROOT)}")
     return 0
 
