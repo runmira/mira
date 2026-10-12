@@ -124,6 +124,9 @@ jobs:
 
       - name: Build, sign and notarize
         env:
+          # Tauri otherwise skips Finder customization under CI=true,
+          # producing a DMG without its background or configured icon positions.
+          TAURI_BUNDLER_DMG_IGNORE_CI: 'true'
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
