@@ -123,6 +123,15 @@ pub fn has_embedded_frontend() -> bool {
     embedded::has_frontend()
 }
 
+fn restored_boot_agent(
+    instance: Option<&mira_engine::EngineInstance>,
+    resumed: bool,
+) -> Option<(String, String)> {
+    instance
+        .filter(|i| !resumed && i.enabled && !i.is_native())
+        .map(|i| (i.id.to_string(), i.driver.to_string()))
+}
+
 /// Build args for [`run`]. Everything the server needs except the initial
 /// slot, which is constructed inside `run` so its channels are wired
 /// consistently with the WsApprover / PromptChannel / AgentTool.
@@ -254,6 +263,7 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
         if let Ok(runtime) = mira_config::RuntimeState::load() {
             if let Some(last) = runtime.last_engine {
                 if boot_engines.get(&last).is_some() {
+                    boot_agent = restored_boot_agent(boot_engines.get(&last), cfg.resume.is_some());
                     *inst = Some(last);
                     user_pinned = true;
                 }
@@ -405,11 +415,17 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
         if let Some(driver_cfg) = state.engines.current().external_driver_config(&id) {
             let mut params =
                 crate::acp_session::AcpLaunchParams::for_instance(id.clone(), kind, driver_cfg);
-            params.model = state
-                .engines
-                .current()
-                .get(&id)
-                .and_then(|i| i.model.clone());
+            params.model = mira_config::RuntimeState::load()
+                .ok()
+                .filter(|r| r.last_engine.as_deref() == Some(id.as_str()))
+                .and_then(|r| r.last_model)
+                .or_else(|| {
+                    state
+                        .engines
+                        .current()
+                        .get(&id)
+                        .and_then(|i| i.model.clone())
+                });
             crate::session_engine::select_agent(&state, &initial_slot, params).await;
         }
     }
@@ -1072,5 +1088,25 @@ mod compression_tests {
     #[tokio::test]
     async fn leaves_ndjson_streams_alone() {
         assert_eq!(encoding("/ndjson").await, None);
+    }
+}
+
+#[cfg(test)]
+mod boot_preference_tests {
+    use super::restored_boot_agent;
+    #[test]
+    fn saved_codex_choice_launches_on_a_fresh_chat_but_not_a_resumed_chat() {
+        let registry =
+            mira_engine::EngineRegistry::from_config(&mira_config::MiraConfig::default());
+        let codex = registry.get("codex").unwrap();
+        assert_eq!(
+            restored_boot_agent(Some(codex), false),
+            Some(("codex".into(), "codex".into()))
+        );
+        assert_eq!(restored_boot_agent(Some(codex), true), None);
+        assert_eq!(restored_boot_agent(None, false), None);
+        let mut disabled = codex.clone();
+        disabled.enabled = false;
+        assert_eq!(restored_boot_agent(Some(&disabled), false), None);
     }
 }

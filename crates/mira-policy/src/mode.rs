@@ -36,10 +36,8 @@ impl Mode {
     /// snapshot, …) are split from the verbs that change something
     /// (click, type, navigate, …).
     ///
-    /// Desktop control is the one family that never auto-approves a
-    /// mutating action, not even in `Yolo`: a stray click can land on
-    /// anything on the user's screen. Opting in takes an explicit
-    /// `Computer(...)` allow rule.
+    /// Explicit all-actions presets cover computer input as well as browser
+    /// input. Narrower presets still ask before desktop mutations.
     pub fn default_for_target(self, action: Action, target: &str) -> Decision {
         use Action::*;
         use Decision::*;
@@ -47,6 +45,7 @@ impl Mode {
         match (self, action) {
             (Mode::Plan | Mode::Manual, Computer) => Ask,
             (_, Computer) if observe => Allow,
+            (Mode::Edit | Mode::Yolo, Computer) => Allow,
             (_, Computer) => Ask,
 
             (_, Browser) if observe => Allow,
@@ -132,12 +131,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn computer_actions_prompt_even_in_yolo() {
-        for mode in [Mode::Manual, Mode::Auto, Mode::Edit, Mode::Yolo] {
+    fn computer_actions_follow_the_all_actions_preset() {
+        for mode in [Mode::Manual, Mode::Auto] {
             assert_eq!(
                 mode.default_for_target(Action::Computer, "left_click:10,10"),
                 Decision::Ask,
                 "{mode:?}"
+            );
+        }
+        for mode in [Mode::Edit, Mode::Yolo] {
+            assert_eq!(
+                mode.default_for_target(Action::Computer, "left_click:10,10"),
+                Decision::Allow
             );
         }
         assert_eq!(

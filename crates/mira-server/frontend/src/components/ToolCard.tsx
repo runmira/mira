@@ -1,3 +1,4 @@
+import { toolPresentation } from '../lib/toolPresentation.mjs';
 import { cn } from '@/lib/utils';
 import { AnimatePresence, m } from 'framer-motion';
 import { Check, ChevronDown, LoaderCircle, X } from 'lucide-react';
@@ -357,7 +358,7 @@ function ScopeMenuItem({
 function CompactToolRow({
   call,
   status,
-  result,
+  result: rawResult,
   preview,
   onOpenFile,
   progressLines,
@@ -371,6 +372,11 @@ function CompactToolRow({
   progressLines?: string[];
   detailsOnly?: boolean;
 }) {
+  const result = useMemo(() => {
+    if (!rawResult) return null;
+    const output = toolPresentation(rawResult.content);
+    return { ...rawResult, content: output.text, is_error: rawResult.is_error || output.isError, images: [...(rawResult.images ?? []), ...output.images.filter(image => !rawResult.images?.some(existing => existing.data === image.data && existing.media_type === image.media_type))] };
+  }, [rawResult]);
   const [expanded, setExpanded] = useTranscriptDisclosure(`tool:${call.id}`, detailsOnly);
   const summary = useMemo(() => summarize(call, status), [call, status]);
 
@@ -425,7 +431,7 @@ function CompactToolRow({
   }, [call.function.name, call.function.arguments]);
 
   return (
-    <div className="w-full max-w-[78%]">
+    <div className="w-full">
       {/* Use div+role instead of <button> so the filename chip (also a
           button) doesn't trigger the "nested interactive content" HTML
           violation that causes browsers to hoist or swallow the inner click. */}
@@ -438,7 +444,7 @@ function CompactToolRow({
             if (e.key === 'Enter' || e.key === ' ') setExpanded((v) => !v);
           }}
           className={cn(
-            'group relative flex w-full min-w-0 cursor-pointer items-center gap-1.5 rounded-md px-1 py-0.5 text-left text-[13px] transition-colors hover:bg-accent/40',
+            'group relative flex w-full min-w-0 cursor-pointer items-center gap-1.5 rounded-md px-1 py-0.5 text-left text-[13px] font-medium text-muted-foreground transition-colors hover:bg-accent/40',
             completedCommand && 'pl-4',
             commandFailed && 'rounded-md border border-rose-500/30 bg-rose-500/5 text-rose-200',
           )}
@@ -539,7 +545,7 @@ function CompactToolRow({
               shows what changed; "wrote N bytes" adds nothing. Any
               other tool (bash / grep / read_file / …) still surfaces
               its output because the output IS the point there. */}
-            {result && !(call.function.name in RESULT_SUPPRESSED) && (
+            {result && (result.content.trim() || bashOutput) && !(call.function.name in RESULT_SUPPRESSED) && (
               <ResultBlock
                 stateKey={call.id}
                 content={bashOutput?.output ?? result.content}
@@ -548,6 +554,9 @@ function CompactToolRow({
                 timedOut={bashOutput?.timedOut}
                 command={bashCommand}
               />
+            )}
+            {!preview && !effectiveDiff && !result?.content.trim() && !result?.images?.length && status === 'complete' && (
+              <p className="px-2 py-1 text-[12px] text-muted-foreground">Completed without text output.</p>
             )}
             {result?.images?.map((img, i) => (
               <img

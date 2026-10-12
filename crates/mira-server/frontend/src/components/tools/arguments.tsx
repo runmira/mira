@@ -71,7 +71,10 @@ export function summarize(
  *  human skimming the row — the file path, the command, the query — so
  *  the row reads as `Verb <what>` at a glance. */
 export function pickTarget(tool: string, args: any): string {
+  if (tool.startsWith("mcp__")) tool = tool.split("__").at(-1) ?? tool;
   switch (tool) {
+    case 'computer':
+      return typeof args?.action === 'string' ? args.action.replace(/_/g, ' ') : '';
     case 'read_file':
     case 'write_file':
     case 'edit_file':

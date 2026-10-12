@@ -197,7 +197,7 @@ export function TurnViewImpl({
   return (
     <div
       data-minimap-id={minimapId ?? undefined}
-      className="flex min-w-0 flex-col gap-2"
+      className={cn("flex min-w-0 flex-col gap-2", isActive && "transcript-live")}
       // Long chats: skip layout and paint for older turns while they're off
       // screen. The browser remembers each one's last size, so scrolling and
       // the minimap's jumps stay accurate.
@@ -219,7 +219,7 @@ export function TurnViewImpl({
         </div>
       )}
 
-      {intermediate.length > 0 && <Collapse open={effectivelyExpanded || !showWorkedChip}><div className="flex min-w-0 flex-col gap-2">{intermediate.map((item, i) => renderActivity(item, i, 'work'))}</div></Collapse>}
+      {intermediate.length > 0 && <Collapse open={effectivelyExpanded || !showWorkedChip}><div className="transcript-work flex min-w-0 flex-col gap-2">{intermediate.map((item, i) => renderActivity(item, i, 'work'))}</div></Collapse>}
 
       {finalEntry && (
         <TurnStatsContext.Provider

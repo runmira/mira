@@ -27,6 +27,7 @@ struct Call(String);
 
 #[derive(Default)]
 struct State {
+    driver_calls: Mutex<Vec<(String, serde_json::Value)>>,
     calls: Mutex<Vec<Call>>,
     /// Primary display bounds, in global logical points.
     primary: Mutex<pb::Display>,
@@ -411,6 +412,27 @@ fn key_pos(p: &Option<pb::Point>) -> String {
 /// A stand-in guest: one Retina primary display plus a second display to its
 /// right, a cursor parked on the second one, and a solid-colour PNG that
 /// decodes to the primary's native resolution.
+#[tonic::async_trait]
+impl pb::driver_service_server::DriverService for Fake {
+    async fn list_tools(
+        &self,
+        _: Request<pb::ListToolsRequest>,
+    ) -> Result<Response<pb::ListToolsResponse>, Status> {
+        Ok(Response::new(pb::ListToolsResponse::default()))
+    }
+    async fn call_tool(
+        &self,
+        request: Request<pb::CallToolRequest>,
+    ) -> Result<Response<pb::CallToolResponse>, Status> {
+        let body = request.into_inner();
+        self.state.driver_calls.lock().unwrap().push((
+            body.name,
+            serde_json::from_str(&body.arguments_json).unwrap(),
+        ));
+        Ok(Response::new(pb::CallToolResponse::default()))
+    }
+}
+
 async fn fake_space() -> (String, Arc<State>) {
     let state = Arc::new(State::default());
 
@@ -477,6 +499,9 @@ async fn fake_space() -> (String, Arc<State>) {
                 },
             ))
             .add_service(pb::system_service_server::SystemServiceServer::new(Fake {
+                state: served.clone(),
+            }))
+            .add_service(pb::driver_service_server::DriverServiceServer::new(Fake {
                 state: served.clone(),
             }))
             .add_service(pb::windows_service_server::WindowsServiceServer::new(
@@ -1136,4 +1161,22 @@ async fn stale_windows_are_not_retargeted() {
     .await
     .unwrap();
     assert!(b.screen_size().await.is_err());
+}
+
+#[tokio::test]
+async fn agent_cursor_uses_visual_window_scope_and_a_stable_private_session() {
+    let (endpoint, state) = fake_space().await;
+    let backend = backend(&endpoint).await;
+    backend.mouse_move(Point { x: 100, y: 200 }).await.unwrap();
+    backend.mouse_move(Point { x: 120, y: 210 }).await.unwrap();
+    let calls = state.driver_calls.lock().unwrap();
+    assert_eq!(calls[0].0, "set_agent_cursor_enabled");
+    assert_eq!(calls[0].1["enabled"], true);
+    assert_eq!(calls.len(), 3);
+    for (_, args) in &calls[1..] {
+        assert_eq!(args["scope"], "window");
+        assert_eq!(args["session"], calls[0].1["session"]);
+    }
+    assert_eq!(calls[1].1["x"], 100.0);
+    assert_eq!(calls[1].1["y"], 200.0);
 }

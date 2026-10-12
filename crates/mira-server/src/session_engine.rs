@@ -450,6 +450,23 @@ pub async fn select_agent(state: &AppState, slot: &Arc<SessionSlot>, params: Acp
         .model
         .write()
         .expect("selection lock poisoned") = params.model.clone();
+    // Keep the global composer preference separate from per-chat launch state.
+    let mut runtime = mira_config::RuntimeState::load().unwrap_or_default();
+    runtime.last_engine = Some(params.instance.clone());
+    runtime.last_model = params.model.clone();
+    if let Err(error) = runtime.save() {
+        tracing::warn!(%error, "could not remember selected agent");
+    }
+    *state
+        .selection
+        .instance
+        .write()
+        .expect("selection lock poisoned") = Some(params.instance.clone());
+    *state
+        .selection
+        .model
+        .write()
+        .expect("selection lock poisoned") = params.model.clone();
     remember_agent(slot, &params, true).await;
     *slot.engine.phase.lock().await = AgentPhase::Starting;
     publish(state, slot).await;

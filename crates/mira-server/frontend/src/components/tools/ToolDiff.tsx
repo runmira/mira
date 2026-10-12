@@ -144,9 +144,12 @@ export function ReconstructedPreview({ call }: { call: ToolCall }) {
     );
   }
 
-  // Nothing worth showing — args are either empty or too weird to
-  // render nicely. Drop the block entirely rather than fall back to
-  // raw JSON (which was the old failure mode).
+  if (args && Object.keys(args).length > 0) return (
+    <div className="rounded-md bg-mira-elev1/40 px-3 py-2">
+      <div className="mb-1 text-[11px] font-medium text-muted-foreground">Input</div>
+      <pre className="m-0 max-h-48 overflow-auto whitespace-pre-wrap break-words text-[11.5px] text-muted-foreground">{JSON.stringify(args, null, 2)}</pre>
+    </div>
+  );
   return null;
 }
 
