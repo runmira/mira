@@ -113,11 +113,16 @@ export function PanelNewTabButton({
   activeId,
   onOpenPane,
   onOpenFile,
+  onSelectTab,
 }: {
   toolTabs: ToolPaneTab[];
   activeId: string | null;
   onOpenPane: (kind: ToolPaneKind) => void;
   onOpenFile: () => void;
+  /** Focus an already-open tab. Used by the "Open tabs" list — some
+   *  tabs (PRs) are parameterized, so re-opening by kind would land
+   *  on the wrong one. */
+  onSelectTab?: (id: string) => void;
 }) {
   const [menu, setMenu] = useState(false);
 
@@ -162,7 +167,7 @@ export function PanelNewTabButton({
                 label={t.title}
                 icon={TOOL_PANE_DEFS[t.kind].icon}
                 active={activeId === t.id}
-                onSelect={() => onOpenPane(t.kind)}
+                onSelect={() => (onSelectTab ? onSelectTab(t.id) : onOpenPane(t.kind))}
               />
             ))}
           </>

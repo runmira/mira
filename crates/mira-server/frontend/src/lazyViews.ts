@@ -16,6 +16,7 @@ export const ActivityPane = lazyNamed(() => import('./components/panes/ActivityP
 export const DevicesPane = lazyNamed(() => import('./components/panes/DevicesPane'), 'DevicesPane');
 export const ProcessesPane = lazyNamed(() => import('./components/panes/ProcessesPane'), 'ProcessesPane');
 export const TestsPane = lazyNamed(() => import('./components/panes/TestsPane'), 'TestsPane');
+export const PrPane = lazyNamed(() => import('./components/panes/PrPane'), 'PrPane');
 
 // Dialogs and one-off surfaces, mounted on first open.
 export const GetStarted = lazyNamed(() => import('./components/onboarding/GetStarted'), 'GetStarted');

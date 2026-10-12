@@ -61,6 +61,7 @@ export type WorkspaceCommands = Pick<
   | 'closeFileTab'
   | 'closeToolTab'
   | 'openToolPane'
+  | 'openPrPane'
   | 'closeAnyTab'
   | 'sendWhiteboardToChat'
   | 'handlePanelResizeStart'
@@ -126,6 +127,7 @@ const COMMAND_NAMES = [
   'closeFileTab',
   'closeToolTab',
   'openToolPane',
+  'openPrPane',
   'closeAnyTab',
   'sendWhiteboardToChat',
   'handlePanelResizeStart',
