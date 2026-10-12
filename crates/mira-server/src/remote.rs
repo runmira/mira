@@ -229,7 +229,7 @@ impl Remote {
         }
     }
 
-    fn view(&self) -> serde_json::Value {
+    pub(crate) fn view(&self) -> serde_json::Value {
         let inner = self.lock();
         serde_json::json!({
             "machine_id": self.machine_id,

@@ -47,10 +47,20 @@ impl Registry {
         self
     }
 
+    pub fn remove(&mut self, name: &str) {
+        self.tools.remove(name);
+        self.order.retain(|n| n != name);
+    }
+
     /// Add a live tool source (see [`ToolSource`]).
     pub fn add_source(&mut self, source: Arc<dyn ToolSource>) -> &mut Self {
         self.sources.push(source);
         self
+    }
+
+    /// Reserve a built-in name ahead of optional external tool sources.
+    pub fn add_source_first(&mut self, source: Arc<dyn ToolSource>) {
+        self.sources.insert(0, source);
     }
 
     /// The live sources, so a derived registry (a subagent's) can keep

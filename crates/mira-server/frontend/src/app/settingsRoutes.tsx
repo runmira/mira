@@ -56,6 +56,11 @@ export const settingsRoute: RouteObject = {
       lazy: () => import('../components/settings/routes/subagents'),
     },
     {
+      path: 'computer',
+      ErrorBoundary: SettingsRouteError,
+      lazy: () => import('../components/settings/routes/computer'),
+    },
+    {
       path: 'devices',
       ErrorBoundary: SettingsRouteError,
       lazy: () => import('../components/settings/routes/devices'),

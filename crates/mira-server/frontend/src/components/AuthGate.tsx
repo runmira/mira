@@ -1,3 +1,4 @@
+import { LoadingScreen } from './LoadingScreen';
 import { useEffect, useState } from 'react';
 import { LazyBoundary } from './LazyBoundary';
 import type { User } from '@supabase/supabase-js';
@@ -85,11 +86,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   }
 
   if (status === 'loading') {
-    return (
-      <div className="flex h-screen items-center justify-center text-sm text-neutral-500">
-        Loading…
-      </div>
-    );
+    return <LoadingScreen />;
   }
 
   if (status === 'signed-out') {

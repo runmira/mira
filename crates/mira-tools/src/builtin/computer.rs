@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use mira_ai::ToolSpec;
-use mira_computer::{Computer, ComputerAction};
+use mira_computer::{ComputerAction, ComputerController};
 use mira_core::{ImageData, ToolCall, ToolResult};
 use serde_json::{json, Value};
 
@@ -18,13 +18,13 @@ use crate::context::ToolContext;
 use crate::tool::{spec, Action, Tool, ToolError};
 
 pub struct ComputerTool {
-    computer: Arc<Computer>,
+    computer: Arc<dyn ComputerController>,
     /// Model-space display size at registration, for the description.
     display: Option<(u32, u32)>,
 }
 
 impl ComputerTool {
-    pub fn new(computer: Arc<Computer>, display: Option<(u32, u32)>) -> Self {
+    pub fn new(computer: Arc<dyn ComputerController>, display: Option<(u32, u32)>) -> Self {
         Self { computer, display }
     }
 }
@@ -34,21 +34,19 @@ fn parse(call: &ToolCall) -> Result<ComputerAction, String> {
     ComputerAction::from_args(&args).map_err(|e| e.to_string())
 }
 
-#[async_trait]
-impl Tool for ComputerTool {
-    fn spec(&self) -> ToolSpec {
-        let display = match self.display {
-            Some((w, h)) => format!("The screen is {w}x{h} in screenshot pixels. "),
-            None => String::new(),
-        };
-        spec(
+pub fn computer_spec(display: Option<(u32, u32)>) -> ToolSpec {
+    let display = match display {
+        Some((w, h)) => format!("The screen is {w}x{h} in screenshot pixels. "),
+        None => String::new(),
+    };
+    spec(
             "computer",
             &format!(
-                "Control the user's desktop: take screenshots, move and click the mouse, type, \
+                "Control the computer selected in Mira: take screenshots, move and click the mouse, type, \
                  press keys, scroll. {display}Coordinates are [x, y] pixels in the most recent \
                  screenshot. Start with `screenshot` to see the screen; after each action you \
                  get a fresh screenshot back. Prefer keyboard shortcuts when they are reliable. \
-                 Every action is visible to the user and most need their approval — explain \
+                 Actions are reported to the user and most need their approval — explain \
                  what you are about to do. Never enter passwords or payment details, and stop \
                  to ask the user before anything destructive or irreversible."
             ),
@@ -88,6 +86,12 @@ impl Tool for ComputerTool {
                 "required": ["action"]
             }),
         )
+}
+
+#[async_trait]
+impl Tool for ComputerTool {
+    fn spec(&self) -> ToolSpec {
+        computer_spec(self.display)
     }
 
     fn action(&self) -> Action {
@@ -125,7 +129,7 @@ impl Tool for ComputerTool {
 mod tests {
     use super::*;
     use mira_computer::backend::mock::MockBackend;
-    use mira_computer::ComputerOptions;
+    use mira_computer::{Computer, ComputerOptions};
     use mira_core::message::{ToolCallFunction, ToolCallKind};
 
     fn call(args: Value) -> ToolCall {

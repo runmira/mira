@@ -170,7 +170,7 @@ export function SettingsSurface() {
         <span className="min-w-0 flex-1 truncate text-[13.5px] text-foreground">
           {currentLabel}
         </span>
-        {view && (
+        {view && section !== 'computer' && (
           <div
             className={cn(
               'inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[10.5px]',
@@ -234,7 +234,7 @@ export function SettingsSurface() {
         </div>
       </div>
 
-      {view && (
+      {view && section !== 'computer' && (
         <div className="flex shrink-0 items-center justify-between border-t border-border/60 px-6 py-3">
           <div className="text-[11.5px] text-muted-foreground">
             {saveError ? (

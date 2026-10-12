@@ -4,10 +4,13 @@
 //! events. Scaling to and from the model's screenshot space happens one
 //! level up in [`crate::Computer`], so backends stay dumb.
 //!
-//! Backends drive the OS through its stock command-line tools (xdotool,
-//! screencapture, osascript) rather than native bindings. That keeps
-//! Mira's build free of X11 / CoreGraphics link dependencies, and the
-//! trait is the seam where a native or remote (VM) backend slots in later.
+//! The `macos` and `x11` backends drive the OS through its stock
+//! command-line tools (xdotool, screencapture, osascript) rather than native
+//! bindings. That keeps Mira's build free of X11 / CoreGraphics link
+//! dependencies, and the trait is the seam where a native or remote (VM)
+//! backend slots in — [`cua`] is that backend, driving another machine over
+//! cua-spacesd and, where the guest allows it, without taking the user's
+//! pointer.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -19,9 +22,12 @@ use crate::action::{MouseButton, Point, ScrollDirection};
 use crate::keys::KeyChord;
 use crate::ComputerError;
 
+pub mod cua;
 pub mod macos;
 pub mod mock;
 pub mod x11;
+
+pub use cua::{Capabilities, CuaBackend, CuaOptions, Delivery};
 
 /// What to do with a mouse button.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -60,6 +66,59 @@ pub trait ComputerBackend: Send + Sync {
     async fn type_text(&self, text: &str) -> Result<(), ComputerError>;
     async fn key(&self, chord: &KeyChord, action: KeyAction) -> Result<(), ComputerError>;
     async fn cursor_position(&self) -> Result<Point, ComputerError>;
+    /// Atomic operations let remote backends use native background delivery.
+    async fn click(
+        &self,
+        button: MouseButton,
+        count: u8,
+        modifiers: Option<&KeyChord>,
+    ) -> Result<(), ComputerError> {
+        if let Some(chord) = modifiers {
+            self.key(chord, KeyAction::Down).await?;
+        }
+        let result = self.button(button, ButtonAction::Click(count)).await;
+        if let Some(chord) = modifiers {
+            let up = self.key(chord, KeyAction::Up).await;
+            return result.and(up);
+        }
+        result
+    }
+    async fn drag(&self, from: Point, to: Point) -> Result<(), ComputerError> {
+        self.mouse_move(from).await?;
+        self.button(MouseButton::Left, ButtonAction::Down).await?;
+        let result = async {
+            self.mouse_move(Point {
+                x: (from.x + to.x) / 2,
+                y: (from.y + to.y) / 2,
+            })
+            .await?;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            self.mouse_move(to).await
+        }
+        .await;
+        let release = self.button(MouseButton::Left, ButtonAction::Up).await;
+        result.and(release)
+    }
+    /// A plain scroll has no modifiers. Unsupported combinations fail before input.
+    async fn scroll_modified(
+        &self,
+        direction: ScrollDirection,
+        amount: u32,
+        modifiers: Option<&KeyChord>,
+    ) -> Result<(), ComputerError> {
+        if let Some(chord) = modifiers {
+            self.key(chord, KeyAction::Down).await?;
+        }
+        let result = self.scroll(direction, amount).await;
+        if let Some(chord) = modifiers {
+            let up = self.key(chord, KeyAction::Up).await;
+            return result.and(up);
+        }
+        result
+    }
+    async fn delivery_note(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Pick the backend for the current platform, or explain why there is

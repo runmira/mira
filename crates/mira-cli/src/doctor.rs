@@ -169,7 +169,7 @@ pub async fn run(cli: &crate::Cli, args: DoctorArgs) -> Result<()> {
     // ---- computer use / browser ----
     let computer_on = cli.computer || cfg.computer.enabled();
     if computer_on {
-        for c in mira_computer::preflight().await {
+        for c in mira_tools::builtin::computer_preflight(&cfg.computer, cli.cua_delivery).await {
             let label = format!("computer · {}", c.label);
             if c.ok {
                 report.pass(label, c.detail);

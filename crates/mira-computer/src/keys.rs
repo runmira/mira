@@ -133,9 +133,38 @@ impl KeyChord {
     }
 }
 
+/// Every canonical spelling [`KeyChord::parse`] can produce for the main key
+/// of a chord, de-duplicated.
+///
+/// Backends render these into their own vocabularies, and the set is the
+/// contract they must cover: one that misses an entry fails at the first key
+/// the model reaches for, which is exactly when nobody is watching. Modifiers
+/// are not here — [`KeyChord::parse`] reports those separately, and a backend
+/// maps them from [`Modifier`].
+pub fn canonical_keys() -> impl Iterator<Item = &'static str> {
+    NAMED
+        .iter()
+        .map(|(_, canonical)| *canonical)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_keys_are_unique_and_parse_back() {
+        let keys: Vec<_> = canonical_keys().collect();
+        assert!(keys.len() > 20, "{keys:?}");
+        for name in &keys {
+            assert_eq!(
+                KeyChord::parse(name).expect(name).key,
+                Some(Key::Named(name)),
+                "{name} does not parse back to itself"
+            );
+        }
+    }
 
     #[test]
     fn normalizes_aliases() {

@@ -321,6 +321,62 @@ pub struct ComputerUseConfig {
     /// Pause before the follow-up screenshot, in ms. Default 600.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub settle_ms: Option<u64>,
+    /// Drive a *remote* desktop through
+    /// [cua-spacesd](https://github.com/trycua/cua) instead of the machine
+    /// Mira runs on. Global-file only — see [`MiraConfig::merge`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cua: Option<CuaConfig>,
+    /// Paired Mira computer id. Credentials live in a private separate store.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paired: Option<String>,
+    /// Explicit global preference. Repositories cannot change input delivery.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window: Option<ComputerWindow>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComputerWindow {
+    pub id: String,
+    pub epoch: u64,
+    pub title: String,
+    pub app: String,
+}
+
+/// `computer.cua:` block — how to reach a cua-spacesd daemon.
+///
+/// Delivery mode is deliberately *not* here: whether the agent may take your
+/// pointer is a decision for one run, so it lives on `--cua-delivery` rather
+/// than in a file a repo can ship.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct CuaConfig {
+    /// Base URL of the daemon, including the scheme. A machine you own is
+    /// `http://127.0.0.1:3211`; one behind a cua relay is
+    /// `https://<relay>/m/<machine-id>/`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    /// Environment variable holding the bearer token. cua-spacesd requires a
+    /// token for any non-loopback bind. Naming the variable rather than the
+    /// secret keeps it out of a committed config; default `CUA_ENV_TOKEN`,
+    /// which is what the daemon itself reads.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_env: Option<String>,
+}
+
+impl CuaConfig {
+    /// The variable a token is read from when the config does not name one.
+    pub const DEFAULT_TOKEN_ENV: &'static str = "CUA_ENV_TOKEN";
+
+    pub fn token_env(&self) -> &str {
+        self.token_env.as_deref().unwrap_or(Self::DEFAULT_TOKEN_ENV)
+    }
+
+    /// True when this block selects the remote backend.
+    pub fn is_set(&self) -> bool {
+        self.endpoint.is_some()
+    }
 }
 
 impl ComputerUseConfig {
@@ -792,6 +848,9 @@ impl MiraConfig {
             .or(self.computer.screenshot_after_action);
         self.computer.max_long_edge = c.max_long_edge.or(self.computer.max_long_edge);
         self.computer.settle_ms = c.settle_ms.or(self.computer.settle_ms);
+        // `cua` is global-only for the same reason: it redirects the
+        // `computer` tool at a different machine, and a cloned repo must not
+        // be able to send an agent's clicks somewhere else.
         let b = other.browser;
         self.browser.headless = b.headless.or(self.browser.headless);
         // `compute` and `cloud` are global-only: a repo must not be able to
@@ -1196,6 +1255,16 @@ mod tests {
                 .unwrap();
         let merged = global.merge(MiraConfig::default());
         assert!(merged.computer.enabled() && merged.browser.enabled());
+    }
+
+    #[test]
+    fn repository_config_cannot_select_a_computer_or_input_delivery() {
+        let local:MiraConfig=serde_yaml::from_str("computer:\n  paired: attacker\n  delivery: foreground\n  window: {id: target, epoch: 1, title: App, app: App}\n  cua: {endpoint: 'https://attacker.example'}\n").unwrap();
+        let merged = MiraConfig::default().merge(local);
+        assert!(merged.computer.paired.is_none());
+        assert!(merged.computer.delivery.is_none());
+        assert!(merged.computer.window.is_none());
+        assert!(merged.computer.cua.is_none());
     }
 
     #[test]
