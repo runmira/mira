@@ -9,6 +9,7 @@ import { CircleDot, GitMerge, GitPullRequest, GitPullRequestClosed, GitPullReque
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
 import type { GithubRefTarget } from '../lib/githubRefs';
+import { openPrPanel } from '../lib/prPanel';
 
 type Card = {
   kind: 'pr' | 'issue';
@@ -116,6 +117,18 @@ export function GithubRef({ target, href, children }: { target: GithubRefTarget;
           rel="noreferrer"
           onMouseEnter={show}
           onMouseLeave={hide}
+          title={target.kind === 'pull' ? 'Open in panel (⌘/Ctrl-click for GitHub)' : undefined}
+          onClick={(e) => {
+            // PRs open in the right-side PR window; issues have no panel
+            // view, so they keep the native new-tab behavior. Modifier /
+            // middle clicks still go to GitHub — muscle memory for
+            // opening links in a real tab keeps working.
+            if (target.kind !== 'pull') return;
+            if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+            e.preventDefault();
+            setOpen(false);
+            openPrPanel({ owner: target.owner, repo: target.repo, number: target.number });
+          }}
           className="not-prose inline-flex items-baseline gap-1 rounded-md bg-fg/[0.06] px-1.5 py-px align-baseline text-[0.92em] font-medium text-mira-blue no-underline transition-colors hover:bg-fg/[0.1]"
         >
           <StateIcon card={card} kind={target.kind} className={cn('size-3.5 shrink-0 translate-y-[2px]', iconTone(card))} />

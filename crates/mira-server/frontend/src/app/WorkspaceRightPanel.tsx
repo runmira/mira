@@ -1,12 +1,15 @@
+import { useEffect } from 'react';
 import { LazyBoundary } from '../components/LazyBoundary';
 import {
   ActivityPane,
   AsidePane,
   DevicesPane,
+  PrPane,
   ProcessesPane,
   SubagentPanel,
   TestsPane,
 } from '../lazyViews';
+import { OPEN_PR_EVENT, type PrTarget } from '../lib/prPanel';
 import type { WorkspaceRuntime } from './WorkspaceRuntime';
 export function WorkspaceRightPanel(
   context: Pick<
@@ -18,6 +21,8 @@ export function WorkspaceRightPanel(
     | 'toolTabs'
     | 'sendWhiteboardToChat'
     | 'openToolPane'
+    | 'openPrPane'
+    | 'runPrReview'
     | 'setPanelFilePickerOpen'
     | 'sessionId'
     | 'entries'
@@ -45,6 +50,8 @@ export function WorkspaceRightPanel(
     toolTabs,
     sendWhiteboardToChat,
     openToolPane,
+    openPrPane,
+    runPrReview,
     setPanelFilePickerOpen,
     sessionId,
     entries,
@@ -63,6 +70,24 @@ export function WorkspaceRightPanel(
     replyToSubagentReview,
     handlePanelResizeStart,
   } = context;
+  // PR chips in the transcript open here: a plain click dispatches the
+  // event (see `lib/prPanel`), and the panel focuses (or opens) that
+  // PR's tab. Modifier-clicks bypass the panel for a real GitHub tab.
+  useEffect(() => {
+    const onOpenPr = (e: Event) => {
+      const t = (e as CustomEvent<PrTarget>).detail;
+      if (t) openPrPane(t.owner, t.repo, t.number);
+    };
+    window.addEventListener(OPEN_PR_EVENT, onOpenPr);
+    return () => window.removeEventListener(OPEN_PR_EVENT, onOpenPr);
+  }, [openPrPane]);
+  // The active PR tab, for the pane body below. `renderPane` only gets
+  // the kind, so the tab is resolved here where the full list is in
+  // scope.
+  const activePrTab =
+    toolTabs.find((t) => t.id === activeAgentTab && t.kind === 'pr') ??
+    [...toolTabs].reverse().find((t) => t.kind === 'pr') ??
+    null;
   return (
     <>
       {panelOpen && (
@@ -127,6 +152,10 @@ export function WorkspaceRightPanel(
                         );
                       case 'devices':
                         return <DevicesPane />;
+                      case 'pr':
+                        return activePrTab ? (
+                          <PrPane tab={activePrTab} onReviewPr={runPrReview} />
+                        ) : null;
                       default:
                         return null;
                     }

@@ -157,6 +157,7 @@ export function SubagentPanel({
             toolTabs={toolTabs}
             activeId={effectiveActiveId}
             onOpenPane={onOpenPane}
+            onSelectTab={onSelectTab}
             onOpenFile={() => {
               onBrowseFile?.();
             }}

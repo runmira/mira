@@ -2,6 +2,7 @@ import { getSessionHistory } from '../api';
 import {
   isToolPaneId,
   TOOL_PANE_DEFS,
+  prPaneId,
   toolPaneId,
   type ToolPaneKind,
 } from '../components/panes/toolPanes';
@@ -174,6 +175,24 @@ export function usePanelCommands(
     else closeFileTab(id);
   }
 
+  /**
+   * Show a pull request in the right panel. One tab per PR (like file
+   * tabs), so several PRs can sit side by side; clicking the same PR
+   * again just re-focuses its tab.
+   */
+  function openPrPane(owner: string, repo: string, number: number) {
+    const id = prPaneId(owner, repo, number);
+    setToolTabs((prev) => {
+      const withoutLauncher = prev.filter((t) => t.kind !== 'new');
+      if (withoutLauncher.some((t) => t.id === id)) return withoutLauncher;
+      return [
+        ...withoutLauncher,
+        { id, kind: 'pr', title: `#${number} · ${repo}`, pr: { owner, repo, number } },
+      ];
+    });
+    setActiveAgentTab(id);
+  }
+
   /** Whiteboard "Send": hand the drawing to the composer as an image
    *  attachment so the model can actually see it. */
   async function sendWhiteboardToChat(pngDataUrl: string) {
@@ -216,6 +235,7 @@ export function usePanelCommands(
     closeToolTab,
     openToolPane,
     closeAnyTab,
+    openPrPane,
     sendWhiteboardToChat,
     handlePanelResizeStart,
     toggleTurn,
