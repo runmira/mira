@@ -812,6 +812,9 @@
   opacity: 0.75;
 }
 
+/* Agent prose reads at full contrast wherever it appears. An earlier rule
+   dimmed anything inside `.transcript-work` (intermediate narration between
+   tool calls) to muted-foreground, which made running commentary look
+   disabled next to the final reply's white/black. The stream now carries one
+   voice: if the agent said it, it is foreground text. */
 [data-assistant-message] .md { font-weight: 450; }
-.transcript-work [data-assistant-message] .md { color: hsl(var(--muted-foreground)); font-weight: 400; }
-.transcript-work [data-assistant-message] .md strong { color: inherit; font-weight: 500; }
