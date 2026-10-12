@@ -9,6 +9,7 @@ import {
   describeAcpStop,
   finishCompaction,
   isSuccessfulAcpStop,
+  isUserCancelledStop,
   sealAcpThought,
   settleTools,
   stampLastTurn,
@@ -199,6 +200,12 @@ export function useAgentEvents(
           const sealed = settleTools(sealAcpThought(prev));
           if (isSuccessfulAcpStop(stopped) || hasCurrentAgentFailure(sealed)) return sealed;
           const detail = msg.detail ? ` ${msg.detail}` : '';
+          // A turn the user stopped is not a failure. It gets a quiet note
+          // rather than an error card: there is no retry worth offering
+          // (the user just chose to stop) and no connection to go fix.
+          if (isUserCancelledStop(stopped)) {
+            return [...sealed, { kind: 'warning', text: describeAcpStop(stopped) }];
+          }
           return [
             ...sealed,
             {

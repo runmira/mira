@@ -17,7 +17,7 @@ import type {
   ToolResult,
   AgentTranscriptLine,
 } from '../types';
-import { type Entry, engineFromRef, upsertToolStart, updateTool, attachToolResult, applyNativeFrame, type NativeFrame, appendAcpText, appendAcpThought, upsertAcpTool, sealAcpThought, type AcpPlanEntry, addTurnUsage, withTurnStats, isSuccessfulAcpStop, describeAcpStop, compactionSummary, stripHookContext, type ToolEntry } from './entries';
+import { type Entry, engineFromRef, upsertToolStart, updateTool, attachToolResult, applyNativeFrame, type NativeFrame, appendAcpText, appendAcpThought, upsertAcpTool, sealAcpThought, type AcpPlanEntry, addTurnUsage, withTurnStats, isSuccessfulAcpStop, isUserCancelledStop, describeAcpStop, compactionSummary, stripHookContext, type ToolEntry } from './entries';
 
 /**
  * Rebuild transcript entries from an agent sidecar.
@@ -186,6 +186,12 @@ export function replayAgentTranscript(lines: AgentTranscriptLine[]): Entry[] {
           break;
         }
         const detail = msg.detail ? ` ${msg.detail}` : '';
+        // Mirrors the live path: a user-stopped turn replays as a quiet
+        // note, not a failure card the user never asked for.
+        if (isUserCancelledStop(msg.stop_reason)) {
+          out = [...sealed, { kind: 'warning', text: describeAcpStop(msg.stop_reason) }];
+          break;
+        }
         out = [
           ...sealed,
           { kind: 'error', text: `${describeAcpStop(msg.stop_reason)}${detail}`, responseFailure: true },

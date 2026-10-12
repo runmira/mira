@@ -511,30 +511,11 @@ export function appendAcpThought(prev: Entry[], text: string): Entry[] {
   );
 }
 
-/**
- * Whether a stop reason means the turn actually produced an answer.
- *
- * Deliberately a small allowlist rather than a blocklist: an unfamiliar
- * reason is far more likely to be a failure or a limit than a clean finish,
- * and saying so beats claiming success.
- */
-export function isSuccessfulAcpStop(stop: string): boolean {
-  return ['end_turn', 'success', 'completed', 'stop_sequence'].includes(stop);
-}
-
-/** A human explanation of why a turn stopped, for the transcript. */
-export function describeAcpStop(stop: string): string {
-  if (stop === 'rate_limited') {
-    return 'The agent hit a usage limit, so this turn failed without an answer.';
-  }
-  if (stop === 'cancelled' || stop === 'canceled') {
-    return 'This turn was cancelled.';
-  }
-  if (stop === 'max_tokens' || stop === 'max_turns') {
-    return `The agent stopped early (${stop}).`;
-  }
-  return `The agent stopped: ${stop}.`;
-}
+/** Whether a stop reason means the turn produced an answer, whether the
+ *  user ended it, and what to say. Defined in `lib/acpStop` (pure, and
+ *  testable on its own) and re-exported here because callers that build
+ *  entries already import their transcript helpers from this module. */
+export { describeAcpStop, isSuccessfulAcpStop, isUserCancelledStop } from '../lib/acpStop';
 
 export function sealAcpThought(prev: Entry[]): Entry[] {
   return sealThought(prev);
