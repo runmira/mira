@@ -28,6 +28,8 @@ pub struct MockBackend {
     pub capture_size: (u32, u32),
     pub events: Mutex<Vec<Event>>,
     cursor: Mutex<Point>,
+    #[cfg(test)]
+    pub release_delay: std::time::Duration,
 }
 
 impl MockBackend {
@@ -37,6 +39,8 @@ impl MockBackend {
             capture_size,
             events: Mutex::new(Vec::new()),
             cursor: Mutex::new(Point { x: 0, y: 0 }),
+            #[cfg(test)]
+            release_delay: std::time::Duration::ZERO,
         }
     }
 
@@ -80,6 +84,10 @@ impl ComputerBackend for MockBackend {
     }
 
     async fn button(&self, button: MouseButton, action: ButtonAction) -> Result<(), ComputerError> {
+        #[cfg(test)]
+        if action == ButtonAction::Up {
+            tokio::time::sleep(self.release_delay).await;
+        }
         self.push(Event::Button(button, action));
         Ok(())
     }
@@ -95,6 +103,10 @@ impl ComputerBackend for MockBackend {
     }
 
     async fn key(&self, chord: &KeyChord, action: KeyAction) -> Result<(), ComputerError> {
+        #[cfg(test)]
+        if action == KeyAction::Up {
+            tokio::time::sleep(self.release_delay).await;
+        }
         self.push(Event::Key(chord.clone(), action));
         Ok(())
     }

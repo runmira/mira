@@ -144,7 +144,15 @@ pub async fn register_computer_use(
     use std::sync::Arc;
     let mut report = ComputerUseReport::default();
 
-    if enable_computer {
+    if enable_computer && computer_cfg.paired.is_some() {
+        match computer_controller(computer_cfg, cua_delivery).await {
+            Ok(controller) => {
+                reg.register(computer::ComputerTool::new(controller, None));
+                report.computer = Some("paired");
+            }
+            Err(e) => report.warnings.push(format!("computer use disabled: {e}")),
+        }
+    } else if enable_computer {
         match computer_backend(computer_cfg, cua_delivery).await {
             Ok(backend) => {
                 let mut opts = mira_computer::ComputerOptions::default();
@@ -213,11 +221,15 @@ pub async fn register_computer_use(
 /// quietly falling back to the local desktop — silently clicking on the
 /// user's real screen because a remote box was down is not a fallback anyone
 /// wants.
-async fn computer_backend(
+pub async fn computer_backend(
     cfg: &mira_config::ComputerUseConfig,
     delivery: Option<mira_computer::Delivery>,
 ) -> Result<Box<dyn mira_computer::ComputerBackend>, mira_computer::ComputerError> {
-    let Some(opts) = cua_options(cfg, delivery) else {
+    let delivery = resolved_delivery(cfg, delivery)?;
+    let Some(opts) = cua_options(cfg, Some(delivery)) else {
+        if delivery == mira_computer::Delivery::Background {
+            return Err(mira_computer::ComputerError::Unsupported("The native desktop backend cannot promise background delivery. Use CUA or explicitly select Foreground.".into()));
+        }
         return mira_computer::detect();
     };
     let endpoint = opts.endpoint.clone();
@@ -228,18 +240,19 @@ async fn computer_backend(
     // input should be said out loud before the agent starts clicking, not
     // discovered on the first click that moves the user's pointer.
     match backend.capabilities().await {
+        Ok(caps) if caps.protocol_version != 1 => {
+            return Err(mira_computer::ComputerError::Unsupported(
+                "Unsupported CUA protocol version".into(),
+            ))
+        }
         Ok(caps) if !caps.background_input && delivery == mira_computer::Delivery::Background => {
-            tracing::warn!(
-                "cua: {endpoint} reports no background input ({})",
-                if caps.background_input_limitation.is_empty() {
-                    "no limitation given"
-                } else {
-                    &caps.background_input_limitation
-                }
-            );
+            return Err(mira_computer::ComputerError::Unsupported(format!(
+                "{endpoint} cannot deliver background input: {}",
+                caps.background_input_limitation
+            )))
         }
         Ok(_) => {}
-        Err(e) => tracing::debug!("cua: capabilities probe failed ({e}); continuing"),
+        Err(e) => return Err(e),
     }
 
     Ok(Box::new(backend))
@@ -259,7 +272,19 @@ pub fn cua_options(
         mira_computer::CuaOptions {
             endpoint: cua.endpoint.clone()?,
             token: None,
-            delivery: delivery.unwrap_or_else(delivery_from_env),
+            delivery: delivery
+                .or_else(|| cfg.delivery.as_ref().and_then(|v| v.parse().ok()))
+                .unwrap_or_else(delivery_from_env),
+            window: cfg
+                .window
+                .as_ref()
+                .map(|w| mira_computer::backend::cua::TargetWindow {
+                    id: w.id.clone(),
+                    epoch: w.epoch,
+                    title: w.title.clone(),
+                    app: w.app.clone(),
+                }),
+            ..Default::default()
         }
         .token_from_env(cua.token_env()),
     )
@@ -287,10 +312,88 @@ fn delivery_from_env() -> mira_computer::Delivery {
         Ok(v) => match v.parse() {
             Ok(d) => d,
             Err(e) => {
-                tracing::warn!("MIRA_CUA_DELIVERY: {e}; using auto");
-                mira_computer::Delivery::Auto
+                tracing::warn!("MIRA_CUA_DELIVERY: {e}; using background only");
+                mira_computer::Delivery::Background
             }
         },
         Err(_) => mira_computer::Delivery::Auto,
+    }
+}
+
+/// Same target selection for CLI tools and the live Settings source. Never fall back from a paired target.
+pub async fn computer_controller(
+    cfg: &mira_config::ComputerUseConfig,
+    delivery: Option<mira_computer::Delivery>,
+) -> Result<std::sync::Arc<dyn mira_computer::ComputerController>, mira_computer::ComputerError> {
+    let delivery = resolved_delivery(cfg, delivery)?;
+    let window = cfg
+        .window
+        .as_ref()
+        .map(|w| mira_computer::backend::cua::TargetWindow {
+            id: w.id.clone(),
+            epoch: w.epoch,
+            title: w.title.clone(),
+            app: w.app.clone(),
+        });
+    if let Some(id) = &cfg.paired {
+        let connection = mira_computer::remote::load_connections()?
+            .into_iter()
+            .find(|c| &c.id == id)
+            .ok_or_else(|| {
+                mira_computer::ComputerError::Remote(
+                    "The selected computer is no longer paired. Choose a computer in Settings."
+                        .into(),
+                )
+            })?;
+        return Ok(mira_computer::remote::RemoteComputer::new(
+            connection, delivery, window,
+        )?);
+    }
+    let backend = computer_backend(cfg, Some(delivery)).await?;
+    let mut options = mira_computer::ComputerOptions {
+        screenshot_after_action: cfg.screenshot_after_action.unwrap_or(true),
+        settle: std::time::Duration::from_millis(cfg.settle_ms.unwrap_or(600).min(10_000)),
+        ..Default::default()
+    };
+    options.limits.max_long_edge = cfg.max_long_edge.unwrap_or(1568).clamp(256, 4096);
+    Ok(std::sync::Arc::new(mira_computer::Computer::new(
+        std::sync::Arc::from(backend),
+        options,
+    )))
+}
+
+fn resolved_delivery(
+    cfg: &mira_config::ComputerUseConfig,
+    explicit: Option<mira_computer::Delivery>,
+) -> Result<mira_computer::Delivery, mira_computer::ComputerError> {
+    if let Some(delivery) = explicit {
+        return Ok(delivery);
+    }
+    if let Some(delivery) = &cfg.delivery {
+        return delivery
+            .parse()
+            .map_err(mira_computer::ComputerError::InvalidArgs);
+    }
+    Ok(delivery_from_env())
+}
+#[cfg(test)]
+mod computer_settings_tests {
+    use super::*;
+    #[tokio::test]
+    async fn background_delivery_never_silently_uses_native_input() {
+        let result = computer_backend(
+            &Default::default(),
+            Some(mira_computer::Delivery::Background),
+        )
+        .await;
+        assert!(result.is_err());
+    }
+    #[test]
+    fn invalid_delivery_configuration_is_rejected() {
+        let cfg = mira_config::ComputerUseConfig {
+            delivery: Some("backgound".into()),
+            ..Default::default()
+        };
+        assert!(resolved_delivery(&cfg, None).is_err());
     }
 }

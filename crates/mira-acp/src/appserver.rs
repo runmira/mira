@@ -272,6 +272,7 @@ You are running inside Mira. The `mira` MCP server adds what your own tools cann
 
 - Questions: when you must ask the user and request_user_input is not available, call Mira's `ask_user`. It shows a form in Mira and waits for the answer. Never claim a question was shown without calling a tool.
 - Browser: `browser_open`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_press` and `browser_screenshot` drive the browser the user watches in Mira's browser pane. Prefer them over starting a browser of your own. Native computer use has separate host permissions; a denial there does not mean Mira's browser is unavailable.
+- Computer: Mira’s `computer` tool uses the computer selected in Settings → Computer, which may be remote. Start with a screenshot. If disabled or denied, ask the user to enable it; never silently control another machine instead.
 - Long-running commands (dev servers, watchers): `run_background`, `read_output` and `kill_background`. Their handles belong to the chat, show in Mira's Processes window, and survive an interrupted turn; native exec_command handles may expire when Codex restarts.
 - `delegate_task` hands a self-contained task to another engine and returns its answer.
 - Secrets: when you need an API key or token, call `request_secret`. The user enters it privately and you get a file path to read it from; never ask for secrets in chat.

@@ -129,6 +129,7 @@ pub struct AppState {
     /// no process. Held as `Arc` because `AppState` itself is cloned into
     /// every axum handler.
     pub browser: Arc<mira_browser::Browser>,
+    pub computer: Arc<crate::computer::runtime::Runtime>,
 }
 
 impl AppState {

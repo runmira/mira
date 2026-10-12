@@ -398,7 +398,15 @@ pub fn is_local(peer: Option<SocketAddr>, method: &Method, headers: &HeaderMap) 
 fn is_public(path: &str) -> bool {
     matches!(
         path,
-        "/api/health" | "/api/version" | "/api/pairing/me" | "/api/pairing/pair"
+        "/api/health"
+            | "/api/version"
+            | "/api/pairing/me"
+            | "/api/pairing/pair"
+            | "/api/computer/identity"
+            | "/api/computer/pairing/claim"
+            | "/api/computer/control"
+            | "/api/computer/windows"
+            | "/api/computer/access/revoke"
     ) || !(path.starts_with("/api/") || path == "/ws" || path.starts_with("/ws/"))
 }
 
@@ -455,14 +463,14 @@ pub async fn guard(State(devices): State<Arc<Devices>>, mut req: Request, next: 
     next.run(req).await
 }
 
-fn caller(req_ext: &axum::http::Extensions) -> Caller {
+pub(crate) fn caller(req_ext: &axum::http::Extensions) -> Caller {
     req_ext
         .get::<Caller>()
         .cloned()
         .unwrap_or(Caller::Anonymous)
 }
 
-fn local_only(c: &Caller) -> Option<Response> {
+pub(crate) fn local_only(c: &Caller) -> Option<Response> {
     (!matches!(c, Caller::Local)).then(|| {
         (
             StatusCode::FORBIDDEN,

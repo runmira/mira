@@ -37,7 +37,7 @@ use async_trait::async_trait;
 use image::RgbaImage;
 use tokio::sync::{Mutex, RwLock};
 use tonic::metadata::{Ascii, MetadataValue};
-use tonic::transport::{Channel, Endpoint};
+use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use tonic::Request;
 
 use crate::action::{MouseButton, Point, ScrollDirection};
@@ -63,12 +63,13 @@ const GEOMETRY_TTL: Duration = Duration::from_secs(30);
 /// How long to wait for the daemon to answer before giving up. Generous,
 /// because a cold guest may still be starting its desktop session.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const RPC_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// The port `cua-spacesd` serves the contract on.
 const DEFAULT_PORT: u16 = 3211;
 
 /// How synthetic input reaches the guest.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Delivery {
     /// Prefer background delivery and fall back to foreground when the guest
@@ -122,11 +123,11 @@ impl std::fmt::Display for Delivery {
 }
 
 /// Everything needed to reach one guest.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CuaOptions {
     /// Base URL of cua-spacesd, including the scheme. A daemon on this
     /// machine is `http://127.0.0.1:3211`; one behind a cua relay is an
-    /// `https://<relay>/m/<machine-id>/` URL.
+    /// an HTTPS origin terminating TLS for the daemon. URL prefixes are not supported.
     pub endpoint: String,
     /// Bearer token. Mandatory for any non-loopback bind — a daemon will not
     /// listen on a routable address without one. Prefer
@@ -134,6 +135,76 @@ pub struct CuaOptions {
     pub token: Option<String>,
     /// See [`Delivery`].
     pub delivery: Delivery,
+    pub window: Option<TargetWindow>,
+    pub rpc_timeout: Duration,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TargetWindow {
+    pub id: String,
+    #[serde(with = "epoch_json")]
+    pub epoch: u64,
+    pub title: String,
+    pub app: String,
+}
+mod epoch_json {
+    use serde::{Deserialize, Deserializer, Serializer};
+    pub fn serialize<S: Serializer>(value: &u64, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&value.to_string())
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Value {
+            Text(String),
+            Number(u64),
+        }
+        match Value::deserialize(d)? {
+            Value::Text(v) => v.parse().map_err(serde::de::Error::custom),
+            Value::Number(v) => Ok(v),
+        }
+    }
+}
+impl TargetWindow {
+    fn reference(&self) -> pb::WindowRef {
+        pb::WindowRef {
+            id: self.id.clone(),
+            epoch: self.epoch,
+        }
+    }
+}
+impl std::fmt::Debug for CuaOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CuaOptions")
+            .field("endpoint", &self.endpoint)
+            .field("authenticated", &self.token.is_some())
+            .field("delivery", &self.delivery)
+            .field("window", &self.window)
+            .finish()
+    }
+}
+
+/// Accept only encrypted remote connections or direct loopback HTTP.
+pub fn validate_endpoint(endpoint: &str) -> Result<url::Url, ComputerError> {
+    let url = url::Url::parse(endpoint)
+        .map_err(|_| ComputerError::InvalidArgs("Invalid computer address".into()))?;
+    let loopback = url.host_str().is_some_and(|h| {
+        h == "localhost"
+            || h.trim_matches(['[', ']'])
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+    });
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.path() != "/"
+        || !matches!(url.scheme(), "http" | "https")
+        || (url.scheme() == "http" && !loopback)
+    {
+        return Err(ComputerError::InvalidArgs("Use an HTTPS computer address. HTTP is only supported on loopback; credentials, paths, queries and fragments are not allowed.".into()));
+    }
+    Ok(url)
 }
 
 impl Default for CuaOptions {
@@ -142,6 +213,8 @@ impl Default for CuaOptions {
             endpoint: format!("http://127.0.0.1:{DEFAULT_PORT}"),
             token: None,
             delivery: Delivery::default(),
+            window: None,
+            rpc_timeout: RPC_TIMEOUT,
         }
     }
 }
@@ -161,7 +234,10 @@ impl CuaOptions {
         match &self.token {
             None => Ok(None),
             Some(t) => MetadataValue::try_from(format!("Bearer {t}"))
-                .map(Some)
+                .map(|mut value| {
+                    value.set_sensitive(true);
+                    Some(value)
+                })
                 .map_err(|_| {
                     ComputerError::InvalidArgs("cua: token is not valid HTTP metadata".into())
                 }),
@@ -183,6 +259,31 @@ struct Geometry {
 }
 
 impl Geometry {
+    fn validated(bounds: pb::Rect, native: (u32, u32)) -> Result<Self, ComputerError> {
+        if ![bounds.x, bounds.y, bounds.width, bounds.height]
+            .iter()
+            .all(|value| value.is_finite())
+            || bounds.width < 1.0
+            || bounds.height < 1.0
+            || bounds.width > 32768.0
+            || bounds.height > 32768.0
+            || bounds.x.abs() > 1_000_000.0
+            || bounds.y.abs() > 1_000_000.0
+        {
+            return Err(ComputerError::Remote(
+                "The guest reported invalid capture geometry. Input was refused.".into(),
+            ));
+        }
+        Ok(Self {
+            origin: Point {
+                x: bounds.x.round() as i32,
+                y: bounds.y.round() as i32,
+            },
+            size: (bounds.width.round() as u32, bounds.height.round() as u32),
+            native,
+            fetched: Instant::now(),
+        })
+    }
     /// Mira's primary-relative point → the contract's global logical space.
     fn to_global(self, p: Point) -> Point {
         Point {
@@ -223,10 +324,16 @@ impl Geometry {
 pub struct CuaBackend {
     computer: pb::computer_service_client::ComputerServiceClient<Channel>,
     system: pb::system_service_client::SystemServiceClient<Channel>,
+    windows: pb::windows_service_client::WindowsServiceClient<Channel>,
+    window: Option<TargetWindow>,
+    report: Mutex<Option<pb::DeliveryReport>>,
+    geometry_changed: std::sync::atomic::AtomicBool,
+    input_blocked: std::sync::atomic::AtomicBool,
     auth: Option<MetadataValue<Ascii>>,
     delivery: i32,
+    rpc_timeout: Duration,
     geometry: RwLock<Option<Geometry>>,
-    /// The last point Mira asked us to move to, in global space.
+    /// The last point Mira selected, relative to the capture source.
     ///
     /// `ComputerBackend::button` takes no coordinates — `Computer` moves and
     /// then clicks — so without this a click would have to mean "wherever the
@@ -248,6 +355,7 @@ pub struct Capabilities {
     pub protocol_revision: u32,
     /// Guest hostname, when it reports one.
     pub hostname: String,
+    pub os: String,
     /// Whether the guest can take input without moving the user's pointer.
     pub background_input: bool,
     /// Why [`Capabilities::background_input`] is degraded or absent, in the
@@ -261,11 +369,20 @@ impl CuaBackend {
     /// Fails fast on a bad endpoint or an unreachable daemon rather than
     /// leaving `mira` to start and fail on the model's first click.
     pub async fn connect(opts: &CuaOptions) -> Result<Self, ComputerError> {
-        let channel = Endpoint::from_shared(opts.endpoint.clone())
-            .map_err(|e| {
-                ComputerError::InvalidArgs(format!("cua endpoint `{}`: {e}", opts.endpoint))
-            })?
+        let url = validate_endpoint(&opts.endpoint)?;
+        let mut endpoint = Endpoint::from_shared(opts.endpoint.clone()).map_err(|e| {
+            ComputerError::InvalidArgs(format!("cua endpoint `{}`: {e}", opts.endpoint))
+        })?;
+        if url.scheme() == "https" {
+            endpoint = endpoint
+                .tls_config(ClientTlsConfig::new().with_webpki_roots())
+                .map_err(|_| {
+                    ComputerError::InvalidArgs("Could not configure computer TLS".into())
+                })?;
+        }
+        let channel = endpoint
             .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(opts.rpc_timeout)
             .connect()
             .await
             .map_err(|e| {
@@ -281,11 +398,17 @@ impl CuaBackend {
             computer: pb::computer_service_client::ComputerServiceClient::new(channel.clone())
                 .max_decoding_message_size(MAX_MESSAGE_BYTES)
                 .max_encoding_message_size(MAX_MESSAGE_BYTES),
+            windows: pb::windows_service_client::WindowsServiceClient::new(channel.clone()),
+            window: opts.window.clone(),
+            report: Mutex::new(None),
+            geometry_changed: std::sync::atomic::AtomicBool::new(false),
+            input_blocked: std::sync::atomic::AtomicBool::new(false),
             system: pb::system_service_client::SystemServiceClient::new(channel)
                 .max_decoding_message_size(MAX_MESSAGE_BYTES)
                 .max_encoding_message_size(MAX_MESSAGE_BYTES),
             auth: opts.auth_header()?,
             delivery: opts.delivery.as_i32(),
+            rpc_timeout: opts.rpc_timeout,
             geometry: RwLock::new(None),
             pointer: Mutex::new(None),
         })
@@ -318,6 +441,16 @@ impl CuaBackend {
             protocol_version: caps.protocol_version,
             protocol_revision: caps.protocol_revision,
             hostname: caps.hostname,
+            os: caps
+                .os
+                .map(|os| {
+                    if os.pretty_name.is_empty() {
+                        os.name
+                    } else {
+                        os.pretty_name
+                    }
+                })
+                .unwrap_or_default(),
             background_input: background.as_ref().is_some_and(|(ok, _)| *ok),
             background_input_limitation: background.map(|(_, l)| l).unwrap_or_default(),
         })
@@ -325,6 +458,7 @@ impl CuaBackend {
 
     fn request<T>(&self, message: T) -> Request<T> {
         let mut req = Request::new(message);
+        req.set_timeout(self.rpc_timeout);
         if let Some(auth) = &self.auth {
             req.metadata_mut().insert("authorization", auth.clone());
         }
@@ -334,6 +468,7 @@ impl CuaBackend {
     /// Target for input: the primary display, in the contract's global space.
     fn target(&self) -> pb::InputTarget {
         pb::InputTarget {
+            window: self.window.as_ref().map(TargetWindow::reference),
             display_id: PRIMARY.to_owned(),
             delivery: self.delivery,
             space: pb::CoordinateSpace::Screen as i32,
@@ -342,20 +477,23 @@ impl CuaBackend {
     }
 
     async fn pointer(&self, action: pb::pointer_request::Action) -> Result<(), ComputerError> {
+        self.check_input_target()?;
         let mut client = self.computer.clone();
-        client
+        let response = client
             .pointer(self.request(pb::PointerRequest {
                 target: Some(self.target()),
                 action: Some(action),
             }))
             .await
-            .map_err(|e| call_error("Pointer", e))?;
-        Ok(())
+            .map_err(|e| self.input_error("Pointer", e))?
+            .into_inner();
+        self.record_report(response.report).await
     }
 
     async fn keyboard(&self, action: pb::keyboard_request::Action) -> Result<(), ComputerError> {
+        self.check_input_target()?;
         let mut client = self.computer.clone();
-        client
+        let response = client
             .keyboard(self.request(pb::KeyboardRequest {
                 // `KeyboardRequest` ignores `space` and any points; only
                 // `delivery` is meaningful here.
@@ -363,8 +501,90 @@ impl CuaBackend {
                 action: Some(action),
             }))
             .await
-            .map_err(|e| call_error("Keyboard", e))?;
+            .map_err(|e| self.input_error("Keyboard", e))?
+            .into_inner();
+        self.record_report(response.report).await
+    }
+
+    fn input_error(&self, op: &str, error: tonic::Status) -> ComputerError {
+        if matches!(
+            error.code(),
+            tonic::Code::DeadlineExceeded | tonic::Code::Cancelled | tonic::Code::Unavailable
+        ) {
+            self.input_blocked
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        call_error(op, error)
+    }
+    fn check_input_target(&self) -> Result<(), ComputerError> {
+        if self.input_blocked.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(ComputerError::Remote("Computer input is paused after an unconfirmed delivery. Reconnect in Computer settings before continuing.".into()));
+        }
+        if self.delivery == Delivery::Background.as_i32() && self.window.is_none() {
+            return Err(ComputerError::InvalidArgs(
+                "Select an application window before using background input.".into(),
+            ));
+        }
         Ok(())
+    }
+    async fn record_report(&self, report: Option<pb::DeliveryReport>) -> Result<(), ComputerError> {
+        if report.as_ref().is_none_or(|r| {
+            r.delivery != pb::Delivery::Background as i32
+                && r.delivery != pb::Delivery::Foreground as i32
+        }) {
+            self.input_blocked
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            return Err(ComputerError::Remote("The guest did not confirm input delivery. Input has been stopped; inspect the target computer before reconnecting.".into()));
+        }
+        if self.delivery == Delivery::Background.as_i32()
+            && report.as_ref().is_none_or(|r| {
+                r.delivery != pb::Delivery::Background as i32 || r.focus_changed || r.pointer_moved
+            })
+        {
+            self.input_blocked
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            return Err(ComputerError::Remote("The guest did not confirm background-only delivery. Input has been stopped; check the target computer.".into()));
+        }
+        if let Some(report) = report {
+            let mut previous = self.report.lock().await;
+            if let Some(old) = previous.as_mut() {
+                old.pointer_moved |= report.pointer_moved;
+                old.focus_changed |= report.focus_changed;
+                if report.delivery == pb::Delivery::Foreground as i32 {
+                    old.delivery = report.delivery;
+                }
+            } else {
+                *previous = Some(report);
+            }
+        }
+        Ok(())
+    }
+    pub async fn list_windows(&self) -> Result<Vec<TargetWindow>, ComputerError> {
+        let response = self
+            .windows
+            .clone()
+            .list_windows(self.request(pb::ListWindowsRequest {
+                filter: Some(pb::WindowFilter {
+                    on_screen_only: true,
+                    ..Default::default()
+                }),
+            }))
+            .await
+            .map_err(|e| call_error("ListWindows", e))?
+            .into_inner();
+        Ok(response
+            .windows
+            .into_iter()
+            .filter_map(|w| {
+                let reference = w.r#ref?;
+                Some(TargetWindow {
+                    id: reference.id,
+                    epoch: reference.epoch,
+                    title: w.title,
+                    app: w.app.map(|a| a.name).unwrap_or_default(),
+                })
+            })
+            .collect())
     }
 
     /// The primary display's geometry, cached briefly.
@@ -381,6 +601,26 @@ impl CuaBackend {
             }
         }
 
+        if let Some(window) = &self.window {
+            let response = self
+                .windows
+                .clone()
+                .get_window(self.request(pb::GetWindowRequest {
+                    window: Some(window.reference()),
+                }))
+                .await
+                .map_err(|e| call_error("GetWindow", e))?
+                .into_inner();
+            let bounds = response.window.and_then(|w| w.bounds).ok_or_else(|| {
+                ComputerError::Remote(
+                    "Selected window is unavailable. Choose another window in Computer settings."
+                        .into(),
+                )
+            })?;
+            let g = Geometry::validated(bounds, (0, 0))?;
+            *self.geometry.write().await = Some(g);
+            return Ok(g);
+        }
         let primary = self.primary_display().await?.ok_or_else(|| {
             // A real guest genuinely reports no display: its desktop
             // session has not come up, the screen is locked, or it is
@@ -399,19 +639,7 @@ impl CuaBackend {
             .map(|s| (s.width, s.height))
             .unwrap_or((0, 0));
 
-        let size = (
-            bounds.width.round().max(1.0) as u32,
-            bounds.height.round().max(1.0) as u32,
-        );
-        let geometry = Geometry {
-            origin: Point {
-                x: bounds.x.round() as i32,
-                y: bounds.y.round() as i32,
-            },
-            size,
-            native,
-            fetched: Instant::now(),
-        };
+        let geometry = Geometry::validated(bounds, native)?;
         *self.geometry.write().await = Some(geometry);
         Ok(geometry)
     }
@@ -444,9 +672,41 @@ impl CuaBackend {
         Ok(caps.displays.into_iter().find(|d| d.primary))
     }
 
-    /// Where Mira last pointed, in global space.
-    async fn last_point(&self) -> Option<Point> {
-        *self.pointer.lock().await
+    async fn input_geometry(&self) -> Result<Geometry, ComputerError> {
+        if self
+            .geometry_changed
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(ComputerError::Remote(
+                "The capture source was resized. Take a fresh screenshot before sending input."
+                    .into(),
+            ));
+        }
+        let previous = *self.geometry.read().await;
+        if self.window.is_some() {
+            *self.geometry.write().await = None;
+        }
+        let current = self.geometry().await?;
+        if previous.is_some_and(|g| g.size != current.size) {
+            self.geometry_changed
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            return Err(ComputerError::Remote(
+                "The capture source was resized. Take a fresh screenshot before sending input."
+                    .into(),
+            ));
+        }
+        Ok(current)
+    }
+    async fn input_point(&self) -> Result<Option<pb::Point>, ComputerError> {
+        self.check_input_target()?;
+        let point = *self.pointer.lock().await;
+        if self.delivery == Delivery::Background.as_i32() && point.is_none() {
+            return Err(ComputerError::InvalidArgs(
+                "Provide a coordinate before clicking or scrolling in the background.".into(),
+            ));
+        }
+        let geometry = self.input_geometry().await?;
+        Ok(point.map(|p| self::point(geometry.to_global(p))))
     }
 }
 
@@ -464,10 +724,12 @@ impl ComputerBackend for CuaBackend {
         let mut client = self.computer.clone();
         let shot = client
             .screenshot(self.request(pb::ScreenshotRequest {
-                source: Some(pb::screenshot_request::Source::DisplayId(
-                    PRIMARY.to_owned(),
-                )),
+                source: Some(match &self.window {
+                    Some(window) => pb::screenshot_request::Source::Window(window.reference()),
+                    None => pb::screenshot_request::Source::DisplayId(PRIMARY.to_owned()),
+                }),
                 format: pb::ImageFormat::Png as i32,
+                max_dimension: 4096,
                 // The cursor is part of what the user sees, and seeing it
                 // stops a model from hunting for a pointer it already drew.
                 include_cursor: true,
@@ -477,31 +739,71 @@ impl ComputerBackend for CuaBackend {
             .map_err(|e| call_error("Screenshot", e))?
             .into_inner();
 
+        if let Some(bounds) = shot.logical_bounds {
+            let g = Geometry::validated(
+                bounds,
+                shot.native_size
+                    .map(|s| (s.width, s.height))
+                    .unwrap_or_default(),
+            )?;
+            *self.geometry.write().await = Some(g);
+        }
         if shot.image.is_empty() {
             return Err(ComputerError::Remote(
                 "cua: the guest returned an empty screenshot".into(),
             ));
         }
-        image::load_from_memory_with_format(&shot.image, image::ImageFormat::Png)
-            .map(|img| img.to_rgba8())
-            .map_err(|e| ComputerError::Image(format!("cua screenshot: {e}")))
+        let mut reader = image::ImageReader::with_format(
+            std::io::Cursor::new(&shot.image),
+            image::ImageFormat::Png,
+        );
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(8192);
+        limits.max_image_height = Some(8192);
+        limits.max_alloc = Some(128 * 1024 * 1024);
+        reader.limits(limits);
+        let image = reader
+            .decode()
+            .map(|image| image.to_rgba8())
+            .map_err(|e| ComputerError::Image(format!("cua screenshot: {e}")))?;
+        self.geometry_changed
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        Ok(image)
     }
 
     async fn mouse_move(&self, p: Point) -> Result<(), ComputerError> {
-        let g = self.geometry().await?;
+        let g = self.input_geometry().await?;
         let global = g.to_global(p);
+        if self.delivery == Delivery::Background.as_i32() {
+            self.check_input_target()?;
+            *self.pointer.lock().await = Some(p);
+            *self.report.lock().await = Some(pb::DeliveryReport {
+                delivery: pb::Delivery::Background as i32,
+                detail: "Target point selected; the visible pointer was not moved.".into(),
+                ..Default::default()
+            });
+            return Ok(());
+        }
         self.pointer(pb::pointer_request::Action::Move(pb::PointerMove {
             position: Some(point(global)),
             // Unset jumps instantly, matching what Mira's local backends do.
             duration: None,
         }))
         .await?;
-        *self.pointer.lock().await = Some(global);
+        *self.pointer.lock().await = Some(p);
         Ok(())
     }
 
     async fn button(&self, button: MouseButton, action: ButtonAction) -> Result<(), ComputerError> {
-        let at = self.last_point().await.map(point);
+        if self.delivery == Delivery::Background.as_i32()
+            && !matches!(action, ButtonAction::Click(_))
+        {
+            return Err(ComputerError::Unsupported(
+                "Background input does not support separate button down/up. Use click or drag."
+                    .into(),
+            ));
+        }
+        let at = self.input_point().await?;
         let button = mouse_button(button) as i32;
         let action = match action {
             ButtonAction::Click(count) => pb::pointer_request::Action::Click(pb::PointerClick {
@@ -523,7 +825,7 @@ impl ComputerBackend for CuaBackend {
     }
 
     async fn scroll(&self, direction: ScrollDirection, amount: u32) -> Result<(), ComputerError> {
-        let at = self.last_point().await.map(point);
+        let at = self.input_point().await?;
         // `amount` is wheel clicks, as on the local backends, and the contract
         // takes a delta in the chosen unit: positive scrolls content down and
         // right.
@@ -558,6 +860,12 @@ impl ComputerBackend for CuaBackend {
     }
 
     async fn key(&self, chord: &KeyChord, action: KeyAction) -> Result<(), ComputerError> {
+        if self.delivery == Delivery::Background.as_i32() && !matches!(action, KeyAction::Press) {
+            return Err(ComputerError::Unsupported(
+                "Background input does not support holding keys across requests. Use a key chord."
+                    .into(),
+            ));
+        }
         // Modifiers first, main key last — the order a human presses them in.
         let keys: Vec<pb::KeyInput> = chord
             .modifiers
@@ -610,6 +918,66 @@ impl ComputerBackend for CuaBackend {
         }
     }
 
+    async fn click(
+        &self,
+        button: MouseButton,
+        count: u8,
+        modifiers: Option<&KeyChord>,
+    ) -> Result<(), ComputerError> {
+        let modifiers = pointer_modifiers(modifiers)?;
+        self.pointer(pb::pointer_request::Action::Click(pb::PointerClick {
+            position: self.input_point().await?,
+            button: mouse_button(button) as i32,
+            count: count.max(1) as u32,
+            modifiers,
+        }))
+        .await
+    }
+    async fn drag(&self, from: Point, to: Point) -> Result<(), ComputerError> {
+        let g = self.input_geometry().await?;
+        self.pointer(pb::pointer_request::Action::Drag(pb::PointerDrag {
+            from: Some(point(g.to_global(from))),
+            to: Some(point(g.to_global(to))),
+            button: pb::MouseButton::Left as i32,
+            ..Default::default()
+        }))
+        .await?;
+        *self.pointer.lock().await = Some(to);
+        Ok(())
+    }
+    async fn scroll_modified(
+        &self,
+        direction: ScrollDirection,
+        amount: u32,
+        modifiers: Option<&KeyChord>,
+    ) -> Result<(), ComputerError> {
+        if modifiers.is_none() {
+            return self.scroll(direction, amount).await;
+        }
+        if self.delivery == Delivery::Background.as_i32() {
+            return Err(ComputerError::Unsupported("The guest contract does not support modified background scrolling. Use a keyboard shortcut.".into()));
+        }
+        let chord = modifiers.expect("checked");
+        self.key(chord, KeyAction::Down).await?;
+        let result = self.scroll(direction, amount).await;
+        let release = self.key(chord, KeyAction::Up).await;
+        result.and(release)
+    }
+    async fn delivery_note(&self) -> Option<String> {
+        self.report.lock().await.take().map(|r| {
+            format!(
+                "Input delivered in {}. Pointer moved: {}. Focus changed: {}.",
+                if r.delivery == pb::Delivery::Background as i32 {
+                    "the background"
+                } else {
+                    "the foreground"
+                },
+                r.pointer_moved,
+                r.focus_changed
+            )
+        })
+    }
+
     async fn cursor_position(&self) -> Result<Point, ComputerError> {
         let g = self.geometry().await?;
         let mut client = self.computer.clone();
@@ -626,6 +994,22 @@ impl ComputerBackend for CuaBackend {
             y: p.y.round() as i32,
         }))
     }
+}
+
+fn pointer_modifiers(chord: Option<&KeyChord>) -> Result<Vec<i32>, ComputerError> {
+    let Some(chord) = chord else {
+        return Ok(vec![]);
+    };
+    if chord.key.is_some() {
+        return Err(ComputerError::InvalidArgs(
+            "Click modifiers must contain only modifier keys".into(),
+        ));
+    }
+    Ok(chord
+        .modifiers
+        .iter()
+        .map(|m| named_key(modifier_keysym(*m)).expect("known modifier") as i32)
+        .collect())
 }
 
 fn point(p: Point) -> pb::Point {
@@ -745,8 +1129,9 @@ fn named_key(name: &str) -> Option<pb::Key> {
 /// that reliably fixes the most common failure.
 fn call_error(op: &str, e: tonic::Status) -> ComputerError {
     let hint = match e.code() {
+        tonic::Code::DeadlineExceeded | tonic::Code::Cancelled if matches!(op, "Pointer" | "Keyboard") => " — input delivery could not be confirmed. Do not repeat the action; inspect the screen before continuing",
         tonic::Code::Unauthenticated => {
-            " — the daemon wants a token; set `computer.cua.token` (or `computer.cua.token_env`)"
+            " — the daemon wants a token; set the environment variable named by `computer.cua.token_env`"
         }
         tonic::Code::PermissionDenied => {
             " — the guest denied input. On macOS that means a Screen Recording or \
@@ -991,5 +1376,40 @@ mod tests {
         assert_eq!(opts.endpoint, "http://127.0.0.1:3211");
         assert!(opts.token.is_none());
         assert_eq!(opts.delivery, Delivery::Auto);
+    }
+    #[test]
+    fn remote_transport_requires_tls_and_masks_credentials() {
+        assert!(validate_endpoint("https://computer.example").is_ok());
+        assert!(validate_endpoint("http://127.0.0.1:3211").is_ok());
+        assert!(validate_endpoint("http://[::1]:3211").is_ok());
+        for endpoint in [
+            "http://192.168.1.20:3211",
+            "https://user:secret@computer.example",
+            "https://computer.example/m/machine/",
+            "https://computer.example/?token=secret",
+        ] {
+            assert!(validate_endpoint(endpoint).is_err(), "{endpoint}");
+        }
+        let opts = CuaOptions {
+            token: Some("private-token".into()),
+            ..Default::default()
+        };
+        assert!(!format!("{opts:?}").contains("private-token"));
+        assert!(opts.auth_header().unwrap().unwrap().is_sensitive());
+    }
+    #[test]
+    fn window_epochs_survive_javascript_precision_limits() {
+        let window = TargetWindow {
+            id: "window".into(),
+            epoch: u64::MAX,
+            title: "App".into(),
+            app: "App".into(),
+        };
+        let encoded = serde_json::to_value(&window).unwrap();
+        assert_eq!(encoded["epoch"], u64::MAX.to_string());
+        assert_eq!(
+            serde_json::from_value::<TargetWindow>(encoded).unwrap(),
+            window
+        );
     }
 }

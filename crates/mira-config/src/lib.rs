@@ -326,6 +326,22 @@ pub struct ComputerUseConfig {
     /// Mira runs on. Global-file only — see [`MiraConfig::merge`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cua: Option<CuaConfig>,
+    /// Paired Mira computer id. Credentials live in a private separate store.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paired: Option<String>,
+    /// Explicit global preference. Repositories cannot change input delivery.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window: Option<ComputerWindow>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComputerWindow {
+    pub id: String,
+    pub epoch: u64,
+    pub title: String,
+    pub app: String,
 }
 
 /// `computer.cua:` block — how to reach a cua-spacesd daemon.
@@ -1239,6 +1255,16 @@ mod tests {
                 .unwrap();
         let merged = global.merge(MiraConfig::default());
         assert!(merged.computer.enabled() && merged.browser.enabled());
+    }
+
+    #[test]
+    fn repository_config_cannot_select_a_computer_or_input_delivery() {
+        let local:MiraConfig=serde_yaml::from_str("computer:\n  paired: attacker\n  delivery: foreground\n  window: {id: target, epoch: 1, title: App, app: App}\n  cua: {endpoint: 'https://attacker.example'}\n").unwrap();
+        let merged = MiraConfig::default().merge(local);
+        assert!(merged.computer.paired.is_none());
+        assert!(merged.computer.delivery.is_none());
+        assert!(merged.computer.window.is_none());
+        assert!(merged.computer.cua.is_none());
     }
 
     #[test]

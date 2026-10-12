@@ -8,7 +8,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use mira_computer::backend::cua::{CuaBackend, CuaOptions, Delivery};
+use mira_computer::backend::cua::{CuaBackend, CuaOptions, Delivery, TargetWindow};
 use mira_computer::{
     Computer, ComputerAction, ComputerOptions, MouseButton, Point, ScrollDirection,
 };
@@ -41,6 +41,9 @@ struct State {
     /// Set when a request arrived without the expected bearer token.
     bad_auth: Mutex<Vec<String>>,
     expect_token: Mutex<Option<String>>,
+    force_foreground: Mutex<bool>,
+    delay: Mutex<std::time::Duration>,
+    deadlines: Mutex<Vec<String>>,
 }
 
 impl State {
@@ -54,6 +57,12 @@ impl State {
 
     /// Record a call, and check the bearer token if one is expected.
     fn record(&self, rpc: &str, detail: String, md: &tonic::metadata::MetadataMap) {
+        self.deadlines.lock().unwrap().push(
+            md.get("grpc-timeout")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .into(),
+        );
         let auth = md
             .get("authorization")
             .map(|v| v.to_str().unwrap_or_default().to_owned());
@@ -112,7 +121,25 @@ impl pb::computer_service_server::ComputerService for Fake {
         let r = req.into_inner();
         let detail = summarize_pointer(&r);
         self.state.record("Pointer", detail, &md);
-        Ok(Response::new(pb::PointerResponse::default()))
+        let delivery = if *self.state.force_foreground.lock().unwrap() {
+            pb::Delivery::Foreground
+        } else {
+            pb::Delivery::try_from(r.target.as_ref().unwrap().delivery)
+                .unwrap_or(pb::Delivery::Foreground)
+        };
+        Ok(Response::new(pb::PointerResponse {
+            report: Some(pb::DeliveryReport {
+                delivery: if delivery == pb::Delivery::Auto {
+                    pb::Delivery::Foreground as i32
+                } else {
+                    delivery as i32
+                },
+                pointer_moved: delivery == pb::Delivery::Foreground,
+                focus_changed: false,
+                detail: String::new(),
+            }),
+            ..Default::default()
+        }))
     }
 
     async fn keyboard(
@@ -123,7 +150,18 @@ impl pb::computer_service_server::ComputerService for Fake {
         let r = req.into_inner();
         let detail = summarize_keyboard(&r);
         self.state.record("Keyboard", detail, &md);
-        Ok(Response::new(pb::KeyboardResponse::default()))
+        let delivery = pb::Delivery::try_from(r.target.as_ref().unwrap().delivery)
+            .unwrap_or(pb::Delivery::Foreground);
+        Ok(Response::new(pb::KeyboardResponse {
+            report: Some(pb::DeliveryReport {
+                delivery: if delivery == pb::Delivery::Auto {
+                    pb::Delivery::Foreground as i32
+                } else {
+                    delivery as i32
+                },
+                ..Default::default()
+            }),
+        }))
     }
 
     async fn get_clipboard(
@@ -176,6 +214,8 @@ impl pb::system_service_server::SystemService for Fake {
         let md = req.metadata().clone();
         self.state.record("GetCapabilities", String::new(), &md);
         // Read once: two guards in one struct literal would deadlock.
+        let delay = *self.state.delay.lock().unwrap();
+        tokio::time::sleep(delay).await;
         let background = *self.state.background_input.lock().unwrap();
         Ok(Response::new(pb::GetCapabilitiesResponse {
             version: "0.5.3".into(),
@@ -437,8 +477,11 @@ async fn fake_space() -> (String, Arc<State>) {
                 },
             ))
             .add_service(pb::system_service_server::SystemServiceServer::new(Fake {
-                state: served,
+                state: served.clone(),
             }))
+            .add_service(pb::windows_service_server::WindowsServiceServer::new(
+                Fake { state: served },
+            ))
             .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
             .await
             .unwrap();
@@ -675,6 +718,7 @@ async fn delivery_is_stated_on_every_input_call() {
     let b = CuaBackend::connect(&CuaOptions {
         endpoint,
         delivery: Delivery::Background,
+        window: Some(test_window()),
         ..Default::default()
     })
     .await
@@ -860,4 +904,236 @@ async fn live_readonly_smoke() {
         (0..w as i32).contains(&at.x) && (0..h as i32).contains(&at.y),
         "cursor {at:?} outside the {w}x{h} input space"
     );
+}
+
+fn test_window() -> TargetWindow {
+    TargetWindow {
+        id: "window-1".into(),
+        epoch: 3,
+        title: "Calculator".into(),
+        app: "Calculator".into(),
+    }
+}
+fn window_info() -> pb::WindowInfo {
+    pb::WindowInfo {
+        r#ref: Some(pb::WindowRef {
+            id: "window-1".into(),
+            epoch: 3,
+        }),
+        title: "Calculator".into(),
+        app: Some(pb::AppInfo {
+            name: "Calculator".into(),
+            ..Default::default()
+        }),
+        bounds: Some(pb::Rect {
+            x: 100.0,
+            y: 200.0,
+            width: 800.0,
+            height: 600.0,
+        }),
+        on_screen: true,
+        ..Default::default()
+    }
+}
+#[tonic::async_trait]
+impl pb::windows_service_server::WindowsService for Fake {
+    type WatchWindowsStream = tokio_stream::Empty<Result<pb::WatchWindowsResponse, Status>>;
+    async fn watch_windows(
+        &self,
+        _: Request<pb::WatchWindowsRequest>,
+    ) -> Result<Response<Self::WatchWindowsStream>, Status> {
+        Err(Status::unimplemented("unused"))
+    }
+    async fn list_windows(
+        &self,
+        req: Request<pb::ListWindowsRequest>,
+    ) -> Result<Response<pb::ListWindowsResponse>, Status> {
+        self.state.record("ListWindows", "".into(), req.metadata());
+        Ok(Response::new(pb::ListWindowsResponse {
+            windows: vec![window_info()],
+        }))
+    }
+    async fn get_window(
+        &self,
+        req: Request<pb::GetWindowRequest>,
+    ) -> Result<Response<pb::GetWindowResponse>, Status> {
+        self.state.record("GetWindow", "".into(), req.metadata());
+        if req
+            .get_ref()
+            .window
+            .as_ref()
+            .is_none_or(|w| w.id != "window-1" || w.epoch != 3)
+        {
+            return Err(Status::failed_precondition("stale window"));
+        }
+        Ok(Response::new(pb::GetWindowResponse {
+            window: Some(window_info()),
+        }))
+    }
+    async fn activate_window(
+        &self,
+        _: Request<pb::ActivateWindowRequest>,
+    ) -> Result<Response<pb::ActivateWindowResponse>, Status> {
+        Err(Status::unimplemented("unused"))
+    }
+    async fn set_window_bounds(
+        &self,
+        _: Request<pb::SetWindowBoundsRequest>,
+    ) -> Result<Response<pb::SetWindowBoundsResponse>, Status> {
+        Err(Status::unimplemented("unused"))
+    }
+    async fn minimize_window(
+        &self,
+        _: Request<pb::MinimizeWindowRequest>,
+    ) -> Result<Response<pb::MinimizeWindowResponse>, Status> {
+        Err(Status::unimplemented("unused"))
+    }
+    async fn maximize_window(
+        &self,
+        _: Request<pb::MaximizeWindowRequest>,
+    ) -> Result<Response<pb::MaximizeWindowResponse>, Status> {
+        Err(Status::unimplemented("unused"))
+    }
+    async fn restore_window(
+        &self,
+        _: Request<pb::RestoreWindowRequest>,
+    ) -> Result<Response<pb::RestoreWindowResponse>, Status> {
+        Err(Status::unimplemented("unused"))
+    }
+    async fn close_window(
+        &self,
+        _: Request<pb::CloseWindowRequest>,
+    ) -> Result<Response<pb::CloseWindowResponse>, Status> {
+        Err(Status::unimplemented("unused"))
+    }
+    async fn launch_app(
+        &self,
+        _: Request<pb::LaunchAppRequest>,
+    ) -> Result<Response<pb::LaunchAppResponse>, Status> {
+        Err(Status::unimplemented("unused"))
+    }
+    async fn open(
+        &self,
+        _: Request<pb::OpenRequest>,
+    ) -> Result<Response<pb::OpenResponse>, Status> {
+        Err(Status::unimplemented("unused"))
+    }
+}
+
+#[tokio::test]
+async fn background_input_requires_a_window_and_confirms_delivery() {
+    let (endpoint, state) = fake_space().await;
+    let missing = CuaBackend::connect(&CuaOptions {
+        endpoint: endpoint.clone(),
+        delivery: Delivery::Background,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    assert!(missing
+        .type_text("x")
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("Select an application"));
+    assert!(state
+        .call_strings()
+        .iter()
+        .all(|c| !c.starts_with("Keyboard")));
+    let b = CuaBackend::connect(&CuaOptions {
+        endpoint,
+        delivery: Delivery::Background,
+        window: Some(test_window()),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    b.mouse_move(Point { x: 10, y: 10 }).await.unwrap();
+    b.click(MouseButton::Left, 1, None).await.unwrap();
+    assert!(b.delivery_note().await.unwrap().contains("background"));
+    *state.force_foreground.lock().unwrap() = true;
+    assert!(b
+        .click(MouseButton::Left, 1, None)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("did not confirm"));
+    assert!(b
+        .type_text("never sent")
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("paused"));
+}
+#[tokio::test]
+async fn background_drag_and_modified_click_are_atomic() {
+    let (endpoint, state) = fake_space().await;
+    let b = CuaBackend::connect(&CuaOptions {
+        endpoint,
+        delivery: Delivery::Background,
+        window: Some(test_window()),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    b.drag(Point { x: 10, y: 20 }, Point { x: 30, y: 40 })
+        .await
+        .unwrap();
+    b.click(
+        MouseButton::Left,
+        1,
+        Some(&mira_computer::KeyChord::parse("shift").unwrap()),
+    )
+    .await
+    .unwrap();
+    let calls = state.call_strings();
+    assert_eq!(
+        calls.iter().filter(|c| c.starts_with("Pointer ")).count(),
+        2
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("drag(from=110,220 to=130,240)")),
+        "{calls:?}"
+    );
+    assert!(!calls
+        .iter()
+        .any(|c| c.contains(" down(") || c.contains(" up(")));
+}
+#[tokio::test]
+async fn every_rpc_has_a_deadline_and_stalled_daemons_time_out() {
+    let (endpoint, state) = fake_space().await;
+    let b = CuaBackend::connect(&CuaOptions {
+        endpoint,
+        rpc_timeout: std::time::Duration::from_millis(100),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    b.capabilities().await.unwrap();
+    assert!(state
+        .deadlines
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|d| !d.is_empty()));
+    *state.delay.lock().unwrap() = std::time::Duration::from_secs(2);
+    let start = std::time::Instant::now();
+    assert!(b.capabilities().await.is_err());
+    assert!(start.elapsed() < std::time::Duration::from_secs(1));
+}
+#[tokio::test]
+async fn stale_windows_are_not_retargeted() {
+    let (endpoint, _) = fake_space().await;
+    let mut window = test_window();
+    window.epoch = 999;
+    let b = CuaBackend::connect(&CuaOptions {
+        endpoint,
+        window: Some(window),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    assert!(b.screen_size().await.is_err());
 }
