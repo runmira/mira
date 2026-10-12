@@ -153,8 +153,14 @@ export function WorkspaceRightPanel(
                       case 'devices':
                         return <DevicesPane />;
                       case 'pr':
+                        // Keyed by tab: each PR keeps its own
+                        // summary/code selection when switching tabs.
                         return activePrTab ? (
-                          <PrPane tab={activePrTab} onReviewPr={runPrReview} />
+                          <PrPane
+                            key={activePrTab.id}
+                            tab={activePrTab}
+                            onReviewPr={runPrReview}
+                          />
                         ) : null;
                       default:
                         return null;
