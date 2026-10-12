@@ -36,25 +36,24 @@
       main { max-width: 560px; padding: 24px; text-align: center; }
       h1 { font-size: 20px; font-weight: 600; margin: 0 0 8px; letter-spacing: -0.01em; }
       p { color: var(--muted); margin: 0; }
-      .spinner {
-        width: 22px; height: 22px; margin: 0 auto 16px;
-        border: 2px solid var(--border); border-top-color: var(--fg);
-        border-radius: 50%; animation: spin 0.8s linear infinite;
-      }
-      @keyframes spin { to { transform: rotate(360deg); } }
+      .logo { width: 64px; height: 64px; border-radius: 16px; object-fit: contain; animation: pulse 1.6s ease-in-out infinite; }
+      @keyframes pulse { 50% { opacity: .45; } }
+      @media (prefers-reduced-motion: reduce) { .logo { animation: none; } }
+      #title, #detail { display: none; }
+      body.failed #title, body.failed #detail { display: block; }
       pre {
         display: none; text-align: left; white-space: pre-wrap; word-break: break-word;
         margin: 16px 0 0; padding: 12px; border: 1px solid var(--border); border-radius: 8px;
         font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--error);
         max-height: 50vh; overflow: auto; -webkit-user-select: text; user-select: text;
       }
-      body.failed .spinner { display: none; }
+      body.failed .logo { display: none; }
       body.failed pre { display: block; }
     </style>
   </head>
-  <body>
-    <main>
-      <div class="spinner"></div>
+  <body data-tauri-drag-region>
+    <main data-tauri-drag-region role="status" aria-label="Starting Mira">
+      <img class="logo" src="mira-logo.png" alt="" draggable="false" data-tauri-drag-region />
       <h1 id="title">Starting Mira…</h1>
       <p id="detail">Launching the local server.</p>
       <pre id="error"></pre>

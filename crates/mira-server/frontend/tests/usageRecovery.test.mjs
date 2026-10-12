@@ -1,0 +1,34 @@
+import assert from 'node:assert/strict';
+import { after, test } from 'node:test';
+import { Window } from 'happy-dom';
+import { bundle } from './helpers/bundle.mjs';
+const browser = new Window();
+for (const key of ['window', 'document', 'navigator', 'HTMLElement', 'Element', 'Node', 'MutationObserver', 'SVGElement']) Object.defineProperty(globalThis, key, { configurable: true, value: browser[key] });
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+after(() => browser.happyDOM.abort());
+const { act } = await import('react');
+const { createRoot } = await import('react-dom/client');
+const { renderCard } = await bundle(`
+import { UsageRecoveryCard } from './src/components/UsageRecoveryCard';
+import { LazyMotion, domAnimation } from 'framer-motion';
+export const renderCard = (item, action) => <LazyMotion features={domAnimation}><UsageRecoveryCard item={item} disabled={false} onAction={action} /></LazyMotion>;
+`);
+test('retry shows pending feedback, prevents double submission and exposes delivery errors', async () => {
+  const host = document.createElement('div'); document.body.append(host);
+  const root = createRoot(host);
+  const item = { id: 'claude-recovery', recovery: { reset_at: null, scheduled_at: null, snoozed: false }, dispatching: false };
+  let reject; const calls = [];
+  await act(async () => root.render(renderCard(item, (id, action) => { calls.push([id, action]); return new Promise((_, fail) => { reject = fail; }); })));
+  const retry = [...host.querySelectorAll('button')].find(b => b.textContent === 'Retry now');
+  await act(async () => retry.click());
+  assert.equal(retry.disabled, true);
+  assert.equal(retry.textContent, 'Retrying…');
+  assert.deepEqual(calls, [['claude-recovery', 'retry']]);
+  await act(async () => reject(new Error('Reconnect before changing recovery.')));
+  assert.match(host.querySelector('[role="alert"]').textContent, /Reconnect/);
+  assert.equal(retry.disabled, false);
+  await act(async () => root.render(renderCard({ ...item, recovery: { ...item.recovery, scheduled_at: Date.now() - 1 } }, async () => {})));
+  assert.equal(host.querySelector('h3').textContent, 'Resuming your task');
+  assert.match(host.textContent, /Cancel retry/);
+  await act(async () => root.unmount());
+});

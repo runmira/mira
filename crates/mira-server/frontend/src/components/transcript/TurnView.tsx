@@ -112,7 +112,7 @@ export function TurnViewImpl({
   const failureInfo = failure ? responseFailed ? chatFailure(failure.text) : {
     title: "Couldn't complete this action", description: 'Try the action again from its original control. Technical details may help explain what went wrong.', settings: false,
   } : null;
-  const body = useMemo(() => turn.body.filter((e) => e.kind !== 'turn_stats' && e.kind !== 'error' && !(e.kind === 'warning' && isFatalChatWarning(e.text))), [turn.body]);
+  const body = useMemo(() => turn.body.filter((e) => e.kind !== 'turn_stats' && e.kind !== 'activity' && e.kind !== 'error' && !(e.kind === 'warning' && isFatalChatWarning(e.text))), [turn.body]);
   const nativeTurn = own != null || body.some((e) => (e.kind === 'msg' && e.nativeMessageId != null) || (e.kind === 'tool' && e.agentCall != null) || (e.kind === 'thought' && e.native));
   const { intermediateRaw, intermediate, finalEntry, trailing } = useMemo(
     () => turnActivity(body, nativeTurn && !isActive), [body, nativeTurn, isActive],
