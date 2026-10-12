@@ -359,6 +359,7 @@ async fn dispatch_on_slot(
                 return;
             };
             let (engine, _, _) = slot.selection.snapshot();
+            info!(session = %slot.id, id = %id, engine = ?engine, "queue_input received");
             let item = crate::message_queue::QueuedInput {
                 id,
                 text,
@@ -2026,6 +2027,16 @@ async fn send_input_at_epoch(
         return Err("This chat was deleted".into());
     }
     if slot.is_foreground_running().await {
+        // Diagnostic: a `send` arriving mid-turn is the client failing to
+        // queue. Logged (not just warned) because the UI warning is easy
+        // to miss and this is the only place that distinguishes "the user
+        // raced the turn" from "the composer thought it was idle".
+        info!(
+            session = %slot.id,
+            agent_in_turn = slot.engine.agent_in_turn.load(std::sync::atomic::Ordering::SeqCst),
+            provider_in_turn = slot.engine.provider_in_turn.load(std::sync::atomic::Ordering::SeqCst),
+            "rejected send: foreground turn already running (client did not queue)"
+        );
         return Err("A foreground turn is already running".into());
     }
     if let Some(id) = input_id.as_deref() {

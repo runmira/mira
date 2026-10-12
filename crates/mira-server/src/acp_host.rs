@@ -1481,6 +1481,12 @@ impl AcpEventPort {
                     self.push(ServerMsg::RuntimeTurnUpdated { turn });
                 }
             }
+            tracing::info!(
+                driver = ?self.driver.lock().ok().and_then(|d| d.clone()).unwrap_or_default(),
+                stop_reason,
+                agent_in_turn = slot.engine.agent_in_turn.load(std::sync::atomic::Ordering::SeqCst),
+                "agent turn ended; clearing agent_in_turn"
+            );
             slot.engine
                 .agent_in_turn
                 .store(false, std::sync::atomic::Ordering::SeqCst);
