@@ -321,6 +321,46 @@ pub struct ComputerUseConfig {
     /// Pause before the follow-up screenshot, in ms. Default 600.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub settle_ms: Option<u64>,
+    /// Drive a *remote* desktop through
+    /// [cua-spacesd](https://github.com/trycua/cua) instead of the machine
+    /// Mira runs on. Global-file only — see [`MiraConfig::merge`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cua: Option<CuaConfig>,
+}
+
+/// `computer.cua:` block — how to reach a cua-spacesd daemon.
+///
+/// Delivery mode is deliberately *not* here: whether the agent may take your
+/// pointer is a decision for one run, so it lives on `--cua-delivery` rather
+/// than in a file a repo can ship.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct CuaConfig {
+    /// Base URL of the daemon, including the scheme. A machine you own is
+    /// `http://127.0.0.1:3211`; one behind a cua relay is
+    /// `https://<relay>/m/<machine-id>/`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    /// Environment variable holding the bearer token. cua-spacesd requires a
+    /// token for any non-loopback bind. Naming the variable rather than the
+    /// secret keeps it out of a committed config; default `CUA_ENV_TOKEN`,
+    /// which is what the daemon itself reads.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_env: Option<String>,
+}
+
+impl CuaConfig {
+    /// The variable a token is read from when the config does not name one.
+    pub const DEFAULT_TOKEN_ENV: &'static str = "CUA_ENV_TOKEN";
+
+    pub fn token_env(&self) -> &str {
+        self.token_env.as_deref().unwrap_or(Self::DEFAULT_TOKEN_ENV)
+    }
+
+    /// True when this block selects the remote backend.
+    pub fn is_set(&self) -> bool {
+        self.endpoint.is_some()
+    }
 }
 
 impl ComputerUseConfig {
@@ -792,6 +832,9 @@ impl MiraConfig {
             .or(self.computer.screenshot_after_action);
         self.computer.max_long_edge = c.max_long_edge.or(self.computer.max_long_edge);
         self.computer.settle_ms = c.settle_ms.or(self.computer.settle_ms);
+        // `cua` is global-only for the same reason: it redirects the
+        // `computer` tool at a different machine, and a cloned repo must not
+        // be able to send an agent's clicks somewhere else.
         let b = other.browser;
         self.browser.headless = b.headless.or(self.browser.headless);
         // `compute` and `cloud` are global-only: a repo must not be able to

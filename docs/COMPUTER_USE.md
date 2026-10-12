@@ -12,6 +12,13 @@ Mira has two optional tools for work that happens outside the terminal:
 
 Both are **off by default**.
 
+`computer` drives *your* desktop by default. It can also drive a
+**remote** machine through
+[cua-spacesd](https://github.com/trycua/cua) — another box on the
+network, a sandbox, or a machine you cannot reach at all — and on a
+guest that supports it, deliver input without taking your pointer. See
+[Driving a remote machine](#driving-a-remote-machine-cua).
+
 ## Turning them on
 
 For one run:
@@ -30,6 +37,9 @@ computer:
   # screenshot_after_action: true  # screenshot after every action (default)
   # max_long_edge: 1568            # longest screenshot edge sent to the model
   # settle_ms: 600                 # pause before that screenshot
+  # cua:                          # drive a remote machine instead (below)
+  #   endpoint: http://127.0.0.1:3211
+  #   token_env: CUA_ENV_TOKEN
 browser:
   enabled: true
   # executable: /path/to/chrome    # default: auto-detect
@@ -53,6 +63,84 @@ Run `mira doctor --computer --browser` to check readiness.
 | Windows | ❌ | Not yet. |
 
 `browser` works anywhere a Chromium-family browser is installed.
+
+## Driving a remote machine (cua)
+
+Point `computer.cua.endpoint` at a
+[cua-spacesd](https://github.com/trycua/cua) daemon and `computer`
+drives that machine instead of this one. The tool surface is
+identical — same actions, same coordinates, same policy rules — so the
+only thing that changes is whose screen it is.
+
+```yaml
+# ~/.mira/mira.yaml — global file only
+computer:
+  enabled: true
+  cua:
+    endpoint: http://192.168.1.20:3211
+    token_env: CUA_ENV_TOKEN   # default; a token is required off-loopback
+```
+
+Run the daemon on the target machine with
+[`cua host setup`](https://cua.ai/docs) (or `cua-spacesd serve` by
+hand), then check it:
+
+```sh
+mira doctor --computer
+```
+
+```
+✔ computer · cua endpoint      http://192.168.1.20:3211 (reachable)
+✔ computer · cua daemon        cua-spacesd 0.5.3 · cua.env.v1 1·8 on studio-mac
+✔ computer · background input  supported
+✔ computer · display           2560x1440 logical (2560x1440 physical)
+```
+
+### Delivery: who sees the pointer
+
+This is the setting that decides what the agent's input looks like
+from where you are sitting.
+
+| `--cua-delivery` | Behaviour |
+| --- | --- |
+| `auto` (default) | Deliver in the background where the guest allows it; fall back to foreground when it does not. |
+| `background` | Never move the pointer or change focus. **Fails** rather than falling back, so an agent cannot quietly start taking over. |
+| `foreground` | Always deliver through the global input stream — the real pointer and focus move, same as the local backends. |
+
+```sh
+mira --computer --cua-delivery background
+```
+
+Or `MIRA_CUA_DELIVERY=background` for one shell session. It is a
+flag rather than a setting in `mira.yaml` on purpose: whether an agent
+may take your pointer is a decision about right now, not about the
+project, and a repo must not be able to grant it.
+
+Under `background`, the guest reports a *limitation* rather than
+failing when it can only manage part of the surface — for example
+"pointer/key down-up pairs are not available; use click, drag, press
+or hotkey" — which `mira doctor` prints.
+
+### Notes
+
+- **`cua` is global-file only.** A repo's `.mira/config.yaml` can
+  tune `settle_ms` and `max_long_edge`, but it cannot redirect the
+  `computer` tool at a different machine — same rule as `enabled`.
+- **No silent fallback.** If the daemon is unreachable, `computer` is
+  disabled with a warning naming `computer.cua.endpoint`. It does not
+  quietly fall back to your local desktop, because "the remote box was
+  down so the agent clicked on my real screen" is not a fallback
+  anyone wants.
+- **The primary display.** `computer` screenshots and drives the
+  guest's primary display. A cursor parked on a second monitor reads
+  back clamped to the primary's edge rather than as a coordinate
+  outside the screenshot.
+- **Coordinates are unchanged.** Model-space pixels, Retina scaling
+  and out-of-bounds refusal all work the same as on a local desktop;
+  see [How it works](#how-it-works).
+- **Licensing.** Mira depends on cua-spacesd's `cua.env.v1` *contract*
+  (MIT, vendored under `crates/mira-computer/proto`). The daemon
+  itself is source-available under FSL-1.1-MIT and is not vendored.
 
 ## Permissions
 
@@ -119,5 +207,10 @@ Subagents never inherit `computer` or `browser`.
 - The TUI approval card doesn't preview the screenshot yet. The web UI
   shows screenshots inline in the tool card.
 - No Wayland or Windows backend. The backend trait
-  (`mira_computer::ComputerBackend`) is where they, or a VM-sandboxed
-  backend, would plug in.
+  (`mira_computer::ComputerBackend`) is where they would plug in. The
+  cua backend does reach a Windows or Linux guest, but Mira itself
+  still runs on macOS or Linux.
+- The cua backend implements `ComputerService` only. cua-spacesd also
+  serves processes, files, windows and streaming, which would be the
+  natural way to close the "agent on a remote box can't run the code
+  it writes" gap; none of it is wired up here.

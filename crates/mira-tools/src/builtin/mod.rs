@@ -113,7 +113,7 @@ pub fn register_consolidate(
 /// What [`register_computer_use`] did, for the caller to surface.
 #[derive(Debug, Default)]
 pub struct ComputerUseReport {
-    /// `computer` registered, with the backend name (`x11`, `macos`).
+    /// `computer` registered, with the backend name (`x11`, `macos`, `cua`).
     pub computer: Option<&'static str>,
     pub browser: bool,
     /// Why a requested tool was skipped (unsupported platform, …).
@@ -121,6 +121,11 @@ pub struct ComputerUseReport {
 }
 
 /// Register the `computer` and/or `browser` tools, per `enable_*`.
+///
+/// `computer_cfg.cua` selects the remote backend: when it is set, the
+/// `computer` tool drives that machine through cua-spacesd instead of the
+/// desktop Mira runs on. Otherwise [`mira_computer::detect`] picks the local
+/// one.
 ///
 /// Callers register these *after* snapshotting the registry subagents
 /// inherit: desktop and browser control stay with the top-level session,
@@ -132,6 +137,7 @@ pub async fn register_computer_use(
     reg: &mut Registry,
     enable_computer: bool,
     computer_cfg: &mira_config::ComputerUseConfig,
+    cua_delivery: Option<mira_computer::Delivery>,
     enable_browser: bool,
     browser_cfg: &mira_config::BrowserConfig,
 ) -> ComputerUseReport {
@@ -139,7 +145,7 @@ pub async fn register_computer_use(
     let mut report = ComputerUseReport::default();
 
     if enable_computer {
-        match mira_computer::detect() {
+        match computer_backend(computer_cfg, cua_delivery).await {
             Ok(backend) => {
                 let mut opts = mira_computer::ComputerOptions::default();
                 if let Some(v) = computer_cfg.screenshot_after_action {
@@ -197,4 +203,94 @@ pub async fn register_computer_use(
         }
     }
     report
+}
+
+/// Pick the backend the `computer` tool drives.
+///
+/// `computer_cfg.cua` wins when present: it names a machine other than this
+/// one, and asking the local platform what it can do would answer a question
+/// nobody asked. A failure to reach the remote daemon is reported rather than
+/// quietly falling back to the local desktop — silently clicking on the
+/// user's real screen because a remote box was down is not a fallback anyone
+/// wants.
+async fn computer_backend(
+    cfg: &mira_config::ComputerUseConfig,
+    delivery: Option<mira_computer::Delivery>,
+) -> Result<Box<dyn mira_computer::ComputerBackend>, mira_computer::ComputerError> {
+    let Some(opts) = cua_options(cfg, delivery) else {
+        return mira_computer::detect();
+    };
+    let endpoint = opts.endpoint.clone();
+    let delivery = opts.delivery;
+    let backend = mira_computer::CuaBackend::connect(&opts).await?;
+
+    // Worth one round trip at startup: a guest that cannot take background
+    // input should be said out loud before the agent starts clicking, not
+    // discovered on the first click that moves the user's pointer.
+    match backend.capabilities().await {
+        Ok(caps) if !caps.background_input && delivery == mira_computer::Delivery::Background => {
+            tracing::warn!(
+                "cua: {endpoint} reports no background input ({})",
+                if caps.background_input_limitation.is_empty() {
+                    "no limitation given"
+                } else {
+                    &caps.background_input_limitation
+                }
+            );
+        }
+        Ok(_) => {}
+        Err(e) => tracing::debug!("cua: capabilities probe failed ({e}); continuing"),
+    }
+
+    Ok(Box::new(backend))
+}
+
+/// Options for the remote backend, or `None` when `computer.cua` does not
+/// select it and the local backend should be used instead.
+///
+/// One place, so registration and `mira doctor` cannot disagree about which
+/// machine the `computer` tool is pointed at.
+pub fn cua_options(
+    cfg: &mira_config::ComputerUseConfig,
+    delivery: Option<mira_computer::Delivery>,
+) -> Option<mira_computer::CuaOptions> {
+    let cua = cfg.cua.as_ref().filter(|c| c.is_set())?;
+    Some(
+        mira_computer::CuaOptions {
+            endpoint: cua.endpoint.clone()?,
+            token: None,
+            delivery: delivery.unwrap_or_else(delivery_from_env),
+        }
+        .token_from_env(cua.token_env()),
+    )
+}
+
+/// Readiness checks for whichever backend the `computer` tool would use.
+pub async fn computer_preflight(
+    cfg: &mira_config::ComputerUseConfig,
+    delivery: Option<mira_computer::Delivery>,
+) -> Vec<mira_computer::Check> {
+    match cua_options(cfg, delivery) {
+        Some(opts) => mira_computer::backend::cua::preflight(&opts).await,
+        None => mira_computer::preflight().await,
+    }
+}
+
+/// Delivery mode when neither `--cua-delivery` nor the caller said:
+/// `MIRA_CUA_DELIVERY`, else [`mira_computer::Delivery::Auto`].
+///
+/// A run-time flag rather than a setting in `mira.yaml` because whether an
+/// agent may take your pointer is a decision about right now, not about the
+/// project.
+fn delivery_from_env() -> mira_computer::Delivery {
+    match std::env::var("MIRA_CUA_DELIVERY") {
+        Ok(v) => match v.parse() {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!("MIRA_CUA_DELIVERY: {e}; using auto");
+                mira_computer::Delivery::Auto
+            }
+        },
+        Err(_) => mira_computer::Delivery::Auto,
+    }
 }

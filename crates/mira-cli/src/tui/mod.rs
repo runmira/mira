@@ -102,6 +102,9 @@ pub struct TuiConfig {
     /// Computer-use config from `mira.yaml` — used by `/computer on` to
     /// register the backend with its configured options.
     pub computer_cfg: mira_config::ComputerUseConfig,
+    /// `--cua-delivery`, so `/computer on` honours the same delivery mode as
+    /// the boot-time registration.
+    pub cua_delivery: Option<mira_computer::Delivery>,
     /// Browser config from `mira.yaml` — used by `/browser on`.
     pub browser_cfg: mira_config::BrowserConfig,
     /// MCP servers, plugins, custom commands (`/mcp`, `/plugin`).
@@ -714,6 +717,7 @@ async fn run_computer_slash(
                 &mut tmp,
                 true,
                 &cfg.computer_cfg,
+                cfg.cua_delivery,
                 false,
                 &mira_config::BrowserConfig::default(),
             )
@@ -764,6 +768,7 @@ async fn run_browser_slash(
                 &mut tmp,
                 false,
                 &mira_config::ComputerUseConfig::default(),
+                None,
                 true,
                 &cfg.browser_cfg,
             )

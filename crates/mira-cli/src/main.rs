@@ -134,6 +134,14 @@ pub(crate) struct Cli {
     #[arg(long, global = true)]
     browser: bool,
 
+    /// How a remote (`computer.cua`) guest receives input:
+    /// `auto` (default — deliver in the background where the guest allows
+    /// it), `background` (never move the pointer or change focus; fail
+    /// rather than fall back), or `foreground` (move the real pointer and
+    /// focus, like the local backends). Ignored without `computer.cua`.
+    #[arg(long, global = true, value_name = "MODE", value_parser = parse_cua_delivery)]
+    cua_delivery: Option<mira_computer::Delivery>,
+
     /// Start in a remote environment instead of on your worktree: a name
     /// from `compute.environments`, or the built-ins `scratch` (a copy on
     /// this machine) and `e2b` (a cloud sandbox; needs E2B_API_KEY).
@@ -681,6 +689,7 @@ async fn main() -> Result<()> {
                     store: store.clone(),
                     models,
                     computer_cfg: cfg.computer.clone(),
+                    cua_delivery: cli.cua_delivery,
                     browser_cfg: cfg.browser.clone(),
                     environments: environments.clone(),
                     env_tx,
@@ -1013,6 +1022,12 @@ fn system_prompt(cwd: &std::path::Path, registry: &Registry) -> String {
     )
 }
 
+/// clap parser for `--cua-delivery`. `Delivery::from_str` is the single
+/// place that knows the accepted spellings.
+fn parse_cua_delivery(s: &str) -> Result<mira_computer::Delivery, String> {
+    s.parse()
+}
+
 /// Register `computer` / `browser` when enabled by flag or global config,
 /// printing what happened. Shared by the TUI/REPL and `mira serve` boots.
 pub(crate) async fn register_computer_use(registry: &mut Registry, cli: &Cli, cfg: &MiraConfig) {
@@ -1025,6 +1040,7 @@ pub(crate) async fn register_computer_use(registry: &mut Registry, cli: &Cli, cf
         registry,
         enable_computer,
         &cfg.computer,
+        cli.cua_delivery,
         enable_browser,
         &cfg.browser,
     )
