@@ -475,7 +475,7 @@ pub fn map_line_with(v: &Value, models: Option<&[NativeModel]>) -> Vec<NativeAct
                     resets_at: info
                         .get("resetsAt")
                         .and_then(Value::as_i64)
-                        .map(describe_reset),
+                        .map(|at| at.to_string()),
                 });
             }
             out
@@ -494,21 +494,6 @@ pub fn map_line_with(v: &Value, models: Option<&[NativeModel]>) -> Vec<NativeAct
                 },
             })]
         }
-    }
-}
-
-/// "in 3h 12m" for a unix-seconds reset time.
-fn describe_reset(at: i64) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let secs = (at - now).max(0);
-    let (h, m) = (secs / 3600, (secs % 3600) / 60);
-    if h > 0 {
-        format!("in {h}h {m}m")
-    } else {
-        format!("in {}m", m.max(1))
     }
 }
 
@@ -2906,7 +2891,7 @@ done
         let hit = map_line(&serde_json::from_str(
             r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":4102444800}}"#,
         ).unwrap());
-        assert!(hit.iter().any(|a| matches!(a, NativeAction::RateLimited { resets_at: Some(r) } if r.starts_with("in "))));
+        assert!(hit.iter().any(|a| matches!(a, NativeAction::RateLimited { resets_at: Some(r) } if r == "4102444800")));
     }
 
     #[test]

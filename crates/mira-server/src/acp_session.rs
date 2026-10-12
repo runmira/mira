@@ -438,7 +438,10 @@ pub async fn start_agent(
                             Some(reset) => {
                                 let _ = warn.send(ServerMsg::acp_turn_end_with(
                                     &end.stop_reason,
-                                    format!("resets {reset}"),
+                                    reset.parse::<i64>().ok()
+                                        .and_then(|at| chrono::DateTime::from_timestamp(at, 0))
+                                        .map(|at| format!("resets {}", at.to_rfc3339()))
+                                        .unwrap_or_else(|| format!("resets {reset}")),
                                 ));
                             }
                             None => port.turn_ended(&end.stop_reason),
