@@ -672,7 +672,7 @@ pub fn wake(state: &AppState, slot: &Arc<SessionSlot>) {
                 }
                 continue;
             }
-            let (engine, _, _) = slot.selection.snapshot();
+            let engine = slot.active_engine().await;
             let claimed = match slot
                 .message_queue
                 .claim_first(&item.id, engine.as_deref())
@@ -681,9 +681,15 @@ pub fn wake(state: &AppState, slot: &Arc<SessionSlot>) {
                 Ok(Some(item)) => item,
                 Ok(None) => continue,
                 Err(error) => {
+                    // One unsendable message must not take the queue with
+                    // it. Settle this item, publish so the UI can show why,
+                    // and keep going — the messages behind it may well be
+                    // fine. Breaking here left everything queued after one
+                    // unsendable item stranded until something else woke the
+                    // worker.
                     let _ = slot.message_queue.settle(&item.id, Some(error)).await;
                     publish(&slot).await;
-                    break;
+                    continue;
                 }
             };
             publish(&slot).await;
@@ -765,6 +771,33 @@ mod tests {
             error: None,
             recovery: None,
         }
+    }
+    #[tokio::test]
+    async fn a_claim_bound_to_the_running_engine_is_accepted() {
+        // The regression: items were stamped with `SharedSelection`, one
+        // global cell, so a chat that started on a provider and switched to
+        // an agent was stamped with the provider and then failed its own
+        // dispatch check. Stamping and claiming now both read
+        // `SessionSlot::active_engine`, so they agree.
+        let dir = tempfile::tempdir().unwrap();
+        let queue = MessageQueue::open(Some(dir.path().join("e.queue"))).await;
+        queue.enqueue(item("agent-message")).await.unwrap();
+        let claimed = queue.claim("agent-message", Some("codex")).await.unwrap();
+        assert_eq!(claimed.engine.as_deref(), Some("codex"));
+    }
+    #[tokio::test]
+    async fn the_engine_gate_still_refuses_a_genuine_switch() {
+        // Same guard, different intent: routing a message to an engine other
+        // than the one it was queued for is still refused. Only the *source*
+        // of that engine changed — the check itself must not be weakened.
+        let dir = tempfile::tempdir().unwrap();
+        let queue = MessageQueue::open(Some(dir.path().join("e.queue"))).await;
+        queue.enqueue(item("switched")).await.unwrap();
+        let error = queue.claim("switched", Some("claude-code")).await.unwrap_err();
+        assert!(
+            error.contains("engine changed"),
+            "expected an engine-change refusal, got: {error}"
+        );
     }
     #[tokio::test]
     async fn recovery_controls_cannot_dismiss_an_ordinary_message() {

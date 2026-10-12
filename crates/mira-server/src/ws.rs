@@ -358,7 +358,9 @@ async fn dispatch_on_slot(
             else {
                 return;
             };
-            let (engine, _, _) = slot.selection.snapshot();
+            // Stamp with what will actually run the message, not the globally
+            // selected instance — see `SessionSlot::active_engine`.
+            let engine = slot.active_engine().await;
             info!(session = %slot.id, id = %id, engine = ?engine, "queue_input received");
             let item = crate::message_queue::QueuedInput {
                 id,
@@ -528,7 +530,7 @@ async fn dispatch_on_slot(
                     return;
                 }
                 if queued {
-                    let (engine, _, _) = slot.selection.snapshot();
+                    let engine = slot.active_engine().await;
                     if let Err(error) = slot
                         .message_queue
                         .claim(&request_id, engine.as_deref())
@@ -2045,6 +2047,10 @@ async fn send_input_at_epoch(
             .validate_recovery(id, engine.as_deref(), model.as_deref())
             .await?;
     }
+    // (Recovery validation above deliberately still reads the shared
+    // selection: a usage-limit recovery is a provider concept and must match
+    // what `offer_recovery` recorded. Queue *dispatch* is the path that needs
+    // the per-slot engine.)
     slot.message_queue
         .supersede_recovery(input_id.as_deref())
         .await?;

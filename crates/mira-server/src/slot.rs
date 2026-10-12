@@ -206,6 +206,22 @@ impl SessionSlot {
         self.engine.agent_in_turn.load(Ordering::SeqCst)
             || self.engine.provider_in_turn.load(Ordering::SeqCst)
     }
+    /// The engine that will actually execute a prompt for *this* slot right
+    /// now: the external agent driving it, else the selected instance.
+    ///
+    /// `SharedSelection` is one global cell shared by every slot, so
+    /// `selection.snapshot().0` answers "which engine did anyone last pick",
+    /// not "what runs here". A chat that started on a provider and later
+    /// switched to an agent has a selection of the provider forever, so a
+    /// queued message stamped with it failed `claim`'s engine check at
+    /// dispatch time — and the worker treated that as fatal, stalling every
+    /// message queued behind it.
+    pub async fn active_engine(&self) -> Option<String> {
+        if let Some(launch) = self.acp_launch.lock().await.as_ref() {
+            return Some(launch.driver_kind.clone());
+        }
+        self.selection.snapshot().0
+    }
     pub fn publish_activity(&self) {
         // Serialize computing and publishing, so a delayed completion cannot
         // overwrite a concurrently started foreground or background task.
