@@ -160,10 +160,13 @@ export function TerminalPanel({ onClose }: { onClose: () => void }) {
 
   return (
     <div className="relative flex shrink-0 flex-col border-t border-border bg-[#fbfbfc] dark:bg-[#0b0b0d]" style={{ height }}>
+      {/* `data-no-window-drag`: see SubagentPanel's handle — this one was
+          dragging the app window instead of resizing the terminal. */}
       <div
         onPointerDown={startResize}
         className="absolute inset-x-0 -top-1 z-10 h-2 cursor-row-resize"
         title="Drag to resize"
+        data-no-window-drag
       />
       <div className="flex h-9 shrink-0 items-center gap-1 border-b border-border px-2">
         <SquareTerminal className="mr-1 size-3.5 text-muted-foreground" strokeWidth={1.75} />

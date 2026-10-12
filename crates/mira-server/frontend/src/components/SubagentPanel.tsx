@@ -112,11 +112,18 @@ export function SubagentPanel({
 
   return (
     <aside className="relative flex h-full min-w-0 flex-col overflow-hidden bg-transparent">
-      {/* Left-edge drag handle — 5px wide, invisible until hovered */}
+      {/* Left-edge drag handle — 5px wide, invisible until hovered.
+          `data-no-window-drag` is load-bearing: the document-level
+          window-drag handler treats any empty, non-control element as
+          draggable desktop, so without it this handle moved the whole
+          window instead of resizing the panel. React's onMouseDown runs
+          first, but calling preventDefault does not stop other mousedown
+          listeners — only opting out of the drag handler does. */}
       <div
         className="absolute left-0 top-0 z-20 h-full w-[5px] cursor-col-resize max-md:hidden transition-colors hover:bg-mira-blue/30 active:bg-mira-blue/50"
         onMouseDown={onResizeStart}
         title="Drag to resize panel"
+        data-no-window-drag
       />
       {/* tab strip — h-11 matches the main pane's header so the two
           dividers line up exactly across the vertical border. */}
