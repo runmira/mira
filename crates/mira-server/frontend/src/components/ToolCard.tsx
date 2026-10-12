@@ -556,7 +556,7 @@ function CompactToolRow({
               />
             )}
             {!preview && !effectiveDiff && !result?.content.trim() && !result?.images?.length && status === 'complete' && (
-              <p className="px-2 py-1 text-[12px] text-muted-foreground">Completed without text output.</p>
+              <p className="px-2 py-1 text-[12px] text-muted-foreground">{result?.is_error ? 'Tool failed without additional output.' : 'Completed without text output.'}</p>
             )}
             {result?.images?.map((img, i) => (
               <img
