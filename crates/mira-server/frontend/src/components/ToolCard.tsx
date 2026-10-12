@@ -5,9 +5,9 @@ import { Check, ChevronDown, LoaderCircle, X } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { imageSrc } from '../lib/images';
 import { parseBashOutput } from '../lib/toolOutput.mjs';
+import { STREAM_ROW_GUTTER } from '../lib/streamLayout';
 import type { ApprovalScope, DiffLine, DiffPreview, Mode, ToolCall, ToolResult } from '../types';
 import { ActivityShimmer } from './ActivityShimmer';
-import { BranchElbow } from './BranchElbow';
 import { InlineDiff } from './diffs/LazyDiffs';
 import {
   isPathishTool,
@@ -19,9 +19,10 @@ import {
 } from './tools/arguments';
 import {
   countDiff,
+  DIFF_CARD_TOOLS,
   DiffCard,
   DiffRow,
-  reconstructDiff,
+  diffLinesFor,
   ReconstructedPreview,
 } from './tools/ToolDiff';
 import { CommandBlock, LiveOutputPanel, ResultBlock } from './tools/ToolResult';
@@ -57,11 +58,6 @@ const RESULT_SUPPRESSED: Record<string, true> = {
  *  outside with `+N -N` summary, elevated card with its own header +
  *  line numbers). Any tool that produces a `DiffPreview` today —
  *  write, edit, create — falls in this bucket. */
-const DIFF_CARD_TOOLS: Record<string, true> = {
-  write_file: true,
-  edit_file: true,
-};
-
 type Props = {
   call: ToolCall;
   preview: DiffPreview | null;
@@ -384,14 +380,10 @@ function CompactToolRow({
   // Fallback: reconstruct a pseudo-diff from raw args when the server
   // didn't stream a live preview (session reloads, tests). Same
   // treatment either way — we just need the numbers for +N -N.
-  const effectiveDiff: DiffLine[] | null = useMemo(() => {
-    if (preview) return preview.lines;
-    if (isDiffCardTool) {
-      const args = safeParse(call.function.arguments);
-      return reconstructDiff(call.function.name, args);
-    }
-    return null;
-  }, [preview, isDiffCardTool, call.function.name, call.function.arguments]);
+  const effectiveDiff: DiffLine[] | null = useMemo(
+    () => diffLinesFor(call, preview),
+    [preview, call],
+  );
   const stats = useMemo(() => (effectiveDiff ? countDiff(effectiveDiff) : null), [effectiveDiff]);
   const filePath = useMemo(() => {
     if (!isDiffCardTool) return '';
@@ -444,12 +436,11 @@ function CompactToolRow({
             if (e.key === 'Enter' || e.key === ' ') setExpanded((v) => !v);
           }}
           className={cn(
-            'group relative flex w-full min-w-0 cursor-pointer items-center gap-1.5 rounded-md px-1 py-0.5 text-left text-[13px] font-medium text-muted-foreground transition-colors hover:bg-accent/40',
-            completedCommand && 'pl-4',
+            'group relative flex w-full min-w-0 cursor-pointer items-center gap-1.5 rounded-md py-0.5 text-left text-[13px] font-medium text-muted-foreground transition-colors hover:bg-accent/40',
+            STREAM_ROW_GUTTER,
             commandFailed && 'rounded-md border border-rose-500/30 bg-rose-500/5 text-rose-200',
           )}
         >
-          {completedCommand && <BranchElbow className="left-0 top-0" />}
           <span
             aria-hidden="true"
             className="inline-flex size-3.5 shrink-0 items-center justify-center text-muted-foreground"

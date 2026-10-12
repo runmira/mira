@@ -79,6 +79,36 @@ export function countDiff(lines: DiffLine[]): { adds: number; dels: number } {
   return { adds, dels };
 }
 
+/** Tools whose call carries a file edit we can count lines for. */
+export const DIFF_CARD_TOOLS: Record<string, true> = {
+  write_file: true,
+  edit_file: true,
+};
+
+/** The diff lines behind one tool call, whatever shape they arrive in.
+ *
+ *  Prefers the server's live preview; falls back to reconstructing a
+ *  pseudo-diff from the call's own arguments when the server never sent
+ *  one (session reloads — previews aren't persisted — and tests). Both
+ *  `ToolCard` and `ToolGroup` resolve through here so a group's `+N -N`
+ *  can never disagree with the cards it expands into. */
+export function diffLinesFor(call: ToolCall, preview: DiffPreview | null): DiffLine[] | null {
+  if (preview) return preview.lines;
+  if (!(call.function.name in DIFF_CARD_TOOLS)) return null;
+  return reconstructDiff(call.function.name, safeParse(call.function.arguments));
+}
+
+/** `+N -N` for one call, or null when it changed no lines. */
+export function diffStatFor(
+  call: ToolCall,
+  preview: DiffPreview | null,
+): { adds: number; dels: number } | null {
+  const lines = diffLinesFor(call, preview);
+  if (!lines) return null;
+  const { adds, dels } = countDiff(lines);
+  return adds || dels ? { adds, dels } : null;
+}
+
 /**
  * Fallback body shown when a live `DiffPreview` isn't available — most
  * commonly after a session reload, since the server currently doesn't
