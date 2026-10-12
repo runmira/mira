@@ -1,4 +1,4 @@
-import { Activity, Bug, FlaskConical, Globe2, MessageCircleQuestion, Pencil, Plus, Smartphone, SquareTerminal } from 'lucide-react';
+import { Activity, Bug, FlaskConical, Globe2, GitPullRequest, MessageCircleQuestion, Pencil, Plus, Smartphone, SquareTerminal } from 'lucide-react';
 import type { ReactNode } from 'react';
 
 /**
@@ -19,9 +19,12 @@ export type ToolPaneKind =
   | 'tests'
   | 'activity'
   | 'whiteboard'
-  | 'devtools';
+  | 'devtools'
+  | 'pr';
 
-/** What the launcher, the "+" menu and the toolbar menu offer, in order. */
+/** What the launcher, the "+" menu and the toolbar menu offer, in order.
+ *  `pr` is intentionally absent: it needs a PR to show, so it only ever
+ *  opens from a PR link in the transcript — never from a blank menu. */
 export const OPENABLE_PANES: ToolPaneKind[] = [
   'aside',
   'browser',
@@ -35,17 +38,31 @@ export const OPENABLE_PANES: ToolPaneKind[] = [
 
 export type ToolPaneTab = {
   /** `tool:<kind>`. The prefix keeps these from ever colliding with a
-   *  file path (file tab ids are paths) or a subagent call id. */
+   *  file path (file tab ids are paths) or a subagent call id. PR tabs
+   *  carry their target: `tool:pr:<owner>/<repo>#<number>`. */
   id: string;
   kind: ToolPaneKind;
   /** Tab-strip label; the browser pane updates it with the live hostname. */
   title: string;
+  /** Set on `pr` tabs: which pull request the pane shows. */
+  pr?: { owner: string; repo: string; number: number };
 };
 
 export const TOOL_PANE_PREFIX = 'tool:';
 
 export function toolPaneId(kind: ToolPaneKind): string {
   return `${TOOL_PANE_PREFIX}${kind}`;
+}
+
+/** `tool:pr:runmira/mira#188` — one tab per PR, so several can sit
+ *  side by side like file tabs. */
+export function prPaneId(owner: string, repo: string, number: number): string {
+  return `${TOOL_PANE_PREFIX}pr:${owner}/${repo}#${number}`;
+}
+
+export function parsePrPaneId(id: string): { owner: string; repo: string; number: number } | null {
+  const m = /^tool:pr:([\w.-]+)\/([\w.-]+)#(\d+)$/.exec(id);
+  return m ? { owner: m[1], repo: m[2], number: Number(m[3]) } : null;
 }
 
 export function isToolPaneId(id: string): boolean {
@@ -55,6 +72,7 @@ export function isToolPaneId(id: string): boolean {
 export function toolPaneKindOf(id: string): ToolPaneKind | null {
   if (!isToolPaneId(id)) return null;
   const kind = id.slice(TOOL_PANE_PREFIX.length);
+  if (kind === 'pr' || kind.startsWith('pr:')) return 'pr';
   return kind === 'new' || (OPENABLE_PANES as string[]).includes(kind)
     ? (kind as ToolPaneKind)
     : null;
@@ -108,5 +126,10 @@ export const TOOL_PANE_DEFS: Record<
     title: 'Developer tools',
     blurb: 'Tokens and request log',
     icon: <Bug className="size-3.5" />,
+  },
+  pr: {
+    title: 'PR',
+    blurb: 'View a pull request',
+    icon: <GitPullRequest className="size-3.5" />,
   },
 };

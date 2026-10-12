@@ -29,7 +29,7 @@ export function QuoteCard({ quote, onRemove }: { quote: ComposerQuote; onRemove:
     >
       <span aria-hidden className="absolute inset-y-1.5 left-0 w-[3px] rounded-full bg-mira-blue/60" />
       <Quote className="mt-0.5 size-3 shrink-0 text-mira-blue/80" aria-hidden />
-      <span className="min-w-0">
+      <span className="min-w-0 flex-1">
         <span className="block text-[10.5px] font-medium uppercase tracking-wide text-muted-foreground/70">
           {quoteSource(quote.turn)}
         </span>

@@ -192,6 +192,7 @@ export interface WorkspaceRuntime extends WorkspaceState {
   closeFileTab: (tabId: string) => void;
   closeToolTab: (tabId: string) => void;
   openToolPane: (kind: ToolPaneKind) => void;
+  openPrPane: (owner: string, repo: string, number: number) => void;
   closeAnyTab: (id: string) => void;
   sendWhiteboardToChat: (pngDataUrl: string) => Promise<void>;
   handlePanelResizeStart: (e: React.MouseEvent) => void;

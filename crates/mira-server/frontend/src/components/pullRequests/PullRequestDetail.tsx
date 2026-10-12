@@ -30,6 +30,7 @@ export function PullRequestDetail({
   onToggleExpand,
   onMutation,
   onReviewPr,
+  hideExpand = false,
 }: {
   selection: Selection;
   pane: 'summary' | 'code';
@@ -38,6 +39,9 @@ export function PullRequestDetail({
   onToggleExpand: () => void;
   onMutation: () => void;
   onReviewPr: (owner: string, repo: string, number: number) => void;
+  /** Side-panel use: the panel has no list to expand from, so the
+   *  expand button is hidden. */
+  hideExpand?: boolean;
 }) {
   const [detail, setDetail] = useState<PullRequestDetailView | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -74,6 +78,7 @@ export function PullRequestDetail({
         onToggleExpand={onToggleExpand}
         onReload={reload}
         onReviewPr={onReviewPr}
+        hideExpand={hideExpand}
       />
       <div className="flex-1 min-h-0 overflow-y-auto">
         {loading && (
@@ -105,6 +110,7 @@ export function DetailHeader({
   onToggleExpand,
   onReload,
   onReviewPr,
+  hideExpand = false,
 }: {
   selection: Selection;
   detail: PullRequestDetailView | null;
@@ -114,6 +120,7 @@ export function DetailHeader({
   onToggleExpand: () => void;
   onReload: () => void;
   onReviewPr: (owner: string, repo: string, number: number) => void;
+  hideExpand?: boolean;
 }) {
   return (
     <div className="flex h-11 shrink-0 items-center gap-2 border-b border-border/60 px-3">
@@ -163,6 +170,7 @@ export function DetailHeader({
         <button
           onClick={onToggleExpand}
           title={expanded ? 'Show list' : 'Expand'}
+          hidden={hideExpand}
           className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
         >
           <Expand className="size-4" />
