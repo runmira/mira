@@ -426,10 +426,15 @@ export function WorkspaceMain(
                   }}
                   ref={paneRef}
                   onScroll={onPaneScroll}
+                  // Deliberately no `onPointerDown`: that fires for a plain
+                  // click too, and clicking to expand a collapsed turn is not
+                  // a scroll — it would hold follow-mode off for the whole
+                  // settle window and let content above drift. A scrollbar
+                  // drag is covered by the move handler, which only stamps
+                  // while a button is held.
                   onWheel={noteScrollInput}
                   onTouchMove={noteScrollInput}
                   onKeyDown={noteScrollInput}
-                  onPointerDown={noteScrollInput}
                   onPointerMove={(e) => {
                     if (e.buttons) noteScrollInput();
                   }}

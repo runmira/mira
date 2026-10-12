@@ -14,6 +14,7 @@ import { useBackgroundProcesses } from '../lib/backgroundProcesses';
 import { hasHiddenTitleBar } from '../lib/desktop';
 import { useLatch } from '../lib/lazy';
 import { getBoolPref, PREF_KEYS } from '../lib/prefs';
+import { distanceFromBottom, FOLLOW_ENGAGE_AT, nextFollow } from '../lib/transcriptFollow';
 import { playTurnSound } from '../lib/sound';
 import { groupByTurn } from '../lib/turnActivity';
 import { costUsd } from '../lib/usage';
@@ -347,12 +348,17 @@ export function useWorkspaceView(
   const onPaneScroll = useCallback(() => {
     const el = paneRef.current;
     if (!el) return;
-    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    const distance = distanceFromBottom(el);
     // Settings → General → Transcript can disable auto-follow; the
     // jump-to-latest button still works (it re-arms follow explicitly).
-    if (Date.now() - lastScrollInputRef.current < 1000)
-      followRef.current = atBottom && getBoolPref(PREF_KEYS.transcriptFollow, true);
-    setShowJump(!atBottom);
+    if (Date.now() - lastScrollInputRef.current < 1000) {
+      followRef.current = nextFollow(
+        followRef.current,
+        distance,
+        getBoolPref(PREF_KEYS.transcriptFollow, true),
+      );
+    }
+    setShowJump(distance >= FOLLOW_ENGAGE_AT);
   }, []);
 
   const pendingApprovals = useMemo<PendingApproval[]>(

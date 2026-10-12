@@ -66,6 +66,7 @@ export function useWorkspaceEffects(
     | 'paneRef'
     | 'readingAnchorRef'
     | 'followRef'
+    | 'lastScrollInputRef'
     | 'thinking'
     | 'sessionId'
     | 'setNowTick'
@@ -147,6 +148,7 @@ export function useWorkspaceEffects(
     paneRef,
     readingAnchorRef,
     followRef,
+    lastScrollInputRef,
     thinking,
     sessionId,
     setNowTick,
@@ -424,13 +426,27 @@ export function useWorkspaceEffects(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useLayoutEffect(() => {
+  /** True while the user is actively scrolling the transcript.
+ *
+ *  Follow-mode pinning used to fire on every streamed token, which fought
+ *  the pointer: the reader would scroll down through a section and the
+ *  next token would yank the pane back to the bottom, so the text they
+ *  were reading slid away instead of staying put. Pinning yields for the
+ *  duration of a scroll gesture and resumes once it settles. */
+const scrollSettlesAfterMs = 700;
+function isScrolling(lastScrollInput: number): boolean {
+  return Date.now() - lastScrollInput < scrollSettlesAfterMs;
+}
+
+useLayoutEffect(() => {
     const el = paneRef.current;
     if (!el) return;
     if (readingAnchorRef.current != null) {
       el.scrollTop = readingAnchorRef.current;
       readingAnchorRef.current = null;
-    } else if (followRef.current) el.scrollTop = el.scrollHeight;
+    } else if (followRef.current && !isScrolling(lastScrollInputRef.current)) {
+      el.scrollTop = el.scrollHeight;
+    }
   }, [entries, thinking]);
 
   useEffect(() => {
@@ -438,7 +454,8 @@ export function useWorkspaceEffects(
     const column = pane?.querySelector('[data-transcript-column]');
     if (!pane || !column) return;
     const observer = new ResizeObserver(() => {
-      if (followRef.current) pane.scrollTop = pane.scrollHeight;
+      if (followRef.current && !isScrolling(lastScrollInputRef.current))
+        pane.scrollTop = pane.scrollHeight;
     });
     observer.observe(column);
     return () => observer.disconnect();
