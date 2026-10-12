@@ -113,11 +113,14 @@ pub struct Computer {
     opts: ComputerOptions,
     /// Last known model↔input mapping; refreshed by every screenshot.
     scale: Mutex<Option<Scale>>,
-    operation: Mutex<()>,
+    operation: Arc<Mutex<()>>,
 }
 
-/// Cancellation must release synthetic held keys, including during a network disconnect.
+type OperationLease = Arc<std::sync::Mutex<Option<tokio::sync::OwnedMutexGuard<()>>>>;
+
+/// Cancellation transfers the operation lock to cleanup before the next action.
 struct ReleaseKey {
+    operation: OperationLease,
     backend: Arc<dyn ComputerBackend>,
     chord: KeyChord,
     armed: bool,
@@ -130,13 +133,20 @@ impl Drop for ReleaseKey {
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             let backend = self.backend.clone();
             let chord = self.chord.clone();
+            let operation = self
+                .operation
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take();
             runtime.spawn(async move {
+                let _operation = operation;
                 let _ = backend.key(&chord, KeyAction::Up).await;
             });
         }
     }
 }
 struct ReleaseButton {
+    operation: OperationLease,
     backend: Arc<dyn ComputerBackend>,
     armed: bool,
 }
@@ -145,7 +155,13 @@ impl Drop for ReleaseButton {
         if self.armed {
             if let Ok(runtime) = tokio::runtime::Handle::try_current() {
                 let backend = self.backend.clone();
+                let operation = self
+                    .operation
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take();
                 runtime.spawn(async move {
+                    let _operation = operation;
                     let _ = backend.button(MouseButton::Left, ButtonAction::Up).await;
                 });
             }
@@ -158,7 +174,7 @@ impl Computer {
             backend,
             opts,
             scale: Mutex::new(None),
-            operation: Mutex::new(()),
+            operation: Arc::new(Mutex::new(())),
         }
     }
 
@@ -230,7 +246,9 @@ impl Computer {
 
     /// Run one action. Coordinates in `action` are model space.
     pub async fn execute(&self, action: &ComputerAction) -> Result<Outcome, ComputerError> {
-        let _operation = self.operation.lock().await;
+        let operation = Arc::new(std::sync::Mutex::new(Some(
+            self.operation.clone().lock_owned().await,
+        )));
         use ComputerAction as A;
         let b = &self.backend;
         let text = match action {
@@ -289,6 +307,7 @@ impl Computer {
                         .as_ref()
                         .filter(|_| b.name() != "cua")
                         .map(|chord| ReleaseKey {
+                            operation: operation.clone(),
                             backend: b.clone(),
                             chord: chord.clone(),
                             armed: true,
@@ -305,6 +324,7 @@ impl Computer {
             A::Drag { from, to } => {
                 let (f, t) = (self.to_input(*from).await?, self.to_input(*to).await?);
                 let mut release = ReleaseButton {
+                    operation: operation.clone(),
                     backend: b.clone(),
                     armed: b.name() != "cua",
                 };
@@ -334,6 +354,7 @@ impl Computer {
             A::HoldKey { keys, seconds } => {
                 let chord = KeyChord::parse(keys)?;
                 let mut release = ReleaseKey {
+                    operation: operation.clone(),
                     backend: b.clone(),
                     chord: chord.clone(),
                     armed: true,
@@ -359,6 +380,7 @@ impl Computer {
                         .as_ref()
                         .filter(|_| b.name() != "cua")
                         .map(|chord| ReleaseKey {
+                            operation: operation.clone(),
                             backend: b.clone(),
                             chord: chord.clone(),
                             armed: true,
@@ -492,11 +514,47 @@ impl ComputerController for Computer {
 mod cancellation_tests {
     use super::*;
     #[tokio::test]
-    async fn cancelled_key_holds_release_synthetic_modifiers() {
-        let backend = Arc::new(crate::backend::mock::MockBackend::new(
-            (100, 100),
-            (100, 100),
+    async fn cancelled_button_cleanup_finishes_before_next_input() {
+        let mut backend = crate::backend::mock::MockBackend::new((100, 100), (100, 100));
+        backend.release_delay = Duration::from_millis(50);
+        let backend = Arc::new(backend);
+        let computer = Computer::new(
+            backend.clone(),
+            ComputerOptions {
+                screenshot_after_action: false,
+                ..Default::default()
+            },
+        );
+        let operation = Arc::new(std::sync::Mutex::new(Some(
+            computer.operation.clone().lock_owned().await,
+        )));
+        backend
+            .button(MouseButton::Left, ButtonAction::Down)
+            .await
+            .unwrap();
+        let release = ReleaseButton {
+            backend: backend.clone(),
+            operation: operation.clone(),
+            armed: true,
+        };
+        drop(release);
+        drop(operation);
+        computer
+            .execute(&ComputerAction::Type("next".into()))
+            .await
+            .unwrap();
+        let events = backend.events();
+        assert!(matches!(
+            events[1],
+            crate::backend::mock::Event::Button(_, ButtonAction::Up)
         ));
+        assert!(matches!(events[2], crate::backend::mock::Event::Type(_)));
+    }
+    #[tokio::test]
+    async fn cancelled_key_holds_release_synthetic_modifiers() {
+        let mut backend = crate::backend::mock::MockBackend::new((100, 100), (100, 100));
+        backend.release_delay = Duration::from_millis(50);
+        let backend = Arc::new(backend);
         let computer = Arc::new(Computer::new(
             backend.clone(),
             ComputerOptions {
@@ -504,8 +562,9 @@ mod cancellation_tests {
                 ..Default::default()
             },
         ));
+        let running = computer.clone();
         let task = tokio::spawn(async move {
-            computer
+            running
                 .execute(&ComputerAction::HoldKey {
                     keys: "shift".into(),
                     seconds: 30.0,
@@ -521,6 +580,20 @@ mod cancellation_tests {
         .unwrap();
         task.abort();
         let _ = task.await;
+        computer
+            .execute(&ComputerAction::Type("next".into()))
+            .await
+            .unwrap();
+        let events = backend.events();
+        let up = events
+            .iter()
+            .position(|e| matches!(e, crate::backend::mock::Event::Key(_, KeyAction::Up)))
+            .unwrap();
+        let typed = events
+            .iter()
+            .position(|e| matches!(e, crate::backend::mock::Event::Type(_)))
+            .unwrap();
+        assert!(up < typed, "cleanup must finish before the next input");
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 if backend

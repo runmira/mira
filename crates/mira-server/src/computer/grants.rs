@@ -136,8 +136,7 @@ impl Grants {
             inner.code = None;
         }
     }
-    pub fn claim(&self, value: &str, name: &str) -> Result<(GrantView, String), String> {
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+    fn validate_locked(inner: &mut Inner, value: &str) -> Result<String, String> {
         let now = Instant::now();
         while inner
             .failures
@@ -168,7 +167,17 @@ impl Grants {
             inner.failures.push_back(now);
             return Err("That pairing code is not correct.".into());
         }
-        let backend = code.backend.clone();
+        Ok(code.backend.clone())
+    }
+    /// Validate and account for failures before any expensive identity RPC.
+    /// Valid codes remain available until claim commits durable credentials.
+    pub fn validate(&self, value: &str) -> Result<String, String> {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        Self::validate_locked(&mut inner, value)
+    }
+    pub fn claim(&self, value: &str, name: &str) -> Result<(GrantView, String), String> {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let backend = Self::validate_locked(&mut inner, value)?;
         if inner.grants.len() >= 32 {
             return Err("Remove an existing computer before pairing another.".into());
         }

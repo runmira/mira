@@ -105,16 +105,11 @@ pub(super) async fn inspect(
     }
 }
 pub(super) async fn claim(State(api): State<ControlApi>, Json(body): Json<Claim>) -> Response {
-    if !api.computer.grants.is_open() {
-        return failure(
-            StatusCode::GONE,
-            "That pairing link has expired or was already used.",
-        );
-    }
-    if body.code.len() != 10 || !body.code.chars().all(|c| c.is_ascii_hexdigit()) {
-        return failure(StatusCode::BAD_REQUEST, "Invalid pairing code.");
-    }
-    let identity = if api.computer.grants.open_backend().as_deref() == Some("native") {
+    let backend = match api.computer.grants.validate(&body.code) {
+        Ok(backend) => backend,
+        Err(e) => return failure(StatusCode::UNAUTHORIZED, e),
+    };
+    let identity = if backend == "native" {
         native_identity(&api.machine_id)
     } else {
         match api.computer.local_cua(Delivery::Auto, None).await {

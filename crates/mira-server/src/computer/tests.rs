@@ -155,3 +155,31 @@ async fn remote_controller_runs_against_a_scoped_gateway_without_real_desktop_in
     assert!(backend.events().iter().any(|event|matches!(event,mira_computer::backend::mock::Event::Type(text)if text=="fixture input")));
     server.abort();
 }
+
+#[tokio::test]
+async fn invalid_pairing_codes_are_rejected_before_cua_lookup() {
+    let (computer, _, routes) = fixture();
+    let (code, _) = computer.grants.open_for("cua");
+    assert_eq!(computer.grants.validate(&code).unwrap(), "cua");
+    assert_eq!(computer.grants.validate(&code).unwrap(), "cua");
+    assert!(
+        computer.grants.is_open(),
+        "validation must not consume the code"
+    );
+    for _ in 0..5 {
+        let response = routes
+            .clone()
+            .oneshot(request(
+                "/api/computer/pairing/claim",
+                None,
+                serde_json::json!({"code":"not-a-code","name":"attacker"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+    assert!(
+        !computer.grants.is_open(),
+        "invalid attempts close the code without CUA RPCs"
+    );
+}
