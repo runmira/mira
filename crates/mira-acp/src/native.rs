@@ -2891,7 +2891,9 @@ done
         let hit = map_line(&serde_json::from_str(
             r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":4102444800}}"#,
         ).unwrap());
-        assert!(hit.iter().any(|a| matches!(a, NativeAction::RateLimited { resets_at: Some(r) } if r == "4102444800")));
+        assert!(hit.iter().any(
+            |a| matches!(a, NativeAction::RateLimited { resets_at: Some(r) } if r == "4102444800")
+        ));
     }
 
     #[test]
