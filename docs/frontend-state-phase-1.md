@@ -156,3 +156,24 @@ measurements confirm a 240px body with overflow content, continued bounded heigh
 after completion, and a four-second activity sweep. Tests cover latest-line identity,
 preview scrolling/observer disposal, manual reading retention and completed caps.
 Initial gzip remains 423.4kB against the unchanged 400kB limit.
+
+## Paced summaries and output reading snapshots
+
+Tool-group summaries and collapsed thinking lines share bounded presentation
+pacing: a 300ms entrance plus 500ms hold, at most two pending identities, same-ID
+updates in place, and stale backlog skipping after timer drift. Completion and
+reduced motion immediately show authoritative latest text. Disposal clears timers;
+Strict Mode recreates the controller. Runtime facts and command dispatch are not
+delayed by presentation pacing.
+
+Command output follows the bottom while live. Scrolling upward freezes one display
+snapshot, preserving older lines even if the live buffer rolls over or the process
+finishes. Returning to the bottom or Jump to live reveals the current buffer.
+Nested output scrolling does not interfere with transcript anchoring. Historical
+output opens at the top rather than auto-following.
+
+Validation: 94 tests and TypeScript/build/module checks pass. Browser testing
+confirmed that a paused display stayed unchanged through new output and resumed
+the newest buffer on Jump to live. Tests cover bounded queues, same-ID metadata,
+stale timer skipping, completion, Strict Mode/disposal, buffer replacement and
+manual resume. Initial gzip remains 423.4kB against the unchanged 400kB budget.

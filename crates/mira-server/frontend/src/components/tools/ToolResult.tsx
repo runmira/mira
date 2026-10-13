@@ -1,6 +1,6 @@
 import { cn } from '@/lib/utils';
 import { Copy } from 'lucide-react';
-import { useState } from 'react';
+import { useLayoutEffect, useRef, useState } from 'react';
 import { ansiToSegments, foldOutputLines } from '../../lib/toolOutput.mjs';
 import { useTranscriptDisclosure } from '../TranscriptDisclosure';
 /** For tools whose meaningful arg is a single prose field, pull it
@@ -195,16 +195,47 @@ export function LiveOutputPanel({
   running: boolean;
   expanded: boolean;
 }) {
-  const visibleLines = expanded ? lines : lines.slice(-5);
-  const totalLines = lines.length;
+  const scroll = useRef<HTMLDivElement>(null);
+  const previousTop = useRef(0);
+  const hasStreamed = useRef(running);
+  const [frozen, setFrozen] = useState<string[] | null>(null);
+  const following = frozen === null;
+  const display = frozen ?? lines;
+  const visibleLines = expanded ? display : display.slice(-5);
+  const totalLines = display.length;
+  useLayoutEffect(() => {
+    if (running) hasStreamed.current = true;
+    const el = scroll.current;
+    if (!hasStreamed.current || !following || !el) return;
+    el.scrollTop = el.scrollHeight;
+    previousTop.current = el.scrollTop;
+  }, [lines, running, following, expanded]);
+  function onScroll() {
+    const el = scroll.current;
+    if (!el) return;
+    const atBottom = el.scrollHeight - el.clientHeight - el.scrollTop <= 8;
+    if (hasStreamed.current && following && el.scrollTop < previousTop.current && !atBottom) setFrozen([...display]);
+    else if (!following && atBottom) setFrozen(null);
+    previousTop.current = el.scrollTop;
+  }
 
   return (
     <div
+      ref={scroll}
+      data-live-output
+      data-following={following}
+      role="region"
+      tabIndex={0}
+      aria-label="Command output"
+      onScroll={onScroll}
+      onWheel={event => event.stopPropagation()}
+      onTouchMove={event => event.stopPropagation()}
+      onKeyDown={event => event.stopPropagation()}
       className={cn(
         'ml-6 mt-0.5 rounded-md border font-mono text-[11.5px] leading-[1.55] transition-[max-height] duration-200',
         'border-border/30 bg-[#f6f7f9] dark:bg-[#1a1b1e]',
         expanded ? 'max-h-[40vh]' : 'max-h-[8rem]',
-        'overflow-auto',
+        'overflow-auto overscroll-contain',
       )}
     >
       {/* Header strip */}
@@ -216,14 +247,16 @@ export function LiveOutputPanel({
           )}
         />
         <span className="text-[10.5px] text-muted-foreground/60">
-          {running ? 'running' : 'exited'}
+          {running ? 'running' : 'exited'}{!following && ' · paused'}
         </span>
-        {!expanded && totalLines > 5 && (
+        {!following && <button type="button" className="ml-auto rounded px-1 text-[10.5px] text-muted-foreground hover:text-foreground"
+          onClick={event => { event.stopPropagation(); setFrozen(null); }}>Jump to live</button>}
+        {following && !expanded && totalLines > 5 && (
           <span className="ml-auto text-[10px] text-muted-foreground/40">
             {totalLines} lines · showing last 5
           </span>
         )}
-        {expanded && (
+        {following && expanded && (
           <span className="ml-auto text-[10px] text-muted-foreground/40">{totalLines} lines</span>
         )}
       </div>

@@ -13,6 +13,7 @@ import { useEffect, useState } from 'react';
 import { ToolGroup } from './components/ToolGroup';
 import { ToolCard } from './components/ToolCard';
 import { EntryView, StatusLine } from './components/transcript/EntryView';
+import { LiveOutputPanel } from './components/tools/ToolResult';
 import { ThoughtBlock } from './components/ThoughtBlock';
 import { TurnView, WorkedForChip } from './components/transcript/TurnView';
 import { STREAM_CONTENT_GUTTER } from './lib/streamLayout';
@@ -65,11 +66,15 @@ function App() {
   const [measure, setMeasure] = useState(false);
   const [thinking, setThinking] = useState('Checking the project.');
   const [streamingThought, setStreamingThought] = useState(false);
+  const [activityTick, setActivityTick] = useState(0);
+  const [output, setOutput] = useState(() => Array.from({ length: 40 }, (_, index) => `Output line ${index + 1}`));
   useEffect(() => {
     if (!streamingThought) return;
     let token = 0;
     const timer = window.setInterval(() => {
       token++;
+      setActivityTick(value => value + 1);
+      setOutput(previous => [...previous.slice(-99), `New output ${Date.now()}: step ${token}`]);
       setThinking(previous => previous + (token % 8 === 0 ? '\nChecking the next step.' : ' More reasoning arrives.'));
     }, 200);
     return () => window.clearInterval(timer);
@@ -139,7 +144,7 @@ function App() {
         {msg('<think>Embedded reasoning uses the same text edge.</think>The assistant text starts on the same column.')}
 
         {/* grouped tool run */}
-        <ToolGroup entries={grouped.map(entry => ({ ...entry, status: streamingThought ? 'running' : 'complete' }))} />
+        <ToolGroup entries={grouped.map((entry, index) => ({ ...entry, activityAt: index === activityTick % grouped.length ? activityTick + 1 : 0, status: streamingThought ? 'running' : 'complete' }))} />
 
         {/* grouped edits — should show a summed +N -N on the right rail */}
         <ToolGroup entries={edits} />
@@ -163,6 +168,8 @@ function App() {
           { kind: 'warning', text: '[environment] Switched to local environment.' },
         ] }} timing={{ startedAt: 0, endedAt: 39000 }} index={100} expanded={false} usage={null} model="test" isActive={false} onOpenFile={noop} skills={[]} mode="manual" onSetMode={noop}
           onToggle={noop} onDecide={noop} onPlanReply={noop} onAskUserReply={noop} onOpenAgent={noop} />
+
+        <LiveOutputPanel lines={output} running={streamingThought} expanded />
 
         {/* trailing assistant prose */}
         {msg('The booted device came from `devices.rs`; polling is absent.', true)}

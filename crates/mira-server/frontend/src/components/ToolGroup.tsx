@@ -1,3 +1,4 @@
+import { usePacedSummary } from '../lib/usePacedSummary';
 import { cn } from '@/lib/utils';
 import { AnimatePresence, m, useReducedMotion } from 'framer-motion';
 import { ChevronDown, CircleAlert, CircleCheck, LoaderCircle } from 'lucide-react';
@@ -76,7 +77,11 @@ export function ToolGroup({
       ? plainToolAction(latest.call, latest.status === 'running')
       : 'Working'
     : completedToolSummary(entries);
-  const GroupIcon = infoFor((anyActive ? latest : entries[0])?.call.function.name ?? '').Icon;
+  const nextIcon = infoFor((anyActive ? latest : entries[0])?.call.function.name ?? '').Icon;
+  const displayed = usePacedSummary({ key: latest?.call.id ?? '', version: lastAction,
+    value: { text: lastAction, Icon: nextIcon } }, anyActive);
+  const GroupIcon = displayed.value.Icon;
+  const displayAction = displayed.value.text;
 
   /** Net lines touched by the whole run, summed across the calls in it.
    *  Null when nothing in the group was an edit, so a run of reads or
@@ -107,8 +112,8 @@ export function ToolGroup({
         )}
       >
         <span aria-hidden="true" className="inline-flex size-3.5 shrink-0 items-center justify-center"><GroupIcon className="size-3.5 text-muted-foreground" /></span>
-        <span className="min-w-0 flex-1 truncate" title={lastAction}>
-          <ActivityShimmer active={anyActive}>{lastAction}</ActivityShimmer>
+        <span className="min-w-0 flex-1 truncate" title={displayAction}>
+          <ActivityShimmer active={anyActive}><span key={displayed.key} className={anyActive ? "thinking-line-enter inline-block" : undefined}>{displayAction}</span></ActivityShimmer>
         </span>
         {/* Trailing metadata reads as one group: the run count and the
             net line delta are the same kind of fact, so they share a

@@ -1,11 +1,14 @@
 import { useLayoutEffect, useRef, useState } from 'react';
 import { useReducedMotion } from 'framer-motion';
 import { PREF_KEYS, useBoolPref } from '../lib/prefs';
+import { usePacedSummary } from '../lib/usePacedSummary';
 import { thinkingPreview } from '../lib/thinkingPreview';
 
 /** Last-line preview follows new tokens horizontally without widening the row. */
 export function ThinkingPreview({ content }: { content: string }) {
-  const summary = thinkingPreview(content);
+  const next = thinkingPreview(content);
+  const displayed = usePacedSummary({ key: next.key, version: next.text, value: next }, true);
+  const summary = displayed.value;
   const viewport = useRef<HTMLSpanElement>(null);
   const text = useRef<HTMLSpanElement>(null);
   const [overflow, setOverflow] = useState(false);
