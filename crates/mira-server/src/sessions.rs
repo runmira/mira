@@ -946,13 +946,13 @@ pub(crate) fn spawn_retention_gc(state: AppState) {
             return;
         };
         let active = state.active.read().await.clone().to_string();
-        let queued: std::collections::HashSet<String> = store
-            .queued_sessions()
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .map(|id| id.to_string())
-            .collect();
+        let queued: std::collections::HashSet<String> = match store.queued_sessions().await {
+            Ok(ids) => ids.into_iter().map(|id| id.to_string()).collect(),
+            Err(e) => {
+                warn!(%e, "session retention GC skipped: queue scan failed");
+                return;
+            }
+        };
         let mut metas = match store.list_metadata(None, false, true, usize::MAX).await {
             Ok(m) => m,
             Err(e) => {
@@ -965,12 +965,37 @@ pub(crate) fn spawn_retention_gc(state: AppState) {
         let victims = retention_victims(&metas, &active, &queued, now);
         let mut deleted = 0usize;
         for id in &victims {
+            let sid = SessionId::from(id.as_str());
+            // Loading is protected until its slot is registered. Keeping all
+            // live slots also protects running/attached/queued work in memory.
+            let _loading = state.lock_slot_load(&sid).await;
+            let active = state.active.read().await;
+            let slots = state.slots.read().await;
+            if *active == sid || slots.contains_key(&sid) {
+                continue;
+            }
+            let queued = match store.queued_sessions().await {
+                Ok(ids) => ids,
+                Err(e) => {
+                    warn!(%e, "session retention GC stopped: queue recheck failed");
+                    return;
+                }
+            };
+            if queued.iter().any(|queued| *queued == sid) {
+                continue;
+            }
+            // Hold the guards through deletion: activation, loading and queue
+            // dispatch cannot race the last safety checks for this session.
             match store.delete(id).await {
                 Ok(()) => deleted += 1,
                 Err(e) => warn!(session = %id, %e, "retention GC: delete failed"),
             }
         }
-        info!(deleted, total = metas.len(), "session retention GC finished");
+        info!(
+            deleted,
+            total = metas.len(),
+            "session retention GC finished"
+        );
     });
 }
 

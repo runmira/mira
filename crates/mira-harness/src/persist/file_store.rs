@@ -221,12 +221,10 @@ impl SessionStore for FileStore {
             let Some(id) = name.strip_suffix(".agent.queue") else {
                 continue;
             };
-            let Ok(bytes) = fs::read(&path).await else {
-                continue;
-            };
-            let Ok(items) = serde_json::from_slice::<Vec<serde_json::Value>>(&bytes) else {
-                continue;
-            };
+            // Retention depends on a complete scan. Unreadable or malformed
+            // queue state is uncertainty, never proof of an empty outbox.
+            let bytes = fs::read(&path).await?;
+            let items = serde_json::from_slice::<Vec<serde_json::Value>>(&bytes)?;
             if items
                 .iter()
                 .find(|i| i["delivered"] != true)
@@ -640,5 +638,16 @@ mod tests {
         }
         let ids = store.queued_sessions().await.unwrap();
         assert_eq!(ids, vec![SessionId::from("pending")]);
+    }
+    #[tokio::test]
+    async fn queued_scan_fails_closed_on_malformed_or_unreadable_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileStore::at(dir.path()).unwrap();
+        let path = store.queue_state_path(&SessionId::from("pending")).unwrap();
+        fs::write(&path, b"incomplete queue").await.unwrap();
+        assert!(store.queued_sessions().await.is_err());
+        fs::remove_file(&path).await.unwrap();
+        fs::create_dir(&path).await.unwrap();
+        assert!(store.queued_sessions().await.is_err());
     }
 }
