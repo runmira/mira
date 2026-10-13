@@ -100,7 +100,13 @@ echo "staged $DESKTOP/binaries/mira-$TRIPLE$EXT"
 cd "$DESKTOP"
 case "$MODE" in
   sidecar) ;;
-  dev) cargo tauri dev ;;
+  dev)
+    # Debug executables have no adjacent packaged sidecar. Point the app at
+    # the server we just built instead of falling back to an older mira on PATH.
+    TAURI_ARGS=()
+    [ "$CHANNEL" = stable ] || TAURI_ARGS+=(--config "channels/$CHANNEL.json")
+    MIRA_BIN="$ROOT/target/$PROFILE/mira$EXT" cargo tauri dev ${TAURI_ARGS[@]+"${TAURI_ARGS[@]}"}
+    ;;
   release)
     TAURI_ARGS=()
     [ "$CHANNEL" = stable ] || TAURI_ARGS+=(--config "channels/$CHANNEL.json")
