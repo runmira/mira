@@ -36,7 +36,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use mira_agents::AgentRegistry;
@@ -150,6 +150,10 @@ pub struct SessionSlot {
     /// watchers) — the same store its tools use, so the Processes pane
     /// sees and stops exactly what the agent sees.
     pub bg_processes: Arc<BackgroundProcessStore>,
+    /// Unix seconds of the last observed use (slot lookup, attach, turn,
+    /// …), for the idle-slot evictor. Initialized at build; refreshed by
+    /// [`SessionSlot::touch`].
+    pub last_used: AtomicU64,
 }
 
 impl SessionSlot {
@@ -183,6 +187,21 @@ impl SessionSlot {
     /// `Ask` decisions via [`BackgroundMode`].
     pub fn is_attached(&self) -> bool {
         self.attached.load(Ordering::SeqCst) > 0
+    }
+
+    /// Record a use of this slot now. Called on slot lookup/attach so the
+    /// idle-slot evictor only drops slots nobody has touched in a while.
+    pub fn touch(&self) {
+        self.last_used.store(
+            crate::session_engine::now_secs(),
+            Ordering::Relaxed,
+        );
+    }
+
+    /// Seconds since [`SessionSlot::touch`] last ran.
+    pub fn idle_secs(&self) -> u64 {
+        crate::session_engine::now_secs()
+            .saturating_sub(self.last_used.load(Ordering::Relaxed))
     }
 
     /// True while a spawned turn task is still holding the slot's turn
@@ -531,6 +550,7 @@ pub async fn build_slot(
         background_mode,
         environments,
         bg_processes: bg_store,
+        last_used: AtomicU64::new(crate::session_engine::now_secs()),
     })
 }
 

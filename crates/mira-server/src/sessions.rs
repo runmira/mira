@@ -922,6 +922,93 @@ pub async fn delete_session(
     Json(serde_json::json!({ "ok": true, "promoted": promoted })).into_response()
 }
 
+/// How many non-archived session records to keep regardless of age,
+/// newest first.
+const RETAIN_SESSION_COUNT: usize = 300;
+/// Non-archived sessions older than this are eligible for collection once
+/// the count above is exceeded.
+const RETAIN_SESSION_DAYS: u64 = 30;
+
+/// Delete old session transcripts from disk, once, in the background at
+/// startup. `~/.mira/sessions/` otherwise grows without bound (tens of MB
+/// and 1000+ files on a busy machine), and every file is something the
+/// sidebar lists and an attach may load whole into memory.
+///
+/// Conservative: a record survives if ANY of these hold — it is the active
+/// session, pinned, or archived (explicit user intent); it was updated
+/// within [`RETAIN_SESSION_DAYS`]; it is among the [`RETAIN_SESSION_COUNT`]
+/// newest records; it has queued work waiting; or another record names it
+/// as a parent (don't orphan a kept child). Per-record failures are logged
+/// and skipped; `store.delete` already cascades the sidecars.
+pub(crate) fn spawn_retention_gc(state: AppState) {
+    tokio::spawn(async move {
+        let Some(store) = state.store.clone() else {
+            return;
+        };
+        let active = state.active.read().await.clone().to_string();
+        let queued: std::collections::HashSet<String> = store
+            .queued_sessions()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect();
+        let mut metas = match store.list_metadata(None, false, true, usize::MAX).await {
+            Ok(m) => m,
+            Err(e) => {
+                warn!(%e, "session retention GC skipped: listing failed");
+                return;
+            }
+        };
+        metas.sort_by_key(|m| std::cmp::Reverse(m.updated_at));
+        let now = mira_harness::persist::now_secs();
+        let victims = retention_victims(&metas, &active, &queued, now);
+        let mut deleted = 0usize;
+        for id in &victims {
+            match store.delete(id).await {
+                Ok(()) => deleted += 1,
+                Err(e) => warn!(session = %id, %e, "retention GC: delete failed"),
+            }
+        }
+        info!(deleted, total = metas.len(), "session retention GC finished");
+    });
+}
+
+/// Pure retention policy behind [`spawn_retention_gc`]: which record ids to
+/// delete. `metas` must be newest-first. A record is deleted only when it is
+/// simultaneously: not the active session, not pinned, not archived, older
+/// than [`RETAIN_SESSION_DAYS`], past the first [`RETAIN_SESSION_COUNT`]
+/// entries, childless, and with no queued work.
+fn retention_victims(
+    metas: &[SessionListRecord],
+    active: &str,
+    queued: &std::collections::HashSet<String>,
+    now: u64,
+) -> Vec<mira_core::SessionId> {
+    let parents: std::collections::HashSet<String> = metas
+        .iter()
+        .filter_map(|m| m.parent_id.as_ref().map(|p| p.to_string()))
+        .collect();
+    let cutoff = now.saturating_sub(RETAIN_SESSION_DAYS * 86_400);
+    metas
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| {
+            let id = m.id.to_string();
+            id != active
+                && !m.pinned
+                && m.archived_at.is_none()
+                && m.updated_at < cutoff
+                && !parents.contains(&id)
+                && !queued.contains(&id)
+        })
+        // Position counts every surviving record (protected ones included):
+        // the budget is "newest N records", not "newest N deletable ones".
+        .filter(|(i, _)| *i >= RETAIN_SESSION_COUNT)
+        .map(|(_, m)| m.id.clone())
+        .collect()
+}
+
 /// Pin / archive / restore a session. Each field is optional so the UI
 /// can flip one flag without knowing the other; the record is the source
 /// of truth, so this survives restarts and CLI use.
@@ -1603,5 +1690,91 @@ mod metadata_tests {
         assert!(rows
             .iter()
             .all(|row| row.worktree_status.is_none() && row.worktree_branch.is_none()));
+    }
+
+    fn retention_record(id: &str, updated_at: u64) -> SessionListRecord {
+        SessionListRecord {
+            id: SessionId::from(id),
+            cwd: "/project".into(),
+            model: "model".into(),
+            created_at: 1,
+            updated_at,
+            title: None,
+            first_user_message: None,
+            message_count: 0,
+            usage: Default::default(),
+            parent_id: None,
+            pinned: false,
+            archived_at: None,
+            settle: Default::default(),
+            agent_driver: None,
+            forked_from: None,
+        }
+    }
+
+    #[test]
+    fn retention_keeps_everything_young_or_protected() {
+        let now = 1_800_000_000u64;
+        let old = now - (RETAIN_SESSION_DAYS + 1) * 86_400;
+        // Recent fillers consume the whole count budget, so every record
+        // below sits past it — only the guards decide who survives.
+        let mut metas: Vec<SessionListRecord> = (0..RETAIN_SESSION_COUNT)
+            .map(|i| retention_record(&format!("fill-{i}"), now - 100))
+            .collect();
+        let mut pinned = retention_record("pinned-old", old);
+        pinned.pinned = true;
+        let mut archived = retention_record("archived-old", old);
+        archived.archived_at = Some(old);
+        let guard_parent = retention_record("guard-parent", old);
+        let mut child = retention_record("young-parent", old);
+        child.parent_id = Some(SessionId::from("guard-parent"));
+        let queued = retention_record("queued-old", old);
+        let active = retention_record("active-old", old);
+        let doomed: Vec<SessionListRecord> = (0..5)
+            .map(|i| retention_record(&format!("doomed-{i}"), old - i))
+            .collect();
+        metas.extend([pinned, archived, guard_parent, child, queued, active]);
+        metas.extend(doomed);
+        let queued_set: std::collections::HashSet<String> =
+            ["queued-old".to_string()].into_iter().collect();
+        let victims = retention_victims(&metas, "active-old", &queued_set, now)
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect::<std::collections::HashSet<_>>();
+        // Protected: pinned, archived, parent of a listed record, queued,
+        // and the active session — none are victims. (Fresh-by-the-clock
+        // is covered by the fillers and the next test.)
+        for kept in [
+            "pinned-old",
+            "archived-old",
+            "guard-parent",
+            "queued-old",
+            "active-old",
+        ] {
+            assert!(!victims.contains(kept), "{kept} must survive");
+        }
+        // Exactly the unprotected olds past the budget: the doomed five
+        // plus the child, which is safe to drop while its parent survives.
+        let expected: std::collections::HashSet<String> = ["young-parent".to_string()]
+            .into_iter()
+            .chain((0..5).map(|i| format!("doomed-{i}")))
+            .collect();
+        assert_eq!(victims, expected);
+    }
+
+    #[test]
+    fn retention_never_fires_under_the_budgets() {
+        let now = 1_800_000_000u64;
+        let old = now - (RETAIN_SESSION_DAYS + 1) * 86_400;
+        // Old, but within the count budget: all survive.
+        let metas: Vec<SessionListRecord> = (0..RETAIN_SESSION_COUNT)
+            .map(|i| retention_record(&format!("s-{i}"), old))
+            .collect();
+        assert!(retention_victims(&metas, "none", &Default::default(), now).is_empty());
+        // Old and over budget, but fresh by the clock: all survive.
+        let metas: Vec<SessionListRecord> = (0..RETAIN_SESSION_COUNT + 10)
+            .map(|i| retention_record(&format!("s-{i}"), now - 100))
+            .collect();
+        assert!(retention_victims(&metas, "none", &Default::default(), now).is_empty());
     }
 }
