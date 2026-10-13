@@ -36,7 +36,10 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
       const request = ++validation;
       const { data, error } = await supabase!.auth.getUser();
       if (cancelled || request !== validation) return;
-      if (expectedAccount && data.user && data.user.id !== expectedAccount) return;
+      if (expectedAccount && data.user && data.user.id !== expectedAccount) {
+        void validate();
+        return;
+      }
       if (error || !data.user) {
         // Any error from getUser() with a cached session means the token
         // isn't valid anymore (deleted user, revoked, expired refresh). Clear
