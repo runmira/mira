@@ -68,6 +68,13 @@ if [ "$SIGN" = 1 ] && [ "$MODE" = release ]; then
   "$ROOT/scripts/macos-signing.sh" check
 fi
 
+# Native dev builds can otherwise consume many GB in debug symbols and
+# incremental caches across the server and desktop workspaces.
+if [ "$MODE" = dev ]; then
+  export CARGO_PROFILE_DEV_DEBUG=0
+  export CARGO_INCREMENTAL=0
+fi
+
 echo "==> web UI"
 (
   cd "$FRONTEND"
