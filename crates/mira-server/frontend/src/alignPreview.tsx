@@ -7,14 +7,16 @@
  *
  *  Toggle "Measure edges" to outline each row's first-glyph column.
  */
+import { LazyMotion, domAnimation } from 'framer-motion';
 import { createRoot } from 'react-dom/client';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ToolGroup } from './components/ToolGroup';
 import { ToolCard } from './components/ToolCard';
 import { EntryView, StatusLine } from './components/transcript/EntryView';
+import { LiveOutputPanel } from './components/tools/ToolResult';
 import { ThoughtBlock } from './components/ThoughtBlock';
-import { WorkedForChip } from './components/transcript/TurnView';
-import { STREAM_ROW_GUTTER } from './lib/streamLayout';
+import { TurnView, WorkedForChip } from './components/transcript/TurnView';
+import { STREAM_CONTENT_GUTTER } from './lib/streamLayout';
 import { cn } from './lib/utils';
 import './styles.css';
 
@@ -62,11 +64,27 @@ function Measure({ on }: { on: boolean }) {
 
 function App() {
   const [measure, setMeasure] = useState(false);
+  const [thinking, setThinking] = useState('Checking the project.');
+  const [streamingThought, setStreamingThought] = useState(false);
+  const [activityTick, setActivityTick] = useState(0);
+  const [output, setOutput] = useState(() => Array.from({ length: 40 }, (_, index) => `Output line ${index + 1}`));
+  useEffect(() => {
+    if (!streamingThought) return;
+    let token = 0;
+    const timer = window.setInterval(() => {
+      token++;
+      setActivityTick(value => value + 1);
+      setOutput(previous => [...previous.slice(-99), `New output ${Date.now()}: step ${token}`]);
+      setThinking(previous => previous + (token % 8 === 0 ? '\nChecking the next step.' : ' More reasoning arrives.'));
+    }, 200);
+    return () => window.clearInterval(timer);
+  }, [streamingThought]);
   const noop = () => {};
   // The real EntryView, so what we measure is what the transcript renders.
-  const msg = (text: string) => (
+  const msg = (text: string, final = false) => (
     <EntryView
       entry={{ kind: 'msg', msg: { role: 'assistant', content: text, created_at: 0 } }}
+      showAssistantActions={final}
       onDecide={noop}
       onPlanReply={noop}
       onOpenAgent={noop}
@@ -81,11 +99,16 @@ function App() {
           {measure ? 'Hide edges' : 'Measure edges'}
         </button>
         <span className="text-xs text-muted-foreground">
-          Faint line = column edge. Bright line = where a row starts. Every
-          row and every rule should sit on the bright one.
+          Faint line = column edge. Bright line = the shared row edge.
+          Prose starts where tool and thinking icons start.
         </span>
       </div>
 
+      <div className="mb-4 flex gap-2">
+        <button className="rounded-md border border-border px-2 py-1 text-xs" onClick={() => setStreamingThought(value => !value)}>{streamingThought ? 'Stop thinking demo' : 'Stream thinking demo'}</button>
+        <button className="rounded-md border border-border px-2 py-1 text-xs" onClick={() => setThinking(Array.from({ length: 80 }, (_, index) => `Reasoning line ${index + 1}: checking the project and its dependencies.`).join('\n'))}>Load long thinking</button>
+      </div>
+      <div className="mb-4"><ThoughtBlock content={thinking} live={streamingThought} /></div>
       <div className="flex flex-col gap-2">
         {/* Duration chip. The wrapper + nested rule mirrors TurnView
             exactly: the gutter goes on a padded WRAPPER, because a
@@ -93,7 +116,7 @@ function App() {
             inset by padding applied to the same element. Keep these two
             lines in sync with TurnView or this harness measures itself
             instead of the app. */}
-        <div className={cn('w-full', STREAM_ROW_GUTTER)}>
+        <div className={cn('w-full', STREAM_CONTENT_GUTTER)}>
           <WorkedForChip
             durationMs={39000}
             active={false}
@@ -118,8 +141,10 @@ function App() {
         {/* thought cell — must land on the same gutter as every other row */}
         <div className="flex justify-start"><div className="max-w-[90%]"><ThoughtBlock content="Checking how the queue worker gates on engine." live={false} /></div></div>
 
+        {msg('<think>Embedded reasoning uses the same text edge.</think>The assistant text starts on the same column.')}
+
         {/* grouped tool run */}
-        <ToolGroup entries={grouped} />
+        <ToolGroup entries={grouped.map((entry, index) => ({ ...entry, activityAt: index === activityTick % grouped.length ? activityTick + 1 : 0, status: streamingThought ? 'running' : 'complete' }))} />
 
         {/* grouped edits — should show a summed +N -N on the right rail */}
         <ToolGroup entries={edits} />
@@ -136,11 +161,21 @@ function App() {
         {/* status line (warnings / errors) */}
         <StatusLine text="Turn ended manually by user." />
 
+        <TurnView turn={{ user: null, body: [
+          ...grouped.map(e => ({ kind: 'tool' as const, ...e })),
+          { kind: 'msg', msg: { role: 'assistant', content: 'The reply remains visible with work collapsed.' } },
+          { kind: 'warning', text: 'Turn ended manually by user.' },
+          { kind: 'warning', text: '[environment] Switched to local environment.' },
+        ] }} timing={{ startedAt: 0, endedAt: 39000 }} index={100} expanded={false} usage={null} model="test" isActive={false} onOpenFile={noop} skills={[]} mode="manual" onSetMode={noop}
+          onToggle={noop} onDecide={noop} onPlanReply={noop} onAskUserReply={noop} onOpenAgent={noop} />
+
+        <LiveOutputPanel lines={output} running={streamingThought} expanded />
+
         {/* trailing assistant prose */}
-        {msg('The booted device came from `devices.rs`; polling is absent.')}
+        {msg('The booted device came from `devices.rs`; polling is absent.', true)}
       </div>
     </main>
   );
 }
 
-createRoot(document.getElementById('root')!).render(<App />);
+createRoot(document.getElementById('root')!).render(<LazyMotion features={domAnimation}><App /></LazyMotion>);

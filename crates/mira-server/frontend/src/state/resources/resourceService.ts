@@ -24,7 +24,7 @@ export function createResourceService(client: QueryClient, scope: RuntimeScope,
   function key(name: ResourceName, archived = false) {
     const current = context();
     return ['mira', scope.backend, scope.account, name,
-      ...(contextual.has(name) ? [current.session, current.cwd, current.engine] : []), ...(name === 'sessions' ? [{ all: true, archived }] : [])] as const;
+      ...(contextual.has(name) ? [current.session, current.cwd, current.engine, current.attachment, current.connection] : []), ...(name === 'sessions' ? [{ all: true, archived }] : [])] as const;
   }
   function options<K extends ResourceName>(name: K, archived = false, probe = false) {
     const owner = context();

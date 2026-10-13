@@ -72,6 +72,7 @@ export function useSessionEvents(
     | 'recordEnvironmentTransition'
     | 'refreshRepo'
     | 'setMainView'
+    | 'attachFromRef'
   >,
 ) {
   const appRuntime = useAppRuntime();
@@ -128,6 +129,7 @@ export function useSessionEvents(
     recordEnvironmentTransition,
     refreshRepo,
     setMainView,
+    attachFromRef,
   } = context;
   return useStableCallback((msg: ServerMsg) => {
     const receivedAt = Date.now();
@@ -153,9 +155,6 @@ export function useSessionEvents(
         recordHistoryError(msg.error);
         if (msg.page) {
           const page = msg.page;
-          const pane = paneRef.current;
-          const beforeHeight = pane?.scrollHeight ?? 0;
-          const beforeTop = pane?.scrollTop ?? 0;
           followRef.current = false;
           historyOffsetRef.current = page.first_turn;
           recordHistoryCursor(page.next_cursor);
@@ -163,13 +162,6 @@ export function useSessionEvents(
             ...entriesForTranscriptPage(page, historyPreviewsRef.current),
             ...previous,
           ]);
-          const attachment = appRuntime.sessionState.get().attachment;
-          appRuntime.service.frame(() => {
-            if (pane && appRuntime.sessionState.get().attachment === attachment) {
-              pane.scrollTop = beforeTop + pane.scrollHeight - beforeHeight;
-              readingAnchorRef.current = pane.scrollTop;
-            }
-          });
         }
         break;
       }
@@ -208,11 +200,18 @@ export function useSessionEvents(
       }
 
       case 'ready': {
-        const previousSession = getSessionId();
+        // Which chat we came from: `attachSession` records it before
+        // `suspend()` flips the selection, because by the time this frame
+        // arrives `getSessionId()` already reports the new chat. Falls back
+        // to the current selection for readies that follow no attach (a
+        // reconnect replays the same chat, whose scroll position must stay).
+        const previousSession = attachFromRef.current ?? getSessionId();
+        attachFromRef.current = null;
         for (const item of msg.queued_inputs ?? []) appRuntime.effect(() => appRuntime.drafts.confirmDelivery(item.id));
         for (const message of msg.history) if (message.input_id) appRuntime.effect(() => appRuntime.drafts.confirmDelivery(message.input_id!));
         appRuntime.resources.cancelContext();
         turnCommands.hydrate(msg.session_id, !!msg.running, msg.runtime_work ?? []);
+        appRuntime.reconcileTerminals(!!msg.running, msg.turns);
         if (msg.session_activity) updateSessionActivity({ snapshot: msg.session_activity });
         if (msg.title) {
           activityTitlesRef.current.set(msg.session_id, msg.title);

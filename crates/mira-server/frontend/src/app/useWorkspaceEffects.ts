@@ -57,8 +57,6 @@ export function useWorkspaceEffects(
     | 'appRuntime'
     | 'streams'
     | 'paneRef'
-    | 'followRef'
-    | 'lastScrollInputRef'
     | 'sessionId'
     | 'chatTitleRef'
     | 'sessionTitle'
@@ -128,8 +126,6 @@ export function useWorkspaceEffects(
     appRuntime,
     streams,
     paneRef,
-    followRef,
-    lastScrollInputRef,
     sessionId,
     chatTitleRef,
     sessionTitle,
@@ -382,32 +378,6 @@ export function useWorkspaceEffects(
     const view = appRuntime.queryClient.getQueryData<import('../types').SettingsView>(appRuntime.resources.key('settings'));
     if (view && !view.configured) openSettings();
   }, [configured, appRuntime, openSettings]);
-
-  /** True while the user is actively scrolling the transcript.
- *
- *  Follow-mode pinning used to fire on every streamed token, which fought
- *  the pointer: the reader would scroll down through a section and the
- *  next token would yank the pane back to the bottom, so the text they
- *  were reading slid away instead of staying put. Pinning yields for the
- *  duration of a scroll gesture and resumes once it settles. */
-const scrollSettlesAfterMs = 700;
-function isScrolling(lastScrollInput: number): boolean {
-  return Date.now() - lastScrollInput < scrollSettlesAfterMs;
-}
-
-
-
-  useEffect(() => {
-    const pane = paneRef.current;
-    const column = pane?.querySelector('[data-transcript-column]');
-    if (!pane || !column) return;
-    const observer = new ResizeObserver(() => {
-      if (followRef.current && !isScrolling(lastScrollInputRef.current))
-        pane.scrollTop = pane.scrollHeight;
-    });
-    observer.observe(column);
-    return () => observer.disconnect();
-  }, [sessionId, outlineEntries.length === 0]);
 
   chatTitleRef.current = sessionTitle ?? titleFromEntries(outlineEntries);
 

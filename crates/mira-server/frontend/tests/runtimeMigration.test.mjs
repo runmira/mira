@@ -182,3 +182,52 @@ test('Stop drains final tokens atomically and a failed transport does not imply 
     sub.unsubscribe();
   } finally { delete globalThis.requestAnimationFrame; delete globalThis.cancelAnimationFrame; }
 });
+
+test('failed unsent request ownership cannot route a reused ID to the old session', () => {
+  const r=runtime();r.updateSessionData('entries',[pendingTool('same')]);
+  assert.equal(r.requests.submit('same',{type:'approve',call_id:'same',allow:true},()=>false),false);
+  r.turnCommands.hydrate('b',false,[]);r.updateSessionData('entries',[pendingTool('same')]);
+  r.requests.resolve('same');
+  assert.ok(r.readSession().resolvedRequests.same);
+  assert.ok(!r.sessionState.get().sessions.get('a').resolvedRequests.same);
+});
+
+
+test('in-flight request IDs retain their owner across a session switch', () => {
+  const r=runtime(); const frame={type:'approve',call_id:'same',allow:true};
+  r.updateSessionData('entries',[pendingTool('same')]);
+  assert.equal(r.requests.submit('same',frame,()=>true),true);
+  r.turnCommands.hydrate('b',false,[]);r.updateSessionData('entries',[pendingTool('same')]);
+  let sent=false;
+  assert.equal(r.requests.submit('same',frame,()=>{sent=true;return true;}),false);
+  assert.equal(sent,false);
+  r.requests.resolve('same');
+  assert.ok(r.sessionState.get().sessions.get('a').resolvedRequests.same);
+  assert.equal(r.readSession().resolvedRequests.same,undefined);
+  assert.equal(r.sessionState.get().sessions.get('a').requestDelivery.same,undefined);
+  assert.equal(r.requests.submit('same',frame,()=>true),true);
+  r.requests.fail('same','retry');
+  assert.equal(r.readSession().requestDelivery.same.status,'failed');
+});
+
+test('Ready reconciliation preserves resumed turn identities and usage bases per session', () => {
+  const r=runtime();const base={turn:0,base:{input_tokens:12,output_tokens:3}};
+  r.sessionServices.ref('turnBase').current=base;
+  r.beginTerminalTurn('a-first',10,0);r.beginTerminalTurn('a-next',20,1);
+  r.turnCommands.hydrate('b',true,[]);r.beginTerminalTurn('b-first',30,0);
+  r.reconcileTerminals(true);
+  assert.equal(r.acceptTerminal().id,'b-first');
+  r.turnCommands.hydrate('a',true,[]);r.reconcileTerminals(true);
+  const first=r.acceptTerminal();
+  assert.equal(first.id,'a-first');assert.equal(first.startedAt,10);
+  assert.equal(first.usageBase,base);assert.equal(first.pending,true);
+  assert.equal(r.acceptTerminal().id,'a-next');
+});
+
+test('Ready discards snapshot-confirmed completed turns and clears idle-session terminals', () => {
+  const r=runtime();r.beginTerminalTurn('finished',10,0);r.beginTerminalTurn('live',20,1);
+  r.reconcileTerminals(true,[{started_at:10,ended_at:15},{started_at:20,ended_at:null}]);
+  assert.equal(r.acceptTerminal().id,'live');
+  r.beginTerminalTurn('stale',30,2);r.reconcileTerminals(false);
+  assert.equal(r.acceptTerminal().id,undefined);
+});

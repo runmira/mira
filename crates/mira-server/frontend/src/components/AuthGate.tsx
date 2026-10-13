@@ -37,6 +37,9 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
       const { data, error } = await supabase!.auth.getUser();
       if (cancelled || request !== validation) return;
       if (expectedAccount && data.user && data.user.id !== expectedAccount) {
+        // A newer auth event already named a different account: re-validate
+        // without the stale expectation instead of dropping the response,
+        // or the gate sits on `loading` forever when no later callback runs.
         void validate();
         return;
       }

@@ -41,6 +41,7 @@ export function useSessionCommands(
     | 'chatTitleRef'
     | 'activityTitlesRef'
     | 'setMainView'
+    | 'attachFromRef'
   >,
 ) {
   const appRuntime = useAppRuntime();
@@ -75,6 +76,7 @@ export function useSessionCommands(
     chatTitleRef,
     activityTitlesRef,
     setMainView,
+    attachFromRef,
   } = context;
 
   function loadOlderHistory() {
@@ -143,6 +145,11 @@ export function useSessionCommands(
     clearThinkingIdle();
     historyRequestRef.current = null;
     recordHistoryLoading(false);
+    // Remember which chat we came from: `suspend` below flips the selected
+    // session at once, so by the time this chat's `ready` arrives
+    // `getSessionId()` already reports the *new* chat and the scroll/follow
+    // reset is skipped. The ready handler consumes this.
+    attachFromRef.current = getSessionId();
     turnCommands.suspend(id);
     wsRef.current?.attach(id);
   }

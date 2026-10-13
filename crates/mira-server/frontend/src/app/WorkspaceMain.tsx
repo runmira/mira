@@ -1,5 +1,5 @@
 import { ArrowDown,PanelLeft,SquareTerminal } from 'lucide-react';
-import { useLayoutEffect,useMemo } from 'react';
+import { useMemo } from 'react';
 import { Outlet } from 'react-router';
 import { AssistantSelectionToolbar } from '../components/AssistantSelectionToolbar';
 import { ChatRelationships } from '../components/ChatRelationships';
@@ -202,15 +202,6 @@ export function WorkspaceMain(
 ) {
   const entries = useLiveEntries();
   const { minimapItems, isEmpty } = useMemo(() => liveTranscriptView(entries, context.historyOffsetRef.current), [entries]);
-  useLayoutEffect(() => {
-    const pane = context.paneRef.current;
-    if (!pane) return;
-    if (context.readingAnchorRef.current != null) {
-      pane.scrollTop = context.readingAnchorRef.current; context.readingAnchorRef.current = null;
-    } else if (context.followRef.current && Date.now() - context.lastScrollInputRef.current >= 700) {
-      pane.scrollTop = pane.scrollHeight;
-    }
-  }, [entries, context.thinking]);
   const {
     phone,
     mainView,
@@ -423,6 +414,7 @@ export function WorkspaceMain(
                 <div
                   className="absolute inset-0 overflow-y-auto overscroll-contain px-5 pb-5 transition-[padding] duration-200 max-md:px-3"
                   style={{
+                    overflowAnchor: 'none',
                     paddingRight: ctxReserve ? CONTEXT_PANEL_RESERVE + 12 : phone ? 12 : 20,
                     paddingTop: ctxPill ? 52 : 16,
                   }}

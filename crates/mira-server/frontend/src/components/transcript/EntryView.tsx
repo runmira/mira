@@ -28,7 +28,7 @@ import { CompactionCard } from '../CompactionCard';
 import { prettyModel } from '../../lib/models';
 import { isAgentRequest } from '../../lib/agentRequest';
 import { getBoolPref, PREF_KEYS } from '../../lib/prefs';
-import { STREAM_ROW_GUTTER } from '../../lib/streamLayout';
+import { STREAM_ROW_GUTTER, STREAM_CONTENT_GUTTER } from '../../lib/streamLayout';
 import { costUsd, formatDollars, shortNum } from '../../lib/usage';
 import { type SkillView } from '../../api';
 import { Tip } from '../ui/Tip';
@@ -190,9 +190,9 @@ export function EntryView({
       }
       return (
         <div className="group/msg flex justify-start">
-          <div className={cn('max-w-[90%]', STREAM_ROW_GUTTER)}>
-            <div data-assistant-message><AssistantContent streaming={streaming && !entry.nativeCompleted} text={content ?? ''} onOpenFile={onOpenFile} /></div>
-            {showAssistantActions ? <AssistantActions entry={entry} text={content ?? ''} /> : <div className="mt-1 flex opacity-0 transition-opacity group-hover/msg:opacity-100 focus-within:opacity-100"><MessageTime entry={entry} /></div>}
+          <div className="relative w-full min-w-0">
+            <div data-assistant-message><AssistantContent transcript streaming={streaming && !entry.nativeCompleted} text={content ?? ''} onOpenFile={onOpenFile} /></div>
+            {showAssistantActions && <div className={STREAM_CONTENT_GUTTER}><AssistantActions entry={entry} text={content ?? ''} /></div>}
           </div>
         </div>
       );
@@ -344,7 +344,7 @@ export function EntryView({
       // the tool rows around it, not a separately labelled box.
       return (
         <div className="flex justify-start">
-          <div className={cn('w-full max-w-[90%] py-0.5 text-[13px]', STREAM_ROW_GUTTER)}>
+          <div className={cn('w-full py-0.5 text-[13px]', STREAM_CONTENT_GUTTER)}>
             <div className="mb-1.5 text-[12px] font-medium text-muted-foreground">Plan</div>
             <ul className="space-y-1">
               {entry.entries.map((item, i) => {
@@ -394,9 +394,9 @@ export function EntryView({
           {/* No gutter here: ThoughtBlock carries its own px-2, which is
               the shared inset. Adding STREAM_ROW_GUTTER on top double-padded
               it to 16px and broke the line. AssistantContent renders the
-              same block with no wrapper gutter, so this keeps them
+              same block with segment-owned padding, so this keeps them
               aligned with each other. */}
-          <div className="max-w-[90%]">
+          <div className="w-full min-w-0">
             <ThoughtBlock
               content={entry.text}
               live={entry.live}
@@ -835,7 +835,8 @@ export function StatusLine({ text, tone }: { text: string; tone?: StatusTone }) 
     memory: <Sparkle className="size-3.5 text-violet-300/70" />,
   }[s.tone];
   return (
-    <div className={cn('flex items-start gap-2 py-0.5 text-[12.5px] leading-5 text-muted-foreground', STREAM_ROW_GUTTER)}>
+    <div data-transcript-notice className={cn('flex min-w-0 items-center gap-2 py-2 text-xs text-muted-foreground', STREAM_ROW_GUTTER, s.tone === 'error' && 'text-destructive')}>
+      <span aria-hidden="true" className="h-px min-w-3 flex-1 bg-border/70" />
       <span className="flex h-5 shrink-0 items-center">{icon}</span>
       <span className="min-w-0 break-words">
         {withCode(s.text)}
@@ -845,6 +846,7 @@ export function StatusLine({ text, tone }: { text: string; tone?: StatusTone }) 
           </pre>
         )}
       </span>
+      <span aria-hidden="true" className="h-px min-w-3 flex-1 bg-border/70" />
     </div>
   );
 }
