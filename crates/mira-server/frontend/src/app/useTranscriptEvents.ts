@@ -176,7 +176,6 @@ export function useTranscriptEvents(
         }
         turnBaseRef.current = null;
         setBusy(false);
-        busyRef.current = false;
         setThinking(false);
         clearThinkingIdle();
         setEntries((prev) => settleTools(sealThought(prev)));

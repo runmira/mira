@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react';
-import { useContextPanelState } from '../state/RuntimeProvider';
+import { useContextPanelState, useTurnState } from '../state/RuntimeProvider';
 import {
   type BranchPrView,
   type CommandInfo,
@@ -40,7 +40,6 @@ import type {
   Mode,
   PlanProposal,
   RateLimitReading,
-  ServerMsg,
   SessionEngine,
   TaskItem,
   UsageTotals,
@@ -192,18 +191,7 @@ export function useWorkspaceState() {
 
   const [expandedTurns, setExpandedTurns] = useState<Set<number>>(new Set());
 
-  const [busy, setBusy] = useState<boolean>(false);
-
-  const nativeWorkRef = useRef<Extract<ServerMsg, { type: 'runtime_work_updated' }>['work'][]>([]);
-
-  const nativeTurnsRef = useRef<Set<string>>(new Set());
-
-  // Read by the frame handler, which is a long-lived closure: a frame that
-  // arrives after the turn ended (a cancelled tool's result, a late
-  // turn_complete) must not restart the working indicator.
-  const busyRef = useRef(false);
-
-  const [thinking, setThinking] = useState<boolean>(false);
+  const { busy, thinking, busyRef, setBusy, setThinking, turnCommands } = useTurnState();
 
   // When text tokens go quiet mid-turn — typically because the model is
   // emitting tool-call deltas that don't surface as `token` events — we
@@ -599,9 +587,8 @@ export function useWorkspaceState() {
     setExpandedTurns,
     busy,
     setBusy,
-    nativeWorkRef,
-    nativeTurnsRef,
     busyRef,
+    turnCommands,
     thinking,
     setThinking,
     thinkingIdleTimerRef,

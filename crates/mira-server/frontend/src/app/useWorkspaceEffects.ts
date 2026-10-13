@@ -87,6 +87,7 @@ export function useWorkspaceEffects(
     | 'closeAnyTab'
     | 'setBusy'
     | 'setThinking'
+    | 'clearThinkingIdle'
     | 'setPanelFilePickerOpen'
     | 'closeSubagentPanel'
     | 'onNewChat'
@@ -169,6 +170,7 @@ export function useWorkspaceEffects(
     closeAnyTab,
     setBusy,
     setThinking,
+    clearThinkingIdle,
     setPanelFilePickerOpen,
     closeSubagentPanel,
     onNewChat,
@@ -279,8 +281,6 @@ export function useWorkspaceEffects(
       );
     }
   }, [acpUsage]);
-
-  busyRef.current = busy;
 
   // ⌘K is usually how the palette opens, so there's no hover to preload
   // on; fetch it once the first load has settled.
@@ -405,6 +405,7 @@ export function useWorkspaceEffects(
     return () => {
       queueMutationsRef.current.setConnected(false);
       c.close();
+      clearThinkingIdle();
       if (nativeRafRef.current != null) cancelAnimationFrame(nativeRafRef.current);
       if (tokenRafRef.current != null) cancelAnimationFrame(tokenRafRef.current);
       nativeFramesRef.current = [];
@@ -638,7 +639,6 @@ useLayoutEffect(() => {
           e.preventDefault();
           wsRef.current?.send({ type: 'interrupt' });
           setBusy(false);
-          busyRef.current = false;
           setThinking(false);
           break;
         case 'panel.files':

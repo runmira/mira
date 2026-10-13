@@ -29,7 +29,7 @@ export function useSessionCommands(
     | 'setAcpLimits'
     | 'setInfoNotices'
     | 'setBusy'
-    | 'busyRef'
+    | 'turnCommands'
     | 'setThinking'
     | 'setRestoreNote'
     | 'setPickerOpen'
@@ -65,7 +65,7 @@ export function useSessionCommands(
     setAcpLimits,
     setInfoNotices,
     setBusy,
-    busyRef,
+    turnCommands,
     setThinking,
     setRestoreNote,
     setPickerOpen,
@@ -141,9 +141,8 @@ export function useSessionCommands(
    *  last chat's turn at once; the new chat's `ready` turns Stop back on if
    *  a turn is running there. */
   function attachSession(id: string) {
-    setBusy(false);
-    busyRef.current = false;
-    setThinking(false);
+    clearThinkingIdle();
+    turnCommands.suspend();
     wsRef.current?.attach(id);
   }
 
@@ -184,7 +183,6 @@ export function useSessionCommands(
     // A compaction is a turn like any other: busy until its end arrives, or
     // the composer would take input for a session that is summarizing.
     setBusy(true);
-    busyRef.current = true;
     setThinking(true);
     // Agents compact inside their own process and only end the turn, so the
     // card runs from here until that turn ends.
@@ -211,9 +209,10 @@ export function useSessionCommands(
 
   function scheduleThinkingIdle() {
     clearThinkingIdle();
+    const scheduledGeneration = appRuntime.turns.get().generation;
     thinkingIdleTimerRef.current = window.setTimeout(() => {
       thinkingIdleTimerRef.current = null;
-      setThinking(true);
+      if (appRuntime.turns.get().generation === scheduledGeneration) setThinking(true);
     }, 350);
   }
 

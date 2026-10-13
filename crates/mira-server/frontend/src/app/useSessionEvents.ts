@@ -68,11 +68,8 @@ export function useSessionEvents(
     | 'setRateLimit'
     | 'setTasks'
     | 'setGoal'
-    | 'nativeWorkRef'
-    | 'nativeTurnsRef'
-    | 'setBusy'
+    | 'turnCommands'
     | 'busyRef'
-    | 'setThinking'
     | 'clearThinkingIdle'
     | 'setSidebarRefresh'
     | 'setSkills'
@@ -134,11 +131,8 @@ export function useSessionEvents(
     setRateLimit,
     setTasks,
     setGoal,
-    nativeWorkRef,
-    nativeTurnsRef,
-    setBusy,
+    turnCommands,
     busyRef,
-    setThinking,
     clearThinkingIdle,
     setSidebarRefresh,
     setSkills,
@@ -389,11 +383,7 @@ export function useSessionEvents(
         setGoal(msg.goal ?? null);
         // Opened mid-turn: show Stop and the working indicator until the
         // turn's end arrives, instead of an idle composer over a live reply.
-        nativeWorkRef.current = msg.runtime_work ?? [];
-        nativeTurnsRef.current.clear();
-        setBusy(!!msg.running);
-        busyRef.current = !!msg.running;
-        setThinking(!!msg.running);
+        turnCommands.hydrate(msg.session_id, !!msg.running, msg.runtime_work ?? []);
         clearThinkingIdle();
         setSidebarRefresh((n) => n + 1);
         // Refresh the skill roster on every Ready — a cwd swap may

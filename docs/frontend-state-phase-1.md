@@ -38,7 +38,7 @@ These refs remain in hooks until their corresponding commands/events migrate.
 DOM refs, timers, buffers and sockets must never enter renderable/persisted state.
 Projection mirrors must be removed with their store migration, rather than dual-written.
 
-`pingPrimedRef`, `activityTitlesRef`, `sessionIdRef`, `queuedBySessionRef`, `pendingSteerRef`, `approvalStarted`, `historyRequestRef`, `historyPreviewsRef`, `historyOffsetRef`, `providerTurnCursorRef`, `acpStopRef`, `capsDriverRef`, `engineRef`, `acpAgentsRef`, `completedUpdatesRef`, `turnStartRef`, `nativeWorkRef`, `nativeTurnsRef`, `busyRef`, `thinkingIdleTimerRef`, `drawerTouchX`, `drawerRef`, `chatShortcutRequest`, `shortcutEntriesRef`, `chatColObserver`, `repoSeqRef`, `wsRef`, `queueMutationsRef`, `paneRef`, `pendingProposalsRef`, `pendingAskUserRef`, `followRef`, `readingAnchorRef`, `lastScrollInputRef`, `chatTitleRef`, `tokenBufRef`, `tokenRafRef`, `usageRef`, `turnBaseRef`, `nativeFramesRef`, `nativeRafRef`, `visibleApprovalRef`, `browserShownFor`, `browserPingSeen`.
+`pingPrimedRef`, `activityTitlesRef`, `sessionIdRef`, `queuedBySessionRef`, `pendingSteerRef`, `approvalStarted`, `historyRequestRef`, `historyPreviewsRef`, `historyOffsetRef`, `providerTurnCursorRef`, `acpStopRef`, `capsDriverRef`, `engineRef`, `acpAgentsRef`, `completedUpdatesRef`, `turnStartRef`, `thinkingIdleTimerRef`, `drawerTouchX`, `drawerRef`, `chatShortcutRequest`, `shortcutEntriesRef`, `chatColObserver`, `repoSeqRef`, `wsRef`, `queueMutationsRef`, `paneRef`, `pendingProposalsRef`, `pendingAskUserRef`, `followRef`, `readingAnchorRef`, `lastScrollInputRef`, `chatTitleRef`, `tokenBufRef`, `tokenRafRef`, `usageRef`, `turnBaseRef`, `nativeFramesRef`, `nativeRafRef`, `visibleApprovalRef`, `browserShownFor`, `browserPingSeen`.
 
 `mainView`, `settingsSection`, and their navigation commands belong to React
 Router (`useAppNavigation`). `phone`, `ctxFits`, and `keybindings` are existing
@@ -166,8 +166,8 @@ new transitions. Notifications remain outside the reducer. `WorkspaceSidebar`
 subscribes directly to running/completed projections, so activity notifications
 no longer rerender Application and its command/event hooks.
 
-`busy`, `thinking`, native turn/work refs, token buffers and transcript state
-remain in their existing owners. Moving them requires the attached-session and
+`busy` and `thinking` are now migrated in the turn slice below. Token buffers
+and transcript state remain in their existing owners. Moving them requires the attached-session and
 connection-generation contract described above. This slice begins the activity
 phase; it does not complete the turn or streaming migration.
 
@@ -184,3 +184,47 @@ initial gzip. Final branch measures 413.5 kB (+12.3 kB). Both fail the unchanged
 400 kB size budget. These fresh results supersede the earlier existing-artifact
 measurement and ENOSPC limitation. Desktop UI checks are unavailable because
 auth configuration is server-side; no native recovery behavior is claimed.
+
+## Turn slice
+
+`state/turnStore.ts` is now the sole owner of busy/thinking flags and native
+turn/work tracking. It retains projections by session ID inside the scoped
+backend/account runtime. Hydration commits the active session, server running
+flag and native work in one transition. Running projections survive navigation;
+reconstructable idle projections are limited to 20 plus running sessions.
+Ready snapshots reconcile the selected projection from server facts. The
+socket still watches one attached session, so this does not promise background
+transcript or turn-detail streaming while another chat is selected.
+
+`busyRef` is now a read-only accessor over the store, not a writable mirror.
+Legacy `setBusy`/`setThinking` adapters delegate to named store commands;
+starting/stopping commits both flags coherently. Native events use dedicated
+commands. Late completion/work-terminal events cannot restore busy after Stop.
+Server-originated new running work can still restore the authoritative working
+indicator. No client permission or command acceptance is inferred from busy.
+
+Attachment suspends the selected turn without overwriting its projection.
+Deferred thinking callbacks capture a generation; Ready, suspend, and a new
+turn increment that generation. Idle thinking commands are ignored. The
+thinking timer is cancelled during workspace transport cleanup. Disconnect
+status remains separate from turn state and never declares a running turn over.
+
+`ws.ts` gates ordinary attach, as well as reconnect, until the target Ready.
+Global activity remains accepted while waiting. Attach stores its reconnect
+target immediately; callbacks from obsolete/closed sockets are ignored and
+reconnect timers are cancelled on close. This relies on the existing ordered
+attached-socket protocol. It cannot distinguish a server frame emitted with
+incorrect attachment identity after Ready, because legacy token frames contain
+no explicit session/stream cursor. No exactly-once replay contract is invented.
+
+New tests cover atomic hydration/start/stop, native overlap and late completion,
+switching and authoritative Ready reconciliation, retention/disposal, narrow
+turn selectors and socket attach/reconnect/obsolete callbacks. Total frontend
+suite: 61 tests passing. Existing transcript and approval event tests still
+pass. React Compiler remains enabled. Desktop verification is unavailable due
+to server-side auth configuration. Transcript, request, queue and history owners
+remain unchanged; move them only in coherent slices preserving replay helpers.
+
+Turn-slice final checks: TypeScript, production build, module limits and diff
+checks pass. Initial gzip measures 413.3 kB (fresh baseline 401.2 kB), still over
+the unchanged 400 kB budget. This remains a draft-PR validation failure.

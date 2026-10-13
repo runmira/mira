@@ -57,7 +57,6 @@ export function WorkspaceComposer(
     | 'envSwitching'
     | 'setEnvSwitching'
     | 'setBusy'
-    | 'busyRef'
     | 'setThinking'
     | 'onNewChat'
     | 'openSettings'
@@ -134,7 +133,6 @@ export function WorkspaceComposer(
     envSwitching,
     setEnvSwitching,
     setBusy,
-    busyRef,
     setThinking,
     onNewChat,
     openSettings,
@@ -294,7 +292,6 @@ export function WorkspaceComposer(
           // Settle the composer now; the server's turn end follows
           // (within a few seconds even for an agent that never says).
           setBusy(false);
-          busyRef.current = false;
           setThinking(false);
         }}
         onNewChat={onNewChat}

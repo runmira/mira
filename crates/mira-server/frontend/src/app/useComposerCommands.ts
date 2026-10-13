@@ -239,7 +239,6 @@ export function useComposerCommands(
       return next;
     });
     setBusy(true);
-    busyRef.current = true;
     setThinking(true);
     // The server routes by the session's engine: a session on an agent
     // sends this to the agent (starting it if needed, with the
@@ -350,7 +349,6 @@ export function useComposerCommands(
       return clone;
     });
     setBusy(true);
-    busyRef.current = true;
     setThinking(true);
     wsRef.current?.send({ type: 'resend', original, occurrence, text });
   }

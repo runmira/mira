@@ -33,7 +33,7 @@ export function connect(
   let ws: WebSocket | null = null;
   let stopped = false;
   let attempt = 0;
-  let opened = false;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let session: string | null = null;
   /** Re-attaching after a reconnect: until this session's Ready arrives,
    *  frames are the server's default session's, not the user's chat. */
@@ -44,22 +44,23 @@ export function connect(
     if (stopped) return;
     const delay = Math.min(1000 * 2 ** attempt, 8000);
     attempt += 1;
-    setTimeout(open, delay);
+    reconnectTimer = setTimeout(open, delay);
   }
 
   function open() {
+    reconnectTimer = null;
     if (stopped) return;
     onStatus('connecting');
     ws = new WebSocket(url);
     const socket = ws;
     socket.onopen = () => {
+      if (stopped || ws !== socket) return;
       attempt = 0;
       onStatus('open');
       // On reconnect, get back onto the chat the user is looking at first —
       // attaching replays its Ready — so nothing below lands elsewhere.
       // Otherwise ask for the current state, in case a frame was missed.
-      const reattach = opened && session;
-      opened = true;
+      const reattach = session;
       reattaching = reattach ? session : null;
       socket.send(
         JSON.stringify(
@@ -71,15 +72,17 @@ export function connect(
         socket.send(JSON.stringify(queue.shift()!));
       }
     };
-    ws.onclose = () => {
+    socket.onclose = () => {
+      if (stopped || ws !== socket) return;
       onStatus('closed');
       ws = null;
       schedule();
     };
-    ws.onerror = () => {
+    socket.onerror = () => {
       // onclose fires next; let it drive the reconnect.
     };
-    ws.onmessage = (ev) => {
+    socket.onmessage = (ev) => {
+      if (stopped || ws !== socket) return;
       let msg: ServerMsg;
       try {
         msg = JSON.parse(ev.data) as ServerMsg;
@@ -122,6 +125,10 @@ export function connect(
       return true;
     },
     attach(sessionId) {
+      // Gate connection-scoped frames until the requested snapshot arrives.
+      // Remember the target now so a disconnect mid-attach reconnects to it.
+      session = sessionId;
+      reattaching = sessionId;
       sendMsg({ type: 'attach', session_id: sessionId });
     },
     setBackgroundMode(mode) {
@@ -132,6 +139,8 @@ export function connect(
     },
     close() {
       stopped = true;
+      if (reconnectTimer != null) clearTimeout(reconnectTimer);
+      reconnectTimer = null;
       document.removeEventListener('visibilitychange',resync);
       window.removeEventListener('online',resync);
       if (ws) ws.close();

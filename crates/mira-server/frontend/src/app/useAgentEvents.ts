@@ -25,11 +25,8 @@ export function useAgentEvents(
   context: Pick<
     WorkspaceRuntime,
     | 'setEntries'
-    | 'nativeTurnsRef'
-    | 'setBusy'
+    | 'turnCommands'
     | 'busyRef'
-    | 'setThinking'
-    | 'nativeWorkRef'
     | 'playPing'
     | 'clearThinkingIdle'
     | 'acpStopRef'
@@ -55,11 +52,8 @@ export function useAgentEvents(
 ) {
   const {
     setEntries,
-    nativeTurnsRef,
-    setBusy,
+    turnCommands,
     busyRef,
-    setThinking,
-    nativeWorkRef,
     playPing,
     clearThinkingIdle,
     acpStopRef,
@@ -89,26 +83,12 @@ export function useAgentEvents(
         break;
 
       case 'runtime_turn_updated':
-        if (msg.turn.running) {
-          nativeTurnsRef.current.add(msg.turn.native_turn_id);
-          setBusy(true);
-          busyRef.current = true;
-          setThinking(true);
-        } else {
-          nativeTurnsRef.current.delete(msg.turn.native_turn_id);
-        }
+        turnCommands.nativeTurn(msg.turn.native_turn_id, msg.turn.running);
         break;
 
-      case 'runtime_work_updated': {
-        const active = ['pending', 'running', 'waiting'].includes(msg.work.status);
-        nativeWorkRef.current = nativeWorkRef.current.filter((w) => w.id !== msg.work.id);
-        if (active) nativeWorkRef.current.push(msg.work);
-        const running =
-          active || nativeTurnsRef.current.size > 0 || nativeWorkRef.current.length > 0;
-        setBusy(running);
-        busyRef.current = running;
+      case 'runtime_work_updated':
+        turnCommands.nativeWork(msg.work);
         break;
-      }
 
       // -------- ACP (external agent) --------
       case 'acp_text':
@@ -163,11 +143,7 @@ export function useAgentEvents(
         // turn that was running here (a Stop already settled the composer,
         // and its confirmation shouldn't chime).
         if (busyRef.current) playPing();
-        const nativeStillWorking =
-          nativeTurnsRef.current.size > 0 || nativeWorkRef.current.length > 0;
-        setBusy(nativeStillWorking);
-        busyRef.current = nativeStillWorking;
-        setThinking(false);
+        turnCommands.finishAgent();
         clearThinkingIdle();
         acpStopRef.current = null;
         // The agent edits files in its own process; nothing else tells the

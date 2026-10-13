@@ -1,3 +1,4 @@
+import { selectTurn } from './turnStore';
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
 import { QueryClientProvider } from '@tanstack/react-query';
 import { useSelector } from '@tanstack/react-store';
@@ -32,4 +33,13 @@ export function useContextPanelState() {
   const runtime = useAppRuntime();
   const open = useSelector(runtime.workspaceUi, (state) => state.contextOpen);
   return [open, runtime.commands.setContextOpen] as const;
+}
+
+/** Temporary hook adapter: the store is the sole owner; refs only read its snapshot. */
+export function useTurnState() {
+  const runtime = useAppRuntime();
+  const busy = useSelector(runtime.turns, state => selectTurn(state).busy);
+  const thinking = useSelector(runtime.turns, state => selectTurn(state).thinking);
+  return { busy, thinking, busyRef: runtime.busyRef, setBusy: runtime.turnCommands.setBusy,
+    setThinking: runtime.turnCommands.setThinking, turnCommands: runtime.turnCommands };
 }

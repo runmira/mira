@@ -121,3 +121,28 @@ test('activity selectors ignore UI changes and revision-only snapshots', async (
   await act(() => root.unmount());
   await runtime.dispose();
 });
+
+test('turn selectors ignore completed work metadata and retain unrelated session references', async () => {
+  const runtime = createAppRuntime(scope);
+  runtime.turnCommands.hydrate('a', true, []);
+  const a = runtime.turns.get().sessions.get('a');
+  runtime.turnCommands.hydrate('b', false, []);
+  let renders = 0;
+  function Probe() {
+    const busy = useSelector(runtime.turns, state => state.sessions.get('b')?.busy ?? false);
+    renders++;
+    return String(busy);
+  }
+  const root = createRoot(document.createElement('div'));
+  await act(() => root.render(React.createElement(Probe)));
+  const before = renders;
+  await act(() => {
+    for (let i = 0; i < 100; i++) runtime.turnCommands.nativeWork({ id: String(i), status: 'completed' });
+  });
+  assert.equal(renders, before);
+  assert.equal(runtime.turns.get().sessions.get('a'), a);
+  await act(() => runtime.turnCommands.setBusy(true));
+  assert.equal(renders, before + 1);
+  await act(() => root.unmount());
+  await runtime.dispose();
+});
