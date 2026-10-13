@@ -7,8 +7,9 @@
  *
  *  Toggle "Measure edges" to outline each row's first-glyph column.
  */
+import { LazyMotion, domAnimation } from 'framer-motion';
 import { createRoot } from 'react-dom/client';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ToolGroup } from './components/ToolGroup';
 import { ToolCard } from './components/ToolCard';
 import { EntryView, StatusLine } from './components/transcript/EntryView';
@@ -62,6 +63,17 @@ function Measure({ on }: { on: boolean }) {
 
 function App() {
   const [measure, setMeasure] = useState(false);
+  const [thinking, setThinking] = useState('Checking the project.');
+  const [streamingThought, setStreamingThought] = useState(false);
+  useEffect(() => {
+    if (!streamingThought) return;
+    let token = 0;
+    const timer = window.setInterval(() => {
+      token++;
+      setThinking(previous => previous + (token % 8 === 0 ? '\nChecking the next step.' : ' More reasoning arrives.'));
+    }, 200);
+    return () => window.clearInterval(timer);
+  }, [streamingThought]);
   const noop = () => {};
   // The real EntryView, so what we measure is what the transcript renders.
   const msg = (text: string, final = false) => (
@@ -87,6 +99,11 @@ function App() {
         </span>
       </div>
 
+      <div className="mb-4 flex gap-2">
+        <button className="rounded-md border border-border px-2 py-1 text-xs" onClick={() => setStreamingThought(value => !value)}>{streamingThought ? 'Stop thinking demo' : 'Stream thinking demo'}</button>
+        <button className="rounded-md border border-border px-2 py-1 text-xs" onClick={() => setThinking(Array.from({ length: 80 }, (_, index) => `Reasoning line ${index + 1}: checking the project and its dependencies.`).join('\n'))}>Load long thinking</button>
+      </div>
+      <div className="mb-4"><ThoughtBlock content={thinking} live={streamingThought} /></div>
       <div className="flex flex-col gap-2">
         {/* Duration chip. The wrapper + nested rule mirrors TurnView
             exactly: the gutter goes on a padded WRAPPER, because a
@@ -122,7 +139,7 @@ function App() {
         {msg('<think>Embedded reasoning uses the same text edge.</think>The assistant text starts on the same column.')}
 
         {/* grouped tool run */}
-        <ToolGroup entries={grouped} />
+        <ToolGroup entries={grouped.map(entry => ({ ...entry, status: streamingThought ? 'running' : 'complete' }))} />
 
         {/* grouped edits — should show a summed +N -N on the right rail */}
         <ToolGroup entries={edits} />
@@ -154,4 +171,4 @@ function App() {
   );
 }
 
-createRoot(document.getElementById('root')!).render(<App />);
+createRoot(document.getElementById('root')!).render(<LazyMotion features={domAnimation}><App /></LazyMotion>);

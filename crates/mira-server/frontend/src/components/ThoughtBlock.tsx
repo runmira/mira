@@ -1,9 +1,10 @@
 import { STREAM_ROW_GUTTER } from '../lib/streamLayout';
-import { StreamFade } from './StreamFade';
+import { ThinkingPreview } from './ThinkingPreview';
+import { ActivityShimmer } from './ActivityShimmer';
+import { thinkingScrollEdges } from '../lib/thinkingPreview';
 import { useTranscriptDisclosure } from './TranscriptDisclosure';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Brain, ChevronDown } from 'lucide-react';
-import { Markdown } from './Markdown';
 import { Collapse } from './ui/Collapse';
 import { cn } from '@/lib/utils';
 
@@ -41,7 +42,7 @@ export function ThoughtBlock({
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!live) return;
-    const id = setInterval(() => setNow(Date.now()), 500);
+    const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, [live]);
 
@@ -51,19 +52,40 @@ export function ThoughtBlock({
   // they scroll back to the bottom.
   const bodyRef = useRef<HTMLDivElement>(null);
   const following = useRef(true);
-  useEffect(() => {
+  const contentRef = useRef<HTMLDivElement>(null);
+  const [edges, setEdges] = useState({ top: false, bottom: false });
+  function syncBody() {
     const el = bodyRef.current;
-    if (live && el && following.current) el.scrollTop = el.scrollHeight;
-  }, [content, live, open]);
+    if (!el) return;
+    if (live && following.current) el.scrollTop = el.scrollHeight;
+    const next = thinkingScrollEdges(el);
+    setEdges(previous => previous.top === next.top && previous.bottom === next.bottom ? previous : next);
+  }
+  useLayoutEffect(syncBody, [content, live, open]);
+  useLayoutEffect(() => {
+    const el = bodyRef.current;
+    if (!open || !el) return;
+    const observer = new ResizeObserver(syncBody);
+    observer.observe(el);
+    if (contentRef.current) observer.observe(contentRef.current);
+    return () => observer.disconnect();
+  }, [open, live]);
   const onScroll = () => {
     const el = bodyRef.current;
-    if (el) following.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+    if (!el) return;
+    following.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+    const next = thinkingScrollEdges(el);
+    setEdges(previous => previous.top === next.top && previous.bottom === next.bottom ? previous : next);
   };
+  const mask = edges.top && edges.bottom
+    ? 'linear-gradient(to bottom, transparent, black 16px, black calc(100% - 16px), transparent)'
+    : edges.top ? 'linear-gradient(to bottom, transparent, black 16px)'
+    : edges.bottom ? 'linear-gradient(to bottom, black calc(100% - 16px), transparent)' : undefined;
 
   const secs =
     startedAt != null ? Math.max(0, Math.round(((endedAt ?? now) - startedAt) / 1000)) : null;
   const dur = secs == null ? null : secs < 1 ? '<1s' : formatElapsed(secs);
-  const label = live
+  const label = live && !open
     ? 'Thinking…'
     : dur
       ? `Thought for ${dur}`
@@ -80,12 +102,12 @@ export function ThoughtBlock({
         }}
         disabled={!body}
         aria-expanded={open}
-        className={cn('group inline-flex max-w-full items-center gap-1.5 rounded py-1 text-[13px] leading-5 text-muted-foreground transition-colors hover:text-foreground disabled:cursor-default', STREAM_ROW_GUTTER)}
+        className={cn('group flex w-full min-w-0 items-center gap-1.5 rounded py-1 text-left text-[13px] leading-5 text-muted-foreground transition-colors hover:text-foreground disabled:cursor-default', STREAM_ROW_GUTTER)}
       >
-        <span aria-hidden="true" className="inline-flex size-3.5 shrink-0 items-center justify-center"><Brain className={cn('size-3.5', live && 'animate-pulse text-mira-purple')} /></span>
-        <span className={cn('shrink-0 font-normal', live && 'text-foreground/80')}>{label}</span>
-        {!open && body && <span className="max-w-[min(60ch,55vw)] truncate font-normal leading-5 text-muted-foreground/70">{body.replace(/[#*_`]/g, '').replace(/\s+/g, ' ')}</span>}
-        {live && dur && <span className="font-mono text-[11px] text-muted-foreground/70">{dur}</span>}
+        <span aria-hidden="true" className="inline-flex size-3.5 shrink-0 items-center justify-center"><Brain className="size-3.5" /></span>
+        <span className="shrink-0 whitespace-nowrap font-normal"><ActivityShimmer active={live && !open}>{label}</ActivityShimmer></span>
+        {!open && live && body && <><span aria-hidden className="shrink-0">·</span><ThinkingPreview content={body} /></>}
+        {live && !open && dur && <span className="font-mono text-[11px] text-muted-foreground/70">{dur}</span>}
         {body && (
           <ChevronDown
             strokeWidth={2.5}
@@ -99,15 +121,21 @@ export function ThoughtBlock({
       <Collapse open={open && !!body}>
         <div
           ref={bodyRef}
-          onScroll={live ? onScroll : undefined}
+          data-thinking-scroll
+          role="region"
+          tabIndex={0}
+          aria-label="Thinking content"
+          onScroll={onScroll}
+          onWheel={event => event.stopPropagation()}
+          onTouchMove={event => event.stopPropagation()}
+          onKeyDown={event => event.stopPropagation()}
+          style={{ maskImage: mask }}
           className={cn(
             'thought ml-2 mr-2 mt-1 border-l-2 border-border pl-[18px] text-[13px] leading-relaxed text-muted-foreground',
-            // Fade the top edge so older lines read as scrolling away.
-            live &&
-              'max-h-40 overflow-y-auto [mask-image:linear-gradient(to_bottom,transparent,black_2rem)]',
+            'max-h-60 overflow-y-auto overscroll-contain',
           )}
         >
-          <StreamFade streaming={live} revision={body ?? ''}><Markdown text={body ?? ''} /></StreamFade>
+          <div ref={contentRef} className="whitespace-pre-wrap break-words">{body}</div>
         </div>
       </Collapse>
     </div>

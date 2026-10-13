@@ -124,7 +124,8 @@ export function VirtualTranscript({ children, pane, identity, onNeedOlder, hasOl
       if (positions.size > 100) positions.delete(positions.keys().next().value!);
       try { sessionStorage.setItem(`mira:scroll:${identity}`, JSON.stringify(anchor)); } catch { /* optional */ }
     }
-    function input() {
+    function input(event: Event) {
+      if ((event.target as Element)?.closest?.('[data-thinking-scroll]')) return;
       disclosure.current = undefined;
       // A new gesture wins over unfinished restore/measurement work.
       restore.current = undefined;

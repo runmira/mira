@@ -135,3 +135,24 @@ have no secondary row. Compact thinking/tool headers use a 28px row height with
 original left edge, and segment spacing is 8px. Successful tool status marks are
 quiet outlines rather than filled color dots. Browser measurements cover the
 standalone and embedded reasoning paths as well as grouped and individual tools.
+
+## Bounded thinking and live previews
+
+Thinking content is capped at 240px in both streaming and completed states, with
+contained vertical scrolling. Live content follows the bottom until the reader
+scrolls away. Overflow masks reflect the current top/bottom position instead of
+hiding short content. Expanded reasoning renders plain text with preserved line
+breaks, avoiding a full Markdown reparse on every token.
+
+Collapsed live thinking shows the newest nonempty line, updating tokens in place,
+scrolling horizontally to reveal the tail, and using a 300ms entrance on newline
+changes. The preview stays one row high. Opening thinking hides the preview;
+completion leaves the standard Thought/duration header. Tool and thinking labels
+share ZCode's four-second gradient sweep, mapped to Mira's theme and reduced-motion
+settings. Source attribution is in THIRD-PARTY-NOTICES.md.
+
+Validation: 89 frontend tests pass, plus TypeScript/build/module checks. Browser
+measurements confirm a 240px body with overflow content, continued bounded height
+after completion, and a four-second activity sweep. Tests cover latest-line identity,
+preview scrolling/observer disposal, manual reading retention and completed caps.
+Initial gzip remains 423.4kB against the unchanged 400kB limit.
