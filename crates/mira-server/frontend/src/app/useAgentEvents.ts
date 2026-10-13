@@ -1,5 +1,5 @@
 import type { Entry } from '../transcript/entries';
-import { applyExternalChild, childCallId, projectAcpSubagent, projectExternalWork, upsertExternalWork } from '../lib/externalSubagents';
+import { applyExternalChild, childCallId, pauseParentChildEntries, pauseParentChildStreams, projectAcpSubagent, projectExternalWork, upsertExternalWork } from '../lib/externalSubagents';
 import { terminalEntries } from '../lib/terminalEntries';
 import { agentFailureEntry,hasCurrentAgentFailure } from '../lib/agentProgress';
 import { applyNativeMetadata } from '../lib/nativeStream';
@@ -90,7 +90,11 @@ export function useAgentEvents(
         break;
 
       case 'external_subagent_frame':
-        updateTranscript(previous => previous.some(e => e.kind === 'tool' && e.call.id === childCallId(msg.agent_id)) ? previous :
+        if (msg.work) {
+          updateTranscript(previous => upsertExternalWork(previous, msg.work!));
+          context.updateSubagentProjection(previous => projectExternalWork(previous, msg.work!));
+        }
+        updateTranscript(previous => msg.work || previous.some(e => e.kind === 'tool' && (e.call.id === childCallId(msg.agent_id) || e.externalWork?.native_thread_id === msg.agent_id)) ? previous :
           upsertExternalWork(previous, { id: `subagent:${msg.agent_id}`, native_thread_id: msg.agent_id, kind: 'subagent', status: 'running', title: null }));
         context.updateSubagentProjection(previous => applyExternalChild(previous, msg.agent_id, msg.frame, receivedAt));
         break;
@@ -132,6 +136,12 @@ export function useAgentEvents(
         if (!terminal) break;
         if (!terminal.pending) appRuntime.updateSessionData('activeInputId', null);
         const finishTranscript: typeof updateTranscript = apply => updateTranscript(previous => terminalEntries(previous, terminal.id, apply as (entries: Entry[]) => Entry[]));
+        const endedChildren = new Set<string>();
+        finishTranscript(previous => {
+          for (const entry of previous) if (entry.kind === 'tool' && (entry.externalWork?.id.startsWith('subagent:acp:') || entry.externalWork?.id.startsWith('subagent:claude:'))) endedChildren.add(entry.call.id);
+          return pauseParentChildEntries(previous);
+        });
+        context.updateSubagentProjection(previous => pauseParentChildStreams(previous, endedChildren));
         // An agent compaction ends with its turn.
         finishTranscript((prev) =>
           prev.some((e) => e.kind === 'compact' && e.state === 'running' && e.trigger === 'agent')

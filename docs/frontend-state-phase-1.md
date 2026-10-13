@@ -209,3 +209,26 @@ TypeScript/build/module checks, workspace Rust formatting and Clippy pass.
 Combined review-branch initial gzip is 423.9kB; the unchanged
 400kB gate remains a validation failure. Server safety fixes are also applied
 directly to #190's feature branch; frontend review fixes are delivered in #192.
+
+
+## Completed implementation follow-up
+
+Session events now carry an explicit session ID, stream epoch and sequence for
+clients negotiating WebSocket protocol 2. A bounded in-memory journal (2,048
+frames or 4 MiB) permits retained-cursor replay on reconnect and lag recovery.
+Duplicate frames and foreign-session events are rejected before projection.
+Expired cursors and server restarts fall back to an authoritative Ready snapshot;
+this is not an exactly-once guarantee across restart. Older clients continue to
+receive the original unwrapped event protocol.
+
+Repository, file, context, provider, integration and other session-dependent HTTP
+operations capture their owner in X-Mira-Session. The server validates that owner
+and holds its slot for the request rather than borrowing the mutable global active
+pointer. Requests without the header retain legacy behavior. Session CRUD retains
+its existing lifecycle owner.
+
+Supabase initializes from a lazy SDK chunk before the application mounts. This
+reduces the eager production bundle below the unchanged 400 kB gzip budget;
+configured authentication still downloads its SDK during startup. The historical
+bundle failures above are superseded by this implementation. Live authenticated
+desktop acceptance remains separate from automated validation.

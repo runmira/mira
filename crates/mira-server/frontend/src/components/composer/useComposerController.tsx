@@ -451,7 +451,7 @@ export function useComposerController({
     setAttachError(null);
     setAttachLoading(true);
     try {
-      const f = await readFile(path);
+      const f = await readFile(path, { sessionId: runtime.sessionState.get().active ?? undefined });
       // De-dupe by path — re-attaching the same file just refreshes it.
       setAttachments(
         (prev) => [

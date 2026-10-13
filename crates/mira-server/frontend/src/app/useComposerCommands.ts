@@ -272,7 +272,7 @@ export function useComposerCommands(
     const ref = messageRefAt(userIdx);
     if (!ref || busy) return;
     try {
-      const changes = await previewCheckpoint(ref);
+      const changes = await previewCheckpoint(ref, appRuntime.sessionState.get().active ?? undefined);
       if (changes.length === 0) {
         setRestoreNote({ text: 'Nothing to restore — the files already match.' });
         return;

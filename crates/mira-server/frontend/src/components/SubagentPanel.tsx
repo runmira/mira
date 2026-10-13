@@ -630,6 +630,7 @@ function SubagentEntryView({ entry }: { entry: Entry }) {
 }
 
 function StatusPill({ status, isError }: { status: ToolStatus; isError: boolean }) {
+  if (status === 'paused') return <span className="text-[11.5px] text-muted-foreground">Activity paused</span>;
   // All pills share the same shape (soft secondary fill, no border);
   // the semantic hint is a single accent-colored glyph or word so the
   // scan is still 1-2ms without leaning on colored strokes.

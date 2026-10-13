@@ -7,18 +7,18 @@
 //! flows (creating a skill on disk) happen through the `skill-creator`
 //! skill itself, not through this endpoint.
 
+use crate::session_scope::ScopedState as State;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::{Path as AxumPath, State};
+use axum::extract::Path as AxumPath;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use mira_skills::Skill;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
-use tokio::sync::broadcast;
 
 use crate::protocol::ServerMsg;
 use crate::state::AppState;
@@ -265,7 +265,7 @@ async fn run_watcher(state: AppState) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn broadcast_reloaded(tx: &broadcast::Sender<ServerMsg>) {
+fn broadcast_reloaded(tx: &crate::session_stream::SessionEvents) {
     // Broadcast fails when there are no active subscribers — that's
     // fine, the browser just picks up the fresh roster on its next
     // fetch.

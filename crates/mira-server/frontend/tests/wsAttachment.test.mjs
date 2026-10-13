@@ -79,3 +79,41 @@ test('attach before socket open and rapid selection accept only the latest targe
     assert.deepEqual(h.received, [{ type: 'ready', session_id: 'b' }]);
   } finally { h.restore(); }
 });
+
+
+const stamped = (session, sequence, text, epoch='epoch') => ({type:'session_stream',session_id:session,epoch,sequence,frame:{type:'token',text}});
+test('sequenced streams reject other sessions, duplicates and unowned frames', () => {
+  const h=harness();try {
+    const socket=h.sockets[0];socket.open();h.client.setSession('a');
+    socket.message({type:'ready',session_id:'a',stream_cursor:{epoch:'epoch',sequence:0}});
+    socket.message(stamped('b',1,'wrong'));socket.message(stamped('a',1,'one'));socket.message(stamped('a',1,'duplicate'));
+    socket.message({type:'token',text:'unowned'});
+    assert.deepEqual(h.received.filter(m=>m.type==='token').map(m=>m.text),['one']);
+  } finally {h.restore();}
+});
+
+test('a gap requests cursor replay and resumes without replacing the cached transcript', () => {
+  const h=harness();try {
+    const socket=h.sockets[0];socket.open();h.client.setSession('a');
+    socket.message({type:'ready',session_id:'a',stream_cursor:{epoch:'epoch',sequence:0}});
+    socket.message(stamped('a',1,'one'));socket.message(stamped('a',3,'early-three'));
+    assert.deepEqual(socket.sent.at(-1),{type:'attach',session_id:'a',cursor:{epoch:'epoch',sequence:1}});
+    socket.message({type:'stream_resumed',session_id:'a',cursor:{epoch:'epoch',sequence:1}});
+    socket.message(stamped('a',2,'two'));socket.message(stamped('a',3,'three'));socket.message(stamped('a',3,'duplicate'));
+    assert.deepEqual(h.received.filter(m=>m.type==='token').map(m=>m.text),['one','two','three']);
+    assert.equal(h.received.filter(m=>m.type==='ready').length,1);
+  } finally {h.restore();}
+});
+
+test('reconnect restores the retained cursor; a restarted epoch falls back to Ready', () => {
+  const h=harness();try {
+    const socket=h.sockets[0];socket.open();h.client.setSession('a');
+    socket.message({type:'ready',session_id:'a',stream_cursor:{epoch:'epoch',sequence:0}});socket.message(stamped('a',1,'one'));
+    socket.close();const timer=[...h.timers.values()][0];h.timers.clear();timer();
+    const current=h.sockets[1];current.open();assert.equal(current.sent.length,0);
+    current.message({type:'stream_resumed',session_id:'a',cursor:{epoch:'epoch',sequence:1}});current.message(stamped('a',2,'two'));
+    assert.equal(h.received.at(-1).text,'two');
+    current.message({type:'ready',session_id:'a',stream_cursor:{epoch:'restart',sequence:0}});current.message(stamped('a',1,'new','restart'));
+    assert.equal(h.received.at(-1).text,'new');
+  } finally {h.restore();}
+});

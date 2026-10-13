@@ -99,3 +99,17 @@ test('Claude background lifecycle updates reuse the launch call and outlive its 
   before=upsertAcpTool(before,call);
   assert.equal(before.length,1,'lifecycle before tool creation also converges');
 });
+
+
+test('late native call IDs coalesce fallback and launch rows while keeping the open identity', () => {
+  const pending=work('late');let entries=upsertExternalWork([],pending);
+  const id=entries[0].call.id;
+  const call={id:'actual',name:'Task',title:'Task',status:'in_progress',raw_input:{prompt:'Inspect',subagent_type:'explore'},content:[]};
+  entries=upsertAcpTool(entries,call);
+  let streams=projectExternalWork(new Map(),pending);streams=projectAcpSubagent(streams,call);
+  const bound={...pending,subagent:{call_id:'actual'}};
+  entries=upsertExternalWork(entries,bound);streams=projectExternalWork(streams,bound);
+  assert.equal(entries.length,1);assert.equal(entries[0].call.id,id);assert.equal(JSON.parse(entries[0].call.function.arguments).prompt,'Inspect');
+  assert.equal(streams.size,1);assert.ok(streams.has(id));
+  entries=upsertAcpTool(entries,{...call,status:'completed'});assert.equal(entries.length,1);assert.equal(entries[0].call.id,id);
+});

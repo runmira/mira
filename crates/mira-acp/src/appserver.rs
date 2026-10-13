@@ -1878,6 +1878,7 @@ impl crate::conn::AgentCallback for Callbacks {
                             continue;
                         };
                         e.event = MiraEvent::SubagentEvent {
+                            work: None,
                             native_thread_id: thread.into(),
                             event: Box::new(e.event),
                         };
@@ -3767,6 +3768,7 @@ mod thread_isolation_tests {
             if let MiraEvent::SubagentEvent {
                 native_thread_id,
                 event,
+                ..
             } = event.event
             {
                 assert_eq!(native_thread_id, "child");

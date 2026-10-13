@@ -511,6 +511,8 @@ pub fn map_line_with(v: &Value, models: Option<&[NativeModel]>) -> Vec<NativeAct
 /// reply is unreadable. Their tool calls still pass.
 #[derive(Default)]
 pub struct StreamState {
+    children: std::collections::HashMap<String, Box<StreamState>>,
+    ended_children: std::collections::VecDeque<String>,
     background: std::collections::HashMap<String, crate::runtime::RuntimeWork>,
     runtime_turn: Option<crate::runtime::RuntimeTurn>,
     turn_sequence: u64,
@@ -558,6 +560,64 @@ fn context_tokens(usage: &Value) -> Option<u64> {
 impl StreamState {
     pub fn map(&mut self, v: &Value, models: Option<&[NativeModel]>) -> Vec<NativeAction> {
         use crate::runtime::*;
+        if let Some(call) = v
+            .get("parent_tool_use_id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+        {
+            let mut frame = v.clone();
+            frame["parent_tool_use_id"] = Value::Null;
+            let ended = self.ended_children.iter().any(|id| id == call);
+            let first = !self.children.contains_key(call);
+            let child = self.children.entry(call.to_owned()).or_default();
+            let work = self
+                .background
+                .values()
+                .find(|w| w.subagent.as_ref().and_then(|s| s.call_id.as_deref()) == Some(call))
+                .cloned()
+                .unwrap_or_else(|| RuntimeWork {
+                    id: format!("subagent:claude:{call}"),
+                    native_thread_id: Some(format!("claude:{call}")),
+                    kind: WorkKind::Subagent,
+                    status: if ended {
+                        WorkStatus::Completed
+                    } else {
+                        WorkStatus::Running
+                    },
+                    title: None,
+                    subagent: Some(SubagentDetails {
+                        call_id: Some(call.into()),
+                        reopen: first && !ended,
+                        ..Default::default()
+                    }),
+                });
+            return child
+                .map(&frame, models)
+                .into_iter()
+                .filter_map(|action| match action {
+                    NativeAction::Event(mut event)
+                        if matches!(
+                            &event.event,
+                            MiraEvent::AssistantText { .. }
+                                | MiraEvent::AssistantSnapshot { .. }
+                                | MiraEvent::AgentThought { .. }
+                                | MiraEvent::ToolCall(_)
+                                | MiraEvent::ToolCallUpdate(_)
+                                | MiraEvent::ToolOutputDelta { .. }
+                        ) =>
+                    {
+                        event.event = MiraEvent::SubagentEvent {
+                            native_thread_id: format!("claude:{call}"),
+                            work: Some(work.clone()),
+                            event: Box::new(event.event),
+                        };
+                        Some(NativeAction::Event(event))
+                    }
+                    NativeAction::Permission(_) => Some(action),
+                    _ => None,
+                })
+                .collect();
+        }
         let event = |event| {
             NativeAction::Event(NormalizedEvent {
                 source: EventSource::Acp {
@@ -623,7 +683,57 @@ impl StreamState {
                 lifecycle.push(event(MiraEvent::RuntimeTurn(turn)));
             }
         }
-        lifecycle.extend(self.map_inner(v, models));
+        let actions = self.map_inner(v, models);
+        for action in &actions {
+            if let NativeAction::Event(NormalizedEvent {
+                event: MiraEvent::ToolCallUpdate(call),
+                ..
+            }) = action
+            {
+                if self.children.contains_key(&call.id)
+                    && matches!(
+                        call.status,
+                        ToolCallStatus::Completed | ToolCallStatus::Failed
+                    )
+                    && !self.background.values().any(|w| {
+                        w.subagent.as_ref().and_then(|s| s.call_id.as_deref())
+                            == Some(call.id.as_str())
+                    })
+                {
+                    self.children.remove(&call.id);
+                    self.ended_children.push_back(call.id.clone());
+                    while self.ended_children.len() > 128 {
+                        self.ended_children.pop_front();
+                    }
+                    lifecycle.push(event(MiraEvent::RuntimeWork(RuntimeWork {
+                        id: format!("subagent:claude:{}", call.id),
+                        native_thread_id: Some(format!("claude:{}", call.id)),
+                        kind: WorkKind::Subagent,
+                        status: if call.status == ToolCallStatus::Failed {
+                            WorkStatus::Failed
+                        } else {
+                            WorkStatus::Completed
+                        },
+                        title: None,
+                        subagent: Some(SubagentDetails {
+                            call_id: Some(call.id.clone()),
+                            result: Some(
+                                call.content
+                                    .iter()
+                                    .filter_map(|c| match c {
+                                        ToolContent::Content { text } => Some(text.as_str()),
+                                        _ => None,
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("\n"),
+                            ),
+                            ..Default::default()
+                        }),
+                    })));
+                }
+            }
+        }
+        lifecycle.extend(actions);
         lifecycle
     }
 
@@ -2756,6 +2866,23 @@ done
             let v = serde_json::from_str::<Value>(l).unwrap();
             assert!(texts(&st.map(&v, None)).is_empty(), "{l}");
         }
+    }
+
+    #[test]
+    fn claude_children_have_separate_delta_and_snapshot_state() {
+        let mut st = StreamState::default();
+        for call in ["child-a", "child-b"] {
+            let start = json!({"type":"stream_event","parent_tool_use_id":call,"event":{"type":"message_start","message":{"id":"same-id"}}});
+            st.map(&start, None);
+            let delta = json!({"type":"stream_event","parent_tool_use_id":call,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":call}}});
+            let mapped = st.map(&delta, None);
+            assert!(texts(&mapped).is_empty());
+            assert!(mapped.iter().any(|a| matches!(a, NativeAction::Event(NormalizedEvent {event: MiraEvent::SubagentEvent {native_thread_id, work:Some(work), event}, ..}) if native_thread_id == &format!("claude:{call}") && work.subagent.as_ref().and_then(|s| s.call_id.as_deref()) == Some(call) && matches!(**event, MiraEvent::AssistantText { .. }))));
+            let whole = json!({"type":"assistant","parent_tool_use_id":call,"message":{"id":"same-id","content":[{"type":"text","text":call},{"type":"tool_use","id":"same-tool","name":"Read","input":{"file_path":"file"}}]}});
+            let mapped = st.map(&whole, None);
+            assert!(mapped.iter().any(|a| matches!(a, NativeAction::Event(NormalizedEvent {event: MiraEvent::SubagentEvent {event, ..}, ..}) if matches!(**event, MiraEvent::ToolCall(_)))));
+        }
+        assert_eq!(st.children.len(), 2);
     }
 
     #[test]

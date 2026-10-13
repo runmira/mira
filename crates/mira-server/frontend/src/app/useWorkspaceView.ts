@@ -631,13 +631,13 @@ export function useWorkspaceView(
   const subagentTabs: SubagentTab[] = useMemo(() => {
     const byCallId = new Map<string, ToolEntry>();
     for (const e of outlineEntries) {
-      if (e.kind === 'tool') byCallId.set(e.call.id, e);
+      if (e.kind === 'tool') { byCallId.set(e.call.id, e); if (e.externalWork?.subagent?.call_id) byCallId.set(e.externalWork.subagent.call_id, e); }
     }
     return agentTabs
       .map((callId) => {
         const entry = byCallId.get(callId);
         if (!entry) return null;
-        const stream = subagentState.get(callId);
+        const stream = subagentState.get(entry.call.id);
         return {
           callId,
           call: entry.call,

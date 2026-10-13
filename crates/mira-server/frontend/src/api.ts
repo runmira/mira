@@ -1,3 +1,4 @@
+import { sessionFetch } from './api/sessionScope';
 import { Origin } from './api/plugins';
 import { readError } from './api/pullRequests';
 import { jsonOrThrow, post } from './api/request';
@@ -402,10 +403,9 @@ export type FileView = { path: string; bytes: number; content: string };
 
 /** Read a text file. `view` is for the file viewer, which allows larger
  *  files than attaching one to a message does. */
-export async function readFile(path: string, opts?: { view?: boolean }): Promise<FileView> {
-  const r = await fetch(
-    `/api/file?path=${encodeURIComponent(path)}${opts?.view ? '&purpose=view' : ''}`,
-  );
+export async function readFile(path: string, opts?: { view?: boolean; sessionId?: string }): Promise<FileView> {
+  const r = await sessionFetch(
+    `/api/file?path=${encodeURIComponent(path)}${opts?.view ? '&purpose=view' : ''}`, undefined, opts?.sessionId);
   if (!r.ok) {
     let msg = `Couldn't read the file (HTTP ${r.status}).`;
     try {
@@ -460,8 +460,8 @@ export type GitStatusView = {
   last_commit?: string | null;
 };
 
-export async function getGitStatus(): Promise<GitStatusView> {
-  const r = await fetch('/api/git/status');
+export async function getGitStatus(sessionId?: string): Promise<GitStatusView> {
+  const r = await sessionFetch('/api/git/status', undefined, sessionId);
   if (!r.ok) throw new Error(`git status ${r.status}`);
   return (await r.json()) as GitStatusView;
 }
@@ -488,8 +488,8 @@ export type SessionDiffView = {
   untracked?: number;
 };
 
-export async function getSessionDiff(): Promise<SessionDiffView> {
-  const r = await fetch('/api/git/session-diff');
+export async function getSessionDiff(sessionId?: string): Promise<SessionDiffView> {
+  const r = await sessionFetch('/api/git/session-diff', undefined, sessionId);
   if (!r.ok) return { added: 0, removed: 0, files: [] };
   return (await r.json()) as SessionDiffView;
 }
@@ -504,8 +504,8 @@ export type SessionChange = {
 };
 
 /** Full diffs for every file this session changed that differs from HEAD. */
-export async function getSessionChanges(): Promise<SessionChange[]> {
-  const r = await fetch('/api/git/session-changes');
+export async function getSessionChanges(sessionId?: string): Promise<SessionChange[]> {
+  const r = await sessionFetch('/api/git/session-changes', undefined, sessionId);
   if (!r.ok) throw new Error(`session changes ${r.status}`);
   return ((await r.json()) as { files: SessionChange[] }).files;
 }
@@ -543,20 +543,20 @@ export type ContextView = {
 export type DroppedResult = { tool: string; label: string; tokens: number };
 
 /** What fills the active chat's context window. */
-export async function getContextBreakdown(): Promise<ContextView> {
-  const r = await fetch('/api/context');
+export async function getContextBreakdown(sessionId?: string): Promise<ContextView> {
+  const r = await sessionFetch('/api/context', undefined, sessionId);
   const json = (await r.json().catch(() => ({}))) as ContextView & { error?: string };
   if (!r.ok) throw new Error(json.error ?? `HTTP ${r.status}`);
   return json;
 }
 
 /** Take one tool result out of the context (replaced with a stub). */
-export async function dropContextResult(callId: string): Promise<DroppedResult> {
-  const r = await fetch('/api/context/drop', {
+export async function dropContextResult(callId: string, sessionId?: string): Promise<DroppedResult> {
+  const r = await sessionFetch('/api/context/drop', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ call_id: callId }),
-  });
+  }, sessionId);
   const json = (await r.json().catch(() => ({}))) as DroppedResult & { error?: string };
   if (!r.ok) throw new Error(json.error ?? `HTTP ${r.status}`);
   return json;
@@ -571,12 +571,12 @@ export type RestoreChange = {
 
 export type Restored = { changes: RestoreChange[]; undo: string };
 
-async function checkpointCall<T>(path: string, body: unknown): Promise<T> {
-  const r = await fetch(path, {
+async function checkpointCall<T>(path: string, body: unknown, sessionId?: string): Promise<T> {
+  const r = await sessionFetch(path, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
-  });
+  }, sessionId);
   const json = (await r.json().catch(() => ({}))) as T & { error?: string };
   if (!r.ok) throw new Error(json.error ?? `HTTP ${r.status}`);
   return json;
@@ -587,14 +587,14 @@ async function checkpointCall<T>(path: string, body: unknown): Promise<T> {
 export type MessageRef = { text: string; occurrence: number };
 
 /** What restoring the files to before a message would change. */
-export async function previewCheckpoint(ref: MessageRef): Promise<RestoreChange[]> {
-  return (await checkpointCall<{ changes: RestoreChange[] }>('/api/checkpoints/preview', ref))
+export async function previewCheckpoint(ref: MessageRef, sessionId?: string): Promise<RestoreChange[]> {
+  return (await checkpointCall<{ changes: RestoreChange[] }>('/api/checkpoints/preview', ref, sessionId))
     .changes;
 }
 
 /** Put the files back the way they were before a message. */
-export function restoreCheckpoint(ref: MessageRef): Promise<Restored> {
-  return checkpointCall<Restored>('/api/checkpoints/restore', ref);
+export function restoreCheckpoint(ref: MessageRef, sessionId?: string): Promise<Restored> {
+  return checkpointCall<Restored>('/api/checkpoints/restore', ref, sessionId);
 }
 
 /** "Fork from here": a new chat with this one's history through the
@@ -606,17 +606,17 @@ export async function forkSession(sessionId: string, ref: MessageRef): Promise<s
 }
 
 /** Undo a restore. */
-export function undoRestore(undo: string): Promise<Restored> {
-  return checkpointCall<Restored>('/api/checkpoints/undo', { undo });
+export function undoRestore(undo: string, sessionId?: string): Promise<Restored> {
+  return checkpointCall<Restored>('/api/checkpoints/undo', { undo }, sessionId);
 }
 
 /** Discard this session's changes to one file (restore / delete). */
-export async function revertFile(path: string): Promise<void> {
-  const r = await fetch('/api/git/revert-file', {
+export async function revertFile(path: string, sessionId?: string): Promise<void> {
+  const r = await sessionFetch('/api/git/revert-file', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ path }),
-  });
+  }, sessionId);
   if (!r.ok) {
     let msg = `revert ${r.status}`;
     try {
@@ -629,8 +629,8 @@ export async function revertFile(path: string): Promise<void> {
   }
 }
 
-export async function gitPush(): Promise<void> {
-  const r = await fetch('/api/git/push', { method: 'POST' });
+export async function gitPush(sessionId?: string): Promise<void> {
+  const r = await sessionFetch('/api/git/push', { method: 'POST' }, sessionId);
   if (!r.ok) {
     let msg = `git push ${r.status}`;
     try {
@@ -652,8 +652,8 @@ export type BranchPrView = {
   reviewDecision: string | null;
 };
 
-export async function getBranchPr(): Promise<BranchPrView | null> {
-  const r = await fetch('/api/git/branch-pr');
+export async function getBranchPr(sessionId?: string): Promise<BranchPrView | null> {
+  const r = await sessionFetch('/api/git/branch-pr', undefined, sessionId);
   if (!r.ok) return null;
   return (await r.json()) as BranchPrView;
 }
@@ -664,12 +664,12 @@ export type CommitRequest = {
   push_after: boolean;
 };
 
-export async function gitCommit(req: CommitRequest): Promise<void> {
-  const r = await fetch('/api/git/commit', {
+export async function gitCommit(req: CommitRequest, sessionId?: string): Promise<void> {
+  const r = await sessionFetch('/api/git/commit', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(req),
-  });
+  }, sessionId);
   if (!r.ok) {
     let msg = `git commit ${r.status}`;
     try {
@@ -686,12 +686,12 @@ export type UndoOp = 'overwrite' | 'create';
 
 export type AppliedUndo = { seq: number; path: string; op: UndoOp };
 
-export async function applyUndo(count: number): Promise<{ applied: AppliedUndo[] }> {
-  const r = await fetch('/api/undo', {
+export async function applyUndo(count: number, sessionId?: string): Promise<{ applied: AppliedUndo[] }> {
+  const r = await sessionFetch('/api/undo', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ count }),
-  });
+  }, sessionId);
   if (!r.ok) {
     let msg = `undo POST ${r.status}`;
     try {
@@ -710,12 +710,13 @@ export type MemoryScope = 'user' | 'project';
 export async function appendMemory(
   scope: MemoryScope,
   text: string,
+  sessionId?: string,
 ): Promise<{ path: string; bytes: number }> {
-  const r = await fetch('/api/memory/append', {
+  const r = await sessionFetch('/api/memory/append', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ scope, text }),
-  });
+  }, sessionId);
   if (!r.ok) {
     let msg = `memory append ${r.status}`;
     try {
@@ -732,12 +733,13 @@ export async function appendMemory(
 export async function createWorktree(
   branch: string,
   base?: string,
+  sessionId?: string,
 ): Promise<{ path: string; branch: string }> {
-  const r = await fetch('/api/git/worktree', {
+  const r = await sessionFetch('/api/git/worktree', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ branch, base }),
-  });
+  }, sessionId);
   if (!r.ok) {
     let msg = `worktree POST ${r.status}`;
     try {
@@ -751,12 +753,12 @@ export async function createWorktree(
   return (await r.json()) as { path: string; branch: string };
 }
 
-export async function putCwd(path: string): Promise<{ session_id?: string }> {
-  const r = await fetch('/api/cwd', {
+export async function putCwd(path: string, sessionId?: string): Promise<{ session_id?: string }> {
+  const r = await sessionFetch('/api/cwd', {
     method: 'PUT',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ path }),
-  });
+  }, sessionId);
   if (!r.ok) {
     let msg = `cwd PUT ${r.status}`;
     try {
@@ -793,21 +795,21 @@ export type GithubConnectReport = {
   workflow_unchanged: boolean;
 };
 
-export async function getGithubConnect(repo?: string): Promise<GithubConnectView> {
+export async function getGithubConnect(repo?: string, sessionId?: string): Promise<GithubConnectView> {
   const q = repo ? `?repo=${encodeURIComponent(repo)}` : '';
-  const r = await fetch(`/api/github/connect${q}`, { cache: 'no-store' });
+  const r = await sessionFetch(`/api/github/connect${q}`, { cache: 'no-store' }, sessionId);
   if (!r.ok) throw new Error(await readError(r, 'github connect GET'));
   return (await r.json()) as GithubConnectView;
 }
 
 /** Connect `repo`. `token` is a Runmira-bot app token for it; without one
  *  the server uses the GitHub key from Settings. */
-export async function connectGithub(repo?: string, token?: string): Promise<GithubConnectReport> {
-  const r = await fetch('/api/github/connect', {
+export async function connectGithub(repo?: string, token?: string, sessionId?: string): Promise<GithubConnectReport> {
+  const r = await sessionFetch('/api/github/connect', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ repo: repo || null, token: token || null }),
-  });
+  }, sessionId);
   if (!r.ok) throw new Error(await readError(r, 'github connect'));
   return (await r.json()) as GithubConnectReport;
 }

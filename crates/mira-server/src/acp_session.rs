@@ -1955,6 +1955,8 @@ fn is_transcript_frame(msg: &ServerMsg) -> bool {
             | ToolEnd { .. }
             | StreamActivity { .. }
             | AcpMessageMetadata { .. }
+            | RuntimeWorkUpdated { .. }
+            | ExternalSubagentFrame { .. }
             | AcpText { .. }
             | AcpTextSnapshot { .. }
             | AcpToolOutputDelta { .. }
@@ -2706,5 +2708,39 @@ mod ordered_transcript_tests {
             assert_eq!(serde_json::to_value(stored).unwrap(), expected);
         }
         assert!(writer.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod child_transcript_tests {
+    use super::*;
+
+    #[test]
+    fn child_content_and_lifecycle_survive_transcript_capture() {
+        let work = mira_acp::runtime::RuntimeWork {
+            id: "child".into(),
+            native_thread_id: Some("native-child".into()),
+            kind: mira_acp::runtime::WorkKind::Subagent,
+            status: mira_acp::runtime::WorkStatus::Running,
+            title: None,
+            subagent: None,
+        };
+        assert!(is_transcript_frame(&ServerMsg::RuntimeWorkUpdated {
+            work: work.clone()
+        }));
+        assert!(is_transcript_frame(&ServerMsg::ExternalSubagentFrame {
+            agent_id: work.id.clone(),
+            work: Some(work),
+            frame: Box::new(ServerMsg::Warning {
+                text: "child activity".into()
+            }),
+        }));
+        assert!(!is_transcript_frame(&ServerMsg::RuntimeTurnUpdated {
+            turn: mira_acp::runtime::RuntimeTurn {
+                native_thread_id: "parent".into(),
+                native_turn_id: "turn".into(),
+                running: true,
+            },
+        }));
     }
 }

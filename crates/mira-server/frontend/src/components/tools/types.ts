@@ -17,4 +17,4 @@ export const ARG_PREVIEW_REDUNDANT: Record<string, true> = {
   git_log: true,
 };
 
-export type ToolStatus = 'pending' | 'running' | 'denied' | 'complete';
+export type ToolStatus = 'pending' | 'paused' | 'running' | 'denied' | 'complete';

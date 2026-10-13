@@ -52,6 +52,8 @@ export function usePanelCommands(
   } = context;
 
   function openAgentTab(callId: string) {
+    const entry = appRuntime.readSession().entries.find(e => e.kind === 'tool' && (e.call.id === callId || e.externalWork?.subagent?.call_id === callId));
+    if (entry?.kind === 'tool') callId = agentTabs.find(id => id === entry.call.id || id === entry.externalWork?.subagent?.call_id) ?? entry.call.id;
     setAgentTabs((prev) => (prev.includes(callId) ? prev : [...prev, callId]));
     setActiveAgentTab(callId);
     // Fire-and-forget: if we don't already have a live stream for this
@@ -71,7 +73,7 @@ export function usePanelCommands(
     const existing = subagentState.get(callId);
     if (existing && existing.entries.length > 0) return;
     // Find the parent's tool entry to read the tool_result content.
-    const entry = appRuntime.readSession().entries.find((e): e is ToolEntry => e.kind === 'tool' && e.call.id === callId);
+    const entry = appRuntime.readSession().entries.find((e): e is ToolEntry => e.kind === 'tool' && (e.call.id === callId || e.externalWork?.subagent?.call_id === callId));
     if (!entry?.result) return;
     // Native child IDs belong to the provider, never Mira's session API.
     try { if (JSON.parse(entry.call.function.arguments)._external) return; } catch { /* older entry */ }

@@ -7,7 +7,7 @@
 //! agent's own figures are used, mapped onto the same parts. Only Mira's
 //! own history can have results dropped; an agent owns its history.
 
-use axum::extract::State;
+use crate::session_scope::ScopedState as State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;

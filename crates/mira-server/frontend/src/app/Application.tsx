@@ -46,6 +46,10 @@ export function Application() {
     )
       runtime.flushTokens();
     switch (msg.type) {
+      case 'stream_resumed':
+        appRuntime.turnCommands.resume(msg.session_id);
+        appRuntime.resources.cancelContext();
+        return;
       case 'queue_mutation_result':
       case 'session_activity':
       case 'session_activity_snapshot':

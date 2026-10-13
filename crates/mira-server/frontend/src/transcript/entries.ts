@@ -538,7 +538,7 @@ export const AGENT_PROMPT_TOOLS = new Set(['AskUserQuestion', 'ExitPlanMode']);
 export function upsertAcpTool(prevRaw: Entry[], call: AcpToolCall, at = Date.now()): Entry[] {
   call = boundAgentOutput(call);
   const prev = sealThought(prevRaw, at);
-  const idx = prev.findIndex((e) => e.kind === 'tool' && (e.agentCall?.id === call.id || e.call.id === call.id));
+  const idx = prev.findIndex((e) => e.kind === 'tool' && (e.agentCall?.id === call.id || e.call.id === call.id || e.externalWork?.subagent?.call_id === call.id));
   let merged: AcpToolCall = call;
   if (idx >= 0) {
     const existing = prev[idx];
@@ -555,7 +555,7 @@ export function upsertAcpTool(prevRaw: Entry[], call: AcpToolCall, at = Date.now
   const prior = idx >= 0 ? (prev[idx] as ToolEntry) : null;
   const entry: Entry = {
     kind: 'tool',
-    call: agentCallToToolCall(merged),
+    call: { ...agentCallToToolCall(merged), id: prior?.call.id ?? merged.id },
     preview: null,
     status: agentToolStatus(merged),
     result: (() => {
@@ -591,7 +591,7 @@ export function upsertToolStart(prevRaw: Entry[], call: ToolCall, at = Date.now(
   if (existing >= 0)
     return updateTool(prev, call.id, (entry) => ({
       ...entry,
-      status: entry.status === 'pending' || entry.result || ['denied', 'complete', 'error'].includes(entry.status) ? entry.status : 'running',
+      status: entry.result || ['denied', 'complete', 'error'].includes(entry.status) ? entry.status : 'running',
       startedAt: entry.startedAt ?? at,
     }));
   return [

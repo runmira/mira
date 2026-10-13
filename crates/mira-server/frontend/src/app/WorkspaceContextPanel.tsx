@@ -42,7 +42,7 @@ export const WorkspaceContextPanel = memo(function WorkspaceContextPanel({ conte
                       setReviewOpen(true);
                     }}
                     onPush={async () => {
-                      await gitPush();
+                      await gitPush(sessionId ?? undefined);
                       refreshRepo();
                     }}
                     onCommit={async (message, includeUnstaged, pushAfter) => {
@@ -51,7 +51,7 @@ export const WorkspaceContextPanel = memo(function WorkspaceContextPanel({ conte
                         message,
                         include_unstaged: includeUnstaged,
                         push_after: pushAfter,
-                      });
+                      }, owner ?? undefined);
                       if (owner) appRuntime.updateSessionDataAt(owner, 'sessionCommitted', () => true);
                       refreshRepo();
                     }}

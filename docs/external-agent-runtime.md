@@ -211,3 +211,23 @@ Verification covers parent/child isolation, parallel identities, replay, late
 snapshots, reopening, delegation translation and launch/lifecycle convergence.
 Live authenticated provider acceptance remains separate; this does not claim
 that every provider exposes child tokens or tools.
+
+
+### Child stream completion follow-up
+
+OpenCode ACP child updates use its documented `_meta["opencode/child-session"]`
+identity to route assistant text, reasoning and tools to child panels. Child
+configuration updates cannot change the parent's configuration. Claude stream
+updates carrying `parent_tool_use_id` use independent child normalizers, preserving
+parallel children even when their local message or tool IDs coincide. Child
+terminal frames cannot finish the parent turn. Explicit foreground child tool
+results complete that child; parent completion pauses remaining exposed activity.
+Providers that do not emit child content continue to show supplied progress/results.
+
+Lifecycle and child content frames are persisted in the transcript sidecar and
+replayed separately from parent narration. Late launch IDs become aliases of the
+first displayed child identity, preserving open tabs and avoiding duplicate cards.
+An approved pending tool becomes running on its tool-start event; settled tools
+remain settled.
+
+Protocol reference: [OpenCode ACP child sessions](https://dev.opencode.ai/v2/docs/cli/acp/).

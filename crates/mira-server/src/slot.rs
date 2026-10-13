@@ -50,7 +50,7 @@ use mira_sandbox::Sandbox;
 use mira_tools::context::ToolProgressSink;
 use mira_tools::{BackgroundProcessStore, Registry, ToolContext};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 
 use crate::approver::{PendingMap, WsApprover};
@@ -64,7 +64,7 @@ use crate::protocol::ServerMsg;
 /// cleared between turns, so background process drain tasks can keep emitting
 /// `ToolProgress` frames even after `invoke` has returned.
 pub(crate) struct SessionProgress {
-    pub(crate) tx: broadcast::Sender<ServerMsg>,
+    pub(crate) tx: crate::session_stream::SessionEvents,
 }
 
 impl ToolProgressSink for SessionProgress {
@@ -107,7 +107,7 @@ pub struct SessionSlot {
     pub session: Arc<RwLock<Session>>,
     pub native_provider: crate::provider::SwappableProvider,
     pub selection: Arc<crate::state::SharedSelection>,
-    pub events_tx: broadcast::Sender<ServerMsg>,
+    pub events_tx: crate::session_stream::SessionEvents,
     pub pending: PendingMap,
     pub prompt_pending: PendingPromptMap,
     pub runtime_requests: crate::runtime_requests::RequestStore,
@@ -357,7 +357,7 @@ pub async fn build_slot(
         }
     }
     let session_provider: Arc<dyn ChatProvider> = Arc::new(native_provider.clone());
-    let (events_tx, _rx0) = broadcast::channel::<ServerMsg>(256);
+    let events_tx = crate::session_stream::SessionEvents::new("initializing");
     // NOTE: we intentionally drop `_rx0` — its only purpose was to keep the
     // channel alive before subscribers attach. Sends with zero receivers
     // return Err(SendError), which the harness forwarder happily ignores.
@@ -522,6 +522,7 @@ pub async fn build_slot(
         deps.store.as_ref().and_then(|s| s.queue_state_path(&id)),
     )
     .await;
+    events_tx.bind_session(&id.to_string());
     Arc::new(SessionSlot {
         session_activity: deps.session_activity.clone(),
         id,

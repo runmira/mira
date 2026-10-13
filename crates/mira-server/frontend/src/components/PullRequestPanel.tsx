@@ -1,3 +1,4 @@
+import { useOptionalRuntime } from '../state/RuntimeProvider';
 import { cn } from '@/lib/utils';
 import { MessageCircle, Search } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
@@ -27,7 +28,8 @@ export function PullRequestPanel({
    *  frames drive the existing side-slide. */
   onReviewPr: (owner: string, repo: string, number: number) => void;
 }) {
-  const [list, setList] = useState<PullRequestListView | null>(null);
+
+  const requestRuntime = useOptionalRuntime();  const [list, setList] = useState<PullRequestListView | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<Filter>('all');
@@ -39,7 +41,7 @@ export function PullRequestPanel({
 
   useEffect(() => {
     setLoading(true);
-    listPullRequests()
+    listPullRequests(requestRuntime?.sessionState.get().active ?? requestRuntime?.sessionState.get().selected ?? undefined)
       .then((v) => {
         setList(v);
         setError(null);

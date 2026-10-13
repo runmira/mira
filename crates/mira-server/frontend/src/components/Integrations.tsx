@@ -1,3 +1,4 @@
+import { useOptionalRuntime } from '../state/RuntimeProvider';
 /**
  * Settings → Integrations: GitHub (the Runmira-bot app, or a personal
  * token) and Slack.
@@ -188,7 +189,9 @@ function GithubAppCard({
   githubReturn?: GithubReturn;
   onOpenKeys: () => void;
 }) {
-  const [status, setStatus] = useState<AppStatus | null>(null);
+
+  const requestRuntime = useOptionalRuntime();
+  const requestSession = () => requestRuntime?.sessionState.get().active ?? requestRuntime?.sessionState.get().selected ?? undefined;  const [status, setStatus] = useState<AppStatus | null>(null);
   const [data, setData] = useState<AppInstallations | null>(null);
   const [settings, setSettings] = useState<GithubConnectView | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -209,7 +212,7 @@ function GithubAppCard({
     try {
       const st = await appStatus();
       setStatus(st);
-      setSettings(await getGithubConnect().catch(() => null));
+      setSettings(await getGithubConnect(undefined, requestSession()).catch(() => null));
       if (st.configured) setData(await listInstallations());
     } catch (e) {
       setError(message(e));
@@ -245,7 +248,7 @@ function GithubAppCard({
     setError(null);
     try {
       const { token } = await repoToken(installation, repo);
-      const report = await connectGithub(repo, token);
+      const report = await connectGithub(repo, token, requestSession());
       setNotes((n) => ({
         ...n,
         [repo]: report.pull_request
@@ -604,6 +607,9 @@ function CreateGithubApp() {
 
 /** Fallback: connect one repository with a personal access token. */
 function TokenConnect({ onOpenKeys }: { onOpenKeys: () => void }) {
+
+  const requestRuntime = useOptionalRuntime();
+  const requestSession = () => requestRuntime?.sessionState.get().active ?? requestRuntime?.sessionState.get().selected ?? undefined;
   const [repo, setRepo] = useState('');
   const [info, setInfo] = useState<GithubConnectView | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -613,7 +619,7 @@ function TokenConnect({ onOpenKeys }: { onOpenKeys: () => void }) {
   async function load(r?: string) {
     setError(null);
     try {
-      const v = await getGithubConnect(r);
+      const v = await getGithubConnect(r, requestSession());
       setInfo(v);
       if (!r && v.repo) setRepo(v.repo);
     } catch (e) {
@@ -627,7 +633,7 @@ function TokenConnect({ onOpenKeys }: { onOpenKeys: () => void }) {
     setError(null);
     setDone(null);
     try {
-      setDone(await connectGithub(repo.trim() || undefined));
+      setDone(await connectGithub(repo.trim() || undefined, undefined, requestSession()));
       await load(repo.trim() || undefined);
     } catch (e) {
       setError(message(e));

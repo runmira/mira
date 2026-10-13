@@ -14,10 +14,11 @@
 //! digest, used when the server has no transcript (an external agent's
 //! session).
 
+use crate::session_scope::ScopedState as State;
 use std::path::{Path as FsPath, PathBuf};
 
 use axum::body::Body;
-use axum::extract::{Query, State};
+use axum::extract::Query;
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;

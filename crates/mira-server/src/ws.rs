@@ -21,7 +21,7 @@
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::response::IntoResponse;
 use futures::{SinkExt, StreamExt};
 use mira_ai::ChatProvider;
@@ -35,8 +35,69 @@ use crate::slot::{AttachGuard, SessionSlot};
 use crate::state::AppState;
 use crate::title;
 
-pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+#[derive(Default, serde::Deserialize)]
+pub struct ConnectQuery {
+    session_id: Option<String>,
+    epoch: Option<String>,
+    after: Option<u64>,
+    protocol: Option<u8>,
+}
+pub async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    Query(query): Query<ConnectQuery>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_socket(socket, state, query))
+}
+
+// Snapshot and subscription travel together to this connection only.
+type Subscription = (
+    Arc<SessionSlot>,
+    broadcast::Receiver<ServerMsg>,
+    Vec<ServerMsg>,
+);
+fn frame_cursor(frame: &ServerMsg) -> Option<crate::session_stream::StreamCursor> {
+    match frame {
+        ServerMsg::SessionStream {
+            epoch, sequence, ..
+        } => Some(crate::session_stream::StreamCursor {
+            epoch: epoch.clone(),
+            sequence: *sequence,
+        }),
+        ServerMsg::Ready { stream_cursor, .. } => stream_cursor.clone(),
+        ServerMsg::StreamResumed { cursor, .. } => Some(cursor.clone()),
+        _ => None,
+    }
+}
+async fn subscription(
+    slot: &Arc<SessionSlot>,
+    state: &AppState,
+    after: Option<crate::session_stream::StreamCursor>,
+    sequenced: bool,
+) -> Subscription {
+    if !sequenced {
+        return (
+            slot.clone(),
+            slot.events_tx.subscribe(),
+            vec![build_ready(slot, state).await],
+        );
+    }
+    let rx = slot.events_tx.subscribe_stream();
+    let initial = if let Some((cursor, replay)) = after.and_then(|cursor| {
+        slot.events_tx
+            .replay(&cursor)
+            .map(|frames| (cursor, frames))
+    }) {
+        let mut frames = vec![ServerMsg::StreamResumed {
+            session_id: slot.id.to_string(),
+            cursor,
+        }];
+        frames.extend(replay);
+        frames
+    } else {
+        vec![build_ready(slot, state).await]
+    };
+    (slot.clone(), rx, initial)
 }
 
 /// Per-connection attach state. Shared between the reader (which mutates
@@ -46,36 +107,56 @@ pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> 
 struct AttachState {
     slot: Arc<SessionSlot>,
     _guard: AttachGuard,
+    sequenced: bool,
 }
 
-async fn handle_socket(socket: WebSocket, state: AppState) {
+async fn handle_socket(socket: WebSocket, state: AppState, query: ConnectQuery) {
     info!("ws: client connected");
     let (mut sink, mut stream) = socket.split();
 
     // Attach to the server's currently-active slot at connect time.
-    let initial_slot = state.active_slot().await;
+    let initial_slot = match query.session_id.as_deref() {
+        Some(id) if !crate::session_scope::valid_session_id(id) => return,
+        Some(id) => match state.ensure_slot(&mira_core::SessionId::from(id)).await {
+            Ok(slot) => slot,
+            Err(_) => return,
+        },
+        None => state.active_slot().await,
+    };
+    let sequenced = query.protocol == Some(2);
     let attach = Arc::new(RwLock::new(AttachState {
         _guard: AttachGuard::new(&initial_slot),
         slot: initial_slot.clone(),
+        sequenced,
     }));
 
     // Send the initial Ready before the forwarder loop starts so no
     // between-snapshot frames get lost.
     let mut global_activity = state.session_activity.subscribe();
     let activity_hub = state.session_activity.clone();
-    let initial_events = initial_slot.events_tx.subscribe();
-    let ready = build_ready(&initial_slot, &state).await;
-    if send_json(&mut sink, &ready).await.is_err() {
-        return;
+    let after = query
+        .epoch
+        .zip(query.after)
+        .map(|(epoch, sequence)| crate::session_stream::StreamCursor { epoch, sequence });
+    let (_, initial_events, initial_frames) =
+        subscription(&initial_slot, &state, after, sequenced).await;
+    let initial_cursor = initial_frames.iter().rev().find_map(frame_cursor);
+    for frame in initial_frames {
+        if send_json(&mut sink, &frame).await.is_err() {
+            return;
+        }
     }
 
     // Channel the reader uses to hand new broadcast receivers to the
     // forwarder when the client attaches to a different slot.
-    let (rx_swap_tx, mut rx_swap_rx) = mpsc::channel::<broadcast::Receiver<ServerMsg>>(4);
+    let (rx_swap_tx, mut rx_swap_rx) = mpsc::channel::<Subscription>(4);
 
     // Forwarder task: broadcast → socket, with hot-swappable subscription.
+    let forward_state = state.clone();
     let mut forwarder = tokio::spawn(async move {
         let mut rx = initial_events;
+        let mut forward_slot = initial_slot;
+        let mut last = initial_cursor;
         loop {
             tokio::select! {
                 activity = global_activity.recv() => {
@@ -86,19 +167,30 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     };
                     if send_json(&mut sink,&frame).await.is_err() {break;}
                 }
-                Some(new_rx) = rx_swap_rx.recv() => {
-                    rx = new_rx;
+                Some((new_slot, new_rx, frames)) = rx_swap_rx.recv() => {
+                    forward_slot = new_slot; rx = new_rx; last = None;
+                    for frame in frames { if let Some(cursor) = frame_cursor(&frame) { last = Some(cursor); }
+                    if send_json(&mut sink, &frame).await.is_err() { return; } }
                 }
                 res = rx.recv() => {
                     match res {
                         Ok(frame) => {
+                            if let ServerMsg::SessionStream { epoch, sequence, .. } = &frame {
+                                if last.as_ref().is_some_and(|c| c.epoch == *epoch && c.sequence >= *sequence) { continue; }
+                                last = Some(crate::session_stream::StreamCursor { epoch: epoch.clone(), sequence: *sequence });
+                            }
                             if send_json(&mut sink, &frame).await.is_err() {
                                 break;
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(n)) => {
                             warn!(dropped = n, "ws: broadcast lagged");
-                            if send_json(&mut sink,&ServerMsg::SessionActivitySnapshot {snapshot:activity_hub.snapshot()}).await.is_err() {break;}
+                            let frames = match last.as_ref().filter(|_| sequenced).and_then(|c| forward_slot.events_tx.replay(c)) {
+                                Some(frames) => frames,
+                                None => vec![build_ready(&forward_slot, &forward_state).await],
+                            };
+                            for frame in frames { if let Some(cursor) = frame_cursor(&frame) { last = Some(cursor); }
+                    if send_json(&mut sink, &frame).await.is_err() { return; } }
                         }
                         Err(broadcast::error::RecvError::Closed) => break,
                     }
@@ -147,6 +239,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 }
 
 pub(crate) async fn build_ready(slot: &SessionSlot, state: &AppState) -> ServerMsg {
+    let stream_cursor = slot.events_tx.cursor();
     if let Some(owner) = state.slot(&slot.id).await {
         crate::runtime_requests::wake_outbox(state, &owner);
         crate::message_queue::wake(state, &owner);
@@ -194,6 +287,7 @@ pub(crate) async fn build_ready(slot: &SessionSlot, state: &AppState) -> ServerM
     let agent_transcript = crate::transcript_history::latest_state(&agent_transcript);
     let turn_diffs = crate::checkpoints::turn_diffs(&cwd, &sess.id.to_string());
     ServerMsg::Ready {
+        stream_cursor: Some(stream_cursor),
         queued_inputs: slot.message_queue.snapshot().await,
         session_activity: state.session_activity.snapshot(),
         turn_diffs,
@@ -230,7 +324,7 @@ async fn dispatch(
     cmd: ClientMsg,
     state: &AppState,
     attach: &Arc<RwLock<AttachState>>,
-    rx_swap: &mpsc::Sender<broadcast::Receiver<ServerMsg>>,
+    rx_swap: &mpsc::Sender<Subscription>,
 ) {
     // Common: whenever we're about to act on the "current" slot, take a
     // cheap Arc clone once so we don't re-lock for every field.
@@ -335,10 +429,11 @@ async fn dispatch_on_slot(
     cmd: ClientMsg,
     state: &AppState,
     attach: &Arc<RwLock<AttachState>>,
-    rx_swap: &mpsc::Sender<broadcast::Receiver<ServerMsg>>,
+    rx_swap: &mpsc::Sender<Subscription>,
     slot: &Arc<SessionSlot>,
 ) {
     let slot = slot.clone();
+    let sequenced = attach.read().await.sequenced;
 
     match cmd {
         ClientMsg::SyncActivity => {
@@ -1616,10 +1711,14 @@ async fn dispatch_on_slot(
             });
         }
         ClientMsg::Sync => {
-            let ready = build_ready(&slot, state).await;
-            let _ = slot.events_tx.send(ready);
+            let _ = rx_swap
+                .send(subscription(&slot, state, None, sequenced).await)
+                .await;
         }
-        ClientMsg::Attach { session_id } => {
+        ClientMsg::Attach { session_id, cursor } => {
+            if !crate::session_scope::valid_session_id(&session_id) {
+                return;
+            }
             // Materialize the slot from disk if it isn't loaded yet — a
             // sidebar click on a persisted-but-not-open session should
             // Just Work rather than surfacing "unknown session id".
@@ -1638,7 +1737,9 @@ async fn dispatch_on_slot(
             if target.id == slot.id {
                 // No-op attach — still send a fresh Ready in case the
                 // client just wants to re-sync state cheaply.
-                let _ = slot.events_tx.send(build_ready(&slot, state).await);
+                let _ = rx_swap
+                    .send(subscription(&slot, state, cursor, sequenced).await)
+                    .await;
                 return;
             }
             // Swap the attach state: drop the old AttachGuard (decrements
@@ -1649,16 +1750,15 @@ async fn dispatch_on_slot(
                 *guard = AttachState {
                     _guard: AttachGuard::new(&target),
                     slot: target.clone(),
+                    sequenced,
                 };
             }
             // Hand the forwarder a fresh receiver on the target slot's
             // channel. Fresh subscription = we won't replay past frames;
             // the Ready below is the client's single source of state.
-            let _ = rx_swap.send(target.events_tx.subscribe()).await;
-            // Publish a Ready onto the TARGET slot's channel so this
-            // client sees the new session's state on its next tick.
-            let ready = build_ready(&target, state).await;
-            let _ = target.events_tx.send(ready);
+            let _ = rx_swap
+                .send(subscription(&target, state, cursor, sequenced).await)
+                .await;
             // Update `active` so the next HTTP call (settings, memory, …)
             // targets what the user is watching.
             state.set_active(target.id.clone()).await;
@@ -1679,11 +1779,12 @@ async fn dispatch_on_slot(
                 *guard = AttachState {
                     _guard: AttachGuard::new(&target),
                     slot: target.clone(),
+                    sequenced,
                 };
             }
-            let _ = rx_swap.send(target.events_tx.subscribe()).await;
-            let ready = build_ready(&target, state).await;
-            let _ = target.events_tx.send(ready);
+            let _ = rx_swap
+                .send(subscription(&target, state, None, sequenced).await)
+                .await;
         }
         ClientMsg::SetBackgroundMode { mode } => {
             {
@@ -2587,7 +2688,7 @@ pub(crate) fn track_agent_turn(slot: &Arc<SessionSlot>) {
 /// dialog, a network it can't reach. Say so once instead of spinning in
 /// silence. Any frame from the agent (text, a tool, the turn ending) means
 /// it's alive and ends the watch.
-fn spawn_quiet_agent_watchdog(events: &tokio::sync::broadcast::Sender<ServerMsg>) {
+fn spawn_quiet_agent_watchdog(events: &crate::session_stream::SessionEvents) {
     const QUIET: std::time::Duration = std::time::Duration::from_secs(45);
     let mut rx = events.subscribe();
     let tx = events.clone();

@@ -11,11 +11,12 @@
 //! The pane parses the output itself (per framework), so this stays a
 //! plain runner. POST + JSON so another site can't start a command.
 
+use crate::session_scope::ScopedState as State;
 use std::path::Path as FsPath;
 use std::process::Stdio;
 
 use axum::body::Body;
-use axum::extract::{Query, State};
+use axum::extract::Query;
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;

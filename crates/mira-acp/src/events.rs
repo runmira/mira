@@ -118,6 +118,8 @@ pub enum MiraEvent {
     /// Native child narration/tools, scoped separately from the parent turn.
     SubagentEvent {
         native_thread_id: String,
+        #[serde(default)]
+        work: Option<crate::runtime::RuntimeWork>,
         event: Box<MiraEvent>,
     },
     /// A terminal provider failure, kept distinct from transient retry progress.

@@ -2,6 +2,7 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { LazyMotion } from 'framer-motion';
 import App from './App';
+import { initializeSupabase } from './lib/supabase';
 import { AuthGate } from './components/AuthGate';
 import { OnboardingGate } from './components/onboarding/OnboardingGate';
 import { PairingGate } from './components/pairing/PairingGate';
@@ -37,6 +38,8 @@ trackVisibleViewport();
 
 // Lucide icons size via `size` prop or tailwind size-* classes (which set
 // width/height in CSS and override the SVG's own width attr).
+async function start() {
+await initializeSupabase();
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     {/* Components use the slim `m.*` elements; the animation features load
@@ -53,3 +56,6 @@ createRoot(document.getElementById('root')!).render(
     </LazyMotion>
   </StrictMode>,
 );
+
+}
+void start().catch(error => { console.error('Account initialization failed', error); document.getElementById('root')!.textContent = 'Could not initialize sign-in. Reload to retry.'; });

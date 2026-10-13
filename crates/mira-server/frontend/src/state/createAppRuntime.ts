@@ -60,6 +60,7 @@ export function createAppRuntime(scope: RuntimeScope, storage?: UiStorage) {
     connection: { get: () => connection.get(), subscribe: connection.subscribe.bind(connection) },
     reportConnection(status: import('../ws').WsStatus) {
       if (disposed) return;
+      if (status !== 'open') streams.flush();
       connection.setState(previous => ({ status, generation: previous.generation + (status === 'connecting' ? 1 : 0) }));
       if (status !== 'open') resources.cancelContext();
     },

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 import { bundle } from './helpers/bundle.mjs';
-const { createAppRuntime, useApprovalEvents, useTranscriptEvents, useSessionEvents, useStreamCommands, useComposerCommands, useAgentEvents } = await bundle(`
+const { createAppRuntime, useApprovalEvents, useTranscriptEvents, useSessionEvents, useStreamCommands, useComposerCommands, useAgentEvents, upsertToolStart } = await bundle(`
 export { createAppRuntime } from './src/state/createAppRuntime';
 export { useApprovalEvents } from './src/app/useApprovalEvents';
 export { useTranscriptEvents } from './src/app/useTranscriptEvents';
@@ -9,6 +9,7 @@ export { useSessionEvents } from './src/app/useSessionEvents';
 export { useStreamCommands } from './src/app/useStreamCommands';
 export { useComposerCommands } from './src/app/useComposerCommands';
 export { useAgentEvents } from './src/app/useAgentEvents';
+export { upsertToolStart } from './src/transcript/entries';
 `, {
   'src/state/RuntimeProvider': 'export const useAppRuntime = () => globalThis.eventRuntime; export const useOptionalRuntime = () => null;',
   'src/app/shared': 'export const useStableCallback = fn => fn;',
@@ -164,4 +165,13 @@ test('native child frames open Mira subagent cards without changing the parent r
   handler({type:'runtime_work_updated',work:{id:'subagent:child',native_thread_id:'child',kind:'subagent',status:'completed',title:null}});
   assert.equal(h.runtime.readSession().subagentState.get('external:subagent:child').done,true);
   assert.equal(h.runtime.isTurnRunning(),true,'child completion cannot end the live parent');
+});
+
+
+test('an approved tool start transitions waiting to running but never reopens settled tools', () => {
+  const call={id:'approved',type:'function',function:{name:'run',arguments:'{}'}};
+  const pending={kind:'tool',call,status:'pending',preview:null,result:null};
+  assert.equal(upsertToolStart([pending],call,10)[0].status,'running');
+  assert.equal(upsertToolStart([{...pending,status:'denied'}],call,10)[0].status,'denied');
+  assert.equal(upsertToolStart([{...pending,status:'complete',result:{call_id:call.id,content:'done'}}],call,10)[0].status,'complete');
 });

@@ -476,7 +476,7 @@ impl AgentCallback for AcpHost {
         if session.is_empty() {
             return;
         }
-        let Some(event) = from_session_notification(&params) else {
+        let Some(mut event) = from_session_notification(&params) else {
             return;
         };
 
@@ -488,7 +488,50 @@ impl AgentCallback for AcpHost {
                 .await
                 .insert(tool_key(&session, &state.id), state.clone());
         }
-        let spend = spend_of(&session, &event);
+        let child = params
+            .pointer("/update/_meta/opencode~1child-session")
+            .or_else(|| params.pointer("/update/_meta/mira~1child-session"));
+        let child_id = child
+            .and_then(|c| c.get("id"))
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty() && *id != session);
+        let spend = spend_of(child_id.unwrap_or(&session), &event);
+        if let Some(id) = child_id {
+            if matches!(
+                &event.event,
+                crate::events::MiraEvent::AssistantText { .. }
+                    | crate::events::MiraEvent::AgentThought { .. }
+                    | crate::events::MiraEvent::ToolCall(_)
+                    | crate::events::MiraEvent::ToolCallUpdate(_)
+            ) {
+                let title = child
+                    .and_then(|c| c.get("title"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                event.event = crate::events::MiraEvent::SubagentEvent {
+                    native_thread_id: id.into(),
+                    work: Some(crate::runtime::RuntimeWork {
+                        id: format!("subagent:acp:{id}"),
+                        native_thread_id: Some(id.into()),
+                        kind: crate::runtime::WorkKind::Subagent,
+                        status: crate::runtime::WorkStatus::Running,
+                        title: title.clone(),
+                        subagent: Some(crate::runtime::SubagentDetails {
+                            name: title,
+                            reopen: true,
+                            ..Default::default()
+                        }),
+                    }),
+                    event: Box::new(event.event),
+                };
+            } else {
+                // Child config/usage cannot replace the parent session's pickers.
+                if let Some(spend) = spend {
+                    self.events.emit(spend).await;
+                }
+                return;
+            }
+        }
         self.events.emit(event).await;
         if let Some(spend) = spend {
             self.events.emit(spend).await;
@@ -639,12 +682,14 @@ mod tests {
 
     #[derive(Default)]
     struct FakeEvents {
+        full: StdMutex<Vec<NormalizedEvent>>,
         got: StdMutex<Vec<String>>,
     }
 
     #[async_trait::async_trait]
     impl EventPort for FakeEvents {
         async fn emit(&self, e: NormalizedEvent) {
+            self.full.lock().unwrap().push(e.clone());
             let tag = match &e.event {
                 MiraEvent::ToolCall(s) => format!("tool:{}", s.id),
                 MiraEvent::ToolCallUpdate(s) => format!("update:{}", s.id),
@@ -666,6 +711,38 @@ mod tests {
         events: Arc<FakeEvents>,
     ) -> Arc<AcpHost> {
         AcpHost::new(files, terms, perm, events)
+    }
+
+    #[tokio::test]
+    async fn opencode_child_metadata_routes_text_and_tools_without_parent_config_leakage() {
+        let events = Arc::new(FakeEvents::default());
+        let h = host(
+            Arc::new(FakeFiles::default()),
+            Arc::new(FakeTerms::default()),
+            Arc::new(FakePerm { answer: None }),
+            events.clone(),
+        );
+        let meta = json!({"opencode/child-session":{"id":"child", "parentID":"root", "depth":1, "title":"Explore"}});
+        for mut update in [
+            json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"child only"}}),
+            json!({"sessionUpdate":"tool_call","toolCallId":"child:read","title":"Read","kind":"read","status":"in_progress","rawInput":{"path":"src/lib.rs"}}),
+            json!({"sessionUpdate":"session_info_update","title":"Child title"}),
+        ] {
+            update["_meta"] = meta.clone();
+            h.on_notification(
+                "session/update",
+                json!({"sessionId":"root", "update":update}),
+            )
+            .await;
+        }
+        let all = events.full.lock().unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(
+            matches!(&all[0].event, MiraEvent::SubagentEvent {native_thread_id, event, work: Some(work)} if native_thread_id == "child" && work.title.as_deref() == Some("Explore") && matches!(**event, MiraEvent::AssistantText {..}))
+        );
+        assert!(
+            matches!(&all[1].event, MiraEvent::SubagentEvent {event, ..} if matches!(**event, MiraEvent::ToolCall(_)))
+        );
     }
 
     fn sid() -> Value {

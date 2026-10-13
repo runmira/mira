@@ -78,6 +78,8 @@ mod session_activity;
 pub mod session_changes;
 pub mod session_engine;
 mod session_prs;
+mod session_scope;
+mod session_stream;
 mod sessions;
 mod settings;
 mod skills;
@@ -353,6 +355,7 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
     slots.insert(initial_id.clone(), initial_slot.clone());
 
     let state = AppState {
+        request_slot: None,
         slot_loads: Arc::new(std::sync::Mutex::new(HashMap::new())),
         session_activity,
         runtime_retries: Arc::new(crate::runtime_requests::RetryQueue::default()),

@@ -11,7 +11,7 @@ use mira_memory::{EpisodicStore, MemoryStore};
 use mira_policy::Policy;
 use mira_sandbox::Sandbox;
 use mira_tools::{Registry, ToolContext};
-use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock};
 
 use crate::approver::PendingMap;
 use crate::interactive::{PendingPromptMap, ScratchpadEntry};
@@ -78,6 +78,8 @@ impl SharedSelection {
 /// connection's own `attached_id` so two tabs can watch two sessions.
 #[derive(Clone)]
 pub struct AppState {
+    /// A request-scoped lease prevents eviction while an HTTP action runs.
+    pub request_slot: Option<Arc<SessionSlot>>,
     pub slot_loads: Arc<std::sync::Mutex<HashMap<SessionId, std::sync::Weak<Mutex<()>>>>>,
     pub session_activity: Arc<crate::session_activity::ActivityHub>,
     pub runtime_retries: Arc<crate::runtime_requests::RetryQueue>,
@@ -139,6 +141,11 @@ impl AppState {
     /// session id in the URL default here.
     pub async fn active_slot(&self) -> Arc<SessionSlot> {
         let id = self.active.read().await;
+        if let Some(slot) = &self.request_slot {
+            if slot.id == *id {
+                return slot.clone();
+            }
+        }
         let slots = self.slots.read().await;
         slots
             .get(&*id)
@@ -225,7 +232,7 @@ impl AppState {
     /// Active slot's broadcast sender. Fanout target for handlers that
     /// broadcast to whichever tab happens to be watching the active
     /// session (title updates, cwd swap Ready, ModelChanged, …).
-    pub async fn events_tx(&self) -> broadcast::Sender<ServerMsg> {
+    pub async fn events_tx(&self) -> crate::session_stream::SessionEvents {
         self.active_slot().await.events_tx.clone()
     }
 

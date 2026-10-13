@@ -258,7 +258,7 @@ export const WorkspaceComposer = memo(function WorkspaceComposer(
               onClick={() => {
                 const undo = restoreNote.undo!;
                 setRestoreNote(null);
-                void doRestore(() => undoRestore(undo), 'Put back');
+                void doRestore(() => undoRestore(undo, appRuntime.sessionState.get().active ?? undefined), 'Put back');
               }}
               className="shrink-0 rounded px-1.5 py-0.5 text-[12px] font-medium text-foreground/80 hover:bg-fg/[0.06] hover:text-foreground"
             >
@@ -366,11 +366,11 @@ export const WorkspaceComposer = memo(function WorkspaceComposer(
         onCompact={onCompact}
         goal={goal}
         onRemember={async (scope, text) => {
-          const r = await appendMemory(scope, text);
+          const r = await appendMemory(scope, text, appRuntime.sessionState.get().active ?? undefined);
           return `remembered → ${r.path}`;
         }}
         onUndo={async (count) => {
-          const r = await applyUndo(count);
+          const r = await applyUndo(count, appRuntime.sessionState.get().active ?? undefined);
           if (r.applied.length === 0) return 'nothing to undo';
           return `reverted ${r.applied.length} write${r.applied.length === 1 ? '' : 's'}`;
         }}

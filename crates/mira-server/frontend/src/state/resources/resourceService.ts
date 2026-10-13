@@ -35,7 +35,7 @@ export function createResourceService(client: QueryClient, scope: RuntimeScope,
         if (disposed) throw new CancelledError({ silent: true });
         if (contextual.has(name) && (!owner.session || !owner.connected || owner.attachment !== context().attachment || owner.connection !== context().connection)) throw new CancelledError({ silent: true });
         const suffix = name === 'sessions' && archived ? '&archived=true' : name === 'engines' && probe ? '?refresh=1' : '';
-        const response = await fetch(paths[name] + suffix, { signal, cache: 'no-store' });
+        const response = await fetch(paths[name] + suffix, { signal, cache: 'no-store', headers: contextual.has(name) && owner.session ? { 'X-Mira-Session': owner.session } : undefined });
         if (!response.ok) throw new ResourceError(response.status);
         const body = await response.json();
         if (signal.aborted || disposed || (contextual.has(name) && (owner.attachment !== context().attachment || owner.connection !== context().connection))) throw new CancelledError({ silent: true });

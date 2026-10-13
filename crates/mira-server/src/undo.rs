@@ -6,7 +6,7 @@
 //! disabled during session init; we surface that as a clean 400 rather
 //! than a 500 so the frontend can tell the user.
 
-use axum::extract::State;
+use crate::session_scope::ScopedState as State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;

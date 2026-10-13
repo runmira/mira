@@ -1,3 +1,4 @@
+import { useOptionalRuntime } from '../state/RuntimeProvider';
 /**
  * "Review changes" drawer: every file this session changed, rendered with
  * the Pierre CodeView diff surface, with a file tree, per-file collapse,
@@ -38,7 +39,9 @@ export function ReviewChanges({
   /** Files were reverted — refresh anything showing diff stats. */
   onChanged: () => void;
 }) {
-  const [files, setFiles] = useState<SessionChange[] | null>(null);
+
+  const requestRuntime = useOptionalRuntime();
+  const requestSession = () => requestRuntime?.sessionState.get().active ?? requestRuntime?.sessionState.get().selected ?? undefined;  const [files, setFiles] = useState<SessionChange[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [comments, setComments] = useState<MiraReviewComment[]>([]);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
@@ -51,7 +54,7 @@ export function ReviewChanges({
 
   const load = useCallback(() => {
     setError(null);
-    getSessionChanges().then(setFiles).catch((e) => setError((e as Error).message));
+    getSessionChanges(requestSession()).then(setFiles).catch((e) => setError((e as Error).message));
   }, []);
 
   useEffect(() => {
@@ -128,7 +131,8 @@ export function ReviewChanges({
   async function revert(paths: string[]) {
     setError(null);
     try {
-      for (const p of paths) await revertFile(p);
+      const owner = requestSession();
+      for (const p of paths) await revertFile(p, owner);
       setComments((prev) => prev.filter((c) => !paths.includes(c.filePath)));
       load();
       onChanged();

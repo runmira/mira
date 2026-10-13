@@ -15,11 +15,12 @@
 //! cached and refreshed in the background; the first request answers
 //! with presence-only rows and the full probe replaces them shortly.
 
+use crate::session_scope::ScopedState as State;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use axum::extract::{Query, State};
+use axum::extract::Query;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use mira_engine::{EngineSnapshot, EngineState};

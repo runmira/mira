@@ -10,9 +10,9 @@
 //! the server pick it up through the shared crate. This module is the write
 //! side — a tiny endpoint the frontend's `/remember` slash command hits.
 
+use crate::session_scope::ScopedState as State;
 use std::path::PathBuf;
 
-use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;

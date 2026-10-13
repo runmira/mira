@@ -56,7 +56,7 @@ export function useSubagentIdentity(call: ToolCall, typeHint?: string | null): S
 export function faceStateFor(status: ToolStatus, isError: boolean): FaceState {
   if (isError) return 'error';
   if (status === 'running') return 'working';
-  if (status === 'pending') return 'waiting';
+  if (status === 'pending' || status === 'paused') return 'waiting';
   if (status === 'complete') return 'done';
   return 'idle';
 }
@@ -181,6 +181,8 @@ function StatusIndicator({ status, isError }: { status: ToolStatus; isError: boo
     );
   }
   switch (status) {
+    case 'paused':
+      return <span className="text-[11.5px] text-muted-foreground">activity paused</span>;
     case 'pending':
       return <span className="text-[11.5px] text-amber-400">awaiting approval</span>;
     case 'running':

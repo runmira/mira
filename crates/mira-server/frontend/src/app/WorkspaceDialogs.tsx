@@ -1,3 +1,4 @@
+import { useAppRuntime } from '../state/RuntimeProvider';
 import { Dialog,DialogContent,DialogTitle } from '@/components/ui/dialog';
 import { useEffect } from 'react';
 import { restoreCheckpoint } from '../api';
@@ -53,6 +54,7 @@ export function WorkspaceDialogs(
     | 'setReviewPanelOpen'
   >,
 ) {
+  const requestRuntime = useAppRuntime();
   const {
     pendingAcpMode,
     agentPostures,
@@ -284,7 +286,7 @@ export function WorkspaceDialogs(
             onChoose: (id) => {
               const ask = restoreAsk;
               setRestoreAsk(null);
-              if (id === 'restore') void doRestore(() => restoreCheckpoint(ask.ref), 'Restored');
+              if (id === 'restore') void doRestore(() => restoreCheckpoint(ask.ref, requestRuntime.sessionState.get().active ?? undefined), 'Restored');
             },
           }}
         />

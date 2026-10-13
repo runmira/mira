@@ -1,3 +1,4 @@
+import { useOptionalRuntime } from '../state/RuntimeProvider';
 /**
  * The context inspector: what fills the context window, and ways to make
  * room — drop a big tool result, or compact with a focus.
@@ -34,6 +35,8 @@ export function ContextInspector({
   /** A result was dropped — note it in the transcript. */
   onDropped: (callId: string, d: DroppedResult) => void;
 }) {
+  const requestRuntime = useOptionalRuntime();
+  const requestSession = () => requestRuntime?.sessionState.get().active ?? requestRuntime?.sessionState.get().selected ?? undefined;
   const [view, setView] = useState<ContextView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [dropping, setDropping] = useState<string | null>(null);
@@ -41,7 +44,7 @@ export function ContextInspector({
 
   const load = useCallback(() => {
     setError(null);
-    getContextBreakdown()
+    getContextBreakdown(requestSession())
       .then(setView)
       .catch((e) => setError((e as Error).message));
   }, []);
@@ -53,7 +56,7 @@ export function ContextInspector({
   async function drop(callId: string) {
     setDropping(callId);
     try {
-      onDropped(callId, await dropContextResult(callId));
+      onDropped(callId, await dropContextResult(callId, requestSession()));
       load();
     } catch (e) {
       setError((e as Error).message);

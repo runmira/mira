@@ -102,6 +102,12 @@ export function createRuntimeStore() {
       if (changed) commit({ ...state, sessions });
     },
     commands: {
+      resume(session: string) {
+        if (disposed) return;
+        const state = read();
+        if (!state.sessions.has(session)) return;
+        commit({ ...state, active: session, selected: session, attachment: state.attachment + 1, generation: state.generation + 1 });
+      },
       hydrate(session: string, running: boolean, work: readonly Work[]) {
         if (disposed) return;
         const state = read();

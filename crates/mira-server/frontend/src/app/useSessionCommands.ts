@@ -160,7 +160,7 @@ export function useSessionCommands(
    *  frames and the UI silently stays where it was. */
   async function switchCwd(path: string) {
     try {
-      const { session_id } = await putCwd(path);
+      const { session_id } = await putCwd(path, appRuntime.sessionState.get().active ?? undefined);
       if (session_id) attachSession(session_id);
     } catch (e) {
       setRestoreNote({ text: String((e as Error).message ?? e), error: true });

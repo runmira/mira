@@ -21,9 +21,9 @@ export function liveTranscriptView(entries: Entry[], offset: number) {
 }
 export function liveSubagentTabs(ids: string[], entries: Entry[], streams: Map<string, SubagentStreamState>): SubagentTab[] {
   return ids.flatMap(callId => {
-    const entry = entries.find(entry => entry.kind === 'tool' && entry.call.id === callId);
+    const entry = entries.find(entry => entry.kind === 'tool' && (entry.call.id === callId || entry.externalWork?.subagent?.call_id === callId));
     if (entry?.kind !== 'tool') return [];
-    const stream = streams.get(callId);
+    const stream = streams.get(entry.call.id);
     return [{ callId, call: entry.call, status: entry.status, result: entry.result,
       streamEntries: stream?.entries ?? [], streamDone: stream?.done ?? false, pendingReview: stream?.pendingReview ?? null }];
   });

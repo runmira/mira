@@ -11,10 +11,10 @@
 //! worktree switching layered on top of `put_cwd` means the fresh-session +
 //! system-prompt rebuild logic isn't duplicated here.
 
+use crate::session_scope::ScopedState as State;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;

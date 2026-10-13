@@ -27,7 +27,7 @@ use mira_tools::tool::{spec, Action, Tool, ToolError};
 use mira_tools::Registry;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::sync::{broadcast, oneshot, Mutex};
+use tokio::sync::{oneshot, Mutex};
 use tracing::{info, warn};
 
 use crate::agent_worktree::WorktreeSession;
@@ -42,12 +42,12 @@ pub type PendingPromptMap = Arc<Mutex<HashMap<String, oneshot::Sender<PromptResp
 /// registered under a fresh `prompt_id`.
 #[derive(Clone)]
 pub struct PromptChannel {
-    events_tx: broadcast::Sender<ServerMsg>,
+    events_tx: crate::session_stream::SessionEvents,
     pending: PendingPromptMap,
 }
 
 impl PromptChannel {
-    pub fn new(events_tx: broadcast::Sender<ServerMsg>) -> Self {
+    pub fn new(events_tx: crate::session_stream::SessionEvents) -> Self {
         Self {
             events_tx,
             pending: Arc::new(Mutex::new(HashMap::new())),
@@ -195,7 +195,7 @@ pub struct AgentTool {
     /// live child transcript in the right-side panel. `None` means the
     /// tool was constructed without a channel (headless / test paths) —
     /// events are dropped silently in that case.
-    events_tx: Option<broadcast::Sender<ServerMsg>>,
+    events_tx: Option<crate::session_stream::SessionEvents>,
     /// Named agent types loaded at boot (builtins + AGENTS.md merges).
     /// When the caller passes `type: "explore"` we look up the entry
     /// here and use its tools/model/prompt/schema overrides. `None`
@@ -306,8 +306,8 @@ impl AgentTool {
     /// Enable live child-event forwarding. When set, each HarnessEvent
     /// from a spawned child is translated into a `Subagent*` frame and
     /// broadcast to every connected WS.
-    pub fn with_events_tx(mut self, tx: broadcast::Sender<ServerMsg>) -> Self {
-        self.events_tx = Some(tx);
+    pub fn with_events_tx(mut self, tx: impl Into<crate::session_stream::SessionEvents>) -> Self {
+        self.events_tx = Some(tx.into());
         self
     }
 
@@ -1477,12 +1477,12 @@ fn subagent_system_prompt() -> &'static str {
 /// registry gets this instance directly so the model has a first-class
 /// tool call (not some out-of-band side channel) to signal progress.
 pub struct ProgressTool {
-    events_tx: broadcast::Sender<ServerMsg>,
+    events_tx: crate::session_stream::SessionEvents,
     parent_call_id: String,
 }
 
 impl ProgressTool {
-    pub fn new(events_tx: broadcast::Sender<ServerMsg>, parent_call_id: String) -> Self {
+    pub fn new(events_tx: crate::session_stream::SessionEvents, parent_call_id: String) -> Self {
         Self {
             events_tx,
             parent_call_id,
@@ -1626,7 +1626,7 @@ pub struct ScratchpadNoteTool {
     parent_session_id: String,
     parent_call_id: String,
     author: String,
-    events_tx: Option<broadcast::Sender<ServerMsg>>,
+    events_tx: Option<crate::session_stream::SessionEvents>,
 }
 
 impl ScratchpadNoteTool {
@@ -1635,7 +1635,7 @@ impl ScratchpadNoteTool {
         parent_session_id: String,
         parent_call_id: String,
         author: String,
-        events_tx: Option<broadcast::Sender<ServerMsg>>,
+        events_tx: Option<crate::session_stream::SessionEvents>,
     ) -> Self {
         Self {
             store,
