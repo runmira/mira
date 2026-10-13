@@ -295,6 +295,8 @@ pub enum ClientMsg {
     ///    HTTP calls target this session.
     Attach {
         session_id: String,
+        #[serde(default)]
+        cursor: Option<crate::session_stream::StreamCursor>,
     },
     /// Detach from any session on this WS connection — used when a client
     /// wants to explicitly stop watching without closing the socket. Rare
@@ -316,6 +318,17 @@ pub enum ClientMsg {
 // connection; boxing it would only add churn at every construction site.
 #[allow(clippy::large_enum_variant)]
 pub enum ServerMsg {
+    SessionStream {
+        session_id: String,
+        epoch: String,
+        sequence: u64,
+        frame: Box<ServerMsg>,
+    },
+    StreamResumed {
+        session_id: String,
+        cursor: crate::session_stream::StreamCursor,
+    },
+
     SessionActivity {
         epoch: String,
         revision: u64,
@@ -355,6 +368,9 @@ pub enum ServerMsg {
         summaries: Vec<crate::checkpoints::TurnDiffSummary>,
     },
     Ready {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stream_cursor: Option<crate::session_stream::StreamCursor>,
+
         queued_inputs: Vec<crate::message_queue::QueuedInput>,
         session_activity: crate::session_activity::ActivitySnapshot,
         turn_diffs: Vec<crate::checkpoints::TurnDiffSummary>,
@@ -711,6 +727,12 @@ pub enum ServerMsg {
     RuntimeWorkUpdated {
         work: mira_acp::runtime::RuntimeWork,
     },
+    ExternalSubagentFrame {
+        agent_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        work: Option<mira_acp::runtime::RuntimeWork>,
+        frame: Box<ServerMsg>,
+    },
     RuntimeTurnUpdated {
         turn: mira_acp::runtime::RuntimeTurn,
     },
@@ -1056,6 +1078,18 @@ impl ServerMsg {
         use mira_acp::events::{EventSource, MiraEvent};
         let event = ev.event;
         Some(match event {
+            MiraEvent::SubagentEvent {
+                native_thread_id,
+                work,
+                event,
+            } => Self::ExternalSubagentFrame {
+                agent_id: native_thread_id,
+                work,
+                frame: Box::new(Self::from_acp(mira_acp::events::NormalizedEvent {
+                    source: ev.source,
+                    event: *event,
+                })?),
+            },
             MiraEvent::Failure {
                 code,
                 message,

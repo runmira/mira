@@ -1,7 +1,6 @@
-import { useCallback, useMemo } from 'react';
-import { getBranchPr, getGitStatus, getSessionDiff, listEngines } from '../api';
-import { parseSentAttachments, type PendingApproval } from '../components/Composer';
-import { CONTEXT_PANEL_RESERVE, contextPanelHasContent } from '../components/ContextPanel';
+import { useCallback,useMemo } from 'react';
+import { parseSentAttachments,type PendingApproval } from '../components/Composer';
+import { CONTEXT_PANEL_RESERVE,contextPanelHasContent } from '../components/ContextPanel';
 import type { ActivityTurn } from '../components/panes/ActivityPane';
 import type { SubagentTab } from '../components/SubagentPanel';
 import { type MinimapItem } from '../components/TimelineMinimap';
@@ -9,19 +8,20 @@ import { categoryFor } from '../components/tools/toolInfo';
 import { type MessageActions } from '../components/transcript/EntryView';
 import type { UsageRingData } from '../components/UsageRing';
 import { acpOptionsToDescriptors } from '../lib/acpOptions';
-import { mapPosturesToModes, POSTURES } from '../lib/agentPostures';
+import { mapPosturesToModes,POSTURES } from '../lib/agentPostures';
 import { useBackgroundProcesses } from '../lib/backgroundProcesses';
 import { hasHiddenTitleBar } from '../lib/desktop';
 import { useLatch } from '../lib/lazy';
-import { getBoolPref, PREF_KEYS } from '../lib/prefs';
-import { distanceFromBottom, FOLLOW_ENGAGE_AT, nextFollow } from '../lib/transcriptFollow';
+import { getBoolPref,PREF_KEYS } from '../lib/prefs';
 import { playTurnSound } from '../lib/sound';
+import { distanceFromBottom,FOLLOW_ENGAGE_AT } from '../lib/transcriptFollow';
 import { groupByTurn } from '../lib/turnActivity';
 import { costUsd } from '../lib/usage';
-import { type Entry, type ToolEntry } from '../transcript/entries';
-import type { Mode, SettingsView } from '../types';
+import { useAppRuntime } from '../state/RuntimeProvider';
+import { type Entry,type ToolEntry } from '../transcript/entries';
+import type { SettingsView } from '../types';
 
-import { MIN_STREAM_WIDTH, useStableCallback } from './shared';
+import { MIN_STREAM_WIDTH,useStableCallback } from './shared';
 import type { WorkspaceRuntime } from './WorkspaceRuntime';
 export function useWorkspaceView(
   context: Pick<
@@ -33,9 +33,7 @@ export function useWorkspaceView(
     | 'engine'
     | 'acpConfig'
     | 'acpAgents'
-    | 'setEngines'
-    | 'setAcpStatusPending'
-    | 'setAcpError'
+    | 'recordAgentError'
     | 'wsRef'
     | 'inspectOpen'
     | 'paletteOpen'
@@ -51,15 +49,11 @@ export function useWorkspaceView(
     | 'mainView'
     | 'chatColObserver'
     | 'setChatColWidth'
-    | 'repoSeqRef'
-    | 'setGitStatus'
-    | 'setSessionDiff'
-    | 'setBranchPr'
     | 'lastScrollInputRef'
     | 'followRef'
     | 'setShowJump'
     | 'paneRef'
-    | 'entries'
+    | 'outlineEntries'
     | 'approvalStarted'
     | 'approvalRules'
     | 'acpModes'
@@ -96,10 +90,6 @@ export function useWorkspaceView(
     | 'terminalOpen'
     | 'openToolPane'
     | 'setImportOpen'
-    | 'setConfigured'
-    | 'setProviderName'
-    | 'setModel'
-    | 'setMode'
     | 'historyOffsetRef'
     | 'sessionDiff'
     | 'secondOpinionSeen'
@@ -115,6 +105,7 @@ export function useWorkspaceView(
     | 'rightPanelWidth'
   >,
 ) {
+  const appRuntime = useAppRuntime();
   const {
     tasks,
     gitStatus,
@@ -123,9 +114,7 @@ export function useWorkspaceView(
     engine,
     acpConfig,
     acpAgents,
-    setEngines,
-    setAcpStatusPending,
-    setAcpError,
+    recordAgentError,
     wsRef,
     inspectOpen,
     paletteOpen,
@@ -141,15 +130,11 @@ export function useWorkspaceView(
     mainView,
     chatColObserver,
     setChatColWidth,
-    repoSeqRef,
-    setGitStatus,
-    setSessionDiff,
-    setBranchPr,
     lastScrollInputRef,
     followRef,
     setShowJump,
     paneRef,
-    entries,
+    outlineEntries,
     approvalStarted,
     approvalRules,
     acpModes,
@@ -177,10 +162,6 @@ export function useWorkspaceView(
     forkAt,
     setLightbox,
     busy,
-    setConfigured,
-    setProviderName,
-    setModel,
-    setMode,
     historyOffsetRef,
     sessionDiff,
     secondOpinionSeen,
@@ -197,7 +178,7 @@ export function useWorkspaceView(
   } = context;
 
   // Respects Settings → General → "Sound when a reply finishes".
-  const playPing = useCallback(() => playTurnSound(), []);
+  const playPing = useCallback(() => appRuntime.effect(() => playTurnSound()), [appRuntime]);
 
   /** The agent this session runs on (picked, starting or running), or
    *  null on a provider. Agent mode starts the moment one is picked. */
@@ -233,35 +214,17 @@ export function useWorkspaceView(
   /** Read the engines list. Right after the server starts, agent rows are
    *  placeholders until its background probe lands (`fresh: false`), so
    *  look again a few times rather than showing them as unknown. */
-  const loadEngines = useCallback(() => {
-    let tries = 0;
-    const load = () => {
-      void listEngines()
-        .then((v) => {
-          setEngines(v.engines);
-          if (!v.fresh && ++tries < 6) window.setTimeout(load, 2500);
-        })
-        .catch(() => {});
-    };
-    load();
-  }, []);
-
-  /** Agent health comes from one place: `GET /api/engines` (#85). This
-   *  forces the server to probe every agent again, for the explicit
-   *  "check agents" actions; normal loads read the cached list. */
+  const loadEngines = useCallback(() => { void appRuntime.resources.refresh('engines').catch(() => {}); }, [appRuntime]);
   const requestAcpStatus = useCallback(() => {
-    setAcpStatusPending(true);
-    void listEngines(true)
-      .then((v) => setEngines(v.engines))
-      .catch(() => {})
-      .finally(() => setAcpStatusPending(false));
-  }, []);
+    void appRuntime.resources.refresh('engines', false, true).catch(() => {})
+      ;
+  }, [appRuntime]);
 
   /** Start an agent in this chat. Only names it: its setup comes from
    *  the engine's settings on the server (#79). */
   const startAcpAgent = useCallback(
     (kind: string, resume?: string | null, model?: string | null, instance?: string | null) => {
-      setAcpError(null);
+      recordAgentError(null);
       wsRef.current?.send({
         type: 'acp_start',
         driver: kind,
@@ -285,27 +248,13 @@ export function useWorkspaceView(
 
   const closeDrawer = useCallback(() => setDrawerOpen(false), []);
 
-  const onCtxOpenChange = (v: boolean) => {
-    setCtxOpen(v);
-    try {
-      localStorage.setItem('mira.context.open', v ? '1' : '0');
-    } catch {
-      /* private mode */
-    }
-  };
+  const onCtxOpenChange = setCtxOpen;
 
   // Lazy chunk: fetched on first open, then kept mounted so draft review
   // comments survive closing the drawer.
   const reviewMounted = useLatch(reviewOpen);
 
-  const setTerminal = useCallback((v: boolean) => {
-    setTerminalOpen(v);
-    try {
-      localStorage.setItem('mira.terminal.open', v ? '1' : '0');
-    } catch {
-      /* private mode */
-    }
-  }, []);
+  const setTerminal = useCallback((open: boolean) => setTerminalOpen(open), [setTerminalOpen]);
 
   const backgroundProcesses = useBackgroundProcesses(
     sessionId,
@@ -321,21 +270,13 @@ export function useWorkspaceView(
   }, []);
 
   const refreshRepo = useCallback(() => {
-    const seq = ++repoSeqRef.current;
-    const live = () => seq === repoSeqRef.current;
-    getGitStatus()
-      .then((s) => live() && setGitStatus(s))
-      .catch(() => {});
-    getSessionDiff()
-      .then((d) => live() && setSessionDiff(d))
-      .catch(() => {});
-    getBranchPr()
-      .then((pr) => live() && setBranchPr(pr))
-      .catch(() => live() && setBranchPr(null));
-  }, []);
+    for (const name of ['gitStatus', 'sessionDiff', 'branchPr'] as const)
+      void appRuntime.resources.refresh(name).catch(() => {});
+  }, [appRuntime]);
 
   const noteScrollInput = () => {
     lastScrollInputRef.current = Date.now();
+    followRef.current = false;
   };
 
   const jumpToLatest = useCallback(() => {
@@ -352,18 +293,16 @@ export function useWorkspaceView(
     // Settings → General → Transcript can disable auto-follow; the
     // jump-to-latest button still works (it re-arms follow explicitly).
     if (Date.now() - lastScrollInputRef.current < 1000) {
-      followRef.current = nextFollow(
-        followRef.current,
-        distance,
-        getBoolPref(PREF_KEYS.transcriptFollow, true),
-      );
+      // Layout corrections must never re-arm follow. Only an explicit gesture
+      // reaching the actual end, or Jump to latest, does that.
+      followRef.current = distance <= 2 && getBoolPref(PREF_KEYS.transcriptFollow, true);
     }
     setShowJump(distance >= FOLLOW_ENGAGE_AT);
   }, []);
 
   const pendingApprovals = useMemo<PendingApproval[]>(
     () =>
-      entries
+      outlineEntries
         .filter(
           (e): e is Extract<Entry, { kind: 'tool' }> => e.kind === 'tool' && e.status === 'pending',
         )
@@ -375,7 +314,7 @@ export function useWorkspaceView(
           startedAt: approvalStarted.current[e.call.id],
           rulePreview: approvalRules[e.call.id],
         })),
-    [entries, approvalRules],
+    [outlineEntries, approvalRules],
   );
 
   /** The canonical postures mapped onto this agent's modes. Empty when the
@@ -484,22 +423,22 @@ export function useWorkspaceView(
   // scroll away in a long transcript.
   const pendingPlans = useMemo(
     () =>
-      entries.flatMap((e) =>
+      outlineEntries.flatMap((e) =>
         e.kind === 'tool' && e.plan?.decision === null
           ? [{ callId: e.call.id, proposal: e.plan.proposal }]
           : [],
       ),
-    [entries],
+    [outlineEntries],
   );
 
   const pendingQuestions = useMemo(
     () =>
-      entries.flatMap((e) =>
+      outlineEntries.flatMap((e) =>
         e.kind === 'tool' && e.askUser?.decision === null
           ? [{ callId: e.call.id, proposal: e.askUser.proposal }]
           : [],
       ),
-    [entries],
+    [outlineEntries],
   );
 
   // Global approval shortcuts for the first pending approval, resolved
@@ -531,19 +470,19 @@ export function useWorkspaceView(
   });
 
   const editMessage = useStableCallback((entry: Entry, text: string) =>
-    onResend(entries.indexOf(entry), text),
+    onResend(appRuntime.readSession().entries.indexOf(entry), text),
   );
 
   const restoreMessage = useStableCallback(
-    (entry: Entry) => void askRestore(entries.indexOf(entry)),
+    (entry: Entry) => void askRestore(appRuntime.readSession().entries.indexOf(entry)),
   );
 
-  const forkMessage = useStableCallback((entry: Entry) => void forkAt(entries.indexOf(entry)));
+  const forkMessage = useStableCallback((entry: Entry) => void forkAt(appRuntime.readSession().entries.indexOf(entry)));
 
   const retryMessage = useStableCallback((entry: Entry) => {
-    const at = entries.indexOf(entry);
+    const at = appRuntime.readSession().entries.indexOf(entry);
     for (let i = at - 1; i >= 0; i--) {
-      const e = entries[i];
+      const e = appRuntime.readSession().entries[i];
       if (e.kind === 'msg' && e.msg.role === 'user') {
         onResend(i, e.msg.content ?? '');
         return;
@@ -568,28 +507,23 @@ export function useWorkspaceView(
   /** Everything ⌘K can do. Each entry runs exactly what its button or
    *  shortcut does, so the palette never drifts from the rest of the app. */
 
-  const settingsHandler = (v: SettingsView) => {
-    setConfigured(v.configured);
-    setProviderName(v.default_provider ?? null);
-    if (v.default_model) setModel(v.default_model);
-    // Backend list for the pickers — native providers + external agents
-    // with health + catalogs. Failures degrade to an empty list.
+  const settingsHandler = (value: SettingsView) => {
+    appRuntime.resources.accept('settings', value);
     loadEngines();
-    if (v.default_mode) setMode(v.default_mode as Mode);
   };
 
   const isEmpty = useMemo(
     () =>
-      entries.every(
+      outlineEntries.every(
         (e) =>
           e.kind === 'msg' &&
           !(e.msg.content || '').trim() &&
           (e.msg.tool_calls?.length ?? 0) === 0,
       ),
-    [entries],
+    [outlineEntries],
   );
 
-  const turns = useMemo(() => groupByTurn(entries), [entries]);
+  const turns = useMemo(() => groupByTurn(outlineEntries), [outlineEntries]);
 
   const lastTurnIdx = turns.length - 1;
 
@@ -645,13 +579,13 @@ export function useWorkspaceView(
       if (turn.user?.kind !== 'msg' || turn.user.msg.role !== 'user') return;
       out.push({
         id: `turn-${turn.user?.transcriptTurnIndex ?? i + historyOffsetRef.current}`,
-        userIdx: entries.indexOf(turn.user),
+        userIdx: outlineEntries.indexOf(turn.user),
         text: parseSentAttachments(turn.user.msg.content ?? '').text.trim(),
         body: turn.body,
       });
     });
     return out;
-  }, [turns, entries]);
+  }, [turns, outlineEntries]);
 
   const jumpToMinimapTurn = useCallback((id: string) => {
     const pane = paneRef.current;
@@ -678,7 +612,7 @@ export function useWorkspaceView(
       branchPr,
       sessionCommitted,
       subagentState,
-      entries,
+      entries: outlineEntries,
     });
 
   // Beside the stream when the chat column has room for both; over it
@@ -696,14 +630,14 @@ export function useWorkspaceView(
    *  (e.g. session load replaced history) silently drop. */
   const subagentTabs: SubagentTab[] = useMemo(() => {
     const byCallId = new Map<string, ToolEntry>();
-    for (const e of entries) {
-      if (e.kind === 'tool') byCallId.set(e.call.id, e);
+    for (const e of outlineEntries) {
+      if (e.kind === 'tool') { byCallId.set(e.call.id, e); if (e.externalWork?.subagent?.call_id) byCallId.set(e.externalWork.subagent.call_id, e); }
     }
     return agentTabs
       .map((callId) => {
         const entry = byCallId.get(callId);
         if (!entry) return null;
-        const stream = subagentState.get(callId);
+        const stream = subagentState.get(entry.call.id);
         return {
           callId,
           call: entry.call,
@@ -715,7 +649,7 @@ export function useWorkspaceView(
         };
       })
       .filter((t): t is SubagentTab => t !== null);
-  }, [agentTabs, entries, subagentState]);
+  }, [agentTabs, outlineEntries, subagentState]);
 
   const panelOpen = subagentTabs.length > 0 || fileTabs.length > 0 || toolTabs.length > 0;
 

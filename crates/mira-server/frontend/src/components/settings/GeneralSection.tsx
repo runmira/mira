@@ -1,24 +1,25 @@
 import { SectionInput } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
-import { getPreferredEditorId, listEditors } from '@/lib/editors';
+import { getPreferredEditorId,listEditors } from '@/lib/editors';
 import { isMacPlatform } from '@/lib/keybindings';
-import { PREF_KEYS, useBoolPref, useStringPref } from '@/lib/prefs';
+import { PREF_KEYS,useBoolPref,useStringPref } from '@/lib/prefs';
 import { playTurnSound } from '@/lib/sound';
 import {
-  Bell,
-  Cog,
-  Globe2,
-  MessagesSquare,
-  PanelLeft,
-  PenLine,
-  SquareTerminal,
-  Timer,
+Bell,
+Cog,
+Globe2,
+MessagesSquare,
+PanelLeft,
+PenLine,
+SquareTerminal,
+Timer,
 } from 'lucide-react';
-import React, { useEffect, useState } from 'react';
-import { getSettings, putSettings } from '../../api';
-import type { Mode, SessionsSettings } from '../../types';
+import React,{ useEffect,useState } from 'react';
+import { useAppRuntime } from '../../state/RuntimeProvider';
+import { useResource } from '../../state/resources/hooks';
+import type { Mode,SessionsSettings } from '../../types';
 import { EditorIcon } from '../EditorPicker';
-import { TRow, TSection, TSwitch } from './SettingsFields';
+import { TRow,TSection,TSwitch } from './SettingsFields';
 import { Draft } from './types';
 export const MODES: Mode[] = ['plan', 'manual', 'auto', 'edit', 'yolo'];
 
@@ -49,27 +50,19 @@ export function GeneralSection({
   const [browserAutoOpen, setBrowserAutoOpen] = useBoolPref(PREF_KEYS.browserAutoOpen, true);
   // Server-side: these act with no window open, so they live in Mira's
   // config rather than this browser's storage.
-  const [sessionsCfg, setSessionsCfg] = useState<SessionsSettings | null>(null);
+  const runtime = useAppRuntime();
+  const settings = useResource('settings');
+  // A failed load must not masquerade as "both off": surface it and lock
+  // the switches until real values arrive.
+  const sessionsLoadFailed = !settings.data && !!settings.error;
+  const sessionsCfg = settings.data?.sessions ?? { auto_resume_after_limit: false, keep_awake_while_running: false };
   const [sessionsError, setSessionsError] = useState<string | null>(null);
-  useEffect(() => {
-    getSettings()
-      .then((v) =>
-        setSessionsCfg(
-          v.sessions ?? { auto_resume_after_limit: false, keep_awake_while_running: false },
-        ),
-      )
-      .catch((e) => setSessionsError(String((e as Error).message ?? e)));
-  }, []);
   function setSessionsFlag(key: keyof SessionsSettings, value: boolean) {
-    const prev = sessionsCfg;
-    setSessionsCfg((c) => (c ? { ...c, [key]: value } : c));
+    if (!settings.data) return;
     setSessionsError(null);
-    putSettings({ sessions: { [key]: value } })
-      .then((v) => v.sessions && setSessionsCfg(v.sessions))
-      .catch((e) => {
-        setSessionsCfg(prev);
-        setSessionsError(String((e as Error).message ?? e));
-      });
+    // Serialize saved changes in the service; never roll back a newer server value.
+    void runtime.resources.saveSettings({ sessions: { [key]: value } })
+      .catch(error => setSessionsError(String(error.message ?? error)));
   }
   const [preferredEditor, setPreferredEditor] = useStringPref(PREF_KEYS.preferredEditor, '');
   const [editorOptions, setEditorOptions] = useState<
@@ -260,6 +253,7 @@ export function GeneralSection({
               checked={sessionsCfg?.auto_resume_after_limit ?? false}
               onChange={(v) => setSessionsFlag('auto_resume_after_limit', v)}
               label="Auto resume after a limit resets"
+              disabled={!settings.data}
             />
           }
         />
@@ -271,9 +265,15 @@ export function GeneralSection({
               checked={sessionsCfg?.keep_awake_while_running ?? false}
               onChange={(v) => setSessionsFlag('keep_awake_while_running', v)}
               label="Keep the screen awake while a session runs"
+              disabled={!settings.data}
             />
           }
         />
+        {sessionsLoadFailed && (
+          <p className="px-1 text-[12px] text-destructive">
+            Couldn't load these settings ({settings.error?.message ?? 'request failed'}). They'll apply once loading succeeds — nothing here was turned off.
+          </p>
+        )}
         {sessionsError && <p className="px-1 text-[12px] text-destructive">{sessionsError}</p>}
       </TSection>
 

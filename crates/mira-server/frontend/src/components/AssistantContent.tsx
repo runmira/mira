@@ -1,3 +1,4 @@
+import { STREAM_CONTENT_GUTTER } from '../lib/streamLayout';
 import { StreamFade } from './StreamFade';
 import { Markdown } from './Markdown';
 import { ThoughtBlock } from './ThoughtBlock';
@@ -13,18 +14,18 @@ import type { DiffPreview } from '../types';
  * arriving renders as an open "Thinking…" block that morphs into the
  * final collapsed section once the closing tag lands.
  */
-export function AssistantContent({ text, onOpenFile, streaming = false }: { streaming?: boolean; text: string; onOpenFile?: (path: string, diff: DiffPreview | null) => void }) {
+export function AssistantContent({ text, onOpenFile, streaming = false, transcript = false }: { transcript?: boolean; streaming?: boolean; text: string; onOpenFile?: (path: string, diff: DiffPreview | null) => void }) {
   const segments = parseSegments(text);
   return (
-    <>
+    <div className={transcript ? "flex min-w-0 flex-col gap-2" : undefined}>
       {segments.map((s, i) =>
         s.kind === 'think' ? (
           <ThoughtBlock key={i} content={s.content} live={s.streaming} />
         ) : (
-          <StreamFade key={i} streaming={streaming} revision={s.content}><Markdown text={s.content} onOpenFile={onOpenFile} /></StreamFade>
+          <div key={i} className={transcript ? `min-h-7 py-[3px] ${STREAM_CONTENT_GUTTER}` : undefined}><StreamFade streaming={streaming} revision={s.content}><Markdown text={s.content} onOpenFile={onOpenFile} /></StreamFade></div>
         ),
       )}
-    </>
+    </div>
   );
 }
 

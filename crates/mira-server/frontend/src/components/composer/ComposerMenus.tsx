@@ -1,3 +1,4 @@
+import { useOptionalRuntime } from '../../state/RuntimeProvider';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
 import { Camera, Folder, Link, Loader, Paperclip, Check as PhCheck, Plus } from 'lucide-react';
@@ -234,6 +235,8 @@ export function basename(p: string): string {
 /* ---------- project chip (opens folder picker) ---------- */
 
 export function ProjectChip({ cwd, onClick }: { cwd: string; onClick: () => void }) {
+  const requestRuntime = useOptionalRuntime();
+  const requestSession = () => requestRuntime?.sessionState.get().active ?? requestRuntime?.sessionState.get().selected ?? undefined;
   // Prefer the primary-worktree name when the cwd is a linked worktree so
   // switching branches doesn't visually change the project. Falls back to
   // the cwd basename in every other case (no git, load error, primary tree).
@@ -244,7 +247,7 @@ export function ProjectChip({ cwd, onClick }: { cwd: string; onClick: () => void
       setPrimary(null);
       return;
     }
-    getGitStatus()
+    getGitStatus(requestSession())
       .then((s) => {
         if (cancelled) return;
         setPrimary(s.is_worktree ? (s.primary_project ?? null) : null);

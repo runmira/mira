@@ -1,94 +1,92 @@
-import { forkSession, newSession, previewCheckpoint, type MessageRef, type Restored } from '../api';
+import { forkSession,newSession,previewCheckpoint,type MessageRef,type Restored } from '../api';
 import { type QueuedComposerMessage } from '../components/Composer';
 import { type RecoveryAction } from '../components/UsageRecoveryCard';
 import { loadModelOptions } from '../lib/models';
-import { countUserMessages, sealThought, type Entry } from '../transcript/entries';
+import { useAppRuntime } from '../state/RuntimeProvider';
+import { countUserMessages,sealThought,type Entry } from '../transcript/entries';
 import type { Mode } from '../types';
 
 import type { WorkspaceRuntime } from './WorkspaceRuntime';
 export function useComposerCommands(
   context: Pick<
     WorkspaceRuntime,
-    | 'sessionIdRef'
-    | 'queuedBySession'
-    | 'setQueuedBySession'
+    | 'getSessionId'
+    | 'updateQueueProjection'
     | 'wsRef'
     | 'queueMutationsRef'
     | 'pendingSteerRef'
-    | 'queuedBySessionRef'
-    | 'busyRef'
+    | 'getQueues'
+    | 'isTurnRunning'
     | 'flushNativeFrames'
     | 'flushTokens'
     | 'followRef'
-    | 'setEntries'
+    | 'updateTranscript'
     | 'setMainView'
     | 'setSidebarRefresh'
     | 'setShowJump'
     | 'turnStartRef'
-    | 'engineRef'
+    | 'getEngine'
     | 'providerTurnCursorRef'
     | 'historyOffsetRef'
     | 'startTurnUsage'
-    | 'setTurnTimings'
-    | 'setBusy'
-    | 'setThinking'
-    | 'entries'
+    | 'recordTurnTimings'
+    | 'reportTurnRunning'
+    | 'reportThinking'
     | 'busy'
     | 'setRestoreNote'
     | 'setRestoreAsk'
     | 'sessionId'
     | 'attachSession'
     | 'refreshRepo'
-    | 'setTurnUsage'
+    | 'recordTurnUsage'
     | 'acpDriver'
     | 'acpModelOption'
   >,
 ) {
+  const appRuntime = useAppRuntime();
   const {
-    sessionIdRef,
-    queuedBySession,
-    setQueuedBySession,
+    getSessionId,
+    updateQueueProjection,
     wsRef,
     queueMutationsRef,
     pendingSteerRef,
-    queuedBySessionRef,
-    busyRef,
+    getQueues,
+    isTurnRunning,
     flushNativeFrames,
     flushTokens,
     followRef,
-    setEntries,
+    updateTranscript,
     setMainView,
     setSidebarRefresh,
     setShowJump,
     turnStartRef,
-    engineRef,
+    getEngine,
     providerTurnCursorRef,
     historyOffsetRef,
     startTurnUsage,
-    setTurnTimings,
-    setBusy,
-    setThinking,
-    entries,
+    recordTurnTimings,
+    reportTurnRunning,
+    reportThinking,
     busy,
     setRestoreNote,
     setRestoreAsk,
     sessionId,
     attachSession,
     refreshRepo,
-    setTurnUsage,
+    recordTurnUsage,
     acpDriver,
     acpModelOption,
   } = context;
 
-  function queuedFor(id = sessionIdRef.current) {
-    return queuedBySession.get(id) ?? [];
+  function queuedFor(id = getSessionId()) {
+    return appRuntime.sessionState.get().queued.get(id) ?? [];
   }
 
-  function setQueuedForSession(
+  function updateSessionQueue(
     id: string,
     update: (items: QueuedComposerMessage[]) => QueuedComposerMessage[],
   ) {
-    setQueuedBySession((prev) => {
+    updateQueueProjection((prev) => {
       const next = new Map(prev);
       const items = update(next.get(id) ?? []);
       if (items.length === 0) next.delete(id);
@@ -98,19 +96,24 @@ export function useComposerCommands(
   }
 
   function queueMessage(text: string, images?: { media_type: string; data: string }[]) {
-    const id = sessionIdRef.current;
-    if (!id) return;
+    const id = getSessionId();
+    if (!id) return false;
+    const draftKey = appRuntime.drafts.key(id);
+    if (appRuntime.drafts.awaiting(draftKey)) return false;
     const item: QueuedComposerMessage = {
       id: crypto.randomUUID(),
       text,
       images,
     };
-    setQueuedForSession(id, (items) => [...items, item]);
-    wsRef.current?.send({ type: 'queue_input', session_id: id, id: item.id, text, images });
+    if (!wsRef.current?.sendImmediate({ type: 'queue_input', session_id: id, id: item.id, text, images })) return false;
+    appRuntime.drafts.markDelivery(draftKey, item.id);
+    updateSessionQueue(id, items => [...items, { ...item, error: 'Waiting for server queue confirmation.' }]);
+    // Keep the draft until QueueUpdated acknowledges this stable input ID.
+    return false;
   }
 
   function removeQueuedMessage(id: string) {
-    const session = sessionIdRef.current;
+    const session = getSessionId();
     if (!session) return;
     wsRef.current?.send({ type: 'remove_queued_input', session_id: session, id });
   }
@@ -119,7 +122,7 @@ export function useComposerCommands(
     return queueMutationsRef.current.request(
       {
         type: 'edit_queued_input',
-        session_id: sessionIdRef.current,
+        session_id: getSessionId(),
         id: item.id,
         fingerprint: item.fingerprint ?? '',
         text,
@@ -134,7 +137,7 @@ export function useComposerCommands(
 
   function changeRecovery(id: string, action: RecoveryAction) {
     return queueMutationsRef.current.request(
-      { type: 'update_limit_recovery', session_id: sessionIdRef.current, id, action },
+      { type: 'update_limit_recovery', session_id: getSessionId(), id, action },
       (message) => {
         if (!wsRef.current?.sendImmediate(message))
           throw new Error('Reconnect before changing recovery.');
@@ -146,7 +149,7 @@ export function useComposerCommands(
     return queueMutationsRef.current.request(
       {
         type: 'reorder_queued_input',
-        session_id: sessionIdRef.current,
+        session_id: getSessionId(),
         id,
         before_id: beforeId,
       },
@@ -158,30 +161,31 @@ export function useComposerCommands(
   }
 
   function steerQueuedMessage(id: string) {
-    const session = sessionIdRef.current;
+    const session = getSessionId();
     if (!session || pendingSteerRef.current.has(session)) return;
-    const picked = queuedBySessionRef.current.get(session)?.find((item) => item.id === id);
+    const picked = getQueues().get(session)?.find((item) => item.id === id);
     if (!picked) return;
-    if (!busyRef.current) {
+    if (!isTurnRunning()) {
       // The server outbox will dispatch when the foreground turn releases.
-      drainQueuedMessage();
+      return;
       return;
     }
     flushNativeFrames();
     flushTokens();
     pendingSteerRef.current.set(session, picked);
-    setQueuedForSession(session, (items) =>
+    updateSessionQueue(session, (items) =>
       items.map((item) => (item.id === id ? { ...item, steering: true, error: undefined } : item)),
     );
+    const createdAt = Date.now();
     followRef.current = true;
-    setEntries((entries) => [
-      ...sealThought(entries),
+    updateTranscript((entries) => [
+      ...sealThought(entries, createdAt),
       {
         kind: 'msg',
         steerRequestId: id,
         msg: {
           role: 'user',
-          created_at: Date.now(),
+          created_at: createdAt,
           content: picked.text,
           images: picked.images,
           input_intent: 'steer',
@@ -202,6 +206,13 @@ export function useComposerCommands(
     transmit = true,
     inputId?: string,
   ) {
+    if (transmit) return queueMessage(text, images);
+    if (!appRuntime.sessionState.get().active) {
+      setRestoreNote({ text: 'The message could not be sent. Your draft is kept here.', error: true });
+      return false;
+    }
+    if (inputId && appRuntime.readSession().entries.some(entry => entry.kind === 'msg' && entry.msg.input_id === inputId)) return true;
+    if (inputId) appRuntime.updateSessionData('activeInputId', inputId);
     // Belt-and-suspenders — the composer isn't visible on non-chat views,
     // but a keyboard-driven send would still land the message and it should
     // pull the user back to the transcript.
@@ -215,51 +226,30 @@ export function useComposerCommands(
     setShowJump(false);
     const now = Date.now();
     turnStartRef.current = now;
-    setEntries((prev) => {
-      if (inputId && prev.some((entry) => entry.kind === 'msg' && entry.msg.input_id === inputId))
-        return prev;
-      const providerIndex =
-        engineRef.current?.kind === 'provider' ? providerTurnCursorRef.current++ : undefined;
-      const next: Entry[] = [
-        ...prev,
-        {
-          kind: 'msg',
-          providerTurnIndex: providerIndex,
-          transcriptTurnIndex: countUserMessages(prev) + historyOffsetRef.current,
-          msg: { role: 'user', created_at: Date.now(), content: text, images, input_id: inputId },
-        },
-      ];
-      const turnIndex = providerIndex ?? countUserMessages(next) - 1 + historyOffsetRef.current;
-      startTurnUsage(turnIndex);
-      setTurnTimings((tt) => {
-        const clone = new Map(tt);
-        clone.set(turnIndex, { startedAt: now, endedAt: null });
-        return clone;
-      });
-      return next;
-    });
-    setBusy(true);
-    busyRef.current = true;
-    setThinking(true);
+    const previous = appRuntime.readSession().entries;
+    const providerIndex = getEngine()?.kind === 'provider' ? providerTurnCursorRef.current++ : undefined;
+    const next: Entry[] = [...previous, { kind: 'msg', providerTurnIndex: providerIndex,
+      transcriptTurnIndex: countUserMessages(previous) + historyOffsetRef.current,
+      msg: { role: 'user', created_at: now, content: text, images, input_id: inputId } }];
+    const turnIndex = providerIndex ?? countUserMessages(next) - 1 + historyOffsetRef.current;
+    startTurnUsage(turnIndex);
+    appRuntime.beginTerminalTurn(inputId, now, turnIndex);
+    updateTranscript(next);
+    recordTurnTimings(previous => new Map(previous).set(turnIndex, { startedAt: now, endedAt: null }));
+    reportTurnRunning(true);
+    reportThinking(true);
     // The server routes by the session's engine: a session on an agent
     // sends this to the agent (starting it if needed, with the
     // conversation so far if it just took over), otherwise to the
     // provider. One message type, so a prompt can never go to the wrong
     // engine because this client's view lagged the server's.
-    if (transmit) wsRef.current?.send({ type: 'send', text, images });
+    return true;
   }
 
   function onSend(text: string, images?: { media_type: string; data: string }[]) {
-    if (busyRef.current) {
-      queueMessage(text, images);
-      return;
-    }
-    sendNow(text, images);
-  }
-
-  function drainQueuedMessage() {
-    // Server-owned outboxes dispatch without a connected browser. Ready
-    // restores their state; terminal frames only update local presentation.
+    // The existing durable outbox provides input IDs, acceptance snapshots and
+    // dispatch events. Plain Send has no acknowledgement identity.
+    return queueMessage(text, images);
   }
 
   /** Edit & resend (or retry, with the same text) the user message at
@@ -269,10 +259,10 @@ export function useComposerCommands(
    *  of it counting from the latest. Shared by edit and restore so they can
    *  never disagree about which message is meant. */
   function messageRefAt(userIdx: number): MessageRef | null {
-    const target = entries[userIdx];
+    const target = appRuntime.readSession().entries[userIdx];
     if (!target || target.kind !== 'msg' || target.msg.role !== 'user') return null;
     const text = target.msg.content ?? '';
-    const occurrence = entries
+    const occurrence = appRuntime.readSession().entries
       .slice(userIdx + 1)
       .filter((e) => e.kind === 'msg' && e.msg.role === 'user' && e.msg.content === text).length;
     return { text, occurrence };
@@ -282,7 +272,7 @@ export function useComposerCommands(
     const ref = messageRefAt(userIdx);
     if (!ref || busy) return;
     try {
-      const changes = await previewCheckpoint(ref);
+      const changes = await previewCheckpoint(ref, appRuntime.sessionState.get().active ?? undefined);
       if (changes.length === 0) {
         setRestoreNote({ text: 'Nothing to restore — the files already match.' });
         return;
@@ -324,13 +314,17 @@ export function useComposerCommands(
 
   function onResend(userIdx: number, text: string) {
     const ref = messageRefAt(userIdx);
-    const target = entries[userIdx];
+    const target = appRuntime.readSession().entries[userIdx];
     if (busy || !ref || !target || target.kind !== 'msg') return;
     const { text: original, occurrence } = ref;
+    if (!wsRef.current?.sendImmediate({ type: 'resend', original, occurrence, text })) {
+      setRestoreNote({ text: 'The edit could not be sent. Reconnect before retrying.', error: true });
+      return;
+    }
     followRef.current = true;
     setShowJump(false);
     const next: Entry[] = [
-      ...entries.slice(0, userIdx),
+      ...appRuntime.readSession().entries.slice(0, userIdx),
       {
         kind: 'msg',
         transcriptTurnIndex: target.transcriptTurnIndex,
@@ -341,18 +335,15 @@ export function useComposerCommands(
     const turnIndex =
       target.providerTurnIndex ?? countUserMessages(next) - 1 + historyOffsetRef.current;
     startTurnUsage(turnIndex);
-    setTurnUsage((prev) => new Map([...prev].filter(([i]) => i < turnIndex)));
-    setEntries(next);
-    setTurnTimings((tt) => {
-      const clone = new Map([...tt].filter(([i]) => i < turnIndex));
-      turnStartRef.current = Date.now();
-      clone.set(turnIndex, { startedAt: turnStartRef.current, endedAt: null });
-      return clone;
-    });
-    setBusy(true);
-    busyRef.current = true;
-    setThinking(true);
-    wsRef.current?.send({ type: 'resend', original, occurrence, text });
+    recordTurnUsage((prev) => new Map([...prev].filter(([i]) => i < turnIndex)));
+    updateTranscript(next);
+    const startedAt = Date.now();
+    turnStartRef.current = startedAt;
+    appRuntime.beginTerminalTurn(undefined, startedAt, turnIndex);
+    recordTurnTimings(previous => new Map([...previous].filter(([index]) => index < turnIndex))
+      .set(turnIndex, { startedAt, endedAt: null }));
+    reportTurnRunning(true);
+    reportThinking(true);
   }
 
   function onSetMode(m: Mode) {
@@ -437,12 +428,12 @@ export function useComposerCommands(
       // the new slot's frames (Ready + subsequent tokens).
       attachSession(id);
     } catch (e) {
-      setEntries((prev) => [...prev, { kind: 'error', text: `new chat: ${(e as Error).message}` }]);
+      updateTranscript((prev) => [...prev, { kind: 'error', text: `new chat: ${(e as Error).message}` }]);
     }
   }
   return {
     queuedFor,
-    setQueuedForSession,
+    updateSessionQueue,
     queueMessage,
     removeQueuedMessage,
     editQueuedMessage,
@@ -451,7 +442,6 @@ export function useComposerCommands(
     steerQueuedMessage,
     sendNow,
     onSend,
-    drainQueuedMessage,
     messageRefAt,
     askRestore,
     forkAt,

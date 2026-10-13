@@ -1,3 +1,4 @@
+import { RuntimeProvider } from '../state/RuntimeProvider';
 import { LoadingScreen } from './LoadingScreen';
 import { useEffect, useState } from 'react';
 import { LazyBoundary } from './LazyBoundary';
@@ -18,7 +19,7 @@ type Status = 'loading' | 'signed-out' | 'signed-in';
  */
 export function AuthGate({ children }: { children: React.ReactNode }) {
   const [status, setStatus] = useState<Status>('loading');
-  const [_user, setUser] = useState<User | null>(null);
+  const [user, setUser] = useState<User | null>(null);
 
   useEffect(() => {
     const supabase = getSupabase();
@@ -28,10 +29,20 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
     }
 
     let cancelled = false;
+    let validation = 0;
+    let validatedAccount: string | null = null;
 
-    async function validate() {
+    async function validate(expectedAccount?: string) {
+      const request = ++validation;
       const { data, error } = await supabase!.auth.getUser();
-      if (cancelled) return;
+      if (cancelled || request !== validation) return;
+      if (expectedAccount && data.user && data.user.id !== expectedAccount) {
+        // A newer auth event already named a different account: re-validate
+        // without the stale expectation instead of dropping the response,
+        // or the gate sits on `loading` forever when no later callback runs.
+        void validate();
+        return;
+      }
       if (error || !data.user) {
         // Any error from getUser() with a cached session means the token
         // isn't valid anymore (deleted user, revoked, expired refresh). Clear
@@ -41,10 +52,13 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
         } catch {
           /* ignore */
         }
+        if (cancelled || request !== validation) return;
+        validatedAccount = null;
         setUser(null);
         setStatus('signed-out');
         return;
       }
+      validatedAccount = data.user.id;
       setUser(data.user);
       setStatus('signed-in');
     }
@@ -68,15 +82,19 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
       // Session change fired locally — re-validate against the server so a
       // stale but present JWT can't leave us stuck in `signed-in`.
       if (!session) {
+        validation++;
+        validatedAccount = null;
         setUser(null);
         setStatus('signed-out');
         return;
       }
-      void validate();
+      if (validatedAccount !== session.user.id) { setUser(null); setStatus('loading'); }
+      void validate(session.user.id);
     });
 
     return () => {
       cancelled = true;
+      validation++;
       sub.subscription.unsubscribe();
     };
   }, []);
@@ -97,7 +115,11 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
     );
   }
 
-  return <>{children}</>;
+  return (
+    <RuntimeProvider key={user!.id} scope={{ backend: window.location.origin, account: user!.id }}>
+      {children}
+    </RuntimeProvider>
+  );
 }
 
 function UnconfiguredNotice() {

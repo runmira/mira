@@ -68,6 +68,13 @@ if [ "$SIGN" = 1 ] && [ "$MODE" = release ]; then
   "$ROOT/scripts/macos-signing.sh" check
 fi
 
+# Native dev builds can otherwise consume many GB in debug symbols and
+# incremental caches across the server and desktop workspaces.
+if [ "$MODE" = dev ]; then
+  export CARGO_PROFILE_DEV_DEBUG=0
+  export CARGO_INCREMENTAL=0
+fi
+
 echo "==> web UI"
 (
   cd "$FRONTEND"
@@ -100,7 +107,13 @@ echo "staged $DESKTOP/binaries/mira-$TRIPLE$EXT"
 cd "$DESKTOP"
 case "$MODE" in
   sidecar) ;;
-  dev) cargo tauri dev ;;
+  dev)
+    # Debug executables have no adjacent packaged sidecar. Point the app at
+    # the server we just built instead of falling back to an older mira on PATH.
+    TAURI_ARGS=()
+    [ "$CHANNEL" = stable ] || TAURI_ARGS+=(--config "channels/$CHANNEL.json")
+    MIRA_BIN="$ROOT/target/$PROFILE/mira$EXT" cargo tauri dev ${TAURI_ARGS[@]+"${TAURI_ARGS[@]}"}
+    ;;
   release)
     TAURI_ARGS=()
     [ "$CHANNEL" = stable ] || TAURI_ARGS+=(--config "channels/$CHANNEL.json")

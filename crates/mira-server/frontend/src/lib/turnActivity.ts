@@ -94,14 +94,23 @@ export function findFinalAssistantIndex(body: Entry[]): number {
 }
 
 
+export function isTurnNotice(entry: Entry): boolean {
+  return ['warning', 'error', 'engine_switch', 'compact', 'goal', 'html_render'].includes(entry.kind);
+}
+
 /** Both sides of assistant text use the same live grouping path. Completing
  * a native turn only folds trailing work into its history disclosure. */
 export function turnActivity(body: Entry[], foldTrailing: boolean) {
+  // Lifecycle facts remain visible even when work is folded, like T3's
+  // independent timeline rows. Preserve their server order under the reply.
+  const notices = body.filter(isTurnNotice);
+  body = body.filter(entry => !isTurnNotice(entry));
   const finalIdx = findFinalAssistantIndex(body);
   const intermediateRaw = finalIdx < 0 ? body
     : foldTrailing ? body.filter((_, index) => index !== finalIdx) : body.slice(0, finalIdx);
   const trailingRaw = finalIdx >= 0 && !foldTrailing ? body.slice(finalIdx + 1) : [];
   return {
+    notices,
     intermediateRaw,
     intermediate: groupAgentRuns(intermediateRaw),
     finalEntry: finalIdx >= 0 ? body[finalIdx] : null,

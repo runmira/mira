@@ -1,20 +1,20 @@
-import { listEngines, setSessionBackgroundMode } from '../api';
-import { InfoNoticeHost, noticeId } from '../components/InfoNoticeHost';
-import { Sidebar } from '../components/Sidebar';
+import { setSessionBackgroundMode } from '../api';
+import { InfoNoticeHost,noticeId } from '../components/InfoNoticeHost';
 import { cn } from '../lib/utils';
+import { useAppRuntime } from '../state/RuntimeProvider';
 import { WorkspaceDialogs } from './WorkspaceDialogs';
 import { WorkspaceMain } from './WorkspaceMain';
 import { WorkspaceRightPanel } from './WorkspaceRightPanel';
+import { WorkspaceSidebar } from './WorkspaceSidebar';
 
 import type { WorkspaceRuntime } from './WorkspaceRuntime';
 export function WorkspaceLayout(context: WorkspaceRuntime) {
+  const appRuntime = useAppRuntime();
   const {
     status,
     cwd,
     sessionId,
     busy,
-    sessionActivity,
-    completedSessions,
     sidebarRefresh,
     mainView,
     closeDrawer,
@@ -36,7 +36,6 @@ export function WorkspaceLayout(context: WorkspaceRuntime) {
     dismissInfoNotice,
     completedUpdatesRef,
     requestAcpStatus,
-    setEngines,
     pushInfoNotice,
     drawerOpen,
     drawerRef,
@@ -44,13 +43,11 @@ export function WorkspaceLayout(context: WorkspaceRuntime) {
   } = context;
 
   const sidebar = (
-    <Sidebar
+    <WorkspaceSidebar
       status={status}
       cwd={cwd}
       activeSessionId={sessionId}
       activeBusy={busy}
-      runningSessions={sessionActivity?.running ?? null}
-      completedSessions={completedSessions}
       refreshKey={sidebarRefresh}
       activeView={mainView}
       onNavigate={(view) => {
@@ -123,9 +120,7 @@ export function WorkspaceLayout(context: WorkspaceRuntime) {
         onAgentUpdated={(kind) => {
           completedUpdatesRef.current.add(kind);
           requestAcpStatus();
-          void listEngines()
-            .then((view) => setEngines(view.engines))
-            .catch(() => {});
+          void appRuntime.resources.refresh('engines').catch(() => {});
           pushInfoNotice({
             id: noticeId('updated'),
             kind: 'short',

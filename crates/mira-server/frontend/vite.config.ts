@@ -69,7 +69,10 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
-    sourcemap: true,
+    // Sourcemaps are ~65% of dist (~47 MB) and ship inside the server
+    // binary + desktop app to every user. `SOURCEMAP=1` still gets them
+    // for a local debugging build.
+    sourcemap: process.env.SOURCEMAP ? true : false,
     // Read by scripts/check-bundle-size.mjs to find the first-load chunks.
     manifest: true,
     rollupOptions: {

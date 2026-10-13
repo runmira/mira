@@ -10,7 +10,8 @@
 //!
 //! Plugin servers come from their plugin and can only be turned off.
 
-use axum::extract::{Path as AxumPath, Query, State};
+use crate::session_scope::ScopedState as State;
+use axum::extract::{Path as AxumPath, Query};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
 use axum::Json;

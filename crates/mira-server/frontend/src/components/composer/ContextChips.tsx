@@ -1,3 +1,4 @@
+import { useOptionalRuntime } from '../../state/RuntimeProvider';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
 import { m } from 'framer-motion';
@@ -295,6 +296,8 @@ export function WorktreeChip({
   cwd: string;
   onCwdSwitched?: (path: string, sessionId?: string) => void;
 }) {
+  const requestRuntime = useOptionalRuntime();
+  const requestSession = () => requestRuntime?.sessionState.get().active ?? requestRuntime?.sessionState.get().selected ?? undefined;
   const [open, setOpen] = useState(false);
   const [status, setStatus] = useState<GitStatusView | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -303,7 +306,7 @@ export function WorktreeChip({
 
   async function refresh() {
     try {
-      const s = await getGitStatus();
+      const s = await getGitStatus(requestSession());
       setStatus(s);
       setLoadError(null);
     } catch (e) {
@@ -322,7 +325,7 @@ export function WorktreeChip({
   async function switchTo(path: string) {
     setBusy(true);
     try {
-      const { session_id } = await putCwd(path);
+      const { session_id } = await putCwd(path, requestSession());
       // Hand the new slot id up to the parent so it can attach its WS.
       // Without this, the socket keeps forwarding the old slot's frames
       // and the transcript silently stays on the previous folder.
@@ -383,11 +386,11 @@ export function WorktreeChip({
     setOpen(false);
     report(stage);
     try {
-      createdPath ??= (await createWorktree(branch)).path;
+      createdPath ??= (await createWorktree(branch, undefined, requestSession())).path;
       if (cancelled || sequence !== setupSequence.current) return;
       stage = 'opening';
       report('opening');
-      const { session_id } = await putCwd(createdPath);
+      const { session_id } = await putCwd(createdPath, requestSession());
       onCwdSwitched?.(createdPath, session_id);
       setNewBranch('');
       report('done');

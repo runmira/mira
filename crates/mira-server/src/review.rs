@@ -6,18 +6,17 @@
 //! / `review_error` frames on the shared events channel, tagged with the
 //! same `run_id` so the frontend can correlate multiple overlapping runs.
 
+use crate::session_scope::ScopedState as State;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use mira_review::{Progress, ProgressSink};
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -115,7 +114,7 @@ pub async fn start_review(
 
 struct BroadcastSink {
     run_id: String,
-    tx: broadcast::Sender<ServerMsg>,
+    tx: crate::session_stream::SessionEvents,
 }
 
 #[async_trait]

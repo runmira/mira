@@ -7,7 +7,7 @@
 //!                    is left running (a background session in the old
 //!                    folder keeps making progress).
 
-use axum::extract::State;
+use crate::session_scope::ScopedState as State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;

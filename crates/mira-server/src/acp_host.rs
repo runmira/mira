@@ -1094,7 +1094,7 @@ type RuntimeBinding = (
 pub struct AcpEventPort {
     runtime: std::sync::Mutex<Option<RuntimeBinding>>,
 
-    events: tokio::sync::broadcast::Sender<ServerMsg>,
+    events: crate::session_stream::SessionEvents,
     /// Where the agent's spend reports are booked, for the Usage page.
     spend: Option<SpendBooking>,
     /// Which agent this port serves, stamped onto modes/config frames so
@@ -1142,7 +1142,7 @@ fn turn_usage(rows: &[crate::agent_spend::SpendRow]) -> Option<ServerMsg> {
 }
 
 impl AcpEventPort {
-    pub fn new(events: tokio::sync::broadcast::Sender<ServerMsg>) -> Arc<Self> {
+    pub fn new(events: crate::session_stream::SessionEvents) -> Arc<Self> {
         Arc::new(AcpEventPort {
             runtime: std::sync::Mutex::new(None),
             events,
@@ -1182,7 +1182,7 @@ impl AcpEventPort {
 
     /// A port that also books the agent's spend reports to `ledger`.
     pub fn with_spend(
-        events: tokio::sync::broadcast::Sender<ServerMsg>,
+        events: crate::session_stream::SessionEvents,
         ledger: crate::agent_spend::SpendLedger,
         who: crate::agent_spend::Spender,
     ) -> Arc<Self> {
@@ -1525,7 +1525,7 @@ mod event_tests {
         let dir = tempfile::tempdir().unwrap();
         let (tx, mut rx) = tokio::sync::broadcast::channel(16);
         let port = AcpEventPort::with_spend(
-            tx,
+            tx.into(),
             crate::agent_spend::SpendLedger::at(dir.path()),
             crate::agent_spend::Spender {
                 session_id: "chat".into(),
@@ -1614,7 +1614,7 @@ mod event_tests {
         // Late frames from a stopped agent must not pollute another
         // driver's "last seen" cache (OpenCode showing Claude models).
         let (tx, mut rx) = tokio::sync::broadcast::channel(16);
-        let port = AcpEventPort::new(tx);
+        let port = AcpEventPort::new(tx.into());
         port.set_driver("opencode");
         port.emit(NormalizedEvent {
             source: EventSource::Acp {
@@ -1632,7 +1632,7 @@ mod event_tests {
         // No driver set (e.g. ad-hoc ports): frames stay unstamped and
         // the client keeps its previous attribution behaviour.
         let (tx, mut rx) = tokio::sync::broadcast::channel(16);
-        let port = AcpEventPort::new(tx);
+        let port = AcpEventPort::new(tx.into());
         port.emit(NormalizedEvent {
             source: EventSource::Acp {
                 variant: "x".into(),
@@ -1850,7 +1850,7 @@ mod event_tests {
     #[tokio::test]
     async fn the_event_port_pushes_onto_the_session_channel() {
         let (tx, mut rx) = tokio::sync::broadcast::channel::<ServerMsg>(16);
-        let port = AcpEventPort::new(tx);
+        let port = AcpEventPort::new(tx.into());
         port.emit(NormalizedEvent {
             source: EventSource::Acp {
                 variant: "agent_message_chunk".into(),
@@ -1878,7 +1878,7 @@ mod event_tests {
         // background session.
         let (tx, rx) = tokio::sync::broadcast::channel::<ServerMsg>(4);
         drop(rx);
-        let port = AcpEventPort::new(tx);
+        let port = AcpEventPort::new(tx.into());
         port.emit(NormalizedEvent {
             source: EventSource::Acp {
                 variant: "v".into(),

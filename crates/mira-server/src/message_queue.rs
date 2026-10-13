@@ -793,7 +793,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let queue = MessageQueue::open(Some(dir.path().join("e.queue"))).await;
         queue.enqueue(item("switched")).await.unwrap();
-        let error = queue.claim("switched", Some("claude-code")).await.unwrap_err();
+        let error = queue
+            .claim("switched", Some("claude-code"))
+            .await
+            .unwrap_err();
         assert!(
             error.contains("engine changed"),
             "expected an engine-change refusal, got: {error}"

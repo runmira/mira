@@ -1,4 +1,4 @@
-import { listCommands, listSkills } from '../api';
+import { useAppRuntime } from '../state/RuntimeProvider';
 import type { ServerMsg } from '../types';
 
 import { useStableCallback } from './shared';
@@ -6,24 +6,21 @@ import type { WorkspaceRuntime } from './WorkspaceRuntime';
 export function useNoticeEvents(
   context: Pick<
     WorkspaceRuntime,
-    | 'setEnvironment'
-    | 'setEnvironments'
-    | 'setEnvSwitching'
-    | 'setEntries'
-    | 'setCommands'
-    | 'setSkills'
+    | 'recordEnvironment'
+    | 'recordEnvironments'
+    | 'recordEnvironmentTransition'
+    | 'updateTranscript'
     | 'setExtensionsVersion'
     | 'loadEngines'
     | 'setSkillsVersion'
   >,
 ) {
+  const appRuntime = useAppRuntime();
   const {
-    setEnvironment,
-    setEnvironments,
-    setEnvSwitching,
-    setEntries,
-    setCommands,
-    setSkills,
+    recordEnvironment,
+    recordEnvironments,
+    recordEnvironmentTransition,
+    updateTranscript,
     setExtensionsVersion,
     loadEngines,
     setSkillsVersion,
@@ -31,17 +28,17 @@ export function useNoticeEvents(
   return useStableCallback((msg: ServerMsg) => {
     switch (msg.type) {
       case 'environment_status':
-        setEnvironment(msg.status);
-        setEnvironments(msg.environments);
+        recordEnvironment(msg.status);
+        recordEnvironments(msg.environments);
         break;
 
       case 'environment_progress':
-        setEnvSwitching(msg.text);
+        recordEnvironmentTransition(msg.text);
         break;
 
       case 'environment_switched': {
-        setEnvSwitching(null);
-        setEnvironment(msg.status);
+        recordEnvironmentTransition(null);
+        recordEnvironment(msg.status);
         const notes: string[] = msg.error
           ? [`[environment] couldn't switch to ${msg.to}`, msg.error]
           : msg.from === msg.to
@@ -51,13 +48,13 @@ export function useNoticeEvents(
           notes.push(`Merge conflicts to resolve: ${msg.conflicts.join(', ')}`);
         }
         if (notes.length > 0) {
-          setEntries((prev) => [...prev, { kind: 'warning', text: notes.join('\n') }]);
+          updateTranscript((prev) => [...prev, { kind: 'warning', text: notes.join('\n') }]);
         }
         break;
       }
 
       case 'warning':
-        setEntries((prev) => {
+        updateTranscript((prev) => {
           // A verify result replaces its own "running …" line.
           const last = prev[prev.length - 1];
           if (
@@ -73,12 +70,8 @@ export function useNoticeEvents(
 
       case 'extensions_changed':
         // An MCP server connected/dropped or a plugin changed.
-        listCommands()
-          .then(setCommands)
-          .catch(() => {});
-        listSkills()
-          .then(setSkills)
-          .catch(() => {});
+        void appRuntime.resources.refresh('commands').catch(() => {});
+        void appRuntime.resources.refresh('skills').catch(() => {});
         setExtensionsVersion((n) => n + 1);
         // Agent install/auth state can move under us (an adapter was
         // installed, a CLI signed in) — refresh the engine list.
@@ -89,18 +82,16 @@ export function useNoticeEvents(
         // A skill file appeared / changed / vanished. Refetch the
         // roster so the composer palette + the Settings panel pick
         // up the new state without a click.
-        listSkills()
-          .then(setSkills)
-          .catch(() => {});
+        void appRuntime.resources.refresh('skills').catch(() => {});
         setSkillsVersion((n) => n + 1);
         break;
 
       case 'error':
-        setEntries((prev) => [...prev, { kind: 'error', text: msg.text }]);
+        updateTranscript((prev) => [...prev, { kind: 'error', text: msg.text }]);
         break;
 
       case 'memory_learned':
-        setEntries((prev) => [
+        updateTranscript((prev) => [
           ...prev,
           {
             kind: 'warning',

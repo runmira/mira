@@ -1,4 +1,5 @@
-import { useMemo, useRef } from 'react';
+import { useMemo,useRef } from 'react';
+import { useAppRuntime } from '../state/RuntimeProvider';
 import type { WorkspaceRuntime } from './WorkspaceRuntime';
 export type WorkspaceCommands = Pick<
   WorkspaceRuntime,
@@ -16,7 +17,6 @@ export type WorkspaceCommands = Pick<
   | 'openAgentSettings'
   | 'shortcutContext'
   | 'updateSessionActivity'
-  | 'drainTokens'
   | 'flushTokens'
   | 'startTurnUsage'
   | 'flushNativeFrames'
@@ -30,7 +30,7 @@ export type WorkspaceCommands = Pick<
   | 'runPrReview'
   | 'decideApproval'
   | 'queuedFor'
-  | 'setQueuedForSession'
+  | 'updateSessionQueue'
   | 'queueMessage'
   | 'removeQueuedMessage'
   | 'editQueuedMessage'
@@ -39,7 +39,6 @@ export type WorkspaceCommands = Pick<
   | 'steerQueuedMessage'
   | 'sendNow'
   | 'onSend'
-  | 'drainQueuedMessage'
   | 'messageRefAt'
   | 'askRestore'
   | 'forkAt'
@@ -82,7 +81,6 @@ const COMMAND_NAMES = [
   'openAgentSettings',
   'shortcutContext',
   'updateSessionActivity',
-  'drainTokens',
   'flushTokens',
   'startTurnUsage',
   'flushNativeFrames',
@@ -96,7 +94,7 @@ const COMMAND_NAMES = [
   'runPrReview',
   'decideApproval',
   'queuedFor',
-  'setQueuedForSession',
+  'updateSessionQueue',
   'queueMessage',
   'removeQueuedMessage',
   'editQueuedMessage',
@@ -105,7 +103,6 @@ const COMMAND_NAMES = [
   'steerQueuedMessage',
   'sendNow',
   'onSend',
-  'drainQueuedMessage',
   'messageRefAt',
   'askRestore',
   'forkAt',
@@ -136,6 +133,7 @@ const COMMAND_NAMES = [
 
 /** Stable delegates let socket callbacks invoke the current render's commands. */
 export function useCommandBridge() {
+  const runtime = useAppRuntime();
   const commands = useRef<WorkspaceCommands | null>(null);
   const stable = useMemo(
     () =>
@@ -145,11 +143,11 @@ export function useCommandBridge() {
           (...args: unknown[]) => {
             const command = commands.current?.[name];
             if (!command) throw new Error('Workspace commands are not bound');
-            return Reflect.apply(command, undefined, args);
+            return runtime.transition(() => Reflect.apply(command, undefined, args));
           },
         ]),
       ) as WorkspaceCommands,
-    [],
+    [runtime],
   );
   return {
     stable,

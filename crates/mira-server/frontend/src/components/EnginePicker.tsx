@@ -1,3 +1,5 @@
+import { useSelector } from '@tanstack/react-store';
+import { useAppRuntime } from '../state/RuntimeProvider';
 /**
  * The engine picker: one place to choose what drives this chat.
  *
@@ -22,34 +24,34 @@
  * list it saw last time (cached per agent) and, failing that, a single
  * "default model" row — picking an agent never waits on a process.
  */
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { AlertCircle, Check, ChevronDown, Loader2, RefreshCw, Settings2 } from 'lucide-react';
-import { listInstanceModels, listModels, type EngineSnapshot, type ModelInfo, type OptionDescriptor } from '../api';
-import type { AcpAgentStatus, AcpConfigOption, SessionEngine } from '../types';
-import { agentModelChoices, describeAgentStatus, loadAgentCaps } from '../lib/acpAgents';
 import {
-  CODING_MATCHERS,
-  formatCtx,
-  groupByVendor,
-  loadModelOptions,
-  modelDotClass,
-  prettyModel,
-  saveModelOptions,
+Command,
+CommandEmpty,
+CommandGroup,
+CommandInput,
+CommandItem,
+CommandList,
+} from '@/components/ui/command';
+import { Popover,PopoverContent,PopoverTrigger } from '@/components/ui/popover';
+import { cn } from '@/lib/utils';
+import { AlertCircle,Check,ChevronDown,Loader2,RefreshCw,Settings2 } from 'lucide-react';
+import { useEffect,useMemo,useRef,useState } from 'react';
+import { listInstanceModels,listModels,type EngineSnapshot,type ModelInfo,type OptionDescriptor } from '../api';
+import { agentModelChoices,describeAgentStatus } from '../lib/acpAgents';
+import {
+CODING_MATCHERS,
+formatCtx,
+groupByVendor,
+loadModelOptions,
+modelDotClass,
+prettyModel,
+saveModelOptions,
 } from '../lib/models';
-import { AgentIcon, ModelIcon, ProviderIcon } from './AgentIcon';
+import type { AcpAgentStatus,AcpConfigOption,SessionEngine } from '../types';
+import { AgentIcon,ModelIcon,ProviderIcon } from './AgentIcon';
 import { RevertButton } from './AgentSessionActions';
 import { ApprovalDialog } from './ApprovalDialog';
-import { PrivateText, redactEmails } from './PrivateText';
-import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
-import {
-  Command,
-  CommandEmpty,
-  CommandGroup,
-  CommandInput,
-  CommandItem,
-  CommandList,
-} from '@/components/ui/command';
-import { cn } from '@/lib/utils';
+import { PrivateText,redactEmails } from './PrivateText';
 
 /** A rail entry: a provider instance or an agent driver. */
 type RailItem =
@@ -89,6 +91,8 @@ export type EnginePickerProps = {
 };
 
 export function EnginePicker(props: EnginePickerProps) {
+  const runtime = useAppRuntime();
+  const capabilities = useSelector(runtime.agentCapabilities, snapshot => snapshot);
   const {
     open, onOpenChange, engine, fallbackModel, providerName, engines, agents,
     agentsChecking, onCheckAgents, agentConfig, agentDescriptors,
@@ -241,7 +245,7 @@ export function EnginePicker(props: EnginePickerProps) {
     if (fetched && !Array.isArray(fetched)) return { choices: [], live: false, error: fetched.error };
     const catalog = agents?.find((a) => a.kind === driver)?.models ?? [];
     if (catalog.length > 0) return { choices: catalog.map((m) => ({ id: m.value, label: m.label })), live: true };
-    const cached = agentModelChoices(loadAgentCaps(driver).config);
+    const cached = agentModelChoices(capabilities.get(driver)?.config);
     return { choices: cached.map((c) => ({ id: c.value, label: c.label })), live: false };
   };
 

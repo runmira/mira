@@ -17,7 +17,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use axum::extract::State;
+use crate::session_scope::ScopedState as State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;

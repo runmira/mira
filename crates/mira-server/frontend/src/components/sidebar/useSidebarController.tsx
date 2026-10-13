@@ -1,40 +1,42 @@
 import { hasHiddenTitleBar } from '@/lib/desktop';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect,useMemo,useRef,useState } from 'react';
 import {
-  deleteSession,
-  listSessions,
-  loadSession,
-  regenerateSessionTitle,
-  renameSession,
-  setSessionFlags,
+deleteSession,
+loadSession,
+regenerateSessionTitle,
+renameSession,
+setSessionFlags
 } from '../../api';
 import { useLatch } from '../../lib/lazy';
-import { isSettled, settledOrder } from '../../lib/settled';
-import { matchesSidebar, type SidebarFilter } from '../../lib/sidebar';
-import type { BackgroundMode, SessionSummary } from '../../types';
+import { isSettled,settledOrder } from '../../lib/settled';
+import { matchesSidebar,type SidebarFilter } from '../../lib/sidebar';
+import { useAppRuntime } from '../../state/RuntimeProvider';
+import { useResource } from '../../state/resources/hooks';
+import type { BackgroundMode,SessionSummary } from '../../types';
 import type { PeekTarget } from '../SessionPeek';
 import { groupByCwd } from '../sidebar/groups';
 import {
-  FORKS_KEY,
-  loadCollapsed,
-  loadFlag,
-  loadScroll,
-  loadSet,
-  loadUnread,
-  NEEDS_MORE_KEY,
-  persistCollapsed,
-  RECENTS_LIMIT,
-  RECENTS_MORE_KEY,
-  RECENTS_OPEN_KEY,
-  saveFlag,
-  saveSet,
-  saveUnread,
-  SETTLED_OPEN_KEY,
-  SETTLED_PAGE,
-  SHOW_MORE_KEY,
+FORKS_KEY,
+loadCollapsed,
+loadFlag,
+loadScroll,
+loadSet,
+loadUnread,
+NEEDS_MORE_KEY,
+persistCollapsed,
+RECENTS_LIMIT,
+RECENTS_MORE_KEY,
+RECENTS_OPEN_KEY,
+saveFlag,
+saveSet,
+saveUnread,
+SETTLED_OPEN_KEY,
+SETTLED_PAGE,
+SHOW_MORE_KEY,
 } from '../sidebar/preferences';
 import { SessionRow } from '../sidebar/sessionRows';
 import { Props } from '../sidebar/types';
+const EMPTY_SESSIONS: SessionSummary[] = [];
 export function useSidebarController({
   cwd,
   activeSessionId,
@@ -49,7 +51,11 @@ export function useSidebarController({
 }: Props) {
   const hiddenTitleBar = hasHiddenTitleBar();
 
-  const [storedSessions, setSessions] = useState<SessionSummary[]>([]);
+  const runtime = useAppRuntime();
+  const sessionResource = useResource('sessions');
+  const storedSessions = sessionResource.data ?? EMPTY_SESSIONS;
+  const setSessions = (apply: (previous: SessionSummary[]) => SessionSummary[]) =>
+    runtime.resources.accept('sessions', apply(runtime.queryClient.getQueryData<SessionSummary[]>(runtime.resources.key('sessions')) ?? []));
 
   const sessions = useMemo(
     () =>
@@ -62,13 +68,9 @@ export function useSidebarController({
     [storedSessions, runningSessions],
   );
 
-  const [listError, setListError] = useState<string | null>(null);
 
-  const [archivedError, setArchivedError] = useState<string | null>(null);
 
-  const [listLoading, setListLoading] = useState(false);
 
-  const [archivedLoading, setArchivedLoading] = useState(false);
 
   const [error, setError] = useState<string | null>(null);
 
@@ -97,7 +99,12 @@ export function useSidebarController({
   // Archived view — fetched lazily on first expand, then kept fresh.
   const [showArchived, setShowArchived] = useState(false);
 
-  const [archived, setArchived] = useState<SessionSummary[] | null>(null);
+  const archivedResource = useResource('sessions', showArchived, true);
+  const archived = archivedResource.data ?? null;
+  const listError = sessionResource.error?.message ?? null;
+  const archivedError = archivedResource.error?.message ?? null;
+  const listLoading = sessionResource.isFetching;
+  const archivedLoading = archivedResource.isFetching;
 
   // Bulk-select mode: clicking rows toggles checkboxes instead of
   // opening sessions; a floating bar offers archive/delete/cancel.
@@ -179,50 +186,9 @@ export function useSidebarController({
   const [settledShown, setSettledShown] = useState(SETTLED_PAGE);
 
   useEffect(() => {
-    // Fetch all non-archived sessions across every folder — grouped
-    // in-memory below. The server excludes archived ones here; they come
-    // through the separate archived fetch when the user opens that view.
-    let cancelled = false;
-    setListLoading(true);
-    listSessions({ all: true })
-      .then((s) => {
-        if (!cancelled) {
-          setSessions(s);
-          setListError(null);
-        }
-      })
-      .catch((e) => {
-        if (!cancelled) setListError(String(e.message ?? e));
-      })
-      .finally(() => {
-        if (!cancelled) setListLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [refreshKey, localVersion]);
-
-  useEffect(() => {
-    if (!showArchived) return;
-    let cancelled = false;
-    setArchivedLoading(true);
-    listSessions({ all: true, archived: true })
-      .then((s) => {
-        if (!cancelled) {
-          setArchived(s);
-          setArchivedError(null);
-        }
-      })
-      .catch((e) => {
-        if (!cancelled) setArchivedError(String(e.message ?? e));
-      })
-      .finally(() => {
-        if (!cancelled) setArchivedLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [showArchived, refreshKey, localVersion]);
+    void runtime.resources.refresh('sessions').catch(() => {});
+    if (showArchived) void runtime.resources.refresh('sessions', true).catch(() => {});
+  }, [refreshKey, localVersion, showArchived, runtime]);
 
   const refresh = () => setLocalVersion((n) => n + 1);
 

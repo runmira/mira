@@ -1,15 +1,16 @@
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect,useMemo,useRef,useState } from 'react';
 import { Outlet } from 'react-router';
-import { getSettings, putSettings } from '../api';
 import { PROVIDER_PRESETS } from '../lib/providers';
-import type { KeyUpdate, MemoryUpdate, Mode, ProviderUpdate, SettingsView } from '../types';
+import { useResource } from '../state/resources/hooks';
+import { useAppRuntime } from '../state/RuntimeProvider';
+import type { KeyUpdate,MemoryUpdate,Mode,ProviderUpdate,SettingsView } from '../types';
 import { ErrorNotice } from './ErrorNotice';
 import { memoryPatchFor } from './settings/MemorySection';
 import { SETTINGS_SECTIONS } from './settings/sections';
-import { useSettingsNavigation, type SettingsDraftContext } from './settings/SettingsContext';
-import { Draft, EMPTY_DRAFT, EMPTY_MEMORY } from './settings/types';
+import { useSettingsNavigation,type SettingsDraftContext } from './settings/SettingsContext';
+import { Draft,EMPTY_DRAFT,EMPTY_MEMORY } from './settings/types';
 // Local alias — the exported name is `SETTINGS_SECTIONS` (used by the
 // Sidebar); everywhere inside this file we still refer to it as
 // `SECTIONS` to keep the diff tight.
@@ -18,10 +19,12 @@ const SECTIONS = SETTINGS_SECTIONS;
 export function SettingsSurface() {
   const navigation = useSettingsNavigation();
   const { section, onSaved, onExit } = navigation;
-  const [view, setView] = useState<SettingsView | null>(null);
-  const [loadAttempt, setLoadAttempt] = useState(0);
-  const [loadingSettings, setLoadingSettings] = useState(false);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const runtime = useAppRuntime();
+  const settings = useResource('settings');
+  const view = settings.data ?? null;
+  const loadingSettings = settings.isFetching;
+  const loadError = settings.error?.message ?? null;
+  const baseline = useRef<SettingsView | null>(null);
   const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -31,50 +34,15 @@ export function SettingsSurface() {
   // the UI needs to see `has_api_key: true` without clobbering any
   // in-progress edits.
   const refetch = () => {
-    getSettings()
-      .then((v) => {
-        setView(v);
-        // Only rehydrate the API-key visibility flag; keep other draft
-        // fields untouched so a mid-edit doesn't get reset.
-        const p = v.providers.find((x) => x.name === draft.providerName);
-        setDraft((d) => ({
-          ...d,
-          showReplaceKey: !(p?.has_api_key || p?.api_key_env),
-        }));
-        onSaved(v);
-      })
-      .catch(() => {
-        /* leave stale view; user can retry */
-      });
+    void runtime.resources.refresh('settings').then(value => {
+      const provider = value.providers.find(item => item.name === draft.providerName);
+      setDraft(previous => ({ ...previous, showReplaceKey: !(provider?.has_api_key || provider?.api_key_env) }));
+      onSaved(value);
+    }).catch(() => {});
   };
-
-  // Load once on mount. The surface persists across section swaps
-  // (the sidebar changes `section` without unmounting us), so we
-  // shouldn't re-hydrate on every section click — that would drop
-  // in-progress edits when the user navigates away and back.
   useEffect(() => {
-    let cancelled = false;
-    setLoadingSettings(true);
-    getSettings()
-      .then((v) => {
-        if (!cancelled) {
-          setView(v);
-          hydrate(v);
-          setLoadError(null);
-        }
-      })
-      .catch((e) => {
-        if (!cancelled) setLoadError(String(e.message ?? e));
-      })
-      .finally(() => {
-        if (!cancelled) setLoadingSettings(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-    // Only hydrate an initial successful load; retry is offered for failed loads.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loadAttempt]);
+    if (view && !baseline.current) { hydrate(view); baseline.current = view; }
+  }, [view]);
 
   function hydrate(v: SettingsView) {
     const pName = v.default_provider ?? 'openrouter';
@@ -118,7 +86,9 @@ export function SettingsSurface() {
       // save, which loses the "field absent, use default" semantics.
       const memPatch: MemoryUpdate | undefined = memoryPatchFor(view!.memory, draft.memory);
 
-      const v = await putSettings({
+      if (baseline.current && JSON.stringify(baseline.current) !== JSON.stringify(view))
+        throw new Error('Settings changed on the server. Reload settings and review your changes before saving.');
+      const v = await runtime.resources.saveSettings({
         default_provider: draft.providerName || null,
         default_model: draft.model.trim() ? draft.model.trim() : null,
         small_model: draft.smallModel.trim() ? draft.smallModel.trim() : null,
@@ -128,7 +98,8 @@ export function SettingsSurface() {
         keys,
         ...(memPatch ? { memory: memPatch } : {}),
       });
-      setView(v);
+      baseline.current = v;
+      hydrate(v);
       onSaved(v);
       // Stay in settings — the sidebar handles navigation now.
       // Users click "Back to App" (or another sidebar item) to leave.
@@ -212,8 +183,14 @@ export function SettingsSurface() {
               description="Check that Mira is running, then try again. Local appearance preferences are still available."
               details={loadError}
               pending={loadingSettings}
-              onRetry={() => setLoadAttempt((n) => n + 1)}
+              onRetry={() => { void runtime.resources.refresh('settings').catch(() => {}); }}
             />
+          )}
+          {view && baseline.current && JSON.stringify(baseline.current) !== JSON.stringify(view) && (
+            <div className="mb-3 text-xs text-muted-foreground" role="status">
+              Settings changed on the server. Your draft is preserved.
+              <button type="button" className="ml-2 underline" onClick={() => { hydrate(view); baseline.current = view; setSaveError(null); }}>Reload saved settings</button>
+            </div>
           )}
           {saveError && (
             <ErrorNotice
@@ -260,4 +237,4 @@ export function SettingsSurface() {
 }
 
 export type { GithubReturn } from './Integrations';
-export { SETTINGS_SECTIONS, type SettingsSectionId } from './settings/sections';
+export { SETTINGS_SECTIONS,type SettingsSectionId } from './settings/sections';

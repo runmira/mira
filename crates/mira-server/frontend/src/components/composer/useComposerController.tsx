@@ -1,44 +1,41 @@
 import {
-  ATTACH_FILE_EVENT,
-  COMPOSE_QUOTE_EVENT,
-  COMPOSE_TEXT_EVENT,
-  registerAttachmentIntake,
-  type ComposerQuote,
+ATTACH_FILE_EVENT,
+COMPOSE_QUOTE_EVENT,
+COMPOSE_TEXT_EVENT,
+registerAttachmentIntake,
+type ComposerQuote,
 } from '@/lib/attachBridge';
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useSelector } from '@tanstack/react-store';
+import { useEffect,useLayoutEffect,useMemo,useRef,useState } from 'react';
 import { readFile } from '../../api';
-import { mapPosturesToModes, MIRA_MODE_TO_POSTURE } from '../../lib/agentPostures';
-import { draftKey } from '../../lib/composerDrafts';
+import { mapPosturesToModes,MIRA_MODE_TO_POSTURE } from '../../lib/agentPostures';
 import { useIsPhone } from '../../lib/mobile';
-import { PREF_KEYS, useBoolPref } from '../../lib/prefs';
+import { PREF_KEYS,useBoolPref } from '../../lib/prefs';
 import {
-  cachedDraft,
-  changeRichDraft,
-  clearRichDraft,
-  restoreRichDraft,
-  type RichDraft,
+type RichDraft
 } from '../../lib/richComposerDrafts';
+import { useAppRuntime } from '../../state/RuntimeProvider';
 import type { Mode } from '../../types';
 import { type ComposerNotice } from '../ComposerNoticeStack';
 import { type MentionInputHandle } from '../MentionInput';
 import { quoteMarkdown } from '../QuoteCard';
 import {
-  customToCommand,
-  filterCommands,
-  groupCommands,
-  slashState,
-  type PaletteGroup,
-  type SlashCommand,
+customToCommand,
+filterCommands,
+groupCommands,
+slashState,
+type PaletteGroup,
+type SlashCommand,
 } from '../commands';
 import { MODES } from '../composer/ComposerMenus';
 import {
-  formatBytes,
-  looksBinary,
-  NATIVE_ATTACH_MAX_BYTES,
-  readImage,
-  renderAttachments,
+formatBytes,
+looksBinary,
+NATIVE_ATTACH_MAX_BYTES,
+readImage,
+renderAttachments,
 } from '../composer/attachments';
-import { Attachment, ImageData, Props } from '../composer/types';
+import { Attachment,ImageData,Props } from '../composer/types';
 export function useComposerController({
   disabled,
   busy,
@@ -105,16 +102,13 @@ export function useComposerController({
 
   const phone = useIsPhone();
 
-  const [text, setText] = useState(() => cachedDraft(draftKey(sessionId)).text);
-
-  const [attachments, setAttachmentState] = useState<Attachment[]>(
-    () => cachedDraft(draftKey(sessionId)).attachments,
-  );
-
-  const [images, setImageState] = useState<ImageData[]>(
-    () => cachedDraft(draftKey(sessionId)).images,
-  );
-
+  const runtime = useAppRuntime();
+  const draftKeyFor = runtime.drafts.key(sessionId);
+  const richDraft = useSelector(runtime.drafts.source, state => state.get(draftKeyFor) ?? runtime.drafts.get(draftKeyFor));
+  const { text, attachments, images } = richDraft;
+  const setText = (value: string) => runtime.drafts.update(textOwner.current, { ...runtime.drafts.get(textOwner.current), text: value });
+  const setAttachmentState = (value: Attachment[]) => runtime.drafts.update(textOwner.current, { ...runtime.drafts.get(textOwner.current), attachments: value }, true);
+  const setImageState = (value: ImageData[]) => runtime.drafts.update(textOwner.current, { ...runtime.drafts.get(textOwner.current), images: value }, true);
   const [draftError, setDraftError] = useState<string | null>(null);
 
   const [dragging, setDragging] = useState(false);
@@ -198,18 +192,15 @@ export function useComposerController({
    * another's. `textOwner` is re-pointed by the restore before any
    * write can happen, so every write lands on the right session.
    */
-  const draftKeyFor = draftKey(sessionId);
 
   const textOwner = useRef(draftKeyFor);
 
   const restoringDraft = useRef(false);
 
-  const draftState = useRef<RichDraft>(cachedDraft(draftKeyFor));
+  const draftState = { get current() { return runtime.drafts.get(textOwner.current); } };
 
   function applyDraft(key: string, next: RichDraft, immediate = false) {
-    changeRichDraft(key, next, immediate);
-    if (textOwner.current !== key) return;
-    draftState.current = next;
+    runtime.drafts.update(key, next, immediate);
   }
 
   function persistText(next: string) {
@@ -221,7 +212,7 @@ export function useComposerController({
     value: Attachment[] | ((prev: Attachment[]) => Attachment[]),
     key = textOwner.current,
   ) {
-    const previous = key === textOwner.current ? draftState.current : cachedDraft(key);
+    const previous = key === textOwner.current ? draftState.current : runtime.drafts.get(key);
     const next = {
       ...previous,
       attachments: typeof value === 'function' ? value(previous.attachments) : value,
@@ -234,7 +225,7 @@ export function useComposerController({
     value: ImageData[] | ((prev: ImageData[]) => ImageData[]),
     key = textOwner.current,
   ) {
-    const previous = key === textOwner.current ? draftState.current : cachedDraft(key);
+    const previous = key === textOwner.current ? draftState.current : runtime.drafts.get(key);
     const next = {
       ...previous,
       images: typeof value === 'function' ? value(previous.images) : value,
@@ -246,8 +237,7 @@ export function useComposerController({
   useLayoutEffect(() => {
     let alive = true;
     textOwner.current = draftKeyFor;
-    const local = cachedDraft(draftKeyFor);
-    draftState.current = local;
+    const local = runtime.drafts.get(draftKeyFor);
     setText(local.text);
     setAttachmentState(local.attachments);
     setImageState(local.images);
@@ -258,9 +248,8 @@ export function useComposerController({
     setAttachError(null);
     setAttachLoading(false);
     setPreview(null);
-    void restoreRichDraft(draftKeyFor).then((stored) => {
+    void runtime.drafts.restore(draftKeyFor).then((stored) => {
       if (!alive || textOwner.current !== draftKeyFor) return;
-      draftState.current = stored;
       setText(stored.text);
       setAttachmentState(stored.attachments);
       setImageState(stored.images);
@@ -280,6 +269,16 @@ export function useComposerController({
     };
     window.addEventListener('mira:draft-storage', listener);
     return () => window.removeEventListener('mira:draft-storage', listener);
+  }, []);
+
+  useEffect(() => {
+    const confirmed = (event: Event) => {
+      if ((event as CustomEvent<string>).detail !== textOwner.current) return;
+      restoringDraft.current = true; mentionRef.current?.setText(''); restoringDraft.current = false;
+      setQuotes([]); setAttachError(null); setSlashFeedback(null);
+    };
+    window.addEventListener('mira:draft-delivered', confirmed);
+    return () => window.removeEventListener('mira:draft-delivered', confirmed);
   }, []);
 
   // Hidden `<input type="file">` — programmatically clicked by both the
@@ -452,7 +451,7 @@ export function useComposerController({
     setAttachError(null);
     setAttachLoading(true);
     try {
-      const f = await readFile(path);
+      const f = await readFile(path, { sessionId: runtime.sessionState.get().active ?? undefined });
       // De-dupe by path — re-attaching the same file just refreshes it.
       setAttachments(
         (prev) => [
@@ -635,12 +634,11 @@ export function useComposerController({
     const quoted = quotes.map(quoteMarkdown).join('') + trimmed;
     const body =
       attachments.length > 0 ? renderAttachments(attachments, cwd) + '\n\n' + quoted : quoted;
-    if (busy && onQueueMessage) onQueueMessage(body, images.length > 0 ? images : undefined);
+    if (busy && onQueueMessage) { if (onQueueMessage(body, images.length > 0 ? images : undefined) === false) return; }
     else if (busy) return;
-    else onSend(body, images.length > 0 ? images : undefined);
+    else if (onSend(body, images.length > 0 ? images : undefined) === false) return;
     updateText('');
-    clearRichDraft(textOwner.current);
-    draftState.current = { text: '', attachments: [], images: [] };
+    runtime.drafts.clear(textOwner.current);
     setAttachmentState([]);
     setImageState([]);
     setQuotes([]);

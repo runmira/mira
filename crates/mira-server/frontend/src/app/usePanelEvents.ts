@@ -1,10 +1,10 @@
-import { applyReviewEvent, emptyReviewState } from '../components/ReviewPanel';
+import { applyReviewEvent,emptyReviewState } from '../components/ReviewPanel';
 import {
-  appendDelegateStep,
-  appendToken,
-  attachToolResult,
-  updateSubagent,
-  upsertToolStart,
+appendDelegateStep,
+appendToken,
+attachToolResult,
+updateSubagent,
+upsertToolStart,
 } from '../transcript/entries';
 import type { ServerMsg } from '../types';
 
@@ -15,23 +15,24 @@ export function usePanelEvents(
     WorkspaceRuntime,
     | 'setReviewState'
     | 'setReviewPanelOpen'
-    | 'setSubagentState'
+    | 'updateSubagentProjection'
     | 'setAgentTabs'
     | 'setActiveAgentTab'
-    | 'setEntries'
+    | 'updateTranscript'
     | 'setBrowserPing'
   >,
 ) {
   const {
     setReviewState,
     setReviewPanelOpen,
-    setSubagentState,
+    updateSubagentProjection,
     setAgentTabs,
     setActiveAgentTab,
-    setEntries,
+    updateTranscript,
     setBrowserPing,
   } = context;
   return useStableCallback((msg: ServerMsg) => {
+    const receivedAt = Date.now();
     switch (msg.type) {
       case 'review_started':
         setReviewState(emptyReviewState(msg.run_id));
@@ -62,7 +63,7 @@ export function usePanelEvents(
         break;
 
       case 'subagent_started':
-        setSubagentState((prev) => {
+        updateSubagentProjection((prev) => {
           const next = new Map(prev);
           const existing = next.get(msg.parent_call_id);
           next.set(msg.parent_call_id, {
@@ -89,25 +90,25 @@ export function usePanelEvents(
         break;
 
       case 'subagent_token':
-        setSubagentState((prev) =>
+        updateSubagentProjection((prev) =>
           updateSubagent(prev, msg.parent_call_id, (s) => ({
             ...s,
-            entries: appendToken(s.entries, msg.text),
+            entries: appendToken(s.entries, msg.text, receivedAt),
           })),
         );
         break;
 
       case 'subagent_tool_start':
-        setSubagentState((prev) =>
+        updateSubagentProjection((prev) =>
           updateSubagent(prev, msg.parent_call_id, (s) => ({
             ...s,
-            entries: upsertToolStart(s.entries, msg.call),
+            entries: upsertToolStart(s.entries, msg.call, receivedAt),
           })),
         );
         break;
 
       case 'subagent_tool_end':
-        setSubagentState((prev) =>
+        updateSubagentProjection((prev) =>
           updateSubagent(prev, msg.parent_call_id, (s) => ({
             ...s,
             entries: attachToolResult(s.entries, msg.result),
@@ -116,7 +117,7 @@ export function usePanelEvents(
         break;
 
       case 'subagent_warning':
-        setSubagentState((prev) =>
+        updateSubagentProjection((prev) =>
           updateSubagent(prev, msg.parent_call_id, (s) => ({
             ...s,
             entries: [...s.entries, { kind: 'warning', text: msg.text }],
@@ -128,7 +129,7 @@ export function usePanelEvents(
         // Streaming intermediate summary — surfaces as a `[progress]`
         // chip in the SubagentPanel (styled distinctly from warnings so
         // the reader can tell "here's where I am" from "something's off").
-        setSubagentState((prev) =>
+        updateSubagentProjection((prev) =>
           updateSubagent(prev, msg.parent_call_id, (s) => ({
             ...s,
             entries: [...s.entries, { kind: 'warning', text: `[progress] ${msg.text}` }],
@@ -144,7 +145,7 @@ export function usePanelEvents(
           prev.includes(msg.parent_call_id) ? prev : [...prev, msg.parent_call_id],
         );
         setActiveAgentTab(msg.parent_call_id);
-        setSubagentState((prev) =>
+        updateSubagentProjection((prev) =>
           updateSubagent(prev, msg.parent_call_id, (s) => ({
             ...s,
             pendingReview: { promptId: msg.prompt_id, summary: msg.summary },
@@ -153,7 +154,7 @@ export function usePanelEvents(
         break;
 
       case 'subagent_done':
-        setSubagentState((prev) =>
+        updateSubagentProjection((prev) =>
           updateSubagent(prev, msg.parent_call_id, (s) => ({
             ...s,
             done: true,
@@ -166,7 +167,7 @@ export function usePanelEvents(
         // the author's tab so a viewer can see who posted what, and keep
         // the raw text so a future "Shared notes" pane can dedupe by
         // (session, ts) if we surface it more prominently later.
-        setSubagentState((prev) =>
+        updateSubagentProjection((prev) =>
           updateSubagent(prev, msg.parent_call_id, (s) => ({
             ...s,
             entries: [
@@ -181,7 +182,7 @@ export function usePanelEvents(
         // A step the delegated child just took. Routes to its card by call id
         // (the parent's `delegate_task` id), with a fallback to the most
         // recent running delegation for providers that don't echo the id.
-        setEntries((prev) => appendDelegateStep(prev, msg.call_id, msg.kind, msg.text));
+        updateTranscript((prev) => appendDelegateStep(prev, msg.call_id, msg.kind, msg.text, receivedAt));
         break;
 
       case 'browser_active':
@@ -190,7 +191,7 @@ export function usePanelEvents(
         break;
 
       case 'html_render':
-        setEntries((prev) =>
+        updateTranscript((prev) =>
           prev.some((e) => e.kind === 'html_render' && e.id === msg.id)
             ? prev
             : [...prev, { kind: 'html_render', id: msg.id, title: msg.title, html: msg.html }],

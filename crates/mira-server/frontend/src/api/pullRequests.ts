@@ -1,3 +1,4 @@
+import { sessionFetch } from './sessionScope';
 /* ---------- pull requests ---------- */
 
 export type PullRequestSummary = {
@@ -112,8 +113,8 @@ export async function readError(r: Response, prefix: string): Promise<string> {
   return msg;
 }
 
-export async function listPullRequests(): Promise<PullRequestListView> {
-  const r = await fetch('/api/prs', { cache: 'no-store' });
+export async function listPullRequests(sessionId?: string): Promise<PullRequestListView> {
+  const r = await sessionFetch('/api/prs', { cache: 'no-store' }, sessionId);
   if (!r.ok) throw new Error(await readError(r, 'prs GET'));
   return (await r.json()) as PullRequestListView;
 }

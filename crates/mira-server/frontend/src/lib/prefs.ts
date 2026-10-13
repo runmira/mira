@@ -1,3 +1,5 @@
+import { useOptionalRuntime } from '../state/RuntimeProvider';
+import { PREF_KEYS } from './preferenceKeys';
 /**
  * Local app preferences (General tab). Browser-local localStorage settings
  * for shell behavior — no server round-trip, unlike the model settings in
@@ -58,50 +60,22 @@ export function setBoolPref(key: string, value: boolean): void {
 }
 
 /** Reactive boolean pref for render-gating. */
-export function useBoolPref(key: string, def: boolean): [boolean, (v: boolean) => void] {
-  const value = useSyncExternalStore(
-    subscribe,
-    () => getBoolPref(key, def),
-    () => def,
-  );
-  return [value, (v: boolean) => setBoolPref(key, v)];
+export function useBoolPref(key: string, def: boolean): [boolean, (value: boolean) => void] {
+  const runtime = useOptionalRuntime();
+  const value = useSyncExternalStore(runtime ? listener => {
+    const sub = runtime.preferences.source.subscribe(listener); return () => sub.unsubscribe();
+  } : subscribe, () => runtime ? (runtime.preferences.source.get()[key] == null ? def : runtime.preferences.source.get()[key] === '1') : getBoolPref(key, def), () => def);
+  return [value, next => runtime ? runtime.preferences.set(key, next ? '1' : '0') : setBoolPref(key, next)];
+}
+export function useStringPref(key: string, def: string): [string, (value: string) => void] {
+  const runtime = useOptionalRuntime();
+  const value = useSyncExternalStore(runtime ? listener => {
+    const sub = runtime.preferences.source.subscribe(listener); return () => sub.unsubscribe();
+  } : subscribe, () => runtime ? runtime.preferences.source.get()[key] ?? def : getPref(key, def), () => def);
+  return [value, next => runtime ? runtime.preferences.set(key, next) : setPref(key, next)];
 }
 
-/** Reactive string pref for render-gating. */
-export function useStringPref(key: string, def: string): [string, (v: string) => void] {
-  const value = useSyncExternalStore(
-    subscribe,
-    () => getPref(key, def),
-    () => def,
-  );
-  return [value, (v: string) => setPref(key, v)];
-}
-
-export const PREF_KEYS = {
-  sidebarOpen: 'mira.sidebar.open',
-  terminalRestore: 'mira.terminal.restore',
-  composerCmdEnter: 'mira.composer.cmdEnter',
-  transcriptFollow: 'mira.transcript.follow',
-  transcriptTurnStats: 'mira.transcript.turnStats',
-  diffLayout: 'mira.diff.layout',
-  reduceMotion: 'mira.reduceMotion',
-  notifyTurnDone: 'mira.notify.turnDone',
-  browserAutoOpen: 'mira.browser.autoOpen',
-  preferredEditor: 'mira.editor.preferred',
-  /** 'system' | 'light' | 'dark' — see lib/theme.ts. */
-  theme: 'mira.theme',
-  /** Play a sound when a reply finishes. */
-  turnSound: 'mira.sound.turnDone',
-  /** Accent color and interface size — see lib/appearance.ts. */
-  accent: 'mira.accent',
-  uiScale: 'mira.uiScale',
-  /** Diff appearance — see lib/diffPrefs.ts. */
-  diffWrap: 'mira.diff.wrap',
-  diffInline: 'mira.diff.inline',
-  diffMarkers: 'mira.diff.markers',
-  diffLineNumbers: 'mira.diff.lineNumbers',
-  diffTint: 'mira.diff.tint',
-} as const;
+export { PREF_KEYS } from './preferenceKeys';
 
 /** Apply the reduce-motion class to <html>. Call on boot and on toggle. */
 export function applyReduceMotion(): void {

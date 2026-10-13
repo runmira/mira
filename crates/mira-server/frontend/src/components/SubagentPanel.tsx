@@ -1,14 +1,15 @@
 import { useFileIcons } from '@/lib/fileIcons';
 import { cn } from '@/lib/utils';
-import { CircleAlert, File as FileIcon, Info, LoaderCircle, X } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { CircleAlert,File as FileIcon,Info,LoaderCircle,X } from 'lucide-react';
+import { useMemo,useState } from 'react';
 import { groupAgentRuns } from '../lib/turnActivity';
 import type { Entry } from '../transcript/entries';
-import type { DiffPreview, ToolCall, ToolResult } from '../types';
-import { extractPrompt, faceStateFor, stripAgentIdMarker, useSubagentIdentity } from './AgentCard';
-import { DelegateCard, isDelegateTaskName } from './DelegateCard';
-import { FilePanelBody, type FilePanelTab } from './FilePanel';
+import type { DiffPreview,ToolCall,ToolResult } from '../types';
+import { extractPrompt,faceStateFor,stripAgentIdMarker,useSubagentIdentity } from './AgentCard';
+import { DelegateCard,isDelegateTaskName } from './DelegateCard';
+import { FilePanelBody,type FilePanelTab } from './FilePanel';
 import { PanelLauncher } from './PanelLauncher';
+import { RequestBoundary } from './RequestBoundary';
 import { PanelNewTabButton } from './RightPanelButton';
 import { SubagentFace } from './SubagentFace';
 import type { ToolStatus } from './ToolCard';
@@ -17,8 +18,8 @@ import { ToolGroup } from './ToolGroup';
 import { BrowserPane } from './panes/BrowserPane';
 import { DevToolsPane } from './panes/DevToolsPane';
 import { WhiteboardPane } from './panes/WhiteboardPane';
-import { TOOL_PANE_DEFS, type ToolPaneTab } from './panes/toolPanes';
-import { ReviewCard, SubagentResult } from './subagents/StructuredResult';
+import { TOOL_PANE_DEFS,type ToolPaneTab } from './panes/toolPanes';
+import { ReviewCard,SubagentResult } from './subagents/StructuredResult';
 /** Right-side pane that shows one or more subagents in detail. Opens
  *  when the user clicks an AgentCard row in the transcript and adds a
  *  tab; further clicks add more tabs. Tabs are dismissible; when the
@@ -443,8 +444,10 @@ function TabBody({
             <span className="text-[13px] font-medium text-foreground">About {identity.name}</span>
           </div>
           <p className="mb-3 text-[12px] leading-relaxed text-muted-foreground">
-            A bounded subagent spawned by the parent — cold context, its own tools, and one summary
-            back to the parent when done.
+            {(() => {
+              try { if (JSON.parse(tab.call.function.arguments)._external) return 'A helper managed by the external agent. Its reported work and result appear here.'; } catch { /* older call */ }
+              return 'A bounded subagent spawned by the parent — cold context, its own tools, and one summary back to the parent when done.';
+            })()}
           </p>
           <div className="mb-1.5 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground/70">
             Task
@@ -456,12 +459,14 @@ function TabBody({
       )}
 
       {tab.pendingReview && (
+<RequestBoundary id={tab.pendingReview.promptId}>
         <ReviewCard
           review={tab.pendingReview}
           identityTextClass="text-foreground"
           onApprove={(note) => onReview(tab.callId, tab.pendingReview!.promptId, true, note)}
           onDeny={(note) => onReview(tab.callId, tab.pendingReview!.promptId, false, note)}
         />
+</RequestBoundary>
       )}
 
       {/* Live child transcript — renders like a mini chat as tokens
@@ -625,6 +630,7 @@ function SubagentEntryView({ entry }: { entry: Entry }) {
 }
 
 function StatusPill({ status, isError }: { status: ToolStatus; isError: boolean }) {
+  if (status === 'paused') return <span className="text-[11.5px] text-muted-foreground">Activity paused</span>;
   // All pills share the same shape (soft secondary fill, no border);
   // the semantic hint is a single accent-colored glyph or word so the
   // scan is still 1-2ms without leaning on colored strokes.

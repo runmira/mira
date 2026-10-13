@@ -1,10 +1,9 @@
-import { AnimatePresence } from 'framer-motion';
-import { ArrowDown, PanelLeft, SquareTerminal } from 'lucide-react';
+import { ArrowDown,PanelLeft,SquareTerminal } from 'lucide-react';
+import { useMemo } from 'react';
 import { Outlet } from 'react-router';
-import { gitCommit, gitPush } from '../api';
 import { AssistantSelectionToolbar } from '../components/AssistantSelectionToolbar';
 import { ChatRelationships } from '../components/ChatRelationships';
-import { CONTEXT_PANEL_RESERVE, ContextPanel } from '../components/ContextPanel';
+import { CONTEXT_PANEL_RESERVE } from '../components/ContextPanel';
 import { EditorPicker } from '../components/EditorPicker';
 import { ImageLightbox } from '../components/ImageLightbox';
 import { LazyBoundary } from '../components/LazyBoundary';
@@ -16,35 +15,50 @@ import { SourceCitationNavigator } from '../components/SourceCitationNavigator';
 import { TaskListPanel } from '../components/TaskListPanel';
 import { Thinking } from '../components/Thinking';
 import { TimelineMinimap } from '../components/TimelineMinimap';
-import { ComingSoon, EmptyState } from '../components/transcript/EmptyState';
+import { ComingSoon,EmptyState } from '../components/transcript/EmptyState';
 import { WorkspaceSetupCard } from '../components/WorkspaceSetupCard';
 import {
-  GetStarted,
-  GoalPanel,
-  PluginsPanel,
-  PullRequestPanel,
-  ReviewChanges,
-  SubagentPanel,
-  TerminalPanel,
+GetStarted,
+GoalPanel,
+PluginsPanel,
+PullRequestPanel,
+ReviewChanges,
+SubagentPanel,
+TerminalPanel,
 } from '../lazyViews';
-import { composeQuote, setAsidePassage } from '../lib/attachBridge';
+import { composeQuote,setAsidePassage } from '../lib/attachBridge';
 import { shortcutLabelForCommand } from '../lib/keybindings';
-import { lazyNamed, preloadOnIntent } from '../lib/lazy';
+import { lazyNamed,preloadOnIntent } from '../lib/lazy';
 import { cn } from '../lib/utils';
-import { goalActivity, titleFromEntries } from '../transcript/entries';
-import { IS_MAC, PAGE_TITLES } from './shared';
+import { useLiveEntries } from '../state/RuntimeProvider';
+import { goalActivity,titleFromEntries } from '../transcript/entries';
+import { liveTranscriptView } from './liveTranscriptView';
+import { IS_MAC,PAGE_TITLES } from './shared';
 import { WorkspaceComposer } from './WorkspaceComposer';
+import { WorkspaceContextPanel } from './WorkspaceContextPanel';
 import type { WorkspaceRuntime } from './WorkspaceRuntime';
 const WorkspaceTranscript = lazyNamed(() => import('./WorkspaceTranscript'), 'WorkspaceTranscript');
 export function WorkspaceMain(
   context: Pick<
     WorkspaceRuntime,
     | 'phone'
+    | 'setSessionCommitted'
+    | 'openAgentTab'
+    | 'onCtxOpenChange'
+    | 'ctxOpen'
+    | 'sessionCommitted'
+    | 'branchPr'
+    | 'gitStatus'
+    | 'setSelectedProcess'
+    | 'backgroundProcesses'
     | 'mainView'
     | 'toggleSidebar'
     | 'sidebarOpen'
     | 'sessionTitle'
-    | 'entries'
+    | 'outlineEntries'
+    | 'readingAnchorRef'
+    | 'followRef'
+    | 'lastScrollInputRef'
     | 'sessionDiff'
     | 'setReviewOpen'
     | 'panelOpen'
@@ -122,16 +136,7 @@ export function WorkspaceMain(
     | 'reviewFocus'
     | 'showJump'
     | 'jumpToLatest'
-    | 'backgroundProcesses'
-    | 'setSelectedProcess'
     | 'subagentState'
-    | 'gitStatus'
-    | 'branchPr'
-    | 'sessionCommitted'
-    | 'ctxOpen'
-    | 'onCtxOpenChange'
-    | 'openAgentTab'
-    | 'setSessionCommitted'
     | 'restoreNote'
     | 'setRestoreNote'
     | 'doRestore'
@@ -162,10 +167,10 @@ export function WorkspaceMain(
     | 'environment'
     | 'environments'
     | 'envSwitching'
-    | 'setEnvSwitching'
-    | 'setBusy'
-    | 'busyRef'
-    | 'setThinking'
+    | 'recordEnvironmentTransition'
+    | 'reportTurnRunning'
+    | 'isTurnRunning'
+    | 'reportThinking'
     | 'onNewChat'
     | 'onCompact'
     | 'usageRing'
@@ -181,7 +186,6 @@ export function WorkspaceMain(
     | 'infoNotices'
     | 'dismissInfoNotice'
     | 'completedUpdatesRef'
-    | 'setEngines'
     | 'replyToPlan'
     | 'replyToAskUser'
     | 'acpCommands'
@@ -196,13 +200,14 @@ export function WorkspaceMain(
     | 'acpError'
   >,
 ) {
+  const entries = useLiveEntries();
+  const { minimapItems, isEmpty } = useMemo(() => liveTranscriptView(entries, context.historyOffsetRef.current), [entries]);
   const {
     phone,
     mainView,
     toggleSidebar,
     sidebarOpen,
     sessionTitle,
-    entries,
     sessionDiff,
     setReviewOpen,
     panelOpen,
@@ -222,7 +227,6 @@ export function WorkspaceMain(
     noteScrollInput,
     configured,
     acpDriver,
-    isEmpty,
     acpAgents,
     startAcpAgent,
     openAgentSettings,
@@ -247,7 +251,6 @@ export function WorkspaceMain(
     retireSecondOpinion,
     runReview,
     thinking,
-    minimapItems,
     jumpToMinimapTurn,
     lightbox,
     setLightbox,
@@ -258,16 +261,6 @@ export function WorkspaceMain(
     reviewFocus,
     showJump,
     jumpToLatest,
-    backgroundProcesses,
-    setSelectedProcess,
-    subagentState,
-    gitStatus,
-    branchPr,
-    sessionCommitted,
-    ctxOpen,
-    onCtxOpenChange,
-    openAgentTab,
-    setSessionCommitted,
     acpStatusPending,
     requestAcpStatus,
     extensionsVersion,
@@ -421,6 +414,7 @@ export function WorkspaceMain(
                 <div
                   className="absolute inset-0 overflow-y-auto overscroll-contain px-5 pb-5 transition-[padding] duration-200 max-md:px-3"
                   style={{
+                    overflowAnchor: 'none',
                     paddingRight: ctxReserve ? CONTEXT_PANEL_RESERVE + 12 : phone ? 12 : 20,
                     paddingTop: ctxPill ? 52 : 16,
                   }}
@@ -598,53 +592,7 @@ export function WorkspaceMain(
                   </button>
                 )}
 
-                {/* Floating context panel — absolutely anchored to top-right */}
-                <AnimatePresence>
-                  <ContextPanel
-                    key="ctx"
-                    sessionTitle={sessionTitle ?? titleFromEntries(entries)}
-                    tasks={tasks}
-                    processes={backgroundProcesses.processes}
-                    stoppingProcesses={
-                      new Set(
-                        [...backgroundProcesses.stopping]
-                          .filter((key) => key.startsWith(`${sessionId}:`))
-                          .map((key) => Number(key.split(':').at(-1))),
-                      )
-                    }
-                    onOpenProcess={(id) => {
-                      setSelectedProcess({ session: sessionId, id, nonce: Date.now() });
-                      openToolPane('processes');
-                    }}
-                    onStopProcess={backgroundProcesses.stop}
-                    subagentState={subagentState}
-                    entries={entries}
-                    gitStatus={gitStatus}
-                    sessionDiff={sessionDiff}
-                    branchPr={branchPr}
-                    sessionCommitted={sessionCommitted}
-                    open={ctxOpen}
-                    onOpenChange={onCtxOpenChange}
-                    onOpenAgent={openAgentTab}
-                    onReview={(path) => {
-                      setReviewFocus(path ?? null);
-                      setReviewOpen(true);
-                    }}
-                    onPush={async () => {
-                      await gitPush();
-                      refreshRepo();
-                    }}
-                    onCommit={async (message, includeUnstaged, pushAfter) => {
-                      await gitCommit({
-                        message,
-                        include_unstaged: includeUnstaged,
-                        push_after: pushAfter,
-                      });
-                      setSessionCommitted(true);
-                      refreshRepo();
-                    }}
-                  />
-                </AnimatePresence>
+                <WorkspaceContextPanel context={context} />
               </div>
 
               <WorkspaceComposer {...context} />

@@ -19,11 +19,12 @@
 //! `POST /api/prs/:owner/:repo/:number/reviews`       → submit review
 //! `PUT  /api/prs/:owner/:repo/:number/merge`         → merge
 
+use crate::session_scope::ScopedState as State;
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use axum::extract::{Path as AxumPath, State};
+use axum::extract::Path as AxumPath;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;

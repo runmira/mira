@@ -1,3 +1,4 @@
+import { useAppRuntime } from '../state/RuntimeProvider';
 import type { ServerMsg } from '../types';
 import { useAgentEvents } from './useAgentEvents';
 import { useApprovalCommands } from './useApprovalCommands';
@@ -18,6 +19,7 @@ import { useWorkspaceView } from './useWorkspaceView';
 import { WorkspaceLayout } from './WorkspaceLayout';
 
 export function Application() {
+  const appRuntime = useAppRuntime();
   const commands = useCommandBridge();
   const state = useWorkspaceState();
   const view = useWorkspaceView({ ...state, ...commands.stable });
@@ -34,7 +36,9 @@ export function Application() {
   const noticeEvents = useNoticeEvents(runtime);
   const transcriptEvents = useTranscriptEvents(runtime);
   const agentEvents = useAgentEvents(runtime);
-  function handleMessage(msg: ServerMsg) {
+  function applyMessage(msg: ServerMsg) {
+    appRuntime.diagnostics.record({ type: msg.type, session: appRuntime.sessionState.get().active, generation: appRuntime.connection.get().generation, at: Date.now() });
+    if (msg.type !== 'token') appRuntime.streams.flush();
     if (
       !['token', 'session_activity', 'session_activity_snapshot', 'queue_updated'].includes(
         msg.type,
@@ -42,6 +46,10 @@ export function Application() {
     )
       runtime.flushTokens();
     switch (msg.type) {
+      case 'stream_resumed':
+        appRuntime.turnCommands.resume(msg.session_id);
+        appRuntime.resources.cancelContext();
+        return;
       case 'queue_mutation_result':
       case 'session_activity':
       case 'session_activity_snapshot':
@@ -119,6 +127,7 @@ export function Application() {
         return;
       case 'acp_message_metadata':
       case 'runtime_turn_updated':
+      case 'external_subagent_frame':
       case 'runtime_work_updated':
       case 'acp_text':
       case 'acp_thought':
@@ -147,6 +156,7 @@ export function Application() {
         console.warn('[ws] unhandled server message type:', msg.type);
     }
   }
+  const handleMessage = (msg: ServerMsg) => appRuntime.transition(() => applyMessage(msg));
   commands.bind({
     ...sessionCommands,
     ...approvalCommands,

@@ -1,9 +1,9 @@
-import type { BackgroundMode, ClientMsg, ServerMsg } from './types';
+import type { BackgroundMode, ClientMsg, ServerMsg, StreamCursor } from './types';
 
 export type WsStatus = 'connecting' | 'open' | 'closed';
 
 export interface WsClient {
-  send(msg: ClientMsg): void;
+  send(msg: ClientMsg): boolean;
   /** Conditional mutations must not enter the reconnect replay buffer. */
   sendImmediate(msg: ClientMsg): boolean;
   /** Convenience: swap which session this WS is watching. Server updates
@@ -33,59 +33,83 @@ export function connect(
   let ws: WebSocket | null = null;
   let stopped = false;
   let attempt = 0;
-  let opened = false;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let session: string | null = null;
+  let cursor: StreamCursor | null = null;
   /** Re-attaching after a reconnect: until this session's Ready arrives,
    *  frames are the server's default session's, not the user's chat. */
   let reattaching: string | null = null;
-  const queue: ClientMsg[] = [];
 
   function schedule() {
     if (stopped) return;
     const delay = Math.min(1000 * 2 ** attempt, 8000);
     attempt += 1;
-    setTimeout(open, delay);
+    reconnectTimer = setTimeout(open, delay);
   }
 
   function open() {
+    reconnectTimer = null;
     if (stopped) return;
     onStatus('connecting');
-    ws = new WebSocket(url);
+    const params = new URLSearchParams();
+    params.set('protocol', '2');
+    if (session) params.set('session_id', session);
+    if (cursor && session) { params.set('epoch', cursor.epoch); params.set('after', String(cursor.sequence)); }
+    ws = new WebSocket(url + (params.size ? `?${params}` : ''));
     const socket = ws;
     socket.onopen = () => {
+      if (stopped || ws !== socket) return;
       attempt = 0;
       onStatus('open');
       // On reconnect, get back onto the chat the user is looking at first —
       // attaching replays its Ready — so nothing below lands elsewhere.
       // Otherwise ask for the current state, in case a frame was missed.
-      const reattach = opened && session;
-      opened = true;
+      const reattach = session;
       reattaching = reattach ? session : null;
-      socket.send(
+      if (!cursor) socket.send(
         JSON.stringify(
           (reattach ? { type: 'attach', session_id: session } : { type: 'sync' }) as ClientMsg,
         ),
       );
-      // Then what was sent while disconnected, in order.
-      while (queue.length > 0 && socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify(queue.shift()!));
-      }
+      // The attach frame precedes these on the same socket, so the server
+      // routes replays at the session the user is looking at.
+      flush();
+
     };
-    ws.onclose = () => {
+    socket.onclose = () => {
+      if (stopped || ws !== socket) return;
       onStatus('closed');
       ws = null;
       schedule();
     };
-    ws.onerror = () => {
+    socket.onerror = () => {
       // onclose fires next; let it drive the reconnect.
     };
-    ws.onmessage = (ev) => {
+    socket.onmessage = (ev) => {
+      if (stopped || ws !== socket) return;
       let msg: ServerMsg;
       try {
         msg = JSON.parse(ev.data) as ServerMsg;
       } catch (e) {
-        console.error('bad frame', ev.data, e);
+        console.error('[ws] malformed frame');
         return;
+      }
+      if (msg.type === 'session_stream') {
+        if (reattaching || msg.session_id !== session) return;
+        if (!cursor || cursor.epoch !== msg.epoch || msg.sequence !== cursor.sequence + 1) {
+          if (cursor?.epoch === msg.epoch && msg.sequence <= cursor.sequence) return;
+          reattaching = session;
+          socket.send(JSON.stringify({ type: 'attach', session_id: session, ...(cursor ? { cursor } : {}) }));
+          return;
+        }
+        onMsg(msg.frame);
+        cursor = { epoch: msg.epoch, sequence: msg.sequence };
+        return;
+      }
+      if (msg.type === 'stream_resumed') {
+        if (msg.session_id !== session || !cursor || cursor.epoch !== msg.cursor.epoch || cursor.sequence !== msg.cursor.sequence) return;
+        reattaching = null;
+        onMsg(msg); flush(); return;
       }
       if (reattaching) {
         // A restarted server greets the socket with its own default
@@ -93,9 +117,18 @@ export function connect(
         if (msg.type === 'session_activity' || msg.type === 'session_activity_snapshot') {
           onMsg(msg); return;
         }
-        if (msg.type !== 'ready' || msg.session_id !== reattaching) return;
+        if (msg.type !== 'ready' || msg.session_id !== reattaching) {
+          // Older servers ignore reconnect URL cursors; explicitly attach.
+          if (msg.type === 'ready') socket.send(JSON.stringify({ type: 'attach', session_id: reattaching }));
+          return;
+        }
         reattaching = null;
+        // The awaited snapshot landed: anything buffered while reattaching
+        // can go now, against the right session.
+        flush();
       }
+      if (cursor && !['ready', 'session_activity', 'session_activity_snapshot'].includes(msg.type)) return;
+      if (msg.type === 'ready') cursor = msg.stream_cursor ?? null;
       onMsg(msg);
     };
   }
@@ -105,24 +138,53 @@ export function connect(
   window.addEventListener('online',resync);
   open();
 
-  function sendMsg(msg: ClientMsg) {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(msg));
-    } else {
-      // Queue so a submit made during a brief drop still lands.
-      queue.push(msg);
+  function sendDirect(msg: ClientMsg): boolean {
+    if (stopped || !ws || ws.readyState !== WebSocket.OPEN) return false;
+    try { ws.send(JSON.stringify(msg)); return true; } catch { return false; }
+  }
+
+  // Ordinary sends issued while offline or mid-reattach wait here instead
+  // of being dropped. Conditional mutations (`interrupt`, `resend`, …) go
+  // through `sendImmediate` and never queue: replaying a stale one after
+  // the user moved on would clobber newer state.
+  const outbox: ClientMsg[] = [];
+  const OUTBOX_MAX = 50;
+  function flush() {
+    if (stopped || !ws || ws.readyState !== WebSocket.OPEN || reattaching) return;
+    while (outbox.length > 0) {
+      const msg = outbox.shift()!;
+      try {
+        ws.send(JSON.stringify(msg));
+      } catch {
+        outbox.unshift(msg);
+        break;
+      }
     }
+  }
+
+  function sendMsg(msg: ClientMsg): boolean {
+    if (stopped) return false;
+    if (ws && ws.readyState === WebSocket.OPEN && !reattaching) return sendDirect(msg);
+    if (outbox.length >= OUTBOX_MAX) outbox.shift();
+    outbox.push(msg);
+    return true;
+  }
+
+  function sendImmediateMsg(msg: ClientMsg): boolean {
+    if (stopped || !ws || ws.readyState !== WebSocket.OPEN || reattaching) return false;
+    try { ws.send(JSON.stringify(msg)); return true; } catch { return false; }
   }
 
   return {
     send: sendMsg,
-    sendImmediate(msg) {
-      if (!ws || ws.readyState !== WebSocket.OPEN || reattaching) return false;
-      ws.send(JSON.stringify(msg));
-      return true;
-    },
+    sendImmediate: sendImmediateMsg,
     attach(sessionId) {
-      sendMsg({ type: 'attach', session_id: sessionId });
+      cursor = null;
+      // Gate connection-scoped frames until the requested snapshot arrives.
+      // Remember the target now so a disconnect mid-attach reconnects to it.
+      session = sessionId;
+      reattaching = sessionId;
+      if (ws?.readyState === WebSocket.OPEN && !stopped) ws.send(JSON.stringify({ type: 'attach', session_id: sessionId }));
     },
     setBackgroundMode(mode) {
       sendMsg({ type: 'set_background_mode', mode });
@@ -132,6 +194,9 @@ export function connect(
     },
     close() {
       stopped = true;
+      outbox.length = 0;
+      if (reconnectTimer != null) clearTimeout(reconnectTimer);
+      reconnectTimer = null;
       document.removeEventListener('visibilitychange',resync);
       window.removeEventListener('online',resync);
       if (ws) ws.close();

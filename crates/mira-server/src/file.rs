@@ -6,7 +6,8 @@
 //! stuffing a 5 MB log into the model's context. Non-UTF-8 files are
 //! rejected — the composer only supports text attachments.
 
-use axum::extract::{Query, State};
+use crate::session_scope::ScopedState as State;
+use axum::extract::Query;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;

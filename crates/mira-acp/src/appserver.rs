@@ -878,6 +878,7 @@ fn runtime_notifications(method: &str, p: &Value) -> Vec<MiraEvent> {
                 _ => return vec![],
             };
             return vec![MiraEvent::RuntimeWork(RuntimeWork {
+                subagent: None,
                 id: format!("subagent:{id}"),
                 native_thread_id: Some(id.into()),
                 kind: WorkKind::Subagent,
@@ -902,11 +903,35 @@ fn runtime_notifications(method: &str, p: &Value) -> Vec<MiraEvent> {
                             _ => WorkStatus::Waiting,
                         };
                         MiraEvent::RuntimeWork(RuntimeWork {
+                            subagent: Some(SubagentDetails {
+                                call_id: None,
+                                reopen: method == "item/started"
+                                    && matches!(
+                                        item.get("tool").and_then(Value::as_str),
+                                        Some("spawnAgent" | "sendInput")
+                                    ),
+                                name: state
+                                    .get("agentNickname")
+                                    .or_else(|| item.get("agentNickname"))
+                                    .and_then(Value::as_str)
+                                    .map(str::to_owned),
+                                prompt: item
+                                    .get("prompt")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_owned),
+                                result: state
+                                    .get("message")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_owned),
+                            }),
                             id: format!("subagent:{id}"),
                             native_thread_id: Some(id.clone()),
                             kind: WorkKind::Subagent,
                             status,
-                            title: None,
+                            title: item
+                                .get("prompt")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned),
                         })
                     })
                     .collect();
@@ -930,6 +955,7 @@ fn runtime_notifications(method: &str, p: &Value) -> Vec<MiraEvent> {
             }
         };
         return vec![MiraEvent::RuntimeWork(RuntimeWork {
+            subagent: None,
             id: format!("goal:{thread}"),
             native_thread_id: Some(thread.into()),
             kind: WorkKind::Goal,
@@ -1723,6 +1749,7 @@ impl crate::conn::AgentCallback for Callbacks {
         let root = self.thread_id.lock().await.clone();
         let belongs_to_root = params
             .get("threadId")
+            .or_else(|| params.pointer("/thread/id"))
             .and_then(Value::as_str)
             .is_none_or(|thread| root.as_deref().is_none_or(|id| id == thread));
         if belongs_to_root {
@@ -1764,14 +1791,98 @@ impl crate::conn::AgentCallback for Callbacks {
                     let mut root = self.thread_id.lock().await;
                     if root.is_none() {
                         *root = Some(tid);
+                    } else if root.as_deref() != Some(&tid) {
+                        drop(root);
+                        let thread = params.get("thread").unwrap_or(&params);
+                        let _ = self
+                            .tx
+                            .send(NormalizedEvent {
+                                source: variant("subagent"),
+                                event: MiraEvent::RuntimeWork(crate::runtime::RuntimeWork {
+                                    id: format!("subagent:{tid}"),
+                                    native_thread_id: Some(tid),
+                                    kind: crate::runtime::WorkKind::Subagent,
+                                    status: crate::runtime::WorkStatus::Pending,
+                                    title: thread
+                                        .get("title")
+                                        .and_then(Value::as_str)
+                                        .map(str::to_owned),
+                                    subagent: Some(crate::runtime::SubagentDetails {
+                                        name: thread
+                                            .get("agentNickname")
+                                            .or_else(|| thread.get("agentRole"))
+                                            .and_then(Value::as_str)
+                                            .map(str::to_owned),
+                                        ..Default::default()
+                                    }),
+                                }),
+                            })
+                            .await;
                     }
                 }
                 AppServerAction::Event(mut e) => {
+                    if !belongs_to_root {
+                        if let MiraEvent::RuntimeTurn(turn) = &e.event {
+                            let _ = self
+                                .tx
+                                .send(NormalizedEvent {
+                                    source: variant("subagent"),
+                                    event: MiraEvent::RuntimeWork(crate::runtime::RuntimeWork {
+                                        subagent: Some(crate::runtime::SubagentDetails {
+                                            reopen: turn.running,
+                                            ..Default::default()
+                                        }),
+                                        id: format!("subagent:{}", turn.native_thread_id),
+                                        native_thread_id: Some(turn.native_thread_id.clone()),
+                                        kind: crate::runtime::WorkKind::Subagent,
+                                        status: if turn.running {
+                                            crate::runtime::WorkStatus::Running
+                                        } else if method == "turn/aborted"
+                                            || params
+                                                .pointer("/turn/status")
+                                                .and_then(Value::as_str)
+                                                == Some("interrupted")
+                                        {
+                                            crate::runtime::WorkStatus::Cancelled
+                                        } else if params
+                                            .pointer("/turn/status")
+                                            .and_then(Value::as_str)
+                                            == Some("failed")
+                                        {
+                                            crate::runtime::WorkStatus::Failed
+                                        } else {
+                                            crate::runtime::WorkStatus::Completed
+                                        },
+                                        title: None,
+                                    }),
+                                })
+                                .await;
+                        }
+                    }
                     // Child narration belongs to the child's thread; only
                     // its normalized lifecycle contributes to root ownership.
                     // Its spend still counts: a subagent's tokens are real
                     // usage, booked under the child thread's own id.
                     if !belongs_to_root
+                        && matches!(
+                            &e.event,
+                            MiraEvent::AssistantText { .. }
+                                | MiraEvent::AssistantSnapshot { .. }
+                                | MiraEvent::AgentThought { .. }
+                                | MiraEvent::ToolCall(_)
+                                | MiraEvent::ToolCallUpdate(_)
+                                | MiraEvent::ToolOutputDelta { .. }
+                        )
+                    {
+                        let Some(thread) = params.get("threadId").and_then(Value::as_str) else {
+                            continue;
+                        };
+                        e.event = MiraEvent::SubagentEvent {
+                            work: None,
+                            native_thread_id: thread.into(),
+                            event: Box::new(e.event),
+                        };
+                    } else if !belongs_to_root
                         && !matches!(
                             &e.event,
                             MiraEvent::RuntimeTurn(_)
@@ -3651,9 +3762,20 @@ mod thread_isolation_tests {
         assert_eq!(root.lock().await.as_deref(), Some("root"));
         assert_eq!(active.lock().await.as_deref(), Some("root-turn"));
         assert!(ends.try_recv().is_err());
+        let mut child_text_seen = false;
         while let Ok(event) = events.try_recv() {
             assert!(!matches!(event.event, MiraEvent::AssistantText { .. }));
+            if let MiraEvent::SubagentEvent {
+                native_thread_id,
+                event,
+                ..
+            } = event.event
+            {
+                assert_eq!(native_thread_id, "child");
+                child_text_seen |= matches!(*event, MiraEvent::AssistantText { ref text, .. } if text == "child narration");
+            }
         }
+        assert!(child_text_seen, "child narration must reach its own panel");
         callbacks
             .on_notification(
                 "turn/completed",

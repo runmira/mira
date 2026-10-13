@@ -1,15 +1,15 @@
-import { useEffect, useLayoutEffect } from 'react';
-import { getAgentSettings, getSettings, listSessions, putAgentSettings } from '../api';
+import { useEffect } from 'react';
+import { getAgentSettings,listSessions,putAgentSettings } from '../api';
 import { agentUpdateNotice } from '../components/InfoNoticeHost';
 import { type ToolPaneKind } from '../components/panes/toolPanes';
 import { CommandPalette } from '../lazyViews';
 import { migrateLegacyAgentConfigs } from '../lib/acpAgents';
 import { attachFilesToComposer } from '../lib/attachBridge';
-import { getCustomKeybindingRules, resolveShortcutCommand } from '../lib/keybindings';
+import { getCustomKeybindingRules,resolveShortcutCommand } from '../lib/keybindings';
 import { useModalFocus } from '../lib/mobile';
-import { applyReduceMotion, getBoolPref, PREF_KEYS } from '../lib/prefs';
+import { applyReduceMotion,getBoolPref,PREF_KEYS } from '../lib/prefs';
 import { ensureServerPricing } from '../lib/usage';
-import { titleFromEntries, type MsgEntry } from '../transcript/entries';
+import { titleFromEntries,type MsgEntry } from '../transcript/entries';
 import type { AcpAgentStatus } from '../types';
 import { connect } from '../ws';
 
@@ -18,34 +18,31 @@ export function useWorkspaceEffects(
   context: Pick<
     WorkspaceRuntime,
     | 'pingPrimedRef'
-    | 'queuedBySessionRef'
-    | 'queuedBySession'
-    | 'entries'
+    | 'outlineEntries'
     | 'approvalStarted'
-    | 'setApprovalRules'
+    | 'recordApprovalRules'
     | 'setRuleEditorCallId'
     | 'engines'
     | 'acpAgentsRef'
-    | 'setAcpAgents'
     | 'completedUpdatesRef'
     | 'pushInfoNotice'
     | 'loadEngines'
     | 'acpAgents'
     | 'acpUsage'
-    | 'busyRef'
-    | 'busy'
+    | 'isTurnRunning'
     | 'mainView'
     | 'setMainView'
     | 'githubReturn'
     | 'setSettingsSection'
     | 'openSettings'
+    | 'configured'
     | 'phone'
     | 'drawerOpen'
     | 'drawerRef'
     | 'closeDrawer'
     | 'attachSession'
     | 'setSidebarRefresh'
-    | 'shortcutEntriesRef'
+    | 'getTranscript'
     | 'keybindings'
     | 'shortcutContext'
     | 'setTerminalOpen'
@@ -57,19 +54,10 @@ export function useWorkspaceEffects(
     | 'flushTokens'
     | 'setStatus'
     | 'wsRef'
-    | 'nativeRafRef'
-    | 'tokenRafRef'
-    | 'nativeFramesRef'
-    | 'tokenBufRef'
-    | 'setConfigured'
-    | 'setProviderName'
+    | 'appRuntime'
+    | 'streams'
     | 'paneRef'
-    | 'readingAnchorRef'
-    | 'followRef'
-    | 'lastScrollInputRef'
-    | 'thinking'
     | 'sessionId'
-    | 'setNowTick'
     | 'chatTitleRef'
     | 'sessionTitle'
     | 'firstPendingCallId'
@@ -80,13 +68,12 @@ export function useWorkspaceEffects(
     | 'toolTabs'
     | 'setActiveAgentTab'
     | 'chatShortcutRequest'
-    | 'sessionIdRef'
-    | 'setEntries'
+    | 'getSessionId'
+    | 'updateTranscript'
     | 'openToolPane'
     | 'activeAgentTab'
     | 'closeAnyTab'
-    | 'setBusy'
-    | 'setThinking'
+    | 'clearThinkingIdle'
     | 'setPanelFilePickerOpen'
     | 'closeSubagentPanel'
     | 'onNewChat'
@@ -100,34 +87,31 @@ export function useWorkspaceEffects(
 ) {
   const {
     pingPrimedRef,
-    queuedBySessionRef,
-    queuedBySession,
-    entries,
+    outlineEntries,
     approvalStarted,
-    setApprovalRules,
+    recordApprovalRules,
     setRuleEditorCallId,
     engines,
     acpAgentsRef,
-    setAcpAgents,
     completedUpdatesRef,
     pushInfoNotice,
     loadEngines,
     acpAgents,
     acpUsage,
-    busyRef,
-    busy,
+    isTurnRunning,
     mainView,
     setMainView,
     githubReturn,
     setSettingsSection,
     openSettings,
+    configured,
     phone,
     drawerOpen,
     drawerRef,
     closeDrawer,
     attachSession,
     setSidebarRefresh,
-    shortcutEntriesRef,
+    getTranscript,
     keybindings,
     shortcutContext,
     setTerminalOpen,
@@ -139,19 +123,10 @@ export function useWorkspaceEffects(
     flushTokens,
     setStatus,
     wsRef,
-    nativeRafRef,
-    tokenRafRef,
-    nativeFramesRef,
-    tokenBufRef,
-    setConfigured,
-    setProviderName,
+    appRuntime,
+    streams,
     paneRef,
-    readingAnchorRef,
-    followRef,
-    lastScrollInputRef,
-    thinking,
     sessionId,
-    setNowTick,
     chatTitleRef,
     sessionTitle,
     firstPendingCallId,
@@ -162,13 +137,12 @@ export function useWorkspaceEffects(
     toolTabs,
     setActiveAgentTab,
     chatShortcutRequest,
-    sessionIdRef,
-    setEntries,
+    getSessionId,
+    updateTranscript,
     openToolPane,
     activeAgentTab,
     closeAnyTab,
-    setBusy,
-    setThinking,
+    clearThinkingIdle,
     setPanelFilePickerOpen,
     closeSubagentPanel,
     onNewChat,
@@ -210,25 +184,24 @@ export function useWorkspaceEffects(
     };
   }, []);
 
-  queuedBySessionRef.current = queuedBySession;
 
   useEffect(() => {
     const pending = new Set(
-      entries.flatMap((entry) =>
+      outlineEntries.flatMap((entry) =>
         entry.kind === 'tool' && entry.status === 'pending' ? [entry.call.id] : [],
       ),
     );
     for (const id of Object.keys(approvalStarted.current)) {
       if (!pending.has(id)) delete approvalStarted.current[id];
     }
-    setApprovalRules((previous) => {
+    recordApprovalRules((previous) => {
       const retained = Object.entries(previous).filter(([id]) => pending.has(id));
       return retained.length === Object.keys(previous).length
         ? previous
         : Object.fromEntries(retained);
     });
     setRuleEditorCallId((previous) => (previous && pending.has(previous) ? previous : null));
-  }, [entries]);
+  }, [outlineEntries]);
 
   // The agent list, from the engines list: one row per agent driver (its
   // default instance), with the full status the server probed. Agent update
@@ -242,7 +215,6 @@ export function useWorkspaceEffects(
     const notice =
       acpAgentsRef.current.length > 0 ? agentUpdateNotice(acpAgentsRef.current, next) : null;
     acpAgentsRef.current = next;
-    setAcpAgents(next);
     if (notice && (!notice.updateAgent || !completedUpdatesRef.current.has(notice.updateAgent)))
       pushInfoNotice(notice);
     completedUpdatesRef.current.clear();
@@ -279,8 +251,6 @@ export function useWorkspaceEffects(
       );
     }
   }, [acpUsage]);
-
-  busyRef.current = busy;
 
   // ⌘K is usually how the palette opens, so there's no hover to preload
   // on; fetch it once the first load has settled.
@@ -336,7 +306,6 @@ export function useWorkspaceEffects(
     return () => window.removeEventListener('mira:sessions-changed', refresh);
   }, []);
 
-  shortcutEntriesRef.current = entries;
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -349,14 +318,7 @@ export function useWorkspaceEffects(
       const command = resolveShortcutCommand(e, keybindings, { context: shortcutContext() });
       if (command !== 'terminal.toggle') return;
       e.preventDefault();
-      setTerminalOpen((v) => {
-        try {
-          localStorage.setItem('mira.terminal.open', v ? '0' : '1');
-        } catch {
-          /* private mode */
-        }
-        return !v;
-      });
+      setTerminalOpen(value => !value);
     };
     // Capture phase: the shortcut must work while xterm has focus.
     window.addEventListener('keydown', onKey, true);
@@ -396,6 +358,7 @@ export function useWorkspaceEffects(
     const c = connect(onMessage, (nextStatus) => {
       queueMutationsRef.current.setConnected(nextStatus === 'open');
       if (nextStatus !== 'open') {
+        appRuntime.requests.disconnected();
         flushNativeFrames();
         flushTokens();
       }
@@ -405,71 +368,18 @@ export function useWorkspaceEffects(
     return () => {
       queueMutationsRef.current.setConnected(false);
       c.close();
-      if (nativeRafRef.current != null) cancelAnimationFrame(nativeRafRef.current);
-      if (tokenRafRef.current != null) cancelAnimationFrame(tokenRafRef.current);
-      nativeFramesRef.current = [];
-      tokenBufRef.current = '';
+      clearThinkingIdle();
+      streams.flush();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
-    getSettings()
-      .then((v) => {
-        setConfigured(v.configured);
-        setProviderName(v.default_provider ?? null);
-        if (!v.configured) openSettings();
-      })
-      .catch(() => setConfigured(false));
-    // openSettings is stable within this component's lifetime; deps
-    // deliberately empty so this only runs once on mount.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    const view = appRuntime.queryClient.getQueryData<import('../types').SettingsView>(appRuntime.resources.key('settings'));
+    if (view && !view.configured) openSettings();
+  }, [configured, appRuntime, openSettings]);
 
-  /** True while the user is actively scrolling the transcript.
- *
- *  Follow-mode pinning used to fire on every streamed token, which fought
- *  the pointer: the reader would scroll down through a section and the
- *  next token would yank the pane back to the bottom, so the text they
- *  were reading slid away instead of staying put. Pinning yields for the
- *  duration of a scroll gesture and resumes once it settles. */
-const scrollSettlesAfterMs = 700;
-function isScrolling(lastScrollInput: number): boolean {
-  return Date.now() - lastScrollInput < scrollSettlesAfterMs;
-}
-
-useLayoutEffect(() => {
-    const el = paneRef.current;
-    if (!el) return;
-    if (readingAnchorRef.current != null) {
-      el.scrollTop = readingAnchorRef.current;
-      readingAnchorRef.current = null;
-    } else if (followRef.current && !isScrolling(lastScrollInputRef.current)) {
-      el.scrollTop = el.scrollHeight;
-    }
-  }, [entries, thinking]);
-
-  useEffect(() => {
-    const pane = paneRef.current;
-    const column = pane?.querySelector('[data-transcript-column]');
-    if (!pane || !column) return;
-    const observer = new ResizeObserver(() => {
-      if (followRef.current && !isScrolling(lastScrollInputRef.current))
-        pane.scrollTop = pane.scrollHeight;
-    });
-    observer.observe(column);
-    return () => observer.disconnect();
-  }, [sessionId, entries.length === 0]);
-
-  // Tick the live counter while a turn is in flight. Stopping the interval
-  // as soon as `busy` clears avoids a needless setInterval that runs forever.
-  useEffect(() => {
-    if (!busy) return;
-    const id = window.setInterval(() => setNowTick((n) => n + 1), 1000);
-    return () => window.clearInterval(id);
-  }, [busy]);
-
-  chatTitleRef.current = sessionTitle ?? titleFromEntries(entries);
+  chatTitleRef.current = sessionTitle ?? titleFromEntries(outlineEntries);
 
   // Apply the reduce-motion class on boot (Settings → General → Appearance).
   useEffect(() => {
@@ -557,10 +467,10 @@ useLayoutEffect(() => {
       if (command.startsWith('chat.slot')) {
         e.preventDefault();
         const request = ++chatShortcutRequest.current;
-        const origin = sessionIdRef.current;
+        const origin = getSessionId();
         void listSessions({ all: true })
           .then((chats) => {
-            if (request !== chatShortcutRequest.current || origin !== sessionIdRef.current) return;
+            if (request !== chatShortcutRequest.current || origin !== getSessionId()) return;
             const chat = chats
               .filter((chat) => !chat.parent_id)
               .sort((a, b) => b.updated_at - a.updated_at)[Number(command.at(-1)) - 1];
@@ -570,7 +480,7 @@ useLayoutEffect(() => {
             }
           })
           .catch((error) =>
-            setEntries((prev) => [
+            updateTranscript((prev) => [
               ...prev,
               { kind: 'error', text: `Could not switch chats: ${error.message}` },
             ]),
@@ -622,24 +532,21 @@ useLayoutEffect(() => {
         case 'composer.attach':
           e.preventDefault();
           setMainView('chat');
-          requestAnimationFrame(() =>
+          appRuntime.service.frame(() =>
             document.querySelector<HTMLInputElement>('[data-composer-attachments]')?.click(),
           );
           break;
         case 'composer.focus':
           e.preventDefault();
           setMainView('chat');
-          requestAnimationFrame(() =>
+          appRuntime.service.frame(() =>
             document.querySelector<HTMLElement>('.mention-input[contenteditable=true]')?.focus(),
           );
           break;
         case 'chat.stop':
-          if (mainView !== 'chat' || !busyRef.current) return;
+          if (mainView !== 'chat' || !isTurnRunning()) return;
           e.preventDefault();
-          wsRef.current?.send({ type: 'interrupt' });
-          setBusy(false);
-          busyRef.current = false;
-          setThinking(false);
+          appRuntime.requestStop();
           break;
         case 'panel.files':
         case 'panel.processes':
@@ -661,7 +568,7 @@ useLayoutEffect(() => {
         case 'chat.copyResponse':
         case 'chat.copyCode': {
           if (mainView !== 'chat') return;
-          const responses = shortcutEntriesRef.current
+          const responses = getTranscript()
             .filter(
               (entry): entry is MsgEntry =>
                 entry.kind === 'msg' && entry.msg.role === 'assistant' && !!entry.msg.content,
@@ -676,7 +583,7 @@ useLayoutEffect(() => {
             void navigator.clipboard
               .writeText(text)
               .catch(() =>
-                setEntries((prev) => [
+                updateTranscript((prev) => [
                   ...prev,
                   { kind: 'error', text: 'Could not copy to the clipboard.' },
                 ]),
@@ -714,8 +621,8 @@ useLayoutEffect(() => {
     let live = browserPing !== browserPingSeen.current;
     browserPingSeen.current = browserPing;
     let turnStart = -1;
-    for (let i = entries.length - 1; i >= 0; i--) {
-      const e = entries[i];
+    for (let i = outlineEntries.length - 1; i >= 0; i--) {
+      const e = outlineEntries[i];
       if (e.kind === 'msg' && e.msg.role === 'user') {
         turnStart = i;
         break;
@@ -734,6 +641,6 @@ useLayoutEffect(() => {
     browserShownFor.current = turn;
     if (getBoolPref(PREF_KEYS.browserAutoOpen, true)) openToolPane('browser');
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [entries, browserPing]);
+  }, [outlineEntries, browserPing]);
   return {};
 }

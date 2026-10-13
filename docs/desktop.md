@@ -45,7 +45,9 @@ sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appi
 
 The web UI reads `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY`
 at build time, from the environment or
-`crates/mira-server/frontend/.env`.
+`crates/mira-server/frontend/.env.local` (gitignored). Restart/rebuild after
+changing these values. Use the project URL and publishable key, not a service-role
+key.
 
 Then, from the repo root:
 
@@ -57,6 +59,9 @@ scripts/build-desktop.sh         # release bundles
 The script builds the web UI, builds `mira`, copies it to
 `apps/desktop/binaries/mira-<target-triple>` (where Tauri's bundler looks
 for the sidecar), and then runs `cargo tauri dev` or `cargo tauri build`.
+Dev mode sets `MIRA_BIN` to the freshly built server so an older executable on
+PATH cannot supply stale frontend assets. `--channel alpha` also applies the
+alpha app identity and callback scheme in dev mode.
 Release bundles land in `apps/desktop/target/release/bundle/`: `.app` and
 `.dmg` on macOS, `.msi` and `.exe` on Windows, `.deb`, `.rpm` and
 `.AppImage` on Linux.

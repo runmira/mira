@@ -1,11 +1,12 @@
+import { useAppRuntime } from '../state/RuntimeProvider';
+import { Dialog,DialogContent,DialogTitle } from '@/components/ui/dialog';
 import { useEffect } from 'react';
-import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { restoreCheckpoint } from '../api';
 import { ApprovalDialog } from '../components/ApprovalDialog';
 import { FilePicker } from '../components/FilePicker';
 import { LazyBoundary } from '../components/LazyBoundary';
 import { ReviewPanel } from '../components/ReviewPanel';
-import { CommandPalette, ContextInspector, FolderPicker, ImportChats, ReportProblem } from '../lazyViews';
+import { CommandPalette,ContextInspector,FolderPicker,ImportChats,ReportProblem } from '../lazyViews';
 import { shortNum } from '../lib/usage';
 import { cn } from '../lib/utils';
 import type { WorkspaceRuntime } from './WorkspaceRuntime';
@@ -35,7 +36,7 @@ export function WorkspaceDialogs(
     | 'acpDriver'
     | 'compactAcpAgent'
     | 'onCompact'
-    | 'setEntries'
+    | 'updateTranscript'
     | 'paletteOpenMounted'
     | 'paletteOpen'
     | 'setPaletteOpen'
@@ -53,6 +54,7 @@ export function WorkspaceDialogs(
     | 'setReviewPanelOpen'
   >,
 ) {
+  const requestRuntime = useAppRuntime();
   const {
     pendingAcpMode,
     agentPostures,
@@ -77,7 +79,7 @@ export function WorkspaceDialogs(
     acpDriver,
     compactAcpAgent,
     onCompact,
-    setEntries,
+    updateTranscript,
     paletteOpenMounted,
     paletteOpen,
     setPaletteOpen,
@@ -204,7 +206,7 @@ export function WorkspaceDialogs(
             onDropped={(callId, d) => {
               // The tool card shows what the model now sees, and a status line
               // records the drop where it happened.
-              setEntries((prev) => [
+              updateTranscript((prev) => [
                 ...prev.map((e) =>
                   e.kind === 'tool' && e.call.id === callId && e.result
                     ? {
@@ -284,7 +286,7 @@ export function WorkspaceDialogs(
             onChoose: (id) => {
               const ask = restoreAsk;
               setRestoreAsk(null);
-              if (id === 'restore') void doRestore(() => restoreCheckpoint(ask.ref), 'Restored');
+              if (id === 'restore') void doRestore(() => restoreCheckpoint(ask.ref, requestRuntime.sessionState.get().active ?? undefined), 'Restored');
             },
           }}
         />

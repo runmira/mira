@@ -18,11 +18,12 @@
 //! Ports come from `lsof`, so they show on macOS and Linux; elsewhere the
 //! list is empty and the processes still work.
 
+use crate::session_scope::ScopedState as State;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;

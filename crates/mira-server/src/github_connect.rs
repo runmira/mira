@@ -5,7 +5,8 @@
 //! - `POST {repo?}` connects it, using the provider, model and key from
 //!   Settings and the `GITHUB_TOKEN` key.
 
-use axum::extract::{Query, State};
+use crate::session_scope::ScopedState as State;
+use axum::extract::Query;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;

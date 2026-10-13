@@ -1,13 +1,19 @@
+import { useMemo } from 'react';
 import { EntryBoundary } from '../components/EntryBoundary';
 import { MessageActionsContext } from '../components/transcript/EntryView';
 import { TurnView } from '../components/transcript/TurnView';
 import { VirtualTranscript } from '../components/VirtualTranscript';
+import { groupByTurn } from '../lib/turnActivity';
+import { useAppRuntime,useLiveEntries } from '../state/RuntimeProvider';
 import type { WorkspaceRuntime } from './WorkspaceRuntime';
 export function WorkspaceTranscript(
   context: Pick<
     WorkspaceRuntime,
     | 'messageActions'
     | 'paneRef'
+    | 'followRef'
+    | 'lastScrollInputRef'
+    | 'readingAnchorRef'
     | 'sessionId'
     | 'historyCursor'
     | 'loadOlderHistory'
@@ -35,13 +41,15 @@ export function WorkspaceTranscript(
     | 'changeRecovery'
   >,
 ) {
+  const runtime = useAppRuntime();
+  const entries = useLiveEntries();
+  const turns = useMemo(() => groupByTurn(entries), [entries]);
   const {
     messageActions,
     paneRef,
     sessionId,
     historyCursor,
     loadOlderHistory,
-    turns,
     historyOffsetRef,
     turnDiffs,
     turnTimings,
@@ -68,7 +76,10 @@ export function WorkspaceTranscript(
     <MessageActionsContext.Provider value={messageActions}>
       <VirtualTranscript
         pane={paneRef}
-        identity={sessionId ?? 'new'}
+        follow={context.followRef}
+        lastInput={context.lastScrollInputRef}
+        readingAnchor={context.readingAnchorRef}
+        identity={JSON.stringify(runtime.resourceKey('scroll', sessionId || 'new'))}
         hasOlder={!!historyCursor}
         onNeedOlder={loadOlderHistory}
       >

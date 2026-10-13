@@ -1,8 +1,8 @@
 import type { OptionDescriptor } from '../api';
-import { type MessageRef, type Restored } from '../api';
+import { type MessageRef,type Restored } from '../api';
 import { type AskUserDecision } from '../components/AskUserCard';
 import type { PaletteAction } from '../components/CommandPalette';
-import { type PendingApproval, type QueuedComposerMessage } from '../components/Composer';
+import { type PendingApproval,type QueuedComposerMessage } from '../components/Composer';
 import { type InfoNotice } from '../components/InfoNoticeHost';
 import type { ActivityTurn } from '../components/panes/ActivityPane';
 import { type ToolPaneKind } from '../components/panes/toolPanes';
@@ -13,21 +13,21 @@ import { type RecoveryAction } from '../components/UsageRecoveryCard';
 import type { UsageRingData } from '../components/UsageRing';
 import type { PostureOption } from '../lib/agentPostures';
 import type { BackgroundProcess } from '../lib/backgroundProcesses';
-import { shortcutLabelForCommand, type ShortcutMatchContext } from '../lib/keybindings';
+import { shortcutLabelForCommand,type ShortcutMatchContext } from '../lib/keybindings';
 import { type SessionActivityUpdate } from '../lib/sessionActivity';
 import type { Turn } from '../lib/turnActivity';
 import { type Entry } from '../transcript/entries';
 import type {
-  AcpConfigOption,
-  ApprovalScope,
-  AskUserProposal,
-  DiffPreview,
-  Mode,
-  PlanProposal,
-  PlanStep,
-  ServerMsg,
-  SessionEngine,
-  SettingsView,
+AcpConfigOption,
+ApprovalScope,
+AskUserProposal,
+DiffPreview,
+Mode,
+PlanProposal,
+PlanStep,
+ServerMsg,
+SessionEngine,
+SettingsView,
 } from '../types';
 import type { useWorkspaceState } from './useWorkspaceState';
 
@@ -82,7 +82,6 @@ export interface WorkspaceRuntime extends WorkspaceState {
   jumpToLatest: () => void;
   onPaneScroll: () => void;
   updateSessionActivity: (update: SessionActivityUpdate) => void;
-  drainTokens: () => void;
   flushTokens: () => void;
   startTurnUsage: (turn: number) => void;
   flushNativeFrames: () => void;
@@ -107,11 +106,11 @@ export interface WorkspaceRuntime extends WorkspaceState {
   pendingQuestions: { callId: string; proposal: AskUserProposal }[];
   firstPendingCallId: string;
   queuedFor: (id?: string) => QueuedComposerMessage[];
-  setQueuedForSession: (
+  updateSessionQueue: (
     id: string,
     update: (items: QueuedComposerMessage[]) => QueuedComposerMessage[],
   ) => void;
-  queueMessage: (text: string, images?: { media_type: string; data: string }[]) => void;
+  queueMessage: (text: string, images?: { media_type: string; data: string }[]) => boolean;
   removeQueuedMessage: (id: string) => void;
   editQueuedMessage: (item: QueuedComposerMessage, text: string) => Promise<void>;
   changeRecovery: (id: string, action: RecoveryAction) => Promise<void>;
@@ -123,8 +122,7 @@ export interface WorkspaceRuntime extends WorkspaceState {
     transmit?: boolean,
     inputId?: string,
   ) => void;
-  onSend: (text: string, images?: { media_type: string; data: string }[]) => void;
-  drainQueuedMessage: () => void;
+  onSend: (text: string, images?: { media_type: string; data: string }[]) => boolean;
   messageRefAt: (userIdx: number) => MessageRef | null;
   askRestore: (userIdx: number) => Promise<void>;
   forkAt: (userIdx: number) => Promise<void>;

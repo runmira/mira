@@ -38,8 +38,8 @@ export type Props = {
   usage: UsageTotals | null;
   /** The provider's latest rate-limit reading, when it reports one. */
   rateLimit?: RateLimitReading | null;
-  onSend: (text: string, images?: ImageData[]) => void;
-  onQueueMessage?: (text: string, images?: ImageData[]) => void;
+  onSend: (text: string, images?: ImageData[]) => boolean | void;
+  onQueueMessage?: (text: string, images?: ImageData[]) => boolean | void;
   queuedMessages?: QueuedComposerMessage[];
   onRemoveQueuedMessage?: (id: string) => void;
   onEditQueuedMessage?: (item: QueuedComposerMessage, text: string) => Promise<void>;
@@ -167,6 +167,8 @@ export type Attachment = { path: string; content: string; bytes: number };
 export type ImageData = import('../../types').ImageAttachment;
 
 export type QueuedComposerMessage = {
+  /** Set only by an authoritative queue snapshot. */
+  accepted?: boolean;
   fingerprint?: string;
   steering?: boolean;
   error?: string;

@@ -1,0 +1,55 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import React, { act } from 'react';
+import { createRoot } from 'react-dom/client';
+import { Window } from 'happy-dom';
+import { bundle } from './helpers/bundle.mjs';
+const { thinkingPreview, thinkingScrollEdges, ThinkingPreview, ThoughtBlock } = await bundle(`
+export { thinkingPreview, thinkingScrollEdges } from './src/lib/thinkingPreview';
+export { ThinkingPreview } from './src/components/ThinkingPreview';
+export { ThoughtBlock } from './src/components/ThoughtBlock';
+`, { 'src/components/ui/Collapse': `export function Collapse({open,children}) { return open ? children : null; }` });
+const window = new Window({url:'https://mira.test'});
+globalThis.window=window;globalThis.document=window.document;globalThis.IS_REACT_ACT_ENVIRONMENT=true;
+const observers=new Set();
+globalThis.ResizeObserver=class { constructor(cb){this.cb=cb;observers.add(this);} observe(){} disconnect(){observers.delete(this);} };
+test('collapsed summary follows the newest nonempty line and keeps its identity during token updates',()=>{
+  assert.deepEqual(thinkingPreview('old\r\nnew\r\n  '),{key:'4',text:'new'});
+  assert.equal(thinkingPreview('old\nnew').key,thinkingPreview('old\nnew tokens').key);
+  assert.equal(thinkingPreview('old\nnew tokens').text,'new tokens');
+  assert.equal(thinkingPreview('  ').text,'');
+  assert.deepEqual(thinkingScrollEdges({scrollTop:0,scrollHeight:240,clientHeight:240}),{top:false,bottom:false});
+  assert.deepEqual(thinkingScrollEdges({scrollTop:100,scrollHeight:800,clientHeight:240}),{top:true,bottom:true});
+});
+test('collapsed live preview scrolls to new tokens without replacing the observer per token',async()=>{
+  const node=document.createElement('div');const root=createRoot(node);
+  await act(()=>root.render(React.createElement(ThinkingPreview,{content:'old\nnew'})));
+  const viewport=node.querySelector('[data-thinking-preview]');
+  Object.defineProperty(viewport,'scrollWidth',{value:800,configurable:true});
+  Object.defineProperty(viewport,'clientWidth',{value:200,configurable:true});
+  const count=observers.size;
+  await act(()=>root.render(React.createElement(ThinkingPreview,{content:'old\nnew newest tokens'})));
+  assert.equal(viewport.scrollLeft,800);
+  assert.equal(viewport.textContent,'new newest tokens');
+  assert.ok(viewport.style.maskImage.includes('16px'));
+  assert.equal(observers.size,count);
+  await act(()=>root.unmount());assert.equal(observers.size,0);
+});
+test('thinking stays capped after completion, preserves manual reading, and contains scrolling',async()=>{
+  const node=document.createElement('div');const root=createRoot(node);
+  await act(()=>root.render(React.createElement(ThoughtBlock,{content:'First\nSecond',live:true})));
+  await act(()=>node.querySelector('button').click());
+  let body=node.querySelector('[data-thinking-scroll]');
+  assert.ok(body.className.includes('max-h-60'));
+  Object.defineProperty(body,'scrollHeight',{value:1000,configurable:true});
+  Object.defineProperty(body,'clientHeight',{value:240,configurable:true});
+  body.scrollTop=100;
+  await act(()=>body.dispatchEvent(new window.Event('scroll')));
+  await act(()=>root.render(React.createElement(ThoughtBlock,{content:'First\nSecond\nThird',live:true})));
+  assert.equal(body.scrollTop,100,'streaming cannot pull a reader away from older thinking');
+  await act(()=>root.render(React.createElement(ThoughtBlock,{content:'First\nSecond\nThird',live:false})));
+  body=node.querySelector('[data-thinking-scroll]');
+  assert.ok(body.className.includes('max-h-60')&&body.className.includes('overflow-y-auto'));
+  assert.ok(body.className.includes('overscroll-contain'));
+  await act(()=>root.unmount());assert.equal(observers.size,0);
+});

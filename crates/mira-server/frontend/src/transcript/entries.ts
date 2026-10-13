@@ -42,6 +42,7 @@ import type {
  *  `subagent_done` frame lands or the parent's ToolEnd for this call
  *  arrives (whichever is first). */
 export type SubagentStreamState = {
+  externalWork?: import('../types').RuntimeWork;
   parentCallId: string;
   agentId?: string;
   model?: string;
@@ -60,9 +61,12 @@ export type SubagentStreamState = {
   pendingReview: null | { promptId: string; summary: string };
 };
 
-export let toolActivitySequence = 0;
+function nextToolActivity(entries: Entry[]): number {
+  return entries.reduce((latest, entry) => entry.kind === 'tool' ? Math.max(latest, entry.activityAt ?? 0) : latest, 0) + 1;
+}
 
 export type ToolEntry = {
+  externalWork?: import('../types').RuntimeWork;
   activityAt?: number;
   kind: 'tool';
   runtimeDelivery?: Extract<ServerMsg, { type: 'runtime_request_updated' }>['request']['delivery'];
@@ -256,9 +260,9 @@ export function stripHookContext(content: string | null | undefined): string | n
 
 /** Close the newest running compaction card (or add a finished one, when
  *  the start was missed: a reload mid-compaction, an older server). */
-export function finishCompaction(prev: Entry[], patch: Partial<CompactionEntry>): Entry[] {
+export function finishCompaction(prev: Entry[], patch: Partial<CompactionEntry>, at = Date.now()): Entry[] {
   const i = prev.map((e) => e.kind === 'compact' && e.state === 'running').lastIndexOf(true);
-  const done = { endedAt: Date.now(), ...patch };
+  const done = { endedAt: at, ...patch };
   if (i < 0) {
     return [...prev, { kind: 'compact', summarized: null, summary: null, ...done } as Entry];
   }
@@ -395,12 +399,12 @@ export function updateSubagent(
   return next;
 }
 
-export function appendReasoning(prev: Entry[], text: string): Entry[] {
+export function appendReasoning(prev: Entry[], text: string, at = Date.now()): Entry[] {
   const last = prev[prev.length - 1];
   if (last && last.kind === 'thought' && last.live) {
     return [...prev.slice(0, -1), { ...last, text: last.text + text }];
   }
-  return [...prev, { kind: 'thought', text, live: true, startedAt: Date.now(), endedAt: null }];
+  return [...prev, { kind: 'thought', text, live: true, startedAt: at, endedAt: null }];
 }
 
 /** A turn is over: nothing in it can still be running or awaiting an
@@ -442,17 +446,18 @@ export function settleTools(prev: Entry[]): Entry[] {
 }
 
 /** Close the live thought block, if any — the model moved on. */
-export function sealThought(prev: Entry[]): Entry[] {
+export function sealThought(prev: Entry[], at = Date.now()): Entry[] {
   const last = prev[prev.length - 1];
   if (!last || last.kind !== 'thought' || !last.live) return prev;
-  return [...prev.slice(0, -1), { ...last, live: false, endedAt: Date.now() }];
+  return [...prev.slice(0, -1), { ...last, live: false, endedAt: at }];
 }
 
-export function appendToken(prevRaw: Entry[], text: string): Entry[] {
-  const prev = sealThought(prevRaw);
+export function appendToken(prevRaw: Entry[], text: string, at = Date.now()): Entry[] {
+  const prev = sealThought(prevRaw, at);
   const last = prev[prev.length - 1];
   if (last && last.kind === 'msg' && last.msg.role === 'assistant') {
     const updated: Entry = {
+      ...last,
       kind: 'msg',
       msg: { ...last.msg, content: (last.msg.content ?? '') + text },
     };
@@ -460,7 +465,7 @@ export function appendToken(prevRaw: Entry[], text: string): Entry[] {
   }
   return [
     ...prev,
-    { kind: 'msg', msg: { role: 'assistant', content: text, created_at: Date.now() } },
+    { kind: 'msg', msg: { role: 'assistant', content: text, created_at: at } },
   ];
 }
 
@@ -480,32 +485,32 @@ export type NativeFrame = Extract<
   }
 >;
 
-export function applyNativeFrame(entries: Entry[], frame: NativeFrame): Entry[] {
+export function applyNativeFrame(entries: Entry[], frame: NativeFrame, at = Date.now()): Entry[] {
   switch (frame.type) {
     case 'acp_text':
-      return appendAcpText(entries, frame.text, frame.message_id);
+      return appendAcpText(entries, frame.text, frame.message_id, at);
     case 'acp_text_snapshot':
-      return appendNativeText(sealThought(entries), frame.text, frame.message_id, true);
+      return appendNativeText(sealThought(entries, at), frame.text, frame.message_id, true);
     case 'acp_thought':
-      return appendAcpThought(entries, frame.text);
+      return appendAcpThought(entries, frame.text, at);
     case 'acp_tool_call':
     case 'acp_tool_call_update':
-      return upsertAcpTool(entries, frame.call);
+      return upsertAcpTool(entries, frame.call, at);
     case 'acp_tool_output_delta':
       return appendNativeToolOutput(entries, frame.id, frame.text);
   }
 }
 
-export function appendAcpText(prev: Entry[], text: string, messageId?: string | null): Entry[] {
+export function appendAcpText(prev: Entry[], text: string, messageId?: string | null, at = Date.now()): Entry[] {
   if (!text) return prev;
-  if (!messageId) return appendToken(prev, text);
-  return appendNativeText(sealThought(prev), text, messageId);
+  if (!messageId) return appendToken(prev, text, at);
+  return appendNativeText(sealThought(prev, at), text, messageId);
 }
 
 /** An agent's thinking, as Mira's own thought block. */
-export function appendAcpThought(prev: Entry[], text: string): Entry[] {
+export function appendAcpThought(prev: Entry[], text: string, at = Date.now()): Entry[] {
   if (!text) return prev;
-  const next = appendReasoning(prev, text);
+  const next = appendReasoning(prev, text, at);
   return next.map((e, i) =>
     i === next.length - 1 && e.kind === 'thought' ? { ...e, native: true } : e,
   );
@@ -517,8 +522,8 @@ export function appendAcpThought(prev: Entry[], text: string): Entry[] {
  *  entries already import their transcript helpers from this module. */
 export { describeAcpStop, isSuccessfulAcpStop, isUserCancelledStop } from '../lib/acpStop';
 
-export function sealAcpThought(prev: Entry[]): Entry[] {
-  return sealThought(prev);
+export function sealAcpThought(prev: Entry[], at = Date.now()): Entry[] {
+  return sealThought(prev, at);
 }
 
 /** Questions and plans render as Mira's own cards (the server wraps them),
@@ -530,15 +535,15 @@ export const AGENT_PROMPT_TOOLS = new Set(['AskUserQuestion', 'ExitPlanMode']);
  *  An update carries only what changed (no name, an empty title), so it
  *  merges onto the call already recorded — empty fields never blank what
  *  is there — and the Mira view is rebuilt from the merged call. */
-export function upsertAcpTool(prevRaw: Entry[], call: AcpToolCall): Entry[] {
+export function upsertAcpTool(prevRaw: Entry[], call: AcpToolCall, at = Date.now()): Entry[] {
   call = boundAgentOutput(call);
-  const prev = sealThought(prevRaw);
-  const idx = prev.findIndex((e) => e.kind === 'tool' && e.agentCall?.id === call.id);
+  const prev = sealThought(prevRaw, at);
+  const idx = prev.findIndex((e) => e.kind === 'tool' && (e.agentCall?.id === call.id || e.call.id === call.id || e.externalWork?.subagent?.call_id === call.id));
   let merged: AcpToolCall = call;
   if (idx >= 0) {
     const existing = prev[idx];
-    if (existing.kind !== 'tool' || !existing.agentCall) return prev;
-    merged = { ...existing.agentCall };
+    if (existing.kind !== 'tool') return prev;
+    merged = { ...(existing.agentCall ?? call) };
     for (const [k, v] of Object.entries(call) as [keyof AcpToolCall, unknown][]) {
       if (v === null || v === undefined || v === '') continue;
       if (Array.isArray(v) && v.length === 0) continue;
@@ -550,7 +555,7 @@ export function upsertAcpTool(prevRaw: Entry[], call: AcpToolCall): Entry[] {
   const prior = idx >= 0 ? (prev[idx] as ToolEntry) : null;
   const entry: Entry = {
     kind: 'tool',
-    call: agentCallToToolCall(merged),
+    call: { ...agentCallToToolCall(merged), id: prior?.call.id ?? merged.id },
     preview: null,
     status: agentToolStatus(merged),
     result: (() => {
@@ -560,13 +565,19 @@ export function upsertAcpTool(prevRaw: Entry[], call: AcpToolCall): Entry[] {
         : (prior?.result ?? null);
     })(),
     agentCall: merged,
-    activityAt: ++toolActivitySequence,
+    activityAt: nextToolActivity(prev),
     // Updates rebuild the entry from the agent's merged call; that call
     // carries no Mira-side state, so accumulated fields would be lost on
     // every progress frame unless carried across here.
-    startedAt: prior?.startedAt ?? Date.now(),
+    startedAt: prior?.startedAt ?? at,
     delegateSteps: prior?.delegateSteps,
   };
+  if (entry.kind === 'tool' && prior?.externalWork) {
+    entry.externalWork = prior.externalWork;
+    // A background launch can finish while its native child keeps working.
+    entry.status = prior.status;
+    entry.result = prior.result;
+  }
   if (idx >= 0) return [...prev.slice(0, idx), entry, ...prev.slice(idx + 1)];
   return [...prev, entry];
 }
@@ -574,14 +585,14 @@ export function upsertAcpTool(prevRaw: Entry[], call: AcpToolCall): Entry[] {
 // A tool_start arrives after either (a) a user-approved approval_request, in
 // which case an entry already exists — leave it alone, or (b) an auto-approved
 // call the policy let through with no prompt — add a fresh entry.
-export function upsertToolStart(prevRaw: Entry[], call: ToolCall): Entry[] {
-  const prev = sealThought(prevRaw);
+export function upsertToolStart(prevRaw: Entry[], call: ToolCall, at = Date.now()): Entry[] {
+  const prev = sealThought(prevRaw, at);
   const existing = prev.findIndex((e) => e.kind === 'tool' && e.call.id === call.id);
   if (existing >= 0)
     return updateTool(prev, call.id, (entry) => ({
       ...entry,
-      status: 'running',
-      startedAt: entry.startedAt ?? Date.now(),
+      status: entry.result || ['denied', 'complete', 'error'].includes(entry.status) ? entry.status : 'running',
+      startedAt: entry.startedAt ?? at,
     }));
   return [
     ...prev,
@@ -591,8 +602,8 @@ export function upsertToolStart(prevRaw: Entry[], call: ToolCall): Entry[] {
       preview: null,
       status: 'running',
       result: null,
-      startedAt: Date.now(),
-      activityAt: ++toolActivitySequence,
+      startedAt: at,
+      activityAt: nextToolActivity(prev),
     },
   ];
 }
@@ -631,7 +642,7 @@ export function updateTool(prev: Entry[], callId: string, f: (t: ToolEntry) => T
     if (e.kind === 'tool' && e.call.id === callId) {
       return [
         ...prev.slice(0, i),
-        { ...f(e), activityAt: ++toolActivitySequence },
+        { ...f(e), activityAt: nextToolActivity(prev) },
         ...prev.slice(i + 1),
       ];
     }
@@ -646,7 +657,7 @@ export function appendProgressLine(prev: Entry[], callId: string, line: string):
       const updated: ToolEntry = {
         ...e,
         progressLines: [...(e.progressLines ?? []), line],
-        activityAt: ++toolActivitySequence,
+        activityAt: nextToolActivity(prev),
       };
       return [...prev.slice(0, i), updated, ...prev.slice(i + 1)];
     }
@@ -663,6 +674,7 @@ export function appendDelegateStep(
   callId: string,
   kind: string,
   text: string,
+  at = Date.now(),
 ): Entry[] {
   const isDelegateRunning = (e: Entry) =>
     e.kind === 'tool' &&
@@ -686,7 +698,7 @@ export function appendDelegateStep(
   }
   if (idx === -1) return prev;
   const e = prev[idx] as ToolEntry;
-  const step: DelegateStep = { kind, text, at: Date.now() };
+  const step: DelegateStep = { kind, text, at };
   const updated: ToolEntry = { ...e, delegateSteps: [...(e.delegateSteps ?? []), step] };
   return [...prev.slice(0, idx), updated, ...prev.slice(idx + 1)];
 }
@@ -866,7 +878,7 @@ export function upsertRuntimeQuestion(
     ? record.response.cancelled
       ? { cancelled: true }
       : { cancelled: false, answers: record.response.answers }
-    : null;
+    : record.delivery === 'cancelled' ? { cancelled: true } : null;
   const index = prev.findIndex((e) => e.kind === 'tool' && e.call.id === record.id);
   const entry: ToolEntry = {
     kind: 'tool',

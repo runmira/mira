@@ -1,17 +1,18 @@
-import { getContextBreakdown, listCommands, listSkills } from '../api';
+import { replayExternalStreams, projectExternalWork, upsertExternalWork } from '../lib/externalSubagents';
 import * as agentTerminal from '../lib/agentTerminal';
-import { getBoolPref, PREF_KEYS } from '../lib/prefs';
+import { getBoolPref,PREF_KEYS } from '../lib/prefs';
 import { hasTranscriptPosition } from '../lib/transcriptPosition';
+import { reconcileQueue } from '../state/queueReconciliation';
+import { useAppRuntime } from '../state/RuntimeProvider';
 import {
-  rebuildTurnModels,
-  rebuildTurnTimings,
-  rebuildTurnUsage,
-  sealThought,
-  upsertRuntimeQuestion,
-  type Entry,
-  type SubagentStreamState,
+rebuildTurnModels,
+rebuildTurnTimings,
+rebuildTurnUsage,
+sealThought,
+upsertRuntimeQuestion,
+type Entry,
 } from '../transcript/entries';
-import { entriesForTranscriptPage, historyToEntries, interleaveReplay } from '../transcript/replay';
+import { entriesForTranscriptPage,historyToEntries,interleaveReplay } from '../transcript/replay';
 import type { ServerMsg } from '../types';
 
 import { useStableCallback } from './shared';
@@ -21,135 +22,117 @@ export function useSessionEvents(
     WorkspaceRuntime,
     | 'queueMutationsRef'
     | 'updateSessionActivity'
-    | 'sessionIdRef'
+    | 'getSessionId'
     | 'historyRequestRef'
-    | 'setHistoryLoading'
-    | 'setHistoryError'
+    | 'recordHistoryLoading'
+    | 'recordHistoryError'
     | 'paneRef'
     | 'followRef'
     | 'historyOffsetRef'
-    | 'setHistoryCursor'
-    | 'setEntries'
+    | 'recordHistoryCursor'
+    | 'updateTranscript'
     | 'historyPreviewsRef'
     | 'readingAnchorRef'
-    | 'setRecoveryBySession'
-    | 'setQueuedForSession'
+    | 'recordQueueRecovery'
+    | 'updateSessionQueue'
     | 'sendNow'
     | 'activityTitlesRef'
     | 'pendingSteerRef'
-    | 'setGitStatus'
-    | 'setSessionDiff'
     | 'setSessionCommitted'
-    | 'setBranchPr'
-    | 'setSessionId'
     | 'approvalStarted'
-    | 'setApprovalRules'
+    | 'recordApprovalRules'
     | 'setRuleEditorCallId'
     | 'wsRef'
-    | 'setSessionTitle'
-    | 'setProviderContext'
-    | 'setAcpUsage'
+    | 'recordSessionTitle'
+    | 'recordProviderContext'
+    | 'recordAgentUsage'
     | 'setRestoreNote'
     | 'setRestoreAsk'
-    | 'setModel'
-    | 'setMode'
-    | 'setCwd'
+    | 'recordModel'
+    | 'recordMode'
+    | 'recordCwd'
     | 'applyEngine'
     | 'onMessage'
-    | 'setTurnDiffs'
+    | 'recordTurnDiffs'
     | 'providerTurnCursorRef'
-    | 'setSubagentState'
-    | 'setTurnTimings'
-    | 'setTurnUsage'
-    | 'setTurnModels'
+    | 'updateSubagentProjection'
+    | 'recordTurnTimings'
+    | 'recordTurnUsage'
+    | 'recordTurnModels'
     | 'setExpandedTurns'
-    | 'setUsage'
-    | 'setCacheMiss'
-    | 'setRateLimit'
-    | 'setTasks'
-    | 'setGoal'
-    | 'nativeWorkRef'
-    | 'nativeTurnsRef'
-    | 'setBusy'
-    | 'busyRef'
-    | 'setThinking'
+    | 'recordUsage'
+    | 'recordCacheMiss'
+    | 'recordRateLimit'
+    | 'recordTasks'
+    | 'recordGoal'
+    | 'turnCommands'
     | 'clearThinkingIdle'
     | 'setSidebarRefresh'
-    | 'setSkills'
-    | 'setCommands'
     | 'loadEngines'
-    | 'setEnvSwitching'
+    | 'recordEnvironmentTransition'
     | 'refreshRepo'
     | 'setMainView'
-    | 'drainQueuedMessage'
+    | 'attachFromRef'
   >,
 ) {
+  const appRuntime = useAppRuntime();
   const {
     queueMutationsRef,
     updateSessionActivity,
-    sessionIdRef,
+    getSessionId,
     historyRequestRef,
-    setHistoryLoading,
-    setHistoryError,
+    recordHistoryLoading,
+    recordHistoryError,
     paneRef,
     followRef,
     historyOffsetRef,
-    setHistoryCursor,
-    setEntries,
+    recordHistoryCursor,
+    updateTranscript,
     historyPreviewsRef,
     readingAnchorRef,
-    setRecoveryBySession,
-    setQueuedForSession,
+    recordQueueRecovery,
+    updateSessionQueue,
     sendNow,
     activityTitlesRef,
     pendingSteerRef,
-    setGitStatus,
-    setSessionDiff,
     setSessionCommitted,
-    setBranchPr,
-    setSessionId,
     approvalStarted,
-    setApprovalRules,
+    recordApprovalRules,
     setRuleEditorCallId,
     wsRef,
-    setSessionTitle,
-    setProviderContext,
-    setAcpUsage,
+    recordSessionTitle,
+    recordProviderContext,
+    recordAgentUsage,
     setRestoreNote,
     setRestoreAsk,
-    setModel,
-    setMode,
-    setCwd,
+    recordModel,
+    recordMode,
+    recordCwd,
     applyEngine,
     onMessage,
-    setTurnDiffs,
+    recordTurnDiffs,
     providerTurnCursorRef,
-    setSubagentState,
-    setTurnTimings,
-    setTurnUsage,
-    setTurnModels,
+    updateSubagentProjection,
+    recordTurnTimings,
+    recordTurnUsage,
+    recordTurnModels,
     setExpandedTurns,
-    setUsage,
-    setCacheMiss,
-    setRateLimit,
-    setTasks,
-    setGoal,
-    nativeWorkRef,
-    nativeTurnsRef,
-    setBusy,
-    busyRef,
-    setThinking,
+    recordUsage,
+    recordCacheMiss,
+    recordRateLimit,
+    recordTasks,
+    recordGoal,
+    turnCommands,
     clearThinkingIdle,
     setSidebarRefresh,
-    setSkills,
-    setCommands,
     loadEngines,
-    setEnvSwitching,
+    recordEnvironmentTransition,
     refreshRepo,
     setMainView,
-    drainQueuedMessage,
+    attachFromRef,
   } = context;
   return useStableCallback((msg: ServerMsg) => {
+    const receivedAt = Date.now();
     switch (msg.type) {
       case 'queue_mutation_result':
         queueMutationsRef.current.receive(msg);
@@ -164,39 +147,37 @@ export function useSessionEvents(
         break;
 
       case 'history_page': {
-        if (msg.session_id !== sessionIdRef.current || msg.request_id !== historyRequestRef.current)
+        if (msg.session_id !== getSessionId() || msg.request_id !== historyRequestRef.current ||
+          appRuntime.sessionServices.ref('historyGeneration').current !== appRuntime.sessionState.get().attachment)
           break;
         historyRequestRef.current = null;
-        setHistoryLoading(false);
-        setHistoryError(msg.error);
+        recordHistoryLoading(false);
+        recordHistoryError(msg.error);
         if (msg.page) {
           const page = msg.page;
-          const pane = paneRef.current;
-          const beforeHeight = pane?.scrollHeight ?? 0;
-          const beforeTop = pane?.scrollTop ?? 0;
           followRef.current = false;
           historyOffsetRef.current = page.first_turn;
-          setHistoryCursor(page.next_cursor);
-          setEntries((previous) => [
+          recordHistoryCursor(page.next_cursor);
+          updateTranscript((previous) => [
             ...entriesForTranscriptPage(page, historyPreviewsRef.current),
             ...previous,
           ]);
-          requestAnimationFrame(() => {
-            if (pane) {
-              pane.scrollTop = beforeTop + pane.scrollHeight - beforeHeight;
-              readingAnchorRef.current = pane.scrollTop;
-            }
-          });
         }
         break;
       }
 
       case 'queue_updated': {
-        setRecoveryBySession((prev) => ({
+        if (msg.session_id === getSessionId() && msg.items.some(item =>
+          item.id === appRuntime.readSession().activeInputId && !!item.error)) {
+          appRuntime.turnCommands.reportTurnRunning(false);
+          appRuntime.updateSessionData('activeInputId', null);
+        }
+        for (const item of msg.items) appRuntime.effect(() => appRuntime.drafts.confirmDelivery(item.id));
+        recordQueueRecovery((prev) => ({
           ...prev,
           [msg.session_id]: msg.items.filter((item) => item.recovery),
         }));
-        setQueuedForSession(msg.session_id, () =>
+        updateSessionQueue(msg.session_id, previous => reconcileQueue(previous,
           msg.items
             .filter((item) => !item.recovery)
             .map((item) => ({
@@ -206,29 +187,42 @@ export function useSessionEvents(
               fingerprint: item.fingerprint,
               steering: item.dispatching && !item.error,
               error: item.error ?? undefined,
-            })),
+            })), new Set<string>())
         );
         break;
       }
 
       case 'queue_delivery': {
-        if (msg.session_id === sessionIdRef.current)
+        appRuntime.effect(() => appRuntime.drafts.confirmDelivery(msg.item.id));
+        if (msg.session_id === getSessionId())
           sendNow(msg.item.text, msg.item.images, false, msg.item.id);
         break;
       }
 
       case 'ready': {
+        // Which chat we came from: `attachSession` records it before
+        // `suspend()` flips the selection, because by the time this frame
+        // arrives `getSessionId()` already reports the new chat. Falls back
+        // to the current selection for readies that follow no attach (a
+        // reconnect replays the same chat, whose scroll position must stay).
+        const previousSession = attachFromRef.current ?? getSessionId();
+        attachFromRef.current = null;
+        for (const item of msg.queued_inputs ?? []) appRuntime.effect(() => appRuntime.drafts.confirmDelivery(item.id));
+        for (const message of msg.history) if (message.input_id) appRuntime.effect(() => appRuntime.drafts.confirmDelivery(message.input_id!));
+        appRuntime.resources.cancelContext();
+        turnCommands.hydrate(msg.session_id, !!msg.running, msg.runtime_work ?? []);
+        appRuntime.reconcileTerminals(!!msg.running, msg.turns);
         if (msg.session_activity) updateSessionActivity({ snapshot: msg.session_activity });
         if (msg.title) {
           activityTitlesRef.current.set(msg.session_id, msg.title);
           if (activityTitlesRef.current.size > 1000)
             activityTitlesRef.current.delete(activityTitlesRef.current.keys().next().value!);
         }
-        setRecoveryBySession((prev) => ({
+        recordQueueRecovery((prev) => ({
           ...prev,
           [msg.session_id]: (msg.queued_inputs ?? []).filter((item) => item.recovery),
         }));
-        setQueuedForSession(msg.session_id, () =>
+        updateSessionQueue(msg.session_id, previous => reconcileQueue(previous,
           (msg.queued_inputs ?? [])
             .filter((item) => !item.recovery)
             .map((item) => ({
@@ -238,57 +232,33 @@ export function useSessionEvents(
               fingerprint: item.fingerprint,
               steering: item.dispatching && !item.error,
               error: item.error ?? undefined,
-            })),
+            })), new Set(msg.history.flatMap(message => message.input_id ? [message.input_id] : [])))
         );
         pendingSteerRef.current.delete(msg.session_id);
-        if (msg.session_id === sessionIdRef.current && !followRef.current)
+        if (msg.session_id === previousSession && !followRef.current)
           readingAnchorRef.current = paneRef.current?.scrollTop ?? null;
-        else if (msg.session_id !== sessionIdRef.current) {
+        else if (msg.session_id !== previousSession) {
           readingAnchorRef.current = null;
           followRef.current =
-            !hasTranscriptPosition(msg.session_id) && getBoolPref(PREF_KEYS.transcriptFollow, true);
+            !hasTranscriptPosition(JSON.stringify(appRuntime.resourceKey('scroll', msg.session_id))) && getBoolPref(PREF_KEYS.transcriptFollow, true);
         }
         agentTerminal.reset();
-        setGitStatus(null);
-        setSessionDiff({ added: 0, removed: 0, files: [] });
         setSessionCommitted(false);
-        setBranchPr(null);
-        setSessionId(msg.session_id);
         approvalStarted.current = {};
-        setApprovalRules({});
+        recordApprovalRules({});
         setRuleEditorCallId(null);
         wsRef.current?.setSession(msg.session_id);
-        sessionIdRef.current = msg.session_id;
-        setSessionTitle(msg.title ?? null);
+
+        recordSessionTitle(msg.title ?? null);
         // Context is per chat; the agent's plan limits are per account and
         // stay. The session's own usage frames (replayed below) restore it.
-        setProviderContext(null);
-        // A provider chat's context is otherwise only known once its next
-        // request reports usage, so a reopened chat showed tokens but no
-        // window. Seed it from the breakdown; a live report replaces it.
-        {
-          const opened = msg.session_id;
-          const isAgent = msg.engine
-            ? msg.engine.kind === 'agent'
-            : !!(msg.agent_kind || msg.agent_configured);
-          if (!isAgent) {
-            getContextBreakdown()
-              .then((v) => {
-                if (sessionIdRef.current !== opened || v.source !== 'mira') return;
-                setProviderContext(
-                  (cur) =>
-                    cur ?? { used: v.breakdown.total, window: v.window, compactAt: v.compact_at },
-                );
-              })
-              .catch(() => {});
-          }
-        }
-        setAcpUsage(null);
+        recordProviderContext(null);
+        recordAgentUsage(null);
         setRestoreNote(null);
         setRestoreAsk(null);
-        setModel(msg.model);
-        setMode(msg.mode);
-        setCwd(msg.cwd);
+        recordModel(msg.model);
+        recordMode(msg.mode);
+        recordCwd(msg.cwd);
         // The engine first: it decides whose capabilities the state frames
         // below belong to. Older servers send no engine — derive one.
         applyEngine(
@@ -325,11 +295,11 @@ export function useSessionEvents(
         }
         // Provider and agent turns interleave in the order they happened.
         historyRequestRef.current = null;
-        setHistoryLoading(false);
-        setHistoryError(null);
+        recordHistoryLoading(false);
+        recordHistoryError(null);
         historyPreviewsRef.current = msg.previews ?? {};
-        setTurnDiffs(msg.turn_diffs ?? []);
-        setHistoryCursor(msg.transcript_page?.next_cursor ?? null);
+        recordTurnDiffs(msg.turn_diffs ?? []);
+        recordHistoryCursor(msg.transcript_page?.next_cursor ?? null);
         historyOffsetRef.current = msg.transcript_page?.first_turn ?? 0;
         providerTurnCursorRef.current =
           msg.turns?.length ??
@@ -339,25 +309,30 @@ export function useSessionEvents(
         const readyEntries = msg.transcript_page
           ? entriesForTranscriptPage(msg.transcript_page, msg.previews)
           : historyToEntries(msg.history, msg.previews);
-        setEntries(
+        // The Ready activity snapshot is authoritative for resumed children.
+        const resumedWork = (msg.runtime_work ?? []).map(work => ({ ...work, subagent: work.kind === 'subagent'
+          ? { name: null, prompt: null, result: null, ...work.subagent, reopen: true } : work.subagent }));
+        updateTranscript(
           (msg.runtime_requests ?? []).reduce(
             (entries, request) => upsertRuntimeQuestion(entries, request),
-            msg.transcript_page
-              ? readyEntries
-              : interleaveReplay(msg.history, msg.previews, msg.agent_transcript ?? []),
+            resumedWork.reduce(upsertExternalWork,
+              msg.transcript_page ? readyEntries : interleaveReplay(msg.history, msg.previews, msg.agent_transcript ?? [])),
           ),
         );
         // Seed subagent state from history so the ContextPanel shows agents
         // on session reload (live subagent_started frames don't replay).
-        setSubagentState(() => {
-          const seeded = new Map<string, SubagentStreamState>();
+        updateSubagentProjection(previous => {
+          const replayLines = msg.transcript_page ? msg.transcript_page.items.flatMap(item => item.line ? [item.line] : []) : msg.agent_transcript ?? [];
+          const seeded = resumedWork.reduce(projectExternalWork, replayExternalStreams(replayLines));
           for (const e of readyEntries) {
             if (e.kind !== 'tool' || e.call.function.name !== 'agent') continue;
+            if (seeded.has(e.call.id)) continue;
             try {
               const args = JSON.parse(e.call.function.arguments) as {
                 prompt?: string;
                 type?: string;
               };
+              if (previous.has(e.call.id)) { seeded.set(e.call.id, previous.get(e.call.id)!); continue; }
               seeded.set(e.call.id, {
                 parentCallId: e.call.id,
                 prompt: args.prompt ?? '',
@@ -371,43 +346,34 @@ export function useSessionEvents(
               /* skip malformed args */
             }
           }
+          for (const [id, stream] of previous) if ((!stream.done || stream.pendingReview) && !seeded.has(id)) seeded.set(id, stream);
           return seeded;
         });
         // Server-persisted turn timing is aligned with user-message order
         // (turn 0 = first user msg). Rebuild the local Map so "Worked for"
         // chips render on reloaded transcripts.
-        setTurnTimings(rebuildTurnTimings(msg.turns ?? []));
+        recordTurnTimings(rebuildTurnTimings(msg.turns ?? []));
         // The reply hover row's tokens and cost, for turns from before this
         // page loaded — the server keeps them per turn.
-        setTurnUsage(rebuildTurnUsage(msg.turns ?? []));
-        setTurnModels(rebuildTurnModels(msg.turns ?? []));
+        recordTurnUsage(rebuildTurnUsage(msg.turns ?? []));
+        recordTurnModels(rebuildTurnModels(msg.turns ?? []));
         setExpandedTurns(new Set());
-        setUsage(msg.usage ?? null);
-        setCacheMiss(null);
-        setRateLimit(null);
-        setTasks(msg.tasks ?? []);
-        setGoal(msg.goal ?? null);
+        recordUsage(msg.usage ?? null);
+        recordCacheMiss(null);
+        recordRateLimit(null);
+        recordTasks(msg.tasks ?? []);
+        recordGoal(msg.goal ?? null);
         // Opened mid-turn: show Stop and the working indicator until the
         // turn's end arrives, instead of an idle composer over a live reply.
-        nativeWorkRef.current = msg.runtime_work ?? [];
-        nativeTurnsRef.current.clear();
-        setBusy(!!msg.running);
-        busyRef.current = !!msg.running;
-        setThinking(!!msg.running);
         clearThinkingIdle();
         setSidebarRefresh((n) => n + 1);
         // Refresh the skill roster on every Ready — a cwd swap may
         // change the project tier (~/.mira vs. <cwd>/.mira). Silent on
         // failure; the palette just shows built-in commands.
-        listSkills()
-          .then(setSkills)
-          .catch(() => setSkills([]));
-        listCommands()
-          .then(setCommands)
-          .catch(() => setCommands([]));
+        for (const resource of ['skills', 'commands'] as const) void appRuntime.resources.refresh(resource).catch(() => {});
         loadEngines();
         // Each session (and worktree) has its own environment; ask for it.
-        setEnvSwitching(null);
+        recordEnvironmentTransition(null);
         wsRef.current?.send({ type: 'environment' });
         // Fetch git status, session diff, and branch PR for the new cwd.
         refreshRepo();
@@ -423,7 +389,7 @@ export function useSessionEvents(
         const pending = pendingSteerRef.current.get(msg.session_id);
         if (pending?.id === msg.request_id) {
           pendingSteerRef.current.delete(msg.session_id);
-          setQueuedForSession(msg.session_id, (items) =>
+          updateSessionQueue(msg.session_id, (items) =>
             msg.error
               ? items.map((item) =>
                   item.id === msg.request_id
@@ -433,16 +399,15 @@ export function useSessionEvents(
               : items.filter((item) => item.id !== msg.request_id),
           );
         }
-        if (msg.session_id !== sessionIdRef.current) break;
-        if (!busyRef.current) window.setTimeout(drainQueuedMessage, 0);
-        setEntries((entries) => {
+        if (msg.session_id !== getSessionId()) break;
+        updateTranscript((entries) => {
           const index = entries.findIndex(
             (entry) => entry.kind === 'msg' && entry.steerRequestId === msg.request_id,
           );
           if (!msg.message) return index < 0 ? entries : entries.filter((_, i) => i !== index);
           const entry: Entry = { kind: 'msg', msg: msg.message, steerRequestId: msg.request_id };
           return index < 0
-            ? [...sealThought(entries), entry]
+            ? [...sealThought(entries, receivedAt), entry]
             : entries.map((previous, i) => (i === index ? entry : previous));
         });
         break;
@@ -457,7 +422,7 @@ export function useSessionEvents(
         // switches from the first-user-message fallback to the AI title,
         // and retitle the header when it is this chat's.
         setSidebarRefresh((n) => n + 1);
-        if (msg.session_id === sessionIdRef.current) setSessionTitle(msg.title);
+        if (msg.session_id === getSessionId()) recordSessionTitle(msg.title);
         break;
 
       case 'background_mode_changed':

@@ -60,6 +60,7 @@ const { mount } = await bundle(
 import { createElement } from 'react';
 import { createRoot } from 'react-dom/client';
 import { createMemoryRouter, RouterProvider, Outlet } from 'react-router';
+import { RuntimeProvider } from './src/state/RuntimeProvider';
 import { settingsRoute } from './src/app/settingsRoutes';
 import { useAppNavigation } from './src/app/useAppNavigation';
 import { SettingsNavigationContext } from './src/components/settings/SettingsContext';
@@ -71,7 +72,7 @@ export function mount(element, initial) {
   }
   const router = createMemoryRouter([{ path: '/', Component: Root, HydrateFallback: () => null, children: [settingsRoute, {path: 'chat', element: <p>Chat</p>}, {path: 'plugins', element: <p>Plugins</p>}]}], { initialEntries: [initial] });
   const root = createRoot(element);
-  root.render(<RouterProvider router={router} />);
+  root.render(<RuntimeProvider scope={{ backend: 'http://localhost', account: 'test' }}><RouterProvider router={router} /></RuntimeProvider>);
   return { router, root, navigation: () => navigation };
 }
 `,

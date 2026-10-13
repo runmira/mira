@@ -3,6 +3,7 @@
  * log, external-agent transcript lines, and the interleaved pages the
  * server sends on load. Split out of App.tsx.
  */
+import { pauseParentChildEntries, upsertExternalWork } from '../lib/externalSubagents';
 import { applyNativeMetadata } from '../lib/nativeStream';
 import { appendAgentProgress, agentFailureEntry, hasCurrentAgentFailure } from '../lib/agentProgress';
 import { type AskUserDecision } from '../components/AskUserCard';
@@ -137,6 +138,14 @@ export function replayAgentTranscript(lines: AgentTranscriptLine[]): Entry[] {
         out = appendAgentProgress(out, activity);
         break;
       }
+      case 'external_subagent_frame': {
+        const child = f as Extract<ServerMsg, { type: 'external_subagent_frame' }>;
+        if (child.work) out = upsertExternalWork(out, child.work);
+        break;
+      }
+      case 'runtime_work_updated':
+        out = upsertExternalWork(out, (f as Extract<ServerMsg, { type: 'runtime_work_updated' }>).work);
+        break;
       case 'acp_failure':
         out.push(agentFailureEntry(f as Extract<ServerMsg, { type: 'acp_failure' }>));
         break;
@@ -177,6 +186,7 @@ export function replayAgentTranscript(lines: AgentTranscriptLine[]): Entry[] {
         out = addTurnUsage(out, f as Extract<ServerMsg, { type: 'acp_turn_usage' }>);
         break;
       case 'acp_turn_end': {
+        out = pauseParentChildEntries(out);
         const msg = f as Extract<ServerMsg, { type: 'acp_turn_end' }>;
         const started = turnStartedAt;
         out = withTurnStats(out, (s) => ({ ...s, startedAt: s.startedAt ?? started, endedAt: line.t }));

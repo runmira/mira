@@ -278,32 +278,7 @@ export type AgentCaps = {
   modes?: { current: string; available: AcpSessionMode[] };
 };
 
-const CAPS_KEY = 'mira.acp.caps.v2';
-// v2: v1 attributed late frames from a stopped agent to whichever driver
-// was current (`capsDriverRef`), so one agent's models could land in
-// another's cache (OpenCode showing Claude models). Frames are now
-// driver-stamped server-side; the bump drops any polluted v1 entries.
 
-export function loadAgentCaps(driver: string): AgentCaps {
-  try {
-    const raw = localStorage.getItem(CAPS_KEY);
-    if (!raw) return {};
-    return (JSON.parse(raw) as Record<string, AgentCaps>)[driver] ?? {};
-  } catch {
-    return {};
-  }
-}
-
-export function saveAgentCaps(driver: string, patch: AgentCaps) {
-  try {
-    const raw = localStorage.getItem(CAPS_KEY);
-    const all = raw ? (JSON.parse(raw) as Record<string, AgentCaps>) : {};
-    all[driver] = { ...(all[driver] ?? {}), ...patch };
-    localStorage.setItem(CAPS_KEY, JSON.stringify(all));
-  } catch {
-    /* quota / private mode — the live lists still work */
-  }
-}
 
 /** The model choices in an agent's config options, if it has a model option. */
 export function agentModelChoices(config: AcpConfigOption[] | undefined | null): { value: string; label: string }[] {

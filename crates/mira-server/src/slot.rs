@@ -36,7 +36,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use mira_agents::AgentRegistry;
@@ -50,7 +50,7 @@ use mira_sandbox::Sandbox;
 use mira_tools::context::ToolProgressSink;
 use mira_tools::{BackgroundProcessStore, Registry, ToolContext};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 
 use crate::approver::{PendingMap, WsApprover};
@@ -64,7 +64,7 @@ use crate::protocol::ServerMsg;
 /// cleared between turns, so background process drain tasks can keep emitting
 /// `ToolProgress` frames even after `invoke` has returned.
 pub(crate) struct SessionProgress {
-    pub(crate) tx: broadcast::Sender<ServerMsg>,
+    pub(crate) tx: crate::session_stream::SessionEvents,
 }
 
 impl ToolProgressSink for SessionProgress {
@@ -107,7 +107,7 @@ pub struct SessionSlot {
     pub session: Arc<RwLock<Session>>,
     pub native_provider: crate::provider::SwappableProvider,
     pub selection: Arc<crate::state::SharedSelection>,
-    pub events_tx: broadcast::Sender<ServerMsg>,
+    pub events_tx: crate::session_stream::SessionEvents,
     pub pending: PendingMap,
     pub prompt_pending: PendingPromptMap,
     pub runtime_requests: crate::runtime_requests::RequestStore,
@@ -150,6 +150,10 @@ pub struct SessionSlot {
     /// watchers) — the same store its tools use, so the Processes pane
     /// sees and stops exactly what the agent sees.
     pub bg_processes: Arc<BackgroundProcessStore>,
+    /// Unix seconds of the last observed use (slot lookup, attach, turn,
+    /// …), for the idle-slot evictor. Initialized at build; refreshed by
+    /// [`SessionSlot::touch`].
+    pub last_used: AtomicU64,
 }
 
 impl SessionSlot {
@@ -183,6 +187,18 @@ impl SessionSlot {
     /// `Ask` decisions via [`BackgroundMode`].
     pub fn is_attached(&self) -> bool {
         self.attached.load(Ordering::SeqCst) > 0
+    }
+
+    /// Record a use of this slot now. Called on slot lookup/attach so the
+    /// idle-slot evictor only drops slots nobody has touched in a while.
+    pub fn touch(&self) {
+        self.last_used
+            .store(crate::session_engine::now_secs(), Ordering::Relaxed);
+    }
+
+    /// Seconds since [`SessionSlot::touch`] last ran.
+    pub fn idle_secs(&self) -> u64 {
+        crate::session_engine::now_secs().saturating_sub(self.last_used.load(Ordering::Relaxed))
     }
 
     /// True while a spawned turn task is still holding the slot's turn
@@ -341,7 +357,7 @@ pub async fn build_slot(
         }
     }
     let session_provider: Arc<dyn ChatProvider> = Arc::new(native_provider.clone());
-    let (events_tx, _rx0) = broadcast::channel::<ServerMsg>(256);
+    let events_tx = crate::session_stream::SessionEvents::new("initializing");
     // NOTE: we intentionally drop `_rx0` — its only purpose was to keep the
     // channel alive before subscribers attach. Sends with zero receivers
     // return Err(SendError), which the harness forwarder happily ignores.
@@ -506,6 +522,7 @@ pub async fn build_slot(
         deps.store.as_ref().and_then(|s| s.queue_state_path(&id)),
     )
     .await;
+    events_tx.bind_session(&id.to_string());
     Arc::new(SessionSlot {
         session_activity: deps.session_activity.clone(),
         id,
@@ -531,6 +548,7 @@ pub async fn build_slot(
         background_mode,
         environments,
         bg_processes: bg_store,
+        last_used: AtomicU64::new(crate::session_engine::now_secs()),
     })
 }
 

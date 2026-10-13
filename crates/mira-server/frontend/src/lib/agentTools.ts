@@ -32,6 +32,9 @@ export function agentToolAsMira(call: AcpToolCall): { name: string; args: Args }
     | { type: 'diff'; path: string; old_text?: string | null; new_text?: string | null }
     | undefined;
 
+  if ((['Task', 'Agent', 'task', 'agent', 'subagent'].includes(name) || typeof input.subagent_type === 'string') && typeof input.prompt === 'string') {
+    return { name: 'agent', args: { prompt: input.prompt, type: str(input.subagent_type) ?? str(input.agent) ?? 'External agent', _external: true } };
+  }
   switch (name) {
     case 'Computer':
     case 'computer':

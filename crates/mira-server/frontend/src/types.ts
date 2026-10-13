@@ -428,7 +428,7 @@ export type EnvironmentStatus = {
 
 export type EnvironmentInfo = { name: string; backend: string; description: string };
 
-export type RuntimeWork = { id: string; native_thread_id: string | null; kind: 'goal' | 'task' | 'subagent'; status: 'pending' | 'running' | 'waiting' | 'paused' | 'completed' | 'failed' | 'cancelled'; title: string | null };
+export type RuntimeWork = { subagent?: { call_id?: string | null; reopen?: boolean; name: string | null; prompt: string | null; result: string | null } | null; id: string; native_thread_id: string | null; kind: 'goal' | 'task' | 'subagent'; status: 'pending' | 'running' | 'waiting' | 'paused' | 'completed' | 'failed' | 'cancelled'; title: string | null };
 export type RuntimeRequestRecord = {
   id: string; instance: string; driver: string;
   request: { native_id: string; native_thread_id: string; native_turn_id: string | null; questions: { id: string; question: string; header: string | null; options: string[]; required: boolean }[]; response_capability: 'message' | 'live_rpc' };
@@ -447,7 +447,10 @@ export interface QueuedInput {
   dispatching: boolean; error: string | null;
   fingerprint?: string;
 }
+export type StreamCursor = { epoch: string; sequence: number };
 export type ServerMsg =
+  | { type: 'session_stream'; session_id: string; epoch: string; sequence: number; frame: ServerMsg }
+  | { type: 'stream_resumed'; session_id: string; cursor: StreamCursor }
   | { type: 'session_activity'; epoch: string; revision: number; session_id: string; running: boolean }
   | { type: 'session_activity_snapshot'; snapshot: import('./lib/sessionActivity').SessionActivitySnapshot }
   | { type: 'queue_updated'; session_id: string; items: QueuedInput[] }
@@ -458,11 +461,12 @@ export type ServerMsg =
   | { type: 'acp_message_metadata'; message_id: string; phase: string }
   | { type: 'stream_activity'; kind: string; title: string; detail: string }
   | { type: 'history_page'; session_id: string; request_id: string; page: TranscriptPage | null; error: string | null }
-  | { type: 'ready'; session_activity?: import('./lib/sessionActivity').SessionActivitySnapshot; queued_inputs?: QueuedInput[]; turn_diffs?: TurnDiffSummary[]; transcript_page?: TranscriptPage; session_id: string; model: string; mode: Mode; cwd: string; history: Message[]; turns?: TurnMeta[]; usage?: UsageTotals; tasks?: TaskItem[]; goal?: Goal | null; previews?: Record<string, DiffPreview>; agent_transcript?: AgentTranscriptLine[]; agent_driver?: string | null; agent_kind?: string | null; instance?: string | null; agent_configured?: string | null; engine?: SessionEngine | null; title?: string | null; running?: boolean; runtime_requests?: RuntimeRequestRecord[]; runtime_work?: RuntimeWork[] }
+  | { type: 'ready'; stream_cursor?: StreamCursor; session_activity?: import('./lib/sessionActivity').SessionActivitySnapshot; queued_inputs?: QueuedInput[]; turn_diffs?: TurnDiffSummary[]; transcript_page?: TranscriptPage; session_id: string; model: string; mode: Mode; cwd: string; history: Message[]; turns?: TurnMeta[]; usage?: UsageTotals; tasks?: TaskItem[]; goal?: Goal | null; previews?: Record<string, DiffPreview>; agent_transcript?: AgentTranscriptLine[]; agent_driver?: string | null; agent_kind?: string | null; instance?: string | null; agent_configured?: string | null; engine?: SessionEngine | null; title?: string | null; running?: boolean; runtime_requests?: RuntimeRequestRecord[]; runtime_work?: RuntimeWork[] }
   /** The session's engine changed: picked, starting, ready, failed, exited. */
   | { type: 'session_engine'; engine: SessionEngine }
   | { type: 'runtime_request_updated'; request: RuntimeRequestRecord }
   | { type: 'runtime_work_updated'; work: RuntimeWork }
+  | { type: 'external_subagent_frame'; agent_id: string; work?: RuntimeWork; frame: ExternalChildFrame }
   | { type: 'runtime_turn_updated'; turn: { native_thread_id: string; native_turn_id: string; running: boolean } }
   | { type: 'token'; text: string }
   | { type: 'reasoning'; text: string }
@@ -669,7 +673,7 @@ export type ClientMsg =
   /** Switch which session this WS is watching. Server updates its
    *  per-connection attached_id, swaps the forwarder's subscription,
    *  and emits a fresh Ready for the new session. */
-  | { type: 'attach'; session_id: string }
+  | { type: 'attach'; session_id: string; cursor?: StreamCursor }
   /** Fall back to the server's `active` pointer without closing the
    *  socket. Rarely needed by the current UI (tab close does the same
    *  work) but harmless to expose. */
@@ -831,3 +835,5 @@ export type SessionSummary = {
    *  nests it there. */
   launched_by?: string | null;
 };
+
+export type ExternalChildFrame = Extract<ServerMsg, { type: 'acp_text' | 'acp_text_snapshot' | 'acp_thought' | 'acp_tool_call' | 'acp_tool_call_update' | 'acp_tool_output_delta' }>;

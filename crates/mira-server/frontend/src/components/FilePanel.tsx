@@ -1,3 +1,4 @@
+import { useOptionalRuntime } from '../state/RuntimeProvider';
 import { useEffect, useMemo, useState, useRef } from 'react';
 import {
   ChevronDown,
@@ -555,6 +556,8 @@ type Props = {
 };
 
 export function FilePanelBody({ tab, cwd, onOpenFile }: Props) {
+  const requestRuntime = useOptionalRuntime();
+  const requestSession = () => requestRuntime?.sessionState.get().active ?? requestRuntime?.sessionState.get().selected ?? undefined;
   const { folderIcon } = useFileIcons();
   const [content, setContent] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -587,7 +590,7 @@ export function FilePanelBody({ tab, cwd, onOpenFile }: Props) {
     let cancelled = false;
     setLoading(true);
     setLoadError(null);
-    readFile(viewPath, { view: true })
+    readFile(viewPath, { view: true, sessionId: requestSession() })
       .then((v) => { if (!cancelled) setContent(v.content); })
       .catch((e) => { if (!cancelled) setLoadError(String((e as Error).message)); })
       .finally(() => { if (!cancelled) setLoading(false); });

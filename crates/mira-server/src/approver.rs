@@ -34,7 +34,7 @@ use mira_core::ToolCall;
 use mira_harness::Approver;
 use mira_policy::Decision;
 use mira_tools::compute_preview;
-use tokio::sync::{broadcast, oneshot, Mutex, RwLock};
+use tokio::sync::{oneshot, Mutex, RwLock};
 use tracing::warn;
 
 use crate::protocol::ServerMsg;
@@ -57,7 +57,7 @@ pub type PendingMap = Arc<Mutex<HashMap<String, PendingEntry>>>;
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(600);
 
 pub struct WsApprover {
-    event_tx: broadcast::Sender<ServerMsg>,
+    event_tx: crate::session_stream::SessionEvents,
     pending: PendingMap,
     /// Slot cwd — read through the same Arc so preview computation
     /// targets whatever folder the slot's session is bound to.
@@ -78,7 +78,7 @@ impl WsApprover {
     }
 
     pub fn new(
-        event_tx: broadcast::Sender<ServerMsg>,
+        event_tx: crate::session_stream::SessionEvents,
         pending: PendingMap,
         cwd: Arc<RwLock<PathBuf>>,
         attached: Arc<AtomicUsize>,

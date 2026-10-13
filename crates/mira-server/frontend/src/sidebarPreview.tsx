@@ -1,3 +1,4 @@
+import { RuntimeProvider } from './state/RuntimeProvider';
 /**
  * Dev-only preview of the sidebar with fake chats in every state: running,
  * waiting on you, unread, merged, pinned, forked, launched threads, worktree
@@ -193,7 +194,7 @@ function Preview() {
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <LazyMotion features={domMax}>
-      <Preview />
+      <RuntimeProvider scope={{ backend: window.location.origin, account: 'preview' }}><Preview /></RuntimeProvider>
     </LazyMotion>
   </React.StrictMode>,
 );
