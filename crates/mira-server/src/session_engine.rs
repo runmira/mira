@@ -284,7 +284,9 @@ const EVICT_EVERY: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 /// full histories, screenshots, agent processes and all. A slot is only
 /// evicted when it is all of: not the active session, attached to no WS
 /// client, past [`EVICT_AFTER`] without a touch, not running, waiting on
-/// nothing, and holding no turn handle. Eviction is memory-only (no
+/// nothing, holding no turn handle, and running no background processes.
+/// Live processes retain their slot and stop API until shutdown completes.
+/// Eviction is memory-only (no
 /// `store.delete`): re-attaching transparently reloads from disk.
 pub fn spawn_slot_eviction(state: AppState) {
     tokio::spawn(async move {
@@ -304,7 +306,10 @@ pub fn spawn_slot_eviction(state: AppState) {
                 if idle < EVICT_AFTER.as_secs() {
                     continue;
                 }
-                if slot.is_running().await || slot.needs_attention().await {
+                if slot.is_running().await
+                    || slot.needs_attention().await
+                    || slot.bg_processes.has_running().await
+                {
                     continue;
                 }
                 if slot.turn.lock().await.is_some() {
@@ -321,6 +326,7 @@ pub fn spawn_slot_eviction(state: AppState) {
                 if slot.is_attached()
                     || slot.is_running().await
                     || slot.needs_attention().await
+                    || slot.bg_processes.has_running().await
                     || slot.turn.lock().await.is_some()
                 {
                     continue;
@@ -332,6 +338,7 @@ pub fn spawn_slot_eviction(state: AppState) {
                 if *active == slot.id
                     || slot.is_attached()
                     || slot.idle_secs() < EVICT_AFTER.as_secs()
+                    || slot.bg_processes.has_running().await
                 {
                     continue;
                 }

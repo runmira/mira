@@ -108,6 +108,16 @@ impl BackgroundProcessStore {
         all
     }
 
+    /// A live process keeps its session resident, even between agent turns.
+    pub async fn has_running(&self) -> bool {
+        for entry in self.processes.lock().await.values() {
+            if entry.running().await {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Forget a finished process (the UI's "clear"). Running ones stay.
     pub async fn remove_finished(&self, id: u32) -> bool {
         let mut g = self.processes.lock().await;
@@ -496,5 +506,39 @@ impl Tool for KillBackground {
         }
 
         Ok(ToolResult::ok(call.id.clone(), body))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn running_process_keeps_session_resident_until_exit_is_recorded() {
+        let store = BackgroundProcessStore::new();
+        assert!(!store.has_running().await);
+        let exit_code = Arc::new(Mutex::new(None));
+        store
+            .insert(ProcessEntry {
+                id: 1,
+                command: "server".into(),
+                call_id: "call".into(),
+                cwd: PathBuf::new(),
+                started_at: Instant::now(),
+                lines: Arc::new(Mutex::new(VecDeque::new())),
+                exit_code: exit_code.clone(),
+                cancel: CancellationToken::new(),
+                pid: Arc::new(AtomicU32::new(0)),
+                stopped: Arc::new(AtomicBool::new(false)),
+            })
+            .await;
+        assert!(store.has_running().await);
+        store.get(1).await.unwrap().stop();
+        assert!(
+            store.has_running().await,
+            "a stop request is not a completed shutdown"
+        );
+        *exit_code.lock().await = Some(0);
+        assert!(!store.has_running().await);
     }
 }
