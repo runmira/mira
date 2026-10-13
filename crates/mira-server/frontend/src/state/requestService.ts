@@ -35,7 +35,7 @@ export function createRequestService(
       const state = read();
       const session = state.active;
       const data = session ? state.sessions.get(session) : undefined;
-      if (disposed || !session || !data || data.resolvedRequests[id] || data.requestDelivery[id]?.status === 'submitting') return false;
+      if (disposed || !session || !data || owners.has(id) || data.resolvedRequests[id] || data.requestDelivery[id]?.status === 'submitting') return false;
       const entry = data.entries.find(entry => entry.kind === 'tool' && entry.call.id === id);
       const actionable = message.type === 'approve' ? entry?.kind === 'tool' && entry.status === 'pending' :
         message.type === 'prompt_response' && (message.kind === 'secret' ? data.secretRequests.some(request => request.promptId === id) :

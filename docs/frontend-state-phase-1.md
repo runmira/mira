@@ -186,22 +186,26 @@ rechecks the live active pointer, registry and durable queue. Live slots are kep
 loading/activation cannot cross the protected deletion boundary. Slot eviction
 holds registry/active guards together and skips Arc borrowers, attached clients,
 recently touched sessions and replaced registry entries. Active lookups retain
-the active-pointer guard until they acquire a resident slot.
+the active-pointer guard until they acquire a resident slot. Background processes
+keep the slot resident until their exit is recorded, preserving the stop API.
 
 Frontend terminal identities are captured per delivered input, rather than derived
 from a mutable turn-start clock. Ordered terminals finalize their own transcript
-slice and timing; an earlier terminal cannot clear a pending follow-up. Ready resets
-the pending terminal projection from the authoritative attachment. Legacy frames
+slice and timing; an earlier terminal cannot clear a pending follow-up. Ready retains
+in-flight identities and usage baselines per session; idle or completed snapshot
+turns clear their pending projection. Legacy frames
 still depend on ordered delivery; no new exactly-once wire guarantee is claimed.
 
-Failed unsent decisions release request ownership. Session switches are disabled
+Failed unsent decisions release request ownership. In-flight IDs reject duplicate
+submissions from another session until their owner finishes. Session switches are disabled
 until saved settings are known. Status dividers use a neutral content container so
 code spans and environment details remain available to assistive technologies.
 Existing auth, attachment, resource-key and ordinary-send fixes remain included.
 
-Validation: 98 frontend tests, 250 server tests (serial run), and 15 persistence
+Validation: 101 frontend tests, 250 server tests (serial run), and 15 persistence
 checks pass. Parallel server testing encountered one timing-sensitive spend test;
-the complete serial run passes. TypeScript/build/module checks and touched Rust
-formatting pass. Combined review-branch initial gzip is 423.8kB; the unchanged
+the complete serial run passes. The background-process residency regression,
+TypeScript/build/module checks, workspace Rust formatting and Clippy pass.
+Combined review-branch initial gzip is 423.9kB; the unchanged
 400kB gate remains a validation failure. Server safety fixes are also applied
 directly to #190's feature branch; frontend review fixes are delivered in #192.

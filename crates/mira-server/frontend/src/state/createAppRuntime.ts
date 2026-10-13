@@ -101,8 +101,12 @@ export function createAppRuntime(scope: RuntimeScope, storage?: UiStorage) {
       sessionServices.ref('pendingTerminals').current = [...sessionServices.ref('pendingTerminals').current,
         { id, startedAt, turnIndex, usageBase: sessionServices.ref('turnBase').current }];
     },
-    resetTerminals() {
-      sessionServices.ref('pendingTerminals').current = [];
+    reconcileTerminals(running: boolean, persistedTurns: readonly import('../types').TurnMeta[] = []) {
+      const pending = sessionServices.ref('pendingTerminals');
+      // Ready can resume this session's live turn after a reconnect or attach.
+      // Preserve its captured input identity and usage baseline; discard only
+      // completions confirmed by the snapshot (or all when it is idle).
+      pending.current = running ? pending.current.filter(turn => persistedTurns[turn.turnIndex]?.ended_at == null) : [];
       sessionServices.ref('terminalGeneration').current = '';
       sessionServices.ref('terminalSourceGeneration').current = -1;
     },

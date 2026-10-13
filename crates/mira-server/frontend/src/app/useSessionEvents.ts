@@ -211,7 +211,7 @@ export function useSessionEvents(
         for (const message of msg.history) if (message.input_id) appRuntime.effect(() => appRuntime.drafts.confirmDelivery(message.input_id!));
         appRuntime.resources.cancelContext();
         turnCommands.hydrate(msg.session_id, !!msg.running, msg.runtime_work ?? []);
-        appRuntime.resetTerminals();
+        appRuntime.reconcileTerminals(!!msg.running, msg.turns);
         if (msg.session_activity) updateSessionActivity({ snapshot: msg.session_activity });
         if (msg.title) {
           activityTitlesRef.current.set(msg.session_id, msg.title);
