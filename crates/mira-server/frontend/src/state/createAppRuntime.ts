@@ -1,4 +1,5 @@
 import { createStore } from '@tanstack/react-store';
+import { createSessionActivityStore } from './sessionActivityStore';
 import { QueryClient } from '@tanstack/react-query';
 
 export type RuntimeScope = { backend: string; account: string };
@@ -11,6 +12,7 @@ export function createAppRuntime(scope: RuntimeScope, storage?: UiStorage) {
   let disposed = false;
   let contextOpen = false;
   try { contextOpen = storage?.getItem('mira.context.open') === '1'; } catch { /* private mode */ }
+  const activity = createSessionActivityStore();
   const ui = createStore<WorkspaceUiState>({ contextOpen });
   const queryClient = new QueryClient({
     defaultOptions: {
@@ -23,9 +25,11 @@ export function createAppRuntime(scope: RuntimeScope, storage?: UiStorage) {
     scope: runtimeScope,
     workspaceUi: { get: () => ui.get(), subscribe: ui.subscribe.bind(ui) },
     queryClient,
+    sessionActivity: activity.source,
     resourceKey: (resource: string, ...identity: readonly string[]) =>
       ['mira', runtimeScope.backend, runtimeScope.account, resource, ...identity] as const,
     commands: {
+      applySessionActivity: activity.apply,
       setContextOpen(open: boolean) {
         if (disposed || ui.get().contextOpen === open) return;
         ui.setState(() => ({ contextOpen: open }));
@@ -35,6 +39,7 @@ export function createAppRuntime(scope: RuntimeScope, storage?: UiStorage) {
     dispose() {
       if (disposed) return;
       disposed = true;
+      activity.dispose();
       const queries = queryClient.getQueryCache().getAll();
       const cancelled = queryClient.cancelQueries();
       queryClient.clear();

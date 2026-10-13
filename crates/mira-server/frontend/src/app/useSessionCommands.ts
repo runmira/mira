@@ -1,10 +1,11 @@
+import { useAppRuntime } from '../state/RuntimeProvider';
 import { putCwd } from '../api';
 import { type InfoNotice } from '../components/InfoNoticeHost';
 import { loadAgentCaps } from '../lib/acpAgents';
 import { callForAttention } from '../lib/attention';
 import { isDesktop, pickFolder } from '../lib/desktop';
 import { type ShortcutMatchContext } from '../lib/keybindings';
-import { applySessionActivity, type SessionActivityUpdate } from '../lib/sessionActivity';
+import { type SessionActivityUpdate } from '../lib/sessionActivity';
 import type { SessionEngine } from '../types';
 
 import type { WorkspaceRuntime } from './WorkspaceRuntime';
@@ -39,14 +40,12 @@ export function useSessionCommands(
     | 'setSettingsSection'
     | 'visibleApprovalRef'
     | 'mainView'
-    | 'sessionActivityRef'
-    | 'setSessionActivity'
-    | 'setCompletedSessions'
     | 'chatTitleRef'
     | 'activityTitlesRef'
     | 'setMainView'
   >,
 ) {
+  const appRuntime = useAppRuntime();
   const {
     reviewOpen,
     historyCursor,
@@ -76,9 +75,6 @@ export function useSessionCommands(
     setSettingsSection,
     visibleApprovalRef,
     mainView,
-    sessionActivityRef,
-    setSessionActivity,
-    setCompletedSessions,
     chatTitleRef,
     activityTitlesRef,
     setMainView,
@@ -246,23 +242,7 @@ export function useSessionCommands(
   }
 
   function updateSessionActivity(update: SessionActivityUpdate) {
-    const previous = sessionActivityRef.current;
-    const next = applySessionActivity(previous, update);
-    if (next === previous) return;
-    sessionActivityRef.current = next;
-    setSessionActivity(next);
-    if (!previous || !next || previous.epoch !== next.epoch) return;
-    const completed = [...previous.running].filter((id) => !next.running.has(id));
-    if (!completed.length) return;
-    setCompletedSessions((previous) => {
-      const records = new Map(previous);
-      for (const id of completed) {
-        records.delete(id);
-        records.set(id, next.revision);
-      }
-      while (records.size > 500) records.delete(records.keys().next().value!);
-      return records;
-    });
+    const completed = appRuntime.commands.applySessionActivity(update);
     for (const id of completed) {
       const title =
         id === sessionIdRef.current ? chatTitleRef.current : activityTitlesRef.current.get(id);

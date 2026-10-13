@@ -21,7 +21,6 @@ import { useKeybindings } from '../lib/keybindings';
 import { useIsPhone } from '../lib/mobile';
 import { getBoolPref, PREF_KEYS } from '../lib/prefs';
 import { QueueMutations } from '../lib/queueMutations';
-import { type SessionActivityState } from '../lib/sessionActivity';
 import {
   type Entry,
   type NativeFrame,
@@ -54,15 +53,7 @@ export function useWorkspaceState() {
 
   const [status, setStatus] = useState<WsStatus>('connecting');
 
-  const [sessionActivity, setSessionActivity] = useState<SessionActivityState | null>(null);
-
-  const sessionActivityRef = useRef<SessionActivityState | null>(null);
-
   const activityTitlesRef = useRef(new Map<string, string>());
-
-  const [completedSessions, setCompletedSessions] = useState<ReadonlyMap<string, number>>(
-    new Map(),
-  );
 
   const [sessionId, setSessionId] = useState<string>('');
 
@@ -535,12 +526,7 @@ export function useWorkspaceState() {
     pingPrimedRef,
     status,
     setStatus,
-    sessionActivity,
-    setSessionActivity,
-    sessionActivityRef,
     activityTitlesRef,
-    completedSessions,
-    setCompletedSessions,
     sessionId,
     setSessionId,
     sessionIdRef,

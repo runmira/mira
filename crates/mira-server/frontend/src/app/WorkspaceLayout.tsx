@@ -1,6 +1,6 @@
 import { listEngines, setSessionBackgroundMode } from '../api';
 import { InfoNoticeHost, noticeId } from '../components/InfoNoticeHost';
-import { Sidebar } from '../components/Sidebar';
+import { WorkspaceSidebar } from './WorkspaceSidebar';
 import { cn } from '../lib/utils';
 import { WorkspaceDialogs } from './WorkspaceDialogs';
 import { WorkspaceMain } from './WorkspaceMain';
@@ -13,8 +13,6 @@ export function WorkspaceLayout(context: WorkspaceRuntime) {
     cwd,
     sessionId,
     busy,
-    sessionActivity,
-    completedSessions,
     sidebarRefresh,
     mainView,
     closeDrawer,
@@ -44,13 +42,11 @@ export function WorkspaceLayout(context: WorkspaceRuntime) {
   } = context;
 
   const sidebar = (
-    <Sidebar
+    <WorkspaceSidebar
       status={status}
       cwd={cwd}
       activeSessionId={sessionId}
       activeBusy={busy}
-      runningSessions={sessionActivity?.running ?? null}
-      completedSessions={completedSessions}
       refreshKey={sidebarRefresh}
       activeView={mainView}
       onNavigate={(view) => {

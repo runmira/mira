@@ -5,8 +5,9 @@ The separate `frontend-state.md` proposal remains the overarching plan.
 
 ## Ownership inventory
 
-Each name below is a field from `app/useWorkspaceState.ts`. Except `ctxOpen`,
-all retain their current hook owner in this change. Runtime session fields are
+Each name below was a field from the baseline `app/useWorkspaceState.ts`.
+`ctxOpen` now belongs to the UI store; `sessionActivity` and `completedSessions`
+now belong to the activity projection. Other fields retain their hook owner. Runtime session fields are
 currently mostly attached-session state; the target is scoped session projections.
 `status` and `sessionActivity` are connection/backend scoped; `completedSessions`,
 `queuedBySession`, and `recoveryBySession` already aggregate sessions.
@@ -37,7 +38,7 @@ These refs remain in hooks until their corresponding commands/events migrate.
 DOM refs, timers, buffers and sockets must never enter renderable/persisted state.
 Projection mirrors must be removed with their store migration, rather than dual-written.
 
-`pingPrimedRef`, `sessionActivityRef`, `activityTitlesRef`, `sessionIdRef`, `queuedBySessionRef`, `pendingSteerRef`, `approvalStarted`, `historyRequestRef`, `historyPreviewsRef`, `historyOffsetRef`, `providerTurnCursorRef`, `acpStopRef`, `capsDriverRef`, `engineRef`, `acpAgentsRef`, `completedUpdatesRef`, `turnStartRef`, `nativeWorkRef`, `nativeTurnsRef`, `busyRef`, `thinkingIdleTimerRef`, `drawerTouchX`, `drawerRef`, `chatShortcutRequest`, `shortcutEntriesRef`, `chatColObserver`, `repoSeqRef`, `wsRef`, `queueMutationsRef`, `paneRef`, `pendingProposalsRef`, `pendingAskUserRef`, `followRef`, `readingAnchorRef`, `lastScrollInputRef`, `chatTitleRef`, `tokenBufRef`, `tokenRafRef`, `usageRef`, `turnBaseRef`, `nativeFramesRef`, `nativeRafRef`, `visibleApprovalRef`, `browserShownFor`, `browserPingSeen`.
+`pingPrimedRef`, ``activityTitlesRef`, `sessionIdRef`, `queuedBySessionRef`, `pendingSteerRef`, `approvalStarted`, `historyRequestRef`, `historyPreviewsRef`, `historyOffsetRef`, `providerTurnCursorRef`, `acpStopRef`, `capsDriverRef`, `engineRef`, `acpAgentsRef`, `completedUpdatesRef`, `turnStartRef`, `nativeWorkRef`, `nativeTurnsRef`, `busyRef`, `thinkingIdleTimerRef`, `drawerTouchX`, `drawerRef`, `chatShortcutRequest`, `shortcutEntriesRef`, `chatColObserver`, `repoSeqRef`, `wsRef`, `queueMutationsRef`, `paneRef`, `pendingProposalsRef`, `pendingAskUserRef`, `followRef`, `readingAnchorRef`, `lastScrollInputRef`, `chatTitleRef`, `tokenBufRef`, `tokenRafRef`, `usageRef`, `turnBaseRef`, `nativeFramesRef`, `nativeRafRef`, `visibleApprovalRef`, `browserShownFor`, `browserPingSeen`.
 
 `mainView`, `settingsSection`, and their navigation commands belong to React
 Router (`useAppNavigation`). `phone`, `ctxFits`, and `keybindings` are existing
@@ -147,3 +148,39 @@ and diff whitespace checks passed. Production asset emission again failed with
 ENOSPC. The size check could not run against the incomplete output because its
 manifest was not emitted. The budget remains 400 kB. No desktop build/install or
 live UI verification was performed. The full issue remains open.
+
+## Activity slice on the same PR branch
+
+`state/sessionActivityStore.ts` reuses `applySessionActivity` in a pure reducer.
+Running sessions and completion revisions commit atomically. Duplicate snapshots
+retain references; revision-only changes preserve the running-set reference.
+Completed revisions retain the existing 500-entry cap. A server epoch change
+clears previous-epoch completion markers rather than comparing incompatible
+revision namespaces. Account runtimes isolate the projection; disposal blocks
+late updates. No activity data is persisted.
+
+The old activity state, setter, mirrored ref and completion setter are removed
+from `useWorkspaceState`. `useSessionCommands` delegates its existing event
+command to the store and issues completion notifications only for the returned
+new transitions. Notifications remain outside the reducer. `WorkspaceSidebar`
+subscribes directly to running/completed projections, so activity notifications
+no longer rerender Application and its command/event hooks.
+
+`busy`, `thinking`, native turn/work refs, token buffers and transcript state
+remain in their existing owners. Moving them requires the attached-session and
+connection-generation contract described above. This slice begins the activity
+phase; it does not complete the turn or streaming migration.
+
+Updated validation: 53 frontend tests pass. TypeScript, production build,
+module checks and diff checks pass. The activity selector React probe sees no
+extra renders across 99 revision-only snapshots and a UI preference change,
+and one render when the selected running set changes. Reducer tests cover
+atomic completion, duplicate/stale frames, reconnect snapshots, epoch restart,
+structural sharing, retention, disposal and account isolation.
+
+A fresh baseline build from commit ecf39b9 using the same Vite configuration,
+build environment and dependency installation passes and measures 401.2 kB
+initial gzip. Final branch measures 413.5 kB (+12.3 kB). Both fail the unchanged
+400 kB size budget. These fresh results supersede the earlier existing-artifact
+measurement and ENOSPC limitation. Desktop UI checks are unavailable because
+auth configuration is server-side; no native recovery behavior is claimed.

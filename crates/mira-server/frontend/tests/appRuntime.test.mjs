@@ -97,3 +97,27 @@ test('provider survives Strict Mode, replaces account runtime, and clears caches
   await act(() => root.unmount());
   assert.equal(current.queryClient.getQueryCache().getAll().length, 0);
 });
+
+test('activity selectors ignore UI changes and revision-only snapshots', async () => {
+  const runtime = createAppRuntime(scope);
+  const snapshot = (revision, running) => ({ snapshot: { epoch: 'test', revision, running } });
+  runtime.commands.applySessionActivity(snapshot(1, ['a', 'b']));
+  let renders = 0;
+  function Probe() {
+    const running = useSelector(runtime.sessionActivity, state => state.activity?.running);
+    renders++;
+    return String(running?.size);
+  }
+  const root = createRoot(document.createElement('div'));
+  await act(() => root.render(React.createElement(Probe)));
+  const before = renders;
+  await act(() => {
+    runtime.commands.setContextOpen(true);
+    for (let i = 2; i <= 100; i++) runtime.commands.applySessionActivity(snapshot(i, ['a', 'b']));
+  });
+  assert.equal(renders, before);
+  await act(() => runtime.commands.applySessionActivity(snapshot(101, ['b'])));
+  assert.equal(renders, before + 1);
+  await act(() => root.unmount());
+  await runtime.dispose();
+});
