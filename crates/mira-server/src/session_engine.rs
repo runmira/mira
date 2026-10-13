@@ -1011,6 +1011,7 @@ mod tests {
     fn a_restart_note_lists_cancelled_work_and_stays_bounded() {
         use mira_acp::runtime::{RuntimeWork, WorkKind, WorkStatus};
         let work = |i: usize| RuntimeWork {
+            subagent: None,
             id: format!("w{i}"),
             native_thread_id: None,
             kind: WorkKind::Subagent,

@@ -177,3 +177,37 @@ New messages expose their timestamp in the hover actions. Native-agent replay
 uses persisted frame times; legacy provider messages without a stored timestamp
 do not receive an invented time. Deploy frontend and server together, and
 reconnect existing Codex agents to pick up the revised tool configuration.
+
+
+## External subagents in Mira's agent UI
+
+Native child identities and explicit delegation tool calls use the same `agent`
+entries, AgentCard/AgentGroup and SubagentPanel as Mira's own helpers. This follows
+T3's separation of provider lifecycle projection from each child's stream,
+adapted to Mira's transcript and session store.
+
+Codex collaboration states and child-thread lifecycle frames produce stable child
+IDs, names/prompts when supplied, completion status and reported results. Child
+assistant text, snapshots, reasoning and tool updates travel in a scoped
+`external_subagent_frame` envelope. Child spend retains the existing accounting
+path. Child narration cannot append to the parent reply or finish its turn.
+
+ACP `Task`, `Agent`, `task`, `agent` and `subagent` calls with a prompt (including
+OpenCode), or a prompt plus an explicit subagent type, translate into Mira agent
+cards. Providers can report tool progress and results without exposing a full
+child transcript; the panel displays what is available. Ordinary task-management
+and shell calls keep their regular tool UI. Claude background lifecycle updates
+retain their launch call ID so a tool's result cannot prematurely finish a
+still-running child or create a second card.
+
+Late snapshots do not reopen a completed child. A new child turn explicitly
+reopens it; Ready's authoritative activity snapshot restores resumed work.
+Sidecars replay lifecycle cards and child streams separately. Provider child IDs
+never go to Mira's session-history endpoint.
+
+Reference inspected: T3's CodexAdapterV2 subagent projection and child contexts,
+and the OpenCode2AdapterV2 native child/session background lifecycle fixtures.
+Verification covers parent/child isolation, parallel identities, replay, late
+snapshots, reopening, delegation translation and launch/lifecycle convergence.
+Live authenticated provider acceptance remains separate; this does not claim
+that every provider exposes child tokens or tools.

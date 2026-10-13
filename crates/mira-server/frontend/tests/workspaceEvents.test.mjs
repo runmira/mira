@@ -24,6 +24,7 @@ function harness() {
   runtime.turnCommands.hydrate('active', true, []);
   const context = {
     updateTranscript: update => runtime.updateSessionData('entries', update),
+    updateSubagentProjection: update => runtime.updateSessionData('subagentState', update),
     pendingProposalsRef: runtime.sessionServices.ref('pendingProposals'),
     pendingAskUserRef: runtime.sessionServices.ref('pendingQuestions'),
     approvalStarted: runtime.sessionServices.ref('approvalStarted'),
@@ -147,4 +148,20 @@ test('queued ACP terminals consume captured input identities and finish each tur
   assert.equal(h.runtime.readSession().turnTimings,ended,'duplicate terminal has no effect');
   h.runtime.beginTerminalTurn('c',2,2);h.runtime.turnCommands.reportTurnRunning(true);
   handler({type:'acp_turn_end',stop_reason:'end_turn'});assert.equal(h.runtime.isTurnRunning(),false,'same timestamp does not deduplicate a new turn');
+});
+
+
+test('native child frames open Mira subagent cards without changing the parent reply or ending its turn', () => {
+  const h=harness();
+  h.runtime.updateSessionData('entries',[{kind:'msg',msg:{role:'assistant',content:'Parent reply'}}]);
+  const handler=useAgentEvents({...h.context,turnCommands:h.runtime.turnCommands});
+  handler({type:'runtime_turn_updated',turn:{native_thread_id:'root',native_turn_id:'parent',running:true}});
+  handler({type:'runtime_work_updated',work:{id:'subagent:child',native_thread_id:'child',kind:'subagent',status:'running',title:'Inspect files'}});
+  handler({type:'external_subagent_frame',agent_id:'child',frame:{type:'acp_text',text:'Child report',message_id:'m'}});
+  assert.equal(h.entries()[0].msg.content,'Parent reply');
+  assert.equal(h.entries()[1].call.function.name,'agent');
+  assert.equal(h.runtime.readSession().subagentState.get('external:subagent:child').entries[0].msg.content,'Child report');
+  handler({type:'runtime_work_updated',work:{id:'subagent:child',native_thread_id:'child',kind:'subagent',status:'completed',title:null}});
+  assert.equal(h.runtime.readSession().subagentState.get('external:subagent:child').done,true);
+  assert.equal(h.runtime.isTurnRunning(),true,'child completion cannot end the live parent');
 });

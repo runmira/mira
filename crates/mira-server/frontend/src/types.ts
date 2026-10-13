@@ -428,7 +428,7 @@ export type EnvironmentStatus = {
 
 export type EnvironmentInfo = { name: string; backend: string; description: string };
 
-export type RuntimeWork = { id: string; native_thread_id: string | null; kind: 'goal' | 'task' | 'subagent'; status: 'pending' | 'running' | 'waiting' | 'paused' | 'completed' | 'failed' | 'cancelled'; title: string | null };
+export type RuntimeWork = { subagent?: { call_id?: string | null; reopen?: boolean; name: string | null; prompt: string | null; result: string | null } | null; id: string; native_thread_id: string | null; kind: 'goal' | 'task' | 'subagent'; status: 'pending' | 'running' | 'waiting' | 'paused' | 'completed' | 'failed' | 'cancelled'; title: string | null };
 export type RuntimeRequestRecord = {
   id: string; instance: string; driver: string;
   request: { native_id: string; native_thread_id: string; native_turn_id: string | null; questions: { id: string; question: string; header: string | null; options: string[]; required: boolean }[]; response_capability: 'message' | 'live_rpc' };
@@ -463,6 +463,7 @@ export type ServerMsg =
   | { type: 'session_engine'; engine: SessionEngine }
   | { type: 'runtime_request_updated'; request: RuntimeRequestRecord }
   | { type: 'runtime_work_updated'; work: RuntimeWork }
+  | { type: 'external_subagent_frame'; agent_id: string; frame: ExternalChildFrame }
   | { type: 'runtime_turn_updated'; turn: { native_thread_id: string; native_turn_id: string; running: boolean } }
   | { type: 'token'; text: string }
   | { type: 'reasoning'; text: string }
@@ -831,3 +832,5 @@ export type SessionSummary = {
    *  nests it there. */
   launched_by?: string | null;
 };
+
+export type ExternalChildFrame = Extract<ServerMsg, { type: 'acp_text' | 'acp_text_snapshot' | 'acp_thought' | 'acp_tool_call' | 'acp_tool_call_update' | 'acp_tool_output_delta' }>;

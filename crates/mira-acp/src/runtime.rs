@@ -86,8 +86,22 @@ impl WorkStatus {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentDetails {
+    #[serde(default)]
+    pub call_id: Option<String>,
+    /// An actual new child turn, rather than a late lifecycle snapshot.
+    #[serde(default)]
+    pub reopen: bool,
+    pub name: Option<String>,
+    pub prompt: Option<String>,
+    pub result: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeWork {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent: Option<SubagentDetails>,
     pub id: String,
     pub native_thread_id: Option<String>,
     pub kind: WorkKind,
@@ -170,6 +184,7 @@ mod tests {
         };
         a.turn(&turn);
         let mut task = RuntimeWork {
+            subagent: None,
             id: "task".into(),
             native_thread_id: Some("t".into()),
             kind: WorkKind::Task,
@@ -190,6 +205,7 @@ mod tests {
         let b = RuntimeActivity::default();
         for i in 0..10000 {
             let mut w = RuntimeWork {
+                subagent: None,
                 id: i.to_string(),
                 native_thread_id: None,
                 kind: WorkKind::Subagent,

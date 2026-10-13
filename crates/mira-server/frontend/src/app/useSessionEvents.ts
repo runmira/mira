@@ -1,3 +1,4 @@
+import { replayExternalStreams, projectExternalWork, upsertExternalWork } from '../lib/externalSubagents';
 import * as agentTerminal from '../lib/agentTerminal';
 import { getBoolPref,PREF_KEYS } from '../lib/prefs';
 import { hasTranscriptPosition } from '../lib/transcriptPosition';
@@ -10,7 +11,6 @@ rebuildTurnUsage,
 sealThought,
 upsertRuntimeQuestion,
 type Entry,
-type SubagentStreamState,
 } from '../transcript/entries';
 import { entriesForTranscriptPage,historyToEntries,interleaveReplay } from '../transcript/replay';
 import type { ServerMsg } from '../types';
@@ -309,20 +309,24 @@ export function useSessionEvents(
         const readyEntries = msg.transcript_page
           ? entriesForTranscriptPage(msg.transcript_page, msg.previews)
           : historyToEntries(msg.history, msg.previews);
+        // The Ready activity snapshot is authoritative for resumed children.
+        const resumedWork = (msg.runtime_work ?? []).map(work => ({ ...work, subagent: work.kind === 'subagent'
+          ? { name: null, prompt: null, result: null, ...work.subagent, reopen: true } : work.subagent }));
         updateTranscript(
           (msg.runtime_requests ?? []).reduce(
             (entries, request) => upsertRuntimeQuestion(entries, request),
-            msg.transcript_page
-              ? readyEntries
-              : interleaveReplay(msg.history, msg.previews, msg.agent_transcript ?? []),
+            resumedWork.reduce(upsertExternalWork,
+              msg.transcript_page ? readyEntries : interleaveReplay(msg.history, msg.previews, msg.agent_transcript ?? [])),
           ),
         );
         // Seed subagent state from history so the ContextPanel shows agents
         // on session reload (live subagent_started frames don't replay).
         updateSubagentProjection(previous => {
-          const seeded = new Map<string, SubagentStreamState>();
+          const replayLines = msg.transcript_page ? msg.transcript_page.items.flatMap(item => item.line ? [item.line] : []) : msg.agent_transcript ?? [];
+          const seeded = resumedWork.reduce(projectExternalWork, replayExternalStreams(replayLines));
           for (const e of readyEntries) {
             if (e.kind !== 'tool' || e.call.function.name !== 'agent') continue;
+            if (seeded.has(e.call.id)) continue;
             try {
               const args = JSON.parse(e.call.function.arguments) as {
                 prompt?: string;
@@ -342,7 +346,7 @@ export function useSessionEvents(
               /* skip malformed args */
             }
           }
-          for (const [id, stream] of previous) if (!stream.done || stream.pendingReview) seeded.set(id, stream);
+          for (const [id, stream] of previous) if ((!stream.done || stream.pendingReview) && !seeded.has(id)) seeded.set(id, stream);
           return seeded;
         });
         // Server-persisted turn timing is aligned with user-message order

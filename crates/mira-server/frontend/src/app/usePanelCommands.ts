@@ -73,6 +73,8 @@ export function usePanelCommands(
     // Find the parent's tool entry to read the tool_result content.
     const entry = appRuntime.readSession().entries.find((e): e is ToolEntry => e.kind === 'tool' && e.call.id === callId);
     if (!entry?.result) return;
+    // Native child IDs belong to the provider, never Mira's session API.
+    try { if (JSON.parse(entry.call.function.arguments)._external) return; } catch { /* older entry */ }
     const agentId = extractAgentId(entry.result.content);
     if (!agentId) return;
     try {

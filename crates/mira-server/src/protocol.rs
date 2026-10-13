@@ -711,6 +711,10 @@ pub enum ServerMsg {
     RuntimeWorkUpdated {
         work: mira_acp::runtime::RuntimeWork,
     },
+    ExternalSubagentFrame {
+        agent_id: String,
+        frame: Box<ServerMsg>,
+    },
     RuntimeTurnUpdated {
         turn: mira_acp::runtime::RuntimeTurn,
     },
@@ -1056,6 +1060,16 @@ impl ServerMsg {
         use mira_acp::events::{EventSource, MiraEvent};
         let event = ev.event;
         Some(match event {
+            MiraEvent::SubagentEvent {
+                native_thread_id,
+                event,
+            } => Self::ExternalSubagentFrame {
+                agent_id: native_thread_id,
+                frame: Box::new(Self::from_acp(mira_acp::events::NormalizedEvent {
+                    source: ev.source,
+                    event: *event,
+                })?),
+            },
             MiraEvent::Failure {
                 code,
                 message,

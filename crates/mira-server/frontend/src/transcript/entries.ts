@@ -42,6 +42,7 @@ import type {
  *  `subagent_done` frame lands or the parent's ToolEnd for this call
  *  arrives (whichever is first). */
 export type SubagentStreamState = {
+  externalWork?: import('../types').RuntimeWork;
   parentCallId: string;
   agentId?: string;
   model?: string;
@@ -65,6 +66,7 @@ function nextToolActivity(entries: Entry[]): number {
 }
 
 export type ToolEntry = {
+  externalWork?: import('../types').RuntimeWork;
   activityAt?: number;
   kind: 'tool';
   runtimeDelivery?: Extract<ServerMsg, { type: 'runtime_request_updated' }>['request']['delivery'];
@@ -536,12 +538,12 @@ export const AGENT_PROMPT_TOOLS = new Set(['AskUserQuestion', 'ExitPlanMode']);
 export function upsertAcpTool(prevRaw: Entry[], call: AcpToolCall, at = Date.now()): Entry[] {
   call = boundAgentOutput(call);
   const prev = sealThought(prevRaw, at);
-  const idx = prev.findIndex((e) => e.kind === 'tool' && e.agentCall?.id === call.id);
+  const idx = prev.findIndex((e) => e.kind === 'tool' && (e.agentCall?.id === call.id || e.call.id === call.id));
   let merged: AcpToolCall = call;
   if (idx >= 0) {
     const existing = prev[idx];
-    if (existing.kind !== 'tool' || !existing.agentCall) return prev;
-    merged = { ...existing.agentCall };
+    if (existing.kind !== 'tool') return prev;
+    merged = { ...(existing.agentCall ?? call) };
     for (const [k, v] of Object.entries(call) as [keyof AcpToolCall, unknown][]) {
       if (v === null || v === undefined || v === '') continue;
       if (Array.isArray(v) && v.length === 0) continue;
@@ -570,6 +572,12 @@ export function upsertAcpTool(prevRaw: Entry[], call: AcpToolCall, at = Date.now
     startedAt: prior?.startedAt ?? at,
     delegateSteps: prior?.delegateSteps,
   };
+  if (entry.kind === 'tool' && prior?.externalWork) {
+    entry.externalWork = prior.externalWork;
+    // A background launch can finish while its native child keeps working.
+    entry.status = prior.status;
+    entry.result = prior.result;
+  }
   if (idx >= 0) return [...prev.slice(0, idx), entry, ...prev.slice(idx + 1)];
   return [...prev, entry];
 }

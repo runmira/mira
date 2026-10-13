@@ -3227,6 +3227,15 @@ fn native_background_work(v: &Value) -> Option<crate::runtime::RuntimeWork> {
         return None;
     }
     Some(RuntimeWork {
+        subagent: Some(SubagentDetails {
+            call_id: v
+                .get("tool_use_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            reopen: subtype == "task_started",
+            result: v.get("summary").and_then(Value::as_str).map(str::to_owned),
+            ..Default::default()
+        }),
         id: format!("task:{id}"),
         native_thread_id: v
             .get("session_id")
@@ -3256,7 +3265,7 @@ mod background_work_tests {
         let mut stream = StreamState::default();
         let mut activity = crate::runtime::RuntimeActivity::default();
         for frame in [
-            json!({"type":"system","subtype":"task_started","task_id":"job","session_id":"s","description":"build"}),
+            json!({"type":"system","subtype":"task_started","task_id":"job","session_id":"s","description":"build","tool_use_id":"launch"}),
             json!({"type":"result","subtype":"success","is_error":false,"session_id":"s"}),
         ] {
             for action in stream.map(&frame, None) {
@@ -3265,6 +3274,10 @@ mod background_work_tests {
                     ..
                 }) = action
                 {
+                    assert_eq!(
+                        w.subagent.as_ref().unwrap().call_id.as_deref(),
+                        Some("launch")
+                    );
                     activity.work(&w);
                 }
             }

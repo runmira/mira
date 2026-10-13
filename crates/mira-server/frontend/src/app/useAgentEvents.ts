@@ -1,4 +1,5 @@
 import type { Entry } from '../transcript/entries';
+import { applyExternalChild, childCallId, projectAcpSubagent, projectExternalWork, upsertExternalWork } from '../lib/externalSubagents';
 import { terminalEntries } from '../lib/terminalEntries';
 import { agentFailureEntry,hasCurrentAgentFailure } from '../lib/agentProgress';
 import { applyNativeMetadata } from '../lib/nativeStream';
@@ -26,6 +27,7 @@ export function useAgentEvents(
   context: Pick<
     WorkspaceRuntime,
     | 'updateTranscript'
+    | 'updateSubagentProjection'
     | 'turnCommands'
     | 'isTurnRunning'
     | 'playPing'
@@ -83,6 +85,14 @@ export function useAgentEvents(
 
       case 'runtime_work_updated':
         turnCommands.nativeWork(msg.work);
+        updateTranscript(previous => upsertExternalWork(previous, msg.work));
+        context.updateSubagentProjection(previous => projectExternalWork(previous, msg.work));
+        break;
+
+      case 'external_subagent_frame':
+        updateTranscript(previous => previous.some(e => e.kind === 'tool' && e.call.id === childCallId(msg.agent_id)) ? previous :
+          upsertExternalWork(previous, { id: `subagent:${msg.agent_id}`, native_thread_id: msg.agent_id, kind: 'subagent', status: 'running', title: null }));
+        context.updateSubagentProjection(previous => applyExternalChild(previous, msg.agent_id, msg.frame, receivedAt));
         break;
 
       // -------- ACP (external agent) --------
@@ -98,6 +108,7 @@ export function useAgentEvents(
 
       case 'acp_tool_call_update':
         updateTranscript((prev) => upsertAcpTool(prev, msg.call, receivedAt));
+        context.updateSubagentProjection(previous => projectAcpSubagent(previous, msg.call));
         break;
 
       case 'acp_plan':

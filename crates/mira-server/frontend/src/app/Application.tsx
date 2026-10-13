@@ -123,6 +123,7 @@ export function Application() {
         return;
       case 'acp_message_metadata':
       case 'runtime_turn_updated':
+      case 'external_subagent_frame':
       case 'runtime_work_updated':
       case 'acp_text':
       case 'acp_thought':

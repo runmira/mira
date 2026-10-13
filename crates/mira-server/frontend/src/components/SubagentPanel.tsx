@@ -444,8 +444,10 @@ function TabBody({
             <span className="text-[13px] font-medium text-foreground">About {identity.name}</span>
           </div>
           <p className="mb-3 text-[12px] leading-relaxed text-muted-foreground">
-            A bounded subagent spawned by the parent — cold context, its own tools, and one summary
-            back to the parent when done.
+            {(() => {
+              try { if (JSON.parse(tab.call.function.arguments)._external) return 'A helper managed by the external agent. Its reported work and result appear here.'; } catch { /* older call */ }
+              return 'A bounded subagent spawned by the parent — cold context, its own tools, and one summary back to the parent when done.';
+            })()}
           </p>
           <div className="mb-1.5 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground/70">
             Task
