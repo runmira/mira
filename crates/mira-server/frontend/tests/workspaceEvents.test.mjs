@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 import { bundle } from './helpers/bundle.mjs';
-const { createAppRuntime, useApprovalEvents, useTranscriptEvents, useSessionEvents, useStreamCommands, useComposerCommands } = await bundle(`
+const { createAppRuntime, useApprovalEvents, useTranscriptEvents, useSessionEvents, useStreamCommands, useComposerCommands, useAgentEvents } = await bundle(`
 export { createAppRuntime } from './src/state/createAppRuntime';
 export { useApprovalEvents } from './src/app/useApprovalEvents';
 export { useTranscriptEvents } from './src/app/useTranscriptEvents';
 export { useSessionEvents } from './src/app/useSessionEvents';
 export { useStreamCommands } from './src/app/useStreamCommands';
 export { useComposerCommands } from './src/app/useComposerCommands';
+export { useAgentEvents } from './src/app/useAgentEvents';
 `, {
   'src/state/RuntimeProvider': 'export const useAppRuntime = () => globalThis.eventRuntime; export const useOptionalRuntime = () => null;',
   'src/app/shared': 'export const useStableCallback = fn => fn;',
@@ -121,4 +122,29 @@ test('a late queue acceptance does not erase a newer draft', () => {
   h.runtime.drafts.update(key, { text: 'newer', attachments: [], images: [] });
   h.runtime.drafts.confirmDelivery('id');
   assert.equal(h.runtime.drafts.get(key).text, 'newer');
+});
+
+test('queued ACP terminals consume captured input identities and finish each turn without clearing its follow-up', () => {
+  const h=harness();
+  const user=(id,text)=>({kind:'msg',msg:{role:'user',input_id:id,content:text}});
+  h.runtime.updateSessionData('entries',[user('a','A'),{kind:'thought',native:true,text:'A thought',live:true,startedAt:1,endedAt:null},user('b','B'),{kind:'thought',native:true,text:'B thought',live:true,startedAt:2,endedAt:null}]);
+  h.runtime.updateSessionData('turnTimings',new Map([[0,{startedAt:1,endedAt:null}],[1,{startedAt:2,endedAt:null}]]));
+  h.runtime.beginTerminalTurn('a',1,0);h.runtime.beginTerminalTurn('b',2,1);
+  h.runtime.sessionServices.ref('turnStart').current=2;
+  const handler=useAgentEvents({...h.context,turnCommands:h.runtime.turnCommands,refreshRepo(){},
+    recordTurnTimings:apply=>h.runtime.updateSessionData('turnTimings',apply),turnStartRef:h.runtime.sessionServices.ref('turnStart'),setSidebarRefresh(){}});
+  handler({type:'acp_turn_end',stop_reason:'end_turn'});
+  assert.equal(h.runtime.isTurnRunning(),true,'ending A cannot clear the already delivered B');
+  assert.equal(h.entries().find(e=>e.text==='A thought').live,false);
+  assert.equal(h.entries().find(e=>e.text==='B thought').live,true);
+  assert.ok(h.runtime.readSession().turnTimings.get(0).endedAt!==null);
+  assert.equal(h.runtime.readSession().turnTimings.get(1).endedAt,null);
+  handler({type:'acp_turn_end',stop_reason:'end_turn'});
+  assert.equal(h.runtime.isTurnRunning(),false);
+  assert.equal(h.entries().find(e=>e.text==='B thought').live,false);
+  const ended=h.runtime.readSession().turnTimings;
+  handler({type:'acp_turn_end',stop_reason:'end_turn'});
+  assert.equal(h.runtime.readSession().turnTimings,ended,'duplicate terminal has no effect');
+  h.runtime.beginTerminalTurn('c',2,2);h.runtime.turnCommands.reportTurnRunning(true);
+  handler({type:'acp_turn_end',stop_reason:'end_turn'});assert.equal(h.runtime.isTurnRunning(),false,'same timestamp does not deduplicate a new turn');
 });

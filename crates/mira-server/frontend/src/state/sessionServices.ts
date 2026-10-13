@@ -4,6 +4,7 @@ import type { AskUserProposal,DiffPreview,PlanProposal,ServerMsg,UsageTotals } f
 /** Session-scoped resources and staging. These are not renderable or persisted state. */
 function createResources() {
   return {
+    pendingTerminals: [] as { id: string; startedAt: number; turnIndex: number; usageBase: { turn: number; base: UsageTotals } | null }[], terminalOrdinal: 0, terminalSourceGeneration: -1,
     historyRequest: null as string | null, historyGeneration: 0, terminalGeneration: '',
     historyPreviews: {} as Record<string, DiffPreview>, historyOffset: 0, providerTurnCursor: 0,
     pendingProposals: new Map<string, PlanProposal>(), pendingQuestions: new Map<string, AskUserProposal>(),

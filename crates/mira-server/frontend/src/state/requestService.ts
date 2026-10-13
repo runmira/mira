@@ -26,6 +26,7 @@ export function createRequestService(
   function fail(id: string, error: string) {
     const session = ownerOf(id);
     cancel(id);
+    owners.delete(id);
     if (!session) return;
     updateAt(session, 'requestDelivery', previous => ({ ...previous, [id]: { status: 'failed', error } }));
   }

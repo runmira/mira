@@ -233,6 +233,7 @@ export function useComposerCommands(
       msg: { role: 'user', created_at: now, content: text, images, input_id: inputId } }];
     const turnIndex = providerIndex ?? countUserMessages(next) - 1 + historyOffsetRef.current;
     startTurnUsage(turnIndex);
+    appRuntime.beginTerminalTurn(inputId, now, turnIndex);
     updateTranscript(next);
     recordTurnTimings(previous => new Map(previous).set(turnIndex, { startedAt: now, endedAt: null }));
     reportTurnRunning(true);
@@ -338,6 +339,7 @@ export function useComposerCommands(
     updateTranscript(next);
     const startedAt = Date.now();
     turnStartRef.current = startedAt;
+    appRuntime.beginTerminalTurn(undefined, startedAt, turnIndex);
     recordTurnTimings(previous => new Map([...previous].filter(([index]) => index < turnIndex))
       .set(turnIndex, { startedAt, endedAt: null }));
     reportTurnRunning(true);

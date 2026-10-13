@@ -95,19 +95,30 @@ export function createAppRuntime(scope: RuntimeScope, storage?: UiStorage) {
       });
       return true;
     },
+    beginTerminalTurn(inputId: string | undefined, startedAt: number, turnIndex: number) {
+      const ordinal = sessionServices.ref('terminalOrdinal'); ordinal.current++;
+      const id = inputId ?? `local:${ordinal.current}`;
+      sessionServices.ref('pendingTerminals').current = [...sessionServices.ref('pendingTerminals').current,
+        { id, startedAt, turnIndex, usageBase: sessionServices.ref('turnBase').current }];
+    },
+    resetTerminals() {
+      sessionServices.ref('pendingTerminals').current = [];
+      sessionServices.ref('terminalGeneration').current = '';
+      sessionServices.ref('terminalSourceGeneration').current = -1;
+    },
     acceptTerminal() {
-      const state = turns.source.get(); if (!state.active || disposed) return false;
-      // Terminal dedup is per turn, not per session generation: a follow-up
-      // sent while the turn is still busy (queued/steered input) never bumps
-      // the generation, so generation-scoped dedup rejected that turn's end
-      // — and every later end, since the composer stayed busy forever.
-      // `turnStart` is written on every send and never cleared, so it
-      // identifies the turn even after its end was handled (duplicates still
-      // collapse onto the same key).
+      const state = turns.source.get(); if (!state.active || disposed) return null;
+      // Ordered attached-socket terminals consume identities captured on send.
+      // A follow-up cannot overwrite the earlier turn's terminal identity.
+      const pending = sessionServices.ref('pendingTerminals');
+      const captured = pending.current[0];
       const terminal = sessionServices.ref('terminalGeneration');
-      const key = `${state.generation}:${sessionServices.ref('turnStart').current ?? ''}`;
-      if (terminal.current === key) return false;
-      terminal.current = key; return true;
+      const key = captured ? `${state.attachment}:${captured.id}` : `generation:${state.generation}`;
+      if (!captured && sessionServices.ref('terminalSourceGeneration').current === state.generation) return null;
+      sessionServices.ref('terminalSourceGeneration').current = state.generation;
+      terminal.current = key;
+      if (captured) pending.current = pending.current.slice(1);
+      return { ...captured, pending: pending.current.length > 0 };
     },
     sessionServices,
     sessionState: turns.source,

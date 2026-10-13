@@ -6,9 +6,10 @@ import { Window } from 'happy-dom';
 import { bundle } from './helpers/bundle.mjs';
 const window = new Window({ url: 'https://mira.test' });
 globalThis.window = window; globalThis.document = window.document;
-const { turnActivity, TurnView, AssistantContent, EntryView } = await bundle(`
+const { turnActivity, TurnView, AssistantContent, EntryView, StatusLine } = await bundle(`
 export { turnActivity } from './src/lib/turnActivity';
 export { TurnView } from './src/components/transcript/TurnView';
+export { StatusLine } from './src/components/transcript/EntryView';
 export { EntryView } from './src/components/transcript/EntryView';
 export { AssistantContent } from './src/components/AssistantContent';
 `, { 'src/components/diffs/DiffWorkerPoolProvider': `export function DiffWorkerPoolProvider({children}) { return children; }`, 'src/components/ui/Collapse': `export function Collapse({open, children}) { return open ? children : null; }` });
@@ -30,7 +31,7 @@ test('a collapsed completed turn still renders interruptions below the reply as 
   const html = renderToStaticMarkup(React.createElement(TurnView, {turn:{user:null,body:[tool,answer,notice]},timing:{startedAt:0,endedAt:1000},index:0,expanded:false,onToggle:noop,onDecide:noop,onPlanReply:noop,onOpenAgent:noop}));
   const dom = document.createElement('div');dom.innerHTML=html;
   assert.ok(!dom.querySelector('.transcript-work'));
-  assert.equal(dom.querySelector('[role="separator"]')?.textContent.trim(),notice.text);
+  assert.equal(dom.querySelector('[data-transcript-notice]')?.textContent.trim(),notice.text);
   assert.ok(html.indexOf('The final answer.')<html.indexOf(notice.text));
 });
 test('embedded reasoning owns one icon gutter while prose owns the content gutter', () => {
@@ -53,4 +54,12 @@ test('intermediate messages have no timestamp or action row; the final reply ret
   assert.equal(render(false).querySelectorAll('button,time').length,0);
   assert.equal(render(false).textContent,answer.msg.content,'intermediate messages have no secondary timestamp text');
   assert.ok(render(true).querySelector('button'), 'final answer retains actions');
+});
+
+test('status dividers preserve readable code and detail outside presentational separator roles', () => {
+  const dom=document.createElement('div');dom.innerHTML=renderToStaticMarkup(React.createElement(StatusLine,{text:'[environment] Switched to `local`\nEnvironment detail'}));
+  const notice=dom.querySelector('[data-transcript-notice]');
+  assert.ok(!notice.closest('[role="separator"],[aria-hidden="true"]'));
+  assert.equal(notice.querySelector('code').textContent,'local');
+  assert.equal(notice.querySelector('pre').textContent,'Environment detail');
 });

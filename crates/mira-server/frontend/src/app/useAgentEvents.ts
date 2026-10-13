@@ -1,3 +1,5 @@
+import type { Entry } from '../transcript/entries';
+import { terminalEntries } from '../lib/terminalEntries';
 import { agentFailureEntry,hasCurrentAgentFailure } from '../lib/agentProgress';
 import { applyNativeMetadata } from '../lib/nativeStream';
 import { useAppRuntime } from '../state/RuntimeProvider';
@@ -114,11 +116,13 @@ export function useAgentEvents(
         updateTranscript((prev) => [...prev, agentFailureEntry(msg)]);
         break;
 
-      case 'acp_turn_end':
-        if (!appRuntime.acceptTerminal()) break;
-        appRuntime.updateSessionData('activeInputId', null);
+      case 'acp_turn_end': {
+        const terminal = appRuntime.acceptTerminal();
+        if (!terminal) break;
+        if (!terminal.pending) appRuntime.updateSessionData('activeInputId', null);
+        const finishTranscript: typeof updateTranscript = apply => updateTranscript(previous => terminalEntries(previous, terminal.id, apply as (entries: Entry[]) => Entry[]));
         // An agent compaction ends with its turn.
-        updateTranscript((prev) =>
+        finishTranscript((prev) =>
           prev.some((e) => e.kind === 'compact' && e.state === 'running' && e.trigger === 'agent')
             ? finishCompaction(prev, isSuccessfulAcpStop(msg.stop_reason)
                   ? { state: 'done' }
@@ -135,8 +139,7 @@ export function useAgentEvents(
         // turn that was running here (a Stop already settled the composer,
         // and its confirmation shouldn't chime).
         if (isTurnRunning()) playPing();
-        turnCommands.finishAgent();
-        clearThinkingIdle();
+        if (!terminal.pending) { turnCommands.finishAgent(); clearThinkingIdle(); }
         // The agent edits files in its own process; nothing else tells the
         // panels their counts are stale.
         refreshRepo();
@@ -144,11 +147,15 @@ export function useAgentEvents(
         // turn that ended minutes ago. The harness path does this on `done`;
         // the agent path never did, which is why a finished turn still showed
         // a live duration.
-        recordTurnTimings((prev) => stampLastTurn(prev, receivedAt));
+        recordTurnTimings(previous => {
+          if (terminal.turnIndex === undefined) return stampLastTurn(previous, receivedAt);
+          const timing = previous.get(terminal.turnIndex);
+          return timing ? new Map(previous).set(terminal.turnIndex, { ...timing, endedAt: receivedAt }) : previous;
+        });
         {
-          const started = turnStartRef.current;
+          const started = terminal.startedAt ?? turnStartRef.current;
           const ended = receivedAt;
-          updateTranscript((prev) =>
+          finishTranscript((prev) =>
             withTurnStats(prev, (st) => ({
               ...st,
               startedAt: st.startedAt ?? started,
@@ -163,7 +170,7 @@ export function useAgentEvents(
         // completed one. The server puts the agent's own context (e.g. when
         // a limit resets) on the frame so this is one message, not two.
         const stopped = msg.stop_reason;
-        updateTranscript((prev) => {
+        finishTranscript((prev) => {
           const sealed = settleTools(sealAcpThought(prev, receivedAt));
           if (isSuccessfulAcpStop(stopped) || hasCurrentAgentFailure(sealed)) return sealed;
           const detail = msg.detail ? ` ${msg.detail}` : '';
@@ -183,6 +190,7 @@ export function useAgentEvents(
           ];
         });
         break;
+      }
 
       case 'acp_privileged_mode_confirmation':
         // The server refused without an acknowledgement. Show what the mode

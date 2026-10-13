@@ -1,3 +1,4 @@
+import { terminalEntries } from '../lib/terminalEntries';
 import { appendAgentProgress } from '../lib/agentProgress';
 import * as agentTerminal from '../lib/agentTerminal';
 import { applyResolution } from '../state/requestReducer';
@@ -155,10 +156,11 @@ export function useTranscriptEvents(
         break;
 
       case 'done': {
-        if (!appRuntime.acceptTerminal()) break;
-        appRuntime.updateSessionData('activeInputId', null);
+        const terminal = appRuntime.acceptTerminal();
+        if (!terminal) break;
+        if (!terminal.pending) appRuntime.updateSessionData('activeInputId', null);
         const wasRunning = isTurnRunning();
-        const started = turnBaseRef.current;
+        const started = terminal.id ? terminal.usageBase : turnBaseRef.current;
         const now = getUsage();
         if (started && now) {
           const d: UsageTotals = {
@@ -171,16 +173,20 @@ export function useTranscriptEvents(
             recordTurnUsage((prev) => new Map(prev).set(started.turn, d));
           }
         }
-        turnBaseRef.current = null;
-        reportTurnRunning(false);
-        reportThinking(false);
-        clearThinkingIdle();
-        updateTranscript((prev) => settleTools(sealThought(prev, receivedAt)));
+        if (!terminal.pending) {
+          turnBaseRef.current = null;
+          reportTurnRunning(false); reportThinking(false); clearThinkingIdle();
+        }
+        updateTranscript(previous => terminalEntries(previous, terminal.id, entries => settleTools(sealThought(entries, receivedAt))));
         if (wasRunning) playPing();
         // Refresh git status, session diff, and branch PR after each turn.
         refreshRepo();
         // Close out the most recent turn's timing.
-        recordTurnTimings((prev) => stampLastTurn(prev, receivedAt));
+        recordTurnTimings(previous => {
+          if (terminal.turnIndex === undefined) return stampLastTurn(previous, receivedAt);
+          const timing = previous.get(terminal.turnIndex);
+          return timing ? new Map(previous).set(terminal.turnIndex, { ...timing, endedAt: receivedAt }) : previous;
+        });
         setSidebarRefresh((n) => n + 1);
         break;
       }

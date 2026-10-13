@@ -58,6 +58,7 @@ export function GeneralSection({
   const sessionsCfg = settings.data?.sessions ?? { auto_resume_after_limit: false, keep_awake_while_running: false };
   const [sessionsError, setSessionsError] = useState<string | null>(null);
   function setSessionsFlag(key: keyof SessionsSettings, value: boolean) {
+    if (!settings.data) return;
     setSessionsError(null);
     // Serialize saved changes in the service; never roll back a newer server value.
     void runtime.resources.saveSettings({ sessions: { [key]: value } })
@@ -252,7 +253,7 @@ export function GeneralSection({
               checked={sessionsCfg?.auto_resume_after_limit ?? false}
               onChange={(v) => setSessionsFlag('auto_resume_after_limit', v)}
               label="Auto resume after a limit resets"
-              disabled={sessionsLoadFailed}
+              disabled={!settings.data}
             />
           }
         />
@@ -264,7 +265,7 @@ export function GeneralSection({
               checked={sessionsCfg?.keep_awake_while_running ?? false}
               onChange={(v) => setSessionsFlag('keep_awake_while_running', v)}
               label="Keep the screen awake while a session runs"
-              disabled={sessionsLoadFailed}
+              disabled={!settings.data}
             />
           }
         />

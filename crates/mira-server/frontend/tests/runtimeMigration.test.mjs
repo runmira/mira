@@ -182,3 +182,12 @@ test('Stop drains final tokens atomically and a failed transport does not imply 
     sub.unsubscribe();
   } finally { delete globalThis.requestAnimationFrame; delete globalThis.cancelAnimationFrame; }
 });
+
+test('failed unsent request ownership cannot route a reused ID to the old session', () => {
+  const r=runtime();r.updateSessionData('entries',[pendingTool('same')]);
+  assert.equal(r.requests.submit('same',{type:'approve',call_id:'same',allow:true},()=>false),false);
+  r.turnCommands.hydrate('b',false,[]);r.updateSessionData('entries',[pendingTool('same')]);
+  r.requests.resolve('same');
+  assert.ok(r.readSession().resolvedRequests.same);
+  assert.ok(!r.sessionState.get().sessions.get('a').resolvedRequests.same);
+});

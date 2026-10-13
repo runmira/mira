@@ -835,7 +835,7 @@ export function StatusLine({ text, tone }: { text: string; tone?: StatusTone }) 
     memory: <Sparkle className="size-3.5 text-violet-300/70" />,
   }[s.tone];
   return (
-    <div role="separator" aria-label={s.text} className={cn('flex min-w-0 items-center gap-2 py-2 text-xs text-muted-foreground', STREAM_ROW_GUTTER, s.tone === 'error' && 'text-destructive')}>
+    <div data-transcript-notice className={cn('flex min-w-0 items-center gap-2 py-2 text-xs text-muted-foreground', STREAM_ROW_GUTTER, s.tone === 'error' && 'text-destructive')}>
       <span aria-hidden="true" className="h-px min-w-3 flex-1 bg-border/70" />
       <span className="flex h-5 shrink-0 items-center">{icon}</span>
       <span className="min-w-0 break-words">
