@@ -93,3 +93,22 @@ but cross-window server-pointer isolation requires a backend contract change.
 The PR stays draft and issue #187 stays open pending the bundle gate and live
 acceptance checks. Implementation is consolidated; these limitations must remain
 visible when evaluating completion.
+
+## Transcript scroll stabilization
+
+The follow-up fixes use one transcript scroll owner. Browser anchoring is disabled
+for the virtual pane; measured height changes and older-history insertion retain
+a stable row ID and offset from the actual scroll position. Explicit scroll input
+suspends following immediately; reaching the actual end or Jump to latest can
+resume it. Disclosure toggles pin their visible header, or keep the end visible
+when following there. Observer subscriptions depend on mounted row identity, not
+streamed content, and remounted tool rows do not replay entrance fades.
+
+Compared with the local T3 implementation in `MessagesTimeline.tsx` and
+`work-log/scrollAnchor.ts`, the same separation of end following, reading anchors
+and disclosure settling is used without replacing Mira's virtual list implementation.
+Regression coverage includes fast scroll before resize, height changes above the
+viewport, history prepend, disclosure geometry, observer stability and disposal.
+The frontend suite now passes 82 tests. Native scrolling and streaming remain
+manual acceptance checks; simulated DOM geometry does not establish native paint
+or momentum-scroll behavior.

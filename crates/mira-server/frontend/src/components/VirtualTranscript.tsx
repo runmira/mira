@@ -1,187 +1,183 @@
-import {
-  Children,
-  useEffect,
-  useLayoutEffect,
-  useRef,
-  useState,
-  type ReactNode,
-  type RefObject,
-} from 'react';
-import { Anchor, positions, savedPosition } from '../lib/transcriptPosition';
+import { Children, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
+import { anchorTop, transcriptAnchor } from '../lib/transcriptAnchor';
+import { type Anchor, positions, savedPosition } from '../lib/transcriptPosition';
 import { transcriptWindow } from '../lib/transcriptWindow';
 import { TranscriptRowContext, TranscriptSessionContext } from './TranscriptDisclosure';
-/** Keep a bounded set of measured transcript rows mounted. Measurements survive
- * streaming updates; browser scroll anchoring preserves the visible row. */
-export function VirtualTranscript({
-  children,
-  pane,
-  identity,
-  onNeedOlder,
-  hasOlder,
-}: {
-  onNeedOlder?: () => void;
-  hasOlder?: boolean;
+
+/** One scroll owner: virtual measurements, reading anchors and end following. */
+export function VirtualTranscript({ children, pane, identity, onNeedOlder, hasOlder, follow, lastInput, readingAnchor }: {
   children: ReactNode;
   pane: RefObject<HTMLDivElement | null>;
   identity: string;
+  onNeedOlder?: () => void;
+  hasOlder?: boolean;
+  follow?: { current: boolean };
+  lastInput?: { current: number };
+  readingAnchor?: { current: number | null };
 }) {
   const rows = Children.toArray(children);
   const root = useRef<HTMLDivElement>(null);
-  const pendingRestore = useRef<Anchor | undefined>(undefined);
-  const visibleAnchor = useRef<Anchor | undefined>(undefined);
-  const previousIdentity = useRef('');
-  if (previousIdentity.current !== identity) {
-    previousIdentity.current = identity;
-    pendingRestore.current = savedPosition(identity);
-    visibleAnchor.current = undefined;
-  }
-  const offsetsRef = useRef<number[]>([]);
-  const keysRef = useRef<string[]>([]);
-
   const heights = useRef(new Map<string, number>());
+  const committed = useRef({ identity: '', keys: [] as string[], offsets: [0] });
+  const restore = useRef<Anchor | undefined>(undefined);
+  const disclosure = useRef<{ element: HTMLElement; top: number; end: boolean } | undefined>(undefined);
   const [viewport, setViewport] = useState({ top: 0, height: 1000 });
   const [, invalidate] = useState(0);
   const keys = rows.map((row, index) => `${identity}:${(row as { key?: string }).key ?? index}`);
   const offsets = [0];
-  for (const key of keys)
-    offsets.push(offsets[offsets.length - 1] + (heights.current.get(key) ?? 280));
-  offsetsRef.current = offsets;
-  keysRef.current = keys;
+  for (const key of keys) offsets.push(offsets.at(-1)! + (heights.current.get(key) ?? 280));
   const { start, end } = transcriptWindow(offsets, viewport.top, viewport.height);
-  useEffect(() => {
+  const latest = useRef({ keys, offsets, follow, lastInput, onNeedOlder, hasOlder });
+  latest.current = { keys, offsets, follow, lastInput, onNeedOlder, hasOlder };
+
+  function origin() {
+    const scroll = pane.current!;
+    return root.current!.getBoundingClientRect().top - scroll.getBoundingClientRect().top + scroll.scrollTop;
+  }
+  function readViewport() {
+    const scroll = pane.current;
+    if (!scroll || !root.current) return;
+    const top = scroll.scrollTop - origin(), height = scroll.clientHeight;
+    setViewport(previous => previous.top === top && previous.height === height ? previous : { top, height });
+  }
+  function following() {
+    return !!latest.current.follow?.current && Date.now() - (latest.current.lastInput?.current ?? 0) >= 700;
+  }
+
+  // Capture from the committed layout before replacing spacer estimates. This
+  // also preserves stable row IDs when older history is prepended.
+  useLayoutEffect(() => {
+    const scroll = pane.current;
+    if (!scroll || !root.current) return;
+    const old = committed.current;
+    const switched = old.identity !== identity;
+    const changed = old.keys.join('|') !== keys.join('|') || old.offsets.join('|') !== offsets.join('|');
+    const anchor = switched ? savedPosition(identity) : restore.current ??
+      (changed && !following() ? transcriptAnchor(old.keys, old.offsets, scroll.scrollTop - origin()) : undefined);
+    restore.current = anchor;
+    committed.current = { identity, keys, offsets };
+    if (readingAnchor?.current != null) {
+      scroll.scrollTop = readingAnchor.current;
+      readingAnchor.current = null;
+      restore.current = undefined;
+    } else if (anchor && !anchor.bottom) {
+      const top = anchorTop(anchor, keys, offsets);
+      if (top !== undefined) {
+        scroll.scrollTop = origin() + top;
+        if (heights.current.has(anchor.key)) restore.current = undefined;
+      } else if (hasOlder) onNeedOlder?.();
+      else restore.current = undefined;
+    } else if (anchor?.bottom || following()) {
+      scroll.scrollTop = scroll.scrollHeight;
+      restore.current = undefined;
+    }
+    const pinned = disclosure.current;
+    if (pinned?.element.isConnected) {
+      if (pinned.end && following()) scroll.scrollTop = scroll.scrollHeight;
+      else scroll.scrollTop += pinned.element.getBoundingClientRect().top - pinned.top;
+    }
+    readViewport();
+  });
+
+  // Measure newly mounted rows before paint, and asynchronously for images/tool
+  // output. The observer depends on mounted row identity, never token content.
+  useLayoutEffect(() => {
+    const scroll = pane.current;
+    if (!root.current || !scroll) return;
+    function measure() {
+      const old = committed.current;
+      const anchor = transcriptAnchor(old.keys, old.offsets, scroll!.scrollTop - origin());
+      let changed = false;
+      root.current?.querySelectorAll<HTMLElement>('[data-virtual-key]').forEach(row => {
+        const key = row.dataset.virtualKey!, height = row.getBoundingClientRect().height;
+        if (height > 0 && (!heights.current.has(key) || Math.abs(heights.current.get(key)! - height) > 0.5)) {
+          heights.current.set(key, height);
+          if (heights.current.size > 10000) heights.current.delete(heights.current.keys().next().value!);
+          changed = true;
+        }
+      });
+      if (changed) {
+        if (!restore.current && !following()) restore.current = anchor;
+        invalidate(value => value + 1);
+      }
+    }
+    measure();
+    const observer = new ResizeObserver(measure);
+    root.current.querySelectorAll('[data-virtual-key]').forEach(row => observer.observe(row));
+    return () => observer.disconnect();
+  }, [identity, start, end, keys.join('|')]);
+
+  // Streaming can resize existing rows during a React commit without creating
+  // a new observer. ResizeObserver reports those changes before the next paint.
+  useLayoutEffect(() => {
     const scroll = pane.current;
     if (!scroll) return;
-    let frame = 0;
-    const read = () => {
-      frame = 0;
-      if (!root.current) return;
-      setViewport({
-        top:
-          scroll.scrollTop -
-          (root.current.getBoundingClientRect().top -
-            scroll.getBoundingClientRect().top +
-            scroll.scrollTop),
-        height: scroll.clientHeight,
-      });
-    };
-    const update = () => {
-      if (!frame) frame = requestAnimationFrame(read);
-    };
+    let settle = 0;
     function remember() {
-      update();
-      if (!root.current || pendingRestore.current) return;
-      const boundary = scroll!.getBoundingClientRect().top;
-      const row = Array.from(root.current.querySelectorAll<HTMLElement>('[data-virtual-key]')).find(
-        (element) => element.getBoundingClientRect().bottom > boundary,
-      );
-      if (!row?.dataset.virtualKey) return;
-      const anchor = {
-        key: row.dataset.virtualKey,
-        offset: boundary - row.getBoundingClientRect().top,
-        bottom: scroll!.scrollHeight - scroll!.scrollTop - scroll!.clientHeight < 80,
-      };
-      visibleAnchor.current = anchor;
+      readViewport();
+      if (!root.current || restore.current) return;
+      const model = committed.current;
+      const anchor = transcriptAnchor(model.keys, model.offsets, scroll!.scrollTop - origin());
+      if (!anchor) return;
+      anchor.bottom = !!latest.current.follow?.current && scroll!.scrollHeight - scroll!.scrollTop - scroll!.clientHeight < 80;
       positions.set(identity, anchor);
       if (positions.size > 100) positions.delete(positions.keys().next().value!);
-      try {
-        sessionStorage.setItem(`mira:scroll:${identity}`, JSON.stringify(anchor));
-      } catch {
-        /* storage is optional */
-      }
+      try { sessionStorage.setItem(`mira:scroll:${identity}`, JSON.stringify(anchor)); } catch { /* optional */ }
+    }
+    function input() {
+      disclosure.current = undefined;
+      // A new gesture wins over unfinished restore/measurement work.
+      restore.current = undefined;
     }
     function jump(event: Event) {
       const id = (event as CustomEvent<string>).detail;
-      const nodeIndex = keysRef.current.findIndex((key) =>
-        key.endsWith(`turn-${id.replace('turn-', '')}`),
-      );
-      if (nodeIndex < 0 || !root.current) return;
-      const top =
-        root.current.getBoundingClientRect().top -
-        scroll!.getBoundingClientRect().top +
-        scroll!.scrollTop;
-      pendingRestore.current = { key: keysRef.current[nodeIndex], offset: 0, bottom: false };
-      scroll!.scrollTop = top + offsetsRef.current[nodeIndex];
-      invalidate((value) => value + 1);
-      update();
+      const model = committed.current;
+      const index = model.keys.findIndex(key => key.endsWith(`turn-${id.replace('turn-', '')}`));
+      if (index < 0 || !root.current) return;
+      if (latest.current.follow) latest.current.follow.current = false;
+      restore.current = { key: model.keys[index], offset: 0, bottom: false };
+      scroll!.scrollTop = origin() + model.offsets[index];
+      invalidate(value => value + 1);
     }
-    window.addEventListener('mira:transcript-jump', jump);
+    function toggle(event: Event) {
+      const target = (event.target as HTMLElement).closest<HTMLElement>('button, [role="button"]');
+      if (!target || !root.current?.contains(target)) return;
+      const atEnd = scroll!.scrollHeight - scroll!.scrollTop - scroll!.clientHeight < 2;
+      disclosure.current = { element: target, top: target.getBoundingClientRect().top, end: atEnd };
+      if (!atEnd && latest.current.follow) latest.current.follow.current = false;
+      clearTimeout(settle);
+      settle = window.setTimeout(() => { disclosure.current = undefined; }, 700);
+    }
     scroll.addEventListener('scroll', remember, { passive: true });
-    const resize = new ResizeObserver(update);
-    resize.observe(scroll);
-    read();
+    scroll.addEventListener('wheel', input, { passive: true });
+    scroll.addEventListener('touchmove', input, { passive: true });
+    scroll.addEventListener('keydown', input);
+    scroll.addEventListener('pointerdown', input, { passive: true });
+    root.current?.addEventListener('click', toggle, true);
+    window.addEventListener('mira:transcript-jump', jump);
+    const observer = new ResizeObserver(readViewport);
+    observer.observe(scroll);
     return () => {
-      window.removeEventListener('mira:transcript-jump', jump);
-      scroll.removeEventListener('scroll', remember);
-      resize.disconnect();
-      cancelAnimationFrame(frame);
-    };
-  }, [pane, identity, rows.length]);
-  useLayoutEffect(() => {
-    const anchor = pendingRestore.current;
-    const scroll = pane.current;
-    if (!anchor || !scroll || !root.current) return;
-    if (anchor.bottom) {
-      pendingRestore.current = undefined;
-      scroll.scrollTop = scroll.scrollHeight;
-      return;
-    }
-    const index = keys.findIndex((key) => key === anchor.key);
-    if (index < 0) {
-      if (hasOlder) onNeedOlder?.();
-      else pendingRestore.current = undefined;
-      return;
-    }
-    const origin =
-      root.current.getBoundingClientRect().top -
-      scroll.getBoundingClientRect().top +
-      scroll.scrollTop;
-    scroll.scrollTop = origin + offsets[index] + anchor.offset;
-    if (heights.current.has(anchor.key)) pendingRestore.current = undefined;
-  }, [identity, keys.join('|'), offsets.join('|'), hasOlder]);
-  useLayoutEffect(() => {
-    if (!root.current) return;
-    let frame = 0;
-    const observer = new ResizeObserver((items) => {
-      let changed = false;
-      for (const item of items) {
-        const key = (item.target as HTMLElement).dataset.virtualKey!;
-        const height = item.target.getBoundingClientRect().height;
-        if (height > 0 && Math.abs((heights.current.get(key) ?? 280) - height) > 0.5) {
-          heights.current.set(key, height);
-          if (heights.current.size > 10000)
-            heights.current.delete(heights.current.keys().next().value!);
-          changed = true;
-        }
-      }
-      if (changed && !frame)
-        frame = requestAnimationFrame(() => {
-          frame = 0;
-          if (!pendingRestore.current && visibleAnchor.current && !visibleAnchor.current.bottom)
-            pendingRestore.current = visibleAnchor.current;
-          invalidate((v) => v + 1);
-        });
-    });
-    root.current.querySelectorAll('[data-virtual-key]').forEach((row) => observer.observe(row));
-    return () => {
+      clearTimeout(settle);
       observer.disconnect();
-      cancelAnimationFrame(frame);
+      scroll.removeEventListener('scroll', remember);
+      scroll.removeEventListener('wheel', input);
+      scroll.removeEventListener('touchmove', input);
+      scroll.removeEventListener('keydown', input);
+      scroll.removeEventListener('pointerdown', input);
+      root.current?.removeEventListener('click', toggle, true);
+      window.removeEventListener('mira:transcript-jump', jump);
     };
-  }, [start, end, identity, children]);
-  return (
-    <TranscriptSessionContext.Provider value={identity}>
-      <div ref={root}>
-        <div aria-hidden style={{ height: offsets[start] }} />
-        {rows.slice(start, end).map((row, index) => (
-          <div key={keys[start + index]} data-virtual-key={keys[start + index]} className="pb-2">
-            <TranscriptRowContext.Provider value={keys[start + index]}>
-              {row}
-            </TranscriptRowContext.Provider>
-          </div>
-        ))}
-        <div aria-hidden style={{ height: offsets[rows.length] - offsets[end] }} />
-      </div>
-    </TranscriptSessionContext.Provider>
-  );
-}
+  }, [pane, identity]);
 
+  return <TranscriptSessionContext.Provider value={identity}>
+    <div ref={root}>
+      <div aria-hidden style={{ height: offsets[start], overflowAnchor: 'none' }} />
+      {rows.slice(start, end).map((row, index) => <div key={keys[start + index]} data-virtual-key={keys[start + index]} className="pb-2">
+        <TranscriptRowContext.Provider value={keys[start + index]}>{row}</TranscriptRowContext.Provider>
+      </div>)}
+      <div aria-hidden style={{ height: offsets[rows.length] - offsets[end], overflowAnchor: 'none' }} />
+    </div>
+  </TranscriptSessionContext.Provider>;
+}
 export { hasTranscriptPosition } from '../lib/transcriptPosition';

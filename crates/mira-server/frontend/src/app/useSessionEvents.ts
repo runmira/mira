@@ -155,9 +155,6 @@ export function useSessionEvents(
         recordHistoryError(msg.error);
         if (msg.page) {
           const page = msg.page;
-          const pane = paneRef.current;
-          const beforeHeight = pane?.scrollHeight ?? 0;
-          const beforeTop = pane?.scrollTop ?? 0;
           followRef.current = false;
           historyOffsetRef.current = page.first_turn;
           recordHistoryCursor(page.next_cursor);
@@ -165,13 +162,6 @@ export function useSessionEvents(
             ...entriesForTranscriptPage(page, historyPreviewsRef.current),
             ...previous,
           ]);
-          const attachment = appRuntime.sessionState.get().attachment;
-          appRuntime.service.frame(() => {
-            if (pane && appRuntime.sessionState.get().attachment === attachment) {
-              pane.scrollTop = beforeTop + pane.scrollHeight - beforeHeight;
-              readingAnchorRef.current = pane.scrollTop;
-            }
-          });
         }
         break;
       }

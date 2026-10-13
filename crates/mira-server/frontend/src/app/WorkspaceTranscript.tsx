@@ -11,6 +11,9 @@ export function WorkspaceTranscript(
     WorkspaceRuntime,
     | 'messageActions'
     | 'paneRef'
+    | 'followRef'
+    | 'lastScrollInputRef'
+    | 'readingAnchorRef'
     | 'sessionId'
     | 'historyCursor'
     | 'loadOlderHistory'
@@ -73,6 +76,9 @@ export function WorkspaceTranscript(
     <MessageActionsContext.Provider value={messageActions}>
       <VirtualTranscript
         pane={paneRef}
+        follow={context.followRef}
+        lastInput={context.lastScrollInputRef}
+        readingAnchor={context.readingAnchorRef}
         identity={JSON.stringify(runtime.resourceKey('scroll', sessionId || 'new'))}
         hasOlder={!!historyCursor}
         onNeedOlder={loadOlderHistory}

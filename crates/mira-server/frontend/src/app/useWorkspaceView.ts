@@ -14,7 +14,7 @@ import { hasHiddenTitleBar } from '../lib/desktop';
 import { useLatch } from '../lib/lazy';
 import { getBoolPref,PREF_KEYS } from '../lib/prefs';
 import { playTurnSound } from '../lib/sound';
-import { distanceFromBottom,FOLLOW_ENGAGE_AT,nextFollow } from '../lib/transcriptFollow';
+import { distanceFromBottom,FOLLOW_ENGAGE_AT } from '../lib/transcriptFollow';
 import { groupByTurn } from '../lib/turnActivity';
 import { costUsd } from '../lib/usage';
 import { useAppRuntime } from '../state/RuntimeProvider';
@@ -276,6 +276,7 @@ export function useWorkspaceView(
 
   const noteScrollInput = () => {
     lastScrollInputRef.current = Date.now();
+    followRef.current = false;
   };
 
   const jumpToLatest = useCallback(() => {
@@ -292,11 +293,9 @@ export function useWorkspaceView(
     // Settings → General → Transcript can disable auto-follow; the
     // jump-to-latest button still works (it re-arms follow explicitly).
     if (Date.now() - lastScrollInputRef.current < 1000) {
-      followRef.current = nextFollow(
-        followRef.current,
-        distance,
-        getBoolPref(PREF_KEYS.transcriptFollow, true),
-      );
+      // Layout corrections must never re-arm follow. Only an explicit gesture
+      // reaching the actual end, or Jump to latest, does that.
+      followRef.current = distance <= 2 && getBoolPref(PREF_KEYS.transcriptFollow, true);
     }
     setShowJump(distance >= FOLLOW_ENGAGE_AT);
   }, []);

@@ -163,7 +163,8 @@ export function ToolGroup({
                 key={e.call.id}
                 custom={i}
                 variants={itemVariants}
-                initial="hidden"
+                // Virtual rows remount while scrolling; do not replay entrance fades.
+                initial={false}
                 animate="visible"
                 transition={reduceMotion ? { duration: 0, delay: 0 } : undefined}
               >
