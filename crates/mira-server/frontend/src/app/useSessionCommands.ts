@@ -1,11 +1,10 @@
-import { useAppRuntime } from '../state/RuntimeProvider';
 import { putCwd } from '../api';
 import { type InfoNotice } from '../components/InfoNoticeHost';
-import { loadAgentCaps } from '../lib/acpAgents';
 import { callForAttention } from '../lib/attention';
-import { isDesktop, pickFolder } from '../lib/desktop';
+import { isDesktop,pickFolder } from '../lib/desktop';
 import { type ShortcutMatchContext } from '../lib/keybindings';
 import { type SessionActivityUpdate } from '../lib/sessionActivity';
+import { useAppRuntime } from '../state/RuntimeProvider';
 import type { SessionEngine } from '../types';
 
 import type { WorkspaceRuntime } from './WorkspaceRuntime';
@@ -14,26 +13,25 @@ export function useSessionCommands(
     WorkspaceRuntime,
     | 'historyCursor'
     | 'historyLoading'
-    | 'sessionIdRef'
+    | 'getSessionId'
     | 'historyRequestRef'
-    | 'setHistoryLoading'
-    | 'setHistoryError'
+    | 'recordHistoryLoading'
+    | 'recordHistoryError'
     | 'wsRef'
-    | 'engineRef'
-    | 'setEngine'
-    | 'capsDriverRef'
-    | 'setAcpModes'
-    | 'setAcpConfig'
-    | 'setAcpCommands'
-    | 'setAcpUsage'
-    | 'setAcpLimits'
+    | 'getEngine'
+    | 'recordEngine'
+    | 'recordAgentModes'
+    | 'recordAgentConfig'
+    | 'recordAgentCommands'
+    | 'recordAgentUsage'
+    | 'recordAgentLimits'
     | 'setInfoNotices'
-    | 'setBusy'
+    | 'reportTurnRunning'
     | 'turnCommands'
-    | 'setThinking'
+    | 'reportThinking'
     | 'setRestoreNote'
     | 'setPickerOpen'
-    | 'setEntries'
+    | 'updateTranscript'
     | 'reviewOpen'
     | 'thinkingIdleTimerRef'
     | 'openSettings'
@@ -50,26 +48,25 @@ export function useSessionCommands(
     reviewOpen,
     historyCursor,
     historyLoading,
-    sessionIdRef,
+    getSessionId,
     historyRequestRef,
-    setHistoryLoading,
-    setHistoryError,
+    recordHistoryLoading,
+    recordHistoryError,
     wsRef,
-    engineRef,
-    setEngine,
-    capsDriverRef,
-    setAcpModes,
-    setAcpConfig,
-    setAcpCommands,
-    setAcpUsage,
-    setAcpLimits,
+    getEngine,
+    recordEngine,
+    recordAgentModes,
+    recordAgentConfig,
+    recordAgentCommands,
+    recordAgentUsage,
+    recordAgentLimits,
     setInfoNotices,
-    setBusy,
+    reportTurnRunning,
     turnCommands,
-    setThinking,
+    reportThinking,
     setRestoreNote,
     setPickerOpen,
-    setEntries,
+    updateTranscript,
     thinkingIdleTimerRef,
     openSettings,
     setSettingsSection,
@@ -81,22 +78,23 @@ export function useSessionCommands(
   } = context;
 
   function loadOlderHistory() {
-    if (!historyCursor || historyLoading || !sessionIdRef.current) return;
+    if (!historyCursor || historyLoading || !getSessionId()) return;
     const request_id = crypto.randomUUID();
     historyRequestRef.current = request_id;
-    setHistoryLoading(true);
-    setHistoryError(null);
+    appRuntime.sessionServices.ref('historyGeneration').current = appRuntime.sessionState.get().attachment;
+    recordHistoryLoading(true);
+    recordHistoryError(null);
     wsRef.current?.send({
       type: 'history',
-      session_id: sessionIdRef.current,
+      session_id: getSessionId(),
       cursor: historyCursor,
       request_id,
     });
-    window.setTimeout(() => {
+    appRuntime.service.schedule(() => {
       if (historyRequestRef.current === request_id) {
         historyRequestRef.current = null;
-        setHistoryLoading(false);
-        setHistoryError('Older messages could not be loaded. Try again.');
+        recordHistoryLoading(false);
+        recordHistoryError('Older messages could not be loaded. Try again.');
       }
     }, 15000);
   }
@@ -106,17 +104,17 @@ export function useSessionCommands(
    *  list and the mode control are right before the agent has reported
    *  anything; its live frames replace them as they arrive. */
   function applyEngine(next: SessionEngine | null) {
-    engineRef.current = next;
-    setEngine(next);
+    const previousEngine = getEngine();
+    const previousDriver = previousEngine?.kind === 'agent' ? previousEngine.driver ?? null : null;
+    recordEngine(next);
     const driver = next?.kind === 'agent' ? (next.driver ?? null) : null;
-    if (driver === capsDriverRef.current) return;
-    capsDriverRef.current = driver;
-    const caps = driver ? loadAgentCaps(driver) : {};
-    setAcpModes(caps.modes ?? null);
-    setAcpConfig(caps.config ?? []);
-    setAcpCommands([]);
-    setAcpUsage(null);
-    setAcpLimits([]);
+    if (driver === previousDriver) return;
+    const caps = driver ? appRuntime.readCapabilities(driver) ?? {} : {};
+    recordAgentModes(caps.modes ?? null);
+    recordAgentConfig(caps.config ?? []);
+    recordAgentCommands([]);
+    recordAgentUsage(null);
+    recordAgentLimits([]);
   }
 
   function pushInfoNotice(notice: InfoNotice) {
@@ -127,7 +125,7 @@ export function useSessionCommands(
       ].slice(-5),
     );
     if (notice.kind === 'short') {
-      window.setTimeout(() => {
+      appRuntime.service.schedule(() => {
         setInfoNotices((prev) => prev.filter((n) => n.id !== notice.id));
       }, 3200);
     }
@@ -141,8 +139,11 @@ export function useSessionCommands(
    *  last chat's turn at once; the new chat's `ready` turns Stop back on if
    *  a turn is running there. */
   function attachSession(id: string) {
+    appRuntime.streams.flush();
     clearThinkingIdle();
-    turnCommands.suspend();
+    historyRequestRef.current = null;
+    recordHistoryLoading(false);
+    turnCommands.suspend(id);
     wsRef.current?.attach(id);
   }
 
@@ -180,13 +181,16 @@ export function useSessionCommands(
   }
 
   function compactAcpAgent(focus?: string) {
+    if (!wsRef.current?.sendImmediate({ type: 'acp_compact', focus: focus?.trim() || null })) {
+      setRestoreNote({ text: 'Reconnect before compacting this chat.', error: true }); return;
+    }
     // A compaction is a turn like any other: busy until its end arrives, or
     // the composer would take input for a session that is summarizing.
-    setBusy(true);
-    setThinking(true);
+    reportTurnRunning(true);
+    reportThinking(true);
     // Agents compact inside their own process and only end the turn, so the
     // card runs from here until that turn ends.
-    setEntries((prev) => [
+    updateTranscript((prev) => [
       ...prev,
       {
         kind: 'compact',
@@ -197,7 +201,6 @@ export function useSessionCommands(
         summary: null,
       },
     ]);
-    wsRef.current?.send({ type: 'acp_compact', focus: focus?.trim() || null });
   }
 
   function clearThinkingIdle() {
@@ -209,10 +212,10 @@ export function useSessionCommands(
 
   function scheduleThinkingIdle() {
     clearThinkingIdle();
-    const scheduledGeneration = appRuntime.turns.get().generation;
-    thinkingIdleTimerRef.current = window.setTimeout(() => {
+    const scheduledGeneration = appRuntime.sessionState.get().generation;
+    thinkingIdleTimerRef.current = appRuntime.service.schedule(() => {
       thinkingIdleTimerRef.current = null;
-      if (appRuntime.turns.get().generation === scheduledGeneration) setThinking(true);
+      if (appRuntime.sessionState.get().generation === scheduledGeneration) reportThinking(true);
     }, 350);
   }
 
@@ -244,13 +247,13 @@ export function useSessionCommands(
     const completed = appRuntime.commands.applySessionActivity(update);
     for (const id of completed) {
       const title =
-        id === sessionIdRef.current ? chatTitleRef.current : activityTitlesRef.current.get(id);
+        id === getSessionId() ? chatTitleRef.current : activityTitlesRef.current.get(id);
       callForAttention('done', title ?? `Chat ${id.slice(0, 8)}`, {
         sessionId: id,
-        whileVisible: id !== sessionIdRef.current,
+        whileVisible: id !== getSessionId(),
         onOpen: () => {
           setMainView('chat');
-          wsRef.current?.attach(id);
+          attachSession(id);
         },
       });
     }

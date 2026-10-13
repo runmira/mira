@@ -1,38 +1,40 @@
-import { Dialog, DialogContent } from '@/components/ui/dialog';
+import { Dialog,DialogContent } from '@/components/ui/dialog';
 import { cn } from '@/lib/utils';
 import {
-  Book,
-  BookOpen,
-  Braces,
-  Bug,
-  ChevronRight,
-  Code,
-  Cog,
-  Database,
-  Eye,
-  FileText,
-  FolderOpen,
-  GitBranch,
-  GitCommit,
-  GitMerge,
-  GitPullRequest,
-  Lightbulb,
-  NotebookPen,
-  Package,
-  Paperclip,
-  Rocket,
-  RotateCw,
-  ScanFace,
-  Search,
-  Shield,
-  ShieldCheck,
-  Sparkle,
-  Target,
-  Terminal,
-  Wrench,
+Book,
+BookOpen,
+Braces,
+Bug,
+ChevronRight,
+Code,
+Cog,
+Database,
+Eye,
+FileText,
+FolderOpen,
+GitBranch,
+GitCommit,
+GitMerge,
+GitPullRequest,
+Lightbulb,
+NotebookPen,
+Package,
+Paperclip,
+Rocket,
+RotateCw,
+ScanFace,
+Search,
+Shield,
+ShieldCheck,
+Sparkle,
+Target,
+Terminal,
+Wrench,
 } from 'lucide-react';
-import React, { useEffect, useMemo, useState } from 'react';
-import { getSkill, listSkills, reloadSkills, type SkillDetail, type SkillView } from '../../api';
+import React,{ useEffect,useMemo,useState } from 'react';
+import { getSkill,reloadSkills,type SkillDetail,type SkillView } from '../../api';
+import { useAppRuntime } from '../../state/RuntimeProvider';
+import { useResource } from '../../state/resources/hooks';
 import { Markdown } from '../Markdown';
 import { TSection } from './SettingsFields';
 /* ---------- skills ---------- */
@@ -53,9 +55,13 @@ import { TSection } from './SettingsFields';
  * the "official" roster the user can rely on.
  */
 export function SkillsSection({ version = 0 }: { version?: number }) {
-  const [skills, setSkills] = useState<SkillView[] | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const runtime = useAppRuntime();
+  const resource = useResource('skills');
+  const skills = resource.data ?? null;
+  const [reloadError, setReloadError] = useState<string | null>(null);
+  const [reloading, setReloading] = useState(false);
+  const loading = resource.isFetching || reloading;
+  const error = reloadError ?? resource.error?.message ?? null;
   const [lastReload, setLastReload] = useState<number | null>(null);
   // Name of the skill whose detail drawer is open (null = closed). The
   // drawer fetches the full payload lazily on open so the list-view
@@ -63,31 +69,17 @@ export function SkillsSection({ version = 0 }: { version?: number }) {
   const [selected, setSelected] = useState<string | null>(null);
 
   useEffect(() => {
-    setLoading(true);
-    listSkills()
-      .then((s) => {
-        setSkills(s);
-        setError(null);
-        // Stamp reload time on any fetch trigger so the "reloaded Xs
-        // ago" hint applies to auto-reloads (via the fs watcher) too.
-        if (version > 0) setLastReload(Date.now());
-      })
-      .catch((e) => setError(String((e as Error).message)))
-      .finally(() => setLoading(false));
-  }, [version]);
-
+    if (version > 0) void runtime.resources.refresh('skills').then(() => setLastReload(Date.now())).catch(() => {});
+  }, [version, runtime]);
   async function reload() {
-    setLoading(true);
-    setError(null);
+    if (reloading) return;
+    setReloading(true); setReloadError(null);
     try {
-      const fresh = await reloadSkills();
-      setSkills(fresh);
+      await reloadSkills();
+      await runtime.resources.refresh('skills');
       setLastReload(Date.now());
-    } catch (e) {
-      setError(String((e as Error).message));
-    } finally {
-      setLoading(false);
-    }
+    } catch (error) { setReloadError(String((error as Error).message)); }
+    finally { setReloading(false); }
   }
 
   const grouped = useMemo(() => {

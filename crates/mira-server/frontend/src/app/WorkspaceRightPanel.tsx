@@ -1,15 +1,19 @@
-import { useEffect } from 'react';
+import { useSelector } from '@tanstack/react-store';
+import { useEffect,useMemo } from 'react';
 import { LazyBoundary } from '../components/LazyBoundary';
 import {
-  ActivityPane,
-  AsidePane,
-  DevicesPane,
-  PrPane,
-  ProcessesPane,
-  SubagentPanel,
-  TestsPane,
+ActivityPane,
+AsidePane,
+DevicesPane,
+PrPane,
+ProcessesPane,
+SubagentPanel,
+TestsPane,
 } from '../lazyViews';
-import { OPEN_PR_EVENT, type PrTarget } from '../lib/prPanel';
+import { OPEN_PR_EVENT,type PrTarget } from '../lib/prPanel';
+import { useAppRuntime,useLiveEntries } from '../state/RuntimeProvider';
+import { selectActiveSession } from '../state/runtimeStore';
+import { liveSubagentTabs,liveTranscriptView } from './liveTranscriptView';
 import type { WorkspaceRuntime } from './WorkspaceRuntime';
 export function WorkspaceRightPanel(
   context: Pick<
@@ -25,7 +29,9 @@ export function WorkspaceRightPanel(
     | 'runPrReview'
     | 'setPanelFilePickerOpen'
     | 'sessionId'
-    | 'entries'
+    | 'outlineEntries'
+    | 'historyOffsetRef'
+    | 'agentTabs'
     | 'busy'
     | 'selectedProcess'
     | 'cwd'
@@ -42,10 +48,14 @@ export function WorkspaceRightPanel(
     | 'handlePanelResizeStart'
   >,
 ) {
+  const runtime = useAppRuntime();
+  const entries = useLiveEntries();
+  const streams = useSelector(runtime.sessionState, state => selectActiveSession(state).subagentState);
+  const { activityTurns } = useMemo(() => liveTranscriptView(entries, context.historyOffsetRef.current), [entries]);
+  const subagentTabs = useMemo(() => liveSubagentTabs(context.agentTabs, entries, streams), [context.agentTabs, entries, streams]);
   const {
     panelOpen,
     phone,
-    subagentTabs,
     fileTabs,
     toolTabs,
     sendWhiteboardToChat,
@@ -54,11 +64,9 @@ export function WorkspaceRightPanel(
     runPrReview,
     setPanelFilePickerOpen,
     sessionId,
-    entries,
     busy,
     selectedProcess,
     cwd,
-    activityTurns,
     setMainView,
     jumpToMinimapTurn,
     askRestore,

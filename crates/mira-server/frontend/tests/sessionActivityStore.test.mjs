@@ -64,8 +64,8 @@ test('activity is account isolated and disposed commands cannot mutate or emit c
   const b = createAppRuntime({ backend: 'one', account: 'b' });
   a.commands.applySessionActivity(snapshot(1, ['same']));
   assert.equal(b.sessionActivity.get().activity, null);
-  const state = a.sessionActivity.get();
   await a.dispose();
+  const state = a.sessionActivity.get();
   assert.deepEqual(a.commands.applySessionActivity(delta(2, 'same', false)), []);
   assert.equal(a.sessionActivity.get(), state);
   await b.dispose();

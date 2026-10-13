@@ -58,8 +58,9 @@ export type SessionHistoryView = {
 /** Read-only lookup — returns messages without swapping the active
  *  session. Used by the SubagentPanel to rebuild a child transcript
  *  after a browser reload. */
-export async function getSessionHistory(id: string): Promise<SessionHistoryView> {
+export async function getSessionHistory(id: string, signal?: AbortSignal): Promise<SessionHistoryView> {
   const r = await fetch(`/api/sessions/${encodeURIComponent(id)}/history`, {
+    signal,
     cache: 'no-store',
   });
   if (!r.ok) {

@@ -1,3 +1,4 @@
+import { useLiveClock } from '../../lib/useLiveClock';
 import { ErrorNotice } from '../ErrorNotice';
 import { chatFailure, isFatalChatWarning, isProviderLimitFailure, isResponseFailure, failedTurnPrompt } from '../../lib/chatFailure';
 /**
@@ -95,6 +96,7 @@ export function TurnViewImpl({
   // An agent turn carries its own stats; they win over the per-index
   // maps, which only line up with Mira's own turns.
   const own = turn.body.find((e): e is TurnStatsEntry => e.kind === 'turn_stats');
+  const clock = useLiveClock(isActive);
   const timing: TurnTiming | null =
     own?.startedAt != null ? { startedAt: own.startedAt, endedAt: own.endedAt } : timingProp;
   const usage = own?.usage ?? usageProp;
@@ -159,7 +161,7 @@ export function TurnViewImpl({
     waitStartedRef.current !== null ? Date.now() - waitStartedRef.current : 0;
   const totalWaitMs = waitAccumRef.current + activeWaitMs;
   const rawDurationMs = timing
-    ? (timing.endedAt ?? Date.now()) - timing.startedAt
+    ? (timing.endedAt ?? clock) - timing.startedAt
     : null;
   const durationMs =
     rawDurationMs !== null ? Math.max(0, rawDurationMs - totalWaitMs) : null;

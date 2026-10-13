@@ -1,32 +1,33 @@
 import { cn } from '@/lib/utils';
 import { m } from 'framer-motion';
-import { ArrowUp, Square } from 'lucide-react';
+import { ArrowUp,Square } from 'lucide-react';
 import { captureScreenshot } from '../lib/screenCapture';
 import { ComposerNoticeStack } from './ComposerNoticeStack';
 import { EnginePicker } from './EnginePicker';
 import { FilePicker } from './FilePicker';
+import { RequestBoundary } from './RequestBoundary';
 
-import { ImageLightbox } from './ImageLightbox';
 import { ImageAttachmentMeta } from './ImageAttachmentDetails';
-import { HoverCard } from './ui/hover-card';
+import { ImageLightbox } from './ImageLightbox';
 import { MentionInput } from './MentionInput';
 import { QuoteCard } from './QuoteCard';
 import {
-  AGENT_APPROVAL_MODES,
-  AttachMenu,
-  ModePicker,
-  MODES,
-  ProjectChip,
+AGENT_APPROVAL_MODES,
+AttachMenu,
+ModePicker,
+MODES,
+ProjectChip,
 } from './composer/ComposerMenus';
-import { ComposerContextDock, GoalChip, GoalComposeChip, PlanChip } from './composer/ContextChips';
-import { ApprovalQueue, EmbeddedApprovalCard } from './composer/EmbeddedApprovalCard';
+import { ComposerContextDock,GoalChip,GoalComposeChip,PlanChip } from './composer/ContextChips';
+import { ApprovalQueue,EmbeddedApprovalCard } from './composer/EmbeddedApprovalCard';
 import { EmbeddedAskUserCard } from './composer/EmbeddedAskUserCard';
 import { EmbeddedPlanCard } from './composer/EmbeddedPlanCard';
 import { QueuedMessageStack } from './composer/QueuedMessageStack';
-import { OriginIcon, SlashButton, SlashPalette } from './composer/SlashPalette';
+import { OriginIcon,SlashButton,SlashPalette } from './composer/SlashPalette';
 import { AttachmentChip } from './composer/attachments';
 import { Props } from './composer/types';
 import { useComposerController } from './composer/useComposerController';
+import { HoverCard } from './ui/hover-card';
 export function Composer(props: Props) {
   const {
     disabled,
@@ -299,11 +300,13 @@ export function Composer(props: Props) {
             transition={{ duration: 0.15 }}
           >
             {onPlanReply && (
-              <EmbeddedPlanCard
+              <RequestBoundary id={plan.callId}>
+<EmbeddedPlanCard
                 proposal={plan.proposal}
                 onApprove={(steps) => onPlanReply(plan.callId, true, steps)}
                 onCancel={(note) => onPlanReply(plan.callId, false, undefined, note || undefined)}
               />
+</RequestBoundary>
             )}
           </m.div>
         ))}
@@ -316,7 +319,8 @@ export function Composer(props: Props) {
             transition={{ duration: 0.15 }}
           >
             {onAskUserReply && (
-              <EmbeddedAskUserCard
+              <RequestBoundary id={question.callId}>
+<EmbeddedAskUserCard
                 asker={engine?.kind === 'agent' ? engine.display_name : 'Mira'}
                 proposal={question.proposal}
                 onSubmit={(answers) =>
@@ -324,6 +328,7 @@ export function Composer(props: Props) {
                 }
                 onCancel={() => onAskUserReply(question.callId, { cancelled: true })}
               />
+</RequestBoundary>
             )}
           </m.div>
         ))}
@@ -487,7 +492,8 @@ export function Composer(props: Props) {
             hidden={pendingApproval?.callId !== approval.callId}
           >
             {onDecide && (
-              <EmbeddedApprovalCard
+              <RequestBoundary id={approval.callId}>
+<EmbeddedApprovalCard
                 position={index + 1}
                 openRuleEditor={ruleEditorCallId === approval.callId}
                 onRuleEditorCancel={onRuleEditorCancel}
@@ -496,6 +502,7 @@ export function Composer(props: Props) {
                 onAllowAll={onAllowAllPending}
                 onDecide={(allow, scope, rules) => onDecide(approval.callId, allow, scope, rules)}
               />
+</RequestBoundary>
             )}
           </div>
         ))}
@@ -646,5 +653,5 @@ export function Composer(props: Props) {
   );
 }
 
-export { parseSentAttachments, SentAttachmentChip } from './composer/attachments';
-export { type ImageData, type PendingApproval, type QueuedComposerMessage } from './composer/types';
+export { parseSentAttachments,SentAttachmentChip } from './composer/attachments';
+export { type ImageData,type PendingApproval,type QueuedComposerMessage } from './composer/types';

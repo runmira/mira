@@ -1,14 +1,15 @@
 import { useFileIcons } from '@/lib/fileIcons';
 import { cn } from '@/lib/utils';
-import { CircleAlert, File as FileIcon, Info, LoaderCircle, X } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { CircleAlert,File as FileIcon,Info,LoaderCircle,X } from 'lucide-react';
+import { useMemo,useState } from 'react';
 import { groupAgentRuns } from '../lib/turnActivity';
 import type { Entry } from '../transcript/entries';
-import type { DiffPreview, ToolCall, ToolResult } from '../types';
-import { extractPrompt, faceStateFor, stripAgentIdMarker, useSubagentIdentity } from './AgentCard';
-import { DelegateCard, isDelegateTaskName } from './DelegateCard';
-import { FilePanelBody, type FilePanelTab } from './FilePanel';
+import type { DiffPreview,ToolCall,ToolResult } from '../types';
+import { extractPrompt,faceStateFor,stripAgentIdMarker,useSubagentIdentity } from './AgentCard';
+import { DelegateCard,isDelegateTaskName } from './DelegateCard';
+import { FilePanelBody,type FilePanelTab } from './FilePanel';
 import { PanelLauncher } from './PanelLauncher';
+import { RequestBoundary } from './RequestBoundary';
 import { PanelNewTabButton } from './RightPanelButton';
 import { SubagentFace } from './SubagentFace';
 import type { ToolStatus } from './ToolCard';
@@ -17,8 +18,8 @@ import { ToolGroup } from './ToolGroup';
 import { BrowserPane } from './panes/BrowserPane';
 import { DevToolsPane } from './panes/DevToolsPane';
 import { WhiteboardPane } from './panes/WhiteboardPane';
-import { TOOL_PANE_DEFS, type ToolPaneTab } from './panes/toolPanes';
-import { ReviewCard, SubagentResult } from './subagents/StructuredResult';
+import { TOOL_PANE_DEFS,type ToolPaneTab } from './panes/toolPanes';
+import { ReviewCard,SubagentResult } from './subagents/StructuredResult';
 /** Right-side pane that shows one or more subagents in detail. Opens
  *  when the user clicks an AgentCard row in the transcript and adds a
  *  tab; further clicks add more tabs. Tabs are dismissible; when the
@@ -456,12 +457,14 @@ function TabBody({
       )}
 
       {tab.pendingReview && (
+<RequestBoundary id={tab.pendingReview.promptId}>
         <ReviewCard
           review={tab.pendingReview}
           identityTextClass="text-foreground"
           onApprove={(note) => onReview(tab.callId, tab.pendingReview!.promptId, true, note)}
           onDeny={(note) => onReview(tab.callId, tab.pendingReview!.promptId, false, note)}
         />
+</RequestBoundary>
       )}
 
       {/* Live child transcript — renders like a mini chat as tokens

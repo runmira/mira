@@ -1,21 +1,20 @@
-import { listEngines } from '../api';
-import { agentFailureEntry, hasCurrentAgentFailure } from '../lib/agentProgress';
-import { saveAgentCaps } from '../lib/acpAgents';
+import { agentFailureEntry,hasCurrentAgentFailure } from '../lib/agentProgress';
 import { applyNativeMetadata } from '../lib/nativeStream';
+import { useAppRuntime } from '../state/RuntimeProvider';
 import {
-  addTurnUsage,
-  appendAcpText,
-  appendAcpThought,
-  describeAcpStop,
-  finishCompaction,
-  isSuccessfulAcpStop,
-  isUserCancelledStop,
-  sealAcpThought,
-  settleTools,
-  stampLastTurn,
-  upsertAcpTool,
-  withTurnStats,
-  type AcpPlanEntry,
+addTurnUsage,
+appendAcpText,
+appendAcpThought,
+describeAcpStop,
+finishCompaction,
+isSuccessfulAcpStop,
+isUserCancelledStop,
+sealAcpThought,
+settleTools,
+stampLastTurn,
+upsertAcpTool,
+withTurnStats,
+type AcpPlanEntry,
 } from '../transcript/entries';
 import type { ServerMsg } from '../types';
 
@@ -24,62 +23,56 @@ import type { WorkspaceRuntime } from './WorkspaceRuntime';
 export function useAgentEvents(
   context: Pick<
     WorkspaceRuntime,
-    | 'setEntries'
+    | 'updateTranscript'
     | 'turnCommands'
-    | 'busyRef'
+    | 'isTurnRunning'
     | 'playPing'
     | 'clearThinkingIdle'
-    | 'acpStopRef'
     | 'refreshRepo'
-    | 'setTurnTimings'
+    | 'recordTurnTimings'
     | 'turnStartRef'
-    | 'drainQueuedMessage'
     | 'setPendingAcpMode'
-    | 'setEngines'
-    | 'capsDriverRef'
-    | 'setAcpModes'
-    | 'setAcpConfig'
-    | 'setAcpCommands'
-    | 'setAcpUsage'
-    | 'setAcpLimits'
+    | 'getCapsDriver'
+    | 'recordAgentModes'
+    | 'recordAgentConfig'
+    | 'recordAgentCommands'
+    | 'recordAgentUsage'
+    | 'recordAgentLimits'
     | 'setSidebarRefresh'
-    | 'setAcpError'
-    | 'engineRef'
+    | 'recordAgentError'
+    | 'getEngine'
     | 'applyEngine'
-    | 'setAcpStatusPending'
     | 'loadEngines'
   >,
 ) {
+  const appRuntime = useAppRuntime();
   const {
-    setEntries,
+    updateTranscript,
     turnCommands,
-    busyRef,
+    isTurnRunning,
     playPing,
     clearThinkingIdle,
-    acpStopRef,
     refreshRepo,
-    setTurnTimings,
+    recordTurnTimings,
     turnStartRef,
-    drainQueuedMessage,
     setPendingAcpMode,
-    setEngines,
-    capsDriverRef,
-    setAcpModes,
-    setAcpConfig,
-    setAcpCommands,
-    setAcpUsage,
-    setAcpLimits,
+    getCapsDriver,
+    recordAgentModes,
+    recordAgentConfig,
+    recordAgentCommands,
+    recordAgentUsage,
+    recordAgentLimits,
     setSidebarRefresh,
-    setAcpError,
-    engineRef,
+    recordAgentError,
+    getEngine,
     applyEngine,
-    setAcpStatusPending,
     loadEngines,
   } = context;
   return useStableCallback((msg: ServerMsg) => {
+    const receivedAt = Date.now();
     switch (msg.type) {
       case 'acp_message_metadata':
-        setEntries((previous) => applyNativeMetadata(previous, msg.message_id, msg.phase));
+        updateTranscript((previous) => applyNativeMetadata(previous, msg.message_id, msg.phase));
         break;
 
       case 'runtime_turn_updated':
@@ -92,22 +85,22 @@ export function useAgentEvents(
 
       // -------- ACP (external agent) --------
       case 'acp_text':
-        setEntries((prev) => appendAcpText(prev, msg.text, msg.message_id));
+        updateTranscript((prev) => appendAcpText(prev, msg.text, msg.message_id, receivedAt));
         break;
 
       case 'acp_thought':
-        setEntries((prev) => appendAcpThought(prev, msg.text));
+        updateTranscript((prev) => appendAcpThought(prev, msg.text, receivedAt));
         break;
 
       case 'acp_tool_call':
 
       case 'acp_tool_call_update':
-        setEntries((prev) => upsertAcpTool(prev, msg.call));
+        updateTranscript((prev) => upsertAcpTool(prev, msg.call, receivedAt));
         break;
 
       case 'acp_plan':
-        setEntries((prev) => {
-          const sealed = sealAcpThought(prev);
+        updateTranscript((prev) => {
+          const sealed = sealAcpThought(prev, receivedAt);
           const idx = sealed.findIndex((e) => e.kind === 'acp_plan');
           const entry: AcpPlanEntry = { kind: 'acp_plan', entries: msg.entries };
           if (idx >= 0) {
@@ -118,19 +111,18 @@ export function useAgentEvents(
         break;
 
       case 'acp_failure':
-        setEntries((prev) => [...prev, agentFailureEntry(msg)]);
+        updateTranscript((prev) => [...prev, agentFailureEntry(msg)]);
         break;
 
       case 'acp_turn_end':
+        if (!appRuntime.acceptTerminal()) break;
+        appRuntime.updateSessionData('activeInputId', null);
         // An agent compaction ends with its turn.
-        setEntries((prev) =>
+        updateTranscript((prev) =>
           prev.some((e) => e.kind === 'compact' && e.state === 'running' && e.trigger === 'agent')
-            ? finishCompaction(
-                prev,
-                isSuccessfulAcpStop(msg.stop_reason)
+            ? finishCompaction(prev, isSuccessfulAcpStop(msg.stop_reason)
                   ? { state: 'done' }
-                  : { state: 'failed', error: describeAcpStop(msg.stop_reason) },
-              )
+                  : { state: 'failed', error: describeAcpStop(msg.stop_reason) }, receivedAt)
             : prev,
         );
         // End the turn. This is the only place an external agent's turn can
@@ -142,10 +134,9 @@ export function useAgentEvents(
         // The same "turn finished" sound Mira's own turns make — only for a
         // turn that was running here (a Stop already settled the composer,
         // and its confirmation shouldn't chime).
-        if (busyRef.current) playPing();
+        if (isTurnRunning()) playPing();
         turnCommands.finishAgent();
         clearThinkingIdle();
-        acpStopRef.current = null;
         // The agent edits files in its own process; nothing else tells the
         // panels their counts are stale.
         refreshRepo();
@@ -153,11 +144,11 @@ export function useAgentEvents(
         // turn that ended minutes ago. The harness path does this on `done`;
         // the agent path never did, which is why a finished turn still showed
         // a live duration.
-        setTurnTimings((prev) => stampLastTurn(prev, Date.now()));
+        recordTurnTimings((prev) => stampLastTurn(prev, receivedAt));
         {
           const started = turnStartRef.current;
-          const ended = Date.now();
-          setEntries((prev) =>
+          const ended = receivedAt;
+          updateTranscript((prev) =>
             withTurnStats(prev, (st) => ({
               ...st,
               startedAt: st.startedAt ?? started,
@@ -172,8 +163,8 @@ export function useAgentEvents(
         // completed one. The server puts the agent's own context (e.g. when
         // a limit resets) on the frame so this is one message, not two.
         const stopped = msg.stop_reason;
-        setEntries((prev) => {
-          const sealed = settleTools(sealAcpThought(prev));
+        updateTranscript((prev) => {
+          const sealed = settleTools(sealAcpThought(prev, receivedAt));
           if (isSuccessfulAcpStop(stopped) || hasCurrentAgentFailure(sealed)) return sealed;
           const detail = msg.detail ? ` ${msg.detail}` : '';
           // A turn the user stopped is not a failure. It gets a quiet note
@@ -191,7 +182,6 @@ export function useAgentEvents(
             },
           ];
         });
-        window.setTimeout(drainQueuedMessage, 0);
         break;
 
       case 'acp_privileged_mode_confirmation':
@@ -207,7 +197,7 @@ export function useAgentEvents(
         // A standing change to what the agent may do, recorded in the
         // transcript so it is visible after the fact and not only in a
         // dropdown that may have been closed by then.
-        setEntries((prev) => [
+        updateTranscript((prev) => [
           ...prev,
           {
             kind: 'warning',
@@ -222,9 +212,7 @@ export function useAgentEvents(
       case 'engines_changed':
         // mira.yaml changed and the server rebuilt its engines: pickers
         // show new instances and keys without a restart.
-        void listEngines()
-          .then((view) => setEngines(view.engines))
-          .catch(() => {});
+        void appRuntime.resources.refresh('engines').catch(() => {});
         break;
 
       case 'acp_unmodelled':
@@ -232,7 +220,7 @@ export function useAgentEvents(
         // buried answers under diagnostics ("ACP system: {…}"), and a
         // wedged agent is already visible: its turn never ends and the
         // composer keeps spinning.
-        console.debug(`[acp] unmodelled ${msg.method}:`, msg.reason);
+        console.debug(`[acp] unmodelled ${msg.method}`);
         break;
 
       // State the agent owns rather than transcript content. Captured so it
@@ -245,39 +233,39 @@ export function useAgentEvents(
         // stopped agent must neither overwrite the live state nor pollute
         // another driver's "last seen" cache (OpenCode showing Claude
         // models). Unstamped frames keep the old behaviour.
-        const modesDriver = msg.driver ?? capsDriverRef.current;
+        const modesDriver = msg.driver ?? getCapsDriver();
         if (modesDriver) {
-          saveAgentCaps(modesDriver, { modes: { current: msg.current, available: msg.available } });
+          appRuntime.recordCapabilities(modesDriver, { modes: { current: msg.current, available: msg.available } });
         }
-        if (!msg.driver || msg.driver === capsDriverRef.current) {
-          setAcpModes({ current: msg.current, available: msg.available, postures: msg.postures });
+        if (!msg.driver || msg.driver === getCapsDriver()) {
+          recordAgentModes({ current: msg.current, available: msg.available, postures: msg.postures });
         }
         break;
       }
 
       case 'acp_config_options': {
-        const configDriver = msg.driver ?? capsDriverRef.current;
-        if (configDriver) saveAgentCaps(configDriver, { config: msg.options });
-        if (!msg.driver || msg.driver === capsDriverRef.current) {
-          setAcpConfig(msg.options);
+        const configDriver = msg.driver ?? getCapsDriver();
+        if (configDriver) appRuntime.recordCapabilities(configDriver, { config: msg.options });
+        if (!msg.driver || msg.driver === getCapsDriver()) {
+          recordAgentConfig(msg.options);
         }
         break;
       }
 
       case 'acp_commands':
-        setAcpCommands(msg.names);
+        recordAgentCommands(msg.names);
         break;
 
       case 'acp_usage':
-        setAcpUsage(msg);
+        recordAgentUsage(msg);
         break;
 
       case 'acp_turn_usage':
-        setEntries((prev) => addTurnUsage(prev, msg));
+        updateTranscript((prev) => addTurnUsage(prev, msg));
         break;
 
       case 'acp_limits':
-        setAcpLimits(msg.windows);
+        recordAgentLimits(msg.windows);
         break;
 
       case 'acp_session_info':
@@ -290,13 +278,13 @@ export function useAgentEvents(
         // Startup outcome. Surfaced as a warning on failure so a user learns
         // "grok isn't installed" instead of watching an empty pane.
         if (msg.error) {
-          setAcpError(`${msg.display_name}: ${msg.error}`);
-          setEntries((prev) => [
+          recordAgentError(`${msg.display_name}: ${msg.error}`);
+          updateTranscript((prev) => [
             ...prev,
             { kind: 'warning', text: `${msg.display_name}: ${msg.error}` },
           ]);
         } else {
-          setAcpError(null);
+          recordAgentError(null);
         }
         break;
 
@@ -304,14 +292,14 @@ export function useAgentEvents(
         // A switch the user made (or an agent exiting) marks the
         // transcript, so the reader can see where one engine handed off
         // to the other. Status-only transitions (starting → ready) don't.
-        const prev = engineRef.current;
+        const prev = getEngine();
         const next = msg.engine;
         const moved =
           prev != null &&
           (prev.kind !== next.kind ||
             (next.kind === 'agent' ? prev.driver !== next.driver : false));
         if (moved) {
-          setEntries((es) => [...es, { kind: 'engine_switch', engine: next, from: prev }]);
+          updateTranscript((es) => [...es, { kind: 'engine_switch', engine: next, from: prev }]);
         }
         // The sidebar badges each chat by its engine.
         if (moved || prev?.model !== next.model) setSidebarRefresh((n) => n + 1);
@@ -321,7 +309,6 @@ export function useAgentEvents(
 
       case 'acp_agent_status':
         // A probe ran on the server: the engines list has the fresh result.
-        setAcpStatusPending(false);
         loadEngines();
         break;
     }

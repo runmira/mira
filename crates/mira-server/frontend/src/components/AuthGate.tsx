@@ -29,10 +29,14 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
     }
 
     let cancelled = false;
+    let validation = 0;
+    let validatedAccount: string | null = null;
 
-    async function validate() {
+    async function validate(expectedAccount?: string) {
+      const request = ++validation;
       const { data, error } = await supabase!.auth.getUser();
-      if (cancelled) return;
+      if (cancelled || request !== validation) return;
+      if (expectedAccount && data.user && data.user.id !== expectedAccount) return;
       if (error || !data.user) {
         // Any error from getUser() with a cached session means the token
         // isn't valid anymore (deleted user, revoked, expired refresh). Clear
@@ -42,10 +46,13 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
         } catch {
           /* ignore */
         }
+        if (cancelled || request !== validation) return;
+        validatedAccount = null;
         setUser(null);
         setStatus('signed-out');
         return;
       }
+      validatedAccount = data.user.id;
       setUser(data.user);
       setStatus('signed-in');
     }
@@ -69,15 +76,19 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
       // Session change fired locally — re-validate against the server so a
       // stale but present JWT can't leave us stuck in `signed-in`.
       if (!session) {
+        validation++;
+        validatedAccount = null;
         setUser(null);
         setStatus('signed-out');
         return;
       }
-      void validate();
+      if (validatedAccount !== session.user.id) { setUser(null); setStatus('loading'); }
+      void validate(session.user.id);
     });
 
     return () => {
       cancelled = true;
+      validation++;
       sub.subscription.unsubscribe();
     };
   }, []);

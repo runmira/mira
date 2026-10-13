@@ -1,15 +1,16 @@
 import { getSessionHistory } from '../api';
 import {
-  isToolPaneId,
-  TOOL_PANE_DEFS,
-  prPaneId,
-  toolPaneId,
-  type ToolPaneKind,
+isToolPaneId,
+prPaneId,
+TOOL_PANE_DEFS,
+toolPaneId,
+type ToolPaneKind,
 } from '../components/panes/toolPanes';
 import { extractAgentId } from '../lib/agentIdentifiers';
-import { attachFilesToComposer, dataUrlToFile } from '../lib/attachBridge';
+import { attachFilesToComposer,dataUrlToFile } from '../lib/attachBridge';
 import { splitFileRef } from '../lib/refs';
-import { updateSubagent, type ToolEntry } from '../transcript/entries';
+import { useAppRuntime } from '../state/RuntimeProvider';
+import { updateSubagent,type ToolEntry } from '../transcript/entries';
 import { historyToEntries } from '../transcript/replay';
 import type { DiffPreview } from '../types';
 
@@ -21,8 +22,7 @@ export function usePanelCommands(
     | 'setAgentTabs'
     | 'setActiveAgentTab'
     | 'subagentState'
-    | 'entries'
-    | 'setSubagentState'
+    | 'updateSubagentProjection'
     | 'activeAgentTab'
     | 'fileTabs'
     | 'toolTabs'
@@ -34,12 +34,12 @@ export function usePanelCommands(
     | 'setExpandedTurns'
   >,
 ) {
+  const appRuntime = useAppRuntime();
   const {
     setAgentTabs,
     setActiveAgentTab,
     subagentState,
-    entries,
-    setSubagentState,
+    updateSubagentProjection,
     activeAgentTab,
     fileTabs,
     toolTabs,
@@ -71,14 +71,20 @@ export function usePanelCommands(
     const existing = subagentState.get(callId);
     if (existing && existing.entries.length > 0) return;
     // Find the parent's tool entry to read the tool_result content.
-    const entry = entries.find((e): e is ToolEntry => e.kind === 'tool' && e.call.id === callId);
+    const entry = appRuntime.readSession().entries.find((e): e is ToolEntry => e.kind === 'tool' && e.call.id === callId);
     if (!entry?.result) return;
     const agentId = extractAgentId(entry.result.content);
     if (!agentId) return;
     try {
-      const view = await getSessionHistory(agentId);
+      const owner = appRuntime.sessionState.get().active;
+      const attachment = appRuntime.sessionState.get().attachment;
+      const view = await appRuntime.queryClient.fetchQuery({
+        queryKey: appRuntime.resourceKey('session-history', agentId), staleTime: 30_000,
+        retry: false, queryFn: ({ signal }) => getSessionHistory(agentId, signal),
+      });
+      if (!owner || appRuntime.sessionState.get().active !== owner || appRuntime.sessionState.get().attachment !== attachment) return;
       const rebuilt = historyToEntries(view.messages, view.previews);
-      setSubagentState((prev) =>
+      updateSubagentProjection((prev) =>
         updateSubagent(prev, callId, (s) => ({
           ...s,
           agentId,

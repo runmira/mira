@@ -1,8 +1,8 @@
 import { createStore } from '@tanstack/react-store';
 import {
-  applySessionActivity,
-  type SessionActivityState,
-  type SessionActivityUpdate,
+applySessionActivity,
+type SessionActivityState,
+type SessionActivityUpdate,
 } from '../lib/sessionActivity';
 
 export type ActivityProjection = {

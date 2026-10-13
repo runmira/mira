@@ -1,54 +1,43 @@
 import { startReview } from '../api';
 import { type AskUserDecision } from '../components/AskUserCard';
 import { isAgentRequest } from '../lib/agentRequest';
-import {
-  recordAskUserDecision,
-  recordPlanDecision,
-  updateSubagent,
-  updateTool,
-} from '../transcript/entries';
-import type { ApprovalScope, PlanStep } from '../types';
+import { useAppRuntime } from '../state/RuntimeProvider';
+import type { ApprovalScope,PlanStep } from '../types';
 
 import type { WorkspaceRuntime } from './WorkspaceRuntime';
 export function useApprovalCommands(
   context: Pick<
     WorkspaceRuntime,
     | 'wsRef'
-    | 'setSecretRequests'
-    | 'setEntries'
-    | 'setSubagentState'
     | 'setReviewState'
     | 'setReviewPanelOpen'
-    | 'entries'
     | 'setRuleEditorCallId'
   >,
 ) {
+  const appRuntime = useAppRuntime();
+  const submit = (id: string, message: import('../types').ClientMsg) =>
+    appRuntime.requests.submit(id, message, frame => wsRef.current?.sendImmediate(frame) ?? false);
   const {
     wsRef,
-    setSecretRequests,
-    setEntries,
-    setSubagentState,
     setReviewState,
     setReviewPanelOpen,
-    entries,
     setRuleEditorCallId,
   } = context;
 
   /** Answer an agent's secret prompt. `null` declines. The value goes only
    *  to the server, which stores it privately; it is not kept here. */
   function replyToSecret(promptId: string, value: string | null) {
-    wsRef.current?.send({
+    submit(promptId, {
       type: 'prompt_response',
       prompt_id: promptId,
       kind: 'secret',
       value,
       cancelled: value == null,
     });
-    setSecretRequests((prev) => prev.filter((r) => r.promptId !== promptId));
   }
 
   function replyToPlan(callId: string, approved: boolean, steps?: PlanStep[], note?: string) {
-    wsRef.current?.send({
+    submit(callId, {
       type: 'prompt_response',
       prompt_id: callId,
       kind: 'plan',
@@ -58,14 +47,14 @@ export function useApprovalCommands(
     });
     // Record the decision locally so the card switches to its resolved state
     // immediately, without waiting for tool_end to round-trip.
-    setEntries((prev) => recordPlanDecision(prev, callId, { approved, steps, note }));
+
   }
 
   /** Send answers (or a skip) for an `ask_user` prompt back to the
    *  server and flip the card into its resolved state locally. */
   function replyToAskUser(callId: string, decision: AskUserDecision) {
     if (decision.cancelled) {
-      wsRef.current?.send({
+      submit(callId, {
         type: 'prompt_response',
         prompt_id: callId,
         kind: 'ask_user',
@@ -73,7 +62,7 @@ export function useApprovalCommands(
         cancelled: true,
       });
     } else {
-      wsRef.current?.send({
+      submit(callId, {
         type: 'prompt_response',
         prompt_id: callId,
         kind: 'ask_user',
@@ -81,32 +70,26 @@ export function useApprovalCommands(
         cancelled: false,
       });
     }
-    if (!callId.startsWith('async-'))
-      setEntries((prev) => recordAskUserDecision(prev, callId, decision));
+
   }
 
   /** Answer a subagent's review-required prompt. Clears `pendingReview`
    *  locally so the SubagentPanel immediately drops the review card; the
    *  backend's tool_end will land shortly after with the final result. */
   function replyToSubagentReview(
-    parentCallId: string,
+    _parentCallId: string,
     promptId: string,
     approved: boolean,
     note?: string,
   ) {
-    wsRef.current?.send({
+    submit(promptId, {
       type: 'prompt_response',
       prompt_id: promptId,
       kind: 'subagent_review',
       approved,
       note,
     });
-    setSubagentState((prev) =>
-      updateSubagent(prev, parentCallId, (s) => ({
-        ...s,
-        pendingReview: null,
-      })),
-    );
+
   }
 
   async function runReview(args: string) {
@@ -159,7 +142,7 @@ export function useApprovalCommands(
     scope: ApprovalScope = 'once',
     rules?: string[],
   ) {
-    const pendingCall = entries.find((entry) => entry.kind === 'tool' && entry.call.id === callId);
+    const pendingCall = appRuntime.readSession().entries.find((entry) => entry.kind === 'tool' && entry.call.id === callId);
     if (
       allow &&
       scope === 'always' &&
@@ -170,22 +153,7 @@ export function useApprovalCommands(
       setRuleEditorCallId(callId);
       return;
     }
-    wsRef.current?.send({ type: 'approve', call_id: callId, allow, scope, rules });
-    if (rules) return; // Keep the editor visible if server validation rejects the rule.
-    // An agent's request is only the question; the agent's own tool card
-    // shows the call running. Keeping the request would leave a second
-    // card that never finishes.
-    const decided = entries.find((e) => e.kind === 'tool' && e.call.id === callId);
-    if (decided && decided.kind === 'tool' && isAgentRequest(decided.call)) {
-      setEntries((prev) => prev.filter((e) => !(e.kind === 'tool' && e.call.id === callId)));
-      return;
-    }
-    setEntries((prev) =>
-      updateTool(prev, callId, (t) => ({
-        ...t,
-        status: allow ? 'running' : 'denied',
-      })),
-    );
+    submit(callId, { type: 'approve', call_id: callId, allow, scope, rules });
   }
   return {
     replyToSecret,

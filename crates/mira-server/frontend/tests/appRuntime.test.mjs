@@ -17,7 +17,9 @@ test('runtime instances isolate UI and resource caches, disposal cancels work an
   const b = createAppRuntime({ ...scope, account: 'b' });
   a.commands.setContextOpen(false);
   assert.equal(b.workspaceUi.get().contextOpen, false);
-  assert.deepEqual(writes, [['mira.context.open', '0']]);
+  assert.deepEqual(writes[0], ['mira.context.open', '0']);
+  const saved = JSON.parse(writes.find(([key]) => key === 'mira.workspace-ui.v1')[1]);
+  assert.deepEqual(Object.keys(saved.values).sort(), ['contextOpen', 'terminalOpen']);
   assert.notDeepEqual(a.resourceKey('session', 'same'), b.resourceKey('session', 'same'));
   a.queryClient.setQueryData(a.resourceKey('session', 'same'), { text: 'private' });
   assert.equal(b.queryClient.getQueryData(b.resourceKey('session', 'same')), undefined);
@@ -125,11 +127,11 @@ test('activity selectors ignore UI changes and revision-only snapshots', async (
 test('turn selectors ignore completed work metadata and retain unrelated session references', async () => {
   const runtime = createAppRuntime(scope);
   runtime.turnCommands.hydrate('a', true, []);
-  const a = runtime.turns.get().sessions.get('a');
+  const a = runtime.sessionState.get().sessions.get('a');
   runtime.turnCommands.hydrate('b', false, []);
   let renders = 0;
   function Probe() {
-    const busy = useSelector(runtime.turns, state => state.sessions.get('b')?.busy ?? false);
+    const busy = useSelector(runtime.sessionState, state => state.sessions.get('b')?.busy ?? false);
     renders++;
     return String(busy);
   }
@@ -140,8 +142,8 @@ test('turn selectors ignore completed work metadata and retain unrelated session
     for (let i = 0; i < 100; i++) runtime.turnCommands.nativeWork({ id: String(i), status: 'completed' });
   });
   assert.equal(renders, before);
-  assert.equal(runtime.turns.get().sessions.get('a'), a);
-  await act(() => runtime.turnCommands.setBusy(true));
+  assert.equal(runtime.sessionState.get().sessions.get('a'), a);
+  await act(() => runtime.turnCommands.reportTurnRunning(true));
   assert.equal(renders, before + 1);
   await act(() => root.unmount());
   await runtime.dispose();

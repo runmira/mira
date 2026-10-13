@@ -1,230 +1,95 @@
-# Issue #187: first migration phase
+# Issue #187: frontend state migration
 
-This inventory describes the current source, not completed session migration.
-The separate `frontend-state.md` proposal remains the overarching plan.
+PR #190 implements the frontend migration on one branch. This document supersedes
+its earlier phase inventories. The architecture proposal in `frontend-state.md`
+remains separate. Backend contracts, replay algorithms and routing are retained.
 
-## Ownership inventory
+## Current ownership
 
-Each name below was a field from the baseline `app/useWorkspaceState.ts`.
-`ctxOpen` now belongs to the UI store; `sessionActivity` and `completedSessions`
-now belong to the activity projection. Other fields retain their hook owner. Runtime session fields are
-currently mostly attached-session state; the target is scoped session projections.
-`status` and `sessionActivity` are connection/backend scoped; `completedSessions`,
-`queuedBySession`, and `recoveryBySession` already aggregate sessions.
+- The backend/account scoped runtime owns session projections: transcript,
+  turn/work status, model/mode/environment, usage, history metadata, requests,
+  subagents, tasks, goals and recovery. Session activity is an atomic projection.
+- TanStack Query owns supported HTTP snapshots: settings, engines, skills,
+  commands, sessions, context, git status, session diff and branch PR. Cache keys
+  include backend/account and applicable session, cwd, engine/model and environment.
+- Preferences and shared workspace UI use scoped stores. Versioned persistence
+  explicitly allowlists preferences and panel visibility. Server defaults remain
+  server owned; requests, secrets and transcripts are not persisted in these stores.
+- Composer drafts use account/backend/session scoped rich-draft persistence.
+  Isolated form state, quotes, DOM interactions and unsaved settings stay local.
+- React Router owns navigation. Socket, timers, observers, request bookkeeping,
+  buffers and scroll resources live in disposable services, outside render state.
 
-### Runtime projections — session unless noted
+The runtime is created in provider effect setup and disposed during cleanup.
+Strict Mode recreates resources. Logout/account replacement cancels queries and
+transport work, clears projections, and rejects stale auth validation callbacks.
+Capabilities are cached in the runtime by driver rather than unscoped storage.
 
-`status`, `sessionActivity`, `completedSessions`, `sessionId`, `queuedBySession`, `sessionTitle`, `model`, `mode`, `cwd`, `entries`, `historyCursor`, `historyLoading`, `historyError`, `turnDiffs`, `acpModes`, `acpConfig`, `acpCommands`, `acpUsage`, `acpLimits`, `providerContext`, `engine`, `acpError`, `turnTimings`, `busy`, `thinking`, `subagentState`, `usage`, `cacheMiss`, `rateLimit`, `tasks`, `goal`, `environment`, `environments`, `envSwitching`, `recoveryBySession`, `turnUsage`, `turnModels`, `secretRequests`.
+## Runtime and recovery
 
-### Fetched resources — Query candidates, retained in hooks in this phase
+Named commands update projections; typed field reducers preserve structural
+sharing. Transitions commit buffered text and structural facts atomically before
+notifications or other effects. Stream buffers capture session and generation,
+flush once per animation frame, and have a bounded timer fallback when hidden.
+Tool, request and terminal events flush text first. Stop preserves final buffered
+text and late terminal events cannot restart a stopped turn.
 
-`engines`, `acpAgents`, `acpStatusPending`, `configured`, `providerName`, `gitStatus`, `sessionDiff`, `branchPr`, `skills`, `commands`.
+Session selection exposes retained cached projections while awaiting authoritative
+Ready. Retention limits idle sessions to 20, protecting running work, pending
+requests and queued inputs. Ready/history keep the existing reconstruction and
+pagination helpers. History responses require matching session, request and
+attachment generation. Native subagent review state survives navigation.
 
-### Workspace UI — context visibility migrated; others retained in hooks
+Decisions remain actionable until server resolution. Submitting disables duplicate
+clicks; failure, timeout or disconnect restores retryable UI. Resolution tombstones
+and input IDs prevent replayed requests or queue snapshots reopening actions.
+Diagnostics are bounded, development-only metadata and omit content and credentials.
 
-`pickerOpen`, `paletteOpen`, `inspectOpen`, `importOpen`, `reportOpen`, `panelFilePickerOpen`, `sidebarOpen`, `drawerOpen`, `agentTabs`, `fileTabs`, `toolTabs`, `activeAgentTab`, `rightPanelWidth`, `reviewPanelOpen`, `ctxOpen`, `reviewOpen`, `reviewFocus`, `lightbox`, `terminalOpen`, `selectedProcess`.
+Normal sends use the existing durable server QueueInput outbox. The editor retains
+its draft until authoritative acceptance; acceptance cannot erase newer typing.
+Unconfirmed rows are retained by stable ID, never deduplicated by text. Side effects
+are not automatically replayed after uncertain delivery or reconnect.
 
-### Interaction or unsaved workflow state — retain React owner until coherent slice migrates
+Query reads classify transient retries, reject obsolete attachment responses,
+coalesce refreshes and cancel superseded snapshots. Settings writes are serialized
+and reconcile authoritative responses; unsaved forms detect remote conflicts.
+Contextual requests are disabled until attachment is ready.
 
-`ruleEditorCallId`, `approvalRules`, `infoNotices`, `pendingAcpMode`, `expandedTurns`, `githubReturn`, `reviewState`, `sessionCommitted`, `chatColWidth`, `restoreAsk`, `restoreNote`, `secondOpinionSeen`, `showJump`.
+## Rendering and validation
 
-### Refresh/event counters — migrate with the resource or service they drive
+Application reads transcript outlines and stable metadata; live text subscribes
+inside transcript/right-panel boundaries. Composer and context-panel boundaries
+exclude streamed text. Elapsed time ticks only where visible timing is rendered.
+The render probe sends 100 separate streaming updates: transcript renders 100
+additional times, shell and composer render zero additional times. Switching to a
+same-shaped transcript still updates the selected session correctly.
 
-`sidebarRefresh`, `extensionsVersion`, `skillsVersion`, `browserPing`.
+Consolidated frontend suite: 76 tests passing. Related native-stream, tool/turn,
+queue and rich-draft helper suites: 26 tests passing. TypeScript, production build,
+module limits and whitespace checks pass. Tests cover scopes and Strict Mode,
+transport attachment/reconnect, stale history/query/auth responses, atomic Stop,
+request acknowledgement, duplicate submission, draft retention, persistence,
+settings serialization, scheduler cleanup and render isolation.
 
-### Runtime service resources and bookkeeping
+A fresh comparable baseline from ecf39b9 measures 401.2 kB initial gzip. The
+migration measures 423.6 kB, versus the unchanged 400 kB budget.
+The size gate fails; its limit has not been raised. Exact final output is recorded
+in the PR validation notes.
 
-These refs remain in hooks until their corresponding commands/events migrate.
-DOM refs, timers, buffers and sockets must never enter renderable/persisted state.
-Projection mirrors must be removed with their store migration, rather than dual-written.
+## Remaining acceptance limits
 
-`pingPrimedRef`, `activityTitlesRef`, `sessionIdRef`, `queuedBySessionRef`, `pendingSteerRef`, `approvalStarted`, `historyRequestRef`, `historyPreviewsRef`, `historyOffsetRef`, `providerTurnCursorRef`, `acpStopRef`, `capsDriverRef`, `engineRef`, `acpAgentsRef`, `completedUpdatesRef`, `turnStartRef`, `thinkingIdleTimerRef`, `drawerTouchX`, `drawerRef`, `chatShortcutRequest`, `shortcutEntriesRef`, `chatColObserver`, `repoSeqRef`, `wsRef`, `queueMutationsRef`, `paneRef`, `pendingProposalsRef`, `pendingAskUserRef`, `followRef`, `readingAnchorRef`, `lastScrollInputRef`, `chatTitleRef`, `tokenBufRef`, `tokenRafRef`, `usageRef`, `turnBaseRef`, `nativeFramesRef`, `nativeRafRef`, `visibleApprovalRef`, `browserShownFor`, `browserPingSeen`.
+Desktop UI verification is deferred because authentication configuration is server
+side. Live multi-session navigation, provider restart, reconnect and permission
+flows still require testing in the configured application. Automated tests do not
+establish native desktop performance or live authentication behavior.
 
-`mainView`, `settingsSection`, and their navigation commands belong to React
-Router (`useAppNavigation`). `phone`, `ctxFits`, and `keybindings` are existing
-external hooks, not additional store-owned fields. The unnamed `setNowTick`
-state is a rendering clock and should move to a narrow timing subscriber later.
+The socket watches one attached session. Legacy token/native terminal frames lack
+explicit session/stream cursors; client generation fences cannot identify a server
+frame emitted with incorrect identity after Ready. No exactly-once/background
+transcript streaming guarantee is added. Repository HTTP endpoints still target
+the server's active pointer: client attachment fences prevent stale client writes,
+but cross-window server-pointer isolation requires a backend contract change.
 
-## Persistence and scope
-
-The first slice is `ctxOpen`: one primitive subscription and one named command.
-It keeps the existing browser-wide `mira.context.open` boolean encoding (`1`
-means open; other/missing values mean closed). Storage denial falls back safely.
-No new persistence schema is introduced; migrating other preferences requires
-an allowlisted versioned schema and explicit legacy migration.
-
-Sidebar and terminal restore preferences stay in their current owners. Provider
-and model defaults remain backend owned; this phase does not change startup
-selection. `lib/composerDrafts.ts` persists text with a 400 ms debounce, 14-day
-expiry and 40-entry cap; rich attachments are cached by composer logic.
-Existing draft keys use session IDs, not backend/account identity. Scope that
-cache before adopting it into a multi-account runtime.
-
-AuthGate supplies the validated user ID and backend origin. Each provider
-creates a fresh runtime and Query client. Account changes clear the old cache;
-sign-out unmounts the provider. Pairing is above AuthGate; the transport URL
-currently uses `location.host`. In-place backend switching is not an exposed
-workspace path. Any future host switch must supply a different provider scope.
-No module singleton or credentials enter the new runtime.
-
-## Transport and reconciliation contract
-
-`ws.ts` connects to same-origin `/ws`. `attach` changes the server connection's
-attached slot and process-wide active pointer. `ready.session_id` identifies
-its snapshot. Token, reasoning, tool and legacy approval messages generally
-lack session identity. Do not route these by whichever session is selected
-when a deferred callback fires. A later migration must bind them to an
-immutable attached-session/generation context and define attach boundaries.
-
-Reconnect sends attach (or sync), waits for the expected Ready, and suppresses
-other session messages except activity snapshots. Ordinary attach does not
-currently use that reconnect gate. The transport buffers ordinary disconnected
-sends; `sendImmediate` bypasses replay for conditional mutations. Do not add
-automatic mutation retries. Runtime work/request records carry provider/native
-identities, but there is no global token cursor or exactly-once replay guarantee.
-Activity snapshots use epoch/revision; queue and history messages carry session
-IDs and request IDs. These guarantees are different and cannot be generalized.
-
-`useSessionEvents` rejects history pages with mismatched session/request IDs,
-prepends older pages, and reconstructs Ready snapshots with existing replay
-helpers including `interleaveReplay`. Proposal/ask-user staging uses call IDs.
-Preserve these helpers and Stop/late-completion behavior in subsequent phases.
-The current token buffer is global to the workspace and drained before most
-structural events in `Application`; it is intentionally untouched here.
-
-## Resource discovery and Query boundary
-
-Existing API snapshots include sessions, engines, skills, commands, settings,
-git status, session diff and branch PR. Several repository HTTP helpers target
-the server's active session implicitly. Adding scoped Query keys alone would
-not make those requests race safe: establish explicit request identity and
-snapshot reconciliation first. Existing `repoSeqRef` guards stale refreshes.
-WebSocket-only usage, approvals, live work and environment projections stay out
-of Query until a supported snapshot path is established.
-
-The new Query client retries neither reads nor mutations by default. Resource
-options must explicitly classify retryable errors. Defaults: 30-second stale
-time, five-minute retention, no window-focus refresh. No resources have migrated
-in this phase, so this is a tested lifecycle foundation, not a new fetch owner.
-Keys include backend/account plus resource and caller-supplied identity.
-
-## Selector and lifecycle contract
-
-Pinned integration: react-store 0.11.2 and react-query 5.104.2. Installed Store
-exports `createStore`, `get`, `subscribe` (returning an unsubscribe object),
-`setState`, and `useSelector`. Select primitives or stable references; use the
-installed hook's `compare` option when necessary. Public UI access is read-only
-with named commands; no arbitrary application setter is exported.
-
-Provider resources are created in effect setup and disposed in cleanup so
-Strict Mode creates a fresh instance on replay. Disposal is idempotent, cancels
-queries, clears caches and blocks stale UI commands. Transport remains owned
-by existing workspace effects; there is no second socket.
-
-The temporary `setCtxOpen` hook property delegates directly to the sole store
-command. Remove it when panel consumers subscribe directly. Application still
-subscribes to visibility, and streaming still drives its existing broad render
-path. No whole-workspace performance improvement is claimed from this slice.
-
-## Baseline and verification
-
-Before changes: 44 frontend tests passed; module check passed. Existing built
-assets reported 400.7 kB initial gzip versus the unchanged 400 kB budget.
-A fresh baseline build passed TypeScript but failed emitting assets with ENOSPC.
-The incomplete generated dist was removed to recover space before installing
-dependencies. This means the old size measurement is an existing-artifact
-baseline, not a successful comparable fresh build.
-
-New isolated React probe: 100 unrelated store updates cause zero extra renders
-for a primitive selector; changing the selected value causes one. Tests cover
-independent runtimes/accounts, cache keys, cancellation, disposal, malformed or
-unavailable storage, Strict Mode replay, scope replacement and unsubscription.
-These synthetic measurements prove the installed integration contract, not
-native desktop performance. Live streaming, reconnect, simultaneous sessions,
-provider restart and full workspace profiling remain later-phase verification.
-
-Final local checks: 48 tests passed, TypeScript passed, module limits passed,
-and diff whitespace checks passed. Production asset emission again failed with
-ENOSPC. The size check could not run against the incomplete output because its
-manifest was not emitted. The budget remains 400 kB. No desktop build/install or
-live UI verification was performed. The full issue remains open.
-
-## Activity slice on the same PR branch
-
-`state/sessionActivityStore.ts` reuses `applySessionActivity` in a pure reducer.
-Running sessions and completion revisions commit atomically. Duplicate snapshots
-retain references; revision-only changes preserve the running-set reference.
-Completed revisions retain the existing 500-entry cap. A server epoch change
-clears previous-epoch completion markers rather than comparing incompatible
-revision namespaces. Account runtimes isolate the projection; disposal blocks
-late updates. No activity data is persisted.
-
-The old activity state, setter, mirrored ref and completion setter are removed
-from `useWorkspaceState`. `useSessionCommands` delegates its existing event
-command to the store and issues completion notifications only for the returned
-new transitions. Notifications remain outside the reducer. `WorkspaceSidebar`
-subscribes directly to running/completed projections, so activity notifications
-no longer rerender Application and its command/event hooks.
-
-`busy` and `thinking` are now migrated in the turn slice below. Token buffers
-and transcript state remain in their existing owners. Moving them requires the attached-session and
-connection-generation contract described above. This slice begins the activity
-phase; it does not complete the turn or streaming migration.
-
-Updated validation: 53 frontend tests pass. TypeScript, production build,
-module checks and diff checks pass. The activity selector React probe sees no
-extra renders across 99 revision-only snapshots and a UI preference change,
-and one render when the selected running set changes. Reducer tests cover
-atomic completion, duplicate/stale frames, reconnect snapshots, epoch restart,
-structural sharing, retention, disposal and account isolation.
-
-A fresh baseline build from commit ecf39b9 using the same Vite configuration,
-build environment and dependency installation passes and measures 401.2 kB
-initial gzip. Final branch measures 413.5 kB (+12.3 kB). Both fail the unchanged
-400 kB size budget. These fresh results supersede the earlier existing-artifact
-measurement and ENOSPC limitation. Desktop UI checks are unavailable because
-auth configuration is server-side; no native recovery behavior is claimed.
-
-## Turn slice
-
-`state/turnStore.ts` is now the sole owner of busy/thinking flags and native
-turn/work tracking. It retains projections by session ID inside the scoped
-backend/account runtime. Hydration commits the active session, server running
-flag and native work in one transition. Running projections survive navigation;
-reconstructable idle projections are limited to 20 plus running sessions.
-Ready snapshots reconcile the selected projection from server facts. The
-socket still watches one attached session, so this does not promise background
-transcript or turn-detail streaming while another chat is selected.
-
-`busyRef` is now a read-only accessor over the store, not a writable mirror.
-Legacy `setBusy`/`setThinking` adapters delegate to named store commands;
-starting/stopping commits both flags coherently. Native events use dedicated
-commands. Late completion/work-terminal events cannot restore busy after Stop.
-Server-originated new running work can still restore the authoritative working
-indicator. No client permission or command acceptance is inferred from busy.
-
-Attachment suspends the selected turn without overwriting its projection.
-Deferred thinking callbacks capture a generation; Ready, suspend, and a new
-turn increment that generation. Idle thinking commands are ignored. The
-thinking timer is cancelled during workspace transport cleanup. Disconnect
-status remains separate from turn state and never declares a running turn over.
-
-`ws.ts` gates ordinary attach, as well as reconnect, until the target Ready.
-Global activity remains accepted while waiting. Attach stores its reconnect
-target immediately; callbacks from obsolete/closed sockets are ignored and
-reconnect timers are cancelled on close. This relies on the existing ordered
-attached-socket protocol. It cannot distinguish a server frame emitted with
-incorrect attachment identity after Ready, because legacy token frames contain
-no explicit session/stream cursor. No exactly-once replay contract is invented.
-
-New tests cover atomic hydration/start/stop, native overlap and late completion,
-switching and authoritative Ready reconciliation, retention/disposal, narrow
-turn selectors and socket attach/reconnect/obsolete callbacks. Total frontend
-suite: 61 tests passing. Existing transcript and approval event tests still
-pass. React Compiler remains enabled. Desktop verification is unavailable due
-to server-side auth configuration. Transcript, request, queue and history owners
-remain unchanged; move them only in coherent slices preserving replay helpers.
-
-Turn-slice final checks: TypeScript, production build, module limits and diff
-checks pass. Initial gzip measures 413.3 kB (fresh baseline 401.2 kB), still over
-the unchanged 400 kB budget. This remains a draft-PR validation failure.
+The PR stays draft and issue #187 stays open pending the bundle gate and live
+acceptance checks. Implementation is consolidated; these limitations must remain
+visible when evaluating completion.

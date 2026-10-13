@@ -40,6 +40,7 @@ export async function bundle(entry, mocks = {}) {
           api.onLoad({ filter: /.*/, namespace: 'mock' }, (args) => ({
             contents: mocks[args.path],
             loader: 'tsx',
+            resolveDir: root,
           }));
         },
       },

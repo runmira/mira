@@ -3,7 +3,7 @@ import type { BackgroundMode, ClientMsg, ServerMsg } from './types';
 export type WsStatus = 'connecting' | 'open' | 'closed';
 
 export interface WsClient {
-  send(msg: ClientMsg): void;
+  send(msg: ClientMsg): boolean;
   /** Conditional mutations must not enter the reconnect replay buffer. */
   sendImmediate(msg: ClientMsg): boolean;
   /** Convenience: swap which session this WS is watching. Server updates
@@ -38,7 +38,6 @@ export function connect(
   /** Re-attaching after a reconnect: until this session's Ready arrives,
    *  frames are the server's default session's, not the user's chat. */
   let reattaching: string | null = null;
-  const queue: ClientMsg[] = [];
 
   function schedule() {
     if (stopped) return;
@@ -67,10 +66,7 @@ export function connect(
           (reattach ? { type: 'attach', session_id: session } : { type: 'sync' }) as ClientMsg,
         ),
       );
-      // Then what was sent while disconnected, in order.
-      while (queue.length > 0 && socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify(queue.shift()!));
-      }
+
     };
     socket.onclose = () => {
       if (stopped || ws !== socket) return;
@@ -87,7 +83,7 @@ export function connect(
       try {
         msg = JSON.parse(ev.data) as ServerMsg;
       } catch (e) {
-        console.error('bad frame', ev.data, e);
+        console.error('[ws] malformed frame');
         return;
       }
       if (reattaching) {
@@ -108,28 +104,20 @@ export function connect(
   window.addEventListener('online',resync);
   open();
 
-  function sendMsg(msg: ClientMsg) {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(msg));
-    } else {
-      // Queue so a submit made during a brief drop still lands.
-      queue.push(msg);
-    }
+  function sendMsg(msg: ClientMsg): boolean {
+    if (stopped || !ws || ws.readyState !== WebSocket.OPEN || reattaching) return false;
+    try { ws.send(JSON.stringify(msg)); return true; } catch { return false; }
   }
 
   return {
     send: sendMsg,
-    sendImmediate(msg) {
-      if (!ws || ws.readyState !== WebSocket.OPEN || reattaching) return false;
-      ws.send(JSON.stringify(msg));
-      return true;
-    },
+    sendImmediate: sendMsg,
     attach(sessionId) {
       // Gate connection-scoped frames until the requested snapshot arrives.
       // Remember the target now so a disconnect mid-attach reconnects to it.
       session = sessionId;
       reattaching = sessionId;
-      sendMsg({ type: 'attach', session_id: sessionId });
+      if (ws?.readyState === WebSocket.OPEN && !stopped) ws.send(JSON.stringify({ type: 'attach', session_id: sessionId }));
     },
     setBackgroundMode(mode) {
       sendMsg({ type: 'set_background_mode', mode });

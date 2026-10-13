@@ -1,5 +1,5 @@
-import type { ComponentProps } from 'react';
 import { useSelector } from '@tanstack/react-store';
+import type { ComponentProps } from 'react';
 import { Sidebar } from '../components/Sidebar';
 import { useAppRuntime } from '../state/RuntimeProvider';
 

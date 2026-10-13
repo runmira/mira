@@ -1,14 +1,90 @@
-import { History, X } from 'lucide-react';
-import { appendMemory, applyUndo, listEngines, undoRestore } from '../api';
+import { useSelector } from '@tanstack/react-store';
+import { History,X } from 'lucide-react';
+import { memo } from 'react';
+import { appendMemory,applyUndo,undoRestore } from '../api';
 import { Composer } from '../components/Composer';
 import { CONTEXT_PANEL_RESERVE } from '../components/ContextPanel';
 import { InfoNoticeHost } from '../components/InfoNoticeHost';
+import { RequestBoundary } from '../components/RequestBoundary';
 import { SecretPrompt } from '../components/SecretPrompt';
 import { MIRA_MODE_TO_POSTURE } from '../lib/agentPostures';
 import { loadModelOptions } from '../lib/models';
 import { cn } from '../lib/utils';
+import { useAppRuntime } from '../state/RuntimeProvider';
 import type { WorkspaceRuntime } from './WorkspaceRuntime';
-export function WorkspaceComposer(
+const EMPTY_QUEUE: import('../components/Composer').QueuedComposerMessage[] = [];
+const COMPOSER_FIELDS = [
+  'ctxReserve',
+  'restoreNote',
+  'setRestoreNote',
+  'doRestore',
+  'status',
+  'busy',
+  'mode',
+  'model',
+  'providerName',
+  'cwd',
+  'usage',
+  'rateLimit',
+  'onSend',
+  'queueMessage',
+  'sessionId',
+  'removeQueuedMessage',
+  'editQueuedMessage',
+  'reorderQueuedMessage',
+  'steerQueuedMessage',
+  'onSetMode',
+  'onSetModel',
+  'engine',
+  'engines',
+  'acpAgents',
+  'acpStatusPending',
+  'requestAcpStatus',
+  'acpDriver',
+  'acpConfig',
+  'acpDescriptors',
+  'onSetModelOption',
+  'wsRef',
+  'startAcpAgent',
+  'openAgentSettings',
+  'compactAcpAgent',
+  'forkAcpAgent',
+  'attachSession',
+  'acpModes',
+  'agentPostures',
+  'setPendingAcpMode',
+  'openProjectPicker',
+  'environment',
+  'environments',
+  'envSwitching',
+  'recordEnvironmentTransition',
+  'onNewChat',
+  'openSettings',
+  'runReview',
+  'onSetGoal',
+  'onClearGoal',
+  'onCompact',
+  'goal',
+  'skills',
+  'usageRing',
+  'pendingApprovals',
+  'decideApproval',
+  'visibleApprovalRef',
+  'ruleEditorCallId',
+  'setRuleEditorCallId',
+  'pendingPlans',
+  'pendingQuestions',
+  'secretRequests',
+  'replyToSecret',
+  'infoNotices',
+  'dismissInfoNotice',
+  'completedUpdatesRef',
+  'replyToPlan',
+  'replyToAskUser',
+  'acpCommands',
+  'commands',
+] as const;
+export const WorkspaceComposer = memo(function WorkspaceComposer(
   context: Pick<
     WorkspaceRuntime,
     | 'ctxReserve'
@@ -25,7 +101,6 @@ export function WorkspaceComposer(
     | 'rateLimit'
     | 'onSend'
     | 'queueMessage'
-    | 'queuedFor'
     | 'sessionId'
     | 'removeQueuedMessage'
     | 'editQueuedMessage'
@@ -55,9 +130,7 @@ export function WorkspaceComposer(
     | 'environment'
     | 'environments'
     | 'envSwitching'
-    | 'setEnvSwitching'
-    | 'setBusy'
-    | 'setThinking'
+    | 'recordEnvironmentTransition'
     | 'onNewChat'
     | 'openSettings'
     | 'runReview'
@@ -79,13 +152,14 @@ export function WorkspaceComposer(
     | 'infoNotices'
     | 'dismissInfoNotice'
     | 'completedUpdatesRef'
-    | 'setEngines'
     | 'replyToPlan'
     | 'replyToAskUser'
     | 'acpCommands'
     | 'commands'
   >,
 ) {
+  const appRuntime = useAppRuntime();
+  const queuedMessages = useSelector(appRuntime.sessionState, state => state.queued.get(context.sessionId) ?? EMPTY_QUEUE);
   const {
     ctxReserve,
     restoreNote,
@@ -101,7 +175,6 @@ export function WorkspaceComposer(
     rateLimit,
     onSend,
     queueMessage,
-    queuedFor,
     sessionId,
     removeQueuedMessage,
     editQueuedMessage,
@@ -131,9 +204,7 @@ export function WorkspaceComposer(
     environment,
     environments,
     envSwitching,
-    setEnvSwitching,
-    setBusy,
-    setThinking,
+    recordEnvironmentTransition,
     onNewChat,
     openSettings,
     runReview,
@@ -155,7 +226,6 @@ export function WorkspaceComposer(
     infoNotices,
     dismissInfoNotice,
     completedUpdatesRef,
-    setEngines,
     replyToPlan,
     replyToAskUser,
     acpCommands,
@@ -216,7 +286,7 @@ export function WorkspaceComposer(
         rateLimit={rateLimit}
         onSend={onSend}
         onQueueMessage={queueMessage}
-        queuedMessages={queuedFor(sessionId)}
+        queuedMessages={queuedMessages}
         onRemoveQueuedMessage={removeQueuedMessage}
         onEditQueuedMessage={editQueuedMessage}
         onReorderQueuedMessage={reorderQueuedMessage}
@@ -284,16 +354,10 @@ export function WorkspaceComposer(
         environments={environments}
         envSwitching={envSwitching}
         onSwitchEnvironment={(target) => {
-          setEnvSwitching(`switching to ${target}…`);
-          wsRef.current?.send({ type: 'environment', target });
+          if (wsRef.current?.sendImmediate({ type: 'environment', target }))
+            recordEnvironmentTransition(`switch requested: ${target}…`);
         }}
-        onInterrupt={() => {
-          wsRef.current?.send({ type: 'interrupt' });
-          // Settle the composer now; the server's turn end follows
-          // (within a few seconds even for an agent that never says).
-          setBusy(false);
-          setThinking(false);
-        }}
+        onInterrupt={() => { appRuntime.requestStop(); }}
         onNewChat={onNewChat}
         onOpenSettings={() => openSettings()}
         onRunReview={runReview}
@@ -345,7 +409,7 @@ export function WorkspaceComposer(
             id: `secret:${request.promptId}`,
             kind: 'question' as const,
             title: `An agent needs ${request.name}`,
-            content: <SecretPrompt request={request} onReply={replyToSecret} />,
+            content: <RequestBoundary id={request.promptId}><SecretPrompt request={request} onReply={replyToSecret} /></RequestBoundary>,
           })),
           ...infoNotices
             .filter((notice) => notice.kind === 'persistent')
@@ -362,9 +426,7 @@ export function WorkspaceComposer(
                   onAgentUpdated={(kind) => {
                     completedUpdatesRef.current.add(kind);
                     requestAcpStatus();
-                    void listEngines()
-                      .then((view) => setEngines(view.engines))
-                      .catch(() => {});
+                    void appRuntime.resources.refresh('engines').catch(() => {});
                   }}
                 />
               ),
@@ -397,4 +459,4 @@ export function WorkspaceComposer(
       />
     </div>
   );
-}
+}, (previous, next) => COMPOSER_FIELDS.every(key => Object.is(previous[key], next[key])));
