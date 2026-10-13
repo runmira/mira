@@ -24,7 +24,7 @@ export function createSessionData() {
     mode: ('manual') as Mode,
     cwd: ('') as string,
     entries: ([]) as Entry[],
-    approvalRules: ({}) as 
+    approvalRules: ({}) as
     Record<string, { rules: string[]; error: string | null }>
   ,
     historyCursor: (null) as string | null,
@@ -43,7 +43,7 @@ export function createSessionData() {
     size: number;
     cost: { amount: number; currency: string } | null;
   } | null,
-    acpLimits: ([]) as 
+    acpLimits: ([]) as
     { name: string; utilization: number; resets_at?: number | null }[]
   ,
     providerContext: (null) as {
