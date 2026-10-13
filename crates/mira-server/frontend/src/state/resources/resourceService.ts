@@ -48,7 +48,7 @@ export function createResourceService(client: QueryClient, scope: RuntimeScope,
   function refresh<K extends ResourceName>(name: K, archived = false, probe = false): Promise<ResourceData[K]> {
     if (disposed) return Promise.reject(new CancelledError({ silent: true }));
     const config = options(name, archived, probe);
-    const id = JSON.stringify(config.queryKey);
+    const id = JSON.stringify([config.queryKey, probe]);
     const existing = refreshes.get(id); if (existing) return existing.promise as Promise<ResourceData[K]>;
     let resolve!: (value: unknown) => void; let reject!: (error: unknown) => void;
     const promise = new Promise<unknown>((yes, no) => { resolve = yes; reject = no; });
