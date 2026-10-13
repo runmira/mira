@@ -325,13 +325,29 @@ pub fn spawn_slot_eviction(state: AppState) {
                 {
                     continue;
                 }
+                // Lock the registry and active pointer together. Any in-flight
+                // lookup/attach owns another Arc, so do not orphan that borrower.
+                let active = state.active.read().await;
+                let mut slots = state.slots.write().await;
+                if *active == slot.id
+                    || slot.is_attached()
+                    || slot.idle_secs() < EVICT_AFTER.as_secs()
+                {
+                    continue;
+                }
+                if !crate::state::remove_unborrowed(&mut slots, &*active, &slot.id, &slot) {
+                    continue;
+                }
+                slot.engine
+                    .retired
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                drop(slots);
+                drop(active);
                 tracing::info!(session = %slot.id, idle_secs = idle, "evicting idle session slot");
-                slot.engine.retired.store(true, std::sync::atomic::Ordering::SeqCst);
                 crate::acp_session::stop_agent(&slot).await;
                 slot.runtime_requests.close().await;
                 slot.message_queue.close().await;
                 state.session_activity.set(slot.id.to_string(), false);
-                state.remove_slot(&slot.id).await;
                 if let Some(h) = slot.turn.lock().await.take() {
                     h.abort();
                 }

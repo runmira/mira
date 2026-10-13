@@ -138,10 +138,10 @@ impl AppState {
     /// Return the "most recently attached" slot. HTTP handlers with no
     /// session id in the URL default here.
     pub async fn active_slot(&self) -> Arc<SessionSlot> {
-        let id = self.active.read().await.clone();
+        let id = self.active.read().await;
         let slots = self.slots.read().await;
         slots
-            .get(&id)
+            .get(&*id)
             .cloned()
             .expect("active session id must exist in slots")
     }
@@ -177,6 +177,23 @@ impl AppState {
 
     pub async fn set_active(&self, id: SessionId) {
         *self.active.write().await = id;
+    }
+
+    /// Coordinate disk retention with loading/activation of the same session.
+    pub(crate) async fn lock_slot_load(&self, id: &SessionId) -> tokio::sync::OwnedMutexGuard<()> {
+        let load_lock = {
+            let mut loads = self.slot_loads.lock().unwrap_or_else(|e| e.into_inner());
+            loads.retain(|_, lock| lock.strong_count() > 0);
+            match loads.get(id).and_then(std::sync::Weak::upgrade) {
+                Some(lock) => lock,
+                None => {
+                    let lock = Arc::new(Mutex::new(()));
+                    loads.insert(id.clone(), Arc::downgrade(&lock));
+                    lock
+                }
+            }
+        };
+        load_lock.lock_owned().await
     }
 
     // ---------- backwards-compat accessors ----------
@@ -300,19 +317,7 @@ impl AppState {
         }
         // Coalesce recovery and concurrent attaches for the same chat.
         // Weak entries retain only in-flight loads, rather than every chat ID.
-        let load_lock = {
-            let mut loads = self.slot_loads.lock().unwrap_or_else(|e| e.into_inner());
-            loads.retain(|_, lock| lock.strong_count() > 0);
-            match loads.get(id).and_then(std::sync::Weak::upgrade) {
-                Some(lock) => lock,
-                None => {
-                    let lock = Arc::new(Mutex::new(()));
-                    loads.insert(id.clone(), Arc::downgrade(&lock));
-                    lock
-                }
-            }
-        };
-        let _loading = load_lock.lock().await;
+        let _loading = self.lock_slot_load(id).await;
         if let Some(slot) = self.slot(id).await {
             return Ok(slot);
         }
@@ -346,5 +351,44 @@ impl EnginesHandle {
     }
     pub fn replace(&self, registry: mira_engine::EngineRegistry) {
         *self.0.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(registry);
+    }
+}
+
+/// Called while the registry and active pointer guards are held. Borrowers
+/// (including a client about to attach) keep their slot resident by owning an Arc.
+pub(crate) fn remove_unborrowed<K: std::hash::Hash + Eq, T>(
+    slots: &mut HashMap<K, Arc<T>>,
+    active: &K,
+    id: &K,
+    candidate: &Arc<T>,
+) -> bool {
+    if active == id
+        || Arc::strong_count(candidate) != 2
+        || !slots
+            .get(id)
+            .is_some_and(|slot| Arc::ptr_eq(slot, candidate))
+    {
+        return false;
+    }
+    slots.remove(id).is_some()
+}
+
+#[cfg(test)]
+mod eviction_tests {
+    use super::*;
+    #[test]
+    fn eviction_preserves_active_borrowed_and_replaced_slots() {
+        let slot = Arc::new(());
+        let mut slots = HashMap::from([("old", slot.clone())]);
+        assert!(!remove_unborrowed(&mut slots, &"old", &"old", &slot));
+        let attaching_client = slot.clone();
+        assert!(!remove_unborrowed(&mut slots, &"new", &"old", &slot));
+        drop(attaching_client);
+        assert!(remove_unborrowed(&mut slots, &"new", &"old", &slot));
+        assert!(slots.is_empty());
+        let stale = slot.clone();
+        slots.insert("old", Arc::new(()));
+        assert!(!remove_unborrowed(&mut slots, &"new", &"old", &stale));
+        assert!(slots.contains_key("old"));
     }
 }
