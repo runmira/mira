@@ -13,8 +13,8 @@ import { ToolGroup } from './components/ToolGroup';
 import { ToolCard } from './components/ToolCard';
 import { EntryView, StatusLine } from './components/transcript/EntryView';
 import { ThoughtBlock } from './components/ThoughtBlock';
-import { WorkedForChip } from './components/transcript/TurnView';
-import { STREAM_ROW_GUTTER } from './lib/streamLayout';
+import { TurnView, WorkedForChip } from './components/transcript/TurnView';
+import { STREAM_CONTENT_GUTTER } from './lib/streamLayout';
 import { cn } from './lib/utils';
 import './styles.css';
 
@@ -64,9 +64,10 @@ function App() {
   const [measure, setMeasure] = useState(false);
   const noop = () => {};
   // The real EntryView, so what we measure is what the transcript renders.
-  const msg = (text: string) => (
+  const msg = (text: string, final = false) => (
     <EntryView
       entry={{ kind: 'msg', msg: { role: 'assistant', content: text, created_at: 0 } }}
+      showAssistantActions={final}
       onDecide={noop}
       onPlanReply={noop}
       onOpenAgent={noop}
@@ -81,8 +82,8 @@ function App() {
           {measure ? 'Hide edges' : 'Measure edges'}
         </button>
         <span className="text-xs text-muted-foreground">
-          Faint line = column edge. Bright line = where a row starts. Every
-          row and every rule should sit on the bright one.
+          Faint line = column edge. Bright line = the shared row edge.
+          Prose starts where tool and thinking icons start.
         </span>
       </div>
 
@@ -93,7 +94,7 @@ function App() {
             inset by padding applied to the same element. Keep these two
             lines in sync with TurnView or this harness measures itself
             instead of the app. */}
-        <div className={cn('w-full', STREAM_ROW_GUTTER)}>
+        <div className={cn('w-full', STREAM_CONTENT_GUTTER)}>
           <WorkedForChip
             durationMs={39000}
             active={false}
@@ -118,6 +119,8 @@ function App() {
         {/* thought cell — must land on the same gutter as every other row */}
         <div className="flex justify-start"><div className="max-w-[90%]"><ThoughtBlock content="Checking how the queue worker gates on engine." live={false} /></div></div>
 
+        {msg('<think>Embedded reasoning uses the same text edge.</think>The assistant text starts on the same column.')}
+
         {/* grouped tool run */}
         <ToolGroup entries={grouped} />
 
@@ -136,8 +139,16 @@ function App() {
         {/* status line (warnings / errors) */}
         <StatusLine text="Turn ended manually by user." />
 
+        <TurnView turn={{ user: null, body: [
+          ...grouped.map(e => ({ kind: 'tool' as const, ...e })),
+          { kind: 'msg', msg: { role: 'assistant', content: 'The reply remains visible with work collapsed.' } },
+          { kind: 'warning', text: 'Turn ended manually by user.' },
+          { kind: 'warning', text: '[environment] Switched to local environment.' },
+        ] }} timing={{ startedAt: 0, endedAt: 39000 }} index={100} expanded={false} usage={null} model="test" isActive={false} onOpenFile={noop} skills={[]} mode="manual" onSetMode={noop}
+          onToggle={noop} onDecide={noop} onPlanReply={noop} onAskUserReply={noop} onOpenAgent={noop} />
+
         {/* trailing assistant prose */}
-        {msg('The booted device came from `devices.rs`; polling is absent.')}
+        {msg('The booted device came from `devices.rs`; polling is absent.', true)}
       </div>
     </main>
   );

@@ -106,7 +106,7 @@ export function ToolGroup({
           STREAM_ROW_GUTTER,
         )}
       >
-        <GroupIcon aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" />
+        <span aria-hidden="true" className="inline-flex size-3.5 shrink-0 items-center justify-center"><GroupIcon className="size-3.5 text-muted-foreground" /></span>
         <span className="min-w-0 flex-1 truncate" title={lastAction}>
           <ActivityShimmer active={anyActive}>{lastAction}</ActivityShimmer>
         </span>
@@ -221,7 +221,7 @@ function StatusCluster({
   if (done > 0) {
     return (
       <span className="inline-flex" title={`${done} done`}>
-        <CircleCheck className="ml-1 size-3.5 shrink-0 text-emerald-500" fill="currentColor" />
+        <CircleCheck className="ml-1 size-3.5 shrink-0 text-muted-foreground/60" />
       </span>
     );
   }

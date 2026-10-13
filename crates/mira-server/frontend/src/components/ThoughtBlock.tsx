@@ -1,3 +1,4 @@
+import { STREAM_ROW_GUTTER } from '../lib/streamLayout';
 import { StreamFade } from './StreamFade';
 import { useTranscriptDisclosure } from './TranscriptDisclosure';
 import { useEffect, useRef, useState } from 'react';
@@ -70,7 +71,7 @@ export function ThoughtBlock({
   const body = content.trim();
 
   return (
-    <div className="my-1">
+    <div className="min-w-0">
       <button
         type="button"
         onClick={() => {
@@ -79,9 +80,9 @@ export function ThoughtBlock({
         }}
         disabled={!body}
         aria-expanded={open}
-        className="group inline-flex max-w-full items-center gap-1.5 rounded px-2 py-1 text-[13px] leading-5 text-muted-foreground transition-colors hover:text-foreground disabled:cursor-default"
+        className={cn('group inline-flex max-w-full items-center gap-1.5 rounded py-1 text-[13px] leading-5 text-muted-foreground transition-colors hover:text-foreground disabled:cursor-default', STREAM_ROW_GUTTER)}
       >
-        <Brain className={cn('size-3.5 shrink-0', live && 'animate-pulse text-mira-purple')} />
+        <span aria-hidden="true" className="inline-flex size-3.5 shrink-0 items-center justify-center"><Brain className={cn('size-3.5', live && 'animate-pulse text-mira-purple')} /></span>
         <span className={cn('shrink-0 font-normal', live && 'text-foreground/80')}>{label}</span>
         {!open && body && <span className="max-w-[min(60ch,55vw)] truncate font-normal leading-5 text-muted-foreground/70">{body.replace(/[#*_`]/g, '').replace(/\s+/g, ' ')}</span>}
         {live && dur && <span className="font-mono text-[11px] text-muted-foreground/70">{dur}</span>}
@@ -100,7 +101,7 @@ export function ThoughtBlock({
           ref={bodyRef}
           onScroll={live ? onScroll : undefined}
           className={cn(
-            'thought ml-[7px] mt-1 border-l-2 border-border pl-3 text-[13px] leading-relaxed text-muted-foreground',
+            'thought ml-2 mr-2 mt-1 border-l-2 border-border pl-[18px] text-[13px] leading-relaxed text-muted-foreground',
             // Fade the top edge so older lines read as scrolling away.
             live &&
               'max-h-40 overflow-y-auto [mask-image:linear-gradient(to_bottom,transparent,black_2rem)]',

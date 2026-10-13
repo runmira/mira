@@ -112,3 +112,26 @@ viewport, history prepend, disclosure geometry, observer stability and disposal.
 The frontend suite now passes 82 tests. Native scrolling and streaming remain
 manual acceptance checks; simulated DOM geometry does not establish native paint
 or momentum-scroll behavior.
+
+## Visible notices and stream alignment
+
+Lifecycle notices (including manual turn-end notices), environment/context changes,
+goals and render cards remain outside the collapsed work disclosure. Notices are
+rendered underneath the reply in server order; status messages use the independent
+horizontal divider pattern from T3's TimelineSystemDivider. Fatal errors retain
+their existing visible error/retry controls.
+
+Iconless assistant messages and duration rows begin at the same left edge as the
+existing tool/thinking icons. No new agent-message or duration icons are added.
+Inline reasoning owns its own gutter, preventing message padding from doubling
+its inset. The alignment preview now includes inline reasoning and an actual
+collapsed completed turn. Browser measurements confirm equal left coordinates
+for prose, duration text and the existing icon rail. The suite passes 86 tests,
+including notice visibility/order and inline reasoning padding regressions.
+
+Only the final assistant reply renders its timestamp/actions. Intermediate replies
+have no secondary row. Compact thinking/tool headers use a 28px row height with
+14px icon boxes; thinking has no extra outer margins. Iconless prose keeps its
+original left edge, and segment spacing is 8px. Successful tool status marks are
+quiet outlines rather than filled color dots. Browser measurements cover the
+standalone and embedded reasoning paths as well as grouped and individual tools.

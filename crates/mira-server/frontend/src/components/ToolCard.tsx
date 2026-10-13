@@ -436,14 +436,14 @@ function CompactToolRow({
             if (e.key === 'Enter' || e.key === ' ') setExpanded((v) => !v);
           }}
           className={cn(
-            'group relative flex w-full min-w-0 cursor-pointer items-center gap-1.5 rounded-md py-0.5 text-left text-[13px] font-medium text-muted-foreground transition-colors hover:bg-accent/40',
+            'group relative flex w-full min-w-0 cursor-pointer items-center gap-1.5 rounded-md py-1 text-left text-[13px] leading-5 font-medium text-muted-foreground transition-colors hover:bg-accent/40',
             STREAM_ROW_GUTTER,
             commandFailed && 'rounded-md border border-rose-500/30 bg-rose-500/5 text-rose-200',
           )}
         >
           <span
             aria-hidden="true"
-            className="inline-flex size-3.5 shrink-0 items-center justify-center text-muted-foreground"
+            className="inline-flex size-3.5 shrink-0 items-center justify-center text-muted-foreground [&_svg]:size-3.5"
           >
             {summary.icon}
           </span>
@@ -589,7 +589,7 @@ function StatusMark({ status, failed = false }: { status: ToolStatus; failed?: b
       return failed ? (
         <X className="size-3.5 shrink-0 text-rose-400" />
       ) : (
-        <Check className="size-3.5 shrink-0 text-emerald-500" />
+        <Check className="size-3.5 shrink-0 text-muted-foreground/60" />
       );
     default:
       return null;

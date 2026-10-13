@@ -16,7 +16,7 @@ import {
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { getBoolPref, PREF_KEYS } from '../../lib/prefs';
-import { STREAM_ROW_GUTTER } from '../../lib/streamLayout';
+import { STREAM_CONTENT_GUTTER } from '../../lib/streamLayout';
 import { type SkillView } from '../../api';
 import { type AskUserDecision } from '../AskUserCard';
 import { AgentGroup } from '../AgentCard';
@@ -117,7 +117,7 @@ export function TurnViewImpl({
   } : null;
   const body = useMemo(() => turn.body.filter((e) => e.kind !== 'turn_stats' && e.kind !== 'activity' && e.kind !== 'error' && !(e.kind === 'warning' && isFatalChatWarning(e.text))), [turn.body]);
   const nativeTurn = own != null || body.some((e) => (e.kind === 'msg' && e.nativeMessageId != null) || (e.kind === 'tool' && e.agentCall != null) || (e.kind === 'thought' && e.native));
-  const { intermediateRaw, intermediate, finalEntry, trailing } = useMemo(
+  const { intermediateRaw, intermediate, finalEntry, trailing, notices } = useMemo(
     () => turnActivity(body, nativeTurn && !isActive), [body, nativeTurn, isActive],
   );
 
@@ -194,7 +194,7 @@ export function TurnViewImpl({
     if (item.kind === 'tool-group') {
       return <div key={`${section}-g-${item.entries[0].call.id}`} className="flex justify-start"><ToolGroup entries={item.entries} onOpenFile={onOpenFile} /></div>;
     }
-    return <EntryView key={`${section}-i-${i}`} showAssistantActions={!nativeTurn} streaming={isActive} entry={item.entry} onDecide={onDecide} onPlanReply={onPlanReply} onAskUserReply={onAskUserReply} onOpenAgent={onOpenAgent} approvalViaDialog={approvalViaDialog} onOpenFile={onOpenFile} skills={skills} mode={mode} onSetMode={onSetMode} />;
+    return <EntryView key={`${section}-i-${i}`} showAssistantActions={false} streaming={isActive} entry={item.entry} onDecide={onDecide} onPlanReply={onPlanReply} onAskUserReply={onAskUserReply} onOpenAgent={onOpenAgent} approvalViaDialog={approvalViaDialog} onOpenFile={onOpenFile} skills={skills} mode={mode} onSetMode={onSetMode} />;
   };
 
   return (
@@ -214,7 +214,7 @@ export function TurnViewImpl({
         // padding on the same element leaves the rule full-bleed at the
         // column edge while every row under it sits 8px in. Nesting the
         // rule inside a padded wrapper is what actually insets it.
-        <div className={cn('w-full', STREAM_ROW_GUTTER)}>
+        <div className={cn('w-full', STREAM_CONTENT_GUTTER)}>
         <WorkedForChip
           durationMs={durationMs!}
           active={isActive && timing?.endedAt == null}
@@ -242,6 +242,7 @@ export function TurnViewImpl({
         </TurnStatsContext.Provider>
       )}
       {trailing.map((item, i) => renderActivity(item, i, 'trailing'))}
+      {notices.map((entry, i) => renderActivity({ kind: 'entry', entry }, i, 'notice'))}
       {failure && failureInfo && (!recovery || !isProviderLimitFailure(failure.text)) && <ErrorNotice title={failureInfo.title} description={failureInfo.description + (canRetryFailure && recoveryDisabled ? ' Reconnect or wait for the active turn to finish before retrying.' : '')} details={failures.map(e => e.text).join('\n\n')} disabled={!!recoveryDisabled} retryLabel="Retry message" onRetry={canRetryFailure && openingPrompt && messageActions ? () => messageActions.edit(openingPrompt, openingPrompt.msg.content ?? '') : undefined} secondary={failureInfo.settings && onFailureSettings ? { label: 'Connection settings', onClick: onFailureSettings } : undefined} />}
       {recovery && onRecoveryAction && <UsageRecoveryCard key={recovery.id} item={recovery} disabled={!!recoveryDisabled} onAction={onRecoveryAction} />}
       {diffSummary && <TurnChanges summary={diffSummary} onOpenFile={path => onOpenFile(path, null)} busy={messageActions?.busy} onUndo={turn.user && messageActions ? () => messageActions.restore(turn.user!) : undefined} />}
