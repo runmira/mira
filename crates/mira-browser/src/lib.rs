@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use serde::Deserialize;
@@ -39,6 +39,14 @@ const MAX_TEXT: usize = 6_000;
 const MAX_EVAL: usize = 8_000;
 /// How long to wait for a page to finish loading.
 const LOAD_TIMEOUT: Duration = Duration::from_secs(20);
+/// Idle time after which a running browser is shut down automatically.
+/// Chrome otherwise lives until an explicit `Close` or process exit — users
+/// who opened the browser pane once kept paying for a full Chromium (GPU,
+/// network, renderers) for days. The next action after a shutdown simply
+/// starts a fresh one via `ensure`.
+const IDLE_SHUTDOWN_AFTER: Duration = Duration::from_secs(15 * 60);
+/// How often the idle reaper checks for an expired browser.
+const IDLE_CHECK_EVERY: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Error)]
 pub enum BrowserError {
@@ -427,7 +435,9 @@ impl ViewSize {
 }
 
 /// A lazily-launched browser. The first action starts it; `close` (or
-/// dropping the `Browser`) stops it.
+/// dropping the `Browser`) stops it. A running browser nobody has touched
+/// for [`IDLE_SHUTDOWN_AFTER`] is also shut down by a background reaper —
+/// see [`shared`](Browser::shared).
 pub struct Browser {
     opts: BrowserOptions,
     session: Mutex<Option<Session>>,
@@ -436,11 +446,30 @@ pub struct Browser {
     /// the page at once instead of waiting for the next repaint.
     last_frame: std::sync::Arc<std::sync::Mutex<Option<LiveEvent>>>,
     last_url: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// Last time anyone used the browser (`execute` / `input` /
+    /// `ensure_started`). `None` until first use.
+    last_used: std::sync::Mutex<Option<Instant>>,
 }
 
 /// One browser per profile, per process.
 static SHARED: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, std::sync::Arc<Browser>>>> =
     std::sync::OnceLock::new();
+
+/// Watch `browser` and shut it down after `ttl` without use. The loop holds
+/// only a [`std::sync::Weak`], so it ends on its own when the last `Arc` is
+/// dropped. Shutdown reuses the normal `Close` path (drop kills a launched
+/// child via `kill_on_drop`; an adopted one gets a `Browser.close` RPC), so
+/// there is no second teardown to keep in sync.
+fn spawn_idle_reaper(browser: &std::sync::Arc<Browser>, ttl: Duration, every: Duration) {
+    let weak = std::sync::Arc::downgrade(browser);
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(every).await;
+            let Some(b) = weak.upgrade() else { break };
+            b.reap_if_idle(ttl).await;
+        }
+    });
+}
 
 impl Browser {
     pub fn new(opts: BrowserOptions) -> Self {
@@ -451,6 +480,38 @@ impl Browser {
             live,
             last_frame: Default::default(),
             last_url: Default::default(),
+            last_used: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Record a use of the browser now. Every entry point that can start
+    /// or drive Chrome calls this, so the idle reaper sees real activity.
+    fn touch(&self) {
+        if let Ok(mut g) = self.last_used.lock() {
+            *g = Some(Instant::now());
+        }
+    }
+
+    /// One idle-reaper pass: shut the browser down if it has been idle for
+    /// at least `ttl`. Returns whether a shutdown was issued. Closing an
+    /// already-stopped browser is a no-op, so this is safe to call often.
+    async fn reap_if_idle(&self, ttl: Duration) -> bool {
+        let idle = self
+            .last_used
+            .lock()
+            .ok()
+            .and_then(|g| *g)
+            .map(|t| t.elapsed());
+        match idle {
+            Some(elapsed) if elapsed >= ttl => {
+                tracing::info!(
+                    idle_secs = elapsed.as_secs(),
+                    "browser idle; shutting it down"
+                );
+                let _ = self.execute(&BrowserAction::Close).await;
+                true
+            }
+            _ => false,
         }
     }
 
@@ -466,9 +527,13 @@ impl Browser {
             std::fs::canonicalize(&opts.profile_dir).unwrap_or_else(|_| opts.profile_dir.clone());
         let map = SHARED.get_or_init(Default::default);
         let mut map = map.lock().expect("browser registry poisoned");
-        map.entry(key)
-            .or_insert_with(|| std::sync::Arc::new(Browser::new(opts)))
-            .clone()
+        if let Some(b) = map.get(&key) {
+            return b.clone();
+        }
+        let b = std::sync::Arc::new(Browser::new(opts));
+        spawn_idle_reaper(&b, IDLE_SHUTDOWN_AFTER, IDLE_CHECK_EVERY);
+        map.insert(key, b.clone());
+        b
     }
 
     pub fn options(&self) -> &BrowserOptions {
@@ -495,6 +560,7 @@ impl Browser {
     pub async fn ensure_started(&self) -> Result<(), BrowserError> {
         let mut guard = self.session.lock().await;
         self.ensure(&mut guard).await?;
+        self.touch();
         Ok(())
     }
 
@@ -548,6 +614,7 @@ impl Browser {
                 screenshot: None,
             });
         }
+        self.touch();
         let sess = self.ensure(&mut guard).await?;
         let res = run(sess, &self.opts, action).await;
         if matches!(res, Err(BrowserError::Closed)) {
@@ -563,6 +630,7 @@ impl Browser {
     pub async fn input(&self, input: &UserInput) -> Result<(), BrowserError> {
         let mut guard = self.session.lock().await;
         let sess = self.ensure(&mut guard).await?;
+        self.touch();
         match input {
             UserInput::Click { x, y } => mouse_click(sess, *x, *y, 1).await,
             UserInput::Scroll { x, y, dx, dy } => page_call(
@@ -1809,5 +1877,40 @@ mod tests {
         let a = cdp_key(&Key::Char('a')).unwrap();
         assert_eq!((a.1.as_str(), a.2), ("KeyA", 65));
         assert_eq!(cdp_key(&Key::Named("F5")).unwrap().2, 116);
+    }
+
+    fn test_browser() -> Browser {
+        Browser::new(BrowserOptions {
+            executable: None,
+            headless: true,
+            profile_dir: std::env::temp_dir().join("mira-browser-idle-test"),
+            window_size: (1280, 900),
+            limits: ImageLimits::default(),
+        })
+    }
+
+    #[test]
+    fn fresh_browser_has_no_last_used() {
+        let b = test_browser();
+        assert!(b.last_used.lock().unwrap().is_none());
+        b.touch();
+        assert!(b.last_used.lock().unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn idle_browser_is_reaped_but_fresh_one_survives() {
+        // Never-started browser: reaping is a no-op "not running" close.
+        let b = test_browser();
+        assert!(!b.reap_if_idle(Duration::from_secs(60)).await);
+
+        // Backdate last use past the TTL: reaper issues the shutdown.
+        b.touch();
+        *b.last_used.lock().unwrap() =
+            Some(Instant::now() - IDLE_SHUTDOWN_AFTER - Duration::from_secs(1));
+        assert!(b.reap_if_idle(IDLE_SHUTDOWN_AFTER).await);
+
+        // Fresh use is left alone.
+        b.touch();
+        assert!(!b.reap_if_idle(IDLE_SHUTDOWN_AFTER).await);
     }
 }

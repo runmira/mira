@@ -147,7 +147,13 @@ impl AppState {
     }
 
     pub async fn slot(&self, id: &SessionId) -> Option<Arc<SessionSlot>> {
-        self.slots.read().await.get(id).cloned()
+        let slot = self.slots.read().await.get(id).cloned();
+        // Any lookup is observed use: it keeps the idle-slot evictor from
+        // dropping a session somebody is still reading.
+        if let Some(slot) = &slot {
+            slot.touch();
+        }
+        slot
     }
 
     /// Find a slot by string id — used by handlers that receive a path

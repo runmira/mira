@@ -165,7 +165,7 @@ impl EngineRuntime {
     }
 }
 
-fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -271,6 +271,83 @@ pub fn spawn_reaper(state: AppState) {
     });
 }
 
+/// Idle time after which a session slot is evicted from server memory.
+/// The transcript stays on disk, so the next attach reloads it via
+/// `ensure_slot` — eviction only drops the live `history + archived` vecs,
+/// screenshots, agent processes and channels, never user data.
+const EVICT_AFTER: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+/// How often the slot evictor sweeps.
+const EVICT_EVERY: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// Drop idle session slots from memory. Before this, every session ever
+/// opened stayed live in the `slots` map for the server's whole lifetime —
+/// full histories, screenshots, agent processes and all. A slot is only
+/// evicted when it is all of: not the active session, attached to no WS
+/// client, past [`EVICT_AFTER`] without a touch, not running, waiting on
+/// nothing, and holding no turn handle. Eviction is memory-only (no
+/// `store.delete`): re-attaching transparently reloads from disk.
+pub fn spawn_slot_eviction(state: AppState) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(EVICT_EVERY);
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            let active = state.active.read().await.clone();
+            for slot in state.list_slots().await {
+                if slot.id.to_string() == active.to_string() {
+                    continue;
+                }
+                if slot.is_attached() {
+                    continue;
+                }
+                let idle = slot.idle_secs();
+                if idle < EVICT_AFTER.as_secs() {
+                    continue;
+                }
+                if slot.is_running().await || slot.needs_attention().await {
+                    continue;
+                }
+                if slot.turn.lock().await.is_some() {
+                    continue;
+                }
+                let Ok(_dispatch) = slot.engine.dispatch_lock.try_lock() else {
+                    continue;
+                };
+                let Ok(_start) = slot.engine.start_lock.try_lock() else {
+                    continue;
+                };
+                // Re-check under the locks: a turn may have started between
+                // the probes above and acquiring them.
+                if slot.is_attached()
+                    || slot.is_running().await
+                    || slot.needs_attention().await
+                    || slot.turn.lock().await.is_some()
+                {
+                    continue;
+                }
+                tracing::info!(session = %slot.id, idle_secs = idle, "evicting idle session slot");
+                slot.engine.retired.store(true, std::sync::atomic::Ordering::SeqCst);
+                crate::acp_session::stop_agent(&slot).await;
+                slot.runtime_requests.close().await;
+                slot.message_queue.close().await;
+                state.session_activity.set(slot.id.to_string(), false);
+                state.remove_slot(&slot.id).await;
+                if let Some(h) = slot.turn.lock().await.take() {
+                    h.abort();
+                }
+                let _ = slot.session.read().await.cancel().await;
+                // Release its remote environments in the background; pending
+                // changes are saved as a patch, never applied.
+                let envs = slot.environments.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = envs.finish().await {
+                        tracing::warn!(%e, "releasing an evicted session's environments failed");
+                    }
+                });
+            }
+        }
+    });
+}
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum AgentPhase {
     #[default]

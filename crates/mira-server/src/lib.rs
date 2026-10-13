@@ -438,6 +438,10 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
 
     // Idle external agents are stopped (not forgotten) after a while.
     session_engine::spawn_reaper(state.clone());
+    // Idle session slots are evicted from memory (transcript stays on
+    // disk; re-attach reloads). Old transcripts are collected below.
+    session_engine::spawn_slot_eviction(state.clone());
+    crate::sessions::spawn_retention_gc(state.clone());
     keep_awake::spawn(state.clone());
     engines_reload::spawn(state.clone());
 
