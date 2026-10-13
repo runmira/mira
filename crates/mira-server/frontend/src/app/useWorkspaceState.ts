@@ -1,4 +1,5 @@
 import { useRef, useState } from 'react';
+import { useContextPanelState } from '../state/RuntimeProvider';
 import {
   type BranchPrView,
   type CommandInfo,
@@ -339,13 +340,7 @@ export function useWorkspaceState() {
 
   // Context panel: collapsed to a pill by default so it stays out of the
   // way; the choice is remembered per browser.
-  const [ctxOpen, setCtxOpen] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem('mira.context.open') === '1';
-    } catch {
-      return false;
-    }
-  });
+  const [ctxOpen, setCtxOpen] = useContextPanelState();
 
   // The session committed through the panel, so any unpushed commits on
   // the branch are its own to push.

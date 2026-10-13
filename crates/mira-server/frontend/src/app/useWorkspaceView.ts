@@ -285,14 +285,7 @@ export function useWorkspaceView(
 
   const closeDrawer = useCallback(() => setDrawerOpen(false), []);
 
-  const onCtxOpenChange = (v: boolean) => {
-    setCtxOpen(v);
-    try {
-      localStorage.setItem('mira.context.open', v ? '1' : '0');
-    } catch {
-      /* private mode */
-    }
-  };
+  const onCtxOpenChange = setCtxOpen;
 
   // Lazy chunk: fetched on first open, then kept mounted so draft review
   // comments survive closing the drawer.

@@ -1,3 +1,4 @@
+import { RuntimeProvider } from '../state/RuntimeProvider';
 import { LoadingScreen } from './LoadingScreen';
 import { useEffect, useState } from 'react';
 import { LazyBoundary } from './LazyBoundary';
@@ -18,7 +19,7 @@ type Status = 'loading' | 'signed-out' | 'signed-in';
  */
 export function AuthGate({ children }: { children: React.ReactNode }) {
   const [status, setStatus] = useState<Status>('loading');
-  const [_user, setUser] = useState<User | null>(null);
+  const [user, setUser] = useState<User | null>(null);
 
   useEffect(() => {
     const supabase = getSupabase();
@@ -97,7 +98,11 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
     );
   }
 
-  return <>{children}</>;
+  return (
+    <RuntimeProvider key={user!.id} scope={{ backend: window.location.origin, account: user!.id }}>
+      {children}
+    </RuntimeProvider>
+  );
 }
 
 function UnconfiguredNotice() {
