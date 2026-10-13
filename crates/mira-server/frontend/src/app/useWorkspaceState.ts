@@ -18,7 +18,7 @@ const EMPTY_DIFF: SessionDiffView = { added: 0, removed: 0, files: [] };
 export function useWorkspaceState() {
   const appRuntime = useAppRuntime();
   const { streams, sessionServices } = appRuntime;
-  const { pingPrimedRef, activityTitlesRef, acpAgentsRef, completedUpdatesRef, thinkingIdleTimerRef, drawerTouchX, drawerRef, paneRef, chatShortcutRequest, chatColObserver, lastScrollInputRef, readingAnchorRef, followRef, chatTitleRef, visibleApprovalRef, browserShownFor, browserPingSeen, wsRef, queueMutationsRef } = appRuntime.service.refs;
+  const { pingPrimedRef, activityTitlesRef, acpAgentsRef, completedUpdatesRef, thinkingIdleTimerRef, drawerTouchX, drawerRef, paneRef, chatShortcutRequest, chatColObserver, lastScrollInputRef, readingAnchorRef, attachFromRef, followRef, chatTitleRef, visibleApprovalRef, browserShownFor, browserPingSeen, wsRef, queueMutationsRef } = appRuntime.service.refs;
 
   const transportStatus = useSelector(appRuntime.connection, state => state.status);
   const attachmentReady = useSelector(appRuntime.sessionState, state => state.active !== null);
@@ -600,6 +600,7 @@ export function useWorkspaceState() {
     pendingAskUserRef,
     followRef,
     readingAnchorRef,
+    attachFromRef,
     showJump,
     setShowJump,
     lastScrollInputRef,

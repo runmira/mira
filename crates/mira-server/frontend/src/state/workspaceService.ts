@@ -13,6 +13,7 @@ export function createWorkspaceService() {
     drawerRef: { current: null as HTMLDivElement | null }, paneRef: { current: null as HTMLDivElement | null },
     chatShortcutRequest: { current: 0 }, chatColObserver: { current: null as ResizeObserver | null },
     lastScrollInputRef: { current: 0 }, readingAnchorRef: { current: null as number | null },
+    attachFromRef: { current: null as string | null },
     followRef: { current: getBoolPref(PREF_KEYS.transcriptFollow, true) }, chatTitleRef: { current: null as string | null },
     visibleApprovalRef: { current: null as string | null }, browserShownFor: { current: null as string | null },
     browserPingSeen: { current: 0 }, wsRef: { current: null as WsClient | null },

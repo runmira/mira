@@ -72,6 +72,7 @@ export function useSessionEvents(
     | 'recordEnvironmentTransition'
     | 'refreshRepo'
     | 'setMainView'
+    | 'attachFromRef'
   >,
 ) {
   const appRuntime = useAppRuntime();
@@ -128,6 +129,7 @@ export function useSessionEvents(
     recordEnvironmentTransition,
     refreshRepo,
     setMainView,
+    attachFromRef,
   } = context;
   return useStableCallback((msg: ServerMsg) => {
     const receivedAt = Date.now();
@@ -208,7 +210,13 @@ export function useSessionEvents(
       }
 
       case 'ready': {
-        const previousSession = getSessionId();
+        // Which chat we came from: `attachSession` records it before
+        // `suspend()` flips the selection, because by the time this frame
+        // arrives `getSessionId()` already reports the new chat. Falls back
+        // to the current selection for readies that follow no attach (a
+        // reconnect replays the same chat, whose scroll position must stay).
+        const previousSession = attachFromRef.current ?? getSessionId();
+        attachFromRef.current = null;
         for (const item of msg.queued_inputs ?? []) appRuntime.effect(() => appRuntime.drafts.confirmDelivery(item.id));
         for (const message of msg.history) if (message.input_id) appRuntime.effect(() => appRuntime.drafts.confirmDelivery(message.input_id!));
         appRuntime.resources.cancelContext();

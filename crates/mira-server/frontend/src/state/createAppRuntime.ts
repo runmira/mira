@@ -97,9 +97,17 @@ export function createAppRuntime(scope: RuntimeScope, storage?: UiStorage) {
     },
     acceptTerminal() {
       const state = turns.source.get(); if (!state.active || disposed) return false;
+      // Terminal dedup is per turn, not per session generation: a follow-up
+      // sent while the turn is still busy (queued/steered input) never bumps
+      // the generation, so generation-scoped dedup rejected that turn's end
+      // — and every later end, since the composer stayed busy forever.
+      // `turnStart` is written on every send and never cleared, so it
+      // identifies the turn even after its end was handled (duplicates still
+      // collapse onto the same key).
       const terminal = sessionServices.ref('terminalGeneration');
-      if (terminal.current === state.generation) return false;
-      terminal.current = state.generation; return true;
+      const key = `${state.generation}:${sessionServices.ref('turnStart').current ?? ''}`;
+      if (terminal.current === key) return false;
+      terminal.current = key; return true;
     },
     sessionServices,
     sessionState: turns.source,

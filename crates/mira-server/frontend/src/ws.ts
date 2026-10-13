@@ -66,6 +66,9 @@ export function connect(
           (reattach ? { type: 'attach', session_id: session } : { type: 'sync' }) as ClientMsg,
         ),
       );
+      // The attach frame precedes these on the same socket, so the server
+      // routes replays at the session the user is looking at.
+      flush();
 
     };
     socket.onclose = () => {
@@ -94,6 +97,9 @@ export function connect(
         }
         if (msg.type !== 'ready' || msg.session_id !== reattaching) return;
         reattaching = null;
+        // The awaited snapshot landed: anything buffered while reattaching
+        // can go now, against the right session.
+        flush();
       }
       onMsg(msg);
     };
@@ -104,14 +110,46 @@ export function connect(
   window.addEventListener('online',resync);
   open();
 
+  function sendDirect(msg: ClientMsg): boolean {
+    if (stopped || !ws || ws.readyState !== WebSocket.OPEN) return false;
+    try { ws.send(JSON.stringify(msg)); return true; } catch { return false; }
+  }
+
+  // Ordinary sends issued while offline or mid-reattach wait here instead
+  // of being dropped. Conditional mutations (`interrupt`, `resend`, …) go
+  // through `sendImmediate` and never queue: replaying a stale one after
+  // the user moved on would clobber newer state.
+  const outbox: ClientMsg[] = [];
+  const OUTBOX_MAX = 50;
+  function flush() {
+    if (stopped || !ws || ws.readyState !== WebSocket.OPEN || reattaching) return;
+    while (outbox.length > 0) {
+      const msg = outbox.shift()!;
+      try {
+        ws.send(JSON.stringify(msg));
+      } catch {
+        outbox.unshift(msg);
+        break;
+      }
+    }
+  }
+
   function sendMsg(msg: ClientMsg): boolean {
+    if (stopped) return false;
+    if (ws && ws.readyState === WebSocket.OPEN && !reattaching) return sendDirect(msg);
+    if (outbox.length >= OUTBOX_MAX) outbox.shift();
+    outbox.push(msg);
+    return true;
+  }
+
+  function sendImmediateMsg(msg: ClientMsg): boolean {
     if (stopped || !ws || ws.readyState !== WebSocket.OPEN || reattaching) return false;
     try { ws.send(JSON.stringify(msg)); return true; } catch { return false; }
   }
 
   return {
     send: sendMsg,
-    sendImmediate: sendMsg,
+    sendImmediate: sendImmediateMsg,
     attach(sessionId) {
       // Gate connection-scoped frames until the requested snapshot arrives.
       // Remember the target now so a disconnect mid-attach reconnects to it.
@@ -127,6 +165,7 @@ export function connect(
     },
     close() {
       stopped = true;
+      outbox.length = 0;
       if (reconnectTimer != null) clearTimeout(reconnectTimer);
       reconnectTimer = null;
       document.removeEventListener('visibilitychange',resync);
