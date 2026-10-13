@@ -981,7 +981,7 @@ pub(crate) fn spawn_retention_gc(state: AppState) {
                     return;
                 }
             };
-            if queued.iter().any(|queued| *queued == sid) {
+            if queued.contains(&sid) {
                 continue;
             }
             // Hold the guards through deletion: activation, loading and queue

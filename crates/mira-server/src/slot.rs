@@ -192,16 +192,13 @@ impl SessionSlot {
     /// Record a use of this slot now. Called on slot lookup/attach so the
     /// idle-slot evictor only drops slots nobody has touched in a while.
     pub fn touch(&self) {
-        self.last_used.store(
-            crate::session_engine::now_secs(),
-            Ordering::Relaxed,
-        );
+        self.last_used
+            .store(crate::session_engine::now_secs(), Ordering::Relaxed);
     }
 
     /// Seconds since [`SessionSlot::touch`] last ran.
     pub fn idle_secs(&self) -> u64 {
-        crate::session_engine::now_secs()
-            .saturating_sub(self.last_used.load(Ordering::Relaxed))
+        crate::session_engine::now_secs().saturating_sub(self.last_used.load(Ordering::Relaxed))
     }
 
     /// True while a spawned turn task is still holding the slot's turn
