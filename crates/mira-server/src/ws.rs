@@ -1262,6 +1262,17 @@ async fn dispatch_on_slot(
                             if let Some(params) = params {
                                 crate::session_engine::remember_agent(&slot, &params, true).await;
                             }
+                            let current = outcome
+                                .iter()
+                                .find(|option| option.category.as_deref() == Some("model"))
+                                .and_then(|option| option.current.clone())
+                                .unwrap_or_else(|| value.clone());
+                            *slot
+                                .engine
+                                .reported_model
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner()) = Some(current);
+                            crate::session_engine::publish(state, &slot).await;
                         }
                         // The agent returns its refreshed option list, and a
                         // change usually moves `currentValue`. Forwarding it

@@ -244,3 +244,11 @@ test('OpenCode compaction waits for server admission instead of inventing a runn
  const disconnected=useSessionCommands({getEngine:()=>({kind:'agent',driver:'opencode'}),wsRef:ref({sendImmediate:()=>false}),setRestoreNote:value=>notice=value});
  disconnected.compactAcpAgent();assert.match(notice.text,/Reconnect/);
 });
+
+
+test('Codex model picks target the existing native model option without starting another session',()=>{
+ const h=harness(),sent=[];
+ const commands=useComposerCommands({...h.context,acpDriver:'codex',acpModelOption:{id:'model'},wsRef:ref({send:message=>{sent.push(message);return true;}})});
+ commands.onSetModel('gpt-6.1-sol');
+ assert.deepEqual(sent,[{type:'acp_set_config_option',option_id:'model',value:'gpt-6.1-sol'}]);
+});

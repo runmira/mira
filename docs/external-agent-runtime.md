@@ -327,3 +327,11 @@ Compaction presentation follows T3's small transcript divider with a live label;
 retained context and failures expand inline in a bounded panel. The context
 meter disables compaction while the turn is active or OpenCode has not advertised
 the command, with an explanation beside the action.
+
+
+Codex model picks acknowledge the refreshed catalog/current value through the
+same config-option path as ACP agents. Mira publishes the acknowledged model
+into the session engine immediately and saves the standing choice. Codex applies
+that choice on the next `turn/start` in the existing native thread; an already
+running turn retains its original model. No new Mira session or native thread
+is required, and stale context-window readings are cleared on the switch.

@@ -1542,8 +1542,7 @@ impl AgentHandle {
             }
             AgentHandle::AppServer(a) if option_id == "model" => {
                 let model = value.as_str().unwrap_or_default();
-                a.set_model(model).await;
-                Ok(Vec::new())
+                Ok(a.set_model(model).await)
             }
             AgentHandle::Native(_) | AgentHandle::AppServer(_) => Err(format!(
                 "{option_id} applies to the next run of this agent — restart it to change the model"

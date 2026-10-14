@@ -1984,6 +1984,7 @@ pub struct AppServerAgent {
     goal_active: Arc<std::sync::atomic::AtomicBool>,
     rate_limits: Arc<Mutex<Option<Value>>>,
     model: Arc<Mutex<String>>,
+    models: Arc<Mutex<Vec<CodexModel>>>,
     turns: Arc<TurnContext>,
     events_tx: mpsc::Sender<NormalizedEvent>,
     pub events: std::sync::Mutex<Option<mpsc::Receiver<NormalizedEvent>>>,
@@ -2161,6 +2162,7 @@ impl AppServerAgent {
             goal_active,
             rate_limits,
             model: current_model,
+            models: models_retained,
             turns,
             events_tx,
             events: std::sync::Mutex::new(Some(rx)),
@@ -2413,7 +2415,7 @@ impl AppServerAgent {
     /// the model on `thread/start` and `turn/start`; sending a separate native
     /// control request is the stale-rollout path that produced missing-model
     /// errors.
-    pub async fn set_model(&self, model: &str) {
+    pub async fn set_model(&self, model: &str) -> Vec<SessionConfigView> {
         let model = model.trim();
         let next = if model.is_empty() || model == "default" {
             DEFAULT_CODEX_MODEL
@@ -2440,6 +2442,19 @@ impl AppServerAgent {
                     },
                 })
                 .await;
+        }
+        let mut models = self.models.lock().await.clone();
+        if !models.iter().any(|model| model.value == next) {
+            models.push(CodexModel {
+                value: next.to_owned(),
+                label: next.to_owned(),
+            });
+        }
+        // Same acknowledgement shape as ACP: the caller publishes this catalog
+        // with the selected value, even though Codex applies it on turn/start.
+        match config_options_event(&models, Some(next)).event {
+            MiraEvent::ConfigOptions { options } => options,
+            _ => unreachable!("model catalog must produce config options"),
         }
     }
 
@@ -3483,6 +3498,55 @@ done
         assert_eq!(re(&line).as_deref(), Some("7"), "frame: {line}");
         // The shape the old greedy expression matched into.
         assert!(line.contains("request_user_input") || line.contains("Collaboration Mode"));
+    }
+
+    #[tokio::test]
+    async fn model_switch_acknowledges_the_current_session_and_the_next_turn_uses_it() {
+        let (cfg, dir) = fake_codex();
+        let output = dir.path().join("turn-input.json");
+        let script = std::fs::read_to_string(&cfg.program).unwrap();
+        let script = script.replace("      id=$(id_of \"$line\")\n      echo \"{\\\"id\\\":$id,\\\"result\\\":{\\\"turn\\\":{\\\"id\\\":\\\"tu-1\\\"}}}\"", &format!("      printf '%s' \"$line\" > '{}'\n      id=$(id_of \"$line\")\n      echo \"{{\\\"id\\\":$id,\\\"result\\\":{{\\\"turn\\\":{{\\\"id\\\":\\\"tu-1\\\"}}}}}}\"",output.display()));
+        std::fs::write(&cfg.program, script).unwrap();
+        let gate: PermissionGate =
+            Arc::new(|_| Box::pin(async { crate::native::PermissionDecision::from(true) }));
+        let agent = AppServerAgent::start(
+            &cfg,
+            "approval-required",
+            None,
+            Some("gpt-6-astra".into()),
+            None,
+            gate,
+            None,
+        )
+        .await
+        .unwrap();
+        let agent = Arc::new(agent);
+        let handle = crate::native::AgentHandle::AppServer(agent.clone());
+        let original = agent.session_id().await;
+        let options = handle
+            .set_config_option("model", json!("gpt-6.1-sol"))
+            .await
+            .unwrap();
+        assert_eq!(options[0].current.as_deref(), Some("gpt-6.1-sol"));
+        assert!(options[0]
+            .values
+            .iter()
+            .any(|model| model.value == "gpt-6.1-sol"));
+        assert_eq!(agent.session_id().await, original);
+        agent
+            .prompt("Continue in the same conversation")
+            .await
+            .unwrap();
+        let payload: Value = serde_json::from_slice(&std::fs::read(output).unwrap()).unwrap();
+        assert_eq!(payload["method"], "turn/start");
+        assert_eq!(payload["params"]["threadId"], "th-1");
+        assert_eq!(payload["params"]["model"], "gpt-6.1-sol");
+        let repeated = handle
+            .set_config_option("model", json!("gpt-6.1-sol"))
+            .await
+            .unwrap();
+        assert_eq!(repeated[0].current.as_deref(), Some("gpt-6.1-sol"));
+        agent.shutdown().await;
     }
 
     #[tokio::test]
