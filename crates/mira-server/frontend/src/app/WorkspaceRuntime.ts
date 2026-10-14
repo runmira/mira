@@ -78,7 +78,7 @@ export interface WorkspaceRuntime extends WorkspaceState {
   };
   chatColRef: (el: HTMLDivElement | null) => void;
   refreshRepo: () => void;
-  noteScrollInput: () => void;
+  noteScrollInput: (event: React.SyntheticEvent<HTMLDivElement>) => void;
   jumpToLatest: () => void;
   onPaneScroll: () => void;
   updateSessionActivity: (update: SessionActivityUpdate) => void;

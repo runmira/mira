@@ -45,7 +45,7 @@ export function VirtualTranscript({ children, pane, identity, onNeedOlder, hasOl
     setViewport(previous => previous.top === top && previous.height === height ? previous : { top, height });
   }
   function following() {
-    return !!latest.current.follow?.current && Date.now() - (latest.current.lastInput?.current ?? 0) >= 700;
+    return !!latest.current.follow?.current;
   }
 
   // Capture from the committed layout before replacing spacer estimates. This
@@ -56,8 +56,8 @@ export function VirtualTranscript({ children, pane, identity, onNeedOlder, hasOl
     const old = committed.current;
     const switched = old.identity !== identity;
     const changed = old.keys.join('|') !== keys.join('|') || old.offsets.join('|') !== offsets.join('|');
-    const anchor = switched ? savedPosition(identity) : restore.current ??
-      (changed && !following() ? transcriptAnchor(old.keys, old.offsets, scroll.scrollTop - origin()) : undefined);
+    const anchor = switched ? savedPosition(identity) : following() ? undefined : restore.current ??
+      (changed ? transcriptAnchor(old.keys, old.offsets, scroll.scrollTop - origin()) : undefined);
     restore.current = anchor;
     committed.current = { identity, keys, offsets };
     if (readingAnchor?.current != null) {

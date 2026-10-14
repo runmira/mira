@@ -1,4 +1,4 @@
-import { useCallback,useMemo } from 'react';
+import { useCallback,useMemo, type SyntheticEvent } from 'react';
 import { parseSentAttachments,type PendingApproval } from '../components/Composer';
 import { CONTEXT_PANEL_RESERVE,contextPanelHasContent } from '../components/ContextPanel';
 import type { ActivityTurn } from '../components/panes/ActivityPane';
@@ -14,7 +14,7 @@ import { hasHiddenTitleBar } from '../lib/desktop';
 import { useLatch } from '../lib/lazy';
 import { getBoolPref,PREF_KEYS } from '../lib/prefs';
 import { playTurnSound } from '../lib/sound';
-import { distanceFromBottom,FOLLOW_ENGAGE_AT } from '../lib/transcriptFollow';
+import { distanceFromBottom,followFromInput,FOLLOW_ENGAGE_AT } from '../lib/transcriptFollow';
 import { groupByTurn } from '../lib/turnActivity';
 import { costUsd } from '../lib/usage';
 import { useAppRuntime } from '../state/RuntimeProvider';
@@ -274,9 +274,11 @@ export function useWorkspaceView(
       void appRuntime.resources.refresh(name).catch(() => {});
   }, [appRuntime]);
 
-  const noteScrollInput = () => {
+  const noteScrollInput = (event: SyntheticEvent<HTMLDivElement>) => {
+    const next = followFromInput(event, getBoolPref(PREF_KEYS.transcriptFollow, true));
+    if (next === null) return;
     lastScrollInputRef.current = Date.now();
-    followRef.current = false;
+    followRef.current = next;
   };
 
   const jumpToLatest = useCallback(() => {
@@ -295,7 +297,7 @@ export function useWorkspaceView(
     if (Date.now() - lastScrollInputRef.current < 1000) {
       // Layout corrections must never re-arm follow. Only an explicit gesture
       // reaching the actual end, or Jump to latest, does that.
-      followRef.current = distance <= 2 && getBoolPref(PREF_KEYS.transcriptFollow, true);
+      if (distance <= 2) followRef.current = getBoolPref(PREF_KEYS.transcriptFollow, true);
     }
     setShowJump(distance >= FOLLOW_ENGAGE_AT);
   }, []);

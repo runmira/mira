@@ -36,3 +36,15 @@ export function distanceFromBottom(el: {
 }): number {
   return el.scrollHeight - el.scrollTop - el.clientHeight;
 }
+
+/** Explicit gestures own follow intent; layout scroll events cannot release it. */
+export function followFromInput(event: {
+  nativeEvent: Event; target: EventTarget | null; currentTarget: HTMLElement;
+}, prefOn: boolean): boolean | null {
+  if ((event.target as Element)?.closest?.('[data-thinking-scroll], [data-live-output]')) return null;
+  const native = event.nativeEvent;
+  if (native instanceof KeyboardEvent && !['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(native.key)) return null;
+  const towardEnd = native instanceof WheelEvent ? native.deltaY >= 0 :
+    native instanceof KeyboardEvent && ['ArrowDown', 'PageDown', 'End', ' '].includes(native.key) && !native.shiftKey;
+  return towardEnd && distanceFromBottom(event.currentTarget) <= 2 && prefOn;
+}

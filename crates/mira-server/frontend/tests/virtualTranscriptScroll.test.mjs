@@ -4,10 +4,11 @@ import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Window } from 'happy-dom';
 import { bundle } from './helpers/bundle.mjs';
-const { VirtualTranscript } = await bundle(`export { VirtualTranscript } from './src/components/VirtualTranscript';`);
+const { VirtualTranscript, followFromInput } = await bundle(`export { followFromInput } from './src/lib/transcriptFollow'; export { VirtualTranscript } from './src/components/VirtualTranscript';`);
 const window = new Window({ url: 'https://scroll.mira.test' });
 globalThis.window = window; globalThis.document = window.document;
 globalThis.sessionStorage = window.sessionStorage;
+globalThis.WheelEvent = window.WheelEvent; globalThis.KeyboardEvent = window.KeyboardEvent;
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const observers = new Set();
 let created = 0;
@@ -128,6 +129,42 @@ test('an unrelated expandable control does not pin scrolling or disable followin
   assert.equal(f.follow.current,true,'unrelated popovers do not change follow mode');
   triggerTop += 120;
   await f.render(ids);
-  assert.equal(f.pane.scrollTop,3000,'a changing popover trigger cannot move the reading position');
+  assert.equal(f.pane.scrollTop,f.pane.scrollHeight,'an unrelated popover cannot block following at the end');
   await act(() => f.root.unmount()); f.pane.remove();
+});
+
+
+test('recent input at the bottom does not pause streaming follow or retain a stale anchor', async () => {
+  const f = fixture(), ids = Array.from({length:20},(_,i)=>String(i));
+  await f.render(ids); await f.resize();
+  f.follow.current = true;
+  await f.render(ids);
+  assert.equal(f.pane.scrollTop,f.pane.scrollHeight);
+  f.heights.set('19',700);
+  await f.resize();
+  assert.equal(f.pane.scrollTop,f.pane.scrollHeight,'stream growth follows despite input less than 700ms ago');
+  f.follow.current = false;
+  f.pane.scrollTop = 3000;
+  await act(() => f.pane.dispatchEvent(new window.Event('scroll'))); f.geometry();
+  const before = f.pane.scrollTop;
+  f.heights.set('19',1000);
+  await f.resize();
+  assert.equal(f.pane.scrollTop,before,'scrolling up still preserves the reading position');
+  await act(() => f.root.unmount()); f.pane.remove();
+});
+
+
+test('downward input at the exact end keeps following without requiring a scroll event', () => {
+  const pane = document.createElement('div');
+  Object.defineProperties(pane,{scrollHeight:{value:1000},clientHeight:{value:600}});
+  pane.scrollTop=400;
+  const gesture=(nativeEvent,target=pane)=>({nativeEvent,target,currentTarget:pane});
+  assert.equal(followFromInput(gesture(new window.WheelEvent('wheel',{deltaY:100})),true),true);
+  assert.equal(followFromInput(gesture(new window.WheelEvent('wheel',{deltaY:-100})),true),false);
+  assert.equal(followFromInput(gesture(new window.WheelEvent('wheel',{deltaY:100})),false),false);
+  pane.scrollTop=350;
+  assert.equal(followFromInput(gesture(new window.WheelEvent('wheel',{deltaY:100})),true),false,'reading near the end does not force a jump');
+  const inner=document.createElement('div');inner.setAttribute('data-thinking-scroll','');pane.append(inner);
+  assert.equal(followFromInput(gesture(new window.WheelEvent('wheel',{deltaY:-100}),inner),true),null);
+  assert.equal(followFromInput(gesture(new window.KeyboardEvent('keydown',{key:'c',metaKey:true})),true),null,'copy does not release following');
 });

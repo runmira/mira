@@ -430,7 +430,7 @@ export function WorkspaceMain(
                   onTouchMove={noteScrollInput}
                   onKeyDown={noteScrollInput}
                   onPointerMove={(e) => {
-                    if (e.buttons) noteScrollInput();
+                    if (e.buttons && e.target === e.currentTarget) noteScrollInput(e);
                   }}
                 >
                   {/* Agents bring their own login, so a chat on one needs no provider. */}
