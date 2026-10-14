@@ -113,6 +113,7 @@ export function CompactionCard({ entry }: { entry: CompactionEntry }) {
           <button
             type="button"
             onClick={() => setOpen((v) => !v)}
+            data-transcript-disclosure
             aria-expanded={open}
             className="relative inline-flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-[11.5px] text-muted-foreground transition-colors hover:bg-fg/[0.06] hover:text-foreground"
           >

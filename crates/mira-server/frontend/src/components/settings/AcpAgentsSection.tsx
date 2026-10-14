@@ -1,3 +1,4 @@
+import { openCodeLoginCommand } from '../../lib/agentAuth';
 /**
  * The external-agent list.
  *
@@ -264,6 +265,7 @@ function AgentKeyField({
   view: AgentSettings;
   saveKey: (kind: string, patch: Pick<AgentSettingsPatch, 'api_key' | 'api_key_env'>) => Promise<void>;
 }) {
+  const [copiedLogin, setCopiedLogin] = useState(false);
   const [editing, setEditing] = useState(false);
   const [mode, setMode] = useState<'key' | 'env'>('key');
   const [value, setValue] = useState('');
@@ -276,6 +278,17 @@ function AgentKeyField({
       <Field label="API key">
         <div className="text-[11.5px] text-muted-foreground/70">
           {agent.display_name} signs in through its own CLI and doesn't take a key.
+          {agent.kind === 'opencode' && <div className="mt-2 space-y-2">
+            <p>This command uses the CLI configured for Mira. Check its provider login with auth list. OpenCode’s desktop app and CLI can use different versions or credential stores; a working desktop login may need importing into the CLI.</p>
+            <div className="flex flex-wrap items-center gap-2">
+              <code className="rounded bg-muted px-2 py-1">{openCodeLoginCommand(view.binary_path)}</code>
+              <button type="button" className="rounded border border-border px-2 py-1" onClick={() => {
+                void navigator.clipboard.writeText(openCodeLoginCommand(view.binary_path)).then(() => setCopiedLogin(true)).catch(() => setErr('Copy failed. Select the command above and copy it manually.'));
+              }}>{copiedLogin ? 'Copied' : 'Copy login command'}</button>
+            </div>
+            <p>If the CLI has no saved login, connect the provider used by your model with the command above. Mira uses OpenCode's saved login or environment entries explicitly configured for this agent. Shell-only tokens are not inherited automatically.</p>
+            {err && <p className="text-destructive">{err}</p>}
+          </div>}
         </div>
       </Field>
     );
@@ -680,6 +693,7 @@ export function AcpAgentsSection({
     [agents, views, drafts],
   );
 
+  if (agents.length === 0 && error) return <div className="space-y-3"><Note text={error} tone="error" /><button type="button" onClick={onRefresh}>Retry agent discovery</button></div>;
   if (agents.length === 0) {
     return (
       <div className="flex items-center gap-2 rounded-xl border border-dashed border-border/70 px-4 py-6 text-[12.5px] text-muted-foreground/70">

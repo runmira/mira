@@ -51,7 +51,6 @@ export function useComposerCommands(
     queueMutationsRef,
     pendingSteerRef,
     getQueues,
-    isTurnRunning,
     flushNativeFrames,
     flushTokens,
     followRef,
@@ -165,11 +164,6 @@ export function useComposerCommands(
     if (!session || pendingSteerRef.current.has(session)) return;
     const picked = getQueues().get(session)?.find((item) => item.id === id);
     if (!picked) return;
-    if (!isTurnRunning()) {
-      // The server outbox will dispatch when the foreground turn releases.
-      return;
-      return;
-    }
     flushNativeFrames();
     flushTokens();
     pendingSteerRef.current.set(session, picked);
@@ -192,12 +186,16 @@ export function useComposerCommands(
         },
       },
     ]);
-    wsRef.current?.send({
+    if (wsRef.current?.send({
       type: 'steer',
       request_id: id,
       text: picked.text,
       images: picked.images,
-    });
+    }) === false || !wsRef.current) {
+      pendingSteerRef.current.delete(session);
+      updateSessionQueue(session, items => items.map(item => item.id === id ? {...item, steering:false, error:'Reconnect before steering. Your message is still queued.'} : item));
+      updateTranscript(entries => entries.filter(entry => entry.kind !== 'msg' || entry.steerRequestId !== id));
+    }
   }
 
   function sendNow(
@@ -421,7 +419,7 @@ export function useComposerCommands(
     // model, or agent and its settings — and its `ready` reports it, so
     // the composer carries on exactly as it was. Nothing to reset here.
     try {
-      const { id } = await newSession();
+      const { id } = await newSession(getSessionId() || undefined);
       // The server just built a fresh slot for `id`, marked it active,
       // and published a Ready on ITS channel. Our WS forwarder is still
       // subscribed to the previous slot — attach so we start receiving

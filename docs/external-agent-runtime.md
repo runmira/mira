@@ -231,3 +231,67 @@ An approved pending tool becomes running on its tool-start event; settled tools
 remain settled.
 
 Protocol reference: [OpenCode ACP child sessions](https://dev.opencode.ai/v2/docs/cli/acp/).
+
+
+### Early launch visibility and OpenCode sign-in
+
+Claude tool-use block starts are emitted immediately, before completed argument
+JSON or the assistant snapshot. Explicit delegation names can create a Mira agent
+card with a pending prompt; later sparse updates merge launch metadata into that
+same card and child panel. Ordinary shell and task-management calls retain their
+existing tool presentation. The ACP client explicitly advertises
+`_meta["opencode/child-session-updates"]`, which OpenCode requires before sending
+child updates.
+
+OpenCode's ACP `authenticate(opencode-login)` returns success without collecting
+credentials. Its own CLI login supplies saved provider credentials. Mira keeps
+its restricted child environment; it does not silently forward ambient provider
+or GitHub tokens. OpenCode settings show a copyable login command using the
+configured binary, and ACP provider-auth failures direct the user to that flow.
+After saving the selected provider login, retry the message explicitly.
+
+Sources inspected: [OpenCode ACP service](https://github.com/anomalyco/opencode/blob/dev/packages/cli/src/acp/service.ts)
+and [child capability negotiation](https://github.com/anomalyco/opencode/blob/dev/packages/cli/src/acp/capabilities.ts).
+
+### Desktop and CLI credential compatibility
+
+A working OpenCode desktop login does not establish that Mira’s configured CLI
+has the same credentials. Diagnose the exact CLI binary and version first, then
+check `auth list --standalone` on OpenCode v2 with the same environment Mira
+passes. Do not forward ambient shell provider tokens as a workaround.
+
+OpenCode v1 stores provider credentials in its XDG data directory’s `auth.json`;
+v2 stores credentials in its database. The v2 `auth import --standalone` command
+accepts exported `Credential.Entry` records, not the legacy JSON object. Migration
+must preserve existing destination integrations and translate the legacy schema.
+Pipe the translated records directly to the import process; keep secret values
+out of logs, temporary files, browser responses, and issue or PR descriptions.
+Verify the stored provider appears without shell tokens, then separately verify
+the selected model and a live prompt. Importing a credential alone does not prove
+that the provider accepts it or has credit.
+
+Sources: [OpenCode credential schema](https://github.com/anomalyco/opencode/blob/v2.0.22/packages/schema/src/credential.ts),
+[legacy credential migration](https://github.com/anomalyco/opencode/blob/dev/packages/core/src/database/migration/20260805200742_import_legacy_credentials.ts),
+and [auth import](https://github.com/anomalyco/opencode/blob/dev/packages/cli/src/commands/handlers/auth/import.ts).
+
+
+## OpenCode native steering
+
+OpenCode v2's ACP process owns a private server. Mira installs a temporary local
+plugin package using OpenCode's promise-plugin API and admits queued input through
+that server's `session.prompt` with `delivery: "steer"`. The existing ACP prompt
+and conversation remain active; steering does not cancel or start a second ACP
+prompt. Legacy OpenCode versions that advertise HTTP flags retain their original
+control path. The prepared launch configuration reaches the actual ACP process.
+
+The plugin exposes a loopback-only endpoint authenticated by a per-runtime token
+stored in a private file (0600 on Unix). It rejects browser origins, accepts text
+and inline images, deduplicates admission IDs, and closes when its plugin owners
+stop. Mira advertises steering only after the bridge passes its authenticated
+health check. Ambiguous delivery failures are never automatically retried.
+
+Validation includes the installed OpenCode v2.0.22 ACP startup and a live free-model
+turn that receives a steering instruction and finishes without cancellation.
+These opt-in tests use `MIRA_TEST_OPENCODE_BIN` and remain ignored in normal CI.
+Plugin authentication, admission deduplication and cleanup also run in the normal
+frontend test suite.

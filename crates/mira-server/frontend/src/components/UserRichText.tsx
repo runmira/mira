@@ -1,22 +1,24 @@
 import { useMemo } from 'react';
 import { GithubRef } from './GithubRef';
+import { SessionRef } from './SessionRef';
 import { LinkRef } from './RichRefs';
 import { SkillChip } from './SkillMention';
 import { parseGithubRef } from '../lib/githubRefs';
 
 /**
  * The user's own message, rendered with the same inline richness the
- * agent's messages get — links and PR references only, for now.
+ * agent's messages get — links, PR references, and session references.
  *
  * Why not just run the text through `Markdown`? Because this is a
  * *sent* message, not model output: it is plain text, never a
  * document. Handing it to a Markdown pipeline would silently turn a
  * pasted `#` or a stray `<` into structure the user never wrote. So the
  * bubble gets a tokeniser instead of a parser — it recognises exactly
- * three things it knows the user meant:
+ * four things it knows the user meant:
  *
  *   - `@skill:<name>`     → the skill chip (already existed here)
  *   - `owner/repo#123`    → the PR/issue chip, with its state popover
+ *   - `sess_<32 hex>`     → the session chip, with its preview popover
  *   - a bare `http(s)://` → the link chip, with its unfurl hover card
  *
  * Everything else is text, byte for byte. The bubble is
@@ -30,12 +32,16 @@ export type UserSegment =
   | { kind: 'text'; text: string }
   | { kind: 'skill'; name: string }
   | { kind: 'link'; href: string }
+  | { kind: 'session'; id: string }
   | { kind: 'github'; href: string };
 
 /** `@skill:<name>` — kept in sync with `SkillMention`'s own token. */
 const SKILL_TOKEN = /@skill:([a-zA-Z0-9][a-zA-Z0-9_-]*)/i;
 /** `owner/repo#123`, the shorthand for a PR or issue. */
 const GH_REF = /[A-Za-z0-9][\w-]*\/[\w.-]+#\d+\b/;
+/** A Mira session id. Hex class covers both cases; the combined
+ *  tokenizer below only carries the `g` flag. */
+const SESS_REF = /sess_[0-9a-fA-F]{32}\b/;
 /** A bare URL. Stops at whitespace and the characters that, in prose,
  *  always belong to the sentence rather than to the link. */
 const URL = /https?:\/\/[^\s<>()[\]"'`]+/;
@@ -67,11 +73,12 @@ function pushText(out: UserSegment[], text: string) {
  * the obvious one and it is wrong: a global regex carries `lastIndex`
  * across calls, so after the first match the cursor lands mid-string
  * and every later link is silently swallowed. Group numbering comes
- * from the wrapper parens: 2 = skill name, 3 = PR ref, 4 = URL.
+ * from the wrapper parens: 2 = skill name, 3 = PR ref, 4 = session id,
+ * 5 = URL.
  */
 function tokenizeProse(prose: string, out: UserSegment[]) {
   const token = new RegExp(
-    `(${SKILL_TOKEN.source})|(${GH_REF.source})|(${URL.source})`,
+    `(${SKILL_TOKEN.source})|(${GH_REF.source})|(${SESS_REF.source})|(${URL.source})`,
     'g',
   );
   let last = 0;
@@ -85,10 +92,12 @@ function tokenizeProse(prose: string, out: UserSegment[]) {
       // one, so this is the same target the Markdown path builds.
       out.push({ kind: 'github', href: `https://github.com/${m[3].replace('#', '/pull/')}` });
     } else if (m[4]) {
+      out.push({ kind: 'session', id: m[4] });
+    } else if (m[5]) {
       // Hand back the trailing sentence punctuation: `(see
       // https://example.com).` links the URL, not the period.
-      const trimmed = m[4].replace(TRAILING, '');
-      const tail = m[4].slice(trimmed.length);
+      const trimmed = m[5].replace(TRAILING, '');
+      const tail = m[5].slice(trimmed.length);
       if (trimmed) out.push({ kind: 'link', href: trimmed });
       pushText(out, tail);
     }
@@ -135,6 +144,8 @@ export function UserRichText({
             return <SkillChip key={i} name={seg.name} roster={roster} />;
           case 'link':
             return <LinkRef key={i} href={seg.href}>{seg.href}</LinkRef>;
+          case 'session':
+            return <SessionRef key={i} id={seg.id} />;
           case 'github': {
             const target = parseGithubRef(seg.href);
             if (!target) return <span key={i}>{seg.href}</span>;

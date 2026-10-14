@@ -37,13 +37,16 @@ import { cn } from '@/lib/utils';
 import { AlertCircle,Check,ChevronDown,Loader2,RefreshCw,Settings2 } from 'lucide-react';
 import { useEffect,useMemo,useRef,useState } from 'react';
 import { listInstanceModels,listModels,type EngineSnapshot,type ModelInfo,type OptionDescriptor } from '../api';
+import { navigateEnginePicker } from '../lib/enginePickerNavigation';
 import { agentModelChoices,describeAgentStatus } from '../lib/acpAgents';
+import { enabledPickerRail } from '../lib/enginePickerRail';
 import {
 CODING_MATCHERS,
 formatCtx,
 groupByVendor,
 loadModelOptions,
-modelDotClass,
+modelPickerLabel,
+modelVendor,
 prettyModel,
 saveModelOptions,
 } from '../lib/models';
@@ -56,9 +59,9 @@ import { PrivateText,redactEmails } from './PrivateText';
 /** A rail entry: a provider instance or an agent driver. */
 type RailItem =
   | { key: string; kind: 'provider'; instance: string | null; name: string; snapshot?: EngineSnapshot }
-  | { key: string; kind: 'agent'; driver: string; name: string; status?: AcpAgentStatus };
+  | { key: string; kind: 'agent'; driver: string; instance?: string; name: string; status?: AcpAgentStatus };
 
-type Choice = { id: string; label: string; hint?: string | null; ctx?: number | null };
+type Choice = { id: string; label: string; ctx?: number | null };
 
 export type EnginePickerProps = {
   open: boolean;
@@ -80,7 +83,7 @@ export type EnginePickerProps = {
   /** The running agent's non-model options, projected for rendering. */
   agentDescriptors?: OptionDescriptor[] | null;
   onPickProvider: (instance: string | null, model: string) => void;
-  onPickAgent: (driver: string, model: string | null) => void;
+  onPickAgent: (driver: string, model: string | null, instance?: string) => void;
   onSetModelOption: (id: string, value: string) => void;
   onConfigureAgents?: () => void;
   /** Session actions for the running agent. */
@@ -101,63 +104,13 @@ export function EnginePicker(props: EnginePickerProps) {
 
   const isAgent = engine?.kind === 'agent';
   const currentKey = isAgent
-    ? `agent:${engine?.driver ?? ''}`
+    ? `agent:${engine?.instance ?? engine?.driver ?? ''}`
     : `provider:${engine?.instance ?? ''}`;
   const currentModel = engine?.model ?? (isAgent ? null : fallbackModel);
 
-  // The provider this chat would go back to, remembered while an agent
-  // drives so its row keeps its real name and icon.
-  const lastProvider = useRef<{ instance: string | null; name: string } | null>(null);
-  if (!isAgent && engine) {
-    lastProvider.current = {
-      instance: engine.instance ?? null,
-      name: engine.display_name && engine.display_name !== 'Mira' ? engine.display_name : (providerName ?? 'Mira provider'),
-    };
-  }
-
-  // ---- the rail ----------------------------------------------------------
-  const rail = useMemo<RailItem[]>(() => {
-    const items: RailItem[] = [];
-    const native = (engines ?? []).filter((e) => e.flavor === 'native' && e.enabled);
-    if (native.length > 0) {
-      for (const e of native) {
-        items.push({ key: `provider:${e.instance}`, kind: 'provider', instance: e.instance, name: e.display_name, snapshot: e });
-      }
-    }
-    // The running provider always has a row, even when the registry is
-    // empty or does not list it (a legacy single-provider config).
-    const activeProviderKey = `provider:${!isAgent ? (engine?.instance ?? '') : ''}`;
-    if (!isAgent && !items.some((i) => i.key === activeProviderKey)) {
-      items.unshift({
-        key: activeProviderKey,
-        kind: 'provider',
-        instance: engine?.instance ?? null,
-        name: engine?.display_name && engine.display_name !== 'Mira' ? engine.display_name : prettyProvider(providerName),
-      });
-    }
-    if (!items.some((i) => i.kind === 'provider')) {
-      const last = lastProvider.current;
-      items.push({
-        key: `provider:${last?.instance ?? ''}`,
-        kind: 'provider',
-        instance: last?.instance ?? null,
-        name: last?.name ?? prettyProvider(providerName),
-      });
-    }
-    const seen = new Set<string>();
-    for (const a of agents ?? []) {
-      seen.add(a.kind);
-      // Name and on/off come from the agent's engine (Settings → Agents).
-      const row = engines?.find((e) => e.flavor === 'external' && e.instance === a.kind);
-      if (row && !row.enabled && engine?.driver !== a.kind) continue;
-      items.push({ key: `agent:${a.kind}`, kind: 'agent', driver: a.kind, name: row?.display_name || a.display_name, status: a });
-    }
-    // The session's agent is listed even before the first health probe.
-    if (isAgent && engine?.driver && !seen.has(engine.driver)) {
-      items.push({ key: `agent:${engine.driver}`, kind: 'agent', driver: engine.driver, name: engine.display_name });
-    }
-    return items;
-  }, [engines, agents, engine, isAgent, providerName]);
+  // Membership comes only from enabled registry instances. Probes enrich
+  // status without changing order, including while the active engine changes.
+  const rail = useMemo<RailItem[]>(() => enabledPickerRail(engines, agents), [engines, agents]);
 
   // What the right pane shows. Follows the current engine until the user
   // points elsewhere; reset on every open so it always starts at "here".
@@ -212,8 +165,6 @@ export function EnginePicker(props: EnginePickerProps) {
     if (Array.isArray(fetched)) return fetched;
     if (fetched) return [];
     if (item.snapshot?.models && item.snapshot.models.length > 0) return item.snapshot.models;
-    // The provider the chat would return to, while an agent drives.
-    if (isAgent && item.instance === (lastProvider.current?.instance ?? null)) return activeCatalog;
     return null;
   };
   const providerError = (item: Extract<RailItem, { kind: 'provider' }>): string | null => {
@@ -224,7 +175,7 @@ export function EnginePicker(props: EnginePickerProps) {
 
   // ---- agent model lists --------------------------------------------------
   const [agentCatalogs, setAgentCatalogs] = useState<Record<string, ModelInfo[] | { error: string }>>({});
-  const shownAgent = shown?.kind === 'agent' ? shown.driver : null;
+  const shownAgent = shown?.kind === 'agent' ? (shown.instance ?? shown.driver) : null;
   useEffect(() => {
     if (!open || !shownAgent || agentCatalogs[shownAgent]) return;
     const existing = agents?.find((a) => a.kind === shownAgent)?.models ?? [];
@@ -236,9 +187,10 @@ export function EnginePicker(props: EnginePickerProps) {
   }, [open, shownAgent, agents, agentCatalogs]);
 
   const agentChoices = (driver: string): { choices: Choice[]; live: boolean; error?: string } => {
-    const live = isAgent && engine?.driver === driver ? agentModelChoices(agentConfig) : [];
+    const live = isAgent && engine?.driver === driver && shownIsCurrent ? agentModelChoices(agentConfig) : [];
     if (live.length > 0) return { choices: live.map((c) => ({ id: c.value, label: c.label })), live: true };
-    const fetched = agentCatalogs[driver];
+    const instance = shown?.kind === 'agent' && shown.driver === driver ? shown.instance ?? driver : driver;
+    const fetched = agentCatalogs[instance];
     if (Array.isArray(fetched) && fetched.length > 0) {
       return { choices: fetched.map((m) => ({ id: m.id, label: m.display_name || prettyModel(m.id) })), live: true };
     }
@@ -283,16 +235,14 @@ export function EnginePicker(props: EnginePickerProps) {
         setBlocked(item.status);
         return;
       }
-      onPickAgent(item.driver, model);
+      onPickAgent(item.driver, model, item.instance);
     }
     onOpenChange(false);
   }
 
   // ---- trigger ---------------------------------------------------------------
-  const triggerLabel = isAgent
-    ? (currentModel ? prettyModel(currentModel) : 'Default model')
-    : prettyModel(currentModel) || 'Choose model';
-  const optionSummary = summarizeOptions(descriptors, options);
+  const triggerLabel = currentModel ? modelPickerLabel(currentModel) : isAgent ? 'Default model' : 'Choose model';
+  const engineLabel = rail.find(row => row.key === currentKey)?.name ?? engine?.display_name ?? providerName ?? 'Mira';
 
   return (
     <>
@@ -310,19 +260,8 @@ export function EnginePicker(props: EnginePickerProps) {
                 them) visibly off-centre. */}
             <span className="grid size-4 shrink-0 place-items-center"><EngineMark engine={engine} model={currentModel} /></span>
             <span className="inline-flex h-4 min-w-0 items-center gap-1.5">
-              {isAgent ? (
-                <>
-                  <span className="shrink-0 text-[12.5px] font-semibold leading-none">{engine?.display_name}</span>
-                  <span className="min-w-0 truncate text-[12.5px] font-medium leading-none text-muted-foreground">
-                    {triggerLabel}
-                  </span>
-                </>
-              ) : (
-                <span className="min-w-0 truncate text-[12.5px] font-semibold leading-none">{triggerLabel}</span>
-              )}
-              {optionSummary && (
-                <span className="shrink-0 text-[11.5px] font-medium leading-none text-muted-foreground/80 max-md:hidden">{optionSummary}</span>
-              )}
+              <span className="shrink-0 text-[12.5px] font-semibold leading-none">{engineLabel}</span>
+              <span className="min-w-0 truncate text-[12.5px] font-medium leading-none text-muted-foreground">{triggerLabel}</span>
             </span>
             <EngineStatusGlyph engine={engine} />
             <span className="grid size-4 shrink-0 place-items-center">
@@ -336,11 +275,11 @@ export function EnginePicker(props: EnginePickerProps) {
           sideOffset={8}
           className="w-[36rem] max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl border border-border/60 bg-popover/95 p-0 backdrop-blur"
         >
-          <div className="grid h-[26rem] grid-cols-[12.5rem_minmax(0,1fr)]">
+          <div data-engine-picker className="grid h-[26rem] max-h-[calc(100dvh-8rem)] grid-cols-[12.5rem_minmax(0,1fr)]" onKeyDown={navigateEnginePicker}>
             {/* Rail */}
             <div className="flex min-h-0 flex-col border-r border-border/50 bg-fg/[0.015]">
-              <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
-                <RailSection label="Providers" />
+              <div data-engine-rail className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-1.5">
+                {rail.some(r => r.kind === 'provider') && <RailSection label="Providers" />}
                 {rail.filter((r) => r.kind === 'provider').map((r) => (
                   <RailRow
                     key={r.key}
@@ -374,7 +313,7 @@ export function EnginePicker(props: EnginePickerProps) {
                 ))}
                 {!rail.some((r) => r.kind === 'agent') && (
                   <div className="px-2 py-1.5 text-[11.5px] text-muted-foreground/60">
-                    {agentsChecking ? 'Looking for installed agents…' : 'No external agents found.'}
+                    {engines == null ? 'Loading enabled engines…' : 'No external agents enabled.'}
                   </div>
                 )}
               </div>
@@ -413,7 +352,7 @@ export function EnginePicker(props: EnginePickerProps) {
                     catalogError={shown.kind === 'provider' ? providerError(shown) : null}
                     onPick={(model) => commit(shown, model)}
                   />
-                ) : null}
+                ) : <div className="flex h-full items-center justify-center px-5 text-center text-[12.5px] text-muted-foreground" role="status">{engines == null ? 'Loading enabled engines…' : 'Enable a provider or external agent in Settings to choose a model.'}</div>}
               </div>
 
               {/* Options and session actions belong to the running engine,
@@ -544,6 +483,8 @@ function RailRow({
       // crosses other rows, and hover-to-show flipped the pane to
       // whichever engine the pointer passed on the way.
       onClick={onShow}
+      data-engine-row
+      aria-pressed={shown}
       className={cn(
         'relative flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors',
         shown ? 'bg-fg/[0.08]' : 'hover:bg-fg/[0.04]',
@@ -637,7 +578,7 @@ function ModelList({
   const inputRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
     // Typing is the fastest way through a long catalog.
-    const t = setTimeout(() => inputRef.current?.focus(), 0);
+    const t = setTimeout(() => inputRef.current?.focus({preventScroll:true}), 0);
     return () => clearTimeout(t);
   }, []);
 
@@ -653,7 +594,6 @@ function ModelList({
     const toChoice = (m: ModelInfo): Choice => ({
       id: m.id,
       label: m.display_name || prettyModel(m.id),
-      hint: m.id,
       ctx: m.context_length,
     });
     if (!query.trim()) {
@@ -682,7 +622,7 @@ function ModelList({
         onValueChange={setQuery}
         placeholder={loading ? 'Loading models…' : item.kind === 'agent' ? 'Search, or type a model id…' : 'Search models, or type an id…'}
       />
-      <CommandList className="max-h-none min-h-0 flex-1 overflow-y-auto">
+      <CommandList className="max-h-none min-h-0 flex-1 overflow-y-auto overscroll-contain">
         {catalogError && <div className="px-3 py-2 text-[11.5px] text-destructive">{catalogError}</div>}
         {item.kind === 'agent' && agentChoices?.error && <div className="px-3 py-2 text-[11.5px] text-destructive">{agentChoices.error}</div>}
         {loading && (
@@ -699,39 +639,36 @@ function ModelList({
                   Default model
                   {isCurrent && !currentModel && <Check className="ml-1.5 inline size-3 text-mira-blue" />}
                 </div>
-                <div className="text-[10.5px] text-muted-foreground/70">
-                  Whatever {item.name} is set to use
-                </div>
               </div>
             </CommandItem>
           </CommandGroup>
         )}
         {sections.map((sec) => (
           <CommandGroup key={sec.name} heading={sec.name}>
-            {sec.choices.map((c) => (
-              <CommandItem
+            {sec.choices.map((c) => {
+              const label = modelPickerLabel(c.id, c.label);
+              return <CommandItem
                 key={`${sec.name}:${c.id}`}
-                value={`${c.id} ${c.label}`}
+                value={`${c.id} ${label}`}
                 onSelect={() => onPick(c.id)}
                 className="flex items-center gap-2"
               >
-                <span className={cn('size-2 shrink-0 rounded-full', modelDotClass(c.id))} />
+                {modelVendor(c.id) !== 'other' ? <ModelIcon model={c.id} size="xs" /> : item.kind === 'agent'
+                  ? <AgentIcon kind={item.driver} name={item.name} size="xs" tile={false} />
+                  : <ProviderIcon instance={item.instance} name={item.name} model={c.id} size="xs" />}
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-1.5 truncate text-[13px]">
-                    {c.label}
+                    {label}
                     {c.id === currentModel && <Check className="size-3 shrink-0 text-mira-blue" />}
                   </div>
-                  {c.hint && c.hint !== c.label && (
-                    <div className="truncate font-mono text-[10.5px] text-muted-foreground/65">{c.hint}</div>
-                  )}
                 </div>
                 {c.ctx ? (
                   <span className="shrink-0 rounded-full border border-mira-blue/25 bg-mira-blue/[0.09] px-1.5 py-0.5 font-mono text-[10.5px] text-mira-blue">
                     {formatCtx(c.ctx)}
                   </span>
                 ) : null}
-              </CommandItem>
-            ))}
+              </CommandItem>;
+            })}
           </CommandGroup>
         ))}
         {item.kind === 'agent' && !agentChoices?.live && !query.trim() && (
@@ -777,22 +714,7 @@ function currentOptionValue(d: OptionDescriptor, config: AcpConfigOption[] | nul
   return d.type === 'select' ? (d.options[0]?.value ?? '') : '';
 }
 
-/**
- * The short string shown after the model name on the trigger: whatever the
- * user changed away from a default. A "Fast" tier is worth the space; an
- * `auto` effort is not.
- */
-function summarizeOptions(descriptors: OptionDescriptor[], options: Record<string, string>): string {
-  for (const d of descriptors) {
-    if (d.type !== 'select') continue;
-    const match = d.options.find((o) => o.value === options[d.id]);
-    if (match && match.value !== 'off' && match.value !== 'auto') return match.label;
-  }
-  for (const d of descriptors) {
-    if (d.type === 'boolean' && options[d.id]) return d.label;
-  }
-  return '';
-}
+
 
 /**
  * One advertised option: `select` descriptors get a dropdown, `boolean`
@@ -860,15 +782,4 @@ function OptionControl({
       </PopoverContent>
     </Popover>
   );
-}
-
-/** A provider slug as a name, for when nothing better is known. */
-function prettyProvider(slug: string | null | undefined): string {
-  if (!slug) return 'Mira provider';
-  const known: Record<string, string> = {
-    openrouter: 'OpenRouter', openai: 'OpenAI', anthropic: 'Anthropic', google: 'Google',
-    gemini: 'Gemini', groq: 'Groq', xai: 'xAI', deepseek: 'DeepSeek', mistral: 'Mistral',
-    ollama: 'Ollama', together: 'Together', fireworks: 'Fireworks', bedrock: 'Bedrock',
-  };
-  return known[slug.toLowerCase()] ?? slug.charAt(0).toUpperCase() + slug.slice(1);
 }

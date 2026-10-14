@@ -1,3 +1,4 @@
+import { TranscriptFollowContext, useTranscriptDisclosure } from '../TranscriptDisclosure';
 import { useLiveClock } from '../../lib/useLiveClock';
 import { ErrorNotice } from '../ErrorNotice';
 import { chatFailure, isFatalChatWarning, isProviderLimitFailure, isResponseFailure, failedTurnPrompt } from '../../lib/chatFailure';
@@ -112,7 +113,7 @@ export function TurnViewImpl({
   const responseFailed = failure ? isResponseFailure(failure) : false;
   const openingPrompt = failedTurnPrompt(turn.user);
   const canRetryFailure = failureRetryEnabled && responseFailed && !!openingPrompt && !!messageActions;
-  const failureInfo = failure ? responseFailed ? chatFailure(failure.text) : {
+  const failureInfo = failure ? responseFailed ? chatFailure(failures.map(e => e.text).join('\n')) : {
     title: "Couldn't complete this action", description: 'Try the action again from its original control. Technical details may help explain what went wrong.', settings: false,
   } : null;
   const body = useMemo(() => turn.body.filter((e) => e.kind !== 'turn_stats' && e.kind !== 'activity' && e.kind !== 'error' && !(e.kind === 'warning' && isFatalChatWarning(e.text))), [turn.body]);
@@ -170,7 +171,18 @@ export function TurnViewImpl({
     (intermediate.length > 0 || isActive) && durationMs != null;
 
   const forceOpen = isActive || hasPendingApproval || hasPendingAskUser || hasPendingPlan;
-  const effectivelyExpanded = expanded || forceOpen;
+  const follow = useContext(TranscriptFollowContext);
+  const [wasActive, setWasActive] = useState(isActive);
+  const [keepReadingWork, setKeepReadingWork] = useTranscriptDisclosure('reading-work');
+  if (wasActive !== isActive) {
+    setWasActive(isActive);
+    setKeepReadingWork(wasActive && !isActive && follow?.current === false);
+  }
+  const effectivelyExpanded = expanded || forceOpen || keepReadingWork;
+  const toggleWork = () => {
+    if (keepReadingWork) setKeepReadingWork(false);
+    if (expanded || !keepReadingWork) onToggle(index);
+  };
 
   // Codex-style categorised activity phrase ("3 reads, 4 searches, 1 write")
   // shown next to the "Worked for" duration so a collapsed turn still tells
@@ -221,7 +233,7 @@ export function TurnViewImpl({
           waitingForUser={waitingForUser}
           expanded={effectivelyExpanded}
           locked={forceOpen}
-          onToggle={() => onToggle(index)}
+          onToggle={toggleWork}
           activity={activitySummary}
         />
           <div aria-hidden className="mt-2 border-b border-border/70" />
@@ -304,6 +316,7 @@ export function WorkedForChip({
       type="button"
       onClick={locked ? undefined : onToggle}
       disabled={locked}
+      data-transcript-disclosure
       aria-expanded={expanded}
       title={locked ? 'Auto-expanded while in progress' : undefined}
       // `group` so the trailing caret can key off hover state via

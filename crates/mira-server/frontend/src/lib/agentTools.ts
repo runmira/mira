@@ -32,8 +32,9 @@ export function agentToolAsMira(call: AcpToolCall): { name: string; args: Args }
     | { type: 'diff'; path: string; old_text?: string | null; new_text?: string | null }
     | undefined;
 
-  if ((['Task', 'Agent', 'task', 'agent', 'subagent'].includes(name) || typeof input.subagent_type === 'string') && typeof input.prompt === 'string') {
-    return { name: 'agent', args: { prompt: input.prompt, type: str(input.subagent_type) ?? str(input.agent) ?? 'External agent', _external: true } };
+  if ((['Task', 'Agent', 'task', 'agent', 'subagent'].includes(name) || typeof input.subagent_type === 'string')
+    && (typeof input.prompt === 'string' || !Object.keys(input).length || typeof input.subagent_type === 'string' || ((name === 'Task' || name === 'Agent') && !('command' in input) && !('task_id' in input)))) {
+    return { name: 'agent', args: { prompt: str(input.prompt) ?? str(input.description) ?? '', type: str(input.subagent_type) ?? str(input.agent) ?? 'External agent', _external: true } };
   }
   switch (name) {
     case 'Computer':
@@ -154,4 +155,18 @@ export function boundAgentOutput(call: AcpToolCall): AcpToolCall {
   }).reverse();
   const raw = typeof call.raw_output === 'string' ? call.raw_output : call.raw_output == null ? null : JSON.stringify(call.raw_output);
   return { ...call, content, raw_output: raw && raw.length > MAX_TOOL_OUTPUT ? boundedOutput('', raw) : call.raw_output };
+}
+
+/** Progress updates omit launch metadata; keep the launch identity and arguments. */
+export function mergeAgentCall(previous: AcpToolCall | undefined, call: AcpToolCall): AcpToolCall {
+  if (!previous) return call;
+  const merged = { ...previous };
+  for (const [key, value] of Object.entries(call)) {
+    if (value == null || value === '' || (Array.isArray(value) && !value.length)) continue;
+    (merged as Record<string, unknown>)[key] = value;
+  }
+  if (previous.raw_input && call.raw_input && typeof previous.raw_input === 'object' && typeof call.raw_input === 'object' && !Array.isArray(previous.raw_input) && !Array.isArray(call.raw_input)) {
+    merged.raw_input = { ...previous.raw_input, ...call.raw_input };
+  }
+  return merged;
 }

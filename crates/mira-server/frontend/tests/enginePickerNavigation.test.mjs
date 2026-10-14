@@ -1,0 +1,20 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { Window } from 'happy-dom';
+import { bundle } from './helpers/bundle.mjs';
+const { navigateEnginePicker }=await bundle(`export { navigateEnginePicker } from './src/lib/enginePickerNavigation';`);
+test('keyboard navigation links the engine rail and search while preserving text caret keys', () => {
+  const window=new Window(), document=window.document;
+  const root=document.createElement('div');
+  root.innerHTML='<div data-engine-rail><button data-engine-row aria-pressed="true">Claude</button><button data-engine-row>Codex</button></div><input cmdk-input />';
+  document.body.append(root);
+  const [claude,codex]=root.querySelectorAll('button'),input=root.querySelector('input');
+  const key=(target,key,shiftKey=false)=>{let handled=false;target.focus();navigateEnginePicker({currentTarget:root,target,key,shiftKey,preventDefault(){handled=true;},stopPropagation(){}});return handled;};
+  assert.equal(key(input,'ArrowLeft'),true);assert.equal(document.activeElement,claude);
+  key(claude,'ArrowDown');assert.equal(document.activeElement,codex);
+  key(codex,'ArrowUp');assert.equal(document.activeElement,claude);
+  key(claude,'ArrowRight');assert.equal(document.activeElement,input);
+  input.value='claude';assert.equal(key(input,'ArrowLeft'),false);assert.equal(document.activeElement,input);
+  key(input,'Tab',true);assert.equal(document.activeElement,claude);
+  root.remove();
+});

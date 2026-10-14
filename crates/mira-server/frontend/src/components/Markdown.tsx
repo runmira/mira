@@ -6,7 +6,9 @@ import { useEffect, useMemo, useState } from 'react';
 import 'highlight.js/styles/atom-one-dark.css';
 import type { DiffPreview } from '../types';
 import { GithubRef } from './GithubRef';
+import { SessionRef } from './SessionRef';
 import { linkifyGithubRefs, parseGithubRef } from '../lib/githubRefs';
+import { linkifySessionRefs, parseSessionRef } from '../lib/sessionRefs';
 import { classifyInline, parseWorkspaceFileLink } from '../lib/refs';
 import { BranchChip, ColorChip, CommitChip, FileChip, KeysChip, LinkRef, SymbolRef } from './RichRefs';
 import { Blockquote, DiffBlock, Table, Th, remarkCallouts } from './RichBlocks';
@@ -130,8 +132,12 @@ function useFenceGrammars(hl: typeof import('../lib/highlight') | null, langs: s
 }
 
 export function Markdown({ text, onOpenFile, document = false }: Props) {
-  // `owner/repo#123` mentions become links, rendered as PR/issue chips.
-  const linked = useMemo(() => document ? text : linkifyGithubRefs(text), [text, document]);
+  // `owner/repo#123` mentions become links, rendered as PR/issue chips;
+  // bare `sess_…` ids become session links, rendered as session chips.
+  const linked = useMemo(
+    () => (document ? text : linkifySessionRefs(linkifyGithubRefs(text))),
+    [text, document],
+  );
   const hasMath = MATH_RE.test(text);
 
   // rehype-katex + katex.min.css load on first use (issue #68 acceptance:
@@ -266,6 +272,8 @@ export function Markdown({ text, onOpenFile, document = false }: Props) {
             }
             const target = parseGithubRef(href);
             if (target) return <GithubRef target={target} href={href}>{children}</GithubRef>;
+            const session = parseSessionRef(href);
+            if (session) return <SessionRef id={session.id}>{children}</SessionRef>;
             const fileLink = parseWorkspaceFileLink(href);
             if (fileLink && onOpenFile) {
               const { path, line: at } = fileLink;

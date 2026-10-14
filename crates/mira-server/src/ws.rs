@@ -1026,7 +1026,7 @@ async fn dispatch_on_slot(
                 }
             }
             if model.is_some() {
-                params.model = model;
+                params.model = model.filter(|m| !m.trim().is_empty());
             }
             // An explicit resume (history import) is recorded as this
             // session's cursor, so the start picks it up like any other

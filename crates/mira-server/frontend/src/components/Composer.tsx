@@ -553,7 +553,7 @@ export function Composer(props: Props) {
               onPickProvider={(instance, m) =>
                 onPickProvider ? onPickProvider(instance, m) : onSetModel(m, instance)
               }
-              onPickAgent={(driver, m) => onPickAgent?.(driver, m)}
+              onPickAgent={(driver, m, instance) => onPickAgent?.(driver, m, instance)}
               onSetModelOption={onSetModelOption}
               onConfigureAgents={onConfigureAgents}
               sessionId={sessionId}

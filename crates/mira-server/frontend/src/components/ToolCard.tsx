@@ -430,6 +430,8 @@ function CompactToolRow({
       {!detailsOnly && (
         <div
           role="button"
+          data-transcript-disclosure
+          aria-expanded={expanded}
           tabIndex={0}
           onClick={() => setExpanded((v) => !v)}
           onKeyDown={(e) => {

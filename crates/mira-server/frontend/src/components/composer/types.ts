@@ -63,7 +63,7 @@ export type Props = {
   /** Hand the chat to a provider (instance may be null for the default). */
   onPickProvider?: (instance: string | null, model: string) => void;
   /** Hand the chat to an agent, optionally with a model. */
-  onPickAgent?: (driver: string, model: string | null) => void;
+  onPickAgent?: (driver: string, model: string | null, instance?: string) => void;
   /** Open Settings → Agents. */
   onConfigureAgents?: () => void;
   sessionId?: string | null;

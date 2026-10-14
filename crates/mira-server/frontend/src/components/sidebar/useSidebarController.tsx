@@ -366,6 +366,7 @@ export function useSidebarController({
       groupByCwd(
         searching ? arrangedSessions.filter((s) => matchesSidebar(s, query, filter)) : live,
         cwd,
+        arrangedSessions,
       ),
     [arrangedSessions, live, cwd, query, searching, filter],
   );

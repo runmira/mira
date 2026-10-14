@@ -232,3 +232,28 @@ reduces the eager production bundle below the unchanged 400 kB gzip budget;
 configured authentication still downloads its SDK during startup. The historical
 bundle failures above are superseded by this implementation. Live authenticated
 desktop acceptance remains separate from automated validation.
+
+
+## Alpha.18 reliability follow-up
+
+The virtual transcript now attaches ownership effects after its ancestor scroll
+pane ref exists. The first-mount regression covers a real ancestor ref rather
+than a pre-populated test ref. Real-browser verification advances the mounted
+range during a long scroll and preserves the exact reading offset when a turn
+finishes. Work stays open at completion while reading; measured disclosures
+change height immediately, and unrelated buttons do not pin the viewport.
+
+Engine inventory is a backend/account resource available without an attached
+chat. Settings retain pending or failed probe rows and poll until the bounded
+server sweep completes. The picker lists enabled external instances before probes
+finish. New-chat requests capture their source, persist inherited agent setup,
+and empty histories do not produce handoff markers. Explicit ACP model picks are
+applied before prompting. Missing external-provider credentials still require
+that agent's sign-in; Mira's native-provider key does not supply them.
+
+Waiting-queue projections exclude dispatched inputs, including failed submitted
+turns, while durable receipts remain retained for recovery/idempotency. Sidebar
+time is a narrow clock subscription: known turn timing is authoritative, and an
+uncached background turn reports observed working time. It does not depend on
+stream-driven parent renders. The development fixture is
+`crates/mira-server/frontend/reliability-preview.html`.

@@ -102,7 +102,8 @@ test('settings deep links and history preserve a draft without refetching', asyn
   await settle();
   assert.equal(mounted.router.state.location.pathname, '/settings/memory');
   assert.match(element.textContent, /Cross-session memory/);
-  const input = element.querySelector('input');
+  assert.doesNotMatch(element.textContent, /Needs API key|Configured/);
+  const input = element.querySelector('input[placeholder="(uses session model)"]');
   assert.ok(input, 'memory extractor input is rendered');
   // Use the native setter so React sees an actual input event.
   await act(async () => {
@@ -118,7 +119,7 @@ test('settings deep links and history preserve a draft without refetching', asyn
   assert.match(element.textContent, /Model provider/);
   await act(async () => mounted.router.navigate(-1));
   await settle();
-  assert.equal(element.querySelector('input').value, 'draft-extractor');
+  assert.equal(element.querySelector('input[placeholder="(uses session model)"]').value, 'draft-extractor');
   assert.equal(settingsReads, 1, 'section navigation does not reload or rehydrate the draft');
   await act(async () => mounted.router.navigate(1));
   await settle();

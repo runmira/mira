@@ -1,4 +1,5 @@
 import { createContext, useContext, useRef, useState, type Dispatch, type SetStateAction } from 'react';
+export const TranscriptFollowContext = createContext<{ current: boolean } | undefined>(undefined);
 export const TranscriptSessionContext = createContext('');
 export const TranscriptRowContext = createContext('');
 const states = new Map<string, boolean>();

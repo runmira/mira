@@ -231,3 +231,13 @@ test('Ready discards snapshot-confirmed completed turns and clears idle-session 
   r.beginTerminalTurn('stale',30,2);r.reconcileTerminals(false);
   assert.equal(r.acceptTerminal().id,undefined);
 });
+
+test('engine discovery is available in settings without an attached chat or an open websocket', async () => {
+  const app = runtime(); const original = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({engines:[],fresh:true}));
+  try {
+    const options = app.resources.options('engines');
+    const result = await options.queryFn({signal:new AbortController().signal});
+    assert.equal(result.fresh,true);
+  } finally { globalThis.fetch = original; }
+});

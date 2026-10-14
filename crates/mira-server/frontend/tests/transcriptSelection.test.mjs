@@ -1,0 +1,42 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import React, {act} from 'react';
+import {createRoot} from 'react-dom/client';
+import {Window} from 'happy-dom';
+import {bundle} from './helpers/bundle.mjs';
+const {AssistantSelectionToolbar}=await bundle(`export { AssistantSelectionToolbar } from './src/components/AssistantSelectionToolbar';`);
+const window=new Window({url:'https://selection.mira.test'});
+globalThis.window=window;globalThis.document=window.document;globalThis.Node=window.Node;
+globalThis.IS_REACT_ACT_ENVIRONMENT=true;
+let next=0;const frames=new Map();
+globalThis.requestAnimationFrame=fn=>{frames.set(++next,fn);return next;};
+globalThis.cancelAnimationFrame=id=>frames.delete(id);
+const rect={top:100,bottom:120,left:10,width:120,height:20,right:130};
+window.Range.prototype.getBoundingClientRect=()=>rect;
+window.Range.prototype.getClientRects=()=>({length:1,item:()=>rect});
+async function capture(node){
+  const selection=window.getSelection(),range=document.createRange();range.selectNodeContents(node);
+  await act(()=>{selection.removeAllRanges();selection.addRange(range);document.dispatchEvent(new window.Event('selectionchange'));});
+  await act(()=>{const batch=[...frames.values()];frames.clear();for(const fn of batch)fn();});
+}
+test('outside taps clear the transcript range while toolbar and context-menu actions preserve it', async()=>{
+  const host=document.createElement('div'),pane=document.createElement('div'),message=document.createElement('p'),outside=document.createElement('button');
+  pane.getBoundingClientRect=()=>({...rect,top:0,bottom:600});
+  message.dataset.assistantMessage='';message.textContent='Selected passage';pane.append(message);
+  document.body.append(host,pane,outside);
+  const quoted=[],root=createRoot(host);
+  await act(()=>root.render(React.createElement(AssistantSelectionToolbar,{pane:{current:pane},sessionId:'chat',onQuote:(...args)=>quoted.push(args)})));
+  await capture(message);
+  assert.ok(document.querySelector('[role="toolbar"]'));
+  await act(()=>outside.dispatchEvent(new window.PointerEvent('pointerdown',{bubbles:true,button:0})));
+  await act(()=>document.dispatchEvent(new window.PointerEvent('pointerup',{bubbles:true,button:0})));
+  assert.equal(window.getSelection().toString(),'');assert.equal(document.querySelector('[role="toolbar"]'),null);
+  await capture(message);
+  await act(()=>outside.dispatchEvent(new window.PointerEvent('pointerdown',{bubbles:true,button:2})));
+  assert.equal(window.getSelection().toString(),'Selected passage');
+  const quote=document.querySelector('[role="toolbar"] button');
+  await act(()=>quote.dispatchEvent(new window.PointerEvent('pointerdown',{bubbles:true,button:0})));
+  assert.equal(window.getSelection().toString(),'Selected passage');
+  await act(()=>quote.click());assert.equal(quoted[0][0],'Selected passage');assert.equal(window.getSelection().toString(),'');
+  await act(()=>root.unmount());host.remove();pane.remove();outside.remove();
+});

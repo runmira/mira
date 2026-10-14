@@ -428,6 +428,9 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
                         .get(&id)
                         .and_then(|i| i.model.clone())
                 });
+            // A fresh chat starts on its chosen engine; selecting its initial
+            // agent must not manufacture a provider-to-agent handoff.
+            *initial_slot.acp_launch.lock().await = Some(params.clone());
             crate::session_engine::select_agent(&state, &initial_slot, params).await;
         }
     }

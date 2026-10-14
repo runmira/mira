@@ -175,3 +175,61 @@ test('an approved tool start transitions waiting to running but never reopens se
   assert.equal(upsertToolStart([{...pending,status:'denied'}],call,10)[0].status,'denied');
   assert.equal(upsertToolStart([{...pending,status:'complete',result:{call_id:call.id,content:'done'}}],call,10)[0].status,'complete');
 });
+
+
+test('dispatched and failed delivered input stays out of waiting queue while later input remains queued', () => {
+  const h = harness();
+  const commands = useComposerCommands({ ...h.context, updateQueueProjection: h.runtime.updateQueues });
+  const events = useSessionEvents({ ...h.context, updateSessionQueue: commands.updateSessionQueue, recordQueueRecovery: h.runtime.updateRecovery });
+  const item = { id: 'sent', text: 'already sent', images: [], fingerprint: 'sent-fingerprint', dispatching: true, error: 'Authentication required' };
+  const waiting = { ...item, id: 'waiting', text: 'next turn', dispatching: false, error: null };
+  h.runtime.transition(() => events({ type: 'queue_updated', session_id: 'active', items: [item, waiting] }));
+  assert.deepEqual(h.runtime.sessionState.get().queued.get('active').map(i => i.id), ['waiting']);
+});
+
+test('Ready drops dispatching and delivered optimistic queue items before history includes them', () => {
+  const h=harness();
+  h.runtime.updateQueues(previous=>new Map(previous).set('active',[
+    {id:'dispatching',text:'Sent'}, {id:'delivered',text:'Received'}, {id:'unconfirmed',text:'Pending confirmation'},
+  ]));
+  const commands=useComposerCommands({...h.context,updateQueueProjection:h.runtime.updateQueues});
+  const context=new Proxy({...h.context,
+    updateSessionQueue:commands.updateSessionQueue, recordQueueRecovery:h.runtime.updateRecovery,
+    turnCommands:h.runtime.turnCommands, activityTitlesRef:ref(new Map()), pendingSteerRef:ref(new Map()),
+    attachFromRef:ref(null), followRef:ref(true), paneRef:ref(null),
+  },{get(target,key){
+    if(key in target)return target[key];
+    if(String(key).endsWith('Ref'))return target[key]=ref(null);
+    return ()=>{};
+  }});
+  h.runtime.transition(()=>useSessionEvents(context)({
+    type:'ready',session_id:'active',history:[],running:false,
+    queued_inputs:[
+      {id:'dispatching',text:'Sent',dispatching:true},
+      {id:'delivered',text:'Received',delivered:true},
+      {id:'waiting',text:'Next',dispatching:false},
+    ],
+  }));
+  const queued=h.runtime.sessionState.get().queued.get('active');
+  assert.deepEqual(queued.map(item=>item.id),['waiting','unconfirmed']);
+  assert.match(queued[1].error,/unconfirmed/);
+});
+
+test('steering reaches the server even when the client turn flag is stale, with feedback if disconnected', () => {
+  const h=harness(), pending=ref(new Map()), sent=[];
+  const item={id:'queued',text:'Change direction',images:[]};
+  h.runtime.updateQueues(previous=>new Map(previous).set('active',[item]));
+  const context={...h.context,pendingSteerRef:pending,getQueues:()=>h.runtime.sessionState.get().queued,
+    updateQueueProjection:h.runtime.updateQueues,isTurnRunning:()=>false,
+    flushNativeFrames(){},flushTokens(){},followRef:ref(false),wsRef:ref({send:message=>{sent.push(message);return true;}}),
+  };
+  const commands=useComposerCommands(context);
+  h.runtime.transition(()=>commands.steerQueuedMessage('queued'));
+  assert.equal(sent[0].type,'steer');assert.equal(sent[0].request_id,'queued');
+  pending.current.clear();context.wsRef.current={send:()=>false};
+  h.runtime.transition(()=>commands.steerQueuedMessage('queued'));
+  const queued=h.runtime.sessionState.get().queued.get('active')[0];
+  assert.equal(queued.steering,false);assert.match(queued.error,/Reconnect/);
+  assert.equal(pending.current.size,0);
+  assert.ok(!h.entries().some(entry=>entry.steerRequestId==='queued'));
+});

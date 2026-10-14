@@ -1,3 +1,7 @@
+import { useSelector } from '@tanstack/react-store';
+import { useOptionalRuntime } from '../../state/RuntimeProvider';
+import { useRef } from 'react';
+import { useLiveClock } from '../../lib/useLiveClock';
 import { openExternal } from '@/lib/desktop';
 import { cn } from '@/lib/utils';
 import { m, useReducedMotion } from 'framer-motion';
@@ -281,7 +285,7 @@ export function SessionRow({
           </span>
           {!selecting && (
             <span className="mt-0.5 text-right text-[10.5px] leading-[15px] tabular-nums text-muted-foreground/50">
-              {timeAgo(session.updated_at)}
+              {<SessionTime updatedAt={session.updated_at} running={running} sessionId={session.id} />}
             </span>
           )}
         </span>
@@ -569,10 +573,34 @@ export function ArchivedRow({
   );
 }
 
-export function timeAgo(unixSecs: number): string {
+type SessionTimeProps = { updatedAt: number; running: boolean; sessionId?: string };
+export function SessionTime(props: SessionTimeProps) {
+  const runtime = useOptionalRuntime();
+  return runtime && props.sessionId ? <RuntimeSessionTime {...props} runtime={runtime} /> : <SessionTimeView {...props} />;
+}
+function RuntimeSessionTime({ runtime, ...props }: SessionTimeProps & { runtime: NonNullable<ReturnType<typeof useOptionalRuntime>> }) {
+  const startedAt = useSelector(runtime.sessionState, state => {
+    let start: number | undefined;
+    for (const timing of state.sessions.get(props.sessionId!)?.turnTimings.values() ?? []) {
+      if (timing.endedAt == null && (start == null || timing.startedAt > start)) start = timing.startedAt;
+    }
+    return start;
+  });
+  return <SessionTimeView {...props} startedAt={startedAt} />;
+}
+function SessionTimeView({ updatedAt, running, startedAt }: SessionTimeProps & { startedAt?: number }) {
+  const observedStart = useRef<{ running: boolean; at: number }>({ running, at: Date.now() });
+  if (observedStart.current.running !== running) observedStart.current = { running, at: Date.now() };
+  const now = useLiveClock(running || Date.now() / 1000 - updatedAt < 60);
+  return <span title={running ? startedAt ? 'Elapsed turn time' : 'Time working since this view observed the turn' : 'Last activity'}>{running
+    ? timeAgo(Math.floor((startedAt ?? observedStart.current.at) / 1000), now)
+    : timeAgo(updatedAt, now)}</span>;
+}
+
+export function timeAgo(unixSecs: number, nowMs = Date.now()): string {
   // No timestamp (0) is unknown, not 1970: show nothing rather than "2961w".
   if (!unixSecs || unixSecs <= 0) return '';
-  const now = Math.floor(Date.now() / 1000);
+  const now = Math.floor(nowMs / 1000);
   const diff = Math.max(0, now - unixSecs);
   if (diff < 60) return `${diff}s`;
   if (diff < 3600) return `${Math.floor(diff / 60)}m`;

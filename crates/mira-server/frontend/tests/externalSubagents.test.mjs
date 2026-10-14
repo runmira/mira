@@ -113,3 +113,35 @@ test('late native call IDs coalesce fallback and launch rows while keeping the o
   assert.equal(streams.size,1);assert.ok(streams.has(id));
   entries=upsertAcpTool(entries,{...call,status:'completed'});assert.equal(entries.length,1);assert.equal(entries[0].call.id,id);
 });
+
+test('explicit delegation renders immediately before arguments arrive and enriches the same card', () => {
+  const start = {id:'early-agent',name:'Agent',title:'Agent',status:'pending',raw_input:{},content:[]};
+  let entries = upsertAcpTool([],start,1);
+  assert.equal(entries[0].call.function.name,'agent');
+  assert.equal(projectAcpSubagent(new Map(),start).size,1);
+  entries = upsertAcpTool(entries,{...start,status:'in_progress',raw_input:{prompt:'Inspect files',subagent_type:'explore'}},2);
+  assert.equal(entries.length,1);
+  assert.equal(entries[0].startedAt,1);
+  assert.equal(JSON.parse(entries[0].call.function.arguments).prompt,'Inspect files');
+});
+
+test('sparse delegation progress retains launch metadata and settles the early child panel', () => {
+  const launch = {id:'early',name:'Agent',status:'pending',raw_input:{},content:[]};
+  let streams = projectAcpSubagent(new Map(),launch);
+  streams = projectAcpSubagent(streams,{id:'early',status:'in_progress',raw_input:{prompt:'Investigate',subagent_type:'explore'}});
+  streams = projectAcpSubagent(streams,{id:'early',status:'completed',content:[{type:'content',text:'Found it'}]});
+  assert.equal(streams.size,1);
+  assert.equal(streams.get('early').agentName,'explore');
+  assert.equal(streams.get('early').prompt,'Investigate');
+  assert.equal(streams.get('early').done,true);
+  assert.equal(streams.get('early').entries[0].msg.content,'Found it');
+});
+
+test('description-only Task and Agent calls retain their delegated task in cards and child streams', () => {
+  for (const name of ['Task','Agent']) {
+    const call={id:name,name,status:'in_progress',raw_input:{description:'Inspect the auth flow'},content:[]};
+    const entries=upsertAcpTool([],call);
+    assert.equal(JSON.parse(entries[0].call.function.arguments).prompt,'Inspect the auth flow');
+    assert.equal(projectAcpSubagent(new Map(),call).get(name).prompt,'Inspect the auth flow');
+  }
+});

@@ -106,6 +106,12 @@ impl ClientCaps {
         caps.fs.read_text_file = self.fs_read;
         caps.fs.write_text_file = self.fs_write;
         caps.terminal = self.terminal;
+        // The host routes scoped child updates into separate Mira child streams.
+        // OpenCode only emits them when the client explicitly opts in.
+        caps.meta = Some(serde_json::Map::from_iter([(
+            "opencode/child-session-updates".to_owned(),
+            json!(true),
+        )]));
         if self.elicitation_form {
             caps.elicitation =
                 Some(ElicitationCapabilities::new().form(ElicitationFormCapabilities::new()));
@@ -785,6 +791,7 @@ mod tests {
         assert_eq!(caps["fs"]["readTextFile"], true);
         assert_eq!(caps["fs"]["writeTextFile"], false);
         assert_eq!(caps["terminal"], true);
+        assert_eq!(caps["_meta"]["opencode/child-session-updates"], true);
         assert_eq!(caps["elicitation"]["form"], json!({}));
         r.reply(frame["id"].clone(), init_ok()).await;
         waiter.await.unwrap().expect("initialize");

@@ -442,6 +442,7 @@ export type TranscriptPage = { items: { message?: Message; line?: AgentTranscrip
 export type TurnDiffSummary = { text: string; occurrence: number; files: { path: string; added: number; removed: number; binary: boolean }[] };
 
 export interface QueuedInput {
+  delivered?: boolean;
   recovery?: { created_at: number; reset_at: number | null; scheduled_at: number | null; snoozed: boolean };
   id: string; text: string; images: ImageAttachment[]; engine: string | null;
   dispatching: boolean; error: string | null;

@@ -46,6 +46,8 @@ fn now_ms() -> u64 {
 }
 fn eligible(item: &QueuedInput, now: u64) -> bool {
     !item.delivered
+        && !item.dispatching
+        && item.error.is_none()
         && item
             .recovery
             .as_ref()
@@ -1053,5 +1055,33 @@ mod tests {
             .is_none());
         assert!(queue.reorder("three", None).await.is_err());
         assert!(queue.reorder("one", Some("three")).await.is_err());
+    }
+}
+
+#[cfg(test)]
+mod waiting_eligibility_tests {
+    use super::*;
+    #[test]
+    fn dispatched_failed_and_delivered_inputs_are_not_waiting_work() {
+        let mut item = QueuedInput {
+            id: "message".into(),
+            text: "hello".into(),
+            images: vec![],
+            engine: None,
+            dispatching: false,
+            delivered: false,
+            fingerprint: String::new(),
+            error: None,
+            recovery: None,
+        };
+        assert!(eligible(&item, 0));
+        item.dispatching = true;
+        assert!(!eligible(&item, 0));
+        item.dispatching = false;
+        item.error = Some("authentication required".into());
+        assert!(!eligible(&item, 0));
+        item.error = None;
+        item.delivered = true;
+        assert!(!eligible(&item, 0));
     }
 }

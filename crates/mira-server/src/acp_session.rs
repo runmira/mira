@@ -119,6 +119,50 @@ impl SlotAgent {
 /// The slot's agent, held behind a lock so it can be swapped or stopped.
 pub type AgentSlot = RwLock<Option<Arc<SlotAgent>>>;
 
+/// Keep the working runtime until the complete candidate validation succeeds.
+async fn validate_before_retiring<T>(
+    candidate: impl std::future::Future<Output = Result<T, String>>,
+    retire: impl std::future::Future<Output = bool>,
+) -> Result<T, String> {
+    let candidate = candidate.await?;
+    retire.await;
+    Ok(candidate)
+}
+
+#[cfg(test)]
+mod replacement_validation_tests {
+    use super::validate_before_retiring;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    #[tokio::test]
+    async fn a_rejected_candidate_model_keeps_the_working_runtime() {
+        let retired = AtomicBool::new(false);
+        let result =
+            validate_before_retiring(async { Err::<(), _>("model rejected".to_owned()) }, async {
+                retired.store(true, Ordering::SeqCst);
+                true
+            })
+            .await;
+        assert_eq!(result.unwrap_err(), "model rejected");
+        assert!(!retired.load(Ordering::SeqCst));
+    }
+    #[tokio::test]
+    async fn replacement_retires_only_after_validation_completes() {
+        let validated = AtomicBool::new(false);
+        validate_before_retiring(
+            async {
+                validated.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+            async {
+                assert!(validated.load(Ordering::SeqCst));
+                true
+            },
+        )
+        .await
+        .unwrap();
+    }
+}
+
 /// Start the agent `params` describes for `slot`, replacing any agent
 /// already running.
 ///
@@ -137,6 +181,7 @@ pub async fn start_agent(
     params: &AcpLaunchParams,
     native: Option<mira_acp::native::NativeOverrides>,
 ) -> Result<Arc<SlotAgent>, String> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
     let driver = mira_acp::drivers::by_kind(&params.driver_kind)
         .ok_or_else(|| format!("unknown agent: {}", params.driver_kind))?;
     let driver = driver.as_ref();
@@ -232,13 +277,9 @@ pub async fn start_agent(
         }
         _ => driver.resolve(&driver_cfg, mode, program.clone()),
     };
-    let opencode_control = if driver.kind() == "opencode"
-        && matches!(transport, Transport::Acp)
-        && crate::opencode_control::OpenCodeControl::supported(&launch).await
+    let mut opencode_control = if driver.kind() == "opencode" && matches!(transport, Transport::Acp)
     {
-        Some(crate::opencode_control::OpenCodeControl::configure(
-            &mut launch,
-        )?)
+        crate::opencode_control::OpenCodeControl::prepare(&mut launch).await?
     } else {
         None
     };
@@ -269,9 +310,13 @@ pub async fn start_agent(
     let permissions = AcpPermissions::for_slot(slot);
     // Spend reports are booked to the user's ledger, against this chat, so
     // the Usage page counts agent turns next to Mira's own.
+    // Initialization belongs to a candidate, not the current conversation.
+    // Buffer its frames until the model is accepted and the swap commits.
+    let (candidate_tx, mut candidate_rx) = tokio::sync::broadcast::channel(512);
+    let candidate_events: crate::session_stream::SessionEvents = candidate_tx.into();
     let events = match crate::agent_spend::SpendLedger::user() {
         Some(ledger) => AcpEventPort::with_spend(
-            slot.events_tx.clone(),
+            candidate_events.clone(),
             ledger,
             crate::agent_spend::Spender {
                 session_id: slot.id.to_string(),
@@ -289,21 +334,9 @@ pub async fn start_agent(
                 billing: mira_acp::status::Billing::classify(params.cfg.api_key.is_some(), &[]),
             },
         ),
-        None => AcpEventPort::new(slot.events_tx.clone()),
+        None => AcpEventPort::new(candidate_events.clone()),
     };
     events.set_driver(&params.driver_kind);
-
-    // Restored native modes also configure the host gate: older sessions
-    // persisted the runtime picker independently of agent_approval_mode.
-    if params.driver_kind == "codex" && matches!(transport, Transport::Native) {
-        let runtime = native
-            .permission_mode
-            .as_deref()
-            .unwrap_or_else(|| mira_acp::appserver::mode_for_permission(params.mode));
-        if let Some(mode) = codex_approval_mode(runtime) {
-            set_agent_approval_mode(slot, mode).await;
-        }
-    }
 
     // A native agent has no ACP ports to bind — it runs in its own process and
     // asks the host its questions through one gate. Tool permissions answer
@@ -326,47 +359,115 @@ pub async fn start_agent(
         })
     };
 
-    // Stop whatever runs now *before* spawning the replacement, so two
-    // processes never hold this session's permissions at once and the old
-    // one's exit is recorded as intentional.
-    stop_agent(slot).await;
+    // Reserve the candidate's capacity without evicting a working runtime.
+    // No prompt is dispatched to it until initialization and model selection
+    // succeed under the caller's dispatch/start locks.
     let lease = crate::runtime_admission::AGENT_ADMISSION.acquire(&params.driver_kind)?;
-    events.bind_runtime(slot, &params.instance, &params.driver_kind);
 
     // Native transports always need their overrides (model, mode, resume);
     // ACP transports only need the resume cursor — `session/resume` rather
     // than `session/new`. Pass it through whenever one is set so an idle
     // reaper restart or a Mira restart re-adopts the same agent session.
     let native_overrides = if matches!(transport, Transport::Native) || native.resume.is_some() {
-        Some(native)
+        Some(native.clone())
     } else {
         None
     };
-    let agent = match start_acp_agent_with_ports(
-        driver,
-        &driver_cfg,
-        mode,
-        &program,
-        files,
-        terminals.clone(),
-        permissions,
-        events.clone(),
-        &repo_root,
-        gate,
-        native_overrides,
-        // Mira's tools for ACP agents (OpenCode, Gemini…): they may call MCP
-        // tools without asking, so Mira gates the ones that run commands.
-        Some(crate::browser::agent_mcp(
-            state.local_port,
-            &slot.id.to_string(),
-            crate::browser::McpGate::Mira,
-        )),
+    let agent = validate_before_retiring(
+        async {
+            let agent = match tokio::time::timeout_at(
+                deadline,
+                start_acp_agent_with_ports(
+                    driver,
+                    &driver_cfg,
+                    mode,
+                    &program,
+                    &launch,
+                    files,
+                    terminals.clone(),
+                    permissions,
+                    events.clone(),
+                    &repo_root,
+                    gate,
+                    native_overrides,
+                    // Mira's tools for ACP agents (OpenCode, Gemini…): they may call MCP
+                    // tools without asking, so Mira gates the ones that run commands.
+                    Some(crate::browser::agent_mcp(
+                        state.local_port,
+                        &slot.id.to_string(),
+                        crate::browser::McpGate::Mira,
+                    )),
+                ),
+            )
+            .await
+            {
+                Ok(Ok(a)) => a,
+                Ok(Err(e)) => {
+                    terminals.shutdown();
+                    return Err(describe(&e));
+                }
+                Err(_) => {
+                    terminals.shutdown();
+                    return Err("The external agent did not initialize within 30 seconds.".into());
+                }
+            };
+
+            if let Some(control) = &opencode_control {
+                if !control.ready().await {
+                    opencode_control = None;
+                    let _ = candidate_events.send(ServerMsg::Warning { text:"OpenCode started, but its steering bridge did not become ready. Messages can still queue for the next turn.".into() });
+                }
+            }
+
+            // ACP session/new uses the agent's directory default. Apply the user's
+            // explicit model before any prompt; native transports already take it at launch.
+            if matches!(transport, Transport::Acp) {
+                if let Some(model) = params.model.as_deref().filter(|m| !m.is_empty()) {
+                    match tokio::time::timeout_at(deadline, apply_model_to_agent(&agent, model))
+                        .await
+                        .unwrap_or_else(
+                            |_| Err("model selection timed out after 30 seconds".into()),
+                        ) {
+                        Ok(options) => {
+                            if !options.is_empty() {
+                                let _ = candidate_events.send(ServerMsg::AcpConfigOptions {
+                                    options,
+                                    driver: Some(params.driver_kind.clone()),
+                                });
+                            }
+                        }
+                        Err(error) => {
+                            agent.shutdown().await;
+                            terminals.shutdown();
+                            return Err(format!(
+                                "Could not select {} model {model}: {error}",
+                                params.display_name()
+                            ));
+                        }
+                    }
+                }
+            }
+
+            Ok(agent)
+        },
+        stop_agent(slot),
     )
-    .await
-    {
-        Ok(a) => a,
-        Err(e) => return Err(describe(&e)),
-    };
+    .await?;
+    // Only a validated candidate can retire the previous runtime.
+    crate::session_engine::clear_reported_model(&slot.engine);
+    events.bind_runtime(slot, &params.instance, &params.driver_kind);
+
+    // Restored native modes also configure the host gate: older sessions
+    // persisted the runtime picker independently of agent_approval_mode.
+    if params.driver_kind == "codex" && matches!(transport, Transport::Native) {
+        let runtime = native
+            .permission_mode
+            .as_deref()
+            .unwrap_or_else(|| mira_acp::appserver::mode_for_permission(params.mode));
+        if let Some(mode) = codex_approval_mode(runtime) {
+            set_agent_approval_mode(slot, mode).await;
+        }
+    }
 
     let stopping = Arc::new(AtomicBool::new(false));
 
@@ -525,6 +626,25 @@ pub async fn start_agent(
         }
     }
     ensure_transcript_logger(state, slot);
+    let committed_events = slot.events_tx.clone();
+    let owner = Arc::downgrade(slot);
+    let generation = slot.engine.generation.load(Ordering::SeqCst);
+    tokio::spawn(async move {
+        loop {
+            match candidate_rx.recv().await {
+                Ok(frame) => {
+                    if owner.upgrade().is_none_or(|slot| {
+                        slot.engine.generation.load(Ordering::SeqCst) != generation
+                    }) {
+                        break;
+                    }
+                    let _ = committed_events.send(frame);
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
     Ok(handle)
 }
 
@@ -1568,6 +1688,7 @@ async fn start_acp_agent_with_ports(
     cfg: &DriverConfig,
     mode: PermissionMode,
     program: &std::path::Path,
+    resolved_launch: &LaunchConfig,
     files: Arc<AcpFiles>,
     terminals: Arc<AcpTerminals>,
     permissions: Arc<AcpPermissions>,
@@ -1577,6 +1698,24 @@ async fn start_acp_agent_with_ports(
     native: Option<mira_acp::native::NativeOverrides>,
     mira_mcp: Option<mira_acp::session::MiraMcp>,
 ) -> Result<AgentHandle, StartError> {
+    if matches!(
+        mira_acp::process::choose_transport(driver, cfg, program),
+        Transport::Acp
+    ) {
+        return mira_acp::process::start(mira_acp::process::StartSpec {
+            launch: resolved_launch,
+            caps: Some(driver.client_caps()),
+            files,
+            terminals,
+            permissions,
+            events,
+            cwd: Some(cwd),
+            mira_mcp,
+            resume_session_id: native.and_then(|n| n.resume),
+        })
+        .await
+        .map(AgentHandle::Acp);
+    }
     start_acp_agent(
         driver,
         cfg,
@@ -1862,6 +2001,27 @@ pub fn agent_turns(
         }
     }
     out
+}
+
+/// Apply a model to the existing conversation, using the ACP option's own ID.
+pub(crate) async fn apply_model_to_agent(
+    agent: &mira_acp::native::AgentHandle,
+    model: &str,
+) -> Result<Vec<mira_acp::events::SessionConfigView>, String> {
+    let option_id = match agent {
+        mira_acp::native::AgentHandle::Acp(a) => a
+            .session()
+            .config_options()
+            .iter()
+            .find(|o| o["category"] == "model")
+            .and_then(|o| o["id"].as_str())
+            .unwrap_or("model")
+            .to_owned(),
+        _ => "model".to_owned(),
+    };
+    agent
+        .set_config_option(&option_id, serde_json::json!(model))
+        .await
 }
 
 /// Relaunch the slot's native agent with overrides, keeping the session.
@@ -2411,6 +2571,13 @@ mod resolve_start_tests {
         assert!(
             a.same_agent(&b),
             "picking a model must not cost the running process"
+        );
+        b.model = None;
+        let mut overridden = a.clone();
+        overridden.model = Some("gpt-5".into());
+        assert!(
+            overridden.same_agent(&b),
+            "clearing a model override keeps the conversation"
         );
         assert!(!a.same_agent(&recorded("claude-code")));
     }

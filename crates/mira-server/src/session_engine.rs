@@ -494,18 +494,64 @@ pub async fn select_agent(state: &AppState, slot: &Arc<SessionSlot>, params: Acp
     let from_provider = previous.is_none();
     let same_setup = previous.as_ref().is_some_and(|p| p.same_agent(&params));
 
-    // A different agent (or the same one reconfigured) replaces the old
-    // process: two agents must never share one session's permissions.
-    if !same_setup {
-        crate::acp_session::stop_agent(slot).await;
+    let current_agent = match slot.acp_agent.read().await.clone() {
+        Some(handle) => handle.agent().await,
+        None => None,
+    };
+    let reused_agent = if same_setup {
+        current_agent.clone()
+    } else {
+        None
+    };
+    if previous.as_ref().is_some_and(|p| p.model != params.model) {
+        if let (Some(agent), Some(model)) = (&reused_agent, params.model.as_deref()) {
+            match crate::acp_session::apply_model_to_agent(agent, model).await {
+                Ok(options) => {
+                    if let Ok(mut reported) = slot.engine.reported_model.lock() {
+                        *reported = Some(model.to_owned());
+                    }
+                    if !options.is_empty() {
+                        let _ = slot.events_tx.send(ServerMsg::AcpConfigOptions {
+                            options,
+                            driver: Some(params.driver_kind.clone()),
+                        });
+                    }
+                }
+                Err(error) => {
+                    let _ = slot.events_tx.send(ServerMsg::Error {
+                        text: format!(
+                            "Could not select {} model {model}: {error}",
+                            params.display_name()
+                        ),
+                    });
+                    return;
+                }
+            }
+        }
+        // None releases Mira's standing override. Keep the agent's current
+        // model and session; its own default is used on a future fresh session.
     }
+
+    // Stage a replacement before changing the saved selection or handoff.
+    // A startup/model error preserves the previous handle and all its state.
+    let replacement = if !same_setup && current_agent.is_some() {
+        match crate::acp_session::start_agent(state, slot, &params, None).await {
+            Ok(handle) => Some(handle),
+            Err(error) => {
+                let _ = slot.events_tx.send(ServerMsg::Error { text: error });
+                return;
+            }
+        }
+    } else {
+        None
+    };
     if let Some(prev) = previous
         .as_ref()
         .filter(|p| p.driver_kind != params.driver_kind || p.instance != params.instance)
     {
         hand_agent_turns_to_agent(state, slot, prev, &params).await;
     }
-    if from_provider {
+    if from_provider && !slot.session.read().await.transcript().await.is_empty() {
         slot.engine.handoff.lock().await.agent_needs_context = true;
         // Mark where the provider's turns stop, so a reload replays the two
         // histories interleaved in the order they happened rather than all
@@ -535,7 +581,7 @@ pub async fn select_agent(state: &AppState, slot: &Arc<SessionSlot>, params: Acp
     }
     {
         let mut launch = slot.acp_launch.lock().await;
-        if !same_setup {
+        if !same_setup && replacement.is_none() {
             clear_reported_model(&slot.engine);
         }
         *launch = Some(params.clone());
@@ -567,6 +613,20 @@ pub async fn select_agent(state: &AppState, slot: &Arc<SessionSlot>, params: Acp
         .write()
         .expect("selection lock poisoned") = params.model.clone();
     remember_agent(slot, &params, true).await;
+    if let Some(handle) = &replacement {
+        *slot.engine.phase.lock().await = AgentPhase::Idle;
+        let _ = slot.events_tx.send(ServerMsg::AcpAgentStarted {
+            kind: handle.driver_kind.clone(),
+            display_name: handle.display_name.clone(),
+            launch: handle.launch.clone(),
+            error: None,
+        });
+    }
+    if reused_agent.is_some() || replacement.is_some() {
+        publish(state, slot).await;
+        crate::runtime_requests::wake_outbox(state, slot);
+        return;
+    }
     *slot.engine.phase.lock().await = AgentPhase::Starting;
     publish(state, slot).await;
 
@@ -965,7 +1025,7 @@ fn tail_chars(s: &str, max: usize) -> String {
 
 /// A model report belongs to the process that supplied it. Replacing that
 /// process must clear the report before publishing the next agent selection.
-fn clear_reported_model(runtime: &EngineRuntime) {
+pub(crate) fn clear_reported_model(runtime: &EngineRuntime) {
     *runtime
         .reported_model
         .lock()

@@ -101,6 +101,7 @@ export function ThoughtBlock({
           setOpen((v) => !v);
         }}
         disabled={!body}
+        data-transcript-disclosure
         aria-expanded={open}
         className={cn('group flex w-full min-w-0 items-center gap-1.5 rounded py-1 text-left text-[13px] leading-5 text-muted-foreground transition-colors hover:text-foreground disabled:cursor-default', STREAM_ROW_GUTTER)}
       >
