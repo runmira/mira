@@ -621,6 +621,8 @@ pub async fn get_session_image(
 #[derive(Debug, Serialize)]
 pub struct SessionPreviewView {
     pub id: String,
+    /// Manual or AI-generated title, when the session has one.
+    pub title: Option<String>,
     /// Last thing the *user* said, attachments stripped — what you were
     /// doing. `None` for a session that has only assistant turns.
     pub last_user: Option<String>,
@@ -725,6 +727,7 @@ pub async fn get_session_preview(
 
     Json(SessionPreviewView {
         id: record.id.to_string(),
+        title: record.title.clone(),
         last_user,
         last_assistant,
         last_tool,
