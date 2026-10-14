@@ -368,6 +368,44 @@ pub async fn start_agent(
         Err(e) => return Err(describe(&e)),
     };
 
+    // ACP session/new uses the agent's directory default. Apply the user's
+    // explicit model before any prompt; native transports already take it at launch.
+    if matches!(transport, Transport::Acp) {
+        if let Some(model) = params.model.as_deref().filter(|m| !m.is_empty()) {
+            let option_id = match &agent {
+                mira_acp::native::AgentHandle::Acp(a) => a
+                    .session()
+                    .config_options()
+                    .iter()
+                    .find(|o| o["category"] == "model")
+                    .and_then(|o| o["id"].as_str())
+                    .unwrap_or("model")
+                    .to_owned(),
+                _ => "model".to_owned(),
+            };
+            match agent
+                .set_config_option(&option_id, serde_json::json!(model))
+                .await
+            {
+                Ok(options) => {
+                    if !options.is_empty() {
+                        let _ = slot.events_tx.send(ServerMsg::AcpConfigOptions {
+                            options,
+                            driver: Some(params.driver_kind.clone()),
+                        });
+                    }
+                }
+                Err(error) => {
+                    agent.shutdown().await;
+                    return Err(format!(
+                        "Could not select {} model {model}: {error}",
+                        params.display_name()
+                    ));
+                }
+            }
+        }
+    }
+
     let stopping = Arc::new(AtomicBool::new(false));
 
     // How this agent's spend is billed, now that the agent is up and has

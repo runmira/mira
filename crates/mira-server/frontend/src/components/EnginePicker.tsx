@@ -38,6 +38,7 @@ import { AlertCircle,Check,ChevronDown,Loader2,RefreshCw,Settings2 } from 'lucid
 import { useEffect,useMemo,useRef,useState } from 'react';
 import { listInstanceModels,listModels,type EngineSnapshot,type ModelInfo,type OptionDescriptor } from '../api';
 import { agentModelChoices,describeAgentStatus } from '../lib/acpAgents';
+import { enabledAgentRail } from '../lib/enginePickerRail';
 import {
 CODING_MATCHERS,
 formatCtx,
@@ -56,7 +57,7 @@ import { PrivateText,redactEmails } from './PrivateText';
 /** A rail entry: a provider instance or an agent driver. */
 type RailItem =
   | { key: string; kind: 'provider'; instance: string | null; name: string; snapshot?: EngineSnapshot }
-  | { key: string; kind: 'agent'; driver: string; name: string; status?: AcpAgentStatus };
+  | { key: string; kind: 'agent'; driver: string; instance?: string; name: string; status?: AcpAgentStatus };
 
 type Choice = { id: string; label: string; hint?: string | null; ctx?: number | null };
 
@@ -80,7 +81,7 @@ export type EnginePickerProps = {
   /** The running agent's non-model options, projected for rendering. */
   agentDescriptors?: OptionDescriptor[] | null;
   onPickProvider: (instance: string | null, model: string) => void;
-  onPickAgent: (driver: string, model: string | null) => void;
+  onPickAgent: (driver: string, model: string | null, instance?: string) => void;
   onSetModelOption: (id: string, value: string) => void;
   onConfigureAgents?: () => void;
   /** Session actions for the running agent. */
@@ -101,7 +102,7 @@ export function EnginePicker(props: EnginePickerProps) {
 
   const isAgent = engine?.kind === 'agent';
   const currentKey = isAgent
-    ? `agent:${engine?.driver ?? ''}`
+    ? `agent:${engine?.instance ?? engine?.driver ?? ''}`
     : `provider:${engine?.instance ?? ''}`;
   const currentModel = engine?.model ?? (isAgent ? null : fallbackModel);
 
@@ -135,7 +136,7 @@ export function EnginePicker(props: EnginePickerProps) {
         name: engine?.display_name && engine.display_name !== 'Mira' ? engine.display_name : prettyProvider(providerName),
       });
     }
-    if (!items.some((i) => i.kind === 'provider')) {
+    if (engines == null && !items.some((i) => i.kind === 'provider')) {
       const last = lastProvider.current;
       items.push({
         key: `provider:${last?.instance ?? ''}`,
@@ -144,18 +145,7 @@ export function EnginePicker(props: EnginePickerProps) {
         name: last?.name ?? prettyProvider(providerName),
       });
     }
-    const seen = new Set<string>();
-    for (const a of agents ?? []) {
-      seen.add(a.kind);
-      // Name and on/off come from the agent's engine (Settings → Agents).
-      const row = engines?.find((e) => e.flavor === 'external' && e.instance === a.kind);
-      if (row && !row.enabled && engine?.driver !== a.kind) continue;
-      items.push({ key: `agent:${a.kind}`, kind: 'agent', driver: a.kind, name: row?.display_name || a.display_name, status: a });
-    }
-    // The session's agent is listed even before the first health probe.
-    if (isAgent && engine?.driver && !seen.has(engine.driver)) {
-      items.push({ key: `agent:${engine.driver}`, kind: 'agent', driver: engine.driver, name: engine.display_name });
-    }
+    items.push(...enabledAgentRail(engines, agents, engine));
     return items;
   }, [engines, agents, engine, isAgent, providerName]);
 
@@ -224,7 +214,7 @@ export function EnginePicker(props: EnginePickerProps) {
 
   // ---- agent model lists --------------------------------------------------
   const [agentCatalogs, setAgentCatalogs] = useState<Record<string, ModelInfo[] | { error: string }>>({});
-  const shownAgent = shown?.kind === 'agent' ? shown.driver : null;
+  const shownAgent = shown?.kind === 'agent' ? (shown.instance ?? shown.driver) : null;
   useEffect(() => {
     if (!open || !shownAgent || agentCatalogs[shownAgent]) return;
     const existing = agents?.find((a) => a.kind === shownAgent)?.models ?? [];
@@ -236,9 +226,10 @@ export function EnginePicker(props: EnginePickerProps) {
   }, [open, shownAgent, agents, agentCatalogs]);
 
   const agentChoices = (driver: string): { choices: Choice[]; live: boolean; error?: string } => {
-    const live = isAgent && engine?.driver === driver ? agentModelChoices(agentConfig) : [];
+    const live = isAgent && engine?.driver === driver && shownIsCurrent ? agentModelChoices(agentConfig) : [];
     if (live.length > 0) return { choices: live.map((c) => ({ id: c.value, label: c.label })), live: true };
-    const fetched = agentCatalogs[driver];
+    const instance = shown?.kind === 'agent' && shown.driver === driver ? shown.instance ?? driver : driver;
+    const fetched = agentCatalogs[instance];
     if (Array.isArray(fetched) && fetched.length > 0) {
       return { choices: fetched.map((m) => ({ id: m.id, label: m.display_name || prettyModel(m.id) })), live: true };
     }
@@ -283,7 +274,7 @@ export function EnginePicker(props: EnginePickerProps) {
         setBlocked(item.status);
         return;
       }
-      onPickAgent(item.driver, model);
+      onPickAgent(item.driver, model, item.instance);
     }
     onOpenChange(false);
   }

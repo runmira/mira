@@ -492,7 +492,9 @@ pub async fn select_agent(state: &AppState, slot: &Arc<SessionSlot>, params: Acp
     let _start = slot.engine.start_lock.lock().await;
     let previous = slot.acp_launch.lock().await.clone();
     let from_provider = previous.is_none();
-    let same_setup = previous.as_ref().is_some_and(|p| p.same_agent(&params));
+    let same_setup = previous
+        .as_ref()
+        .is_some_and(|p| p.same_agent(&params) && p.model == params.model);
 
     // A different agent (or the same one reconfigured) replaces the old
     // process: two agents must never share one session's permissions.
@@ -505,7 +507,7 @@ pub async fn select_agent(state: &AppState, slot: &Arc<SessionSlot>, params: Acp
     {
         hand_agent_turns_to_agent(state, slot, prev, &params).await;
     }
-    if from_provider {
+    if from_provider && !slot.session.read().await.transcript().await.is_empty() {
         slot.engine.handoff.lock().await.agent_needs_context = true;
         // Mark where the provider's turns stop, so a reload replays the two
         // histories interleaved in the order they happened rather than all

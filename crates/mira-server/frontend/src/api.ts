@@ -91,8 +91,8 @@ export async function loadSession(id: string): Promise<void> {
   }
 }
 
-export async function newSession(): Promise<{ id: string }> {
-  const r = await fetch('/api/sessions/new', { method: 'POST' });
+export async function newSession(sessionId?: string): Promise<{ id: string }> {
+  const r = await sessionFetch('/api/sessions/new', { method: 'POST' }, sessionId);
   if (!r.ok) throw new Error(`sessions new ${r.status}`);
   return (await r.json()) as { id: string };
 }

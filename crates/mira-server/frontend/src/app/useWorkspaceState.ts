@@ -1,3 +1,4 @@
+import { externalAgentStatuses } from '../lib/enginePickerRail';
 import { useSelector } from '@tanstack/react-store';
 import { useMemo,useState } from 'react';
 import {
@@ -128,8 +129,7 @@ export function useWorkspaceState() {
   const getEngine = () => appRuntime.readSession().engine;
 
   /** Health of every known agent, refreshed on request. */
-  const acpAgents = useMemo(() => (engines ?? []).flatMap(engine =>
-    engine.flavor === 'external' && engine.agent && engine.instance === engine.driver ? [engine.agent] : []), [engines]);
+  const acpAgents = useMemo(() => externalAgentStatuses(engines ?? []), [engines]);
 
   const acpStatusPending = enginesResource.isFetching;
 

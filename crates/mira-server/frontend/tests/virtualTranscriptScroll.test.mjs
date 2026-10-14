@@ -38,7 +38,7 @@ function fixture() {
     for (const element of elements) if (element.dataset.virtualKey) element.firstElementChild.getBoundingClientRect = () => element.getBoundingClientRect();
   }
   async function render(ids) {
-    await act(() => root.render(React.createElement(VirtualTranscript, { pane: ref, identity: 'test', follow, lastInput }, ids.map(id => React.createElement('button', { key: id }, id)))));
+    await act(() => root.render(React.createElement(VirtualTranscript, { pane: ref, identity: 'test', follow, lastInput }, ids.map(id => React.createElement('button', { key: id, 'aria-expanded': false }, id)))));
     geometry();
   }
   async function resize() {
@@ -88,4 +88,27 @@ test('history prepend and a tool disclosure keep the clicked header at its viewp
   await f.resize();
   assert.equal(button.getBoundingClientRect().top,before,'clicked disclosure header stays in place as earlier rows remeasure');
   await act(() => f.root.unmount()); f.pane.remove();
+});
+
+
+test('scroll listeners attach when an ancestor host ref becomes available after child layout effects', async () => {
+  const host = document.createElement('div'); document.body.append(host);
+  const root = createRoot(host); let pane;
+  function Parent() {
+    const ref = React.useRef(null);
+    return React.createElement('div', {ref: node => {
+      ref.current = node;
+      if (!node) return;
+      pane = node;
+      Object.defineProperty(node, 'clientHeight', {configurable:true, value:600});
+      node.getBoundingClientRect = () => rect(0,600);
+      node.firstElementChild.getBoundingClientRect = () => rect(-node.scrollTop,11200);
+    }}, React.createElement(VirtualTranscript, {pane:ref, identity:'ancestor-ref', follow:{current:false}}, Array.from({length:40},(_,i)=>React.createElement('p',{key:i},`Row ${i}`))));
+  }
+  await act(() => root.render(React.createElement(Parent)));
+  pane.scrollTop = 3000;
+  await act(() => pane.dispatchEvent(new window.Event('scroll')));
+  assert.ok(!pane.querySelector('[data-virtual-key]').textContent.includes('Row 0'), 'scroll updates the mounted range on its first lifecycle');
+  assert.ok(pane.textContent.includes('Row 10'));
+  await act(() => root.unmount()); host.remove();
 });

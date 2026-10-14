@@ -230,7 +230,7 @@ export function useWorkspaceView(
         driver: kind,
         instance: instance ?? null,
         resume: resume || null,
-        model: model || null,
+        model: model ?? null,
       });
     },
     [],

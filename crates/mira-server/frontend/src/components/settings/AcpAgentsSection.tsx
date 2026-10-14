@@ -680,6 +680,7 @@ export function AcpAgentsSection({
     [agents, views, drafts],
   );
 
+  if (agents.length === 0 && error) return <div className="space-y-3"><Note text={error} tone="error" /><button type="button" onClick={onRefresh}>Retry agent discovery</button></div>;
   if (agents.length === 0) {
     return (
       <div className="flex items-center gap-2 rounded-xl border border-dashed border-border/70 px-4 py-6 text-[12.5px] text-muted-foreground/70">

@@ -1,8 +1,8 @@
-import { Children, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
+import { Children, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { anchorTop, transcriptAnchor } from '../lib/transcriptAnchor';
 import { type Anchor, positions, savedPosition } from '../lib/transcriptPosition';
 import { transcriptWindow } from '../lib/transcriptWindow';
-import { TranscriptRowContext, TranscriptSessionContext } from './TranscriptDisclosure';
+import { TranscriptFollowContext, TranscriptRowContext, TranscriptSessionContext } from './TranscriptDisclosure';
 
 /** One scroll owner: virtual measurements, reading anchors and end following. */
 export function VirtualTranscript({ children, pane, identity, onNeedOlder, hasOlder, follow, lastInput, readingAnchor }: {
@@ -16,6 +16,10 @@ export function VirtualTranscript({ children, pane, identity, onNeedOlder, hasOl
   readingAnchor?: { current: number | null };
 }) {
   const rows = Children.toArray(children);
+  // Ancestor host refs attach after child layout effects on first mount.
+  // Re-run ownership effects once the actual scroll pane is available.
+  const [scrollElement, setScrollElement] = useState<HTMLDivElement | null>(null);
+  useEffect(() => { setScrollElement(pane.current); }, [pane, identity]);
   const root = useRef<HTMLDivElement>(null);
   const heights = useRef(new Map<string, number>());
   const committed = useRef({ identity: '', keys: [] as string[], offsets: [0] });
@@ -35,7 +39,7 @@ export function VirtualTranscript({ children, pane, identity, onNeedOlder, hasOl
     return root.current!.getBoundingClientRect().top - scroll.getBoundingClientRect().top + scroll.scrollTop;
   }
   function readViewport() {
-    const scroll = pane.current;
+    const scroll = scrollElement;
     if (!scroll || !root.current) return;
     const top = scroll.scrollTop - origin(), height = scroll.clientHeight;
     setViewport(previous => previous.top === top && previous.height === height ? previous : { top, height });
@@ -47,7 +51,7 @@ export function VirtualTranscript({ children, pane, identity, onNeedOlder, hasOl
   // Capture from the committed layout before replacing spacer estimates. This
   // also preserves stable row IDs when older history is prepended.
   useLayoutEffect(() => {
-    const scroll = pane.current;
+    const scroll = scrollElement;
     if (!scroll || !root.current) return;
     const old = committed.current;
     const switched = old.identity !== identity;
@@ -63,7 +67,8 @@ export function VirtualTranscript({ children, pane, identity, onNeedOlder, hasOl
     } else if (anchor && !anchor.bottom) {
       const top = anchorTop(anchor, keys, offsets);
       if (top !== undefined) {
-        scroll.scrollTop = origin() + top;
+        const nextTop = origin() + top;
+        if (Math.abs(scroll.scrollTop - nextTop) > 0.5) scroll.scrollTop = nextTop;
         if (heights.current.has(anchor.key)) restore.current = undefined;
       } else if (hasOlder) onNeedOlder?.();
       else restore.current = undefined;
@@ -74,7 +79,8 @@ export function VirtualTranscript({ children, pane, identity, onNeedOlder, hasOl
     const pinned = disclosure.current;
     if (pinned?.element.isConnected) {
       if (pinned.end && following()) scroll.scrollTop = scroll.scrollHeight;
-      else scroll.scrollTop += pinned.element.getBoundingClientRect().top - pinned.top;
+      else { const delta = pinned.element.getBoundingClientRect().top - pinned.top;
+        if (Math.abs(delta) > 0.5) scroll.scrollTop += delta; }
     }
     readViewport();
   });
@@ -82,7 +88,7 @@ export function VirtualTranscript({ children, pane, identity, onNeedOlder, hasOl
   // Measure newly mounted rows before paint, and asynchronously for images/tool
   // output. The observer depends on mounted row identity, never token content.
   useLayoutEffect(() => {
-    const scroll = pane.current;
+    const scroll = scrollElement;
     if (!root.current || !scroll) return;
     function measure() {
       const old = committed.current;
@@ -105,12 +111,12 @@ export function VirtualTranscript({ children, pane, identity, onNeedOlder, hasOl
     const observer = new ResizeObserver(measure);
     root.current.querySelectorAll('[data-virtual-key]').forEach(row => observer.observe(row));
     return () => observer.disconnect();
-  }, [identity, start, end, keys.join('|')]);
+  }, [scrollElement, identity, start, end, keys.join('|')]);
 
   // Streaming can resize existing rows during a React commit without creating
   // a new observer. ResizeObserver reports those changes before the next paint.
   useLayoutEffect(() => {
-    const scroll = pane.current;
+    const scroll = scrollElement;
     if (!scroll) return;
     let settle = 0;
     function remember() {
@@ -141,7 +147,7 @@ export function VirtualTranscript({ children, pane, identity, onNeedOlder, hasOl
       invalidate(value => value + 1);
     }
     function toggle(event: Event) {
-      const target = (event.target as HTMLElement).closest<HTMLElement>('button, [role="button"]');
+      const target = (event.target as HTMLElement).closest<HTMLElement>('[aria-expanded]');
       if (!target || !root.current?.contains(target)) return;
       const atEnd = scroll!.scrollHeight - scroll!.scrollTop - scroll!.clientHeight < 2;
       disclosure.current = { element: target, top: target.getBoundingClientRect().top, end: atEnd };
@@ -169,9 +175,9 @@ export function VirtualTranscript({ children, pane, identity, onNeedOlder, hasOl
       root.current?.removeEventListener('click', toggle, true);
       window.removeEventListener('mira:transcript-jump', jump);
     };
-  }, [pane, identity]);
+  }, [scrollElement, identity]);
 
-  return <TranscriptSessionContext.Provider value={identity}>
+  return <TranscriptSessionContext.Provider value={identity}><TranscriptFollowContext.Provider value={follow}>
     <div ref={root}>
       <div aria-hidden style={{ height: offsets[start], overflowAnchor: 'none' }} />
       {rows.slice(start, end).map((row, index) => <div key={keys[start + index]} data-virtual-key={keys[start + index]} className="pb-2">
@@ -179,6 +185,6 @@ export function VirtualTranscript({ children, pane, identity, onNeedOlder, hasOl
       </div>)}
       <div aria-hidden style={{ height: offsets[rows.length] - offsets[end], overflowAnchor: 'none' }} />
     </div>
-  </TranscriptSessionContext.Provider>;
+  </TranscriptFollowContext.Provider></TranscriptSessionContext.Provider>;
 }
 export { hasTranscriptPosition } from '../lib/transcriptPosition';

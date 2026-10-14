@@ -766,7 +766,9 @@ pub async fn load_session(
     Json(serde_json::json!({ "id": slot.id.to_string() })).into_response()
 }
 
-pub async fn new_session(State(state): State<AppState>) -> Response {
+pub async fn new_session(
+    crate::session_scope::ScopedState(state): crate::session_scope::ScopedState,
+) -> Response {
     let prev_slot = state.active_slot().await;
     let prev = prev_slot.session.read().await.clone();
     let prev_cfg = prev.config().await;
@@ -793,7 +795,20 @@ pub async fn new_session(State(state): State<AppState>) -> Response {
     // way. Only the config moves — no process is spawned here, and the
     // resume cursor stays per-slot, so this agent begins a blank
     // conversation. `AcpStop` is what declines the inheritance.
-    *slot.acp_launch.lock().await = prev_slot.acp_launch.lock().await.clone();
+    if let Some(params) = prev_slot.acp_launch.lock().await.clone() {
+        *slot
+            .selection
+            .instance
+            .write()
+            .expect("selection lock poisoned") = Some(params.instance.clone());
+        *slot
+            .selection
+            .model
+            .write()
+            .expect("selection lock poisoned") = params.model.clone();
+        *slot.acp_launch.lock().await = Some(params.clone());
+        crate::session_engine::remember_agent(&slot, &params, true).await;
+    }
     let slot_id = slot.id.clone();
     state.insert_slot(slot.clone()).await;
     state.set_active(slot_id.clone()).await;

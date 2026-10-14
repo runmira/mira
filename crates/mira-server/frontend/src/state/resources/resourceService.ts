@@ -15,7 +15,7 @@ export const retryResource = (count: number, error: unknown) => count < 1 &&
 const paths: Record<ResourceName, string> = { settings: '/api/settings', engines: '/api/engines', skills: '/api/skills',
   commands: '/api/commands', context: '/api/context', sessions: '/api/sessions?all=true', gitStatus: '/api/git/status',
   sessionDiff: '/api/git/session-diff', branchPr: '/api/git/branch-pr' };
-const contextual = new Set<ResourceName>(['engines', 'skills', 'commands', 'gitStatus', 'sessionDiff', 'branchPr', 'context']);
+const contextual = new Set<ResourceName>(['skills', 'commands', 'gitStatus', 'sessionDiff', 'branchPr', 'context']);
 export function createResourceService(client: QueryClient, scope: RuntimeScope,
   context: () => { session: string | null; cwd: string; attachment: number; connected: boolean; connection: number; engine: string }) {
   let disposed = false;

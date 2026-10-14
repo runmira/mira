@@ -1,3 +1,5 @@
+import { useContext } from 'react';
+import { TranscriptRowContext } from '../TranscriptDisclosure';
 import { PREF_KEYS, useBoolPref } from '../../lib/prefs';
 import { AnimatePresence, m, useReducedMotion } from 'framer-motion';
 import { cn } from '@/lib/utils';
@@ -20,9 +22,11 @@ export function Collapse({
   children: React.ReactNode;
   className?: string;
 }) {
+  const virtualRow = useContext(TranscriptRowContext);
   const systemReducedMotion = useReducedMotion();
   const [preferReducedMotion] = useBoolPref(PREF_KEYS.reduceMotion, false);
   const reduceMotion = systemReducedMotion || preferReducedMotion;
+  if (virtualRow) return open ? <div className={cn('overflow-hidden', className)}>{children}</div> : null;
   return (
     <AnimatePresence initial={false}>
       {open && (

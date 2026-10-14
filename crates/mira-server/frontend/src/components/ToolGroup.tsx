@@ -150,16 +150,16 @@ export function ToolGroup({
       <AnimatePresence initial={false}>
         {expanded && (
           <m.div
-            initial={{ height: 0, opacity: 0 }}
+            initial={false}
             animate={{
               height: 'auto',
               opacity: 1,
-              transition: { duration: reduceMotion ? 0 : 0.24, ease: [0.22, 1, 0.36, 1] },
+              transition: { duration: 0, ease: [0.22, 1, 0.36, 1] },
             }}
             exit={{
               height: 0,
               opacity: 0,
-              transition: { duration: reduceMotion ? 0 : 0.18, ease: 'easeInOut' },
+              transition: { duration: 0, ease: 'easeInOut' },
             }}
             className="ml-6 mt-0.5 flex flex-col gap-0.5 overflow-hidden border-l border-border/40 pl-3"
           >

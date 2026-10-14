@@ -328,7 +328,7 @@ export function useAgentEvents(
           (prev.kind !== next.kind ||
             (next.kind === 'agent' ? prev.driver !== next.driver : false));
         if (moved) {
-          updateTranscript((es) => [...es, { kind: 'engine_switch', engine: next, from: prev }]);
+          updateTranscript((es) => es.some(e => e.kind === 'msg') ? [...es, { kind: 'engine_switch', engine: next, from: prev }] : es);
         }
         // The sidebar badges each chat by its engine.
         if (moved || prev?.model !== next.model) setSidebarRefresh((n) => n + 1);

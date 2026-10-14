@@ -309,12 +309,13 @@ export const WorkspaceComposer = memo(function WorkspaceComposer(
             options: loadModelOptions(m, instance ?? null),
           });
         }}
-        onPickAgent={(driver, m) => {
+        onPickAgent={(driver, m, pickedInstance) => {
           // Already this chat's agent: only the model can change, and
           // that is an option on the running agent, not a restart
           // with a new setup.
-          if (acpDriver === driver) {
+          if (acpDriver === driver && (!pickedInstance || pickedInstance === engine?.instance)) {
             if (m && m !== engine?.model) onSetModel(m);
+            if (m === null) startAcpAgent(driver, null, '', pickedInstance ?? engine?.instance);
             return;
           }
           // Its saved setup (Settings → Agents) is the engine's, on the
@@ -328,7 +329,7 @@ export const WorkspaceComposer = memo(function WorkspaceComposer(
               external.find((e) => e.instance === driver) ??
               (external.length === 1 ? external[0] : undefined)
             )?.instance ?? null;
-          startAcpAgent(driver, null, m, instance);
+          startAcpAgent(driver, null, m ?? '', pickedInstance ?? instance);
         }}
         onConfigureAgents={openAgentSettings}
         sessionId={sessionId}

@@ -179,7 +179,7 @@ export function useSessionEvents(
         }));
         updateSessionQueue(msg.session_id, previous => reconcileQueue(previous,
           msg.items
-            .filter((item) => !item.recovery)
+            .filter((item) => !item.recovery && !item.dispatching && !item.delivered)
             .map((item) => ({
               id: item.id,
               text: item.text,
@@ -187,7 +187,7 @@ export function useSessionEvents(
               fingerprint: item.fingerprint,
               steering: item.dispatching && !item.error,
               error: item.error ?? undefined,
-            })), new Set<string>())
+            })), new Set(msg.items.filter(item => item.dispatching || item.delivered).map(item => item.id)))
         );
         break;
       }
@@ -224,7 +224,7 @@ export function useSessionEvents(
         }));
         updateSessionQueue(msg.session_id, previous => reconcileQueue(previous,
           (msg.queued_inputs ?? [])
-            .filter((item) => !item.recovery)
+            .filter((item) => !item.recovery && !item.dispatching && !item.delivered)
             .map((item) => ({
               id: item.id,
               text: item.text,

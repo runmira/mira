@@ -86,7 +86,7 @@ export function interleaveReplay(
     const toAgent = line.switch.to !== 'provider';
     const fromRef = line.switch.from_engine;
     const toRef = line.switch.to_engine;
-    out.push({
+    if (out.some(e => e.kind === 'msg')) out.push({
       kind: 'engine_switch',
       engine: toRef
         ? engineFromRef(toRef)

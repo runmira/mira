@@ -175,3 +175,14 @@ test('an approved tool start transitions waiting to running but never reopens se
   assert.equal(upsertToolStart([{...pending,status:'denied'}],call,10)[0].status,'denied');
   assert.equal(upsertToolStart([{...pending,status:'complete',result:{call_id:call.id,content:'done'}}],call,10)[0].status,'complete');
 });
+
+
+test('dispatched and failed delivered input stays out of waiting queue while later input remains queued', () => {
+  const h = harness();
+  const commands = useComposerCommands({ ...h.context, updateQueueProjection: h.runtime.updateQueues });
+  const events = useSessionEvents({ ...h.context, updateSessionQueue: commands.updateSessionQueue, recordQueueRecovery: h.runtime.updateRecovery });
+  const item = { id: 'sent', text: 'already sent', images: [], fingerprint: 'sent-fingerprint', dispatching: true, error: 'Authentication required' };
+  const waiting = { ...item, id: 'waiting', text: 'next turn', dispatching: false, error: null };
+  h.runtime.transition(() => events({ type: 'queue_updated', session_id: 'active', items: [item, waiting] }));
+  assert.deepEqual(h.runtime.sessionState.get().queued.get('active').map(i => i.id), ['waiting']);
+});

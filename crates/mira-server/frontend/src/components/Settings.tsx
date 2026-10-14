@@ -1,3 +1,4 @@
+import { externalAgentStatuses } from '../lib/enginePickerRail';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { useEffect,useMemo,useRef,useState } from 'react';
@@ -21,6 +22,7 @@ export function SettingsSurface() {
   const { section, onSaved, onExit } = navigation;
   const runtime = useAppRuntime();
   const settings = useResource('settings');
+  const agentsResource = useResource('engines', section === 'agents');
   const view = settings.data ?? null;
   const loadingSettings = settings.isFetching;
   const loadError = settings.error?.message ?? null;
@@ -141,7 +143,7 @@ export function SettingsSurface() {
         <span className="min-w-0 flex-1 truncate text-[13.5px] text-foreground">
           {currentLabel}
         </span>
-        {view && section !== 'computer' && (
+        {view && section === 'provider' && (
           <div
             className={cn(
               'inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[10.5px]',
@@ -205,7 +207,14 @@ export function SettingsSurface() {
 
           <Outlet
             context={
-              { ...navigation, view, draft, setDraft, refetch } satisfies SettingsDraftContext
+              { ...navigation, view, draft, setDraft, refetch,
+                ...(section === 'agents' ? {
+                  acpAgents: externalAgentStatuses(agentsResource.data?.engines ?? []),
+                  acpRefreshing: agentsResource.isFetching,
+                  acpError: agentsResource.error?.message ?? navigation.acpError,
+                  onAcpRefresh: () => { void runtime.resources.refresh('engines', false, true).catch(() => {}); },
+                } : {}),
+              } satisfies SettingsDraftContext
             }
           />
         </div>
