@@ -97,7 +97,7 @@ export function EnginePicker(props: EnginePickerProps) {
   const runtime = useAppRuntime();
   const capabilities = useSelector(runtime.agentCapabilities, snapshot => snapshot);
   const {
-    open, onOpenChange, engine, fallbackModel, engines, agents,
+    open, onOpenChange, engine, fallbackModel, providerName, engines, agents,
     agentsChecking, onCheckAgents, agentConfig, agentDescriptors,
     onPickProvider, onPickAgent, onSetModelOption, onConfigureAgents,
   } = props;
@@ -241,10 +241,8 @@ export function EnginePicker(props: EnginePickerProps) {
   }
 
   // ---- trigger ---------------------------------------------------------------
-  const triggerLabel = isAgent
-    ? (currentModel ? prettyModel(currentModel) : 'Default model')
-    : prettyModel(currentModel) || 'Choose model';
-  const optionSummary = summarizeOptions(descriptors, options);
+  const triggerLabel = currentModel ? modelPickerLabel(currentModel) : isAgent ? 'Default model' : 'Choose model';
+  const engineLabel = rail.find(row => row.key === currentKey)?.name ?? engine?.display_name ?? providerName ?? 'Mira';
 
   return (
     <>
@@ -262,19 +260,8 @@ export function EnginePicker(props: EnginePickerProps) {
                 them) visibly off-centre. */}
             <span className="grid size-4 shrink-0 place-items-center"><EngineMark engine={engine} model={currentModel} /></span>
             <span className="inline-flex h-4 min-w-0 items-center gap-1.5">
-              {isAgent ? (
-                <>
-                  <span className="shrink-0 text-[12.5px] font-semibold leading-none">{engine?.display_name}</span>
-                  <span className="min-w-0 truncate text-[12.5px] font-medium leading-none text-muted-foreground">
-                    {triggerLabel}
-                  </span>
-                </>
-              ) : (
-                <span className="min-w-0 truncate text-[12.5px] font-semibold leading-none">{triggerLabel}</span>
-              )}
-              {optionSummary && (
-                <span className="shrink-0 text-[11.5px] font-medium leading-none text-muted-foreground/80 max-md:hidden">{optionSummary}</span>
-              )}
+              <span className="shrink-0 text-[12.5px] font-semibold leading-none">{engineLabel}</span>
+              <span className="min-w-0 truncate text-[12.5px] font-medium leading-none text-muted-foreground">{triggerLabel}</span>
             </span>
             <EngineStatusGlyph engine={engine} />
             <span className="grid size-4 shrink-0 place-items-center">
@@ -727,22 +714,7 @@ function currentOptionValue(d: OptionDescriptor, config: AcpConfigOption[] | nul
   return d.type === 'select' ? (d.options[0]?.value ?? '') : '';
 }
 
-/**
- * The short string shown after the model name on the trigger: whatever the
- * user changed away from a default. A "Fast" tier is worth the space; an
- * `auto` effort is not.
- */
-function summarizeOptions(descriptors: OptionDescriptor[], options: Record<string, string>): string {
-  for (const d of descriptors) {
-    if (d.type !== 'select') continue;
-    const match = d.options.find((o) => o.value === options[d.id]);
-    if (match && match.value !== 'off' && match.value !== 'auto') return match.label;
-  }
-  for (const d of descriptors) {
-    if (d.type === 'boolean' && options[d.id]) return d.label;
-  }
-  return '';
-}
+
 
 /**
  * One advertised option: `select` descriptors get a dropdown, `boolean`
