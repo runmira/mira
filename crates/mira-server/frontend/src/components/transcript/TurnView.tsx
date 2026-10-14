@@ -9,7 +9,7 @@ import { chatFailure, isFatalChatWarning, isProviderLimitFailure, isResponseFail
  */
 import { UsageRecoveryCard, type RecoveryAction } from '../UsageRecoveryCard';
 import { Collapse } from '../ui/Collapse';
-import { turnActivity, type Turn, type GroupItem } from '../../lib/turnActivity';
+import { turnActivity, workSections, type Turn, type GroupItem } from '../../lib/turnActivity';
 import { TurnChanges } from '../TurnChanges';
 import { memo, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -121,6 +121,7 @@ export function TurnViewImpl({
   const { intermediateRaw, intermediate, finalEntry, trailing, notices } = useMemo(
     () => turnActivity(body, nativeTurn && !isActive), [body, nativeTurn, isActive],
   );
+  const sections = useMemo(() => workSections(intermediate), [intermediate]);
 
   // While a turn is in flight, force the intermediate section open so
   // in-progress tool calls (esp. pending approval bubbles) stay visible.
@@ -168,7 +169,7 @@ export function TurnViewImpl({
     rawDurationMs !== null ? Math.max(0, rawDurationMs - totalWaitMs) : null;
   const showWorkedChip =
     getBoolPref(PREF_KEYS.transcriptTurnStats, true) &&
-    (intermediate.length > 0 || isActive) && durationMs != null;
+    (sections.some(section => section.kind === 'work') || isActive) && durationMs != null;
 
   const forceOpen = isActive || hasPendingApproval || hasPendingAskUser || hasPendingPlan;
   const follow = useContext(TranscriptFollowContext);
@@ -240,7 +241,9 @@ export function TurnViewImpl({
         </div>
       )}
 
-      {intermediate.length > 0 && <Collapse open={effectivelyExpanded || !showWorkedChip}><div className="transcript-work flex min-w-0 flex-col gap-2">{intermediate.map((item, i) => renderActivity(item, i, 'work'))}</div></Collapse>}
+      {sections.map((section, sectionIndex) => section.kind === 'steer'
+        ? renderActivity(section.item, sectionIndex, 'steer')
+        : <Collapse key={`work-${sectionIndex}`} open={effectivelyExpanded || !showWorkedChip}><div className="transcript-work flex min-w-0 flex-col gap-2">{section.items.map((item, i) => renderActivity(item, i, `work-${sectionIndex}`))}</div></Collapse>)}
 
       {finalEntry && (
         <TurnStatsContext.Provider

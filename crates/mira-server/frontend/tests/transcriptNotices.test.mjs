@@ -78,3 +78,42 @@ test('a streaming timeout warning stays a plain status row as responses arrive',
     assert.ok(row.classList.contains('items-start'),'wrapped warnings align their icon with the first line');
   }
 });
+
+test('steering bubbles remain visible and ordered when native or provider work is collapsed', () => {
+  const first = {kind:'msg',msg:{role:'user',content:'First steering instruction',input_intent:'steer'}};
+  const second = {kind:'msg',msg:{role:'user',content:'Second steering instruction',input_intent:'steer'}};
+  const commentary = {kind:'msg',msg:{role:'assistant',content:'Intermediate commentary'}};
+  const noop = () => {};
+  for (const native of [false,true]) {
+    for (const expanded of [false,true]) {
+      const body = [commentary,tool,first,tool,second,{...answer,...(native ? {nativeMessageId:'final',nativePhase:'final_answer'} : {})}];
+      const dom = document.createElement('div');
+      dom.innerHTML = renderToStaticMarkup(React.createElement(TurnView,{turn:{user:null,body},isActive:false,timing:{startedAt:0,endedAt:1000},index:0,expanded,onToggle:noop,onDecide:noop,onPlanReply:noop,onOpenAgent:noop}));
+      assert.ok(dom.textContent.includes(first.msg.content));
+      assert.ok(dom.textContent.includes(second.msg.content));
+      assert.ok(dom.textContent.indexOf(first.msg.content)<dom.textContent.indexOf(second.msg.content));
+      assert.ok(dom.textContent.indexOf(second.msg.content)<dom.textContent.indexOf(answer.msg.content));
+      assert.ok(![...dom.querySelectorAll('.transcript-work')].some(row=>row.textContent.includes('steering instruction')));
+      assert.equal(dom.textContent.includes(commentary.msg.content),expanded);
+    }
+  }
+});
+
+test('one stop action renders one notice in either event order, retaining denial details', () => {
+  const interrupted = {kind:'warning',text:'turn interrupted'};
+  const denied = {kind:'warning',text:'turn interrupted (denied 2 pending approval(s))'};
+  const other = {kind:'warning',text:'Unrelated warning'};
+  const noop = () => {};
+  for (const pair of [[interrupted,notice],[notice,interrupted],[notice,notice],[denied,notice],[notice,denied]]) {
+    for (const fold of [false,true]) {
+      const body = [tool,answer,...pair,other];
+      const view = turnActivity(body,fold);
+      assert.equal(view.notices.length,2);
+      assert.equal(view.notices[0],pair.includes(denied) ? denied : notice);
+      assert.equal(view.notices[1],other);
+      const dom = document.createElement('div');
+      dom.innerHTML = renderToStaticMarkup(React.createElement(TurnView,{turn:{user:null,body},timing:{startedAt:0,endedAt:1000},index:0,expanded:false,onToggle:noop,onDecide:noop,onPlanReply:noop,onOpenAgent:noop}));
+      assert.equal(dom.querySelectorAll('[data-transcript-notice]').length,2);
+    }
+  }
+});

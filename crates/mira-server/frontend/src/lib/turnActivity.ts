@@ -79,6 +79,21 @@ function isGroupableTool(e: Entry): boolean {
   return true;
 }
 
+/** User steering remains visible between the work sections it interrupted. */
+export function workSections(items: GroupItem[]) {
+  const sections: ({ kind: 'steer'; item: GroupItem } | { kind: 'work'; items: GroupItem[] })[] = [];
+  for (const item of items) {
+    if (item.kind === 'entry' && item.entry.kind === 'msg' && item.entry.msg.role === 'user' && item.entry.msg.input_intent === 'steer') {
+      sections.push({ kind: 'steer', item });
+    } else {
+      const last = sections.at(-1);
+      if (last?.kind === 'work') last.items.push(item);
+      else sections.push({ kind: 'work', items: [item] });
+    }
+  }
+  return sections;
+}
+
 export function findFinalAssistantIndex(body: Entry[]): number {
   for (let index = body.length - 1; index >= 0; index--) {
     const entry = body[index];
@@ -98,12 +113,30 @@ export function isTurnNotice(entry: Entry): boolean {
   return ['warning', 'error', 'engine_switch', 'compact', 'goal', 'html_render'].includes(entry.kind);
 }
 
+/** Stop acknowledgement and agent cancellation describe the same action. */
+function isManualStopNotice(entry: Entry): entry is Entry & { kind: 'warning' } {
+  return entry.kind === 'warning' && /^(?:turn interrupted(?: \(denied \d+ pending approval\(s\)\))?|Turn ended manually by user\.)$/.test(entry.text);
+}
+
 /** Both sides of assistant text use the same live grouping path. Completing
  * a native turn only folds trailing work into its history disclosure. */
 export function turnActivity(body: Entry[], foldTrailing: boolean) {
   // Lifecycle facts remain visible even when work is folded, like T3's
   // independent timeline rows. Preserve their server order under the reply.
-  const notices = body.filter(isTurnNotice);
+  const rawNotices = body.filter(isTurnNotice);
+  const stopNotices = rawNotices.filter(isManualStopNotice);
+  // Retain approval-denial details when present, otherwise prefer the
+  // explicit manual-stop receipt. Deduplicate within this turn only.
+  const stopNotice = stopNotices.find(entry => entry.text.includes('pending approval'))
+    ?? stopNotices.find(entry => entry.text === 'Turn ended manually by user.')
+    ?? stopNotices[0];
+  let stopShown = false;
+  const notices = rawNotices.filter(entry => {
+    if (!isManualStopNotice(entry)) return true;
+    if (entry !== stopNotice || stopShown) return false;
+    stopShown = true;
+    return true;
+  });
   body = body.filter(entry => !isTurnNotice(entry));
   const finalIdx = findFinalAssistantIndex(body);
   const intermediateRaw = finalIdx < 0 ? body
