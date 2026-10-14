@@ -258,7 +258,7 @@ export type OptionDescriptor =
   | { type: 'select'; id: string; label: string; options: OptionChoice[] }
   | { type: 'boolean'; id: string; label: string; on_value?: string | null };
 
-export type ModelCapabilities = { option_descriptors?: OptionDescriptor[] };
+export type ModelCapabilities = { option_descriptors?: OptionDescriptor[]; native_metadata?: import('./types').NativeModelCapabilities | null };
 
 export type ModelInfo = {
   id: string;

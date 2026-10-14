@@ -142,6 +142,10 @@ impl OptionDescriptor {
 /// What a model can be asked to change about a request.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ModelCapabilities {
+    /// Native catalogs retain their advertised metadata without introducing
+    /// a dependency on a specific external-agent transport.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_metadata: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub option_descriptors: Vec<OptionDescriptor>,
 }

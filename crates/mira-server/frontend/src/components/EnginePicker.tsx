@@ -34,7 +34,7 @@ CommandList,
 } from '@/components/ui/command';
 import { Popover,PopoverContent,PopoverTrigger } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
-import { AlertCircle,Check,ChevronDown,Loader2,RefreshCw,Settings2 } from 'lucide-react';
+import { AlertCircle,Ban,Brain,BrainCircuit,Check,ChevronDown,Feather,Gauge,Lightbulb,Loader2,RefreshCw,Rocket,Settings2,Sparkles,Telescope,Zap } from 'lucide-react';
 import { useEffect,useMemo,useRef,useState } from 'react';
 import { listInstanceModels,listModels,type EngineSnapshot,type ModelInfo,type OptionDescriptor } from '../api';
 import { navigateEnginePicker } from '../lib/enginePickerNavigation';
@@ -365,7 +365,7 @@ export function EnginePicker(props: EnginePickerProps) {
                       <span className="flex min-w-0 flex-1 justify-end">
                         <OptionControl
                           descriptor={d}
-                          value={options[d.id] ?? currentOptionValue(d, agentConfig)}
+                          value={isAgent ? currentOptionValue(d, agentConfig) : options[d.id] ?? currentOptionValue(d, agentConfig)}
                           onChange={(v) => pickOption(d.id, v)}
                         />
                       </span>
@@ -709,8 +709,8 @@ function SmallButton({ children, onClick, title }: { children: React.ReactNode; 
 
 /** The agent's own current value for an option, when it reports one. */
 function currentOptionValue(d: OptionDescriptor, config: AcpConfigOption[] | null | undefined): string {
-  const live = config?.find((o) => o.id === d.id)?.current;
-  if (live) return live;
+  const option = config?.find((o) => o.id === d.id);
+  if (option) return option.current ?? '';
   return d.type === 'select' ? (d.options[0]?.value ?? '') : '';
 }
 
@@ -721,6 +721,20 @@ function currentOptionValue(d: OptionDescriptor, config: AcpConfigOption[] | nul
  * ones a switch — so "Fast" renders right whether a provider sends it as a
  * service-tier select or a fast-mode flag.
  */
+function optionLabel(id: string, value: string, label: string): string {
+  if (id === 'reasoning_effort') {
+    const names: Record<string,string> = {none:'None',minimal:'Minimal',low:'Low',medium:'Medium',high:'High',xhigh:'Extra high',max:'Max',ultra:'Ultra'};
+    return names[value] ?? label.charAt(0).toUpperCase() + label.slice(1);
+  }
+  return label.charAt(0).toUpperCase() + label.slice(1);
+}
+
+function ModelOptionIcon({ id, value }: { id: string; value: string }) {
+  const reasoningIcons: Record<string,typeof Brain> = {none:Ban,minimal:Feather,low:Lightbulb,medium:Brain,high:BrainCircuit,xhigh:Telescope,max:Sparkles,ultra:Rocket};
+  const Icon = id === 'reasoning_effort' ? reasoningIcons[value] ?? Brain : id === 'service_tier' ? (value === 'priority' || value === 'fast' ? Zap : Gauge) : null;
+  return Icon ? <Icon aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" /> : null;
+}
+
 function OptionControl({
   descriptor, value, onChange,
 }: {
@@ -746,8 +760,8 @@ function OptionControl({
       </button>
     );
   }
-  const current = descriptor.options.find((o) => o.value === value) ?? descriptor.options[0];
-  if (!current) return null;
+  const current = descriptor.options.find((o) => o.value === value);
+  if (!descriptor.options.length) return null;
   return (
     <Popover>
       <PopoverTrigger asChild>
@@ -755,7 +769,8 @@ function OptionControl({
           type="button"
           className="inline-flex max-w-[11rem] items-center gap-1 rounded-md px-1.5 py-0.5 text-[12.5px] text-foreground/85 transition-colors hover:bg-fg/[0.05]"
         >
-          <span className="truncate">{current.label}</span>
+          <ModelOptionIcon id={descriptor.id} value={value} />
+          <span className="truncate">{current ? optionLabel(descriptor.id,current.value,current.label) : 'Agent default'}</span>
           <ChevronDown className="size-3 shrink-0 text-muted-foreground/60" />
         </button>
       </PopoverTrigger>
@@ -765,18 +780,19 @@ function OptionControl({
             key={o.value}
             type="button"
             role="menuitemradio"
-            aria-checked={o.value === current.value}
+            aria-checked={o.value === value}
             onClick={() => onChange(o.value)}
             className={cn(
               'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-fg/[0.05]',
-              o.value === current.value ? 'text-foreground' : 'text-muted-foreground',
+              o.value === value ? 'text-foreground' : 'text-muted-foreground',
             )}
           >
+            <ModelOptionIcon id={descriptor.id} value={o.value} />
             <span className="min-w-0 flex-1">
-              <span className="block truncate text-[12.5px] font-medium">{o.label}</span>
+              <span className="block truncate text-[12.5px] font-medium">{optionLabel(descriptor.id,o.value,o.label)}</span>
               {o.hint && <span className="mt-0.5 block truncate text-[11px] text-muted-foreground/75">{o.hint}</span>}
             </span>
-            {o.value === current.value && <Check className="size-3.5 shrink-0" />}
+            {o.value === value && <Check className="size-3.5 shrink-0" />}
           </button>
         ))}
       </PopoverContent>

@@ -1,3 +1,4 @@
+import { agentAcceptsImages } from '../lib/acpOptions';
 import { cn } from '@/lib/utils';
 import { m } from 'framer-motion';
 import { ArrowUp,Square } from 'lucide-react';
@@ -143,6 +144,7 @@ export function Composer(props: Props) {
     attachFile,
     fileInputRef,
   } = useComposerController(props);
+  const unsupportedImages = agentDriving && images.length > 0 && !agentAcceptsImages(agentConfig);
   return (
     <div className="flex flex-col items-center gap-1.5 px-4 pb-4 pt-2 max-md:px-2 max-md:pb-2">
       {draftError && (
@@ -184,7 +186,7 @@ export function Composer(props: Props) {
         )}
         onSubmit={(e) => {
           e.preventDefault();
-          submit();
+          if (!unsupportedImages) submit();
         }}
         onDragOverCapture={(e) => {
           if (!e.dataTransfer.types.includes('Files')) return;
@@ -229,6 +231,7 @@ export function Composer(props: Props) {
           </div>
         )}
 
+        {unsupportedImages && <p role="alert" className="px-3 pt-2 text-xs text-mira-error">This model does not accept images. Remove them or choose another model.</p>}
         {!activePromptKind && images.length > 0 && (
           <div className="flex flex-wrap gap-2 px-1.5 pt-1">
             {images.map((img, i) => {
@@ -400,7 +403,7 @@ export function Composer(props: Props) {
                 // newline and only the mod chord sends.
                 if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
                   e.preventDefault();
-                  submit();
+                  if (!unsupportedImages) submit();
                   return;
                 }
                 if (e.key === 'Enter' && e.shiftKey) {
@@ -410,7 +413,7 @@ export function Composer(props: Props) {
                 }
                 if (e.key === 'Enter' && !cmdEnterSend) {
                   e.preventDefault();
-                  submit();
+                  if (!unsupportedImages) submit();
                   return;
                 }
                 if (e.key === 'Enter' && cmdEnterSend) {
@@ -605,7 +608,7 @@ export function Composer(props: Props) {
               <button
                 type="submit"
                 disabled={
-                  disabled ||
+                  disabled || unsupportedImages ||
                   (!text.trim() &&
                     attachments.length === 0 &&
                     images.length === 0 &&

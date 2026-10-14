@@ -1245,9 +1245,12 @@ async fn dispatch_on_slot(
             let native = matches!(agent, mira_acp::native::AgentHandle::Native(_));
             if native || agent.session_id().await.is_some() {
                 let v = serde_json::Value::String(value.clone());
+                let _dispatch = slot.engine.dispatch_lock.lock().await;
+                if !is_current_agent(&slot, &handle).await {
+                    return;
+                }
                 match agent.set_config_option(&option_id, v).await {
                     Ok(outcome) => {
-                        let _dispatch = slot.engine.dispatch_lock.lock().await;
                         if !is_current_agent(&slot, &handle).await {
                             return;
                         }
@@ -1273,6 +1276,29 @@ async fn dispatch_on_slot(
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner()) = Some(current);
                             crate::session_engine::publish(state, &slot).await;
+                        }
+                        if handle.driver_kind == "codex" && !outcome.is_empty() {
+                            let params = {
+                                let mut launch = slot.acp_launch.lock().await;
+                                launch.as_mut().map(|p| {
+                                    p.model_options = outcome
+                                        .iter()
+                                        .filter(|o| {
+                                            matches!(
+                                                o.id.as_str(),
+                                                "reasoning_effort" | "service_tier"
+                                            )
+                                        })
+                                        .filter_map(|o| {
+                                            o.current.clone().map(|v| (o.id.clone(), v))
+                                        })
+                                        .collect();
+                                    p.clone()
+                                })
+                            };
+                            if let Some(params) = params {
+                                crate::session_engine::remember_agent(&slot, &params, true).await;
+                            }
                         }
                         // The agent returns its refreshed option list, and a
                         // change usually moves `currentValue`. Forwarding it

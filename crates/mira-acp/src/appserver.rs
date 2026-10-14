@@ -324,8 +324,7 @@ fn turn_start_params(
         .unwrap_or(DEFAULT_CODEX_MODEL);
     let effort = effort
         .map(str::trim)
-        .filter(|e| !e.is_empty() && *e != "default")
-        .unwrap_or("medium");
+        .filter(|e| !e.is_empty() && *e != "default");
     let mut params = json!({
         "threadId": thread_id,
         "input": [{ "type": "text", "text": text }],
@@ -444,6 +443,10 @@ pub fn launch(program: std::path::PathBuf) -> crate::driver::LaunchConfig {
 /// A model from `model/list`.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CodexModel {
+    #[serde(default)]
+    pub is_default: bool,
+    #[serde(default)]
+    pub capabilities: crate::events::ModelCapabilities,
     pub value: String,
     pub label: String,
 }
@@ -1392,6 +1395,8 @@ pub fn parse_model_entry(e: &Value) -> Option<CodexModel> {
         .and_then(Value::as_str)
         .unwrap_or(value);
     Some(CodexModel {
+        is_default: e.get("isDefault").and_then(Value::as_bool).unwrap_or(false),
+        capabilities: serde_json::from_value(e.clone()).unwrap_or_default(),
         value: value.to_string(),
         label: label.to_string(),
     })
@@ -1483,23 +1488,90 @@ fn config_options_event(models: &[CodexModel], current: Option<&str>) -> Normali
             variant: "config_options".to_string(),
         },
         event: MiraEvent::ConfigOptions {
-            options: vec![SessionConfigView {
-                id: "model".to_string(),
-                name: "Model".to_string(),
-                description: None,
-                category: Some("model".to_string()),
-                current: current.map(str::to_string),
-                values: models
-                    .iter()
-                    .map(|m| crate::events::ConfigValueView {
-                        value: m.value.clone(),
-                        name: m.label.clone(),
-                        description: None,
-                    })
-                    .collect(),
-            }],
+            options: model_config_options(models, current),
         },
     }
+}
+
+fn model_config_options(models: &[CodexModel], current: Option<&str>) -> Vec<SessionConfigView> {
+    let mut options = vec![SessionConfigView {
+        id: "model".to_string(),
+        name: "Model".to_string(),
+        description: None,
+        category: Some("model".to_string()),
+        current: current.map(str::to_string),
+        values: models
+            .iter()
+            .map(|m| crate::events::ConfigValueView {
+                capabilities: Some(m.capabilities.clone()),
+                value: m.value.clone(),
+                name: m.label.clone(),
+                description: None,
+            })
+            .collect(),
+    }];
+    if let Some(model) = models.iter().find(|m| Some(m.value.as_str()) == current) {
+        let caps = &model.capabilities;
+        let effort_values = caps
+            .supported_reasoning_efforts
+            .iter()
+            .map(|e| crate::events::ConfigValueView {
+                value: e.reasoning_effort.clone(),
+                name: e.reasoning_effort.clone(),
+                description: Some(e.description.clone()),
+                capabilities: None,
+            })
+            .collect::<Vec<_>>();
+        let mut tier_values = caps
+            .service_tiers
+            .iter()
+            .map(|t| crate::events::ConfigValueView {
+                value: t.id.clone(),
+                name: t.name.clone(),
+                description: Some(t.description.clone()),
+                capabilities: None,
+            })
+            .collect::<Vec<_>>();
+        // A null catalog default means no override. Keep that choice available
+        // so enabling an optional priority tier can be undone in this chat.
+        if !tier_values.is_empty() && caps.default_service_tier.is_none() {
+            tier_values.insert(
+                0,
+                crate::events::ConfigValueView {
+                    value: String::new(),
+                    name: "Default".into(),
+                    description: None,
+                    capabilities: None,
+                },
+            );
+        }
+        for (id, name, current, values) in [
+            (
+                "reasoning_effort",
+                "Reasoning",
+                caps.default_reasoning_effort.clone(),
+                effort_values,
+            ),
+            (
+                "service_tier",
+                "Speed",
+                caps.default_service_tier.clone(),
+                tier_values,
+            ),
+        ] {
+            if !values.is_empty() {
+                options.push(SessionConfigView {
+                    id: id.into(),
+                    name: name.into(),
+                    description: None,
+                    category: Some(id.into()),
+                    current,
+                    values,
+                });
+            }
+        }
+    }
+    options
 }
 
 struct Callbacks {
@@ -1536,6 +1608,52 @@ struct PlanReview {
 /// What every `turn/start` is built from. Shared between the agent and the
 /// plan reviewer, so a turn started after a plan approval matches one the
 /// user sent.
+#[derive(Clone, Debug, Default)]
+struct TurnPreferences {
+    effort: Option<String>,
+    service_tier: Option<String>,
+    input_modalities: Option<Vec<String>>,
+}
+impl TurnPreferences {
+    fn reconcile(&mut self, caps: &crate::events::ModelCapabilities) {
+        self.effort = self
+            .effort
+            .take()
+            .filter(|v| {
+                caps.supported_reasoning_efforts
+                    .iter()
+                    .any(|e| &e.reasoning_effort == v)
+            })
+            .or_else(|| {
+                caps.default_reasoning_effort.clone().filter(|v| {
+                    caps.supported_reasoning_efforts
+                        .iter()
+                        .any(|e| &e.reasoning_effort == v)
+                })
+            });
+        self.service_tier = self
+            .service_tier
+            .take()
+            .filter(|v| caps.service_tiers.iter().any(|t| &t.id == v))
+            .or_else(|| {
+                caps.default_service_tier
+                    .clone()
+                    .filter(|v| caps.service_tiers.iter().any(|t| &t.id == v))
+            });
+        self.input_modalities = caps.input_modalities.clone();
+    }
+}
+
+fn apply_preferences(options: &mut [SessionConfigView], preferences: &TurnPreferences) {
+    for option in options {
+        match option.id.as_str() {
+            "reasoning_effort" => option.current = preferences.effort.clone(),
+            "service_tier" => option.current = preferences.service_tier.clone(),
+            _ => {}
+        }
+    }
+}
+
 struct TurnContext {
     model: Arc<Mutex<String>>,
     /// Runtime mode id (`plan`, `approval-required`, …). Applied per turn.
@@ -1543,8 +1661,7 @@ struct TurnContext {
     /// Where an approved plan gets built: the last non-plan mode.
     build_mode: Mutex<String>,
     cwd: Option<String>,
-    effort: Option<String>,
-    service_tier: Option<String>,
+    preferences: Mutex<TurnPreferences>,
     /// Whether Mira's tool server is attached to this thread.
     mira_tools: bool,
     /// Codex turns each user prompt produced, oldest first, this process. A
@@ -1577,8 +1694,26 @@ impl TurnContext {
 }
 
 impl TurnContext {
-    async fn params(&self, thread_id: &str, text: &str, images: &[mira_core::ImageData]) -> Value {
-        let model = self.model.lock().await.clone();
+    async fn params(
+        &self,
+        thread_id: &str,
+        text: &str,
+        images: &[mira_core::ImageData],
+    ) -> Result<Value, NativeError> {
+        let model_guard = self.model.lock().await;
+        let model = model_guard.clone();
+        let preferences = self.preferences.lock().await.clone();
+        drop(model_guard);
+        if !images.is_empty()
+            && preferences
+                .input_modalities
+                .as_ref()
+                .is_some_and(|m| !m.iter().any(|v| v == "image"))
+        {
+            return Err(NativeError::Other(
+                "The selected Codex model does not accept image input".into(),
+            ));
+        }
         let mode = self.mode.lock().await.clone();
         let (policy, sandbox) = policy_for_mode(&mode);
         let mut params = turn_start_params(
@@ -1589,13 +1724,13 @@ impl TurnContext {
             policy,
             sandbox,
             approvals_reviewer_for_mode(&mode),
-            self.effort.as_deref(),
-            self.service_tier.as_deref(),
+            preferences.effort.as_deref(),
+            preferences.service_tier.as_deref(),
             &mode,
             self.mira_tools,
         );
         params["input"] = codex_prompt_input(text, images);
-        params
+        Ok(params)
     }
 
     async fn set_mode(&self, mode: &str) {
@@ -1702,7 +1837,11 @@ async fn review_plans(
         }
         let tid = thread_id.lock().await.clone().unwrap_or_default();
         let params = turns.params(&tid, &text, &[]).await;
-        match start_turn(&conn, params, &active_turn, &turns).await {
+        let result = match params {
+            Ok(params) => start_turn(&conn, params, &active_turn, &turns).await,
+            Err(error) => Err(error),
+        };
+        match result {
             Ok(()) => {
                 // The follow-up belongs to the prompt that asked for the plan.
                 if let Some(last) = turns
@@ -1951,13 +2090,20 @@ impl crate::conn::AgentCallback for Callbacks {
                             .await;
                     }
                 }
-                AppServerAction::ModelRerouted { model } => {
+                AppServerAction::ModelRerouted { .. } => {
+                    // A reroute describes the running turn. Preserve the user's
+                    // selected next-turn model and its confirmed option values,
+                    // including a choice made while that older turn was active.
+                    let model_guard = self.turns.model.lock().await;
                     let models = self.models.lock().await.clone();
+                    let preferences = self.turns.preferences.lock().await.clone();
+                    let mut event = config_options_event(&models, Some(&model_guard));
+                    if let MiraEvent::ConfigOptions { options } = &mut event.event {
+                        apply_preferences(options, &preferences);
+                    }
+                    drop(model_guard);
                     if !models.is_empty() {
-                        let _ = self
-                            .tx
-                            .send(config_options_event(&models, Some(&model)))
-                            .await;
+                        let _ = self.tx.send(event).await;
                     }
                 }
             }
@@ -2033,8 +2179,7 @@ impl AppServerAgent {
                 .to_string(),
             ),
             cwd: cwd.clone(),
-            effort: None,
-            service_tier: None,
+            preferences: Mutex::new(TurnPreferences::default()),
             mira_tools: mira_mcp.is_some(),
             prompt_turns: std::sync::Mutex::new(Vec::new()),
             ended_turns: Default::default(),
@@ -2122,16 +2267,37 @@ impl AppServerAgent {
         // Mark the server-reported model, falling back to an explicit pick.
         // Older servers may omit it; leave their default unmarked.
         let models = Self::fetch_models(conn).await;
+        let initial = current_model.lock().await.clone();
+        let selected = opened
+            .get("model")
+            .and_then(Value::as_str)
+            .or(model
+                .as_deref()
+                .filter(|m| !m.is_empty() && *m != "default"))
+            .or_else(|| {
+                models
+                    .iter()
+                    .find(|m| m.is_default)
+                    .map(|m| m.value.as_str())
+            })
+            .or_else(|| {
+                models
+                    .iter()
+                    .find(|m| m.value == initial)
+                    .map(|m| m.value.as_str())
+            });
+        if let Some(selected) = selected {
+            *current_model.lock().await = selected.to_owned();
+        }
+        let selected_model = current_model.lock().await.clone();
+        if let Some(m) = models.iter().find(|m| m.value == selected_model) {
+            turns.preferences.lock().await.reconcile(&m.capabilities);
+        }
         if !models.is_empty() {
             *models_retained.lock().await = models.clone();
+            let selected = current_model.lock().await.clone();
             let _ = model_tx
-                .send(config_options_event(
-                    &models,
-                    opened
-                        .get("model")
-                        .and_then(Value::as_str)
-                        .or(model.as_deref()),
-                ))
+                .send(config_options_event(&models, Some(&selected)))
                 .await;
         }
 
@@ -2243,7 +2409,7 @@ impl AppServerAgent {
             .session_id()
             .await
             .ok_or_else(|| NativeError::Other("no codex thread yet".to_string()))?;
-        let params = self.turns.params(&tid, text, images).await;
+        let params = self.turns.params(&tid, text, images).await?;
         start_turn(self.process.conn(), params, &self.active_turn, &self.turns).await?;
         self.turns
             .prompt_turns
@@ -2387,6 +2553,7 @@ impl AppServerAgent {
         text: &str,
         images: &[mira_core::ImageData],
     ) -> Result<(), NativeError> {
+        self.turns.params("", "", images).await?;
         let thread_id = self
             .session_id()
             .await
@@ -2422,8 +2589,28 @@ impl AppServerAgent {
         } else {
             model
         };
-        let changed = *self.model.lock().await != next;
-        *self.model.lock().await = next.to_string();
+        let mut model_guard = self.model.lock().await;
+        let changed = *model_guard != next;
+        *model_guard = next.to_string();
+        let mut models = self.models.lock().await.clone();
+        if !models.iter().any(|model| model.value == next) {
+            models.push(CodexModel {
+                is_default: false,
+                capabilities: Default::default(),
+                value: next.to_owned(),
+                label: next.to_owned(),
+            });
+        }
+        *self.models.lock().await = models.clone();
+        // Same acknowledgement shape as ACP: the caller publishes this catalog
+        // with the selected value, even though Codex applies it on turn/start.
+        let caps = models
+            .iter()
+            .find(|m| m.value == next)
+            .map(|m| m.capabilities.clone())
+            .unwrap_or_default();
+        self.turns.preferences.lock().await.reconcile(&caps);
+        drop(model_guard);
         if changed {
             // The last reading was the old model's context against the old
             // model's window. Until the new model reports, the ring shows
@@ -2443,19 +2630,50 @@ impl AppServerAgent {
                 })
                 .await;
         }
-        let mut models = self.models.lock().await.clone();
-        if !models.iter().any(|model| model.value == next) {
-            models.push(CodexModel {
-                value: next.to_owned(),
-                label: next.to_owned(),
-            });
+        self.current_options().await
+    }
+
+    pub async fn current_options(&self) -> Vec<SessionConfigView> {
+        let model_guard = self.model.lock().await;
+        let model = model_guard.clone();
+        let models = self.models.lock().await.clone();
+        let preferences = self.turns.preferences.lock().await.clone();
+        drop(model_guard);
+        let mut options = model_config_options(&models, Some(&model));
+        apply_preferences(&mut options, &preferences);
+        options
+    }
+
+    pub async fn set_option(
+        &self,
+        id: &str,
+        value: &str,
+    ) -> Result<Vec<SessionConfigView>, String> {
+        if id == "model" {
+            return Ok(self.set_model(value).await);
         }
-        // Same acknowledgement shape as ACP: the caller publishes this catalog
-        // with the selected value, even though Codex applies it on turn/start.
-        match config_options_event(&models, Some(next)).event {
-            MiraEvent::ConfigOptions { options } => options,
-            _ => unreachable!("model catalog must produce config options"),
+        let model_guard = self.model.lock().await;
+        let models = self.models.lock().await.clone();
+        let options = model_config_options(&models, Some(&model_guard));
+        let option = options
+            .iter()
+            .find(|o| o.id == id)
+            .ok_or_else(|| format!("{id} is not advertised for this model"))?;
+        if !option.values.iter().any(|v| v.value == value) {
+            return Err(format!("Unsupported {id} value: {value}"));
         }
+        {
+            let mut preferences = self.turns.preferences.lock().await;
+            match id {
+                "reasoning_effort" => preferences.effort = Some(value.into()),
+                "service_tier" => {
+                    preferences.service_tier = (!value.is_empty()).then(|| value.into())
+                }
+                _ => return Err(format!("Unsupported option: {id}")),
+            }
+        }
+        drop(model_guard);
+        Ok(self.current_options().await)
     }
 
     pub async fn cancel(&self) -> Result<(), NativeError> {
@@ -2926,6 +3144,8 @@ mod tests {
         assert_eq!(
             parse_model_entry(&v(r#"{"id":"gpt-5","name":"GPT 5"}"#)),
             Some(CodexModel {
+                is_default: false,
+                capabilities: Default::default(),
                 value: "gpt-5".into(),
                 label: "GPT 5".into()
             })
@@ -2933,6 +3153,8 @@ mod tests {
         assert_eq!(
             parse_model_entry(&v(r#"{"slug":"x-mini"}"#)),
             Some(CodexModel {
+                is_default: false,
+                capabilities: Default::default(),
                 value: "x-mini".into(),
                 label: "x-mini".into()
             })
@@ -2955,14 +3177,139 @@ mod tests {
         assert!(map_notification("model/rerouted", &v(r#"{}"#)).is_empty());
     }
 
+    fn capable_model() -> CodexModel {
+        parse_model_entry(&json!({
+            "id":"catalog-entry", "model":"gpt-test", "displayName":"GPT Test", "isDefault":true,
+            "supportedReasoningEfforts":[{"reasoningEffort":"low","description":"Quick"},{"reasoningEffort":"high","description":"Deep"}],
+            "defaultReasoningEffort":"high", "inputModalities":["text"],
+            "serviceTiers":[{"id":"default","name":"Standard","description":"Standard speed"},{"id":"priority","name":"Fast","description":"Priority"}],
+            "defaultServiceTier":"priority", "additionalSpeedTiers":["fast"]
+        })).unwrap()
+    }
+
+    #[test]
+    fn catalogs_preserve_capabilities_and_advertise_only_supported_defaults() {
+        let model = capable_model();
+        assert!(model.is_default);
+        let options = model_config_options(&[model.clone()], Some("gpt-test"));
+        assert_eq!(options[1].current.as_deref(), Some("high"));
+        assert_eq!(options[2].current.as_deref(), Some("priority"));
+        assert_eq!(
+            options[0].values[0].capabilities.as_ref(),
+            Some(&model.capabilities)
+        );
+        let wire = serde_json::to_value(&options).unwrap();
+        assert_eq!(
+            wire[0]["values"][0]["capabilities"]["inputModalities"],
+            json!(["text"])
+        );
+        assert_eq!(
+            wire[0]["values"][0]["capabilities"]["additionalSpeedTiers"],
+            json!(["fast"])
+        );
+        let old = parse_model_entry(&json!({"id":"old"})).unwrap();
+        assert_eq!(model_config_options(&[old], Some("old")).len(), 1);
+        let mut prefs = TurnPreferences {
+            effort: Some("low".into()),
+            service_tier: Some("flex".into()),
+            ..Default::default()
+        };
+        prefs.reconcile(&model.capabilities);
+        assert_eq!(prefs.effort.as_deref(), Some("low"));
+        assert_eq!(prefs.service_tier.as_deref(), Some("priority"));
+        prefs.reconcile(&Default::default());
+        assert!(prefs.effort.is_none() && prefs.service_tier.is_none());
+        assert!(prefs.input_modalities.is_none());
+    }
+
+    #[tokio::test]
+    async fn native_options_apply_to_next_turn_and_reconcile_on_model_change() {
+        let (cfg, dir) = fake_codex();
+        let output = dir.path().join("settings-turn.json");
+        let script = std::fs::read_to_string(&cfg.program).unwrap();
+        let script = script.replace(
+            "    *'\"method\":\"turn/start\"'*)",
+            &format!(
+                "    *'\"method\":\"turn/start\"'*)\n      printf '%s' \"$line\" > '{}'",
+                output.display()
+            ),
+        );
+        std::fs::write(&cfg.program, script).unwrap();
+        let agent = AppServerAgent::start(
+            &cfg,
+            "approval-required",
+            None,
+            Some("gpt-test".into()),
+            None,
+            Arc::new(|_| Box::pin(async { crate::native::PermissionDecision::from(true) })),
+            None,
+        )
+        .await
+        .unwrap();
+        *agent.models.lock().await = vec![capable_model(), parse_model_entry(&json!({
+            "id":"other", "supportedReasoningEfforts":[{"reasoningEffort":"low"}], "defaultReasoningEffort":"low", "inputModalities":["text","image"]
+        })).unwrap()];
+        let thread = agent.session_id().await.unwrap();
+        let options = agent.set_model("gpt-test").await;
+        assert_eq!(options[1].current.as_deref(), Some("high"));
+        assert_eq!(options[2].current.as_deref(), Some("priority"));
+        assert!(agent.set_option("reasoning_effort", "ultra").await.is_err());
+        assert!(agent.set_option("service_tier", "flex").await.is_err());
+        agent.set_option("reasoning_effort", "low").await.unwrap();
+        agent.set_option("service_tier", "default").await.unwrap();
+        let params = agent.turns.params(&thread, "hello", &[]).await.unwrap();
+        assert_eq!(params["threadId"], thread);
+        assert_eq!(params["effort"], "low");
+        assert_eq!(
+            params["collaborationMode"]["settings"]["reasoning_effort"],
+            "low"
+        );
+        assert!(params.get("serviceTier").is_none());
+        agent.set_option("service_tier", "priority").await.unwrap();
+        assert_eq!(
+            agent.turns.params(&thread, "hello", &[]).await.unwrap()["serviceTier"],
+            "priority"
+        );
+        agent.prompt("Test native option delivery").await.unwrap();
+        let captured: Value = serde_json::from_slice(&std::fs::read(&output).unwrap()).unwrap();
+        assert_eq!(captured["params"]["effort"], "low");
+        assert_eq!(captured["params"]["serviceTier"], "priority");
+        assert_eq!(captured["params"]["threadId"], thread);
+        let image = mira_core::ImageData {
+            media_type: "image/png".into(),
+            data: "fixture".into(),
+            source: None,
+        };
+        assert!(agent
+            .turns
+            .params(&thread, "hello", &[image.clone()])
+            .await
+            .is_err());
+        let options = agent.set_model("other").await;
+        assert_eq!(options.len(), 2);
+        let params = agent
+            .turns
+            .params(&thread, "hello", &[image])
+            .await
+            .unwrap();
+        assert_eq!(params["effort"], "low");
+        assert!(params.get("serviceTier").is_none());
+        assert_eq!(agent.session_id().await.as_deref(), Some(thread.as_str()));
+        agent.shutdown().await;
+    }
+
     #[test]
     fn config_options_event_marks_current_without_reordering() {
         let models = vec![
             CodexModel {
+                is_default: false,
+                capabilities: Default::default(),
                 value: "gpt-5".into(),
                 label: "GPT 5".into(),
             },
             CodexModel {
+                is_default: false,
+                capabilities: Default::default(),
                 value: "gpt-5-mini".into(),
                 label: "GPT 5 Mini".into(),
             },
@@ -3562,9 +3909,17 @@ done
             })
         });
 
-        let agent = AppServerAgent::start(&cfg, "approval-required", None, None, None, gate, None)
-            .await
-            .expect("handshake + thread/start");
+        let agent = AppServerAgent::start(
+            &cfg,
+            "approval-required",
+            None,
+            Some("gpt-5".into()),
+            None,
+            gate,
+            None,
+        )
+        .await
+        .expect("handshake + thread/start");
         assert_eq!(agent.session_id().await.as_deref(), Some("th-1"));
 
         let mut events = agent.events.lock().unwrap().take().expect("events rx");
@@ -3607,7 +3962,7 @@ done
                         MiraEvent::ToolCallUpdate(c) if c.id == "i1" => saw_update = true,
                         MiraEvent::ConfigOptions { options }
                             if options.iter().any(|o| {
-                                o.id == "model" && o.current.as_deref() == Some("gpt-5-mini")
+                                o.id == "model" && o.current.as_deref() == Some("gpt-5")
                             }) => {
                                 saw_marked = true;
                             }
@@ -3625,7 +3980,7 @@ done
         assert_eq!(end.stop_reason, "completed");
         assert!(
             saw_marked,
-            "a reroute must re-emit the list with the new current marked"
+            "an in-flight reroute must preserve the explicitly selected next-turn model"
         );
 
         let asked = asked.lock().await;
@@ -3716,8 +4071,7 @@ mod thread_isolation_tests {
                 mode: Mutex::new("auto".into()),
                 build_mode: Mutex::new("auto".into()),
                 cwd: None,
-                effort: None,
-                service_tier: None,
+                preferences: Mutex::new(TurnPreferences::default()),
                 mira_tools: false,
                 prompt_turns: Default::default(),
                 ended_turns: Default::default(),
@@ -3792,8 +4146,7 @@ mod thread_isolation_tests {
                 mode: Mutex::new("approval-required".into()),
                 build_mode: Mutex::new("approval-required".into()),
                 cwd: None,
-                effort: None,
-                service_tier: None,
+                preferences: Mutex::new(TurnPreferences::default()),
                 mira_tools: false,
                 prompt_turns: Default::default(),
                 ended_turns: Default::default(),

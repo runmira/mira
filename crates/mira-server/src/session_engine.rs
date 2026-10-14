@@ -456,6 +456,23 @@ pub async fn current(state: &AppState, slot: &SessionSlot) -> SessionEngine {
                 .await
                 .map(|a| a.runtime_capabilities())
                 .unwrap_or_default();
+            if let Some(mira_acp::native::AgentHandle::AppServer(codex)) = handle.agent().await {
+                let options = codex.current_options().await;
+                if let Some(model) = options
+                    .iter()
+                    .find(|o| o.category.as_deref() == Some("model"))
+                {
+                    if let Some(modalities) = model
+                        .values
+                        .iter()
+                        .find(|v| Some(&v.value) == model.current.as_ref())
+                        .and_then(|v| v.capabilities.as_ref())
+                        .and_then(|c| c.input_modalities.as_ref())
+                    {
+                        caps.image_input = modalities.iter().any(|m| m == "image");
+                    }
+                }
+            }
             if handle.opencode_control.is_some() {
                 caps.steering = mira_acp::runtime::SteeringCapability::Native;
             }
@@ -487,9 +504,16 @@ pub async fn publish(state: &AppState, slot: &SessionSlot) {
 /// Make `params` this session's engine and bring the agent up in the
 /// background, so the composer can show it (and any startup failure)
 /// straight away instead of on the first prompt.
-pub async fn select_agent(state: &AppState, slot: &Arc<SessionSlot>, params: AcpLaunchParams) {
+pub async fn select_agent(state: &AppState, slot: &Arc<SessionSlot>, mut params: AcpLaunchParams) {
     let _dispatch = slot.engine.dispatch_lock.lock().await;
     let _start = slot.engine.start_lock.lock().await;
+    let meta = slot.session.read().await.agent_meta().await;
+    if params.model_options.is_empty() {
+        params.model_options = AcpLaunchParams::saved_model_options(
+            meta.as_ref().and_then(|m| m.launch.as_ref()),
+            &params.instance,
+        );
+    }
     let previous = slot.acp_launch.lock().await.clone();
     let from_provider = previous.is_none();
     let same_setup = previous.as_ref().is_some_and(|p| p.same_agent(&params));
@@ -507,6 +531,15 @@ pub async fn select_agent(state: &AppState, slot: &Arc<SessionSlot>, params: Acp
         if let (Some(agent), Some(model)) = (&reused_agent, params.model.as_deref()) {
             match crate::acp_session::apply_model_to_agent(agent, model).await {
                 Ok(options) => {
+                    if params.driver_kind == "codex" {
+                        params.model_options = options
+                            .iter()
+                            .filter(|o| {
+                                matches!(o.id.as_str(), "reasoning_effort" | "service_tier")
+                            })
+                            .filter_map(|o| o.current.clone().map(|v| (o.id.clone(), v)))
+                            .collect();
+                    }
                     if let Ok(mut reported) = slot.engine.reported_model.lock() {
                         *reported = Some(model.to_owned());
                     }
@@ -718,13 +751,15 @@ pub async fn ensure_agent(
 /// routes back to it with the same settings.
 pub(crate) async fn remember_agent(slot: &SessionSlot, params: &AcpLaunchParams, active: bool) {
     let session = slot.session.read().await;
+    let previous = session.agent_meta().await;
+    let launch = params.persisted_with_options(previous.as_ref().and_then(|m| m.launch.as_ref()));
     session
         .set_agent(mira_harness::persist::AgentSessionMeta {
             driver_kind: params.driver_kind.clone(),
             instance: Some(params.instance.clone()),
             model: params.model.clone(),
             active,
-            launch: Some(params.to_persisted()),
+            launch: Some(launch),
         })
         .await;
 }

@@ -381,6 +381,8 @@ async fn fill_cli_models(status: &mut AgentStatus, driver: &dyn AcpDriver) {
             .map(str::trim)
             .filter(|l| !l.is_empty() && l.contains('/'))
             .map(|l| crate::appserver::CodexModel {
+                is_default: false,
+                capabilities: Default::default(),
                 value: l.to_string(),
                 label: l.to_string(),
             })
@@ -398,6 +400,8 @@ fn fill_known_models(status: &mut AgentStatus, driver: &dyn AcpDriver) {
             .known_models()
             .iter()
             .map(|(value, label)| crate::appserver::CodexModel {
+                is_default: false,
+                capabilities: Default::default(),
                 value: (*value).to_string(),
                 label: (*label).to_string(),
             })

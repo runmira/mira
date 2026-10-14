@@ -238,7 +238,7 @@ export type AcpAgentState =
 
 /** One row in the agent list. */
 export type AcpAgentStatus = {
-  models?: { value: string; label: string }[];
+  models?: { value: string; label: string; capabilities?: NativeModelCapabilities }[];
   kind: string;
   display_name: string;
   state: AcpAgentState;
@@ -323,7 +323,17 @@ export type ExternalAgentSession = {
   updated_at?: string | null;
 };
 
+export type NativeModelCapabilities = {
+  supportedReasoningEfforts: { reasoningEffort: string; description: string }[];
+  defaultReasoningEffort?: string | null;
+  inputModalities?: string[] | null;
+  serviceTiers: { id: string; name: string; description: string }[];
+  defaultServiceTier?: string | null;
+  additionalSpeedTiers: string[];
+};
+
 export type AcpConfigValue = {
+  capabilities?: NativeModelCapabilities | null;
   value: string;
   name: string;
   description?: string | null;

@@ -163,6 +163,7 @@ fn model_config_event(
 ) -> Option<NormalizedEvent> {
     let mut values = match current {
         Some(model) => vec![ConfigValueView {
+            capabilities: None,
             value: model.to_string(),
             name: model.to_string(),
             description: None,
@@ -173,6 +174,7 @@ fn model_config_event(
         for m in known {
             if Some(m.value.as_str()) != current && !values.iter().any(|e| e.value == m.value) {
                 values.push(ConfigValueView {
+                    capabilities: None,
                     value: m.value.clone(),
                     name: m.label.clone(),
                     description: m.description.clone(),
@@ -1540,11 +1542,14 @@ impl AgentHandle {
                 n.set_model(&model).await.map_err(|e| e.to_string())?;
                 Ok(Vec::new())
             }
-            AgentHandle::AppServer(a) if option_id == "model" => {
-                let model = value.as_str().unwrap_or_default();
-                Ok(a.set_model(model).await)
+            AgentHandle::AppServer(a) => {
+                a.set_option(
+                    option_id,
+                    value.as_str().ok_or("Config value must be a string")?,
+                )
+                .await
             }
-            AgentHandle::Native(_) | AgentHandle::AppServer(_) => Err(format!(
+            AgentHandle::Native(_) => Err(format!(
                 "{option_id} applies to the next run of this agent — restart it to change the model"
             )),
         }

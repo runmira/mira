@@ -956,8 +956,43 @@ impl From<&SessionMode> for SessionModeView {
 }
 
 /// A selectable value within a config option.
+/// Capabilities explicitly advertised by a native model catalog. Missing
+/// modalities means unknown; an empty advertised list does not accept images.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCapabilities {
+    #[serde(default)]
+    pub supported_reasoning_efforts: Vec<ReasoningChoice>,
+    #[serde(default)]
+    pub default_reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub input_modalities: Option<Vec<String>>,
+    #[serde(default)]
+    pub service_tiers: Vec<ServiceTierChoice>,
+    #[serde(default)]
+    pub default_service_tier: Option<String>,
+    #[serde(default)]
+    pub additional_speed_tiers: Vec<String>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReasoningChoice {
+    pub reasoning_effort: String,
+    #[serde(default)]
+    pub description: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceTierChoice {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ConfigValueView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<ModelCapabilities>,
     pub value: String,
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1018,6 +1053,7 @@ impl From<&SessionConfigOption> for SessionConfigView {
 
 fn value_view(v: &SessionConfigSelectOption) -> ConfigValueView {
     ConfigValueView {
+        capabilities: None,
         value: v.value.to_string(),
         name: v.name.clone(),
         description: v.description.clone(),

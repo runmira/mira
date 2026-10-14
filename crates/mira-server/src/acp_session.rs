@@ -448,6 +448,18 @@ pub async fn start_agent(
                 }
             }
 
+            if let AgentHandle::AppServer(codex) = &agent {
+                // Reconcile old saved selections against the freshly advertised
+                // model before accepting them. Unsupported old choices fall back
+                // to this catalog's defaults instead of preventing startup.
+                for (id, value) in &params.model_options {
+                    let _ = codex.set_option(id, value).await;
+                }
+                let _ = candidate_events.send(ServerMsg::AcpConfigOptions {
+                    options: codex.current_options().await,
+                    driver: Some(params.driver_kind.clone()),
+                });
+            }
             Ok(agent)
         },
         stop_agent(slot),
@@ -1761,6 +1773,8 @@ pub struct AcpLaunchParams {
     pub mode: PermissionMode,
     /// The agent model picked for this session; applied on every launch.
     pub model: Option<String>,
+    /// Confirmed native model options for this chat and engine instance.
+    pub model_options: std::collections::BTreeMap<String, String>,
     /// The agent's own permission-mode id picked for this session (native
     /// transports take it at launch); applied on every launch.
     pub mode_id: Option<String>,
@@ -1779,6 +1793,7 @@ impl AcpLaunchParams {
             cfg,
             mode: PermissionMode::Ask,
             model: None,
+            model_options: Default::default(),
             mode_id: None,
         }
     }
@@ -1846,8 +1861,36 @@ impl AcpLaunchParams {
             "effort": self.cfg.effort,
             "setting_sources": self.cfg.setting_sources,
             "model": self.model,
+            "model_options": self.model_options,
             "mode_id": self.mode_id,
         })
+    }
+
+    pub fn saved_model_options(
+        previous: Option<&serde_json::Value>,
+        instance: &str,
+    ) -> std::collections::BTreeMap<String, String> {
+        previous
+            .and_then(|v| v.get("instance_model_options"))
+            .and_then(|v| v.get(instance))
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn persisted_with_options(
+        &self,
+        previous: Option<&serde_json::Value>,
+    ) -> serde_json::Value {
+        let mut launch = self.to_persisted();
+        let mut saved = previous
+            .and_then(|v| v.get("instance_model_options"))
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
+        saved.insert(self.instance.clone(), serde_json::json!(self.model_options));
+        launch["instance_model_options"] = serde_json::Value::Object(saved);
+        launch
     }
 
     /// Rebuild launch params from a session record's agent meta.
@@ -1890,6 +1933,11 @@ impl AcpLaunchParams {
             cfg,
             mode: PermissionMode::Ask,
             model: s("model").or_else(|| meta.model.clone()),
+            model_options: v
+                .get("model_options")
+                .cloned()
+                .and_then(|v| serde_json::from_value(v).ok())
+                .unwrap_or_default(),
             mode_id: s("mode_id"),
         }
     }
@@ -2565,6 +2613,44 @@ mod resolve_start_tests {
             back.same_agent(&p) || p.cfg.api_key.is_some(),
             "only the secrets differ"
         );
+    }
+
+    #[test]
+    fn confirmed_model_options_survive_reload_and_are_scoped_to_instances() {
+        let mut work = AcpLaunchParams::for_instance("codex-work", "codex", Default::default());
+        work.model_options
+            .insert("reasoning_effort".into(), "high".into());
+        work.model_options
+            .insert("service_tier".into(), "priority".into());
+        let first = work.persisted_with_options(None);
+        let mut personal =
+            AcpLaunchParams::for_instance("codex-personal", "codex", Default::default());
+        personal
+            .model_options
+            .insert("reasoning_effort".into(), "low".into());
+        let second = personal.persisted_with_options(Some(&first));
+        let json = serde_json::to_string(&second).unwrap();
+        let reloaded: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            AcpLaunchParams::saved_model_options(Some(&reloaded), "codex-work"),
+            work.model_options
+        );
+        assert_eq!(
+            AcpLaunchParams::saved_model_options(Some(&reloaded), "codex-personal"),
+            personal.model_options
+        );
+        assert!(
+            AcpLaunchParams::saved_model_options(Some(&reloaded), "another-instance").is_empty()
+        );
+        let back = AcpLaunchParams::from_meta(&mira_harness::persist::AgentSessionMeta {
+            driver_kind: "codex".into(),
+            instance: Some("codex-personal".into()),
+            model: None,
+            active: true,
+            launch: Some(reloaded),
+        });
+        assert_eq!(back.model_options, personal.model_options);
+        assert!(AcpLaunchParams::saved_model_options(None, "codex-work").is_empty());
     }
 
     #[test]

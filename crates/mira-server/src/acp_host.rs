@@ -1817,6 +1817,7 @@ mod event_tests {
                 category: Some("model".into()),
                 current: Some("grok-code".into()),
                 values: vec![ConfigValueView {
+                    capabilities: None,
                     value: "grok-code".into(),
                     name: "Grok Code".into(),
                     description: None,

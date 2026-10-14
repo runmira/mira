@@ -176,7 +176,10 @@ pub fn openai_compatible(model_id: &str, flavor: CompatFlavor) -> ModelCapabilit
         option_descriptors.push(tier_descriptor());
     }
 
-    ModelCapabilities { option_descriptors }
+    ModelCapabilities {
+        native_metadata: None,
+        option_descriptors,
+    }
 }
 
 /// Anthropic's native API. Extended thinking is budget-based, and
@@ -196,6 +199,7 @@ pub fn anthropic(model_id: &str) -> ModelCapabilities {
         || id.contains("opus-4")
         || id.contains("haiku-4");
     ModelCapabilities {
+        native_metadata: None,
         option_descriptors: if thinking {
             vec![effort_descriptor()]
         } else {

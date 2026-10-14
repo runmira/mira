@@ -335,3 +335,22 @@ into the session engine immediately and saves the standing choice. Codex applies
 that choice on the next `turn/start` in the existing native thread; an already
 running turn retains its original model. No new Mira session or native thread
 is required, and stale context-window readings are cleared on the switch.
+
+## Codex model capabilities and per-chat choices
+
+Codex model catalogs retain supported/default reasoning efforts, service tiers
+and defaults, input modalities, and legacy speed metadata. Live config options
+and engine resources carry this metadata. The composer shows only advertised
+reasoning and speed choices for the selected model. A null service-tier default
+keeps a Default choice available alongside optional Fast tiers. Older catalogs
+without these fields expose no invented controls and defer to Codex's defaults.
+
+Confirmed choices are persisted with the chat, keyed by engine instance, and
+reapplied after a restart against the current catalog. Changing models retains
+compatible choices and otherwise uses the new model's advertised defaults.
+Each subsequent native turn receives the selected effort (including collaboration
+mode settings) and service tier on the same thread; an active turn keeps its
+existing request. Explicit text-only models reject image prompts and steering,
+and the composer explains the restriction before sending attached images.
+
+Reference: [Codex model schema](https://github.com/openai/codex/blob/f87ba04ec3cd386a92e775405b252a310b40bb0d/codex-rs/app-server-protocol/schema/typescript/v2/Model.ts).
