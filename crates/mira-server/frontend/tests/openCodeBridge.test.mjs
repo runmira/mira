@@ -1,0 +1,20 @@
+import assert from 'node:assert/strict';
+import {test} from 'node:test';
+import bridge from '../../src/opencode_bridge.mjs';
+test('authenticated bridge admits steering into the same session, deduplicates input, and closes with its owners',async()=>{
+  let listener,stops=0;const calls=[];
+  globalThis.Bun={file:()=>({text:async()=> '123456789012345678901234567890123456'}),serve:options=>{listener=options;return {stop(){stops++;}};}};
+  const context={options:{port:19001,authFile:'/private/auth'},session:{prompt:async input=>{calls.push(input);}}};
+  const cleanup=await bridge.setup(context);
+  const authorization='Basic '+Buffer.from('opencode:123456789012345678901234567890123456').toString('base64');
+  const input={sessionID:'active-session',id:'msg_mira_steer_input',prompt:{text:'Change direction',files:[]}};
+  const request=(headers={authorization})=>new Request('http://127.0.0.1:19001/mira/steer',{method:'POST',headers:{'content-type':'application/json',...headers},body:JSON.stringify(input)});
+  assert.equal((await listener.fetch(request({}))).status,401);
+  assert.equal((await listener.fetch(request({authorization,origin:'https://untrusted.example'}))).status,403);
+  assert.equal((await listener.fetch(request())).status,200);
+  assert.equal((await listener.fetch(request())).status,200);
+  assert.deepEqual(calls,[{sessionID:'active-session',id:input.id,text:'Change direction',files:[],delivery:'steer'}]);
+  const another={...context};const cleanupOther=await bridge.setup(another);
+  cleanup();assert.equal(stops,0);cleanupOther();assert.equal(stops,1);
+  delete globalThis.Bun;
+});

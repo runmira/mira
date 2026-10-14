@@ -37,7 +37,18 @@ export function AssistantSelectionToolbar({ pane, sessionId, onQuote, onAskAside
       setCaptured({ text, turn, range: range.cloneRange(), citation: { session: sessionId ?? '', turn, quote: raw, before: full.slice(Math.max(0, offset - 48), offset), after: full.slice(offset + raw.length, offset + raw.length + 48) } });
     };
     const update = () => { if (!dragging) { cancelAnimationFrame(frame); frame = requestAnimationFrame(capture); } };
-    const down = (event: PointerEvent) => { if (toolbar.current?.contains(event.target as Node)) return; dragging = event.button === 0; setCaptured(null); };
+    const down = (event: PointerEvent) => {
+      if (event.button !== 0 || toolbar.current?.contains(event.target as Node)) return;
+      // Buttons can prevent the browser's default selection collapse. Clear
+      // only our transcript range; the new gesture can still select text.
+      const selection = window.getSelection();
+      if (selection?.anchorNode && selection.focusNode && pane.current?.contains(selection.anchorNode) && pane.current.contains(selection.focusNode)) {
+        selection.removeAllRanges();
+      }
+      dragging = true;
+      cancelAnimationFrame(frame);
+      setCaptured(null);
+    };
     const up = () => { dragging = false; update(); };
     const escape = (event: KeyboardEvent) => {
       if (event.key === 'Escape' && toolbar.current) { window.getSelection()?.removeAllRanges(); setCaptured(null); }

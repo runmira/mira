@@ -51,7 +51,6 @@ export function useComposerCommands(
     queueMutationsRef,
     pendingSteerRef,
     getQueues,
-    isTurnRunning,
     flushNativeFrames,
     flushTokens,
     followRef,
@@ -165,11 +164,6 @@ export function useComposerCommands(
     if (!session || pendingSteerRef.current.has(session)) return;
     const picked = getQueues().get(session)?.find((item) => item.id === id);
     if (!picked) return;
-    if (!isTurnRunning()) {
-      // The server outbox will dispatch when the foreground turn releases.
-      return;
-      return;
-    }
     flushNativeFrames();
     flushTokens();
     pendingSteerRef.current.set(session, picked);
@@ -192,12 +186,16 @@ export function useComposerCommands(
         },
       },
     ]);
-    wsRef.current?.send({
+    if (wsRef.current?.send({
       type: 'steer',
       request_id: id,
       text: picked.text,
       images: picked.images,
-    });
+    }) === false || !wsRef.current) {
+      pendingSteerRef.current.delete(session);
+      updateSessionQueue(session, items => items.map(item => item.id === id ? {...item, steering:false, error:'Reconnect before steering. Your message is still queued.'} : item));
+      updateTranscript(entries => entries.filter(entry => entry.kind !== 'msg' || entry.steerRequestId !== id));
+    }
   }
 
   function sendNow(

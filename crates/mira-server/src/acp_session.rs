@@ -277,13 +277,9 @@ pub async fn start_agent(
         }
         _ => driver.resolve(&driver_cfg, mode, program.clone()),
     };
-    let opencode_control = if driver.kind() == "opencode"
-        && matches!(transport, Transport::Acp)
-        && crate::opencode_control::OpenCodeControl::supported(&launch).await
+    let mut opencode_control = if driver.kind() == "opencode" && matches!(transport, Transport::Acp)
     {
-        Some(crate::opencode_control::OpenCodeControl::configure(
-            &mut launch,
-        )?)
+        crate::opencode_control::OpenCodeControl::prepare(&mut launch).await?
     } else {
         None
     };
@@ -386,6 +382,7 @@ pub async fn start_agent(
                     &driver_cfg,
                     mode,
                     &program,
+                    &launch,
                     files,
                     terminals.clone(),
                     permissions,
@@ -414,6 +411,13 @@ pub async fn start_agent(
                     return Err("The external agent did not initialize within 30 seconds.".into());
                 }
             };
+
+            if let Some(control) = &opencode_control {
+                if !control.ready().await {
+                    opencode_control = None;
+                    let _ = candidate_events.send(ServerMsg::Warning { text:"OpenCode started, but its steering bridge did not become ready. Messages can still queue for the next turn.".into() });
+                }
+            }
 
             // ACP session/new uses the agent's directory default. Apply the user's
             // explicit model before any prompt; native transports already take it at launch.
@@ -1684,6 +1688,7 @@ async fn start_acp_agent_with_ports(
     cfg: &DriverConfig,
     mode: PermissionMode,
     program: &std::path::Path,
+    resolved_launch: &LaunchConfig,
     files: Arc<AcpFiles>,
     terminals: Arc<AcpTerminals>,
     permissions: Arc<AcpPermissions>,
@@ -1693,6 +1698,24 @@ async fn start_acp_agent_with_ports(
     native: Option<mira_acp::native::NativeOverrides>,
     mira_mcp: Option<mira_acp::session::MiraMcp>,
 ) -> Result<AgentHandle, StartError> {
+    if matches!(
+        mira_acp::process::choose_transport(driver, cfg, program),
+        Transport::Acp
+    ) {
+        return mira_acp::process::start(mira_acp::process::StartSpec {
+            launch: resolved_launch,
+            caps: Some(driver.client_caps()),
+            files,
+            terminals,
+            permissions,
+            events,
+            cwd: Some(cwd),
+            mira_mcp,
+            resume_session_id: native.and_then(|n| n.resume),
+        })
+        .await
+        .map(AgentHandle::Acp);
+    }
     start_acp_agent(
         driver,
         cfg,

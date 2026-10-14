@@ -273,3 +273,25 @@ that the provider accepts it or has credit.
 Sources: [OpenCode credential schema](https://github.com/anomalyco/opencode/blob/v2.0.22/packages/schema/src/credential.ts),
 [legacy credential migration](https://github.com/anomalyco/opencode/blob/dev/packages/core/src/database/migration/20260805200742_import_legacy_credentials.ts),
 and [auth import](https://github.com/anomalyco/opencode/blob/dev/packages/cli/src/commands/handlers/auth/import.ts).
+
+
+## OpenCode native steering
+
+OpenCode v2's ACP process owns a private server. Mira installs a temporary local
+plugin package using OpenCode's promise-plugin API and admits queued input through
+that server's `session.prompt` with `delivery: "steer"`. The existing ACP prompt
+and conversation remain active; steering does not cancel or start a second ACP
+prompt. Legacy OpenCode versions that advertise HTTP flags retain their original
+control path. The prepared launch configuration reaches the actual ACP process.
+
+The plugin exposes a loopback-only endpoint authenticated by a per-runtime token
+stored in a private file (0600 on Unix). It rejects browser origins, accepts text
+and inline images, deduplicates admission IDs, and closes when its plugin owners
+stop. Mira advertises steering only after the bridge passes its authenticated
+health check. Ambiguous delivery failures are never automatically retried.
+
+Validation includes the installed OpenCode v2.0.22 ACP startup and a live free-model
+turn that receives a steering instruction and finishes without cancellation.
+These opt-in tests use `MIRA_TEST_OPENCODE_BIN` and remain ignored in normal CI.
+Plugin authentication, admission deduplication and cleanup also run in the normal
+frontend test suite.

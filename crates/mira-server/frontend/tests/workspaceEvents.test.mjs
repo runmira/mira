@@ -214,3 +214,22 @@ test('Ready drops dispatching and delivered optimistic queue items before histor
   assert.deepEqual(queued.map(item=>item.id),['waiting','unconfirmed']);
   assert.match(queued[1].error,/unconfirmed/);
 });
+
+test('steering reaches the server even when the client turn flag is stale, with feedback if disconnected', () => {
+  const h=harness(), pending=ref(new Map()), sent=[];
+  const item={id:'queued',text:'Change direction',images:[]};
+  h.runtime.updateQueues(previous=>new Map(previous).set('active',[item]));
+  const context={...h.context,pendingSteerRef:pending,getQueues:()=>h.runtime.sessionState.get().queued,
+    updateQueueProjection:h.runtime.updateQueues,isTurnRunning:()=>false,
+    flushNativeFrames(){},flushTokens(){},followRef:ref(false),wsRef:ref({send:message=>{sent.push(message);return true;}}),
+  };
+  const commands=useComposerCommands(context);
+  h.runtime.transition(()=>commands.steerQueuedMessage('queued'));
+  assert.equal(sent[0].type,'steer');assert.equal(sent[0].request_id,'queued');
+  pending.current.clear();context.wsRef.current={send:()=>false};
+  h.runtime.transition(()=>commands.steerQueuedMessage('queued'));
+  const queued=h.runtime.sessionState.get().queued.get('active')[0];
+  assert.equal(queued.steering,false);assert.match(queued.error,/Reconnect/);
+  assert.equal(pending.current.size,0);
+  assert.ok(!h.entries().some(entry=>entry.steerRequestId==='queued'));
+});
