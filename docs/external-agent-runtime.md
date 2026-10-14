@@ -252,3 +252,24 @@ After saving the selected provider login, retry the message explicitly.
 
 Sources inspected: [OpenCode ACP service](https://github.com/anomalyco/opencode/blob/dev/packages/cli/src/acp/service.ts)
 and [child capability negotiation](https://github.com/anomalyco/opencode/blob/dev/packages/cli/src/acp/capabilities.ts).
+
+### Desktop and CLI credential compatibility
+
+A working OpenCode desktop login does not establish that Mira’s configured CLI
+has the same credentials. Diagnose the exact CLI binary and version first, then
+check `auth list --standalone` on OpenCode v2 with the same environment Mira
+passes. Do not forward ambient shell provider tokens as a workaround.
+
+OpenCode v1 stores provider credentials in its XDG data directory’s `auth.json`;
+v2 stores credentials in its database. The v2 `auth import --standalone` command
+accepts exported `Credential.Entry` records, not the legacy JSON object. Migration
+must preserve existing destination integrations and translate the legacy schema.
+Pipe the translated records directly to the import process; keep secret values
+out of logs, temporary files, browser responses, and issue or PR descriptions.
+Verify the stored provider appears without shell tokens, then separately verify
+the selected model and a live prompt. Importing a credential alone does not prove
+that the provider accepts it or has credit.
+
+Sources: [OpenCode credential schema](https://github.com/anomalyco/opencode/blob/v2.0.22/packages/schema/src/credential.ts),
+[legacy credential migration](https://github.com/anomalyco/opencode/blob/dev/packages/core/src/database/migration/20260805200742_import_legacy_credentials.ts),
+and [auth import](https://github.com/anomalyco/opencode/blob/dev/packages/cli/src/commands/handlers/auth/import.ts).

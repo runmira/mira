@@ -8,7 +8,7 @@ export function isFatalChatWarning(text: string): boolean {
 }
 export function chatFailure(text: string): { title: string; description: string; settings: boolean } {
   const lower = text.toLowerCase();
-  if (/authentication required.*provider authentication required/.test(lower)) return { title: 'Sign in to the external agent’s provider', description: 'The agent could not authenticate its selected model. For OpenCode, run opencode auth login in Terminal, connect that model’s provider, then retry this message. Mira’s provider key does not sign OpenCode in.', settings: true };
+  if (/authentication required.*provider authentication required/.test(lower)) return { title: 'Check the external agent’s provider connection', description: 'The agent could not authenticate its selected model. For OpenCode, check the CLI configured in External agents. Its desktop app and CLI can use different versions or credential stores. Run opencode auth login for that CLI if needed, then retry. Mira’s provider key does not sign OpenCode in.', settings: true };
   if (isProviderLimitFailure(text)) return { title: 'Provider limit reached', description: 'Wait for your provider allowance to become available, or choose another provider before retrying.', settings: true };
   if (/401|403|unauthorized|authentication|api.?key|not logged in|sign.?in/.test(lower)) return { title: 'Check your provider connection', description: 'Your provider or agent could not authenticate. Check its credentials or sign-in before retrying.', settings: true };
   if (/timed out|timeout/.test(lower)) return { title: 'The response timed out', description: 'The provider stopped responding. You can retry this message when the connection is ready.', settings: false };
