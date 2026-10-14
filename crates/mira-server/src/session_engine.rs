@@ -492,9 +492,44 @@ pub async fn select_agent(state: &AppState, slot: &Arc<SessionSlot>, params: Acp
     let _start = slot.engine.start_lock.lock().await;
     let previous = slot.acp_launch.lock().await.clone();
     let from_provider = previous.is_none();
-    let same_setup = previous
-        .as_ref()
-        .is_some_and(|p| p.same_agent(&params) && p.model == params.model);
+    let same_setup = previous.as_ref().is_some_and(|p| p.same_agent(&params));
+
+    let reused_agent = if same_setup {
+        match slot.acp_agent.read().await.clone() {
+            Some(handle) => handle.agent().await,
+            None => None,
+        }
+    } else {
+        None
+    };
+    if previous.as_ref().is_some_and(|p| p.model != params.model) {
+        if let (Some(agent), Some(model)) = (&reused_agent, params.model.as_deref()) {
+            match crate::acp_session::apply_model_to_agent(agent, model).await {
+                Ok(options) => {
+                    if let Ok(mut reported) = slot.engine.reported_model.lock() {
+                        *reported = Some(model.to_owned());
+                    }
+                    if !options.is_empty() {
+                        let _ = slot.events_tx.send(ServerMsg::AcpConfigOptions {
+                            options,
+                            driver: Some(params.driver_kind.clone()),
+                        });
+                    }
+                }
+                Err(error) => {
+                    let _ = slot.events_tx.send(ServerMsg::Error {
+                        text: format!(
+                            "Could not select {} model {model}: {error}",
+                            params.display_name()
+                        ),
+                    });
+                    return;
+                }
+            }
+        }
+        // None releases Mira's standing override. Keep the agent's current
+        // model and session; its own default is used on a future fresh session.
+    }
 
     // A different agent (or the same one reconfigured) replaces the old
     // process: two agents must never share one session's permissions.
@@ -569,6 +604,11 @@ pub async fn select_agent(state: &AppState, slot: &Arc<SessionSlot>, params: Acp
         .write()
         .expect("selection lock poisoned") = params.model.clone();
     remember_agent(slot, &params, true).await;
+    if reused_agent.is_some() {
+        publish(state, slot).await;
+        crate::runtime_requests::wake_outbox(state, slot);
+        return;
+    }
     *slot.engine.phase.lock().await = AgentPhase::Starting;
     publish(state, slot).await;
 

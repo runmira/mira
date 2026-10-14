@@ -232,7 +232,10 @@ export function useSessionEvents(
               fingerprint: item.fingerprint,
               steering: item.dispatching && !item.error,
               error: item.error ?? undefined,
-            })), new Set(msg.history.flatMap(message => message.input_id ? [message.input_id] : [])))
+            })), new Set([
+              ...msg.history.flatMap(message => message.input_id ? [message.input_id] : []),
+              ...(msg.queued_inputs ?? []).filter(item => item.dispatching || item.delivered).map(item => item.id),
+            ]))
         );
         pendingSteerRef.current.delete(msg.session_id);
         if (msg.session_id === previousSession && !followRef.current)

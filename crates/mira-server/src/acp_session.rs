@@ -372,21 +372,7 @@ pub async fn start_agent(
     // explicit model before any prompt; native transports already take it at launch.
     if matches!(transport, Transport::Acp) {
         if let Some(model) = params.model.as_deref().filter(|m| !m.is_empty()) {
-            let option_id = match &agent {
-                mira_acp::native::AgentHandle::Acp(a) => a
-                    .session()
-                    .config_options()
-                    .iter()
-                    .find(|o| o["category"] == "model")
-                    .and_then(|o| o["id"].as_str())
-                    .unwrap_or("model")
-                    .to_owned(),
-                _ => "model".to_owned(),
-            };
-            match agent
-                .set_config_option(&option_id, serde_json::json!(model))
-                .await
-            {
+            match apply_model_to_agent(&agent, model).await {
                 Ok(options) => {
                     if !options.is_empty() {
                         let _ = slot.events_tx.send(ServerMsg::AcpConfigOptions {
@@ -1902,6 +1888,27 @@ pub fn agent_turns(
     out
 }
 
+/// Apply a model to the existing conversation, using the ACP option's own ID.
+pub(crate) async fn apply_model_to_agent(
+    agent: &mira_acp::native::AgentHandle,
+    model: &str,
+) -> Result<Vec<mira_acp::events::SessionConfigView>, String> {
+    let option_id = match agent {
+        mira_acp::native::AgentHandle::Acp(a) => a
+            .session()
+            .config_options()
+            .iter()
+            .find(|o| o["category"] == "model")
+            .and_then(|o| o["id"].as_str())
+            .unwrap_or("model")
+            .to_owned(),
+        _ => "model".to_owned(),
+    };
+    agent
+        .set_config_option(&option_id, serde_json::json!(model))
+        .await
+}
+
 /// Relaunch the slot's native agent with overrides, keeping the session.
 ///
 /// Native launch flags (`--model`, `--permission-mode`) only take effect at
@@ -2449,6 +2456,13 @@ mod resolve_start_tests {
         assert!(
             a.same_agent(&b),
             "picking a model must not cost the running process"
+        );
+        b.model = None;
+        let mut overridden = a.clone();
+        overridden.model = Some("gpt-5".into());
+        assert!(
+            overridden.same_agent(&b),
+            "clearing a model override keeps the conversation"
         );
         assert!(!a.same_agent(&recorded("claude-code")));
     }

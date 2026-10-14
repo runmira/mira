@@ -104,6 +104,7 @@ export function ToolGroup({
     <div className="w-full">
       <button
         type="button"
+        data-transcript-disclosure
         aria-expanded={expanded}
         onClick={() => setExpanded((v) => !v)}
         className={cn(

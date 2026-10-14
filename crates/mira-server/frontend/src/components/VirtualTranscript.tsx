@@ -147,8 +147,10 @@ export function VirtualTranscript({ children, pane, identity, onNeedOlder, hasOl
       invalidate(value => value + 1);
     }
     function toggle(event: Event) {
-      const target = (event.target as HTMLElement).closest<HTMLElement>('[aria-expanded]');
+      const target = (event.target as HTMLElement).closest<HTMLElement>('[data-transcript-disclosure]');
       if (!target || !root.current?.contains(target)) return;
+      // Nested file links and action menus do not toggle the disclosure.
+      if ((event.target as HTMLElement).closest('button, [role="button"], a, input, select') !== target) return;
       const atEnd = scroll!.scrollHeight - scroll!.scrollTop - scroll!.clientHeight < 2;
       disclosure.current = { element: target, top: target.getBoundingClientRect().top, end: atEnd };
       if (!atEnd && latest.current.follow) latest.current.follow.current = false;

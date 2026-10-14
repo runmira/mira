@@ -316,6 +316,7 @@ export function WorkedForChip({
       type="button"
       onClick={locked ? undefined : onToggle}
       disabled={locked}
+      data-transcript-disclosure
       aria-expanded={expanded}
       title={locked ? 'Auto-expanded while in progress' : undefined}
       // `group` so the trailing caret can key off hover state via

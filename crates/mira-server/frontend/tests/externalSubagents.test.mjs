@@ -136,3 +136,12 @@ test('sparse delegation progress retains launch metadata and settles the early c
   assert.equal(streams.get('early').done,true);
   assert.equal(streams.get('early').entries[0].msg.content,'Found it');
 });
+
+test('description-only Task and Agent calls retain their delegated task in cards and child streams', () => {
+  for (const name of ['Task','Agent']) {
+    const call={id:name,name,status:'in_progress',raw_input:{description:'Inspect the auth flow'},content:[]};
+    const entries=upsertAcpTool([],call);
+    assert.equal(JSON.parse(entries[0].call.function.arguments).prompt,'Inspect the auth flow');
+    assert.equal(projectAcpSubagent(new Map(),call).get(name).prompt,'Inspect the auth flow');
+  }
+});

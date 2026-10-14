@@ -34,7 +34,7 @@ export function agentToolAsMira(call: AcpToolCall): { name: string; args: Args }
 
   if ((['Task', 'Agent', 'task', 'agent', 'subagent'].includes(name) || typeof input.subagent_type === 'string')
     && (typeof input.prompt === 'string' || !Object.keys(input).length || typeof input.subagent_type === 'string' || ((name === 'Task' || name === 'Agent') && !('command' in input) && !('task_id' in input)))) {
-    return { name: 'agent', args: { prompt: typeof input.prompt === 'string' ? input.prompt : '', type: str(input.subagent_type) ?? str(input.agent) ?? 'External agent', _external: true } };
+    return { name: 'agent', args: { prompt: str(input.prompt) ?? str(input.description) ?? '', type: str(input.subagent_type) ?? str(input.agent) ?? 'External agent', _external: true } };
   }
   switch (name) {
     case 'Computer':

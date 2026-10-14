@@ -186,3 +186,31 @@ test('dispatched and failed delivered input stays out of waiting queue while lat
   h.runtime.transition(() => events({ type: 'queue_updated', session_id: 'active', items: [item, waiting] }));
   assert.deepEqual(h.runtime.sessionState.get().queued.get('active').map(i => i.id), ['waiting']);
 });
+
+test('Ready drops dispatching and delivered optimistic queue items before history includes them', () => {
+  const h=harness();
+  h.runtime.updateQueues(previous=>new Map(previous).set('active',[
+    {id:'dispatching',text:'Sent'}, {id:'delivered',text:'Received'}, {id:'unconfirmed',text:'Pending confirmation'},
+  ]));
+  const commands=useComposerCommands({...h.context,updateQueueProjection:h.runtime.updateQueues});
+  const context=new Proxy({...h.context,
+    updateSessionQueue:commands.updateSessionQueue, recordQueueRecovery:h.runtime.updateRecovery,
+    turnCommands:h.runtime.turnCommands, activityTitlesRef:ref(new Map()), pendingSteerRef:ref(new Map()),
+    attachFromRef:ref(null), followRef:ref(true), paneRef:ref(null),
+  },{get(target,key){
+    if(key in target)return target[key];
+    if(String(key).endsWith('Ref'))return target[key]=ref(null);
+    return ()=>{};
+  }});
+  h.runtime.transition(()=>useSessionEvents(context)({
+    type:'ready',session_id:'active',history:[],running:false,
+    queued_inputs:[
+      {id:'dispatching',text:'Sent',dispatching:true},
+      {id:'delivered',text:'Received',delivered:true},
+      {id:'waiting',text:'Next',dispatching:false},
+    ],
+  }));
+  const queued=h.runtime.sessionState.get().queued.get('active');
+  assert.deepEqual(queued.map(item=>item.id),['waiting','unconfirmed']);
+  assert.match(queued[1].error,/unconfirmed/);
+});

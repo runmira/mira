@@ -38,14 +38,14 @@ function fixture() {
     for (const element of elements) if (element.dataset.virtualKey) element.firstElementChild.getBoundingClientRect = () => element.getBoundingClientRect();
   }
   async function render(ids) {
-    await act(() => root.render(React.createElement(VirtualTranscript, { pane: ref, identity: 'test', follow, lastInput }, ids.map(id => React.createElement('button', { key: id, 'aria-expanded': false }, id)))));
+    await act(() => root.render(React.createElement(VirtualTranscript, { pane: ref, identity: 'test', follow, lastInput }, ids.map(id => React.createElement('button', { key: id, 'aria-expanded': false, 'data-transcript-disclosure': '' }, id)))));
     geometry();
   }
   async function resize() {
     await act(() => { for (const observer of [...observers]) observer.callback([...observer.targets].map(target => ({ target }))); });
     geometry();
   }
-  return { pane, root, heights, render, resize, geometry };
+  return { pane, root, heights, render, resize, geometry, follow };
 }
 test('row measurement preserves current reading position, including a rapid scroll before resize', async () => {
   const f = fixture(), ids = Array.from({length: 40},(_,i)=>String(i));
@@ -111,4 +111,23 @@ test('scroll listeners attach when an ancestor host ref becomes available after 
   assert.ok(!pane.querySelector('[data-virtual-key]').textContent.includes('Row 0'), 'scroll updates the mounted range on its first lifecycle');
   assert.ok(pane.textContent.includes('Row 10'));
   await act(() => root.unmount()); host.remove();
+});
+
+// Unrelated popovers must not pin their trigger through subsequent row growth.
+test('an unrelated expandable control does not pin scrolling or disable following', async () => {
+  const f = fixture(), ids = Array.from({length:40},(_,i)=>String(i));
+  await f.render(ids); await f.resize();
+  f.pane.scrollTop = 3000;
+  await act(() => f.pane.dispatchEvent(new window.Event('scroll'))); f.geometry();
+  const button = [...f.pane.querySelectorAll('button')].find(el=>el.textContent==='11');
+  button.removeAttribute('data-transcript-disclosure');
+  f.follow.current = true;
+  let triggerTop = button.getBoundingClientRect().top;
+  button.getBoundingClientRect = () => rect(triggerTop,20);
+  await act(() => button.dispatchEvent(new window.MouseEvent('click',{bubbles:true})));
+  assert.equal(f.follow.current,true,'unrelated popovers do not change follow mode');
+  triggerTop += 120;
+  await f.render(ids);
+  assert.equal(f.pane.scrollTop,3000,'a changing popover trigger cannot move the reading position');
+  await act(() => f.root.unmount()); f.pane.remove();
 });
