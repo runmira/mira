@@ -78,6 +78,7 @@ impl SharedSelection {
 /// connection's own `attached_id` so two tabs can watch two sessions.
 #[derive(Clone)]
 pub struct AppState {
+    pub codex_auth: Arc<crate::codex_auth::AuthRegistry>,
     /// A request-scoped lease prevents eviction while an HTTP action runs.
     pub request_slot: Option<Arc<SessionSlot>>,
     pub slot_loads: Arc<std::sync::Mutex<HashMap<SessionId, std::sync::Weak<Mutex<()>>>>>,

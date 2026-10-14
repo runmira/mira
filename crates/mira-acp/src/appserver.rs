@@ -240,7 +240,7 @@ pub fn thread_open_params(
     }
 }
 
-fn initialize_params(name: &str) -> Value {
+pub(crate) fn initialize_params(name: &str) -> Value {
     json!({
         "clientInfo": { "name": name, "title": "Mira", "version": env!("CARGO_PKG_VERSION") },
         "capabilities": { "experimentalApi": true },
@@ -2724,6 +2724,39 @@ impl AppServerAgent {
         Ok(())
     }
 
+    /// Reload credentials, requirements and catalog after an account change.
+    /// This never opens a thread or retries user input.
+    pub async fn refresh_account_catalog(&self) -> Result<Vec<SessionConfigView>, String> {
+        let conn = self.process.conn();
+        for method in ["account/read", "configRequirements/read"] {
+            let params = if method == "account/read" {
+                json!({"refreshToken":false})
+            } else {
+                json!({})
+            };
+            match tokio::time::timeout(CALL_TIMEOUT, conn.request::<Value>(method, params)).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(crate::conn::ConnError::Remote { code: -32601, .. }))
+                    if method == "configRequirements/read" => {}
+                Ok(Err(error)) => return Err(error.to_string()),
+                Err(_) => return Err(format!("{method} timed out")),
+            }
+        }
+        let models = Self::fetch_models(conn).await;
+        {
+            let model_guard = self.model.lock().await;
+            let caps = models
+                .iter()
+                .find(|m| m.value == *model_guard)
+                .map(|m| m.capabilities.clone())
+                .unwrap_or_default();
+            // Never retain an earlier account's model capability metadata.
+            *self.models.lock().await = models;
+            self.turns.preferences.lock().await.reconcile(&caps);
+        }
+        Ok(self.current_options().await)
+    }
+
     /// The last usage snapshot the server pushed, if any.
     pub async fn rate_limits(&self) -> Option<Value> {
         self.rate_limits.lock().await.clone()
@@ -3845,6 +3878,49 @@ done
         assert_eq!(re(&line).as_deref(), Some("7"), "frame: {line}");
         // The shape the old greedy expression matched into.
         assert!(line.contains("request_user_input") || line.contains("Collaboration Mode"));
+    }
+
+    #[tokio::test]
+    async fn account_refresh_reloads_requirements_and_catalog_without_a_prompt() {
+        let (cfg, dir) = fake_codex();
+        let output = dir.path().join("account-requests.ndjson");
+        let script = std::fs::read_to_string(&cfg.program).unwrap();
+        let script = script
+            .replace(
+                "  case \"$line\" in",
+                &format!(
+                    "  printf '%s\\n' \"$line\" >> '{}'\n  case \"$line\" in",
+                    output.display()
+                ),
+            )
+            .replace(
+                r#"    *'"method":"account/read"'*)"#,
+                r#"    *'"method":"configRequirements/read"'*)
+      id=$(id_of "$line")
+      echo "{\"id\":$id,\"error\":{\"code\":-32601,\"message\":\"Method not found\"}}" ;;
+    *'"method":"account/read"'*)"#,
+            );
+        std::fs::write(&cfg.program, script).unwrap();
+        let agent = AppServerAgent::start(
+            &cfg,
+            "approval-required",
+            None,
+            Some("gpt-5".into()),
+            None,
+            Arc::new(|_| Box::pin(async { crate::native::PermissionDecision::from(true) })),
+            None,
+        )
+        .await
+        .unwrap();
+        let thread = agent.session_id().await;
+        let options = agent.refresh_account_catalog().await.unwrap();
+        assert_eq!(options[0].values.len(), 2);
+        assert_eq!(agent.session_id().await, thread);
+        let requests = std::fs::read_to_string(output).unwrap();
+        assert!(requests.contains("configRequirements/read"));
+        assert!(!requests.contains("turn/start"));
+        assert!(!requests.contains("account/login/start"));
+        agent.shutdown().await;
     }
 
     #[tokio::test]

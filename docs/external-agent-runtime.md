@@ -354,3 +354,28 @@ existing request. Explicit text-only models reject image prompts and steering,
 and the composer explains the restriction before sending attached images.
 
 Reference: [Codex model schema](https://github.com/openai/codex/blob/f87ba04ec3cd386a92e775405b252a310b40bb0d/codex-rs/app-server-protocol/schema/typescript/v2/Model.ts).
+
+## Codex sign-in (#196)
+
+The Codex instance's settings contain a sign-in row backed by an account-only
+app-server connection. It reads saved CLI credentials without opening a thread,
+supports browser and device-code sign-in, matches completion by the native login
+ID, and rereads account/requirements before confirming success. Native tokens
+never enter the UI or transcript; pending handoffs stay in memory and HTTP
+responses disable caching. Older CLI methods fall back explicitly to another
+flow or that instance's CLI login.
+
+The connection and pending attempt survive UI reconnects. Cancellation checks
+both connection and login IDs under the protocol gate and closes the native
+callback listener even when older cancellation methods fail. Connections expire
+after ten minutes, with a fresh ten-minute window when a sign-in starts. Changes to the instance's home, binary, launch environment or
+arguments revoke old handoffs; stale completions cannot update the new owner's
+readiness/model cache.
+
+Account changes refresh authenticated readiness/catalogs and affected live Codex
+threads' account requirements/model options. The selected native thread is kept,
+and failed prompts are never resent automatically. Mira's own account and native
+provider OAuth settings remain separate.
+
+References: [official authentication protocol](https://developers.openai.com/codex/app-server#authentication),
+[pinned account protocol](https://github.com/openai/codex/blob/f87ba04ec3cd386a92e775405b252a310b40bb0d/codex-rs/app-server-protocol/src/protocol/v2/account.rs).

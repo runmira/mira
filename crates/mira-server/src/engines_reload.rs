@@ -106,6 +106,7 @@ pub async fn reload(state: &AppState) {
     }
     let default = next.default_native_instance(&cfg).map(|i| i.id.to_string());
     state.engines.replace(next);
+    state.codex_auth.retire_changed(state).await;
 
     // A chat on a removed instance moves to the default and says so.
     for slot in state.list_slots().await {

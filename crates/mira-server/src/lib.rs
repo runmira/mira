@@ -40,6 +40,7 @@ mod browser;
 mod browser_recording;
 mod chat_import;
 pub mod checkpoints;
+pub mod codex_auth;
 mod computer;
 mod context_api;
 mod cwd;
@@ -355,6 +356,7 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
     slots.insert(initial_id.clone(), initial_slot.clone());
 
     let state = AppState {
+        codex_auth: Arc::new(crate::codex_auth::AuthRegistry::default()),
         request_slot: None,
         slot_loads: Arc::new(std::sync::Mutex::new(HashMap::new())),
         session_activity,
@@ -630,6 +632,11 @@ fn build_router(
         .route(
             "/api/engines/:instance/settings",
             get(engine_settings::get_settings).put(engine_settings::put_settings),
+        )
+        .route("/api/engines/:instance/account", get(codex_auth::status))
+        .route(
+            "/api/engines/:instance/account/login",
+            axum::routing::post(codex_auth::start).delete(codex_auth::cancel),
         )
         .route("/api/import/scan", get(chat_import::scan))
         .route("/api/import", axum::routing::post(chat_import::import))

@@ -310,7 +310,7 @@ fn external_models_cached(instance: &str) -> Option<Vec<mira_ai::ModelInfo>> {
         .filter(|m| !m.is_empty())
 }
 
-fn remember_external_snapshot(snapshot: EngineSnapshot) {
+pub(crate) fn remember_external_snapshot(snapshot: EngineSnapshot) {
     if let Ok(mut partial) = PARTIAL.lock() {
         partial
             .get_or_insert_with(Default::default)
@@ -323,6 +323,20 @@ fn remember_external_snapshot(snapshot: EngineSnapshot) {
         });
         hit.snapshots.retain(|s| s.instance != snapshot.instance);
         hit.snapshots.push(snapshot);
+    }
+}
+
+/// Account updates invalidate authenticated catalogs before a fresh probe.
+pub(crate) fn invalidate_account_instance(instance: &str) {
+    if let Ok(mut cache) = EXTERNAL.lock() {
+        if let Some(hit) = cache.as_mut() {
+            hit.snapshots.retain(|s| s.instance.as_str() != instance);
+        }
+    }
+    if let Ok(mut partial) = PARTIAL.lock() {
+        if let Some(rows) = partial.as_mut() {
+            rows.remove(instance);
+        }
     }
 }
 

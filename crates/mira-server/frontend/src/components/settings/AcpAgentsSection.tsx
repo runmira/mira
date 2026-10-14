@@ -1,3 +1,4 @@
+import { CodexAccountPanel } from './CodexAccountPanel';
 import { openCodeLoginCommand } from '../../lib/agentAuth';
 /**
  * The external-agent list.
@@ -417,6 +418,7 @@ function AgentDetail({
   update,
   saveKey,
   onStart,
+  onRefresh,
 }: {
   agent: AcpAgentStatus;
   cfg: Draft;
@@ -424,10 +426,12 @@ function AgentDetail({
   update: (kind: string, patch: Partial<Draft>) => void;
   saveKey: (kind: string, patch: Pick<AgentSettingsPatch, 'api_key' | 'api_key_env'>) => Promise<void>;
   onStart: (kind: string, resume?: string | null) => void;
+  onRefresh: () => void;
 }) {
   return (
     // Disabled until the server's copy loads, so nothing typed is lost.
     <fieldset disabled={!view} className="space-y-3.5 disabled:opacity-60">
+      {view?.driver === 'codex' && <CodexAccountPanel key={view.instance} instance={view.instance} enabled={cfg.enabled} onRefresh={onRefresh} />}
   <Field
     label="Display name"
     hint="Shown in place of the agent's own name."
@@ -894,6 +898,7 @@ export function AcpAgentsSection({
                   update={update}
                   saveKey={saveKey}
                   onStart={onStart}
+                  onRefresh={onRefresh}
                 />
               </div>
             </div>

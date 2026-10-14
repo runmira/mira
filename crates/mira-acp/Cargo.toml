@@ -8,6 +8,7 @@ description = "Agent Client Protocol runtime: drives external coding agents (Gro
 publish = false
 
 [dependencies]
+url = "2"
 uuid = { workspace = true }
 mira-sandbox = { workspace = true }
 mira-core = { workspace = true }
