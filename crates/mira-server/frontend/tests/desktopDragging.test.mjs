@@ -6,19 +6,15 @@ const browser = new Window();
 for (const key of ['window', 'document', 'Element', 'Node']) globalThis[key] = browser[key];
 after(() => browser.happyDOM.abort());
 const { installWindowDragging } = await bundle("export { installWindowDragging } from './src/lib/desktop';");
-test('desktop empty surfaces drag without stealing controls or text selection', () => {
+test('only loading and main toolbar regions drag, while controls and the rest of the app stay interactive', () => {
   let drags = 0;
   window.__MIRA_DESKTOP__ = true;
   window.__TAURI__ = { window: { getCurrentWindow: () => ({ startDragging: async () => { drags++; } }) } };
   installWindowDragging();
-  document.body.innerHTML = '<div id="surface"><button><span>Retry</span></button><textarea></textarea><p>Selectable text</p><div data-no-window-drag><div></div></div><div class="xterm"><div></div></div><div data-tauri-drag-region></div></div>';
+  document.body.innerHTML = '<div id="sidebar"><span>Sidebar</span></div><div id="transcript"><p>Selectable text</p><div id="empty"></div></div><div id="loading" data-window-drag-region><img draggable="false"></div><header data-window-drag-region><span id="title">Chat title</span><button><svg><path></path></svg></button><input><div data-no-window-drag><span>Menu</span></div></header>';
   const click = (target, options = {}) => target.dispatchEvent(new browser.MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0, detail: 1, ...options }));
-  for (const selector of ['button span', 'textarea', 'p', '[data-no-window-drag] div', '.xterm div', '[data-tauri-drag-region]']) click(document.querySelector(selector));
+  for (const selector of ['#sidebar', '#sidebar span', '#empty', '#transcript p', 'button path', 'input', '[data-no-window-drag] span']) click(document.querySelector(selector));
   assert.equal(drags, 0);
-  const surface = document.getElementById('surface');
-  click(surface, { button: 2 });
-  click(surface, { detail: 2 });
-  assert.equal(drags, 0);
-  click(surface);
-  assert.equal(drags, 1);
+  click(document.getElementById('title'), { button: 2 });click(document.getElementById('title'), { detail: 2 });assert.equal(drags, 0);
+  click(document.getElementById('title'));click(document.querySelector('#loading img'));assert.equal(drags, 2);
 });

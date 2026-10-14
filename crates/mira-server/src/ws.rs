@@ -1620,7 +1620,9 @@ async fn dispatch_on_slot(
                                 let _ = slot.events_tx.send(ServerMsg::RuntimeWorkUpdated { work });
                             }
                             approver::drain_pending_as_denied(&slot.pending).await;
-                            crate::acp_host::AcpEventPort::for_slot(&slot).turn_ended("cancelled");
+                            crate::acp_host::AcpEventPort::for_slot(&slot)
+                                .turn_ended("cancelled")
+                                .await;
                             let _ = slot.events_tx.send(ServerMsg::Warning { text: "Claude stopped. The next message will resume this conversation.".into() });
                         });
                         return;
@@ -1634,7 +1636,9 @@ async fn dispatch_on_slot(
                 if let Some(h) = &agent {
                     if h.driver_kind == "grok" {
                         crate::acp_session::stop_agent(&slot).await;
-                        crate::acp_host::AcpEventPort::for_slot(&slot).turn_ended("cancelled");
+                        crate::acp_host::AcpEventPort::for_slot(&slot)
+                            .turn_ended("cancelled")
+                            .await;
                     } else {
                         h.cancel_current_turn().await;
                     }
@@ -1655,7 +1659,7 @@ async fn dispatch_on_slot(
                             .await
                             .unwrap_or(false);
                         if !ended {
-                            turn_port.turn_ended("cancelled");
+                            turn_port.turn_ended("cancelled").await;
                         }
                     });
                 }
@@ -2466,13 +2470,17 @@ async fn prompt_agent_at_epoch(
         Err(e) => {
             record_prompt_failure(slot, e);
             // The client marked the turn busy when it sent; end it.
-            crate::acp_host::AcpEventPort::for_slot(slot).turn_ended("start_failed");
+            crate::acp_host::AcpEventPort::for_slot(slot)
+                .turn_ended("start_failed")
+                .await;
             return;
         }
     };
     let Some(agent) = handle.agent().await else {
         record_prompt_failure(slot, "the external agent has stopped".into());
-        crate::acp_host::AcpEventPort::for_slot(slot).turn_ended("agent_exited");
+        crate::acp_host::AcpEventPort::for_slot(slot)
+            .turn_ended("agent_exited")
+            .await;
         return;
     };
     if slot
@@ -2546,7 +2554,8 @@ async fn prompt_agent_at_epoch(
                                 format!("could not stage attachments: {e}"),
                             );
                             crate::acp_host::AcpEventPort::for_slot(&slot)
-                                .turn_ended("attachments_failed");
+                                .turn_ended("attachments_failed")
+                                .await;
                             return;
                         }
                     }
@@ -2556,7 +2565,9 @@ async fn prompt_agent_at_epoch(
                         &slot,
                         "this agent was started without an attachments dir, so images were not sent".into(),
                     );
-                    crate::acp_host::AcpEventPort::for_slot(&slot).turn_ended("attachments_failed");
+                    crate::acp_host::AcpEventPort::for_slot(&slot)
+                        .turn_ended("attachments_failed")
+                        .await;
                     return;
                 }
             }
@@ -2695,7 +2706,7 @@ async fn prompt_agent_at_epoch(
                 if stop_reason == "rate_limited" {
                     crate::message_queue::offer_recovery(&recovery_slot, None).await;
                 }
-                turn_port.turn_ended(&stop_reason);
+                turn_port.turn_ended(&stop_reason).await;
             }
             Ok(None) => {}
             Err(e) => {
@@ -2722,7 +2733,7 @@ async fn prompt_agent_at_epoch(
                     .unwrap_or_else(|e| e.into_inner()) = Some(text.chars().take(160).collect());
                 let _ = events.send(ServerMsg::Error { text });
                 // Nothing else will end this turn: the prompt never landed.
-                turn_port.turn_ended("error");
+                turn_port.turn_ended("error").await;
             }
         }
     });

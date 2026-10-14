@@ -1449,7 +1449,18 @@ impl EventPort for AcpEventPort {
 
 impl AcpEventPort {
     /// Announce the end of a turn.
-    pub fn turn_ended(&self, stop_reason: &str) {
+    pub async fn turn_ended(&self, stop_reason: &str) {
+        if self.runtime.lock().map(|r| r.is_some()).unwrap_or(true)
+            && self.runtime_owner().is_none()
+        {
+            return;
+        }
+        // Keep the turn reserved until its result snapshot is saved. Await the
+        // cwd instead of silently dropping diffs when a writer holds the lock.
+        if let Some((slot, _, _)) = self.runtime_owner() {
+            crate::checkpoints::finish_slot(slot).await;
+        }
+        // Finalization yields; an engine replacement may have retired this port.
         if self.runtime.lock().map(|r| r.is_some()).unwrap_or(true)
             && self.runtime_owner().is_none()
         {
@@ -1491,21 +1502,6 @@ impl AcpEventPort {
                 .agent_in_turn
                 .store(false, std::sync::atomic::Ordering::SeqCst);
             slot.publish_activity();
-        }
-        if let Some((slot, _, _)) = self.runtime_owner() {
-            if let Ok(cwd) = slot.cwd.try_read() {
-                let cwd = cwd.clone();
-                let id = slot.id.to_string();
-                if let Some(tree) = crate::checkpoints::pending_tree(&cwd, &id) {
-                    let events = slot.events_tx.clone();
-                    tokio::task::spawn_blocking(move || {
-                        crate::checkpoints::finish(&cwd, &id, &tree);
-                        let _ = events.send(ServerMsg::TurnDiffs {
-                            summaries: crate::checkpoints::turn_diffs(&cwd, &id),
-                        });
-                    });
-                }
-            }
         }
         self.push(ServerMsg::acp_turn_end(stop_reason));
     }
@@ -1861,7 +1857,7 @@ mod event_tests {
             },
         })
         .await;
-        port.turn_ended("end_turn");
+        port.turn_ended("end_turn").await;
 
         let first = rx.recv().await.expect("text frame");
         let second = rx.recv().await.expect("turn end");
@@ -1889,7 +1885,7 @@ mod event_tests {
             },
         })
         .await;
-        port.turn_ended("end_turn");
+        port.turn_ended("end_turn").await;
     }
 }
 

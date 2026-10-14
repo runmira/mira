@@ -524,10 +524,6 @@ pub async fn start_agent(
                         if stopping.load(Ordering::SeqCst) { break; }
                         let end_owner = weak_slot.upgrade();
                         let _end_dispatch = match &end_owner { Some(slot) => Some(slot.engine.input_dispatch.lock().await), None => None };
-                        if let Some(slot) = &end_owner {
-                            slot.engine.agent_in_turn.store(false, Ordering::SeqCst);
-                            slot.publish_activity();
-                        }
                         // A usage limit is a real outcome, not a crash. Its
                         // context rides on the turn-end frame itself: sending
                         // a warning as well produced two transcript lines for
@@ -537,6 +533,11 @@ pub async fn start_agent(
                         }
                         match end.rate_limited.clone() {
                             Some(reset) => {
+                                if let Some(slot) = &end_owner {
+                                    crate::checkpoints::finish_slot(slot.clone()).await;
+                                    slot.engine.agent_in_turn.store(false, Ordering::SeqCst);
+                                    slot.publish_activity();
+                                }
                                 let _ = warn.send(ServerMsg::acp_turn_end_with(
                                     &end.stop_reason,
                                     reset.parse::<i64>().ok()
@@ -545,7 +546,7 @@ pub async fn start_agent(
                                         .unwrap_or_else(|| format!("resets {reset}")),
                                 ));
                             }
-                            None => port.turn_ended(&end.stop_reason),
+                            None => port.turn_ended(&end.stop_reason).await,
                         }
                         // The turn ended with the agent alive, so its session
                         // id is a valid resume cursor. Recorded every turn —
@@ -574,7 +575,7 @@ pub async fn start_agent(
                             text: "the external agent exited — your next message restarts it"
                                 .to_string(),
                         });
-                        port.turn_ended("agent_exited");
+                        port.turn_ended("agent_exited").await;
                         if let Some(slot) = weak_slot.upgrade() {
                             let mut current = slot.acp_agent.write().await;
                             let is_ours = current

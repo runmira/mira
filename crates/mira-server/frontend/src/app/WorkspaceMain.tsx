@@ -312,14 +312,12 @@ export function WorkspaceMain(
                 the natural place to move the window, and `Overlay` needs at
                 least one or the window can't be dragged at all. */}
               <div
-                data-tauri-drag-region
+                data-window-drag-region
                 className="flex h-11 shrink-0 items-center gap-3 border-b border-border/60 px-4 max-md:gap-2 max-md:px-2"
               >
-                {/* `data-tauri-drag-region` matches ancestors, so anything
-                  interactive inside the header would drag the window on
-                  mousedown. Opting these out keeps the clicks landing. */}
+                {/* Controls stay interactive inside the toolbar drag region. */}
                 <button
-                  data-tauri-drag-region="false"
+                  data-no-window-drag
                   type="button"
                   onClick={toggleSidebar}
                   title={
@@ -343,7 +341,7 @@ export function WorkspaceMain(
                 {(sessionDiff.uncommitted ?? 0) > 0 && (
                   <button
                     type="button"
-                    data-tauri-drag-region="false"
+                    data-no-window-drag
                     onClick={() => setReviewOpen(true)}
                     {...preloadOnIntent(ReviewChanges.preload)}
                     title="Review this session's changes"
@@ -359,7 +357,7 @@ export function WorkspaceMain(
                     <span className="hidden lg:inline">Review</span>
                   </button>
                 )}
-                <div className="flex items-center gap-0.5" data-tauri-drag-region="false">
+                <div className="flex items-center gap-0.5" data-no-window-drag>
                   <div className="contents" {...preloadOnIntent(SubagentPanel.preload)}>
                     <RightPanelButton
                       open={panelOpen}
