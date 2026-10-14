@@ -61,7 +61,7 @@ type RailItem =
   | { key: string; kind: 'provider'; instance: string | null; name: string; snapshot?: EngineSnapshot }
   | { key: string; kind: 'agent'; driver: string; instance?: string; name: string; status?: AcpAgentStatus };
 
-type Choice = { id: string; label: string; hint?: string | null; ctx?: number | null };
+type Choice = { id: string; label: string; ctx?: number | null };
 
 export type EnginePickerProps = {
   open: boolean;
@@ -607,7 +607,6 @@ function ModelList({
     const toChoice = (m: ModelInfo): Choice => ({
       id: m.id,
       label: m.display_name || prettyModel(m.id),
-      hint: m.id,
       ctx: m.context_length,
     });
     if (!query.trim()) {
@@ -653,9 +652,6 @@ function ModelList({
                   Default model
                   {isCurrent && !currentModel && <Check className="ml-1.5 inline size-3 text-mira-blue" />}
                 </div>
-                <div className="text-[10.5px] text-muted-foreground/70">
-                  Whatever {item.name} is set to use
-                </div>
               </div>
             </CommandItem>
           </CommandGroup>
@@ -664,7 +660,6 @@ function ModelList({
           <CommandGroup key={sec.name} heading={sec.name}>
             {sec.choices.map((c) => {
               const label = modelPickerLabel(c.id, c.label);
-              const hint = c.hint ?? c.id;
               return <CommandItem
                 key={`${sec.name}:${c.id}`}
                 value={`${c.id} ${label}`}
@@ -679,9 +674,6 @@ function ModelList({
                     {label}
                     {c.id === currentModel && <Check className="size-3 shrink-0 text-mira-blue" />}
                   </div>
-                  {hint !== label && (
-                    <div className="truncate font-mono text-[10.5px] text-muted-foreground/65">{hint}</div>
-                  )}
                 </div>
                 {c.ctx ? (
                   <span className="shrink-0 rounded-full border border-mira-blue/25 bg-mira-blue/[0.09] px-1.5 py-0.5 font-mono text-[10.5px] text-mira-blue">
