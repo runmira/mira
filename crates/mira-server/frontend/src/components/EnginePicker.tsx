@@ -37,14 +37,16 @@ import { cn } from '@/lib/utils';
 import { AlertCircle,Check,ChevronDown,Loader2,RefreshCw,Settings2 } from 'lucide-react';
 import { useEffect,useMemo,useRef,useState } from 'react';
 import { listInstanceModels,listModels,type EngineSnapshot,type ModelInfo,type OptionDescriptor } from '../api';
+import { navigateEnginePicker } from '../lib/enginePickerNavigation';
 import { agentModelChoices,describeAgentStatus } from '../lib/acpAgents';
-import { enabledAgentRail } from '../lib/enginePickerRail';
+import { enabledPickerRail } from '../lib/enginePickerRail';
 import {
 CODING_MATCHERS,
 formatCtx,
 groupByVendor,
 loadModelOptions,
-modelDotClass,
+modelPickerLabel,
+modelVendor,
 prettyModel,
 saveModelOptions,
 } from '../lib/models';
@@ -95,7 +97,7 @@ export function EnginePicker(props: EnginePickerProps) {
   const runtime = useAppRuntime();
   const capabilities = useSelector(runtime.agentCapabilities, snapshot => snapshot);
   const {
-    open, onOpenChange, engine, fallbackModel, providerName, engines, agents,
+    open, onOpenChange, engine, fallbackModel, engines, agents,
     agentsChecking, onCheckAgents, agentConfig, agentDescriptors,
     onPickProvider, onPickAgent, onSetModelOption, onConfigureAgents,
   } = props;
@@ -106,48 +108,9 @@ export function EnginePicker(props: EnginePickerProps) {
     : `provider:${engine?.instance ?? ''}`;
   const currentModel = engine?.model ?? (isAgent ? null : fallbackModel);
 
-  // The provider this chat would go back to, remembered while an agent
-  // drives so its row keeps its real name and icon.
-  const lastProvider = useRef<{ instance: string | null; name: string } | null>(null);
-  if (!isAgent && engine) {
-    lastProvider.current = {
-      instance: engine.instance ?? null,
-      name: engine.display_name && engine.display_name !== 'Mira' ? engine.display_name : (providerName ?? 'Mira provider'),
-    };
-  }
-
-  // ---- the rail ----------------------------------------------------------
-  const rail = useMemo<RailItem[]>(() => {
-    const items: RailItem[] = [];
-    const native = (engines ?? []).filter((e) => e.flavor === 'native' && e.enabled);
-    if (native.length > 0) {
-      for (const e of native) {
-        items.push({ key: `provider:${e.instance}`, kind: 'provider', instance: e.instance, name: e.display_name, snapshot: e });
-      }
-    }
-    // The running provider always has a row, even when the registry is
-    // empty or does not list it (a legacy single-provider config).
-    const activeProviderKey = `provider:${!isAgent ? (engine?.instance ?? '') : ''}`;
-    if (!isAgent && !items.some((i) => i.key === activeProviderKey)) {
-      items.unshift({
-        key: activeProviderKey,
-        kind: 'provider',
-        instance: engine?.instance ?? null,
-        name: engine?.display_name && engine.display_name !== 'Mira' ? engine.display_name : prettyProvider(providerName),
-      });
-    }
-    if (engines == null && !items.some((i) => i.kind === 'provider')) {
-      const last = lastProvider.current;
-      items.push({
-        key: `provider:${last?.instance ?? ''}`,
-        kind: 'provider',
-        instance: last?.instance ?? null,
-        name: last?.name ?? prettyProvider(providerName),
-      });
-    }
-    items.push(...enabledAgentRail(engines, agents, engine));
-    return items;
-  }, [engines, agents, engine, isAgent, providerName]);
+  // Membership comes only from enabled registry instances. Probes enrich
+  // status without changing order, including while the active engine changes.
+  const rail = useMemo<RailItem[]>(() => enabledPickerRail(engines, agents), [engines, agents]);
 
   // What the right pane shows. Follows the current engine until the user
   // points elsewhere; reset on every open so it always starts at "here".
@@ -202,8 +165,6 @@ export function EnginePicker(props: EnginePickerProps) {
     if (Array.isArray(fetched)) return fetched;
     if (fetched) return [];
     if (item.snapshot?.models && item.snapshot.models.length > 0) return item.snapshot.models;
-    // The provider the chat would return to, while an agent drives.
-    if (isAgent && item.instance === (lastProvider.current?.instance ?? null)) return activeCatalog;
     return null;
   };
   const providerError = (item: Extract<RailItem, { kind: 'provider' }>): string | null => {
@@ -327,11 +288,11 @@ export function EnginePicker(props: EnginePickerProps) {
           sideOffset={8}
           className="w-[36rem] max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl border border-border/60 bg-popover/95 p-0 backdrop-blur"
         >
-          <div className="grid h-[26rem] grid-cols-[12.5rem_minmax(0,1fr)]">
+          <div data-engine-picker className="grid h-[26rem] max-h-[calc(100dvh-8rem)] grid-cols-[12.5rem_minmax(0,1fr)]" onKeyDown={navigateEnginePicker}>
             {/* Rail */}
             <div className="flex min-h-0 flex-col border-r border-border/50 bg-fg/[0.015]">
-              <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
-                <RailSection label="Providers" />
+              <div data-engine-rail className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-1.5">
+                {rail.some(r => r.kind === 'provider') && <RailSection label="Providers" />}
                 {rail.filter((r) => r.kind === 'provider').map((r) => (
                   <RailRow
                     key={r.key}
@@ -365,7 +326,7 @@ export function EnginePicker(props: EnginePickerProps) {
                 ))}
                 {!rail.some((r) => r.kind === 'agent') && (
                   <div className="px-2 py-1.5 text-[11.5px] text-muted-foreground/60">
-                    {agentsChecking ? 'Looking for installed agents…' : 'No external agents found.'}
+                    {engines == null ? 'Loading enabled engines…' : 'No external agents enabled.'}
                   </div>
                 )}
               </div>
@@ -404,7 +365,7 @@ export function EnginePicker(props: EnginePickerProps) {
                     catalogError={shown.kind === 'provider' ? providerError(shown) : null}
                     onPick={(model) => commit(shown, model)}
                   />
-                ) : null}
+                ) : <div className="flex h-full items-center justify-center px-5 text-center text-[12.5px] text-muted-foreground" role="status">{engines == null ? 'Loading enabled engines…' : 'Enable a provider or external agent in Settings to choose a model.'}</div>}
               </div>
 
               {/* Options and session actions belong to the running engine,
@@ -535,6 +496,8 @@ function RailRow({
       // crosses other rows, and hover-to-show flipped the pane to
       // whichever engine the pointer passed on the way.
       onClick={onShow}
+      data-engine-row
+      aria-pressed={shown}
       className={cn(
         'relative flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors',
         shown ? 'bg-fg/[0.08]' : 'hover:bg-fg/[0.04]',
@@ -628,7 +591,7 @@ function ModelList({
   const inputRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
     // Typing is the fastest way through a long catalog.
-    const t = setTimeout(() => inputRef.current?.focus(), 0);
+    const t = setTimeout(() => inputRef.current?.focus({preventScroll:true}), 0);
     return () => clearTimeout(t);
   }, []);
 
@@ -673,7 +636,7 @@ function ModelList({
         onValueChange={setQuery}
         placeholder={loading ? 'Loading models…' : item.kind === 'agent' ? 'Search, or type a model id…' : 'Search models, or type an id…'}
       />
-      <CommandList className="max-h-none min-h-0 flex-1 overflow-y-auto">
+      <CommandList className="max-h-none min-h-0 flex-1 overflow-y-auto overscroll-contain">
         {catalogError && <div className="px-3 py-2 text-[11.5px] text-destructive">{catalogError}</div>}
         {item.kind === 'agent' && agentChoices?.error && <div className="px-3 py-2 text-[11.5px] text-destructive">{agentChoices.error}</div>}
         {loading && (
@@ -699,21 +662,25 @@ function ModelList({
         )}
         {sections.map((sec) => (
           <CommandGroup key={sec.name} heading={sec.name}>
-            {sec.choices.map((c) => (
-              <CommandItem
+            {sec.choices.map((c) => {
+              const label = modelPickerLabel(c.id, c.label);
+              const hint = c.hint ?? c.id;
+              return <CommandItem
                 key={`${sec.name}:${c.id}`}
-                value={`${c.id} ${c.label}`}
+                value={`${c.id} ${label}`}
                 onSelect={() => onPick(c.id)}
                 className="flex items-center gap-2"
               >
-                <span className={cn('size-2 shrink-0 rounded-full', modelDotClass(c.id))} />
+                {modelVendor(c.id) !== 'other' ? <ModelIcon model={c.id} size="xs" /> : item.kind === 'agent'
+                  ? <AgentIcon kind={item.driver} name={item.name} size="xs" tile={false} />
+                  : <ProviderIcon instance={item.instance} name={item.name} model={c.id} size="xs" />}
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-1.5 truncate text-[13px]">
-                    {c.label}
+                    {label}
                     {c.id === currentModel && <Check className="size-3 shrink-0 text-mira-blue" />}
                   </div>
-                  {c.hint && c.hint !== c.label && (
-                    <div className="truncate font-mono text-[10.5px] text-muted-foreground/65">{c.hint}</div>
+                  {hint !== label && (
+                    <div className="truncate font-mono text-[10.5px] text-muted-foreground/65">{hint}</div>
                   )}
                 </div>
                 {c.ctx ? (
@@ -721,8 +688,8 @@ function ModelList({
                     {formatCtx(c.ctx)}
                   </span>
                 ) : null}
-              </CommandItem>
-            ))}
+              </CommandItem>;
+            })}
           </CommandGroup>
         ))}
         {item.kind === 'agent' && !agentChoices?.live && !query.trim() && (
@@ -851,15 +818,4 @@ function OptionControl({
       </PopoverContent>
     </Popover>
   );
-}
-
-/** A provider slug as a name, for when nothing better is known. */
-function prettyProvider(slug: string | null | undefined): string {
-  if (!slug) return 'Mira provider';
-  const known: Record<string, string> = {
-    openrouter: 'OpenRouter', openai: 'OpenAI', anthropic: 'Anthropic', google: 'Google',
-    gemini: 'Gemini', groq: 'Groq', xai: 'xAI', deepseek: 'DeepSeek', mistral: 'Mistral',
-    ollama: 'Ollama', together: 'Together', fireworks: 'Fireworks', bedrock: 'Bedrock',
-  };
-  return known[slug.toLowerCase()] ?? slug.charAt(0).toUpperCase() + slug.slice(1);
 }

@@ -10,7 +10,7 @@ import { TurnView } from './components/transcript/TurnView';
 import type { Entry } from './transcript/entries';
 import type { EngineSnapshot } from './api';
 import './styles.css';
-const engines = ['codex', 'claude-code', 'opencode'].map(instance => ({ instance, driver: instance, flavor: 'external', enabled: true, display_name: instance, models: [], state: {state:'ready'} })) as EngineSnapshot[];
+const engines = ['codex', 'claude-code', 'opencode'].map(instance => ({ instance, driver: instance, flavor: 'external', enabled: true, display_name: ({codex:'Codex','claude-code':'Claude Code',opencode:'OpenCode'} as Record<string,string>)[instance], models: [], state: {state:'ready'} })) as EngineSnapshot[];
 function Preview() {
   const [picker, setPicker] = useState(false), [active, setActive] = useState(true);
   const [choice, setChoice] = useState('None');

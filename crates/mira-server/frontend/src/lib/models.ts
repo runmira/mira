@@ -96,6 +96,15 @@ export function prettyModel(id: string | null | undefined): string {
   return raw.length > 0 ? raw[0].toUpperCase() + raw.slice(1) : raw;
 }
 
+/** Readable picker text; model IDs remain untouched for filtering and dispatch. */
+export function modelPickerLabel(id: string, label?: string | null): string {
+  const base = id.slice(id.lastIndexOf('/') + 1).replace(/^~/, '');
+  const supplied = label?.trim();
+  const raw = !supplied || supplied.toLowerCase() === id.toLowerCase() || supplied.toLowerCase() === base.toLowerCase() ? base : supplied;
+  const brands: Record<string, string> = {gpt:'GPT',glm:'GLM',llm:'LLM',api:'API',ai:'AI',deepseek:'DeepSeek',minimax:'MiniMax',openai:'OpenAI',xai:'xAI'};
+  return raw.replace(/[_-]+/g, ' ').replace(/\b[a-z][a-z0-9.]*/gi, word => brands[word.toLowerCase()] ?? word[0].toUpperCase() + word.slice(1));
+}
+
 export function formatCtx(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n % 1_000_000 ? 1 : 0)}M`;
   if (n >= 1000) return `${Math.round(n / 1000)}k`;
