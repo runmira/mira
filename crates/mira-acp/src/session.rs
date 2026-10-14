@@ -20,9 +20,9 @@
 
 use agent_client_protocol::schema::v1::{
     ClientCapabilities, ContentBlock, ElicitationCapabilities, ElicitationFormCapabilities,
-    InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse,
-    NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, ResumeSessionRequest,
-    ResumeSessionResponse, StopReason,
+    ForkSessionRequest, ForkSessionResponse, InitializeRequest, InitializeResponse,
+    LoadSessionRequest, LoadSessionResponse, NewSessionRequest, NewSessionResponse, PromptRequest,
+    PromptResponse, ResumeSessionRequest, ResumeSessionResponse, StopReason,
 };
 use agent_client_protocol::schema::ProtocolVersion;
 use serde_json::{json, Value};
@@ -223,6 +223,9 @@ struct SessionState {
     /// Whether the agent advertised top-level `loadSession`
     /// (`session/load`). Fallback when `resume` is absent.
     load_supported: bool,
+    /// Whether the agent advertised `sessionCapabilities.fork`
+    /// (`session/fork`). OpenCode v2 does; the fork copies the whole session.
+    fork_supported: bool,
     image_supported: bool,
     /// What the agent said about itself at `initialize`. Kept because it is
     /// the only place an agent's own name and version are available, and
@@ -265,6 +268,11 @@ impl AcpSession {
         crate::runtime::RuntimeCapabilities {
             image_input: state.as_ref().is_some_and(|s| s.image_supported),
             cancellation: true,
+            fork: if state.as_ref().is_some_and(|s| s.fork_supported) {
+                crate::runtime::ForkCapability::Session
+            } else {
+                crate::runtime::ForkCapability::Unavailable
+            },
             live_mode_switch: state.as_ref().is_some_and(|s| s.current_mode.is_some()),
             live_model_switch: state
                 .as_ref()
@@ -349,8 +357,50 @@ impl AcpSession {
                 .collect();
             st.load_supported = res.agent_capabilities.load_session;
             st.resume_supported = res.agent_capabilities.session_capabilities.resume.is_some();
+            st.fork_supported = res.agent_capabilities.session_capabilities.fork.is_some();
         }
         Ok(res)
+    }
+
+    /// Whether the agent advertised `session/fork`.
+    pub fn supports_fork(&self) -> bool {
+        self.state
+            .try_lock()
+            .map(|g| g.fork_supported)
+            .unwrap_or(false)
+    }
+
+    /// Fork `source` into a new agent session (`session/fork`) and return
+    /// its id. This connection's own session is left alone, and no MCP
+    /// servers are attached: whoever resumes the fork brings its own.
+    pub async fn fork_session(
+        &self,
+        source: &str,
+        cwd: &std::path::Path,
+    ) -> Result<String, SessionError> {
+        if !self.state.lock().await.initialized {
+            return Err(SessionError::NotInitialized);
+        }
+        if !self.supports_fork() {
+            return Err(SessionError::Other(
+                "the agent does not advertise session/fork".into(),
+            ));
+        }
+        let req = ForkSessionRequest::new(source.to_string(), cwd);
+        let res: ForkSessionResponse = self
+            .conn
+            .request(
+                "session/fork",
+                serde_json::to_value(req).unwrap_or(json!({})),
+            )
+            .await?;
+        let id = res.session_id.to_string();
+        if id.is_empty() || id == source {
+            return Err(SessionError::Other(
+                "the agent did not return a new session id for the fork".into(),
+            ));
+        }
+        Ok(id)
     }
 
     /// Whether the agent advertised `session/resume`.
@@ -950,6 +1000,73 @@ mod tests {
         r.reply(f["id"].clone(), json!({})).await;
         w.await.unwrap().expect("resume");
         assert_eq!(r.sess.session_id().as_deref(), Some("ses_abc123"));
+    }
+
+    #[tokio::test]
+    async fn fork_is_negotiated_and_leaves_the_source_session_alone() {
+        let mut r = rig(ClientCaps::default()).await;
+        let w = tokio::spawn({
+            let s = r.sess.clone();
+            async move { s.initialize().await }
+        });
+        let f = r.next_frame().await;
+        r.reply(f["id"].clone(), init_ok()).await;
+        w.await.unwrap().expect("init");
+        // Not advertised: refused locally, nothing reaches the agent.
+        assert!(!r.sess.supports_fork());
+        assert_eq!(
+            r.sess.runtime_capabilities().fork,
+            crate::runtime::ForkCapability::Unavailable
+        );
+        let refused = r
+            .sess
+            .fork_session("ses_src", std::path::Path::new("/repo"))
+            .await;
+        assert!(refused.is_err());
+
+        let mut r = rig(ClientCaps::default()).await;
+        let w = tokio::spawn({
+            let s = r.sess.clone();
+            async move { s.initialize().await }
+        });
+        let f = r.next_frame().await;
+        let mut init = init_ok();
+        init["agentCapabilities"]["sessionCapabilities"] = json!({ "fork": {}, "resume": {} });
+        r.reply(f["id"].clone(), init).await;
+        w.await.unwrap().expect("init");
+        assert!(r.sess.supports_fork());
+        assert_eq!(
+            r.sess.runtime_capabilities().fork,
+            crate::runtime::ForkCapability::Session
+        );
+        let w = tokio::spawn({
+            let s = r.sess.clone();
+            async move {
+                s.fork_session("ses_src", std::path::Path::new("/repo"))
+                    .await
+            }
+        });
+        let f = r.next_frame().await;
+        assert_eq!(f["method"], "session/fork");
+        assert_eq!(f["params"]["sessionId"], "ses_src");
+        assert_eq!(f["params"]["cwd"], "/repo");
+        r.reply(f["id"].clone(), json!({ "sessionId": "ses_fork" }))
+            .await;
+        assert_eq!(w.await.unwrap().expect("fork"), "ses_fork");
+        assert_eq!(r.sess.session_id(), None, "the fork is not adopted here");
+
+        // An agent echoing the source id has not forked anything.
+        let w = tokio::spawn({
+            let s = r.sess.clone();
+            async move {
+                s.fork_session("ses_src", std::path::Path::new("/repo"))
+                    .await
+            }
+        });
+        let f = r.next_frame().await;
+        r.reply(f["id"].clone(), json!({ "sessionId": "ses_src" }))
+            .await;
+        assert!(w.await.unwrap().is_err());
     }
 
     #[test]

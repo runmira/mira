@@ -538,7 +538,8 @@ export type MessageActions = {
   /** Offer to put the files back the way they were before this message. */
   restore: (entry: Entry) => void;
   /** New chat with the history through this message's turn. `null` when
-   *  this chat can't be forked (an external agent drives it). */
+   *  this chat can't be forked there (an external agent that only forks
+   *  its whole conversation, or none at all). */
   fork: ((entry: Entry) => void) | null;
   /** Show an image full-screen. */
   openImage: (src: string) => void;

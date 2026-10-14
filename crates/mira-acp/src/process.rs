@@ -501,6 +501,69 @@ pub async fn start(spec: StartSpec<'_>) -> Result<AcpAgent, StartError> {
     })
 }
 
+/// Why a detached fork did not produce a new session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForkFailure {
+    /// The installed agent does not offer the operation.
+    Unsupported(String),
+    /// The requested boundary is still running.
+    InProgress(String),
+    Failed(String),
+}
+
+impl std::fmt::Display for ForkFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unsupported(m) | Self::InProgress(m) | Self::Failed(m) => f.write_str(m),
+        }
+    }
+}
+
+/// Fork an ACP session in a short-lived process of the same agent, so the
+/// running conversation (if any) never sees the request. The fork is left on
+/// disk for whoever resumes it next; this process only creates it.
+pub async fn fork_detached(
+    launch: &LaunchConfig,
+    caps: crate::session::ClientCaps,
+    source: &str,
+    cwd: &Path,
+) -> Result<String, ForkFailure> {
+    let process = AgentProcess::spawn(launch, Arc::new(crate::conn::NullCallbacks))
+        .await
+        .map_err(|e| ForkFailure::Failed(format!("could not start the agent: {e}")))?;
+    let session = crate::session::AcpSession::new(
+        process.conn().clone(),
+        caps,
+        crate::host::PendingPermissions::default(),
+    );
+    let timeout = std::time::Duration::from_secs(30);
+    let result = async {
+        tokio::time::timeout(timeout, session.initialize())
+            .await
+            .map_err(|_| ForkFailure::Failed("the agent did not initialize in time".into()))?
+            .map_err(|e| ForkFailure::Failed(e.to_string()))?;
+        if !session.supports_fork() {
+            return Err(ForkFailure::Unsupported(
+                "this installed version does not advertise session/fork".into(),
+            ));
+        }
+        tokio::time::timeout(timeout, session.fork_session(source, cwd))
+            .await
+            .map_err(|_| ForkFailure::Failed("session/fork timed out".into()))?
+            .map_err(|e| match &e {
+                crate::session::SessionError::Conn(ConnError::Remote { code: -32601, .. }) => {
+                    ForkFailure::Unsupported(e.to_string())
+                }
+                _ => ForkFailure::Failed(e.to_string()),
+            })
+    }
+    .await;
+    process
+        .shutdown(std::time::Duration::from_millis(500))
+        .await;
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use crate::driver::{AcpDriver, DriverConfig, Transport};
@@ -543,6 +606,95 @@ mod tests {
             std::path::Path::new("opencode"),
         );
         assert_eq!(chosen, Transport::Acp);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires installed OpenCode v2; creates and forks an empty local session"]
+    async fn installed_opencode_forks_a_session_without_touching_the_source() {
+        use crate::drivers::OpenCodeDriver;
+        let Some(program) = crate::which::resolve("opencode") else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().canonicalize().unwrap();
+        let d = OpenCodeDriver;
+        let launch = d.resolve(
+            &DriverConfig::default(),
+            crate::driver::PermissionMode::Ask,
+            program,
+        );
+        let process =
+            super::AgentProcess::spawn(&launch, std::sync::Arc::new(crate::conn::NullCallbacks))
+                .await
+                .unwrap();
+        let session = crate::session::AcpSession::new(
+            process.conn().clone(),
+            d.client_caps(),
+            crate::host::PendingPermissions::default(),
+        );
+        session.initialize().await.unwrap();
+        assert!(
+            session.supports_fork(),
+            "OpenCode v2 advertises session/fork"
+        );
+        let source = session
+            .new_session(&cwd, Vec::new())
+            .await
+            .unwrap()
+            .session_id
+            .to_string();
+        // OpenCode refuses to fork an empty session: give it one exchange,
+        // on a free model (override with MIRA_TEST_OPENCODE_MODEL).
+        let model = std::env::var("MIRA_TEST_OPENCODE_MODEL")
+            .unwrap_or_else(|_| "opencode/big-pickle".into());
+        let option = session
+            .config_options()
+            .into_iter()
+            .find(|o| o["category"] == "model")
+            .and_then(|o| o["id"].as_str().map(str::to_owned))
+            .expect("a model option");
+        session
+            .set_config_option(&source, &option, serde_json::json!(model))
+            .await
+            .expect("select model");
+        session
+            .prompt(
+                &source,
+                vec![agent_client_protocol::schema::v1::ContentBlock::from(
+                    "Reply with the single word ok.".to_string(),
+                )],
+            )
+            .await
+            .expect("prompt (needs a configured or free OpenCode model)");
+        process
+            .shutdown(std::time::Duration::from_millis(500))
+            .await;
+
+        let forked = super::fork_detached(&launch, d.client_caps(), &source, &cwd)
+            .await
+            .expect("fork");
+        assert_ne!(forked, source);
+        // Both sessions resume independently afterwards.
+        for id in [&source, &forked] {
+            let process = super::AgentProcess::spawn(
+                &launch,
+                std::sync::Arc::new(crate::conn::NullCallbacks),
+            )
+            .await
+            .unwrap();
+            let s = crate::session::AcpSession::new(
+                process.conn().clone(),
+                d.client_caps(),
+                crate::host::PendingPermissions::default(),
+            );
+            s.initialize().await.unwrap();
+            s.resume_session(id, &cwd, Vec::new())
+                .await
+                .expect("resume");
+            process
+                .shutdown(std::time::Duration::from_millis(500))
+                .await;
+        }
     }
 
     /// A driver with a native flavor *and* deny prefixes, for proving the

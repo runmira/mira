@@ -28,6 +28,7 @@
 
 pub mod acp_host;
 pub mod acp_session;
+mod agent_fork;
 mod agent_secrets;
 pub mod agent_spend;
 mod agent_threads;

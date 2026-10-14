@@ -12,7 +12,7 @@ url = "2"
 uuid = { workspace = true }
 mira-sandbox = { workspace = true }
 mira-core = { workspace = true }
-agent-client-protocol = { version = "2", features = ["unstable_session_compaction"] }
+agent-client-protocol = { version = "2", features = ["unstable_session_compaction", "unstable_session_fork"] }
 anyhow = "1"
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }

@@ -1328,63 +1328,26 @@ async fn dispatch_on_slot(
         }
 
         ClientMsg::AcpFork => {
-            // Fork continues the history under a new session id. Only Claude
-            // Code has the flag; anything else is told so, not restarted
-            // into amnesia.
-            let Some(handle) = slot.acp_agent.read().await.clone() else {
-                let _ = slot.events_tx.send(ServerMsg::Error {
-                    text: "no external agent is running for this session".into(),
-                });
-                return;
-            };
-            if handle.driver_kind != "claude-code" {
-                let _ = slot.events_tx.send(ServerMsg::Error {
-                    text: format!(
-                        "{} has no fork operation — fork is Claude Code only",
-                        handle.display_name
-                    ),
-                });
-                return;
-            }
-            let Some(agent) = handle.agent().await else {
-                let _ = slot.events_tx.send(ServerMsg::Error {
-                    text: "the external agent has stopped".into(),
-                });
-                return;
-            };
-            let sid = agent.session_id().await;
-            let Some(sid) = sid else {
-                let _ = slot.events_tx.send(ServerMsg::Error {
-                    text: "the agent has no session to fork yet — send a prompt first".into(),
-                });
-                return;
-            };
-            let events = slot.events_tx.clone();
-            let slot_c = slot.clone();
-            let state_c = state.clone();
+            // A separate chat bound to a native fork of the whole agent
+            // session. This chat and its runtime carry on unchanged.
+            let state = state.clone();
+            let slot = slot.clone();
             tokio::spawn(async move {
-                match crate::acp_session::restart_native_agent(
-                    &state_c,
-                    &slot_c,
-                    mira_acp::native::NativeOverrides {
-                        resume: Some(sid),
-                        fork: true,
-                        ..Default::default()
-                    },
+                match crate::agent_fork::fork_chat(
+                    &state,
+                    &slot.id,
+                    crate::agent_fork::Boundary::Whole,
                 )
                 .await
                 {
-                    Ok(h) => {
-                        let _ = events.send(ServerMsg::AcpAgentStarted {
-                            kind: h.driver_kind.clone(),
-                            display_name: h.display_name.clone(),
-                            launch: h.launch.clone(),
-                            error: None,
+                    Ok(id) => {
+                        let _ = slot.events_tx.send(ServerMsg::AgentForked {
+                            session_id: id.to_string(),
                         });
                     }
                     Err(e) => {
-                        let _ = events.send(ServerMsg::Error {
-                            text: format!("could not fork the agent session: {e}"),
+                        let _ = slot.events_tx.send(ServerMsg::Error {
+                            text: format!("could not fork the agent session: {}", e.message),
                         });
                     }
                 }
@@ -2636,6 +2599,7 @@ async fn prompt_agent_at_epoch(
             let line = serde_json::json!({
                 "t": mira_harness::persist::now_ms(),
                 "driver": handle.driver_kind,
+                "instance": handle.instance,
                 "user": { "text": raw_text, "images": images.len(), "attached_images":images, "input_id":input_id },
             });
             let _ = slot

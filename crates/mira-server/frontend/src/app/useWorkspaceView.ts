@@ -7,6 +7,7 @@ import { type MinimapItem } from '../components/TimelineMinimap';
 import { categoryFor } from '../components/tools/toolInfo';
 import { type MessageActions } from '../components/transcript/EntryView';
 import type { UsageRingData } from '../components/UsageRing';
+import { forkActions } from '../lib/agentFork';
 import { acpOptionsToDescriptors } from '../lib/acpOptions';
 import { mapPosturesToModes,POSTURES } from '../lib/agentPostures';
 import { useBackgroundProcesses } from '../lib/backgroundProcesses';
@@ -185,6 +186,7 @@ export function useWorkspaceView(
   /** The agent this session runs on (picked, starting or running), or
    *  null on a provider. Agent mode starts the moment one is picked. */
   const acpDriver = engine?.kind === 'agent' ? (engine.driver ?? null) : null;
+  const forksFromMessage = forkActions(engine).fromMessage;
 
   // An agent's config options projected onto Mira's picker shape, so the
   // Composer needs no knowledge of ACP. Null when no agent is running, which
@@ -505,9 +507,10 @@ export function useWorkspaceView(
       edit: editMessage,
       restore: restoreMessage,
       retry: retryMessage,
-      fork: acpDriver ? null : forkMessage,
+      // External agents fork natively; only some can stop at a chosen turn.
+      fork: forksFromMessage ? forkMessage : null,
     }),
-    [busy, editMessage, restoreMessage, retryMessage, forkMessage, acpDriver],
+    [busy, editMessage, restoreMessage, retryMessage, forkMessage, forksFromMessage],
   );
 
   /** Everything ⌘K can do. Each entry runs exactly what its button or

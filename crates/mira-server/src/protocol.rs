@@ -1013,6 +1013,10 @@ pub enum ServerMsg {
         title: Option<String>,
         updated_at: Option<String>,
     },
+    /// A separate chat now holds a native fork of this chat's agent session.
+    AgentForked {
+        session_id: String,
+    },
     /// A turn finished. `stop_reason` is the agent's own reason verbatim, so
     /// the UI can distinguish a completed answer from a cancelled or
     /// truncated one rather than assuming success. `detail` carries

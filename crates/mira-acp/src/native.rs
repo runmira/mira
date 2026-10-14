@@ -1301,13 +1301,14 @@ impl AgentHandle {
                 live_model_switch: true,
                 live_mode_switch: true,
                 native_rollback: true,
+                fork: crate::runtime::ForkCapability::Turn,
                 cancellation: true,
                 ..Default::default()
             },
             Self::Native(_) => crate::runtime::RuntimeCapabilities {
                 stop_behavior: crate::runtime::StopBehavior::Runtime,
                 background_work: true,
-                native_fork: true,
+                fork: crate::runtime::ForkCapability::Session,
                 steering: crate::runtime::SteeringCapability::Native,
                 image_input: true,
                 live_model_switch: true,

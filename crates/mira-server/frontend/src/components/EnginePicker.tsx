@@ -37,6 +37,7 @@ import { cn } from '@/lib/utils';
 import { AlertCircle,Ban,Brain,BrainCircuit,Check,ChevronDown,Feather,Gauge,Lightbulb,Loader2,RefreshCw,Rocket,Settings2,Sparkles,Telescope,Zap } from 'lucide-react';
 import { useEffect,useMemo,useRef,useState } from 'react';
 import { listInstanceModels,listModels,type EngineSnapshot,type ModelInfo,type OptionDescriptor } from '../api';
+import { forkActions } from '../lib/agentFork';
 import { navigateEnginePicker } from '../lib/enginePickerNavigation';
 import { agentModelChoices,describeAgentStatus } from '../lib/acpAgents';
 import { enabledPickerRail } from '../lib/enginePickerRail';
@@ -379,9 +380,9 @@ export function EnginePicker(props: EnginePickerProps) {
                           Compact
                         </SmallButton>
                       )}
-                      {props.onAgentFork && engine?.driver === 'claude-code' && (
-                        <SmallButton onClick={() => { props.onAgentFork?.(); onOpenChange(false); }} title="Continue this history under a new agent session id">
-                          Fork
+                      {props.onAgentFork && forkActions(engine).wholeChat && (
+                        <SmallButton onClick={() => { props.onAgentFork?.(); onOpenChange(false); }} title="Open a new chat with a native copy of this entire agent conversation">
+                          Fork chat
                         </SmallButton>
                       )}
                       <RevertButton sessionId={props.sessionId} onReverted={props.onAgentReverted} />

@@ -9,7 +9,7 @@ pub struct RuntimeCapabilities {
     pub image_input: bool,
     pub live_model_switch: bool,
     pub live_mode_switch: bool,
-    pub native_fork: bool,
+    pub fork: ForkCapability,
     pub native_rollback: bool,
     pub native_snapshot: bool,
     pub cancellation: bool,
@@ -26,6 +26,17 @@ pub enum SteeringCapability {
     Unavailable,
     Native,
     SafeBoundary,
+}
+
+/// What a native fork can branch from. `Session` copies the whole
+/// conversation; `Turn` can stop at a completed turn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForkCapability {
+    #[default]
+    Unavailable,
+    Session,
+    Turn,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

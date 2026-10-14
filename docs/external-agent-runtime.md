@@ -379,3 +379,35 @@ provider OAuth settings remain separate.
 
 References: [official authentication protocol](https://developers.openai.com/codex/app-server#authentication),
 [pinned account protocol](https://github.com/openai/codex/blob/f87ba04ec3cd386a92e775405b252a310b40bb0d/codex-rs/app-server-protocol/src/protocol/v2/account.rs).
+
+## Native forks as separate chats (#194, #197, #201)
+
+A native fork creates a new Mira chat. It never replaces the runtime in the current
+chat. The new chat is nested under the original in the sidebar. It keeps the project,
+engine instance, model and confirmed launch options. It also receives the transcript
+sidecar through the fork point and a resume cursor for the new native session. The
+original chat, its running agent and its cursor are left unchanged. Nothing is saved
+unless the native fork succeeds; the sidecar and cursor are removed if the chat
+record cannot be saved.
+
+| Agent | Native operation | Scope offered |
+| --- | --- | --- |
+| Codex (app-server) | `thread/fork` with `lastTurnId`, run in a short-lived app-server so the live thread never sees the new thread's notifications | Fork from a completed turn, or the whole chat |
+| OpenCode (ACP) | `session/fork` with the source session's exact working directory, only when `sessionCapabilities.fork` is advertised | Whole chat |
+| Claude Code | `--resume <id> --fork-session` on the new chat's first start; the cursor is marked pending until Claude reports the new session ID | Whole chat |
+
+Codex fork boundaries come from completed native turn IDs, which are now recorded
+in the sidecar. Subagent threads are excluded. Chats recorded before this change can
+fork only from the latest turn. A boundary that is still running is rejected with
+instructions to wait or stop it. A message the provider or another agent answered
+cannot be a native boundary. Agents that fork only whole sessions do not show
+"Fork from here" on individual messages. Their action is labelled **Fork chat**.
+An installed version without the operation reports that it cannot fork natively.
+Mira never falls back to replaying the transcript into a fresh conversation.
+
+OpenCode refuses to fork a session that has no messages. The opt-in
+`installed_opencode_forks_a_session_without_touching_the_source` test uses a
+free model to verify the fork with OpenCode v2.0.22, then resumes both sessions.
+
+References: [pinned `thread/fork` schema](https://github.com/openai/codex/blob/f87ba04ec3cd386a92e775405b252a310b40bb0d/codex-rs/app-server-protocol/schema/typescript/v2/ThreadForkParams.ts),
+[OpenCode ACP sessions](https://dev.opencode.ai/v2/docs/cli/acp/#sessions).

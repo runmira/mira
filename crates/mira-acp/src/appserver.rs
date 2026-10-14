@@ -1479,6 +1479,121 @@ pub async fn probe_handshake(launch: &LaunchConfig) -> Option<AppServerProbe> {
     })
 }
 
+/// What a native Codex fork copies, and how the new thread is configured.
+#[derive(Clone, Debug, Default)]
+pub struct ThreadFork {
+    pub source_thread_id: String,
+    /// Fork through this completed turn, inclusive. `None` copies the
+    /// whole thread.
+    pub last_turn_id: Option<String>,
+    pub cwd: Option<String>,
+    pub model: Option<String>,
+    pub runtime_mode: String,
+}
+
+/// `thread/fork` params: the source thread, the boundary, and the settings
+/// the fork continues with.
+pub fn thread_fork_params(fork: &ThreadFork) -> Value {
+    let (policy, sandbox) = policy_for_mode(&fork.runtime_mode);
+    let mut params = json!({
+        "threadId": fork.source_thread_id,
+        "approvalPolicy": policy,
+        "sandbox": sandbox,
+        "excludeTurns": true,
+    });
+    if let Some(turn) = fork.last_turn_id.as_deref().filter(|t| !t.is_empty()) {
+        params["lastTurnId"] = json!(turn);
+    }
+    if let Some(cwd) = &fork.cwd {
+        params["cwd"] = json!(cwd);
+    }
+    if let Some(model) = fork
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty() && *m != "default")
+    {
+        params["model"] = json!(model);
+    }
+    params
+}
+
+fn fork_failure(error: String) -> crate::process::ForkFailure {
+    use crate::process::ForkFailure;
+    let lower = error.to_ascii_lowercase();
+    if error.contains("-32601")
+        || lower.contains("unknown variant")
+        || lower.contains("method not found")
+    {
+        ForkFailure::Unsupported(
+            "this installed Codex does not support thread/fork; update Codex to fork natively"
+                .into(),
+        )
+    } else if lower.contains("in progress")
+        || lower.contains("in-progress")
+        || lower.contains("still running")
+    {
+        ForkFailure::InProgress(
+            "that turn is still running; wait for it to finish or stop it, then fork".into(),
+        )
+    } else {
+        ForkFailure::Failed(error)
+    }
+}
+
+/// Fork a Codex thread with `thread/fork` in a short-lived app-server, so a
+/// running conversation never receives the new thread's notifications. The
+/// source thread is not modified. Returns the new native thread id, which the
+/// forked chat later opens with `thread/resume`.
+pub async fn fork_thread(
+    launch: &LaunchConfig,
+    fork: &ThreadFork,
+) -> Result<String, crate::process::ForkFailure> {
+    use crate::conn::NullCallbacks;
+    use crate::process::ForkFailure;
+    let process = AgentProcess::spawn(launch, Arc::new(NullCallbacks))
+        .await
+        .map_err(|e| ForkFailure::Failed(format!("could not start Codex: {e}")))?;
+    let conn = process.conn();
+    async fn call(
+        conn: &crate::conn::Connection,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, String> {
+        protocol_log("out", method, &params);
+        let res = tokio::time::timeout(CALL_TIMEOUT, conn.request::<Value>(method, params))
+            .await
+            .map_err(|_| format!("{method} timed out"))?
+            .map_err(|e| e.to_string())?;
+        protocol_log("in", method, &res);
+        Ok(res)
+    }
+    let result = async {
+        call(conn, "initialize", initialize_params("mira-fork"))
+            .await
+            .map_err(ForkFailure::Failed)?;
+        let _ = conn.notify("initialized", json!({})).await;
+        let forked = call(conn, "thread/fork", thread_fork_params(fork))
+            .await
+            .map_err(fork_failure)?;
+        let id = forked
+            .pointer("/thread/id")
+            .or_else(|| forked.get("threadId"))
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty() && *id != fork.source_thread_id)
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                ForkFailure::Failed("Codex did not return a new thread for the fork".into())
+            })?;
+        // Unloading is a courtesy; the fork is already persisted.
+        let _ = call(conn, "thread/unsubscribe", json!({ "threadId": id })).await;
+        Ok(id)
+    }
+    .await;
+    process.shutdown(Duration::from_millis(500)).await;
+    result
+}
+
 /// The model option event: the catalog with `current` marked. `None` means
 /// unmarked — the server has not said what runs, and the picker shows the
 /// list without pretending.
@@ -3663,6 +3778,120 @@ done
         );
         assert_eq!(agent.turns_for_prompts(1), 1, "one prompt left");
         agent.shutdown().await;
+    }
+
+    fn fake_fork_codex(
+        dir: &std::path::Path,
+        fork_reply: &str,
+    ) -> (LaunchConfig, std::path::PathBuf) {
+        let path = dir.join("codex");
+        let log = dir.join("calls.log");
+        std::fs::write(
+            &path,
+            format!(
+                r##"#!/bin/sh
+id_of() {{ printf '%s' "$1" | sed -E 's/^\{{"jsonrpc":"2\.0","id":([0-9]+),.*/\1/'; }}
+while IFS= read -r line; do
+  id=$(id_of "$line")
+  case "$line" in
+    *'"method":"thread/fork"'*)
+      printf '%s\n' "$line" >> '{log}'
+      echo "{{\"id\":$id,{fork_reply}}}" ;;
+    *'"method":"thread/unsubscribe"'*) echo unsubscribe >> '{log}'; echo "{{\"id\":$id,\"result\":{{}}}}" ;;
+    *'"id":'*) echo "{{\"id\":$id,\"result\":{{}}}}" ;;
+  esac
+done
+"##,
+                log = log.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        (
+            LaunchConfig {
+                program: path,
+                args: vec!["app-server".to_string()],
+                env: Default::default(),
+                secret_env: Vec::new(),
+                env_deny: Vec::new(),
+            },
+            log,
+        )
+    }
+
+    #[tokio::test]
+    async fn a_native_fork_names_the_boundary_and_keeps_the_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cfg, log) = fake_fork_codex(
+            dir.path(),
+            r#"\"result\":{\"thread\":{\"id\":\"th-fork\"},\"model\":\"gpt-6.1-sol\"}"#,
+        );
+        let fork = ThreadFork {
+            source_thread_id: "th-src".into(),
+            last_turn_id: Some("tu-2".into()),
+            cwd: Some("/repo".into()),
+            model: Some("gpt-6.1-sol".into()),
+            runtime_mode: "auto-accept-edits".into(),
+        };
+        assert_eq!(fork_thread(&cfg, &fork).await.unwrap(), "th-fork");
+        let calls = std::fs::read_to_string(&log).unwrap();
+        let sent: Value = serde_json::from_str(calls.lines().next().unwrap()).unwrap();
+        let p = &sent["params"];
+        assert_eq!(p["threadId"], "th-src");
+        assert_eq!(p["lastTurnId"], "tu-2");
+        assert_eq!(p["cwd"], "/repo");
+        assert_eq!(p["model"], "gpt-6.1-sol");
+        let (policy, sandbox) = policy_for_mode("auto-accept-edits");
+        assert_eq!(p["approvalPolicy"], policy);
+        assert_eq!(p["sandbox"], sandbox);
+        assert_eq!(p["excludeTurns"], true);
+        assert!(calls.contains("unsubscribe"));
+
+        // A whole-thread fork names no boundary.
+        let whole = ThreadFork {
+            last_turn_id: None,
+            ..fork
+        };
+        assert!(thread_fork_params(&whole).get("lastTurnId").is_none());
+    }
+
+    #[tokio::test]
+    async fn fork_failures_say_what_the_installed_codex_lacks() {
+        use crate::process::ForkFailure;
+        let dir = tempfile::tempdir().unwrap();
+        let fork = ThreadFork {
+            source_thread_id: "th-src".into(),
+            runtime_mode: "auto".into(),
+            ..Default::default()
+        };
+        let (old, _) = fake_fork_codex(
+            dir.path(),
+            r#"\"error\":{\"code\":-32601,\"message\":\"unknown variant thread/fork\"}"#,
+        );
+        assert!(matches!(
+            fork_thread(&old, &fork).await,
+            Err(ForkFailure::Unsupported(_))
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let (busy, _) = fake_fork_codex(
+            dir.path(),
+            r#"\"error\":{\"code\":-32600,\"message\":\"turn tu-2 is in progress\"}"#,
+        );
+        assert!(matches!(
+            fork_thread(&busy, &fork).await,
+            Err(ForkFailure::InProgress(_))
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let (same, _) =
+            fake_fork_codex(dir.path(), r#"\"result\":{\"thread\":{\"id\":\"th-src\"}}"#);
+        assert!(matches!(
+            fork_thread(&same, &fork).await,
+            Err(ForkFailure::Failed(_))
+        ));
     }
 
     #[tokio::test]

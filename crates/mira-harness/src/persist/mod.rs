@@ -204,7 +204,7 @@ fn default_true() -> bool {
 pub enum ForkError {
     #[error("that message isn't in this chat's live history (it may have been compacted)")]
     MessageNotFound,
-    #[error("forking chats run by an external agent isn't supported yet")]
+    #[error("external-agent chats fork through their agent's native session")]
     AgentChat,
 }
 
@@ -292,6 +292,75 @@ impl SessionRecord {
                 at,
             }),
         })
+    }
+
+    /// A new chat continuing this external-agent chat's native fork. The
+    /// agent's own history lives in its sidecar and native session, so this
+    /// copies only the harness turns from before the fork point
+    /// (`keep_messages`) and keeps the agent, instance and launch settings.
+    /// The caller writes the sidecar and resume cursor.
+    pub fn fork_agent_chat(
+        &self,
+        new_id: SessionId,
+        at: &str,
+        keep_messages: usize,
+        agent: AgentSessionMeta,
+    ) -> SessionRecord {
+        let messages: Vec<Message> =
+            self.messages[..keep_messages.min(self.messages.len())].to_vec();
+        let prompts = messages
+            .iter()
+            .filter(|m| m.role == mira_core::Role::User && !crate::history::is_summary(m))
+            .count();
+        let mut turns = self.turns.clone();
+        turns.truncate(prompts);
+        let kept_calls: std::collections::HashSet<String> = messages
+            .iter()
+            .flat_map(|m| m.tool_calls.iter().map(|c| c.id.to_string()))
+            .collect();
+        let previews = self
+            .previews
+            .iter()
+            .filter(|(k, _)| kept_calls.contains(*k))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let base = self
+            .title
+            .clone()
+            .or_else(|| self.first_user_message().map(str::to_string))
+            .unwrap_or_else(|| "Chat".into());
+        let now = now_secs();
+        SessionRecord {
+            id: new_id,
+            cwd: self.cwd.clone(),
+            cfg: self.cfg.clone(),
+            messages,
+            archived: self.archived.clone(),
+            created_at: now,
+            updated_at: now,
+            title: Some(format!(
+                "{} (fork)",
+                base.chars().take(60).collect::<String>()
+            )),
+            turns,
+            usage: UsageTotals::default(),
+            file_calls_done: self.file_calls_done.clone(),
+            parent_id: None,
+            tasks: self.tasks.clone(),
+            goal: None,
+            previews,
+            pinned: false,
+            archived_at: None,
+            settle: SettleMarks::default(),
+            agent: Some(AgentSessionMeta {
+                active: true,
+                ..agent
+            }),
+            forked_from: Some(ForkPoint {
+                session_id: self.id.clone(),
+                at: at.trim().chars().take(80).collect(),
+            }),
+        }
     }
 
     /// Every message of the conversation in order, as a person would
@@ -653,5 +722,38 @@ mod fork_tests {
             agent.fork_at(SessionId::from("n"), "one", 0).unwrap_err(),
             ForkError::AgentChat
         );
+    }
+
+    #[test]
+    fn an_agent_fork_keeps_the_agent_and_the_harness_turns_before_it() {
+        let mut src = record(vec![
+            Message::user("one"),
+            Message::assistant("a1"),
+            Message::user("later provider turn"),
+            Message::assistant("a2"),
+        ]);
+        let agent = AgentSessionMeta {
+            driver_kind: "codex".into(),
+            instance: Some("codex-work".into()),
+            model: Some("gpt-6.1-sol".into()),
+            active: false,
+            launch: Some(serde_json::json!({"model_options": {"reasoning_effort": "high"}})),
+        };
+        src.agent = Some(agent.clone());
+        let f = src.fork_agent_chat(SessionId::from("n"), "  fix it  ", 2, agent);
+        assert_eq!(f.messages.len(), 2);
+        assert_eq!(f.turns.len(), 1);
+        let meta = f.agent.as_ref().unwrap();
+        assert!(meta.active, "the fork routes to its agent");
+        assert_eq!(meta.instance.as_deref(), Some("codex-work"));
+        assert_eq!(
+            meta.launch.as_ref().unwrap()["model_options"]["reasoning_effort"],
+            "high"
+        );
+        let point = f.forked_from.as_ref().unwrap();
+        assert_eq!(point.session_id, SessionId::from("sess_src"));
+        assert_eq!(point.at, "fix it");
+        assert!(f.usage.is_zero() && !f.pinned);
+        assert_eq!(src.messages.len(), 4, "the source is untouched");
     }
 }

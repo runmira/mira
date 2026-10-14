@@ -175,20 +175,12 @@ mod replacement_validation_tests {
 /// hang), and the ports are built from *this* slot's `ToolContext` and
 /// approver, so the agent inherits the session's existing confinement rather
 /// than a fresh one.
-pub async fn start_agent(
-    state: &AppState,
-    slot: &Arc<SessionSlot>,
-    params: &AcpLaunchParams,
-    native: Option<mira_acp::native::NativeOverrides>,
-) -> Result<Arc<SlotAgent>, String> {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
-    let driver = mira_acp::drivers::by_kind(&params.driver_kind)
-        .ok_or_else(|| format!("unknown agent: {}", params.driver_kind))?;
-    let driver = driver.as_ref();
+/// The driver config a launch actually uses. Secrets are never written to a
+/// session record, so a chat restored after a restart comes back without its
+/// key. The engine's config in mira.yaml is the one place they live; fill in
+/// what's missing from it.
+pub(crate) fn effective_driver_config(state: &AppState, params: &AcpLaunchParams) -> DriverConfig {
     let mut driver_cfg = params.cfg.clone();
-    // Secrets are never written to a session record, so a chat restored
-    // after a restart comes back without its key. The engine's config in
-    // mira.yaml is the one place they live; fill in what's missing from it.
     if let Some(current) = state
         .engines
         .current()
@@ -201,6 +193,59 @@ pub async fn start_agent(
             driver_cfg.env.entry(k).or_insert(v);
         }
     }
+    driver_cfg
+}
+
+/// How `params` launches, without anything owned by one chat (Mira's tool
+/// server, browser flags). Helper processes use it to reach the same binary,
+/// home and credentials as the chat they act for.
+pub(crate) fn engine_launch(
+    state: &AppState,
+    params: &AcpLaunchParams,
+) -> Result<(Transport, LaunchConfig), String> {
+    let driver = mira_acp::drivers::by_kind(&params.driver_kind)
+        .ok_or_else(|| format!("unknown agent: {}", params.driver_kind))?;
+    let driver = driver.as_ref();
+    let cfg = effective_driver_config(state, params);
+    let program: PathBuf = cfg
+        .binary_path
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(driver.binary_names().first().copied().unwrap_or("")));
+    let transport = mira_acp::process::choose_transport(driver, &cfg, &program);
+    let launch = match transport {
+        Transport::Native => {
+            let mut l =
+                mira_acp::process::build_native_launch(driver, &cfg, params.mode, &program, None)
+                    .ok_or_else(|| format!("{} has no native interface", driver.display_name()))?;
+            let acp = driver.resolve(&cfg, params.mode, program.clone());
+            l.env = acp.env;
+            l.secret_env = acp.secret_env;
+            l.args.extend(cfg.launch_args.clone());
+            l
+        }
+        _ => driver.resolve(&cfg, params.mode, program.clone()),
+    };
+    if !mira_acp::process::looks_installed(&launch) {
+        return Err(format!(
+            "{} is not installed (looked for `{}`)",
+            driver.display_name(),
+            launch.program.display()
+        ));
+    }
+    Ok((transport, launch))
+}
+
+pub async fn start_agent(
+    state: &AppState,
+    slot: &Arc<SessionSlot>,
+    params: &AcpLaunchParams,
+    native: Option<mira_acp::native::NativeOverrides>,
+) -> Result<Arc<SlotAgent>, String> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    let driver = mira_acp::drivers::by_kind(&params.driver_kind)
+        .ok_or_else(|| format!("unknown agent: {}", params.driver_kind))?;
+    let driver = driver.as_ref();
+    let mut driver_cfg = effective_driver_config(state, params);
     let mode = params.mode;
     // Where the binary lives. `binary_path` in the driver config wins;
     // otherwise the driver's own name on PATH.
@@ -234,6 +279,9 @@ pub async fn start_agent(
     // `session/resume` (OpenCode advertises it) via the same field.
     if native.resume.is_none() {
         if let Some(cur) = mira_acp::agent_sessions::read(&slot.id.to_string(), &params.instance) {
+            // A forked chat's first start creates its fork from the
+            // original's session (Claude: `--fork-session`).
+            native.fork = native.fork || cur.fork_pending;
             native.resume = Some(cur.agent_session_id);
         }
     }
@@ -728,6 +776,35 @@ pub(crate) fn ensure_transcript_logger(state: &AppState, slot: &Arc<SessionSlot>
             };
             if model_changed {
                 crate::session_engine::publish(&state, &slot).await;
+            }
+            // Completed native turns are fork boundaries (`thread/fork`
+            // takes `lastTurnId`). Kept beside the transcript, not in it:
+            // replay has nothing to draw for them.
+            if let ServerMsg::RuntimeTurnUpdated { turn } = &msg {
+                if !turn.running {
+                    let owner = slot
+                        .acp_launch
+                        .lock()
+                        .await
+                        .as_ref()
+                        .map(|p| (p.driver_kind.clone(), p.instance.clone()));
+                    if let (Some(path), Some((driver, instance))) = (path.as_ref(), owner) {
+                        append_transcript_record(
+                            path.clone(),
+                            serde_json::json!({
+                                "t": mira_harness::persist::now_ms(),
+                                "driver": driver,
+                                "instance": instance,
+                                "native_turn": {
+                                    "thread": turn.native_thread_id,
+                                    "turn": turn.native_turn_id,
+                                },
+                            }),
+                        )
+                        .await;
+                    }
+                }
+                continue;
             }
             if !is_transcript_frame(&msg) {
                 continue;

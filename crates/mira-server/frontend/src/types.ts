@@ -298,7 +298,9 @@ export type EngineRef = {
 export type SessionEngine = {
   capabilities?: { asynchronous_questions: boolean; background_work: boolean; native_goals: boolean;
     steering: 'unavailable' | 'native' | 'safe_boundary'; image_input: boolean;
-    live_model_switch: boolean; live_mode_switch: boolean; native_fork: boolean;
+    live_model_switch: boolean; live_mode_switch: boolean;
+    /** `turn`: forks through a chosen completed turn; `session`: only the whole conversation. */
+    fork: 'unavailable' | 'session' | 'turn';
     native_rollback: boolean; native_snapshot: boolean; cancellation: boolean;
     stop_behavior: 'current_turn' | 'runtime' };
   kind: 'provider' | 'agent';
@@ -574,6 +576,8 @@ export type ServerMsg =
   /** The agent's own stop reason, verbatim. `cancelled` and
    *  `max_tokens` must not render as a completed answer. */
   | { type: 'acp_turn_end'; stop_reason: string; detail?: string | null }
+  /** A separate chat now holds a native fork of this chat's agent session. */
+  | { type: 'agent_forked'; session_id: string }
   | { type: 'acp_prompt_committed'; record: unknown }
   | { type: 'acp_failure'; code: string; message: string; retryable: boolean; reset_at: string | null }
     /** Something this build does not model. Surfaced as a warning rather

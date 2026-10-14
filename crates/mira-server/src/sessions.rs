@@ -1205,14 +1205,21 @@ fn summarize_metadata(
 pub struct ForkBody {
     /// The user message to fork at, as edit & resend identifies it: its
     /// text, and which match counting from the latest.
+    #[serde(default)]
     text: String,
     #[serde(default)]
     occurrence: usize,
+    /// Fork the whole conversation (external agents that cannot fork from
+    /// a selected turn).
+    #[serde(default)]
+    whole: bool,
 }
 
 /// `POST /api/sessions/:id/fork` — "Fork from here": a new chat with this
 /// one's history through the given message's turn, nested under it in the
-/// sidebar. The files on disk are left as they are. Answers `{ "id": … }`.
+/// sidebar. External-agent chats fork their native session (see
+/// `agent_fork`). The files on disk are left as they are. Answers
+/// `{ "id": … }`.
 pub async fn fork_session(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
@@ -1233,6 +1240,22 @@ pub async fn fork_session(
         Ok(r) => r,
         Err(e) => return err(StatusCode::NOT_FOUND, format!("load: {e}")),
     };
+    // An external agent's history lives in its own session: fork that
+    // natively and bind a new chat to the result.
+    if record.agent.as_ref().is_some_and(|a| a.active) {
+        let boundary = if body.whole {
+            crate::agent_fork::Boundary::Whole
+        } else {
+            crate::agent_fork::Boundary::At {
+                text: body.text,
+                occurrence: body.occurrence,
+            }
+        };
+        return match crate::agent_fork::fork_chat(&state, &src, boundary).await {
+            Ok(id) => Json(serde_json::json!({ "id": id.to_string() })).into_response(),
+            Err(e) => err(e.status, e.message),
+        };
+    }
     let fork = match record.fork_at(SessionId::new(), &body.text, body.occurrence) {
         Ok(f) => f,
         Err(e) => return err(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()),
