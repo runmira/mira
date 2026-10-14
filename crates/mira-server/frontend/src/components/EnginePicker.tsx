@@ -374,7 +374,12 @@ export function EnginePicker(props: EnginePickerProps) {
                   ))}
                   {isAgent && (
                     <div className="flex items-center gap-1.5 px-1.5 pt-1">
-                      <span className="mr-auto text-[11px] text-muted-foreground/60">This chat's agent session</span>
+                      <span
+                        className="mr-auto truncate text-[11px] text-muted-foreground/60"
+                        title={engine?.capability_source === 'unknown' ? 'Available actions are confirmed when the agent starts' : engine?.agent_version ?? undefined}
+                      >
+                        This chat's agent session{engine?.agent_version ? ` · ${engine.agent_version}` : ''}
+                      </span>
                       {props.onAgentCompact && (
                         <SmallButton onClick={() => { props.onAgentCompact?.(); onOpenChange(false); }} title="Ask the agent to compact its context">
                           Compact

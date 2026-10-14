@@ -656,7 +656,21 @@ async fn dispatch_on_slot(
                                 Ok(()) => {
                                     Ok(())
                                 }
-                                Err(error) => Err(error.to_string()),
+                                Err(error) => {
+                                    let error = error.to_string();
+                                    if crate::agent_capabilities::is_unknown_method(&error) {
+                                        if let Some(handle) = &handle {
+                                            state.agent_capabilities.mark_unsupported(
+                                                &handle.instance,
+                                                crate::agent_capabilities::Feature::Steering,
+                                            );
+                                        }
+                                        crate::session_engine::publish(&state, &slot).await;
+                                        Err("This Codex version does not support steering an active turn. Your message is still queued.".into())
+                                    } else {
+                                        Err(error)
+                                    }
+                                }
                             }
                         }
                         Some(mira_acp::native::AgentHandle::Native(agent)) => {

@@ -175,6 +175,60 @@ mod replacement_validation_tests {
 /// hang), and the ports are built from *this* slot's `ToolContext` and
 /// approver, so the agent inherits the session's existing confinement rather
 /// than a fresh one.
+/// Record what this runtime negotiated for its engine instance. Agents that
+/// report no version on the wire are asked through their CLI afterwards.
+async fn record_capabilities(
+    state: &AppState,
+    slot: &Arc<SessionSlot>,
+    params: &AcpLaunchParams,
+    handle: &Arc<SlotAgent>,
+    agent: &AgentHandle,
+    transport: Transport,
+    epoch: u64,
+) {
+    let Ok((_, launch)) = engine_launch(state, params) else {
+        return;
+    };
+    let program = mira_acp::which::resolve(&launch.program.display().to_string())
+        .unwrap_or_else(|| launch.program.clone());
+    let record = crate::agent_capabilities::CapabilityRecord {
+        instance: params.instance.clone(),
+        driver: params.driver_kind.clone(),
+        transport: match transport {
+            Transport::Native => "native",
+            _ => "acp",
+        }
+        .into(),
+        binary: program.display().to_string(),
+        version: agent.reported_version(),
+        launch_fingerprint: crate::agent_capabilities::launch_fingerprint(&launch),
+        capabilities: crate::session_engine::live_capabilities(handle, agent).await,
+        unsupported: Default::default(),
+        observed_at: 0,
+        epoch,
+    };
+    let ask_cli = record.version.is_none();
+    if !state.agent_capabilities.commit(record.clone()) || !ask_cli {
+        return;
+    }
+    let state = state.clone();
+    let slot = slot.clone();
+    tokio::spawn(async move {
+        if let Some(version) = crate::agent_capabilities::cli_version(&program).await {
+            let committed =
+                state
+                    .agent_capabilities
+                    .commit(crate::agent_capabilities::CapabilityRecord {
+                        version: Some(version),
+                        ..record
+                    });
+            if committed {
+                crate::session_engine::publish(&state, &slot).await;
+            }
+        }
+    });
+}
+
 /// The driver config a launch actually uses. Secrets are never written to a
 /// session record, so a chat restored after a restart comes back without its
 /// key. The engine's config in mira.yaml is the one place they live; fill in
@@ -242,6 +296,9 @@ pub async fn start_agent(
     native: Option<mira_acp::native::NativeOverrides>,
 ) -> Result<Arc<SlotAgent>, String> {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    // Taken before anything starts, so a slower, older start cannot record
+    // its capabilities over this one's.
+    let capability_epoch = state.agent_capabilities.begin();
     let driver = mira_acp::drivers::by_kind(&params.driver_kind)
         .ok_or_else(|| format!("unknown agent: {}", params.driver_kind))?;
     let driver = driver.as_ref();
@@ -685,6 +742,16 @@ pub async fn start_agent(
         if let Some(sid) = agent.session_id().await {
             mira_acp::agent_sessions::record(&slot.id.to_string(), &handle.instance, &sid);
         }
+        record_capabilities(
+            state,
+            slot,
+            params,
+            &handle,
+            &agent,
+            transport,
+            capability_epoch,
+        )
+        .await;
     }
     ensure_transcript_logger(state, slot);
     let committed_events = slot.events_tx.clone();
@@ -2357,7 +2424,17 @@ pub async fn revert_agent_turn(
             ));
             return Ok(notes.join("; "));
         }
-        Some(Err(e)) => notes.push(format!("couldn't rewind the agent ({e})")),
+        Some(Err(e)) => {
+            if crate::agent_capabilities::is_unknown_method(&e) {
+                if let Some(params) = slot.acp_launch.lock().await.as_ref() {
+                    state.agent_capabilities.mark_unsupported(
+                        &params.instance,
+                        crate::agent_capabilities::Feature::Rollback,
+                    );
+                }
+            }
+            notes.push(format!("couldn't rewind the agent ({e})"))
+        }
         None => {}
     }
     // The cursor points at the pre-revert session; keeping it would resume

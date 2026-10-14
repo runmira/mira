@@ -1320,6 +1320,17 @@ impl AgentHandle {
         }
     }
 
+    /// The version the agent reported while starting, when it reports one
+    /// (ACP `agentInfo`, Codex `userAgent`). Claude Code reports none on the
+    /// wire; callers ask its CLI instead.
+    pub fn reported_version(&self) -> Option<String> {
+        match self {
+            Self::Acp(a) => a.session().agent_version(),
+            Self::AppServer(a) => a.user_agent().map(str::to_owned),
+            Self::Native(_) => None,
+        }
+    }
+
     /// Which transport is live, for display and for logs.
     pub fn transport(&self) -> Transport {
         match self {

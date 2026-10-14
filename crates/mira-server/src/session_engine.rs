@@ -81,6 +81,13 @@ pub struct SessionEngine {
     pub status: EngineStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Whether `capabilities` come from the running agent, from the last
+    /// runtime of the same installed launch, or are conservative defaults.
+    #[serde(default)]
+    pub capability_source: crate::agent_capabilities::CapabilitySource,
+    /// The installed agent's version, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_version: Option<String>,
 }
 
 /// How far each side has read the other's turns. See the module docs.
@@ -426,6 +433,8 @@ pub async fn current(state: &AppState, slot: &SessionSlot) -> SessionEngine {
             model: Some(model),
             status: EngineStatus::Ready,
             error: None,
+            capability_source: crate::agent_capabilities::CapabilitySource::Live,
+            agent_version: None,
         };
     };
 
@@ -449,39 +458,40 @@ pub async fn current(state: &AppState, slot: &SessionSlot) -> SessionEngine {
         .lock()
         .ok()
         .and_then(|m| m.clone());
-    let capabilities = match slot.acp_agent.read().await.clone() {
-        Some(handle) => {
-            let mut caps = handle
-                .agent()
-                .await
-                .map(|a| a.runtime_capabilities())
-                .unwrap_or_default();
-            if let Some(mira_acp::native::AgentHandle::AppServer(codex)) = handle.agent().await {
-                let options = codex.current_options().await;
-                if let Some(model) = options
-                    .iter()
-                    .find(|o| o.category.as_deref() == Some("model"))
-                {
-                    if let Some(modalities) = model
-                        .values
-                        .iter()
-                        .find(|v| Some(&v.value) == model.current.as_ref())
-                        .and_then(|v| v.capabilities.as_ref())
-                        .and_then(|c| c.input_modalities.as_ref())
-                    {
-                        caps.image_input = modalities.iter().any(|m| m == "image");
-                    }
-                }
-            }
-            if handle.opencode_control.is_some() {
-                caps.steering = mira_acp::runtime::SteeringCapability::Native;
-            }
-            if handle.driver_kind == "grok" {
-                caps.stop_behavior = mira_acp::runtime::StopBehavior::Runtime;
-            }
-            caps
+    use crate::agent_capabilities::CapabilitySource;
+    let live_handle = match slot.acp_agent.read().await.clone() {
+        Some(handle) => handle.agent().await.map(|agent| (handle, agent)),
+        None => None,
+    };
+    let (capabilities, capability_source, agent_version) = match live_handle {
+        Some((handle, agent)) => {
+            let caps = crate::agent_capabilities::downgrade(
+                live_capabilities(&handle, &agent).await,
+                &state.agent_capabilities.unsupported(&params.instance, None),
+            );
+            let version = state
+                .agent_capabilities
+                .version(&params.instance)
+                .or_else(|| agent.reported_version());
+            (caps, CapabilitySource::Live, version)
         }
-        None => Default::default(),
+        // Not running: what this unchanged install negotiated last time, or
+        // nothing. Never a guess from the driver kind.
+        None => match crate::acp_session::engine_launch(state, &params)
+            .ok()
+            .and_then(|(_, launch)| {
+                state.agent_capabilities.recorded(
+                    &params.instance,
+                    crate::agent_capabilities::launch_fingerprint(&launch),
+                )
+            }) {
+            Some(record) => (
+                record.effective(),
+                CapabilitySource::Recorded,
+                record.version,
+            ),
+            None => (Default::default(), CapabilitySource::Unknown, None),
+        },
     };
     SessionEngine {
         kind: EngineKind::Agent,
@@ -492,7 +502,43 @@ pub async fn current(state: &AppState, slot: &SessionSlot) -> SessionEngine {
         model: reported.or(params.model.clone()),
         status,
         error,
+        capability_source,
+        agent_version,
     }
+}
+
+/// What a running agent supports, as its runtime negotiated it, with the
+/// host-side gates Mira adds (OpenCode's steering bridge, Codex model
+/// modalities).
+pub(crate) async fn live_capabilities(
+    handle: &crate::acp_session::SlotAgent,
+    agent: &mira_acp::native::AgentHandle,
+) -> mira_acp::runtime::RuntimeCapabilities {
+    let mut caps = agent.runtime_capabilities();
+    if let mira_acp::native::AgentHandle::AppServer(codex) = agent {
+        let options = codex.current_options().await;
+        if let Some(model) = options
+            .iter()
+            .find(|o| o.category.as_deref() == Some("model"))
+        {
+            if let Some(modalities) = model
+                .values
+                .iter()
+                .find(|v| Some(&v.value) == model.current.as_ref())
+                .and_then(|v| v.capabilities.as_ref())
+                .and_then(|c| c.input_modalities.as_ref())
+            {
+                caps.image_input = modalities.iter().any(|m| m == "image");
+            }
+        }
+    }
+    if handle.opencode_control.is_some() {
+        caps.steering = mira_acp::runtime::SteeringCapability::Native;
+    }
+    if handle.driver_kind == "grok" {
+        caps.stop_behavior = mira_acp::runtime::StopBehavior::Runtime;
+    }
+    caps
 }
 
 /// Send the session's engine to everyone watching it.

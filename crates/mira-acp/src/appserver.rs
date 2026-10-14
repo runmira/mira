@@ -2248,6 +2248,8 @@ pub struct AppServerAgent {
     models: Arc<Mutex<Vec<CodexModel>>>,
     turns: Arc<TurnContext>,
     events_tx: mpsc::Sender<NormalizedEvent>,
+    /// The app-server's `userAgent` from `initialize` (its name and version).
+    user_agent: Option<String>,
     pub events: std::sync::Mutex<Option<mpsc::Receiver<NormalizedEvent>>>,
     pub turn_end: std::sync::Mutex<Option<mpsc::Receiver<TurnEnd>>>,
 }
@@ -2353,7 +2355,12 @@ impl AppServerAgent {
         }
 
         // Verified handshake shape: `initialize` answers with agent facts.
-        let _init: Value = call(conn, "initialize", initialize_params("mira")).await?;
+        let init: Value = call(conn, "initialize", initialize_params("mira")).await?;
+        let user_agent = init
+            .get("userAgent")
+            .or_else(|| init.get("user_agent"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         let _ = conn.notify("initialized", json!({})).await;
 
         let (method, start_params) = thread_open_params(
@@ -2446,6 +2453,7 @@ impl AppServerAgent {
             models: models_retained,
             turns,
             events_tx,
+            user_agent,
             events: std::sync::Mutex::new(Some(rx)),
             turn_end: std::sync::Mutex::new(Some(end_rx)),
         })
@@ -2507,6 +2515,11 @@ impl AppServerAgent {
 
     pub async fn session_id(&self) -> Option<String> {
         self.thread_id.lock().await.clone()
+    }
+
+    /// The app-server's self-reported `userAgent`, when it sent one.
+    pub fn user_agent(&self) -> Option<&str> {
+        self.user_agent.as_deref()
     }
 
     /// Send a turn. Returns once the turn is accepted, not when it finishes;

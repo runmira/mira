@@ -169,12 +169,17 @@ pub(crate) fn scope(driver_kind: &str, transport: mira_acp::driver::Transport) -
     }
 }
 
-fn native_failure(name: &str, e: ForkFailure) -> ForkError {
+fn native_failure(state: &AppState, instance: &str, name: &str, e: ForkFailure) -> ForkError {
     match e {
-        ForkFailure::Unsupported(m) => fail(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            format!("{name} can't fork natively: {m}"),
-        ),
+        ForkFailure::Unsupported(m) => {
+            state
+                .agent_capabilities
+                .mark_unsupported(instance, crate::agent_capabilities::Feature::Fork);
+            fail(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("{name} can't fork natively: {m}"),
+            )
+        }
         ForkFailure::InProgress(m) => fail(StatusCode::CONFLICT, m),
         ForkFailure::Failed(m) => fail(
             StatusCode::BAD_GATEWAY,
@@ -296,7 +301,7 @@ pub async fn fork_chat(
             Some(
                 mira_acp::appserver::fork_thread(&launch, &fork)
                     .await
-                    .map_err(|e| native_failure(&name, e))?,
+                    .map_err(|e| native_failure(state, &params.instance, &name, e))?,
             )
         }
         (mira_acp::driver::Transport::Native, _) => None,
@@ -310,7 +315,7 @@ pub async fn fork_chat(
             Some(
                 mira_acp::process::fork_detached(&launch, driver.client_caps(), &source, &cwd)
                     .await
-                    .map_err(|e| native_failure(&name, e))?,
+                    .map_err(|e| native_failure(state, &params.instance, &name, e))?,
             )
         }
     };

@@ -313,6 +313,11 @@ export type SessionEngine = {
   /** `idle`: picked, not running (starts on the next message). */
   status: 'idle' | 'starting' | 'ready' | 'error';
   error?: string | null;
+  /** `live`: negotiated by the running agent; `recorded`: by the last runtime
+   *  of the same installed launch; `unknown`: conservative defaults. */
+  capability_source?: 'live' | 'recorded' | 'unknown';
+  /** The installed agent's reported version, when known. */
+  agent_version?: string | null;
 };
 
 /** A session from an agent's own history, resumable in Mira. */

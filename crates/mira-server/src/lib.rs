@@ -28,6 +28,7 @@
 
 pub mod acp_host;
 pub mod acp_session;
+mod agent_capabilities;
 mod agent_fork;
 mod agent_secrets;
 pub mod agent_spend;
@@ -358,6 +359,7 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
 
     let state = AppState {
         codex_auth: Arc::new(crate::codex_auth::AuthRegistry::default()),
+        agent_capabilities: Arc::new(crate::agent_capabilities::CapabilityRegistry::default()),
         request_slot: None,
         slot_loads: Arc::new(std::sync::Mutex::new(HashMap::new())),
         session_activity,

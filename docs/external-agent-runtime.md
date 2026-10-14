@@ -411,3 +411,32 @@ free model to verify the fork with OpenCode v2.0.22, then resumes both sessions.
 
 References: [pinned `thread/fork` schema](https://github.com/openai/codex/blob/f87ba04ec3cd386a92e775405b252a310b40bb0d/codex-rs/app-server-protocol/schema/typescript/v2/ThreadForkParams.ts),
 [OpenCode ACP sessions](https://dev.opencode.ai/v2/docs/cli/acp/#sessions).
+
+## Installed-version capability negotiation (#203)
+
+Each runtime start records, per engine instance, the resolved binary, its reported
+version, the transport, and the capabilities that runtime negotiated. Versions come
+from ACP `agentInfo` or the Codex `userAgent`. Claude Code reports no version on the
+wire, so Mira asks its `--version` after start. The registry is
+`~/.mira/agent-capabilities.json`; an unreadable file is treated as unknown.
+
+- **Live**: the running agent's negotiated capabilities, plus Mira's own gates
+  (OpenCode's steering bridge, Codex model input modalities).
+- **Recorded**: the agent is not running and the launch is unchanged (same resolved
+  program and modification time, arguments and home or config locations). The last
+  runtime's capabilities are used, so a reloaded chat can offer what its install
+  supports.
+- **Unknown**: a new or changed launch. Conservative defaults apply, and actions such
+  as forking stay hidden until the agent starts.
+
+Every start takes an epoch first. A commit from an older epoch never replaces a newer
+runtime's record. Native calls answered as unknown methods (`-32601`, "method not
+found", "unknown variant") permanently downgrade fork, rollback or steering for that
+launch and version. Mira reports the operation as unavailable; it never substitutes
+a fresh conversation or a cancellation. An upgraded CLI starts with a new record and
+is asked again.
+
+Goals and background activity remain event-driven for Codex: an older app-server that
+never emits goal or subagent updates shows none. ACP fork, resume, load and image
+support come from `initialize`. Malformed capability fields count as unadvertised and
+do not fail startup.

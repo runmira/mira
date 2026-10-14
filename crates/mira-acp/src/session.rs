@@ -1069,6 +1069,28 @@ mod tests {
         assert!(w.await.unwrap().is_err());
     }
 
+    #[tokio::test]
+    async fn malformed_session_capabilities_are_treated_as_unadvertised() {
+        let mut r = rig(ClientCaps::default()).await;
+        let w = tokio::spawn({
+            let s = r.sess.clone();
+            async move { s.initialize().await }
+        });
+        let f = r.next_frame().await;
+        let mut init = init_ok();
+        init["agentCapabilities"]["sessionCapabilities"] = json!({ "fork": "yes", "resume": 5 });
+        init["agentCapabilities"]["promptCapabilities"] = json!({ "image": "sometimes" });
+        r.reply(f["id"].clone(), init).await;
+        w.await
+            .unwrap()
+            .expect("a malformed field must not fail initialize");
+        assert!(!r.sess.supports_fork());
+        assert!(!r.sess.supports_resume());
+        let caps = r.sess.runtime_capabilities();
+        assert_eq!(caps.fork, crate::runtime::ForkCapability::Unavailable);
+        assert!(!caps.image_input);
+    }
+
     #[test]
     fn only_a_confirmed_not_found_falls_back_to_a_fresh_session() {
         use crate::conn::ConnError;
