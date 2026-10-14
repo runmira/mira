@@ -15,7 +15,7 @@ import {
   GitPullRequest,
   GitPullRequestClosed,
   GitPullRequestDraft,
-  LoaderCircle,
+  Loader,
   Split,
   Trash2,
 } from 'lucide-react';
@@ -494,7 +494,7 @@ export function SessionStatus({
         title="Streaming"
         aria-label="working"
       >
-        <LoaderCircle className="size-3 shrink-0 animate-spin text-mira-blue" />
+        <Loader className="size-3 shrink-0 animate-spin text-mira-blue" />
       </span>
     );
   }
