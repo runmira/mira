@@ -231,3 +231,24 @@ An approved pending tool becomes running on its tool-start event; settled tools
 remain settled.
 
 Protocol reference: [OpenCode ACP child sessions](https://dev.opencode.ai/v2/docs/cli/acp/).
+
+
+### Early launch visibility and OpenCode sign-in
+
+Claude tool-use block starts are emitted immediately, before completed argument
+JSON or the assistant snapshot. Explicit delegation names can create a Mira agent
+card with a pending prompt; later sparse updates merge launch metadata into that
+same card and child panel. Ordinary shell and task-management calls retain their
+existing tool presentation. The ACP client explicitly advertises
+`_meta["opencode/child-session-updates"]`, which OpenCode requires before sending
+child updates.
+
+OpenCode's ACP `authenticate(opencode-login)` returns success without collecting
+credentials. Its own CLI login supplies saved provider credentials. Mira keeps
+its restricted child environment; it does not silently forward ambient provider
+or GitHub tokens. OpenCode settings show a copyable login command using the
+configured binary, and ACP provider-auth failures direct the user to that flow.
+After saving the selected provider login, retry the message explicitly.
+
+Sources inspected: [OpenCode ACP service](https://github.com/anomalyco/opencode/blob/dev/packages/cli/src/acp/service.ts)
+and [child capability negotiation](https://github.com/anomalyco/opencode/blob/dev/packages/cli/src/acp/capabilities.ts).

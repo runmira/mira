@@ -1,3 +1,4 @@
+import { openCodeLoginCommand } from '../../lib/agentAuth';
 /**
  * The external-agent list.
  *
@@ -264,6 +265,7 @@ function AgentKeyField({
   view: AgentSettings;
   saveKey: (kind: string, patch: Pick<AgentSettingsPatch, 'api_key' | 'api_key_env'>) => Promise<void>;
 }) {
+  const [copiedLogin, setCopiedLogin] = useState(false);
   const [editing, setEditing] = useState(false);
   const [mode, setMode] = useState<'key' | 'env'>('key');
   const [value, setValue] = useState('');
@@ -276,6 +278,17 @@ function AgentKeyField({
       <Field label="API key">
         <div className="text-[11.5px] text-muted-foreground/70">
           {agent.display_name} signs in through its own CLI and doesn't take a key.
+          {agent.kind === 'opencode' && <div className="mt-2 space-y-2">
+            <p>Run this in Terminal and connect the provider used by your OpenCode model. Save the login there, then retry your message in Mira.</p>
+            <div className="flex flex-wrap items-center gap-2">
+              <code className="rounded bg-muted px-2 py-1">{openCodeLoginCommand(view.binary_path)}</code>
+              <button type="button" className="rounded border border-border px-2 py-1" onClick={() => {
+                void navigator.clipboard.writeText(openCodeLoginCommand(view.binary_path)).then(() => setCopiedLogin(true)).catch(() => setErr('Copy failed. Select the command above and copy it manually.'));
+              }}>{copiedLogin ? 'Copied' : 'Copy login command'}</button>
+            </div>
+            <p>Mira uses OpenCode's saved login or environment entries explicitly configured for this agent. Shell-only tokens are not inherited automatically.</p>
+            {err && <p className="text-destructive">{err}</p>}
+          </div>}
         </div>
       </Field>
     );

@@ -34,3 +34,9 @@ test('failed-turn retry targets the opening prompt rather than steering input', 
   assert.equal(failedTurnPrompt(null), null);
   assert.equal(failedTurnPrompt({kind:'msg',msg:{role:'assistant',content:'Answer'}}), null);
 });
+
+test('OpenCode ACP auth_required points to provider login instead of Mira native-provider keys', () => {
+  const info = chatFailure('agent turn failed: -32000 Authentication required: provider authentication required');
+  assert.match(info.description,/opencode auth login/);
+  assert.equal(info.settings,true);
+});

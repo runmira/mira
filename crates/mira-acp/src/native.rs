@@ -891,6 +891,18 @@ impl StreamState {
                     .map(str::to_string);
                 Vec::new()
             }
+            Some("content_block_start") => {
+                let Some(block) = ev.get("content_block").filter(|b| b["type"] == "tool_use")
+                else {
+                    return Vec::new();
+                };
+                // Names and call IDs arrive before the input JSON is complete.
+                // Announce the launch now; the assistant snapshot enriches the
+                // same call later instead of delaying its card until then.
+                map_assistant_block(block, self.current.clone())
+                    .map(|event| vec![NativeAction::Event(event)])
+                    .unwrap_or_default()
+            }
             Some("content_block_delta") => {
                 let delta = ev.get("delta").unwrap_or(&Value::Null);
                 let (kind, text, event) = match delta.get("type").and_then(Value::as_str) {
@@ -2866,6 +2878,15 @@ done
             let v = serde_json::from_str::<Value>(l).unwrap();
             assert!(texts(&st.map(&v, None)).is_empty(), "{l}");
         }
+    }
+
+    #[test]
+    fn claude_delegation_announces_before_its_input_and_snapshot_arrive() {
+        let mut state = StreamState::default();
+        let actions = state.map(&json!({"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"delegate-1","name":"Agent","input":{}}}}), None);
+        assert!(actions.iter().any(|action| matches!(action, NativeAction::Event(NormalizedEvent {event:MiraEvent::ToolCall(call),..}) if call.id == "delegate-1" && call.name.as_deref() == Some("Agent"))));
+        let snapshot = state.map(&json!({"type":"assistant","message":{"id":"message-1","content":[{"type":"tool_use","id":"delegate-1","name":"Agent","input":{"prompt":"Inspect files","subagent_type":"explore"}}]}}), None);
+        assert!(snapshot.iter().any(|action| matches!(action, NativeAction::Event(NormalizedEvent {event:MiraEvent::ToolCall(call),..}) if call.id == "delegate-1" && call.raw_input.as_ref().is_some_and(|v| v["prompt"] == "Inspect files"))));
     }
 
     #[test]

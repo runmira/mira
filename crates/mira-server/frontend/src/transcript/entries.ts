@@ -10,6 +10,7 @@ import type { DelegateStep } from '../components/DelegateCard';
 import { type ToolStatus } from '../components/ToolCard';
 import {
   agentCallToToolCall,
+  mergeAgentCall,
   agentToolResult,
   agentToolStatus,
   boundAgentOutput,
@@ -42,6 +43,7 @@ import type {
  *  `subagent_done` frame lands or the parent's ToolEnd for this call
  *  arrives (whichever is first). */
 export type SubagentStreamState = {
+  agentCall?: AcpToolCall;
   externalWork?: import('../types').RuntimeWork;
   parentCallId: string;
   agentId?: string;
@@ -543,12 +545,7 @@ export function upsertAcpTool(prevRaw: Entry[], call: AcpToolCall, at = Date.now
   if (idx >= 0) {
     const existing = prev[idx];
     if (existing.kind !== 'tool') return prev;
-    merged = { ...(existing.agentCall ?? call) };
-    for (const [k, v] of Object.entries(call) as [keyof AcpToolCall, unknown][]) {
-      if (v === null || v === undefined || v === '') continue;
-      if (Array.isArray(v) && v.length === 0) continue;
-      (merged as Record<string, unknown>)[k] = v;
-    }
+    merged = mergeAgentCall(existing.agentCall, call);
   }
   if (AGENT_PROMPT_TOOLS.has(merged.name ?? ''))
     return idx >= 0 ? prev.filter((_, i) => i !== idx) : prev;

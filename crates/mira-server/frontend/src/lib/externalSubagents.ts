@@ -1,4 +1,4 @@
-import { agentCallToToolCall, agentToolResult, boundAgentOutput } from './agentTools';
+import { agentCallToToolCall, mergeAgentCall, agentToolResult, boundAgentOutput } from './agentTools';
 import { applyNativeFrame, sealAcpThought, settleTools, updateSubagent, type Entry, type SubagentStreamState } from '../transcript/entries';
 import type { AcpToolCall, ExternalChildFrame, RuntimeWork } from '../types';
 
@@ -57,13 +57,13 @@ export function applyExternalChild(streams: Map<string, SubagentStreamState>, id
 }
 
 export function projectAcpSubagent(streams: Map<string, SubagentStreamState>, call: AcpToolCall) {
-  call = boundAgentOutput(call);
+  call = boundAgentOutput(mergeAgentCall(streams.get(call.id)?.agentCall, call));
   const mira = agentCallToToolCall(call);
   if (mira.function.name !== 'agent') return streams;
   const args = JSON.parse(mira.function.arguments);
   const result = agentToolResult(call);
   const progress = (call.content ?? []).flatMap(content => content.type === 'content' ? [content.text] : []).join('\n');
-  return updateSubagent(streams, call.id, s => ({ ...s, prompt: args.prompt,
+  return updateSubagent(streams, call.id, s => ({ ...s, agentCall: call, prompt: args.prompt,
     agentName: args.type, done: s.externalWork ? !active(s.externalWork) : result !== null,
     entries: (result?.content || progress) ? [{ kind: 'msg', msg: { role: 'assistant', content: result?.content || progress } }] : s.entries,
   }));
