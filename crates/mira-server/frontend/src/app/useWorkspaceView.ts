@@ -32,6 +32,7 @@ export function useWorkspaceView(
     | 'sessionCommitted'
     | 'engine'
     | 'acpConfig'
+    | 'acpCommands'
     | 'acpAgents'
     | 'recordAgentError'
     | 'wsRef'
@@ -113,6 +114,7 @@ export function useWorkspaceView(
     sessionCommitted,
     engine,
     acpConfig,
+    acpCommands,
     acpAgents,
     recordAgentError,
     wsRef,
@@ -374,6 +376,8 @@ export function useWorkspaceView(
           resetsAt: w.resets_at ? w.resets_at * 1000 : null,
         })),
         onCompact: () => compactAcpAgent(),
+        compactDisabled: busy || (engine?.driver === 'opencode' && !acpCommands.includes('compact')),
+        compactDisabledReason: busy ? 'Wait for the current turn to finish.' : engine?.driver === 'opencode' && !acpCommands.includes('compact') ? 'OpenCode has not advertised compaction for this session.' : null,
         onInspect: () => setInspectOpen(true),
       };
     }
@@ -418,7 +422,7 @@ export function useWorkspaceView(
       onInspect: () => setInspectOpen(true),
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [acpDriver, acpUsage, acpLimits, engine, rateLimit, providerContext, usage, model, cacheMiss]);
+  }, [acpDriver, acpUsage, acpLimits, acpCommands, busy, engine, rateLimit, providerContext, usage, model, cacheMiss]);
 
   // Plan proposal waiting for the user to approve/cancel. Rendered in
   // the Composer rather than inline so the interactive card doesn't

@@ -725,7 +725,7 @@ async fn dispatch_on_slot(
                 .load(std::sync::atomic::Ordering::SeqCst);
             tokio::spawn(async move {
                 if let Err(text) =
-                    send_input_at_epoch(&state, &slot, text, images, None, epoch).await
+                    send_input_at_epoch(&state, &slot, text, images, None, epoch, None).await
                 {
                     let _ = slot.events_tx.send(ServerMsg::Warning { text });
                 }
@@ -1355,6 +1355,37 @@ async fn dispatch_on_slot(
         }
 
         ClientMsg::AcpCompact { focus } => {
+            let selected = slot.acp_launch.lock().await.clone();
+            if let Some(launch) = selected.filter(|launch| launch.driver_kind == "opencode") {
+                if focus.as_deref().is_some_and(|text| !text.trim().is_empty()) {
+                    let _ = slot.events_tx.send(ServerMsg::Warning {
+                        text: "OpenCode compaction does not support Mira's focus instructions."
+                            .into(),
+                    });
+                    return;
+                }
+                let state = state.clone();
+                let epoch = slot
+                    .engine
+                    .input_epoch
+                    .load(std::sync::atomic::Ordering::SeqCst);
+                tokio::spawn(async move {
+                    if let Err(text) = send_input_at_epoch(
+                        &state,
+                        &slot,
+                        "/compact".into(),
+                        vec![],
+                        None,
+                        epoch,
+                        Some(launch.instance),
+                    )
+                    .await
+                    {
+                        let _ = slot.events_tx.send(ServerMsg::Warning { text });
+                    }
+                });
+                return;
+            }
             let Some(handle) = slot.acp_agent.read().await.clone() else {
                 let _ = slot.events_tx.send(ServerMsg::Error {
                     text: "no external agent is running for this session".into(),
@@ -2092,7 +2123,7 @@ pub(crate) async fn send_input(
         .engine
         .input_epoch
         .load(std::sync::atomic::Ordering::SeqCst);
-    send_input_at_epoch(state, slot, text, images, input_id, epoch).await
+    send_input_at_epoch(state, slot, text, images, input_id, epoch, None).await
 }
 
 async fn send_input_at_epoch(
@@ -2102,6 +2133,7 @@ async fn send_input_at_epoch(
     images: Vec<mira_core::ImageData>,
     input_id: Option<String>,
     epoch: u64,
+    command_instance: Option<String>,
 ) -> Result<(), String> {
     let received = std::time::Instant::now();
     info!(session = %slot.id, "prompt received; preparing dispatch");
@@ -2175,8 +2207,8 @@ async fn send_input_at_epoch(
         return Ok(());
     }
     info!(session = %slot.id, preparation_ms = received.elapsed().as_millis() as u64, "prompt preparation finished");
-    if slot.acp_launch.lock().await.is_some() {
-        prompt_agent_at_epoch(state, slot, text, images, input_id, epoch).await;
+    if command_instance.is_some() || slot.acp_launch.lock().await.is_some() {
+        prompt_agent_at_epoch(state, slot, text, images, input_id, epoch, command_instance).await;
     } else {
         spawn_turn(state.clone(), slot.clone(), text, images, input_id).await;
     }
@@ -2374,7 +2406,7 @@ async fn prompt_agent(
         .engine
         .input_epoch
         .load(std::sync::atomic::Ordering::SeqCst);
-    prompt_agent_at_epoch(state, slot, text, images, input_id, epoch).await;
+    prompt_agent_at_epoch(state, slot, text, images, input_id, epoch, None).await;
 }
 
 async fn prompt_agent_at_epoch(
@@ -2384,6 +2416,7 @@ async fn prompt_agent_at_epoch(
     images: Vec<mira_core::ImageData>,
     input_id: Option<String>,
     epoch: u64,
+    command_instance: Option<String>,
 ) {
     let starting = std::time::Instant::now();
     let _dispatch = slot.engine.dispatch_lock.lock().await;
@@ -2402,6 +2435,15 @@ async fn prompt_agent_at_epoch(
                     .into(),
         });
         return;
+    }
+    if let Some(instance) = &command_instance {
+        let selected = slot.acp_launch.lock().await.clone();
+        if !selected
+            .is_some_and(|launch| launch.instance == *instance && launch.driver_kind == "opencode")
+        {
+            let _ = slot.events_tx.send(ServerMsg::Warning { text: "The agent changed before compaction could start. Try again in the selected chat.".into() });
+            return;
+        }
     }
     // A session set up for an agent — picked here, inherited from the
     // previous chat, or restored from disk — starts it on demand. The
@@ -2431,12 +2473,24 @@ async fn prompt_agent_at_epoch(
         info!(session = %slot.id, "prompt cancelled during agent startup");
         return;
     }
+    if command_instance.is_some()
+        && !matches!(&agent, mira_acp::native::AgentHandle::Acp(acp) if acp.session_id().is_some_and(|id| acp.host().has_command(&id, "compact")))
+    {
+        let _ = slot.events_tx.send(ServerMsg::Warning { text: "This OpenCode session has not advertised the compact command. Refresh the agent and try again.".into() });
+        return;
+    }
     info!(session = %slot.id, startup_ms = starting.elapsed().as_millis() as u64, "agent ready for prompt");
 
     // Reserve while dispatch_lock still excludes the next prompt. Preparation
     // may await files, but another input must already see a foreground turn.
     if !reserve_current_agent_turn(&slot.engine, epoch, || track_agent_turn(slot)) {
         return;
+    }
+    if command_instance.is_some() {
+        let _ = slot.events_tx.send(ServerMsg::Compacting {
+            trigger: "agent".into(),
+            tokens_before: None,
+        });
     }
     let state = state.clone();
     let slot = slot.clone();
@@ -2511,9 +2565,15 @@ async fn prompt_agent_at_epoch(
         // agent gets what it missed in front of this prompt, so switching
         // engines mid-conversation keeps the thread.
         // The sidecar above records only what the user typed.
-        let text = match crate::session_engine::take_context_for_agent(&slot).await {
-            Some(context) => format!("{context}{text}"),
-            None => text,
+        // Slash commands must stay at the beginning. Compaction acts on the
+        // native history; pending context handoff belongs to the next input.
+        let text = if command_instance.is_some() {
+            text
+        } else {
+            match crate::session_engine::take_context_for_agent(&slot).await {
+                Some(context) => format!("{context}{text}"),
+                None => text,
+            }
         };
 
         // The prompt belongs in the transcript sidecar too, or replay shows
@@ -2706,6 +2766,8 @@ fn spawn_quiet_agent_watchdog(events: &crate::session_stream::SessionEvents) {
                     | ServerMsg::AcpToolCall { .. }
                     | ServerMsg::AcpToolCallUpdate { .. }
                     | ServerMsg::AcpPlan { .. }
+                    | ServerMsg::AcpCompaction { .. }
+                    | ServerMsg::AcpCompactionSummary { .. }
                     | ServerMsg::AcpTurnEnd { .. }
                     | ServerMsg::ApprovalRequest { .. }
                     | ServerMsg::ToolStart { .. }

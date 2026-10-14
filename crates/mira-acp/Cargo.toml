@@ -11,7 +11,7 @@ publish = false
 uuid = { workspace = true }
 mira-sandbox = { workspace = true }
 mira-core = { workspace = true }
-agent-client-protocol = "2"
+agent-client-protocol = { version = "2", features = ["unstable_session_compaction"] }
 anyhow = "1"
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }

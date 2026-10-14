@@ -212,8 +212,8 @@ pub enum ClientMsg {
     /// Claude Code only (`--fork-session`); anything else gets an honest
     /// error, not a silent restart.
     AcpFork,
-    /// Ask the agent to compact its context. Native transports only; ACP
-    /// has no such method. `focus` is what the summary should keep in view
+    /// Ask the agent to compact its context. OpenCode uses its advertised
+    /// ACP compact command; native transports use their own operation. `focus` is what the summary should keep in view
     /// (Claude Code's `/compact <instructions>`; Codex has no equivalent).
     AcpCompact {
         #[serde(default)]
@@ -984,6 +984,20 @@ pub enum ServerMsg {
         #[serde(skip_serializing_if = "Option::is_none")]
         cost_usd: Option<f64>,
     },
+    /// Native ACP compaction patches. Replacement flags preserve explicit null
+    /// across persisted sidecar serialization, separately from omission.
+    AcpCompaction {
+        id: String,
+        status: String,
+        summary: Option<String>,
+        replace_summary: bool,
+        error: Option<String>,
+        replace_error: bool,
+    },
+    AcpCompactionSummary {
+        id: String,
+        text: String,
+    },
     /// Context-window and cost accounting for the turn so far.
     AcpUsage {
         used: u64,
@@ -1144,6 +1158,22 @@ impl ServerMsg {
                 options,
                 driver: None,
             },
+            MiraEvent::Compaction {
+                id,
+                status,
+                summary,
+                replace_summary,
+                error,
+                replace_error,
+            } => Self::AcpCompaction {
+                id,
+                status,
+                summary,
+                replace_summary,
+                error,
+                replace_error,
+            },
+            MiraEvent::CompactionSummary { id, text } => Self::AcpCompactionSummary { id, text },
             MiraEvent::Commands { names } => Self::AcpCommands { names },
             MiraEvent::Limits { windows } => Self::AcpLimits { windows },
             MiraEvent::Spend { .. } | MiraEvent::RuntimeRequest(_) => return None,

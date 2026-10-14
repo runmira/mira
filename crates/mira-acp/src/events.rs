@@ -115,6 +115,18 @@ pub struct LimitWindow {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MiraEvent {
+    Compaction {
+        id: String,
+        status: String,
+        summary: Option<String>,
+        replace_summary: bool,
+        error: Option<String>,
+        replace_error: bool,
+    },
+    CompactionSummary {
+        id: String,
+        text: String,
+    },
     /// Native child narration/tools, scoped separately from the parent turn.
     SubagentEvent {
         native_thread_id: String,
@@ -649,6 +661,42 @@ fn update_tag(update: &SessionUpdate) -> String {
 /// [`MiraEvent::Unmodelled`], because dropping it silently would make an
 /// agent upgrade look like a silent hang.
 pub fn from_session_notification(params: &serde_json::Value) -> Option<NormalizedEvent> {
+    // OpenCode v2.0.22 predates the preview compaction updates. Its ACP
+    // projection carries equivalent lifecycle receipts in session-info metadata.
+    if params
+        .pointer("/update/sessionUpdate")
+        .and_then(serde_json::Value::as_str)
+        == Some("session_info_update")
+    {
+        if let Some(marker) = params.pointer("/update/_meta/opencode~1compaction") {
+            if let (Some(session), Some(id), Some(status)) = (
+                params.get("sessionId").and_then(serde_json::Value::as_str),
+                marker.get("messageId").and_then(serde_json::Value::as_str),
+                marker.get("status").and_then(serde_json::Value::as_str),
+            ) {
+                if !session.is_empty() && !id.is_empty() {
+                    return Some(NormalizedEvent {
+                        source: EventSource::variant("opencode/compaction"),
+                        event: MiraEvent::Compaction {
+                            id: format!("{session}:{id}"),
+                            status: if status == "started" {
+                                "in_progress".into()
+                            } else {
+                                status.into()
+                            },
+                            summary: None,
+                            replace_summary: false,
+                            error: marker
+                                .get("error")
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_owned),
+                            replace_error: marker.get("error").is_some(),
+                        },
+                    });
+                }
+            }
+        }
+    }
     // Read the discriminator *before* deserializing.
     //
     // `SessionUpdate` is an internally-tagged enum with no catch-all
@@ -726,6 +774,30 @@ pub fn from_session_notification(params: &serde_json::Value) -> Option<Normalize
                     status: format!("{:?}", e.status).to_lowercase(),
                 })
                 .collect(),
+        },
+        SessionUpdate::CompactionUpdate(c) => MiraEvent::Compaction {
+            id: format!("{}:{}", notif.session_id, c.compaction_id),
+            status: serde_json::to_value(&c.status)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .unwrap_or_else(|| "unknown".into()),
+            summary: match &c.summary {
+                MaybeUndefined::Value(blocks) => Some(
+                    blocks
+                        .iter()
+                        .filter_map(content_to_text)
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                _ => None,
+            },
+            replace_summary: !c.summary.is_undefined(),
+            error: defined(&c.error),
+            replace_error: !c.error.is_undefined(),
+        },
+        SessionUpdate::CompactionSummaryChunk(c) => MiraEvent::CompactionSummary {
+            id: format!("{}:{}", notif.session_id, c.compaction_id),
+            text: content_to_text(&c.content).unwrap_or_default(),
         },
         SessionUpdate::AvailableCommandsUpdate(c) => MiraEvent::Commands {
             names: c
@@ -1042,5 +1114,94 @@ mod unmodelled_tests {
             ev.source
         );
         assert!(matches!(ev.event, MiraEvent::AssistantText { .. }));
+    }
+}
+
+#[cfg(test)]
+mod compaction_tests {
+    use super::*;
+    use serde_json::json;
+    fn normalize(update: serde_json::Value) -> MiraEvent {
+        from_session_notification(&json!({"sessionId":"native-session","update":update}))
+            .unwrap()
+            .event
+    }
+    #[test]
+    fn compaction_preserves_identity_status_and_three_state_patches() {
+        for (summary, expected) in [
+            (None, false),
+            (Some(json!(null)), true),
+            (Some(json!([])), true),
+            (
+                Some(json!([{"type":"text","text":"Retained context"}])),
+                true,
+            ),
+        ] {
+            let mut update = json!({"sessionUpdate":"compaction_update","compactionId":"compact-1","status":"completed"});
+            if let Some(summary) = summary {
+                update["summary"] = summary;
+            }
+            let MiraEvent::Compaction {
+                id,
+                status,
+                summary,
+                replace_summary,
+                error,
+                replace_error,
+            } = normalize(update)
+            else {
+                panic!("compaction must be normalized")
+            };
+            assert_eq!(id, "native-session:compact-1");
+            assert_eq!(status, "completed");
+            assert_eq!(replace_summary, expected);
+            assert!(!replace_error);
+            assert!(error.is_none());
+            if let Some(text) = summary {
+                assert!(text.is_empty() || text == "Retained context");
+            }
+        }
+        for status in ["in_progress", "completed", "failed", "cancelled", "_future"] {
+            let event = normalize(
+                json!({"sessionUpdate":"compaction_update","compactionId":"compact-1","status":status,"error":null}),
+            );
+            assert!(
+                matches!(event,MiraEvent::Compaction{status:actual,replace_error:true,error:None,..} if actual==status)
+            );
+        }
+        let event = normalize(
+            json!({"sessionUpdate":"compaction_update","compactionId":"compact-1","status":"failed","error":"Provider unavailable"}),
+        );
+        assert!(
+            matches!(event,MiraEvent::Compaction{error:Some(text),replace_error:true,..} if text=="Provider unavailable")
+        );
+    }
+    #[test]
+    fn legacy_opencode_receipts_use_the_same_identity_and_lifecycle_without_inventing_a_summary() {
+        for (raw, expected) in [
+            ("started", "in_progress"),
+            ("completed", "completed"),
+            ("failed", "failed"),
+        ] {
+            let event = normalize(
+                json!({"sessionUpdate":"session_info_update","_meta":{"opencode/compaction":{"messageId":"msg_1","status":raw,"error":"Compaction failed"}}}),
+            );
+            assert!(
+                matches!(event, MiraEvent::Compaction{id,status,summary:None,replace_summary:false,error:Some(_),replace_error:true} if id=="native-session:msg_1" && status==expected)
+            );
+        }
+    }
+    #[test]
+    fn compaction_summary_chunks_are_separate_from_assistant_output() {
+        let event = normalize(
+            json!({"sessionUpdate":"compaction_summary_chunk","compactionId":"compact-1","content":{"type":"text","text":"Summary delta"}}),
+        );
+        assert_eq!(
+            event,
+            MiraEvent::CompactionSummary {
+                id: "native-session:compact-1".into(),
+                text: "Summary delta".into()
+            }
+        );
     }
 }

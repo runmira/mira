@@ -2127,6 +2127,9 @@ fn is_transcript_frame(msg: &ServerMsg) -> bool {
             | AcpModes { .. }
             | AcpConfigOptions { .. }
             | AcpCommands { .. }
+            | AcpCompaction { .. }
+            | AcpCompactionSummary { .. }
+            | Compacting { .. }
             | AcpUsage { .. }
             | AcpTurnUsage { .. }
             | AcpLimits { .. }

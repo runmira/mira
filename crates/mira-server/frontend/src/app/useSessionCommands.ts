@@ -191,6 +191,9 @@ export function useSessionCommands(
     if (!wsRef.current?.sendImmediate({ type: 'acp_compact', focus: focus?.trim() || null })) {
       setRestoreNote({ text: 'Reconnect before compacting this chat.', error: true }); return;
     }
+    // OpenCode's normal prompt admission owns busy state and the placeholder.
+    // A rejected request must not invent a turn or leave a running card behind.
+    if (getEngine()?.driver === 'opencode') return;
     // A compaction is a turn like any other: busy until its end arrives, or
     // the composer would take input for a session that is summarizing.
     reportTurnRunning(true);

@@ -553,6 +553,8 @@ export type ServerMsg =
   | { type: 'acp_plan'; entries: AcpPlanItem[] }
   | { type: 'acp_modes'; current: string; available: AcpSessionMode[]; postures?: AgentPostureMapping[]; driver?: string | null }
   | { type: 'acp_config_options'; options: AcpConfigOption[]; driver?: string | null }
+  | { type: 'acp_compaction'; id: string; status: string; summary: string | null; replace_summary: boolean; error: string | null; replace_error: boolean }
+  | { type: 'acp_compaction_summary'; id: string; text: string }
   | { type: 'acp_commands'; names: string[] }
   | { type: 'acp_usage'; used: number; size: number; cost: { amount: number; currency: string } | null }
   | { type: 'acp_turn_usage'; model: string; input_tokens: number; output_tokens: number; cached_input_tokens: number; cost_usd?: number | null }

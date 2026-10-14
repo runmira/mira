@@ -295,3 +295,35 @@ turn that receives a steering instruction and finishes without cancellation.
 These opt-in tests use `MIRA_TEST_OPENCODE_BIN` and remain ignored in normal CI.
 Plugin authentication, admission deduplication and cleanup also run in the normal
 frontend test suite.
+
+
+## ACP compaction
+
+This build enables the ACP SDK's preview session-compaction schema and advertises
+`clientCapabilities.session.compaction`. Native IDs are scoped by native session;
+start, terminal patches and summary chunks update one retained transcript card.
+Replacement flags preserve omitted versus explicitly cleared summary/error fields
+through sidecar serialization. Live traffic and replay use the same reducer.
+Cancellation has its own state. An unfinished native compaction cannot be marked
+successful merely because its surrounding prompt ended.
+
+OpenCode's compact action uses only the live session's advertised `compact`
+command. It shares normal input admission, foreground reservation, Stop epochs
+and turn completion with ordinary prompts; a busy session rejects the request.
+The captured engine instance is rechecked under the dispatch lock. Compaction
+keeps `/compact` at the beginning of the prompt and preserves pending context
+handoff for the next ordinary input. The UI creates no optimistic busy state for
+OpenCode; the server admits the command before creating its fallback card. Older
+agents without native compaction updates retain that turn-based fallback.
+Deploy the frontend and server together for the new transcript frame types.
+
+
+OpenCode v2.0.22 uses `session_info_update` metadata under
+`opencode/compaction` for its lifecycle receipts. Mira normalizes that older
+format into the same ID-addressed events. That release supplies no retained
+summary through this ACP metadata; Mira does not invent one. The preview schema
+path preserves supplied summaries/chunks from agents that implement it.
+Compaction presentation follows T3's small transcript divider with a live label;
+retained context and failures expand inline in a bounded panel. The context
+meter disables compaction while the turn is active or OpenCode has not advertised
+the command, with an explanation beside the action.

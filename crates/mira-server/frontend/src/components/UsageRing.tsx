@@ -29,6 +29,8 @@ export type UsageRingData = {
   limitsTitle: string | null;
   limits: UsageLimit[];
   onCompact?: () => void;
+  compactDisabled?: boolean;
+  compactDisabledReason?: string | null;
   /** Open the context inspector (what fills the window). */
   onInspect?: () => void;
 };
@@ -151,7 +153,8 @@ export function UsageRing({ data }: { data: UsageRingData }) {
                     What&apos;s in it
                   </SmallButton>
                 )}
-                {data.onCompact && <SmallButton onClick={data.onCompact}>Compact session</SmallButton>}
+                {data.onCompact && <SmallButton disabled={data.compactDisabled} onClick={() => {setOpen(false); data.onCompact!();}}>Compact context</SmallButton>}
+                {data.compactDisabled && data.compactDisabledReason && <p className="w-full text-[11px] text-muted-foreground">{data.compactDisabledReason}</p>}
               </div>
             )}
           </Section>
@@ -271,12 +274,13 @@ function Row({ label, value }: { label: string; value: string }) {
   );
 }
 
-function SmallButton({ children, onClick }: { children: React.ReactNode; onClick: () => void }) {
+function SmallButton({ children, onClick, disabled }: { children: React.ReactNode; onClick: () => void; disabled?: boolean }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      className="shrink-0 rounded-md bg-fg/[0.06] px-2 py-1 text-[11.5px] text-foreground/85 transition-colors hover:bg-fg/[0.1]"
+      disabled={disabled}
+      className="disabled:cursor-not-allowed disabled:opacity-50 shrink-0 rounded-md bg-fg/[0.06] px-2 py-1 text-[11.5px] text-foreground/85 transition-colors hover:bg-fg/[0.1]"
     >
       {children}
     </button>

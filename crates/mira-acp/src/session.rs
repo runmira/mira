@@ -106,6 +106,11 @@ impl ClientCaps {
         caps.fs.read_text_file = self.fs_read;
         caps.fs.write_text_file = self.fs_write;
         caps.terminal = self.terminal;
+        // This build handles the full ID-addressed preview compaction contract.
+        caps.session = Some(
+            agent_client_protocol::schema::v1::ClientSessionCapabilities::new()
+                .compaction(agent_client_protocol::schema::v1::CompactionCapabilities::new()),
+        );
         // The host routes scoped child updates into separate Mira child streams.
         // OpenCode only emits them when the client explicitly opts in.
         caps.meta = Some(serde_json::Map::from_iter([(
@@ -793,6 +798,7 @@ mod tests {
         assert_eq!(caps["terminal"], true);
         assert_eq!(caps["_meta"]["opencode/child-session-updates"], true);
         assert_eq!(caps["elicitation"]["form"], json!({}));
+        assert_eq!(caps["session"]["compaction"], json!({}));
         r.reply(frame["id"].clone(), init_ok()).await;
         waiter.await.unwrap().expect("initialize");
     }

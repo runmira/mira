@@ -246,7 +246,7 @@ export function useTranscriptEvents(
                 {
                   kind: 'compact',
                   state: 'running',
-                  trigger: msg.trigger === 'auto' ? 'auto' : 'manual',
+                  trigger: msg.trigger === 'agent' ? 'agent' : msg.trigger === 'auto' ? 'auto' : 'manual',
                   startedAt: receivedAt,
                   summarized: null,
                   summary: null,
