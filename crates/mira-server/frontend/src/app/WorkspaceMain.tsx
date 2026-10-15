@@ -1,5 +1,5 @@
 import { ArrowDown,PanelLeft,SquareTerminal } from 'lucide-react';
-import { useMemo } from 'react';
+import { useMemo, useRef } from 'react';
 import { Outlet } from 'react-router';
 import { AssistantSelectionToolbar } from '../components/AssistantSelectionToolbar';
 import { ChatRelationships } from '../components/ChatRelationships';
@@ -37,7 +37,7 @@ import { IS_MAC,PAGE_TITLES } from './shared';
 import { WorkspaceComposer } from './WorkspaceComposer';
 import { WorkspaceContextPanel } from './WorkspaceContextPanel';
 import type { WorkspaceRuntime } from './WorkspaceRuntime';
-import { WINDOW_STRIP } from './WindowControls';
+import { NOTCH, NotchOutline, notchedPath, usePaneSize } from './WindowControls';
 const WorkspaceTranscript = lazyNamed(() => import('./WorkspaceTranscript'), 'WorkspaceTranscript');
 export function WorkspaceMain(
   context: Pick<
@@ -275,6 +275,8 @@ export function WorkspaceMain(
     githubReturn,
     acpError,
   } = context;
+  const paneCardRef = useRef<HTMLDivElement>(null);
+  const notch = usePaneSize(paneCardRef, hiddenTitleBar && !phone && !sidebarOpen);
   return (
     <>
       <main
@@ -282,20 +284,31 @@ export function WorkspaceMain(
           'flex min-h-0 min-w-0 flex-col',
           phone ? 'pt-safe px-safe' : 'py-2 pl-0.5 pr-2',
         )}
-        // With the sidebar hidden on the desktop, the traffic lights and the
-        // sidebar toggle keep their strip above the pane instead of sitting
-        // on its corner.
-        style={hiddenTitleBar && !phone && !sidebarOpen ? { paddingTop: WINDOW_STRIP } : undefined}
       >
         {/* The main chat surface is the app's base surface, not a card: it
             keeps the flat theme background (pure black in dark) so the
             composer and cards inside it are what read as elevated. */}
+        {/* With the sidebar hidden on the desktop the pane keeps its full
+            height and curves around the traffic lights and the sidebar
+            toggle: an inverted-L notch cut from its top-left corner, with
+            the border drawn along it. `--window-notch` is how far the
+            notch reaches, for headers to start after it. */}
         <div
+          ref={paneCardRef}
           className={cn(
-            'flex min-h-0 flex-1 flex-col overflow-hidden bg-background',
-            !phone && 'rounded-xl border border-border',
+            'relative flex min-h-0 flex-1 flex-col overflow-hidden bg-background',
+            !phone && !notch && 'rounded-xl border border-border',
           )}
+          style={
+            notch
+              ? ({
+                  clipPath: `path('${notchedPath(notch.w, notch.h)}')`,
+                  '--window-notch': `${NOTCH.width + 8}px`,
+                } as React.CSSProperties)
+              : undefined
+          }
         >
+          {notch && <NotchOutline w={notch.w} h={notch.h} />}
           {/* The chat view has its own header with the drawer button; the
             other pages need one too, or a phone has no way back. */}
           {phone && mainView !== 'chat' && (
@@ -320,7 +333,7 @@ export function WorkspaceMain(
                 least one or the window can't be dragged at all. */}
               <div
                 data-window-drag-region
-                className="flex h-11 shrink-0 items-center gap-3 border-b border-border/60 px-4 max-md:gap-2 max-md:px-2"
+                className="flex h-11 shrink-0 items-center gap-3 border-b border-border/60 px-4 pl-[max(1rem,var(--window-notch,0px))] max-md:gap-2 max-md:px-2"
               >
                 {/* Controls stay interactive inside the toolbar drag region.
                     The desktop app pins its toggle beside the traffic
@@ -611,6 +624,12 @@ export function WorkspaceMain(
                 </LazyBoundary>
               )}
             </>
+          )}
+
+          {/* Pages without a header bar of their own start below the notch;
+              the strip beside it drags the window like the chat header. */}
+          {notch && mainView !== 'chat' && mainView !== 'settings' && (
+            <div data-window-drag-region aria-hidden className="shrink-0" style={{ height: NOTCH.height }} />
           )}
 
           {mainView === 'plugins' && (

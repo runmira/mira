@@ -74,8 +74,11 @@ export function hasHiddenTitleBar(): boolean {
 }
 
 /** Padding that clears the macOS traffic lights, in the same shape the
- *  traffic lights occupy. The main toolbar owns window dragging. */
-export const TRAFFIC_LIGHT_INSET = { top: 28, left: 78 } as const;
+ *  traffic lights occupy. The main toolbar owns window dragging.
+ *
+ *  The desktop app places the lights itself (`traffic_light_position` in
+ *  apps/desktop): `centerY` is their centre line and must match it. */
+export const TRAFFIC_LIGHT_INSET = { top: 40, left: 78, centerY: 24 } as const;
 
 export type Channel = 'stable' | 'beta' | 'alpha';
 

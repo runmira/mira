@@ -195,6 +195,10 @@ fn build_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     #[cfg(target_os = "macos")]
     let builder = builder
         .title_bar_style(tauri::TitleBarStyle::Overlay)
+        // Lower than macOS's default (centred 14pt down) so the lights sit
+        // in the app's own header row, beside its sidebar toggle. `y` is the
+        // lights' centre line; the web UI's `TRAFFIC_LIGHTS` must match.
+        .traffic_light_position(tauri::LogicalPosition::new(20.0, 24.0))
         .transparent(true)
         .effects(tauri::utils::config::WindowEffectsConfig {
             effects: vec![tauri::utils::WindowEffect::UnderWindowBackground],

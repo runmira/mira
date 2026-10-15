@@ -139,7 +139,7 @@ export function SettingsSurface() {
     <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       {/* Top bar mirrors the chat/other-view header height so the layout
           doesn't shift when the user enters settings. */}
-      <div data-window-drag-region className="flex h-11 shrink-0 items-center gap-3 border-b border-border/60 px-4">
+      <div data-window-drag-region className="flex h-11 shrink-0 items-center gap-3 border-b border-border/60 px-4 pl-[max(1rem,var(--window-notch,0px))]">
         <span className="min-w-0 flex-1 truncate text-[13.5px] text-foreground">
           {currentLabel}
         </span>
