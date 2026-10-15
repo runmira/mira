@@ -2294,7 +2294,7 @@ async fn run_loop(
             checkpoint(&sess).await;
         }
         // ---- end of round loop ----
-        post_turn_eligible = round_outcome == RoundOutcome::CleanStop;
+        post_turn_eligible = round_outcome == RoundOutcome::CleanStop && !compaction_stalled;
 
         // Common cleanup: close out the turn's timer, flush a checkpoint,
         // fire the auto-extractor. Runs for every outcome so the UI + on

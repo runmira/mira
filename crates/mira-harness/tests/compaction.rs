@@ -325,7 +325,10 @@ async fn a_summarizer_that_refuses_the_whole_conversation_gets_its_newest_part()
     }
     let sess = resume(provider.clone(), messages, tmp.path());
     let events: Vec<_> = sess.send("go on").await.collect().await;
-    assert_eq!(compactions(&events), 1, "{events:?}");
+    // The first automatic compaction retains a recent tail. The scripted
+    // provider then refuses even that smaller request, so overflow recovery
+    // folds the tail as well before the successful retry.
+    assert_eq!(compactions(&events), 2, "{events:?}");
     let log = provider.log.lock().unwrap().clone();
     assert!(log.contains(&"summary refused"), "{log:?}");
     assert!(

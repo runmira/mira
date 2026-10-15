@@ -221,6 +221,7 @@ async fn compaction_fires_pre_compact_first() {
         messages.push(Message::user(format!("u{i} {}", "x".repeat(10_000))));
         messages.push(Message::assistant(format!("a{i}")));
     }
+    let prior = messages.clone();
     let record: SessionRecord = serde_json::from_value(json!({
         "id": SessionId::new(),
         "cwd": tmp.path(),
@@ -255,8 +256,9 @@ async fn compaction_fires_pre_compact_first() {
     assert!(events
         .iter()
         .any(|e| matches!(e, HarnessEvent::Compacted { .. })));
-    // The model now sees system + summary + the new turn; the transcript
-    // still has every earlier message, then the summary as a divider.
+    // The model sees system + summary + a recent verbatim tail + the new
+    // turn. The transcript keeps every original message, with its divider
+    // at the boundary between the summarized prefix and retained tail.
     let history = sess.history().await;
     assert!(
         mira_harness::history::is_summary(&history[1]),
@@ -270,10 +272,32 @@ async fn compaction_fires_pre_compact_first() {
         .filter(|(_, m)| mira_harness::history::is_summary(m))
         .map(|(i, _)| i)
         .collect();
+    let summarized = events
+        .iter()
+        .find_map(|event| match event {
+            HarnessEvent::Compacted { messages_removed } => Some(*messages_removed),
+            _ => None,
+        })
+        .unwrap();
     assert_eq!(
         summaries,
-        [153],
-        "one divider, after the 152 earlier messages"
+        [1 + summarized],
+        "one divider at the compacted prefix boundary"
+    );
+    assert!(
+        summarized < prior.len() - 1,
+        "recent history stays verbatim"
+    );
+    let portable: Vec<_> = transcript
+        .iter()
+        .filter(|message| !mira_harness::history::is_summary(message))
+        .take(prior.len())
+        .cloned()
+        .collect();
+    assert_eq!(
+        serde_json::to_value(portable).unwrap(),
+        serde_json::to_value(prior).unwrap(),
+        "no original transcript message was lost or changed"
     );
     assert_eq!(
         transcript[1]
