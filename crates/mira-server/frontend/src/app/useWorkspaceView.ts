@@ -474,7 +474,9 @@ export function useWorkspaceView(
 
   const stableFailureSettings = useStableCallback(() => {
     openSettings();
-    setSettingsSection(acpDriver ? 'agents' : 'provider');
+    // An agent chat lands on that agent, where its sign-in controls are.
+    if (acpDriver) setSettingsSection('agents', `agent=${encodeURIComponent(acpDriver)}`);
+    else setSettingsSection('provider');
   });
 
   const editMessage = useStableCallback((entry: Entry, text: string) =>

@@ -27,9 +27,10 @@ import { openCodeLoginCommand } from '../../lib/agentAuth';
  * or a secret-looking env value, and starting an agent sends no settings.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router';
 import { m } from 'framer-motion';
 import { AlertCircle, Check, Key, Loader2, RefreshCw, Terminal } from 'lucide-react';
-import type { AcpAgentStatus } from '../../types';
+import type { AcpAgentStatus, SignInNeeded } from '../../types';
 import { AgentHistoryImport } from './AgentHistoryImport';
 import { AgentIcon } from '../AgentIcon';
 import { openExternal } from '@/lib/desktop';
@@ -178,6 +179,35 @@ function Field({
       )}
       <div className="mt-1.5">{children}</div>
     </label>
+  );
+}
+
+/** Providers this agent starts without but can't answer for, and why
+ *  Mira thinks so. Shown above the sign-in controls. */
+export function SignInNeededNote({ needs, terminal }: { needs: SignInNeeded[]; terminal: boolean }) {
+  if (needs.length === 0) return null;
+  return (
+    <div role="status" className="rounded-md border border-amber-400/25 bg-amber-400/[0.06] px-3 py-2 text-[12px] leading-relaxed text-amber-200/90">
+      <div className="flex items-center gap-1.5 font-medium">
+        <AlertCircle className="size-3.5 shrink-0" />
+        Sign-in needed
+      </div>
+      <ul className="mt-1 space-y-0.5 text-foreground/75">
+        {needs.map((n) => (
+          <li key={n.provider ?? '_'}>
+            <span className="font-medium">{n.provider ?? 'This agent'}</span>
+            {n.source === 'turn'
+              ? ` — a turn${n.model ? ` on ${n.model}` : ''} failed: ${n.reason}`
+              : ' — no login stored for this provider.'}
+          </li>
+        ))}
+      </ul>
+      <p className="mt-1 text-muted-foreground/75">
+        {terminal
+          ? 'Sign in below, then retry the message. Models from other providers keep working.'
+          : "Sign in with the agent's own CLI, then retry the message."}
+      </p>
+    </div>
   );
 }
 
@@ -432,6 +462,7 @@ function AgentDetail({
   return (
     // Disabled until the server's copy loads, so nothing typed is lost.
     <fieldset disabled={!view} className="space-y-3.5 disabled:opacity-60">
+      <SignInNeededNote needs={agent.sign_in_needed ?? []} terminal={view?.driver === 'opencode'} />
       {view?.driver === 'codex' && <CodexAccountPanel key={view.instance} instance={view.instance} enabled={cfg.enabled} onRefresh={onRefresh} />}
       {view?.driver === 'opencode' && <TerminalSignInPanel key={view.instance} instance={view.instance} enabled={cfg.enabled} onRefresh={onRefresh} />}
   <Field
@@ -675,7 +706,9 @@ export function AcpAgentsSection({
     setViews((p) => ({ ...p, [kind]: saved }));
   }, []);
 
-  const [selected, setSelected] = useState<string | null>(null);
+  // `?agent=` lands on one agent (the chat's failure card links here).
+  const [params] = useSearchParams();
+  const [selected, setSelected] = useState<string | null>(() => params.get('agent'));
   // Health is probed on demand, but landing on this page IS the demand —
   // showing "no agents yet" until a manual click is a dead end, especially
   // on a first visit when the list has never populated. The WS client

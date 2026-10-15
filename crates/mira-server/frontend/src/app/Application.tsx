@@ -152,6 +152,7 @@ export function Application() {
       case 'acp_agent_started':
       case 'session_engine':
       case 'acp_agent_status':
+      case 'agent_sign_in_changed':
         agentEvents(msg);
         return;
       default:

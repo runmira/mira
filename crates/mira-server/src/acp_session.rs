@@ -791,6 +791,51 @@ pub async fn start_agent(
 /// agent start, so after a mode or model change each frame was written
 /// twice and replay doubled every reply. It also watches the agent's
 /// reported model, so the engine view names what is actually running.
+/// Learn sign-in state from what a turn did: an authentication error marks
+/// the model's provider as needing a sign-in; a turn that completes clears
+/// it. Settings is told either way, so it stops saying "Ready" for a
+/// provider that cannot answer.
+async fn observe_sign_in(
+    state: &AppState,
+    slot: &Arc<SessionSlot>,
+    msg: &ServerMsg,
+    failed: &mut bool,
+) {
+    let Some(launch) = slot.acp_launch.lock().await.clone() else {
+        return;
+    };
+    let model = slot
+        .engine
+        .reported_model
+        .lock()
+        .ok()
+        .and_then(|m| m.clone())
+        .or(launch.model.clone());
+    let changed = match msg {
+        ServerMsg::Error { text } if mira_acp::status::is_sign_in_error(text) => {
+            *failed = true;
+            state
+                .agent_sign_in
+                .turn_failed(&launch.instance, model.as_deref(), text)
+        }
+        ServerMsg::AcpTurnEnd { stop_reason, .. } => {
+            let ok = !std::mem::take(failed) && stop_reason != "error";
+            ok && state
+                .agent_sign_in
+                .turn_succeeded(&launch.instance, model.as_deref())
+        }
+        _ => false,
+    };
+    if changed {
+        state
+            .broadcast_all(ServerMsg::AgentSignInChanged {
+                instance: launch.instance.clone(),
+                needed: state.agent_sign_in.for_instance(&launch.instance),
+            })
+            .await;
+    }
+}
+
 pub(crate) fn ensure_transcript_logger(state: &AppState, slot: &Arc<SessionSlot>) {
     if slot.engine.logger_started.swap(true, Ordering::SeqCst) {
         return;
@@ -803,6 +848,9 @@ pub(crate) fn ensure_transcript_logger(state: &AppState, slot: &Arc<SessionSlot>
     let weak_slot = Arc::downgrade(slot);
     let state = state.clone();
     tokio::spawn(async move {
+        // Whether this turn already failed for a missing sign-in, so its
+        // turn end is not read as proof the provider works.
+        let mut sign_in_failed = false;
         loop {
             let Some(msg) = ordered.recv().await else {
                 break;
@@ -850,6 +898,9 @@ pub(crate) fn ensure_transcript_logger(state: &AppState, slot: &Arc<SessionSlot>
             };
             if model_changed {
                 crate::session_engine::publish(&state, &slot).await;
+            }
+            if matches!(msg, ServerMsg::Error { .. } | ServerMsg::AcpTurnEnd { .. }) {
+                observe_sign_in(&state, &slot, &msg, &mut sign_in_failed).await;
             }
             // Claude's file checkpoint for the prompt it just accepted,
             // with the native session it belongs to: `rewind_files` only

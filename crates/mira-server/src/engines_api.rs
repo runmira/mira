@@ -119,7 +119,7 @@ pub async fn list_engines(
             true
         }
         None => {
-            spawn_refresh(state);
+            spawn_refresh(state.clone());
             let partial = PARTIAL
                 .lock()
                 .ok()
@@ -135,6 +135,12 @@ pub async fn list_engines(
         }
     };
 
+    // What turns showed about sign-in, on top of what the probe saw.
+    for snap in out.iter_mut() {
+        if let Some(agent) = snap.agent.as_mut() {
+            state.agent_sign_in.overlay(snap.instance.as_str(), agent);
+        }
+    }
     Json(EngineListView {
         engines: out,
         active_instance,

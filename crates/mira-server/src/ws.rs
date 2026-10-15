@@ -1466,6 +1466,7 @@ async fn dispatch_on_slot(
             // still shows every agent this build knows.
             let events = slot.events_tx.clone();
             let engines = state.engines.current();
+            let sign_in_needs = state.agent_sign_in.clone();
             tokio::spawn(async move {
                 let mut tasks = Vec::new();
                 let mut covered = std::collections::BTreeSet::new();
@@ -1475,8 +1476,13 @@ async fn dispatch_on_slot(
                     };
                     covered.insert(inst.driver.as_str().to_string());
                     let cfg = mira_engine::driver_config_for(inst);
+                    let instance = inst.id.to_string();
+                    let sign_in = sign_in_needs.clone();
                     tasks.push(tokio::spawn(async move {
-                        mira_acp::probe(d.as_ref(), &cfg, Default::default()).await
+                        let mut status =
+                            mira_acp::probe(d.as_ref(), &cfg, Default::default()).await;
+                        sign_in.overlay(&instance, &mut status);
+                        status
                     }));
                 }
                 for d in mira_acp::drivers::all() {

@@ -334,7 +334,9 @@ export function useAgentEvents(
       }
 
       case 'acp_agent_status':
-        // A probe ran on the server: the engines list has the fresh result.
+      case 'agent_sign_in_changed':
+        // A probe ran, or a turn showed a provider needs (or no longer needs)
+        // a sign-in: the engines list carries the fresh result.
         loadEngines();
         break;
     }

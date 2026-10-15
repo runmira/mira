@@ -149,6 +149,13 @@ export function describeAgentStatus(agent: AcpAgentStatus): {
     case 'failed':
       return { text: 'Failed to start', tone: 'error' };
     case 'ready': {
+      // Started, but some provider's models can't answer yet. The agent
+      // works for others, so this is a warning, not a failure.
+      const needs = agent.sign_in_needed ?? [];
+      if (needs.length > 0) {
+        const names = needs.map((n) => n.provider).filter((p): p is string => !!p);
+        return { text: names.length ? `Sign-in needed · ${names.join(', ')}` : 'Sign-in needed', tone: 'warn' };
+      }
       const bits: string[] = [];
       if (agent.auth) bits.push(agent.auth);
       if (agent.version) bits.push(`v${agent.version}`);

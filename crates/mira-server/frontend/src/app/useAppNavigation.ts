@@ -35,9 +35,10 @@ export function useAppNavigation() {
     [navigate],
   );
   const setSettingsSection = useCallback(
-    (next: SettingsSectionId) => {
+    (next: SettingsSectionId, search?: string) => {
       current.current.settingsSection = next;
-      if (current.current.mainView === 'settings') void navigate(`/settings/${next}`);
+      if (current.current.mainView === 'settings')
+        void navigate(`/settings/${next}${search ? `?${search}` : ''}`);
     },
     [navigate],
   );

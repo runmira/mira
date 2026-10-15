@@ -1013,6 +1013,13 @@ pub enum ServerMsg {
         title: Option<String>,
         updated_at: Option<String>,
     },
+    /// An engine instance's providers needing sign-in changed (a turn
+    /// failed for a missing sign-in, or one succeeded or a sign-in cleared
+    /// it). Clients refresh agent status.
+    AgentSignInChanged {
+        instance: String,
+        needed: Vec<mira_acp::status::SignInNeeded>,
+    },
     /// Claude accepted a prompt and checkpointed files for it.
     AgentFileCheckpoint {
         id: String,

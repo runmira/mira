@@ -32,6 +32,7 @@ mod agent_capabilities;
 mod agent_fork;
 mod agent_rewind;
 mod agent_secrets;
+mod agent_sign_in;
 pub mod agent_spend;
 mod agent_threads;
 mod agent_updates;
@@ -363,6 +364,7 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
         codex_auth: Arc::new(crate::codex_auth::AuthRegistry::default()),
         agent_capabilities: Arc::new(crate::agent_capabilities::CapabilityRegistry::default()),
         terminal_auth: Arc::new(crate::terminal_auth::TerminalAuthRegistry::default()),
+        agent_sign_in: Arc::new(crate::agent_sign_in::SignInRegistry::default()),
         request_slot: None,
         slot_loads: Arc::new(std::sync::Mutex::new(HashMap::new())),
         session_activity,

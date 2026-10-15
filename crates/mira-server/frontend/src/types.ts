@@ -262,6 +262,19 @@ export type AcpAgentStatus = {
   install_hint?: string;
   /** How Mira reached this agent: its own CLI, or an ACP adapter. */
   transport?: 'auto' | 'native' | 'acp';
+  /** Providers whose models need a sign-in before they answer. The agent
+   *  starts without them, so `state` alone still reads ready. */
+  sign_in_needed?: SignInNeeded[];
+};
+
+/** One provider an agent needs signed in, and how Mira knows. */
+export type SignInNeeded = {
+  provider: string | null;
+  model?: string | null;
+  /** `turn`: a turn failed with an auth error. `credentials`: the agent's
+   *  own credential store has no login for it. */
+  source: 'turn' | 'credentials';
+  reason: string;
 };
 
 /** One persisted agent-transcript line: a user prompt or a server frame. */
@@ -601,6 +614,7 @@ export type ServerMsg =
   | { type: 'acp_agent_started'; kind: string; display_name: string; launch: string; error?: string | null }
   /** Per-agent health, for the agent list. */
   | { type: 'acp_agent_status'; agents: AcpAgentStatus[] }
+  | { type: 'agent_sign_in_changed'; instance: string; needed: SignInNeeded[] }
   /** The agent's session mode changed. Recorded for every change, not just
    *  privileged ones: it is a standing change to what the agent may do. */
   | {

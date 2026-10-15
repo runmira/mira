@@ -274,6 +274,15 @@ impl TerminalAuthRegistry {
 async fn refresh_after_sign_in(state: &AppState, instance: &str, attempt: &str, fp: u64) {
     let registry = state.terminal_auth.clone();
     crate::engines_api::invalidate_account_instance(instance);
+    // A fresh login supersedes what earlier turns showed; the next turn
+    // (and the credential check in the probe) says what is still missing.
+    state.agent_sign_in.signed_in(instance);
+    state
+        .broadcast_all(crate::protocol::ServerMsg::AgentSignInChanged {
+            instance: instance.to_owned(),
+            needed: Vec::new(),
+        })
+        .await;
     let snapshot = state.engines.current().snapshot_external(instance).await;
     if !registry.owns(instance, attempt, fp) {
         return;
