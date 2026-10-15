@@ -12,14 +12,13 @@ import {
   Loader,
   Plus,
 } from 'lucide-react';
-import { useState } from 'react';
+import { PREF_KEYS, useStringPref } from '../../lib/prefs';
 import { workShelves, type CiState, type WorkItem, type WorkState } from '../../lib/workItems';
 import { AgentIcon, ModelIcon } from '../AgentIcon';
 import { basename } from '../sidebar/groups';
 import { Empty, NavItem, ShelfHeader, SidebarFolderIcon } from '../sidebar/navigation';
 import { agentName, PR_MARK, SessionStatus, timeAgo } from '../sidebar/sessionRows';
 import { Collapse } from '../ui/Collapse';
-import { diffTotals, type WorkDetail } from './types';
 
 const SHELF: Record<WorkState, { label: string; icon: React.ReactNode }> = {
   'needs-you': { label: 'Needs you', icon: <CircleAlert className="size-3 shrink-0 text-amber-500" /> },
@@ -33,25 +32,23 @@ const SHELF: Record<WorkState, { label: string; icon: React.ReactNode }> = {
  *  stands. Done starts collapsed, like Settled on the Chat side. */
 export function WorkSidebar({
   items,
-  details,
   activeKey,
   onPick,
   onStartWork,
 }: {
   items: WorkItem[];
-  details: Record<string, WorkDetail>;
   activeKey: string | null;
   onPick: (key: string) => void;
   onStartWork: () => void;
 }) {
-  const [closed, setClosed] = useState<Set<WorkState>>(() => new Set(['done']));
-  const toggle = (state: WorkState) =>
-    setClosed((prev) => {
-      const next = new Set(prev);
-      if (next.has(state)) next.delete(state);
-      else next.add(state);
-      return next;
-    });
+  const [closedPref, setClosedPref] = useStringPref(PREF_KEYS.workShelvesClosed, 'done');
+  const closed = new Set(closedPref.split(',').filter(Boolean));
+  const toggle = (state: WorkState) => {
+    const next = new Set(closed);
+    if (next.has(state)) next.delete(state);
+    else next.add(state);
+    setClosedPref([...next].join(','));
+  };
   return (
     <div className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-2">
       <nav className="flex flex-col gap-0.5 px-0.5">
@@ -76,7 +73,6 @@ export function WorkSidebar({
                   <WorkRow
                     key={item.key}
                     item={item}
-                    detail={details[item.key]}
                     active={item.key === activeKey}
                     onPick={() => onPick(item.key)}
                   />
@@ -94,17 +90,15 @@ export function WorkSidebar({
  *  stands below, and who's on it plus its diff and PR at the right. */
 export function WorkRow({
   item,
-  detail,
   active,
   onPick,
 }: {
   item: WorkItem;
-  detail?: WorkDetail;
   active: boolean;
   onPick: () => void;
 }) {
   const running = item.sessions.some((s) => s.running);
-  const diff = diffTotals(detail);
+  const diff = item.meta.diff;
   const project = basename(item.cwd);
   return (
     <div
@@ -154,7 +148,7 @@ export function WorkRow({
             <AgentStack agents={item.agents} model={item.sessions[0]?.model} />
             <PrMark item={item} />
           </span>
-          {diff.files > 0 ? (
+          {diff ? (
             <span className="text-[10.5px] leading-[15px] tabular-nums">
               <span className="text-emerald-600 dark:text-emerald-400">+{diff.added}</span>{' '}
               <span className="text-red-600/80 dark:text-red-400/80">−{diff.removed}</span>

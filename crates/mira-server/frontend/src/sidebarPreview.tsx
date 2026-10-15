@@ -9,6 +9,7 @@ import { RuntimeProvider } from './state/RuntimeProvider';
 import { LazyMotion, domMax } from 'framer-motion';
 import React, { useState } from 'react';
 import ReactDOM from 'react-dom/client';
+import { MemoryRouter } from 'react-router';
 import './styles.css';
 import { Sidebar, type MainView } from './components/Sidebar';
 import type { SessionSummary } from './types';
@@ -195,7 +196,7 @@ function Preview() {
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <LazyMotion features={domMax}>
-      <RuntimeProvider scope={{ backend: window.location.origin, account: 'preview' }}><Preview /></RuntimeProvider>
+      <RuntimeProvider scope={{ backend: window.location.origin, account: 'preview' }}><MemoryRouter><Preview /></MemoryRouter></RuntimeProvider>
     </LazyMotion>
   </React.StrictMode>,
 );

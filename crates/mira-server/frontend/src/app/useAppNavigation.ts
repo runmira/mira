@@ -11,6 +11,7 @@ export function useAppNavigation() {
   const segment = pathname.split('/')[1];
   const mainView: MainView =
     segment === 'settings' ||
+    segment === 'work' ||
     segment === 'plugins' ||
     segment === 'pull-request' ||
     segment === 'scheduled'

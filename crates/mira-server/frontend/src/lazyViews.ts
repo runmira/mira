@@ -5,6 +5,8 @@ import { lazyNamed } from './lib/lazy';
 // UserCard, toolbar) can preload them on hover without importing App.
 export const SettingsSurface = lazyNamed(() => import('./components/Settings'), 'SettingsSurface');
 export const PluginsPanel = lazyNamed(() => import('./components/Plugins'), 'PluginsPanel');
+export const WorkView = lazyNamed(() => import('./components/work/WorkView'), 'WorkView');
+export const WorkSidebarView = lazyNamed(() => import('./components/work/WorkSidebarView'), 'WorkSidebarView');
 export const PullRequestPanel = lazyNamed(() => import('./components/PullRequestPanel'), 'PullRequestPanel');
 export const ReviewChanges = lazyNamed(() => import('./components/ReviewChanges'), 'ReviewChanges');
 export const SubagentPanel = lazyNamed(() => import('./components/SubagentPanel'), 'SubagentPanel');

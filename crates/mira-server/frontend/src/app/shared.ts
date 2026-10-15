@@ -12,6 +12,7 @@ export function useStableCallback<A extends unknown[], R>(
 export const MIN_STREAM_WIDTH = 560;
 export const PAGE_TITLES: Record<MainView, string> = {
   chat: 'Chat',
+  work: 'Work',
   plugins: 'Plugins',
   'pull-request': 'Pull request',
   scheduled: 'Scheduled',
