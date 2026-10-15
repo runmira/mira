@@ -16,7 +16,7 @@ export {pullRequestPatch} from './src/lib/pullRequestDiff';
 export {getRenderablePatch,resolveFileDiffPath} from './src/lib/diffRender';
 `,{
  'src/state/RuntimeProvider.tsx':`import {useSelector} from '@tanstack/react-store'; export const useAppRuntime=()=>globalThis.reviewRuntime; export const useOptionalRuntime=()=>globalThis.reviewRuntime; export function useWorkspaceUiField(key){const runtime=globalThis.reviewRuntime;return [useSelector(runtime.workspaceUi,s=>s[key]),value=>runtime.updateWorkspaceUi(key,value)];}`,
- 'src/lib/prefs.ts':`export const PREF_KEYS={};export const getPref=(key,fallback)=>fallback;export const getBoolPref=(key,fallback)=>fallback;export const useStringPref=(key,fallback)=>[fallback,()=>{}];export const useBoolPref=(key,fallback)=>[fallback,()=>{}];`,
+ 'src/lib/prefs.ts':`import {useState} from 'react';export const PREF_KEYS={};export const getPref=(key,fallback)=>fallback;export const getBoolPref=(key,fallback)=>fallback;export const useStringPref=(key,fallback)=>useState(fallback);export const useBoolPref=(key,fallback)=>useState(fallback);`,
  'src/lib/diffPrefs.ts':`export const useDiffOptions=()=>({});`,
  'src/components/diffs/ReviewDiffView.tsx':`export function ReviewDiffView({files}){return <div data-testid="review-diff">{files.map(f=><span key={f.filePath}>{f.filePath}</span>)}</div>;}`,
  'src/components/diffs/DiffFileTree.tsx':`export const DiffFileTree=()=>null;`,
@@ -53,7 +53,7 @@ test('embedded Diff source follows the selected snapshot including the latest re
  runtime.turnCommands.hydrate('chat-a',false,[]);
  const latest={...summary,occurrence:0};
  runtime.updateSessionData('entries',[summary.text,'another',summary.text].map(content=>({kind:'msg',msg:{role:'user',content}})));
- runtime.updateSessionData('turnDiffs',[latest,summary]);
+ runtime.updateSessionData('turnDiffs',[latest,summary,{text:'another',occurrence:0,files:[]}]);
  globalThis.fetch=async()=>new Response(JSON.stringify({before:'old\n',after:'new\n'}));
  openTurnReview(runtime,latest);
  const host=document.createElement('div');document.body.append(host);const root=createRoot(host);
@@ -68,13 +68,27 @@ test('embedded Diff source follows the selected snapshot including the latest re
   Object.defineProperty(observer.element,'clientWidth',{value:800,configurable:true});
   await act(()=>observer.callback());
   assert.equal(split.disabled,false,'split becomes available when the pane widens');
+  const wrap=host.querySelector('[aria-label="Wrap lines"]');
+  assert.equal(wrap.getAttribute('aria-pressed'),'false');
+  await act(()=>wrap.click());
+  assert.equal(wrap.getAttribute('aria-pressed'),'true');
+  assert.ok(wrap.className.includes('bg-mira-blue/15'),'active wrap has a distinct fill');
+  const numbers=host.querySelector('[aria-label="Line numbers"]');
+  assert.equal(numbers.getAttribute('aria-pressed'),'true');
+  await act(()=>numbers.click());
+  assert.equal(numbers.getAttribute('aria-pressed'),'false');
+  assert.ok(!numbers.className.includes('bg-mira-blue/15'),'inactive numbers have no active tint');
   await act(()=>selector.click());await flush();
   assert.equal(selector.getAttribute('aria-expanded'),'true');
-  const older=[...document.querySelectorAll('[role="menuitem"]')].find(item=>item.dataset.menuItem?.startsWith('Turn edits'));
+  assert.equal(document.querySelector('[data-menu-item="Turn 1"]'),null,'turns live in their own menu');
+  await act(()=>document.querySelector('[data-menu-item="Turns"]').click());await flush();
+  assert.ok(document.querySelector('[aria-label="Turn changes menu"]'));
+  assert.equal(document.querySelector('[data-menu-item="Turn 2"]'),null,'turns without changes are omitted');
+  const older=document.querySelector('[data-menu-item="Turn 1"]');
   assert.ok(older,'source menu actually opens');
   await act(()=>older.click());await flush();
   assert.deepEqual(runtime.workspaceUi.get().reviewTurn.summary,summary);
-  assert.ok(selector.textContent.startsWith('Turn edits'));
+  assert.equal(selector.textContent,'Turn 1');
   assert.equal(selector.getAttribute('aria-expanded'),'false');
   await act(()=>selector.click());await flush();
   await act(()=>document.querySelector('[data-menu-item="Changes"]').click());

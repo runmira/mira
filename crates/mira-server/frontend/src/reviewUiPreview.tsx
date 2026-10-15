@@ -37,7 +37,7 @@ function Preview() {
   const runtime = useAppRuntime();
   const [reviewOpen, setReviewOpen] = useWorkspaceUiField('reviewOpen');
   const [mode, setMode] = useState('Turn card'), [dark, setDark] = useState(false), [file, setFile] = useState<string | null>(null);
-  useEffect(() => { runtime.turnCommands.hydrate('review-preview', false, []); runtime.updateSessionData('turnDiffs', [summary]); runtime.updateSessionData('entries', [{kind:'msg', msg:{role:'user', content:summary.text}}]); openTurnReview(runtime, summary); }, [runtime]);
+  useEffect(() => { runtime.turnCommands.hydrate('review-preview', false, []); runtime.updateSessionData('turnDiffs', [{...summary, text:'Add save validation', files:summary.files.slice(0,2)}, summary]); runtime.updateSessionData('entries', ['Add save validation', 'Explain the save flow', summary.text].map(content => ({kind:'msg' as const, msg:{role:'user' as const, content}}))); openTurnReview(runtime, summary); }, [runtime]);
   useEffect(() => setThemePref(dark ? 'dark' : 'light'), [dark]);
   return <main className="min-h-screen bg-background text-foreground">
     <nav className="flex flex-wrap gap-2 border-b border-border p-3 text-xs">{['Turn card', 'Context card', 'PR header', 'PR code', 'Thinking'].map(label => <button className="rounded border border-border px-2 py-1" key={label} onClick={() => setMode(label)}>{label}</button>)}<button onClick={() => setDark(!dark)}>Toggle theme</button></nav>
