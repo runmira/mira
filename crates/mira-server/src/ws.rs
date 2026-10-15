@@ -2722,7 +2722,17 @@ async fn prompt_agent_at_epoch(
                 }
                 turn_port.turn_ended(&stop_reason).await;
             }
-            Ok(None) => {}
+            Ok(None) => {
+                // Claude Code says where it compacts only when asked; ask once
+                // the turn is done, so the usage ring can show it.
+                let agent = agent.clone();
+                let port = turn_port.clone();
+                tokio::spawn(async move {
+                    if let Ok(usage) = agent.context_usage().await {
+                        port.set_reported_compact_at(usage["autoCompactThreshold"].as_u64());
+                    }
+                });
+            }
             Err(e) => {
                 // The agent's own last words say why ("unknown option",
                 // "not logged in"); "stdin closed" alone leaves the user

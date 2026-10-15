@@ -1131,6 +1131,10 @@ pub struct AcpEventPort {
     /// The instance's `auto_compact_after`, for the threshold the usage ring
     /// shows (the agent was launched with it).
     auto_compact_after: std::sync::Mutex<Option<u64>>,
+    /// The threshold the agent itself reported (Claude Code's
+    /// `autoCompactThreshold`), and the last usage frame, to resend with it.
+    reported_compact_at: std::sync::Mutex<Option<u64>>,
+    last_usage: std::sync::Mutex<Option<ServerMsg>>,
 }
 
 /// Where an agent compacts on its own, in the same tokens its usage reports
@@ -1204,6 +1208,8 @@ impl AcpEventPort {
             spend: None,
             driver: std::sync::Mutex::new(None),
             auto_compact_after: std::sync::Mutex::new(None),
+            reported_compact_at: std::sync::Mutex::new(None),
+            last_usage: std::sync::Mutex::new(None),
         })
     }
 
@@ -1279,6 +1285,8 @@ impl AcpEventPort {
             }),
             driver: std::sync::Mutex::new(None),
             auto_compact_after: std::sync::Mutex::new(None),
+            reported_compact_at: std::sync::Mutex::new(None),
+            last_usage: std::sync::Mutex::new(None),
         })
     }
 
@@ -1303,6 +1311,21 @@ impl AcpEventPort {
 
     /// Remember which agent this port serves. Called once per agent start;
     /// the value is stamped onto modes/config frames.
+    /// The agent reported where it compacts: show it, on the last usage
+    /// frame, without waiting for the next one.
+    pub fn set_reported_compact_at(&self, tokens: Option<u64>) {
+        if let Ok(mut t) = self.reported_compact_at.lock() {
+            if *t == tokens {
+                return;
+            }
+            *t = tokens;
+        }
+        let last = self.last_usage.lock().ok().and_then(|l| l.clone());
+        if let Some(msg) = last {
+            self.push(self.stamp_driver(msg));
+        }
+    }
+
     pub fn set_auto_compact_after(&self, tokens: Option<u64>) {
         if let Ok(mut t) = self.auto_compact_after.lock() {
             *t = tokens;
@@ -1375,7 +1398,11 @@ impl AcpEventPort {
                 size, compact_at, ..
             } => {
                 let configured = self.auto_compact_after.lock().ok().and_then(|t| *t);
-                *compact_at = agent_compact_at(&driver, *size, configured);
+                let reported = self.reported_compact_at.lock().ok().and_then(|t| *t);
+                *compact_at = agent_compact_at(&driver, *size, configured).or(reported);
+                if let Ok(mut last) = self.last_usage.lock() {
+                    *last = Some(msg.clone());
+                }
             }
             _ => {}
         }
@@ -1672,6 +1699,47 @@ mod event_tests {
             event: e,
         })
         .expect("every ACP event maps to a frame")
+    }
+
+    #[tokio::test]
+    async fn usage_frames_carry_where_the_agent_compacts() {
+        let usage = |used: u64| NormalizedEvent {
+            source: EventSource::Acp {
+                variant: "usage".into(),
+            },
+            event: MiraEvent::Usage {
+                used,
+                size: 200_000,
+                cost: None,
+            },
+        };
+        let compact_at = |msg: ServerMsg| match msg {
+            ServerMsg::AcpUsage { compact_at, .. } => compact_at,
+            other => panic!("expected usage, got {other:?}"),
+        };
+        // Claude Code: unknown until it reports, then resent at once.
+        let (tx, mut rx) = tokio::sync::broadcast::channel(16);
+        let port = AcpEventPort::new(tx.into());
+        port.set_driver("claude-code");
+        port.emit(usage(50_000)).await;
+        assert_eq!(compact_at(rx.try_recv().unwrap()), None);
+        port.set_reported_compact_at(Some(187_000));
+        assert_eq!(
+            compact_at(rx.try_recv().unwrap()),
+            Some(187_000),
+            "the last frame, resent"
+        );
+        port.set_reported_compact_at(Some(187_000));
+        assert!(rx.try_recv().is_err(), "unchanged: nothing resent");
+        port.emit(usage(60_000)).await;
+        assert_eq!(compact_at(rx.try_recv().unwrap()), Some(187_000));
+        // Codex: its own rule, lowered by the configured threshold.
+        let (tx, mut rx) = tokio::sync::broadcast::channel(16);
+        let port = AcpEventPort::new(tx.into());
+        port.set_driver("codex");
+        port.set_auto_compact_after(Some(120_000));
+        port.emit(usage(50_000)).await;
+        assert_eq!(compact_at(rx.try_recv().unwrap()), Some(120_000));
     }
 
     #[tokio::test]
