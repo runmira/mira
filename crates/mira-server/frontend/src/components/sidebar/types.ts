@@ -45,6 +45,9 @@ export type Props = {
   settingsSection?: SettingsSectionId;
   onSettingsSectionChange?: (id: SettingsSectionId) => void;
   onExitSettings?: () => void;
+  /** The Chat/Work switch's Work side. Without it, Work is a disabled
+   *  placeholder; with it, picking Work swaps the chat list for `body`. */
+  work?: { open: boolean; onToggle: (open: boolean) => void; body: React.ReactNode };
 };
 
 /* ---------- session row ---------- */
