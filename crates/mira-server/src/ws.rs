@@ -42,6 +42,10 @@ pub struct ConnectQuery {
     after: Option<u64>,
     protocol: Option<u8>,
 }
+/// Admission refused an input because another turn won the race to start.
+/// Nothing reached the engine, so a queued input can wait and retry.
+pub(crate) const FOREGROUND_BUSY: &str = "A foreground turn is already running";
+
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
@@ -2190,7 +2194,7 @@ async fn send_input_at_epoch(
             provider_in_turn = slot.engine.provider_in_turn.load(std::sync::atomic::Ordering::SeqCst),
             "rejected send: foreground turn already running (client did not queue)"
         );
-        return Err("A foreground turn is already running".into());
+        return Err(FOREGROUND_BUSY.into());
     }
     if let Some(id) = input_id.as_deref() {
         let (engine, model, _) = slot.selection.snapshot();

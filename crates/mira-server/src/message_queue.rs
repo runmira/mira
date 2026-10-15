@@ -470,6 +470,26 @@ impl MessageQueue {
         self.changed.notify_one();
         Ok(())
     }
+    /// Undo a claim whose input was refused before reaching the engine, so
+    /// it is delivered later in its original position.
+    pub async fn release(&self, id: &str) -> Result<(), String> {
+        let mut guard = self.items.lock().await;
+        let mut next = guard.clone();
+        match next
+            .iter_mut()
+            .find(|i| i.id == id && i.dispatching && !i.delivered)
+        {
+            Some(item) => {
+                item.dispatching = false;
+                item.error = None;
+            }
+            None => return Ok(()),
+        }
+        self.commit(&next).await?;
+        *guard = next;
+        Ok(())
+    }
+
     pub async fn settle(&self, id: &str, error: Option<String>) -> Result<(), String> {
         let mut guard = self.items.lock().await;
         let mut next = guard.clone();
@@ -708,6 +728,14 @@ pub fn wake(state: &AppState, slot: &Arc<SessionSlot>) {
             )
             .await
             {
+                // Another input was admitted between the idle check and this
+                // dispatch. This one never reached the engine: put it back and
+                // wait for that turn instead of stranding it as "dispatching".
+                if error == crate::ws::FOREGROUND_BUSY {
+                    let _ = slot.message_queue.release(&item.id).await;
+                    publish(&slot).await;
+                    continue;
+                }
                 let _ = slot.message_queue.settle(&item.id, Some(error)).await;
                 publish(&slot).await;
                 break;
@@ -926,6 +954,32 @@ mod tests {
             .unwrap();
         queue.supersede_recovery(None).await.unwrap();
         assert_eq!(queue.snapshot().await.len(), 1); // only the held receipt remains
+    }
+    #[tokio::test]
+    async fn an_input_refused_at_admission_is_released_in_place_not_stranded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("race.queue");
+        let queue = MessageQueue::open(Some(path.clone())).await;
+        queue.enqueue(item("first")).await.unwrap();
+        queue.enqueue(item("second")).await.unwrap();
+        let engine = queue.snapshot().await[0].engine.clone();
+        queue.claim("first", engine.as_deref()).await.unwrap();
+        queue.release("first").await.unwrap();
+        let items = MessageQueue::open(Some(path)).await.snapshot().await;
+        assert_eq!(
+            items.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(),
+            ["first", "second"]
+        );
+        assert!(!items[0].dispatching && items[0].error.is_none() && !items[0].delivered);
+        // Claimable again, and a delivered receipt is never released back.
+        queue.claim("first", engine.as_deref()).await.unwrap();
+        queue.settle("first", None).await.unwrap();
+        queue.release("first").await.unwrap();
+        assert!(!queue
+            .snapshot()
+            .await
+            .iter()
+            .any(|i| i.id == "first" && !i.delivered));
     }
     #[tokio::test]
     async fn durable_queue_recovers_and_deduplicates_delivered_input() {
