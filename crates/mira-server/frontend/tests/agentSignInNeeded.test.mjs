@@ -7,7 +7,9 @@ const ready = { kind: 'opencode', display_name: 'OpenCode', state: { state: 'rea
 test('a started agent with an unsigned provider warns instead of reading ready', () => {
   assert.deepEqual(describeAgentStatus(ready), { text: 'v2.0.22', tone: 'ok' });
   const needs = [{ provider: 'anthropic', model: 'anthropic/claude-x', source: 'turn', reason: 'Authentication required' }];
-  assert.deepEqual(describeAgentStatus({ ...ready, sign_in_needed: needs }), { text: 'Sign-in needed · anthropic', tone: 'warn' });
+  assert.deepEqual(describeAgentStatus({ ...ready, sign_in_needed: needs }), { text: 'Sign-in needed · anthropic/claude-x', tone: 'warn' });
+  const two = [...needs, { provider: 'opencode', model: 'opencode/cat-jam-free', source: 'turn', reason: 'x' }];
+  assert.deepEqual(describeAgentStatus({ ...ready, sign_in_needed: two }), { text: 'Sign-in needed · 2 models', tone: 'warn' });
   const unknown = [{ provider: null, source: 'turn', reason: 'Not logged in' }];
   assert.deepEqual(describeAgentStatus({ ...ready, sign_in_needed: unknown }), { text: 'Sign-in needed', tone: 'warn' });
 });

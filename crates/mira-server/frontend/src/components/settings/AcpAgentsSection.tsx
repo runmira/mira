@@ -194,17 +194,15 @@ export function SignInNeededNote({ needs, terminal }: { needs: SignInNeeded[]; t
       </div>
       <ul className="mt-1 space-y-0.5 text-foreground/75">
         {needs.map((n) => (
-          <li key={n.provider ?? '_'}>
-            <span className="font-medium">{n.provider ?? 'This agent'}</span>
-            {n.source === 'turn'
-              ? ` — a turn${n.model ? ` on ${n.model}` : ''} failed: ${n.reason}`
-              : ' — no login stored for this provider.'}
+          <li key={`${n.provider ?? '_'}:${n.model ?? '_'}`}>
+            <span className="font-medium">{n.model ?? n.provider ?? 'This agent'}</span>
+            {n.source === 'turn' ? ` — its last turn failed: ${n.reason}` : ' — no login stored for this provider.'}
           </li>
         ))}
       </ul>
       <p className="mt-1 text-muted-foreground/75">
         {terminal
-          ? 'Sign in below, then retry the message. Models from other providers keep working.'
+          ? 'Sign in below, then retry the message. Other models keep working.'
           : "Sign in with the agent's own CLI, then retry the message."}
       </p>
     </div>

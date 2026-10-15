@@ -153,8 +153,10 @@ export function describeAgentStatus(agent: AcpAgentStatus): {
       // works for others, so this is a warning, not a failure.
       const needs = agent.sign_in_needed ?? [];
       if (needs.length > 0) {
-        const names = needs.map((n) => n.provider).filter((p): p is string => !!p);
-        return { text: names.length ? `Sign-in needed · ${names.join(', ')}` : 'Sign-in needed', tone: 'warn' };
+        // Name the model when there is one: other models from the same
+        // provider may well work.
+        const label = needs.length === 1 ? (needs[0].model ?? needs[0].provider) : `${needs.length} models`;
+        return { text: label ? `Sign-in needed · ${label}` : 'Sign-in needed', tone: 'warn' };
       }
       const bits: string[] = [];
       if (agent.auth) bits.push(agent.auth);
