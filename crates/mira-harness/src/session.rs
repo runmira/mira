@@ -1705,6 +1705,9 @@ async fn run_loop(
         // different" nudge instead of grinding through max_rounds.
         let mut prev_call_fingerprint: Option<u64> = None;
         let mut consecutive_dupe_rounds: usize = 0;
+        // One compact-and-retry per turn when the provider says the request
+        // is too long; a second refusal is reported, not looped on.
+        let mut overflow_retried = false;
 
         for round in 0..cfg.max_rounds {
             sess.consume_steers(generation).await;
@@ -1716,7 +1719,7 @@ async fn run_loop(
             // filled window). Failure is logged; running uncompacted
             // beats aborting the turn.
             {
-                let before = {
+                {
                     let history = sess.history.lock().await;
                     let mut cleared = sess.cleared_before.lock().await;
                     *cleared = crate::history::clear_tool_results_before(
@@ -1725,50 +1728,30 @@ async fn run_loop(
                         cfg.context_window,
                         *cleared,
                     );
-                    crate::history::needs_compaction(
-                        &history,
-                        &cfg.model,
-                        cfg.context_window,
-                        *cleared,
-                    )
-                };
-                if before {
-                    let tokens_before =
-                        crate::history::estimated_tokens(&sess.history.lock().await);
-                    let _ = tx.send(HarnessEvent::Compacting { tokens_before }).await;
-                    match sess.compact_inner("auto", None, &tx).await {
-                        Ok(n) => {
-                            let _ = tx
-                                .send(HarnessEvent::Compacted {
-                                    messages_removed: n,
-                                })
-                                .await;
-                        }
-                        Err(e) => {
-                            warn!(error = %e, "compaction failed; continuing with full history");
-                            let _ = tx
-                                .send(HarnessEvent::CompactionFailed {
-                                    error: e.to_string(),
-                                })
-                                .await;
-                        }
-                    }
+                }
+                // Measure the request about to be sent — system prompt, tool
+                // definitions and the history as cleared — against what the
+                // provider counted last time, as Codex and OpenCode do.
+                let raw = crate::context::estimate_request(
+                    &build_request_messages(&sess).await,
+                    &request_tools(&sess).await,
+                );
+                let tokens = sess
+                    .calibration
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .calibrated(raw);
+                let window =
+                    crate::history::context_window_with(&cfg.model, cfg.context_window) as u64;
+                if crate::history::needs_compaction(tokens, window) {
+                    auto_compact(&sess, &tx, tokens, "auto").await;
                 }
             }
 
             let req = ChatRequest {
                 model: cfg.model.clone(),
                 messages: build_request_messages(&sess).await,
-                tools: {
-                    // In a remote environment the model only sees tools
-                    // that can run there (see `Tool::remote_capable`).
-                    let reg = sess.registry.lock().await;
-                    if sess.tool_ctx.compute.is_remote() {
-                        reg.remote_specs()
-                    } else {
-                        reg.specs()
-                    }
-                },
+                tools: request_tools(&sess).await,
                 temperature: cfg.temperature,
                 max_tokens: cfg.max_tokens,
                 reasoning_effort: cfg.reasoning_effort.clone(),
@@ -1786,6 +1769,24 @@ async fn run_loop(
             let print = crate::cache_watch::RequestPrint::of(&req);
             let mut stream = match sess.provider.stream(req).await {
                 Ok(s) => s,
+                // Too long for the model after all (the estimate ran low, or
+                // one tool result was huge): summarize and send again, once.
+                Err(e)
+                    if !overflow_retried && crate::history::is_context_overflow(&e.to_string()) =>
+                {
+                    overflow_retried = true;
+                    warn!(error = %e, "request exceeded the context window; compacting and retrying");
+                    let tokens =
+                        crate::history::context_window_with(&cfg.model, cfg.context_window) as u64;
+                    if auto_compact(&sess, &tx, tokens, "overflow").await {
+                        continue;
+                    }
+                    let _ = tx
+                        .send(HarnessEvent::Warning(format!("{PROVIDER_ERROR}: {e}")))
+                        .await;
+                    round_outcome = RoundOutcome::ProviderError;
+                    break;
+                }
                 Err(e) => {
                     let _ = tx
                         .send(HarnessEvent::Warning(format!("{PROVIDER_ERROR}: {e}")))
@@ -1796,6 +1797,7 @@ async fn run_loop(
             };
 
             let mut assistant_text = String::new();
+            let mut overflow_mid_stream: Option<String> = None;
             let mut pending_calls: Vec<ToolCall> = Vec::new();
             let mut reasoning_blocks: Vec<mira_core::ReasoningBlock> = Vec::new();
             let mut finish: FinishReason = FinishReason::Other;
@@ -1896,6 +1898,16 @@ async fn run_loop(
                         }
                         Err(e) => {
                             stream_errored = true;
+                            // Some providers refuse an over-long prompt as the
+                            // stream's first event rather than up front.
+                            if !overflow_retried
+                                && assistant_text.is_empty()
+                                && pending_calls.is_empty()
+                                && crate::history::is_context_overflow(&e.to_string())
+                            {
+                                overflow_mid_stream = Some(e.to_string());
+                                break;
+                            }
                             let _ = tx
                                 .send(HarnessEvent::Warning(format!("{STREAM_ERROR}: {e}")))
                                 .await;
@@ -1903,6 +1915,18 @@ async fn run_loop(
                         }
                     },
                 }
+            }
+            if let Some(e) = overflow_mid_stream.take() {
+                overflow_retried = true;
+                warn!(error = %e, "request exceeded the context window; compacting and retrying");
+                let tokens =
+                    crate::history::context_window_with(&cfg.model, cfg.context_window) as u64;
+                if auto_compact(&sess, &tx, tokens, "overflow").await {
+                    continue;
+                }
+                let _ = tx
+                    .send(HarnessEvent::Warning(format!("{STREAM_ERROR}: {e}")))
+                    .await;
             }
             // Fold stream error / timeout into the round outcome so the
             // goal-loop tick below sees StreamError instead of falling
@@ -3312,6 +3336,52 @@ pub struct DroppedResult {
 
 /// What's sent to the model: `history` with old tool results cleared.
 /// (Memory rides on each turn's prompt; see `Session::with_turn_memory`.)
+/// The tool definitions sent with each request. In a remote environment the
+/// model only sees tools that can run there (see `Tool::remote_capable`).
+async fn request_tools(sess: &Session) -> Vec<mira_ai::ToolSpec> {
+    let reg = sess.registry.lock().await;
+    if sess.tool_ctx.compute.is_remote() {
+        reg.remote_specs()
+    } else {
+        reg.specs()
+    }
+}
+
+/// Summarize the conversation mid-turn, announcing it. `tokens` is the
+/// request size that made it due. Returns whether it compacted; a failure is
+/// reported and the turn carries on uncompacted.
+async fn auto_compact(
+    sess: &Session,
+    tx: &mpsc::Sender<HarnessEvent>,
+    tokens: u64,
+    trigger: &str,
+) -> bool {
+    let _ = tx
+        .send(HarnessEvent::Compacting {
+            tokens_before: tokens as usize,
+        })
+        .await;
+    match sess.compact_inner(trigger, None, tx).await {
+        Ok(n) => {
+            let _ = tx
+                .send(HarnessEvent::Compacted {
+                    messages_removed: n,
+                })
+                .await;
+            true
+        }
+        Err(e) => {
+            warn!(error = %e, "compaction failed; continuing with full history");
+            let _ = tx
+                .send(HarnessEvent::CompactionFailed {
+                    error: e.to_string(),
+                })
+                .await;
+            false
+        }
+    }
+}
+
 async fn build_request_messages(sess: &Session) -> Vec<Message> {
     let history = sess.history.lock().await;
     let before = *sess.cleared_before.lock().await;

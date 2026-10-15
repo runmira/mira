@@ -61,6 +61,14 @@ pub struct Calibration {
 }
 
 impl Calibration {
+    /// `raw` (an uncalibrated `estimate_request`) scaled by how the provider
+    /// counted the last request: its tokenizer, cached prefixes and framing
+    /// are folded in. A plain estimate until a request has been counted.
+    pub fn calibrated(&self, raw: u64) -> u64 {
+        self.ratio()
+            .map_or(raw, |r| (raw as f64 * r).round() as u64)
+    }
+
     /// Reported over estimated, kept within sane bounds so one odd report
     /// (a cached-prompt provider counting differently, a partial stream)
     /// can't make the breakdown absurd.

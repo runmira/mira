@@ -41,10 +41,12 @@ use mira_ai::{ChatEvent, ChatProvider, ChatRequest};
 use mira_core::{Message, Role, ToolCallId};
 use serde_json::Value;
 
-/// Share of the context window at which the conversation is summarized.
-/// Leaves room for the next reply and tool results, and for the 4
-/// chars/token estimate being off.
-const AUTO_COMPACT_FRACTION: f64 = 0.8;
+/// Room kept free below the context window before the conversation is
+/// summarized: for the next reply, its tool results and the summary request.
+/// A tenth of the window, or `RESERVE_MIN_TOKENS` when that is more — the
+/// same ceiling OpenCode uses, which lands next to Codex's 90%.
+const RESERVE_FRACTION: u64 = 10;
+const RESERVE_MIN_TOKENS: u64 = 16_000;
 
 /// Share of the window at which old tool results start being cleared.
 const CLEAR_TOOL_RESULTS_FRACTION: f64 = 0.5;
@@ -367,22 +369,43 @@ pub fn clear_old_tool_results(history: &[Message], before: usize) -> Vec<Message
         .collect()
 }
 
-/// The token count at which a conversation with this window is summarized.
+/// The request size, in tokens, at which a conversation with this window is
+/// summarized. A window too small to give up the minimum keeps a tenth.
 pub fn auto_compact_at(window: u64) -> u64 {
-    (window as f64 * AUTO_COMPACT_FRACTION) as u64
+    let floor = if window >= 2 * RESERVE_MIN_TOKENS {
+        RESERVE_MIN_TOKENS
+    } else {
+        0
+    };
+    window.saturating_sub((window / RESERVE_FRACTION).max(floor))
 }
 
-/// Whether the conversation (as sent: `history` with tool results
-/// before `cleared_before` cleared) is full enough to summarize.
-pub fn needs_compaction(
-    history: &[Message],
-    model: &str,
-    catalog_window: Option<u32>,
-    cleared_before: usize,
-) -> bool {
-    let budget =
-        (context_window_with(model, catalog_window) as f64 * AUTO_COMPACT_FRACTION) as usize;
-    estimated_tokens(&clear_old_tool_results(history, cleared_before)) > budget
+/// Whether a request of `request_tokens` (as it will be sent: system prompt,
+/// tool definitions, history with old tool results cleared, measured against
+/// the provider's own last count — see `context::Calibration::calibrated`)
+/// leaves too little room in `window`.
+pub fn needs_compaction(request_tokens: u64, window: u64) -> bool {
+    request_tokens >= auto_compact_at(window)
+}
+
+/// Whether a provider refused a request for being longer than the model's
+/// context window. Their wording varies; these are the ones they use.
+pub fn is_context_overflow(error: &str) -> bool {
+    let e = error.to_ascii_lowercase();
+    [
+        "context_length_exceeded",
+        "context length",
+        "context window",
+        "prompt is too long",
+        "input is too long",
+        "maximum context",
+        "too many tokens",
+        "exceeds the maximum",
+        "reduce the length",
+        "request too large",
+    ]
+    .iter()
+    .any(|needle| e.contains(needle))
 }
 
 /// Rough char-based token estimate. Real tokenization varies by model
@@ -1061,7 +1084,9 @@ mod tests {
             .count();
         assert_eq!(cleared, 15 - KEEP_TOOL_RESULTS);
         assert_eq!(sent.len(), h.len(), "pairing kept");
-        assert!(!needs_compaction(&h, "claude-opus-4-7", None, before));
+        let window = context_window("claude-opus-4-7") as u64;
+        let sent_tokens = crate::context::estimate_request(&sent, &[]);
+        assert!(!needs_compaction(sent_tokens, window));
         // Stable: asking again doesn't move it.
         assert_eq!(
             clear_tool_results_before(&h, "claude-opus-4-7", None, before),
@@ -1071,20 +1096,63 @@ mod tests {
 
     #[test]
     fn a_full_window_needs_compaction_and_a_small_chat_never_does() {
+        let size = |h: &[Message]| crate::context::estimate_request(h, &[]);
         let h = fat_history();
-        assert!(needs_compaction(&h, "gpt-3.5-turbo", None, 0));
+        assert!(needs_compaction(
+            size(&h),
+            context_window("gpt-3.5-turbo") as u64
+        ));
         let small = long_history();
-        assert!(!needs_compaction(&small, "claude-opus-4-7", None, 0));
+        assert!(!needs_compaction(
+            size(&small),
+            context_window("claude-opus-4-7") as u64
+        ));
         assert_eq!(
             clear_tool_results_before(&small, "claude-opus-4-7", None, 0),
             0
         );
-        // Message count alone never triggers it any more.
+        // Message count alone never triggers it.
         let mut many = vec![Message::system("s")];
         for i in 0..500 {
             many.push(Message::user(format!("u{i}")));
         }
-        assert!(!needs_compaction(&many, "claude-opus-4-7", None, 0));
+        assert!(!needs_compaction(
+            size(&many),
+            context_window("claude-opus-4-7") as u64
+        ));
+    }
+
+    #[test]
+    fn compaction_leaves_a_tenth_of_the_window_or_sixteen_thousand_tokens() {
+        assert_eq!(auto_compact_at(200_000), 180_000);
+        assert_eq!(auto_compact_at(1_000_000), 900_000);
+        assert_eq!(auto_compact_at(128_000), 112_000, "16k beats a tenth");
+        assert_eq!(
+            auto_compact_at(16_385),
+            14_747,
+            "a small window keeps a tenth"
+        );
+        assert!(needs_compaction(180_000, 200_000));
+        assert!(!needs_compaction(179_999, 200_000));
+    }
+
+    #[test]
+    fn context_overflow_errors_are_told_apart_from_other_failures() {
+        for e in [
+            "400 invalid_request_error: prompt is too long: 213000 tokens > 200000 maximum",
+            "This model's maximum context length is 128000 tokens (context_length_exceeded)",
+            "Input is too long for requested model.",
+            "Request too large for gpt-6.1-sol",
+        ] {
+            assert!(is_context_overflow(e), "{e}");
+        }
+        for e in [
+            "429 rate limit exceeded",
+            "stream error: connection reset",
+            "401 invalid api key",
+        ] {
+            assert!(!is_context_overflow(e), "{e}");
+        }
     }
 
     #[test]
