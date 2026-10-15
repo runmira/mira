@@ -36,6 +36,8 @@ const CLAUDE_TOOL_SEARCH_ENV: &str = "ENABLE_TOOL_SEARCH";
 
 /// The agent a slot is currently driving, if any.
 pub struct SlotAgent {
+    /// Checked only before this resumed Claude process receives its first input.
+    pub(crate) resume_compaction_pending: AtomicBool,
     pub opencode_control: Option<crate::opencode_control::OpenCodeControl>,
     lease: std::sync::Mutex<Option<crate::runtime_admission::RuntimeLease>>,
     /// The driver it was started from, for diagnostics and restart.
@@ -728,6 +730,9 @@ pub async fn start_agent(
 
     let agent_files_dir = agent.attachments_dir();
     let handle = Arc::new(SlotAgent {
+        resume_compaction_pending: AtomicBool::new(
+            driver.kind() == "claude-code" && native.resume.is_some(),
+        ),
         opencode_control,
         lease: std::sync::Mutex::new(Some(lease)),
         driver_kind: driver.kind().to_string(),
@@ -1356,7 +1361,7 @@ async fn decide_native_permission(
 
 /// Wrap an interactive prompt in a synthetic tool call, so the client's
 /// existing cards (which attach to a tool entry by id) render it unchanged.
-async fn with_prompt_card<F, Fut, T>(
+pub(crate) async fn with_prompt_card<F, Fut, T>(
     slot: &SessionSlot,
     name: &str,
     args: serde_json::Value,
@@ -1376,7 +1381,31 @@ where
         },
     };
     let _ = slot.events_tx.send(ServerMsg::ToolStart { call });
+    struct EndOnDrop {
+        events: crate::session_stream::SessionEvents,
+        id: Option<mira_core::ToolCallId>,
+    }
+    impl Drop for EndOnDrop {
+        fn drop(&mut self) {
+            if let Some(call_id) = self.id.take() {
+                let _ = self.events.send(ServerMsg::ToolEnd {
+                    result: mira_core::ToolResult {
+                        call_id,
+                        content: "dismissed".into(),
+                        is_error: false,
+                        data: None,
+                        images: vec![],
+                    },
+                });
+            }
+        }
+    }
+    let mut end_on_drop = EndOnDrop {
+        events: slot.events_tx.clone(),
+        id: Some(call_id.clone()),
+    };
     let (out, summary) = ask(call_id.to_string()).await;
+    end_on_drop.id = None;
     let _ = slot.events_tx.send(ServerMsg::ToolEnd {
         result: mira_core::ToolResult {
             call_id,
@@ -2590,6 +2619,7 @@ mod privilege_tests {
     /// A `SlotAgent` with only the fields the mode check reads.
     fn agent(kind: &str) -> Arc<SlotAgent> {
         Arc::new(SlotAgent {
+            resume_compaction_pending: AtomicBool::new(false),
             opencode_control: None,
             lease: std::sync::Mutex::new(None),
             driver_kind: kind.to_string(),

@@ -14,6 +14,7 @@
 
 pub mod approver;
 pub mod cache_watch;
+mod compaction;
 pub mod context;
 pub mod event;
 pub mod goal;

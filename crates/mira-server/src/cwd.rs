@@ -74,6 +74,7 @@ pub async fn put_cwd(State(state): State<AppState>, Json(u): Json<CwdUpdate>) ->
     // flight, and dropping it here would silently kill that work.
     let prev_cfg = state.current_session().await.config().await;
     let cfg = SessionConfig {
+        skip_claude_resume_compaction_prompt: false,
         engine_instance: prev_cfg.engine_instance.clone(),
         agent_approval_mode: prev_cfg.agent_approval_mode,
         model: prev_cfg.model,

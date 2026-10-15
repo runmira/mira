@@ -22,6 +22,9 @@ pub enum ChatEvent {
     /// provider's signatures and redacted payloads — so the harness can
     /// store them on the assistant message for replay.
     Reasoning(Vec<ReasoningBlock>),
+    /// Provider-native output items needed for stateless replay (including
+    /// encrypted reasoning alongside a tool call).
+    ProviderContext(mira_core::message::ProviderContext),
     /// One or more tool calls have finished streaming and can be dispatched.
     ///
     /// Providers stream tool call arguments token-by-token; the client is

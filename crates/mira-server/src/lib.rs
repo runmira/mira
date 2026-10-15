@@ -1144,3 +1144,5 @@ mod boot_preference_tests {
         assert_eq!(restored_boot_agent(Some(&disabled), false), None);
     }
 }
+
+mod resume_compaction;

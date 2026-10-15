@@ -777,6 +777,7 @@ pub async fn new_session(
     let prev_cfg = prev.config().await;
     let cwd = prev_slot.cwd.read().await.clone();
     let cfg = SessionConfig {
+        skip_claude_resume_compaction_prompt: false,
         engine_instance: prev_cfg.engine_instance.clone(),
         agent_approval_mode: mira_policy::Mode::Manual,
         model: prev_cfg.model.clone(),
@@ -912,6 +913,7 @@ pub async fn delete_session(
             let prev_cfg = state.current_session().await.config().await;
             let cwd = state.current_cwd().await;
             let cfg = SessionConfig {
+                skip_claude_resume_compaction_prompt: false,
                 engine_instance: prev_cfg.engine_instance.clone(),
                 agent_approval_mode: mira_policy::Mode::Manual,
                 model: prev_cfg.model,

@@ -1727,8 +1727,11 @@ impl AgentHandle {
     }
 }
 
+type MaintenanceReply = tokio::sync::oneshot::Sender<Result<(), String>>;
+
 /// A running native agent.
 pub struct NativeAgent {
+    maintenance: Arc<std::sync::Mutex<Option<MaintenanceReply>>>,
     #[cfg(unix)]
     process_group: std::sync::atomic::AtomicU32,
     write_poisoned: Arc<std::sync::atomic::AtomicBool>,
@@ -1968,6 +1971,7 @@ impl NativeAgent {
         let models: Option<Vec<NativeModel>> = Some(claude_models());
         let (tx, rx) = mpsc::channel(256);
         let (end_tx, end_rx) = mpsc::channel(16);
+        let maintenance = Arc::new(std::sync::Mutex::new(None::<MaintenanceReply>));
 
         // Announce everything knowable at spawn. The CLI emits nothing —
         // not even `init` — until it receives input (verified: 12s of
@@ -2031,6 +2035,7 @@ impl NativeAgent {
             // a client that ends on the first would then double-count the
             // second. It is held here and attached to the real end instead.
             let rate_limit = rate_limit.clone();
+            let maintenance = maintenance.clone();
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stdout).lines();
                 let mut stream = StreamState::default();
@@ -2096,12 +2101,34 @@ impl NativeAgent {
                                     *session_id.lock().await = Some(sid);
                                 }
                                 NativeAction::Event(e) => {
-                                    let _ = tx.send(e).await;
+                                    // A preflight compaction is maintenance, not the
+                                    // user's pending foreground turn.
+                                    let internal = maintenance
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner())
+                                        .is_some();
+                                    if !(internal && matches!(&e.event, MiraEvent::RuntimeTurn(_)))
+                                    {
+                                        let _ = tx.send(e).await;
+                                    }
                                 }
                                 NativeAction::TurnEnded {
                                     stop_reason,
                                     is_error,
                                 } => {
+                                    let internal = maintenance
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner())
+                                        .take();
+                                    if let Some(done) = internal {
+                                        let _ = rate_limit.lock().await.take();
+                                        let _ = done.send(if is_error {
+                                            Err(stop_reason)
+                                        } else {
+                                            Ok(())
+                                        });
+                                        continue;
+                                    }
                                     let was_limited = rate_limit.lock().await.take();
                                     let _ = end_tx
                                         .send(TurnEnd {
@@ -2144,6 +2171,9 @@ impl NativeAgent {
                         }
                     }
                 }
+                if let Some(done) = maintenance.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                    let _ = done.send(Err("Claude exited during compaction".into()));
+                }
                 replies.lock().await.clear();
                 // The child is gone without a final `result` (crash, OOM,
                 // kill): the `result` that would have ended the turn never
@@ -2164,6 +2194,7 @@ impl NativeAgent {
         }
 
         Ok(Self {
+            maintenance,
             #[cfg(unix)]
             process_group: std::sync::atomic::AtomicU32::new(process_group),
             write_poisoned,
@@ -2191,6 +2222,36 @@ impl NativeAgent {
         self.session_id.lock().await.clone()
     }
 
+    /// Compact before a pending user prompt. The caller serializes dispatch
+    /// and cancellation; maintenance must never consume or end that prompt.
+    pub async fn compact_before_prompt(&self) -> Result<(), NativeError> {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        {
+            let mut slot = self.maintenance.lock().unwrap_or_else(|e| e.into_inner());
+            if slot.is_some() {
+                return Err(NativeError::Other("Compaction already running".into()));
+            }
+            *slot = Some(send);
+        }
+        if let Err(error) = self.user_input_impl("/compact", &[], None, true).await {
+            self.maintenance
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take();
+            return Err(error);
+        }
+        match tokio::time::timeout(Duration::from_secs(120), receive).await {
+            Ok(Ok(Ok(()))) => Ok(()),
+            Ok(Ok(Err(error))) => Err(NativeError::Other(error)),
+            _ => {
+                let _ = self.cancel().await;
+                Err(NativeError::Other(
+                    "Claude compaction did not finish; retry your message".into(),
+                ))
+            }
+        }
+    }
+
     /// Send a user turn.
     pub async fn prompt(&self, text: &str) -> Result<(), NativeError> {
         self.user_input(text, &[], None).await
@@ -2214,6 +2275,27 @@ impl NativeAgent {
         images: &[mira_core::ImageData],
         steer_id: Option<&str>,
     ) -> Result<(), NativeError> {
+        self.user_input_impl(text, images, steer_id, false).await
+    }
+
+    async fn user_input_impl(
+        &self,
+        text: &str,
+        images: &[mira_core::ImageData],
+        steer_id: Option<&str>,
+        internal: bool,
+    ) -> Result<(), NativeError> {
+        if !internal
+            && self
+                .maintenance
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some()
+        {
+            return Err(NativeError::Other(
+                "Claude is still compacting; retry your message when it finishes".into(),
+            ));
+        }
         let sid = self
             .session_id()
             .await
@@ -2909,6 +2991,49 @@ done
             env_deny: Vec::new(),
         };
         (cfg, dir)
+    }
+
+    #[tokio::test]
+    async fn preflight_compaction_finishes_before_the_pending_prompt_and_does_not_end_it() {
+        let (cfg, _dir) = fake_cli();
+        std::fs::write(
+            &cfg.program,
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'/compact'*)
+      echo '{"type":"system","subtype":"status","status":"compacting","session_id":"s"}'
+      echo '{"type":"system","subtype":"compact_boundary","session_id":"s","uuid":"b"}'
+      echo '{"type":"result","subtype":"success","is_error":false}'
+      ;;
+    *'"type":"user"'*)
+      echo '{"type":"result","subtype":"success","is_error":false}'
+      ;;
+  esac
+done
+"#,
+        )
+        .unwrap();
+        let gate: PermissionGate =
+            Arc::new(|_| Box::pin(async { PermissionDecision::from(false) }));
+        let agent = NativeAgent::start(&cfg, gate, None).await.unwrap();
+        let _events = agent.events.lock().unwrap().take().unwrap();
+        let mut ends = agent.turn_end.lock().unwrap().take().unwrap();
+        tokio::time::timeout(Duration::from_secs(3), agent.compact_before_prompt())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            ends.try_recv().is_err(),
+            "maintenance must not finish the pending user turn"
+        );
+        agent.prompt("actual pending request").await.unwrap();
+        let end = tokio::time::timeout(Duration::from_secs(3), ends.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!end.is_error);
+        let _ = agent.shutdown().await;
     }
 
     #[tokio::test]

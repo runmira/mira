@@ -30,6 +30,9 @@ fn text_tokens(s: &str) -> u64 {
 
 /// Raw size of one message, uncalibrated.
 fn message_tokens(m: &Message) -> u64 {
+    if let Some(context) = &m.provider_context {
+        return context.tokens.max(1);
+    }
     let mut n = MESSAGE_OVERHEAD + m.content.as_deref().map(text_tokens).unwrap_or(0);
     for c in &m.tool_calls {
         n += text_tokens(&c.function.name) + text_tokens(&c.function.arguments);

@@ -81,6 +81,13 @@ impl Anthropic {
         Ok(Self { http, cfg })
     }
 
+    fn context_owner(&self) -> String {
+        format!(
+            "anthropic:{}",
+            crate::provider::context_owner(&self.cfg.base_url, &self.cfg.api_key)
+        )
+    }
+
     fn headers(&self) -> Result<HeaderMap, ProviderError> {
         let mut h = HeaderMap::new();
         h.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -105,6 +112,43 @@ impl Anthropic {
 
 #[async_trait]
 impl ChatProvider for Anthropic {
+    fn accepts_context(&self, context: &mira_core::message::ProviderContext) -> bool {
+        context.owner == self.context_owner()
+    }
+
+    async fn compact(&self, request: ChatRequest) -> Result<Option<Message>, ProviderError> {
+        if self.cfg.base_url.trim_end_matches('/') != "https://api.anthropic.com/v1" {
+            return Ok(None);
+        }
+        let mut body = request_body(&request, self.cfg.prompt_caching)?;
+        body["stream"] = serde_json::json!(false);
+        body["compaction"] = serde_json::json!({"type":"summarize"});
+        // Temperature is redundant for the provider's summarizer and conflicts
+        // with thinking on models that accept only the default temperature.
+        body.as_object_mut().unwrap().remove("temperature");
+        let mut headers = self.headers()?;
+        compaction_beta(&mut headers);
+        let response = self
+            .http
+            .post(format!(
+                "{}/messages",
+                self.cfg.base_url.trim_end_matches('/')
+            ))
+            .headers(headers)
+            .json(&body)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(ProviderError::Status {
+                status: response.status().as_u16(),
+                retry_after: crate::provider::retry_after(response.headers()),
+                body: response.text().await.unwrap_or_default(),
+            });
+        }
+        let value: Value = response.json().await?;
+        native_checkpoint(&value, &self.context_owner(), &request.model).map(Some)
+    }
+
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
         let url = format!("{}/models", self.cfg.base_url.trim_end_matches('/'));
         let resp = self.http.get(&url).headers(self.headers()?).send().await?;
@@ -135,6 +179,14 @@ impl ChatProvider for Anthropic {
         &self,
         request: ChatRequest,
     ) -> Result<BoxStream<'static, Result<ChatEvent, ProviderError>>, ProviderError> {
+        if request
+            .messages
+            .iter()
+            .filter_map(|m| m.provider_context.as_ref())
+            .any(|c| !self.accepts_context(c))
+        {
+            return Err(ProviderError::Config("This conversation contains an OpenAI native checkpoint; resume it with the original provider".into()));
+        }
         if request.response_format.is_some() {
             // Anthropic doesn't have OpenAI's response_format field.
             // Rather than silently dropping the schema, log — callers
@@ -151,10 +203,18 @@ impl ChatProvider for Anthropic {
 
         debug!(model = %request.model, tools = request.tools.len(), "anthropic messages request");
 
+        let mut headers = self.headers()?;
+        if request
+            .messages
+            .iter()
+            .any(|m| m.provider_context.is_some())
+        {
+            compaction_beta(&mut headers);
+        }
         let resp = self
             .http
             .post(&url)
-            .headers(self.headers()?)
+            .headers(headers)
             .json(&body)
             .send()
             .await?;
@@ -479,6 +539,46 @@ impl StreamState {
     }
 }
 
+fn compaction_beta(headers: &mut HeaderMap) {
+    let existing = headers
+        .get("anthropic-beta")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let value = if existing.is_empty() {
+        "compact-2026-09-04".to_string()
+    } else {
+        format!("{existing},compact-2026-09-04")
+    };
+    if let Ok(value) = HeaderValue::from_str(&value) {
+        headers.insert("anthropic-beta", value);
+    }
+}
+
+fn native_checkpoint(value: &Value, owner: &str, model: &str) -> Result<Message, ProviderError> {
+    let block = value["content"]
+        .as_array()
+        .filter(|items| items.len() == 1)
+        .and_then(|items| items.first())
+        .filter(|b| {
+            b["type"] == "compaction"
+                && b["content"].as_str().is_some_and(|s| !s.is_empty())
+                && b["signature"].as_str().is_some_and(|s| !s.is_empty())
+        });
+    let Some(block) = block.filter(|_| value["stop_reason"] == "compaction") else {
+        return Err(ProviderError::Decode(
+            "Anthropic did not return a completed compaction block".into(),
+        ));
+    };
+    let mut m = Message::user("Provider-native checkpoint");
+    m.provider_context = Some(mira_core::message::ProviderContext {
+        owner: owner.into(),
+        model: model.into(),
+        items: vec![block.clone()],
+        tokens: (block["content"].as_str().unwrap().len() / 4) as u64,
+    });
+    Ok(m)
+}
+
 // ---------- wire request ----------
 
 #[derive(Serialize)]
@@ -591,6 +691,8 @@ enum WireContentBlock<'a> {
         #[serde(skip_serializing_if = "std::ops::Not::not")]
         is_error: bool,
     },
+    #[serde(untagged)]
+    Native(&'a Value),
 }
 
 /// `tool_result.content`: a bare string for text-only results, or a
@@ -799,6 +901,20 @@ fn build_messages(
         .count();
 
     for msg in &messages[leading_system..] {
+        if let Some(context) = &msg.provider_context {
+            let block = context
+                .items
+                .first()
+                .filter(|b| b["type"] == "compaction")
+                .ok_or_else(|| {
+                    ProviderError::Config("Native checkpoint has no compaction block".into())
+                })?;
+            out.push(WireMessage {
+                role: "assistant",
+                content: vec![WireContentBlock::Native(block)],
+            });
+            continue;
+        }
         match msg.role {
             Role::System => {
                 // A note written mid-conversation: tell the model where it
@@ -1097,6 +1213,40 @@ mod tests {
             service_tier: None,
             response_format: None,
         }
+    }
+
+    #[test]
+    fn signed_compaction_replays_verbatim_and_requires_completed_output() {
+        let block = serde_json::json!({"type":"compaction","content":"Exact src/parser.rs; PR #206 uncommitted","signature":"signed-exact"});
+        let value = serde_json::json!({"stop_reason":"compaction","content":[block.clone()]});
+        let m =
+            native_checkpoint(&value, "https://api.anthropic.com/v1", "claude-opus-4-7").unwrap();
+        let mut request = ChatRequest {
+            model: "claude-opus-4-7".into(),
+            messages: vec![Message::system("same system"), m, Message::user("continue")],
+            tools: vec![],
+            temperature: None,
+            max_tokens: Some(8000),
+            reasoning_effort: None,
+            service_tier: None,
+            response_format: None,
+        };
+        let body = request_body(&request, false).unwrap();
+        assert_eq!(body["messages"][0]["content"][0], block);
+        assert_eq!(body["messages"][1]["content"][0]["text"], "continue");
+        assert!(native_checkpoint(
+            &serde_json::json!({"stop_reason":"max_tokens","content":[block]}),
+            "base",
+            "model"
+        )
+        .is_err());
+        request.messages[1].provider_context.as_mut().unwrap().items[0]["signature"] =
+            serde_json::json!("");
+        assert!(native_checkpoint(&serde_json::json!({"stop_reason":"compaction","content":request.messages[1].provider_context.as_ref().unwrap().items}),"base","model").is_err());
+        let mut headers = HeaderMap::new();
+        headers.insert("anthropic-beta", HeaderValue::from_static("existing"));
+        compaction_beta(&mut headers);
+        assert_eq!(headers["anthropic-beta"], "existing,compact-2026-09-04");
     }
 
     #[test]

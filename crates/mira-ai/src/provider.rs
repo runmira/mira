@@ -44,6 +44,16 @@ impl From<ProviderError> for mira_core::Error {
     }
 }
 
+/// Bind opaque state to its endpoint and credentials without persisting a secret.
+pub(crate) fn context_owner(base: &str, api_key: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!(
+        "{}#{:x}",
+        base.trim_end_matches('/'),
+        Sha256::digest(api_key.as_bytes())
+    )
+}
+
 /// A single completion request.
 #[derive(Clone, Debug)]
 pub struct ChatRequest {
@@ -179,6 +189,17 @@ pub trait ChatProvider: Send + Sync {
         &self,
         request: ChatRequest,
     ) -> Result<BoxStream<'static, Result<ChatEvent, ProviderError>>, ProviderError>;
+
+    /// Whether this adapter can replay a persisted native checkpoint.
+    fn accepts_context(&self, _context: &mira_core::message::ProviderContext) -> bool {
+        false
+    }
+
+    /// Native compaction, when supported. `None` selects the harness summarizer.
+    /// Errors also fall back without mutating the conversation.
+    async fn compact(&self, _request: ChatRequest) -> Result<Option<Message>, ProviderError> {
+        Ok(None)
+    }
 
     /// Fetch the provider's model catalog. Default returns an empty list —
     /// providers that don't expose one (or don't want to) fall back to a

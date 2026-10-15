@@ -407,7 +407,8 @@ async fn complete_messages(
             ChatEvent::Usage(_)
             | ChatEvent::RateLimit(_)
             | ChatEvent::ReasoningDelta(_)
-            | ChatEvent::Reasoning(_) => {}
+            | ChatEvent::Reasoning(_)
+            | ChatEvent::ProviderContext(_) => {}
             ChatEvent::Done(_) => break,
         }
     }
