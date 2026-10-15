@@ -300,11 +300,14 @@ export function Sidebar(props: Props) {
                 </div>
               </div>
             )}
-            <div className={cn('relative z-30 shrink-0 px-2 pb-1', !hiddenTitleBar && 'bg-panel')}>
-              <NavItem icon={<PenLine className="size-3.5" />} onClick={onNewChat}>
-                New thread
-              </NavItem>
-            </div>
+            {/* The desktop app has New thread beside the traffic lights. */}
+            {!hiddenTitleBar && (
+              <div className="relative z-30 shrink-0 bg-panel px-2 pb-1">
+                <NavItem icon={<PenLine className="size-3.5" />} onClick={onNewChat}>
+                  New thread
+                </NavItem>
+              </div>
+            )}
             <div
               ref={scrollRef}
               onScroll={(e) => {

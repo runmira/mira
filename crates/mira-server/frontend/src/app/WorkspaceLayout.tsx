@@ -1,5 +1,6 @@
 import { setSessionBackgroundMode } from '../api';
 import { InfoNoticeHost,noticeId } from '../components/InfoNoticeHost';
+import { useTrafficLights } from '../lib/desktop';
 import { cn } from '../lib/utils';
 import { useAppRuntime } from '../state/RuntimeProvider';
 import { WindowControls } from './WindowControls';
@@ -11,6 +12,7 @@ import { WorkspaceSidebar } from './WorkspaceSidebar';
 import type { WorkspaceRuntime } from './WorkspaceRuntime';
 export function WorkspaceLayout(context: WorkspaceRuntime) {
   const appRuntime = useAppRuntime();
+  const lights = useTrafficLights();
   const {
     status,
     cwd,
@@ -34,6 +36,7 @@ export function WorkspaceLayout(context: WorkspaceRuntime) {
     sidebarOpen,
     toggleSidebar,
     keybindings,
+    setPaletteOpen,
     sidebarCol,
     rightCol,
     infoNotices,
@@ -120,7 +123,17 @@ export function WorkspaceLayout(context: WorkspaceRuntime) {
     >
       {/* Beside the traffic lights, in every view. */}
       {hiddenTitleBar && !phone && (
-        <WindowControls sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} keybindings={keybindings} />
+        <WindowControls
+          lights={lights}
+          sidebarOpen={sidebarOpen}
+          onToggleSidebar={toggleSidebar}
+          onNewChat={() => {
+            setMainView('chat');
+            void onNewChat();
+          }}
+          onSearch={() => setPaletteOpen(true)}
+          keybindings={keybindings}
+        />
       )}
       <InfoNoticeHost
         notices={infoNotices.filter((notice) => notice.kind === 'short')}

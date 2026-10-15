@@ -37,7 +37,9 @@ import { IS_MAC,PAGE_TITLES } from './shared';
 import { WorkspaceComposer } from './WorkspaceComposer';
 import { WorkspaceContextPanel } from './WorkspaceContextPanel';
 import type { WorkspaceRuntime } from './WorkspaceRuntime';
-import { NOTCH, NotchOutline, notchedPath, usePaneSize } from './WindowControls';
+import { NotchOutline, notchedPath, notchWidth, usePaneSize } from './WindowControls';
+import { PAGE_TITLE, PAGE_TOOLBAR, PageToolbar } from '../components/PageToolbar';
+import { useTrafficLights } from '../lib/desktop';
 const WorkspaceTranscript = lazyNamed(() => import('./WorkspaceTranscript'), 'WorkspaceTranscript');
 export function WorkspaceMain(
   context: Pick<
@@ -277,6 +279,10 @@ export function WorkspaceMain(
   } = context;
   const paneCardRef = useRef<HTMLDivElement>(null);
   const notch = usePaneSize(paneCardRef, hiddenTitleBar && !phone && !sidebarOpen);
+  const lights = useTrafficLights();
+  // The pane starts 2px into the window (`pl-0.5`); the notch is in its
+  // own coordinates.
+  const notchReach = notchWidth(lights) - 2;
   return (
     <>
       <main
@@ -305,13 +311,13 @@ export function WorkspaceMain(
           style={
             notch
               ? ({
-                  clipPath: `path('${notchedPath(notch.w, notch.h)}')`,
-                  '--window-notch': `${NOTCH.width + 16}px`,
+                  clipPath: `path('${notchedPath(notch.w, notch.h, notchReach)}')`,
+                  '--window-notch': `${notchReach + 16}px`,
                 } as React.CSSProperties)
               : undefined
           }
         >
-          {notch && <NotchOutline w={notch.w} h={notch.h} />}
+          {notch && <NotchOutline w={notch.w} h={notch.h} nw={notchReach} />}
           {/* The chat view has its own header with the drawer button; the
             other pages need one too, or a phone has no way back. */}
           {phone && mainView !== 'chat' && (
@@ -336,7 +342,7 @@ export function WorkspaceMain(
                 least one or the window can't be dragged at all. */}
               <div
                 data-window-drag-region
-                className="flex h-11 shrink-0 items-center gap-3 border-b border-border/60 px-4 pl-[max(1rem,var(--window-notch,0px))] [[data-notched]_&]:border-border max-md:gap-2 max-md:px-2"
+                className={cn(PAGE_TOOLBAR, 'max-md:gap-2 max-md:px-2')}
               >
                 {/* Controls stay interactive inside the toolbar drag region.
                     The desktop app pins its toggle beside the traffic
@@ -362,7 +368,7 @@ export function WorkspaceMain(
                   <PanelLeft className="size-4" />
                 </button>
                 )}
-                <span className="min-w-0 flex-1 truncate text-[15px] font-semibold tracking-tight text-foreground">
+                <span className={PAGE_TITLE}>
                   {sessionTitle ?? titleFromEntries(entries)}
                 </span>
                 {(sessionDiff.uncommitted ?? 0) > 0 && (
@@ -629,10 +635,10 @@ export function WorkspaceMain(
             </>
           )}
 
-          {/* Pages without a header bar of their own start below the notch;
-              the strip beside it drags the window like the chat header. */}
-          {notch && mainView !== 'chat' && mainView !== 'settings' && (
-            <div data-window-drag-region aria-hidden className="shrink-0" style={{ height: NOTCH.height }} />
+          {/* Every page gets the same toolbar as the chat (Settings draws
+              its own, with its section's name). */}
+          {!phone && mainView !== 'chat' && mainView !== 'settings' && (
+            <PageToolbar title={PAGE_TITLES[mainView]} />
           )}
 
           {mainView === 'plugins' && (

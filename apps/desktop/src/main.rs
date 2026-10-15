@@ -175,7 +175,7 @@ fn build_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         // Let the webview deliver OS files to the shared DOM attachment intake.
         .disable_drag_drop_handler()
         .inner_size(1280.0, 840.0)
-        .min_inner_size(760.0, 520.0)
+        .min_inner_size(800.0, 520.0)
         .initialization_script(INIT_SCRIPT.replace("__CHANNEL__", CHANNEL));
 
     // macOS: the title bar goes away and the app's own header takes its
