@@ -784,6 +784,7 @@ fn build_router(
             get(github_connect::get_connect).post(github_connect::post_connect),
         )
         .route("/api/prs", get(pull_requests::list_pull_requests))
+        .route("/api/issues", get(pull_requests::search_issues))
         .route(
             "/api/prs/:owner/:repo/:number",
             get(pull_requests::get_pull_request),

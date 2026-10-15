@@ -4,7 +4,7 @@ import { bundle } from './helpers/bundle.mjs';
 const { Composer } = await bundle(`export { Composer } from './src/components/Composer';`, {
   'src/components/composer/useComposerController': `export function useComposerController() { return {
     noticeItems: [], images: [], quotes: [], attachments: [], plans: [], questions: [], approvals: [],
-    paletteGroups: [], paletteMatches: [], slash: {mode:'none'}, agentPicker: {modes:[]}, text: '', mentionRef: {current:null}, fileInputRef: {current:null},
+    paletteGroups: [], paletteMatches: [], issuePicker: {open:false,onKeyDown:()=>false}, slash: {mode:'none'}, agentPicker: {modes:[]}, text: '', mentionRef: {current:null}, fileInputRef: {current:null},
   }; }`,
   'src/components/EnginePicker': `export function EnginePicker() { return null; }`,
 });

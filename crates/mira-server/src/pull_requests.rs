@@ -1100,6 +1100,175 @@ async fn github_read(path: &str) -> Result<Option<Value>, String> {
     Err(missing_token_msg())
 }
 
+/// One row of the composer's `#` picker.
+#[derive(Debug, Serialize, PartialEq)]
+pub struct IssueOption {
+    /// `pr` or `issue`.
+    pub kind: &'static str,
+    pub number: u64,
+    pub title: String,
+    /// `open`, `closed`, `merged` or `draft`.
+    pub state: String,
+    pub author: Option<String>,
+    pub labels: Vec<IssueLabel>,
+    /// ISO-8601.
+    pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+pub struct IssueLabel {
+    pub name: String,
+    /// Hex without `#`, as GitHub gives it.
+    pub color: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct IssueSearchView {
+    pub owner: Option<String>,
+    pub repo: Option<String>,
+    pub items: Vec<IssueOption>,
+    /// Why there is nothing to pick from, in words for the picker.
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct IssueSearchQuery {
+    #[serde(default)]
+    pub q: String,
+}
+
+/// An issue or PR from GitHub's issues API, which returns both.
+fn issue_option(v: &Value) -> IssueOption {
+    let is_pr = v.get("pull_request").is_some_and(|p| !p.is_null());
+    let merged = v
+        .pointer("/pull_request/merged_at")
+        .is_some_and(|m| !m.is_null());
+    let draft = v.get("draft").and_then(Value::as_bool).unwrap_or(false);
+    let state = v.get("state").and_then(Value::as_str).unwrap_or("open");
+    IssueOption {
+        kind: if is_pr { "pr" } else { "issue" },
+        number: v.get("number").and_then(Value::as_u64).unwrap_or(0),
+        title: v
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        state: if merged {
+            "merged".into()
+        } else if draft && state == "open" {
+            "draft".into()
+        } else {
+            state.into()
+        },
+        author: v
+            .pointer("/user/login")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        labels: v
+            .get("labels")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|l| {
+                Some(IssueLabel {
+                    name: l.get("name")?.as_str()?.to_string(),
+                    color: l
+                        .get("color")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                })
+            })
+            .take(3)
+            .collect(),
+        updated_at: v
+            .get("updated_at")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+    }
+}
+
+/// The GitHub read behind a `#` query: recent open issues and PRs when
+/// empty, that number (then title matches) when numeric, a title search
+/// otherwise.
+fn issue_search_paths(owner: &str, repo: &str, q: &str) -> Vec<String> {
+    let q = q.trim();
+    let recent = format!("repos/{owner}/{repo}/issues?state=open&sort=updated&per_page=30");
+    if q.is_empty() {
+        return vec![recent];
+    }
+    let terms: String = url_encode(&format!("{q} repo:{owner}/{repo}"));
+    let search = format!("search/issues?q={terms}&sort=updated&per_page=20");
+    if q.chars().all(|c| c.is_ascii_digit()) {
+        return vec![format!("repos/{owner}/{repo}/issues/{q}"), search];
+    }
+    vec![search]
+}
+
+fn url_encode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            b' ' => "+".into(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+/// GET /api/issues?q= — issues and PRs of the chat's GitHub repo, for the
+/// composer's `#` picker.
+pub async fn search_issues(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<IssueSearchQuery>,
+) -> Response {
+    let cwd = state.current_cwd().await;
+    let remote = tokio::task::spawn_blocking(move || parse_github_remote(&cwd))
+        .await
+        .ok()
+        .flatten();
+    let Some((owner, repo)) = remote else {
+        return Json(IssueSearchView {
+            owner: None,
+            repo: None,
+            items: Vec::new(),
+            error: Some("This chat's folder isn't a GitHub repository.".into()),
+        })
+        .into_response();
+    };
+    let mut items: Vec<IssueOption> = Vec::new();
+    let mut error = None;
+    for path in issue_search_paths(&owner, &repo, &query.q) {
+        match github_read(&path).await {
+            Ok(Some(v)) => {
+                let found: Vec<IssueOption> = match v.get("items").or(Some(&v)) {
+                    Some(Value::Array(list)) => list.iter().map(issue_option).collect(),
+                    Some(one) if one.get("number").is_some() => vec![issue_option(one)],
+                    _ => Vec::new(),
+                };
+                for item in found {
+                    if !items.iter().any(|i| i.number == item.number) {
+                        items.push(item);
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                error = Some(e);
+                break;
+            }
+        }
+    }
+    Json(IssueSearchView {
+        owner: Some(owner),
+        repo: Some(repo),
+        error: items.is_empty().then_some(error).flatten(),
+        items,
+    })
+    .into_response()
+}
+
 /// GET /api/prs/:owner/:repo/:number/card — a PR, or else an issue.
 pub async fn mention_card(
     AxumPath((owner, repo, number)): AxumPath<(String, String, u64)>,
@@ -1209,6 +1378,46 @@ mod auth_recovery_tests {
         atomic::{AtomicUsize, Ordering},
         Arc,
     };
+
+    #[test]
+    fn issue_queries_pick_recent_by_number_or_search() {
+        assert_eq!(
+            issue_search_paths("runmira", "mira", " "),
+            vec!["repos/runmira/mira/issues?state=open&sort=updated&per_page=30"]
+        );
+        assert_eq!(
+            issue_search_paths("runmira", "mira", "205"),
+            vec![
+                "repos/runmira/mira/issues/205".to_string(),
+                "search/issues?q=205+repo%3Arunmira%2Fmira&sort=updated&per_page=20".into(),
+            ]
+        );
+        assert_eq!(
+            issue_search_paths("runmira", "mira", "handoff budget"),
+            vec!["search/issues?q=handoff+budget+repo%3Arunmira%2Fmira&sort=updated&per_page=20"]
+        );
+    }
+
+    #[test]
+    fn issue_rows_tell_prs_from_issues_and_their_state() {
+        let issue = serde_json::json!({
+            "number": 205, "title": "Context handoff", "state": "open",
+            "user": {"login": "dami"},
+            "labels": [{"name": "enhancement", "color": "a2eeef"}],
+            "updated_at": "2026-10-15T10:00:00Z"
+        });
+        let row = issue_option(&issue);
+        assert_eq!((row.kind, row.number, row.state.as_str()), ("issue", 205, "open"));
+        assert_eq!(row.labels[0].name, "enhancement");
+        let merged = serde_json::json!({
+            "number": 207, "title": "x", "state": "closed",
+            "pull_request": {"merged_at": "2026-10-15T10:54:08Z"}
+        });
+        assert_eq!(issue_option(&merged).kind, "pr");
+        assert_eq!(issue_option(&merged).state, "merged");
+        let draft = serde_json::json!({"number": 1, "state": "open", "draft": true, "pull_request": {"merged_at": null}});
+        assert_eq!(issue_option(&draft).state, "draft");
+    }
 
     #[tokio::test]
     async fn rejected_credentials_retry_once_but_scope_and_missing_resource_do_not() {

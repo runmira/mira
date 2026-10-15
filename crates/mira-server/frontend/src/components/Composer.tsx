@@ -7,6 +7,7 @@ import { ComposerNoticeStack } from './ComposerNoticeStack';
 import { EnginePicker } from './EnginePicker';
 import { RevertDialog } from './AgentSessionActions';
 import { FilePicker } from './FilePicker';
+import { IssuePalette } from './composer/IssuePalette';
 import { RequestBoundary } from './RequestBoundary';
 
 import { ImageAttachmentMeta } from './ImageAttachmentDetails';
@@ -116,6 +117,7 @@ export function Composer(props: Props) {
     setSlashFeedback,
     paletteVisible,
     paletteMatches,
+    issuePicker,
     setSlashIdx,
     slashIdx,
     commitPaletteChoice,
@@ -350,6 +352,7 @@ export function Composer(props: Props) {
                 setSlashFeedback(null);
               }}
               onKeyDown={(e) => {
+                if (issuePicker.onKeyDown(e)) return;
                 // Palette is open → arrows navigate, Enter picks, Esc closes.
                 if (paletteVisible && paletteMatches.length > 0) {
                   if (e.key === 'ArrowDown') {
@@ -433,7 +436,7 @@ export function Composer(props: Props) {
                       ? 'Describe your task to generate a plan…'
                       : phone
                         ? 'Ask mira anything'
-                        : 'Ask mira anything · @ for files · / for commands'
+                        : 'Ask mira anything · @ for files · / for commands · # for issues'
               }
               disabled={disabled}
               roster={skills}
@@ -448,6 +451,8 @@ export function Composer(props: Props) {
                 onPick={commitPaletteChoice}
               />
             )}
+
+            {issuePicker.open && <IssuePalette picker={issuePicker} />}
 
             {slash.mode === 'args' && (
               <div className="tooltip pointer-events-none absolute -top-7 left-0">

@@ -2,14 +2,16 @@ import { useEffect, useRef, type KeyboardEvent, type ClipboardEvent } from 'reac
 import { cn } from '@/lib/utils';
 import { parseComposerCitations, type ComposerCitationSegment } from '../lib/sourceCitations';
 import { parseSkillMentions } from './SkillMention';
+import { buildIssueChip, splitIssueTokens } from '../lib/issueMentions';
 import type { PaletteSkill } from './commands';
 
 /**
  * Codex-style composer input surface: a `contenteditable` div that
- * renders `@skill:<name>` mentions as inline chip elements while the
- * user types. Externally it behaves like a textarea — the parent tracks
- * a canonical text string with tokens, and typing / paste / imperative
- * inserts all funnel through `onChange(newText)`.
+ * renders `@skill:<name>` mentions and `owner/repo#N` issue references
+ * as inline chip elements while the user types. Externally it behaves
+ * like a textarea — the parent tracks a canonical text string with
+ * tokens, and typing / paste / imperative inserts all funnel through
+ * `onChange(newText)`.
  *
  * ## Model
  *
@@ -212,6 +214,10 @@ function serialize(root: HTMLElement): string {
       out += `@skill:${n.dataset.skill}`;
       return;
     }
+    if (n.dataset.issue) {
+      out += n.dataset.issue;
+      return;
+    }
     if (n.tagName === 'BR') {
       out += '\n';
       return;
@@ -243,7 +249,11 @@ function rebuild(root: HTMLElement, text: string, roster: PaletteSkill[]) {
       const parts = seg.text.split('\n');
       parts.forEach((line, i) => {
         if (i > 0) root.appendChild(document.createElement('br'));
-        if (line.length > 0) root.appendChild(document.createTextNode(line));
+        // `owner/repo#N` (a `#` pick) renders as an issue chip.
+        for (const part of splitIssueTokens(line)) {
+          if (part.kind === 'issue') root.appendChild(buildIssueChip(part.token, part.number));
+          else if (part.text.length > 0) root.appendChild(document.createTextNode(part.text));
+        }
       });
     }
   }
