@@ -6,7 +6,6 @@ import { sessionFetch } from '../../api/sessionScope';
 import { issueToken, rememberIssue, searchIssues, type IssueOption } from '../../lib/issueMentions';
 import { branchFor, ciState, groupWorkItems, linkedIssue, prRef, projectRoot, reviewState, type WorkItem, type WorkMeta } from '../../lib/workItems';
 import type { SessionSummary } from '../../types';
-import { useResource } from '../resources/hooks';
 import { useAppRuntime } from '../RuntimeProvider';
 
 /* Server state for the Work tab. Everything here is a query or a mutation:
@@ -87,10 +86,18 @@ function metaFrom(detail: PullRequestDetailView, branch: string | null): WorkMet
   };
 }
 
-/** Sessions with live running state laid over the listed one. */
+/** The sessions list, kept fresh while Work is on screen: every 4s while
+ *  a chat is running or waiting on you (attention isn't pushed, and the
+ *  open chat's isn't polled anywhere else), every minute otherwise for PR
+ *  changes. A second observer on the shared query, so the Chat side reads
+ *  the same data and polling stops when Work unmounts. */
 function useLiveSessions(): SessionSummary[] {
   const runtime = useAppRuntime();
-  const sessions = useResource('sessions').data ?? EMPTY;
+  const sessions = useQuery({
+    ...runtime.resources.options('sessions'),
+    refetchInterval: (query) =>
+      (query.state.data as SessionSummary[] | undefined)?.some((s) => s.running || s.needs_attention) ? 4_000 : 60_000,
+  }).data ?? EMPTY;
   const running = useSelector(runtime.sessionActivity, (state) => state.activity?.running ?? null);
   return running ? sessions.map((s) => (s.running === running.has(s.id) ? s : { ...s, running: running.has(s.id) })) : sessions;
 }
@@ -157,7 +164,9 @@ export function useStartWork(sessionId: string, onOpened: (sessionId: string) =>
   const runtime = useAppRuntime();
   return useMutation({
     mutationFn: async ({ issue, owner, repo }: { issue: IssueOption; owner: string; repo: string }) => {
-      const worktree = await createWorktree(branchFor(issue), undefined, sessionId);
+      // Branch from the repo's default branch, not whatever the open chat
+      // has checked out.
+      const worktree = await createWorktree(branchFor(issue), await defaultBranch(sessionId), sessionId);
       const { session_id } = await putCwd(worktree.path, sessionId);
       if (!session_id) throw new Error('The worktree opened without a chat');
       // Name the chat for the issue, so the item reads as the issue at once.
@@ -172,4 +181,20 @@ export function useStartWork(sessionId: string, onOpened: (sessionId: string) =>
       await runtime.resources.refresh('sessions').catch(() => undefined);
     },
   });
+}
+
+/** The repo's default branch (`origin/HEAD`, else main / master), as the
+ *  server's branch card reports it. Undefined when it can't tell, which
+ *  falls back to the checkout's HEAD. */
+async function defaultBranch(sessionId: string): Promise<string | undefined> {
+  const status = await sessionFetch('/api/git/status', undefined, sessionId)
+    .then((r) => (r.ok ? (r.json() as Promise<{ branch?: string | null }>) : null))
+    .catch(() => null);
+  for (const name of [status?.branch, 'main', 'master']) {
+    if (!name) continue;
+    const r = await sessionFetch(`/api/git/branch?name=${encodeURIComponent(name)}`, undefined, sessionId).catch(() => null);
+    const card = r?.ok ? ((await r.json()) as BranchCard) : null;
+    if (card?.base) return card.base;
+  }
+  return undefined;
 }
