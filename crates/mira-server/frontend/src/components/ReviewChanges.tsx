@@ -1,3 +1,5 @@
+import { useResource } from '../state/resources/hooks';
+import { reviewDraftKey } from '../state/reviewService';
 import { useSelector } from '@tanstack/react-store';
 import { GuidedWalkthrough } from './GuidedWalkthrough';
 import { useWorkspaceUiField, useAppRuntime } from '../state/RuntimeProvider';
@@ -8,9 +10,9 @@ import { useWorkspaceUiField, useAppRuntime } from '../state/RuntimeProvider';
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { MessageCircle, RotateCcw, ChevronDown, X } from 'lucide-react';
-import { parseDiffFromFile, type FileDiffMetadata } from '@pierre/diffs';
+import { type FileDiffMetadata } from '@pierre/diffs';
 import { cn } from '@/lib/utils';
-import { getTurnFileDiff, getSessionChanges, revertFile, type SessionChange } from '../api';
+import { revertFile, type SessionChange } from '../api';
 import {
   buildFileDiffContentVersion,
   buildFileDiffIdentityKey,
@@ -26,6 +28,8 @@ import { ReviewDiffView, type ReviewDiffFile, type ReviewDiffViewHandle } from '
 import { ReviewSourceSelector, ReviewDisplayActions } from './diffs/ReviewToolbar';
 import { useDiffOptions } from '../lib/diffPrefs';
 
+const EMPTY_COMMENTS: MiraReviewComment[] = [];
+
 export function ReviewChanges({
   open,
   embedded = false,
@@ -40,7 +44,7 @@ export function ReviewChanges({
   focusPath?: string | null;
   onClose: () => void;
   /** Send the composed review message to the agent. */
-  onSendComments: (text: string) => void;
+  onSendComments: (text: string) => boolean | void;
   /** Files were reverted — refresh anything showing diff stats. */
   onChanged: () => void;
 }) {
@@ -57,7 +61,14 @@ export function ReviewChanges({
   const requestSession = () => owner ?? undefined;
   const [files, setFiles] = useState<SessionChange[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [comments, setComments] = useState<MiraReviewComment[]>([]);
+  const draftKey = reviewDraftKey(owner, turnScope?.session === owner ? turnScope.summary : null, turnScope?.turnKey);
+  const comments = useSelector(requestRuntime.review.drafts, state => state.get(draftKey) ?? EMPTY_COMMENTS);
+  const setComments = (apply: MiraReviewComment[] | ((value: MiraReviewComment[]) => MiraReviewComment[])) => requestRuntime.review.updateDraft(draftKey, apply);
+  const [sendError, setSendError] = useState<string | null>(null);
+  const working = useResource('sessionChanges', open && !turnScope);
+  useEffect(() => {
+    if (!turnScope) { setFiles(working.data ?? null); setError(working.error?.message ?? null); setTurnFiles([]); setTurnUnavailable([]); }
+  }, [turnScope, working.data, working.error, owner]);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [confirmAll, setConfirmAll] = useState(false);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
@@ -79,38 +90,33 @@ export function ReviewChanges({
   const narrow = embedded && paneWidth < 600;
   const displayOptions = useMemo(() => narrow ? { ...diffOptions, diffStyle: 'unified' as const } : diffOptions, [diffOptions, narrow]);
 
+  const historicalAbort = useRef<AbortController | null>(null);
   const load = useCallback(() => {
+    historicalAbort.current?.abort();
     const generation = ++loadGeneration.current;
-    setError(null); setFiles(null); setTurnFiles([]); setTurnUnavailable([]);
+    setError(null);
     if (turnScope && turnScope.session !== owner) { setTurnScope(null); return; }
-    if (turnScope) {
-      const { session, summary } = turnScope;
-      Promise.allSettled(summary.files.map(async file => {
-        if (file.binary) throw new Error('Binary file · no text diff available.');
-        const diff = await getTurnFileDiff(session, summary.text, summary.occurrence, file.path);
-        return parseDiffFromFile({ name: file.path, contents: diff.before }, { name: file.path, contents: diff.after });
-      })).then(parsed => {
-        if (generation !== loadGeneration.current) return;
-        setTurnFiles(parsed.flatMap(result => result.status === 'fulfilled' ? [result.value] : []));
-        setTurnUnavailable(parsed.flatMap((result, index) => result.status === 'rejected' ? [{ path: summary.files[index].path, error: String(result.reason?.message ?? result.reason) }] : []));
-        setFiles(summary.files.map(file => ({ ...file, status: 'modified', diff: '' })));
-      }).catch(e => { if (generation === loadGeneration.current) setError((e as Error).message); });
-    } else {
-      getSessionChanges(requestSession()).then(value => {
-        if (generation === loadGeneration.current) setFiles(value);
-      }).catch(e => { if (generation === loadGeneration.current) setError((e as Error).message); });
-    }
-  }, [turnScope, owner]);
+    if (!turnScope) { void working.refetch(); return; }
+    setFiles(null); setTurnFiles([]); setTurnUnavailable([]);
+    const controller = new AbortController();
+    historicalAbort.current = controller;
+    const { session, summary } = turnScope;
+    void requestRuntime.review.loadTurn(session, summary, controller.signal, turnScope.turnKey).then(parsed => {
+      if (generation !== loadGeneration.current || controller.signal.aborted) return;
+      setTurnFiles(parsed.flatMap(result => result.status === 'fulfilled' ? [result.value] : []));
+      setTurnUnavailable(parsed.flatMap((result, index) => result.status === 'rejected' ? [{ path: summary.files[index].path, error: String(result.reason?.message ?? result.reason) }] : []));
+      setFiles(summary.files.map(file => ({ ...file, status: 'modified', diff: '' })));
+    }).catch(error => { if (generation === loadGeneration.current && !controller.signal.aborted) setError(String(error)); });
+  }, [turnScope, owner, requestRuntime, working.refetch]);
 
   useEffect(() => {
-    setGuided(false); setComments([]); setCollapsed(new Set()); setSelectedPath(null);
+    setGuided(false); setSendError(null); setCollapsed(new Set()); setSelectedPath(null);
   }, [owner, turnScope]);
 
   useEffect(() => {
-    if (open) { setConfirmAll(false); load(); }
-    else { loadGeneration.current++; if (turnScope) setTurnScope(null); }
-    return () => { loadGeneration.current++; };
-  }, [open, load]);
+    if (open && turnScope) load();
+    return () => { loadGeneration.current++; historicalAbort.current?.abort(); };
+  }, [open, load, turnScope]);
 
   useEffect(() => {
     if (!open || embedded) return;
@@ -195,6 +201,7 @@ export function ReviewChanges({
   }
 
   function send() {
+    setSendError(null);
     const list = comments.filter((c) => c.text.trim());
     if (list.length === 0) return;
     const body = list
@@ -203,12 +210,22 @@ export function ReviewChanges({
         return `**${c.filePath}** ${c.rangeLabel}:\n${quoted}\n\n${c.text.trim()}`;
       })
       .join('\n\n---\n\n');
-    onSendComments(`Review comments on your changes:\n\n${body}`);
+    try {
+      if (onSendComments(`Review comments on your changes:\n\n${body}`) === false) {
+        setSendError('Comments were not sent. Your draft is saved; try again when the conversation is ready.');
+        return;
+      }
+    } catch (error) {
+      setSendError(`Comments were not sent. Your draft is saved. ${error instanceof Error ? error.message : ''}`);
+      return;
+    }
     setComments([]);
     onClose();
   }
 
   const count = comments.filter((c) => c.text.trim()).length;
+  const detached = comments.filter(comment => !fileByKey.has(comment.fileKey) || (comment.fileVersion && fileByKey.get(comment.fileKey)?.fileVersion !== comment.fileVersion));
+  const inlineComments = comments.filter(comment => !detached.includes(comment));
   const commentsIn = (fileKey: string) => comments.filter((c) => c.fileKey === fileKey).length;
   const allCollapsed = reviewFiles.length > 0 && reviewFiles.every((f) => collapsed.has(f.fileKey));
   const showNav = reviewFiles.length > 1;
@@ -317,8 +334,8 @@ export function ReviewChanges({
               <ReviewDiffView
                 codeViewKey={`mira-review:${reviewFiles.map((f) => f.fileKey).join('|')}`}
                 files={reviewFiles}
-                comments={comments}
-                onAddComment={(c) => setComments((prev) => [...prev, c])}
+                comments={inlineComments}
+                onAddComment={(c) => setComments((prev) => [...prev, { ...c, fileVersion: fileByKey.get(c.fileKey)?.fileVersion }])}
                 onUpdateCommentText={(id, text) =>
                   setComments((prev) => prev.map((c) => (c.id === id ? { ...c, text } : c)))
                 }
@@ -355,6 +372,11 @@ export function ReviewChanges({
           </div>
         </div>
 
+        {detached.length > 0 && <section className="max-h-48 shrink-0 overflow-auto border-t border-border px-4 py-3 text-xs" aria-label="Saved draft comments">
+          <p className="mb-2 text-muted-foreground">These files changed since you commented. Check the original quoted lines before sending.</p>
+          {detached.map(comment => <div key={comment.id} className="mb-2"><div className="mb-1 flex items-center gap-2"><span className="min-w-0 flex-1 truncate font-mono">{comment.filePath} · {comment.rangeLabel}</span><button className="rounded-full px-2 py-1 hover:bg-accent" onClick={() => setComments(previous => previous.filter(item => item.id !== comment.id))}>Remove</button></div><pre className="max-h-20 overflow-auto whitespace-pre-wrap text-muted-foreground">{comment.code}</pre><textarea aria-label={`Draft comment for ${comment.filePath}`} className="mt-1 w-full rounded-md border border-border bg-background p-2" value={comment.text} onChange={event => setComments(previous => previous.map(item => item.id === comment.id ? {...item,text:event.target.value} : item))} /></div>)}
+        </section>}
+        {sendError && <p role="alert" className="shrink-0 border-t border-border px-4 py-2 text-xs text-destructive">{sendError}</p>}
         <footer className="flex flex-wrap items-center gap-3 border-t border-border px-5 py-3">
           <span className="text-[12px] text-muted-foreground">
             Select lines to comment · comments go to the agent as one message.

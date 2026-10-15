@@ -274,7 +274,7 @@ export function useWorkspaceView(
   }, []);
 
   const refreshRepo = useCallback(() => {
-    for (const name of ['gitStatus', 'sessionDiff', 'branchPr'] as const)
+    for (const name of ['sessionChanges', 'gitStatus', 'sessionDiff', 'branchPr'] as const)
       void appRuntime.resources.refresh(name).catch(() => {});
   }, [appRuntime]);
 

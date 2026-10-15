@@ -28,3 +28,12 @@ Development fixtures: `/review-ui-preview.html` and `/walkthrough-preview.html`.
 View changes opens the singleton **Diff** tab in the right panel. Turn entry points retain the selected immutable snapshot; the source selector labels the latest edited turn from transcript order (including repeated prompts). Choose Changes to return to uncommitted session changes. The Turns menu lists only snapshots with changed files, newest first by transcript order; Latest turn remains a direct shortcut. The turn list opens within the same menu bounds to fit narrow panels. File clicks continue to open separate file tabs. Switching tabs keeps the review mounted, preserving draft comments and position; closing the Diff tab disposes it.
 
 The panel toolbar offers unified/split layout, wrapping and line numbers using the existing diff preferences. Below 600px the renderer uses unified layout without overwriting the saved split preference; split becomes available again when widened. The file tree appears at a panel width of 760px. Header actions wrap independently of the application viewport. Expand/restore is a panel window action, with space retained for native macOS chrome.
+
+
+### Drafts, refresh and restore
+
+Review comments belong to the runtime, session and stable turn identity. Changing sources or closing the tab retains drafts until delivery succeeds; rejected sends leave the draft visible. Drafts and quoted code remain in memory and are cleared when the runtime ends. If a working file changes under a draft comment, its original quote moves to a separate editable draft section instead of attaching the old range to new code.
+
+The uncommitted review uses the same repository refresh lifecycle as the context panel: tool completions, focus, reconnect and polling (3 seconds while running, 15 seconds idle). Historical snapshots are cached in memory for 10 minutes, with at most 128 idle entries and four concurrent fetches; queued work stops when the review is abandoned. Turn identity uses transcript ordinals so another identical prompt cannot reuse an earlier turn's cached diff.
+
+Panel width, file/tool tabs and the selected source marker restore per backend, account and working directory. Only paths, tool targets and a turn ordinal are stored; file contents, prompts, diffs and review comments are excluded. The Turns menu supports searching by prompt, turn label or file path and shows timestamps when the transcript supplies them.

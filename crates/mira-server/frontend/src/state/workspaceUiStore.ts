@@ -35,7 +35,7 @@ export function createWorkspaceUiStore(storage?: UiStorage) {
     reviewPanelOpen: (false) as boolean,
     reviewOpen: (false) as boolean,
     reviewFocus: (null) as string | null,
-    reviewTurn: (null) as { session: string; summary: import('../types').TurnDiffSummary } | null,
+    reviewTurn: (null) as { session: string; turnKey?: string; summary: import('../types').TurnDiffSummary } | null,
     lightbox: (null) as string | null,
     selectedProcess: (null) as {
     session: string;

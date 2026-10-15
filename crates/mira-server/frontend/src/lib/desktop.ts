@@ -90,7 +90,7 @@ export function hasHiddenTitleBar(): boolean {
  *  apps/desktop/src/traffic_lights.rs, and injects their centre line. */
 export const TRAFFIC_LIGHT_INSET = {
   top: 44,
-  left: 78,
+  left: 96,
   centerY: typeof window !== 'undefined' ? window.__MIRA_CHROME__?.trafficLightCenterY ?? 30 : 30,
 } as const;
 

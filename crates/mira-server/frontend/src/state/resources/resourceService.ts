@@ -5,6 +5,7 @@ import { putSettings } from '../../api/settings';
 import type { SessionSummary,SettingsUpdate,SettingsView } from '../../types';
 import type { RuntimeScope } from '../createAppRuntime';
 export type ResourceData = {
+  sessionChanges: import('../../api').SessionChange[];
   remote: import('../../lib/remote').RemoteStatus;
   settings: SettingsView; engines: EngineListView; skills: SkillView[]; commands: CommandInfo[];
   sessions: SessionSummary[]; gitStatus: GitStatusView; context: import('../../api').ContextView; sessionDiff: SessionDiffView; branchPr: BranchPrView | null;
@@ -13,10 +14,10 @@ export type ResourceName = keyof ResourceData;
 export class ResourceError extends Error { constructor(readonly status: number) { super(`Resource request failed (${status})`); } }
 export const retryResource = (count: number, error: unknown) => count < 1 &&
   (error instanceof TypeError || (error instanceof ResourceError && error.status >= 500));
-const paths: Record<ResourceName, string> = { remote: '/api/remote', settings: '/api/settings', engines: '/api/engines', skills: '/api/skills',
+const paths: Record<ResourceName, string> = { sessionChanges: '/api/git/session-changes', remote: '/api/remote', settings: '/api/settings', engines: '/api/engines', skills: '/api/skills',
   commands: '/api/commands', context: '/api/context', sessions: '/api/sessions?all=true', gitStatus: '/api/git/status',
   sessionDiff: '/api/git/session-diff', branchPr: '/api/git/branch-pr' };
-const contextual = new Set<ResourceName>(['skills', 'commands', 'gitStatus', 'sessionDiff', 'branchPr', 'context']);
+const contextual = new Set<ResourceName>(['sessionChanges', 'skills', 'commands', 'gitStatus', 'sessionDiff', 'branchPr', 'context']);
 export function createResourceService(client: QueryClient, scope: RuntimeScope,
   context: () => { session: string | null; cwd: string; attachment: number; connected: boolean; connection: number; engine: string }) {
   let disposed = false;
@@ -40,7 +41,7 @@ export function createResourceService(client: QueryClient, scope: RuntimeScope,
         if (!response.ok) throw new ResourceError(response.status);
         const body = await response.json();
         if (signal.aborted || disposed || (contextual.has(name) && (owner.attachment !== context().attachment || owner.connection !== context().connection))) throw new CancelledError({ silent: true });
-        return (name === 'skills' ? body.skills : body) as ResourceData[K];
+        return (name === 'skills' ? body.skills : name === 'sessionChanges' ? body.files : body) as ResourceData[K];
       },
       retry: retryResource, staleTime: name === 'sessions' ? 10_000 : 30_000, gcTime: 5 * 60_000,
       refetchOnWindowFocus: false, refetchOnReconnect: true,

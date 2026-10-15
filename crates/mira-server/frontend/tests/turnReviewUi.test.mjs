@@ -1,3 +1,4 @@
+import { QueryClientProvider } from '@tanstack/react-query';
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import React,{act} from 'react';
@@ -7,7 +8,8 @@ import {bundle} from './helpers/bundle.mjs';
 const browser=new Window({url:'https://mira.test'});
 globalThis.window=browser;globalThis.document=browser.document;globalThis.customElements=browser.customElements;globalThis.getComputedStyle=browser.getComputedStyle.bind(browser);for(const name of ['HTMLElement','Element','Node','CustomEvent','MutationObserver','NodeFilter','HTMLInputElement','Event']) globalThis[name]=browser[name];globalThis.IS_REACT_ACT_ENVIRONMENT=true;
 const observers=[];globalThis.ResizeObserver=class{constructor(callback){this.callback=callback;observers.push(this);}observe(element){this.element=element;}disconnect(){}};
-const {TurnChanges,ReviewChanges,createAppRuntime,openTurnReview,pullRequestPatch,getRenderablePatch,resolveFileDiffPath}=await bundle(`
+const {TurnChanges,ReviewChanges,createAppRuntime,openTurnReview,pullRequestPatch,getRenderablePatch,resolveFileDiffPath,reviewDraftKey}=await bundle(`
+export {reviewDraftKey} from './src/state/reviewService';
 export {TurnChanges} from './src/components/TurnChanges';
 export {ReviewChanges} from './src/components/ReviewChanges';
 export {createAppRuntime} from './src/state/createAppRuntime';
@@ -27,13 +29,13 @@ test('turn files open the right file panel while View changes opens the historic
  const runtime=createAppRuntime({backend:'https://mira.test',account:'test'});globalThis.reviewRuntime=runtime;
  runtime.turnCommands.hydrate('chat-a',false,[]);
  const files=[],requests=[];globalThis.fetch=async(url,options)=>{requests.push({url,body:JSON.parse(options.body)});return new Response(JSON.stringify({before:'old\n',after:'new\n'}));};
- const host=document.createElement('div');document.body.append(host);const root=createRoot(host);
+ const host=document.createElement('div');document.body.append(host);const root=createRoot(host);const render=element=>root.render(React.createElement(QueryClientProvider,{client:runtime.queryClient},element));
  try {
-  await act(()=>root.render(React.createElement(TurnChanges,{summary,onOpenFile:path=>files.push(path),onReview:()=>openTurnReview(runtime,summary)})));
+  await act(()=>render(React.createElement(TurnChanges,{summary,onOpenFile:path=>files.push(path),onReview:()=>openTurnReview(runtime,summary)})));
   await act(()=>host.querySelector('[aria-label="Open file src/save.ts"]').click());assert.deepEqual(files,['src/save.ts']);assert.equal(runtime.workspaceUi.get().reviewOpen,false);
   await act(()=>[...host.querySelectorAll('button')].find(b=>b.textContent.startsWith('View changes')).click());
-  assert.equal(runtime.workspaceUi.get().reviewOpen,true);assert.deepEqual(runtime.workspaceUi.get().reviewTurn,{session:'chat-a',summary});
-  await act(()=>root.render(React.createElement(ReviewChanges,{open:true,onClose(){},onChanged(){},onSendComments(){}})));await flush();
+  assert.equal(runtime.workspaceUi.get().reviewOpen,true);assert.equal(runtime.workspaceUi.get().reviewTurn.session,'chat-a');assert.deepEqual(runtime.workspaceUi.get().reviewTurn.summary,summary);
+  await act(()=>render(React.createElement(ReviewChanges,{open:true,onClose(){},onChanged(){},onSendComments(){}})));await flush();
   assert.ok(host.textContent.includes('Review turn changes'));assert.ok(host.querySelector('[data-testid="review-diff"]').textContent.includes('src/save.ts'));
   assert.ok(host.textContent.includes('logo.png'));assert.ok(host.textContent.includes('Binary file'));
   assert.deepEqual(requests,[{url:'/api/sessions/chat-a/turn-diff',body:{text:'repeat prompt',occurrence:1,path:'src/save.ts'}}]);
@@ -56,9 +58,9 @@ test('embedded Diff source follows the selected snapshot including the latest re
  runtime.updateSessionData('turnDiffs',[latest,summary,{text:'another',occurrence:0,files:[]}]);
  globalThis.fetch=async()=>new Response(JSON.stringify({before:'old\n',after:'new\n'}));
  openTurnReview(runtime,latest);
- const host=document.createElement('div');document.body.append(host);const root=createRoot(host);
+ const host=document.createElement('div');document.body.append(host);const root=createRoot(host);const render=element=>root.render(React.createElement(QueryClientProvider,{client:runtime.queryClient},element));
  try {
-  await act(()=>root.render(React.createElement(ReviewChanges,{embedded:true,open:true,onClose(){},onChanged(){},onSendComments(){}})));await flush();
+  await act(()=>render(React.createElement(ReviewChanges,{embedded:true,open:true,onClose(){},onChanged(){},onSendComments(){}})));await flush();
   const selector=host.querySelector('[aria-label="Changes source"]');
   assert.equal(selector.textContent,'Latest turn');
   assert.equal(host.querySelector('.fixed'),null,'embedded review has no modal backdrop');
@@ -93,5 +95,29 @@ test('embedded Diff source follows the selected snapshot including the latest re
   await act(()=>selector.click());await flush();
   await act(()=>document.querySelector('[data-menu-item="Changes"]').click());
   assert.equal(runtime.workspaceUi.get().reviewTurn,null);
+ } finally {await act(()=>root.unmount());await runtime.dispose();host.remove();delete globalThis.reviewRuntime;}
+});
+
+test('rejected review delivery and source changes preserve drafts until accepted',async()=>{
+ const runtime=createAppRuntime({backend:'https://mira.test',account:'drafts'});globalThis.reviewRuntime=runtime;
+ runtime.turnCommands.hydrate('chat-a',false,[]);openTurnReview(runtime,summary);
+ const scope=runtime.workspaceUi.get().reviewTurn;
+ const key=reviewDraftKey('chat-a',summary,scope.turnKey);
+ runtime.review.updateDraft(key,[{id:'draft',filePath:'src/save.ts',fileKey:'original',range:{start:1,end:1},rangeLabel:'line 1',code:'original quote',text:'Keep this comment'}]);
+ globalThis.fetch=async()=>new Response(JSON.stringify({before:'old\n',after:'new\n'}));
+ const host=document.createElement('div');document.body.append(host);const root=createRoot(host);
+ let accepted=false,closed=0;
+ const render=()=>root.render(React.createElement(QueryClientProvider,{client:runtime.queryClient},React.createElement(ReviewChanges,{open:true,embedded:true,onClose(){closed++;},onChanged(){},onSendComments(){return accepted;}})));
+ const send=()=>[...host.querySelectorAll('button')].find(button=>button.textContent.startsWith('Send 1'));
+ try {
+  await act(render);await flush();
+  await act(()=>send().click());
+  assert.equal(closed,0);assert.equal(runtime.review.drafts.get().get(key)[0].text,'Keep this comment');
+  assert.match(host.querySelector('[role=alert]').textContent,/not sent/);
+  await act(()=>runtime.updateWorkspaceUi('reviewTurn',null));await flush();
+  assert.ok(!send());
+  await act(()=>runtime.updateWorkspaceUi('reviewTurn',scope));await flush();assert.ok(send());
+  await act(()=>root.render(null));await act(render);await flush();assert.ok(send(),'closing/reopening the view retains its draft');
+  accepted=true;await act(()=>send().click());assert.equal(closed,1);assert.equal(runtime.review.drafts.get().has(key),false);
  } finally {await act(()=>root.unmount());await runtime.dispose();host.remove();delete globalThis.reviewRuntime;}
 });

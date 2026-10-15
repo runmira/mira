@@ -9,7 +9,7 @@ export function useResource<K extends ResourceName>(name: K, enabled = true, arc
   const identity = useSelector(runtime.sessionState, state => JSON.stringify([state.active, state.attachment,
     selectActiveSession(state).cwd, selectActiveSession(state).model, selectActiveSession(state).engine, selectActiveSession(state).environment]));
   const active = JSON.parse(identity)[0] !== null;
-  const repository = name === 'gitStatus' || name === 'sessionDiff';
+  const repository = name === 'sessionChanges' || name === 'gitStatus' || name === 'sessionDiff';
   const pullRequest = name === 'branchPr';
   const running = useSelector(runtime.sessionState, state => repository && selectActiveSession(state).busy);
   const contextual = !['settings', 'sessions', 'engines', 'remote'].includes(name);
