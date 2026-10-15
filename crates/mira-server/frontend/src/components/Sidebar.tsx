@@ -11,7 +11,6 @@ import {
   CircleAlert,
   Folder,
   GitBranch,
-  History,
   PenLine,
   Puzzle,
   Search,
@@ -29,12 +28,7 @@ import { SETTINGS_SECTIONS } from './settings/sections';
 import { dateSection } from './sidebar/groups';
 import { Empty, NavItem, ShelfHeader, SidebarFolderIcon } from './sidebar/navigation';
 import {
-  NEEDS_MORE_KEY,
   PER_GROUP_LIMIT,
-  RECENTS_LIMIT,
-  RECENTS_MORE_KEY,
-  RECENTS_OPEN_KEY,
-  saveFlag,
   SCROLL_KEY,
   SETTLED_OPEN_KEY,
   SETTLED_PAGE,
@@ -64,22 +58,15 @@ export function Sidebar(props: Props) {
   } = props;
   const {
     hiddenTitleBar,
+    needsYouCount,
+    workingCount,
     scrollRef,
     setPeek,
     scrollRestored,
     searching,
     savedScroll,
-    needsYou,
-    needsMore,
     flatRow,
-    setNeedsMore,
-    recents,
-    recentsOpen,
     toggleShelf,
-    setRecentsOpen,
-    live,
-    recentsMore,
-    setRecentsMore,
     selecting,
     groups,
     toggleSelectMode,
@@ -238,6 +225,81 @@ export function Sidebar(props: Props) {
           </div>
         ) : (
           <div className="flex min-h-0 flex-1 flex-col">
+            {!selecting && (sessions.length > 0 || searching) && (
+              <div className={cn('relative z-30 shrink-0 px-3 pb-1.5', !hiddenTitleBar && 'bg-panel')}>
+                <label className="sidebar-search flex items-center gap-1.5 rounded-xl border border-border/60 px-1.5 py-1 text-[12px] transition-shadow focus-within:ring-2 focus-within:ring-mira-blue/15">
+                  <button
+                    type="button"
+                    aria-label="Focus chat search"
+                    onClick={() => searchRef.current?.focus()}
+                    className="flex size-6 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-fg/[0.05] hover:text-foreground"
+                  >
+                    <Search className="size-3.5" aria-hidden />
+                  </button>
+                  {/* Plain text, not type=search: that adds the browser's own
+                      clear button beside ours. */}
+                  <input
+                    ref={searchRef}
+                    type="text"
+                    enterKeyHint="search"
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Escape') {
+                        setQuery('');
+                        setFilter('all');
+                      }
+                    }}
+                    placeholder="Search chats, branches, PRs"
+                    aria-label="Search chats"
+                    className="min-w-0 flex-1 bg-transparent text-foreground outline-none placeholder:text-muted-foreground/60"
+                  />
+                  {(query || filter !== 'all') && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setQuery('');
+                        setFilter('all');
+                      }}
+                      aria-label="Clear search and filter"
+                      className="flex size-6 shrink-0 items-center justify-center rounded-full text-muted-foreground/70 transition-colors hover:bg-fg/[0.06] hover:text-foreground"
+                    >
+                      <X className="size-3.5" />
+                    </button>
+                  )}
+                </label>
+                {/* Filters, with what's in each. "Needs you" replaces the
+                    separate shelf: each chat is listed once, in its project. */}
+                <div className="mt-1.5 flex flex-wrap gap-1" aria-label="Filter chats">
+                  {(['all', 'running', 'waiting', 'settled'] as SidebarFilter[]).map((value) => {
+                    const count = value === 'running' ? workingCount : value === 'waiting' ? needsYouCount : 0;
+                    const urgent = value === 'waiting' && count > 0;
+                    return (
+                      <button
+                        type="button"
+                        key={value}
+                        aria-pressed={filter === value}
+                        onClick={() => setFilter(filter === value && value !== 'all' ? 'all' : value)}
+                        className={cn(
+                          'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] transition-colors',
+                          filter === value
+                            ? urgent
+                              ? 'bg-amber-500/20 font-medium text-amber-700 dark:text-amber-300'
+                              : 'sidebar-active bg-fg/[0.08] font-medium text-foreground'
+                            : urgent
+                              ? 'text-amber-700 hover:bg-amber-500/10 dark:text-amber-400'
+                              : 'text-muted-foreground hover:bg-fg/[0.04] hover:text-foreground',
+                        )}
+                      >
+                        {urgent && <CircleAlert className="size-3" aria-hidden />}
+                        {{ all: 'All', running: 'Working', waiting: 'Needs you', settled: 'Settled' }[value]}
+                        {count > 0 && <span className="tabular-nums opacity-75">{count}</span>}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
             <div className={cn('relative z-30 shrink-0 px-2 pb-1', !hiddenTitleBar && 'bg-panel')}>
               <NavItem icon={<PenLine className="size-3.5" />} onClick={onNewChat}>
                 New thread
@@ -284,63 +346,6 @@ export function Sidebar(props: Props) {
                 </NavItem>
               </nav>
 
-              {!searching && needsYou.length > 0 && (
-                <div className="mt-4 flex flex-col gap-0.5 px-0.5">
-                  <div className="flex items-center gap-1.5 px-2 py-1 text-[11.5px] font-semibold text-amber-700 dark:text-amber-400">
-                    <CircleAlert className="size-3" /> Needs you
-                    <span className="ml-auto text-[10.5px] tabular-nums opacity-70">
-                      {needsYou.length}
-                    </span>
-                  </div>
-                  <div className="flex flex-col gap-0.5 pl-1">
-                    {(needsMore ? needsYou : needsYou.slice(0, 2)).map((s) =>
-                      flatRow(s, 'attention'),
-                    )}
-                    {needsYou.length > 2 && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          saveFlag(NEEDS_MORE_KEY, !needsMore);
-                          setNeedsMore(!needsMore);
-                        }}
-                        className="px-2 py-1 text-left text-[11px] text-muted-foreground hover:text-foreground"
-                      >
-                        {needsMore ? 'Show less' : `View ${needsYou.length - 2} more chats`}
-                      </button>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {!searching && recents.length > 0 && (
-                <div className="mt-4 flex flex-col gap-0.5 px-0.5">
-                  <ShelfHeader
-                    icon={<History className="size-3 shrink-0" />}
-                    label="Recents"
-                    open={recentsOpen}
-                    onToggle={() => toggleShelf(RECENTS_OPEN_KEY, setRecentsOpen)}
-                  />
-                  <Collapse open={recentsOpen}>
-                    <div className="flex flex-col gap-0.5 pl-1">
-                      {recents.map((s) => flatRow(s, 'recent'))}
-                      {live.filter((s) => !s.needs_attention && !s.failure_reason).length >
-                        RECENTS_LIMIT && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            saveFlag(RECENTS_MORE_KEY, !recentsMore);
-                            setRecentsMore(!recentsMore);
-                          }}
-                          className="px-2 py-1 text-left text-[11px] text-muted-foreground hover:text-foreground"
-                        >
-                          {recentsMore ? 'Show less' : 'More recent chats'}
-                        </button>
-                      )}
-                    </div>
-                  </Collapse>
-                </div>
-              )}
-
               <div className="mt-4 flex flex-col gap-1 px-0.5">
                 <div
                   // On the desktop the sidebar is the window's vibrancy, and no
@@ -363,74 +368,6 @@ export function Sidebar(props: Props) {
                       </button>
                     )}
                   </div>
-
-                  {!selecting && (sessions.length > 0 || searching) && (
-                    <label className="sidebar-search mx-1 mb-1 flex items-center gap-1.5 rounded-xl border border-border/60 px-1.5 py-1.5 text-[12px] transition-shadow focus-within:ring-2 focus-within:ring-mira-blue/15">
-                      <button
-                        type="button"
-                        aria-label="Focus chat search"
-                        onClick={() => searchRef.current?.focus()}
-                        className="flex size-6 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-fg/[0.05] hover:text-foreground"
-                      >
-                        <Search className="size-3.5" aria-hidden />
-                      </button>
-                      {/* Plain text, not type=search: that adds the browser's own
-                  clear button beside ours. */}
-                      <input
-                        ref={searchRef}
-                        type="text"
-                        enterKeyHint="search"
-                        value={query}
-                        onChange={(e) => setQuery(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Escape') setQuery('');
-                        }}
-                        placeholder="Search chats, branches, PRs"
-                        aria-label="Search chats"
-                        className="min-w-0 flex-1 bg-transparent text-foreground outline-none placeholder:text-muted-foreground/60"
-                      />
-                      {query && (
-                        <button
-                          type="button"
-                          onClick={() => setQuery('')}
-                          aria-label="Clear search"
-                          className="flex size-6 shrink-0 items-center justify-center rounded-full text-muted-foreground/70 transition-colors hover:bg-fg/[0.06] hover:text-foreground"
-                        >
-                          <X className="size-3.5" />
-                        </button>
-                      )}
-                    </label>
-                  )}
-
-                  {!selecting && sessions.length > 0 && (
-                    <div className="mx-1 mb-2 flex gap-1" aria-label="Filter chats">
-                      {(['all', 'running', 'waiting', 'settled'] as SidebarFilter[]).map(
-                        (value) => (
-                          <button
-                            type="button"
-                            key={value}
-                            aria-pressed={filter === value}
-                            onClick={() => setFilter(value)}
-                            className={cn(
-                              'rounded-full px-2 py-1 text-[10.5px] transition-colors',
-                              filter === value
-                                ? 'sidebar-active bg-fg/[0.08] font-medium text-foreground'
-                                : 'text-muted-foreground hover:bg-fg/[0.04] hover:text-foreground',
-                            )}
-                          >
-                            {
-                              {
-                                all: 'All',
-                                running: 'Working',
-                                waiting: 'Needs you',
-                                settled: 'Settled',
-                              }[value]
-                            }
-                          </button>
-                        ),
-                      )}
-                    </div>
-                  )}
 
                   {selecting && (
                     <div className="flex items-center gap-1 rounded-lg border border-border/70 bg-panel px-2.5 py-1.5 shadow-sm">

@@ -24,7 +24,6 @@ import { rowStatus } from '../../lib/sidebar';
 import type { BackgroundMode, SessionPr, SessionSummary } from '../../types';
 import { AgentIcon, ModelIcon } from '../AgentIcon';
 import { parseSentAttachments } from '../composer/attachments';
-import { basename } from './groups';
 import { backgroundMenuItems, RowMenu } from './RowMenu';
 import { ForkNode } from './types';
 /** Human-readable session label. Strips the `## Attached files … ` block
@@ -203,7 +202,7 @@ export function SessionRow({
       )}
       {/* Keep the title and git indicator on the first row, with
        *  secondary context and the timestamp aligned below. */}
-      <span className="grid min-w-0 grid-cols-[16px_minmax(0,1fr)_24px] items-center gap-2 text-left">
+      <span className="grid min-w-0 grid-cols-[16px_minmax(0,1fr)_auto] items-center gap-2 text-left">
         {selecting ? (
           <span />
         ) : depth > 0 && !launched ? (
@@ -251,7 +250,10 @@ export function SessionRow({
               </button>
             )}
           </span>
-          {!selecting && (
+          {/* A second line only when there's something to say: a state
+           *  other than resting, or a worktree branch. The project is the
+           *  folder the row sits in, so it isn't repeated here. */}
+          {!selecting && (detail.tone !== 'idle' || !!session.worktree_branch) && (
             <span className="mt-0.5 flex min-w-0 items-center gap-1 text-[10.5px] leading-[15px]">
               <span
                 className={cn(
@@ -265,26 +267,22 @@ export function SessionRow({
                         : 'text-muted-foreground/75',
                 )}
               >
-                {detail.label}
+                {detail.tone === 'idle' ? null : detail.label}
               </span>
-              {detail.tone !== 'attention' && (
+              {detail.tone !== 'attention' && session.worktree_branch && (
                 <>
-                  <span className="shrink-0 text-muted-foreground/35">·</span>
-                  <span className="truncate text-muted-foreground/60">
-                    {session.worktree_branch || basename(session.cwd)}
-                  </span>
+                  {detail.tone !== 'idle' && <span className="shrink-0 text-muted-foreground/35">·</span>}
+                  <span className="truncate text-muted-foreground/60">{session.worktree_branch}</span>
                 </>
               )}
             </span>
           )}
         </span>
 
-        <span className="flex flex-col items-end self-start">
-          <span className="flex h-4 w-6 items-center justify-end">
-            {!selecting && <GitMark session={session} />}
-          </span>
+        <span className="flex items-center justify-end gap-1 self-start">
+          {!selecting && <GitMark session={session} />}
           {!selecting && (
-            <span className="mt-0.5 text-right text-[10.5px] leading-[15px] tabular-nums text-muted-foreground/50">
+            <span className="text-right text-[10.5px] leading-4 tabular-nums text-muted-foreground/50">
               {<SessionTime updatedAt={session.updated_at} running={running} sessionId={session.id} />}
             </span>
           )}

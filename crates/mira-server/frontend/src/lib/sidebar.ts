@@ -12,7 +12,9 @@ export function matchesSidebar(s: SessionSummary, query: string, filter: Sidebar
   return query.trim().toLowerCase().split(/\s+/).every((word) => haystack.includes(word));
 }
 
-export function rowStatus(s: SessionSummary, unread = false): { label: string; tone: 'attention' | 'error' | 'working' | 'result' | 'quiet' } {
+/** What a row's second line says. `idle` is the ordinary resting state:
+ *  rows say nothing for it, so most rows are one line. */
+export function rowStatus(s: SessionSummary, unread = false): { label: string; tone: 'attention' | 'error' | 'working' | 'result' | 'quiet' | 'idle' } {
   if (s.needs_attention) return { label: s.attention_reason || 'Waiting for you', tone: 'attention' };
   if (s.failure_reason) return { label: 'Needs a retry', tone: 'error' };
   if (s.running) return { label: 'Working', tone: 'working' };
@@ -24,7 +26,7 @@ export function rowStatus(s: SessionSummary, unread = false): { label: string; t
   if (isSettled(s)) return { label: s.pr?.state === 'merged' ? 'Merged' : s.pr?.state === 'closed' ? 'PR closed' : 'Settled', tone: 'quiet' };
   if (s.pr?.state === 'open') return { label: 'PR open', tone: 'quiet' };
   if (s.pr?.state === 'draft') return { label: 'Draft PR', tone: 'quiet' };
-  return { label: 'Ready', tone: 'quiet' };
+  return { label: 'Ready', tone: 'idle' };
 }
 
 export function settledPeriod(s: SessionSummary, now = new Date()): string {

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ChevronUp, LogOut, SlidersHorizontal } from 'lucide-react';
+import { ChevronUp, LogOut, SlidersHorizontal, UserRound } from 'lucide-react';
 import { getSupabase } from '../lib/supabase';
 import { avatarUrl, displayName as oauthDisplayName, initials, useCurrentUser } from '../lib/useCurrentUser';
 import { useProfile } from '../lib/useProfile';
@@ -30,10 +30,13 @@ export function UserCard({
   // Prefer the name the user chose in onboarding; fall back to OAuth-provided
   // name (Google / GitHub) if the profile hasn't been read yet or is empty.
   const oauthName = oauthDisplayName(user);
-  const name = profile?.fullName?.trim() || oauthName;
+  // Until the profile or sign-in says who this is, say so plainly rather
+  // than showing initials of nothing ("??").
+  const name = profile?.fullName?.trim() || oauthName.trim() || 'Your account';
+  const known = name !== 'Your account';
   const workspace = workspaceLabel(profile, name);
   const avatar = avatarUrl(user);
-  const mono = initials(name);
+  const mono = known ? initials(name) : null;
 
   async function signOut() {
     setSigningOut(true);
@@ -57,6 +60,7 @@ export function UserCard({
           type="button"
           // The menu's main item is Settings; start fetching it now.
           {...preloadOnIntent(SettingsSurface.preload)}
+          title={`Account: settings and log out · ${connectionLabel(status)}`}
           className="flex min-w-0 flex-1 items-center gap-2.5 py-2.5 pl-3 pr-1 text-left"
         >
           <span className="relative shrink-0">
@@ -66,7 +70,8 @@ export function UserCard({
                 'absolute -bottom-0.5 -right-0.5 size-2 rounded-full ring-2 ring-panel',
                 dotColor(status),
               )}
-              aria-label={status}
+              aria-label={connectionLabel(status)}
+              title={connectionLabel(status)}
             />
           </span>
           <span className="flex min-w-0 flex-1 flex-col text-left">
@@ -129,7 +134,7 @@ function workspaceLabel(
   return '';
 }
 
-function Avatar({ src, mono }: { src: string | null; mono: string }) {
+function Avatar({ src, mono }: { src: string | null; mono: string | null }) {
   if (src) {
     return (
       <img
@@ -141,11 +146,30 @@ function Avatar({ src, mono }: { src: string | null; mono: string }) {
       />
     );
   }
+  if (!mono) {
+    return (
+      <span className="flex size-8 items-center justify-center rounded-full bg-fg/[0.08] text-muted-foreground">
+        <UserRound className="size-4" aria-hidden />
+      </span>
+    );
+  }
   return (
     <span className="flex size-8 items-center justify-center rounded-full bg-rose-500 text-[11px] font-semibold text-white">
       {mono}
     </span>
   );
+}
+
+/** What the dot on the avatar means. */
+function connectionLabel(s: WsStatus): string {
+  switch (s) {
+    case 'open':
+      return 'Connected to Mira';
+    case 'connecting':
+      return 'Connecting to Mira…';
+    case 'closed':
+      return 'Not connected to Mira';
+  }
 }
 
 function MenuItem({

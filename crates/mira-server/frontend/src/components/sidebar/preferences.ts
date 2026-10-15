@@ -1,22 +1,14 @@
 export const COLLAPSED_KEY = 'mira.sidebar.collapsed-projects';
 
-export const RECENTS_OPEN_KEY = 'mira.sidebar.recents-open';
-
 export const SETTLED_OPEN_KEY = 'mira.sidebar.settled-open';
 
 export const PER_GROUP_LIMIT = 5;
-
-export const RECENTS_LIMIT = 3;
 
 export const SHOW_MORE_KEY = 'mira.sidebar.expanded-projects';
 
 export const FORKS_KEY = 'mira.sidebar.hidden-forks';
 
 export const SCROLL_KEY = 'mira.sidebar.scroll';
-
-export const NEEDS_MORE_KEY = 'mira.sidebar.needs-more';
-
-export const RECENTS_MORE_KEY = 'mira.sidebar.recents-more';
 
 /** The settled shelf is history: a page at a time. */
 export const SETTLED_PAGE = 10;

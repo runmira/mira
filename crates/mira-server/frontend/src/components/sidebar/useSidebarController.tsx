@@ -22,11 +22,7 @@ loadFlag,
 loadScroll,
 loadSet,
 loadUnread,
-NEEDS_MORE_KEY,
 persistCollapsed,
-RECENTS_LIMIT,
-RECENTS_MORE_KEY,
-RECENTS_OPEN_KEY,
 saveFlag,
 saveSet,
 saveUnread,
@@ -144,10 +140,6 @@ export function useSidebarController({
 
   const searching = query.trim().length > 0 || filter !== 'all';
 
-  const [needsMore, setNeedsMore] = useState(() => loadFlag(NEEDS_MORE_KEY, false));
-
-  const [recentsMore, setRecentsMore] = useState(() => loadFlag(RECENTS_MORE_KEY, false));
-
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const searchRef = useRef<HTMLInputElement>(null);
@@ -178,8 +170,6 @@ export function useSidebarController({
     if (!node || !scrollRestored.current) return;
     node.scrollTop = searching ? 0 : savedScroll.current;
   }, [searching]);
-
-  const [recentsOpen, setRecentsOpen] = useState(() => loadFlag(RECENTS_OPEN_KEY, true));
 
   const [settledOpen, setSettledOpen] = useState(() => loadFlag(SETTLED_OPEN_KEY, false));
 
@@ -338,9 +328,13 @@ export function useSidebarController({
   const currentSession = (s: SessionSummary) =>
     sessions.find((current) => current.id === s.id) ?? s;
 
-  const needsYou = sessions
-    .filter((s) => s.needs_attention || s.failure_reason)
-    .sort((a, b) => b.updated_at - a.updated_at);
+  // How many chats are waiting on you or need a retry, and how many are
+  // working: counts on the filters, so a chat is listed once (in its project)
+  // and the filters find it.
+  const needsYouCount = sessions.filter((s) => s.needs_attention || s.failure_reason).length;
+  const workingCount = sessions.filter(
+    (s) => (s.running || (s.id === activeSessionId && activeBusy)) && !s.needs_attention,
+  ).length;
 
   // Settled chats leave their folders for the shelf at the bottom — except
   // while searching, which looks everywhere at once.
@@ -351,15 +345,6 @@ export function useSidebarController({
     settled.sort(settledOrder);
     return { live, settled };
   }, [arrangedSessions]);
-
-  const recents = useMemo(
-    () =>
-      [...live]
-        .sort((a, b) => b.updated_at - a.updated_at)
-        .filter((s) => !s.needs_attention && !s.failure_reason)
-        .slice(0, recentsMore ? 8 : RECENTS_LIMIT),
-    [live, recentsMore],
-  );
 
   const groups = useMemo(
     () =>
@@ -460,7 +445,7 @@ export function useSidebarController({
     });
   }
 
-  /** A row outside the folder tree (Recents, Settled): no forks under it. */
+  /** A row outside the folder tree (the Settled shelf): no forks under it. */
   function flatRow(s: SessionSummary, where: string) {
     return (
       <SessionRow
@@ -498,22 +483,16 @@ export function useSidebarController({
   }
   return {
     hiddenTitleBar,
+    needsYouCount,
+    workingCount,
     scrollRef,
     setPeek,
     scrollRestored,
     searching,
     savedScroll,
-    needsYou,
-    needsMore,
     flatRow,
-    setNeedsMore,
-    recents,
-    recentsOpen,
     toggleShelf,
-    setRecentsOpen,
     live,
-    recentsMore,
-    setRecentsMore,
     selecting,
     groups,
     toggleSelectMode,
