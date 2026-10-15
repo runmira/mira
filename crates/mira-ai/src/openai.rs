@@ -43,8 +43,8 @@ pub struct OpenAiConfig {
 }
 
 pub struct OpenAiCompatible {
-    http: reqwest::Client,
-    cfg: OpenAiConfig,
+    pub(super) http: reqwest::Client,
+    pub(super) cfg: OpenAiConfig,
 }
 
 impl OpenAiCompatible {
@@ -58,7 +58,11 @@ impl OpenAiCompatible {
         Ok(Self { http, cfg })
     }
 
-    fn headers(&self) -> Result<HeaderMap, ProviderError> {
+    pub(super) fn context_owner(&self) -> String {
+        crate::provider::context_owner(&self.cfg.base_url, &self.cfg.api_key)
+    }
+
+    pub(super) fn headers(&self) -> Result<HeaderMap, ProviderError> {
         let mut h = HeaderMap::new();
         h.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         let auth = format!("Bearer {}", self.cfg.api_key);
@@ -78,6 +82,15 @@ impl OpenAiCompatible {
 
 #[async_trait]
 impl ChatProvider for OpenAiCompatible {
+    fn accepts_context(&self, context: &mira_core::message::ProviderContext) -> bool {
+        self.cfg.base_url.trim_end_matches('/') == "https://api.openai.com/v1"
+            && context.owner == self.context_owner()
+    }
+
+    async fn compact(&self, request: ChatRequest) -> Result<Option<Message>, ProviderError> {
+        crate::responses::compact(self, request).await
+    }
+
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
         let url = format!("{}/models", self.cfg.base_url.trim_end_matches('/'));
         let resp = self.http.get(&url).headers(self.headers()?).send().await?;
@@ -113,6 +126,13 @@ impl ChatProvider for OpenAiCompatible {
         &self,
         request: ChatRequest,
     ) -> Result<BoxStream<'static, Result<ChatEvent, ProviderError>>, ProviderError> {
+        if request
+            .messages
+            .iter()
+            .any(|m| m.provider_context.is_some())
+        {
+            return crate::responses::stream(self, request).await;
+        }
         let google = is_google_endpoint(&self.cfg.base_url);
         let body = WireRequest::from_request(&request, self.cfg.prompt_caching, google);
         let body = request_body(&body, self.cfg.prompt_caching)?;

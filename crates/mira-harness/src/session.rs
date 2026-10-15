@@ -139,6 +139,9 @@ pub struct SessionConfig {
     pub agent_approval_mode: mira_policy::Mode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_instance: Option<String>,
+    /// Remembered per-chat preference for the Claude resume context prompt.
+    #[serde(default)]
+    pub skip_claude_resume_compaction_prompt: bool,
     pub model: String,
     /// Number of tool-call rounds allowed within one user turn. Guards
     /// against runaway loops (model calling itself forever).
@@ -292,6 +295,7 @@ const EXTRACTION_OUTPUT_TOKENS: u32 = 512;
 impl SessionConfig {
     pub fn new(model: impl Into<String>) -> Self {
         Self {
+            skip_claude_resume_compaction_prompt: false,
             agent_approval_mode: mira_policy::Mode::Manual,
             engine_instance: None,
             model: model.into(),
@@ -321,6 +325,7 @@ pub struct Session {
     pub id: SessionId,
     cfg: Arc<Mutex<SessionConfig>>,
     history: Arc<Mutex<Vec<Message>>>,
+    background_compaction: Arc<Mutex<crate::compaction::BackgroundCompaction>>,
     /// Messages compaction took out of `history`, kept for display
     /// ([`Session::transcript`]); the model never sees them again.
     archived: Arc<Mutex<Vec<Message>>>,
@@ -522,6 +527,7 @@ impl Session {
         Self {
             id,
             cfg: Arc::new(Mutex::new(cfg)),
+            background_compaction: Arc::new(Mutex::new(Default::default())),
             history: Arc::new(Mutex::new(vec![Message::system(system_prompt)])),
             archived: Arc::new(Mutex::new(Vec::new())),
             cleared_before: Arc::new(Mutex::new(0)),
@@ -568,13 +574,25 @@ impl Session {
     /// autosaving.
     #[allow(clippy::too_many_arguments)]
     pub fn resume_from(
-        record: SessionRecord,
+        mut record: SessionRecord,
         provider: Arc<dyn ChatProvider>,
         registry: Arc<Registry>,
         policy: Arc<Mutex<Policy>>,
         approver: Arc<dyn Approver>,
         mut tool_ctx: ToolContext,
     ) -> Self {
+        if record
+            .messages
+            .iter()
+            .filter_map(|m| m.provider_context.as_ref())
+            .any(|c| !provider.accepts_context(c) || c.model != record.cfg.model)
+        {
+            // Native state cannot move between providers. The complete archive
+            // is our durable fallback; restore it and let the new provider
+            // compact normally rather than dropping the conversation.
+            record.messages = crate::history::portable_history(&record.messages, &record.archived);
+            record.archived.clear();
+        }
         // Same guard wiring as `new` — seq counter picks up where the
         // previous run left off (see FileGuard::open).
         tool_ctx = tool_ctx.with_session_id(record.id.clone());
@@ -608,6 +626,7 @@ impl Session {
         Self {
             id: record.id,
             cfg: Arc::new(Mutex::new(record.cfg)),
+            background_compaction: Arc::new(Mutex::new(Default::default())),
             history: Arc::new(Mutex::new(record.messages)),
             archived: Arc::new(Mutex::new(record.archived)),
             cleared_before: Arc::new(Mutex::new(0)),
@@ -760,6 +779,7 @@ impl Session {
     /// so a UI can put it back in the composer for editing. `None`
     /// when there's no user turn to rewind to.
     pub async fn rewind_last_turn(&self) -> Option<String> {
+        self.background_compaction.lock().await.cancel();
         let mut history = self.history.lock().await;
         rewind_last_turn_in_history(&mut history)
     }
@@ -901,7 +921,61 @@ impl Session {
         shape: crate::history::CompactShape<'_>,
         tx: &mpsc::Sender<HarnessEvent>,
     ) -> Result<usize, String> {
-        let focus = shape.focus;
+        self.background_compaction.lock().await.cancel();
+        self.pre_compact_hooks(trigger, shape.focus, tx).await;
+        let cfg = self.cfg.lock().await.clone();
+        let summarizer_model = cfg.background_model(cfg.compactor_model.as_deref());
+        let native = crate::compaction::native_request(&cfg, request_tools(self).await);
+        let shape = crate::history::CompactShape {
+            native_request: Some(&native),
+            ..shape
+        };
+        let mut history = self.history.lock().await.clone();
+        let prefix_len = history.len();
+        let prefix = serde_json::to_vec(&history).map_err(|e| e.to_string())?;
+        let removed = crate::history::compact_with_fallback(
+            &mut history,
+            self.provider.as_ref(),
+            &cfg.model,
+            &summarizer_model,
+            &self.tool_ctx.cwd,
+            shape,
+        )
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+        let current_cfg = self.cfg.lock().await;
+        if serde_json::to_value(&*current_cfg).map_err(|e| e.to_string())?
+            != serde_json::to_value(&cfg).map_err(|e| e.to_string())?
+        {
+            return Err(
+                "Session configuration changed while compacting; keeping current history".into(),
+            );
+        }
+        let mut current = self.history.lock().await;
+        if current.len() < prefix_len
+            || serde_json::to_vec(&current[..prefix_len]).map_err(|e| e.to_string())? != prefix
+        {
+            return Err(
+                "Conversation changed while compaction was running; keeping current history".into(),
+            );
+        }
+        history.extend(current.drain(prefix_len..));
+        *current = history;
+        *self.cleared_before.lock().await = 0;
+        let n = removed
+            .iter()
+            .filter(|m| !crate::history::is_summary(m))
+            .count();
+        self.archived.lock().await.extend(removed);
+        Ok(n)
+    }
+
+    async fn pre_compact_hooks(
+        &self,
+        trigger: &str,
+        focus: Option<&str>,
+        tx: &mpsc::Sender<HarnessEvent>,
+    ) {
         // PreCompact hooks see it coming (to save the transcript, say).
         // They can't stop it. Run without the history lock; a hook may
         // be slow.
@@ -923,26 +997,65 @@ impl Session {
                 let _ = tx.send(HarnessEvent::Warning(format!("[hook] {m}"))).await;
             }
         }
-        let cfg = self.cfg.lock().await.clone();
-        let summarizer_model = cfg.background_model(cfg.compactor_model.as_deref());
-        let mut history = self.history.lock().await;
-        let removed = crate::history::compact_with_fallback(
-            &mut history,
-            self.provider.as_ref(),
-            &cfg.model,
-            &summarizer_model,
-            &self.tool_ctx.cwd,
-            shape,
+    }
+
+    async fn maybe_prepare_compaction(&self, cfg: &SessionConfig, post_turn: bool) -> bool {
+        let messages = build_request_messages(self).await;
+        let raw = crate::context::estimate_request(&messages, &request_tools(self).await);
+        let tokens = self
+            .calibration
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .calibrated(raw, &cfg.model);
+        let window = crate::history::context_window_with(&cfg.model, cfg.context_window) as u64;
+        if !crate::compaction::due(tokens, window, post_turn) {
+            return false;
+        }
+        // Hooks are user programs: do not run a speculative hook every round.
+        // Such sessions retain the synchronous compaction path instead.
+        if self
+            .hooks
+            .as_ref()
+            .is_some_and(|h| h.has(crate::hooks::HookEvent::PreCompact))
+        {
+            return false;
+        }
+        let history = self.history.lock().await.clone();
+        self.background_compaction.lock().await.start(
+            history,
+            cfg,
+            self.provider.clone(),
+            self.tool_ctx.cwd.clone(),
+            request_tools(self).await,
         )
-        .await
-        .map_err(|e| format!("{e:#}"))?;
-        *self.cleared_before.lock().await = 0;
+    }
+
+    async fn adopt_ready_compaction(&self, tx: &mpsc::Sender<HarnessEvent>) -> bool {
+        let candidate = self.background_compaction.lock().await.take_ready().await;
+        let Some(candidate) = candidate else {
+            return false;
+        };
+        let tools = request_tools(self).await;
+        let cfg = self.cfg.lock().await;
+        let mut history = self.history.lock().await;
+        let Some(removed) = candidate.adopt(&mut history, &cfg, &tools) else {
+            return false;
+        };
         let n = removed
             .iter()
             .filter(|m| !crate::history::is_summary(m))
             .count();
         self.archived.lock().await.extend(removed);
-        Ok(n)
+        *self.cleared_before.lock().await = 0;
+        drop(history);
+        drop(cfg);
+        let _ = tx
+            .send(HarnessEvent::Compacted {
+                messages_removed: n,
+            })
+            .await;
+        checkpoint(self).await;
+        true
     }
 
     pub async fn usage(&self) -> UsageTotals {
@@ -1096,9 +1209,28 @@ impl Session {
         checkpoint(self).await;
     }
 
-    /// Hot-swap the model for the next turn.
+    /// Remember the user's opt-out for this chat only.
+    pub async fn skip_claude_resume_compaction_prompt(&self) {
+        self.cfg.lock().await.skip_claude_resume_compaction_prompt = true;
+        checkpoint(self).await;
+    }
+
+    /// Hot-swap the model for the next turn, restoring portable history if a
+    /// native checkpoint was produced by the previous model.
     pub async fn set_model(&self, model: impl Into<String>) {
-        self.cfg.lock().await.model = model.into();
+        self.background_compaction.lock().await.cancel();
+        let model = model.into();
+        let mut cfg = self.cfg.lock().await;
+        if cfg.model != model {
+            let mut history = self.history.lock().await;
+            if history.iter().any(|m| m.provider_context.is_some()) {
+                let mut archived = self.archived.lock().await;
+                *history = crate::history::portable_history(&history, &archived);
+                archived.clear();
+                *self.cleared_before.lock().await = 0;
+            }
+        }
+        cfg.model = model;
     }
 
     /// Set the cheap model for background work (see
@@ -1494,6 +1626,7 @@ impl Session {
     /// `tokio::spawn` (fire-and-forget) so pressing Stop on the parent
     /// halts every layer of delegated work at once.
     pub async fn cancel(&self) -> bool {
+        self.background_compaction.lock().await.cancel();
         if let Ok(mut inbox) = self.steer_inbox.lock() {
             *inbox = None;
         }
@@ -1653,6 +1786,8 @@ async fn run_loop(
     // Times a Stop hook has kept the turn going; capped so a hook that
     // always blocks can't loop forever.
     let mut stop_hook_runs = 0u32;
+    let mut background_started = false;
+    let mut post_turn_eligible;
     'goal_loop: loop {
         // Persist the user's turn-opening message right away so the sidebar
         // shows the new thread as soon as they hit send — before the model's
@@ -1727,6 +1862,13 @@ async fn run_loop(
 
         for round in 0..cfg.max_rounds {
             sess.consume_steers(generation).await;
+            let adopted = sess.adopt_ready_compaction(&tx).await;
+            if adopted {
+                compacted_since_request = true;
+            }
+            if !background_started && !compaction_stalled && !compacted_since_request {
+                background_started = sess.maybe_prepare_compaction(&cfg, false).await;
+            }
             info!(round, "harness: model turn");
 
             // Keep the conversation inside the context window: first by
@@ -1849,6 +1991,7 @@ async fn run_loop(
             let mut assistant_text = String::new();
             let mut overflow_mid_stream: Option<String> = None;
             let mut pending_calls: Vec<ToolCall> = Vec::new();
+            let mut provider_context = None;
             let mut reasoning_blocks: Vec<mira_core::ReasoningBlock> = Vec::new();
             let mut finish: FinishReason = FinishReason::Other;
             // Tracks whether the stream ended cleanly (Done frame) or
@@ -1890,6 +2033,9 @@ async fn run_loop(
                             if tx.send(HarnessEvent::Reasoning(t)).await.is_err() {
                                 return;
                             }
+                        }
+                        Ok(ChatEvent::ProviderContext(context)) => {
+                            provider_context = Some(context);
                         }
                         Ok(ChatEvent::Reasoning(blocks)) => {
                             reasoning_blocks = blocks;
@@ -1996,6 +2142,7 @@ async fn run_loop(
                 m
             };
             assistant_msg.reasoning = std::mem::take(&mut reasoning_blocks);
+            assistant_msg.provider_context = provider_context;
             sess.history.lock().await.push(assistant_msg);
             checkpoint(&sess).await;
             let _ = tx.send(HarnessEvent::TurnComplete).await;
@@ -2147,6 +2294,7 @@ async fn run_loop(
             checkpoint(&sess).await;
         }
         // ---- end of round loop ----
+        post_turn_eligible = round_outcome == RoundOutcome::CleanStop && !compaction_stalled;
 
         // Common cleanup: close out the turn's timer, flush a checkpoint,
         // fire the auto-extractor. Runs for every outcome so the UI + on
@@ -2380,6 +2528,11 @@ async fn run_loop(
         // fall through — 'goal_loop iterates and the next round starts
     }
 
+    // Prepare the next turn without delaying Done. The owned job is adopted
+    // at the next request boundary, after validating its snapshot.
+    if !background_started && post_turn_eligible {
+        sess.maybe_prepare_compaction(&cfg, true).await;
+    }
     let _ = tx.send(HarnessEvent::Done).await;
 }
 

@@ -2511,6 +2511,29 @@ async fn prompt_agent_at_epoch(
         let _ = slot.events_tx.send(ServerMsg::Warning { text: "This OpenCode session has not advertised the compact command. Refresh the agent and try again.".into() });
         return;
     }
+    if !text.trim_start().starts_with('/') {
+        let preflight = poll_current_input(
+            &slot.engine,
+            epoch,
+            None,
+            crate::resume_compaction::before_prompt(slot, &handle, &agent),
+        )
+        .await;
+        match preflight {
+            Some(Ok(())) => {}
+            Some(Err(error)) => {
+                record_prompt_failure(slot, error);
+                crate::acp_host::AcpEventPort::for_slot(slot)
+                    .turn_ended("compaction_failed")
+                    .await;
+                return;
+            }
+            None => return,
+        }
+        if !is_current_agent(slot, &handle).await {
+            return;
+        }
+    }
     info!(session = %slot.id, startup_ms = starting.elapsed().as_millis() as u64, "agent ready for prompt");
 
     // Reserve while dispatch_lock still excludes the next prompt. Preparation

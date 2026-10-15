@@ -8,7 +8,7 @@ const { RuntimeProvider, useAppRuntime, useSessionField, useLiveEntries, Workspa
 export { RuntimeProvider, useAppRuntime, useSessionField, useLiveEntries } from './src/state/RuntimeProvider';
 export { WorkspaceComposer } from './src/app/WorkspaceComposer';
 export { appendToken } from './src/transcript/entries';
-`, { 'src/components/Composer': `export function Composer() { globalThis.composerRenders++; return null; }` });
+`, { 'src/components/context/LastTurnChanges': 'export function LastTurnChanges(){return null;} export function latestEditedTurn(){return null;}', 'src/components/Composer': `export function Composer() { globalThis.composerRenders++; return null; }` });
 const window = new Window({ url: 'https://mira.test' });
 globalThis.window = window; globalThis.document = window.document; globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 

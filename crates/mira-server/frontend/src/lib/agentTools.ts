@@ -104,6 +104,9 @@ export function agentToolAsMira(call: AcpToolCall): { name: string; args: Args }
     case 'read':
       return { name: 'read_file', args: { path, ...input } };
     case 'edit':
+      if ((name === 'fileChange' || name === 'file_change') && typeof input.patch === 'string') {
+        return { name: 'apply_patch', args: { ...input, path } };
+      }
       return {
         name: diff?.old_text ? 'edit_file' : 'write_file',
         args: diff

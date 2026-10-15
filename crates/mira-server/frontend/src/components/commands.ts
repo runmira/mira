@@ -1,5 +1,5 @@
 import type { ComponentType } from 'react';
-import { Brain, CircleHelp, Eye, FoldVertical, Folder, GitBranch, History, Lightbulb, NotebookPen, Paperclip, RotateCcw, Shield, SlidersHorizontal, Sparkle, SquareTerminal, Target, Zap } from 'lucide-react';
+import { Brain, CircleHelp, Eye, FoldVertical, Folder, GitBranch, History, Lightbulb, NotebookPen, Paperclip, RotateCcw, Radio, Shield, SlidersHorizontal, Sparkle, SquareTerminal, Target, Zap } from 'lucide-react';
 import type { Mode } from '../types';
 import type { CommandInfo, Origin } from '../api';
 
@@ -18,6 +18,7 @@ import type { CommandInfo, Origin } from '../api';
  */
 export type SlashCtx = {
   onNewChat: () => void;
+  onRemoteControl?: (enabled: boolean) => void;
   onSetMode: (m: Mode) => void;
   onSetModel: (m: string) => void;
   onOpenModelPicker: () => void;
@@ -173,6 +174,20 @@ export function groupCommands(matches: SlashCommand[]): PaletteGroup[] {
 const MODE_VALUES: Mode[] = ['plan', 'manual', 'auto', 'edit', 'yolo'];
 
 export const COMMANDS: SlashCommand[] = [
+  {
+    name: 'remote',
+    description: 'Control remote access to this Mira from another device',
+    usage: '/remote control [on|off]',
+    icon: Radio,
+    takesArgs: true,
+    run: (args, ctx) => {
+      const match = /^control(?:\s+(on|off))?$/i.exec(args.trim());
+      if (!match) throw new Error('usage: /remote control [on|off]');
+      if (!ctx.onRemoteControl) throw new Error('Remote control is unavailable here.');
+      ctx.onRemoteControl(match[1]?.toLowerCase() !== 'off');
+      return undefined;
+    },
+  },
   {
     name: 'new',
     aliases: ['clear'],
@@ -444,7 +459,9 @@ export function slashState(
     }
     const rawName = body.slice(0, spaceIdx);
     const name = rawName.toLowerCase();
-    const command = custom.find((c) => c.name === rawName) ?? findCommand(name);
+    // Machine access is a local Mira action even when an agent advertises
+    // a command with the same name.
+    const command = name === 'remote' ? findCommand(name) : custom.find((c) => c.name === rawName) ?? findCommand(name);
     if (!command) {
       return { mode: 'palette', query: name, trigger, triggerStart: 0 };
     }

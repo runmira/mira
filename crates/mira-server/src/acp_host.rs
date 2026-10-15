@@ -1423,6 +1423,39 @@ impl AcpEventPort {
         }
         if let Some((slot, instance, driver)) = self.runtime_owner() {
             slot.engine.touch();
+            if let MiraEvent::ToolCall(call) | MiraEvent::ToolCallUpdate(call) = &event.event {
+                if matches!(
+                    call.kind,
+                    Some(
+                        mira_acp::events::AcpToolKind::Edit
+                            | mira_acp::events::AcpToolKind::Execute
+                    )
+                ) {
+                    let mut paths: Vec<std::path::PathBuf> = call
+                        .locations
+                        .iter()
+                        .map(|location| location.path.clone().into())
+                        .collect();
+                    if let Some(input) = call.raw_input.as_ref() {
+                        for key in ["cwd", "path", "file_path", "filePath"] {
+                            if let Some(path) = input.get(key).and_then(serde_json::Value::as_str) {
+                                paths.push(path.into());
+                            }
+                        }
+                    }
+                    if !paths.is_empty() {
+                        let cwd = slot.cwd.read().await.clone();
+                        let id = slot.id.to_string();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            crate::session_changes::with_snapshot_budget(
+                                std::time::Duration::from_secs(1),
+                                || crate::session_changes::claim_paths(&cwd, &id, &paths),
+                            )
+                        })
+                        .await;
+                    }
+                }
+            }
             match &event.event {
                 MiraEvent::Limits { windows } => {
                     *slot

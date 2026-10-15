@@ -5,7 +5,7 @@ import { ContextPanel } from '../components/ContextPanel';
 import { useAppRuntime } from '../state/RuntimeProvider';
 import { titleFromEntries } from '../transcript/entries';
 import type { WorkspaceRuntime } from './WorkspaceRuntime';
-type Props = Pick<WorkspaceRuntime, 'sessionTitle' | 'outlineEntries' | 'tasks' | 'backgroundProcesses' | 'sessionId' | 'setSelectedProcess' | 'openToolPane' | 'subagentState' | 'gitStatus' | 'sessionDiff' | 'branchPr' | 'sessionCommitted' | 'ctxOpen' | 'onCtxOpenChange' | 'openAgentTab' | 'setReviewFocus' | 'setReviewOpen' | 'refreshRepo'>;
+type Props = Pick<WorkspaceRuntime, 'turnDiffs' | 'stableOpenFile' | 'sessionTitle' | 'outlineEntries' | 'tasks' | 'backgroundProcesses' | 'sessionId' | 'setSelectedProcess' | 'openToolPane' | 'subagentState' | 'gitStatus' | 'sessionDiff' | 'branchPr' | 'sessionCommitted' | 'ctxOpen' | 'onCtxOpenChange' | 'openAgentTab' | 'setReviewFocus' | 'setReviewOpen' | 'refreshRepo'>;
 export const WorkspaceContextPanel = memo(function WorkspaceContextPanel({ context }: { context: Props }) {
   const appRuntime = useAppRuntime();
   const { sessionTitle, outlineEntries, tasks, backgroundProcesses, sessionId, setSelectedProcess, openToolPane, subagentState, gitStatus, sessionDiff, branchPr, sessionCommitted, ctxOpen, onCtxOpenChange, openAgentTab, setReviewFocus, setReviewOpen, refreshRepo } = context;
@@ -13,6 +13,9 @@ export const WorkspaceContextPanel = memo(function WorkspaceContextPanel({ conte
                 <AnimatePresence>
                   <ContextPanel
                     key="ctx"
+                    sessionId={sessionId ?? undefined}
+                    turnDiffs={context.turnDiffs}
+                    onOpenFile={path => context.stableOpenFile(path, null)}
                     sessionTitle={sessionTitle ?? titleFromEntries(outlineEntries)}
                     tasks={tasks}
                     processes={backgroundProcesses.processes}

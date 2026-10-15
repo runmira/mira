@@ -7,6 +7,7 @@ type ComposerQuote,
 } from '@/lib/attachBridge';
 import { useSelector } from '@tanstack/react-store';
 import { useEffect,useLayoutEffect,useMemo,useRef,useState } from 'react';
+import { useRemoteControl } from '../../hooks/useRemoteControl';
 import { readFile } from '../../api';
 import { mapPosturesToModes,MIRA_MODE_TO_POSTURE } from '../../lib/agentPostures';
 import { useIsPhone } from '../../lib/mobile';
@@ -104,6 +105,7 @@ export function useComposerController({
 
   const phone = useIsPhone();
 
+  const remoteControl = useRemoteControl();
   const runtime = useAppRuntime();
   const draftKeyFor = runtime.drafts.key(sessionId);
   const richDraft = useSelector(runtime.drafts.source, state => state.get(draftKeyFor) ?? runtime.drafts.get(draftKeyFor));
@@ -356,6 +358,11 @@ export function useComposerController({
   const ctx = useMemo(
     () => ({
       onNewChat,
+      onRemoteControl: (enabled: boolean) => {
+        void remoteControl.setEnabled(enabled).then(() => {
+          setSlashFeedback(enabled ? 'Remote control is on. Pair devices in Settings → Devices.' : 'Remote control is off.');
+        }).catch(error => setSlashFeedback(error instanceof Error ? error.message : String(error)));
+      },
       onSetMode,
       onSetModel,
       onOpenModelPicker: () => setModelPopOpen(true),
@@ -385,6 +392,7 @@ export function useComposerController({
     }),
     [
       onNewChat,
+      remoteControl.setEnabled,
       onSetMode,
       onSetModel,
       onOpenPicker,

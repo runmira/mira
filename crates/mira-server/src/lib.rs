@@ -59,6 +59,7 @@ mod engines_reload;
 pub mod extensions;
 mod file;
 mod git;
+mod github_auth;
 mod github_connect;
 pub mod hooks_api;
 pub mod interactive;
@@ -1144,3 +1145,5 @@ mod boot_preference_tests {
         assert_eq!(restored_boot_agent(Some(&disabled), false), None);
     }
 }
+
+mod resume_compaction;

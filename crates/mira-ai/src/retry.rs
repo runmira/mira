@@ -101,6 +101,19 @@ type EventStream = BoxStream<'static, Result<ChatEvent, ProviderError>>;
 
 #[async_trait]
 impl ChatProvider for Retrying {
+    fn accepts_context(&self, context: &mira_core::message::ProviderContext) -> bool {
+        self.inner.accepts_context(context)
+    }
+
+    async fn compact(
+        &self,
+        request: ChatRequest,
+    ) -> Result<Option<mira_core::Message>, ProviderError> {
+        // Native compaction failure falls back once in the harness rather than
+        // delaying recovery with another retry loop.
+        self.inner.compact(request).await
+    }
+
     async fn stream(&self, request: ChatRequest) -> Result<EventStream, ProviderError> {
         let mut retry = 0;
         loop {

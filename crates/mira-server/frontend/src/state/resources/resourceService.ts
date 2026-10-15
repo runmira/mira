@@ -5,6 +5,7 @@ import { putSettings } from '../../api/settings';
 import type { SessionSummary,SettingsUpdate,SettingsView } from '../../types';
 import type { RuntimeScope } from '../createAppRuntime';
 export type ResourceData = {
+  remote: import('../../lib/remote').RemoteStatus;
   settings: SettingsView; engines: EngineListView; skills: SkillView[]; commands: CommandInfo[];
   sessions: SessionSummary[]; gitStatus: GitStatusView; context: import('../../api').ContextView; sessionDiff: SessionDiffView; branchPr: BranchPrView | null;
 };
@@ -12,7 +13,7 @@ export type ResourceName = keyof ResourceData;
 export class ResourceError extends Error { constructor(readonly status: number) { super(`Resource request failed (${status})`); } }
 export const retryResource = (count: number, error: unknown) => count < 1 &&
   (error instanceof TypeError || (error instanceof ResourceError && error.status >= 500));
-const paths: Record<ResourceName, string> = { settings: '/api/settings', engines: '/api/engines', skills: '/api/skills',
+const paths: Record<ResourceName, string> = { remote: '/api/remote', settings: '/api/settings', engines: '/api/engines', skills: '/api/skills',
   commands: '/api/commands', context: '/api/context', sessions: '/api/sessions?all=true', gitStatus: '/api/git/status',
   sessionDiff: '/api/git/session-diff', branchPr: '/api/git/branch-pr' };
 const contextual = new Set<ResourceName>(['skills', 'commands', 'gitStatus', 'sessionDiff', 'branchPr', 'context']);

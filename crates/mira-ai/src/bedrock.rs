@@ -721,6 +721,13 @@ impl ChatProvider for Bedrock {
         &self,
         request: ChatRequest,
     ) -> Result<BoxStream<'static, Result<ChatEvent, ProviderError>>, ProviderError> {
+        if request
+            .messages
+            .iter()
+            .any(|m| m.provider_context.is_some())
+        {
+            return Err(ProviderError::Config("This conversation contains an OpenAI native checkpoint; resume it with the original provider".into()));
+        }
         let body = serde_json::to_vec(&build_body(&request))
             .map_err(|e| ProviderError::Decode(e.to_string()))?;
         let url = format!(
@@ -956,6 +963,7 @@ mod tests {
             name: None,
             images: vec![],
             reasoning: vec![],
+            provider_context: None,
             input_intent: None,
             input_id: None,
             created_at: None,

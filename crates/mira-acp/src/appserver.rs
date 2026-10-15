@@ -1015,6 +1015,30 @@ fn compaction_action(id: &str, status: &str) -> AppServerAction {
     })
 }
 
+/// Codex file changes carry unified hunks (not complete old/new file
+/// contents). Keep the original change list, paths and patch as structured
+/// input instead of dropping them or pretending hunks are whole files.
+fn kind_is_file_change(kind: &str) -> bool {
+    matches!(kind, "fileChange" | "file_change")
+}
+
+fn file_change_input(item: &Value) -> Option<Value> {
+    let changes = item.get("changes")?.as_array()?;
+    let patches: Vec<_> = changes
+        .iter()
+        .filter_map(|change| {
+            let path = change.get("path")?.as_str()?;
+            let diff = change.get("diff").and_then(Value::as_str).unwrap_or("");
+            Some(format!("--- a/{path}\n+++ b/{path}\n{diff}"))
+        })
+        .collect();
+    Some(json!({
+        "path": changes.first().and_then(|change| change.get("path")),
+        "changes": changes,
+        "patch": patches.join("\n"),
+    }))
+}
+
 fn map_item(i: &Value, started: bool) -> Vec<AppServerAction> {
     let id = i.get("id").and_then(Value::as_str).unwrap_or_default();
     if id.is_empty() {
@@ -1058,6 +1082,24 @@ fn map_item(i: &Value, started: bool) -> Vec<AppServerAction> {
                     })];
                 }
             }
+            let file_input = if kind_is_file_change(itype) {
+                file_change_input(i)
+            } else if matches!(itype, "command_execution" | "commandExecution") {
+                Some(json!({ "command": i.get("command"), "cwd": i.get("cwd") }))
+            } else {
+                None
+            };
+            let locations = file_input
+                .as_ref()
+                .and_then(|input| input["changes"].as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|change| change["path"].as_str())
+                .map(|path| crate::events::Location {
+                    path: path.to_owned(),
+                    line: None,
+                })
+                .collect::<Vec<_>>();
             let title = i
                 .get("command")
                 .and_then(Value::as_str)
@@ -1086,12 +1128,13 @@ fn map_item(i: &Value, started: bool) -> Vec<AppServerAction> {
                         kind: Some(kind),
                         status: ToolCallStatus::InProgress,
                         content: Vec::new(),
-                        locations: Vec::new(),
-                        raw_input: i
-                            .get("command")
-                            .cloned()
-                            .or_else(|| i.get("input").cloned())
-                            .or_else(|| i.get("arguments").cloned()),
+                        locations: locations.clone(),
+                        raw_input: file_input.clone().or_else(|| {
+                            i.get("command")
+                                .cloned()
+                                .or_else(|| i.get("input").cloned())
+                                .or_else(|| i.get("arguments").cloned())
+                        }),
                         raw_output: None,
                     }),
                 })]
@@ -1134,8 +1177,8 @@ fn map_item(i: &Value, started: bool) -> Vec<AppServerAction> {
                             ToolCallStatus::Completed
                         },
                         content,
-                        locations: Vec::new(),
-                        raw_input: None,
+                        locations,
+                        raw_input: file_input,
                         raw_output: i.get("output").cloned(),
                     }),
                 })]
@@ -2944,6 +2987,53 @@ impl AppServerAgent {
 mod tests {
     use super::*;
     use crate::native::PermissionGate;
+
+    #[test]
+    fn file_changes_keep_all_paths_and_hunks_even_without_a_start_event() {
+        let item = json!({"id":"edit-1", "type":"fileChange", "status":"completed", "changes":[
+            {"path":"/workspace/mira/a.rs", "kind":{"type":"update"}, "diff":"@@ -1 +1 @@\n-old\n+new"},
+            {"path":"/workspace/mira/b.rs", "kind":{"type":"add"}, "diff":"@@ -0,0 +1 @@\n+created"}
+        ]});
+        let actions = map_item(&item, false);
+        let AppServerAction::Event(NormalizedEvent {
+            event: MiraEvent::ToolCallUpdate(call),
+            ..
+        }) = &actions[0]
+        else {
+            panic!("missing file change")
+        };
+        assert_eq!(call.kind, Some(ToolKind::Edit));
+        assert_eq!(call.locations.len(), 2);
+        assert_eq!(call.locations[1].path, "/workspace/mira/b.rs");
+        let input = call.raw_input.as_ref().unwrap();
+        assert_eq!(input["changes"], item["changes"]);
+        assert!(input["patch"].as_str().unwrap().contains("-old\n+new"));
+        assert_eq!(call.status, ToolCallStatus::Completed);
+        assert!(
+            call.content.is_empty(),
+            "hunks must not be mislabeled as full file contents"
+        );
+    }
+
+    #[test]
+    fn command_items_keep_their_working_directory_for_change_ownership() {
+        let actions = map_item(
+            &json!({"id":"shell-1", "type":"commandExecution", "command":"sed -i '' s/old/new/ a.rs", "cwd":"/workspace/mira"}),
+            true,
+        );
+        let AppServerAction::Event(NormalizedEvent {
+            event: MiraEvent::ToolCall(call),
+            ..
+        }) = &actions[0]
+        else {
+            panic!("missing command")
+        };
+        assert_eq!(call.raw_input.as_ref().unwrap()["cwd"], "/workspace/mira");
+        assert_eq!(
+            call.raw_input.as_ref().unwrap()["command"],
+            "sed -i '' s/old/new/ a.rs"
+        );
+    }
 
     #[test]
     fn mira_workspace_calls_have_one_stream_owner() {

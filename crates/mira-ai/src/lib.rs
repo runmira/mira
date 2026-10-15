@@ -30,6 +30,7 @@ pub mod openai;
 pub mod pricing;
 pub mod provider;
 pub mod ratelimit;
+mod responses;
 pub mod retry;
 pub mod tool_spec;
 pub mod typesafe;

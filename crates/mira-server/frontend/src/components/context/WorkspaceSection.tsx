@@ -196,6 +196,7 @@ export function workspaceHasContent(
   branchPr: BranchPrView | null,
   sessionCommitted: boolean,
 ): boolean {
+  if (sessionDiff.files.length > 0) return true;
   if (!gitStatus?.in_repo) return false;
   return sessionDiff.files.length > 0 || (sessionCommitted && gitStatus.ahead > 0) || !!branchPr;
 }
@@ -265,7 +266,7 @@ export function WorkspaceSection({
                     >
                       Review
                     </button>
-                    <Popover open={commitOpen} onOpenChange={setCommitOpen}>
+                    {gitStatus.in_repo && <Popover open={commitOpen} onOpenChange={setCommitOpen}>
                       <PopoverTrigger asChild>
                         <button
                           type="button"
@@ -289,7 +290,7 @@ export function WorkspaceSection({
                           onClose={() => setCommitOpen(false)}
                         />
                       </PopoverContent>
-                    </Popover>
+                    </Popover>}
                   </div>
                 </div>
               )}

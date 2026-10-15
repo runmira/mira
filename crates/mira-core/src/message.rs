@@ -34,6 +34,9 @@ pub struct Message {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_id: Option<String>,
     pub role: Role,
+    /// Native checkpoint or response items, replayed only by their originating adapter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_context: Option<ProviderContext>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
@@ -66,6 +69,16 @@ pub struct Message {
     /// persisted sessions round-trip unchanged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reasoning: Vec<ReasoningBlock>,
+}
+
+/// Persisted native context. Never render opaque items as user text.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProviderContext {
+    pub owner: String,
+    pub model: String,
+    pub items: Vec<Value>,
+    #[serde(default)]
+    pub tokens: u64,
 }
 
 /// One block of model reasoning attached to an assistant [`Message`].
@@ -118,6 +131,7 @@ impl Message {
             name: None,
             images: Vec::new(),
             reasoning: Vec::new(),
+            provider_context: None,
             input_intent: None,
             input_id: None,
             created_at: Some(message_now_ms()),
@@ -134,6 +148,7 @@ impl Message {
             name: None,
             images: Vec::new(),
             reasoning: Vec::new(),
+            provider_context: None,
             input_intent: None,
             input_id: None,
             created_at: Some(message_now_ms()),
@@ -156,6 +171,7 @@ impl Message {
             name: None,
             images: Vec::new(),
             reasoning: Vec::new(),
+            provider_context: None,
             input_intent: None,
             input_id: None,
             created_at: Some(message_now_ms()),
