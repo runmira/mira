@@ -173,7 +173,9 @@ async fn session_files(state: &AppState) -> (PathBuf, Vec<ChangedFile>) {
     };
     let cwd_bg = cwd.clone();
     let files = tokio::task::spawn_blocking(move || {
-        crate::session_changes::changed_files(&cwd_bg, &session, &written)
+        crate::session_changes::with_snapshot_budget(std::time::Duration::from_secs(5), || {
+            crate::session_changes::changed_files(&cwd_bg, &session, &written)
+        })
     })
     .await
     .unwrap_or_default();
@@ -209,17 +211,19 @@ pub async fn session_changes(State(state): State<AppState>) -> Response {
         files
             .into_iter()
             .map(|f| {
+                let (repo, relative) = crate::session_changes::file_repository(&cwd, &f.path)
+                    .unwrap_or_else(|| (cwd.clone(), f.path.clone()));
                 let diff = if f.status == FileStatus::Added {
                     // `--no-index` exits 1 when the files differ, so read
                     // stdout directly instead of going through `run`.
                     Command::new("git")
-                        .current_dir(&cwd)
-                        .args(["diff", "--no-index", "--", "/dev/null", &f.path])
+                        .current_dir(&repo)
+                        .args(["diff", "--no-index", "--", "/dev/null", &relative])
                         .output()
                         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
                         .unwrap_or_default()
                 } else {
-                    run(&cwd, &["diff", "--relative", "HEAD", "--", &f.path]).unwrap_or_default()
+                    run(&repo, &["diff", "--relative", "HEAD", "--", &relative]).unwrap_or_default()
                 };
                 serde_json::json!({
                     "path": f.path,
@@ -256,18 +260,24 @@ pub async fn revert_file(
             "not a file this session changed".into(),
         );
     };
+    let Some((repo, relative)) = crate::session_changes::file_repository(&cwd, &file.path) else {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "file is outside this workspace's repositories".into(),
+        );
+    };
     let result = if file.status == FileStatus::Added {
-        std::fs::remove_file(cwd.join(&file.path))
+        std::fs::remove_file(repo.join(&relative))
     } else {
         run(
-            &cwd,
+            &repo,
             &[
                 "restore",
                 "--source=HEAD",
                 "--staged",
                 "--worktree",
                 "--",
-                &file.path,
+                &relative,
             ],
         )
         .map(|_| ())

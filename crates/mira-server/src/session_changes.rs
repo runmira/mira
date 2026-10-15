@@ -165,6 +165,105 @@ pub fn in_repo(cwd: &Path) -> bool {
     run(git(cwd).args(["rev-parse", "--is-inside-work-tree"])).is_some_and(|s| s.trim() == "true")
 }
 
+/// Repositories owned by this chat folder. Never traverse symlinks or scan
+/// recursively: a workspace can contain unrelated dependencies and worktrees.
+pub(crate) fn repositories(cwd: &Path) -> Vec<PathBuf> {
+    if in_repo(cwd) {
+        return vec![cwd.to_path_buf()];
+    }
+    let Ok(entries) = std::fs::read_dir(cwd) else {
+        return vec![];
+    };
+    let mut repos: Vec<_> = entries
+        .take(128)
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .map(|entry| entry.path())
+        .filter(|path| path.join(".git").exists() && in_repo(path))
+        .collect();
+    repos.sort();
+    repos
+}
+
+/// Discovery is only for taking before snapshots. A child repository becomes
+/// visible in a workspace chat only when that chat reports an edit there (or
+/// executes a command with that repository as its working directory).
+pub(crate) fn claim_paths(cwd: &Path, session: &str, paths: &[PathBuf]) {
+    if in_repo(cwd) {
+        return;
+    }
+    for repo in repositories(cwd) {
+        let root = std::fs::canonicalize(&repo).unwrap_or_else(|_| repo.clone());
+        let claimed = paths.iter().any(|path| {
+            let path = if path.is_absolute() {
+                path.clone()
+            } else {
+                cwd.join(path)
+            };
+            // Deleted files cannot be canonicalized. Canonicalize their parent
+            // too, so a path through a symlink cannot claim another repo.
+            let path = std::fs::canonicalize(&path).ok().or_else(|| {
+                Some(
+                    std::fs::canonicalize(path.parent()?)
+                        .ok()?
+                        .join(path.file_name()?),
+                )
+            });
+            path.is_some_and(|path| path.starts_with(&root))
+        });
+        if claimed {
+            if let Some(baseline) = baseline_file(&repo, session) {
+                let owner = baseline.with_extension("owned");
+                if owner.exists() {
+                    continue;
+                }
+                if let Some(parent) = owner.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                // When a chat first works in a child repo several turns in,
+                // earlier sibling activity must not become this chat's diff.
+                if let Some(pending) = crate::checkpoints::pending_tree(&repo, session) {
+                    if let Some((_, tree)) = pending.split_once(':') {
+                        if std::fs::write(&baseline, tree).is_err() {
+                            continue;
+                        }
+                    }
+                }
+                let _ = std::fs::write(owner, "1");
+            }
+        }
+    }
+}
+
+pub(crate) fn owned_repositories(cwd: &Path, session: &str) -> Vec<PathBuf> {
+    repositories(cwd)
+        .into_iter()
+        .filter(|repo| {
+            repo == cwd
+                || baseline_file(repo, session)
+                    .is_some_and(|file| file.with_extension("owned").exists())
+        })
+        .collect()
+}
+
+/// Route a workspace-relative file to its owning repository. The caller still
+/// validates the file against its session's changes before any mutation.
+pub(crate) fn file_repository(cwd: &Path, path: &str) -> Option<(PathBuf, String)> {
+    let path = Path::new(path);
+    if path
+        .components()
+        .any(|part| !matches!(part, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+    repositories(cwd).into_iter().find_map(|repo| {
+        let prefix = repo.strip_prefix(cwd).ok()?;
+        let relative = path.strip_prefix(prefix).ok()?;
+        (!relative.as_os_str().is_empty())
+            .then(|| (repo.clone(), relative.to_string_lossy().into_owned()))
+    })
+}
+
 /// `HEAD`, or the empty tree when the repository has no commits.
 fn head(cwd: &Path) -> String {
     run(git(cwd).args(["rev-parse", "--verify", "-q", "HEAD^{tree}"]))
@@ -229,6 +328,12 @@ fn baseline_file(cwd: &Path, session: &str) -> Option<PathBuf> {
 /// Record the chat's baseline, once. Later calls keep the first one — the
 /// point is "since this chat began".
 pub fn ensure_baseline(cwd: &Path, session: &str) {
+    if !in_repo(cwd) {
+        for repo in repositories(cwd) {
+            ensure_baseline(&repo, session);
+        }
+        return;
+    }
     let Some(file) = baseline_file(cwd, session) else {
         return;
     };
@@ -278,7 +383,19 @@ pub(crate) fn tree_diff_paths(cwd: &Path, from: &str, to: &str) -> Vec<String> {
 /// (absolute paths); paths outside `cwd` are left out.
 pub fn changed_files(cwd: &Path, session: &str, written: &[PathBuf]) -> Vec<ChangedFile> {
     if !in_repo(cwd) {
-        return Vec::new();
+        claim_paths(cwd, session, written);
+        return owned_repositories(cwd, session)
+            .into_iter()
+            .flat_map(|repo| {
+                let prefix = repo.strip_prefix(cwd).unwrap().to_path_buf();
+                changed_files(&repo, session, written)
+                    .into_iter()
+                    .map(move |mut file| {
+                        file.path = prefix.join(&file.path).to_string_lossy().into_owned();
+                        file
+                    })
+            })
+            .collect();
     }
     let root = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
     let mut candidates: BTreeSet<String> = written
@@ -291,64 +408,70 @@ pub fn changed_files(cwd: &Path, session: &str, written: &[PathBuf]) -> Vec<Chan
         })
         .filter(|r| !r.is_empty())
         .collect();
+    let Some(now) = snapshot_tree(cwd) else {
+        return vec![];
+    };
     if let Some(base) = baseline(cwd, session) {
-        if let Some(now) = snapshot_tree(cwd) {
-            candidates.extend(tree_diff_paths(cwd, &base, &now));
-        }
+        candidates.extend(tree_diff_paths(cwd, &base, &now));
     }
     if candidates.is_empty() {
         return Vec::new();
     }
-    stats_against_head(cwd, &candidates.into_iter().collect::<Vec<_>>())
+    stats_against_head(cwd, &now, &candidates.into_iter().collect::<Vec<_>>())
 }
 
-/// Line counts and status, against HEAD, for those of `paths` that differ
-/// from it. Tracked files come from `git diff HEAD`; new files from
-/// `ls-files --others` (ignored files excluded), counted as all-added.
-pub fn stats_against_head(cwd: &Path, paths: &[String]) -> Vec<ChangedFile> {
+/// Compare immutable trees for both candidates and counts. A second diff
+/// against the working tree could trust stale index stats and lose a same-size
+/// edit within one filesystem timestamp tick.
+fn stats_against_head(cwd: &Path, now: &str, paths: &[String]) -> Vec<ChangedFile> {
     let head = head(cwd);
     let mut out = Vec::new();
     for chunk in paths.chunks(500) {
-        let mut tracked = git(cwd);
-        tracked.args([
-            "diff",
-            "--numstat",
-            "-z",
-            "--no-renames",
-            "--relative",
-            &head,
-            "--",
-        ]);
-        tracked.args(chunk);
-        if let Some(s) = run(&mut tracked) {
-            out.extend(parse_numstat_z(&s));
-        }
-        // Which of them are gone from the work tree (a deletion's numstat
-        // looks like any other change).
-        let mut untracked = git(cwd);
-        untracked.args(["ls-files", "--others", "--exclude-standard", "-z", "--"]);
-        untracked.args(chunk);
-        if let Some(s) = run(&mut untracked) {
-            for path in split_z(&s) {
-                let (added, binary) = match std::fs::read(cwd.join(path)) {
-                    Ok(b) if b.contains(&0) => (0, true),
-                    Ok(b) => (String::from_utf8_lossy(&b).lines().count() as u64, false),
-                    Err(_) => (0, false),
-                };
-                out.push(ChangedFile {
-                    path: path.to_string(),
-                    status: FileStatus::Added,
-                    added,
-                    removed: 0,
-                    binary,
-                });
+        let mut command = git(cwd);
+        command
+            .args([
+                "diff",
+                "--numstat",
+                "-z",
+                "--no-renames",
+                "--relative",
+                &head,
+                now,
+                "--",
+            ])
+            .args(chunk);
+        let Some(stats) = run(&mut command) else {
+            continue;
+        };
+        let mut files = parse_numstat_z(&stats);
+        for (filter, status) in [
+            ("--diff-filter=A", FileStatus::Added),
+            ("--diff-filter=D", FileStatus::Deleted),
+        ] {
+            let mut command = git(cwd);
+            command
+                .args([
+                    "diff",
+                    "--name-only",
+                    "-z",
+                    "--no-renames",
+                    "--relative",
+                    filter,
+                    &head,
+                    now,
+                    "--",
+                ])
+                .args(chunk);
+            if let Some(paths) = run(&mut command) {
+                let paths: BTreeSet<_> = split_z(&paths).collect();
+                for file in &mut files {
+                    if paths.contains(file.path.as_str()) {
+                        file.status = status;
+                    }
+                }
             }
         }
-    }
-    for f in &mut out {
-        if f.status == FileStatus::Modified && !cwd.join(&f.path).exists() {
-            f.status = FileStatus::Deleted;
-        }
+        out.extend(files);
     }
     out.sort_by(|a, b| a.path.cmp(&b.path));
     out.dedup_by(|a, b| a.path == b.path);

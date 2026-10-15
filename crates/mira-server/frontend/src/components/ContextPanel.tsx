@@ -10,6 +10,8 @@ import { useEffect, useMemo, useState } from 'react';
 import type { BranchPrView, GitStatusView, SessionDiffView } from '../api';
 import type { BackgroundProcess } from '../lib/backgroundProcesses';
 import type { Entry, SubagentStreamState } from '../transcript/entries';
+import type { TurnDiffSummary } from '../types';
+import { LastTurnChanges, latestEditedTurn } from './context/LastTurnChanges';
 import type { TaskItem } from '../types';
 import {
   BackgroundProcessesSection,
@@ -19,6 +21,7 @@ import {
   ProgressSection,
   SubagentsSection,
 } from './context/ProgressSection';
+import { RemoteControlSection } from './context/RemoteControlSection';
 import { extractSources, SourcesSection } from './context/SourcesSection';
 import { prStateColor, workspaceHasContent, WorkspaceSection } from './context/WorkspaceSection';
 /* ------------------------------------------------------------------ */
@@ -45,7 +48,7 @@ export function useContextPanelFits(): boolean {
 }
 
 /** True when the panel has anything to show for this session. */
-export function contextPanelHasContent(p: {
+export function contextPanelHasContent(_p: {
   processes?: BackgroundProcess[];
   tasks: TaskItem[];
   gitStatus: GitStatusView | null;
@@ -55,16 +58,14 @@ export function contextPanelHasContent(p: {
   subagentState: Map<string, SubagentStreamState>;
   entries: Entry[];
 }): boolean {
-  return (
-    (p.processes?.some((process) => process.running) ?? false) ||
-    liveTasks(p.tasks).length > 0 ||
-    workspaceHasContent(p.gitStatus, p.sessionDiff, p.branchPr, p.sessionCommitted) ||
-    chatSubagents(p.subagentState, p.entries).length > 0 ||
-    extractSources(p.entries).length > 0
-  );
+  // The machine-wide remote control switch is always available here.
+  return true;
 }
 
 export type ContextPanelProps = {
+  sessionId?: string;
+  turnDiffs?: TurnDiffSummary[];
+  onOpenFile?: (path: string) => void;
   processes?: BackgroundProcess[];
   stoppingProcesses?: ReadonlySet<number>;
   onOpenProcess?: (id: number) => void;
@@ -112,6 +113,7 @@ export function ContextPanel(props: ContextPanelProps) {
     onPush,
     onCommit,
   } = props;
+  const lastEdits = useMemo(() => latestEditedTurn(entries, props.turnDiffs ?? []), [entries, props.turnDiffs]);
   const runningProcesses = (props.processes ?? []).filter((process) => process.running);
   const fits = useContextPanelFits();
   // Derived once per render and shared by the pill and every section, so
@@ -121,16 +123,7 @@ export function ContextPanel(props: ContextPanelProps) {
   const live = liveTasks(tasks);
   const showWorkspace = workspaceHasContent(gitStatus, sessionDiff, branchPr, sessionCommitted);
 
-  if (
-    !fits ||
-    (live.length === 0 &&
-      !showWorkspace &&
-      subagents.length === 0 &&
-      sources.length === 0 &&
-      runningProcesses.length === 0)
-  ) {
-    return null;
-  }
+  if (!fits) return null;
 
   const done = live.filter((t) => t.status === 'completed').length;
   const pending = sessionDiff.files.length;
@@ -221,6 +214,10 @@ export function ContextPanel(props: ContextPanelProps) {
             </button>
           </div>
           <div className="overflow-y-auto px-4 pb-1.5 flex flex-col divide-y divide-fg/[0.07]">
+            <RemoteControlSection />
+            {sessionDiff.files.length === 0 && lastEdits && props.sessionId && props.onOpenFile && (
+              <LastTurnChanges key={`${props.sessionId}:${lastEdits.text}:${lastEdits.occurrence}`} summary={lastEdits} session={props.sessionId} onOpenFile={props.onOpenFile} />
+            )}
             {live.length > 0 && (
               <div className="py-2">
                 <ProgressSection tasks={tasks} />

@@ -136,6 +136,12 @@ fn find(store: &Store, text: &str, occurrence: usize) -> Option<usize> {
 /// edited, for a resend: its checkpoint and every later one go, as those
 /// messages leave the transcript.
 pub fn record(cwd: &Path, session: &str, text: &str, replaces: Option<(&str, usize)>) {
+    if !crate::session_changes::in_repo(cwd) {
+        for repo in crate::session_changes::repositories(cwd) {
+            record(&repo, session, text, replaces);
+        }
+        return;
+    }
     let Some(file) = store_file(cwd, session) else {
         return;
     };
@@ -226,6 +232,25 @@ pub fn finish(cwd: &Path, session: &str, expected_tree: &str) {
 }
 
 pub fn turn_diffs(cwd: &Path, session: &str) -> Vec<TurnDiffSummary> {
+    if !crate::session_changes::in_repo(cwd) {
+        let mut merged: Vec<TurnDiffSummary> = vec![];
+        for repo in crate::session_changes::owned_repositories(cwd, session) {
+            let prefix = repo.strip_prefix(cwd).unwrap();
+            for mut summary in turn_diffs(&repo, session) {
+                for file in &mut summary.files {
+                    file.path = prefix.join(&file.path).to_string_lossy().into_owned();
+                }
+                if let Some(existing) = merged.iter_mut().find(|other| {
+                    other.text == summary.text && other.occurrence == summary.occurrence
+                }) {
+                    existing.files.extend(summary.files);
+                } else {
+                    merged.push(summary);
+                }
+            }
+        }
+        return merged;
+    }
     let Some(file) = store_file(cwd, session) else {
         return vec![];
     };
@@ -279,6 +304,13 @@ pub fn turn_file_diff(
     {
         return Err("invalid file path".into());
     }
+    if !crate::session_changes::in_repo(cwd) {
+        let (repo, relative) = crate::session_changes::file_repository(cwd, path)
+            .ok_or("file is outside this workspace's repositories")?;
+        let mut diff = turn_file_diff(&repo, session, text, occurrence, &relative)?;
+        diff.preview.path = path.to_owned();
+        return Ok(diff);
+    }
     let file = store_file(cwd, session).ok_or("no checkpoints for this chat")?;
     let store = load(&file);
     let index = find(&store, text, occurrence).ok_or("no checkpoint for this turn")?;
@@ -327,6 +359,23 @@ pub fn turn_file_diff(
 }
 
 pub(crate) async fn finish_slot(slot: std::sync::Arc<crate::slot::SessionSlot>) {
+    // Provider/MCP writes use the harness file guard rather than native agent
+    // file-change notifications. Claim those repos before freezing this turn.
+    let guard = slot.session.read().await.file_guard();
+    if let Some(guard) = guard {
+        let paths: Vec<_> = guard.written_snapshot().await.into_iter().collect();
+        if !paths.is_empty() {
+            let cwd = slot.cwd.read().await.clone();
+            let id = slot.id.to_string();
+            let _ = tokio::task::spawn_blocking(move || {
+                crate::session_changes::with_snapshot_budget(
+                    std::time::Duration::from_secs(1),
+                    || crate::session_changes::claim_paths(&cwd, &id, &paths),
+                )
+            })
+            .await;
+        }
+    }
     if let Some(summaries) = finish_in_cwd(slot.cwd.clone(), slot.id.to_string()).await {
         let _ = slot
             .events_tx
@@ -341,8 +390,10 @@ async fn finish_in_cwd(
     let cwd = cwd.read().await.clone();
     tokio::task::spawn_blocking(move || {
         crate::session_changes::with_snapshot_budget(std::time::Duration::from_secs(5), || {
-            if let Some(tree) = pending_tree(&cwd, &id) {
-                finish(&cwd, &id, &tree);
+            for repo in crate::session_changes::owned_repositories(&cwd, &id) {
+                if let Some(tree) = pending_tree(&repo, &id) {
+                    finish(&repo, &id, &tree);
+                }
             }
             turn_diffs(&cwd, &id)
         })
@@ -554,6 +605,50 @@ mod tests {
 
     fn read(p: &Path, f: &str) -> Option<String> {
         std::fs::read_to_string(p.join(f)).ok()
+    }
+
+    #[tokio::test]
+    async fn workspace_turns_track_only_claimed_repos_and_keep_committed_diffs() {
+        let workspace = tempfile::tempdir().unwrap();
+        let first = repo();
+        let other = repo();
+        let owned = workspace.path().join("mira");
+        let sibling = workspace.path().join("other");
+        std::fs::rename(first.path(), &owned).unwrap();
+        std::fs::rename(other.path(), &sibling).unwrap();
+        let cwd = std::sync::Arc::new(tokio::sync::RwLock::new(workspace.path().to_path_buf()));
+        // Work in the sibling before this chat claims it must stay excluded.
+        crate::session_changes::ensure_baseline(workspace.path(), S);
+        record(workspace.path(), S, "first", None);
+        std::fs::write(sibling.join("a.txt"), "someone else\n").unwrap();
+        finish_in_cwd(cwd.clone(), S.into()).await.unwrap();
+        assert!(turn_diffs(workspace.path(), S).is_empty());
+        record(workspace.path(), S, "second", None);
+        crate::session_changes::claim_paths(workspace.path(), S, &[owned.join("a.txt")]);
+        std::fs::write(owned.join("a.txt"), "v2\n").unwrap();
+        std::fs::write(sibling.join("keep.txt"), "unrelated edit\n").unwrap();
+        let pending = crate::session_changes::changed_files(workspace.path(), S, &[]);
+        assert_eq!(
+            pending
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["mira/a.txt"]
+        );
+        // The agent commits before ending: turn snapshots must still show it.
+        sh(&owned, &["add", "a.txt"]);
+        sh(&owned, &["commit", "-qm", "agent edit"]);
+        let summaries = finish_in_cwd(cwd, S.into()).await.unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].text, "second");
+        assert_eq!(summaries[0].files[0].path, "mira/a.txt");
+        assert_eq!(summaries[0].files[0].added, 1);
+        assert_eq!(summaries[0].files[0].removed, 1);
+        let diff = turn_file_diff(workspace.path(), S, "second", 0, "mira/a.txt").unwrap();
+        assert_eq!(diff.preview.path, "mira/a.txt");
+        assert_eq!(diff.before, "v1\n");
+        assert_eq!(diff.after, "v2\n");
+        assert!(turn_file_diff(workspace.path(), S, "second", 0, "../other/a.txt").is_err());
     }
 
     #[test]

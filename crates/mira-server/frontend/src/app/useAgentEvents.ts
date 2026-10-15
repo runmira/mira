@@ -117,6 +117,7 @@ export function useAgentEvents(
       case 'acp_tool_call_update':
         updateTranscript((prev) => upsertAcpTool(prev, msg.call, receivedAt));
         context.updateSubagentProjection(previous => projectAcpSubagent(previous, msg.call));
+        if (msg.call.kind === 'edit' && msg.call.status === 'completed') refreshRepo();
         break;
 
       case 'acp_plan':
