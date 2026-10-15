@@ -1,4 +1,4 @@
-import { Copy, ExternalLink, Loader2, MoreHorizontal, Radio } from 'lucide-react';
+import { Copy, ExternalLink, Loader2, MoreHorizontal } from 'lucide-react';
 import { useState } from 'react';
 import { Menu, MenuItem } from '../ui/Menu';
 import { useRemoteControl } from '../../hooks/useRemoteControl';
@@ -14,16 +14,15 @@ export function RemoteControlSection() {
   const detail = !remote ? 'Checking remote access…'
     : !remote.supported ? 'Unavailable on this computer'
     : !enabled ? (remoteAccessAvailable() ? 'Access Mira from another device' : 'Sign in to Mira in Settings')
-    : remote.status === 'connected' ? 'Connected · paired devices can access Mira'
+    : remote.status === 'connected' ? 'Connected'
     : remote.status === 'reconnecting' ? 'Reconnecting…' : 'Starting…';
-  return <div className="py-2.5">
-    <div className="flex items-center gap-2">
-      <Radio aria-hidden="true" className="size-3.5 text-fg/40" />
-      <span className="flex-1 text-[12px] font-medium text-fg/70">Remote control</span>
+  return <div className="py-2">
+    <div className="flex min-h-7 items-center gap-1.5 py-1.5">
+      <span className="flex-1 text-[11px] font-bold uppercase tracking-widest text-fg/40">Remote control</span>
       {url && <div className="relative">
         <button type="button" aria-label="Remote control options" aria-haspopup="menu" aria-expanded={menuOpen}
           onClick={() => setMenuOpen(open => !open)}
-          className="rounded p-1 text-fg/45 hover:bg-fg/5 hover:text-fg/80"><MoreHorizontal className="size-3.5" /></button>
+          className="rounded-md p-1 text-fg/35 transition-colors hover:bg-fg/[0.05] hover:text-fg/70"><MoreHorizontal className="size-3.5" /></button>
         <Menu open={menuOpen} onOpenChange={setMenuOpen} label="Remote control options">
           <MenuItem label="Copy link" icon={<Copy className="size-3.5" />} onSelect={() => {
             void (async () => {
@@ -41,9 +40,12 @@ export function RemoteControlSection() {
         <span className={`size-3 rounded-full bg-white shadow transition-transform ${enabled ? 'translate-x-3' : ''}`} />
       </button>
     </div>
-    <p className="mt-1 text-[11px] leading-relaxed text-fg/45" role="status">{detail}</p>
-    {enabled && remote?.hostname && <a href={`https://${remote.hostname}`} target="_blank" rel="noreferrer"
-      className="mt-1 block truncate text-[11px] text-blue-500 hover:underline">{remote.hostname}</a>}
+    <div className="flex items-center gap-1.5 pb-1 text-[12px] leading-5 text-fg/45" role="status">
+      {enabled && <span aria-hidden="true" className={`size-1.5 shrink-0 rounded-full ${remote?.status === 'connected' ? 'bg-green-500/75' : 'bg-amber-500/75'}`} />}
+      <span>{detail}</span>
+    </div>
+    {url && <a href={url} target="_blank" rel="noreferrer"
+      className="block truncate pb-1 text-[11.5px] text-fg/55 transition-colors hover:text-fg/80 hover:underline">{remote?.hostname}</a>}
     {enabled && linkFeedback && <p role="status" className="mt-1 text-[11px] text-fg/50">{linkFeedback}</p>}
     {(error || remote?.error) && <p role="alert" className="mt-1 text-[11px] text-red-500">{error?.message ?? remote?.error}</p>}
   </div>;
