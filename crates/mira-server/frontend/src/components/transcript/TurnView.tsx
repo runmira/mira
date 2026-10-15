@@ -23,6 +23,7 @@ import { type AskUserDecision } from '../AskUserCard';
 import { AgentGroup } from '../AgentCard';
 import { countsByCategory, countsPhrase, ToolGroup } from '../ToolGroup';
 import type {
+  TurnDiffSummary,
   ApprovalScope,
   DiffPreview,
   Mode,
@@ -48,7 +49,7 @@ export const TurnView = memo(TurnViewImpl, (prev, next) => {
 export type TurnViewProps = Parameters<typeof TurnViewImpl>[0];
 
 export function TurnViewImpl({
-  turn, diffSummary, failureRetryEnabled = false, onFailureSettings, recovery, recoveryDisabled, onRecoveryAction, timing: timingProp, usage: usageProp, model: modelProp, index, expanded, isActive, onToggle, onDecide, onPlanReply, onAskUserReply, onOpenAgent, onOpenFile, skills, mode, onSetMode, minimapId, approvalViaDialog, offscreenOk = false,
+  turn, diffSummary, onReviewChanges, failureRetryEnabled = false, onFailureSettings, recovery, recoveryDisabled, onRecoveryAction, timing: timingProp, usage: usageProp, model: modelProp, index, expanded, isActive, onToggle, onDecide, onPlanReply, onAskUserReply, onOpenAgent, onOpenFile, skills, mode, onSetMode, minimapId, approvalViaDialog, offscreenOk = false,
 }: {
   turn: Turn;
   failureRetryEnabled?: boolean;
@@ -78,6 +79,7 @@ export function TurnViewImpl({
   onOpenAgent: (callId: string) => void;
   /** Opens (or focuses) a file viewer tab in the right-side panel. */
   onOpenFile: (path: string, diff: DiffPreview | null) => void;
+  onReviewChanges?: (summary: TurnDiffSummary) => void;
   /** Loaded skill roster — passed through so the user bubble can render
    *  `@skill:<name>` mentions as pretty chips (icon + display label +
    *  hash-derived color) rather than raw tokens. */
@@ -260,7 +262,7 @@ export function TurnViewImpl({
       {notices.map((entry, i) => renderActivity({ kind: 'entry', entry }, i, 'notice'))}
       {failure && failureInfo && (!recovery || !isProviderLimitFailure(failure.text)) && <ErrorNotice title={failureInfo.title} description={failureInfo.description + (canRetryFailure && recoveryDisabled ? ' Reconnect or wait for the active turn to finish before retrying.' : '')} details={failures.map(e => e.text).join('\n\n')} disabled={!!recoveryDisabled} retryLabel="Retry message" onRetry={canRetryFailure && openingPrompt && messageActions ? () => messageActions.edit(openingPrompt, openingPrompt.msg.content ?? '') : undefined} secondary={failureInfo.settings && onFailureSettings ? { label: 'Connection settings', onClick: onFailureSettings } : undefined} />}
       {recovery && onRecoveryAction && <UsageRecoveryCard key={recovery.id} item={recovery} disabled={!!recoveryDisabled} onAction={onRecoveryAction} />}
-      {diffSummary && <TurnChanges summary={diffSummary} onOpenFile={path => onOpenFile(path, null)} busy={messageActions?.busy} onUndo={turn.user && messageActions ? () => messageActions.restore(turn.user!) : undefined} />}
+      {diffSummary && <TurnChanges summary={diffSummary} onReview={() => onReviewChanges?.(diffSummary)} onOpenFile={path => onOpenFile(path, null)} busy={messageActions?.busy} onUndo={turn.user && messageActions ? () => messageActions.restore(turn.user!) : undefined} />}
     </div>
   );
 }

@@ -51,6 +51,7 @@ export function WorkspaceMain(
     | 'ctxOpen'
     | 'sessionCommitted'
     | 'branchPr'
+    | 'branchPrError'
     | 'gitStatus'
     | 'setSelectedProcess'
     | 'backgroundProcesses'

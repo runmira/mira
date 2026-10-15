@@ -1,3 +1,8 @@
+import { FileDiff } from '@pierre/diffs/react';
+import { DiffWorkerPoolProvider } from '../diffs/DiffWorkerPoolProvider';
+import { useDiffOptions } from '../../lib/diffPrefs';
+import { getRenderablePatch, DIFF_SURFACE_THEME_UNSAFE_CSS } from '../../lib/diffRender';
+import { pullRequestPatch } from '../../lib/pullRequestDiff';
 import { GuidedWalkthrough } from '../GuidedWalkthrough';
 import { cn } from '@/lib/utils';
 import { ChevronDown, Code as CodeIcon, LoaderCircle } from 'lucide-react';
@@ -12,14 +17,17 @@ export function CodePane({ selection }: { selection: Selection }) {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   useEffect(() => {
-    setLoading(true);
+    let cancelled = false;
+    setLoading(true); setFiles(null); setError(null); setGuided(false);
     getPullRequestFiles(selection.owner, selection.repo, selection.number)
       .then((v) => {
+        if (cancelled) return;
         setFiles(v.files);
         setError(null);
       })
-      .catch((e) => setError(String((e as Error).message)))
-      .finally(() => setLoading(false));
+      .catch((e) => { if (!cancelled) setError(String((e as Error).message)); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
   }, [selection.owner, selection.repo, selection.number]);
 
   if (guided) return <GuidedWalkthrough key={`${selection.owner}/${selection.repo}/${selection.number}`} initialSource={{ kind: 'pr', owner: selection.owner, repo: selection.repo, number: selection.number }} onChanged={() => {}} onClose={() => setGuided(false)} />;
@@ -44,8 +52,8 @@ export function CodePane({ selection }: { selection: Selection }) {
   }
   return (
     <div className="mx-auto max-w-5xl px-4 py-4">
-      <div className="mb-3 flex items-center gap-2 text-[12px] text-muted-foreground">
-        <button type="button" className="rounded border border-border px-2 py-1 hover:bg-accent" onClick={() => setGuided(true)}>Walk me through it</button>
+      <div className="mb-3 flex flex-wrap items-center gap-2 text-[12px] text-muted-foreground">
+        <button type="button" className="inline-flex min-h-8 shrink-0 items-center whitespace-nowrap rounded-md border border-border px-3 py-1.5 text-xs font-medium text-foreground hover:bg-accent" onClick={() => setGuided(true)}>Walk me through it</button>
         <CodeIcon className="size-4" fill="currentColor" />
         <span>
           {files.length} file{files.length === 1 ? '' : 's'} changed
@@ -62,7 +70,11 @@ export function CodePane({ selection }: { selection: Selection }) {
 
 export function FilePatch({ file }: { file: FileChangeView }) {
   const [expanded, setExpanded] = useState(true);
-  const lines = useMemo(() => splitPatchLines(file.patch), [file.patch]);
+  const options = useDiffOptions();
+  const parsed = useMemo(() => {
+    const patch = pullRequestPatch(file);
+    return patch ? getRenderablePatch(patch, 'mira-pr', { compactPartialHunkOffsets: true }) : null;
+  }, [file]);
   return (
     <div className="overflow-hidden rounded-md border border-border">
       <button
@@ -84,43 +96,9 @@ export function FilePatch({ file }: { file: FileChangeView }) {
           {file.status}
         </span>
       </button>
-      {expanded &&
-        (file.patch === null ? (
-          <div className="px-3 py-2 text-[12px] text-muted-foreground/70">
-            Binary or too-large diff — omitted by GitHub.
-          </div>
-        ) : (
-          <div className="overflow-x-auto bg-background">
-            <div className="font-mono text-[12px]">
-              {lines.map((l, i) => (
-                <div
-                  key={i}
-                  className={cn(
-                    'whitespace-pre px-3 py-[1px]',
-                    l.kind === 'add' && 'bg-emerald-500/[0.09] text-emerald-200',
-                    l.kind === 'del' && 'bg-rose-500/[0.09] text-rose-200',
-                    l.kind === 'hunk' && 'bg-secondary/40 text-muted-foreground',
-                    l.kind === 'ctx' && 'text-foreground/80',
-                  )}
-                >
-                  {l.text || ' '}
-                </div>
-              ))}
-            </div>
-          </div>
-        ))}
+      {expanded && (parsed?.kind === 'files' ? (
+        <div className="min-w-0 overflow-auto"><DiffWorkerPoolProvider>{parsed.files.map((fileDiff, index) => <FileDiff key={index} fileDiff={fileDiff} className="diff-render-surface" options={{ ...options, disableFileHeader: true, unsafeCSS: DIFF_SURFACE_THEME_UNSAFE_CSS }} />)}</DiffWorkerPoolProvider></div>
+      ) : <div className="px-3 py-3 text-xs text-muted-foreground">{file.patch === null ? 'Binary or large diff omitted by GitHub.' : 'No text patch available for this file.'}</div>)}
     </div>
   );
-}
-
-export type PatchLine = { kind: 'add' | 'del' | 'hunk' | 'ctx'; text: string };
-
-export function splitPatchLines(patch: string | null): PatchLine[] {
-  if (!patch) return [];
-  return patch.split('\n').map((raw): PatchLine => {
-    if (raw.startsWith('@@')) return { kind: 'hunk', text: raw };
-    if (raw.startsWith('+')) return { kind: 'add', text: raw };
-    if (raw.startsWith('-')) return { kind: 'del', text: raw };
-    return { kind: 'ctx', text: raw };
-  });
 }

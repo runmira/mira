@@ -399,6 +399,7 @@ export function EntryView({
           <div className="w-full min-w-0">
             <ThoughtBlock
               content={entry.text}
+              onOpenFile={onOpenFile}
               live={entry.live}
               startedAt={entry.startedAt}
               endedAt={entry.endedAt}

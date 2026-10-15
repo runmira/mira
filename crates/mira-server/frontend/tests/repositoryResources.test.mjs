@@ -15,24 +15,26 @@ const flush=()=>act(async()=>{await new Promise(resolve=>setTimeout(resolve,30))
 test('context changes poll during generic tools, refresh on focus, and stop when disconnected',async()=>{
  const runtime=createAppRuntime({backend:'https://mira.test',account:'test'});globalThis.repositoryRuntime=runtime;
  runtime.turnCommands.hydrate('chat-a',true,[]);runtime.reportConnection('open');
- let changed=false;const requests=[];
+ let changed=false,prCreated=false;const requests=[];
  globalThis.fetch=async(url,options)=>{
   requests.push({url,session:options.headers['X-Mira-Session']});
+  if(url.endsWith('/branch-pr')) return new Response(JSON.stringify(prCreated?{number:213,title:'Created externally',url:'https://github.com/runmira/mira/pull/213',state:'OPEN',isDraft:false}:null));
   return new Response(JSON.stringify({added:changed?1:0,removed:0,files:changed?[{path:'shell-edit.ts',status:'modified',added:1,removed:0,binary:false}]:[]}));
  };
- function Probe(){const result=useResource('sessionDiff');return React.createElement('div',null,result.data?.files.map(f=>f.path).join(',')??'loading');}
+ function Probe(){const result=useResource('sessionDiff'),pr=useResource('branchPr');return React.createElement('div',null,React.createElement('span',{'data-files':true},result.data?.files.map(f=>f.path).join(',')??'loading'),React.createElement('span',{'data-pr':true},pr.data?`#${pr.data.number}`:''));}
  const host=document.createElement('div');document.body.append(host);const root=createRoot(host);
  try {
   await act(()=>root.render(React.createElement(QueryClientProvider,{client:runtime.queryClient},React.createElement(Probe))));await flush();
-  assert.equal(host.textContent,'');
+  assert.equal(host.querySelector('[data-files]').textContent,'');
   changed=true;
   await act(async()=>{await new Promise(resolve=>setTimeout(resolve,3200));});await flush();
-  assert.equal(host.textContent,'shell-edit.ts','files appear while the tool is still running');
+  assert.equal(host.querySelector('[data-files]').textContent,'shell-edit.ts','files appear while the tool is still running');
   assert.ok(requests.every(r=>r.session==='chat-a'));
   await act(()=>runtime.turnCommands.reportTurnRunning(false));
-  changed=false;
+  changed=false;prCreated=true;
   await act(()=>{focusManager.setFocused(false);focusManager.setFocused(true);});await flush();
-  assert.equal(host.textContent,'','focus refreshes even a recently fetched result');
+  assert.equal(host.querySelector('[data-files]').textContent,'','focus refreshes even a recently fetched result');
+  assert.equal(host.querySelector('[data-pr]').textContent,'#213','a PR created outside Mira appears without an agent action report');
   await act(()=>runtime.reportConnection('closed'));
   const before=requests.length;
   await act(async()=>{await new Promise(resolve=>setTimeout(resolve,3200));});

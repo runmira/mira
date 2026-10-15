@@ -13,3 +13,11 @@ Reverting a text hunk requires confirmation. Mira re-reads the source diff, reje
 Plans require a configured Mira model and include every changed file exactly once. Changes above 150 files or 400,000 diff bytes need a smaller range. Provider failures, incomplete plans and conflicts produce an error with a reload action instead of silently omitting files.
 
 Development fixture: `npm run dev`, then `/walkthrough-preview.html`. This uses the real diff viewer with simulated model responses and revert results; it does not modify files or call a model.
+
+## Turn and pull-request views
+
+A turn card and the context panel's **Latest turn edits** section show changed files directly. File rows open the current file in the right-side panel; **View changes** opens that turn's frozen before/after snapshots in the review drawer, including repeated prompts. Snapshot review does not expose working-tree revert actions. Binary or expired snapshots are listed explicitly rather than hiding the rest of a turn.
+
+Thinking disclosures render Markdown while streaming and after completion, keeping the existing scroll and follow behavior. Both PR surfaces use the shared Pierre diff renderer and the same wrapping action bar. The context panel discovers the current branch's PR through the main panel's GitHub authentication path, refreshes on focus and every 30 seconds, and does not require an agent action report. Remote control remains a compact switch, with connection/link chrome removed.
+
+Development fixtures: `/review-ui-preview.html` and `/walkthrough-preview.html`.

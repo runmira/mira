@@ -196,7 +196,7 @@ export function workspaceHasContent(
   branchPr: BranchPrView | null,
   sessionCommitted: boolean,
 ): boolean {
-  if (sessionDiff.files.length > 0) return true;
+  if (sessionDiff.files.length > 0 || branchPr) return true;
   if (!gitStatus?.in_repo) return false;
   return sessionDiff.files.length > 0 || (sessionCommitted && gitStatus.ahead > 0) || !!branchPr;
 }
@@ -209,12 +209,14 @@ export function WorkspaceSection({
   onPush,
   onCommit,
   onReview,
+  onOpenFile,
 }: {
-  gitStatus: GitStatusView;
+  gitStatus: GitStatusView | null;
   sessionDiff: SessionDiffView;
   branchPr: BranchPrView | null;
   sessionCommitted: boolean;
   onReview: (path?: string) => void;
+  onOpenFile?: (path: string) => void;
   onPush: () => Promise<void>;
   onCommit: (message: string, includeUnstaged: boolean, pushAfter: boolean) => Promise<void>;
 }) {
@@ -225,7 +227,7 @@ export function WorkspaceSection({
   // Only what this session did: its own uncommitted files, and pushes for
   // commits it made — not whatever else happens to be dirty in the repo.
   const pending = sessionDiff.files.length;
-  const canPush = sessionCommitted && gitStatus.ahead > 0;
+  const canPush = sessionCommitted && (gitStatus?.ahead ?? 0) > 0;
 
   return (
     <div>
@@ -266,7 +268,7 @@ export function WorkspaceSection({
                     >
                       Review
                     </button>
-                    {gitStatus.in_repo && <Popover open={commitOpen} onOpenChange={setCommitOpen}>
+                    {gitStatus?.in_repo && <Popover open={commitOpen} onOpenChange={setCommitOpen}>
                       <PopoverTrigger asChild>
                         <button
                           type="button"
@@ -295,7 +297,7 @@ export function WorkspaceSection({
                 </div>
               )}
               {pending > 0 && (
-                <ChangedFiles files={sessionDiff.files} onOpen={(p) => onReview(p)} />
+                <ChangedFiles files={sessionDiff.files} onOpen={onOpenFile ?? ((p) => onReview(p))} />
               )}
 
               {pending === 0 && canPush && (
@@ -316,7 +318,7 @@ export function WorkspaceSection({
                   <span className="flex-1 text-[12.5px] font-medium text-fg/70">
                     {pushing
                       ? 'Pushing…'
-                      : `Push ${gitStatus.ahead} commit${gitStatus.ahead === 1 ? '' : 's'}`}
+                      : `Push ${gitStatus?.ahead ?? 0} commit${gitStatus?.ahead === 1 ? '' : 's'}`}
                   </span>
                 </button>
               )}

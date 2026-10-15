@@ -573,6 +573,7 @@ export function useWorkspaceState() {
     setChatColWidth,
     chatColObserver,
     branchPr,
+    branchPrError: branchResource.isError,
     tasks,
     recordTasks,
     goal,

@@ -813,44 +813,13 @@ pub async fn branch_info(
     }
 }
 
-/// GET /api/git/branch-pr
-/// Returns the PR for the current branch using `gh pr view`.
-/// Returns 404 when no PR exists for the branch.
+/// GET /api/git/branch-pr: discover the current branch's PR through GitHub.
+/// A missing PR is a normal empty result; authentication/network failures are
+/// errors rather than a false "no PR" result.
 pub async fn branch_pr(State(state): State<AppState>) -> Response {
-    let cwd = state.current_cwd().await;
-    if !is_git_repo(&cwd) {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "not a git repo"})),
-        )
-            .into_response();
-    }
-    let out = Command::new("gh")
-        .current_dir(&cwd)
-        .args([
-            "pr",
-            "view",
-            "--json",
-            "number,title,state,url,isDraft,reviewDecision",
-        ])
-        .output();
-    match out {
-        Ok(o) if o.status.success() => {
-            let text = String::from_utf8_lossy(&o.stdout);
-            match serde_json::from_str::<serde_json::Value>(text.trim()) {
-                Ok(v) => Json(v).into_response(),
-                Err(_) => (
-                    StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({"error": "no pr"})),
-                )
-                    .into_response(),
-            }
-        }
-        _ => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "no pr"})),
-        )
-            .into_response(),
+    match crate::pull_requests::current_branch_pr(state.current_cwd().await).await {
+        Ok(pr) => Json(pr).into_response(),
+        Err(e) => err(StatusCode::BAD_GATEWAY, e),
     }
 }
 

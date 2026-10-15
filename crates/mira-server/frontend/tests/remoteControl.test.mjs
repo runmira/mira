@@ -41,6 +41,7 @@ test('Codex multi-file changes stay patches and parent workspaces expose changes
   assert.equal(tool.args.patch,'unified hunks');assert.equal(tool.args.content,undefined);
   assert.equal(workspaceHasContent({in_repo:false},{files:[{path:'mira/a.rs'}]},null,false),true);
   assert.equal(workspaceHasContent({in_repo:false},{files:[]},null,false),false);
+  assert.equal(workspaceHasContent(null,{files:[]},{number:213},false),true,'a PR can appear before Git status resolves');
 });
 
 const {RemoteControlSection,setRemoteFixture}=await bundle(`
@@ -53,10 +54,8 @@ export {setRemoteFixture} from './src/hooks/useRemoteControl';`,{
 const window=new Window();globalThis.window=window;globalThis.document=window.document;globalThis.IS_REACT_ACT_ENVIRONMENT=true;
 Object.defineProperty(globalThis,'navigator',{value:window.navigator,configurable:true});
 
-test('remote toggle offers copy/open only when on and never enables on mount',async()=>{
- const calls=[];const opened=[];let copied;
- Object.defineProperty(window.navigator,'clipboard',{value:{writeText:async text=>{copied=text;}},configurable:true});
- window.open=(...args)=>{opened.push(args);};
+test('remote toggle stays compact without a connected indicator or links and never enables on mount',async()=>{
+ const calls=[];
  const host=document.createElement('div');document.body.append(host);const root=createRoot(host);
  const remote={enabled:false,supported:true,status:'off',hostname:null};
  const fixture={remote,busy:false,error:null,setEnabled:async enabled=>calls.push(enabled)};
@@ -67,10 +66,10 @@ test('remote toggle offers copy/open only when on and never enables on mount',as
   setRemoteFixture({...fixture,remote:{...remote,enabled:true,status:'connected',hostname:'m-test.runmira.dev'}});
   await act(()=>root.render(React.createElement(RemoteControlSection)));
   assert.equal(host.querySelector('[role=switch]').getAttribute('aria-checked'),'true');
-  await act(()=>host.querySelector('[aria-label="Remote control options"]').click());
-  const items=[...host.querySelectorAll('[role=menuitem]')];assert.deepEqual(items.map(item=>item.textContent),['Copy link','Open link']);
-  await act(()=>items[0].click());assert.equal(copied,'https://m-test.runmira.dev');assert.match(host.textContent,/Link copied/);
-  await act(()=>items[1].click());assert.deepEqual(opened,[['https://m-test.runmira.dev','_blank','noopener,noreferrer']]);
+  assert.equal(host.querySelector('[aria-label="Remote control options"]'),null);
+  assert.equal(host.querySelector('a'),null);
+  assert.ok(!host.textContent.includes('Connected'));
+  assert.ok(!host.textContent.includes('m-test.runmira.dev'));
   setRemoteFixture({...fixture,busy:true,error:new Error('Sign in required')});
   await act(()=>root.render(React.createElement(RemoteControlSection)));
   assert.equal(host.querySelector('[role=switch]').disabled,true);assert.match(host.querySelector('[role=alert]').textContent,/Sign in required/);

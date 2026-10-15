@@ -268,7 +268,7 @@ export function ReviewMenu({
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
-        <button className="rounded-full border border-border bg-secondary/60 px-3.5 py-1 text-[12.5px] font-medium text-foreground transition-colors hover:bg-secondary">
+        <button className="inline-flex min-h-8 shrink-0 items-center whitespace-nowrap rounded-md border border-border bg-background px-3 py-1.5 text-[12px] font-medium text-foreground transition-colors hover:bg-secondary">
           Submit review
         </button>
       </PopoverTrigger>
@@ -364,7 +364,7 @@ export function MergeMenu({ selection, onMerged }: { selection: Selection; onMer
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
-        <button className="inline-flex items-center gap-1 rounded-full border border-mira-purple/40 bg-mira-purple/[0.08] px-3.5 py-1 text-[12.5px] font-medium text-mira-purple transition-colors hover:bg-mira-purple/[0.12]">
+        <button className="inline-flex min-h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-mira-purple/30 bg-mira-purple/[0.06] px-3 py-1.5 text-[12px] font-medium text-mira-purple transition-colors hover:bg-mira-purple/[0.12]">
           <GitMerge className="size-3.5" fill="currentColor" />
           Merge
           <ChevronDown className="size-3" />

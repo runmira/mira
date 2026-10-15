@@ -123,15 +123,15 @@ export function DetailHeader({
   hideExpand?: boolean;
 }) {
   return (
-    <div className="flex h-11 shrink-0 items-center gap-2 border-b border-border/60 px-3">
+    <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-border/60 px-3 py-2">
       <GitBranch className="size-4 text-emerald-500" fill="currentColor" />
-      <div className="inline-flex rounded-full border border-border bg-secondary/60 p-0.5">
+      <div className="inline-flex shrink-0 rounded-lg border border-border bg-secondary/40 p-0.5">
         {(['summary', 'code'] as const).map((p) => (
           <button
             key={p}
             onClick={() => onPane(p)}
             className={cn(
-              'rounded-full px-3.5 py-1 text-[12.5px]',
+              'min-h-8 whitespace-nowrap rounded-md px-3 py-1 text-[12px]',
               pane === p
                 ? 'bg-secondary text-foreground'
                 : 'text-muted-foreground hover:text-foreground',
@@ -141,14 +141,14 @@ export function DetailHeader({
           </button>
         ))}
       </div>
-      <div className="ml-auto flex items-center gap-1">
+      <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
         {detail && (
           <button
             onClick={() => onReviewPr(selection.owner, selection.repo, selection.number)}
             title="Run Mira's two-stage review on this PR's diff. Findings appear in the review panel."
-            className="inline-flex items-center gap-1.5 rounded-full border border-mira-blue/40 bg-mira-blue/[0.08] px-3.5 py-1 text-[12.5px] font-medium text-mira-blue transition-colors hover:bg-mira-blue/[0.14]"
+            className="inline-flex min-h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-mira-blue/30 bg-mira-blue/[0.06] px-3 py-1.5 text-[12px] font-medium text-mira-blue transition-colors hover:bg-mira-blue/[0.14]"
           >
-            <Sparkle className="size-3.5" fill="currentColor" />
+            <Sparkle className="size-3.5 shrink-0" fill="currentColor" />
             Review with Mira
           </button>
         )}
@@ -158,7 +158,7 @@ export function DetailHeader({
             target="_blank"
             rel="noreferrer"
             title="Open on GitHub"
-            className="rounded-full p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+            className="shrink-0 rounded-md p-2 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
           >
             <SquareArrowOutUpRight className="size-4" />
           </a>

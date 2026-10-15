@@ -156,6 +156,7 @@ pub struct PullRequestFilesView {
 #[derive(Debug, Serialize)]
 pub struct FileChangeView {
     pub filename: String,
+    pub previous_filename: Option<String>,
     pub status: String,
     pub additions: u64,
     pub deletions: u64,
@@ -363,6 +364,10 @@ pub async fn get_pull_request_files(
     let files: Vec<FileChangeView> = arr
         .iter()
         .map(|f| FileChangeView {
+            previous_filename: f
+                .get("previous_filename")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
             filename: f
                 .get("filename")
                 .and_then(Value::as_str)
@@ -1502,5 +1507,76 @@ mod auth_recovery_tests {
             .await
             .unwrap();
         assert_eq!(value["number"].as_u64(), parts[2].parse::<u64>().ok());
+    }
+}
+
+/// Context panel PR discovery uses the same credentials and recovery as the
+/// main PR panel; it does not depend on an agent reporting a `gh` command.
+pub(crate) async fn current_branch_pr(cwd: PathBuf) -> Result<Option<Value>, String> {
+    let identity = tokio::task::spawn_blocking(move || {
+        let (owner, repo) = parse_github_remote(&cwd)?;
+        let output = Command::new("git")
+            .current_dir(cwd)
+            .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let branch = String::from_utf8(output.stdout).ok()?.trim().to_string();
+        Some((owner, repo, branch))
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    let Some((owner, repo, branch)) = identity else {
+        return Ok(None);
+    };
+    let Some(token) = resolve_token().await else {
+        return Err(missing_token_msg());
+    };
+    let mut url = reqwest::Url::parse(&format!("{GITHUB_API}/repos/{owner}/{repo}/pulls"))
+        .map_err(|e| e.to_string())?;
+    url.query_pairs_mut()
+        .append_pair("head", &format!("{owner}:{branch}"))
+        .append_pair("state", "all")
+        .append_pair("sort", "created")
+        .append_pair("direction", "desc")
+        .append_pair("per_page", "10");
+    let values: Vec<Value> = gh_get(&build_client(), &token, url.as_str())
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(branch_pr_from(&values, &owner, &repo, &branch))
+}
+
+fn branch_pr_from(values: &[Value], owner: &str, repo: &str, branch: &str) -> Option<Value> {
+    values.iter().find(|v| v.pointer("/head/ref").and_then(Value::as_str) == Some(branch)
+        && v.pointer("/head/repo/full_name").and_then(Value::as_str).is_some_and(|name| name.eq_ignore_ascii_case(&format!("{owner}/{repo}"))))
+        .map(|v| serde_json::json!({
+            "number": v["number"], "title": v["title"], "url": v["html_url"],
+            "state": if v.get("merged_at").is_some_and(|v| !v.is_null()) { "MERGED" } else if v["state"] == "closed" { "CLOSED" } else { "OPEN" },
+            "isDraft": v["draft"].as_bool().unwrap_or(false), "reviewDecision": null,
+        }))
+}
+
+#[cfg(test)]
+mod branch_pr_tests {
+    use super::*;
+    #[test]
+    fn current_branch_pr_is_not_inferred_from_agent_actions_or_another_fork() {
+        let pr = |repo, branch, state, merged| serde_json::json!({"number":213,"title":"Walkthrough","html_url":"https://github.com/runmira/mira/pull/213","state":state,"merged_at":merged,"draft":false,"head":{"ref":branch,"repo":{"full_name":repo}}});
+        let values = [
+            pr("someone/mira", "feature", "open", Value::Null),
+            pr("runmira/mira", "other", "open", Value::Null),
+            pr(
+                "runmira/mira",
+                "feature",
+                "closed",
+                Value::String("2026-10-15".into()),
+            ),
+        ];
+        let found = branch_pr_from(&values, "runmira", "mira", "feature").unwrap();
+        assert_eq!(found["state"], "MERGED");
+        assert_eq!(found["number"], 213);
+        assert!(branch_pr_from(&values[..2], "runmira", "mira", "feature").is_none());
     }
 }

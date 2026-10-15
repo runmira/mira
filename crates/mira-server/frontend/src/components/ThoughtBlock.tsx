@@ -1,3 +1,4 @@
+import { Markdown } from './Markdown';
 import { STREAM_ROW_GUTTER } from '../lib/streamLayout';
 import { ThinkingPreview } from './ThinkingPreview';
 import { ActivityShimmer } from './ActivityShimmer';
@@ -20,11 +21,13 @@ import { cn } from '@/lib/utils';
  */
 export function ThoughtBlock({
   content,
+  onOpenFile,
   live,
   startedAt,
   endedAt,
 }: {
   content: string;
+  onOpenFile?: (path: string, diff: import('../types').DiffPreview | null) => void;
   live: boolean;
   /** Epoch ms. Omitted for reasoning restored from history — the
    *  duration wasn't recorded, so the header just reads "Thought". */
@@ -136,7 +139,7 @@ export function ThoughtBlock({
             'max-h-60 overflow-y-auto overscroll-contain',
           )}
         >
-          <div ref={contentRef} className="whitespace-pre-wrap break-words">{body}</div>
+          <div ref={contentRef} className="min-w-0 break-words"><Markdown text={body} onOpenFile={onOpenFile} /></div>
         </div>
       </Collapse>
     </div>
