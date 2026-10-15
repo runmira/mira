@@ -61,6 +61,7 @@ mod file;
 mod git;
 mod github_auth;
 mod github_connect;
+mod handoff;
 pub mod hooks_api;
 pub mod interactive;
 mod keep_awake;

@@ -2628,7 +2628,7 @@ async fn prompt_agent_at_epoch(
         let text = if command_instance.is_some() {
             text
         } else {
-            match crate::session_engine::take_context_for_agent(&slot).await {
+            match crate::session_engine::take_context_for_agent(&state, &slot, &text).await {
                 Some(context) => format!("{context}{text}"),
                 None => text,
             }
@@ -2735,6 +2735,11 @@ async fn prompt_agent_at_epoch(
             return;
         };
         info!(session = %recovery_slot.id, elapsed_ms = sent.elapsed().as_millis() as u64, "external agent prompt call returned");
+        // An accepted prompt delivered its handoff; a failed one leaves it
+        // owed, for the next prompt to carry.
+        if outcome.is_ok() {
+            crate::session_engine::confirm_context_for_agent(&recovery_slot).await;
+        }
         match outcome {
             // `None` means a native agent, which announces its own
             // turn end when the CLI reports `result`. Announcing it
