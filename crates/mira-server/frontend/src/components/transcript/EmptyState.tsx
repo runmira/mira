@@ -2,8 +2,8 @@
  * The new-chat empty state (starter prompts, recent chats) and the
  * placeholder for unbuilt views. Split out of App.tsx.
  */
-import { useEffect, useState } from 'react';
-import { listSessions } from '../../api';
+import { useMemo } from 'react';
+import { useResource } from '../../state/resources/hooks';
 import { ProjectSwitcher } from '../ProjectSwitcher';
 import { basename } from '../../lib/utils';
 import miraLogo from '../../assets/mira-logo.png';
@@ -33,21 +33,16 @@ export function EmptyState({
   /** "New project" — the platform folder panel on the desktop build. */
   onNewProject: () => void;
 }) {
-  const [recent, setRecent] = useState<SessionSummary[]>([]);
-  const [switcherOpen, setSwitcherOpen] = useState(false);
   const project = basename(cwd) || 'this folder';
-  useEffect(() => {
-    listSessions()
-      .then((all) =>
-        setRecent(
-          all
-            .filter((s) => s.cwd === cwd && s.message_count > 0 && !s.active)
-            .sort((a, b) => b.updated_at - a.updated_at)
-            .slice(0, 4),
-        ),
-      )
-      .catch(() => setRecent([]));
-  }, [cwd]);
+  const sessions = useResource('sessions');
+  const recent = useMemo<SessionSummary[]>(
+    () =>
+      (sessions.data ?? [])
+        .filter((s) => s.cwd === cwd && s.message_count > 0 && !s.active)
+        .sort((a, b) => b.updated_at - a.updated_at)
+        .slice(0, 4),
+    [sessions.data, cwd],
+  );
   return (
     <div className="flex min-h-full flex-col items-center justify-center px-6 py-10">
       <img
@@ -61,14 +56,15 @@ export function EmptyState({
           without needing a control to look like. */}
       <h2 className="mt-4 text-[19px] font-medium tracking-tight text-foreground">
         What should we build in{' '}
-        <button
-          type="button"
-          onClick={() => setSwitcherOpen(true)}
-          title={`${cwd} — switch project`}
-          className="underline decoration-dotted decoration-1 underline-offset-[5px] transition-colors hover:text-mira-blue"
-        >
-          {project}
-        </button>
+        <ProjectSwitcher cwd={cwd} onPicked={onSwitchProject} onNewProject={onNewProject}>
+          <button
+            type="button"
+            title={`${cwd} — switch project`}
+            className="underline decoration-dotted decoration-1 underline-offset-[5px] transition-colors hover:text-mira-blue data-[state=open]:text-mira-blue"
+          >
+            {project}
+          </button>
+        </ProjectSwitcher>
         ?
       </h2>
       <p className="mt-1.5 max-w-[46ch] text-center text-[13px] leading-relaxed text-muted-foreground">
@@ -117,13 +113,6 @@ export function EmptyState({
         </div>
       )}
 
-      <ProjectSwitcher
-        open={switcherOpen}
-        onClose={() => setSwitcherOpen(false)}
-        cwd={cwd}
-        onPicked={onSwitchProject}
-        onNewProject={onNewProject}
-      />
     </div>
   );
 }

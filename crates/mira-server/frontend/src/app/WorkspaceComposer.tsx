@@ -54,6 +54,7 @@ const COMPOSER_FIELDS = [
   'agentPostures',
   'setPendingAcpMode',
   'openProjectPicker',
+  'switchCwd',
   'environment',
   'environments',
   'envSwitching',
@@ -127,6 +128,7 @@ export const WorkspaceComposer = memo(function WorkspaceComposer(
     | 'agentPostures'
     | 'setPendingAcpMode'
     | 'openProjectPicker'
+    | 'switchCwd'
     | 'environment'
     | 'environments'
     | 'envSwitching'
@@ -201,6 +203,7 @@ export const WorkspaceComposer = memo(function WorkspaceComposer(
     agentPostures,
     setPendingAcpMode,
     openProjectPicker,
+    switchCwd,
     environment,
     environments,
     envSwitching,
@@ -364,6 +367,7 @@ export const WorkspaceComposer = memo(function WorkspaceComposer(
         }}
         agentDriving={acpDriver != null}
         onOpenPicker={() => void openProjectPicker()}
+        onSwitchProject={(path) => void switchCwd(path)}
         onCwdSwitched={(_path, id) => {
           if (id) attachSession(id);
         }}

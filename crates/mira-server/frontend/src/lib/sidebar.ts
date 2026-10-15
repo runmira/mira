@@ -38,3 +38,14 @@ export function settledPeriod(s: SessionSummary, now = new Date()): string {
   week.setDate(week.getDate() - ((week.getDay() + 6) % 7));
   return at * 1000 >= week.getTime() ? 'This week' : 'Earlier';
 }
+
+/** The Recents shelf: the chats you touched last, across every project.
+ *  Folders keep their chats in creation order, so this is the one place
+ *  activity floats a chat up. Settled chats live on their own shelf and
+ *  untouched blank threads aren't worth a row. */
+export function recentChats(sessions: SessionSummary[], limit: number): SessionSummary[] {
+  return sessions
+    .filter((s) => !isSettled(s) && (s.message_count > 0 || !!s.title))
+    .sort((a, b) => b.updated_at - a.updated_at || a.id.localeCompare(b.id))
+    .slice(0, limit);
+}

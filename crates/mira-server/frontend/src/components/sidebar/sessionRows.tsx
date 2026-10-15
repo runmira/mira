@@ -24,6 +24,7 @@ import { rowStatus } from '../../lib/sidebar';
 import type { BackgroundMode, SessionPr, SessionSummary } from '../../types';
 import { AgentIcon, ModelIcon } from '../AgentIcon';
 import { parseSentAttachments } from '../composer/attachments';
+import { SidebarFolderIcon } from './navigation';
 import { backgroundMenuItems, RowMenu } from './RowMenu';
 import { ForkNode } from './types';
 /** Human-readable session label. Strips the `## Attached files … ` block
@@ -106,8 +107,12 @@ export function SessionRow({
   selecting = false,
   checked = false,
   onToggleSelect,
+  project,
 }: {
   session: SessionSummary;
+  /** The project's name, for rows listed outside their folder (Recents).
+   *  It takes the branch's place on the second line. */
+  project?: string;
   /** Fork nesting level: 0 for a chat, 1 for a fork of it, … */
   depth?: number;
   /** The label of the chat this one was forked from, for the tooltip. */
@@ -252,8 +257,9 @@ export function SessionRow({
           </span>
           {/* A second line only when there's something to say: a state
            *  other than resting, or a worktree branch. The project is the
-           *  folder the row sits in, so it isn't repeated here. */}
-          {!selecting && (detail.tone !== 'idle' || !!session.worktree_branch) && (
+           *  folder the row sits in, so it isn't repeated here — except on
+           *  Recents, where the row sits outside it. */}
+          {!selecting && (detail.tone !== 'idle' || !!session.worktree_branch || !!project) && (
             <span className="mt-0.5 flex min-w-0 items-center gap-1 text-[10.5px] leading-[15px]">
               <span
                 className={cn(
@@ -269,11 +275,22 @@ export function SessionRow({
               >
                 {detail.tone === 'idle' ? null : detail.label}
               </span>
-              {detail.tone !== 'attention' && session.worktree_branch && (
+              {project ? (
                 <>
                   {detail.tone !== 'idle' && <span className="shrink-0 text-muted-foreground/35">·</span>}
-                  <span className="truncate text-muted-foreground/60">{session.worktree_branch}</span>
+                  <span className="flex min-w-0 shrink items-center gap-1 text-muted-foreground/65">
+                    <SidebarFolderIcon name={project} open={false} className="size-3" />
+                    <span className="truncate">{project}</span>
+                  </span>
                 </>
+              ) : (
+                detail.tone !== 'attention' &&
+                session.worktree_branch && (
+                  <>
+                    {detail.tone !== 'idle' && <span className="shrink-0 text-muted-foreground/35">·</span>}
+                    <span className="truncate text-muted-foreground/60">{session.worktree_branch}</span>
+                  </>
+                )
               )}
             </span>
           )}

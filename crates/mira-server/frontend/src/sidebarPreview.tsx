@@ -173,7 +173,8 @@ function Preview() {
           <li><b>Fix Codex plan mode handoff</b>: running</li>
           <li><b>Audit MCP elicitation replies</b>: finished while you were away (unread dot)</li>
           <li><b>Sidebar redesign</b>: the open chat, with a fork under it</li>
-          <li><b>Filters</b>: Working and Needs you show counts; each chat is listed once, in its project</li>
+          <li><b>Recents</b>: the latest chats across projects, each naming its project; three by default, “Show more” for eight</li>
+          <li><b>Filters</b>: Working and Needs you show counts</li>
           <li><b>Settled</b> (bottom, collapsed): PR merged, PR closed, branch merged, settled by hand</li>
           <li><b>Evals follow-up</b>: PR merged but you wrote to it since, so it stays in its folder</li>
           <li>PR marks: open and draft in grey, merged in colour; forks use the split mark</li>

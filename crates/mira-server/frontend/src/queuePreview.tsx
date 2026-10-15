@@ -2,7 +2,21 @@ import React, { useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import './styles.css';
 import { Composer, type QueuedComposerMessage } from './components/Composer';
-import type { Mode } from './types';
+import type { Mode, SessionSummary } from './types';
+import { RuntimeProvider } from './state/RuntimeProvider';
+
+// The project chip's switcher lists folders from /api/sessions; answer it
+// here so the page needs no server.
+const ROOT = '/Users/damilola/Desktop/coding_agent';
+const FAKE_SESSIONS = [`${ROOT}/mira`, `${ROOT}/landing`, '/Users/damilola/Desktop/Faunly', `${ROOT}/mira-service`].map(
+  (cwd, i): SessionSummary => ({ id: `s${i}`, title: 'Chat', cwd, model: 'gpt-6-astra', created_at: 0, updated_at: 1000 - i, message_count: 2, active: false }),
+);
+const realFetch = window.fetch.bind(window);
+window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+  const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, window.location.origin);
+  if (url.pathname === '/api/sessions') return new Response(JSON.stringify(FAKE_SESSIONS), { headers: { 'content-type': 'application/json' } });
+  return realFetch(input, init);
+};
 
 function Preview() {
   const [queued, setQueued] = useState<QueuedComposerMessage[]>([
@@ -38,6 +52,7 @@ function Preview() {
         onSetModel={() => {}}
         onSetModelOption={() => {}}
         onOpenPicker={() => {}}
+        onSwitchProject={(path) => setSteered(`Switched to ${path}`)}
         onInterrupt={() => setSteered('Interrupted current turn')}
         onNewChat={() => {}}
         onOpenSettings={() => {}}
@@ -61,6 +76,6 @@ function Preview() {
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <Preview />
+    <RuntimeProvider scope={{ backend: window.location.origin, account: 'preview' }}><Preview /></RuntimeProvider>
   </React.StrictMode>,
 );

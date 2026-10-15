@@ -1,5 +1,14 @@
 export const COLLAPSED_KEY = 'mira.sidebar.collapsed-projects';
 
+export const RECENTS_OPEN_KEY = 'mira.sidebar.recents-open';
+
+export const RECENTS_MORE_KEY = 'mira.sidebar.recents-more';
+
+/** Recents shows a few chats, or a longer list once asked. */
+export const RECENTS_LIMIT = 3;
+
+export const RECENTS_MORE_LIMIT = 8;
+
 export const SETTLED_OPEN_KEY = 'mira.sidebar.settled-open';
 
 export const PER_GROUP_LIMIT = 5;
