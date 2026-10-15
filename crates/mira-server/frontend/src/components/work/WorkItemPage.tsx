@@ -23,7 +23,8 @@ import { PageToolbar } from '../PageToolbar';
 import { basename } from '../sidebar/groups';
 import { EngineBadge, PR_MARK, sessionLabel, SessionStatus, timeAgo } from '../sidebar/sessionRows';
 import { CiIcon } from './WorkSidebar';
-import { diffTotals, type TimelineKind, type WorkDetail } from './types';
+import { diffTotals, type TimelineKind, type WorkDetail } from '../../lib/workDetail';
+import { openExternal } from '@/lib/desktop';
 
 const STATE_PILL: Record<WorkState, { label: string; tone: string }> = {
   'needs-you': { label: 'Needs you', tone: 'bg-amber-500/15 text-amber-700 dark:text-amber-300' },
@@ -41,15 +42,20 @@ export function WorkItemPage({
   activeSessionId,
   onOpenChat,
   onMerge,
+  merging = false,
+  mergeError = null,
 }: {
   item: WorkItem;
+  /** Undefined while it loads. */
   detail?: WorkDetail;
   activeSessionId?: string;
   onOpenChat?: (id: string) => void;
   onMerge?: () => void;
+  merging?: boolean;
+  mergeError?: string | null;
 }) {
   const pill = STATE_PILL[item.state];
-  const canMerge = item.state === 'ready';
+  const canMerge = item.state === 'ready' && detail?.mergeable !== false && !merging;
   return (
     <div className="flex h-full min-w-0 flex-col">
       <PageToolbar
@@ -62,7 +68,7 @@ export function WorkItemPage({
       >
         <span className={cn('shrink-0 rounded-full px-2 py-0.5 text-[11.5px] font-medium', pill.tone)}>{pill.label}</span>
         {item.pr && item.pr.state !== 'merged' && item.pr.state !== 'closed' && (
-          <Button size="sm" disabled={!canMerge} onClick={onMerge} title={canMerge ? undefined : mergeBlocker(item)} className="h-7 gap-1.5 px-3 text-[12.5px]">
+          <Button size="sm" disabled={!canMerge} onClick={onMerge} title={canMerge ? undefined : mergeBlocker(item, detail, merging)} className="h-7 gap-1.5 px-3 text-[12.5px]">
             <GitMerge className="size-3.5" />
             Merge
           </Button>
@@ -79,7 +85,7 @@ export function WorkItemPage({
             )}
             <Card icon={<CircleDot className="size-3.5" />} title={item.meta.issue ? `Goal · issue #${item.meta.issue.number}` : 'Goal'}>
               <p className="whitespace-pre-line text-[13.5px] leading-relaxed text-foreground/85">
-                {detail?.goal ?? 'No issue linked. The goal is whatever the first chat asked for.'}
+                {detail ? (detail.goal ?? 'Nothing says what this is for yet.') : 'Loading…'}
               </p>
             </Card>
             {detail && detail.plan.length > 0 && <PlanCard plan={detail.plan} />}
@@ -88,7 +94,7 @@ export function WorkItemPage({
           </div>
           <div className="flex min-w-0 flex-col gap-4">
             <BranchCard item={item} detail={detail} />
-            {item.pr && <PrCard item={item} detail={detail} canMerge={canMerge} onMerge={onMerge} />}
+            {item.pr && <PrCard item={item} detail={detail} canMerge={canMerge} onMerge={onMerge} merging={merging} mergeError={mergeError} />}
             {detail && detail.timeline.length > 0 && <TimelineCard timeline={detail.timeline} />}
           </div>
         </div>
@@ -101,8 +107,10 @@ function waitingChat(item: WorkItem): SessionSummary | undefined {
   return item.sessions.find((s) => s.needs_attention || s.failure_reason);
 }
 
-function mergeBlocker(item: WorkItem): string {
+function mergeBlocker(item: WorkItem, detail?: WorkDetail, merging = false): string {
+  if (merging) return 'Merging…';
   if (item.pr?.state === 'draft') return 'Still a draft';
+  if (detail?.mergeable === false) return 'GitHub can’t merge it: resolve conflicts first';
   if (item.meta.ci === 'failing') return 'Checks are failing';
   if (item.meta.ci === 'pending') return 'Checks are still running';
   if (item.meta.review !== 'approved') return 'Waiting for an approving review';
@@ -186,7 +194,7 @@ function ChangesCard({ detail }: { detail: WorkDetail }) {
   return (
     <Card
       icon={<FileCode className="size-3.5" />}
-      title="Changes"
+      title={detail.filesSource === 'pr' ? 'Changes' : 'Uncommitted changes'}
       aside={
         <span className="tabular-nums">
           <span className="text-muted-foreground">{total.files} files </span>
@@ -226,9 +234,9 @@ function BranchCard({ item, detail }: { item: WorkItem; detail?: WorkDetail }) {
         <dt className="text-muted-foreground">Into</dt>
         <dd className="font-mono text-[12px] text-foreground/90">
           {detail?.base ?? 'main'}
-          {(detail?.ahead != null || detail?.behind != null) && (
+          {detail?.ahead != null && (
             <span className="ml-2 font-sans text-muted-foreground">
-              {detail.ahead ?? 0} ahead · {detail.behind ?? 0} behind
+              {detail.ahead} ahead · {detail.behind ?? 0} behind
             </span>
           )}
         </dd>
@@ -254,26 +262,30 @@ const REVIEW: Record<ReviewState, { label: string; tone: string }> = {
   pending: { label: 'Review requested', tone: 'text-muted-foreground' },
 };
 
-function PrCard({ item, detail, canMerge, onMerge }: { item: WorkItem; detail?: WorkDetail; canMerge: boolean; onMerge?: () => void }) {
+function PrCard({ item, detail, canMerge, onMerge, merging, mergeError }: { item: WorkItem; detail?: WorkDetail; canMerge: boolean; onMerge?: () => void; merging: boolean; mergeError: string | null }) {
   const pr = item.pr!;
   const { Icon, tone, label } = PR_MARK[pr.state];
   const open = pr.state === 'open' || pr.state === 'draft';
   return (
     <Card icon={<GitPullRequest className="size-3.5" />} title="Pull request">
-      <div className="mb-2 flex items-start gap-2">
+      <button type="button" onClick={() => void openExternal(pr.url)} className="mb-2 flex w-full items-start gap-2 rounded-md text-left hover:opacity-80">
         <Icon className={cn('mt-0.5 size-4 shrink-0', tone)} />
         <div className="min-w-0">
           <div className="text-[13.5px] font-medium leading-snug text-foreground">{pr.title}</div>
           <div className="text-[11.5px] text-muted-foreground">#{pr.number} · {label}</div>
         </div>
-      </div>
+      </button>
+      {!detail && <p className="text-[12px] text-muted-foreground">Loading checks and reviews…</p>}
       {detail && detail.checks.length > 0 && (
         <ul className="mb-2 flex flex-col gap-1 border-t border-border/60 pt-2">
           {detail.checks.map((c) => (
             <li key={c.name} className="flex items-center gap-2 text-[12.5px]">
               <CiIcon state={c.state} className="size-3.5 shrink-0" />
-              <span className="min-w-0 flex-1 truncate text-foreground/85">{c.name}</span>
-              <span className="text-[11px] tabular-nums text-muted-foreground/60">{c.duration ?? ''}</span>
+              {c.url ? (
+                <button type="button" onClick={() => void openExternal(c.url!)} className="min-w-0 flex-1 truncate text-left text-foreground/85 hover:underline">{c.name}</button>
+              ) : (
+                <span className="min-w-0 flex-1 truncate text-foreground/85">{c.name}</span>
+              )}
             </li>
           ))}
         </ul>
@@ -293,9 +305,13 @@ function PrCard({ item, detail, canMerge, onMerge }: { item: WorkItem; detail?: 
         <div className="border-t border-border/60 pt-2.5">
           <Button size="sm" className="w-full gap-1.5" disabled={!canMerge} onClick={onMerge}>
             <GitMerge className="size-3.5" />
-            Squash and merge
+            {merging ? 'Merging…' : 'Squash and merge'}
           </Button>
-          {!canMerge && <p className="mt-1.5 text-center text-[11.5px] text-muted-foreground">{mergeBlocker(item)}</p>}
+          {mergeError ? (
+            <p className="mt-1.5 text-center text-[11.5px] text-red-600 dark:text-red-400">{mergeError}</p>
+          ) : (
+            !canMerge && <p className="mt-1.5 text-center text-[11.5px] text-muted-foreground">{mergeBlocker(item, detail, merging)}</p>
+          )}
         </div>
       )}
     </Card>

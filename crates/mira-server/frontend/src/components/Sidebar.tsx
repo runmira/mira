@@ -19,7 +19,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { PluginsPanel, PullRequestPanel, SessionPeek } from '../lazyViews';
+import { PluginsPanel, PullRequestPanel, SessionPeek, WorkSidebarView } from '../lazyViews';
 import { isSettled } from '../lib/settled';
 import { settledPeriod, type SidebarFilter } from '../lib/sidebar';
 import { BranchElbow } from './BranchElbow';
@@ -57,7 +57,7 @@ export function Sidebar(props: Props) {
     settingsSection = 'provider',
     onSettingsSectionChange,
     onExitSettings,
-    work,
+    onAttachSession,
   } = props;
   const {
     hiddenTitleBar,
@@ -172,23 +172,17 @@ export function Sidebar(props: Props) {
               unambiguous without relying on colour alone. */}
             <div className="grid grid-cols-2 gap-0.5 rounded-full border border-border/80 bg-shade/25 p-0.5 backdrop-blur-md">
               {(['chat', 'work'] as const).map((tab) => {
-                const selected = (tab === 'work') === !!work?.open;
-                const disabled = tab === 'work' && !work;
+                const selected = (tab === 'work') === (activeView === 'work');
                 return (
                   <button
                     key={tab}
                     type="button"
-                    disabled={disabled}
                     aria-pressed={selected}
-                    title={disabled ? 'Not implemented yet' : undefined}
-                    onClick={() => work?.onToggle(tab === 'work')}
+                    onClick={() => !selected && onNavigate(tab)}
+                    onPointerEnter={tab === 'work' ? WorkSidebarView.preload : undefined}
                     className={cn(
                       'rounded-full px-3.5 py-1 text-center text-[12.5px] transition-colors',
-                      selected
-                        ? 'bg-foreground/90 font-medium text-background'
-                        : disabled
-                          ? 'cursor-not-allowed text-foreground/45'
-                          : 'text-foreground/70 hover:text-foreground',
+                      selected ? 'bg-foreground/90 font-medium text-background' : 'text-foreground/70 hover:text-foreground',
                     )}
                   >
                     {tab === 'chat' ? 'Chat' : 'Work'}
@@ -247,8 +241,15 @@ export function Sidebar(props: Props) {
               </nav>
             </div>
           </div>
-        ) : work?.open ? (
-          <div className="flex min-h-0 flex-1 flex-col">{work.body}</div>
+        ) : activeView === 'work' ? (
+          <div className="flex min-h-0 flex-1 flex-col">
+            <LazyBoundary>
+              <WorkSidebarView sessionId={activeSessionId} onOpenChat={(id) => {
+                onAttachSession?.(id);
+                onNavigate('chat');
+              }} />
+            </LazyBoundary>
+          </div>
         ) : (
           <div className="flex min-h-0 flex-1 flex-col">
             {!selecting && (sessions.length > 0 || searching) && (

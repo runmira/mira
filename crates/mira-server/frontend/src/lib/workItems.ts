@@ -19,11 +19,16 @@ export type WorkMeta = {
   issue?: { number: number; title: string } | null;
   ci?: CiState | null;
   review?: ReviewState | null;
+  /** The PR's line counts. */
+  diff?: { added: number; removed: number; files: number } | null;
 };
 
 export type WorkItem = {
   key: string;
+  /** The project, not the worktree (see `projectRoot`). */
   cwd: string;
+  /** Where the branch is checked out, when that's a worktree. */
+  worktree: string | null;
   branch: string | null;
   pr: SessionPr | null;
   /** Oldest first: the chat that started the work leads. */
@@ -38,9 +43,16 @@ export type WorkItem = {
   meta: WorkMeta;
 };
 
+/** The project a chat belongs to: worktree chats run in
+ *  `<project>/.mira/worktrees/<name>`, and count as the project's. */
+export function projectRoot(cwd: string): string {
+  const i = cwd.indexOf('/.mira/worktrees/');
+  return i >= 0 ? cwd.slice(0, i) : cwd;
+}
+
 function ownKey(s: SessionSummary): string | null {
-  if (s.pr) return `${s.cwd}#${s.pr.number}`;
-  if (s.worktree_branch) return `${s.cwd}@${s.worktree_branch}`;
+  if (s.pr) return `${projectRoot(s.cwd)}#${s.pr.number}`;
+  if (s.worktree_branch) return `${projectRoot(s.cwd)}@${s.worktree_branch}`;
   return null;
 }
 
@@ -95,7 +107,9 @@ export function groupWorkItems(sessions: SessionSummary[], meta: Record<string, 
     list.sort((a, b) => a.created_at - b.created_at || a.id.localeCompare(b.id));
     const owner = list.find((s) => ownKey(s) === key) ?? list[0];
     const pr = list.find((s) => s.pr)?.pr ?? null;
-    const m = meta[key] ?? {};
+    const given = meta[key] ?? {};
+    const issue = given.issue ?? (linkedIssue(owner.worktree_branch ?? null) ? { number: linkedIssue(owner.worktree_branch ?? null)!, title: '' } : null);
+    const m: WorkMeta = { ...given, issue };
     const agents: (string | null)[] = [];
     for (const s of list) {
       const a = s.agent_driver ?? null;
@@ -103,7 +117,8 @@ export function groupWorkItems(sessions: SessionSummary[], meta: Record<string, 
     }
     items.push({
       key,
-      cwd: owner.cwd,
+      cwd: projectRoot(owner.cwd),
+      worktree: list.map((s) => s.cwd).find((cwd) => cwd !== projectRoot(cwd)) ?? null,
       branch: owner.worktree_branch ?? null,
       pr,
       sessions: list,
@@ -120,4 +135,66 @@ export function groupWorkItems(sessions: SessionSummary[], meta: Record<string, 
 /** Items per state, in shelf order; every state is present. */
 export function workShelves(items: WorkItem[]): [WorkState, WorkItem[]][] {
   return WORK_STATES.map((state) => [state, items.filter((i) => i.state === state)]);
+}
+
+/** `owner/repo/number` from a PR's GitHub URL. */
+export function prRef(pr: Pick<SessionPr, 'url' | 'number'>): { owner: string; repo: string; number: number } | null {
+  const m = /github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/.exec(pr.url);
+  return m ? { owner: m[1], repo: m[2], number: Number(m[3]) } : null;
+}
+
+/** One CI state from GitHub's check runs: any failure fails, anything
+ *  unfinished is pending, and no checks at all says nothing. */
+export function ciState(checks: { status: string; conclusion: string | null }[]): CiState | null {
+  if (checks.length === 0) return null;
+  const bad = new Set(['failure', 'timed_out', 'cancelled', 'action_required', 'startup_failure']);
+  if (checks.some((c) => c.conclusion && bad.has(c.conclusion))) return 'failing';
+  if (checks.some((c) => c.status !== 'completed')) return 'pending';
+  return 'passing';
+}
+
+/** GitHub's review decision (`APPROVED`, `CHANGES_REQUESTED`,
+ *  `REVIEW_REQUIRED`), or failing that the latest review per reviewer. */
+export function reviewState(decision: string | null, reviews: { author: string; state: string }[] = []): ReviewState | null {
+  const d = decision?.toUpperCase();
+  if (d === 'APPROVED') return 'approved';
+  if (d === 'CHANGES_REQUESTED') return 'changes-requested';
+  if (d === 'REVIEW_REQUIRED') return 'pending';
+  const latest = new Map<string, string>();
+  for (const r of reviews) if (r.state !== 'COMMENTED') latest.set(r.author, r.state);
+  const states = [...latest.values()];
+  if (states.includes('CHANGES_REQUESTED')) return 'changes-requested';
+  if (states.includes('APPROVED')) return 'approved';
+  return null;
+}
+
+/** The issue a branch or PR says it works on: `issue-12-…` / `12-…`
+ *  branches, or "Fixes #12" style lines in the PR body. */
+export function linkedIssue(branch: string | null, body?: string | null): number | null {
+  const fromBody = body && /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/i.exec(body);
+  if (fromBody) return Number(fromBody[1]);
+  const fromBranch = branch && /(?:^|\/)(?:issue-|gh-)?(\d+)(?:-|$)/.exec(branch);
+  return fromBranch ? Number(fromBranch[1]) : null;
+}
+
+/** Item keys go in the URL as one path segment. */
+export function workPath(key?: string | null): string {
+  return key ? `/work/${encodeURIComponent(key)}` : '/work';
+}
+
+/** The worktree branch an issue's work gets: `issue-N-short-title`. */
+export function branchFor(issue: { number: number; title: string }): string {
+  const slug = issue.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').split('-').filter(Boolean).slice(0, 4).join('-');
+  return slug ? `issue-${issue.number}-${slug}` : `issue-${issue.number}`;
+}
+
+/** The item key in a `/work/:key` path, or null on `/work` or elsewhere. */
+export function workKeyFromPath(pathname: string): string | null {
+  const m = /^\/work\/(.+)$/.exec(pathname);
+  if (!m) return null;
+  try {
+    return decodeURIComponent(m[1]);
+  } catch {
+    return null;
+  }
 }

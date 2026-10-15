@@ -19,7 +19,7 @@ import {
 const DEBOUNCE_MS = 160;
 
 /** `value` once it has held still for `ms`; `null` until then. */
-function useDebounced<T>(value: T, ms: number): T | null {
+export function useDebounced<T>(value: T, ms: number): T | null {
   const [settled, setSettled] = useState<T | null>(null);
   useEffect(() => {
     const timer = setTimeout(() => setSettled(value), ms);

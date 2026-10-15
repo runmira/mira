@@ -2,22 +2,21 @@ import { RuntimeProvider } from './state/RuntimeProvider';
 /**
  * Dev-only prototype of the sidebar's Work tab. Chat is organised by
  * conversation; Work by deliverable: an issue / branch / PR, with every
- * chat, fork, launched thread and agent that touched it. Items are derived
- * from fake SessionSummary rows by `groupWorkItems`; checks, reviews,
- * plans and diffs are faked here too. Nothing reaches a server.
+ * chat, fork, launched thread and agent that touched it. This page runs the
+ * real Work containers and queries against a fake API (sessions, PR detail
+ * and files, branch, diff, issue search, worktree, merge). Nothing reaches a
+ * server.
  * Open /work-preview.html on the Vite dev server.
  */
 import { LazyMotion, domMax } from 'framer-motion';
 import React, { useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import './styles.css';
+import { createMemoryRouter, RouterProvider, useLocation, useNavigate } from 'react-router';
+import type { CheckRunView, PullRequestDetailView, ReviewView } from './api/pullRequests';
 import { Sidebar, type MainView } from './components/Sidebar';
-import { branchFor, StartWork } from './components/work/StartWork';
-import type { WorkDetail } from './components/work/types';
-import { WorkItemPage } from './components/work/WorkItemPage';
-import { WorkSidebar } from './components/work/WorkSidebar';
+import { WorkView } from './components/work/WorkView';
 import type { IssueOption } from './lib/issueMentions';
-import { groupWorkItems, type WorkMeta } from './lib/workItems';
 import type { SessionSummary } from './types';
 
 const ROOT = '/Users/damilola/Desktop/coding_agent';
@@ -34,9 +33,10 @@ function chat(s: Partial<SessionSummary> & { id: string; title: string }): Sessi
   return { model: 'claude-sonnet-4-5-20250929', cwd: MIRA, created_at: ago(DAY), updated_at: ago(30), message_count: 12, active: false, ...s };
 }
 
-const INITIAL: SessionSummary[] = [
+const SESSIONS: SessionSummary[] = [
   // Needs you: an approval on the lead chat, a thread still running.
-  chat({ id: 'stripe', title: 'Add Stripe webhooks', agent_driver: 'claude-code', created_at: ago(300), updated_at: ago(6),
+  chat({ id: 'stripe', title: 'Add Stripe webhooks', agent_driver: 'claude-code', created_at: ago(300), updated_at: ago(6), cwd: `${WT}/issue-212-stripe-webhooks`,
+    first_user_message: 'Payments made through Checkout never reach our database. Add a webhook endpoint that verifies Stripe signatures and records checkout.session.completed.',
     needs_attention: true, attention_reason: 'Approve 3 commands', running: true, worktree_branch: 'issue-212-stripe-webhooks', worktree_status: 'unmerged' }),
   chat({ id: 'stripe-docs', title: 'Docs for the webhook endpoint', launched_by: 'stripe', created_at: ago(120), updated_at: ago(12), running: true }),
   chat({ id: 'stripe-fork', title: 'Add Stripe webhooks (fork)', forked_from: 'stripe', forked_at: 'Try idempotency keys instead', agent_driver: 'codex', model: 'gpt-5-codex', created_at: ago(90), updated_at: ago(40) }),
@@ -72,218 +72,167 @@ const INITIAL: SessionSummary[] = [
   chat({ id: 'flaky', title: 'Investigate the flaky worktree test', updated_at: ago(DAY * 3), model: 'gpt-5' }),
 ];
 
-const key = (cwd: string, ref: string | number) => (typeof ref === 'number' ? `${cwd}#${ref}` : `${cwd}@${ref}`);
 
-const META: Record<string, WorkMeta> = {
-  [key(MIRA, 'issue-212-stripe-webhooks')]: { issue: { number: 212, title: 'Record Stripe payments from webhooks' } },
-  [key(MIRA, 214)]: { issue: { number: 198, title: 'Sign in with GitHub on headless machines' }, ci: 'failing', review: 'pending' },
-  [key(MIRA, 216)]: { ci: 'pending' },
-  [key(MIRA, 209)]: { issue: { number: 205, title: 'Recents shelf in the sidebar' }, ci: 'passing', review: 'pending' },
-  [key(LANDING, 41)]: { ci: 'pending', review: 'pending' },
-  [key(MIRA, 208)]: { issue: { number: 187, title: '# to mention issues in the composer' }, ci: 'passing', review: 'approved' },
-  [key(MIRA, 210)]: { ci: 'passing', review: 'approved' },
+type Fake = {
+  body: string;
+  checks: [string, 'success' | 'failure' | null][];
+  reviews?: [string, 'APPROVED' | 'CHANGES_REQUESTED'][];
+  requested?: string[];
+  decision?: string | null;
+  files: [string, number, number][];
+  timeline?: [number, string, string][];
 };
 
-const files = (...rows: [string, number, number][]) => rows.map(([path, added, removed]) => ({ path, added, removed }));
-const checks = (...rows: [string, 'passing' | 'failing' | 'pending', string?][]) => rows.map(([name, state, duration]) => ({ name, state, duration }));
-
-const DETAILS: Record<string, WorkDetail> = {
-  [key(MIRA, 'issue-212-stripe-webhooks')]: {
-    goal: 'Payments made through Checkout never reach our database. Add a webhook endpoint that verifies Stripe signatures, records `checkout.session.completed`, and is safe to replay.',
-    plan: [
-      { text: 'Add /webhooks/stripe route with signature check', done: true },
-      { text: 'Persist payments idempotently by event id', done: true },
-      { text: 'Retry with backoff on DB errors', done: false },
-      { text: 'Document the endpoint and the signing secret', done: false },
-    ],
-    files: files(['crates/billing/src/webhooks.rs', 186, 4], ['crates/billing/src/store.rs', 42, 11], ['crates/billing/migrations/0007_payments.sql', 24, 0], ['docs/billing.md', 31, 2]),
-    worktree: `${WT}/issue-212-stripe-webhooks`, base: 'main', ahead: 6, behind: 2,
-    checks: [], reviewers: [],
-    timeline: [
-      { at: ago(300), text: 'Started from issue #212', kind: 'issue' },
-      { at: ago(290), text: 'Claude Code made a plan (4 steps)', kind: 'agent' },
-      { at: ago(150), text: '3 commits: route, signature check, store', kind: 'commit' },
-      { at: ago(120), text: 'Launched “Docs for the webhook endpoint”', kind: 'chat' },
-      { at: ago(90), text: 'You forked to try idempotency keys', kind: 'you' },
-      { at: ago(6), text: 'Waiting for you: approve 3 commands', kind: 'agent' },
-    ],
+const PRS: Record<number, Fake> = {
+  214: {
+    body: 'On a remote box there is no browser for the OAuth redirect. Offer the device-code flow: show a code, poll until the user approves on github.com.\n\nFixes #198',
+    checks: [['rust / test', 'failure'], ['rust / clippy', 'success'], ['frontend / test', 'success']],
+    requested: ['damilola'], decision: 'REVIEW_REQUIRED',
+    files: [['crates/mira-auth/src/device.rs', 212, 0], ['crates/mira-auth/src/lib.rs', 18, 6], ['crates/mira-server/frontend/src/components/Login.tsx', 64, 21]],
+    timeline: [[DAY + 20, 'opened', 'opened this pull request'], [55, 'check_failed', 'rust / test failed']],
   },
-  [key(MIRA, 214)]: {
-    goal: 'On a remote box there is no browser for the OAuth redirect. Offer the device-code flow: show a code, poll until the user approves on github.com.',
-    plan: [
-      { text: 'Request a device code', done: true },
-      { text: 'Poll the token endpoint with the server-given interval', done: true },
-      { text: 'Show the code in the TUI and web', done: true },
-      { text: 'Fix slow_down handling', done: false },
-    ],
-    files: files(['crates/mira-auth/src/device.rs', 212, 0], ['crates/mira-auth/src/lib.rs', 18, 6], ['crates/mira-server/frontend/src/components/Login.tsx', 64, 21]),
-    worktree: `${WT}/issue-198-device-flow`, base: 'main', ahead: 4, behind: 0,
-    checks: checks(['rust / test', 'failing', '6m 12s'], ['rust / clippy', 'passing', '2m 40s'], ['frontend / test', 'passing', '58s']),
-    reviewers: [{ name: 'damilola', state: 'pending' }],
-    timeline: [
-      { at: ago(DAY + 200), text: 'Started from issue #198', kind: 'issue' },
-      { at: ago(DAY + 20), text: 'Codex opened PR #214', kind: 'pr' },
-      { at: ago(55), text: 'rust / test failed: device::slow_down_backs_off', kind: 'ci' },
-    ],
+  216: { body: '', checks: [['rust / test', null], ['frontend / test', 'success']], files: [['apps/desktop/src/main/window.ts', 28, 9], ['crates/mira-server/frontend/src/styles.css', 14, 2]] },
+  209: {
+    body: 'Bring back a Recents shelf: the chats you touched last, across projects, each naming its project.\n\nCloses #205',
+    checks: [['rust / test', 'success'], ['rust / clippy', 'success'], ['frontend / test', 'success']],
+    requested: ['damilola'], decision: 'REVIEW_REQUIRED',
+    files: [['crates/mira-server/frontend/src/components/Sidebar.tsx', 58, 12], ['crates/mira-server/frontend/src/lib/sidebar.ts', 14, 0], ['crates/mira-server/frontend/tests/sidebar.test.mjs', 16, 0]],
+    timeline: [[240, 'opened', 'opened this pull request']],
   },
-  [key(MIRA, 216)]: {
-    plan: [
-      { text: 'Match the notch height to the toolbar', done: true },
-      { text: 'Carry the divider through the ledge', done: false },
-      { text: 'Check with the sidebar hidden', done: false },
-    ],
-    files: files(['apps/desktop/src/main/window.ts', 28, 9], ['crates/mira-server/frontend/src/components/PageToolbar.tsx', 6, 3], ['crates/mira-server/frontend/src/styles.css', 14, 2]),
-    worktree: `${WT}/feat-notch-polish`, base: 'main', ahead: 2, behind: 0,
-    checks: checks(['rust / test', 'pending'], ['frontend / test', 'passing', '1m 02s']),
-    reviewers: [],
-    timeline: [
-      { at: ago(200), text: 'Chat started on feat/notch-polish', kind: 'chat' },
-      { at: ago(60), text: 'Draft PR #216 opened', kind: 'pr' },
-      { at: ago(30), text: 'Launched a second opinion with Claude Code', kind: 'chat' },
-    ],
+  41: { body: 'New pricing layout with three plan cards.', checks: [['build', null], ['lint', 'success']], requested: ['damilola'], files: [['src/app/pricing/page.tsx', 140, 38], ['src/components/PlanCard.tsx', 66, 0]] },
+  208: {
+    body: 'Typing # in the composer searches the repo’s issues and PRs and inserts an owner/repo#N chip.\n\nFixes #187',
+    checks: [['rust / test', 'success'], ['rust / clippy', 'success'], ['frontend / test', 'success']],
+    reviews: [['damilola', 'APPROVED']], decision: 'APPROVED',
+    files: [['crates/mira-server/src/github/issues.rs', 148, 0], ['crates/mira-server/frontend/src/components/composer/IssuePalette.tsx', 260, 0], ['crates/mira-server/frontend/src/lib/issueMentions.ts', 112, 0]],
+    timeline: [[DAY * 2, 'opened', 'opened this pull request'], [DAY, 'reviewed', 'approved these changes']],
   },
-  [key(LANDING, 'copy/hero')]: {
-    plan: [{ text: 'Rewrite the headline', done: true }, { text: 'Tighten the subhead', done: false }],
-    files: files(['src/app/page.tsx', 12, 9]),
-    worktree: `${LANDING}/.mira/worktrees/copy-hero`, base: 'main', ahead: 1, behind: 5,
-    checks: [], reviewers: [],
-    timeline: [{ at: ago(DAY * 2), text: 'OpenCode chat started', kind: 'chat' }, { at: ago(DAY + 30), text: '1 commit: headline', kind: 'commit' }],
-  },
-  [key(MIRA, 209)]: {
-    goal: 'Bring back a Recents shelf: the chats you touched last, across projects, each naming its project.',
-    plan: [{ text: 'recentChats() with a node test', done: true }, { text: 'Shelf under the nav', done: true }, { text: 'Project name on each row', done: true }],
-    files: files(['crates/mira-server/frontend/src/components/Sidebar.tsx', 58, 12], ['crates/mira-server/frontend/src/lib/sidebar.ts', 14, 0], ['crates/mira-server/frontend/tests/sidebar.test.mjs', 16, 0], ['crates/mira-server/frontend/src/components/sidebar/sessionRows.tsx', 22, 6]),
-    worktree: `${WT}/issue-205-recents`, base: 'main', ahead: 3, behind: 1,
-    checks: checks(['rust / test', 'passing', '5m 50s'], ['rust / clippy', 'passing', '2m 31s'], ['frontend / test', 'passing', '55s']),
-    reviewers: [{ name: 'damilola', state: 'pending' }],
-    timeline: [
-      { at: ago(DAY * 2), text: 'Started from issue #205', kind: 'issue' },
-      { at: ago(DAY), text: 'Codex chat joined the branch', kind: 'chat' },
-      { at: ago(240), text: 'PR #209 opened', kind: 'pr' },
-      { at: ago(200), text: 'All checks passed', kind: 'ci' },
-    ],
-  },
-  [key(LANDING, 41)]: {
-    plan: [], files: files(['src/app/pricing/page.tsx', 140, 38], ['src/components/PlanCard.tsx', 66, 0]),
-    worktree: `${LANDING}/.mira/worktrees/feat-pricing`, base: 'main', ahead: 2, behind: 0,
-    checks: checks(['build', 'pending'], ['lint', 'passing', '22s']),
-    reviewers: [{ name: 'damilola', state: 'pending' }],
-    timeline: [{ at: ago(DAY * 3), text: 'Chat started', kind: 'chat' }, { at: ago(400), text: 'PR #41 opened', kind: 'pr' }],
-  },
-  [key(MIRA, 208)]: {
-    goal: 'Typing # in the composer should search the repo’s issues and PRs and insert an owner/repo#N chip.',
-    plan: [{ text: 'Issue search endpoint', done: true }, { text: '# picker in the composer', done: true }, { text: 'Chips render as GitHub refs', done: true }],
-    files: files(['crates/mira-server/src/github/issues.rs', 148, 0], ['crates/mira-server/frontend/src/components/composer/IssuePalette.tsx', 260, 0], ['crates/mira-server/frontend/src/lib/issueMentions.ts', 112, 0], ['crates/mira-server/frontend/src/components/MentionInput.tsx', 40, 8]),
-    worktree: `${WT}/issue-187-issue-mentions`, base: 'main', ahead: 5, behind: 0,
-    checks: checks(['rust / test', 'passing', '6m 01s'], ['rust / clippy', 'passing', '2m 44s'], ['frontend / test', 'passing', '57s']),
-    reviewers: [{ name: 'damilola', state: 'approved' }],
-    timeline: [
-      { at: ago(DAY * 3), text: 'Started from issue #187', kind: 'issue' },
-      { at: ago(DAY * 2), text: 'PR #208 opened', kind: 'pr' },
-      { at: ago(DAY + 60), text: 'All checks passed', kind: 'ci' },
-      { at: ago(DAY), text: 'damilola approved', kind: 'review' },
-    ],
-  },
-  [key(MIRA, 210)]: {
-    plan: [], files: files(['apps/desktop/src/main/window.ts', 34, 12], ['crates/mira-server/frontend/src/components/Sidebar.tsx', 10, 22]),
-    worktree: `${WT}/feat-toolbar`, base: 'main',
-    checks: checks(['rust / test', 'passing', '5m 44s']), reviewers: [{ name: 'damilola', state: 'approved' }],
-    timeline: [{ at: ago(DAY * 2), text: 'Merged into main', kind: 'pr' }],
-  },
+  210: { body: '', checks: [['rust / test', 'success']], reviews: [['damilola', 'APPROVED']], decision: 'APPROVED', files: [['apps/desktop/src/main/window.ts', 34, 12]] },
+  160: { body: '', checks: [], files: [['src/components/Composer.tsx', 40, 60]] },
 };
+
+function prDetail(number: number): PullRequestDetailView | null {
+  const fake = PRS[number];
+  const session = SESSIONS.find((s) => s.pr?.number === number);
+  if (!fake || !session?.pr) return null;
+  const iso = (mins: number) => new Date((now - mins * 60) * 1000).toISOString();
+  const files = fake.files;
+  const checks: CheckRunView[] = fake.checks.map(([name, conclusion]) => ({ name, status: conclusion ? 'completed' : 'in_progress', conclusion, url: null }));
+  const reviews: ReviewView[] = (fake.reviews ?? []).map(([author, state]) => ({ author, author_avatar: null, state, body: '', submitted_at: iso(DAY) }));
+  return {
+    summary: {
+      number, title: session.pr.title, state: session.pr.state === 'merged' ? 'closed' : session.pr.state, draft: session.pr.state === 'draft',
+      author: 'damilola', author_avatar: null, head_ref: session.worktree_branch ?? '', base_ref: 'main', html_url: session.pr.url,
+      created_at: iso(DAY * 2), updated_at: iso(30),
+      additions: files.reduce((n, f) => n + f[1], 0), deletions: files.reduce((n, f) => n + f[2], 0), changed_files: files.length,
+      review_decision: fake.decision ?? null, comment_count: 0, requested_reviewers: fake.requested ?? [],
+    },
+    body: fake.body, mergeable: true, mergeable_state: 'clean', merged: session.pr.state === 'merged',
+    check_status: null, checks, reviews, comments: [], commits: [],
+    timeline: (fake.timeline ?? []).map(([mins, kind, message]) => ({ kind, actor: 'damilola', message, at: iso(mins) })),
+  };
+}
 
 const ISSUES: IssueOption[] = [
   { kind: 'issue', number: 221, title: 'Work tab: group chats by what they deliver', state: 'open', author: 'damilola', labels: [{ name: 'sidebar', color: '1d76db' }, { name: 'design', color: 'd876e3' }], updated_at: new Date(Date.now() - 3600e3).toISOString() },
   { kind: 'issue', number: 219, title: 'Scheduled runs: nightly dependency bumps', state: 'open', author: 'damilola', labels: [{ name: 'feature', color: '0e8a16' }], updated_at: new Date(Date.now() - 86400e3).toISOString() },
   { kind: 'issue', number: 217, title: 'Terminal panel loses scrollback on reattach', state: 'open', author: 'damilola', labels: [{ name: 'bug', color: 'd73a4a' }], updated_at: new Date(Date.now() - 2 * 86400e3).toISOString() },
   { kind: 'issue', number: 213, title: 'Show token usage per work item', state: 'open', author: 'damilola', labels: [], updated_at: new Date(Date.now() - 4 * 86400e3).toISOString() },
-  { kind: 'issue', number: 202, title: 'Windows: worktree paths with spaces', state: 'open', author: 'damilola', labels: [{ name: 'windows', color: 'fbca04' }, { name: 'bug', color: 'd73a4a' }], updated_at: new Date(Date.now() - 9 * 86400e3).toISOString() },
+  { kind: 'pr', number: 211, title: 'Prototype the sidebar’s Work tab', state: 'open', author: 'damilola', labels: [], updated_at: new Date(Date.now() - 600e3).toISOString() },
 ];
 
 // Start dark, with the class the `dark:` variants key off.
 document.documentElement.dataset.theme = 'dark';
 document.documentElement.classList.add('dark');
 
-// The Chat tab still lists every chat, from this page's fake API.
-let sessionsForApi = INITIAL;
 const realFetch = window.fetch.bind(window);
+const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, location.href);
-  const json = (v: unknown) => new Response(JSON.stringify(v), { headers: { 'content-type': 'application/json' } });
-  if (url.pathname === '/api/sessions') return json(url.searchParams.get('archived') === 'true' ? [] : sessionsForApi);
-  if (/^\/api\/sessions\/[^/]+\/preview$/.test(url.pathname)) {
-    return json({ last_user: 'Can you take a look at this?', last_assistant: 'Done — the change is in place.', last_tool: 'bash', message_count: 6 });
+  const path = url.pathname;
+  const method = init?.method ?? 'GET';
+  const json = (v: unknown, status = 200) => new Response(JSON.stringify(v), { status, headers: { 'content-type': 'application/json' } });
+  if (path === '/api/sessions') return json(url.searchParams.get('archived') === 'true' ? [] : SESSIONS);
+  const pr = /^\/api\/prs\/[^/]+\/[^/]+\/(\d+)(\/files|\/merge)?$/.exec(path);
+  if (pr) {
+    const number = Number(pr[1]);
+    await wait(250);
+    if (pr[2] === '/merge' && method === 'PUT') {
+      for (const s of SESSIONS) if (s.pr?.number === number) s.pr = { ...s.pr, state: 'merged', closed_at: Math.floor(Date.now() / 1000) };
+      return json({});
+    }
+    if (pr[2] === '/files') return json({ files: (PRS[number]?.files ?? []).map(([filename, additions, deletions]) => ({ filename, status: 'modified', additions, deletions, patch: null, raw_url: null })) });
+    const detail = prDetail(number);
+    return detail ? json(detail) : json({ error: 'not found' }, 404);
   }
-  if (url.pathname.startsWith('/api/')) return json({});
+  if (path === '/api/git/session-diff') {
+    return json({ added: 31, removed: 4, files: [{ path: 'crates/billing/src/webhooks.rs', status: 'modified', added: 27, removed: 4, binary: false }, { path: 'docs/billing.md', status: 'added', added: 4, removed: 0, binary: false }] });
+  }
+  if (path === '/api/git/branch') return json({ name: url.searchParams.get('name'), base: 'main', ahead: 6, behind: 2, last_subject: 'Persist payments by event id', last_date: ago(40) });
+  if (path === '/api/issues') {
+    await wait(300);
+    const q = (url.searchParams.get('q') ?? '').toLowerCase();
+    return json({ owner: 'runmira', repo: 'mira', error: null, items: ISSUES.filter((i) => !q || String(i.number).startsWith(q) || i.title.toLowerCase().includes(q)) });
+  }
+  if (path === '/api/git/worktree' && method === 'POST') {
+    await wait(600);
+    const { branch } = JSON.parse(String(init?.body ?? '{}'));
+    return json({ path: `${WT}/${branch}`, branch });
+  }
+  if (path === '/api/cwd' && method === 'PUT') {
+    const { path: cwd } = JSON.parse(String(init?.body ?? '{}'));
+    const branch = cwd.split('/').pop();
+    const id = `chat-${branch}`;
+    const at = Math.floor(Date.now() / 1000);
+    SESSIONS.push(chat({ id, title: '', message_count: 0, cwd, created_at: at, updated_at: at, worktree_branch: branch, worktree_status: 'unmerged' }));
+    return json({ session_id: id });
+  }
+  const rename = /^\/api\/sessions\/([^/]+)\/title$/.exec(path);
+  if (rename && method === 'PATCH') {
+    const session = SESSIONS.find((s) => s.id === decodeURIComponent(rename[1]));
+    if (session) session.title = JSON.parse(String(init?.body ?? '{}')).title;
+    return json({ id: session?.id, title: session?.title });
+  }
+  if (path.startsWith('/api/')) return json({});
   return realFetch(input, init);
 };
 
 function Preview() {
-  const [view, setView] = useState<MainView>('chat');
-  const [workOpen, setWorkOpen] = useState(true);
-  const [sessions, setSessions] = useState(INITIAL);
-  const [meta, setMeta] = useState(META);
-  const [details, setDetails] = useState(DETAILS);
-  const items = groupWorkItems(sessions, meta);
-  const [activeKey, setActiveKey] = useState<string | null>(key(MIRA, 'issue-212-stripe-webhooks'));
-  const [activeChat, setActiveChat] = useState<Record<string, string>>({});
-  const [starting, setStarting] = useState(false);
-  const item = items.find((i) => i.key === activeKey) ?? null;
-  const focusChat = item
-    ? (activeChat[item.key] ?? (item.sessions.find((s) => s.needs_attention) ?? item.sessions.find((s) => s.running) ?? item.sessions[0]).id)
-    : undefined;
-
+  const { pathname } = useLocation();
+  const navigate = useNavigate();
+  const view: MainView = pathname.startsWith('/work') ? 'work' : 'chat';
+  const [active, setActive] = useState('stripe');
+  const openChat = (id: string) => {
+    setActive(id);
+    void navigate('/chat');
+  };
   return (
     <main className="flex h-screen bg-background text-foreground">
       <div className="h-full w-[290px] shrink-0 border-r border-border bg-panel">
         <Sidebar
           status="open"
           cwd={MIRA}
-          activeSessionId={focusChat ?? 'stripe'}
+          activeSessionId={active}
           activeBusy={false}
-          runningSessions={new Set(sessions.filter((s) => s.running).map((s) => s.id))}
+          runningSessions={null}
           completedSessions={new Map()}
           refreshKey={0}
           activeView={view}
-          onNavigate={setView}
+          onNavigate={(next) => void navigate(`/${next}`)}
           onNewChat={() => {}}
           onOpenSettings={() => {}}
           onOpenPicker={() => {}}
           onSessionLoaded={() => {}}
-          onAttachSession={() => {}}
-          work={{
-            open: workOpen,
-            onToggle: setWorkOpen,
-            body: (
-              <WorkSidebar
-                items={items}
-                details={details}
-                activeKey={activeKey}
-                onPick={setActiveKey}
-                onStartWork={() => setStarting(true)}
-              />
-            ),
-          }}
+          onAttachSession={setActive}
         />
       </div>
       <section className="min-w-0 flex-1">
-        {workOpen && item ? (
-          <WorkItemPage
-            item={item}
-            detail={details[item.key]}
-            activeSessionId={focusChat}
-            onOpenChat={(id) => setActiveChat((m) => ({ ...m, [item.key]: id }))}
-            onMerge={() => {
-              const at = Math.floor(Date.now() / 1000);
-              setSessions((rows) => rows.map((s) => (s.pr?.number === item.pr?.number && s.cwd === item.cwd ? { ...s, pr: { ...s.pr!, state: 'merged', closed_at: at } } : s)));
-              const d = details[item.key];
-              if (d) setDetails({ ...details, [item.key]: { ...d, timeline: [...d.timeline, { at, text: 'You merged it into main', kind: 'you' }] } });
-            }}
-          />
+        {view === 'work' ? (
+          <WorkView activeSessionId={active} onOpenChat={openChat} />
         ) : (
           <div className="p-8 text-[13px] text-muted-foreground">
-            <h1 className="mb-3 text-[15px] font-semibold text-foreground">Work tab prototype (fake data)</h1>
-            <p>Switch the sidebar to <b>Work</b>, then pick an item.</p>
+            <h1 className="mb-3 text-[15px] font-semibold text-foreground">Chat</h1>
+            <p>Open chat: <b className="text-foreground">{active}</b>. Switch the sidebar to <b>Work</b> to see deliverables.</p>
           </div>
         )}
       </section>
@@ -298,42 +247,18 @@ function Preview() {
       >
         Toggle light / dark
       </button>
-      <StartWork
-        open={starting}
-        onOpenChange={setStarting}
-        repo="runmira/mira"
-        issues={ISSUES.filter((i) => !items.some((w) => w.meta.issue?.number === i.number))}
-        agents={['claude-code', 'codex', 'opencode']}
-        onStart={(issue, agent) => {
-          const branch = branchFor(issue);
-          const id = `work-${issue.number}`;
-          const k = key(MIRA, branch);
-          const at = Math.floor(Date.now() / 1000);
-          const next = [...sessions, chat({ id, title: issue.title, agent_driver: agent, created_at: at, updated_at: at, running: true, worktree_branch: branch, worktree_status: 'unmerged' })];
-          sessionsForApi = next;
-          setSessions(next);
-          setMeta((m) => ({ ...m, [k]: { issue: { number: issue.number, title: issue.title } } }));
-          setDetails((d) => ({
-            ...d,
-            [k]: {
-              goal: `${issue.title}.`,
-              plan: [{ text: 'Read the issue and the code it touches', done: false }],
-              files: [], worktree: `${WT}/${branch}`, base: 'main', ahead: 0, behind: 0,
-              checks: [], reviewers: [],
-              timeline: [{ at, text: `Started from issue #${issue.number}`, kind: 'issue' }],
-            },
-          }));
-          setActiveKey(k);
-        }}
-      />
     </main>
   );
 }
 
+const router = createMemoryRouter([{ path: '*', Component: Preview }], { initialEntries: ['/work'] });
+
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <LazyMotion features={domMax}>
-      <RuntimeProvider scope={{ backend: window.location.origin, account: 'preview' }}><Preview /></RuntimeProvider>
+      <RuntimeProvider scope={{ backend: window.location.origin, account: 'preview' }}>
+        <RouterProvider router={router} />
+      </RuntimeProvider>
     </LazyMotion>
   </React.StrictMode>,
 );

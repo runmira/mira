@@ -7,7 +7,7 @@ import { type SettingsSectionId } from '../settings/sections';
  *  first-class view (not a dialog) — when active, the sidebar swaps
  *  its default nav for the settings-tab list and shows a "Back to
  *  app" pill up top. */
-export type MainView = 'chat' | 'plugins' | 'pull-request' | 'scheduled' | 'settings';
+export type MainView = 'chat' | 'work' | 'plugins' | 'pull-request' | 'scheduled' | 'settings';
 
 export type Props = {
   status: WsStatus;
@@ -45,9 +45,6 @@ export type Props = {
   settingsSection?: SettingsSectionId;
   onSettingsSectionChange?: (id: SettingsSectionId) => void;
   onExitSettings?: () => void;
-  /** The Chat/Work switch's Work side. Without it, Work is a disabled
-   *  placeholder; with it, picking Work swaps the chat list for `body`. */
-  work?: { open: boolean; onToggle: (open: boolean) => void; body: React.ReactNode };
 };
 
 /* ---------- session row ---------- */
