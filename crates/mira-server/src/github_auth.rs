@@ -1,0 +1,63 @@
+//! Read the active github.com CLI login privately; never export or log its token.
+use std::path::Path;
+
+pub(crate) async fn cli_token() -> Option<String> {
+    let program = mira_acp::which::resolve_for_spawn(Path::new("gh"));
+    cli_token_from(&program).await
+}
+
+async fn cli_token_from(program: &Path) -> Option<String> {
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        tokio::process::Command::new(program)
+            .args(["auth", "token", "--hostname", "github.com"])
+            // A key exported from Mira's settings must not mask the saved CLI
+            // login when recovering from that very key's rejection.
+            .env_remove("GH_TOKEN")
+            .env_remove("GITHUB_TOKEN")
+            .env_remove("GH_ENTERPRISE_TOKEN")
+            .env_remove("GITHUB_ENTERPRISE_TOKEN")
+            .env("GH_PROMPT_DISABLED", "1")
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let token = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    (!token.is_empty() && !token.chars().any(char::is_whitespace)).then_some(token)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn cli_login_is_private_noninteractive_and_host_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("gh");
+        std::fs::write(
+            &program,
+            r#"#!/bin/sh
+[ "$1 $2 $3 $4" = 'auth token --hostname github.com' ] || exit 1
+[ -z "$GITHUB_TOKEN$GH_TOKEN$GH_ENTERPRISE_TOKEN$GITHUB_ENTERPRISE_TOKEN" ] || exit 2
+[ "$GH_PROMPT_DISABLED" = 1 ] || exit 3
+printf 'fake-saved-login\n'
+"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert_eq!(
+            cli_token_from(&program).await.as_deref(),
+            Some("fake-saved-login")
+        );
+        std::fs::write(&program, "#!/bin/sh\nprintf 'sign in required'\nexit 1\n").unwrap();
+        assert!(cli_token_from(&program).await.is_none());
+    }
+}

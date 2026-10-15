@@ -2,11 +2,9 @@
 //! Mira knows about, then exposes detail, comments, review, and merge
 //! endpoints so the PullRequestPanel can drive them end-to-end.
 //!
-//! Authentication uses the `GITHUB_TOKEN` third-party key (settings.rs
-//! surfaces it in the well-known list). The token flows through the
-//! standard `Authorization: Bearer …` header GitHub expects. When the
-//! token is missing every endpoint returns 401 so the UI can nudge the
-//! user to open Settings.
+//! Authentication uses GH_TOKEN, GITHUB_TOKEN, or the saved github.com CLI
+//! login. A rejected configured credential can recover once through that login;
+//! missing scopes and resource failures are returned without replaying requests.
 //!
 //! Repos are derived by walking every distinct cwd in the session store
 //! and parsing its `origin` remote for `owner/repo`. Non-GitHub remotes
@@ -194,7 +192,7 @@ pub struct MergeBody {
 /* ---------- handlers ---------- */
 
 pub async fn list_pull_requests(State(state): State<AppState>) -> Response {
-    let token = resolve_token();
+    let token = resolve_token().await;
     let repos = match discover_repos(&state).await {
         Ok(r) => r,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("discover: {e}")),
@@ -256,7 +254,7 @@ pub async fn get_pull_request(
     State(_state): State<AppState>,
     AxumPath((owner, repo, number)): AxumPath<(String, String, u64)>,
 ) -> Response {
-    let Some(token) = resolve_token() else {
+    let Some(token) = resolve_token().await else {
         return err(StatusCode::UNAUTHORIZED, missing_token_msg());
     };
     let client = build_client();
@@ -351,7 +349,7 @@ pub async fn get_pull_request_files(
     State(_state): State<AppState>,
     AxumPath((owner, repo, number)): AxumPath<(String, String, u64)>,
 ) -> Response {
-    let Some(token) = resolve_token() else {
+    let Some(token) = resolve_token().await else {
         return err(StatusCode::UNAUTHORIZED, missing_token_msg());
     };
     let client = build_client();
@@ -392,7 +390,7 @@ pub async fn post_pull_request_comment(
     if body.body.trim().is_empty() {
         return err(StatusCode::BAD_REQUEST, "comment body is empty".into());
     }
-    let Some(token) = resolve_token() else {
+    let Some(token) = resolve_token().await else {
         return err(StatusCode::UNAUTHORIZED, missing_token_msg());
     };
     let client = build_client();
@@ -423,7 +421,7 @@ pub async fn post_pull_request_review(
             "REQUEST_CHANGES / COMMENT reviews need a body".into(),
         );
     }
-    let Some(token) = resolve_token() else {
+    let Some(token) = resolve_token().await else {
         return err(StatusCode::UNAUTHORIZED, missing_token_msg());
     };
     let client = build_client();
@@ -450,7 +448,7 @@ pub async fn merge_pull_request(
             format!("invalid merge method: {method}"),
         );
     }
-    let Some(token) = resolve_token() else {
+    let Some(token) = resolve_token().await else {
         return err(StatusCode::UNAUTHORIZED, missing_token_msg());
     };
     let client = build_client();
@@ -607,15 +605,7 @@ async fn gh_get<T: serde::de::DeserializeOwned>(
     token: &str,
     url: &str,
 ) -> Result<T, GhError> {
-    let resp = client
-        .get(url)
-        .bearer_auth(token)
-        .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .send()
-        .await
-        .map_err(|e| GhError::network(e.to_string()))?;
-    handle(resp).await
+    gh_request(client, reqwest::Method::GET, token, url, None).await
 }
 
 async fn gh_post<T: serde::de::DeserializeOwned>(
@@ -624,16 +614,7 @@ async fn gh_post<T: serde::de::DeserializeOwned>(
     url: &str,
     body: &Value,
 ) -> Result<T, GhError> {
-    let resp = client
-        .post(url)
-        .bearer_auth(token)
-        .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .json(body)
-        .send()
-        .await
-        .map_err(|e| GhError::network(e.to_string()))?;
-    handle(resp).await
+    gh_request(client, reqwest::Method::POST, token, url, Some(body)).await
 }
 
 async fn gh_put<T: serde::de::DeserializeOwned>(
@@ -642,16 +623,69 @@ async fn gh_put<T: serde::de::DeserializeOwned>(
     url: &str,
     body: &Value,
 ) -> Result<T, GhError> {
-    let resp = client
-        .put(url)
-        .bearer_auth(token)
-        .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .json(body)
+    gh_request(client, reqwest::Method::PUT, token, url, Some(body)).await
+}
+
+async fn gh_request<T: serde::de::DeserializeOwned>(
+    client: &reqwest::Client,
+    method: reqwest::Method,
+    token: &str,
+    url: &str,
+    body: Option<&Value>,
+) -> Result<T, GhError> {
+    let request = |token: &str| {
+        let request = client
+            .request(method.clone(), url)
+            .bearer_auth(token)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28");
+        if let Some(body) = body {
+            request.json(body)
+        } else {
+            request
+        }
+    };
+    send_with_auth_retry(
+        || request(token),
+        |replacement| request(replacement),
+        crate::github_auth::cli_token,
+        token,
+    )
+    .await
+}
+
+/// Only 401 is safe to recover with another credential. A denied scope (403),
+/// missing resource (404), network failure or rejected mutation is never replayed.
+async fn send_with_auth_retry<T, F, G, H, Fut>(
+    initial: F,
+    replacement: G,
+    fallback: H,
+    original: &str,
+) -> Result<T, GhError>
+where
+    T: serde::de::DeserializeOwned,
+    F: FnOnce() -> reqwest::RequestBuilder,
+    G: FnOnce(&str) -> reqwest::RequestBuilder,
+    H: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Option<String>>,
+{
+    let response = initial()
         .send()
         .await
         .map_err(|e| GhError::network(e.to_string()))?;
-    handle(resp).await
+    if response.status() != StatusCode::UNAUTHORIZED {
+        return handle(response).await;
+    }
+    if let Some(token) = fallback().await.filter(|token| token != original) {
+        let response = replacement(&token)
+            .send()
+            .await
+            .map_err(|e| GhError::network(e.to_string()))?;
+        if response.status() != StatusCode::UNAUTHORIZED {
+            return handle(response).await;
+        }
+    }
+    Err(GhError {status:Some(401),message:"GitHub sign-in expired. Update the GitHub token in Settings → Search & keys, or run `gh auth login` on the machine running Mira.".into()})
 }
 
 async fn handle<T: serde::de::DeserializeOwned>(resp: reqwest::Response) -> Result<T, GhError> {
@@ -1055,7 +1089,7 @@ fn card_from(kind: &'static str, v: &Value) -> MentionCard {
 /// One GitHub REST read: with the stored token when there is one, else
 /// through the `gh` CLI if it's signed in. `None` on a 404.
 async fn github_read(path: &str) -> Result<Option<Value>, String> {
-    if let Some(token) = resolve_token() {
+    if let Some(token) = resolve_token().await {
         let url = format!("{GITHUB_API}/{path}");
         return match gh_get::<Value>(&build_client(), &token, &url).await {
             Ok(v) => Ok(Some(v)),
@@ -1063,22 +1097,7 @@ async fn github_read(path: &str) -> Result<Option<Value>, String> {
             Err(e) => Err(e.to_string()),
         };
     }
-    let path = path.to_string();
-    let out = tokio::task::spawn_blocking(move || Command::new("gh").args(["api", &path]).output())
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|_| missing_token_msg())?;
-    if out.status.success() {
-        return serde_json::from_slice(&out.stdout)
-            .map(Some)
-            .map_err(|e| e.to_string());
-    }
-    let err = String::from_utf8_lossy(&out.stderr);
-    if err.contains("404") || err.contains("Not Found") {
-        Ok(None)
-    } else {
-        Err(err.trim().to_string())
-    }
+    Err(missing_token_msg())
 }
 
 /// GET /api/prs/:owner/:repo/:number/card — a PR, or else an issue.
@@ -1108,17 +1127,23 @@ pub async fn mention_card(
     }
 }
 
-fn resolve_token() -> Option<String> {
-    resolve_github_token()
+async fn resolve_token() -> Option<String> {
+    match resolve_github_token() {
+        Some(token) => Some(token),
+        None => crate::github_auth::cli_token().await,
+    }
 }
 
 /// Public shim so other modules (review.rs) can grab the same token without
 /// re-implementing the env/config lookup. Keeps the token-resolution rules
 /// (env wins over yaml, yaml empty string means "unset") in one place.
 pub fn resolve_github_token() -> Option<String> {
-    if let Ok(v) = std::env::var("GITHUB_TOKEN") {
-        if !v.is_empty() {
-            return Some(v);
+    // Match GitHub CLI precedence, including users who configure GH_TOKEN.
+    for name in ["GH_TOKEN", "GITHUB_TOKEN"] {
+        if let Ok(value) = std::env::var(name) {
+            if !value.trim().is_empty() {
+                return Some(value.trim().to_string());
+            }
         }
     }
     let cfg = match MiraConfig::load_global() {
@@ -1135,7 +1160,7 @@ pub fn resolve_github_token() -> Option<String> {
 }
 
 fn missing_token_msg() -> String {
-    "GITHUB_TOKEN is not set — add it in Settings → Keys.".to_string()
+    "Connect GitHub using `gh auth login` on the machine running Mira, or add a GitHub token in Settings → Search & keys.".to_string()
 }
 
 fn err(status: StatusCode, msg: String) -> Response {
@@ -1174,5 +1199,96 @@ mod mention_tests {
             (i.kind, i.state.as_str(), i.additions),
             ("issue", "closed", None)
         );
+    }
+}
+
+#[cfg(test)]
+mod auth_recovery_tests {
+    use super::*;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    #[tokio::test]
+    async fn rejected_credentials_retry_once_but_scope_and_missing_resource_do_not() {
+        for status in [401u16, 403, 404] {
+            for method in [
+                reqwest::Method::GET,
+                reqwest::Method::POST,
+                reqwest::Method::PUT,
+            ] {
+                let calls = Arc::new(AtomicUsize::new(0));
+                let seen = calls.clone();
+                let router = axum::Router::new().route(
+                    "/resource",
+                    axum::routing::any(
+                        move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+                            seen.fetch_add(1, Ordering::SeqCst);
+                            async move {
+                                if headers["authorization"] == "Bearer saved-login" {
+                                    assert_eq!(body.as_ref(), b"{\"body\":\"same request\"}");
+                                    (StatusCode::OK, Json(serde_json::json!({"ok":true})))
+                                } else {
+                                    (
+                                        StatusCode::from_u16(status).unwrap(),
+                                        Json(serde_json::json!({"message":"rejected"})),
+                                    )
+                                }
+                            }
+                        },
+                    ),
+                );
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let url = format!("http://{}/resource", listener.local_addr().unwrap());
+                let server =
+                    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+                let client = build_client();
+                let attempts = AtomicUsize::new(0);
+                let build = |token: &str| {
+                    client
+                        .request(method.clone(), &url)
+                        .bearer_auth(token)
+                        .json(&serde_json::json!({"body":"same request"}))
+                };
+                let result: Result<Value, GhError> = send_with_auth_retry(
+                    || build("expired"),
+                    |token| build(token),
+                    || {
+                        attempts.fetch_add(1, Ordering::SeqCst);
+                        async { Some("saved-login".into()) }
+                    },
+                    "expired",
+                )
+                .await;
+                if status == 401 {
+                    assert_eq!(result.unwrap()["ok"], true);
+                    assert_eq!(calls.load(Ordering::SeqCst), 2);
+                    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+                } else {
+                    assert_eq!(result.unwrap_err().status, Some(status));
+                    assert_eq!(calls.load(Ordering::SeqCst), 1);
+                    assert_eq!(attempts.load(Ordering::SeqCst), 0);
+                }
+                server.abort();
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires signed-in gh CLI and MIRA_TEST_GITHUB_PR=owner/repo/number; read-only"]
+    async fn installed_cli_recovers_pr_read_from_an_expired_mira_token() {
+        let target = std::env::var("MIRA_TEST_GITHUB_PR").expect("set owner/repo/number");
+        let parts: Vec<_> = target.split('/').collect();
+        assert_eq!(parts.len(), 3);
+        assert!(parts[2].parse::<u64>().is_ok());
+        let url = format!(
+            "{GITHUB_API}/repos/{}/{}/pulls/{}",
+            parts[0], parts[1], parts[2]
+        );
+        let value: Value = gh_get(&build_client(), "deliberately-invalid-test-token", &url)
+            .await
+            .unwrap();
+        assert_eq!(value["number"].as_u64(), parts[2].parse::<u64>().ok());
     }
 }

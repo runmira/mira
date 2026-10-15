@@ -5,12 +5,14 @@
  * quiet pill per kind, details on hover — so a dense answer stays
  * readable instead of turning into a wall of badges.
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { FileCode2, GitBranch, GitCommitHorizontal, GitPullRequest, Globe2, ListFilter, SquareFunction, type LucideIcon } from 'lucide-react';
 import { prettyUrl } from '@/lib/refs';
-import { HoverCard } from '@/components/ui/hover-card';
+import { HoverCard } from './ui/hover-card';
 import { useFileIcons } from '@/lib/fileIcons';
 import { cn } from '@/lib/utils';
+import { sessionFetch } from '../api/sessionScope';
+import { useReferenceScope } from '../hooks/useReferenceScope';
 
 export type OpenFile = (path: string, line?: number | null) => void;
 
@@ -24,12 +26,13 @@ function cached<T>(key: string, load: () => Promise<T>): Promise<T> {
   if (!p) {
     p = load();
     cache.set(key, p);
+    void p.then(value => { if (value == null && cache.get(key) === p) cache.delete(key); }, () => { if (cache.get(key) === p) cache.delete(key); });
   }
   return p;
 }
-async function getJson<T>(url: string): Promise<T | null> {
+async function getJson<T>(url: string, session?: string): Promise<T | null> {
   try {
-    const r = await fetch(url);
+    const r = await sessionFetch(url, undefined, session);
     if (!r.ok || r.status === 204) return null;
     return (await r.json()) as T;
   } catch {
@@ -95,10 +98,25 @@ type Commit = {
 };
 
 export function CommitChip({ sha }: { sha: string }) {
-  const [commit, setCommit] = useState<Commit | null | undefined>(undefined);
+  const scope = useReferenceScope();
+  const key = `${scope.cacheKey}:commit:${sha}`;
+  const active = useRef(key);
+  active.current = key;
+  const [result, setResult] = useState<{ key: string; commit?: Commit | null; error?: string }>();
+  const current = result?.key === key ? result : undefined;
+  const commit = current?.commit;
   const load = () => {
-    if (commit !== undefined) return;
-    void cached(`commit:${sha}`, () => getJson<Commit>(`/api/git/commit/${sha}`)).then(setCommit);
+    if (commit) return;
+    void cached(key, async () => {
+      const response = await sessionFetch(`/api/git/commit/${sha}`, { cache: 'no-store' }, scope.session);
+      if (response.status === 404) return null;
+      if (!response.ok) throw new Error('Commit details are unavailable. Hover to retry.');
+      return await response.json() as Commit;
+    }).then(commit => {
+      if (active.current === key) setResult({ key, commit });
+    }, () => {
+      if (active.current === key) setResult({ key, error: 'Commit details are unavailable. Hover to retry.' });
+    });
   };
   const files = commit?.files ?? [];
   const shown = files.slice(0, 6);
@@ -155,6 +173,8 @@ export function CommitChip({ sha }: { sha: string }) {
             </div>
           )}
         </div>
+      ) : current?.error ? (
+        <div className="text-muted-foreground">{current.error}</div>
       ) : commit === null ? (
         <div className="text-muted-foreground">Not a commit in this repository.</div>
       ) : null}
@@ -184,22 +204,26 @@ const PR_TONE: Record<string, string> = { OPEN: 'text-emerald-400', MERGED: 'tex
 
 /** A branch name. Checked against the repo first: only a branch that
  *  exists becomes a chip, so ordinary words in backticks stay plain. */
-export function BranchChip({ name, children }: { name: string; children: React.ReactNode }) {
+export function BranchChip(props: { name: string; children: React.ReactNode }) {
+  const scope = useReferenceScope();
+  return <ScopedBranchChip key={`${scope.cacheKey}:${props.name}`} {...props} scope={scope} />;
+}
+function ScopedBranchChip({ name, children, scope }: { name: string; children: React.ReactNode; scope: ReturnType<typeof useReferenceScope> }) {
   const [exists, setExists] = useState<Branch | null | undefined>(undefined);
   const [full, setFull] = useState<Branch | null | undefined>(undefined);
   const q = `/api/git/branch?name=${encodeURIComponent(name)}`;
   useEffect(() => {
     let live = true;
-    void cached(`branch:${name}`, () => getJson<Branch>(q)).then((b) => live && setExists(b));
+    void cached(`${scope.cacheKey}:branch:${name}`, () => getJson<Branch>(q, scope.session)).then((b) => live && setExists(b));
     return () => {
       live = false;
     };
-  }, [name, q]);
+  }, [name, q, scope.cacheKey, scope.session]);
   if (!exists) return <code className="md-inline">{children}</code>;
   const b = full ?? exists;
   const load = () => {
     if (full !== undefined) return;
-    void cached(`branch-pr:${name}`, () => getJson<Branch>(`${q}&pr=true`)).then((v) => setFull(v ?? exists));
+    void cached(`${scope.cacheKey}:branch-pr:${name}`, () => getJson<Branch>(`${q}&pr=true`, scope.session)).then((v) => setFull(v ?? exists));
   };
   return (
     <HoverCard
@@ -304,11 +328,15 @@ type Hit = { path: string; line: number; preview: string };
 
 /** A name in the code. Looked up on hover; becomes a link to its
  *  definition only if it has one, so plain identifiers stay quiet. */
-export function SymbolRef({ name, onOpen, children }: { name: string; onOpen?: OpenFile; children: React.ReactNode }) {
+export function SymbolRef(props: { name: string; onOpen?: OpenFile; children: React.ReactNode }) {
+  const scope = useReferenceScope();
+  return <ScopedSymbolRef key={`${scope.cacheKey}:${props.name}`} {...props} scope={scope} />;
+}
+function ScopedSymbolRef({ name, onOpen, children, scope }: { name: string; onOpen?: OpenFile; children: React.ReactNode; scope: ReturnType<typeof useReferenceScope> }) {
   const [hits, setHits] = useState<Hit[] | undefined>(undefined);
   const load = () => {
     if (hits !== undefined || !onOpen) return;
-    void cached(`symbol:${name}`, () => getJson<Hit[]>(`/api/symbol?name=${encodeURIComponent(name)}`)).then((h) =>
+    void cached(`${scope.cacheKey}:symbol:${name}`, () => getJson<Hit[]>(`/api/symbol?name=${encodeURIComponent(name)}`, scope.session)).then((h) =>
       setHits(h ?? []),
     );
   };

@@ -59,6 +59,7 @@ mod engines_reload;
 pub mod extensions;
 mod file;
 mod git;
+mod github_auth;
 mod github_connect;
 pub mod hooks_api;
 pub mod interactive;

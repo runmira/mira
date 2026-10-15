@@ -411,10 +411,26 @@ pub async fn commit_card(
         return err(StatusCode::BAD_REQUEST, "not a commit hash".into());
     }
     let cwd = state.current_cwd().await;
-    let format = format!("--format=%H{SEP}%h{SEP}%an{SEP}%at{SEP}%s{SEP}%b%x1e");
-    let out = tokio::task::spawn_blocking(move || {
+    let result = tokio::task::spawn_blocking(move || find_commit_card(&cwd, &sha)).await;
+    match result {
+        Ok(Ok(Some(card))) => Json(card).into_response(),
+        Ok(Ok(None)) => err(
+            StatusCode::NOT_FOUND,
+            "no such commit in this workspace".into(),
+        ),
+        Ok(Err(message)) => err(StatusCode::CONFLICT, message),
+        Err(_) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "commit lookup failed".into(),
+        ),
+    }
+}
+
+fn find_commit_card(cwd: &Path, sha: &str) -> Result<Option<CommitCard>, String> {
+    let lookup = |repo: &Path| {
+        let format = format!("--format=%H{SEP}%h{SEP}%an{SEP}%at{SEP}%s{SEP}%b%x1e");
         run(
-            &cwd,
+            repo,
             &[
                 "show",
                 "--no-color",
@@ -424,18 +440,35 @@ pub async fn commit_card(
                 "--",
             ],
         )
-    })
-    .await;
-    match out {
-        Ok(Ok(text)) => match parse_commit(&text) {
-            Some(card) => Json(card).into_response(),
-            None => err(StatusCode::NOT_FOUND, "no such commit".into()),
-        },
-        _ => err(
-            StatusCode::NOT_FOUND,
-            "no such commit in this repository".into(),
-        ),
+        .ok()
+        .and_then(|text| parse_commit(&text))
+    };
+    // Inside a repository, never substitute a sibling repository's commit.
+    if is_git_repo(cwd) {
+        return Ok(lookup(cwd));
     }
+    // Workspace chats can start one level above the repo the agent works in.
+    // Inspect direct child repositories only; do not follow symlinks or scan
+    // other chats, the home directory, dependencies or nested worktrees.
+    let entries =
+        std::fs::read_dir(cwd).map_err(|_| "The chat folder is unavailable".to_string())?;
+    let mut found: Option<CommitCard> = None;
+    for entry in entries.take(128).flatten() {
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) || !entry.path().join(".git").exists()
+        {
+            continue;
+        }
+        if let Some(card) = lookup(&entry.path()) {
+            if found
+                .as_ref()
+                .is_some_and(|previous| previous.sha != card.sha)
+            {
+                return Err("This short hash matches commits in multiple workspace repositories. Use the full commit hash.".into());
+            }
+            found = Some(card);
+        }
+    }
+    Ok(found)
 }
 
 #[derive(Deserialize)]
@@ -1540,5 +1573,71 @@ pub async fn turn_file_diff(
         Ok(Ok(diff)) => Json(diff).into_response(),
         Ok(Err(error)) => err(StatusCode::BAD_REQUEST, error),
         Err(error) => err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod workspace_commit_tests {
+    use super::*;
+    fn repo(path: &Path) -> String {
+        std::fs::create_dir_all(path).unwrap();
+        run(path, &["init", "-q", "--template="]).unwrap();
+        std::fs::write(
+            path.join("file.txt"),
+            path.file_name().unwrap().to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+        run(path, &["add", "file.txt"]).unwrap();
+        run(
+            path,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-qm",
+                "Workspace commit",
+            ],
+        )
+        .unwrap();
+        run(path, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string()
+    }
+    #[test]
+    fn parent_workspace_finds_child_repo_but_a_repo_never_uses_its_sibling() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        let sha = repo(&a);
+        let _ = repo(&b);
+        assert_eq!(
+            find_commit_card(dir.path(), &sha[..7])
+                .unwrap()
+                .unwrap()
+                .sha,
+            sha
+        );
+        assert!(find_commit_card(&b, &sha).unwrap().is_none());
+        assert!(find_commit_card(dir.path(), "123456789abcdef")
+            .unwrap()
+            .is_none());
+    }
+    #[test]
+    fn workspace_does_not_follow_symlinks_to_other_repositories() {
+        let outside = tempfile::tempdir().unwrap();
+        let sha = repo(&outside.path().join("private"));
+        let workspace = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(
+            outside.path().join("private"),
+            workspace.path().join("linked"),
+        )
+        .unwrap();
+        assert!(find_commit_card(workspace.path(), &sha).unwrap().is_none());
     }
 }
