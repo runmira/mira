@@ -175,7 +175,7 @@ fn build_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         // Let the webview deliver OS files to the shared DOM attachment intake.
         .disable_drag_drop_handler()
         .inner_size(1280.0, 840.0)
-        .min_inner_size(760.0, 520.0)
+        .min_inner_size(800.0, 520.0)
         .initialization_script(INIT_SCRIPT.replace("__CHANNEL__", CHANNEL));
 
     // macOS: the title bar goes away and the app's own header takes its
@@ -195,6 +195,11 @@ fn build_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     #[cfg(target_os = "macos")]
     let builder = builder
         .title_bar_style(tauri::TitleBarStyle::Overlay)
+        // Lower than macOS's default (centred 14pt down): on the centre line
+        // of the app's own toolbar, beside its sidebar toggle and level with
+        // the chat title. `y` is that centre line; the web UI's
+        // `TRAFFIC_LIGHT_INSET.centerY` must match.
+        .traffic_light_position(tauri::LogicalPosition::new(20.0, 30.0))
         .transparent(true)
         .effects(tauri::utils::config::WindowEffectsConfig {
             effects: vec![tauri::utils::WindowEffect::UnderWindowBackground],

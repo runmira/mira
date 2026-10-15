@@ -1,5 +1,5 @@
 import { ArrowDown,PanelLeft,SquareTerminal } from 'lucide-react';
-import { useMemo } from 'react';
+import { useMemo, useRef } from 'react';
 import { Outlet } from 'react-router';
 import { AssistantSelectionToolbar } from '../components/AssistantSelectionToolbar';
 import { ChatRelationships } from '../components/ChatRelationships';
@@ -37,6 +37,9 @@ import { IS_MAC,PAGE_TITLES } from './shared';
 import { WorkspaceComposer } from './WorkspaceComposer';
 import { WorkspaceContextPanel } from './WorkspaceContextPanel';
 import type { WorkspaceRuntime } from './WorkspaceRuntime';
+import { NotchOutline, notchedPath, notchWidth, usePaneSize } from './WindowControls';
+import { PAGE_TITLE, PAGE_TOOLBAR, PageToolbar } from '../components/PageToolbar';
+import { useTrafficLights } from '../lib/desktop';
 const WorkspaceTranscript = lazyNamed(() => import('./WorkspaceTranscript'), 'WorkspaceTranscript');
 export function WorkspaceMain(
   context: Pick<
@@ -54,6 +57,7 @@ export function WorkspaceMain(
     | 'mainView'
     | 'toggleSidebar'
     | 'sidebarOpen'
+    | 'hiddenTitleBar'
     | 'sessionTitle'
     | 'outlineEntries'
     | 'readingAnchorRef'
@@ -207,6 +211,7 @@ export function WorkspaceMain(
     mainView,
     toggleSidebar,
     sidebarOpen,
+    hiddenTitleBar,
     sessionTitle,
     sessionDiff,
     setReviewOpen,
@@ -272,6 +277,12 @@ export function WorkspaceMain(
     githubReturn,
     acpError,
   } = context;
+  const paneCardRef = useRef<HTMLDivElement>(null);
+  const notch = usePaneSize(paneCardRef, hiddenTitleBar && !phone && !sidebarOpen);
+  const lights = useTrafficLights();
+  // The pane starts 2px into the window (`pl-0.5`); the notch is in its
+  // own coordinates.
+  const notchReach = notchWidth(lights) - 2;
   return (
     <>
       <main
@@ -283,12 +294,30 @@ export function WorkspaceMain(
         {/* The main chat surface is the app's base surface, not a card: it
             keeps the flat theme background (pure black in dark) so the
             composer and cards inside it are what read as elevated. */}
+        {/* With the sidebar hidden on the desktop the pane keeps its full
+            height and curves around the traffic lights and the sidebar
+            toggle: an inverted-L notch cut from its top-left corner, with
+            the border drawn along it. `--window-notch` is how far the
+            notch reaches, for headers to start after it; toolbars take the
+            border's full colour then, since the notch's ledge runs straight
+            into their divider. */}
         <div
+          ref={paneCardRef}
+          data-notched={notch ? '' : undefined}
           className={cn(
-            'flex min-h-0 flex-1 flex-col overflow-hidden bg-background',
-            !phone && 'rounded-xl border border-border',
+            'relative flex min-h-0 flex-1 flex-col overflow-hidden bg-background',
+            !phone && !notch && 'rounded-xl border border-border',
           )}
+          style={
+            notch
+              ? ({
+                  clipPath: `path('${notchedPath(notch.w, notch.h, notchReach)}')`,
+                  '--window-notch': `${notchReach + 16}px`,
+                } as React.CSSProperties)
+              : undefined
+          }
         >
+          {notch && <NotchOutline w={notch.w} h={notch.h} nw={notchReach} />}
           {/* The chat view has its own header with the drawer button; the
             other pages need one too, or a phone has no way back. */}
           {phone && mainView !== 'chat' && (
@@ -313,9 +342,12 @@ export function WorkspaceMain(
                 least one or the window can't be dragged at all. */}
               <div
                 data-window-drag-region
-                className="flex h-11 shrink-0 items-center gap-3 border-b border-border/60 px-4 max-md:gap-2 max-md:px-2"
+                className={cn(PAGE_TOOLBAR, 'max-md:gap-2 max-md:px-2')}
               >
-                {/* Controls stay interactive inside the toolbar drag region. */}
+                {/* Controls stay interactive inside the toolbar drag region.
+                    The desktop app pins its toggle beside the traffic
+                    lights instead (WindowControls), in every view. */}
+                {!(hiddenTitleBar && !phone) && (
                 <button
                   data-no-window-drag
                   type="button"
@@ -335,7 +367,8 @@ export function WorkspaceMain(
                 >
                   <PanelLeft className="size-4" />
                 </button>
-                <span className="min-w-0 flex-1 truncate text-[13.5px] text-foreground">
+                )}
+                <span className={PAGE_TITLE}>
                   {sessionTitle ?? titleFromEntries(entries)}
                 </span>
                 {(sessionDiff.uncommitted ?? 0) > 0 && (
@@ -600,6 +633,12 @@ export function WorkspaceMain(
                 </LazyBoundary>
               )}
             </>
+          )}
+
+          {/* Every page gets the same toolbar as the chat (Settings draws
+              its own, with its section's name). */}
+          {!phone && mainView !== 'chat' && mainView !== 'settings' && (
+            <PageToolbar title={PAGE_TITLES[mainView]} />
           )}
 
           {mainView === 'plugins' && (

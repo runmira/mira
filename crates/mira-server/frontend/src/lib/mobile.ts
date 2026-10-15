@@ -16,9 +16,15 @@ function subscribe(query: string) {
 
 const subscribePhone = subscribe(PHONE);
 
-/** True at phone width. */
+/** True at phone width. Never in the desktop app: a narrow window there is
+ *  still a Mac window, with traffic lights the phone layout doesn't leave
+ *  room for (and the window can't go below 800px anyway). */
 export function useIsPhone(): boolean {
-  return useSyncExternalStore(subscribePhone, () => window.matchMedia(PHONE).matches, () => false);
+  return useSyncExternalStore(
+    subscribePhone,
+    () => window.__MIRA_DESKTOP__ !== true && window.matchMedia(PHONE).matches,
+    () => false,
+  );
 }
 
 /**

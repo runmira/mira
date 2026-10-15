@@ -1,3 +1,4 @@
+import { useSyncExternalStore } from 'react';
 /**
  * Bridge to the Mira desktop app (apps/desktop). The app injects
  * `window.__MIRA_DESKTOP__` and Tauri's global API into the page; in a
@@ -39,7 +40,11 @@ interface TauriGlobal {
     // back from the async `getCurrent()`.
     getCurrent?: () => Promise<{ label: string }>;
     /** The current window, for appearance (`setTheme`). */
-    getCurrentWindow?: () => { startDragging?: () => Promise<void>; setTheme?: (theme: 'light' | 'dark' | null) => Promise<void> };
+    getCurrentWindow?: () => {
+      startDragging?: () => Promise<void>;
+      setTheme?: (theme: 'light' | 'dark' | null) => Promise<void>;
+      isFullscreen?: () => Promise<boolean>;
+    };
   };
   /** App metadata (`core:app:default`). */
   app?: { getVersion?: () => Promise<string> };
@@ -74,8 +79,56 @@ export function hasHiddenTitleBar(): boolean {
 }
 
 /** Padding that clears the macOS traffic lights, in the same shape the
- *  traffic lights occupy. The main toolbar owns window dragging. */
-export const TRAFFIC_LIGHT_INSET = { top: 28, left: 78 } as const;
+ *  traffic lights occupy. The main toolbar owns window dragging.
+ *
+ *  `centerY` is the main toolbar's centre line (it sits 8px down and is
+ *  44px tall), so the lights, the sidebar toggle and the chat title share
+ *  one line; the sidebar's header row (`top + 8`) ends where that toolbar
+ *  does.
+ *
+ *  The desktop app places the lights itself (`traffic_light_position` in
+ *  apps/desktop): `centerY` is their centre line and must match it. */
+export const TRAFFIC_LIGHT_INSET = { top: 44, left: 78, centerY: 30 } as const;
+
+/* ---------- native fullscreen ---------- */
+
+// macOS hides the traffic lights in fullscreen (they only slide in with the
+// menu bar), so the room the UI keeps for them goes too. Native fullscreen
+// isn't the DOM's `fullscreenElement`; the window says so itself, and a
+// window exactly the size of the screen is the fallback answer.
+let fullscreen = false;
+const fullscreenListeners = new Set<() => void>();
+
+function checkFullscreen() {
+  const nativeWindow = window.__TAURI__?.window?.getCurrentWindow?.();
+  const apply = (next: boolean) => {
+    if (next === fullscreen) return;
+    fullscreen = next;
+    fullscreenListeners.forEach((listener) => listener());
+  };
+  const fallback = () => apply(window.innerWidth === screen.width && window.innerHeight === screen.height);
+  if (nativeWindow?.isFullscreen) nativeWindow.isFullscreen().then(apply, fallback);
+  else fallback();
+}
+
+function subscribeFullscreen(onChange: () => void) {
+  if (fullscreenListeners.size === 0) {
+    window.addEventListener('resize', checkFullscreen);
+    checkFullscreen();
+  }
+  fullscreenListeners.add(onChange);
+  return () => {
+    fullscreenListeners.delete(onChange);
+    if (fullscreenListeners.size === 0) window.removeEventListener('resize', checkFullscreen);
+  };
+}
+
+/** Whether the traffic lights are on screen: the desktop app with its title
+ *  bar hidden, and not in fullscreen. */
+export function useTrafficLights(): boolean {
+  const full = useSyncExternalStore(subscribeFullscreen, () => fullscreen, () => false);
+  return hasHiddenTitleBar() && !full;
+}
 
 export type Channel = 'stable' | 'beta' | 'alpha';
 
