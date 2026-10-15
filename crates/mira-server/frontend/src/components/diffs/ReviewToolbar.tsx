@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Menu, MenuItem } from '../ui/Menu';
 import { Tip } from '../ui/Tip';
 import { useSelector } from '@tanstack/react-store';
-import { ChevronDown, ChevronLeft, ChevronRight, Columns2, List, WrapText, Pilcrow } from 'lucide-react';
+import { AlignLeft, ChevronDown, ChevronLeft, ChevronRight, Columns2, List, ListOrdered, Text, WrapText } from 'lucide-react';
 import { useAppRuntime, useWorkspaceUiField } from '../../state/RuntimeProvider';
 import { selectActiveSession } from '../../state/runtimeStore';
 import { PREF_KEYS, useBoolPref, useStringPref } from '../../lib/prefs';
@@ -69,7 +69,7 @@ export function ReviewDisplayActions({ narrow = false }: { narrow?: boolean }) {
       <Tip label="Unified diff" side="bottom" align="start"><button type="button" aria-label="Unified diff" aria-pressed={layout !== 'split' || narrow} onClick={() => setLayout('unified')} className={cn(action,(layout !== 'split' || narrow) && active)}><List className="size-3.5" /></button></Tip>
       <Tip label="Side by side diff" hint={narrow ? "Widen the panel to at least 600px to compare both sides." : undefined} side="bottom" align="end"><button type="button" disabled={narrow} aria-label="Side by side diff" aria-pressed={layout === 'split' && !narrow} onClick={() => setLayout('split')} className={cn(action,layout === 'split' && !narrow && active)}><Columns2 className="size-3.5" /></button></Tip>
     </div>
-    <Tip label={wrap ? "Stop wrapping lines" : "Wrap lines"} side="bottom" align="end"><button type="button" aria-label="Wrap lines" aria-pressed={wrap} onClick={() => setWrap(!wrap)} className={cn(action,'bg-secondary',wrap && active)}><WrapText className="size-3.5" /></button></Tip>
-    <Tip label={numbers ? "Hide line numbers" : "Show line numbers"} side="bottom" align="end"><button type="button" aria-label="Line numbers" aria-pressed={numbers} onClick={() => setNumbers(!numbers)} className={cn(action,'bg-secondary',numbers && active)}><Pilcrow className="size-3.5" /></button></Tip>
+    <Tip label={wrap ? "Stop wrapping lines" : "Wrap lines"} side="bottom" align="end"><button type="button" aria-label="Wrap lines" aria-pressed={wrap} onClick={() => setWrap(!wrap)} className={cn(action,'bg-secondary',wrap && active)}>{wrap ? <WrapText className="size-3.5" /> : <AlignLeft className="size-3.5" />}</button></Tip>
+    <Tip label={numbers ? "Hide line numbers" : "Show line numbers"} side="bottom" align="end"><button type="button" aria-label="Line numbers" aria-pressed={numbers} onClick={() => setNumbers(!numbers)} className={cn(action,'bg-secondary',numbers && active)}>{numbers ? <ListOrdered className="size-3.5" /> : <Text className="size-3.5" />}</button></Tip>
   </div>;
 }
