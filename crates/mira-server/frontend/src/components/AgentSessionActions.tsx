@@ -64,7 +64,6 @@ export function RevertButton({
           setConfirm(null);
           if (turns === null) load();
         }}
-        title="Restore files and transcript to before a turn"
         className="inline-flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-border/70 px-2.5
                    text-[12px] text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
       >

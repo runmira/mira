@@ -54,6 +54,7 @@ saveModelOptions,
 import type { AcpAgentStatus,AcpConfigOption,SessionEngine } from '../types';
 import { AgentIcon,ModelIcon,ProviderIcon } from './AgentIcon';
 import { RevertButton } from './AgentSessionActions';
+import { Tip } from './ui/Tip';
 import { ApprovalDialog } from './ApprovalDialog';
 import { PrivateText,redactEmails } from './PrivateText';
 
@@ -390,16 +391,22 @@ export function EnginePicker(props: EnginePickerProps) {
                       </span>
                       <div className="ml-auto flex shrink-0 items-center gap-1">
                         {props.onAgentCompact && (
-                          <SmallButton icon={<Shrink className="size-3" />} onClick={() => { props.onAgentCompact?.(); onOpenChange(false); }} title="Ask the agent to compact its context">
-                            Compact
-                          </SmallButton>
+                          <Tip label="Compact context" hint={`Ask ${engine?.display_name ?? 'the agent'} to summarize the conversation so far, freeing room for more.`}>
+                            <SmallButton icon={<Shrink className="size-3" />} onClick={() => { props.onAgentCompact?.(); onOpenChange(false); }}>
+                              Compact
+                            </SmallButton>
+                          </Tip>
                         )}
                         {props.onAgentFork && forkActions(engine).wholeChat && (
-                          <SmallButton icon={<GitBranch className="size-3" />} onClick={() => { props.onAgentFork?.(); onOpenChange(false); }} title="Open a new chat with a native copy of this entire agent conversation">
-                            Fork chat
-                          </SmallButton>
+                          <Tip label="Fork into a new chat" hint="Copies this whole agent conversation into a separate chat. This one stays as it is.">
+                            <SmallButton icon={<GitBranch className="size-3" />} onClick={() => { props.onAgentFork?.(); onOpenChange(false); }}>
+                              Fork chat
+                            </SmallButton>
+                          </Tip>
                         )}
-                        <RevertButton sessionId={props.sessionId} onReverted={props.onAgentReverted} />
+                        <Tip label="Revert to an earlier turn" hint="Pick a turn to restore files and the transcript to how they were before it." align="end">
+                          <RevertButton sessionId={props.sessionId} onReverted={props.onAgentReverted} />
+                        </Tip>
                       </div>
                     </div>
                   )}
@@ -714,12 +721,11 @@ function ModelList({
 export const SESSION_BUTTON =
   'inline-flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-border/70 px-2.5 text-[12px] text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground';
 
-function SmallButton({ children, onClick, title, icon }: { children: React.ReactNode; onClick: () => void; title?: string; icon?: React.ReactNode }) {
+function SmallButton({ children, onClick, icon }: { children: React.ReactNode; onClick: () => void; icon?: React.ReactNode }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      title={title}
       className={SESSION_BUTTON}
     >
       {icon}
