@@ -504,7 +504,8 @@ pub fn wake_outbox(
                 Err(e) => {
                     if !running {
                         crate::acp_host::AcpEventPort::for_slot(&slot)
-                            .turn_ended("answer_delivery_failed");
+                            .turn_ended("answer_delivery_failed")
+                            .await;
                     }
                     let _ = slot.events_tx.send(crate::protocol::ServerMsg::Error { text: format!("answer delivery is uncertain; saved answers will not be sent again automatically: {e}") });
                 }

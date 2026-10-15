@@ -65,3 +65,10 @@ export function acpOptionsToDescriptors(
 export function acpInitialValue(o: AcpConfigOption): string | null {
   return o.current ?? null;
 }
+
+/** Unknown catalogs remain usable; an explicit modality list is authoritative. */
+export function agentAcceptsImages(options: AcpConfigOption[] | null | undefined): boolean {
+  const model = options?.find(o => o.category === 'model');
+  const modalities = model?.values.find(v => v.value === model.current)?.capabilities?.inputModalities;
+  return modalities == null || modalities.includes('image');
+}

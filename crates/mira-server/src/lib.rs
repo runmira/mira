@@ -28,7 +28,11 @@
 
 pub mod acp_host;
 pub mod acp_session;
+mod agent_capabilities;
+mod agent_fork;
+mod agent_rewind;
 mod agent_secrets;
+mod agent_sign_in;
 pub mod agent_spend;
 mod agent_threads;
 mod agent_updates;
@@ -40,6 +44,7 @@ mod browser;
 mod browser_recording;
 mod chat_import;
 pub mod checkpoints;
+pub mod codex_auth;
 mod computer;
 mod context_api;
 mod cwd;
@@ -87,6 +92,7 @@ pub mod slot;
 mod state;
 mod subagents_api;
 mod terminal;
+mod terminal_auth;
 mod tests_api;
 mod title;
 mod transcript_history;
@@ -355,6 +361,10 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
     slots.insert(initial_id.clone(), initial_slot.clone());
 
     let state = AppState {
+        codex_auth: Arc::new(crate::codex_auth::AuthRegistry::default()),
+        agent_capabilities: Arc::new(crate::agent_capabilities::CapabilityRegistry::default()),
+        terminal_auth: Arc::new(crate::terminal_auth::TerminalAuthRegistry::default()),
+        agent_sign_in: Arc::new(crate::agent_sign_in::SignInRegistry::default()),
         request_slot: None,
         slot_loads: Arc::new(std::sync::Mutex::new(HashMap::new())),
         session_activity,
@@ -512,6 +522,10 @@ fn build_router(
         .route("/api/diagnostics/bundle", get(diagnostics::download))
         .route("/api/diagnostics/save", post(diagnostics::save))
         .route("/api/aside", post(aside::ask))
+        .route(
+            "/api/sessions/:id/agent-file-rewind",
+            axum::routing::post(agent_rewind::rewind_files),
+        )
         .route("/api/sessions/:id/fork", post(sessions::fork_session))
         .route(
             "/api/sessions/:id/relationships",
@@ -630,6 +644,17 @@ fn build_router(
         .route(
             "/api/engines/:instance/settings",
             get(engine_settings::get_settings).put(engine_settings::put_settings),
+        )
+        .route("/api/engines/:instance/account", get(codex_auth::status))
+        .route(
+            "/api/engines/:instance/terminal-auth",
+            get(terminal_auth::status)
+                .post(terminal_auth::start)
+                .delete(terminal_auth::cancel),
+        )
+        .route(
+            "/api/engines/:instance/account/login",
+            axum::routing::post(codex_auth::start).delete(codex_auth::cancel),
         )
         .route("/api/import/scan", get(chat_import::scan))
         .route("/api/import", axum::routing::post(chat_import::import))

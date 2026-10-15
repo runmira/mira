@@ -37,7 +37,6 @@ export function OnboardingShell({
       <Ambient />
 
       <div
-        data-tauri-drag-region
         className="relative z-10 flex h-14 shrink-0 items-center gap-3 pr-5"
         style={{ paddingLeft: inset ? TRAFFIC_LIGHT_INSET.left + 8 : 24 }}
       >

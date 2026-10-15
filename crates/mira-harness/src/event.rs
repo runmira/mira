@@ -110,6 +110,9 @@ pub enum HarnessEvent {
 pub(crate) const PROVIDER_ERROR: &str = "provider error";
 pub(crate) const STREAM_ERROR: &str = "stream error";
 pub(crate) const STREAM_TIMEOUT: &str = "stream timed out";
+/// Prefix of the warning when a compaction leaves the request still too
+/// close to the window to compact again this turn.
+pub(crate) const COMPACTION_STALLED: &str = "Still near the context limit after compacting";
 
 /// True for a [`HarnessEvent::Warning`] that means the turn failed (the
 /// provider refused the request, or its stream broke or hung), as

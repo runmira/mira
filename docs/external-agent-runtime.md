@@ -295,3 +295,191 @@ turn that receives a steering instruction and finishes without cancellation.
 These opt-in tests use `MIRA_TEST_OPENCODE_BIN` and remain ignored in normal CI.
 Plugin authentication, admission deduplication and cleanup also run in the normal
 frontend test suite.
+
+
+## ACP compaction
+
+This build enables the ACP SDK's preview session-compaction schema and advertises
+`clientCapabilities.session.compaction`. Native IDs are scoped by native session;
+start, terminal patches and summary chunks update one retained transcript card.
+Replacement flags preserve omitted versus explicitly cleared summary/error fields
+through sidecar serialization. Live traffic and replay use the same reducer.
+Cancellation has its own state. An unfinished native compaction cannot be marked
+successful merely because its surrounding prompt ended.
+
+OpenCode's compact action uses only the live session's advertised `compact`
+command. It shares normal input admission, foreground reservation, Stop epochs
+and turn completion with ordinary prompts; a busy session rejects the request.
+The captured engine instance is rechecked under the dispatch lock. Compaction
+keeps `/compact` at the beginning of the prompt and preserves pending context
+handoff for the next ordinary input. The UI creates no optimistic busy state for
+OpenCode; the server admits the command before creating its fallback card. Older
+agents without native compaction updates retain that turn-based fallback.
+Deploy the frontend and server together for the new transcript frame types.
+
+
+OpenCode v2.0.22 uses `session_info_update` metadata under
+`opencode/compaction` for its lifecycle receipts. Mira normalizes that older
+format into the same ID-addressed events. That release supplies no retained
+summary through this ACP metadata; Mira does not invent one. The preview schema
+path preserves supplied summaries/chunks from agents that implement it.
+Compaction presentation follows T3's small transcript divider with a live label;
+retained context and failures expand inline in a bounded panel. The context
+meter disables compaction while the turn is active or OpenCode has not advertised
+the command, with an explanation beside the action.
+
+
+Codex model picks acknowledge the refreshed catalog/current value through the
+same config-option path as ACP agents. Mira publishes the acknowledged model
+into the session engine immediately and saves the standing choice. Codex applies
+that choice on the next `turn/start` in the existing native thread; an already
+running turn retains its original model. No new Mira session or native thread
+is required, and stale context-window readings are cleared on the switch.
+
+## Codex model capabilities and per-chat choices
+
+Codex model catalogs retain supported/default reasoning efforts, service tiers
+and defaults, input modalities, and legacy speed metadata. Live config options
+and engine resources carry this metadata. The composer shows only advertised
+reasoning and speed choices for the selected model. A null service-tier default
+keeps a Default choice available alongside optional Fast tiers. Older catalogs
+without these fields expose no invented controls and defer to Codex's defaults.
+
+Confirmed choices are persisted with the chat, keyed by engine instance, and
+reapplied after a restart against the current catalog. Changing models retains
+compatible choices and otherwise uses the new model's advertised defaults.
+Each subsequent native turn receives the selected effort (including collaboration
+mode settings) and service tier on the same thread; an active turn keeps its
+existing request. Explicit text-only models reject image prompts and steering,
+and the composer explains the restriction before sending attached images.
+
+Reference: [Codex model schema](https://github.com/openai/codex/blob/f87ba04ec3cd386a92e775405b252a310b40bb0d/codex-rs/app-server-protocol/schema/typescript/v2/Model.ts).
+
+## Codex sign-in (#196)
+
+The Codex instance's settings contain a sign-in row backed by an account-only
+app-server connection. It reads saved CLI credentials without opening a thread,
+supports browser and device-code sign-in, matches completion by the native login
+ID, and rereads account/requirements before confirming success. Native tokens
+never enter the UI or transcript; pending handoffs stay in memory and HTTP
+responses disable caching. Older CLI methods fall back explicitly to another
+flow or that instance's CLI login.
+
+The connection and pending attempt survive UI reconnects. Cancellation checks
+both connection and login IDs under the protocol gate and closes the native
+callback listener even when older cancellation methods fail. Connections expire
+after ten minutes, with a fresh ten-minute window when a sign-in starts. Changes to the instance's home, binary, launch environment or
+arguments revoke old handoffs; stale completions cannot update the new owner's
+readiness/model cache.
+
+Account changes refresh authenticated readiness/catalogs and affected live Codex
+threads' account requirements/model options. The selected native thread is kept,
+and failed prompts are never resent automatically. Mira's own account and native
+provider OAuth settings remain separate.
+
+References: [official authentication protocol](https://developers.openai.com/codex/app-server#authentication),
+[pinned account protocol](https://github.com/openai/codex/blob/f87ba04ec3cd386a92e775405b252a310b40bb0d/codex-rs/app-server-protocol/src/protocol/v2/account.rs).
+
+## Native forks as separate chats (#194, #197, #201)
+
+A native fork creates a new Mira chat. It never replaces the runtime in the current
+chat. The new chat is nested under the original in the sidebar. It keeps the project,
+engine instance, model and confirmed launch options. It also receives the transcript
+sidecar through the fork point and a resume cursor for the new native session. The
+original chat, its running agent and its cursor are left unchanged. Nothing is saved
+unless the native fork succeeds; the sidecar and cursor are removed if the chat
+record cannot be saved.
+
+| Agent | Native operation | Scope offered |
+| --- | --- | --- |
+| Codex (app-server) | `thread/fork` with `lastTurnId`, run in a short-lived app-server so the live thread never sees the new thread's notifications | Fork from a completed turn, or the whole chat |
+| OpenCode (ACP) | `session/fork` with the source session's exact working directory, only when `sessionCapabilities.fork` is advertised | Whole chat |
+| Claude Code | `--resume <id> --fork-session` on the new chat's first start; the cursor is marked pending until Claude reports the new session ID | Whole chat |
+
+Codex fork boundaries come from completed native turn IDs, which are now recorded
+in the sidecar. Subagent threads are excluded. Chats recorded before this change can
+fork only from the latest turn. A boundary that is still running is rejected with
+instructions to wait or stop it. A message the provider or another agent answered
+cannot be a native boundary. Agents that fork only whole sessions do not show
+"Fork from here" on individual messages. Their action is labelled **Fork chat**.
+An installed version without the operation reports that it cannot fork natively.
+Mira never falls back to replaying the transcript into a fresh conversation.
+
+OpenCode refuses to fork a session that has no messages. The opt-in
+`installed_opencode_forks_a_session_without_touching_the_source` test uses a
+free model to verify the fork with OpenCode v2.0.22, then resumes both sessions.
+
+References: [pinned `thread/fork` schema](https://github.com/openai/codex/blob/f87ba04ec3cd386a92e775405b252a310b40bb0d/codex-rs/app-server-protocol/schema/typescript/v2/ThreadForkParams.ts),
+[OpenCode ACP sessions](https://dev.opencode.ai/v2/docs/cli/acp/#sessions).
+
+## Installed-version capability negotiation (#203)
+
+Each runtime start records, per engine instance, the resolved binary, its reported
+version, the transport, and the capabilities that runtime negotiated. Versions come
+from ACP `agentInfo` or the Codex `userAgent`. Claude Code reports no version on the
+wire, so Mira asks its `--version` after start. The registry is
+`~/.mira/agent-capabilities.json`; an unreadable file is treated as unknown.
+
+- **Live**: the running agent's negotiated capabilities, plus Mira's own gates
+  (OpenCode's steering bridge, Codex model input modalities).
+- **Recorded**: the agent is not running and the launch is unchanged (same resolved
+  program and modification time, arguments and home or config locations). The last
+  runtime's capabilities are used, so a reloaded chat can offer what its install
+  supports.
+- **Unknown**: a new or changed launch. Conservative defaults apply, and actions such
+  as forking stay hidden until the agent starts.
+
+Every start takes an epoch first. A commit from an older epoch never replaces a newer
+runtime's record. Native calls answered as unknown methods (`-32601`, "method not
+found", "unknown variant") permanently downgrade fork, rollback or steering for that
+launch and version. Mira reports the operation as unavailable; it never substitutes
+a fresh conversation or a cancellation. An upgraded CLI starts with a new record and
+is asked again.
+
+Goals and background activity remain event-driven for Codex: an older app-server that
+never emits goal or subagent updates shows none. ACP fork, resume, load and image
+support come from `initialize`. Malformed capability fields count as unadvertised and
+do not fail startup.
+
+## OpenCode terminal sign-in (#198)
+
+OpenCode's settings include **Sign in in terminal**. Mira initializes that instance's
+configured agent with terminal sign-in advertised: the spec `auth.terminal`
+capability, plus OpenCode's older `_meta["terminal-auth"]` flag. Mira reads the
+terminal method OpenCode returns; v2.0.22 returns `opencode auth login`. A method
+that names the agent's own binary resolves to the instance's configured program,
+never to whatever `PATH` finds first. It runs with the instance's environment and
+deny prefixes in a Mira terminal shown inside the settings panel, so the login
+updates the same credential store the instance's prompts use. Terminal methods are
+never sent to `authenticate`.
+
+Exit status 0 re-probes readiness and the model catalog. It then reconnects idle
+runtimes on that instance, which re-initialize with the new credentials on their next
+prompt and resume the same session. A running turn is left alone, and nothing is
+resent. Any other exit is reported as a failure. Cancel kills the login first and
+marks the attempt cancelled, so its exit is not reported as a failure. A newer attempt
+or a changed binary, home or arguments makes an older attempt's completion stale.
+After a successful login, the panel reports readiness and the number of available
+models. It shows a warning when the agent is signed in but has no models (no provider
+connected yet). Agents without a terminal method keep the copyable login command as
+the fallback. Terminals stay disabled when the server listens beyond localhost.
+
+## Claude Code native file rewind (#200)
+
+Mira starts Claude Code with `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING=true` and
+`--replay-user-messages`. Each accepted prompt's UUID is Claude's file checkpoint.
+It is recorded in the sidecar with the Claude session it belongs to. On a Claude
+chat, a message's **Restore files** action uses these checkpoints: a `rewind_files`
+dry run lists the files first, and the user confirms. The dialog states the
+coverage. Only Write, Edit and NotebookEdit changes are restored. Bash commands,
+subagent edits and edits made outside Claude are not. The conversation is not
+rewound; that remains a separate revert.
+
+Before a real rewind, Mira snapshots tracked files, so **Undo** can put them back.
+Claude replaces each listed file with its checkpoint copy, so later edits to those
+files are replaced too; the dialog says so. Mira reports success only when Claude
+reports `canRewind`, and it surfaces Claude's error otherwise (for example, "No file
+checkpoint found"). Messages sent before checkpoints were enabled, messages another
+engine answered, and checkpoints from a different Claude session (such as the
+original chat of a fork) are reported as unavailable. A busy turn must finish or be
+stopped first. An idle chat resumes its Claude session before rewinding.

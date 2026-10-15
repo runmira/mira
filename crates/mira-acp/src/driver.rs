@@ -156,8 +156,9 @@ pub struct DriverConfig {
     /// Extra arguments appended after the driver's own, verbatim.
     pub launch_args: Vec<String>,
     /// Compact the session once its context passes this many tokens.
-    /// `None` keeps the agent's own default. Only meaningful for agents whose
-    /// context Mira manages.
+    /// `None` keeps the agent's own default. Applied at launch by
+    /// [`apply_auto_compact`]: Codex takes it exactly; Claude Code takes it as
+    /// the window it compacts against; OpenCode has no such setting.
     pub auto_compact_after: Option<u64>,
     /// Home/config directory override, exported as the driver's env var
     /// (`CODEX_HOME`-style). Used to give each instance its own credentials.
@@ -392,6 +393,7 @@ pub trait AcpDriver: Send + Sync {
             fs_write: true,
             terminal: true,
             elicitation_form: true,
+            terminal_auth: false,
         }
     }
 
@@ -619,5 +621,84 @@ mod tests {
             Fake.credential_boundary(&base_cfg()),
             Fake.credential_boundary(&base_cfg())
         );
+    }
+}
+
+/// Claude Code's compaction window override. It compacts a little before
+/// reaching it, leaving room for the summary.
+pub const CLAUDE_AUTO_COMPACT_WINDOW_ENV: &str = "CLAUDE_CODE_AUTO_COMPACT_WINDOW";
+
+/// Pass `auto_compact_after` to an agent that can take it. A variable or
+/// option the user already set wins. `Err` explains why this agent ignores it.
+pub fn apply_auto_compact(
+    kind: &str,
+    launch: &mut LaunchConfig,
+    tokens: u64,
+) -> Result<(), String> {
+    match kind {
+        // `-c` is a global flag, so it is accepted after `app-server`.
+        "codex" => {
+            if !launch.args.iter().any(|a| a.starts_with("model_auto_compact_token_limit=")) {
+                launch.args.push("-c".into());
+                launch.args.push(format!("model_auto_compact_token_limit={tokens}"));
+            }
+            Ok(())
+        }
+        "claude-code" => {
+            launch
+                .env
+                .entry(CLAUDE_AUTO_COMPACT_WINDOW_ENV.to_string())
+                .or_insert_with(|| tokens.to_string());
+            Ok(())
+        }
+        "opencode" => Err(
+            "OpenCode has no compaction threshold, only a reserve below each model's window; auto_compact_after is ignored"
+                .into(),
+        ),
+        other => Err(format!("{other} has no compaction setting Mira can pass; auto_compact_after is ignored")),
+    }
+}
+
+#[cfg(test)]
+mod auto_compact_tests {
+    use super::*;
+
+    fn launch() -> LaunchConfig {
+        LaunchConfig {
+            program: "agent".into(),
+            args: vec!["app-server".into()],
+            env: Default::default(),
+            secret_env: Vec::new(),
+            env_deny: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn each_agent_gets_the_threshold_in_its_own_form() {
+        let mut codex = launch();
+        apply_auto_compact("codex", &mut codex, 150_000).unwrap();
+        assert_eq!(
+            codex.args,
+            ["app-server", "-c", "model_auto_compact_token_limit=150000"]
+        );
+        apply_auto_compact("codex", &mut codex, 150_000).unwrap();
+        assert_eq!(codex.args.len(), 3, "not passed twice");
+
+        let mut claude = launch();
+        claude
+            .env
+            .insert(CLAUDE_AUTO_COMPACT_WINDOW_ENV.into(), "400000".into());
+        apply_auto_compact("claude-code", &mut claude, 150_000).unwrap();
+        assert_eq!(
+            claude.env[CLAUDE_AUTO_COMPACT_WINDOW_ENV], "400000",
+            "the user's own value wins"
+        );
+        let mut fresh = launch();
+        apply_auto_compact("claude-code", &mut fresh, 150_000).unwrap();
+        assert_eq!(fresh.env[CLAUDE_AUTO_COMPACT_WINDOW_ENV], "150000");
+
+        let mut opencode = launch();
+        assert!(apply_auto_compact("opencode", &mut opencode, 150_000).is_err());
+        assert_eq!(opencode.args, ["app-server"], "left alone");
     }
 }

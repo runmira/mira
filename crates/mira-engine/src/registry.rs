@@ -63,6 +63,67 @@ pub enum ProbeDepth {
     Full,
 }
 
+fn native_model_info(model: &mira_acp::appserver::CodexModel) -> ModelInfo {
+    ModelInfo {
+        id: model.value.clone(),
+        display_name: Some(model.label.clone()),
+        owned_by: None,
+        context_length: None,
+        capabilities: Some(mira_ai::provider::ModelCapabilities {
+            option_descriptors: native_model_descriptors(&model.capabilities),
+            native_metadata: serde_json::to_value(&model.capabilities).ok(),
+        }),
+    }
+}
+
+fn native_model_descriptors(
+    caps: &mira_acp::events::ModelCapabilities,
+) -> Vec<mira_ai::provider::OptionDescriptor> {
+    use mira_ai::provider::{OptionChoice, OptionDescriptor};
+    let mut descriptors = Vec::new();
+    let effort = caps
+        .supported_reasoning_efforts
+        .iter()
+        .map(|e| OptionChoice {
+            value: e.reasoning_effort.clone(),
+            label: e.reasoning_effort.clone(),
+            hint: Some(e.description.clone()),
+        })
+        .collect::<Vec<_>>();
+    let mut tiers = caps
+        .service_tiers
+        .iter()
+        .map(|t| OptionChoice {
+            value: t.id.clone(),
+            label: t.name.clone(),
+            hint: Some(t.description.clone()),
+        })
+        .collect::<Vec<_>>();
+    if !tiers.is_empty() && caps.default_service_tier.is_none() {
+        tiers.insert(
+            0,
+            OptionChoice {
+                value: String::new(),
+                label: "Default".into(),
+                hint: None,
+            },
+        );
+    }
+    for (id, label, options) in [
+        ("reasoning_effort", "Reasoning", effort),
+        ("service_tier", "Speed", tiers),
+    ] {
+        if !options.is_empty() {
+            descriptors.push(OptionDescriptor::Select {
+                id: id.into(),
+                label: label.into(),
+                options,
+            });
+        }
+    }
+    descriptors
+}
+
 impl EngineRegistry {
     pub fn from_config(cfg: &MiraConfig) -> Self {
         Self {
@@ -237,17 +298,7 @@ impl EngineRegistry {
         // of "its model list appears once it has started". Previously this
         // was dropped (`models: Vec::new()`), so external rows never listed
         // models until a chat started one.
-        let models: Vec<ModelInfo> = status
-            .models
-            .iter()
-            .map(|m| ModelInfo {
-                id: m.value.clone(),
-                display_name: Some(m.label.clone()),
-                owned_by: None,
-                context_length: None,
-                capabilities: None,
-            })
-            .collect();
+        let models: Vec<ModelInfo> = status.models.iter().map(native_model_info).collect();
         Some(EngineSnapshot {
             instance: inst.id.clone(),
             driver: inst.driver.clone(),
@@ -414,6 +465,37 @@ mod tests {
 
     fn cfg(yaml: &str) -> MiraConfig {
         serde_yaml::from_str(yaml).unwrap()
+    }
+
+    #[test]
+    fn external_model_resources_keep_native_metadata_and_controls() {
+        let model = mira_acp::appserver::parse_model_entry(&serde_json::json!({
+            "id":"gpt-test", "displayName":"GPT Test", "inputModalities":["text"],
+            "supportedReasoningEfforts":[{"reasoningEffort":"high","description":"Deep"}],
+            "defaultReasoningEffort":"high", "serviceTiers":[{"id":"priority","name":"Fast","description":"2x speed"}],
+            "defaultServiceTier":null
+        })).unwrap();
+        let wire = serde_json::to_value(native_model_info(&model)).unwrap();
+        assert_eq!(
+            wire["capabilities"]["native_metadata"]["inputModalities"],
+            serde_json::json!(["text"])
+        );
+        assert_eq!(
+            wire["capabilities"]["native_metadata"]["defaultReasoningEffort"],
+            "high"
+        );
+        assert_eq!(
+            wire["capabilities"]["option_descriptors"][0]["options"][0]["value"],
+            "high"
+        );
+        assert_eq!(
+            wire["capabilities"]["option_descriptors"][1]["options"][0]["value"],
+            ""
+        );
+        assert_eq!(
+            wire["capabilities"]["option_descriptors"][1]["options"][1]["value"],
+            "priority"
+        );
     }
 
     #[test]

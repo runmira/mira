@@ -258,7 +258,7 @@ export type OptionDescriptor =
   | { type: 'select'; id: string; label: string; options: OptionChoice[] }
   | { type: 'boolean'; id: string; label: string; on_value?: string | null };
 
-export type ModelCapabilities = { option_descriptors?: OptionDescriptor[] };
+export type ModelCapabilities = { option_descriptors?: OptionDescriptor[]; native_metadata?: import('./types').NativeModelCapabilities | null };
 
 export type ModelInfo = {
   id: string;
@@ -585,6 +585,8 @@ async function checkpointCall<T>(path: string, body: unknown, sessionId?: string
 /** A user message, as checkpoints identify it: its text, and which match
  *  of that text counting from the latest (the same key editing uses). */
 export type MessageRef = { text: string; occurrence: number };
+/** A fork point: a message, or (`whole`) the entire conversation. */
+export type ForkRef = MessageRef & { whole?: boolean };
 
 /** What restoring the files to before a message would change. */
 export async function previewCheckpoint(ref: MessageRef, sessionId?: string): Promise<RestoreChange[]> {
@@ -598,8 +600,9 @@ export function restoreCheckpoint(ref: MessageRef, sessionId?: string): Promise<
 }
 
 /** "Fork from here": a new chat with this one's history through the
- *  given message's turn. Resolves to the new chat's id. */
-export async function forkSession(sessionId: string, ref: MessageRef): Promise<string> {
+ *  given message's turn. External-agent chats fork their native session.
+ *  Resolves to the new chat's id. */
+export async function forkSession(sessionId: string, ref: ForkRef): Promise<string> {
   return (
     await checkpointCall<{ id: string }>(`/api/sessions/${encodeURIComponent(sessionId)}/fork`, ref)
   ).id;
@@ -976,3 +979,7 @@ export {
   type TimelineEventView,
 } from './api/pullRequests';
 export { getSettings, putSettings } from './api/settings';
+
+export { getCodexAccount, startCodexLogin, cancelCodexLogin, type CodexAccountView } from './api/codexAccount';
+export { agentFileRewind, type AgentFileRewind } from './api/agentFileRewind';
+export { getTerminalAuth, startTerminalAuth, cancelTerminalAuth, type TerminalAuthView } from './api/terminalAuth';

@@ -30,6 +30,11 @@ pub struct AgentCursor {
     pub instance: String,
     pub agent_session_id: String,
     pub updated_at: u64,
+    /// `agent_session_id` is the *source* of a native fork that has not been
+    /// created yet (Claude's `--resume <id> --fork-session`). The next start
+    /// forks it; the new id then replaces this cursor and clears the flag.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fork_pending: bool,
 }
 
 fn now_secs() -> u64 {
@@ -71,7 +76,39 @@ pub fn agent_session_ids_in(home: &Path) -> std::collections::HashSet<String> {
 /// Record where an agent session left off. Overwrites any previous cursor
 /// for the Mira session: there is exactly one agent per slot.
 pub fn record_in(home: &Path, mira_session: &str, instance: &str, agent_session_id: &str) {
+    write_cursor(home, mira_session, instance, agent_session_id, false);
+}
+
+/// Record that this Mira session's first start must fork `source` rather
+/// than resume it.
+pub fn record_pending_fork_in(home: &Path, mira_session: &str, instance: &str, source: &str) {
+    write_cursor(home, mira_session, instance, source, true);
+}
+
+pub fn record_pending_fork(mira_session: &str, instance: &str, source: &str) {
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        record_pending_fork_in(&home, mira_session, instance, source);
+    }
+}
+
+fn write_cursor(
+    home: &Path,
+    mira_session: &str,
+    instance: &str,
+    agent_session_id: &str,
+    fork_pending: bool,
+) {
     let mut all = read_all(home);
+    // A pending fork's source id is not this session's own conversation.
+    // Recording it as one would make the next start resume (and write into)
+    // the original chat's session instead of forking it.
+    if !fork_pending
+        && all
+            .get(&key(mira_session, instance))
+            .is_some_and(|c| c.fork_pending && c.agent_session_id == agent_session_id)
+    {
+        return;
+    }
     all.insert(
         key(mira_session, instance),
         AgentCursor {
@@ -79,6 +116,7 @@ pub fn record_in(home: &Path, mira_session: &str, instance: &str, agent_session_
             instance: instance.to_string(),
             agent_session_id: agent_session_id.to_string(),
             updated_at: now_secs(),
+            fork_pending,
         },
     );
     if let Some(parent) = store_path(home).parent() {
@@ -321,6 +359,31 @@ mod tests {
         );
         assert!(read_in(&home, "s1", "grok").is_none());
         assert!(read_in(&home, "s2", "claude-code").is_none());
+    }
+
+    #[test]
+    fn a_pending_fork_survives_until_the_fork_reports_its_own_id() {
+        let (_d, home) = tmp();
+        record_in(&home, "src", "claude-code", "sid-src");
+        record_pending_fork_in(&home, "fork", "claude-code", "sid-src");
+        let pending = read_in(&home, "fork", "claude-code").unwrap();
+        assert!(pending.fork_pending);
+        assert_eq!(pending.agent_session_id, "sid-src");
+        // The source id must never become the fork's own cursor.
+        record_in(&home, "fork", "claude-code", "sid-src");
+        assert!(read_in(&home, "fork", "claude-code").unwrap().fork_pending);
+        // The forked process's new id replaces it.
+        record_in(&home, "fork", "claude-code", "sid-fork");
+        let done = read_in(&home, "fork", "claude-code").unwrap();
+        assert!(!done.fork_pending);
+        assert_eq!(done.agent_session_id, "sid-fork");
+        // The original chat's cursor was never touched.
+        assert_eq!(
+            read_in(&home, "src", "claude-code")
+                .unwrap()
+                .agent_session_id,
+            "sid-src"
+        );
     }
 
     #[test]

@@ -194,7 +194,18 @@ pub fn finish(cwd: &Path, session: &str, expected_tree: &str) {
         return;
     };
     let lock = store_lock(&file);
-    let _guard = lock.lock().unwrap_or_else(|error| error.into_inner());
+    let _guard = loop {
+        match lock.try_lock() {
+            Ok(guard) => break guard,
+            Err(std::sync::TryLockError::Poisoned(error)) => break error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if crate::session_changes::snapshot_budget_expired() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    };
     let result = snapshot_tree(cwd);
     let mut store = load(&file);
     let Some((index, tree)) = expected_tree.split_once(':') else {
@@ -316,20 +327,28 @@ pub fn turn_file_diff(
 }
 
 pub(crate) async fn finish_slot(slot: std::sync::Arc<crate::slot::SessionSlot>) {
-    let cwd = slot.cwd.read().await.clone();
-    let id = slot.id.to_string();
-    let summaries = tokio::task::spawn_blocking(move || {
-        if let Some(tree) = pending_tree(&cwd, &id) {
-            finish(&cwd, &id, &tree);
-        }
-        turn_diffs(&cwd, &id)
-    })
-    .await;
-    if let Ok(summaries) = summaries {
+    if let Some(summaries) = finish_in_cwd(slot.cwd.clone(), slot.id.to_string()).await {
         let _ = slot
             .events_tx
             .send(crate::protocol::ServerMsg::TurnDiffs { summaries });
     }
+}
+
+async fn finish_in_cwd(
+    cwd: std::sync::Arc<tokio::sync::RwLock<PathBuf>>,
+    id: String,
+) -> Option<Vec<TurnDiffSummary>> {
+    let cwd = cwd.read().await.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::session_changes::with_snapshot_budget(std::time::Duration::from_secs(5), || {
+            if let Some(tree) = pending_tree(&cwd, &id) {
+                finish(&cwd, &id, &tree);
+            }
+            turn_diffs(&cwd, &id)
+        })
+    })
+    .await
+    .ok()
 }
 
 fn tree_exists(cwd: &Path, tree: &str) -> bool {
@@ -613,6 +632,30 @@ mod tests {
         );
         assert!(turn_file_diff(cwd, S, "change", 0, "../a.txt").is_err());
         assert!(turn_file_diff(cwd, S, "change", 0, "missing.txt").is_err());
+    }
+
+    #[tokio::test]
+    async fn finalization_waits_for_folder_lock_and_persists_changes() {
+        let dir = repo();
+        record(dir.path(), S, "edit", None);
+        std::fs::write(dir.path().join("a.txt"), "edited\n").unwrap();
+        let cwd = std::sync::Arc::new(tokio::sync::RwLock::new(dir.path().to_path_buf()));
+        let guard = cwd.write().await;
+        let task = tokio::spawn(finish_in_cwd(cwd.clone(), S.into()));
+        tokio::task::yield_now().await;
+        assert!(!task.is_finished());
+        drop(guard);
+        let summaries = task.await.unwrap().unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].text, "edit");
+        assert_eq!(summaries[0].files[0].path, "a.txt");
+        assert_eq!(turn_diffs(dir.path(), S).len(), 1);
+        assert_eq!(
+            turn_file_diff(dir.path(), S, "edit", 0, "a.txt")
+                .unwrap()
+                .after,
+            "edited\n"
+        );
     }
 
     #[test]

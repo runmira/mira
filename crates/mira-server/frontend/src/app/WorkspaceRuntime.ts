@@ -56,7 +56,7 @@ export interface WorkspaceRuntime extends WorkspaceState {
   attachSession: (id: string) => void;
   switchCwd: (path: string) => Promise<void>;
   openProjectPicker: () => Promise<void>;
-  forkAcpAgent: () => void;
+  forkAcpAgent: () => Promise<void>;
   compactAcpAgent: (focus?: string) => void;
   clearThinkingIdle: () => void;
   scheduleThinkingIdle: () => void;

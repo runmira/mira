@@ -241,6 +241,7 @@ pub struct AcpHost {
     /// Live tool-call state per session, so a `tool_call_update` can be
     /// merged onto the call it belongs to instead of arriving contextless.
     tool_state: tokio::sync::Mutex<HashMap<String, crate::events::ToolCallState>>,
+    commands: std::sync::Mutex<HashMap<String, Vec<String>>>,
 }
 
 impl AcpHost {
@@ -257,7 +258,16 @@ impl AcpHost {
             events,
             pending_permissions: PendingPermissions::new(),
             tool_state: tokio::sync::Mutex::new(HashMap::new()),
+            commands: std::sync::Mutex::new(HashMap::new()),
         })
+    }
+
+    pub fn has_command(&self, session: &str, command: &str) -> bool {
+        self.commands
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(session)
+            .is_some_and(|names| names.iter().any(|name| name == command))
     }
 
     /// A host that can do nothing. Useful for a read-only preview mode and
@@ -532,6 +542,12 @@ impl AgentCallback for AcpHost {
                 return;
             }
         }
+        if let crate::events::MiraEvent::Commands { names } = &event.event {
+            self.commands
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(session, names.clone());
+        }
         self.events.emit(event).await;
         if let Some(spend) = spend {
             self.events.emit(spend).await;
@@ -543,6 +559,10 @@ impl AgentCallback for AcpHost {
             tracing::warn!(stderr = %tail, "acp: agent process ended");
         }
         self.tool_state.lock().await.clear();
+        self.commands
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
 }
 
@@ -1226,5 +1246,30 @@ mod pending_tests {
         assert_eq!(b.len().await, 1);
         b.settle(&json!(7)).await;
         assert!(a.is_empty().await);
+    }
+}
+
+#[cfg(test)]
+mod command_discovery_tests {
+    use super::*;
+    use crate::conn::AgentCallback;
+    #[tokio::test]
+    async fn available_commands_are_session_owned_and_updates_can_remove_support() {
+        let host = AcpHost::inert();
+        let update = |session: &str, names: Vec<&str>| serde_json::json!({"sessionId":session,"update":{"sessionUpdate":"available_commands_update","availableCommands":names.into_iter().map(|name|serde_json::json!({"name":name,"description":name})).collect::<Vec<_>>()}});
+        host.on_notification("session/update", update("root", vec!["compact"]))
+            .await;
+        assert!(host.has_command("root", "compact"));
+        assert!(!host.has_command("another", "compact"));
+        let mut child = update("root", vec![]);
+        child["update"]["_meta"] = serde_json::json!({"opencode/child-session":{"id":"child"}});
+        host.on_notification("session/update", child).await;
+        assert!(
+            host.has_command("root", "compact"),
+            "child command metadata cannot overwrite the parent"
+        );
+        host.on_notification("session/update", update("root", vec![]))
+            .await;
+        assert!(!host.has_command("root", "compact"));
     }
 }

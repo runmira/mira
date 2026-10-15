@@ -58,9 +58,58 @@ pub fn estimate_request(messages: &[Message], tools: &[ToolSpec]) -> u64 {
 pub struct Calibration {
     pub estimated: u64,
     pub reported: Option<u64>,
+    /// Which model counted it (`model_key`): another model's tokenizer and
+    /// caching say nothing about this one's.
+    pub model: u64,
+    /// The most recent request that was counted, kept when a later one
+    /// isn't (a stream that ended without usage).
+    basis: Option<(u64, u64, u64)>,
+}
+
+/// A stable key for a model id.
+pub fn model_key(model: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    model.hash(&mut h);
+    h.finish()
 }
 
 impl Calibration {
+    /// Start measuring a new request, keeping the last counted one as the
+    /// basis until this one is counted.
+    pub fn begin(&mut self, estimated: u64, model: &str) {
+        if let Some(reported) = self.reported {
+            self.basis = Some((self.estimated, reported, self.model));
+        }
+        self.estimated = estimated;
+        self.reported = None;
+        self.model = model_key(model);
+    }
+
+    /// `raw` (an uncalibrated `estimate_request`) scaled by how `model` counted
+    /// its latest request: its tokenizer, cached prefixes and framing are
+    /// folded in. A plain estimate until that model has counted one, so a
+    /// switch to another provider or model starts from the estimate.
+    pub fn calibrated(&self, raw: u64, model: &str) -> u64 {
+        let key = model_key(model);
+        let pair = match self.reported {
+            Some(reported) if self.model == key => Some((self.estimated, reported)),
+            _ => self
+                .basis
+                .filter(|(_, _, m)| *m == key)
+                .map(|(e, r, _)| (e, r)),
+        };
+        let ratio = pair.and_then(|(estimated, reported)| {
+            Calibration {
+                estimated,
+                reported: Some(reported),
+                ..Default::default()
+            }
+            .ratio()
+        });
+        ratio.map_or(raw, |r| (raw as f64 * r).round() as u64)
+    }
+
     /// Reported over estimated, kept within sane bounds so one odd report
     /// (a cached-prompt provider counting differently, a partial stream)
     /// can't make the breakdown absurd.
@@ -236,6 +285,26 @@ pub fn dropped_stub(tool: &str, label: &str, tokens: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn calibration_belongs_to_the_model_that_counted() {
+        let mut cal = Calibration::default();
+        assert_eq!(cal.calibrated(1_000, "a"), 1_000, "nothing counted yet");
+        cal.begin(1_000, "a");
+        cal.reported = Some(2_000);
+        assert_eq!(cal.calibrated(500, "a"), 1_000);
+        assert_eq!(
+            cal.calibrated(500, "b"),
+            500,
+            "another model starts from the estimate"
+        );
+        // A request that was never counted keeps the last basis.
+        cal.begin(1_200, "a");
+        assert_eq!(cal.calibrated(500, "a"), 1_000);
+        // Switching models and back: still the basis for `a`.
+        cal.begin(800, "b");
+        assert_eq!(cal.calibrated(500, "a"), 1_000);
+    }
     use mira_core::{ToolCall, ToolCallFunction, ToolCallId, ToolCallKind};
 
     fn call(id: &str, name: &str, args: &str) -> ToolCall {
@@ -284,6 +353,7 @@ mod tests {
             Calibration {
                 estimated: raw,
                 reported: Some(reported),
+                ..Default::default()
             },
         );
         assert!(b.calibrated);
@@ -323,6 +393,7 @@ mod tests {
             Calibration {
                 estimated: raw,
                 reported: Some(raw * 100),
+                ..Default::default()
             },
         );
         assert!(b.total <= raw * 3 + 5);

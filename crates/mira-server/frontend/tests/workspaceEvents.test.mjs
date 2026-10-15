@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 import { bundle } from './helpers/bundle.mjs';
-const { createAppRuntime, useApprovalEvents, useTranscriptEvents, useSessionEvents, useStreamCommands, useComposerCommands, useAgentEvents, upsertToolStart } = await bundle(`
+const { createAppRuntime, useApprovalEvents, useTranscriptEvents, useSessionEvents, useStreamCommands, useComposerCommands, useAgentEvents, useSessionCommands, upsertToolStart } = await bundle(`
 export { createAppRuntime } from './src/state/createAppRuntime';
 export { useApprovalEvents } from './src/app/useApprovalEvents';
 export { useTranscriptEvents } from './src/app/useTranscriptEvents';
@@ -9,6 +9,7 @@ export { useSessionEvents } from './src/app/useSessionEvents';
 export { useStreamCommands } from './src/app/useStreamCommands';
 export { useComposerCommands } from './src/app/useComposerCommands';
 export { useAgentEvents } from './src/app/useAgentEvents';
+export { useSessionCommands } from './src/app/useSessionCommands';
 export { upsertToolStart } from './src/transcript/entries';
 `, {
   'src/state/RuntimeProvider': 'export const useAppRuntime = () => globalThis.eventRuntime; export const useOptionalRuntime = () => null;',
@@ -232,4 +233,22 @@ test('steering reaches the server even when the client turn flag is stale, with 
   assert.equal(queued.steering,false);assert.match(queued.error,/Reconnect/);
   assert.equal(pending.current.size,0);
   assert.ok(!h.entries().some(entry=>entry.steerRequestId==='queued'));
+});
+
+
+test('OpenCode compaction waits for server admission instead of inventing a running turn',()=>{
+ const h=harness(); const sent=[];let running=0,thinking=0,notice;
+ const commands=useSessionCommands({getEngine:()=>({kind:'agent',driver:'opencode'}),wsRef:ref({sendImmediate:message=>{sent.push(message);return true;}}),reportTurnRunning:()=>running++,reportThinking:()=>thinking++,updateTranscript:h.context.updateTranscript,setRestoreNote:value=>notice=value});
+ commands.compactAcpAgent();
+ assert.equal(sent[0].type,'acp_compact');assert.equal(running,0);assert.equal(thinking,0);assert.equal(h.entries().length,0);
+ const disconnected=useSessionCommands({getEngine:()=>({kind:'agent',driver:'opencode'}),wsRef:ref({sendImmediate:()=>false}),setRestoreNote:value=>notice=value});
+ disconnected.compactAcpAgent();assert.match(notice.text,/Reconnect/);
+});
+
+
+test('Codex model picks target the existing native model option without starting another session',()=>{
+ const h=harness(),sent=[];
+ const commands=useComposerCommands({...h.context,acpDriver:'codex',acpModelOption:{id:'model'},wsRef:ref({send:message=>{sent.push(message);return true;}})});
+ commands.onSetModel('gpt-6.1-sol');
+ assert.deepEqual(sent,[{type:'acp_set_config_option',option_id:'model',value:'gpt-6.1-sol'}]);
 });

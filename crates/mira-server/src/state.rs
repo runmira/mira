@@ -78,6 +78,13 @@ impl SharedSelection {
 /// connection's own `attached_id` so two tabs can watch two sessions.
 #[derive(Clone)]
 pub struct AppState {
+    pub codex_auth: Arc<crate::codex_auth::AuthRegistry>,
+    /// What each engine instance's installed agent last negotiated.
+    pub agent_capabilities: Arc<crate::agent_capabilities::CapabilityRegistry>,
+    /// Terminal sign-ins for ACP agents, by engine instance.
+    pub terminal_auth: Arc<crate::terminal_auth::TerminalAuthRegistry>,
+    /// Providers that turns showed need a sign-in, per engine instance.
+    pub agent_sign_in: Arc<crate::agent_sign_in::SignInRegistry>,
     /// A request-scoped lease prevents eviction while an HTTP action runs.
     pub request_slot: Option<Arc<SessionSlot>>,
     pub slot_loads: Arc<std::sync::Mutex<HashMap<SessionId, std::sync::Weak<Mutex<()>>>>>,

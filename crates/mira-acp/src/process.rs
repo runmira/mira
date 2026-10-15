@@ -501,6 +501,151 @@ pub async fn start(spec: StartSpec<'_>) -> Result<AcpAgent, StartError> {
     })
 }
 
+/// A terminal sign-in, ready to run with the agent's own binary and
+/// environment so it writes the same credential store the agent reads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalAuthPlan {
+    pub method_id: String,
+    pub label: String,
+    pub program: PathBuf,
+    pub args: Vec<String>,
+    /// The launch's environment with the method's overrides applied.
+    pub env: std::collections::BTreeMap<String, String>,
+    pub env_deny: Vec<String>,
+}
+
+/// Turn an advertised terminal method into the command to run. The spec
+/// form appends its arguments to the configured agent invocation. The older
+/// form names a command; when that is the agent's own binary it resolves to
+/// this launch's program, never to whatever `PATH` finds first.
+pub fn terminal_auth_plan(
+    launch: &LaunchConfig,
+    method: &crate::session::TerminalAuthMethod,
+) -> TerminalAuthPlan {
+    let mut env = launch.env.clone();
+    env.extend(method.env.clone());
+    let (program, args) = match &method.command {
+        None => {
+            let mut args = launch.args.clone();
+            args.extend(method.args.clone());
+            (launch.program.clone(), args)
+        }
+        Some(command) => {
+            let named = Path::new(command);
+            let same_binary = named.file_name().is_some_and(|n| {
+                Some(n) == launch.program.file_name()
+                    || crate::which::resolve(command).as_deref()
+                        == crate::which::resolve(&launch.program.display().to_string()).as_deref()
+            });
+            let program = if same_binary {
+                launch.program.clone()
+            } else {
+                PathBuf::from(command)
+            };
+            (program, method.args.clone())
+        }
+    };
+    TerminalAuthPlan {
+        method_id: method.id.clone(),
+        label: method.label.clone(),
+        program: crate::which::resolve_for_spawn(&program),
+        args,
+        env,
+        env_deny: launch.env_deny.clone(),
+    }
+}
+
+/// Initialize the agent with terminal sign-in advertised and return its
+/// terminal method, if it offers one. No session is created and nothing is
+/// sent to `authenticate`.
+pub async fn discover_terminal_auth(
+    launch: &LaunchConfig,
+    mut caps: crate::session::ClientCaps,
+) -> Result<Option<TerminalAuthPlan>, String> {
+    caps.terminal_auth = true;
+    let process = AgentProcess::spawn(launch, Arc::new(crate::conn::NullCallbacks))
+        .await
+        .map_err(|e| format!("could not start the agent: {e}"))?;
+    let session = crate::session::AcpSession::new(
+        process.conn().clone(),
+        caps,
+        crate::host::PendingPermissions::default(),
+    );
+    let init = tokio::time::timeout(std::time::Duration::from_secs(30), session.initialize()).await;
+    process
+        .shutdown(std::time::Duration::from_millis(500))
+        .await;
+    let init = init
+        .map_err(|_| "the agent did not initialize in time".to_string())?
+        .map_err(|e| e.to_string())?;
+    Ok(crate::session::terminal_auth_methods(&init)
+        .first()
+        .map(|m| terminal_auth_plan(launch, m)))
+}
+
+/// Why a detached fork did not produce a new session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForkFailure {
+    /// The installed agent does not offer the operation.
+    Unsupported(String),
+    /// The requested boundary is still running.
+    InProgress(String),
+    Failed(String),
+}
+
+impl std::fmt::Display for ForkFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unsupported(m) | Self::InProgress(m) | Self::Failed(m) => f.write_str(m),
+        }
+    }
+}
+
+/// Fork an ACP session in a short-lived process of the same agent, so the
+/// running conversation (if any) never sees the request. The fork is left on
+/// disk for whoever resumes it next; this process only creates it.
+pub async fn fork_detached(
+    launch: &LaunchConfig,
+    caps: crate::session::ClientCaps,
+    source: &str,
+    cwd: &Path,
+) -> Result<String, ForkFailure> {
+    let process = AgentProcess::spawn(launch, Arc::new(crate::conn::NullCallbacks))
+        .await
+        .map_err(|e| ForkFailure::Failed(format!("could not start the agent: {e}")))?;
+    let session = crate::session::AcpSession::new(
+        process.conn().clone(),
+        caps,
+        crate::host::PendingPermissions::default(),
+    );
+    let timeout = std::time::Duration::from_secs(30);
+    let result = async {
+        tokio::time::timeout(timeout, session.initialize())
+            .await
+            .map_err(|_| ForkFailure::Failed("the agent did not initialize in time".into()))?
+            .map_err(|e| ForkFailure::Failed(e.to_string()))?;
+        if !session.supports_fork() {
+            return Err(ForkFailure::Unsupported(
+                "this installed version does not advertise session/fork".into(),
+            ));
+        }
+        tokio::time::timeout(timeout, session.fork_session(source, cwd))
+            .await
+            .map_err(|_| ForkFailure::Failed("session/fork timed out".into()))?
+            .map_err(|e| match &e {
+                crate::session::SessionError::Conn(ConnError::Remote { code: -32601, .. }) => {
+                    ForkFailure::Unsupported(e.to_string())
+                }
+                _ => ForkFailure::Failed(e.to_string()),
+            })
+    }
+    .await;
+    process
+        .shutdown(std::time::Duration::from_millis(500))
+        .await;
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use crate::driver::{AcpDriver, DriverConfig, Transport};
@@ -543,6 +688,164 @@ mod tests {
             std::path::Path::new("opencode"),
         );
         assert_eq!(chosen, Transport::Acp);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires installed OpenCode v2; creates and forks an empty local session"]
+    async fn installed_opencode_forks_a_session_without_touching_the_source() {
+        use crate::drivers::OpenCodeDriver;
+        let Some(program) = crate::which::resolve("opencode") else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().canonicalize().unwrap();
+        let d = OpenCodeDriver;
+        let launch = d.resolve(
+            &DriverConfig::default(),
+            crate::driver::PermissionMode::Ask,
+            program,
+        );
+        let process =
+            super::AgentProcess::spawn(&launch, std::sync::Arc::new(crate::conn::NullCallbacks))
+                .await
+                .unwrap();
+        let session = crate::session::AcpSession::new(
+            process.conn().clone(),
+            d.client_caps(),
+            crate::host::PendingPermissions::default(),
+        );
+        session.initialize().await.unwrap();
+        assert!(
+            session.supports_fork(),
+            "OpenCode v2 advertises session/fork"
+        );
+        let source = session
+            .new_session(&cwd, Vec::new())
+            .await
+            .unwrap()
+            .session_id
+            .to_string();
+        // OpenCode refuses to fork an empty session: give it one exchange,
+        // on a free model (override with MIRA_TEST_OPENCODE_MODEL).
+        let model = std::env::var("MIRA_TEST_OPENCODE_MODEL")
+            .unwrap_or_else(|_| "opencode/big-pickle".into());
+        let option = session
+            .config_options()
+            .into_iter()
+            .find(|o| o["category"] == "model")
+            .and_then(|o| o["id"].as_str().map(str::to_owned))
+            .expect("a model option");
+        session
+            .set_config_option(&source, &option, serde_json::json!(model))
+            .await
+            .expect("select model");
+        session
+            .prompt(
+                &source,
+                vec![agent_client_protocol::schema::v1::ContentBlock::from(
+                    "Reply with the single word ok.".to_string(),
+                )],
+            )
+            .await
+            .expect("prompt (needs a configured or free OpenCode model)");
+        process
+            .shutdown(std::time::Duration::from_millis(500))
+            .await;
+
+        let forked = super::fork_detached(&launch, d.client_caps(), &source, &cwd)
+            .await
+            .expect("fork");
+        assert_ne!(forked, source);
+        // Both sessions resume independently afterwards.
+        for id in [&source, &forked] {
+            let process = super::AgentProcess::spawn(
+                &launch,
+                std::sync::Arc::new(crate::conn::NullCallbacks),
+            )
+            .await
+            .unwrap();
+            let s = crate::session::AcpSession::new(
+                process.conn().clone(),
+                d.client_caps(),
+                crate::host::PendingPermissions::default(),
+            );
+            s.initialize().await.unwrap();
+            s.resume_session(id, &cwd, Vec::new())
+                .await
+                .expect("resume");
+            process
+                .shutdown(std::time::Duration::from_millis(500))
+                .await;
+        }
+    }
+
+    #[test]
+    fn terminal_sign_in_runs_this_install_with_its_environment() {
+        use crate::session::TerminalAuthMethod;
+        let launch = crate::driver::LaunchConfig {
+            program: std::path::PathBuf::from("/opt/oc/bin/opencode"),
+            args: vec!["acp".into()],
+            env: [("OPENCODE_CONFIG_DIR".to_string(), "/work/oc".to_string())].into(),
+            secret_env: Vec::new(),
+            env_deny: vec!["ANTHROPIC_".into()],
+        };
+        // Spec form: appended to the configured invocation.
+        let spec = super::terminal_auth_plan(
+            &launch,
+            &TerminalAuthMethod {
+                id: "login".into(),
+                label: "Login".into(),
+                command: None,
+                args: vec!["--login".into()],
+                env: [("OPENCODE_AUTH".to_string(), "1".to_string())].into(),
+            },
+        );
+        assert_eq!(spec.args, ["acp", "--login"]);
+        assert_eq!(spec.env["OPENCODE_CONFIG_DIR"], "/work/oc");
+        assert_eq!(spec.env["OPENCODE_AUTH"], "1");
+        assert_eq!(spec.env_deny, ["ANTHROPIC_"]);
+        // Older form naming the agent's binary: this install, not PATH's.
+        let legacy = super::terminal_auth_plan(
+            &launch,
+            &TerminalAuthMethod {
+                id: "opencode-login".into(),
+                label: "OpenCode Login".into(),
+                command: Some("opencode".into()),
+                args: vec!["auth".into(), "login".into()],
+                env: Default::default(),
+            },
+        );
+        assert!(
+            legacy.program.ends_with("opt/oc/bin/opencode"),
+            "{:?}",
+            legacy.program
+        );
+        assert_eq!(legacy.args, ["auth", "login"]);
+        assert_eq!(legacy.env["OPENCODE_CONFIG_DIR"], "/work/oc");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires installed OpenCode v2; only initializes, never signs in"]
+    async fn installed_opencode_advertises_terminal_sign_in_only_when_asked() {
+        use crate::drivers::OpenCodeDriver;
+        let Some(program) = crate::which::resolve("opencode") else {
+            return;
+        };
+        let d = OpenCodeDriver;
+        let launch = d.resolve(
+            &DriverConfig::default(),
+            crate::driver::PermissionMode::Ask,
+            program.clone(),
+        );
+        let plan = super::discover_terminal_auth(&launch, d.client_caps())
+            .await
+            .unwrap()
+            .expect("OpenCode v2 offers terminal sign-in");
+        assert_eq!(
+            plan.program,
+            crate::which::resolve_for_spawn(&launch.program)
+        );
+        assert_eq!(plan.args, ["auth", "login"]);
     }
 
     /// A driver with a native flavor *and* deny prefixes, for proving the

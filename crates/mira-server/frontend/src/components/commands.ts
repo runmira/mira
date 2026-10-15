@@ -1,21 +1,5 @@
 import type { ComponentType } from 'react';
-import {
-  Brain,
-  CircleHelp,
-  Eye,
-  Folder,
-  FoldVertical,
-  Lightbulb,
-  NotebookPen,
-  Paperclip,
-  RotateCcw,
-  Shield,
-  SlidersHorizontal,
-  Sparkle,
-  SquareTerminal,
-  Target,
-  Zap,
-} from 'lucide-react';
+import { Brain, CircleHelp, Eye, FoldVertical, Folder, GitBranch, History, Lightbulb, NotebookPen, Paperclip, RotateCcw, Shield, SlidersHorizontal, Sparkle, SquareTerminal, Target, Zap } from 'lucide-react';
 import type { Mode } from '../types';
 import type { CommandInfo, Origin } from '../api';
 
@@ -54,6 +38,12 @@ export type SlashCtx = {
   onClearGoal: () => void;
   /** Summarize the conversation now, keeping `focus` in view. */
   onCompact: (focus: string) => void;
+  /** Fork this agent chat natively into a new chat. Absent when the agent
+   *  can't (not an agent chat, or no native fork negotiated). */
+  onForkChat?: () => void;
+  /** Open the chooser that reverts an agent chat to before a turn. Absent
+   *  outside agent chats. */
+  onRevertTurn?: () => void;
   /** Flip the composer into "goal compose" mode — the next Enter
    *  fires `onSetGoal(text)` instead of sending as a chat message.
    *  Owned by the Composer; the slash command dispatches into it. */
@@ -274,6 +264,30 @@ export const COMMANDS: SlashCommand[] = [
     icon: FoldVertical,
     takesArgs: true,
     run: (args, ctx) => { ctx.onCompact(args.trim()); return undefined; },
+  },
+  {
+    name: 'fork',
+    description: 'Copy this agent conversation into a new chat',
+    usage: '/fork',
+    icon: GitBranch,
+    takesArgs: false,
+    run: (_args, ctx) => {
+      if (!ctx.onForkChat) throw new Error("This chat's agent can't fork natively. Use Fork from here on a message instead.");
+      ctx.onForkChat();
+      return undefined;
+    },
+  },
+  {
+    name: 'revert',
+    description: 'Restore files and the transcript to before an earlier agent turn',
+    usage: '/revert',
+    icon: History,
+    takesArgs: false,
+    run: (_args, ctx) => {
+      if (!ctx.onRevertTurn) throw new Error('/revert works in external-agent chats. Use Restore files on a message here.');
+      ctx.onRevertTurn();
+      return undefined;
+    },
   },
   {
     name: 'goal',

@@ -212,8 +212,8 @@ pub enum ClientMsg {
     /// Claude Code only (`--fork-session`); anything else gets an honest
     /// error, not a silent restart.
     AcpFork,
-    /// Ask the agent to compact its context. Native transports only; ACP
-    /// has no such method. `focus` is what the summary should keep in view
+    /// Ask the agent to compact its context. OpenCode uses its advertised
+    /// ACP compact command; native transports use their own operation. `focus` is what the summary should keep in view
     /// (Claude Code's `/compact <instructions>`; Codex has no equivalent).
     AcpCompact {
         #[serde(default)]
@@ -984,11 +984,29 @@ pub enum ServerMsg {
         #[serde(skip_serializing_if = "Option::is_none")]
         cost_usd: Option<f64>,
     },
+    /// Native ACP compaction patches. Replacement flags preserve explicit null
+    /// across persisted sidecar serialization, separately from omission.
+    AcpCompaction {
+        id: String,
+        status: String,
+        summary: Option<String>,
+        replace_summary: bool,
+        error: Option<String>,
+        replace_error: bool,
+    },
+    AcpCompactionSummary {
+        id: String,
+        text: String,
+    },
     /// Context-window and cost accounting for the turn so far.
     AcpUsage {
         used: u64,
         size: u64,
         cost: Option<AcpCost>,
+        /// Where the agent compacts on its own, when known
+        /// (`acp_host::agent_compact_at`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        compact_at: Option<u64>,
     },
     /// The agent account's plan limits (5-hour, weekly), for the usage ring.
     AcpLimits {
@@ -998,6 +1016,21 @@ pub enum ServerMsg {
     AcpSessionInfo {
         title: Option<String>,
         updated_at: Option<String>,
+    },
+    /// An engine instance's providers needing sign-in changed (a turn
+    /// failed for a missing sign-in, or one succeeded or a sign-in cleared
+    /// it). Clients refresh agent status.
+    AgentSignInChanged {
+        instance: String,
+        needed: Vec<mira_acp::status::SignInNeeded>,
+    },
+    /// Claude accepted a prompt and checkpointed files for it.
+    AgentFileCheckpoint {
+        id: String,
+    },
+    /// A separate chat now holds a native fork of this chat's agent session.
+    AgentForked {
+        session_id: String,
     },
     /// A turn finished. `stop_reason` is the agent's own reason verbatim, so
     /// the UI can distinguish a completed answer from a cancelled or
@@ -1144,15 +1177,33 @@ impl ServerMsg {
                 options,
                 driver: None,
             },
+            MiraEvent::Compaction {
+                id,
+                status,
+                summary,
+                replace_summary,
+                error,
+                replace_error,
+            } => Self::AcpCompaction {
+                id,
+                status,
+                summary,
+                replace_summary,
+                error,
+                replace_error,
+            },
+            MiraEvent::CompactionSummary { id, text } => Self::AcpCompactionSummary { id, text },
             MiraEvent::Commands { names } => Self::AcpCommands { names },
             MiraEvent::Limits { windows } => Self::AcpLimits { windows },
             MiraEvent::Spend { .. } | MiraEvent::RuntimeRequest(_) => return None,
             MiraEvent::RuntimeWork(work) => Self::RuntimeWorkUpdated { work },
             MiraEvent::RuntimeTurn(turn) => Self::RuntimeTurnUpdated { turn },
+            MiraEvent::FileCheckpoint { id } => Self::AgentFileCheckpoint { id },
             MiraEvent::Usage { used, size, cost } => Self::AcpUsage {
                 used,
                 size,
                 cost: cost.map(|(amount, currency)| AcpCost { amount, currency }),
+                compact_at: None,
             },
             MiraEvent::SessionInfo { title, updated_at } => {
                 Self::AcpSessionInfo { title, updated_at }

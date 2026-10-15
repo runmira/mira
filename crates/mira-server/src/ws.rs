@@ -42,6 +42,10 @@ pub struct ConnectQuery {
     after: Option<u64>,
     protocol: Option<u8>,
 }
+/// Admission refused an input because another turn won the race to start.
+/// Nothing reached the engine, so a queued input can wait and retry.
+pub(crate) const FOREGROUND_BUSY: &str = "A foreground turn is already running";
+
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
@@ -656,7 +660,21 @@ async fn dispatch_on_slot(
                                 Ok(()) => {
                                     Ok(())
                                 }
-                                Err(error) => Err(error.to_string()),
+                                Err(error) => {
+                                    let error = error.to_string();
+                                    if crate::agent_capabilities::is_unknown_method(&error) {
+                                        if let Some(handle) = &handle {
+                                            state.agent_capabilities.mark_unsupported(
+                                                &handle.instance,
+                                                crate::agent_capabilities::Feature::Steering,
+                                            );
+                                        }
+                                        crate::session_engine::publish(&state, &slot).await;
+                                        Err("This Codex version does not support steering an active turn. Your message is still queued.".into())
+                                    } else {
+                                        Err(error)
+                                    }
+                                }
                             }
                         }
                         Some(mira_acp::native::AgentHandle::Native(agent)) => {
@@ -725,7 +743,7 @@ async fn dispatch_on_slot(
                 .load(std::sync::atomic::Ordering::SeqCst);
             tokio::spawn(async move {
                 if let Err(text) =
-                    send_input_at_epoch(&state, &slot, text, images, None, epoch).await
+                    send_input_at_epoch(&state, &slot, text, images, None, epoch, None).await
                 {
                     let _ = slot.events_tx.send(ServerMsg::Warning { text });
                 }
@@ -1245,9 +1263,12 @@ async fn dispatch_on_slot(
             let native = matches!(agent, mira_acp::native::AgentHandle::Native(_));
             if native || agent.session_id().await.is_some() {
                 let v = serde_json::Value::String(value.clone());
+                let _dispatch = slot.engine.dispatch_lock.lock().await;
+                if !is_current_agent(&slot, &handle).await {
+                    return;
+                }
                 match agent.set_config_option(&option_id, v).await {
                     Ok(outcome) => {
-                        let _dispatch = slot.engine.dispatch_lock.lock().await;
                         if !is_current_agent(&slot, &handle).await {
                             return;
                         }
@@ -1256,6 +1277,40 @@ async fn dispatch_on_slot(
                                 let mut launch = slot.acp_launch.lock().await;
                                 launch.as_mut().map(|p| {
                                     p.model = Some(value.clone());
+                                    p.clone()
+                                })
+                            };
+                            if let Some(params) = params {
+                                crate::session_engine::remember_agent(&slot, &params, true).await;
+                            }
+                            let current = outcome
+                                .iter()
+                                .find(|option| option.category.as_deref() == Some("model"))
+                                .and_then(|option| option.current.clone())
+                                .unwrap_or_else(|| value.clone());
+                            *slot
+                                .engine
+                                .reported_model
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner()) = Some(current);
+                            crate::session_engine::publish(state, &slot).await;
+                        }
+                        if handle.driver_kind == "codex" && !outcome.is_empty() {
+                            let params = {
+                                let mut launch = slot.acp_launch.lock().await;
+                                launch.as_mut().map(|p| {
+                                    p.model_options = outcome
+                                        .iter()
+                                        .filter(|o| {
+                                            matches!(
+                                                o.id.as_str(),
+                                                "reasoning_effort" | "service_tier"
+                                            )
+                                        })
+                                        .filter_map(|o| {
+                                            o.current.clone().map(|v| (o.id.clone(), v))
+                                        })
+                                        .collect();
                                     p.clone()
                                 })
                             };
@@ -1291,63 +1346,26 @@ async fn dispatch_on_slot(
         }
 
         ClientMsg::AcpFork => {
-            // Fork continues the history under a new session id. Only Claude
-            // Code has the flag; anything else is told so, not restarted
-            // into amnesia.
-            let Some(handle) = slot.acp_agent.read().await.clone() else {
-                let _ = slot.events_tx.send(ServerMsg::Error {
-                    text: "no external agent is running for this session".into(),
-                });
-                return;
-            };
-            if handle.driver_kind != "claude-code" {
-                let _ = slot.events_tx.send(ServerMsg::Error {
-                    text: format!(
-                        "{} has no fork operation — fork is Claude Code only",
-                        handle.display_name
-                    ),
-                });
-                return;
-            }
-            let Some(agent) = handle.agent().await else {
-                let _ = slot.events_tx.send(ServerMsg::Error {
-                    text: "the external agent has stopped".into(),
-                });
-                return;
-            };
-            let sid = agent.session_id().await;
-            let Some(sid) = sid else {
-                let _ = slot.events_tx.send(ServerMsg::Error {
-                    text: "the agent has no session to fork yet — send a prompt first".into(),
-                });
-                return;
-            };
-            let events = slot.events_tx.clone();
-            let slot_c = slot.clone();
-            let state_c = state.clone();
+            // A separate chat bound to a native fork of the whole agent
+            // session. This chat and its runtime carry on unchanged.
+            let state = state.clone();
+            let slot = slot.clone();
             tokio::spawn(async move {
-                match crate::acp_session::restart_native_agent(
-                    &state_c,
-                    &slot_c,
-                    mira_acp::native::NativeOverrides {
-                        resume: Some(sid),
-                        fork: true,
-                        ..Default::default()
-                    },
+                match crate::agent_fork::fork_chat(
+                    &state,
+                    &slot.id,
+                    crate::agent_fork::Boundary::Whole,
                 )
                 .await
                 {
-                    Ok(h) => {
-                        let _ = events.send(ServerMsg::AcpAgentStarted {
-                            kind: h.driver_kind.clone(),
-                            display_name: h.display_name.clone(),
-                            launch: h.launch.clone(),
-                            error: None,
+                    Ok(id) => {
+                        let _ = slot.events_tx.send(ServerMsg::AgentForked {
+                            session_id: id.to_string(),
                         });
                     }
                     Err(e) => {
-                        let _ = events.send(ServerMsg::Error {
-                            text: format!("could not fork the agent session: {e}"),
+                        let _ = slot.events_tx.send(ServerMsg::Error {
+                            text: format!("could not fork the agent session: {}", e.message),
                         });
                     }
                 }
@@ -1355,6 +1373,37 @@ async fn dispatch_on_slot(
         }
 
         ClientMsg::AcpCompact { focus } => {
+            let selected = slot.acp_launch.lock().await.clone();
+            if let Some(launch) = selected.filter(|launch| launch.driver_kind == "opencode") {
+                if focus.as_deref().is_some_and(|text| !text.trim().is_empty()) {
+                    let _ = slot.events_tx.send(ServerMsg::Warning {
+                        text: "OpenCode compaction does not support Mira's focus instructions."
+                            .into(),
+                    });
+                    return;
+                }
+                let state = state.clone();
+                let epoch = slot
+                    .engine
+                    .input_epoch
+                    .load(std::sync::atomic::Ordering::SeqCst);
+                tokio::spawn(async move {
+                    if let Err(text) = send_input_at_epoch(
+                        &state,
+                        &slot,
+                        "/compact".into(),
+                        vec![],
+                        None,
+                        epoch,
+                        Some(launch.instance),
+                    )
+                    .await
+                    {
+                        let _ = slot.events_tx.send(ServerMsg::Warning { text });
+                    }
+                });
+                return;
+            }
             let Some(handle) = slot.acp_agent.read().await.clone() else {
                 let _ = slot.events_tx.send(ServerMsg::Error {
                     text: "no external agent is running for this session".into(),
@@ -1417,6 +1466,7 @@ async fn dispatch_on_slot(
             // still shows every agent this build knows.
             let events = slot.events_tx.clone();
             let engines = state.engines.current();
+            let sign_in_needs = state.agent_sign_in.clone();
             tokio::spawn(async move {
                 let mut tasks = Vec::new();
                 let mut covered = std::collections::BTreeSet::new();
@@ -1426,8 +1476,13 @@ async fn dispatch_on_slot(
                     };
                     covered.insert(inst.driver.as_str().to_string());
                     let cfg = mira_engine::driver_config_for(inst);
+                    let instance = inst.id.to_string();
+                    let sign_in = sign_in_needs.clone();
                     tasks.push(tokio::spawn(async move {
-                        mira_acp::probe(d.as_ref(), &cfg, Default::default()).await
+                        let mut status =
+                            mira_acp::probe(d.as_ref(), &cfg, Default::default()).await;
+                        sign_in.overlay(&instance, &mut status);
+                        status
                     }));
                 }
                 for d in mira_acp::drivers::all() {
@@ -1578,7 +1633,9 @@ async fn dispatch_on_slot(
                                 let _ = slot.events_tx.send(ServerMsg::RuntimeWorkUpdated { work });
                             }
                             approver::drain_pending_as_denied(&slot.pending).await;
-                            crate::acp_host::AcpEventPort::for_slot(&slot).turn_ended("cancelled");
+                            crate::acp_host::AcpEventPort::for_slot(&slot)
+                                .turn_ended("cancelled")
+                                .await;
                             let _ = slot.events_tx.send(ServerMsg::Warning { text: "Claude stopped. The next message will resume this conversation.".into() });
                         });
                         return;
@@ -1592,7 +1649,9 @@ async fn dispatch_on_slot(
                 if let Some(h) = &agent {
                     if h.driver_kind == "grok" {
                         crate::acp_session::stop_agent(&slot).await;
-                        crate::acp_host::AcpEventPort::for_slot(&slot).turn_ended("cancelled");
+                        crate::acp_host::AcpEventPort::for_slot(&slot)
+                            .turn_ended("cancelled")
+                            .await;
                     } else {
                         h.cancel_current_turn().await;
                     }
@@ -1613,7 +1672,7 @@ async fn dispatch_on_slot(
                             .await
                             .unwrap_or(false);
                         if !ended {
-                            turn_port.turn_ended("cancelled");
+                            turn_port.turn_ended("cancelled").await;
                         }
                     });
                 }
@@ -2092,7 +2151,7 @@ pub(crate) async fn send_input(
         .engine
         .input_epoch
         .load(std::sync::atomic::Ordering::SeqCst);
-    send_input_at_epoch(state, slot, text, images, input_id, epoch).await
+    send_input_at_epoch(state, slot, text, images, input_id, epoch, None).await
 }
 
 async fn send_input_at_epoch(
@@ -2102,6 +2161,7 @@ async fn send_input_at_epoch(
     images: Vec<mira_core::ImageData>,
     input_id: Option<String>,
     epoch: u64,
+    command_instance: Option<String>,
 ) -> Result<(), String> {
     let received = std::time::Instant::now();
     info!(session = %slot.id, "prompt received; preparing dispatch");
@@ -2140,7 +2200,7 @@ async fn send_input_at_epoch(
             provider_in_turn = slot.engine.provider_in_turn.load(std::sync::atomic::Ordering::SeqCst),
             "rejected send: foreground turn already running (client did not queue)"
         );
-        return Err("A foreground turn is already running".into());
+        return Err(FOREGROUND_BUSY.into());
     }
     if let Some(id) = input_id.as_deref() {
         let (engine, model, _) = slot.selection.snapshot();
@@ -2175,8 +2235,8 @@ async fn send_input_at_epoch(
         return Ok(());
     }
     info!(session = %slot.id, preparation_ms = received.elapsed().as_millis() as u64, "prompt preparation finished");
-    if slot.acp_launch.lock().await.is_some() {
-        prompt_agent_at_epoch(state, slot, text, images, input_id, epoch).await;
+    if command_instance.is_some() || slot.acp_launch.lock().await.is_some() {
+        prompt_agent_at_epoch(state, slot, text, images, input_id, epoch, command_instance).await;
     } else {
         spawn_turn(state.clone(), slot.clone(), text, images, input_id).await;
     }
@@ -2374,7 +2434,7 @@ async fn prompt_agent(
         .engine
         .input_epoch
         .load(std::sync::atomic::Ordering::SeqCst);
-    prompt_agent_at_epoch(state, slot, text, images, input_id, epoch).await;
+    prompt_agent_at_epoch(state, slot, text, images, input_id, epoch, None).await;
 }
 
 async fn prompt_agent_at_epoch(
@@ -2384,6 +2444,7 @@ async fn prompt_agent_at_epoch(
     images: Vec<mira_core::ImageData>,
     input_id: Option<String>,
     epoch: u64,
+    command_instance: Option<String>,
 ) {
     let starting = std::time::Instant::now();
     let _dispatch = slot.engine.dispatch_lock.lock().await;
@@ -2403,6 +2464,15 @@ async fn prompt_agent_at_epoch(
         });
         return;
     }
+    if let Some(instance) = &command_instance {
+        let selected = slot.acp_launch.lock().await.clone();
+        if !selected
+            .is_some_and(|launch| launch.instance == *instance && launch.driver_kind == "opencode")
+        {
+            let _ = slot.events_tx.send(ServerMsg::Warning { text: "The agent changed before compaction could start. Try again in the selected chat.".into() });
+            return;
+        }
+    }
     // A session set up for an agent — picked here, inherited from the
     // previous chat, or restored from disk — starts it on demand. The
     // start is shared with any pick still in flight, so a prompt sent
@@ -2413,13 +2483,17 @@ async fn prompt_agent_at_epoch(
         Err(e) => {
             record_prompt_failure(slot, e);
             // The client marked the turn busy when it sent; end it.
-            crate::acp_host::AcpEventPort::for_slot(slot).turn_ended("start_failed");
+            crate::acp_host::AcpEventPort::for_slot(slot)
+                .turn_ended("start_failed")
+                .await;
             return;
         }
     };
     let Some(agent) = handle.agent().await else {
         record_prompt_failure(slot, "the external agent has stopped".into());
-        crate::acp_host::AcpEventPort::for_slot(slot).turn_ended("agent_exited");
+        crate::acp_host::AcpEventPort::for_slot(slot)
+            .turn_ended("agent_exited")
+            .await;
         return;
     };
     if slot
@@ -2431,12 +2505,24 @@ async fn prompt_agent_at_epoch(
         info!(session = %slot.id, "prompt cancelled during agent startup");
         return;
     }
+    if command_instance.is_some()
+        && !matches!(&agent, mira_acp::native::AgentHandle::Acp(acp) if acp.session_id().is_some_and(|id| acp.host().has_command(&id, "compact")))
+    {
+        let _ = slot.events_tx.send(ServerMsg::Warning { text: "This OpenCode session has not advertised the compact command. Refresh the agent and try again.".into() });
+        return;
+    }
     info!(session = %slot.id, startup_ms = starting.elapsed().as_millis() as u64, "agent ready for prompt");
 
     // Reserve while dispatch_lock still excludes the next prompt. Preparation
     // may await files, but another input must already see a foreground turn.
     if !reserve_current_agent_turn(&slot.engine, epoch, || track_agent_turn(slot)) {
         return;
+    }
+    if command_instance.is_some() {
+        let _ = slot.events_tx.send(ServerMsg::Compacting {
+            trigger: "agent".into(),
+            tokens_before: None,
+        });
     }
     let state = state.clone();
     let slot = slot.clone();
@@ -2481,7 +2567,8 @@ async fn prompt_agent_at_epoch(
                                 format!("could not stage attachments: {e}"),
                             );
                             crate::acp_host::AcpEventPort::for_slot(&slot)
-                                .turn_ended("attachments_failed");
+                                .turn_ended("attachments_failed")
+                                .await;
                             return;
                         }
                     }
@@ -2491,7 +2578,9 @@ async fn prompt_agent_at_epoch(
                         &slot,
                         "this agent was started without an attachments dir, so images were not sent".into(),
                     );
-                    crate::acp_host::AcpEventPort::for_slot(&slot).turn_ended("attachments_failed");
+                    crate::acp_host::AcpEventPort::for_slot(&slot)
+                        .turn_ended("attachments_failed")
+                        .await;
                     return;
                 }
             }
@@ -2511,9 +2600,15 @@ async fn prompt_agent_at_epoch(
         // agent gets what it missed in front of this prompt, so switching
         // engines mid-conversation keeps the thread.
         // The sidecar above records only what the user typed.
-        let text = match crate::session_engine::take_context_for_agent(&slot).await {
-            Some(context) => format!("{context}{text}"),
-            None => text,
+        // Slash commands must stay at the beginning. Compaction acts on the
+        // native history; pending context handoff belongs to the next input.
+        let text = if command_instance.is_some() {
+            text
+        } else {
+            match crate::session_engine::take_context_for_agent(&slot).await {
+                Some(context) => format!("{context}{text}"),
+                None => text,
+            }
         };
 
         // The prompt belongs in the transcript sidecar too, or replay shows
@@ -2528,6 +2623,7 @@ async fn prompt_agent_at_epoch(
             let line = serde_json::json!({
                 "t": mira_harness::persist::now_ms(),
                 "driver": handle.driver_kind,
+                "instance": handle.instance,
                 "user": { "text": raw_text, "images": images.len(), "attached_images":images, "input_id":input_id },
             });
             let _ = slot
@@ -2624,9 +2720,19 @@ async fn prompt_agent_at_epoch(
                 if stop_reason == "rate_limited" {
                     crate::message_queue::offer_recovery(&recovery_slot, None).await;
                 }
-                turn_port.turn_ended(&stop_reason);
+                turn_port.turn_ended(&stop_reason).await;
             }
-            Ok(None) => {}
+            Ok(None) => {
+                // Claude Code says where it compacts only when asked; ask once
+                // the turn is done, so the usage ring can show it.
+                let agent = agent.clone();
+                let port = turn_port.clone();
+                tokio::spawn(async move {
+                    if let Ok(usage) = agent.context_usage().await {
+                        port.set_reported_compact_at(usage["autoCompactThreshold"].as_u64());
+                    }
+                });
+            }
             Err(e) => {
                 // The agent's own last words say why ("unknown option",
                 // "not logged in"); "stdin closed" alone leaves the user
@@ -2651,7 +2757,7 @@ async fn prompt_agent_at_epoch(
                     .unwrap_or_else(|e| e.into_inner()) = Some(text.chars().take(160).collect());
                 let _ = events.send(ServerMsg::Error { text });
                 // Nothing else will end this turn: the prompt never landed.
-                turn_port.turn_ended("error");
+                turn_port.turn_ended("error").await;
             }
         }
     });
@@ -2706,6 +2812,8 @@ fn spawn_quiet_agent_watchdog(events: &crate::session_stream::SessionEvents) {
                     | ServerMsg::AcpToolCall { .. }
                     | ServerMsg::AcpToolCallUpdate { .. }
                     | ServerMsg::AcpPlan { .. }
+                    | ServerMsg::AcpCompaction { .. }
+                    | ServerMsg::AcpCompactionSummary { .. }
                     | ServerMsg::AcpTurnEnd { .. }
                     | ServerMsg::ApprovalRequest { .. }
                     | ServerMsg::ToolStart { .. }

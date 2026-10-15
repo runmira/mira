@@ -175,20 +175,66 @@ mod replacement_validation_tests {
 /// hang), and the ports are built from *this* slot's `ToolContext` and
 /// approver, so the agent inherits the session's existing confinement rather
 /// than a fresh one.
-pub async fn start_agent(
+/// Record what this runtime negotiated for its engine instance. Agents that
+/// report no version on the wire are asked through their CLI afterwards.
+async fn record_capabilities(
     state: &AppState,
     slot: &Arc<SessionSlot>,
     params: &AcpLaunchParams,
-    native: Option<mira_acp::native::NativeOverrides>,
-) -> Result<Arc<SlotAgent>, String> {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
-    let driver = mira_acp::drivers::by_kind(&params.driver_kind)
-        .ok_or_else(|| format!("unknown agent: {}", params.driver_kind))?;
-    let driver = driver.as_ref();
+    handle: &Arc<SlotAgent>,
+    agent: &AgentHandle,
+    transport: Transport,
+    epoch: u64,
+) {
+    let Ok((_, launch)) = engine_launch(state, params) else {
+        return;
+    };
+    let program = mira_acp::which::resolve(&launch.program.display().to_string())
+        .unwrap_or_else(|| launch.program.clone());
+    let record = crate::agent_capabilities::CapabilityRecord {
+        instance: params.instance.clone(),
+        driver: params.driver_kind.clone(),
+        transport: match transport {
+            Transport::Native => "native",
+            _ => "acp",
+        }
+        .into(),
+        binary: program.display().to_string(),
+        version: agent.reported_version(),
+        launch_fingerprint: crate::agent_capabilities::launch_fingerprint(&launch),
+        capabilities: crate::session_engine::live_capabilities(handle, agent).await,
+        unsupported: Default::default(),
+        observed_at: 0,
+        epoch,
+    };
+    let ask_cli = record.version.is_none();
+    if !state.agent_capabilities.commit(record.clone()) || !ask_cli {
+        return;
+    }
+    let state = state.clone();
+    let slot = slot.clone();
+    tokio::spawn(async move {
+        if let Some(version) = crate::agent_capabilities::cli_version(&program).await {
+            let committed =
+                state
+                    .agent_capabilities
+                    .commit(crate::agent_capabilities::CapabilityRecord {
+                        version: Some(version),
+                        ..record
+                    });
+            if committed {
+                crate::session_engine::publish(&state, &slot).await;
+            }
+        }
+    });
+}
+
+/// The driver config a launch actually uses. Secrets are never written to a
+/// session record, so a chat restored after a restart comes back without its
+/// key. The engine's config in mira.yaml is the one place they live; fill in
+/// what's missing from it.
+pub(crate) fn effective_driver_config(state: &AppState, params: &AcpLaunchParams) -> DriverConfig {
     let mut driver_cfg = params.cfg.clone();
-    // Secrets are never written to a session record, so a chat restored
-    // after a restart comes back without its key. The engine's config in
-    // mira.yaml is the one place they live; fill in what's missing from it.
     if let Some(current) = state
         .engines
         .current()
@@ -201,6 +247,62 @@ pub async fn start_agent(
             driver_cfg.env.entry(k).or_insert(v);
         }
     }
+    driver_cfg
+}
+
+/// How `params` launches, without anything owned by one chat (Mira's tool
+/// server, browser flags). Helper processes use it to reach the same binary,
+/// home and credentials as the chat they act for.
+pub(crate) fn engine_launch(
+    state: &AppState,
+    params: &AcpLaunchParams,
+) -> Result<(Transport, LaunchConfig), String> {
+    let driver = mira_acp::drivers::by_kind(&params.driver_kind)
+        .ok_or_else(|| format!("unknown agent: {}", params.driver_kind))?;
+    let driver = driver.as_ref();
+    let cfg = effective_driver_config(state, params);
+    let program: PathBuf = cfg
+        .binary_path
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(driver.binary_names().first().copied().unwrap_or("")));
+    let transport = mira_acp::process::choose_transport(driver, &cfg, &program);
+    let launch = match transport {
+        Transport::Native => {
+            let mut l =
+                mira_acp::process::build_native_launch(driver, &cfg, params.mode, &program, None)
+                    .ok_or_else(|| format!("{} has no native interface", driver.display_name()))?;
+            let acp = driver.resolve(&cfg, params.mode, program.clone());
+            l.env = acp.env;
+            l.secret_env = acp.secret_env;
+            l.args.extend(cfg.launch_args.clone());
+            l
+        }
+        _ => driver.resolve(&cfg, params.mode, program.clone()),
+    };
+    if !mira_acp::process::looks_installed(&launch) {
+        return Err(format!(
+            "{} is not installed (looked for `{}`)",
+            driver.display_name(),
+            launch.program.display()
+        ));
+    }
+    Ok((transport, launch))
+}
+
+pub async fn start_agent(
+    state: &AppState,
+    slot: &Arc<SessionSlot>,
+    params: &AcpLaunchParams,
+    native: Option<mira_acp::native::NativeOverrides>,
+) -> Result<Arc<SlotAgent>, String> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    // Taken before anything starts, so a slower, older start cannot record
+    // its capabilities over this one's.
+    let capability_epoch = state.agent_capabilities.begin();
+    let driver = mira_acp::drivers::by_kind(&params.driver_kind)
+        .ok_or_else(|| format!("unknown agent: {}", params.driver_kind))?;
+    let driver = driver.as_ref();
+    let mut driver_cfg = effective_driver_config(state, params);
     let mode = params.mode;
     // Where the binary lives. `binary_path` in the driver config wins;
     // otherwise the driver's own name on PATH.
@@ -234,6 +336,9 @@ pub async fn start_agent(
     // `session/resume` (OpenCode advertises it) via the same field.
     if native.resume.is_none() {
         if let Some(cur) = mira_acp::agent_sessions::read(&slot.id.to_string(), &params.instance) {
+            // A forked chat's first start creates its fork from the
+            // original's session (Claude: `--fork-session`).
+            native.fork = native.fork || cur.fork_pending;
             native.resume = Some(cur.agent_session_id);
         }
     }
@@ -273,10 +378,22 @@ pub async fn start_agent(
             if claude_tool_search && !l.env.contains_key(CLAUDE_TOOL_SEARCH_ENV) {
                 l.env.insert(CLAUDE_TOOL_SEARCH_ENV.into(), "true".into());
             }
+            // Native file checkpoints, so `rewind_files` has something to
+            // restore (see the Claude checkpoint docs).
+            if driver.kind() == "claude-code" {
+                l.env
+                    .entry(mira_acp::native::CLAUDE_CHECKPOINT_ENV.into())
+                    .or_insert_with(|| "true".into());
+            }
             l
         }
         _ => driver.resolve(&driver_cfg, mode, program.clone()),
     };
+    if let Some(tokens) = driver_cfg.auto_compact_after {
+        if let Err(why) = mira_acp::driver::apply_auto_compact(driver.kind(), &mut launch, tokens) {
+            tracing::warn!(instance = %params.instance, "{why}");
+        }
+    }
     let mut opencode_control = if driver.kind() == "opencode" && matches!(transport, Transport::Acp)
     {
         crate::opencode_control::OpenCodeControl::prepare(&mut launch).await?
@@ -337,6 +454,7 @@ pub async fn start_agent(
         None => AcpEventPort::new(candidate_events.clone()),
     };
     events.set_driver(&params.driver_kind);
+    events.set_auto_compact_after(params.cfg.auto_compact_after);
 
     // A native agent has no ACP ports to bind — it runs in its own process and
     // asks the host its questions through one gate. Tool permissions answer
@@ -448,6 +566,18 @@ pub async fn start_agent(
                 }
             }
 
+            if let AgentHandle::AppServer(codex) = &agent {
+                // Reconcile old saved selections against the freshly advertised
+                // model before accepting them. Unsupported old choices fall back
+                // to this catalog's defaults instead of preventing startup.
+                for (id, value) in &params.model_options {
+                    let _ = codex.set_option(id, value).await;
+                }
+                let _ = candidate_events.send(ServerMsg::AcpConfigOptions {
+                    options: codex.current_options().await,
+                    driver: Some(params.driver_kind.clone()),
+                });
+            }
             Ok(agent)
         },
         stop_agent(slot),
@@ -524,10 +654,6 @@ pub async fn start_agent(
                         if stopping.load(Ordering::SeqCst) { break; }
                         let end_owner = weak_slot.upgrade();
                         let _end_dispatch = match &end_owner { Some(slot) => Some(slot.engine.input_dispatch.lock().await), None => None };
-                        if let Some(slot) = &end_owner {
-                            slot.engine.agent_in_turn.store(false, Ordering::SeqCst);
-                            slot.publish_activity();
-                        }
                         // A usage limit is a real outcome, not a crash. Its
                         // context rides on the turn-end frame itself: sending
                         // a warning as well produced two transcript lines for
@@ -537,6 +663,11 @@ pub async fn start_agent(
                         }
                         match end.rate_limited.clone() {
                             Some(reset) => {
+                                if let Some(slot) = &end_owner {
+                                    crate::checkpoints::finish_slot(slot.clone()).await;
+                                    slot.engine.agent_in_turn.store(false, Ordering::SeqCst);
+                                    slot.publish_activity();
+                                }
                                 let _ = warn.send(ServerMsg::acp_turn_end_with(
                                     &end.stop_reason,
                                     reset.parse::<i64>().ok()
@@ -545,7 +676,7 @@ pub async fn start_agent(
                                         .unwrap_or_else(|| format!("resets {reset}")),
                                 ));
                             }
-                            None => port.turn_ended(&end.stop_reason),
+                            None => port.turn_ended(&end.stop_reason).await,
                         }
                         // The turn ended with the agent alive, so its session
                         // id is a valid resume cursor. Recorded every turn —
@@ -574,7 +705,7 @@ pub async fn start_agent(
                             text: "the external agent exited — your next message restarts it"
                                 .to_string(),
                         });
-                        port.turn_ended("agent_exited");
+                        port.turn_ended("agent_exited").await;
                         if let Some(slot) = weak_slot.upgrade() {
                             let mut current = slot.acp_agent.write().await;
                             let is_ours = current
@@ -624,6 +755,16 @@ pub async fn start_agent(
         if let Some(sid) = agent.session_id().await {
             mira_acp::agent_sessions::record(&slot.id.to_string(), &handle.instance, &sid);
         }
+        record_capabilities(
+            state,
+            slot,
+            params,
+            &handle,
+            &agent,
+            transport,
+            capability_epoch,
+        )
+        .await;
     }
     ensure_transcript_logger(state, slot);
     let committed_events = slot.events_tx.clone();
@@ -656,6 +797,51 @@ pub async fn start_agent(
 /// agent start, so after a mode or model change each frame was written
 /// twice and replay doubled every reply. It also watches the agent's
 /// reported model, so the engine view names what is actually running.
+/// Learn sign-in state from what a turn did: an authentication error marks
+/// the model's provider as needing a sign-in; a turn that completes clears
+/// it. Settings is told either way, so it stops saying "Ready" for a
+/// provider that cannot answer.
+async fn observe_sign_in(
+    state: &AppState,
+    slot: &Arc<SessionSlot>,
+    msg: &ServerMsg,
+    failed: &mut bool,
+) {
+    let Some(launch) = slot.acp_launch.lock().await.clone() else {
+        return;
+    };
+    let model = slot
+        .engine
+        .reported_model
+        .lock()
+        .ok()
+        .and_then(|m| m.clone())
+        .or(launch.model.clone());
+    let changed = match msg {
+        ServerMsg::Error { text } if mira_acp::status::is_sign_in_error(text) => {
+            *failed = true;
+            state
+                .agent_sign_in
+                .turn_failed(&launch.instance, model.as_deref(), text)
+        }
+        ServerMsg::AcpTurnEnd { stop_reason, .. } => {
+            let ok = !std::mem::take(failed) && stop_reason != "error";
+            ok && state
+                .agent_sign_in
+                .turn_succeeded(&launch.instance, model.as_deref())
+        }
+        _ => false,
+    };
+    if changed {
+        state
+            .broadcast_all(ServerMsg::AgentSignInChanged {
+                instance: launch.instance.clone(),
+                needed: state.agent_sign_in.for_instance(&launch.instance),
+            })
+            .await;
+    }
+}
+
 pub(crate) fn ensure_transcript_logger(state: &AppState, slot: &Arc<SessionSlot>) {
     if slot.engine.logger_started.swap(true, Ordering::SeqCst) {
         return;
@@ -668,6 +854,9 @@ pub(crate) fn ensure_transcript_logger(state: &AppState, slot: &Arc<SessionSlot>
     let weak_slot = Arc::downgrade(slot);
     let state = state.clone();
     tokio::spawn(async move {
+        // Whether this turn already failed for a missing sign-in, so its
+        // turn end is not read as proof the provider works.
+        let mut sign_in_failed = false;
         loop {
             let Some(msg) = ordered.recv().await else {
                 break;
@@ -715,6 +904,64 @@ pub(crate) fn ensure_transcript_logger(state: &AppState, slot: &Arc<SessionSlot>
             };
             if model_changed {
                 crate::session_engine::publish(&state, &slot).await;
+            }
+            if matches!(msg, ServerMsg::Error { .. } | ServerMsg::AcpTurnEnd { .. }) {
+                observe_sign_in(&state, &slot, &msg, &mut sign_in_failed).await;
+            }
+            // Claude's file checkpoint for the prompt it just accepted,
+            // with the native session it belongs to: `rewind_files` only
+            // works within that session.
+            if let ServerMsg::AgentFileCheckpoint { id } = &msg {
+                let handle = slot.acp_agent.read().await.clone();
+                let session = match &handle {
+                    Some(h) => match h.agent().await {
+                        Some(agent) => agent.session_id().await,
+                        None => None,
+                    },
+                    None => None,
+                };
+                if let (Some(path), Some(handle)) = (path.as_ref(), handle) {
+                    append_transcript_record(
+                        path.clone(),
+                        serde_json::json!({
+                            "t": mira_harness::persist::now_ms(),
+                            "driver": handle.driver_kind,
+                            "instance": handle.instance,
+                            "claude_checkpoint": { "id": id, "session": session },
+                        }),
+                    )
+                    .await;
+                }
+                continue;
+            }
+            // Completed native turns are fork boundaries (`thread/fork`
+            // takes `lastTurnId`). Kept beside the transcript, not in it:
+            // replay has nothing to draw for them.
+            if let ServerMsg::RuntimeTurnUpdated { turn } = &msg {
+                if !turn.running {
+                    let owner = slot
+                        .acp_launch
+                        .lock()
+                        .await
+                        .as_ref()
+                        .map(|p| (p.driver_kind.clone(), p.instance.clone()));
+                    if let (Some(path), Some((driver, instance))) = (path.as_ref(), owner) {
+                        append_transcript_record(
+                            path.clone(),
+                            serde_json::json!({
+                                "t": mira_harness::persist::now_ms(),
+                                "driver": driver,
+                                "instance": instance,
+                                "native_turn": {
+                                    "thread": turn.native_thread_id,
+                                    "turn": turn.native_turn_id,
+                                },
+                            }),
+                        )
+                        .await;
+                    }
+                }
+                continue;
             }
             if !is_transcript_frame(&msg) {
                 continue;
@@ -1760,6 +2007,8 @@ pub struct AcpLaunchParams {
     pub mode: PermissionMode,
     /// The agent model picked for this session; applied on every launch.
     pub model: Option<String>,
+    /// Confirmed native model options for this chat and engine instance.
+    pub model_options: std::collections::BTreeMap<String, String>,
     /// The agent's own permission-mode id picked for this session (native
     /// transports take it at launch); applied on every launch.
     pub mode_id: Option<String>,
@@ -1778,6 +2027,7 @@ impl AcpLaunchParams {
             cfg,
             mode: PermissionMode::Ask,
             model: None,
+            model_options: Default::default(),
             mode_id: None,
         }
     }
@@ -1845,8 +2095,36 @@ impl AcpLaunchParams {
             "effort": self.cfg.effort,
             "setting_sources": self.cfg.setting_sources,
             "model": self.model,
+            "model_options": self.model_options,
             "mode_id": self.mode_id,
         })
+    }
+
+    pub fn saved_model_options(
+        previous: Option<&serde_json::Value>,
+        instance: &str,
+    ) -> std::collections::BTreeMap<String, String> {
+        previous
+            .and_then(|v| v.get("instance_model_options"))
+            .and_then(|v| v.get(instance))
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn persisted_with_options(
+        &self,
+        previous: Option<&serde_json::Value>,
+    ) -> serde_json::Value {
+        let mut launch = self.to_persisted();
+        let mut saved = previous
+            .and_then(|v| v.get("instance_model_options"))
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
+        saved.insert(self.instance.clone(), serde_json::json!(self.model_options));
+        launch["instance_model_options"] = serde_json::Value::Object(saved);
+        launch
     }
 
     /// Rebuild launch params from a session record's agent meta.
@@ -1889,6 +2167,11 @@ impl AcpLaunchParams {
             cfg,
             mode: PermissionMode::Ask,
             model: s("model").or_else(|| meta.model.clone()),
+            model_options: v
+                .get("model_options")
+                .cloned()
+                .and_then(|v| serde_json::from_value(v).ok())
+                .unwrap_or_default(),
             mode_id: s("mode_id"),
         }
     }
@@ -2127,6 +2410,9 @@ fn is_transcript_frame(msg: &ServerMsg) -> bool {
             | AcpModes { .. }
             | AcpConfigOptions { .. }
             | AcpCommands { .. }
+            | AcpCompaction { .. }
+            | AcpCompactionSummary { .. }
+            | Compacting { .. }
             | AcpUsage { .. }
             | AcpTurnUsage { .. }
             | AcpLimits { .. }
@@ -2228,7 +2514,17 @@ pub async fn revert_agent_turn(
             ));
             return Ok(notes.join("; "));
         }
-        Some(Err(e)) => notes.push(format!("couldn't rewind the agent ({e})")),
+        Some(Err(e)) => {
+            if crate::agent_capabilities::is_unknown_method(&e) {
+                if let Some(params) = slot.acp_launch.lock().await.as_ref() {
+                    state.agent_capabilities.mark_unsupported(
+                        &params.instance,
+                        crate::agent_capabilities::Feature::Rollback,
+                    );
+                }
+            }
+            notes.push(format!("couldn't rewind the agent ({e})"))
+        }
         None => {}
     }
     // The cursor points at the pre-revert session; keeping it would resume
@@ -2561,6 +2857,44 @@ mod resolve_start_tests {
             back.same_agent(&p) || p.cfg.api_key.is_some(),
             "only the secrets differ"
         );
+    }
+
+    #[test]
+    fn confirmed_model_options_survive_reload_and_are_scoped_to_instances() {
+        let mut work = AcpLaunchParams::for_instance("codex-work", "codex", Default::default());
+        work.model_options
+            .insert("reasoning_effort".into(), "high".into());
+        work.model_options
+            .insert("service_tier".into(), "priority".into());
+        let first = work.persisted_with_options(None);
+        let mut personal =
+            AcpLaunchParams::for_instance("codex-personal", "codex", Default::default());
+        personal
+            .model_options
+            .insert("reasoning_effort".into(), "low".into());
+        let second = personal.persisted_with_options(Some(&first));
+        let json = serde_json::to_string(&second).unwrap();
+        let reloaded: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            AcpLaunchParams::saved_model_options(Some(&reloaded), "codex-work"),
+            work.model_options
+        );
+        assert_eq!(
+            AcpLaunchParams::saved_model_options(Some(&reloaded), "codex-personal"),
+            personal.model_options
+        );
+        assert!(
+            AcpLaunchParams::saved_model_options(Some(&reloaded), "another-instance").is_empty()
+        );
+        let back = AcpLaunchParams::from_meta(&mira_harness::persist::AgentSessionMeta {
+            driver_kind: "codex".into(),
+            instance: Some("codex-personal".into()),
+            model: None,
+            active: true,
+            launch: Some(reloaded),
+        });
+        assert_eq!(back.model_options, personal.model_options);
+        assert!(AcpLaunchParams::saved_model_options(None, "codex-work").is_empty());
     }
 
     #[test]

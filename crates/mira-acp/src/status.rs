@@ -82,6 +82,65 @@ pub struct AgentStatus {
 
     /// Which transport this status describes.
     pub transport: crate::driver::Transport,
+
+    /// Providers this agent can start without, but whose models will not
+    /// answer until someone signs in. Starting is not the same as being
+    /// signed in: OpenCode initializes with no provider credentials and only
+    /// fails when a turn runs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sign_in_needed: Vec<SignInNeeded>,
+}
+
+/// One provider that needs a sign-in, and how Mira knows.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignInNeeded {
+    /// The provider id (`opencode`, `anthropic`), or `None` when the agent's
+    /// error named no provider and the model id carries none.
+    pub provider: Option<String>,
+    /// The model whose turn failed, when a turn is the source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub source: SignInSource,
+    /// What the agent said, cut to a line.
+    pub reason: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignInSource {
+    /// A turn failed with an authentication error.
+    Turn,
+    /// The agent's own credential store has no login for this provider.
+    Credentials,
+}
+
+/// Whether an agent's turn error means a sign-in is missing, rather than
+/// some other failure. Matches the agents' own wording: OpenCode's
+/// `-32000 Authentication required`, Claude's "not logged in", Codex's
+/// "login required" and HTTP 401 Unauthorized surfaced as text.
+pub fn is_sign_in_error(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    [
+        "authentication required",
+        "not logged in",
+        "not signed in",
+        "login required",
+        "please log in",
+        "please run /login",
+        "unauthorized",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+        && !lower.contains("rate limit")
+}
+
+/// The provider part of an agent model id: `opencode/big-pickle` →
+/// `opencode`. Ids without a provider prefix name none.
+pub fn model_provider(model: &str) -> Option<&str> {
+    model
+        .split_once('/')
+        .map(|(p, _)| p)
+        .filter(|p| !p.is_empty())
 }
 
 /// Probe one agent.
@@ -147,6 +206,7 @@ async fn probe_with_catalog(
         cli_version: None,
         install_hint: None,
         transport: crate::driver::Transport::Acp,
+        sign_in_needed: Vec::new(),
     };
 
     // Deliberately *not* gated on `cfg.enabled`. Enabled/disabled is a user
@@ -381,6 +441,8 @@ async fn fill_cli_models(status: &mut AgentStatus, driver: &dyn AcpDriver) {
             .map(str::trim)
             .filter(|l| !l.is_empty() && l.contains('/'))
             .map(|l| crate::appserver::CodexModel {
+                is_default: false,
+                capabilities: Default::default(),
                 value: l.to_string(),
                 label: l.to_string(),
             })
@@ -398,6 +460,8 @@ fn fill_known_models(status: &mut AgentStatus, driver: &dyn AcpDriver) {
             .known_models()
             .iter()
             .map(|(value, label)| crate::appserver::CodexModel {
+                is_default: false,
+                capabilities: Default::default(),
                 value: (*value).to_string(),
                 label: (*label).to_string(),
             })

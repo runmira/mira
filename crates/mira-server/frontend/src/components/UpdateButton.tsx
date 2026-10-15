@@ -29,7 +29,7 @@ export function UpdateButton() {
       : 'Updates';
   return (
     <>
-      <div className="group relative" data-tauri-drag-region="false" {...preloadOnIntent(UpdateDialogs.preload)}>
+      <div className="group relative" data-no-window-drag {...preloadOnIntent(UpdateDialogs.preload)}>
         <button
           type="button"
           onClick={() => setOpen(true)}

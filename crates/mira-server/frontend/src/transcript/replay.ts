@@ -3,6 +3,7 @@
  * log, external-agent transcript lines, and the interleaved pages the
  * server sends on load. Split out of App.tsx.
  */
+import { applyAcpCompaction, settleAgentCompactions } from '../lib/acpCompaction';
 import { pauseParentChildEntries, upsertExternalWork } from '../lib/externalSubagents';
 import { applyNativeMetadata } from '../lib/nativeStream';
 import { appendAgentProgress, agentFailureEntry, hasCurrentAgentFailure } from '../lib/agentProgress';
@@ -146,6 +147,13 @@ export function replayAgentTranscript(lines: AgentTranscriptLine[]): Entry[] {
       case 'runtime_work_updated':
         out = upsertExternalWork(out, (f as Extract<ServerMsg, { type: 'runtime_work_updated' }>).work);
         break;
+      case 'acp_compaction':
+      case 'acp_compaction_summary':
+        out = applyAcpCompaction(out, f as Extract<ServerMsg, {type:'acp_compaction' | 'acp_compaction_summary'}>, line.t);
+        break;
+      case 'compacting':
+        if ((f as Extract<ServerMsg, {type:'compacting'}>).trigger === 'agent' && !out.some(entry => entry.kind === 'compact' && entry.state === 'running')) out.push({kind:'compact',state:'running',trigger:'agent',summarized:null,summary:null,startedAt:line.t});
+        break;
       case 'acp_failure':
         out.push(agentFailureEntry(f as Extract<ServerMsg, { type: 'acp_failure' }>));
         break;
@@ -188,6 +196,7 @@ export function replayAgentTranscript(lines: AgentTranscriptLine[]): Entry[] {
       case 'acp_turn_end': {
         out = pauseParentChildEntries(out);
         const msg = f as Extract<ServerMsg, { type: 'acp_turn_end' }>;
+        out = settleAgentCompactions(out,isSuccessfulAcpStop(msg.stop_reason),isUserCancelledStop(msg.stop_reason),describeAcpStop(msg.stop_reason),line.t);
         const started = turnStartedAt;
         out = withTurnStats(out, (s) => ({ ...s, startedAt: s.startedAt ?? started, endedAt: line.t }));
         const sealed = sealAcpThought(out);

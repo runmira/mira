@@ -351,3 +351,68 @@ mod live_steering_tests {
         outcome.unwrap();
     }
 }
+
+#[cfg(test)]
+mod live_compaction_tests {
+    use mira_acp::driver::AcpDriver;
+    use mira_acp::events::{MiraEvent, NormalizedEvent};
+    use serde_json::json;
+    struct Events(tokio::sync::mpsc::UnboundedSender<NormalizedEvent>);
+    #[async_trait::async_trait]
+    impl mira_acp::EventPort for Events {
+        async fn emit(&self, event: NormalizedEvent) {
+            let _ = self.0.send(event);
+        }
+    }
+    #[tokio::test]
+    #[ignore = "requires installed OpenCode v2 and network access to its free model"]
+    async fn installed_v2_compaction_reports_native_progress_and_completion() {
+        let binary = std::env::var("MIRA_TEST_OPENCODE_BIN").expect("set MIRA_TEST_OPENCODE_BIN");
+        let cwd = tempfile::tempdir().unwrap();
+        let driver = mira_acp::drivers::OpenCodeDriver;
+        let launch = driver.resolve(
+            &Default::default(),
+            mira_acp::driver::PermissionMode::Ask,
+            binary.into(),
+        );
+        let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let agent = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            mira_acp::process::start(mira_acp::process::StartSpec {
+                launch: &launch,
+                caps: Some(driver.client_caps()),
+                files: std::sync::Arc::new(mira_acp::DenyAll),
+                terminals: std::sync::Arc::new(mira_acp::DenyAll),
+                permissions: std::sync::Arc::new(mira_acp::DenyAll),
+                events: std::sync::Arc::new(Events(tx)),
+                cwd: Some(cwd.path()),
+                mira_mcp: None,
+                resume_session_id: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let outcome=async {
+            let id=agent.session_id().unwrap();
+            let option=agent.session().config_options().iter().find(|o|o["category"]=="model").and_then(|o|o["id"].as_str()).unwrap_or("model").to_owned();
+            agent.session().set_config_option(&id,&option,json!("opencode/big-pickle")).await.map_err(|e|e.to_string())?;
+            let prompt=|text:&str|vec![serde_json::from_value(json!({"type":"text","text":text})).unwrap()];
+            tokio::time::timeout(std::time::Duration::from_secs(60),agent.prompt(prompt("Remember that this isolated test project is called Mira compaction verification. Reply with one sentence. Do not call tools."))).await.map_err(|_|"initial prompt timed out")?.map_err(|e|e.to_string())?;
+            assert!(agent.host().has_command(&id,"compact"),"compact must be advertised by this live session");
+            let response=tokio::time::timeout(std::time::Duration::from_secs(60),agent.prompt(prompt("/compact"))).await.map_err(|_|"compaction timed out")?.map_err(|e|e.to_string())?;
+            assert!(!response.was_cancelled);
+            let mut started=None;let mut completed=false;
+            while let Ok(event)=events.try_recv() {
+                if let MiraEvent::Compaction{id,status,..}=event.event {
+                    if status=="in_progress" {started=Some(id.clone());}
+                    if status=="completed" {assert_eq!(started.as_ref(),Some(&id));completed=true;}
+                }
+            }
+            assert!(started.is_some() && completed,"real ACP compaction must report a stable identity, progress and completion");
+            Ok::<(),String>(())
+        }.await;
+        agent.shutdown().await;
+        outcome.unwrap();
+    }
+}

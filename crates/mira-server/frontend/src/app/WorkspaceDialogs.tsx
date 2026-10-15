@@ -1,7 +1,7 @@
 import { useAppRuntime } from '../state/RuntimeProvider';
 import { Dialog,DialogContent,DialogTitle } from '@/components/ui/dialog';
 import { useEffect } from 'react';
-import { restoreCheckpoint } from '../api';
+import { agentFileRewind, restoreCheckpoint, type MessageRef } from '../api';
 import { ApprovalDialog } from '../components/ApprovalDialog';
 import { FilePicker } from '../components/FilePicker';
 import { LazyBoundary } from '../components/LazyBoundary';
@@ -46,6 +46,8 @@ export function WorkspaceDialogs(
     | 'restoreAsk'
     | 'setRestoreAsk'
     | 'doRestore'
+    | 'setRestoreNote'
+    | 'refreshRepo'
     | 'pickerOpenMounted'
     | 'pickerOpen'
     | 'setPickerOpen'
@@ -89,6 +91,8 @@ export function WorkspaceDialogs(
     restoreAsk,
     setRestoreAsk,
     doRestore,
+    setRestoreNote,
+    refreshRepo,
     pickerOpenMounted,
     pickerOpen,
     setPickerOpen,
@@ -96,6 +100,24 @@ export function WorkspaceDialogs(
     reviewState,
     setReviewPanelOpen,
   } = context;
+  /** Confirmed Claude-native rewind. Success is claimed only when Claude
+   *  reports the files rewound; the undo puts back Mira's snapshot. */
+  async function rewindNative(session: string, ref: MessageRef) {
+    try {
+      const r = await agentFileRewind(session, { ...ref, dry_run: false });
+      if (!r.can_rewind) {
+        setRestoreNote({ text: r.error ?? 'Claude could not rewind these files.', error: true });
+        return;
+      }
+      const n = r.files_changed.length;
+      const skipped = r.skipped ? ` ${r.skipped} linked or unreadable path${r.skipped === 1 ? ' was' : 's were'} skipped.` : '';
+      setRestoreNote({ text: `Rewound ${n} file${n === 1 ? '' : 's'} with Claude's checkpoint.${skipped}`, undoNative: r.undo ?? undefined });
+    } catch (e) {
+      setRestoreNote({ text: (e as Error).message, error: true });
+    } finally {
+      refreshRepo();
+    }
+  }
   // Settings → About dispatches this; the palette sets state directly.
   useEffect(() => {
     const onReport = () => setReportOpen(true);
@@ -245,14 +267,30 @@ export function WorkspaceDialogs(
         <ApprovalDialog
           tone="consequential"
           request={{
-            title: `Restore ${restoreAsk.changes.length} file${restoreAsk.changes.length === 1 ? '' : 's'}?`,
-            source: { label: 'Checkpoint', detail: 'before this message' },
+            title: restoreAsk.native
+              ? `Rewind Claude's edits to ${restoreAsk.changes.length} file${restoreAsk.changes.length === 1 ? '' : 's'}?`
+              : `Restore ${restoreAsk.changes.length} file${restoreAsk.changes.length === 1 ? '' : 's'}?`,
+            source: restoreAsk.native
+              ? { label: "Claude's checkpoint", detail: 'before this message' }
+              : { label: 'Checkpoint', detail: 'before this message' },
             body: (
               <div className="space-y-2">
-                <p>
-                  Every file that changed since this message goes back to how it was — including
-                  changes made after it, by anyone. You can undo this.
-                </p>
+                {restoreAsk.native ? (
+                  <>
+                    <p>{restoreAsk.native.coverage}</p>
+                    <p>
+                      These files are replaced with Claude's copy from before this message, including any
+                      later edits to them. Mira snapshots tracked files first, so you can undo this.
+                      {(restoreAsk.native.insertions != null || restoreAsk.native.deletions != null) &&
+                        ` (+${restoreAsk.native.insertions ?? 0} −${restoreAsk.native.deletions ?? 0} lines)`}
+                    </p>
+                  </>
+                ) : (
+                  <p>
+                    Every file that changed since this message goes back to how it was — including
+                    changes made after it, by anyone. You can undo this.
+                  </p>
+                )}
                 <ul className="max-h-48 space-y-0.5 overflow-auto rounded-md bg-background/60 px-2.5 py-2 font-mono text-[11.5px]">
                   {restoreAsk.changes.map((c) => (
                     <li key={c.path} className="flex gap-2">
@@ -280,13 +318,19 @@ export function WorkspaceDialogs(
             ),
             choices: [
               { id: 'cancel', label: 'Cancel' },
-              { id: 'restore', label: 'Restore files', primary: true },
+              { id: 'restore', label: restoreAsk.native ? 'Rewind files' : 'Restore files', primary: true },
             ],
             onDismiss: () => setRestoreAsk(null),
             onChoose: (id) => {
               const ask = restoreAsk;
               setRestoreAsk(null);
-              if (id === 'restore') void doRestore(() => restoreCheckpoint(ask.ref, requestRuntime.sessionState.get().active ?? undefined), 'Restored');
+              if (id !== 'restore') return;
+              if (ask.native) {
+                const session = requestRuntime.sessionState.get().active;
+                if (session) void rewindNative(session, ask.ref);
+                return;
+              }
+              void doRestore(() => restoreCheckpoint(ask.ref, requestRuntime.sessionState.get().active ?? undefined), 'Restored');
             },
           }}
         />

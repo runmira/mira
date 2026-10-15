@@ -238,7 +238,7 @@ export type AcpAgentState =
 
 /** One row in the agent list. */
 export type AcpAgentStatus = {
-  models?: { value: string; label: string }[];
+  models?: { value: string; label: string; capabilities?: NativeModelCapabilities; is_default?: boolean }[];
   kind: string;
   display_name: string;
   state: AcpAgentState;
@@ -262,6 +262,19 @@ export type AcpAgentStatus = {
   install_hint?: string;
   /** How Mira reached this agent: its own CLI, or an ACP adapter. */
   transport?: 'auto' | 'native' | 'acp';
+  /** Providers whose models need a sign-in before they answer. The agent
+   *  starts without them, so `state` alone still reads ready. */
+  sign_in_needed?: SignInNeeded[];
+};
+
+/** One provider an agent needs signed in, and how Mira knows. */
+export type SignInNeeded = {
+  provider: string | null;
+  model?: string | null;
+  /** `turn`: a turn failed with an auth error. `credentials`: the agent's
+   *  own credential store has no login for it. */
+  source: 'turn' | 'credentials';
+  reason: string;
 };
 
 /** One persisted agent-transcript line: a user prompt or a server frame. */
@@ -298,7 +311,9 @@ export type EngineRef = {
 export type SessionEngine = {
   capabilities?: { asynchronous_questions: boolean; background_work: boolean; native_goals: boolean;
     steering: 'unavailable' | 'native' | 'safe_boundary'; image_input: boolean;
-    live_model_switch: boolean; live_mode_switch: boolean; native_fork: boolean;
+    live_model_switch: boolean; live_mode_switch: boolean;
+    /** `turn`: forks through a chosen completed turn; `session`: only the whole conversation. */
+    fork: 'unavailable' | 'session' | 'turn';
     native_rollback: boolean; native_snapshot: boolean; cancellation: boolean;
     stop_behavior: 'current_turn' | 'runtime' };
   kind: 'provider' | 'agent';
@@ -311,6 +326,11 @@ export type SessionEngine = {
   /** `idle`: picked, not running (starts on the next message). */
   status: 'idle' | 'starting' | 'ready' | 'error';
   error?: string | null;
+  /** `live`: negotiated by the running agent; `recorded`: by the last runtime
+   *  of the same installed launch; `unknown`: conservative defaults. */
+  capability_source?: 'live' | 'recorded' | 'unknown';
+  /** The installed agent's reported version, when known. */
+  agent_version?: string | null;
 };
 
 /** A session from an agent's own history, resumable in Mira. */
@@ -323,7 +343,17 @@ export type ExternalAgentSession = {
   updated_at?: string | null;
 };
 
+export type NativeModelCapabilities = {
+  supportedReasoningEfforts: { reasoningEffort: string; description: string }[];
+  defaultReasoningEffort?: string | null;
+  inputModalities?: string[] | null;
+  serviceTiers: { id: string; name: string; description: string }[];
+  defaultServiceTier?: string | null;
+  additionalSpeedTiers: string[];
+};
+
 export type AcpConfigValue = {
+  capabilities?: NativeModelCapabilities | null;
   value: string;
   name: string;
   description?: string | null;
@@ -553,8 +583,10 @@ export type ServerMsg =
   | { type: 'acp_plan'; entries: AcpPlanItem[] }
   | { type: 'acp_modes'; current: string; available: AcpSessionMode[]; postures?: AgentPostureMapping[]; driver?: string | null }
   | { type: 'acp_config_options'; options: AcpConfigOption[]; driver?: string | null }
+  | { type: 'acp_compaction'; id: string; status: string; summary: string | null; replace_summary: boolean; error: string | null; replace_error: boolean }
+  | { type: 'acp_compaction_summary'; id: string; text: string }
   | { type: 'acp_commands'; names: string[] }
-  | { type: 'acp_usage'; used: number; size: number; cost: { amount: number; currency: string } | null }
+  | { type: 'acp_usage'; used: number; size: number; cost: { amount: number; currency: string } | null; compact_at?: number | null }
   | { type: 'acp_turn_usage'; model: string; input_tokens: number; output_tokens: number; cached_input_tokens: number; cost_usd?: number | null }
   /** The agent account's plan limits (Claude's 5-hour and weekly windows). */
   | { type: 'acp_limits'; windows: { name: string; utilization: number; resets_at?: number | null }[] }
@@ -562,6 +594,8 @@ export type ServerMsg =
   /** The agent's own stop reason, verbatim. `cancelled` and
    *  `max_tokens` must not render as a completed answer. */
   | { type: 'acp_turn_end'; stop_reason: string; detail?: string | null }
+  /** A separate chat now holds a native fork of this chat's agent session. */
+  | { type: 'agent_forked'; session_id: string }
   | { type: 'acp_prompt_committed'; record: unknown }
   | { type: 'acp_failure'; code: string; message: string; retryable: boolean; reset_at: string | null }
     /** Something this build does not model. Surfaced as a warning rather
@@ -580,6 +614,7 @@ export type ServerMsg =
   | { type: 'acp_agent_started'; kind: string; display_name: string; launch: string; error?: string | null }
   /** Per-agent health, for the agent list. */
   | { type: 'acp_agent_status'; agents: AcpAgentStatus[] }
+  | { type: 'agent_sign_in_changed'; instance: string; needed: SignInNeeded[] }
   /** The agent's session mode changed. Recorded for every change, not just
    *  privileged ones: it is a standing change to what the agent may do. */
   | {

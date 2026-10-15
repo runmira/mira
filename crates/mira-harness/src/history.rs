@@ -41,10 +41,12 @@ use mira_ai::{ChatEvent, ChatProvider, ChatRequest};
 use mira_core::{Message, Role, ToolCallId};
 use serde_json::Value;
 
-/// Share of the context window at which the conversation is summarized.
-/// Leaves room for the next reply and tool results, and for the 4
-/// chars/token estimate being off.
-const AUTO_COMPACT_FRACTION: f64 = 0.8;
+/// Room kept free below the context window before the conversation is
+/// summarized: for the next reply, its tool results and the summary request.
+/// A tenth of the window, or `RESERVE_MIN_TOKENS` when that is more — the
+/// same ceiling OpenCode uses, which lands next to Codex's 90%.
+const RESERVE_FRACTION: u64 = 10;
+const RESERVE_MIN_TOKENS: u64 = 16_000;
 
 /// Share of the window at which old tool results start being cleared.
 const CLEAR_TOOL_RESULTS_FRACTION: f64 = 0.5;
@@ -68,6 +70,54 @@ const SUMMARIZER_MESSAGE_CHARS: usize = 4_000;
 
 /// Files re-read into context after compaction.
 const RESTORE_FILES: usize = 5;
+
+/// Where a summary's copies of recently used files start and end, so a
+/// request still too long after compacting can drop them.
+const RESTORED_FILES_HEADING: &str = "\n\nCurrent contents of files recently worked on:\n\n";
+const RESTORED_FILES_END: &str = "<!-- end of restored files -->";
+
+/// Drop the file copies from the newest summary (the tight retry when a
+/// compacted request is still refused as too long). Returns whether there
+/// were any.
+pub fn drop_restored_files(history: &mut [Message]) -> bool {
+    let Some(summary) = history.iter_mut().rev().find(|m| is_summary(m)) else {
+        return false;
+    };
+    let Some(text) = summary.content.as_mut() else {
+        return false;
+    };
+    let (Some(start), Some(end)) = (
+        text.find(RESTORED_FILES_HEADING),
+        text.find(RESTORED_FILES_END),
+    ) else {
+        return false;
+    };
+    text.replace_range(
+        start..end + RESTORED_FILES_END.len(),
+        "\n\n(Copies of recently used files were left out to fit; read them again if you need them.)",
+    );
+    true
+}
+
+/// When the summarizer refuses the conversation as too long, the share of its
+/// window the next attempt gives the conversation, in order (OpenCode's steps).
+const SHRINK_STEPS: [f64; 3] = [0.7, 0.5, 0.35];
+
+/// Characters per token for sizing the summarizer's input.
+const CHARS_PER_TOKEN: usize = 4;
+
+/// How a compaction is shaped.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CompactShape<'a> {
+    /// What the user asked the summary to keep (`/compact <focus>`).
+    pub focus: Option<&'a str>,
+    /// Leave out the copies of recently used files: the tight retry after
+    /// a compacted request was still refused as too long.
+    pub without_files: bool,
+    /// Cap on the conversation the summarizer reads, in characters; the
+    /// oldest messages are left out first. `None` sends all of it.
+    pub transcript_chars: Option<usize>,
+}
 
 /// A restored file larger than this is only named, not included.
 const RESTORE_FILE_MAX_CHARS: usize = 20_000;
@@ -367,22 +417,43 @@ pub fn clear_old_tool_results(history: &[Message], before: usize) -> Vec<Message
         .collect()
 }
 
-/// The token count at which a conversation with this window is summarized.
+/// The request size, in tokens, at which a conversation with this window is
+/// summarized. A window too small to give up the minimum keeps a tenth.
 pub fn auto_compact_at(window: u64) -> u64 {
-    (window as f64 * AUTO_COMPACT_FRACTION) as u64
+    let floor = if window >= 2 * RESERVE_MIN_TOKENS {
+        RESERVE_MIN_TOKENS
+    } else {
+        0
+    };
+    window.saturating_sub((window / RESERVE_FRACTION).max(floor))
 }
 
-/// Whether the conversation (as sent: `history` with tool results
-/// before `cleared_before` cleared) is full enough to summarize.
-pub fn needs_compaction(
-    history: &[Message],
-    model: &str,
-    catalog_window: Option<u32>,
-    cleared_before: usize,
-) -> bool {
-    let budget =
-        (context_window_with(model, catalog_window) as f64 * AUTO_COMPACT_FRACTION) as usize;
-    estimated_tokens(&clear_old_tool_results(history, cleared_before)) > budget
+/// Whether a request of `request_tokens` (as it will be sent: system prompt,
+/// tool definitions, history with old tool results cleared, measured against
+/// the provider's own last count — see `context::Calibration::calibrated`)
+/// leaves too little room in `window`.
+pub fn needs_compaction(request_tokens: u64, window: u64) -> bool {
+    request_tokens >= auto_compact_at(window)
+}
+
+/// Whether a provider refused a request for being longer than the model's
+/// context window. Their wording varies; these are the ones they use.
+pub fn is_context_overflow(error: &str) -> bool {
+    let e = error.to_ascii_lowercase();
+    [
+        "context_length_exceeded",
+        "context length",
+        "context window",
+        "prompt is too long",
+        "input is too long",
+        "maximum context",
+        "too many tokens",
+        "exceeds the maximum",
+        "reduce the length",
+        "request too large",
+    ]
+    .iter()
+    .any(|needle| e.contains(needle))
 }
 
 /// Rough char-based token estimate. Real tokenization varies by model
@@ -454,8 +525,9 @@ pub async fn compact(
     provider: &dyn ChatProvider,
     summarizer_model: &str,
     cwd: &Path,
-    focus: Option<&str>,
+    shape: CompactShape<'_>,
 ) -> Result<Vec<Message>> {
+    let focus = shape.focus;
     let system_end = history
         .iter()
         .take_while(|m| m.role == Role::System)
@@ -469,17 +541,25 @@ pub async fn compact(
     if end.saturating_sub(system_end) < 2 {
         return Err(anyhow!("not enough conversation to compact"));
     }
-    let transcript = render_for_summary(&history[system_end..end]);
+    let transcript = match shape.transcript_chars {
+        Some(budget) => render_newest(&history[system_end..end], budget),
+        None => render_for_summary(&history[system_end..end]),
+    };
     let summary = summarize(provider, summarizer_model, &transcript, focus).await?;
-    let files = restore_files(cwd, &recent_paths(&history[system_end..end]));
+    let files = if shape.without_files {
+        String::new()
+    } else {
+        restore_files(cwd, &recent_paths(&history[system_end..end]))
+    };
     let mut text = format!(
         "{SUMMARY_PREFIX}\nThis session continues from an earlier conversation that was summarized \
          to free up context. The summary:\n\n{}\n</conversation-summary>",
         summary.trim()
     );
     if !files.is_empty() {
-        text.push_str("\n\nCurrent contents of files recently worked on:\n\n");
+        text.push_str(RESTORED_FILES_HEADING);
         text.push_str(&files);
+        text.push_str(RESTORED_FILES_END);
     }
     text.push_str(
         "\n\nContinue from where things left off without asking the user to repeat \
@@ -498,14 +578,71 @@ pub async fn compact_with_fallback(
     session_model: &str,
     summarizer_model: &str,
     cwd: &Path,
-    focus: Option<&str>,
+    shape: CompactShape<'_>,
 ) -> Result<Vec<Message>> {
-    match compact(history, provider, summarizer_model, cwd, focus).await {
+    match compact_shrinking(history, provider, summarizer_model, cwd, shape).await {
         Err(e) if summarizer_model != session_model => {
             tracing::warn!(error = %e, model = summarizer_model, "compaction failed; retrying on the main model");
-            compact(history, provider, session_model, cwd, focus).await
+            compact_shrinking(history, provider, session_model, cwd, shape).await
         }
         r => r,
+    }
+}
+
+/// [`compact`], and when the summarizer refuses the conversation as too long,
+/// again with less of it: the newest part that fits each of [`SHRINK_STEPS`]
+/// of its window.
+async fn compact_shrinking(
+    history: &mut Vec<Message>,
+    provider: &dyn ChatProvider,
+    model: &str,
+    cwd: &Path,
+    shape: CompactShape<'_>,
+) -> Result<Vec<Message>> {
+    let mut last = match compact(history, provider, model, cwd, shape).await {
+        Err(e) if is_context_overflow(&format!("{e:#}")) => e,
+        r => return r,
+    };
+    let window = context_window(model);
+    for step in SHRINK_STEPS {
+        let budget = (window as f64 * step) as usize * CHARS_PER_TOKEN;
+        let budget = shape.transcript_chars.map_or(budget, |b| b.min(budget));
+        tracing::warn!(
+            model,
+            step,
+            "summarizer refused the conversation as too long; retrying with less of it"
+        );
+        let tighter = CompactShape {
+            transcript_chars: Some(budget),
+            ..shape
+        };
+        match compact(history, provider, model, cwd, tighter).await {
+            Err(e) if is_context_overflow(&format!("{e:#}")) => last = e,
+            r => return r,
+        }
+    }
+    Err(last)
+}
+
+/// [`render_for_summary`] of the newest messages that fit `budget`
+/// characters, saying how many older ones were left out.
+fn render_newest(msgs: &[Message], budget: usize) -> String {
+    let mut kept = 0;
+    let mut used = 0;
+    for m in msgs.iter().rev() {
+        let size = render_for_summary(std::slice::from_ref(m)).len();
+        if kept > 0 && used + size > budget {
+            break;
+        }
+        used += size;
+        kept += 1;
+    }
+    let skipped = msgs.len() - kept;
+    let rendered = render_for_summary(&msgs[skipped..]);
+    if skipped == 0 {
+        rendered
+    } else {
+        format!("[{skipped} older messages left out to fit; summarize what remains]\n\n{rendered}")
     }
 }
 
@@ -951,10 +1088,16 @@ mod tests {
             asked: Default::default(),
         };
         let mut h = long_history();
-        let removed =
-            compact_with_fallback(&mut h, &p, "claude-opus-4-7", "tiny", Path::new("."), None)
-                .await
-                .unwrap();
+        let removed = compact_with_fallback(
+            &mut h,
+            &p,
+            "claude-opus-4-7",
+            "tiny",
+            Path::new("."),
+            CompactShape::default(),
+        )
+        .await
+        .unwrap();
         assert_eq!(removed.len(), 40);
         assert_eq!(h.len(), 2, "system + summary");
         assert!(is_summary(&h[1]));
@@ -968,11 +1111,16 @@ mod tests {
         };
         let mut h = long_history();
         let before = h.len();
-        assert!(
-            compact_with_fallback(&mut h, &p, "tiny", "tiny", Path::new("."), None)
-                .await
-                .is_err()
-        );
+        assert!(compact_with_fallback(
+            &mut h,
+            &p,
+            "tiny",
+            "tiny",
+            Path::new("."),
+            CompactShape::default()
+        )
+        .await
+        .is_err());
         assert_eq!(h.len(), before, "history untouched on failure");
         assert_eq!(p.asked.lock().unwrap().len(), 1);
     }
@@ -995,9 +1143,18 @@ mod tests {
         h.push(tool_result("c2", "ok"));
         h.push(assistant_reads("c3", "gone.rs"));
         h.push(tool_result("c3", "missing"));
-        let removed = compact(&mut h, &p, "m", tmp.path(), Some("the parser"))
-            .await
-            .unwrap();
+        let removed = compact(
+            &mut h,
+            &p,
+            "m",
+            tmp.path(),
+            CompactShape {
+                focus: Some("the parser"),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(removed.len(), 7);
         let text = h[1].content.as_deref().unwrap();
         assert!(text.starts_with(SUMMARY_PREFIX));
@@ -1016,7 +1173,7 @@ mod tests {
         };
         let mut h = long_history();
         h.push(Message::user("now do this"));
-        let removed = compact(&mut h, &p, "m", Path::new("."), None)
+        let removed = compact(&mut h, &p, "m", Path::new("."), CompactShape::default())
             .await
             .unwrap();
         assert_eq!(removed.len(), 40);
@@ -1031,9 +1188,11 @@ mod tests {
             asked: Default::default(),
         };
         let mut h = vec![Message::system("s"), Message::user("hi")];
-        assert!(compact(&mut h, &p, "m", Path::new("."), None)
-            .await
-            .is_err());
+        assert!(
+            compact(&mut h, &p, "m", Path::new("."), CompactShape::default())
+                .await
+                .is_err()
+        );
         assert!(p.asked.lock().unwrap().is_empty());
     }
 
@@ -1061,7 +1220,9 @@ mod tests {
             .count();
         assert_eq!(cleared, 15 - KEEP_TOOL_RESULTS);
         assert_eq!(sent.len(), h.len(), "pairing kept");
-        assert!(!needs_compaction(&h, "claude-opus-4-7", None, before));
+        let window = context_window("claude-opus-4-7") as u64;
+        let sent_tokens = crate::context::estimate_request(&sent, &[]);
+        assert!(!needs_compaction(sent_tokens, window));
         // Stable: asking again doesn't move it.
         assert_eq!(
             clear_tool_results_before(&h, "claude-opus-4-7", None, before),
@@ -1071,20 +1232,63 @@ mod tests {
 
     #[test]
     fn a_full_window_needs_compaction_and_a_small_chat_never_does() {
+        let size = |h: &[Message]| crate::context::estimate_request(h, &[]);
         let h = fat_history();
-        assert!(needs_compaction(&h, "gpt-3.5-turbo", None, 0));
+        assert!(needs_compaction(
+            size(&h),
+            context_window("gpt-3.5-turbo") as u64
+        ));
         let small = long_history();
-        assert!(!needs_compaction(&small, "claude-opus-4-7", None, 0));
+        assert!(!needs_compaction(
+            size(&small),
+            context_window("claude-opus-4-7") as u64
+        ));
         assert_eq!(
             clear_tool_results_before(&small, "claude-opus-4-7", None, 0),
             0
         );
-        // Message count alone never triggers it any more.
+        // Message count alone never triggers it.
         let mut many = vec![Message::system("s")];
         for i in 0..500 {
             many.push(Message::user(format!("u{i}")));
         }
-        assert!(!needs_compaction(&many, "claude-opus-4-7", None, 0));
+        assert!(!needs_compaction(
+            size(&many),
+            context_window("claude-opus-4-7") as u64
+        ));
+    }
+
+    #[test]
+    fn compaction_leaves_a_tenth_of_the_window_or_sixteen_thousand_tokens() {
+        assert_eq!(auto_compact_at(200_000), 180_000);
+        assert_eq!(auto_compact_at(1_000_000), 900_000);
+        assert_eq!(auto_compact_at(128_000), 112_000, "16k beats a tenth");
+        assert_eq!(
+            auto_compact_at(16_385),
+            14_747,
+            "a small window keeps a tenth"
+        );
+        assert!(needs_compaction(180_000, 200_000));
+        assert!(!needs_compaction(179_999, 200_000));
+    }
+
+    #[test]
+    fn context_overflow_errors_are_told_apart_from_other_failures() {
+        for e in [
+            "400 invalid_request_error: prompt is too long: 213000 tokens > 200000 maximum",
+            "This model's maximum context length is 128000 tokens (context_length_exceeded)",
+            "Input is too long for requested model.",
+            "Request too large for gpt-6.1-sol",
+        ] {
+            assert!(is_context_overflow(e), "{e}");
+        }
+        for e in [
+            "429 rate limit exceeded",
+            "stream error: connection reset",
+            "401 invalid api key",
+        ] {
+            assert!(!is_context_overflow(e), "{e}");
+        }
     }
 
     #[test]

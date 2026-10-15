@@ -1,3 +1,4 @@
+import { applyAcpCompaction, settleAgentCompactions } from '../lib/acpCompaction';
 import type { Entry } from '../transcript/entries';
 import { applyExternalChild, childCallId, pauseParentChildEntries, pauseParentChildStreams, projectAcpSubagent, projectExternalWork, upsertExternalWork } from '../lib/externalSubagents';
 import { terminalEntries } from '../lib/terminalEntries';
@@ -9,7 +10,6 @@ addTurnUsage,
 appendAcpText,
 appendAcpThought,
 describeAcpStop,
-finishCompaction,
 isSuccessfulAcpStop,
 isUserCancelledStop,
 sealAcpThought,
@@ -75,6 +75,10 @@ export function useAgentEvents(
   return useStableCallback((msg: ServerMsg) => {
     const receivedAt = Date.now();
     switch (msg.type) {
+      case 'acp_compaction':
+      case 'acp_compaction_summary':
+        updateTranscript(previous => applyAcpCompaction(previous, msg, receivedAt));
+        break;
       case 'acp_message_metadata':
         updateTranscript((previous) => applyNativeMetadata(previous, msg.message_id, msg.phase));
         break;
@@ -142,14 +146,7 @@ export function useAgentEvents(
           return pauseParentChildEntries(previous);
         });
         context.updateSubagentProjection(previous => pauseParentChildStreams(previous, endedChildren));
-        // An agent compaction ends with its turn.
-        finishTranscript((prev) =>
-          prev.some((e) => e.kind === 'compact' && e.state === 'running' && e.trigger === 'agent')
-            ? finishCompaction(prev, isSuccessfulAcpStop(msg.stop_reason)
-                  ? { state: 'done' }
-                  : { state: 'failed', error: describeAcpStop(msg.stop_reason) }, receivedAt)
-            : prev,
-        );
+        finishTranscript(previous => settleAgentCompactions(previous, isSuccessfulAcpStop(msg.stop_reason), isUserCancelledStop(msg.stop_reason), describeAcpStop(msg.stop_reason), receivedAt));
         // End the turn. This is the only place an external agent's turn can
         // be declared over — the prompt is fire-and-forget, so unlike the
         // harness there is no surrounding await to imply completion. Without
@@ -337,7 +334,9 @@ export function useAgentEvents(
       }
 
       case 'acp_agent_status':
-        // A probe ran on the server: the engines list has the fresh result.
+      case 'agent_sign_in_changed':
+        // A probe ran, or a turn showed a provider needs (or no longer needs)
+        // a sign-in: the engines list carries the fresh result.
         loadEngines();
         break;
     }

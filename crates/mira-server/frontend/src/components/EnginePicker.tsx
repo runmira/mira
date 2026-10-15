@@ -34,12 +34,13 @@ CommandList,
 } from '@/components/ui/command';
 import { Popover,PopoverContent,PopoverTrigger } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
-import { AlertCircle,Check,ChevronDown,Loader2,RefreshCw,Settings2 } from 'lucide-react';
+import { AlertCircle, Ban, Brain, BrainCircuit, Check, ChevronDown, Feather, Gauge, Lightbulb, Loader2, RefreshCw, Rocket, Settings2, Sparkles, Telescope, Zap } from 'lucide-react';
 import { useEffect,useMemo,useRef,useState } from 'react';
 import { listInstanceModels,listModels,type EngineSnapshot,type ModelInfo,type OptionDescriptor } from '../api';
 import { navigateEnginePicker } from '../lib/enginePickerNavigation';
-import { agentModelChoices,describeAgentStatus } from '../lib/acpAgents';
-import { enabledPickerRail } from '../lib/enginePickerRail';
+import { agentModelChoices,describeAgentStatus,pickerAgentSubtitle } from '../lib/acpAgents';
+import { enabledPickerRail, hiddenFromPicker } from '../lib/enginePickerRail';
+import { recentModels, rememberModel } from '../lib/pickerRecents';
 import {
 CODING_MATCHERS,
 formatCtx,
@@ -52,7 +53,6 @@ saveModelOptions,
 } from '../lib/models';
 import type { AcpAgentStatus,AcpConfigOption,SessionEngine } from '../types';
 import { AgentIcon,ModelIcon,ProviderIcon } from './AgentIcon';
-import { RevertButton } from './AgentSessionActions';
 import { ApprovalDialog } from './ApprovalDialog';
 import { PrivateText,redactEmails } from './PrivateText';
 
@@ -86,11 +86,6 @@ export type EnginePickerProps = {
   onPickAgent: (driver: string, model: string | null, instance?: string) => void;
   onSetModelOption: (id: string, value: string) => void;
   onConfigureAgents?: () => void;
-  /** Session actions for the running agent. */
-  sessionId?: string | null;
-  onAgentCompact?: () => void;
-  onAgentFork?: () => void;
-  onAgentReverted?: () => void;
 };
 
 export function EnginePicker(props: EnginePickerProps) {
@@ -110,7 +105,10 @@ export function EnginePicker(props: EnginePickerProps) {
 
   // Membership comes only from enabled registry instances. Probes enrich
   // status without changing order, including while the active engine changes.
-  const rail = useMemo<RailItem[]>(() => enabledPickerRail(engines, agents), [engines, agents]);
+  // Engines that can't run here (agent not installed, provider without a
+  // key) stay out of the picker, except the one this chat is on.
+  const rail = useMemo<RailItem[]>(() => enabledPickerRail(engines, agents, currentKey), [engines, agents, currentKey]);
+  const hidden = useMemo(() => hiddenFromPicker(engines, agents, currentKey), [engines, agents, currentKey]);
 
   // What the right pane shows. Follows the current engine until the user
   // points elsewhere; reset on every open so it always starts at "here".
@@ -201,6 +199,15 @@ export function EnginePicker(props: EnginePickerProps) {
     return { choices: cached.map((c) => ({ id: c.value, label: c.label })), live: false };
   };
 
+  /** The model "Default model" means for an agent: the instance's own
+   *  configured model, else the one the agent's catalog marks default. */
+  const agentDefaultModel = (item: Extract<RailItem, { kind: 'agent' }>): string | null => {
+    const snap = engines?.find((e) => e.instance === (item.instance ?? item.driver));
+    if (snap?.default_model) return snap.default_model;
+    const catalog = item.status?.models ?? agents?.find((a) => a.kind === item.driver)?.models ?? [];
+    return catalog.find((m) => m.is_default)?.value ?? null;
+  };
+
   // ---- per-model options (provider engines) -------------------------------
   const currentInfo = !isAgent ? (activeCatalog?.find((m) => m.id === currentModel) ?? null) : null;
   const descriptors: OptionDescriptor[] = isAgent
@@ -226,15 +233,33 @@ export function EnginePicker(props: EnginePickerProps) {
 
   // ---- picking ---------------------------------------------------------------
   const [blocked, setBlocked] = useState<AcpAgentStatus | null>(null);
-  function commit(item: RailItem, model: string | null) {
+  // Handing the chat to a different agent (or from an agent back to Mira)
+  // changes who runs it and who bills it, so it is confirmed first.
+  const [handoff, setHandoff] = useState<{ item: RailItem; model: string | null } | null>(null);
+  // A pending switch belongs to the engine it was asked about: closing the
+  // picker or browsing to another engine drops it.
+  useEffect(() => {
+    if (!open) setHandoff(null);
+  }, [open]);
+  useEffect(() => {
+    setHandoff((h) => (h && h.item.key !== shown?.key ? null : h));
+  }, [shown?.key]);
+  const needsHandoff = (item: RailItem) => item.key !== currentKey && (item.kind === 'agent' || isAgent);
+  function commit(item: RailItem, model: string | null, confirmed = false) {
+    if (item.kind === 'agent' && item.status && item.status.state.state === 'not_found') {
+      setBlocked(item.status);
+      return;
+    }
+    if (item.kind === 'provider' && !model) return;
+    if (!confirmed && needsHandoff(item)) {
+      setHandoff({ item, model });
+      return;
+    }
+    setHandoff(null);
+    if (model) rememberModel(item.key, model);
     if (item.kind === 'provider') {
-      if (!model) return;
-      onPickProvider(item.instance, model);
+      onPickProvider(item.instance, model!);
     } else {
-      if (item.status && item.status.state.state === 'not_found') {
-        setBlocked(item.status);
-        return;
-      }
       onPickAgent(item.driver, model, item.instance);
     }
     onOpenChange(false);
@@ -313,7 +338,7 @@ export function EnginePicker(props: EnginePickerProps) {
                 ))}
                 {!rail.some((r) => r.kind === 'agent') && (
                   <div className="px-2 py-1.5 text-[11.5px] text-muted-foreground/60">
-                    {engines == null ? 'Loading enabled engines…' : 'No external agents enabled.'}
+                    {engines == null ? 'Loading enabled engines…' : hidden.agents ? 'No external agents installed.' : 'No external agents enabled.'}
                   </div>
                 )}
               </div>
@@ -323,8 +348,15 @@ export function EnginePicker(props: EnginePickerProps) {
                   onClick={() => { onOpenChange(false); onConfigureAgents(); }}
                   className="flex items-center gap-1.5 border-t border-border/50 px-3 py-2 text-left text-[11.5px] text-muted-foreground transition-colors hover:text-foreground"
                 >
-                  <Settings2 className="size-3.5" />
-                  Set up external agents
+                  <Settings2 className="size-3.5 shrink-0 self-start mt-px" />
+                  <span className="min-w-0">
+                    <span className="block whitespace-nowrap">Set up external agents</span>
+                    {hidden.agents > 0 && (
+                      <span className="block text-[10.5px] text-muted-foreground/50" title="Agents that aren't installed stay out of this list until Mira finds them.">
+                        {hidden.agents} more not installed
+                      </span>
+                    )}
+                  </span>
                 </button>
               )}
             </div>
@@ -350,14 +382,17 @@ export function EnginePicker(props: EnginePickerProps) {
                     providerModels={shown.kind === 'provider' ? providerModels(shown) : null}
                     agentChoices={shown.kind === 'agent' ? agentChoices(shown.driver) : null}
                     catalogError={shown.kind === 'provider' ? providerError(shown) : null}
+                    defaultModel={shown.kind === 'agent' ? agentDefaultModel(shown) : null}
+                    recents={recentModels(shown.key)}
                     onPick={(model) => commit(shown, model)}
                   />
                 ) : <div className="flex h-full items-center justify-center px-5 text-center text-[12.5px] text-muted-foreground" role="status">{engines == null ? 'Loading enabled engines…' : 'Enable a provider or external agent in Settings to choose a model.'}</div>}
               </div>
 
-              {/* Options and session actions belong to the running engine,
-                  so they show only while its pane is open. */}
-              {shownIsCurrent && (descriptors.length > 0 || isAgent) && (
+              {/* Options belong to the running engine, so they show only while
+                  its pane is open. Session actions (compact, fork, revert)
+                  live with the chat: the context meter, /fork, /revert. */}
+              {shownIsCurrent && descriptors.length > 0 && (
                 <div className="shrink-0 border-t border-border/50 px-2 py-1.5">
                   {descriptors.map((d) => (
                     <div key={d.id} className="flex items-center gap-2 rounded-md px-1.5 py-1">
@@ -365,37 +400,44 @@ export function EnginePicker(props: EnginePickerProps) {
                       <span className="flex min-w-0 flex-1 justify-end">
                         <OptionControl
                           descriptor={d}
-                          value={options[d.id] ?? currentOptionValue(d, agentConfig)}
+                          value={isAgent ? currentOptionValue(d, agentConfig) : options[d.id] ?? currentOptionValue(d, agentConfig)}
                           onChange={(v) => pickOption(d.id, v)}
                         />
                       </span>
                     </div>
                   ))}
-                  {isAgent && (
-                    <div className="flex items-center gap-1.5 px-1.5 pt-1">
-                      <span className="mr-auto text-[11px] text-muted-foreground/60">This chat's agent session</span>
-                      {props.onAgentCompact && (
-                        <SmallButton onClick={() => { props.onAgentCompact?.(); onOpenChange(false); }} title="Ask the agent to compact its context">
-                          Compact
-                        </SmallButton>
-                      )}
-                      {props.onAgentFork && engine?.driver === 'claude-code' && (
-                        <SmallButton onClick={() => { props.onAgentFork?.(); onOpenChange(false); }} title="Continue this history under a new agent session id">
-                          Fork
-                        </SmallButton>
-                      )}
-                      <RevertButton sessionId={props.sessionId} onReverted={props.onAgentReverted} />
-                    </div>
-                  )}
                 </div>
               )}
-              {!shownIsCurrent && shown && (
+              {handoff ? (
+                <div className="shrink-0 border-t border-border/50 px-3 py-2.5" role="alertdialog" aria-label={`Switch this chat to ${handoff.item.name}`}>
+                  <div className="text-[12.5px] font-medium text-foreground">
+                    Switch this chat to {handoff.item.name}
+                    {handoff.model ? <span className="font-normal text-muted-foreground"> · {modelPickerLabel(handoff.model)}</span> : null}?
+                  </div>
+                  <p className="mt-0.5 text-[11.5px] leading-snug text-muted-foreground">
+                    {handoff.item.kind === 'agent'
+                      ? `${handoff.item.name} takes over from your next message, with its own login and billing. It gets the conversation so far.`
+                      : `Mira takes over from your next message on ${handoff.item.name}. ${engine?.display_name ?? 'The agent'}'s turns stay in the chat.`}
+                  </p>
+                  <div className="mt-2 flex justify-end gap-1.5">
+                    <button type="button" onClick={() => setHandoff(null)} className="rounded-md px-2.5 py-1 text-[12px] text-muted-foreground hover:bg-fg/[0.05]">
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      autoFocus
+                      onClick={() => commit(handoff.item, handoff.model, true)}
+                      className="rounded-md bg-mira-blue/90 px-2.5 py-1 text-[12px] font-medium text-white hover:bg-mira-blue"
+                    >
+                      Switch to {handoff.item.name}
+                    </button>
+                  </div>
+                </div>
+              ) : !shownIsCurrent && shown && !needsHandoff(shown) ? (
                 <div className="shrink-0 border-t border-border/50 px-3 py-2 text-[11px] leading-snug text-muted-foreground/70">
-                  {shown.kind === 'agent'
-                    ? `Pick a model to hand this chat to ${shown.name}. It uses its own login and billing, and gets the conversation so far.`
-                    : `Pick a model to continue this chat on ${shown.name}${isAgent ? ` — ${engine?.display_name}'s turns come with it` : ''}.`}
+                  Pick a model to continue this chat on {shown.name}.
                 </div>
-              )}
+              ) : null}
             </div>
           </div>
         </PopoverContent>
@@ -513,7 +555,7 @@ function PaneHeader({ item, current, engine }: { item: RailItem; current: boolea
     if (current && engine?.status === 'starting') sub = 'Starting…';
     else if (current && engine?.status === 'error') sub = engine.error ?? 'Failed to start';
     else if (current && engine?.status === 'idle') sub = 'Starts with your next message';
-    else sub = item.status ? describeAgentStatus(item.status).text : 'External agent';
+    else sub = item.status ? pickerAgentSubtitle(item.status) : 'External agent';
   } else {
     const s = item.snapshot;
     sub = s?.auth ?? (s && s.state.state !== 'ready' && 'reason' in s.state ? s.state.reason : 'Mira provider');
@@ -564,7 +606,7 @@ function NotInstalled({ status, onSetUp }: { status: AcpAgentStatus; onSetUp: ()
 }
 
 function ModelList({
-  item, currentModel, isCurrent, providerModels, agentChoices, catalogError, onPick,
+  item, currentModel, isCurrent, providerModels, agentChoices, catalogError, defaultModel, recents, onPick,
 }: {
   item: RailItem;
   currentModel: string | null;
@@ -572,6 +614,10 @@ function ModelList({
   providerModels: ModelInfo[] | null;
   agentChoices: { choices: Choice[]; live: boolean; error?: string } | null;
   catalogError: string | null;
+  /** What "Default model" resolves to, when known. */
+  defaultModel: string | null;
+  /** This engine's recently picked models, newest first. */
+  recents: string[];
   onPick: (model: string | null) => void;
 }) {
   const [query, setQuery] = useState('');
@@ -586,7 +632,8 @@ function ModelList({
 
   const sections = useMemo(() => {
     if (item.kind === 'agent') {
-      const choices = agentChoices?.choices ?? [];
+      // An agent's own "default" alias is what the Default model row picks.
+      const choices = (agentChoices?.choices ?? []).filter((c) => c.id.toLowerCase() !== 'default');
       return choices.length > 0 ? [{ name: agentChoices?.live ? 'Models' : 'Models (last seen)', choices }] : [];
     }
     const models = providerModels ?? [];
@@ -596,6 +643,11 @@ function ModelList({
       label: m.display_name || prettyModel(m.id),
       ctx: m.context_length,
     });
+    // Recent picks first in a long list; in a short one they'd only repeat it.
+    if (!query.trim() && models.length > 12) {
+      const recent = recents.map((id) => models.find((m) => m.id === id)).filter((m): m is ModelInfo => !!m);
+      if (recent.length > 0) out.push({ name: 'Recent', choices: recent.map(toChoice) });
+    }
     if (!query.trim()) {
       const picked = new Set<string>();
       const suggested: Choice[] = [];
@@ -612,7 +664,7 @@ function ModelList({
       for (const g of groups) out.push({ name: g.name, choices: g.models.map(toChoice) });
     }
     return out;
-  }, [item, providerModels, agentChoices, query]);
+  }, [item, providerModels, agentChoices, query, recents]);
 
   return (
     <Command shouldFilter className="flex h-full flex-col bg-transparent">
@@ -635,9 +687,12 @@ function ModelList({
             <CommandItem value="__default__" onSelect={() => onPick(null)} className="flex items-center gap-2">
               <AgentIcon kind={item.driver} name={item.name} size="xs" tile={false} />
               <div className="min-w-0 flex-1">
-                <div className="text-[13px]">
+                <div className="flex items-center gap-1.5 text-[13px]">
                   Default model
-                  {isCurrent && !currentModel && <Check className="ml-1.5 inline size-3 text-mira-blue" />}
+                  <span className="truncate text-[12px] text-muted-foreground">
+                    {defaultModel ? modelPickerLabel(defaultModel) : `${item.name} chooses`}
+                  </span>
+                  {isCurrent && !currentModel && <Check className="size-3 shrink-0 text-mira-blue" />}
                 </div>
               </div>
             </CommandItem>
@@ -694,23 +749,10 @@ function ModelList({
   );
 }
 
-function SmallButton({ children, onClick, title }: { children: React.ReactNode; onClick: () => void; title?: string }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      title={title}
-      className="rounded-lg border border-border/80 px-2 py-1 text-[11.5px] text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
-    >
-      {children}
-    </button>
-  );
-}
-
 /** The agent's own current value for an option, when it reports one. */
 function currentOptionValue(d: OptionDescriptor, config: AcpConfigOption[] | null | undefined): string {
-  const live = config?.find((o) => o.id === d.id)?.current;
-  if (live) return live;
+  const option = config?.find((o) => o.id === d.id);
+  if (option) return option.current ?? '';
   return d.type === 'select' ? (d.options[0]?.value ?? '') : '';
 }
 
@@ -721,6 +763,20 @@ function currentOptionValue(d: OptionDescriptor, config: AcpConfigOption[] | nul
  * ones a switch — so "Fast" renders right whether a provider sends it as a
  * service-tier select or a fast-mode flag.
  */
+function optionLabel(id: string, value: string, label: string): string {
+  if (id === 'reasoning_effort') {
+    const names: Record<string,string> = {none:'None',minimal:'Minimal',low:'Low',medium:'Medium',high:'High',xhigh:'Extra high',max:'Max',ultra:'Ultra'};
+    return names[value] ?? label.charAt(0).toUpperCase() + label.slice(1);
+  }
+  return label.charAt(0).toUpperCase() + label.slice(1);
+}
+
+function ModelOptionIcon({ id, value }: { id: string; value: string }) {
+  const reasoningIcons: Record<string,typeof Brain> = {none:Ban,minimal:Feather,low:Lightbulb,medium:Brain,high:BrainCircuit,xhigh:Telescope,max:Sparkles,ultra:Rocket};
+  const Icon = id === 'reasoning_effort' ? reasoningIcons[value] ?? Brain : id === 'service_tier' ? (value === 'priority' || value === 'fast' ? Zap : Gauge) : null;
+  return Icon ? <Icon aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" /> : null;
+}
+
 function OptionControl({
   descriptor, value, onChange,
 }: {
@@ -746,8 +802,8 @@ function OptionControl({
       </button>
     );
   }
-  const current = descriptor.options.find((o) => o.value === value) ?? descriptor.options[0];
-  if (!current) return null;
+  const current = descriptor.options.find((o) => o.value === value);
+  if (!descriptor.options.length) return null;
   return (
     <Popover>
       <PopoverTrigger asChild>
@@ -755,7 +811,8 @@ function OptionControl({
           type="button"
           className="inline-flex max-w-[11rem] items-center gap-1 rounded-md px-1.5 py-0.5 text-[12.5px] text-foreground/85 transition-colors hover:bg-fg/[0.05]"
         >
-          <span className="truncate">{current.label}</span>
+          <ModelOptionIcon id={descriptor.id} value={value} />
+          <span className="truncate">{current ? optionLabel(descriptor.id,current.value,current.label) : 'Agent default'}</span>
           <ChevronDown className="size-3 shrink-0 text-muted-foreground/60" />
         </button>
       </PopoverTrigger>
@@ -765,18 +822,19 @@ function OptionControl({
             key={o.value}
             type="button"
             role="menuitemradio"
-            aria-checked={o.value === current.value}
+            aria-checked={o.value === value}
             onClick={() => onChange(o.value)}
             className={cn(
               'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-fg/[0.05]',
-              o.value === current.value ? 'text-foreground' : 'text-muted-foreground',
+              o.value === value ? 'text-foreground' : 'text-muted-foreground',
             )}
           >
+            <ModelOptionIcon id={descriptor.id} value={o.value} />
             <span className="min-w-0 flex-1">
-              <span className="block truncate text-[12.5px] font-medium">{o.label}</span>
+              <span className="block truncate text-[12.5px] font-medium">{optionLabel(descriptor.id,o.value,o.label)}</span>
               {o.hint && <span className="mt-0.5 block truncate text-[11px] text-muted-foreground/75">{o.hint}</span>}
             </span>
-            {o.value === current.value && <Check className="size-3.5 shrink-0" />}
+            {o.value === value && <Check className="size-3.5 shrink-0" />}
           </button>
         ))}
       </PopoverContent>

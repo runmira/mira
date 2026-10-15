@@ -50,10 +50,14 @@ export function createWorkspaceUiStore(storage?: UiStorage) {
     restoreAsk: (null) as {
     ref: MessageRef;
     changes: RestoreChange[];
+    /** Set when Claude's own checkpoints restore the files, not Mira's. */
+    native?: { coverage: string; insertions: number | null; deletions: number | null; skipped: number | null };
   } | null,
     restoreNote: (null) as {
     text: string;
     undo?: string;
+    /** Undo for a Claude-native rewind (a snapshot taken just before it). */
+    undoNative?: string;
     error?: boolean;
   } | null,
     secondOpinionSeen: (new Set<string>()) as Set<string>,

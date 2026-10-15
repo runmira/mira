@@ -7,6 +7,7 @@ import { type MinimapItem } from '../components/TimelineMinimap';
 import { categoryFor } from '../components/tools/toolInfo';
 import { type MessageActions } from '../components/transcript/EntryView';
 import type { UsageRingData } from '../components/UsageRing';
+import { forkActions } from '../lib/agentFork';
 import { acpOptionsToDescriptors } from '../lib/acpOptions';
 import { mapPosturesToModes,POSTURES } from '../lib/agentPostures';
 import { useBackgroundProcesses } from '../lib/backgroundProcesses';
@@ -32,6 +33,7 @@ export function useWorkspaceView(
     | 'sessionCommitted'
     | 'engine'
     | 'acpConfig'
+    | 'acpCommands'
     | 'acpAgents'
     | 'recordAgentError'
     | 'wsRef'
@@ -113,6 +115,7 @@ export function useWorkspaceView(
     sessionCommitted,
     engine,
     acpConfig,
+    acpCommands,
     acpAgents,
     recordAgentError,
     wsRef,
@@ -183,6 +186,7 @@ export function useWorkspaceView(
   /** The agent this session runs on (picked, starting or running), or
    *  null on a provider. Agent mode starts the moment one is picked. */
   const acpDriver = engine?.kind === 'agent' ? (engine.driver ?? null) : null;
+  const forksFromMessage = forkActions(engine).fromMessage;
 
   // An agent's config options projected onto Mira's picker shape, so the
   // Composer needs no knowledge of ACP. Null when no agent is running, which
@@ -362,7 +366,8 @@ export function useWorkspaceView(
         // switch): show the ring as unknown, not as a 0-token window.
         used: acpUsage && acpUsage.size > 0 ? acpUsage.used : null,
         window: acpUsage && acpUsage.size > 0 ? acpUsage.size : null,
-        compactAt: null,
+        // The agent compacts itself; this is where (Codex, OpenCode).
+        compactAt: acpUsage && acpUsage.size > 0 ? acpUsage.compact_at ?? null : null,
         tokens: null,
         costUsd: acpUsage?.cost && acpUsage.cost.currency === 'USD' ? acpUsage.cost.amount : null,
         limitsTitle: acpLimits.length
@@ -374,6 +379,8 @@ export function useWorkspaceView(
           resetsAt: w.resets_at ? w.resets_at * 1000 : null,
         })),
         onCompact: () => compactAcpAgent(),
+        compactDisabled: busy || (engine?.driver === 'opencode' && !acpCommands.includes('compact')),
+        compactDisabledReason: busy ? 'Wait for the current turn to finish.' : engine?.driver === 'opencode' && !acpCommands.includes('compact') ? 'OpenCode has not advertised compaction for this session.' : null,
         onInspect: () => setInspectOpen(true),
       };
     }
@@ -418,7 +425,7 @@ export function useWorkspaceView(
       onInspect: () => setInspectOpen(true),
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [acpDriver, acpUsage, acpLimits, engine, rateLimit, providerContext, usage, model, cacheMiss]);
+  }, [acpDriver, acpUsage, acpLimits, acpCommands, busy, engine, rateLimit, providerContext, usage, model, cacheMiss]);
 
   // Plan proposal waiting for the user to approve/cancel. Rendered in
   // the Composer rather than inline so the interactive card doesn't
@@ -468,7 +475,9 @@ export function useWorkspaceView(
 
   const stableFailureSettings = useStableCallback(() => {
     openSettings();
-    setSettingsSection(acpDriver ? 'agents' : 'provider');
+    // An agent chat lands on that agent, where its sign-in controls are.
+    if (acpDriver) setSettingsSection('agents', `agent=${encodeURIComponent(acpDriver)}`);
+    else setSettingsSection('provider');
   });
 
   const editMessage = useStableCallback((entry: Entry, text: string) =>
@@ -501,9 +510,10 @@ export function useWorkspaceView(
       edit: editMessage,
       restore: restoreMessage,
       retry: retryMessage,
-      fork: acpDriver ? null : forkMessage,
+      // External agents fork natively; only some can stop at a chosen turn.
+      fork: forksFromMessage ? forkMessage : null,
     }),
-    [busy, editMessage, restoreMessage, retryMessage, forkMessage, acpDriver],
+    [busy, editMessage, restoreMessage, retryMessage, forkMessage, forksFromMessage],
   );
 
   /** Everything ⌘K can do. Each entry runs exactly what its button or

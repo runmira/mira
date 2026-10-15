@@ -1,0 +1,24 @@
+import assert from 'node:assert/strict';
+import {test} from 'node:test';
+import React,{act} from 'react';
+import {createRoot} from 'react-dom/client';
+import {Window} from 'happy-dom';
+import {bundle} from './helpers/bundle.mjs';
+const {CompactionCard}=await bundle(`export {CompactionCard} from './src/components/CompactionCard';`);
+const window=new Window();globalThis.window=window;globalThis.document=window.document;globalThis.IS_REACT_ACT_ENVIRONMENT=true;
+test('compaction divider retains clear outcomes and exposes bounded summary and failure details',async()=>{
+ const host=document.createElement('div');document.body.append(host);const root=createRoot(host);
+ const base={kind:'compact',trigger:'agent',summarized:null,summary:null};
+ await act(()=>root.render(React.createElement(CompactionCard,{entry:{...base,state:'running'}})));
+ assert.equal(host.querySelector('[role=status]').getAttribute('aria-label'),'Compacting context');
+ assert.equal(host.querySelector('button'),null,'missing native summary does not invent a disclosure');
+ await act(()=>root.render(React.createElement(CompactionCard,{entry:{...base,state:'done',summary:'Retained decisions'}})));
+ const button=host.querySelector('button');assert.equal(button.getAttribute('aria-expanded'),'false');
+ await act(()=>button.click());assert.equal(button.getAttribute('aria-expanded'),'true');
+ assert.equal(host.querySelector('pre[data-live-output]').textContent,'Retained decisions');assert.match(host.querySelector('pre').className,/max-h-60/);
+ await act(()=>root.render(React.createElement(CompactionCard,{entry:{...base,state:'failed',error:'Provider unavailable'}})));
+ assert.match(host.textContent,/Compaction failed/);assert.match(host.textContent,/Provider unavailable/);assert.doesNotMatch(host.textContent,/continues with its full history/);
+ await act(()=>root.render(React.createElement(CompactionCard,{entry:{...base,state:'cancelled'}})));
+ assert.match(host.textContent,/Compaction cancelled/);assert.doesNotMatch(host.textContent,/Context compacted/);
+ await act(()=>root.unmount());host.remove();
+});

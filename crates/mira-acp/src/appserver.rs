@@ -240,7 +240,7 @@ pub fn thread_open_params(
     }
 }
 
-fn initialize_params(name: &str) -> Value {
+pub(crate) fn initialize_params(name: &str) -> Value {
     json!({
         "clientInfo": { "name": name, "title": "Mira", "version": env!("CARGO_PKG_VERSION") },
         "capabilities": { "experimentalApi": true },
@@ -324,8 +324,7 @@ fn turn_start_params(
         .unwrap_or(DEFAULT_CODEX_MODEL);
     let effort = effort
         .map(str::trim)
-        .filter(|e| !e.is_empty() && *e != "default")
-        .unwrap_or("medium");
+        .filter(|e| !e.is_empty() && *e != "default");
     let mut params = json!({
         "threadId": thread_id,
         "input": [{ "type": "text", "text": text }],
@@ -444,6 +443,10 @@ pub fn launch(program: std::path::PathBuf) -> crate::driver::LaunchConfig {
 /// A model from `model/list`.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CodexModel {
+    #[serde(default)]
+    pub is_default: bool,
+    #[serde(default)]
+    pub capabilities: crate::events::ModelCapabilities,
     pub value: String,
     pub label: String,
 }
@@ -570,6 +573,12 @@ pub fn map_notification(method: &str, p: &Value) -> Vec<AppServerAction> {
             Some(i) => map_item(i, true),
             None => vec![],
         },
+        // Older app-servers announce a finished compaction only this way;
+        // current ones send the `contextCompaction` item instead.
+        "thread/compacted" => {
+            let turn = p.get("turnId").and_then(Value::as_str).unwrap_or("");
+            vec![compaction_action(&format!("compacted:{turn}"), "completed")]
+        }
         "item/completed" => match item {
             Some(i) => map_item(i, false),
             None => vec![],
@@ -992,6 +1001,20 @@ fn text_event(item_id: String, text: &str, thought: bool) -> Vec<AppServerAction
 }
 
 /// Map an `item` object from `item/started` / `item/completed`.
+fn compaction_action(id: &str, status: &str) -> AppServerAction {
+    AppServerAction::Event(NormalizedEvent {
+        source: variant("compaction"),
+        event: MiraEvent::Compaction {
+            id: format!("codex:{id}"),
+            status: status.into(),
+            summary: None,
+            replace_summary: false,
+            error: None,
+            replace_error: false,
+        },
+    })
+}
+
 fn map_item(i: &Value, started: bool) -> Vec<AppServerAction> {
     let id = i.get("id").and_then(Value::as_str).unwrap_or_default();
     if id.is_empty() {
@@ -1143,6 +1166,12 @@ fn map_item(i: &Value, started: bool) -> Vec<AppServerAction> {
             events
         }
         "agent_message" | "agentMessage" | "reasoning" => vec![],
+        // Codex summarizes the thread itself near the window's end (and on
+        // `thread/compact/start`); the item brackets that work.
+        "contextCompaction" | "context_compaction" => vec![compaction_action(
+            id,
+            if started { "in_progress" } else { "completed" },
+        )],
         _ => vec![],
     }
 }
@@ -1392,6 +1421,8 @@ pub fn parse_model_entry(e: &Value) -> Option<CodexModel> {
         .and_then(Value::as_str)
         .unwrap_or(value);
     Some(CodexModel {
+        is_default: e.get("isDefault").and_then(Value::as_bool).unwrap_or(false),
+        capabilities: serde_json::from_value(e.clone()).unwrap_or_default(),
         value: value.to_string(),
         label: label.to_string(),
     })
@@ -1474,6 +1505,121 @@ pub async fn probe_handshake(launch: &LaunchConfig) -> Option<AppServerProbe> {
     })
 }
 
+/// What a native Codex fork copies, and how the new thread is configured.
+#[derive(Clone, Debug, Default)]
+pub struct ThreadFork {
+    pub source_thread_id: String,
+    /// Fork through this completed turn, inclusive. `None` copies the
+    /// whole thread.
+    pub last_turn_id: Option<String>,
+    pub cwd: Option<String>,
+    pub model: Option<String>,
+    pub runtime_mode: String,
+}
+
+/// `thread/fork` params: the source thread, the boundary, and the settings
+/// the fork continues with.
+pub fn thread_fork_params(fork: &ThreadFork) -> Value {
+    let (policy, sandbox) = policy_for_mode(&fork.runtime_mode);
+    let mut params = json!({
+        "threadId": fork.source_thread_id,
+        "approvalPolicy": policy,
+        "sandbox": sandbox,
+        "excludeTurns": true,
+    });
+    if let Some(turn) = fork.last_turn_id.as_deref().filter(|t| !t.is_empty()) {
+        params["lastTurnId"] = json!(turn);
+    }
+    if let Some(cwd) = &fork.cwd {
+        params["cwd"] = json!(cwd);
+    }
+    if let Some(model) = fork
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty() && *m != "default")
+    {
+        params["model"] = json!(model);
+    }
+    params
+}
+
+fn fork_failure(error: String) -> crate::process::ForkFailure {
+    use crate::process::ForkFailure;
+    let lower = error.to_ascii_lowercase();
+    if error.contains("-32601")
+        || lower.contains("unknown variant")
+        || lower.contains("method not found")
+    {
+        ForkFailure::Unsupported(
+            "this installed Codex does not support thread/fork; update Codex to fork natively"
+                .into(),
+        )
+    } else if lower.contains("in progress")
+        || lower.contains("in-progress")
+        || lower.contains("still running")
+    {
+        ForkFailure::InProgress(
+            "that turn is still running; wait for it to finish or stop it, then fork".into(),
+        )
+    } else {
+        ForkFailure::Failed(error)
+    }
+}
+
+/// Fork a Codex thread with `thread/fork` in a short-lived app-server, so a
+/// running conversation never receives the new thread's notifications. The
+/// source thread is not modified. Returns the new native thread id, which the
+/// forked chat later opens with `thread/resume`.
+pub async fn fork_thread(
+    launch: &LaunchConfig,
+    fork: &ThreadFork,
+) -> Result<String, crate::process::ForkFailure> {
+    use crate::conn::NullCallbacks;
+    use crate::process::ForkFailure;
+    let process = AgentProcess::spawn(launch, Arc::new(NullCallbacks))
+        .await
+        .map_err(|e| ForkFailure::Failed(format!("could not start Codex: {e}")))?;
+    let conn = process.conn();
+    async fn call(
+        conn: &crate::conn::Connection,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, String> {
+        protocol_log("out", method, &params);
+        let res = tokio::time::timeout(CALL_TIMEOUT, conn.request::<Value>(method, params))
+            .await
+            .map_err(|_| format!("{method} timed out"))?
+            .map_err(|e| e.to_string())?;
+        protocol_log("in", method, &res);
+        Ok(res)
+    }
+    let result = async {
+        call(conn, "initialize", initialize_params("mira-fork"))
+            .await
+            .map_err(ForkFailure::Failed)?;
+        let _ = conn.notify("initialized", json!({})).await;
+        let forked = call(conn, "thread/fork", thread_fork_params(fork))
+            .await
+            .map_err(fork_failure)?;
+        let id = forked
+            .pointer("/thread/id")
+            .or_else(|| forked.get("threadId"))
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty() && *id != fork.source_thread_id)
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                ForkFailure::Failed("Codex did not return a new thread for the fork".into())
+            })?;
+        // Unloading is a courtesy; the fork is already persisted.
+        let _ = call(conn, "thread/unsubscribe", json!({ "threadId": id })).await;
+        Ok(id)
+    }
+    .await;
+    process.shutdown(Duration::from_millis(500)).await;
+    result
+}
+
 /// The model option event: the catalog with `current` marked. `None` means
 /// unmarked — the server has not said what runs, and the picker shows the
 /// list without pretending.
@@ -1483,23 +1629,90 @@ fn config_options_event(models: &[CodexModel], current: Option<&str>) -> Normali
             variant: "config_options".to_string(),
         },
         event: MiraEvent::ConfigOptions {
-            options: vec![SessionConfigView {
-                id: "model".to_string(),
-                name: "Model".to_string(),
-                description: None,
-                category: Some("model".to_string()),
-                current: current.map(str::to_string),
-                values: models
-                    .iter()
-                    .map(|m| crate::events::ConfigValueView {
-                        value: m.value.clone(),
-                        name: m.label.clone(),
-                        description: None,
-                    })
-                    .collect(),
-            }],
+            options: model_config_options(models, current),
         },
     }
+}
+
+fn model_config_options(models: &[CodexModel], current: Option<&str>) -> Vec<SessionConfigView> {
+    let mut options = vec![SessionConfigView {
+        id: "model".to_string(),
+        name: "Model".to_string(),
+        description: None,
+        category: Some("model".to_string()),
+        current: current.map(str::to_string),
+        values: models
+            .iter()
+            .map(|m| crate::events::ConfigValueView {
+                capabilities: Some(m.capabilities.clone()),
+                value: m.value.clone(),
+                name: m.label.clone(),
+                description: None,
+            })
+            .collect(),
+    }];
+    if let Some(model) = models.iter().find(|m| Some(m.value.as_str()) == current) {
+        let caps = &model.capabilities;
+        let effort_values = caps
+            .supported_reasoning_efforts
+            .iter()
+            .map(|e| crate::events::ConfigValueView {
+                value: e.reasoning_effort.clone(),
+                name: e.reasoning_effort.clone(),
+                description: Some(e.description.clone()),
+                capabilities: None,
+            })
+            .collect::<Vec<_>>();
+        let mut tier_values = caps
+            .service_tiers
+            .iter()
+            .map(|t| crate::events::ConfigValueView {
+                value: t.id.clone(),
+                name: t.name.clone(),
+                description: Some(t.description.clone()),
+                capabilities: None,
+            })
+            .collect::<Vec<_>>();
+        // A null catalog default means no override. Keep that choice available
+        // so enabling an optional priority tier can be undone in this chat.
+        if !tier_values.is_empty() && caps.default_service_tier.is_none() {
+            tier_values.insert(
+                0,
+                crate::events::ConfigValueView {
+                    value: String::new(),
+                    name: "Default".into(),
+                    description: None,
+                    capabilities: None,
+                },
+            );
+        }
+        for (id, name, current, values) in [
+            (
+                "reasoning_effort",
+                "Reasoning",
+                caps.default_reasoning_effort.clone(),
+                effort_values,
+            ),
+            (
+                "service_tier",
+                "Speed",
+                caps.default_service_tier.clone(),
+                tier_values,
+            ),
+        ] {
+            if !values.is_empty() {
+                options.push(SessionConfigView {
+                    id: id.into(),
+                    name: name.into(),
+                    description: None,
+                    category: Some(id.into()),
+                    current,
+                    values,
+                });
+            }
+        }
+    }
+    options
 }
 
 struct Callbacks {
@@ -1536,6 +1749,52 @@ struct PlanReview {
 /// What every `turn/start` is built from. Shared between the agent and the
 /// plan reviewer, so a turn started after a plan approval matches one the
 /// user sent.
+#[derive(Clone, Debug, Default)]
+struct TurnPreferences {
+    effort: Option<String>,
+    service_tier: Option<String>,
+    input_modalities: Option<Vec<String>>,
+}
+impl TurnPreferences {
+    fn reconcile(&mut self, caps: &crate::events::ModelCapabilities) {
+        self.effort = self
+            .effort
+            .take()
+            .filter(|v| {
+                caps.supported_reasoning_efforts
+                    .iter()
+                    .any(|e| &e.reasoning_effort == v)
+            })
+            .or_else(|| {
+                caps.default_reasoning_effort.clone().filter(|v| {
+                    caps.supported_reasoning_efforts
+                        .iter()
+                        .any(|e| &e.reasoning_effort == v)
+                })
+            });
+        self.service_tier = self
+            .service_tier
+            .take()
+            .filter(|v| caps.service_tiers.iter().any(|t| &t.id == v))
+            .or_else(|| {
+                caps.default_service_tier
+                    .clone()
+                    .filter(|v| caps.service_tiers.iter().any(|t| &t.id == v))
+            });
+        self.input_modalities = caps.input_modalities.clone();
+    }
+}
+
+fn apply_preferences(options: &mut [SessionConfigView], preferences: &TurnPreferences) {
+    for option in options {
+        match option.id.as_str() {
+            "reasoning_effort" => option.current = preferences.effort.clone(),
+            "service_tier" => option.current = preferences.service_tier.clone(),
+            _ => {}
+        }
+    }
+}
+
 struct TurnContext {
     model: Arc<Mutex<String>>,
     /// Runtime mode id (`plan`, `approval-required`, …). Applied per turn.
@@ -1543,8 +1802,7 @@ struct TurnContext {
     /// Where an approved plan gets built: the last non-plan mode.
     build_mode: Mutex<String>,
     cwd: Option<String>,
-    effort: Option<String>,
-    service_tier: Option<String>,
+    preferences: Mutex<TurnPreferences>,
     /// Whether Mira's tool server is attached to this thread.
     mira_tools: bool,
     /// Codex turns each user prompt produced, oldest first, this process. A
@@ -1577,8 +1835,26 @@ impl TurnContext {
 }
 
 impl TurnContext {
-    async fn params(&self, thread_id: &str, text: &str, images: &[mira_core::ImageData]) -> Value {
-        let model = self.model.lock().await.clone();
+    async fn params(
+        &self,
+        thread_id: &str,
+        text: &str,
+        images: &[mira_core::ImageData],
+    ) -> Result<Value, NativeError> {
+        let model_guard = self.model.lock().await;
+        let model = model_guard.clone();
+        let preferences = self.preferences.lock().await.clone();
+        drop(model_guard);
+        if !images.is_empty()
+            && preferences
+                .input_modalities
+                .as_ref()
+                .is_some_and(|m| !m.iter().any(|v| v == "image"))
+        {
+            return Err(NativeError::Other(
+                "The selected Codex model does not accept image input".into(),
+            ));
+        }
         let mode = self.mode.lock().await.clone();
         let (policy, sandbox) = policy_for_mode(&mode);
         let mut params = turn_start_params(
@@ -1589,13 +1865,13 @@ impl TurnContext {
             policy,
             sandbox,
             approvals_reviewer_for_mode(&mode),
-            self.effort.as_deref(),
-            self.service_tier.as_deref(),
+            preferences.effort.as_deref(),
+            preferences.service_tier.as_deref(),
             &mode,
             self.mira_tools,
         );
         params["input"] = codex_prompt_input(text, images);
-        params
+        Ok(params)
     }
 
     async fn set_mode(&self, mode: &str) {
@@ -1702,7 +1978,11 @@ async fn review_plans(
         }
         let tid = thread_id.lock().await.clone().unwrap_or_default();
         let params = turns.params(&tid, &text, &[]).await;
-        match start_turn(&conn, params, &active_turn, &turns).await {
+        let result = match params {
+            Ok(params) => start_turn(&conn, params, &active_turn, &turns).await,
+            Err(error) => Err(error),
+        };
+        match result {
             Ok(()) => {
                 // The follow-up belongs to the prompt that asked for the plan.
                 if let Some(last) = turns
@@ -1951,13 +2231,20 @@ impl crate::conn::AgentCallback for Callbacks {
                             .await;
                     }
                 }
-                AppServerAction::ModelRerouted { model } => {
+                AppServerAction::ModelRerouted { .. } => {
+                    // A reroute describes the running turn. Preserve the user's
+                    // selected next-turn model and its confirmed option values,
+                    // including a choice made while that older turn was active.
+                    let model_guard = self.turns.model.lock().await;
                     let models = self.models.lock().await.clone();
+                    let preferences = self.turns.preferences.lock().await.clone();
+                    let mut event = config_options_event(&models, Some(&model_guard));
+                    if let MiraEvent::ConfigOptions { options } = &mut event.event {
+                        apply_preferences(options, &preferences);
+                    }
+                    drop(model_guard);
                     if !models.is_empty() {
-                        let _ = self
-                            .tx
-                            .send(config_options_event(&models, Some(&model)))
-                            .await;
+                        let _ = self.tx.send(event).await;
                     }
                 }
             }
@@ -1984,8 +2271,11 @@ pub struct AppServerAgent {
     goal_active: Arc<std::sync::atomic::AtomicBool>,
     rate_limits: Arc<Mutex<Option<Value>>>,
     model: Arc<Mutex<String>>,
+    models: Arc<Mutex<Vec<CodexModel>>>,
     turns: Arc<TurnContext>,
     events_tx: mpsc::Sender<NormalizedEvent>,
+    /// The app-server's `userAgent` from `initialize` (its name and version).
+    user_agent: Option<String>,
     pub events: std::sync::Mutex<Option<mpsc::Receiver<NormalizedEvent>>>,
     pub turn_end: std::sync::Mutex<Option<mpsc::Receiver<TurnEnd>>>,
 }
@@ -2032,8 +2322,7 @@ impl AppServerAgent {
                 .to_string(),
             ),
             cwd: cwd.clone(),
-            effort: None,
-            service_tier: None,
+            preferences: Mutex::new(TurnPreferences::default()),
             mira_tools: mira_mcp.is_some(),
             prompt_turns: std::sync::Mutex::new(Vec::new()),
             ended_turns: Default::default(),
@@ -2092,7 +2381,12 @@ impl AppServerAgent {
         }
 
         // Verified handshake shape: `initialize` answers with agent facts.
-        let _init: Value = call(conn, "initialize", initialize_params("mira")).await?;
+        let init: Value = call(conn, "initialize", initialize_params("mira")).await?;
+        let user_agent = init
+            .get("userAgent")
+            .or_else(|| init.get("user_agent"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         let _ = conn.notify("initialized", json!({})).await;
 
         let (method, start_params) = thread_open_params(
@@ -2121,16 +2415,37 @@ impl AppServerAgent {
         // Mark the server-reported model, falling back to an explicit pick.
         // Older servers may omit it; leave their default unmarked.
         let models = Self::fetch_models(conn).await;
+        let initial = current_model.lock().await.clone();
+        let selected = opened
+            .get("model")
+            .and_then(Value::as_str)
+            .or(model
+                .as_deref()
+                .filter(|m| !m.is_empty() && *m != "default"))
+            .or_else(|| {
+                models
+                    .iter()
+                    .find(|m| m.is_default)
+                    .map(|m| m.value.as_str())
+            })
+            .or_else(|| {
+                models
+                    .iter()
+                    .find(|m| m.value == initial)
+                    .map(|m| m.value.as_str())
+            });
+        if let Some(selected) = selected {
+            *current_model.lock().await = selected.to_owned();
+        }
+        let selected_model = current_model.lock().await.clone();
+        if let Some(m) = models.iter().find(|m| m.value == selected_model) {
+            turns.preferences.lock().await.reconcile(&m.capabilities);
+        }
         if !models.is_empty() {
             *models_retained.lock().await = models.clone();
+            let selected = current_model.lock().await.clone();
             let _ = model_tx
-                .send(config_options_event(
-                    &models,
-                    opened
-                        .get("model")
-                        .and_then(Value::as_str)
-                        .or(model.as_deref()),
-                ))
+                .send(config_options_event(&models, Some(&selected)))
                 .await;
         }
 
@@ -2161,8 +2476,10 @@ impl AppServerAgent {
             goal_active,
             rate_limits,
             model: current_model,
+            models: models_retained,
             turns,
             events_tx,
+            user_agent,
             events: std::sync::Mutex::new(Some(rx)),
             turn_end: std::sync::Mutex::new(Some(end_rx)),
         })
@@ -2226,6 +2543,11 @@ impl AppServerAgent {
         self.thread_id.lock().await.clone()
     }
 
+    /// The app-server's self-reported `userAgent`, when it sent one.
+    pub fn user_agent(&self) -> Option<&str> {
+        self.user_agent.as_deref()
+    }
+
     /// Send a turn. Returns once the turn is accepted, not when it finishes;
     /// completion arrives as `turn/completed` on the event channel.
     pub async fn prompt(&self, text: &str) -> Result<(), NativeError> {
@@ -2241,7 +2563,7 @@ impl AppServerAgent {
             .session_id()
             .await
             .ok_or_else(|| NativeError::Other("no codex thread yet".to_string()))?;
-        let params = self.turns.params(&tid, text, images).await;
+        let params = self.turns.params(&tid, text, images).await?;
         start_turn(self.process.conn(), params, &self.active_turn, &self.turns).await?;
         self.turns
             .prompt_turns
@@ -2385,6 +2707,7 @@ impl AppServerAgent {
         text: &str,
         images: &[mira_core::ImageData],
     ) -> Result<(), NativeError> {
+        self.turns.params("", "", images).await?;
         let thread_id = self
             .session_id()
             .await
@@ -2413,15 +2736,35 @@ impl AppServerAgent {
     /// the model on `thread/start` and `turn/start`; sending a separate native
     /// control request is the stale-rollout path that produced missing-model
     /// errors.
-    pub async fn set_model(&self, model: &str) {
+    pub async fn set_model(&self, model: &str) -> Vec<SessionConfigView> {
         let model = model.trim();
         let next = if model.is_empty() || model == "default" {
             DEFAULT_CODEX_MODEL
         } else {
             model
         };
-        let changed = *self.model.lock().await != next;
-        *self.model.lock().await = next.to_string();
+        let mut model_guard = self.model.lock().await;
+        let changed = *model_guard != next;
+        *model_guard = next.to_string();
+        let mut models = self.models.lock().await.clone();
+        if !models.iter().any(|model| model.value == next) {
+            models.push(CodexModel {
+                is_default: false,
+                capabilities: Default::default(),
+                value: next.to_owned(),
+                label: next.to_owned(),
+            });
+        }
+        *self.models.lock().await = models.clone();
+        // Same acknowledgement shape as ACP: the caller publishes this catalog
+        // with the selected value, even though Codex applies it on turn/start.
+        let caps = models
+            .iter()
+            .find(|m| m.value == next)
+            .map(|m| m.capabilities.clone())
+            .unwrap_or_default();
+        self.turns.preferences.lock().await.reconcile(&caps);
+        drop(model_guard);
         if changed {
             // The last reading was the old model's context against the old
             // model's window. Until the new model reports, the ring shows
@@ -2441,6 +2784,50 @@ impl AppServerAgent {
                 })
                 .await;
         }
+        self.current_options().await
+    }
+
+    pub async fn current_options(&self) -> Vec<SessionConfigView> {
+        let model_guard = self.model.lock().await;
+        let model = model_guard.clone();
+        let models = self.models.lock().await.clone();
+        let preferences = self.turns.preferences.lock().await.clone();
+        drop(model_guard);
+        let mut options = model_config_options(&models, Some(&model));
+        apply_preferences(&mut options, &preferences);
+        options
+    }
+
+    pub async fn set_option(
+        &self,
+        id: &str,
+        value: &str,
+    ) -> Result<Vec<SessionConfigView>, String> {
+        if id == "model" {
+            return Ok(self.set_model(value).await);
+        }
+        let model_guard = self.model.lock().await;
+        let models = self.models.lock().await.clone();
+        let options = model_config_options(&models, Some(&model_guard));
+        let option = options
+            .iter()
+            .find(|o| o.id == id)
+            .ok_or_else(|| format!("{id} is not advertised for this model"))?;
+        if !option.values.iter().any(|v| v.value == value) {
+            return Err(format!("Unsupported {id} value: {value}"));
+        }
+        {
+            let mut preferences = self.turns.preferences.lock().await;
+            match id {
+                "reasoning_effort" => preferences.effort = Some(value.into()),
+                "service_tier" => {
+                    preferences.service_tier = (!value.is_empty()).then(|| value.into())
+                }
+                _ => return Err(format!("Unsupported option: {id}")),
+            }
+        }
+        drop(model_guard);
+        Ok(self.current_options().await)
     }
 
     pub async fn cancel(&self) -> Result<(), NativeError> {
@@ -2489,6 +2876,39 @@ impl AppServerAgent {
         .map_err(|_| NativeError::Other("thread/compact/start timed out".to_string()))?
         .map_err(|e| NativeError::Other(e.to_string()))?;
         Ok(())
+    }
+
+    /// Reload credentials, requirements and catalog after an account change.
+    /// This never opens a thread or retries user input.
+    pub async fn refresh_account_catalog(&self) -> Result<Vec<SessionConfigView>, String> {
+        let conn = self.process.conn();
+        for method in ["account/read", "configRequirements/read"] {
+            let params = if method == "account/read" {
+                json!({"refreshToken":false})
+            } else {
+                json!({})
+            };
+            match tokio::time::timeout(CALL_TIMEOUT, conn.request::<Value>(method, params)).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(crate::conn::ConnError::Remote { code: -32601, .. }))
+                    if method == "configRequirements/read" => {}
+                Ok(Err(error)) => return Err(error.to_string()),
+                Err(_) => return Err(format!("{method} timed out")),
+            }
+        }
+        let models = Self::fetch_models(conn).await;
+        {
+            let model_guard = self.model.lock().await;
+            let caps = models
+                .iter()
+                .find(|m| m.value == *model_guard)
+                .map(|m| m.capabilities.clone())
+                .unwrap_or_default();
+            // Never retain an earlier account's model capability metadata.
+            *self.models.lock().await = models;
+            self.turns.preferences.lock().await.reconcile(&caps);
+        }
+        Ok(self.current_options().await)
     }
 
     /// The last usage snapshot the server pushed, if any.
@@ -2704,6 +3124,42 @@ mod tests {
     }
 
     #[test]
+    fn codex_compaction_items_bracket_one_divider() {
+        let item = |method: &str| {
+            map_notification(
+                method,
+                &v(
+                    r#"{"threadId":"t","turnId":"u","item":{"type":"contextCompaction","id":"c1"}}"#,
+                ),
+            )
+        };
+        let status = |a: &[AppServerAction]| {
+            a.iter()
+                .find_map(|x| match x {
+                    AppServerAction::Event(NormalizedEvent {
+                        event: MiraEvent::Compaction { id, status, .. },
+                        ..
+                    }) => Some((id.clone(), status.clone())),
+                    _ => None,
+                })
+                .expect("a compaction event")
+        };
+        assert_eq!(
+            status(&item("item/started")),
+            ("codex:c1".into(), "in_progress".into())
+        );
+        assert_eq!(
+            status(&item("item/completed")),
+            ("codex:c1".into(), "completed".into())
+        );
+        let old = map_notification("thread/compacted", &v(r#"{"threadId":"t","turnId":"u"}"#));
+        assert_eq!(
+            status(&old),
+            ("codex:compacted:u".into(), "completed".into())
+        );
+    }
+
+    #[test]
     fn token_usage_becomes_a_usage_event() {
         let a = map_notification(
             "thread/tokenUsage/updated",
@@ -2911,6 +3367,8 @@ mod tests {
         assert_eq!(
             parse_model_entry(&v(r#"{"id":"gpt-5","name":"GPT 5"}"#)),
             Some(CodexModel {
+                is_default: false,
+                capabilities: Default::default(),
                 value: "gpt-5".into(),
                 label: "GPT 5".into()
             })
@@ -2918,6 +3376,8 @@ mod tests {
         assert_eq!(
             parse_model_entry(&v(r#"{"slug":"x-mini"}"#)),
             Some(CodexModel {
+                is_default: false,
+                capabilities: Default::default(),
                 value: "x-mini".into(),
                 label: "x-mini".into()
             })
@@ -2940,14 +3400,139 @@ mod tests {
         assert!(map_notification("model/rerouted", &v(r#"{}"#)).is_empty());
     }
 
+    fn capable_model() -> CodexModel {
+        parse_model_entry(&json!({
+            "id":"catalog-entry", "model":"gpt-test", "displayName":"GPT Test", "isDefault":true,
+            "supportedReasoningEfforts":[{"reasoningEffort":"low","description":"Quick"},{"reasoningEffort":"high","description":"Deep"}],
+            "defaultReasoningEffort":"high", "inputModalities":["text"],
+            "serviceTiers":[{"id":"default","name":"Standard","description":"Standard speed"},{"id":"priority","name":"Fast","description":"Priority"}],
+            "defaultServiceTier":"priority", "additionalSpeedTiers":["fast"]
+        })).unwrap()
+    }
+
+    #[test]
+    fn catalogs_preserve_capabilities_and_advertise_only_supported_defaults() {
+        let model = capable_model();
+        assert!(model.is_default);
+        let options = model_config_options(&[model.clone()], Some("gpt-test"));
+        assert_eq!(options[1].current.as_deref(), Some("high"));
+        assert_eq!(options[2].current.as_deref(), Some("priority"));
+        assert_eq!(
+            options[0].values[0].capabilities.as_ref(),
+            Some(&model.capabilities)
+        );
+        let wire = serde_json::to_value(&options).unwrap();
+        assert_eq!(
+            wire[0]["values"][0]["capabilities"]["inputModalities"],
+            json!(["text"])
+        );
+        assert_eq!(
+            wire[0]["values"][0]["capabilities"]["additionalSpeedTiers"],
+            json!(["fast"])
+        );
+        let old = parse_model_entry(&json!({"id":"old"})).unwrap();
+        assert_eq!(model_config_options(&[old], Some("old")).len(), 1);
+        let mut prefs = TurnPreferences {
+            effort: Some("low".into()),
+            service_tier: Some("flex".into()),
+            ..Default::default()
+        };
+        prefs.reconcile(&model.capabilities);
+        assert_eq!(prefs.effort.as_deref(), Some("low"));
+        assert_eq!(prefs.service_tier.as_deref(), Some("priority"));
+        prefs.reconcile(&Default::default());
+        assert!(prefs.effort.is_none() && prefs.service_tier.is_none());
+        assert!(prefs.input_modalities.is_none());
+    }
+
+    #[tokio::test]
+    async fn native_options_apply_to_next_turn_and_reconcile_on_model_change() {
+        let (cfg, dir) = fake_codex();
+        let output = dir.path().join("settings-turn.json");
+        let script = std::fs::read_to_string(&cfg.program).unwrap();
+        let script = script.replace(
+            "    *'\"method\":\"turn/start\"'*)",
+            &format!(
+                "    *'\"method\":\"turn/start\"'*)\n      printf '%s' \"$line\" > '{}'",
+                output.display()
+            ),
+        );
+        std::fs::write(&cfg.program, script).unwrap();
+        let agent = AppServerAgent::start(
+            &cfg,
+            "approval-required",
+            None,
+            Some("gpt-test".into()),
+            None,
+            Arc::new(|_| Box::pin(async { crate::native::PermissionDecision::from(true) })),
+            None,
+        )
+        .await
+        .unwrap();
+        *agent.models.lock().await = vec![capable_model(), parse_model_entry(&json!({
+            "id":"other", "supportedReasoningEfforts":[{"reasoningEffort":"low"}], "defaultReasoningEffort":"low", "inputModalities":["text","image"]
+        })).unwrap()];
+        let thread = agent.session_id().await.unwrap();
+        let options = agent.set_model("gpt-test").await;
+        assert_eq!(options[1].current.as_deref(), Some("high"));
+        assert_eq!(options[2].current.as_deref(), Some("priority"));
+        assert!(agent.set_option("reasoning_effort", "ultra").await.is_err());
+        assert!(agent.set_option("service_tier", "flex").await.is_err());
+        agent.set_option("reasoning_effort", "low").await.unwrap();
+        agent.set_option("service_tier", "default").await.unwrap();
+        let params = agent.turns.params(&thread, "hello", &[]).await.unwrap();
+        assert_eq!(params["threadId"], thread);
+        assert_eq!(params["effort"], "low");
+        assert_eq!(
+            params["collaborationMode"]["settings"]["reasoning_effort"],
+            "low"
+        );
+        assert!(params.get("serviceTier").is_none());
+        agent.set_option("service_tier", "priority").await.unwrap();
+        assert_eq!(
+            agent.turns.params(&thread, "hello", &[]).await.unwrap()["serviceTier"],
+            "priority"
+        );
+        agent.prompt("Test native option delivery").await.unwrap();
+        let captured: Value = serde_json::from_slice(&std::fs::read(&output).unwrap()).unwrap();
+        assert_eq!(captured["params"]["effort"], "low");
+        assert_eq!(captured["params"]["serviceTier"], "priority");
+        assert_eq!(captured["params"]["threadId"], thread);
+        let image = mira_core::ImageData {
+            media_type: "image/png".into(),
+            data: "fixture".into(),
+            source: None,
+        };
+        assert!(agent
+            .turns
+            .params(&thread, "hello", &[image.clone()])
+            .await
+            .is_err());
+        let options = agent.set_model("other").await;
+        assert_eq!(options.len(), 2);
+        let params = agent
+            .turns
+            .params(&thread, "hello", &[image])
+            .await
+            .unwrap();
+        assert_eq!(params["effort"], "low");
+        assert!(params.get("serviceTier").is_none());
+        assert_eq!(agent.session_id().await.as_deref(), Some(thread.as_str()));
+        agent.shutdown().await;
+    }
+
     #[test]
     fn config_options_event_marks_current_without_reordering() {
         let models = vec![
             CodexModel {
+                is_default: false,
+                capabilities: Default::default(),
                 value: "gpt-5".into(),
                 label: "GPT 5".into(),
             },
             CodexModel {
+                is_default: false,
+                capabilities: Default::default(),
                 value: "gpt-5-mini".into(),
                 label: "GPT 5 Mini".into(),
             },
@@ -3270,6 +3855,120 @@ done
         agent.shutdown().await;
     }
 
+    fn fake_fork_codex(
+        dir: &std::path::Path,
+        fork_reply: &str,
+    ) -> (LaunchConfig, std::path::PathBuf) {
+        let path = dir.join("codex");
+        let log = dir.join("calls.log");
+        std::fs::write(
+            &path,
+            format!(
+                r##"#!/bin/sh
+id_of() {{ printf '%s' "$1" | sed -E 's/^\{{"jsonrpc":"2\.0","id":([0-9]+),.*/\1/'; }}
+while IFS= read -r line; do
+  id=$(id_of "$line")
+  case "$line" in
+    *'"method":"thread/fork"'*)
+      printf '%s\n' "$line" >> '{log}'
+      echo "{{\"id\":$id,{fork_reply}}}" ;;
+    *'"method":"thread/unsubscribe"'*) echo unsubscribe >> '{log}'; echo "{{\"id\":$id,\"result\":{{}}}}" ;;
+    *'"id":'*) echo "{{\"id\":$id,\"result\":{{}}}}" ;;
+  esac
+done
+"##,
+                log = log.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        (
+            LaunchConfig {
+                program: path,
+                args: vec!["app-server".to_string()],
+                env: Default::default(),
+                secret_env: Vec::new(),
+                env_deny: Vec::new(),
+            },
+            log,
+        )
+    }
+
+    #[tokio::test]
+    async fn a_native_fork_names_the_boundary_and_keeps_the_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cfg, log) = fake_fork_codex(
+            dir.path(),
+            r#"\"result\":{\"thread\":{\"id\":\"th-fork\"},\"model\":\"gpt-6.1-sol\"}"#,
+        );
+        let fork = ThreadFork {
+            source_thread_id: "th-src".into(),
+            last_turn_id: Some("tu-2".into()),
+            cwd: Some("/repo".into()),
+            model: Some("gpt-6.1-sol".into()),
+            runtime_mode: "auto-accept-edits".into(),
+        };
+        assert_eq!(fork_thread(&cfg, &fork).await.unwrap(), "th-fork");
+        let calls = std::fs::read_to_string(&log).unwrap();
+        let sent: Value = serde_json::from_str(calls.lines().next().unwrap()).unwrap();
+        let p = &sent["params"];
+        assert_eq!(p["threadId"], "th-src");
+        assert_eq!(p["lastTurnId"], "tu-2");
+        assert_eq!(p["cwd"], "/repo");
+        assert_eq!(p["model"], "gpt-6.1-sol");
+        let (policy, sandbox) = policy_for_mode("auto-accept-edits");
+        assert_eq!(p["approvalPolicy"], policy);
+        assert_eq!(p["sandbox"], sandbox);
+        assert_eq!(p["excludeTurns"], true);
+        assert!(calls.contains("unsubscribe"));
+
+        // A whole-thread fork names no boundary.
+        let whole = ThreadFork {
+            last_turn_id: None,
+            ..fork
+        };
+        assert!(thread_fork_params(&whole).get("lastTurnId").is_none());
+    }
+
+    #[tokio::test]
+    async fn fork_failures_say_what_the_installed_codex_lacks() {
+        use crate::process::ForkFailure;
+        let dir = tempfile::tempdir().unwrap();
+        let fork = ThreadFork {
+            source_thread_id: "th-src".into(),
+            runtime_mode: "auto".into(),
+            ..Default::default()
+        };
+        let (old, _) = fake_fork_codex(
+            dir.path(),
+            r#"\"error\":{\"code\":-32601,\"message\":\"unknown variant thread/fork\"}"#,
+        );
+        assert!(matches!(
+            fork_thread(&old, &fork).await,
+            Err(ForkFailure::Unsupported(_))
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let (busy, _) = fake_fork_codex(
+            dir.path(),
+            r#"\"error\":{\"code\":-32600,\"message\":\"turn tu-2 is in progress\"}"#,
+        );
+        assert!(matches!(
+            fork_thread(&busy, &fork).await,
+            Err(ForkFailure::InProgress(_))
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let (same, _) =
+            fake_fork_codex(dir.path(), r#"\"result\":{\"thread\":{\"id\":\"th-src\"}}"#);
+        assert!(matches!(
+            fork_thread(&same, &fork).await,
+            Err(ForkFailure::Failed(_))
+        ));
+    }
+
     #[tokio::test]
     async fn an_approved_plan_continues_into_a_build_turn() {
         let dir = tempfile::tempdir().unwrap();
@@ -3486,6 +4185,98 @@ done
     }
 
     #[tokio::test]
+    async fn account_refresh_reloads_requirements_and_catalog_without_a_prompt() {
+        let (cfg, dir) = fake_codex();
+        let output = dir.path().join("account-requests.ndjson");
+        let script = std::fs::read_to_string(&cfg.program).unwrap();
+        let script = script
+            .replace(
+                "  case \"$line\" in",
+                &format!(
+                    "  printf '%s\\n' \"$line\" >> '{}'\n  case \"$line\" in",
+                    output.display()
+                ),
+            )
+            .replace(
+                r#"    *'"method":"account/read"'*)"#,
+                r#"    *'"method":"configRequirements/read"'*)
+      id=$(id_of "$line")
+      echo "{\"id\":$id,\"error\":{\"code\":-32601,\"message\":\"Method not found\"}}" ;;
+    *'"method":"account/read"'*)"#,
+            );
+        std::fs::write(&cfg.program, script).unwrap();
+        let agent = AppServerAgent::start(
+            &cfg,
+            "approval-required",
+            None,
+            Some("gpt-5".into()),
+            None,
+            Arc::new(|_| Box::pin(async { crate::native::PermissionDecision::from(true) })),
+            None,
+        )
+        .await
+        .unwrap();
+        let thread = agent.session_id().await;
+        let options = agent.refresh_account_catalog().await.unwrap();
+        assert_eq!(options[0].values.len(), 2);
+        assert_eq!(agent.session_id().await, thread);
+        let requests = std::fs::read_to_string(output).unwrap();
+        assert!(requests.contains("configRequirements/read"));
+        assert!(!requests.contains("turn/start"));
+        assert!(!requests.contains("account/login/start"));
+        agent.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn model_switch_acknowledges_the_current_session_and_the_next_turn_uses_it() {
+        let (cfg, dir) = fake_codex();
+        let output = dir.path().join("turn-input.json");
+        let script = std::fs::read_to_string(&cfg.program).unwrap();
+        let script = script.replace("      id=$(id_of \"$line\")\n      echo \"{\\\"id\\\":$id,\\\"result\\\":{\\\"turn\\\":{\\\"id\\\":\\\"tu-1\\\"}}}\"", &format!("      printf '%s' \"$line\" > '{}'\n      id=$(id_of \"$line\")\n      echo \"{{\\\"id\\\":$id,\\\"result\\\":{{\\\"turn\\\":{{\\\"id\\\":\\\"tu-1\\\"}}}}}}\"",output.display()));
+        std::fs::write(&cfg.program, script).unwrap();
+        let gate: PermissionGate =
+            Arc::new(|_| Box::pin(async { crate::native::PermissionDecision::from(true) }));
+        let agent = AppServerAgent::start(
+            &cfg,
+            "approval-required",
+            None,
+            Some("gpt-6-astra".into()),
+            None,
+            gate,
+            None,
+        )
+        .await
+        .unwrap();
+        let agent = Arc::new(agent);
+        let handle = crate::native::AgentHandle::AppServer(agent.clone());
+        let original = agent.session_id().await;
+        let options = handle
+            .set_config_option("model", json!("gpt-6.1-sol"))
+            .await
+            .unwrap();
+        assert_eq!(options[0].current.as_deref(), Some("gpt-6.1-sol"));
+        assert!(options[0]
+            .values
+            .iter()
+            .any(|model| model.value == "gpt-6.1-sol"));
+        assert_eq!(agent.session_id().await, original);
+        agent
+            .prompt("Continue in the same conversation")
+            .await
+            .unwrap();
+        let payload: Value = serde_json::from_slice(&std::fs::read(output).unwrap()).unwrap();
+        assert_eq!(payload["method"], "turn/start");
+        assert_eq!(payload["params"]["threadId"], "th-1");
+        assert_eq!(payload["params"]["model"], "gpt-6.1-sol");
+        let repeated = handle
+            .set_config_option("model", json!("gpt-6.1-sol"))
+            .await
+            .unwrap();
+        assert_eq!(repeated[0].current.as_deref(), Some("gpt-6.1-sol"));
+        agent.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn a_full_app_server_session() {
         let (cfg, _dir) = fake_codex();
         let asked = Arc::new(Mutex::new(Vec::new()));
@@ -3498,9 +4289,17 @@ done
             })
         });
 
-        let agent = AppServerAgent::start(&cfg, "approval-required", None, None, None, gate, None)
-            .await
-            .expect("handshake + thread/start");
+        let agent = AppServerAgent::start(
+            &cfg,
+            "approval-required",
+            None,
+            Some("gpt-5".into()),
+            None,
+            gate,
+            None,
+        )
+        .await
+        .expect("handshake + thread/start");
         assert_eq!(agent.session_id().await.as_deref(), Some("th-1"));
 
         let mut events = agent.events.lock().unwrap().take().expect("events rx");
@@ -3543,7 +4342,7 @@ done
                         MiraEvent::ToolCallUpdate(c) if c.id == "i1" => saw_update = true,
                         MiraEvent::ConfigOptions { options }
                             if options.iter().any(|o| {
-                                o.id == "model" && o.current.as_deref() == Some("gpt-5-mini")
+                                o.id == "model" && o.current.as_deref() == Some("gpt-5")
                             }) => {
                                 saw_marked = true;
                             }
@@ -3561,7 +4360,7 @@ done
         assert_eq!(end.stop_reason, "completed");
         assert!(
             saw_marked,
-            "a reroute must re-emit the list with the new current marked"
+            "an in-flight reroute must preserve the explicitly selected next-turn model"
         );
 
         let asked = asked.lock().await;
@@ -3652,8 +4451,7 @@ mod thread_isolation_tests {
                 mode: Mutex::new("auto".into()),
                 build_mode: Mutex::new("auto".into()),
                 cwd: None,
-                effort: None,
-                service_tier: None,
+                preferences: Mutex::new(TurnPreferences::default()),
                 mira_tools: false,
                 prompt_turns: Default::default(),
                 ended_turns: Default::default(),
@@ -3728,8 +4526,7 @@ mod thread_isolation_tests {
                 mode: Mutex::new("approval-required".into()),
                 build_mode: Mutex::new("approval-required".into()),
                 cwd: None,
-                effort: None,
-                service_tier: None,
+                preferences: Mutex::new(TurnPreferences::default()),
                 mira_tools: false,
                 prompt_turns: Default::default(),
                 ended_turns: Default::default(),

@@ -20,9 +20,9 @@
 
 use agent_client_protocol::schema::v1::{
     ClientCapabilities, ContentBlock, ElicitationCapabilities, ElicitationFormCapabilities,
-    InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse,
-    NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, ResumeSessionRequest,
-    ResumeSessionResponse, StopReason,
+    ForkSessionRequest, ForkSessionResponse, InitializeRequest, InitializeResponse,
+    LoadSessionRequest, LoadSessionResponse, NewSessionRequest, NewSessionResponse, PromptRequest,
+    PromptResponse, ResumeSessionRequest, ResumeSessionResponse, StopReason,
 };
 use agent_client_protocol::schema::ProtocolVersion;
 use serde_json::{json, Value};
@@ -96,6 +96,10 @@ pub struct ClientCaps {
     /// it they are cancelled on the spot ("The user dismissed this
     /// question").
     pub elicitation_form: bool,
+    /// Terminal authentication (`auth.terminal`, and OpenCode's older
+    /// `_meta["terminal-auth"]`). Only advertised by a client that will run
+    /// the advertised command in an interactive terminal the user can see.
+    pub terminal_auth: bool,
 }
 
 impl ClientCaps {
@@ -106,12 +110,22 @@ impl ClientCaps {
         caps.fs.read_text_file = self.fs_read;
         caps.fs.write_text_file = self.fs_write;
         caps.terminal = self.terminal;
+        // This build handles the full ID-addressed preview compaction contract.
+        caps.session = Some(
+            agent_client_protocol::schema::v1::ClientSessionCapabilities::new()
+                .compaction(agent_client_protocol::schema::v1::CompactionCapabilities::new()),
+        );
         // The host routes scoped child updates into separate Mira child streams.
         // OpenCode only emits them when the client explicitly opts in.
-        caps.meta = Some(serde_json::Map::from_iter([(
+        let mut meta = serde_json::Map::from_iter([(
             "opencode/child-session-updates".to_owned(),
             json!(true),
-        )]));
+        )]);
+        if self.terminal_auth {
+            caps.auth.terminal = true;
+            meta.insert("terminal-auth".to_owned(), json!(true));
+        }
+        caps.meta = Some(meta);
         if self.elicitation_form {
             caps.elicitation =
                 Some(ElicitationCapabilities::new().form(ElicitationFormCapabilities::new()));
@@ -172,6 +186,76 @@ fn mira_mcp_entry(mcp: &MiraMcp, http: bool, exe: Option<std::path::PathBuf>) ->
     }))
 }
 
+/// A sign-in the client runs as an interactive terminal process. The agent
+/// never receives it through `authenticate`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalAuthMethod {
+    pub id: String,
+    pub label: String,
+    /// A command named by the older `_meta["terminal-auth"]` form. `None`
+    /// means the configured agent invocation itself (the spec form).
+    pub command: Option<String>,
+    /// Arguments: appended to the agent invocation (spec form) or given to
+    /// `command` (older form).
+    pub args: Vec<String>,
+    pub env: std::collections::BTreeMap<String, String>,
+}
+
+/// The terminal sign-ins an agent advertised, spec form first.
+pub fn terminal_auth_methods(res: &InitializeResponse) -> Vec<TerminalAuthMethod> {
+    use agent_client_protocol::schema::v1::AuthMethod;
+    let mut out = Vec::new();
+    for method in &res.auth_methods {
+        match method {
+            AuthMethod::Terminal(t) => out.push(TerminalAuthMethod {
+                id: t.id.to_string(),
+                label: t.name.clone(),
+                command: None,
+                args: t.args.clone(),
+                env: t.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            }),
+            other => {
+                let Some(legacy) = other.meta().and_then(|m| m.get("terminal-auth")) else {
+                    continue;
+                };
+                let Some(command) = legacy.get("command").and_then(Value::as_str) else {
+                    continue;
+                };
+                out.push(TerminalAuthMethod {
+                    id: other.id().to_string(),
+                    label: legacy
+                        .get("label")
+                        .and_then(Value::as_str)
+                        .unwrap_or(other.name())
+                        .to_owned(),
+                    command: Some(command.to_owned()),
+                    args: legacy
+                        .get("args")
+                        .and_then(Value::as_array)
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(Value::as_str)
+                                .map(str::to_owned)
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    env: legacy
+                        .get("env")
+                        .and_then(Value::as_object)
+                        .map(|o| {
+                            o.iter()
+                                .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_owned())))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                });
+            }
+        }
+    }
+    out.sort_by_key(|m| m.command.is_some());
+    out
+}
+
 /// A live ACP conversation with one agent process.
 pub struct AcpSession {
     conn: Connection,
@@ -218,6 +302,9 @@ struct SessionState {
     /// Whether the agent advertised top-level `loadSession`
     /// (`session/load`). Fallback when `resume` is absent.
     load_supported: bool,
+    /// Whether the agent advertised `sessionCapabilities.fork`
+    /// (`session/fork`). OpenCode v2 does; the fork copies the whole session.
+    fork_supported: bool,
     image_supported: bool,
     /// What the agent said about itself at `initialize`. Kept because it is
     /// the only place an agent's own name and version are available, and
@@ -260,6 +347,11 @@ impl AcpSession {
         crate::runtime::RuntimeCapabilities {
             image_input: state.as_ref().is_some_and(|s| s.image_supported),
             cancellation: true,
+            fork: if state.as_ref().is_some_and(|s| s.fork_supported) {
+                crate::runtime::ForkCapability::Session
+            } else {
+                crate::runtime::ForkCapability::Unavailable
+            },
             live_mode_switch: state.as_ref().is_some_and(|s| s.current_mode.is_some()),
             live_model_switch: state
                 .as_ref()
@@ -344,8 +436,50 @@ impl AcpSession {
                 .collect();
             st.load_supported = res.agent_capabilities.load_session;
             st.resume_supported = res.agent_capabilities.session_capabilities.resume.is_some();
+            st.fork_supported = res.agent_capabilities.session_capabilities.fork.is_some();
         }
         Ok(res)
+    }
+
+    /// Whether the agent advertised `session/fork`.
+    pub fn supports_fork(&self) -> bool {
+        self.state
+            .try_lock()
+            .map(|g| g.fork_supported)
+            .unwrap_or(false)
+    }
+
+    /// Fork `source` into a new agent session (`session/fork`) and return
+    /// its id. This connection's own session is left alone, and no MCP
+    /// servers are attached: whoever resumes the fork brings its own.
+    pub async fn fork_session(
+        &self,
+        source: &str,
+        cwd: &std::path::Path,
+    ) -> Result<String, SessionError> {
+        if !self.state.lock().await.initialized {
+            return Err(SessionError::NotInitialized);
+        }
+        if !self.supports_fork() {
+            return Err(SessionError::Other(
+                "the agent does not advertise session/fork".into(),
+            ));
+        }
+        let req = ForkSessionRequest::new(source.to_string(), cwd);
+        let res: ForkSessionResponse = self
+            .conn
+            .request(
+                "session/fork",
+                serde_json::to_value(req).unwrap_or(json!({})),
+            )
+            .await?;
+        let id = res.session_id.to_string();
+        if id.is_empty() || id == source {
+            return Err(SessionError::Other(
+                "the agent did not return a new session id for the fork".into(),
+            ));
+        }
+        Ok(id)
     }
 
     /// Whether the agent advertised `session/resume`.
@@ -779,6 +913,7 @@ mod tests {
             fs_write: false,
             terminal: true,
             elicitation_form: true,
+            terminal_auth: false,
         })
         .await;
         let waiter = tokio::spawn({
@@ -793,6 +928,7 @@ mod tests {
         assert_eq!(caps["terminal"], true);
         assert_eq!(caps["_meta"]["opencode/child-session-updates"], true);
         assert_eq!(caps["elicitation"]["form"], json!({}));
+        assert_eq!(caps["session"]["compaction"], json!({}));
         r.reply(frame["id"].clone(), init_ok()).await;
         waiter.await.unwrap().expect("initialize");
     }
@@ -944,6 +1080,95 @@ mod tests {
         r.reply(f["id"].clone(), json!({})).await;
         w.await.unwrap().expect("resume");
         assert_eq!(r.sess.session_id().as_deref(), Some("ses_abc123"));
+    }
+
+    #[tokio::test]
+    async fn fork_is_negotiated_and_leaves_the_source_session_alone() {
+        let mut r = rig(ClientCaps::default()).await;
+        let w = tokio::spawn({
+            let s = r.sess.clone();
+            async move { s.initialize().await }
+        });
+        let f = r.next_frame().await;
+        r.reply(f["id"].clone(), init_ok()).await;
+        w.await.unwrap().expect("init");
+        // Not advertised: refused locally, nothing reaches the agent.
+        assert!(!r.sess.supports_fork());
+        assert_eq!(
+            r.sess.runtime_capabilities().fork,
+            crate::runtime::ForkCapability::Unavailable
+        );
+        let refused = r
+            .sess
+            .fork_session("ses_src", std::path::Path::new("/repo"))
+            .await;
+        assert!(refused.is_err());
+
+        let mut r = rig(ClientCaps::default()).await;
+        let w = tokio::spawn({
+            let s = r.sess.clone();
+            async move { s.initialize().await }
+        });
+        let f = r.next_frame().await;
+        let mut init = init_ok();
+        init["agentCapabilities"]["sessionCapabilities"] = json!({ "fork": {}, "resume": {} });
+        r.reply(f["id"].clone(), init).await;
+        w.await.unwrap().expect("init");
+        assert!(r.sess.supports_fork());
+        assert_eq!(
+            r.sess.runtime_capabilities().fork,
+            crate::runtime::ForkCapability::Session
+        );
+        let w = tokio::spawn({
+            let s = r.sess.clone();
+            async move {
+                s.fork_session("ses_src", std::path::Path::new("/repo"))
+                    .await
+            }
+        });
+        let f = r.next_frame().await;
+        assert_eq!(f["method"], "session/fork");
+        assert_eq!(f["params"]["sessionId"], "ses_src");
+        assert_eq!(f["params"]["cwd"], "/repo");
+        r.reply(f["id"].clone(), json!({ "sessionId": "ses_fork" }))
+            .await;
+        assert_eq!(w.await.unwrap().expect("fork"), "ses_fork");
+        assert_eq!(r.sess.session_id(), None, "the fork is not adopted here");
+
+        // An agent echoing the source id has not forked anything.
+        let w = tokio::spawn({
+            let s = r.sess.clone();
+            async move {
+                s.fork_session("ses_src", std::path::Path::new("/repo"))
+                    .await
+            }
+        });
+        let f = r.next_frame().await;
+        r.reply(f["id"].clone(), json!({ "sessionId": "ses_src" }))
+            .await;
+        assert!(w.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn malformed_session_capabilities_are_treated_as_unadvertised() {
+        let mut r = rig(ClientCaps::default()).await;
+        let w = tokio::spawn({
+            let s = r.sess.clone();
+            async move { s.initialize().await }
+        });
+        let f = r.next_frame().await;
+        let mut init = init_ok();
+        init["agentCapabilities"]["sessionCapabilities"] = json!({ "fork": "yes", "resume": 5 });
+        init["agentCapabilities"]["promptCapabilities"] = json!({ "image": "sometimes" });
+        r.reply(f["id"].clone(), init).await;
+        w.await
+            .unwrap()
+            .expect("a malformed field must not fail initialize");
+        assert!(!r.sess.supports_fork());
+        assert!(!r.sess.supports_resume());
+        let caps = r.sess.runtime_capabilities();
+        assert_eq!(caps.fork, crate::runtime::ForkCapability::Unavailable);
+        assert!(!caps.image_input);
     }
 
     #[test]

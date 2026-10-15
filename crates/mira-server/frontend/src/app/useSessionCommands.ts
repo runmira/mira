@@ -1,4 +1,4 @@
-import { putCwd } from '../api';
+import { forkSession, putCwd } from '../api';
 import { type InfoNotice } from '../components/InfoNoticeHost';
 import { callForAttention } from '../lib/attention';
 import { isDesktop,pickFolder } from '../lib/desktop';
@@ -42,6 +42,7 @@ export function useSessionCommands(
     | 'activityTitlesRef'
     | 'setMainView'
     | 'attachFromRef'
+    | 'setSidebarRefresh'
   >,
 ) {
   const appRuntime = useAppRuntime();
@@ -77,6 +78,7 @@ export function useSessionCommands(
     activityTitlesRef,
     setMainView,
     attachFromRef,
+    setSidebarRefresh,
   } = context;
 
   function loadOlderHistory() {
@@ -183,14 +185,27 @@ export function useSessionCommands(
     if (picked) await switchCwd(picked);
   }
 
-  function forkAcpAgent() {
-    wsRef.current?.send({ type: 'acp_fork' });
+  /** A separate chat continuing a native fork of this agent's whole
+   *  conversation. This chat and its agent carry on unchanged. */
+  async function forkAcpAgent() {
+    const sessionId = getSessionId();
+    if (!sessionId) return;
+    try {
+      const id = await forkSession(sessionId, { text: '', occurrence: 0, whole: true });
+      setSidebarRefresh((n) => n + 1);
+      attachSession(id);
+    } catch (e) {
+      setRestoreNote({ text: `Couldn't fork: ${(e as Error).message}`, error: true });
+    }
   }
 
   function compactAcpAgent(focus?: string) {
     if (!wsRef.current?.sendImmediate({ type: 'acp_compact', focus: focus?.trim() || null })) {
       setRestoreNote({ text: 'Reconnect before compacting this chat.', error: true }); return;
     }
+    // OpenCode's normal prompt admission owns busy state and the placeholder.
+    // A rejected request must not invent a turn or leave a running card behind.
+    if (getEngine()?.driver === 'opencode') return;
     // A compaction is a turn like any other: busy until its end arrives, or
     // the composer would take input for a session that is summarizing.
     reportTurnRunning(true);

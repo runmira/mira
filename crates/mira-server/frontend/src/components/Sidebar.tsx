@@ -147,12 +147,8 @@ export function Sidebar(props: Props) {
           hiddenTitleBar ? 'bg-transparent' : 'bg-panel',
         )}
       >
-        {/* When the native title bar is hidden, this row *is* the title bar:
-          it sits in the strip beside the traffic lights, carries the
-          wordmark, and is the window's drag region. Otherwise it's a normal
-          padded header. */}
+        {/* Reserve space for native traffic lights without making the sidebar draggable. */}
         <div
-          data-tauri-drag-region
           className={cn(
             'flex items-center justify-between px-3',
             hiddenTitleBar ? 'shrink-0' : 'pb-2 pt-3.5',
@@ -168,8 +164,7 @@ export function Sidebar(props: Props) {
           }
         >
           {/* No wordmark: the sidebar's own nav labels identify the app, and
-            a title here just crowds the traffic lights. The row stays as
-            the drag region and as the inset that keeps the lights clear. */}
+            a title here just crowds the traffic lights. The inset keeps them clear. */}
         </div>
 
         {activeView !== 'settings' && (

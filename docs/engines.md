@@ -229,3 +229,37 @@ instances answer `400`: their keys are provider settings.
 set, and a `null` value keeps that variable's stored value (how a masked
 secret survives an edit of the others). The change applies to the next
 agent start at once.
+
+### `auto_compact_after`
+
+Compact an agent's conversation once its context passes this many tokens.
+Agents compact on their own; this only lowers where:
+
+| Agent | How Mira passes it | Default without it |
+| --- | --- | --- |
+| Codex | `-c model_auto_compact_token_limit=N` (it never goes past its own 90% of the model's window) | 90% of the model's window |
+| Claude Code | `CLAUDE_CODE_AUTO_COMPACT_WINDOW=N`, the window it compacts against (it compacts a little before) | its own window |
+| OpenCode | Not supported: OpenCode keeps a reserve below each model's window rather than a threshold. Mira logs that it ignored the setting. | window minus 10% (at least 16k tokens) |
+
+A variable or `-c` override already in the instance's own `env` or `launch_args` wins.
+The usage ring shows where each agent will compact: Codex and OpenCode by their rules,
+and Claude Code from the threshold it reports after each turn.
+
+## Automatic compaction in Mira's own chats
+
+Chats on a Mira provider compact before any model request that would leave less than
+a tenth of the window (or 16k tokens, whichever is more) free. The request is measured
+as it will be sent: the system prompt, the tool definitions, and the history with old
+tool results cleared. That size is scaled by how the provider counted the previous
+request, so its tokenizer and cached prefix count; Codex and OpenCode measure the same
+way, and only counts from the same model are trusted: after a switch, the first request
+is measured by estimate alone.
+
+If the provider still refuses a request as too long, Mira compacts and sends it again. If
+it is refused a second time, Mira leaves out the copies of recent files the summary carries
+and tries once more; a third refusal is reported. When the summarizer itself refuses the
+conversation as too long, it is given the newest part that fits 70%, then 50%, then 35% of
+its window. Mira never compacts twice without a request in between. If one compaction
+leaves the request still over the line (a system prompt and tools that fill the window, for
+example), Mira says so and doesn't compact again that turn.
+

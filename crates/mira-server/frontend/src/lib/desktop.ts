@@ -74,8 +74,7 @@ export function hasHiddenTitleBar(): boolean {
 }
 
 /** Padding that clears the macOS traffic lights, in the same shape the
- *  traffic lights occupy. The header is also a drag region, so the window
- *  stays movable with no title bar. */
+ *  traffic lights occupy. The main toolbar owns window dragging. */
 export const TRAFFIC_LIGHT_INSET = { top: 28, left: 78 } as const;
 
 export type Channel = 'stable' | 'beta' | 'alpha';
@@ -151,15 +150,14 @@ export async function captureNativeScreenshot(): Promise<File | null | undefined
   return bytes ? new File([new Uint8Array(bytes)], 'Screenshot.png', { type: 'image/png' }) : null;
 }
 
-/** Drag from empty desktop surfaces while preserving controls and selectable content. */
+/** Only explicitly marked loading and main-toolbar regions move the window. */
 export function installWindowDragging(): void {
   if (!isDesktop()) return;
   document.addEventListener('mousedown', (event) => {
     if (event.button !== 0 || event.detail !== 1 || !(event.target instanceof Element)) return;
     const target = event.target;
-    if (target.closest('button, a, input, textarea, select, label, summary, pre, code, [contenteditable], [role="button"], [role="menuitem"], [role="slider"], [role="tab"], [role="checkbox"], [role="radio"], [role="switch"], [role="combobox"], [role="textbox"], [role="option"], canvas, [data-tauri-drag-region], [data-no-window-drag]')) return;
-    if (target.closest('.xterm, .monaco-editor, svg, p, h1, h2, h3, h4, h5, h6, [role="dialog"], [role="menu"]')) return;
-    if ([...target.childNodes].some((node) => node.nodeType === Node.TEXT_NODE && node.textContent?.trim())) return;
+    if (!target.closest('[data-window-drag-region]')) return;
+    if (target.closest('button, a, input, textarea, select, label, summary, pre, code, [contenteditable], [role="button"], [role="menuitem"], [role="slider"], [role="tab"], [role="checkbox"], [role="radio"], [role="switch"], [role="combobox"], [role="textbox"], [role="option"], [role="dialog"], [role="menu"], canvas, .xterm, .monaco-editor, [data-no-window-drag]')) return;
     const nativeWindow = window.__TAURI__?.window?.getCurrentWindow?.();
     if (nativeWindow?.startDragging) {
       event.preventDefault();

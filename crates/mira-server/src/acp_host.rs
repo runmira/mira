@@ -583,6 +583,34 @@ pub fn confine_root(repo_root: &Path, session_root: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn agent_thresholds_match_what_each_agent_does() {
+        // Codex: 258,400 usable of a 272k window; compacts at 90% of 272k.
+        assert_eq!(
+            super::agent_compact_at("codex", 258_400, None),
+            Some(244_800)
+        );
+        assert_eq!(
+            super::agent_compact_at("codex", 258_400, Some(150_000)),
+            Some(150_000)
+        );
+        assert_eq!(
+            super::agent_compact_at("codex", 258_400, Some(900_000)),
+            Some(244_800),
+            "never past its own"
+        );
+        assert_eq!(
+            super::agent_compact_at("opencode", 200_000, None),
+            Some(180_000)
+        );
+        assert_eq!(super::agent_compact_at("claude-code", 200_000, None), None);
+        assert_eq!(
+            super::agent_compact_at("codex", 0, None),
+            None,
+            "unknown window"
+        );
+    }
+
     use super::*;
     use std::time::Duration;
 
@@ -1100,6 +1128,37 @@ pub struct AcpEventPort {
     /// Which agent this port serves, stamped onto modes/config frames so
     /// the client attributes "last seen" capabilities to the right driver.
     driver: std::sync::Mutex<Option<String>>,
+    /// The instance's `auto_compact_after`, for the threshold the usage ring
+    /// shows (the agent was launched with it).
+    auto_compact_after: std::sync::Mutex<Option<u64>>,
+    /// The threshold the agent itself reported (Claude Code's
+    /// `autoCompactThreshold`), and the last usage frame, to resend with it.
+    reported_compact_at: std::sync::Mutex<Option<u64>>,
+    last_usage: std::sync::Mutex<Option<ServerMsg>>,
+}
+
+/// Where an agent compacts on its own, in the same tokens its usage reports
+/// count, when Mira knows. `size` is the window the agent reported.
+///
+/// - Codex reports 95% of the model's window as usable and compacts at 90%
+///   of the full window, or at `model_auto_compact_token_limit` (which Mira
+///   passes as `auto_compact_after`) when that is lower.
+/// - OpenCode compacts when a request would leave less than a tenth of the
+///   window, or 16k tokens, free.
+/// - Claude Code reports its threshold only through `get_context_usage`
+///   (the context inspector shows it), so none here.
+pub(crate) fn agent_compact_at(driver: &str, size: u64, configured: Option<u64>) -> Option<u64> {
+    if size == 0 {
+        return None;
+    }
+    match driver {
+        "codex" => {
+            let own = size * 90 / 95;
+            Some(configured.map_or(own, |c| c.min(own)))
+        }
+        "opencode" => Some(mira_harness::history::auto_compact_at(size)),
+        _ => None,
+    }
 }
 
 /// Books spend reports in the order they arrive. Reports are running
@@ -1148,6 +1207,9 @@ impl AcpEventPort {
             events,
             spend: None,
             driver: std::sync::Mutex::new(None),
+            auto_compact_after: std::sync::Mutex::new(None),
+            reported_compact_at: std::sync::Mutex::new(None),
+            last_usage: std::sync::Mutex::new(None),
         })
     }
 
@@ -1222,6 +1284,9 @@ impl AcpEventPort {
                 billing,
             }),
             driver: std::sync::Mutex::new(None),
+            auto_compact_after: std::sync::Mutex::new(None),
+            reported_compact_at: std::sync::Mutex::new(None),
+            last_usage: std::sync::Mutex::new(None),
         })
     }
 
@@ -1246,6 +1311,27 @@ impl AcpEventPort {
 
     /// Remember which agent this port serves. Called once per agent start;
     /// the value is stamped onto modes/config frames.
+    /// The agent reported where it compacts: show it, on the last usage
+    /// frame, without waiting for the next one.
+    pub fn set_reported_compact_at(&self, tokens: Option<u64>) {
+        if let Ok(mut t) = self.reported_compact_at.lock() {
+            if *t == tokens {
+                return;
+            }
+            *t = tokens;
+        }
+        let last = self.last_usage.lock().ok().and_then(|l| l.clone());
+        if let Some(msg) = last {
+            self.push(self.stamp_driver(msg));
+        }
+    }
+
+    pub fn set_auto_compact_after(&self, tokens: Option<u64>) {
+        if let Ok(mut t) = self.auto_compact_after.lock() {
+            *t = tokens;
+        }
+    }
+
     pub fn set_driver(&self, driver: &str) {
         if let Ok(mut d) = self.driver.lock() {
             *d = Some(driver.to_string());
@@ -1307,6 +1393,16 @@ impl AcpEventPort {
             ServerMsg::AcpModes { driver: d, .. }
             | ServerMsg::AcpConfigOptions { driver: d, .. } => {
                 *d = Some(driver);
+            }
+            ServerMsg::AcpUsage {
+                size, compact_at, ..
+            } => {
+                let configured = self.auto_compact_after.lock().ok().and_then(|t| *t);
+                let reported = self.reported_compact_at.lock().ok().and_then(|t| *t);
+                *compact_at = agent_compact_at(&driver, *size, configured).or(reported);
+                if let Ok(mut last) = self.last_usage.lock() {
+                    *last = Some(msg.clone());
+                }
             }
             _ => {}
         }
@@ -1449,7 +1545,18 @@ impl EventPort for AcpEventPort {
 
 impl AcpEventPort {
     /// Announce the end of a turn.
-    pub fn turn_ended(&self, stop_reason: &str) {
+    pub async fn turn_ended(&self, stop_reason: &str) {
+        if self.runtime.lock().map(|r| r.is_some()).unwrap_or(true)
+            && self.runtime_owner().is_none()
+        {
+            return;
+        }
+        // Keep the turn reserved until its result snapshot is saved. Await the
+        // cwd instead of silently dropping diffs when a writer holds the lock.
+        if let Some((slot, _, _)) = self.runtime_owner() {
+            crate::checkpoints::finish_slot(slot).await;
+        }
+        // Finalization yields; an engine replacement may have retired this port.
         if self.runtime.lock().map(|r| r.is_some()).unwrap_or(true)
             && self.runtime_owner().is_none()
         {
@@ -1491,21 +1598,6 @@ impl AcpEventPort {
                 .agent_in_turn
                 .store(false, std::sync::atomic::Ordering::SeqCst);
             slot.publish_activity();
-        }
-        if let Some((slot, _, _)) = self.runtime_owner() {
-            if let Ok(cwd) = slot.cwd.try_read() {
-                let cwd = cwd.clone();
-                let id = slot.id.to_string();
-                if let Some(tree) = crate::checkpoints::pending_tree(&cwd, &id) {
-                    let events = slot.events_tx.clone();
-                    tokio::task::spawn_blocking(move || {
-                        crate::checkpoints::finish(&cwd, &id, &tree);
-                        let _ = events.send(ServerMsg::TurnDiffs {
-                            summaries: crate::checkpoints::turn_diffs(&cwd, &id),
-                        });
-                    });
-                }
-            }
         }
         self.push(ServerMsg::acp_turn_end(stop_reason));
     }
@@ -1607,6 +1699,47 @@ mod event_tests {
             event: e,
         })
         .expect("every ACP event maps to a frame")
+    }
+
+    #[tokio::test]
+    async fn usage_frames_carry_where_the_agent_compacts() {
+        let usage = |used: u64| NormalizedEvent {
+            source: EventSource::Acp {
+                variant: "usage".into(),
+            },
+            event: MiraEvent::Usage {
+                used,
+                size: 200_000,
+                cost: None,
+            },
+        };
+        let compact_at = |msg: ServerMsg| match msg {
+            ServerMsg::AcpUsage { compact_at, .. } => compact_at,
+            other => panic!("expected usage, got {other:?}"),
+        };
+        // Claude Code: unknown until it reports, then resent at once.
+        let (tx, mut rx) = tokio::sync::broadcast::channel(16);
+        let port = AcpEventPort::new(tx.into());
+        port.set_driver("claude-code");
+        port.emit(usage(50_000)).await;
+        assert_eq!(compact_at(rx.try_recv().unwrap()), None);
+        port.set_reported_compact_at(Some(187_000));
+        assert_eq!(
+            compact_at(rx.try_recv().unwrap()),
+            Some(187_000),
+            "the last frame, resent"
+        );
+        port.set_reported_compact_at(Some(187_000));
+        assert!(rx.try_recv().is_err(), "unchanged: nothing resent");
+        port.emit(usage(60_000)).await;
+        assert_eq!(compact_at(rx.try_recv().unwrap()), Some(187_000));
+        // Codex: its own rule, lowered by the configured threshold.
+        let (tx, mut rx) = tokio::sync::broadcast::channel(16);
+        let port = AcpEventPort::new(tx.into());
+        port.set_driver("codex");
+        port.set_auto_compact_after(Some(120_000));
+        port.emit(usage(50_000)).await;
+        assert_eq!(compact_at(rx.try_recv().unwrap()), Some(120_000));
     }
 
     #[tokio::test]
@@ -1821,6 +1954,7 @@ mod event_tests {
                 category: Some("model".into()),
                 current: Some("grok-code".into()),
                 values: vec![ConfigValueView {
+                    capabilities: None,
                     value: "grok-code".into(),
                     name: "Grok Code".into(),
                     description: None,
@@ -1861,7 +1995,7 @@ mod event_tests {
             },
         })
         .await;
-        port.turn_ended("end_turn");
+        port.turn_ended("end_turn").await;
 
         let first = rx.recv().await.expect("text frame");
         let second = rx.recv().await.expect("turn end");
@@ -1889,7 +2023,7 @@ mod event_tests {
             },
         })
         .await;
-        port.turn_ended("end_turn");
+        port.turn_ended("end_turn").await;
     }
 }
 

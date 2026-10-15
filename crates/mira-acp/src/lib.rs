@@ -20,6 +20,7 @@
 //! Nothing here spawns a process yet, and nothing depends on the rest of
 //! Mira, so each layer can be verified on its own.
 
+pub mod account;
 pub mod agent_sessions;
 pub mod appserver;
 mod claude_protocol;

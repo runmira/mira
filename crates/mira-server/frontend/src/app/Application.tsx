@@ -142,6 +142,8 @@ export function Application() {
       case 'acp_unmodelled':
       case 'acp_modes':
       case 'acp_config_options':
+      case 'acp_compaction':
+      case 'acp_compaction_summary':
       case 'acp_commands':
       case 'acp_usage':
       case 'acp_turn_usage':
@@ -150,6 +152,7 @@ export function Application() {
       case 'acp_agent_started':
       case 'session_engine':
       case 'acp_agent_status':
+      case 'agent_sign_in_changed':
         agentEvents(msg);
         return;
       default:
