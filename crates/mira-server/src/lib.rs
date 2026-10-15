@@ -30,6 +30,7 @@ pub mod acp_host;
 pub mod acp_session;
 mod agent_capabilities;
 mod agent_fork;
+mod agent_rewind;
 mod agent_secrets;
 pub mod agent_spend;
 mod agent_threads;
@@ -519,6 +520,10 @@ fn build_router(
         .route("/api/diagnostics/bundle", get(diagnostics::download))
         .route("/api/diagnostics/save", post(diagnostics::save))
         .route("/api/aside", post(aside::ask))
+        .route(
+            "/api/sessions/:id/agent-file-rewind",
+            axum::routing::post(agent_rewind::rewind_files),
+        )
         .route("/api/sessions/:id/fork", post(sessions::fork_session))
         .route(
             "/api/sessions/:id/relationships",

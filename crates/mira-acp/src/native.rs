@@ -679,6 +679,11 @@ impl StreamState {
                 self.runtime_turn = Some(turn);
             }
         }
+        if root && v["type"] == "user" {
+            if let Some(id) = user_checkpoint(v) {
+                lifecycle.push(event(MiraEvent::FileCheckpoint { id }));
+            }
+        }
         if root && v["type"] == "result" {
             if let Some(mut turn) = self.runtime_turn.take() {
                 turn.running = false;
@@ -1161,6 +1166,62 @@ pub fn permission_mode_arg(mode: PermissionMode) -> &'static str {
     }
 }
 
+/// The checkpoint a replayed user prompt carries: its UUID, when the message
+/// is something the user sent rather than a tool result on a `user` envelope.
+fn user_checkpoint(v: &Value) -> Option<String> {
+    let id = v
+        .get("uuid")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())?;
+    let content = v.pointer("/message/content")?;
+    let prompt = match content {
+        Value::String(_) => true,
+        Value::Array(blocks) => blocks
+            .iter()
+            .any(|b| b.get("type").and_then(Value::as_str) != Some("tool_result")),
+        _ => false,
+    };
+    (prompt && v.get("isSynthetic").and_then(Value::as_bool) != Some(true)).then(|| id.to_owned())
+}
+
+/// What `rewind_files` reports. A dry run fills the same fields without
+/// touching the disk.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FileRewind {
+    pub can_rewind: bool,
+    pub error: Option<String>,
+    pub files_changed: Vec<String>,
+    pub insertions: Option<u64>,
+    pub deletions: Option<u64>,
+    /// Links and unreadable backups Claude skipped (v2.1.216+).
+    pub skipped: Option<u64>,
+}
+
+impl FileRewind {
+    pub fn from_reply(v: &Value) -> Self {
+        Self {
+            can_rewind: v.get("canRewind").and_then(Value::as_bool).unwrap_or(false),
+            error: v.get("error").and_then(Value::as_str).map(str::to_owned),
+            files_changed: v
+                .get("filesChanged")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            insertions: v.get("insertions").and_then(Value::as_u64),
+            deletions: v.get("deletions").and_then(Value::as_u64),
+            skipped: v.get("skippedLinks").and_then(Value::as_u64),
+        }
+    }
+}
+
+/// Native file checkpointing for Claude Code sessions Mira starts.
+pub const CLAUDE_CHECKPOINT_ENV: &str = "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING";
+
 /// Overrides applied when relaunching a native agent.
 ///
 /// A native agent takes `--model` and `--permission-mode` at launch, so
@@ -1229,6 +1290,9 @@ pub fn launch(
 ) -> LaunchConfig {
     let mut args: Vec<String> = vec![
         "-p".into(),
+        // Each accepted prompt is echoed back with its UUID: the file
+        // checkpoint `rewind_files` restores to.
+        "--replay-user-messages".into(),
         "--input-format".into(),
         "stream-json".into(),
         "--output-format".into(),
@@ -1267,7 +1331,7 @@ pub fn launch(
     LaunchConfig {
         program,
         args,
-        env: Default::default(),
+        env: [(CLAUDE_CHECKPOINT_ENV.to_string(), "true".to_string())].into(),
         secret_env: Vec::new(),
         env_deny: Vec::new(),
     }
@@ -1328,6 +1392,22 @@ impl AgentHandle {
             Self::Acp(a) => a.session().agent_version(),
             Self::AppServer(a) => a.user_agent().map(str::to_owned),
             Self::Native(_) => None,
+        }
+    }
+
+    /// Claude's native file rewind; `None` for agents without one.
+    pub async fn rewind_files(
+        &self,
+        checkpoint: &str,
+        dry_run: bool,
+    ) -> Option<Result<FileRewind, String>> {
+        match self {
+            Self::Native(n) => Some(
+                n.rewind_files(checkpoint, dry_run)
+                    .await
+                    .map_err(|e| e.to_string()),
+            ),
+            _ => None,
         }
     }
 
@@ -2195,6 +2275,23 @@ impl NativeAgent {
         Ok(reply["response"].clone())
     }
 
+    /// Restore the files Claude's Write/Edit/NotebookEdit tools changed since
+    /// the user message `checkpoint` (`rewind_files`). The conversation is
+    /// not rewound. `dry_run` reports what would change.
+    pub async fn rewind_files(
+        &self,
+        checkpoint: &str,
+        dry_run: bool,
+    ) -> Result<FileRewind, NativeError> {
+        let reply = self
+            .ask(
+                json!({ "subtype": "rewind_files", "user_message_id": checkpoint, "dry_run": dry_run }),
+                Duration::from_secs(30),
+            )
+            .await?;
+        Ok(FileRewind::from_reply(&reply))
+    }
+
     /// A short title for the conversation, written by the agent's own model
     /// from `description` (typically the first message).
     pub async fn generate_title(&self, description: &str) -> Result<String, NativeError> {
@@ -2326,6 +2423,64 @@ mod tests {
         events.recv().await.unwrap();
         events.recv().await.unwrap();
         (agent, dir, events)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn file_rewind_asks_claude_for_the_checkpoint_and_reports_what_changed() {
+        let (agent, dir, _events) = protocol_agent(r#"
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+  printf "%s\n" "$line" >> "$(dirname "$0")/requests.log"
+  case "$line" in
+    *'"user_message_id":"gone"'*) printf '{"type":"control_response","response":{"request_id":"%s","subtype":"error","error":"No file checkpoint found for this message"}}\n' "$id" ;;
+    *) printf '{"type":"control_response","response":{"request_id":"%s","subtype":"success","response":{"canRewind":true,"filesChanged":["src/a.rs","b.txt"],"insertions":3,"deletions":7}}}\n' "$id" ;;
+  esac
+done
+"#).await;
+        let preview = agent.rewind_files("uuid-1", true).await.unwrap();
+        assert!(preview.can_rewind);
+        assert_eq!(preview.files_changed, ["src/a.rs", "b.txt"]);
+        assert_eq!((preview.insertions, preview.deletions), (Some(3), Some(7)));
+        let log = std::fs::read_to_string(dir.path().join("requests.log")).unwrap_or_default();
+        let sent: Value = serde_json::from_str(log.lines().last().unwrap()).unwrap();
+        assert_eq!(sent["request"]["subtype"], "rewind_files");
+        assert_eq!(sent["request"]["user_message_id"], "uuid-1");
+        assert_eq!(sent["request"]["dry_run"], true);
+        let missing = agent.rewind_files("gone", false).await.unwrap_err();
+        assert!(missing.to_string().contains("No file checkpoint"));
+    }
+
+    #[test]
+    fn replayed_prompts_are_checkpoints_and_tool_results_are_not() {
+        let prompt = json!({"type":"user","uuid":"u-1","message":{"role":"user","content":[{"type":"text","text":"fix it"}]}});
+        assert_eq!(user_checkpoint(&prompt).as_deref(), Some("u-1"));
+        let plain =
+            json!({"type":"user","uuid":"u-2","message":{"role":"user","content":"fix it"}});
+        assert_eq!(user_checkpoint(&plain).as_deref(), Some("u-2"));
+        let tool = json!({"type":"user","uuid":"u-3","message":{"content":[{"type":"tool_result","tool_use_id":"t","content":"ok"}]}});
+        assert_eq!(user_checkpoint(&tool), None);
+        let synthetic =
+            json!({"type":"user","uuid":"u-4","isSynthetic":true,"message":{"content":"x"}});
+        assert_eq!(user_checkpoint(&synthetic), None);
+        let mut stream = StreamState::default();
+        let actions = stream.map(&prompt, None);
+        assert!(actions.iter().any(|a| matches!(a, NativeAction::Event(NormalizedEvent { event: MiraEvent::FileCheckpoint { id }, .. }) if id == "u-1")));
+    }
+
+    #[test]
+    fn claude_launches_with_file_checkpoints_and_replayed_prompts() {
+        let l = launch(
+            std::path::PathBuf::from("claude"),
+            PermissionMode::Ask,
+            None,
+            None,
+        );
+        assert!(l.args.iter().any(|a| a == "--replay-user-messages"));
+        assert_eq!(
+            l.env.get(CLAUDE_CHECKPOINT_ENV).map(String::as_str),
+            Some("true")
+        );
     }
 
     #[cfg(unix)]

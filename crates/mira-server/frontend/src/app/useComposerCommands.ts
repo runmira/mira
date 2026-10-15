@@ -1,4 +1,4 @@
-import { forkSession,newSession,previewCheckpoint,type MessageRef,type Restored } from '../api';
+import { agentFileRewind,forkSession,newSession,previewCheckpoint,type MessageRef,type RestoreChange,type Restored } from '../api';
 import { type QueuedComposerMessage } from '../components/Composer';
 import { type RecoveryAction } from '../components/UsageRecoveryCard';
 import { loadModelOptions } from '../lib/models';
@@ -269,6 +269,27 @@ export function useComposerCommands(
   async function askRestore(userIdx: number) {
     const ref = messageRefAt(userIdx);
     if (!ref || busy) return;
+    const engine = getEngine();
+    if (engine?.kind === 'agent' && engine.driver === 'claude-code' && sessionId) {
+      // Claude's own checkpoints: preview first, then confirm.
+      try {
+        const preview = await agentFileRewind(sessionId, { ...ref, dry_run: true });
+        if (!preview.can_rewind) {
+          setRestoreNote({ text: preview.error ?? 'Claude cannot rewind files to this message.', error: true });
+        } else if (preview.files_changed.length === 0) {
+          setRestoreNote({ text: "Nothing to rewind — Claude's checkpoint matches the files." });
+        } else {
+          setRestoreAsk({
+            ref,
+            changes: preview.files_changed.map((path) => ({ path, action: 'revert' }) as RestoreChange),
+            native: { coverage: preview.coverage, insertions: preview.insertions, deletions: preview.deletions, skipped: preview.skipped },
+          });
+        }
+      } catch (e) {
+        setRestoreNote({ text: (e as Error).message, error: true });
+      }
+      return;
+    }
     try {
       const changes = await previewCheckpoint(ref, appRuntime.sessionState.get().active ?? undefined);
       if (changes.length === 0) {

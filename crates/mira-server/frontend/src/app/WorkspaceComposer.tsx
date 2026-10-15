@@ -1,7 +1,7 @@
 import { useSelector } from '@tanstack/react-store';
 import { History,X } from 'lucide-react';
 import { memo } from 'react';
-import { appendMemory,applyUndo,undoRestore } from '../api';
+import { appendMemory,applyUndo,undoRestore , agentFileRewind } from '../api';
 import { Composer } from '../components/Composer';
 import { CONTEXT_PANEL_RESERVE } from '../components/ContextPanel';
 import { InfoNoticeHost } from '../components/InfoNoticeHost';
@@ -252,6 +252,22 @@ export const WorkspaceComposer = memo(function WorkspaceComposer(
           >
             {restoreNote.text}
           </span>
+          {restoreNote.undoNative && (
+            <button
+              type="button"
+              onClick={() => {
+                const undo = restoreNote.undoNative!;
+                const session = appRuntime.sessionState.get().active;
+                setRestoreNote(null);
+                if (session) void agentFileRewind(session, { undo })
+                  .then(() => setRestoreNote({ text: 'Put tracked files back as they were before the rewind.' }))
+                  .catch((e) => setRestoreNote({ text: (e as Error).message, error: true }));
+              }}
+              className="shrink-0 rounded px-1.5 py-0.5 text-[12px] font-medium text-foreground/80 hover:bg-fg/[0.06] hover:text-foreground"
+            >
+              Undo
+            </button>
+          )}
           {restoreNote.undo && (
             <button
               type="button"

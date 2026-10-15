@@ -1013,6 +1013,10 @@ pub enum ServerMsg {
         title: Option<String>,
         updated_at: Option<String>,
     },
+    /// Claude accepted a prompt and checkpointed files for it.
+    AgentFileCheckpoint {
+        id: String,
+    },
     /// A separate chat now holds a native fork of this chat's agent session.
     AgentForked {
         session_id: String,
@@ -1183,6 +1187,7 @@ impl ServerMsg {
             MiraEvent::Spend { .. } | MiraEvent::RuntimeRequest(_) => return None,
             MiraEvent::RuntimeWork(work) => Self::RuntimeWorkUpdated { work },
             MiraEvent::RuntimeTurn(turn) => Self::RuntimeTurnUpdated { turn },
+            MiraEvent::FileCheckpoint { id } => Self::AgentFileCheckpoint { id },
             MiraEvent::Usage { used, size, cost } => Self::AcpUsage {
                 used,
                 size,

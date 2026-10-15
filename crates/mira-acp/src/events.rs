@@ -153,6 +153,11 @@ pub enum MiraEvent {
     RuntimeRequest(crate::runtime::RuntimeRequest),
     RuntimeWork(crate::runtime::RuntimeWork),
     RuntimeTurn(crate::runtime::RuntimeTurn),
+    /// Claude Code's file checkpoint for the user message just accepted
+    /// (its message UUID, replayed with `--replay-user-messages`).
+    FileCheckpoint {
+        id: String,
+    },
     /// Authoritative completed message, replacing streamed partial prose.
     AssistantSnapshot {
         message_id: String,

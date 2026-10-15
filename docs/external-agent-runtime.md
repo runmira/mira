@@ -463,3 +463,23 @@ After a successful login, the panel reports readiness and the number of availabl
 models. It shows a warning when the agent is signed in but has no models (no provider
 connected yet). Agents without a terminal method keep the copyable login command as
 the fallback. Terminals stay disabled when the server listens beyond localhost.
+
+## Claude Code native file rewind (#200)
+
+Mira starts Claude Code with `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING=true` and
+`--replay-user-messages`. Each accepted prompt's UUID is Claude's file checkpoint.
+It is recorded in the sidecar with the Claude session it belongs to. On a Claude
+chat, a message's **Restore files** action uses these checkpoints: a `rewind_files`
+dry run lists the files first, and the user confirms. The dialog states the
+coverage. Only Write, Edit and NotebookEdit changes are restored. Bash commands,
+subagent edits and edits made outside Claude are not. The conversation is not
+rewound; that remains a separate revert.
+
+Before a real rewind, Mira snapshots tracked files, so **Undo** can put them back.
+Claude replaces each listed file with its checkpoint copy, so later edits to those
+files are replaced too; the dialog says so. Mira reports success only when Claude
+reports `canRewind`, and it surfaces Claude's error otherwise (for example, "No file
+checkpoint found"). Messages sent before checkpoints were enabled, messages another
+engine answered, and checkpoints from a different Claude session (such as the
+original chat of a fork) are reported as unavailable. A busy turn must finish or be
+stopped first. An idle chat resumes its Claude session before rewinding.

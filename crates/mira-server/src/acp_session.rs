@@ -378,6 +378,13 @@ pub async fn start_agent(
             if claude_tool_search && !l.env.contains_key(CLAUDE_TOOL_SEARCH_ENV) {
                 l.env.insert(CLAUDE_TOOL_SEARCH_ENV.into(), "true".into());
             }
+            // Native file checkpoints, so `rewind_files` has something to
+            // restore (see the Claude checkpoint docs).
+            if driver.kind() == "claude-code" {
+                l.env
+                    .entry(mira_acp::native::CLAUDE_CHECKPOINT_ENV.into())
+                    .or_insert_with(|| "true".into());
+            }
             l
         }
         _ => driver.resolve(&driver_cfg, mode, program.clone()),
@@ -843,6 +850,32 @@ pub(crate) fn ensure_transcript_logger(state: &AppState, slot: &Arc<SessionSlot>
             };
             if model_changed {
                 crate::session_engine::publish(&state, &slot).await;
+            }
+            // Claude's file checkpoint for the prompt it just accepted,
+            // with the native session it belongs to: `rewind_files` only
+            // works within that session.
+            if let ServerMsg::AgentFileCheckpoint { id } = &msg {
+                let handle = slot.acp_agent.read().await.clone();
+                let session = match &handle {
+                    Some(h) => match h.agent().await {
+                        Some(agent) => agent.session_id().await,
+                        None => None,
+                    },
+                    None => None,
+                };
+                if let (Some(path), Some(handle)) = (path.as_ref(), handle) {
+                    append_transcript_record(
+                        path.clone(),
+                        serde_json::json!({
+                            "t": mira_harness::persist::now_ms(),
+                            "driver": handle.driver_kind,
+                            "instance": handle.instance,
+                            "claude_checkpoint": { "id": id, "session": session },
+                        }),
+                    )
+                    .await;
+                }
+                continue;
             }
             // Completed native turns are fork boundaries (`thread/fork`
             // takes `lastTurnId`). Kept beside the transcript, not in it:
