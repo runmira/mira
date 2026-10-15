@@ -11,7 +11,8 @@ function compiled(path) {
 function moduleUrl(source) { return `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`; }
 const settled = moduleUrl(compiled('../src/lib/settled.ts'));
 const source = compiled('../src/lib/sidebar.ts').replace("'./settled'", JSON.stringify(settled));
-const { matchesSidebar, rowStatus, settledPeriod } = await import(moduleUrl(source));
+const mod = await import(moduleUrl(source));
+const { matchesSidebar, rowStatus, settledPeriod } = mod;
 const chat = { title: 'Fix authentication', cwd: '/work/Mira', updated_at: 1000,
   worktree_branch: 'fix/auth', pr: { number: 179, title: 'Restore login', state: 'open' } };
 
@@ -49,4 +50,17 @@ test('settled dates use the finish time and local calendar boundaries', () => {
   assert.equal(settledPeriod({ updated_at: timestamp(1), settled_at: timestamp(9) }, now), 'Today');
   assert.equal(settledPeriod({ updated_at: timestamp(8) }, now), 'This week');
   assert.equal(settledPeriod({ updated_at: timestamp(4) }, now), 'Earlier');
+});
+
+test('recents lists the latest chats across projects, skipping settled and blank ones', () => {
+  const { recentChats } = mod;
+  const rows = [
+    { id: 'a', cwd: '/work/Mira', title: 'Old', updated_at: 100, message_count: 3 },
+    { id: 'b', cwd: '/work/Landing', title: 'Newest', updated_at: 500, message_count: 2 },
+    { id: 'c', cwd: '/work/Mira', title: 'Settled', updated_at: 900, message_count: 4, settled_at: 950 },
+    { id: 'd', cwd: '/work/Faunly', title: '', updated_at: 800, message_count: 0 },
+    { id: 'e', cwd: '/work/Faunly', title: 'Middle', updated_at: 300, message_count: 1, needs_attention: true },
+  ];
+  assert.deepEqual(recentChats(rows, 3).map((s) => s.id), ['b', 'e', 'a']);
+  assert.deepEqual(recentChats(rows, 1).map((s) => s.id), ['b']);
 });

@@ -11,6 +11,7 @@ import {
   CircleAlert,
   Folder,
   GitBranch,
+  History,
   PenLine,
   Puzzle,
   Search,
@@ -25,10 +26,11 @@ import { BranchElbow } from './BranchElbow';
 import { ErrorNotice } from './ErrorNotice';
 import { LazyBoundary } from './LazyBoundary';
 import { SETTINGS_SECTIONS } from './settings/sections';
-import { dateSection } from './sidebar/groups';
+import { basename, dateSection } from './sidebar/groups';
 import { Empty, NavItem, ShelfHeader, SidebarFolderIcon } from './sidebar/navigation';
 import {
   PER_GROUP_LIMIT,
+  RECENTS_OPEN_KEY,
   SCROLL_KEY,
   SETTLED_OPEN_KEY,
   SETTLED_PAGE,
@@ -67,6 +69,12 @@ export function Sidebar(props: Props) {
     savedScroll,
     flatRow,
     toggleShelf,
+    recents,
+    recentsOverflow,
+    recentsOpen,
+    setRecentsOpen,
+    recentsMore,
+    toggleRecentsMore,
     selecting,
     groups,
     toggleSelectMode,
@@ -345,6 +353,34 @@ export function Sidebar(props: Props) {
                   Scheduled
                 </NavItem>
               </nav>
+
+              {/* Recents: the chats you touched last, whichever project they
+                  live in. Folders keep creation order, so this is where
+                  activity shows; each row names its project. */}
+              {!searching && recents.length > 0 && (
+                <div className="mt-4 flex flex-col gap-0.5 px-0.5">
+                  <ShelfHeader
+                    icon={<History className="size-3 shrink-0" />}
+                    label="Recents"
+                    open={recentsOpen}
+                    onToggle={() => toggleShelf(RECENTS_OPEN_KEY, setRecentsOpen)}
+                  />
+                  <Collapse open={recentsOpen}>
+                    <div className="flex flex-col gap-0.5 pl-1">
+                      {recents.map((s) => flatRow(s, 'recent', basename(s.cwd)))}
+                      {recentsOverflow && (
+                        <button
+                          type="button"
+                          onClick={toggleRecentsMore}
+                          className="px-2 py-1 text-left text-[12.5px] text-muted-foreground/80 transition-colors hover:text-foreground"
+                        >
+                          {recentsMore ? 'Show less' : 'Show more'}
+                        </button>
+                      )}
+                    </div>
+                  </Collapse>
+                </div>
+              )}
 
               <div className="mt-4 flex flex-col gap-1 px-0.5">
                 <div

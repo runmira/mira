@@ -53,6 +53,7 @@ export function Composer(props: Props) {
     onPickAgentMode,
     agentDriving,
     onOpenPicker,
+    onSwitchProject,
     onCwdSwitched,
     onInterrupt,
     onClearGoal,
@@ -564,7 +565,7 @@ export function Composer(props: Props) {
             />
 
             <span className="contents max-md:hidden">
-              <ProjectChip cwd={cwd} onClick={onOpenPicker} />
+              <ProjectChip cwd={cwd} onNewProject={onOpenPicker} onSwitchProject={onSwitchProject} />
             </span>
 
             <span className="flex-1 max-md:min-w-1" />

@@ -6,6 +6,7 @@ import { useEffect, useState } from 'react';
 import { getGitStatus } from '../../api';
 import type { Mode } from '../../types';
 import { ApprovalModeIcon } from '../ApprovalDialog';
+import { ProjectSwitcher } from '../ProjectSwitcher';
 export const MODES: { value: Mode; label: string; desc: string }[] = [
   { value: 'plan', label: 'Plan only', desc: 'Reads and searches. No edits, no commands.' },
   { value: 'manual', label: 'Ask each time', desc: 'Prompt before every edit or command.' },
@@ -232,9 +233,21 @@ export function basename(p: string): string {
   return i >= 0 ? trimmed.slice(i + 1) || '/' : trimmed;
 }
 
-/* ---------- project chip (opens folder picker) ---------- */
+/* ---------- project chip (opens the project switcher) ---------- */
 
-export function ProjectChip({ cwd, onClick }: { cwd: string; onClick: () => void }) {
+export function ProjectChip({
+  cwd,
+  onNewProject,
+  onSwitchProject,
+}: {
+  cwd: string;
+  /** The folder panel, for a folder Mira hasn't seen yet. */
+  onNewProject: () => void;
+  /** Switch to one of your projects. When given, the chip opens the same
+   *  switcher as the empty state's title; otherwise the folder panel. */
+  onSwitchProject?: (path: string) => void;
+}) {
+  const [switcherOpen, setSwitcherOpen] = useState(false);
   const requestRuntime = useOptionalRuntime();
   const requestSession = () => requestRuntime?.sessionState.get().active ?? requestRuntime?.sessionState.get().selected ?? undefined;
   // Prefer the primary-worktree name when the cwd is a linked worktree so
@@ -264,14 +277,26 @@ export function ProjectChip({ cwd, onClick }: { cwd: string; onClick: () => void
   const label = primary ?? fallback;
   const title = primary ? `${primary} (worktree at ${cwd})` : cwd || 'Choose a folder';
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      title={title}
-      className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-[12.5px] text-muted-foreground hover:bg-mira-elev2 hover:text-foreground transition-colors max-w-[9rem] min-w-0"
-    >
-      <Folder className="size-3 shrink-0" />
-      <span className="truncate">{label}</span>
-    </button>
+    <>
+      <button
+        type="button"
+        onClick={() => (onSwitchProject ? setSwitcherOpen(true) : onNewProject())}
+        title={title}
+        aria-haspopup={onSwitchProject ? 'dialog' : undefined}
+        className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-[12.5px] text-muted-foreground hover:bg-mira-elev2 hover:text-foreground transition-colors max-w-[9rem] min-w-0"
+      >
+        <Folder className="size-3 shrink-0" />
+        <span className="truncate">{label}</span>
+      </button>
+      {onSwitchProject && (
+        <ProjectSwitcher
+          open={switcherOpen}
+          onClose={() => setSwitcherOpen(false)}
+          cwd={cwd}
+          onPicked={onSwitchProject}
+          onNewProject={onNewProject}
+        />
+      )}
+    </>
   );
 }

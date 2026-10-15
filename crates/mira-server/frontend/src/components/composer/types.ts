@@ -85,7 +85,12 @@ export type Props = {
   /** Apply one advertised model option (e.g. `reasoning_effort`,
    *  `service_tier`). The server validates the id. */
   onSetModelOption: (id: string, value: string) => void;
+  /** "New project": the folder panel (or the in-app folder dialog). */
   onOpenPicker: () => void;
+  /** Point this chat at one of your projects. With it, the project chip
+   *  opens the same project switcher as the empty state's title; without
+   *  it, the chip goes straight to the folder panel. */
+  onSwitchProject?: (path: string) => void;
   /** Called after a successful in-composer cwd switch (Composer's own
    *  quick-switch dropdown, not the FolderPicker dialog). `sessionId` is
    *  the fresh slot the server built for the new folder — App attaches

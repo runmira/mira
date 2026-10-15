@@ -9,7 +9,7 @@ setSessionFlags
 } from '../../api';
 import { useLatch } from '../../lib/lazy';
 import { isSettled,settledOrder } from '../../lib/settled';
-import { matchesSidebar,type SidebarFilter } from '../../lib/sidebar';
+import { matchesSidebar,recentChats,type SidebarFilter } from '../../lib/sidebar';
 import { useAppRuntime } from '../../state/RuntimeProvider';
 import { useResource } from '../../state/resources/hooks';
 import type { BackgroundMode,SessionSummary } from '../../types';
@@ -23,6 +23,10 @@ loadScroll,
 loadSet,
 loadUnread,
 persistCollapsed,
+RECENTS_LIMIT,
+RECENTS_MORE_KEY,
+RECENTS_MORE_LIMIT,
+RECENTS_OPEN_KEY,
 saveFlag,
 saveSet,
 saveUnread,
@@ -170,6 +174,10 @@ export function useSidebarController({
     if (!node || !scrollRestored.current) return;
     node.scrollTop = searching ? 0 : savedScroll.current;
   }, [searching]);
+
+  const [recentsOpen, setRecentsOpen] = useState(() => loadFlag(RECENTS_OPEN_KEY, true));
+
+  const [recentsMore, setRecentsMore] = useState(() => loadFlag(RECENTS_MORE_KEY, false));
 
   const [settledOpen, setSettledOpen] = useState(() => loadFlag(SETTLED_OPEN_KEY, false));
 
@@ -346,6 +354,20 @@ export function useSidebarController({
     return { live, settled };
   }, [arrangedSessions]);
 
+  // The latest chats across every project. Built from the arranged list, so
+  // a row doesn't jump out from under the pointer while its card is open.
+  const recents = useMemo(
+    () => recentChats(arrangedSessions, RECENTS_MORE_LIMIT),
+    [arrangedSessions],
+  );
+
+  function toggleRecentsMore() {
+    setRecentsMore((v) => {
+      saveFlag(RECENTS_MORE_KEY, !v);
+      return !v;
+    });
+  }
+
   const groups = useMemo(
     () =>
       groupByCwd(
@@ -445,12 +467,14 @@ export function useSidebarController({
     });
   }
 
-  /** A row outside the folder tree (the Settled shelf): no forks under it. */
-  function flatRow(s: SessionSummary, where: string) {
+  /** A row outside the folder tree (Recents, Settled): no forks under it.
+   *  Recents rows name their project, since they aren't inside it. */
+  function flatRow(s: SessionSummary, where: string, project?: string) {
     return (
       <SessionRow
         key={`${where}-${s.id}`}
         session={currentSession(s)}
+        project={project}
         settled={isSettled(currentSession(s))}
         active={s.id === activeSessionId && activeView === 'chat'}
         activeBusy={runningSessions == null && activeBusy}
@@ -492,6 +516,12 @@ export function useSidebarController({
     savedScroll,
     flatRow,
     toggleShelf,
+    recents: recents.slice(0, recentsMore ? RECENTS_MORE_LIMIT : RECENTS_LIMIT),
+    recentsOverflow: recents.length > RECENTS_LIMIT,
+    recentsOpen,
+    setRecentsOpen,
+    recentsMore,
+    toggleRecentsMore,
     live,
     selecting,
     groups,

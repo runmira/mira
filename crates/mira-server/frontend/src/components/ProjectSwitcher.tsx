@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, Folder, Plus, Search } from 'lucide-react';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
-import { listSessions } from '../api';
+import { useResource } from '../state/resources/hooks';
 import { basename, cn, parentName } from '@/lib/utils';
 
 /**
@@ -38,8 +38,18 @@ export function ProjectSwitcher({
   onNewProject: () => void;
 }) {
   const [query, setQuery] = useState('');
-  const [recent, setRecent] = useState<string[]>([]);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  // Every folder with a chat, from the shared sessions query: the list of
+  // chats is already the honest answer to "what do I work in".
+  const sessions = useResource('sessions', open);
+  const recent = useMemo(() => {
+    const seen: string[] = [];
+    // Most recently touched folder first.
+    for (const s of [...(sessions.data ?? [])].sort((a, b) => b.updated_at - a.updated_at)) {
+      if (s.cwd && !seen.includes(s.cwd)) seen.push(s.cwd);
+    }
+    return seen;
+  }, [sessions.data]);
 
   useEffect(() => {
     if (!open) return;
@@ -47,17 +57,6 @@ export function ProjectSwitcher({
     // Focus after the dialog's enter animation, or the caret lands in a
     // field that is still scaling in and the first keystroke is lost.
     const t = setTimeout(() => inputRef.current?.focus(), 60);
-    listSessions({ all: true })
-      .then((all) => {
-        // Most recently touched folder first; the list of chats is
-        // already the honest answer to "what do I work in".
-        const seen: string[] = [];
-        for (const s of [...all].sort((a, b) => b.updated_at - a.updated_at)) {
-          if (s.cwd && !seen.includes(s.cwd)) seen.push(s.cwd);
-        }
-        setRecent(seen);
-      })
-      .catch(() => setRecent([]));
     return () => clearTimeout(t);
   }, [open]);
 

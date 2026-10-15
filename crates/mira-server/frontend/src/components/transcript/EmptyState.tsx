@@ -2,8 +2,8 @@
  * The new-chat empty state (starter prompts, recent chats) and the
  * placeholder for unbuilt views. Split out of App.tsx.
  */
-import { useEffect, useState } from 'react';
-import { listSessions } from '../../api';
+import { useMemo, useState } from 'react';
+import { useResource } from '../../state/resources/hooks';
 import { ProjectSwitcher } from '../ProjectSwitcher';
 import { basename } from '../../lib/utils';
 import miraLogo from '../../assets/mira-logo.png';
@@ -33,21 +33,17 @@ export function EmptyState({
   /** "New project" — the platform folder panel on the desktop build. */
   onNewProject: () => void;
 }) {
-  const [recent, setRecent] = useState<SessionSummary[]>([]);
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const project = basename(cwd) || 'this folder';
-  useEffect(() => {
-    listSessions()
-      .then((all) =>
-        setRecent(
-          all
-            .filter((s) => s.cwd === cwd && s.message_count > 0 && !s.active)
-            .sort((a, b) => b.updated_at - a.updated_at)
-            .slice(0, 4),
-        ),
-      )
-      .catch(() => setRecent([]));
-  }, [cwd]);
+  const sessions = useResource('sessions');
+  const recent = useMemo<SessionSummary[]>(
+    () =>
+      (sessions.data ?? [])
+        .filter((s) => s.cwd === cwd && s.message_count > 0 && !s.active)
+        .sort((a, b) => b.updated_at - a.updated_at)
+        .slice(0, 4),
+    [sessions.data, cwd],
+  );
   return (
     <div className="flex min-h-full flex-col items-center justify-center px-6 py-10">
       <img
