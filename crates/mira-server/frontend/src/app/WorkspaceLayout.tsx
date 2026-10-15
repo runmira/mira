@@ -2,6 +2,7 @@ import { setSessionBackgroundMode } from '../api';
 import { InfoNoticeHost,noticeId } from '../components/InfoNoticeHost';
 import { cn } from '../lib/utils';
 import { useAppRuntime } from '../state/RuntimeProvider';
+import { WindowControls } from './WindowControls';
 import { WorkspaceDialogs } from './WorkspaceDialogs';
 import { WorkspaceMain } from './WorkspaceMain';
 import { WorkspaceRightPanel } from './WorkspaceRightPanel';
@@ -30,6 +31,9 @@ export function WorkspaceLayout(context: WorkspaceRuntime) {
     exitSettings,
     phone,
     hiddenTitleBar,
+    sidebarOpen,
+    toggleSidebar,
+    keybindings,
     sidebarCol,
     rightCol,
     infoNotices,
@@ -114,6 +118,10 @@ export function WorkspaceLayout(context: WorkspaceRuntime) {
           : { gridTemplateColumns: `${sidebarCol} minmax(0,1fr) ${rightCol}` }
       }
     >
+      {/* Beside the traffic lights, in every view. */}
+      {hiddenTitleBar && !phone && (
+        <WindowControls sidebarOpen={sidebarOpen} onToggleSidebar={toggleSidebar} keybindings={keybindings} />
+      )}
       <InfoNoticeHost
         notices={infoNotices.filter((notice) => notice.kind === 'short')}
         onDismiss={dismissInfoNotice}

@@ -37,6 +37,7 @@ import { IS_MAC,PAGE_TITLES } from './shared';
 import { WorkspaceComposer } from './WorkspaceComposer';
 import { WorkspaceContextPanel } from './WorkspaceContextPanel';
 import type { WorkspaceRuntime } from './WorkspaceRuntime';
+import { WINDOW_STRIP } from './WindowControls';
 const WorkspaceTranscript = lazyNamed(() => import('./WorkspaceTranscript'), 'WorkspaceTranscript');
 export function WorkspaceMain(
   context: Pick<
@@ -54,6 +55,7 @@ export function WorkspaceMain(
     | 'mainView'
     | 'toggleSidebar'
     | 'sidebarOpen'
+    | 'hiddenTitleBar'
     | 'sessionTitle'
     | 'outlineEntries'
     | 'readingAnchorRef'
@@ -207,6 +209,7 @@ export function WorkspaceMain(
     mainView,
     toggleSidebar,
     sidebarOpen,
+    hiddenTitleBar,
     sessionTitle,
     sessionDiff,
     setReviewOpen,
@@ -279,6 +282,10 @@ export function WorkspaceMain(
           'flex min-h-0 min-w-0 flex-col',
           phone ? 'pt-safe px-safe' : 'py-2 pl-0.5 pr-2',
         )}
+        // With the sidebar hidden on the desktop, the traffic lights and the
+        // sidebar toggle keep their strip above the pane instead of sitting
+        // on its corner.
+        style={hiddenTitleBar && !phone && !sidebarOpen ? { paddingTop: WINDOW_STRIP } : undefined}
       >
         {/* The main chat surface is the app's base surface, not a card: it
             keeps the flat theme background (pure black in dark) so the
@@ -315,7 +322,10 @@ export function WorkspaceMain(
                 data-window-drag-region
                 className="flex h-11 shrink-0 items-center gap-3 border-b border-border/60 px-4 max-md:gap-2 max-md:px-2"
               >
-                {/* Controls stay interactive inside the toolbar drag region. */}
+                {/* Controls stay interactive inside the toolbar drag region.
+                    The desktop app pins its toggle beside the traffic
+                    lights instead (WindowControls), in every view. */}
+                {!(hiddenTitleBar && !phone) && (
                 <button
                   data-no-window-drag
                   type="button"
@@ -335,6 +345,7 @@ export function WorkspaceMain(
                 >
                   <PanelLeft className="size-4" />
                 </button>
+                )}
                 <span className="min-w-0 flex-1 truncate text-[13.5px] text-foreground">
                   {sessionTitle ?? titleFromEntries(entries)}
                 </span>
