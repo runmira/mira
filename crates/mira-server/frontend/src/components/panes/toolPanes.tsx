@@ -11,6 +11,7 @@ import type { ReactNode } from 'react';
  * times out of a hundred and much cheaper than tab bookkeeping.
  */
 export type ToolPaneKind =
+  | 'diff'
   | 'new'
   | 'aside'
   | 'browser'
@@ -26,6 +27,7 @@ export type ToolPaneKind =
  *  `pr` is intentionally absent: it needs a PR to show, so it only ever
  *  opens from a PR link in the transcript — never from a blank menu. */
 export const OPENABLE_PANES: ToolPaneKind[] = [
+  'diff',
   'aside',
   'browser',
   'devices',
@@ -82,6 +84,7 @@ export const TOOL_PANE_DEFS: Record<
   ToolPaneKind,
   { title: string; blurb: string; icon: ReactNode }
 > = {
+  diff: { title: 'Diff', blurb: 'Review changed files and turn snapshots', icon: <Activity className="size-3.5" /> },
   new: {
     title: 'New',
     blurb: 'Choose what to open here',

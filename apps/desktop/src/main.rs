@@ -10,6 +10,8 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod traffic_lights;
+
 use std::io::{Read, Seek, SeekFrom};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -68,7 +70,7 @@ const INIT_SCRIPT: &str = r#"
   // The app draws its own header where macOS's title bar used to be, so the
   // web UI needs to know to pad itself clear of the floating traffic lights
   // and to lay its surfaces over the window's vibrancy.
-  window.__MIRA_CHROME__ = { hiddenTitleBar: true, translucent: true };
+  window.__MIRA_CHROME__ = { hiddenTitleBar: true, translucent: true, trafficLightCenterY: __TRAFFIC_LIGHT_CENTER_Y__ };
   function openExternal(url) {
     try {
       var abs = new URL(url, window.location.href).toString();
@@ -176,7 +178,10 @@ fn build_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .disable_drag_drop_handler()
         .inner_size(1280.0, 840.0)
         .min_inner_size(800.0, 520.0)
-        .initialization_script(INIT_SCRIPT.replace("__CHANNEL__", CHANNEL));
+        .initialization_script(INIT_SCRIPT.replace("__CHANNEL__", CHANNEL).replace(
+            "__TRAFFIC_LIGHT_CENTER_Y__",
+            &traffic_lights::CENTER_Y.to_string(),
+        ));
 
     // macOS: the title bar goes away and the app's own header takes its
     // place, so there's no duplicated title row and no wasted 28px. The
@@ -195,11 +200,9 @@ fn build_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     #[cfg(target_os = "macos")]
     let builder = builder
         .title_bar_style(tauri::TitleBarStyle::Overlay)
-        // Lower than macOS's default (centred 14pt down): on the centre line
-        // of the app's own toolbar, beside its sidebar toggle and level with
-        // the chat title. `y` is that centre line; the web UI's
-        // `TRAFFIC_LIGHT_INSET.centerY` must match.
-        .traffic_light_position(tauri::LogicalPosition::new(20.0, 30.0))
+        // With `unstable`, the main webview is a child and Tauri's
+        // traffic_light_position inset is ignored. Position the NSWindow
+        // buttons after creation instead, using their measured native frames.
         .transparent(true)
         .effects(tauri::utils::config::WindowEffectsConfig {
             effects: vec![tauri::utils::WindowEffect::UnderWindowBackground],
@@ -208,7 +211,7 @@ fn build_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
             color: None,
         });
 
-    builder
+    let window = builder
         .on_navigation(move |url| {
             // The window only ever shows the bundled loading page and the
             // local server; anything else goes to the system browser.
@@ -222,7 +225,44 @@ fn build_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
             let _ = handle.opener().open_url(url.as_str(), None::<&str>);
             false
         })
-        .build()
+        .build()?;
+    #[cfg(target_os = "macos")]
+    install_traffic_light_positioning(&window);
+    Ok(window)
+}
+
+#[cfg(target_os = "macos")]
+fn install_traffic_light_positioning(window: &WebviewWindow) {
+    fn schedule(window: &WebviewWindow) {
+        let target = window.clone();
+        let _ = window.run_on_main_thread(move || {
+            let Some(_main_thread) = objc2_foundation::MainThreadMarker::new() else {
+                return;
+            };
+            let Ok(pointer) = target.ns_window() else {
+                return;
+            };
+            // SAFETY: Tauri supplies this window's NSWindow pointer. The
+            // handle is retained by `target`, and AppKit is called only on
+            // the main thread for the duration of this closure.
+            if let Some(native) = unsafe { pointer.cast::<objc2_app_kit::NSWindow>().as_ref() } {
+                traffic_lights::position(native);
+            }
+        });
+    }
+    schedule(window);
+    let target = window.clone();
+    window.on_window_event(move |event| {
+        if matches!(
+            event,
+            tauri::WindowEvent::Resized(_)
+                | tauri::WindowEvent::ScaleFactorChanged { .. }
+                | tauri::WindowEvent::Focused(_)
+                | tauri::WindowEvent::ThemeChanged(_)
+        ) {
+            schedule(&target);
+        }
+    });
 }
 
 #[tauri::command]

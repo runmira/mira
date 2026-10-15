@@ -101,6 +101,7 @@ mod transcript_history;
 mod undo;
 mod unfurl;
 mod usage;
+mod walkthrough;
 mod ws;
 
 use std::collections::HashMap;
@@ -666,6 +667,15 @@ fn build_router(
         .route("/api/pricing", get(usage::get_pricing))
         .route("/api/usage/external", get(usage::get_external_usage))
         .route("/api/git/session-changes", get(git::session_changes))
+        .route("/api/walkthrough", axum::routing::post(walkthrough::start))
+        .route(
+            "/api/walkthrough/revert",
+            axum::routing::post(walkthrough::revert),
+        )
+        .route(
+            "/api/walkthrough/question",
+            axum::routing::post(walkthrough::question),
+        )
         .route(
             "/api/git/revert-file",
             axum::routing::post(git::revert_file),

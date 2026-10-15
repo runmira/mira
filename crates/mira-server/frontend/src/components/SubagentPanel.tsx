@@ -1,6 +1,7 @@
+import { Tip } from './ui/Tip';
 import { useFileIcons } from '@/lib/fileIcons';
 import { cn } from '@/lib/utils';
-import { CircleAlert,File as FileIcon,Info,LoaderCircle,X } from 'lucide-react';
+import { CircleAlert,File as FileIcon,Info,LoaderCircle,Maximize2,Minimize2,X } from 'lucide-react';
 import { useMemo,useState } from 'react';
 import { groupAgentRuns } from '../lib/turnActivity';
 import type { Entry } from '../transcript/entries';
@@ -62,6 +63,9 @@ type Props = {
   onBrowseFile?: () => void;
   /** Body for the panes that need the chat's state (Ask aside, Processes,
    *  Tests, Activity, Devices). Null falls through to the built-ins. */
+  diffPane?: React.ReactNode;
+  expanded?: boolean;
+  onToggleExpand?: () => void;
   renderPane?: (kind: import('./panes/toolPanes').ToolPaneKind) => React.ReactNode | null;
   /** Active panel id — either a subagent callId or a file tab id (= path). */
   activeCallId: string | null;
@@ -91,6 +95,9 @@ export function SubagentPanel({
   onOpenPane,
   onBrowseFile,
   renderPane,
+  diffPane,
+  expanded,
+  onToggleExpand,
   activeCallId,
   cwd,
   onSelectTab,
@@ -171,20 +178,21 @@ export function SubagentPanel({
             }}
           />
         )}
-        <button
+        {onToggleExpand && <Tip label={expanded ? 'Restore panel' : 'Expand panel'} side="bottom" align="end"><button type="button" onClick={onToggleExpand} aria-label={expanded ? 'Restore panel' : 'Expand panel'} className="shrink-0 rounded-full bg-secondary p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">{expanded ? <Minimize2 className="size-4" /> : <Maximize2 className="size-4" />}</button></Tip>}
+        <Tip label="Close panel" side="bottom" align="end"><button
           type="button"
           onClick={onClose}
-          title="Close panel"
           aria-label="Close panel"
-          className="shrink-0 rounded-md p-1.5 touch:p-2.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          className="shrink-0 rounded-full bg-secondary p-1.5 touch:p-2.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
         >
           <X className="size-4" />
-        </button>
+        </button></Tip>
       </div>
 
       {/* active tab body */}
       <div className="min-h-0 flex-1 overflow-hidden">
-        {effectiveTool ? (
+        {toolTabs.some(tab => tab.kind === 'diff') && <div className={effectiveTool?.kind === 'diff' ? 'h-full' : 'hidden'}>{diffPane}</div>}
+        {effectiveTool?.kind === 'diff' ? null : effectiveTool ? (
           customPane !== null ? (
             customPane
           ) : effectiveTool.kind === 'new' ? (

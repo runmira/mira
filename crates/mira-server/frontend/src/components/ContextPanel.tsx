@@ -65,6 +65,8 @@ export function contextPanelHasContent(_p: {
 export type ContextPanelProps = {
   sessionId?: string;
   turnDiffs?: TurnDiffSummary[];
+  branchPrError?: boolean;
+  onReviewTurn?: (summary: import('../types').TurnDiffSummary) => void;
   onOpenFile?: (path: string) => void;
   processes?: BackgroundProcess[];
   stoppingProcesses?: ReadonlySet<number>;
@@ -216,14 +218,14 @@ export function ContextPanel(props: ContextPanelProps) {
           <div className="overflow-y-auto px-4 pb-1.5 flex flex-col divide-y divide-fg/[0.07]">
             <RemoteControlSection />
             {sessionDiff.files.length === 0 && lastEdits && props.sessionId && props.onOpenFile && (
-              <LastTurnChanges key={`${props.sessionId}:${lastEdits.text}:${lastEdits.occurrence}`} summary={lastEdits} session={props.sessionId} onOpenFile={props.onOpenFile} />
+              <LastTurnChanges key={`${props.sessionId}:${lastEdits.text}:${lastEdits.occurrence}`} summary={lastEdits} onOpenFile={props.onOpenFile} onReview={() => props.onReviewTurn?.(lastEdits)} />
             )}
             {live.length > 0 && (
               <div className="py-2">
                 <ProgressSection tasks={tasks} />
               </div>
             )}
-            {gitStatus && showWorkspace && (
+            {showWorkspace && (
               <div className="py-2">
                 <WorkspaceSection
                   gitStatus={gitStatus}
@@ -231,11 +233,13 @@ export function ContextPanel(props: ContextPanelProps) {
                   branchPr={branchPr}
                   sessionCommitted={sessionCommitted}
                   onReview={onReview}
+                  onOpenFile={props.onOpenFile}
                   onPush={onPush}
                   onCommit={onCommit}
                 />
               </div>
             )}
+            {props.branchPrError && <p role="status" className="py-2 text-xs text-muted-foreground">Could not load pull requests. Check the GitHub connection in Settings.</p>}
             {subagents.length > 0 && (
               <div className="py-2">
                 <SubagentsSection ordered={subagents} onOpenAgent={onOpenAgent} />

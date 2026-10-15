@@ -1,3 +1,4 @@
+import { useAppRuntime } from '../state/RuntimeProvider';
 import {
 Activity,
 Bot,
@@ -52,6 +53,7 @@ export function useWorkspacePalette(
     | 'setImportOpen'
   >,
 ) {
+  const reviewRuntime = useAppRuntime();
   const {
     acpDriver,
     toggleSidebar,
@@ -111,7 +113,7 @@ export function useWorkspacePalette(
       icon: FileDiff,
       shortcut: keyFor('review.toggle'),
       keywords: ['diff', 'git'],
-      run: () => setReviewOpen(true),
+      run: () => { reviewRuntime.updateWorkspaceUi('reviewTurn', null); reviewRuntime.updateWorkspaceUi('reviewFocus', null); setReviewOpen(true); },
     },
     {
       id: 'context',

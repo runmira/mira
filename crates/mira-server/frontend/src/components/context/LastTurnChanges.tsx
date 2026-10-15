@@ -1,8 +1,5 @@
-import { useState } from 'react';
 import type { Entry } from '../../transcript/entries';
 import type { TurnDiffSummary } from '../../types';
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../ui/dialog';
-import { TranscriptSessionContext } from '../TranscriptDisclosure';
 import { TurnChanges } from '../TurnChanges';
 
 /** Find by transcript order, including repeated prompts, rather than repo order. */
@@ -20,21 +17,8 @@ export function latestEditedTurn(entries: Entry[], summaries: TurnDiffSummary[])
   return null;
 }
 
-export function LastTurnChanges({ summary, session, onOpenFile }: {
-  summary: TurnDiffSummary; session: string; onOpenFile: (path: string) => void;
+export function LastTurnChanges({ summary, onOpenFile, onReview }: {
+  summary: TurnDiffSummary; onOpenFile: (path: string) => void; onReview: () => void;
 }) {
-  const [open, setOpen] = useState(false);
-  return <div className="py-2">
-    <button type="button" onClick={() => setOpen(true)} className="flex w-full items-center justify-between rounded-md py-1.5 text-left text-[12px] text-fg/65 hover:text-fg/90">
-      <span>Latest turn edits</span><span>{summary.files.length} file{summary.files.length === 1 ? '' : 's'}</span>
-    </button>
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogContent className="max-h-[85vh] max-w-3xl overflow-y-auto">
-        <DialogHeader><DialogTitle>Latest turn edits</DialogTitle></DialogHeader>
-        <TranscriptSessionContext.Provider value={session}>
-          <TurnChanges summary={summary} onOpenFile={onOpenFile} />
-        </TranscriptSessionContext.Provider>
-      </DialogContent>
-    </Dialog>
-  </div>;
+  return <div className="py-2"><p className="mb-1 text-[11px] font-medium text-muted-foreground">Latest turn edits</p><TurnChanges summary={summary} onOpenFile={onOpenFile} onReview={onReview} /></div>;
 }

@@ -64,7 +64,7 @@ declare global {
      * of its own — the app draws its own header, with the system traffic
      * lights floating over it and vibrancy behind the sidebar.
      */
-    __MIRA_CHROME__?: { hiddenTitleBar: boolean; translucent: boolean };
+    __MIRA_CHROME__?: { hiddenTitleBar: boolean; translucent: boolean; trafficLightCenterY?: number };
     /** The desktop app's release channel, set by its init script. */
     __MIRA_CHANNEL__?: string;
   }
@@ -86,9 +86,13 @@ export function hasHiddenTitleBar(): boolean {
  *  one line; the sidebar's header row (`top + 8`) ends where that toolbar
  *  does.
  *
- *  The desktop app places the lights itself (`traffic_light_position` in
- *  apps/desktop): `centerY` is their centre line and must match it. */
-export const TRAFFIC_LIGHT_INSET = { top: 44, left: 78, centerY: 30 } as const;
+ *  The desktop app measures and positions the native buttons in
+ *  apps/desktop/src/traffic_lights.rs, and injects their centre line. */
+export const TRAFFIC_LIGHT_INSET = {
+  top: 44,
+  left: 78,
+  centerY: typeof window !== 'undefined' ? window.__MIRA_CHROME__?.trafficLightCenterY ?? 30 : 30,
+} as const;
 
 /* ---------- native fullscreen ---------- */
 

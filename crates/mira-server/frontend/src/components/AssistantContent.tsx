@@ -20,7 +20,7 @@ export function AssistantContent({ text, onOpenFile, streaming = false, transcri
     <div className={transcript ? "flex min-w-0 flex-col gap-2" : undefined}>
       {segments.map((s, i) =>
         s.kind === 'think' ? (
-          <ThoughtBlock key={i} content={s.content} live={s.streaming} />
+          <ThoughtBlock key={i} onOpenFile={onOpenFile} content={s.content} live={s.streaming} />
         ) : (
           <div key={i} className={transcript ? `min-h-7 py-[3px] ${STREAM_CONTENT_GUTTER}` : undefined}><StreamFade streaming={streaming} revision={s.content}><Markdown text={s.content} onOpenFile={onOpenFile} /></StreamFade></div>
         ),

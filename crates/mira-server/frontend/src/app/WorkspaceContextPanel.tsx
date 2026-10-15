@@ -1,3 +1,4 @@
+import { openTurnReview } from '../lib/openTurnReview';
 import { AnimatePresence } from 'framer-motion';
 import { memo } from 'react';
 import { gitCommit,gitPush } from '../api';
@@ -5,7 +6,7 @@ import { ContextPanel } from '../components/ContextPanel';
 import { useAppRuntime } from '../state/RuntimeProvider';
 import { titleFromEntries } from '../transcript/entries';
 import type { WorkspaceRuntime } from './WorkspaceRuntime';
-type Props = Pick<WorkspaceRuntime, 'turnDiffs' | 'stableOpenFile' | 'sessionTitle' | 'outlineEntries' | 'tasks' | 'backgroundProcesses' | 'sessionId' | 'setSelectedProcess' | 'openToolPane' | 'subagentState' | 'gitStatus' | 'sessionDiff' | 'branchPr' | 'sessionCommitted' | 'ctxOpen' | 'onCtxOpenChange' | 'openAgentTab' | 'setReviewFocus' | 'setReviewOpen' | 'refreshRepo'>;
+type Props = Pick<WorkspaceRuntime, 'turnDiffs' | 'stableOpenFile' | 'sessionTitle' | 'outlineEntries' | 'tasks' | 'backgroundProcesses' | 'sessionId' | 'setSelectedProcess' | 'openToolPane' | 'subagentState' | 'gitStatus' | 'sessionDiff' | 'branchPrError' | 'branchPr' | 'sessionCommitted' | 'ctxOpen' | 'onCtxOpenChange' | 'openAgentTab' | 'setReviewFocus' | 'setReviewOpen' | 'refreshRepo'>;
 export const WorkspaceContextPanel = memo(function WorkspaceContextPanel({ context }: { context: Props }) {
   const appRuntime = useAppRuntime();
   const { sessionTitle, outlineEntries, tasks, backgroundProcesses, sessionId, setSelectedProcess, openToolPane, subagentState, gitStatus, sessionDiff, branchPr, sessionCommitted, ctxOpen, onCtxOpenChange, openAgentTab, setReviewFocus, setReviewOpen, refreshRepo } = context;
@@ -15,6 +16,7 @@ export const WorkspaceContextPanel = memo(function WorkspaceContextPanel({ conte
                     key="ctx"
                     sessionId={sessionId ?? undefined}
                     turnDiffs={context.turnDiffs}
+                    onReviewTurn={summary => openTurnReview(appRuntime, summary)}
                     onOpenFile={path => context.stableOpenFile(path, null)}
                     sessionTitle={sessionTitle ?? titleFromEntries(outlineEntries)}
                     tasks={tasks}
@@ -36,11 +38,13 @@ export const WorkspaceContextPanel = memo(function WorkspaceContextPanel({ conte
                     gitStatus={gitStatus}
                     sessionDiff={sessionDiff}
                     branchPr={branchPr}
+                    branchPrError={context.branchPrError}
                     sessionCommitted={sessionCommitted}
                     open={ctxOpen}
                     onOpenChange={onCtxOpenChange}
                     onOpenAgent={openAgentTab}
                     onReview={(path) => {
+                      appRuntime.updateWorkspaceUi('reviewTurn', null);
                       setReviewFocus(path ?? null);
                       setReviewOpen(true);
                     }}

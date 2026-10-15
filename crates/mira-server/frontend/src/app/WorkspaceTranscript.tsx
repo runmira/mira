@@ -1,4 +1,5 @@
-import { useMemo } from 'react';
+import { openTurnReview } from '../lib/openTurnReview';
+import { useCallback, useMemo } from 'react';
 import { EntryBoundary } from '../components/EntryBoundary';
 import { MessageActionsContext } from '../components/transcript/EntryView';
 import { TurnView } from '../components/transcript/TurnView';
@@ -43,6 +44,7 @@ export function WorkspaceTranscript(
 ) {
   const runtime = useAppRuntime();
   const entries = useLiveEntries();
+  const reviewTurn = useCallback((summary: import('../types').TurnDiffSummary) => openTurnReview(runtime, summary), [runtime]);
   const turns = useMemo(() => groupByTurn(entries), [entries]);
   const {
     messageActions,
@@ -132,6 +134,7 @@ export function WorkspaceTranscript(
               onAskUserReply={stableAskUserReply}
               onOpenAgent={stableOpenAgent}
               onOpenFile={stableOpenFile}
+              onReviewChanges={reviewTurn}
               isActive={busy && i === turns.length - 1}
               skills={skills}
               mode={mode}

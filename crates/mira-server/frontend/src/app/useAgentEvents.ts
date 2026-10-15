@@ -117,7 +117,9 @@ export function useAgentEvents(
       case 'acp_tool_call_update':
         updateTranscript((prev) => upsertAcpTool(prev, msg.call, receivedAt));
         context.updateSubagentProjection(previous => projectAcpSubagent(previous, msg.call));
-        if (msg.call.kind === 'edit' && msg.call.status === 'completed') refreshRepo();
+        // Shell commands and generic MCP tools can edit files too. Tool kind
+        // describes the UI, not whether the working tree can have changed.
+        if (msg.call.status === 'completed') refreshRepo();
         break;
 
       case 'acp_plan':

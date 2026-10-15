@@ -983,3 +983,12 @@ export { getSettings, putSettings } from './api/settings';
 export { getCodexAccount, startCodexLogin, cancelCodexLogin, type CodexAccountView } from './api/codexAccount';
 export { agentFileRewind, type AgentFileRewind } from './api/agentFileRewind';
 export { getTerminalAuth, startTerminalAuth, cancelTerminalAuth, type TerminalAuthView } from './api/terminalAuth';
+
+export async function walkthroughCall<T>(action: '' | '/revert' | '/question', body: unknown, sessionId?: string): Promise<T> {
+  const r = await sessionFetch(`/api/walkthrough${action}`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+  }, sessionId);
+  const result = await r.json();
+  if (!r.ok) throw new Error(result.error ?? `walkthrough ${r.status}`);
+  return result as T;
+}

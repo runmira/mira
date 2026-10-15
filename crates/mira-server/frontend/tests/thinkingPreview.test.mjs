@@ -53,3 +53,16 @@ test('thinking stays capped after completion, preserves manual reading, and cont
   assert.ok(body.className.includes('overscroll-contain'));
   await act(()=>root.unmount());assert.equal(observers.size,0);
 });
+
+test('expanded streamed thinking formats headings, emphasis, lists and inline code safely',async()=>{
+  const node=document.createElement('div');const root=createRoot(node);
+  await act(()=>root.render(React.createElement(ThoughtBlock,{content:'## Review plan\n\n**Check** the change:\n\n1. Read `save`\n2. Verify errors\n\n<script>bad()</script>',live:true})));
+  await act(()=>node.querySelector('button').click());
+  const body=node.querySelector('[data-thinking-scroll]');
+  assert.equal(body.querySelector('h2').textContent,'Review plan');
+  assert.equal(body.querySelector('strong').textContent,'Check');
+  assert.equal(body.querySelectorAll('ol li').length,2);
+  assert.equal(body.querySelector('code').textContent,'save');
+  assert.equal(body.querySelector('script'),null);
+  await act(()=>root.unmount());
+});

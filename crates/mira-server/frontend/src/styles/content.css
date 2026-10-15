@@ -859,3 +859,10 @@
    disabled next to the final reply's white/black. The stream now carries one
    voice: if the agent said it, it is foreground text. */
 [data-assistant-message] .md { font-weight: 450; }
+
+/* Review responds to its resizable pane, independently of viewport width. */
+.review-container { container: review / inline-size; }
+.review-file-nav { display: none; }
+@container review (min-width: 760px) {
+  .review-file-nav { display: block; width: 200px; }
+}

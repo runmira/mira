@@ -93,6 +93,7 @@ export type PullRequestDetailView = {
 
 export type FileChangeView = {
   filename: string;
+  previous_filename?: string | null;
   status: string;
   additions: number;
   deletions: number;
