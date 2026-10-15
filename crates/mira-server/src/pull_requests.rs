@@ -1407,7 +1407,10 @@ mod auth_recovery_tests {
             "updated_at": "2026-10-15T10:00:00Z"
         });
         let row = issue_option(&issue);
-        assert_eq!((row.kind, row.number, row.state.as_str()), ("issue", 205, "open"));
+        assert_eq!(
+            (row.kind, row.number, row.state.as_str()),
+            ("issue", 205, "open")
+        );
         assert_eq!(row.labels[0].name, "enhancement");
         let merged = serde_json::json!({
             "number": 207, "title": "x", "state": "closed",
