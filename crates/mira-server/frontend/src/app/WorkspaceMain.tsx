@@ -292,9 +292,12 @@ export function WorkspaceMain(
             height and curves around the traffic lights and the sidebar
             toggle: an inverted-L notch cut from its top-left corner, with
             the border drawn along it. `--window-notch` is how far the
-            notch reaches, for headers to start after it. */}
+            notch reaches, for headers to start after it; toolbars take the
+            border's full colour then, since the notch's ledge runs straight
+            into their divider. */}
         <div
           ref={paneCardRef}
+          data-notched={notch ? '' : undefined}
           className={cn(
             'relative flex min-h-0 flex-1 flex-col overflow-hidden bg-background',
             !phone && !notch && 'rounded-xl border border-border',
@@ -333,7 +336,7 @@ export function WorkspaceMain(
                 least one or the window can't be dragged at all. */}
               <div
                 data-window-drag-region
-                className="flex h-11 shrink-0 items-center gap-3 border-b border-border/60 px-4 pl-[max(1rem,var(--window-notch,0px))] max-md:gap-2 max-md:px-2"
+                className="flex h-11 shrink-0 items-center gap-3 border-b border-border/60 px-4 pl-[max(1rem,var(--window-notch,0px))] [[data-notched]_&]:border-border max-md:gap-2 max-md:px-2"
               >
                 {/* Controls stay interactive inside the toolbar drag region.
                     The desktop app pins its toggle beside the traffic
