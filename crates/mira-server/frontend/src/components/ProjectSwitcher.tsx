@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Check, Folder, Plus, Search } from 'lucide-react';
-import { Dialog, DialogContent } from '@/components/ui/dialog';
+import { Check, FolderPlus, Search } from 'lucide-react';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { basename, cn } from '@/lib/utils';
 import { useResource } from '../state/resources/hooks';
-import { basename, cn, parentName } from '@/lib/utils';
+import { SidebarFolderIcon } from './sidebar/navigation';
+import { timeAgo } from './sidebar/sessionRows';
 
 /**
  * The project switcher: every folder Mira has a chat in, one keystroke
@@ -11,153 +13,205 @@ import { basename, cn, parentName } from '@/lib/utils';
  * Where the *folder* picker answers "where is it on disk", this answers
  * "which one do I mean" — so the list is built from the chats that
  * already exist, most recent first, with the current project checked.
- * There is deliberately no "no project" row: this dialog is opened from
- * inside a project (the empty state names it), and leaving that context
- * is what the composer's own picker is for.
+ *
+ * It opens as a popover on whatever opened it (the empty state's title,
+ * the composer's project chip), so the choice stays next to the thing
+ * being changed. Rows look like the sidebar's folders: the same themed
+ * icon, with how many chats live there and when you were last in it.
  *
  * Switching starts a **new** chat in that folder. The server
- * materialises a fresh slot per cwd, so this is the same swap the
- * project chip performs — just with the choice made from a list instead
- * of a file panel.
+ * materialises a fresh slot per cwd.
  */
 export function ProjectSwitcher({
-  open,
-  onClose,
   cwd,
   onPicked,
   onNewProject,
+  children,
+  side = 'bottom',
+  align = 'center',
 }: {
-  open: boolean;
-  onClose: () => void;
   /** The chat's current folder; shown checked. */
   cwd: string;
   /** Fires with the chosen folder. The caller swaps the cwd, which the
    *  server turns into a new session. */
   onPicked: (path: string) => void;
-  /** "New project" — hands off to the platform folder panel. */
+  /** "Open folder…" — hands off to the platform folder panel. */
   onNewProject: () => void;
+  /** The control that opens it. */
+  children: React.ReactNode;
+  side?: 'top' | 'bottom';
+  align?: 'start' | 'center' | 'end';
 }) {
+  const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
+  const [highlight, setHighlight] = useState(0);
   const inputRef = useRef<HTMLInputElement | null>(null);
-  // Every folder with a chat, from the shared sessions query: the list of
-  // chats is already the honest answer to "what do I work in".
+  const listRef = useRef<HTMLDivElement | null>(null);
   const sessions = useResource('sessions', open);
-  const recent = useMemo(() => {
-    const seen: string[] = [];
-    // Most recently touched folder first.
-    for (const s of [...(sessions.data ?? [])].sort((a, b) => b.updated_at - a.updated_at)) {
-      if (s.cwd && !seen.includes(s.cwd)) seen.push(s.cwd);
+
+  // One entry per folder, most recently touched first, with what's in it.
+  const folders = useMemo(() => {
+    const byCwd = new Map<string, { path: string; chats: number; last: number }>();
+    for (const s of sessions.data ?? []) {
+      if (!s.cwd) continue;
+      const entry = byCwd.get(s.cwd) ?? { path: s.cwd, chats: 0, last: 0 };
+      entry.chats += 1;
+      entry.last = Math.max(entry.last, s.updated_at ?? 0);
+      byCwd.set(s.cwd, entry);
     }
-    return seen;
-  }, [sessions.data]);
+    if (cwd && !byCwd.has(cwd)) byCwd.set(cwd, { path: cwd, chats: 0, last: 0 });
+    return [...byCwd.values()].sort(
+      (a, b) => Number(b.path === cwd) - Number(a.path === cwd) || b.last - a.last,
+    );
+  }, [sessions.data, cwd]);
+
+  const projects = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return (q ? folders.filter((f) => f.path.toLowerCase().includes(q)) : folders).slice(0, 40);
+  }, [folders, query]);
 
   useEffect(() => {
     if (!open) return;
     setQuery('');
-    // Focus after the dialog's enter animation, or the caret lands in a
-    // field that is still scaling in and the first keystroke is lost.
-    const t = setTimeout(() => inputRef.current?.focus(), 60);
-    return () => clearTimeout(t);
+    setHighlight(0);
   }, [open]);
 
-  const projects = useMemo(() => {
-    const all = [cwd, ...recent].filter(Boolean);
-    const q = query.trim().toLowerCase();
-    const matched = q
-      ? all.filter((p) => p.toLowerCase().includes(q) || basename(p).toLowerCase().includes(q))
-      : all;
-    return matched.filter((p, i) => matched.indexOf(p) === i).slice(0, 40);
-  }, [cwd, recent, query]);
+  useEffect(() => setHighlight(0), [query]);
+
+  useEffect(() => {
+    listRef.current
+      ?.querySelector<HTMLElement>(`[data-index="${highlight}"]`)
+      ?.scrollIntoView({ block: 'nearest' });
+  }, [highlight]);
 
   const pick = (path: string) => {
-    onClose();
-    onPicked(path);
+    setOpen(false);
+    if (path !== cwd) onPicked(path);
   };
 
   return (
-    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent
-        showClose={false}
-        className="gap-0 overflow-hidden p-0 sm:max-w-[26rem]"
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>{children}</PopoverTrigger>
+      <PopoverContent
+        side={side}
+        align={align}
+        sideOffset={8}
+        onOpenAutoFocus={(e) => {
+          e.preventDefault();
+          inputRef.current?.focus();
+        }}
+        className="w-[22rem] max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl border-border/60 bg-popover/95 p-0 backdrop-blur"
       >
         {/* Search */}
-        <div className="flex items-center gap-2 px-4 py-3">
-          <Search className="size-4 shrink-0 text-muted-foreground/60" />
-          <input
-            ref={inputRef}
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={(e) => {
-              // Enter opens the top match — the reason a search field in
-              // a list dialog should never need the mouse.
-              if (e.key === 'Enter' && projects.length > 0) pick(projects[0]);
-              if (e.key === 'Escape') onClose();
-            }}
-            placeholder="Search projects"
-            spellCheck={false}
-            className="min-w-0 flex-1 bg-transparent text-[14px] text-foreground outline-none placeholder:text-muted-foreground/50"
-          />
+        <div className="p-1.5">
+          <label className="flex items-center gap-2 rounded-lg bg-fg/[0.04] px-2.5 py-1.5 focus-within:ring-2 focus-within:ring-mira-blue/15">
+            <Search className="size-3.5 shrink-0 text-muted-foreground/70" aria-hidden />
+            <input
+              ref={inputRef}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                  e.preventDefault();
+                  const step = e.key === 'ArrowDown' ? 1 : -1;
+                  setHighlight((h) => (projects.length ? (h + step + projects.length) % projects.length : 0));
+                }
+                // Enter opens the highlighted match: the list never
+                // needs the mouse.
+                if (e.key === 'Enter' && projects[highlight]) {
+                  e.preventDefault();
+                  pick(projects[highlight].path);
+                }
+              }}
+              placeholder="Switch project…"
+              aria-label="Search projects"
+              spellCheck={false}
+              className="min-w-0 flex-1 bg-transparent text-[13px] text-foreground outline-none placeholder:text-muted-foreground/60"
+            />
+          </label>
         </div>
 
-        <div className="h-px bg-border/60" />
+        <div className="px-3 pb-1 pt-0.5 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground/60">
+          {query.trim() ? 'Matches' : 'Recent projects'}
+        </div>
 
-        {/* Projects */}
-        <div className="max-h-[46vh] overflow-y-auto py-1">
+        <div ref={listRef} role="listbox" aria-label="Projects" className="max-h-[min(20rem,50vh)] overflow-y-auto px-1.5 pb-1.5">
           {projects.length === 0 && (
-            <div className="px-4 py-3 text-[12.5px] text-muted-foreground">
-              {query.trim() ? `No project matches “${query.trim()}”` : 'No projects yet'}
+            <div className="px-2 py-3 text-[12.5px] text-muted-foreground">
+              {sessions.isLoading ? 'Loading projects…' : query.trim() ? `No project matches “${query.trim()}”` : 'No projects yet'}
             </div>
           )}
-          {projects.map((path) => {
-            const active = path === cwd;
+          {projects.map((f, i) => {
+            const active = f.path === cwd;
+            const name = basename(f.path) || f.path;
+            const when = timeAgo(f.last);
             return (
               <button
-                key={path}
+                key={f.path}
                 type="button"
-                onClick={() => pick(path)}
-                title={path}
+                role="option"
+                aria-selected={active}
+                data-index={i}
+                onClick={() => pick(f.path)}
+                onPointerMove={() => setHighlight(i)}
+                title={f.path}
                 className={cn(
-                  'flex w-full items-center gap-3 px-4 py-2 text-left transition-colors',
-                  active ? 'bg-accent/60' : 'hover:bg-fg/[0.05]',
+                  'flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left transition-colors',
+                  i === highlight ? 'bg-fg/[0.07]' : 'hover:bg-fg/[0.05]',
                 )}
               >
-                <Folder className="size-4 shrink-0 text-muted-foreground/70" />
-                <span
-                  className={cn(
-                    'min-w-0 flex-1 truncate text-[13.5px]',
-                    active ? 'font-semibold text-foreground' : 'text-foreground/90',
-                  )}
-                >
-                  {basename(path)}
+                <SidebarFolderIcon name={name} open={active} current={active} className="size-4" />
+                <span className="flex min-w-0 flex-1 flex-col">
+                  <span
+                    className={cn(
+                      'truncate text-[13.5px] leading-5',
+                      active ? 'font-semibold text-foreground' : 'font-medium text-foreground/90',
+                    )}
+                  >
+                    {name}
+                  </span>
+                  {/* Where it lives: two projects can share a name. */}
+                  <span className="truncate text-[11px] leading-4 text-muted-foreground/60">
+                    {shortParent(f.path)}
+                  </span>
                 </span>
-                {/* Parent folder, dimmed: two projects can share a name,
-                    and the path is what tells them apart. */}
-                <span className="max-w-[9rem] shrink-0 truncate text-[12px] text-muted-foreground/60">
-                  {parentName(path)}
+                <span className="flex shrink-0 flex-col items-end text-[11px] leading-4 tabular-nums text-muted-foreground/60">
+                  {f.chats > 0 && (
+                    <span>
+                      {f.chats} chat{f.chats === 1 ? '' : 's'}
+                    </span>
+                  )}
+                  {when && <span className="text-muted-foreground/45">{when}</span>}
                 </span>
                 <span className="flex size-4 shrink-0 items-center justify-center">
-                  {active && <Check className="size-4 text-mira-blue" />}
+                  {active && <Check className="size-3.5 text-mira-blue" aria-label="Current project" />}
                 </span>
               </button>
             );
           })}
         </div>
 
-        <div className="h-px bg-border/60" />
-
-        {/* New project */}
-        <button
-          type="button"
-          onClick={() => {
-            onClose();
-            onNewProject();
-          }}
-          className="flex w-full items-center gap-3 px-4 py-2.5 text-left text-[13.5px] text-foreground/90 transition-colors hover:bg-fg/[0.05]"
-        >
-          <Plus className="size-4 shrink-0 text-muted-foreground/70" />
-          <span className="flex-1">New project</span>
-        </button>
-      </DialogContent>
-    </Dialog>
+        {/* A folder Mira hasn't seen yet */}
+        <div className="border-t border-border/50 p-1.5">
+          <button
+            type="button"
+            onClick={() => {
+              setOpen(false);
+              onNewProject();
+            }}
+            className="flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-[13px] text-foreground/85 transition-colors hover:bg-fg/[0.05] hover:text-foreground"
+          >
+            <FolderPlus className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+            <span className="flex-1">Open folder…</span>
+          </button>
+        </div>
+      </PopoverContent>
+    </Popover>
   );
+}
+
+/** The folder a project sits in, with the home directory as `~`. */
+function shortParent(path: string): string {
+  const parent = path.replace(/\/+$/, '').replace(/\/[^/]*$/, '') || '/';
+  return parent.replace(/^\/(Users|home)\/[^/]+/, '~');
 }

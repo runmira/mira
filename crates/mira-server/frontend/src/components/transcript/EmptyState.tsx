@@ -2,7 +2,7 @@
  * The new-chat empty state (starter prompts, recent chats) and the
  * placeholder for unbuilt views. Split out of App.tsx.
  */
-import { useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import { useResource } from '../../state/resources/hooks';
 import { ProjectSwitcher } from '../ProjectSwitcher';
 import { basename } from '../../lib/utils';
@@ -33,7 +33,6 @@ export function EmptyState({
   /** "New project" — the platform folder panel on the desktop build. */
   onNewProject: () => void;
 }) {
-  const [switcherOpen, setSwitcherOpen] = useState(false);
   const project = basename(cwd) || 'this folder';
   const sessions = useResource('sessions');
   const recent = useMemo<SessionSummary[]>(
@@ -57,14 +56,15 @@ export function EmptyState({
           without needing a control to look like. */}
       <h2 className="mt-4 text-[19px] font-medium tracking-tight text-foreground">
         What should we build in{' '}
-        <button
-          type="button"
-          onClick={() => setSwitcherOpen(true)}
-          title={`${cwd} — switch project`}
-          className="underline decoration-dotted decoration-1 underline-offset-[5px] transition-colors hover:text-mira-blue"
-        >
-          {project}
-        </button>
+        <ProjectSwitcher cwd={cwd} onPicked={onSwitchProject} onNewProject={onNewProject}>
+          <button
+            type="button"
+            title={`${cwd} — switch project`}
+            className="underline decoration-dotted decoration-1 underline-offset-[5px] transition-colors hover:text-mira-blue data-[state=open]:text-mira-blue"
+          >
+            {project}
+          </button>
+        </ProjectSwitcher>
         ?
       </h2>
       <p className="mt-1.5 max-w-[46ch] text-center text-[13px] leading-relaxed text-muted-foreground">
@@ -113,13 +113,6 @@ export function EmptyState({
         </div>
       )}
 
-      <ProjectSwitcher
-        open={switcherOpen}
-        onClose={() => setSwitcherOpen(false)}
-        cwd={cwd}
-        onPicked={onSwitchProject}
-        onNewProject={onNewProject}
-      />
     </div>
   );
 }

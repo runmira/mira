@@ -247,7 +247,6 @@ export function ProjectChip({
    *  switcher as the empty state's title; otherwise the folder panel. */
   onSwitchProject?: (path: string) => void;
 }) {
-  const [switcherOpen, setSwitcherOpen] = useState(false);
   const requestRuntime = useOptionalRuntime();
   const requestSession = () => requestRuntime?.sessionState.get().active ?? requestRuntime?.sessionState.get().selected ?? undefined;
   // Prefer the primary-worktree name when the cwd is a linked worktree so
@@ -276,27 +275,21 @@ export function ProjectChip({
   const fallback = cwd ? basename(cwd) : 'Choose project';
   const label = primary ?? fallback;
   const title = primary ? `${primary} (worktree at ${cwd})` : cwd || 'Choose a folder';
+  const chip = (
+    <button
+      type="button"
+      onClick={onSwitchProject ? undefined : onNewProject}
+      title={title}
+      className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-[12.5px] text-muted-foreground hover:bg-mira-elev2 hover:text-foreground data-[state=open]:bg-mira-elev2 data-[state=open]:text-foreground transition-colors max-w-[9rem] min-w-0"
+    >
+      <Folder className="size-3 shrink-0" />
+      <span className="truncate">{label}</span>
+    </button>
+  );
+  if (!onSwitchProject) return chip;
   return (
-    <>
-      <button
-        type="button"
-        onClick={() => (onSwitchProject ? setSwitcherOpen(true) : onNewProject())}
-        title={title}
-        aria-haspopup={onSwitchProject ? 'dialog' : undefined}
-        className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1.5 text-[12.5px] text-muted-foreground hover:bg-mira-elev2 hover:text-foreground transition-colors max-w-[9rem] min-w-0"
-      >
-        <Folder className="size-3 shrink-0" />
-        <span className="truncate">{label}</span>
-      </button>
-      {onSwitchProject && (
-        <ProjectSwitcher
-          open={switcherOpen}
-          onClose={() => setSwitcherOpen(false)}
-          cwd={cwd}
-          onPicked={onSwitchProject}
-          onNewProject={onNewProject}
-        />
-      )}
-    </>
+    <ProjectSwitcher cwd={cwd} onPicked={onSwitchProject} onNewProject={onNewProject} side="top" align="start">
+      {chip}
+    </ProjectSwitcher>
   );
 }
