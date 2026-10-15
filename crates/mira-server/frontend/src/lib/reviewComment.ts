@@ -15,6 +15,8 @@ export interface MiraReviewComment {
   /** Mini unified diff of the selected lines, quoted into the agent message. */
   readonly code: string;
   text: string;
+  /** Diff version at creation, so refreshed files cannot misplace old ranges. */
+  readonly fileVersion?: number;
 }
 
 interface DiffReviewLine {

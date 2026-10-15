@@ -66,7 +66,9 @@ test('remote toggle stays compact without a connected indicator or links and nev
   setRemoteFixture({...fixture,remote:{...remote,enabled:true,status:'connected',hostname:'m-test.runmira.dev'}});
   await act(()=>root.render(React.createElement(RemoteControlSection)));
   assert.equal(host.querySelector('[role=switch]').getAttribute('aria-checked'),'true');
-  assert.equal(host.querySelector('[aria-label="Remote control options"]'),null);
+  assert.ok(host.querySelector('[aria-label="Remote control options"]'));
+  await act(()=>host.querySelector('[aria-label="Remote control options"]').click());
+  assert.ok(host.querySelector('[role=menu]'));
   assert.equal(host.querySelector('a'),null);
   assert.ok(!host.textContent.includes('Connected'));
   assert.ok(!host.textContent.includes('m-test.runmira.dev'));

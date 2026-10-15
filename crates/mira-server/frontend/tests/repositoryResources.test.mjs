@@ -21,7 +21,7 @@ test('context changes poll during generic tools, refresh on focus, and stop when
   if(url.endsWith('/branch-pr')) return new Response(JSON.stringify(prCreated?{number:213,title:'Created externally',url:'https://github.com/runmira/mira/pull/213',state:'OPEN',isDraft:false}:null));
   return new Response(JSON.stringify({added:changed?1:0,removed:0,files:changed?[{path:'shell-edit.ts',status:'modified',added:1,removed:0,binary:false}]:[]}));
  };
- function Probe(){const result=useResource('sessionDiff'),pr=useResource('branchPr');return React.createElement('div',null,React.createElement('span',{'data-files':true},result.data?.files.map(f=>f.path).join(',')??'loading'),React.createElement('span',{'data-pr':true},pr.data?`#${pr.data.number}`:''));}
+ function Probe(){const result=useResource('sessionDiff'),pr=useResource('branchPr'),review=useResource('sessionChanges');return React.createElement('div',null,React.createElement('span',{'data-files':true},result.data?.files.map(f=>f.path).join(',')??'loading'),React.createElement('span',{'data-review':true},review.data?.map(f=>f.path).join(',')??'loading'),React.createElement('span',{'data-pr':true},pr.data?`#${pr.data.number}`:''));}
  const host=document.createElement('div');document.body.append(host);const root=createRoot(host);
  try {
   await act(()=>root.render(React.createElement(QueryClientProvider,{client:runtime.queryClient},React.createElement(Probe))));await flush();
@@ -30,6 +30,7 @@ test('context changes poll during generic tools, refresh on focus, and stop when
   await act(async()=>{await new Promise(resolve=>setTimeout(resolve,3200));});await flush();
   assert.equal(host.querySelector('[data-files]').textContent,'shell-edit.ts','files appear while the tool is still running');
   assert.ok(requests.every(r=>r.session==='chat-a'));
+  assert.equal(host.querySelector('[data-review]').textContent,'shell-edit.ts','the open Diff resource refreshes while generic tools run');
   await act(()=>runtime.turnCommands.reportTurnRunning(false));
   changed=false;prCreated=true;
   await act(()=>{focusManager.setFocused(false);focusManager.setFocused(true);});await flush();

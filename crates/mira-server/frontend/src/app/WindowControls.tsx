@@ -13,7 +13,7 @@ import { cn } from '../lib/utils';
 export const WINDOW_STRIP = TRAFFIC_LIGHT_INSET.top + 8;
 
 const BUTTON = 28;
-const GAP = 2;
+const GAP = 6;
 const BUTTONS = 3;
 /** Where the controls start: after the traffic lights, or at the window's
  *  edge in fullscreen, where macOS hides the lights. */

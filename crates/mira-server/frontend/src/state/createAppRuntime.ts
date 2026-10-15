@@ -1,3 +1,6 @@
+import { reviewTurnSources } from '../lib/reviewSources';
+import { createPanelLayoutService } from './panelLayoutService';
+import { createReviewService } from './reviewService';
 import { QueryClient } from '@tanstack/react-query';
 import { createStore } from '@tanstack/react-store';
 import { createDiagnostics } from './diagnostics';
@@ -35,6 +38,11 @@ export function createAppRuntime(scope: RuntimeScope, storage?: UiStorage) {
   const connection = createStore({ status: 'connecting' as import('../ws').WsStatus, generation: 0 });
   const capabilities = createStore(new Map<string, import('../lib/acpAgents').AgentCaps>());
   const turns = createRuntimeStore();
+  const review = createReviewService(queryClient, runtimeScope, (session,key) => {
+    const data = turns.source.get().sessions.get(session);
+    return data ? reviewTurnSources(data.entries,data.turnDiffs).find(source=>source.key===key)?.summary : undefined;
+  });
+  const panelLayout = createPanelLayoutService(storage, runtimeScope, turns.source, ui);
   const streams = createStreamService(() => {
     const state = turns.source.get();
     return state.active ? { session: state.active, generation: state.generation } : null;
@@ -74,7 +82,7 @@ export function createAppRuntime(scope: RuntimeScope, storage?: UiStorage) {
         return next;
       });
     },
-    drafts,
+    drafts, review,
     service,
     preferences,
     workspaceUi: ui.source,
@@ -151,9 +159,11 @@ export function createAppRuntime(scope: RuntimeScope, storage?: UiStorage) {
     dispose() {
       if (disposed) return;
       disposed = true;
+      panelLayout.dispose();
       ui.dispose();
       service.dispose();
       drafts.dispose();
+      review.dispose();
       preferences.dispose();
       activity.dispose();
       streams.dispose();
