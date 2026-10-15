@@ -524,6 +524,10 @@ pub struct StreamState {
     /// Tokens in context after the latest model response: its input
     /// (fresh, cached and cache-written) plus what it wrote.
     context: Option<u64>,
+    /// The compaction Claude announced (`status: compacting`) and has not
+    /// yet closed with a `compact_boundary`, so both land on one divider.
+    compaction: Option<String>,
+    compaction_sequence: u64,
 }
 
 /// A result's `modelUsage`, as running spend per model. `None` when the
@@ -677,6 +681,43 @@ impl StreamState {
                 };
                 lifecycle.push(event(MiraEvent::RuntimeTurn(turn.clone())));
                 self.runtime_turn = Some(turn);
+            }
+        }
+        // Claude compacts on its own near the window's end (or on /compact):
+        // `status: compacting`, then a `compact_boundary`. Without these the
+        // transcript never shows that the conversation was summarized.
+        if root && v["type"] == "system" {
+            let compaction = |id: String, status: &str| {
+                event(MiraEvent::Compaction {
+                    id,
+                    status: status.into(),
+                    summary: None,
+                    replace_summary: false,
+                    error: None,
+                    replace_error: false,
+                })
+            };
+            match v["subtype"].as_str() {
+                Some("status") if v["status"] == "compacting" && self.compaction.is_none() => {
+                    self.compaction_sequence += 1;
+                    let id = format!(
+                        "claude:{}:compact:{}",
+                        v["session_id"].as_str().unwrap_or(""),
+                        self.compaction_sequence
+                    );
+                    self.compaction = Some(id.clone());
+                    lifecycle.push(compaction(id, "in_progress"));
+                }
+                Some("compact_boundary") => {
+                    let id = self.compaction.take().unwrap_or_else(|| {
+                        format!(
+                            "claude:{}",
+                            v["uuid"].as_str().unwrap_or("compact-boundary")
+                        )
+                    });
+                    lifecycle.push(compaction(id, "completed"));
+                }
+                _ => {}
             }
         }
         if root && v["type"] == "user" {
@@ -2449,6 +2490,48 @@ done
         assert_eq!(sent["request"]["dry_run"], true);
         let missing = agent.rewind_files("gone", false).await.unwrap_err();
         assert!(missing.to_string().contains("No file checkpoint"));
+    }
+
+    #[test]
+    fn claude_auto_compaction_opens_and_closes_one_divider() {
+        let mut stream = StreamState::default();
+        let compactions = |actions: Vec<NativeAction>| -> Vec<(String, String)> {
+            actions
+                .into_iter()
+                .filter_map(|a| match a {
+                    NativeAction::Event(NormalizedEvent {
+                        event: MiraEvent::Compaction { id, status, .. },
+                        ..
+                    }) => Some((id, status)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let start = compactions(stream.map(
+            &json!({"type":"system","subtype":"status","status":"compacting","session_id":"s"}),
+            None,
+        ));
+        assert_eq!(
+            start,
+            [("claude:s:compact:1".to_string(), "in_progress".to_string())]
+        );
+        // A repeated status while compacting is the same compaction.
+        assert!(compactions(stream.map(
+            &json!({"type":"system","subtype":"status","status":"compacting","session_id":"s"}),
+            None
+        ))
+        .is_empty());
+        let done = compactions(stream.map(&json!({"type":"system","subtype":"compact_boundary","session_id":"s","uuid":"b1","compact_metadata":{"trigger":"auto","pre_tokens":180000}}), None));
+        assert_eq!(
+            done,
+            [("claude:s:compact:1".to_string(), "completed".to_string())]
+        );
+        // A boundary with no announced start (missed, or /compact) still shows.
+        let lone = compactions(stream.map(
+            &json!({"type":"system","subtype":"compact_boundary","session_id":"s","uuid":"b2"}),
+            None,
+        ));
+        assert_eq!(lone, [("claude:b2".to_string(), "completed".to_string())]);
     }
 
     #[test]

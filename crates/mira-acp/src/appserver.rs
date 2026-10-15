@@ -573,6 +573,12 @@ pub fn map_notification(method: &str, p: &Value) -> Vec<AppServerAction> {
             Some(i) => map_item(i, true),
             None => vec![],
         },
+        // Older app-servers announce a finished compaction only this way;
+        // current ones send the `contextCompaction` item instead.
+        "thread/compacted" => {
+            let turn = p.get("turnId").and_then(Value::as_str).unwrap_or("");
+            vec![compaction_action(&format!("compacted:{turn}"), "completed")]
+        }
         "item/completed" => match item {
             Some(i) => map_item(i, false),
             None => vec![],
@@ -995,6 +1001,20 @@ fn text_event(item_id: String, text: &str, thought: bool) -> Vec<AppServerAction
 }
 
 /// Map an `item` object from `item/started` / `item/completed`.
+fn compaction_action(id: &str, status: &str) -> AppServerAction {
+    AppServerAction::Event(NormalizedEvent {
+        source: variant("compaction"),
+        event: MiraEvent::Compaction {
+            id: format!("codex:{id}"),
+            status: status.into(),
+            summary: None,
+            replace_summary: false,
+            error: None,
+            replace_error: false,
+        },
+    })
+}
+
 fn map_item(i: &Value, started: bool) -> Vec<AppServerAction> {
     let id = i.get("id").and_then(Value::as_str).unwrap_or_default();
     if id.is_empty() {
@@ -1146,6 +1166,12 @@ fn map_item(i: &Value, started: bool) -> Vec<AppServerAction> {
             events
         }
         "agent_message" | "agentMessage" | "reasoning" => vec![],
+        // Codex summarizes the thread itself near the window's end (and on
+        // `thread/compact/start`); the item brackets that work.
+        "contextCompaction" | "context_compaction" => vec![compaction_action(
+            id,
+            if started { "in_progress" } else { "completed" },
+        )],
         _ => vec![],
     }
 }
@@ -3095,6 +3121,42 @@ mod tests {
                 is_error: true
             }
         ));
+    }
+
+    #[test]
+    fn codex_compaction_items_bracket_one_divider() {
+        let item = |method: &str| {
+            map_notification(
+                method,
+                &v(
+                    r#"{"threadId":"t","turnId":"u","item":{"type":"contextCompaction","id":"c1"}}"#,
+                ),
+            )
+        };
+        let status = |a: &[AppServerAction]| {
+            a.iter()
+                .find_map(|x| match x {
+                    AppServerAction::Event(NormalizedEvent {
+                        event: MiraEvent::Compaction { id, status, .. },
+                        ..
+                    }) => Some((id.clone(), status.clone())),
+                    _ => None,
+                })
+                .expect("a compaction event")
+        };
+        assert_eq!(
+            status(&item("item/started")),
+            ("codex:c1".into(), "in_progress".into())
+        );
+        assert_eq!(
+            status(&item("item/completed")),
+            ("codex:c1".into(), "completed".into())
+        );
+        let old = map_notification("thread/compacted", &v(r#"{"threadId":"t","turnId":"u"}"#));
+        assert_eq!(
+            status(&old),
+            ("codex:compacted:u".into(), "completed".into())
+        );
     }
 
     #[test]
