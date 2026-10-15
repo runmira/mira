@@ -242,14 +242,17 @@ export function TerminalPanel({ onClose }: { onClose: () => void }) {
   );
 }
 
-function TerminalView({
+export function TerminalView({
   termId,
   visible,
   onId,
+  attachOnly = false,
 }: {
   termId: string | null;
   visible: boolean;
   onId: (id: string) => void;
+  /** Attach to `termId` only; never start a shell in its place. */
+  attachOnly?: boolean;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -285,6 +288,7 @@ function TerminalView({
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const params = new URLSearchParams({ cols: String(term.cols), rows: String(term.rows) });
     if (idRef.current) params.set('id', idRef.current);
+    if (attachOnly) params.set('attach_only', 'true');
     const ws = new WebSocket(`${proto}//${location.host}/ws/terminal?${params}`);
     ws.binaryType = 'arraybuffer';
     const enc = new TextEncoder();

@@ -161,6 +161,7 @@ impl AcpDriver for AntigravityDriver {
             fs_write: true,
             terminal: false,
             elicitation_form: true,
+            terminal_auth: false,
         }
     }
 }
@@ -579,6 +580,7 @@ impl AcpDriver for CodexDriver {
             fs_write: true,
             terminal: false,
             elicitation_form: true,
+            terminal_auth: false,
         }
     }
 }

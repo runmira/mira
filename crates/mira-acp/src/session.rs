@@ -96,6 +96,10 @@ pub struct ClientCaps {
     /// it they are cancelled on the spot ("The user dismissed this
     /// question").
     pub elicitation_form: bool,
+    /// Terminal authentication (`auth.terminal`, and OpenCode's older
+    /// `_meta["terminal-auth"]`). Only advertised by a client that will run
+    /// the advertised command in an interactive terminal the user can see.
+    pub terminal_auth: bool,
 }
 
 impl ClientCaps {
@@ -113,10 +117,15 @@ impl ClientCaps {
         );
         // The host routes scoped child updates into separate Mira child streams.
         // OpenCode only emits them when the client explicitly opts in.
-        caps.meta = Some(serde_json::Map::from_iter([(
+        let mut meta = serde_json::Map::from_iter([(
             "opencode/child-session-updates".to_owned(),
             json!(true),
-        )]));
+        )]);
+        if self.terminal_auth {
+            caps.auth.terminal = true;
+            meta.insert("terminal-auth".to_owned(), json!(true));
+        }
+        caps.meta = Some(meta);
         if self.elicitation_form {
             caps.elicitation =
                 Some(ElicitationCapabilities::new().form(ElicitationFormCapabilities::new()));
@@ -175,6 +184,76 @@ fn mira_mcp_entry(mcp: &MiraMcp, http: bool, exe: Option<std::path::PathBuf>) ->
         "args": ["mcp-bridge", mcp.url],
         "env": [{ "name": MIRA_MCP_TOKEN_ENV, "value": mcp.token }],
     }))
+}
+
+/// A sign-in the client runs as an interactive terminal process. The agent
+/// never receives it through `authenticate`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalAuthMethod {
+    pub id: String,
+    pub label: String,
+    /// A command named by the older `_meta["terminal-auth"]` form. `None`
+    /// means the configured agent invocation itself (the spec form).
+    pub command: Option<String>,
+    /// Arguments: appended to the agent invocation (spec form) or given to
+    /// `command` (older form).
+    pub args: Vec<String>,
+    pub env: std::collections::BTreeMap<String, String>,
+}
+
+/// The terminal sign-ins an agent advertised, spec form first.
+pub fn terminal_auth_methods(res: &InitializeResponse) -> Vec<TerminalAuthMethod> {
+    use agent_client_protocol::schema::v1::AuthMethod;
+    let mut out = Vec::new();
+    for method in &res.auth_methods {
+        match method {
+            AuthMethod::Terminal(t) => out.push(TerminalAuthMethod {
+                id: t.id.to_string(),
+                label: t.name.clone(),
+                command: None,
+                args: t.args.clone(),
+                env: t.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            }),
+            other => {
+                let Some(legacy) = other.meta().and_then(|m| m.get("terminal-auth")) else {
+                    continue;
+                };
+                let Some(command) = legacy.get("command").and_then(Value::as_str) else {
+                    continue;
+                };
+                out.push(TerminalAuthMethod {
+                    id: other.id().to_string(),
+                    label: legacy
+                        .get("label")
+                        .and_then(Value::as_str)
+                        .unwrap_or(other.name())
+                        .to_owned(),
+                    command: Some(command.to_owned()),
+                    args: legacy
+                        .get("args")
+                        .and_then(Value::as_array)
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(Value::as_str)
+                                .map(str::to_owned)
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    env: legacy
+                        .get("env")
+                        .and_then(Value::as_object)
+                        .map(|o| {
+                            o.iter()
+                                .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_owned())))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                });
+            }
+        }
+    }
+    out.sort_by_key(|m| m.command.is_some());
+    out
 }
 
 /// A live ACP conversation with one agent process.
@@ -834,6 +913,7 @@ mod tests {
             fs_write: false,
             terminal: true,
             elicitation_form: true,
+            terminal_auth: false,
         })
         .await;
         let waiter = tokio::spawn({

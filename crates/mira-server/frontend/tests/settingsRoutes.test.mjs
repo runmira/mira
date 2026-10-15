@@ -76,7 +76,10 @@ export function mount(element, initial) {
   return { router, root, navigation: () => navigation };
 }
 `,
-  { 'src/components/diffs/StyledDiffCodeView': 'export const StyledDiffCodeView = () => null;' },
+  {
+    'src/components/diffs/StyledDiffCodeView': 'export const StyledDiffCodeView = () => null;',
+    'src/components/TerminalPanel': 'export const TerminalView = () => null;',
+  },
 );
 
 async function settle() {

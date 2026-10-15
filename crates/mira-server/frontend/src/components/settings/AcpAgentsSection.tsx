@@ -1,4 +1,5 @@
 import { CodexAccountPanel } from './CodexAccountPanel';
+import { TerminalSignInPanel } from './TerminalSignInPanel';
 import { openCodeLoginCommand } from '../../lib/agentAuth';
 /**
  * The external-agent list.
@@ -432,6 +433,7 @@ function AgentDetail({
     // Disabled until the server's copy loads, so nothing typed is lost.
     <fieldset disabled={!view} className="space-y-3.5 disabled:opacity-60">
       {view?.driver === 'codex' && <CodexAccountPanel key={view.instance} instance={view.instance} enabled={cfg.enabled} onRefresh={onRefresh} />}
+      {view?.driver === 'opencode' && <TerminalSignInPanel key={view.instance} instance={view.instance} enabled={cfg.enabled} onRefresh={onRefresh} />}
   <Field
     label="Display name"
     hint="Shown in place of the agent's own name."

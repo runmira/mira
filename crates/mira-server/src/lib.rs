@@ -90,6 +90,7 @@ pub mod slot;
 mod state;
 mod subagents_api;
 mod terminal;
+mod terminal_auth;
 mod tests_api;
 mod title;
 mod transcript_history;
@@ -360,6 +361,7 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
     let state = AppState {
         codex_auth: Arc::new(crate::codex_auth::AuthRegistry::default()),
         agent_capabilities: Arc::new(crate::agent_capabilities::CapabilityRegistry::default()),
+        terminal_auth: Arc::new(crate::terminal_auth::TerminalAuthRegistry::default()),
         request_slot: None,
         slot_loads: Arc::new(std::sync::Mutex::new(HashMap::new())),
         session_activity,
@@ -637,6 +639,12 @@ fn build_router(
             get(engine_settings::get_settings).put(engine_settings::put_settings),
         )
         .route("/api/engines/:instance/account", get(codex_auth::status))
+        .route(
+            "/api/engines/:instance/terminal-auth",
+            get(terminal_auth::status)
+                .post(terminal_auth::start)
+                .delete(terminal_auth::cancel),
+        )
         .route(
             "/api/engines/:instance/account/login",
             axum::routing::post(codex_auth::start).delete(codex_auth::cancel),

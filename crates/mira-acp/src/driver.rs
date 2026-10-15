@@ -392,6 +392,7 @@ pub trait AcpDriver: Send + Sync {
             fs_write: true,
             terminal: true,
             elicitation_form: true,
+            terminal_auth: false,
         }
     }
 

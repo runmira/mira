@@ -440,3 +440,26 @@ Goals and background activity remain event-driven for Codex: an older app-server
 never emits goal or subagent updates shows none. ACP fork, resume, load and image
 support come from `initialize`. Malformed capability fields count as unadvertised and
 do not fail startup.
+
+## OpenCode terminal sign-in (#198)
+
+OpenCode's settings include **Sign in in terminal**. Mira initializes that instance's
+configured agent with terminal sign-in advertised: the spec `auth.terminal`
+capability, plus OpenCode's older `_meta["terminal-auth"]` flag. Mira reads the
+terminal method OpenCode returns; v2.0.22 returns `opencode auth login`. A method
+that names the agent's own binary resolves to the instance's configured program,
+never to whatever `PATH` finds first. It runs with the instance's environment and
+deny prefixes in a Mira terminal shown inside the settings panel, so the login
+updates the same credential store the instance's prompts use. Terminal methods are
+never sent to `authenticate`.
+
+Exit status 0 re-probes readiness and the model catalog. It then reconnects idle
+runtimes on that instance, which re-initialize with the new credentials on their next
+prompt and resume the same session. A running turn is left alone, and nothing is
+resent. Any other exit is reported as a failure. Cancel kills the login first and
+marks the attempt cancelled, so its exit is not reported as a failure. A newer attempt
+or a changed binary, home or arguments makes an older attempt's completion stale.
+After a successful login, the panel reports readiness and the number of available
+models. It shows a warning when the agent is signed in but has no models (no provider
+connected yet). Agents without a terminal method keep the copyable login command as
+the fallback. Terminals stay disabled when the server listens beyond localhost.

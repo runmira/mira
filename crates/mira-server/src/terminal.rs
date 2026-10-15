@@ -69,6 +69,8 @@ struct Terminal {
     scrollback: Mutex<VecDeque<u8>>,
     output: broadcast::Sender<Vec<u8>>,
     exited: AtomicBool,
+    /// The exit code once the process ended, for callers waiting on it.
+    exit: tokio::sync::watch::Sender<Option<Option<u32>>>,
 }
 
 fn registry() -> &'static Mutex<HashMap<String, Arc<Terminal>>> {
@@ -77,14 +79,71 @@ fn registry() -> &'static Mutex<HashMap<String, Arc<Terminal>>> {
 }
 
 fn spawn(id: &str, cwd: PathBuf, cols: u16, rows: u16) -> anyhow::Result<Arc<Terminal>> {
+    let mut cmd = CommandBuilder::new_default_prog();
+    cmd.cwd(&cwd);
+    spawn_command(id, cmd, cwd, cols, rows)
+}
+
+/// A program (not a shell) the user drives in a terminal: an agent's own
+/// interactive sign-in. Registered like any terminal so the UI attaches to
+/// it by id; the returned receiver yields the exit code once it ends.
+pub fn spawn_program(
+    program: &std::path::Path,
+    args: &[String],
+    env: &std::collections::BTreeMap<String, String>,
+    env_deny: &[String],
+    cwd: PathBuf,
+) -> anyhow::Result<(String, tokio::sync::watch::Receiver<Option<Option<u32>>>)> {
+    if !enabled() {
+        anyhow::bail!("terminal is disabled when the server listens beyond localhost");
+    }
+    let mut cmd = CommandBuilder::new(program);
+    cmd.args(args);
+    cmd.cwd(&cwd);
+    for (key, _) in std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v))) {
+        if mira_acp::which::env_denied(&key, env_deny) {
+            cmd.env_remove(&key);
+        }
+    }
+    if let Some(path) = mira_acp::which::effective_path() {
+        cmd.env("PATH", path);
+    }
+    for (key, value) in env {
+        if !mira_acp::which::env_denied(key, env_deny) {
+            cmd.env(key, value);
+        }
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    let term = spawn_command(&id, cmd, cwd, 100, 30)?;
+    let exit = term.exit.subscribe();
+    registry().lock().unwrap().insert(id.clone(), term);
+    Ok((id, exit))
+}
+
+/// Kill a terminal started here. `false` when it already ended.
+pub fn kill_terminal(id: &str) -> bool {
+    match registry().lock().unwrap().remove(id) {
+        Some(t) => {
+            let _ = t.child.lock().unwrap().kill();
+            true
+        }
+        None => false,
+    }
+}
+
+fn spawn_command(
+    id: &str,
+    mut cmd: CommandBuilder,
+    cwd: PathBuf,
+    cols: u16,
+    rows: u16,
+) -> anyhow::Result<Arc<Terminal>> {
     let pair = native_pty_system().openpty(PtySize {
         rows,
         cols,
         pixel_width: 0,
         pixel_height: 0,
     })?;
-    let mut cmd = CommandBuilder::new_default_prog();
-    cmd.cwd(&cwd);
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
     let child = pair.slave.spawn_command(cmd)?;
@@ -100,6 +159,7 @@ fn spawn(id: &str, cwd: PathBuf, cols: u16, rows: u16) -> anyhow::Result<Arc<Ter
         scrollback: Mutex::new(VecDeque::new()),
         output,
         exited: AtomicBool::new(false),
+        exit: tokio::sync::watch::channel(None).0,
     });
 
     // Blocking PTY reads live on their own thread; output fans out to
@@ -124,6 +184,17 @@ fn spawn(id: &str, cwd: PathBuf, cols: u16, rows: u16) -> anyhow::Result<Arc<Ter
             }
         }
         t.exited.store(true, Ordering::Relaxed);
+        // Polled rather than `wait()`ed: a blocking wait would hold the child
+        // lock that `kill` needs if the process outlives its terminal.
+        let mut code = None;
+        for _ in 0..100 {
+            if let Ok(Some(status)) = t.child.lock().unwrap().try_wait() {
+                code = Some(status.exit_code());
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let _ = t.exit.send(Some(code));
         let _ = t.output.send(Vec::new()); // empty chunk = exited
         registry().lock().unwrap().remove(&id);
     });
@@ -133,6 +204,10 @@ fn spawn(id: &str, cwd: PathBuf, cols: u16, rows: u16) -> anyhow::Result<Arc<Ter
 #[derive(Deserialize)]
 pub struct AttachQuery {
     id: Option<String>,
+    /// Attach to `id` only: an ended or unknown terminal is not replaced
+    /// by a new shell (a finished sign-in must not turn into a prompt).
+    #[serde(default)]
+    attach_only: bool,
     #[serde(default = "default_cols")]
     cols: u16,
     #[serde(default = "default_rows")]
@@ -166,6 +241,7 @@ pub async fn terminal_ws(
             .and_then(|id| registry().lock().unwrap().get(id).cloned());
     let (id, term) = match existing {
         Some(t) => (q.id.clone().unwrap(), t),
+        None if q.attach_only => return StatusCode::NOT_FOUND.into_response(),
         None => {
             let id = uuid::Uuid::new_v4().to_string();
             let cwd = state.current_cwd().await;
@@ -312,5 +388,31 @@ mod tests {
         let out: Vec<u8> = term.scrollback.lock().unwrap().iter().copied().collect();
         assert!(String::from_utf8_lossy(&out).contains("mira-terminal-ok"));
         assert!(term.exited.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn a_program_reports_its_exit_code_and_is_never_replaced_by_a_shell() {
+        ENABLED.store(true, Ordering::Relaxed);
+        let env = [("MIRA_TERM_TEST".to_string(), "seen".to_string())].into();
+        let (id, mut exit) = spawn_program(
+            std::path::Path::new("/bin/sh"),
+            &["-c".into(), "echo $MIRA_TERM_TEST; exit 3".into()],
+            &env,
+            &[],
+            std::env::temp_dir(),
+        )
+        .unwrap();
+        let code = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Some(code) = *exit.borrow_and_update() {
+                    break code;
+                }
+                exit.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(code, Some(3));
+        assert!(!kill_terminal(&id), "an ended program leaves the registry");
     }
 }

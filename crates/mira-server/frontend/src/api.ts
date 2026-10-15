@@ -981,3 +981,4 @@ export {
 export { getSettings, putSettings } from './api/settings';
 
 export { getCodexAccount, startCodexLogin, cancelCodexLogin, type CodexAccountView } from './api/codexAccount';
+export { getTerminalAuth, startTerminalAuth, cancelTerminalAuth, type TerminalAuthView } from './api/terminalAuth';
