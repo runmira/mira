@@ -5,7 +5,7 @@ import {createRoot} from 'react-dom/client';
 import {Window} from 'happy-dom';
 import {bundle} from './helpers/bundle.mjs';
 const browser=new Window({url:'https://mira.test'});
-globalThis.window=browser;globalThis.document=browser.document;globalThis.IS_REACT_ACT_ENVIRONMENT=true;
+globalThis.window=browser;globalThis.document=browser.document;globalThis.customElements=browser.customElements;globalThis.getComputedStyle=browser.getComputedStyle.bind(browser);for(const name of ['HTMLElement','Element','Node','CustomEvent','MutationObserver','NodeFilter','HTMLInputElement','Event']) globalThis[name]=browser[name];globalThis.IS_REACT_ACT_ENVIRONMENT=true;
 const observers=[];globalThis.ResizeObserver=class{constructor(callback){this.callback=callback;observers.push(this);}observe(element){this.element=element;}disconnect(){}};
 const {TurnChanges,ReviewChanges,createAppRuntime,openTurnReview,pullRequestPatch,getRenderablePatch,resolveFileDiffPath}=await bundle(`
 export {TurnChanges} from './src/components/TurnChanges';
@@ -60,7 +60,7 @@ test('embedded Diff source follows the selected snapshot including the latest re
  try {
   await act(()=>root.render(React.createElement(ReviewChanges,{embedded:true,open:true,onClose(){},onChanged(){},onSendComments(){}})));await flush();
   const selector=host.querySelector('[aria-label="Changes source"]');
-  assert.equal(selector.selectedOptions[0].textContent,'Latest turn');
+  assert.equal(selector.textContent,'Latest turn');
   assert.equal(host.querySelector('.fixed'),null,'embedded review has no modal backdrop');
   const split=host.querySelector('[aria-label="Side by side diff"]');
   assert.equal(split.disabled,true,'narrow pane uses unified diff');
@@ -68,11 +68,16 @@ test('embedded Diff source follows the selected snapshot including the latest re
   Object.defineProperty(observer.element,'clientWidth',{value:800,configurable:true});
   await act(()=>observer.callback());
   assert.equal(split.disabled,false,'split becomes available when the pane widens');
-  await act(()=>{selector.value='1';selector.dispatchEvent(new window.Event('change',{bubbles:true}));});await flush();
+  await act(()=>selector.click());await flush();
+  assert.equal(selector.getAttribute('aria-expanded'),'true');
+  const older=[...document.querySelectorAll('[role="menuitem"]')].find(item=>item.dataset.menuItem?.startsWith('Turn edits'));
+  assert.ok(older,'source menu actually opens');
+  await act(()=>older.click());await flush();
   assert.deepEqual(runtime.workspaceUi.get().reviewTurn.summary,summary);
-  assert.equal(selector.value,'1');
-  assert.ok(!selector.querySelector('option[value="1"]').textContent.includes('Latest turn'));
-  await act(()=>{selector.value='changes';selector.dispatchEvent(new window.Event('change',{bubbles:true}));});
+  assert.ok(selector.textContent.startsWith('Turn edits'));
+  assert.equal(selector.getAttribute('aria-expanded'),'false');
+  await act(()=>selector.click());await flush();
+  await act(()=>document.querySelector('[data-menu-item="Changes"]').click());
   assert.equal(runtime.workspaceUi.get().reviewTurn,null);
  } finally {await act(()=>root.unmount());await runtime.dispose();host.remove();delete globalThis.reviewRuntime;}
 });

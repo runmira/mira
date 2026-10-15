@@ -1,6 +1,8 @@
+import { useState } from 'react';
+import { Menu, MenuItem } from '../ui/Menu';
 import { Tip } from '../ui/Tip';
 import { useSelector } from '@tanstack/react-store';
-import { Columns2, List, WrapText, Pilcrow } from 'lucide-react';
+import { ChevronDown, Columns2, List, WrapText, Pilcrow } from 'lucide-react';
 import { useAppRuntime, useWorkspaceUiField } from '../../state/RuntimeProvider';
 import { selectActiveSession } from '../../state/runtimeStore';
 import { PREF_KEYS, useBoolPref, useStringPref } from '../../lib/prefs';
@@ -15,14 +17,20 @@ export function ReviewSourceSelector() {
   const [scope, setScope] = useWorkspaceUiField('reviewTurn');
   const owner = useSelector(runtime.sessionState, state => state.active ?? state.selected);
   const selected = scope ? summaries.findIndex(turn => turn.text === scope.summary.text && turn.occurrence === scope.summary.occurrence) : -1;
-  return <select aria-label="Changes source" className="h-7 min-w-0 max-w-48 rounded-full border border-border/60 bg-secondary px-2 text-xs text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" value={scope ? selected < 0 ? 'snapshot' : String(selected) : 'changes'} onChange={event => {
-    if (event.target.value === 'changes') setScope(null);
-    else if (owner && summaries[Number(event.target.value)]) setScope({ session: owner, summary: summaries[Number(event.target.value)] });
-  }}>
-    <option value="changes">Changes · uncommitted</option>
-    {scope && selected < 0 && <option value="snapshot">Selected turn</option>}
-    {summaries.map((turn, index) => ({ turn, index })).reverse().map(({turn,index}) => <option key={`${turn.text}:${turn.occurrence}`} value={String(index)}>{turn.text === latest?.text && turn.occurrence === latest.occurrence ? 'Latest turn' : `Turn edits · ${turn.text.slice(0, 48)}`}</option>)}
-  </select>;
+  const [open, setOpen] = useState(false);
+  const labelFor = (turn: typeof summaries[number]) => turn.text === latest?.text && turn.occurrence === latest.occurrence ? 'Latest turn' : `Turn edits · ${turn.text.slice(0, 48)}`;
+  const label = scope ? selected < 0 ? 'Selected turn' : labelFor(summaries[selected]) : 'Changes';
+  return <div className="relative min-w-0 max-w-48">
+    <button type="button" aria-label="Changes source" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(value => !value)} onKeyDown={event => {
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); setOpen(true); }
+    }} className="flex h-7 max-w-full items-center gap-3 rounded-full border border-border/60 bg-secondary pl-3 pr-3 text-xs text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+      <span className="truncate">{label}</span><ChevronDown aria-hidden="true" className="size-3 shrink-0 text-muted-foreground" />
+    </button>
+    <Menu open={open} onOpenChange={setOpen} label="Changes source menu" align="start" minWidth={220} className="max-h-80 max-w-[calc(100vw-24px)] overflow-y-auto">
+      <MenuItem label="Changes" hint="Uncommitted session changes" active={!scope} onSelect={() => setScope(null)} />
+      {summaries.map((turn, index) => ({ turn, index })).sort((a,b) => Number(labelFor(b.turn) === 'Latest turn') - Number(labelFor(a.turn) === 'Latest turn')).map(({ turn, index }) => <MenuItem key={`${turn.text}:${turn.occurrence}`} label={labelFor(turn)} hint={`${turn.files.length} files · ${turn.text}`} active={!!scope && selected === index} onSelect={() => { if (owner) setScope({ session: owner, summary: turn }); }} />)}
+    </Menu>
+  </div>;
 }
 
 export function ReviewDisplayActions({ narrow = false }: { narrow?: boolean }) {
