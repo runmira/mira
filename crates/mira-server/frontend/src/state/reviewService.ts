@@ -1,6 +1,5 @@
 import { createStore } from '@tanstack/react-store';
 import { CancelledError, type QueryClient } from '@tanstack/react-query';
-import { parseDiffFromFile } from '@pierre/diffs';
 import { getTurnFileDiff } from '../api';
 import type { MiraReviewComment } from '../lib/reviewComment';
 import type { TurnDiffSummary } from '../types';
@@ -43,6 +42,8 @@ export function createReviewService(client: QueryClient, scope: RuntimeScope, re
             const current = turnKey?.startsWith('turn:') && resolveTurn ? resolveTurn(session,turnKey) : summary;
             if (!current) throw new Error('This turn is not loaded. Reopen it after loading the earlier conversation.');
             const diff = await getTurnFileDiff(session, current.text, current.occurrence, file.path, querySignal);
+            // Loaded on demand so the diff renderer stays out of the initial bundle.
+            const { parseDiffFromFile } = await import('@pierre/diffs');
             return parseDiffFromFile({ name: file.path, contents: diff.before }, { name: file.path, contents: diff.after });
           }),
         }).then(value => {
