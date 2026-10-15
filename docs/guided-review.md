@@ -21,3 +21,10 @@ A turn card and the context panel's **Latest turn edits** section show changed f
 Thinking disclosures render Markdown while streaming and after completion, keeping the existing scroll and follow behavior. Both PR surfaces use the shared Pierre diff renderer and the same wrapping action bar. The context panel discovers the current branch's PR through the main panel's GitHub authentication path, refreshes on focus and every 30 seconds, and does not require an agent action report. Remote control remains a compact switch, with connection/link chrome removed.
 
 Development fixtures: `/review-ui-preview.html` and `/walkthrough-preview.html`.
+
+
+### Diff tab and resizable panels
+
+View changes opens the singleton **Diff** tab in the right panel. Turn entry points retain the selected immutable snapshot; the source selector labels the latest edited turn from transcript order (including repeated prompts). Choose Changes to return to uncommitted session changes. File clicks continue to open separate file tabs. Switching tabs keeps the review mounted, preserving draft comments and position; closing the Diff tab disposes it.
+
+The panel toolbar offers unified/split layout, wrapping and line numbers using the existing diff preferences. Below 600px the renderer uses unified layout without overwriting the saved split preference; split becomes available again when widened. The file tree appears at a panel width of 760px. Header actions wrap independently of the application viewport. Expand/restore is a panel window action, with space retained for native macOS chrome.

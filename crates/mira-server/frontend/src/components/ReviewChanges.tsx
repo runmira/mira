@@ -23,16 +23,19 @@ import { DiffFileTree, type DiffFileTreeEntry } from './diffs/DiffFileTree';
 import { diffFileTreeEntries } from './diffs/diffFileTree.logic';
 import { DiffStatLabel } from './diffs/DiffStatLabel';
 import { ReviewDiffView, type ReviewDiffFile, type ReviewDiffViewHandle } from './diffs/ReviewDiffView';
+import { ReviewSourceSelector, ReviewDisplayActions } from './diffs/ReviewToolbar';
 import { useDiffOptions } from '../lib/diffPrefs';
 
 export function ReviewChanges({
   open,
+  embedded = false,
   onClose,
   onSendComments,
   onChanged,
   focusPath = null,
 }: {
   open: boolean;
+  embedded?: boolean;
   /** Open scrolled to this file (a path relative to the session cwd). */
   focusPath?: string | null;
   onClose: () => void;
@@ -62,6 +65,19 @@ export function ReviewChanges({
   const [viewer, setViewer] = useState<ReviewDiffViewHandle | null>(null);
   // Diff layout (Settings → General → Diff).
   const diffOptions = useDiffOptions();
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [paneWidth, setPaneWidth] = useState(0);
+  useEffect(() => {
+    const element = containerRef.current;
+    if (!open || !element) return;
+    const measure = () => { if (element.clientWidth > 0) setPaneWidth(element.clientWidth); };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [open, embedded]);
+  const narrow = embedded && paneWidth < 600;
+  const displayOptions = useMemo(() => narrow ? { ...diffOptions, diffStyle: 'unified' as const } : diffOptions, [diffOptions, narrow]);
 
   const load = useCallback(() => {
     const generation = ++loadGeneration.current;
@@ -97,11 +113,11 @@ export function ReviewChanges({
   }, [open, load]);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open || embedded) return;
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [open, onClose]);
+  }, [open, onClose, embedded]);
 
   /** Parse every session file's unified diff into Pierre file entries (diff order kept). */
   const reviewFiles: ReviewDiffFile[] = useMemo(() => {
@@ -213,11 +229,12 @@ export function ReviewChanges({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex justify-end">
-      <div className="absolute inset-0 bg-shade/40" onClick={onClose} />
-      <aside className="relative flex h-full w-full max-w-[1040px] animate-fade-in flex-col border-l border-border bg-background shadow-2xl">
+    <div ref={containerRef} className={embedded ? "review-container flex h-full min-h-0 min-w-0 flex-col" : "fixed inset-0 z-50 flex justify-end"}>
+      {!embedded && <div className="absolute inset-0 bg-shade/40" onClick={onClose} />}
+      <aside className={embedded ? "flex h-full min-h-0 min-w-0 flex-col bg-background" : "relative flex h-full w-full max-w-[1040px] animate-fade-in flex-col border-l border-border bg-background shadow-2xl"}>
+        {embedded && <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border/60 px-3 py-2"><ReviewSourceSelector /><ReviewDisplayActions narrow={narrow} /></div>}
         <header className="flex min-h-12 shrink-0 flex-wrap items-center gap-2 border-b border-border/60 bg-background px-4 py-2">
-          <span className="text-[14px] font-semibold">{turnScope ? 'Review turn changes' : 'Review changes'}</span>
+          <span className="text-[14px] font-semibold">{embedded ? '' : turnScope ? 'Review turn changes' : 'Review changes'}</span>
           {files && files.length > 0 && (
             <span className="flex items-center gap-2 text-[12px] text-muted-foreground">
               <span className="tabular-nums">
@@ -259,17 +276,17 @@ export function ReviewChanges({
               type="button"
               onClick={onClose}
               aria-label="Close"
-              className="ml-1 rounded-md p-1 text-muted-foreground hover:bg-accent/50 hover:text-foreground"
+              className={cn('ml-1 rounded-md p-1 text-muted-foreground hover:bg-accent/50 hover:text-foreground', embedded && 'hidden')}
             >
               <X className="size-4" />
             </button>
           </div>
         </header>
 
-        {guided ? <div className="min-h-0 flex-1"><GuidedWalkthrough onChanged={() => { load(); onChanged(); }} onClose={() => setGuided(false)} /></div> : <>
+        {guided ? <div className="min-h-0 flex-1"><GuidedWalkthrough narrow={narrow} onChanged={() => { load(); onChanged(); }} onClose={() => setGuided(false)} /></div> : <>
         <div className="flex min-h-0 flex-1">
           {showNav && (
-            <nav className="hidden w-60 shrink-0 border-r border-border/60 md:block">
+            <nav className={embedded ? "review-file-nav shrink-0 border-r border-border/60" : "hidden w-60 shrink-0 border-r border-border/60 md:block"}>
               <DiffFileTree
                 entries={treeEntries}
                 onSelectFile={selectTreeFile}
@@ -308,7 +325,7 @@ export function ReviewChanges({
                 onRemoveComment={(id) => setComments((prev) => prev.filter((c) => c.id !== id))}
                 viewerRef={setViewer}
                 className="min-h-0 flex-1 overflow-auto"
-                options={diffOptions}
+                options={displayOptions}
                 renderHeaderFilenameSuffix={() => null}
                 renderHeaderPrefix={(_fileDiff, fileKey, isCollapsed) => (
                   <span className="flex shrink-0 items-center">
@@ -398,7 +415,7 @@ function HeaderButton({ onClick, children }: { onClick: () => void; children: Re
     <button
       type="button"
       onClick={onClick}
-      className="flex min-h-8 shrink-0 items-center gap-1 whitespace-nowrap rounded-md px-2.5 py-1.5 text-[12px] text-muted-foreground hover:bg-accent/50 hover:text-foreground"
+      className="flex min-h-8 shrink-0 items-center gap-1 whitespace-nowrap rounded-full bg-secondary px-2.5 py-1.5 text-[12px] text-muted-foreground hover:bg-accent/50 hover:text-foreground"
     >
       {children}
     </button>

@@ -1,3 +1,4 @@
+import { useAppRuntime } from '../state/RuntimeProvider';
 import { ArrowDown,PanelLeft,SquareTerminal } from 'lucide-react';
 import { useMemo, useRef } from 'react';
 import { Outlet } from 'react-router';
@@ -206,6 +207,7 @@ export function WorkspaceMain(
   >,
 ) {
   const entries = useLiveEntries();
+  const reviewRuntime = useAppRuntime();
   const { minimapItems, isEmpty } = useMemo(() => liveTranscriptView(entries, context.historyOffsetRef.current), [entries]);
   const {
     phone,
@@ -260,11 +262,6 @@ export function WorkspaceMain(
     jumpToMinimapTurn,
     lightbox,
     setLightbox,
-    reviewMounted,
-    reviewOpen,
-    setReviewFocus,
-    refreshRepo,
-    reviewFocus,
     showJump,
     jumpToLatest,
     acpStatusPending,
@@ -376,7 +373,7 @@ export function WorkspaceMain(
                   <button
                     type="button"
                     data-no-window-drag
-                    onClick={() => setReviewOpen(true)}
+                    onClick={() => { reviewRuntime.updateWorkspaceUi('reviewTurn', null); reviewRuntime.updateWorkspaceUi('reviewFocus', null); setReviewOpen(true); }}
                     {...preloadOnIntent(ReviewChanges.preload)}
                     title="Review this session's changes"
                     // h-8 and rounded-lg to match the icon controls beside it.
@@ -598,20 +595,7 @@ export function WorkspaceMain(
                   onSelect={jumpToMinimapTurn}
                 />
                 <ImageLightbox src={lightbox} onClose={() => setLightbox(null)} />
-                {reviewMounted && (
-                  <LazyBoundary>
-                    <ReviewChanges
-                      open={reviewOpen}
-                      onClose={() => {
-                        setReviewOpen(false);
-                        setReviewFocus(null);
-                      }}
-                      onSendComments={(text) => onSend(text)}
-                      onChanged={refreshRepo}
-                      focusPath={reviewFocus}
-                    />
-                  </LazyBoundary>
-                )}
+
 
                 {showJump && (
                   <button

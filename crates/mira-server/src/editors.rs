@@ -120,6 +120,14 @@ const KNOWN_EDITORS: &[KnownEditor] = &[
         win_exes: &["idea64.exe"],
         win_dirs: &["JetBrains\\IntelliJ IDEA"],
     },
+    KnownEditor {
+        id: "xcode",
+        name: "Xcode",
+        mac_app: Some("Xcode.app"),
+        bins: &[],
+        win_exes: &[],
+        win_dirs: &[],
+    },
 ];
 
 #[derive(Debug, Clone, Serialize)]

@@ -6,7 +6,7 @@ import {Window} from 'happy-dom';
 import {bundle} from './helpers/bundle.mjs';
 const browser=new Window({url:'https://mira.test'});
 globalThis.window=browser;globalThis.document=browser.document;globalThis.IS_REACT_ACT_ENVIRONMENT=true;
-globalThis.ResizeObserver=class{observe(){}disconnect(){}};
+const observers=[];globalThis.ResizeObserver=class{constructor(callback){this.callback=callback;observers.push(this);}observe(element){this.element=element;}disconnect(){}};
 const {TurnChanges,ReviewChanges,createAppRuntime,openTurnReview,pullRequestPatch,getRenderablePatch,resolveFileDiffPath}=await bundle(`
 export {TurnChanges} from './src/components/TurnChanges';
 export {ReviewChanges} from './src/components/ReviewChanges';
@@ -16,7 +16,7 @@ export {pullRequestPatch} from './src/lib/pullRequestDiff';
 export {getRenderablePatch,resolveFileDiffPath} from './src/lib/diffRender';
 `,{
  'src/state/RuntimeProvider.tsx':`import {useSelector} from '@tanstack/react-store'; export const useAppRuntime=()=>globalThis.reviewRuntime; export const useOptionalRuntime=()=>globalThis.reviewRuntime; export function useWorkspaceUiField(key){const runtime=globalThis.reviewRuntime;return [useSelector(runtime.workspaceUi,s=>s[key]),value=>runtime.updateWorkspaceUi(key,value)];}`,
- 'src/lib/prefs.ts':`export const PREF_KEYS={};export const getPref=(key,fallback)=>fallback;export const getBoolPref=(key,fallback)=>fallback;export const useBoolPref=(key,fallback)=>[fallback,()=>{}];`,
+ 'src/lib/prefs.ts':`export const PREF_KEYS={};export const getPref=(key,fallback)=>fallback;export const getBoolPref=(key,fallback)=>fallback;export const useStringPref=(key,fallback)=>[fallback,()=>{}];export const useBoolPref=(key,fallback)=>[fallback,()=>{}];`,
  'src/lib/diffPrefs.ts':`export const useDiffOptions=()=>({});`,
  'src/components/diffs/ReviewDiffView.tsx':`export function ReviewDiffView({files}){return <div data-testid="review-diff">{files.map(f=><span key={f.filePath}>{f.filePath}</span>)}</div>;}`,
  'src/components/diffs/DiffFileTree.tsx':`export const DiffFileTree=()=>null;`,
@@ -46,4 +46,33 @@ test('PR hunks use Pierre parsing with real line numbers, rename paths and missi
  const parsed=getRenderablePatch(patch,'test');assert.equal(parsed.kind,'files');assert.equal(parsed.files.length,1);assert.equal(resolveFileDiffPath(parsed.files[0]),file.filename);
  assert.equal(parsed.files[0].hunks[0].deletionStart,40);assert.equal(parsed.files[0].hunks[0].additionStart,41);
  assert.equal(pullRequestPatch({...file,patch:null}),null);
+});
+
+test('embedded Diff source follows the selected snapshot including the latest repeated prompt',async()=>{
+ const runtime=createAppRuntime({backend:'https://mira.test',account:'test'});globalThis.reviewRuntime=runtime;
+ runtime.turnCommands.hydrate('chat-a',false,[]);
+ const latest={...summary,occurrence:0};
+ runtime.updateSessionData('entries',[summary.text,'another',summary.text].map(content=>({kind:'msg',msg:{role:'user',content}})));
+ runtime.updateSessionData('turnDiffs',[latest,summary]);
+ globalThis.fetch=async()=>new Response(JSON.stringify({before:'old\n',after:'new\n'}));
+ openTurnReview(runtime,latest);
+ const host=document.createElement('div');document.body.append(host);const root=createRoot(host);
+ try {
+  await act(()=>root.render(React.createElement(ReviewChanges,{embedded:true,open:true,onClose(){},onChanged(){},onSendComments(){}})));await flush();
+  const selector=host.querySelector('[aria-label="Changes source"]');
+  assert.equal(selector.selectedOptions[0].textContent,'Latest turn');
+  assert.equal(host.querySelector('.fixed'),null,'embedded review has no modal backdrop');
+  const split=host.querySelector('[aria-label="Side by side diff"]');
+  assert.equal(split.disabled,true,'narrow pane uses unified diff');
+  const observer=observers.at(-1);
+  Object.defineProperty(observer.element,'clientWidth',{value:800,configurable:true});
+  await act(()=>observer.callback());
+  assert.equal(split.disabled,false,'split becomes available when the pane widens');
+  await act(()=>{selector.value='1';selector.dispatchEvent(new window.Event('change',{bubbles:true}));});await flush();
+  assert.deepEqual(runtime.workspaceUi.get().reviewTurn.summary,summary);
+  assert.equal(selector.value,'1');
+  assert.ok(!selector.querySelector('option[value="1"]').textContent.includes('Latest turn'));
+  await act(()=>{selector.value='changes';selector.dispatchEvent(new window.Event('change',{bubbles:true}));});
+  assert.equal(runtime.workspaceUi.get().reviewTurn,null);
+ } finally {await act(()=>root.unmount());await runtime.dispose();host.remove();delete globalThis.reviewRuntime;}
 });

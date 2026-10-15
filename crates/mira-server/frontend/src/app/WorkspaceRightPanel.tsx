@@ -1,5 +1,8 @@
+import { TRAFFIC_LIGHT_INSET, hasHiddenTitleBar } from '../lib/desktop';
+import { ReviewChanges } from '../lazyViews';
+import { useWorkspaceUiField } from '../state/RuntimeProvider';
 import { useSelector } from '@tanstack/react-store';
-import { useEffect,useMemo } from 'react';
+import { useEffect,useMemo,useState } from 'react';
 import { LazyBoundary } from '../components/LazyBoundary';
 import {
 ActivityPane,
@@ -18,6 +21,8 @@ import type { WorkspaceRuntime } from './WorkspaceRuntime';
 export function WorkspaceRightPanel(
   context: Pick<
     WorkspaceRuntime,
+    | 'onSend'
+    | 'refreshRepo'
     | 'panelOpen'
     | 'phone'
     | 'subagentTabs'
@@ -49,6 +54,15 @@ export function WorkspaceRightPanel(
   >,
 ) {
   const runtime = useAppRuntime();
+  const [expanded, setExpanded] = useState(false);
+  useEffect(() => { if (!context.panelOpen) setExpanded(false); }, [context.panelOpen]);
+  const [reviewOpen, setReviewOpen] = useWorkspaceUiField('reviewOpen');
+  const [reviewFocus] = useWorkspaceUiField('reviewFocus');
+  useEffect(() => {
+    if (!reviewOpen) return;
+    context.openToolPane('diff');
+    setReviewOpen(false);
+  }, [reviewOpen, context.openToolPane, setReviewOpen]);
   const entries = useLiveEntries();
   const streams = useSelector(runtime.sessionState, state => selectActiveSession(state).subagentState);
   const { activityTurns } = useMemo(() => liveTranscriptView(entries, context.historyOffsetRef.current), [entries]);
@@ -103,11 +117,13 @@ export function WorkspaceRightPanel(
           // On a phone the panel is a full-screen sheet over the chat; its
           // close button returns there.
           className={
-            phone
+            expanded && !phone
+              ? 'fixed inset-2 z-40 min-h-0 min-w-0 bg-background shadow-2xl'
+              : phone
               ? 'pt-safe pb-safe px-safe fixed left-0 right-0 top-0 z-40 flex flex-col bg-background'
               : 'min-h-0 min-w-0 py-2 pr-2'
           }
-          style={phone ? { height: 'var(--app-height, 100dvh)' } : undefined}
+          style={phone ? { height: 'var(--app-height, 100dvh)' } : expanded ? { top: hasHiddenTitleBar() ? TRAFFIC_LIGHT_INSET.centerY * 2 : 8 } : undefined}
         >
           <div
             className={
@@ -118,6 +134,9 @@ export function WorkspaceRightPanel(
           >
             <LazyBoundary>
               <SubagentPanel
+                expanded={expanded}
+                onToggleExpand={phone ? undefined : () => setExpanded(value => !value)}
+                diffPane={<LazyBoundary><ReviewChanges embedded open onClose={() => context.closeAnyTab('tool:diff')} onSendComments={context.onSend} onChanged={context.refreshRepo} focusPath={reviewFocus} /></LazyBoundary>}
                 tabs={subagentTabs}
                 fileTabs={fileTabs}
                 toolTabs={toolTabs}
@@ -182,7 +201,7 @@ export function WorkspaceRightPanel(
                 onCloseTab={closeAnyTab}
                 onClose={closeSubagentPanel}
                 onReview={replyToSubagentReview}
-                onResizeStart={handlePanelResizeStart}
+                onResizeStart={expanded ? () => {} : handlePanelResizeStart}
                 onOpenFile={openFileTab}
               />
             </LazyBoundary>

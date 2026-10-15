@@ -9,18 +9,18 @@ import { useDiffOptions } from '../lib/diffPrefs';
 const button = 'rounded-md border border-border px-3 py-1.5 text-xs hover:bg-accent disabled:opacity-40';
 const labels = { core: 'Core change', dependent: 'Depends on it', tests: 'Tests', incidental: 'Incidental edits' };
 
-export function GuidedWalkthrough({ initialSource = { kind: 'session' }, onChanged, onClose }: {
-  initialSource?: WalkthroughSource; onChanged: () => void; onClose: () => void;
+export function GuidedWalkthrough({ initialSource = { kind: 'session' }, onChanged, onClose, narrow = false }: {
+  narrow?: boolean; initialSource?: WalkthroughSource; onChanged: () => void; onClose: () => void;
 }) {
   const runtime = useOptionalRuntime();
   const sessionId = runtime?.sessionState.get().active ?? runtime?.sessionState.get().selected ?? undefined;
   // Remount all state when the owning chat changes. Async work stays pinned to
   // the original session; responses cannot appear in the next chat's review.
-  return <Walkthrough key={sessionId ?? 'standalone'} sessionId={sessionId} initialSource={initialSource} onChanged={onChanged} onClose={onClose} />;
+  return <Walkthrough key={sessionId ?? 'standalone'} sessionId={sessionId} initialSource={initialSource} onChanged={onChanged} onClose={onClose} narrow={narrow} />;
 }
 
-function Walkthrough({ sessionId, initialSource, onChanged, onClose }: {
-  sessionId?: string; initialSource: WalkthroughSource; onChanged: () => void; onClose: () => void;
+function Walkthrough({ sessionId, initialSource, onChanged, onClose, narrow }: {
+  narrow?: boolean; sessionId?: string; initialSource: WalkthroughSource; onChanged: () => void; onClose: () => void;
 }) {
   const [kind, setKind] = useState<WalkthroughSource['kind']>(initialSource.kind);
   const [input, setInput] = useState(initialSource.kind === 'branch' ? initialSource.range : initialSource.kind === 'pr' ? `${initialSource.owner}/${initialSource.repo}/${initialSource.number}` : 'main...HEAD');
@@ -127,7 +127,7 @@ function Walkthrough({ sessionId, initialSource, onChanged, onClose }: {
     finally { setAsking(false); }
   }
   const pending = busy || asking;
-  return <section className="flex h-full min-h-0 flex-col" aria-label="Guided walkthrough">
+  return <section className="review-container flex h-full min-h-0 min-w-0 flex-col" aria-label="Guided walkthrough">
     <div className="flex flex-wrap items-end gap-2 border-b border-border p-3">
       <label className="flex flex-col gap-1 text-xs">Review source
         <select aria-label="Review source" className="rounded border border-border bg-background p-1.5" disabled={pending} value={kind} onChange={e => { setKind(e.target.value as WalkthroughSource['kind']); setPlan(null); setError(null); setInput(e.target.value === 'branch' ? 'main...HEAD' : ''); }}>
@@ -147,7 +147,7 @@ function Walkthrough({ sessionId, initialSource, onChanged, onClose }: {
     {plan?.stops.length === 0 && <p className="p-5 text-sm">No changes in this source.</p>}
     {plan && stop && <>
       <div className="flex min-h-0 flex-1">
-        <nav aria-label="Walkthrough stops" className="hidden w-56 shrink-0 overflow-auto border-r border-border p-2 md:block">
+        <nav aria-label="Walkthrough stops" className="review-file-nav shrink-0 overflow-auto border-r border-border p-2">
           {plan.stops.map((s, i) => s.category !== 'incidental' && <button key={s.file_index} className={`mb-1 block w-full rounded p-2 text-left text-xs ${i === index ? 'bg-accent' : 'hover:bg-accent/50'}`} aria-current={i === index ? 'step' : undefined} disabled={pending} onClick={() => go(i)}>
             <span className="block text-muted-foreground">{i + 1}. {labels[s.category]}</span>
             <span className="break-all">{fileName(plan.files[s.file_index])}</span>
@@ -172,7 +172,7 @@ function Walkthrough({ sessionId, initialSource, onChanged, onClose }: {
           </div>
           <div className="min-h-0 flex-1 overflow-auto">
             {rendered.length ? <ReviewDiffView enableComments={false} codeViewKey={`walkthrough:${fileIndex}:${hunk}:${rendered[0].fileVersion}`} files={rendered} comments={[]} onAddComment={() => {}} onUpdateCommentText={() => {}} onRemoveComment={() => {}}
-              options={{ ...diffOptions, enableLineSelection: false, enableGutterUtility: false }} className="h-full min-h-48" renderHeaderFilenameSuffix={() => null} renderHeaderPrefix={() => null} /> : <pre className="overflow-auto p-4 text-xs">{patch}</pre>}
+              options={{ ...diffOptions, diffStyle: narrow ? 'unified' : diffOptions.diffStyle, enableLineSelection: false, enableGutterUtility: false }} className="h-full min-h-48" renderHeaderFilenameSuffix={() => null} renderHeaderPrefix={() => null} /> : <pre className="overflow-auto p-4 text-xs">{patch}</pre>}
           </div>
           <div className="flex flex-wrap items-center gap-2 border-t border-border p-3">
             {hunks.length > 0 && <><button className={button} disabled={pending || hunk === 0} onClick={() => { setHunk(hunk - 1); setConfirm(false); }}>Previous hunk</button><span className="text-xs">Hunk {hunk + 1}/{hunks.length}</span><button className={button} disabled={pending || hunk === hunks.length - 1} onClick={() => { setHunk(hunk + 1); setConfirm(false); }}>Next hunk</button></>}

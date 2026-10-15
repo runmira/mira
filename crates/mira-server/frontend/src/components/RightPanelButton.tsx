@@ -1,3 +1,4 @@
+import { Tip } from './ui/Tip';
 import { useRef, useState } from 'react';
 import { ChevronDown, PanelRight } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -128,16 +129,16 @@ export function PanelNewTabButton({
 
   return (
     <div className="relative shrink-0">
-      <button
+      <Tip label="New tab" side="bottom" align="end"><button
         type="button"
         onClick={() => setMenu((v) => !v)}
         aria-haspopup="menu"
         aria-expanded={menu}
-        title="New tab"
-        className="flex size-6 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-fg/[0.05] hover:text-foreground"
+        aria-label="New tab"
+        className="flex size-6 items-center justify-center rounded-full bg-secondary text-muted-foreground transition-colors hover:bg-fg/[0.05] hover:text-foreground"
       >
         <PlusIcon />
-      </button>
+      </button></Tip>
 
       <Menu open={menu} onOpenChange={setMenu} label="New tab" minWidth={224}>
         <MenuLabel>Open</MenuLabel>
