@@ -82,6 +82,7 @@ export interface ReviewDiffFile {
 }
 
 interface ReviewDiffViewProps {
+  enableComments?: boolean;
   codeViewKey: string;
   files: ReadonlyArray<ReviewDiffFile>;
   comments: ReadonlyArray<MiraReviewComment>;
@@ -108,6 +109,7 @@ interface DiffSelectionContext {
 
 export function ReviewDiffView({
   codeViewKey,
+  enableComments = true,
   files,
   comments,
   onAddComment,
@@ -255,8 +257,8 @@ export function ReviewDiffView({
       onSelectedLinesChange={setSelectedLines}
       options={{
         ...options,
-        enableGutterUtility: !hasOpenComment,
-        enableLineSelection: !hasOpenComment,
+        enableGutterUtility: enableComments && !hasOpenComment,
+        enableLineSelection: enableComments && !hasOpenComment,
         onGutterUtilityClick: beginComment,
       }}
       renderHeaderFilenameSuffix={(item) =>

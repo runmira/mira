@@ -129,7 +129,7 @@ impl ProgressSink for BroadcastSink {
 
 /* ---------- diff sourcing (mirrors CLI logic) ---------- */
 
-async fn collect_diff_async(req: &ReviewRequest, cwd: &Path) -> anyhow::Result<String> {
+pub(crate) async fn collect_diff_async(req: &ReviewRequest, cwd: &Path) -> anyhow::Result<String> {
     if let Some(d) = &req.diff {
         return Ok(d.clone());
     }
@@ -143,6 +143,19 @@ async fn collect_diff_async(req: &ReviewRequest, cwd: &Path) -> anyhow::Result<S
             if let Some(token) = crate::pull_requests::resolve_github_token() {
                 return fetch_pr_diff_rest(&token, owner, repo, pr).await;
             }
+        }
+        if let (Some(owner), Some(repo)) = (req.owner.as_deref(), req.repo.as_deref()) {
+            return run_capture(
+                cwd,
+                &[
+                    "gh",
+                    "pr",
+                    "diff",
+                    &pr.to_string(),
+                    "--repo",
+                    &format!("{owner}/{repo}"),
+                ],
+            );
         }
         return run_capture(cwd, &["gh", "pr", "diff", &pr.to_string()]);
     }

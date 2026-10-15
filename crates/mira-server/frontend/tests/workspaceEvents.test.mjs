@@ -252,3 +252,16 @@ test('Codex model picks target the existing native model option without starting
  commands.onSetModel('gpt-6.1-sol');
  assert.deepEqual(sent,[{type:'acp_set_config_option',option_id:'model',value:'gpt-6.1-sol'}]);
 });
+
+
+test('completed shell and generic ACP tools refresh context changes before the turn ends', () => {
+  const h = harness(); let refreshed = 0;
+  const handler = useAgentEvents({...h.context, turnCommands:h.runtime.turnCommands, refreshRepo(){refreshed++;}});
+  const call = {id:'shell-change', title:'Run command', kind:'execute', status:'in_progress', content:[], locations:[]};
+  handler({type:'acp_tool_call', call});
+  assert.equal(refreshed, 0);
+  handler({type:'acp_tool_call_update', call:{...call,status:'completed'}});
+  assert.equal(refreshed, 1, 'shell edits refresh without waiting for ACP turn-end');
+  handler({type:'acp_tool_call_update', call:{...call,id:'generic',kind:'other',status:'completed'}});
+  assert.equal(refreshed, 2, 'generic MCP tools may mutate files too');
+});

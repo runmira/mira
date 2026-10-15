@@ -1,3 +1,4 @@
+import { GuidedWalkthrough } from './GuidedWalkthrough';
 import { useOptionalRuntime } from '../state/RuntimeProvider';
 /**
  * "Review changes" drawer: every file this session changed, rendered with
@@ -40,6 +41,7 @@ export function ReviewChanges({
   onChanged: () => void;
 }) {
 
+  const [guided, setGuided] = useState(false);
   const requestRuntime = useOptionalRuntime();
   const requestSession = () => requestRuntime?.sessionState.get().active ?? requestRuntime?.sessionState.get().selected ?? undefined;  const [files, setFiles] = useState<SessionChange[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -192,7 +194,8 @@ export function ReviewChanges({
             </span>
           )}
           <div className="ml-auto flex items-center gap-1">
-            {reviewFiles.length > 0 && (
+            <HeaderButton onClick={() => setGuided(value => !value)}>{guided ? "Show files" : "Walk me through it"}</HeaderButton>
+            {!guided && reviewFiles.length > 0 && (
               <>
                 <HeaderButton
                   onClick={() =>
@@ -230,6 +233,7 @@ export function ReviewChanges({
           </div>
         </header>
 
+        {guided ? <div className="min-h-0 flex-1"><GuidedWalkthrough onChanged={() => { load(); onChanged(); }} onClose={() => setGuided(false)} /></div> : <>
         <div className="flex min-h-0 flex-1">
           {showNav && (
             <nav className="hidden w-60 shrink-0 border-r border-border/60 md:block">
@@ -313,6 +317,7 @@ export function ReviewChanges({
             Send {count > 0 ? `${count} ` : ''}comment{count === 1 ? '' : 's'}
           </button>
         </footer>
+        </>}
       </aside>
     </div>
   );

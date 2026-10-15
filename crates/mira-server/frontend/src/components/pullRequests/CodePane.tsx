@@ -1,3 +1,4 @@
+import { GuidedWalkthrough } from '../GuidedWalkthrough';
 import { cn } from '@/lib/utils';
 import { ChevronDown, Code as CodeIcon, LoaderCircle } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
@@ -6,6 +7,7 @@ import { Selection } from './types';
 /* ---------- code pane (Files changed) ---------- */
 
 export function CodePane({ selection }: { selection: Selection }) {
+  const [guided, setGuided] = useState(false);
   const [files, setFiles] = useState<FileChangeView[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -19,6 +21,8 @@ export function CodePane({ selection }: { selection: Selection }) {
       .catch((e) => setError(String((e as Error).message)))
       .finally(() => setLoading(false));
   }, [selection.owner, selection.repo, selection.number]);
+
+  if (guided) return <GuidedWalkthrough key={`${selection.owner}/${selection.repo}/${selection.number}`} initialSource={{ kind: 'pr', owner: selection.owner, repo: selection.repo, number: selection.number }} onChanged={() => {}} onClose={() => setGuided(false)} />;
 
   if (loading) {
     return (
@@ -41,6 +45,7 @@ export function CodePane({ selection }: { selection: Selection }) {
   return (
     <div className="mx-auto max-w-5xl px-4 py-4">
       <div className="mb-3 flex items-center gap-2 text-[12px] text-muted-foreground">
+        <button type="button" className="rounded border border-border px-2 py-1 hover:bg-accent" onClick={() => setGuided(true)}>Walk me through it</button>
         <CodeIcon className="size-4" fill="currentColor" />
         <span>
           {files.length} file{files.length === 1 ? '' : 's'} changed

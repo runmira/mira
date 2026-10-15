@@ -206,8 +206,12 @@ pub async fn session_diff(State(state): State<AppState>) -> Response {
 /// Full unified diffs for every file this chat changed that still differs
 /// from HEAD — the data behind the "Review changes" panel.
 pub async fn session_changes(State(state): State<AppState>) -> Response {
-    let (cwd, files) = session_files(&state).await;
-    let out = tokio::task::spawn_blocking(move || {
+    Json(serde_json::json!({ "files": session_change_views(&state).await })).into_response()
+}
+
+pub(crate) async fn session_change_views(state: &AppState) -> Vec<serde_json::Value> {
+    let (cwd, files) = session_files(state).await;
+    tokio::task::spawn_blocking(move || {
         files
             .into_iter()
             .map(|f| {
@@ -236,8 +240,7 @@ pub async fn session_changes(State(state): State<AppState>) -> Response {
             .collect::<Vec<_>>()
     })
     .await
-    .unwrap_or_default();
-    Json(serde_json::json!({ "files": out })).into_response()
+    .unwrap_or_default()
 }
 
 #[derive(Deserialize)]
