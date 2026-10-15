@@ -340,7 +340,7 @@ function TimelineCard({ timeline }: { timeline: WorkDetail['timeline'] }) {
               <span className="z-[1] flex size-4 items-center justify-center rounded-full bg-background ring-1 ring-border">
                 <Icon className="size-2.5 text-muted-foreground" />
               </span>
-              <span className="leading-4 text-foreground/85">{e.text}</span>
+              <span className="line-clamp-2 break-words leading-4 text-foreground/85" title={e.text}>{e.text}</span>
               <span className="text-[10.5px] leading-4 tabular-nums text-muted-foreground/60">{timeAgo(e.at)}</span>
             </li>
           );
