@@ -76,9 +76,14 @@ export function hasHiddenTitleBar(): boolean {
 /** Padding that clears the macOS traffic lights, in the same shape the
  *  traffic lights occupy. The main toolbar owns window dragging.
  *
+ *  `centerY` is the main toolbar's centre line (it sits 8px down and is
+ *  44px tall), so the lights, the sidebar toggle and the chat title share
+ *  one line; the sidebar's header row (`top + 8`) ends where that toolbar
+ *  does.
+ *
  *  The desktop app places the lights itself (`traffic_light_position` in
  *  apps/desktop): `centerY` is their centre line and must match it. */
-export const TRAFFIC_LIGHT_INSET = { top: 40, left: 78, centerY: 24 } as const;
+export const TRAFFIC_LIGHT_INSET = { top: 44, left: 78, centerY: 30 } as const;
 
 export type Channel = 'stable' | 'beta' | 'alpha';
 

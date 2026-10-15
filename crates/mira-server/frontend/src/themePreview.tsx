@@ -23,7 +23,7 @@ if (new URLSearchParams(location.search).get('chrome') === 'mac') {
   window.__MIRA_DESKTOP__ = true;
   window.__MIRA_CHROME__ = { hiddenTitleBar: true, translucent: false };
   const lights = document.createElement('div');
-  lights.style.cssText = 'position:fixed;left:20px;top:18px;display:flex;gap:8px;z-index:100;pointer-events:none';
+  lights.style.cssText = 'position:fixed;left:20px;top:24px;display:flex;gap:8px;z-index:100;pointer-events:none';
   for (const c of ['#ff5f57', '#febc2e', '#28c840']) {
     const dot = document.createElement('span');
     dot.style.cssText = `width:12px;height:12px;border-radius:50%;background:${c}`;

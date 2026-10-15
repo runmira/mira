@@ -38,7 +38,12 @@ export function OnboardingShell({
 
       <div
         className="relative z-10 flex h-14 shrink-0 items-center gap-3 pr-5"
-        style={{ paddingLeft: inset ? TRAFFIC_LIGHT_INSET.left + 8 : 24 }}
+        // On the desktop the row is centred on the traffic lights' line.
+        style={
+          inset
+            ? { paddingLeft: TRAFFIC_LIGHT_INSET.left + 8, height: TRAFFIC_LIGHT_INSET.centerY * 2 }
+            : { paddingLeft: 24 }
+        }
       >
         <img src={miraLogo} alt="" draggable={false} className="pointer-events-none size-6 rounded-full" />
         <span className="pointer-events-none text-[14px] font-semibold tracking-tight">Mira</span>

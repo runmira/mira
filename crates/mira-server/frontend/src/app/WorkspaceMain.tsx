@@ -303,7 +303,7 @@ export function WorkspaceMain(
             notch
               ? ({
                   clipPath: `path('${notchedPath(notch.w, notch.h)}')`,
-                  '--window-notch': `${NOTCH.width + 8}px`,
+                  '--window-notch': `${NOTCH.width + 16}px`,
                 } as React.CSSProperties)
               : undefined
           }
@@ -359,7 +359,7 @@ export function WorkspaceMain(
                   <PanelLeft className="size-4" />
                 </button>
                 )}
-                <span className="min-w-0 flex-1 truncate text-[13.5px] text-foreground">
+                <span className="min-w-0 flex-1 truncate text-[15px] font-semibold tracking-tight text-foreground">
                   {sessionTitle ?? titleFromEntries(entries)}
                 </span>
                 {(sessionDiff.uncommitted ?? 0) > 0 && (

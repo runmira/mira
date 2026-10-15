@@ -59,8 +59,9 @@ export function WindowControls({
 
 /** The notch the hidden-sidebar pane leaves for the traffic lights and the
  *  toggle, in the pane's own coordinates (its top-left corner is 0,0). It
- *  reaches past the toggle and a little below the lights' line. */
-export const NOTCH = { width: 116, height: 38, radius: 12 } as const;
+ *  reaches past the toggle and is exactly as tall as the pane's toolbar
+ *  (`h-11`), so its ledge and the toolbar's divider are one line. */
+export const NOTCH = { width: 116, height: 44, radius: 12 } as const;
 
 /** Outline of a `w`×`h` rounded rectangle with an inverted-L notch cut from
  *  its top-left: the pane's top edge starts after the notch, its left edge
