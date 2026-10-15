@@ -21,6 +21,8 @@
 //! missed: the agent's turns become a note in the harness history, and the
 //! provider's turns ride in front of the agent's next prompt. Each side
 //! only receives what it has not already seen, tracked by [`Handoff`].
+//! What goes in, and how much, is [`crate::handoff`]'s call: whole items,
+//! sized to the receiving engine's window.
 //!
 //! # Starts are serialized
 //!
@@ -97,15 +99,102 @@ pub struct Handoff {
     pub agent_seen_harness: usize,
     /// Sidecar line count the harness has been given.
     pub harness_seen_agent: usize,
-    /// Set when the session moved provider → agent: the agent's next
-    /// prompt carries the provider turns it missed.
-    pub agent_needs_context: bool,
-    /// Set when the session moved from one agent to another: what the
-    /// previous agent did, for the new one's next prompt.
-    pub previous_agent: Option<String>,
+    /// History the agent is owed in front of its next prompt, after a
+    /// switch to it from a provider or another agent.
+    pub pending: Option<PendingContext>,
     /// Facts the agent must hear before its next prompt, e.g. background
     /// work a restart cancelled. Delivered once, then dropped.
     pub notes: Vec<String>,
+    /// Context taken for a prompt that has not been accepted yet. Accepted,
+    /// it is dropped ([`confirm_context_for_agent`]); otherwise the next
+    /// prompt takes it again, so a failed send neither loses it nor, once
+    /// accepted, repeats it.
+    in_flight: Option<InFlight>,
+}
+
+/// Which history items a switch owes the agent: harness messages from
+/// `harness_from`, sidecar lines from `agent_from`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingContext {
+    /// The engine that was driving, as the handoff names it.
+    pub from: String,
+    pub harness_from: usize,
+    pub agent_from: usize,
+}
+
+impl PendingContext {
+    fn covers(&self, source: crate::handoff::Source) -> bool {
+        match source {
+            crate::handoff::Source::Harness(i) => i >= self.harness_from,
+            crate::handoff::Source::Agent(i) => i >= self.agent_from,
+        }
+    }
+
+    /// Two switches before the agent's next prompt: it is owed both.
+    fn merge(self, newer: PendingContext) -> PendingContext {
+        PendingContext {
+            from: newer.from,
+            harness_from: self.harness_from.min(newer.harness_from),
+            agent_from: self.agent_from.min(newer.agent_from),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct InFlight {
+    pending: Option<PendingContext>,
+    notes: Vec<String>,
+    harness_len: usize,
+}
+
+impl Handoff {
+    /// Owe the agent `context`, on top of anything still owed.
+    pub fn owe(&mut self, context: PendingContext) {
+        self.pending = Some(match self.pending.take() {
+            Some(old) => old.merge(context),
+            None => context,
+        });
+    }
+
+    /// Take what the agent is owed for a prompt, putting back anything a
+    /// prompt that was never accepted took. It stays in flight until
+    /// [`Self::confirm`].
+    fn take_for_prompt(&mut self, harness_len: usize) -> (Option<PendingContext>, Vec<String>) {
+        self.restore_in_flight();
+        let pending = self.pending.take();
+        let notes = std::mem::take(&mut self.notes);
+        self.in_flight = Some(InFlight {
+            pending: pending.clone(),
+            notes: notes.clone(),
+            harness_len,
+        });
+        (pending, notes)
+    }
+
+    /// The prompt that took the in-flight context was accepted.
+    fn confirm(&mut self) {
+        if let Some(flight) = self.in_flight.take() {
+            if flight.pending.is_some() {
+                self.agent_seen_harness = self.agent_seen_harness.max(flight.harness_len);
+            }
+        }
+    }
+
+    /// Put back context taken for a prompt that was never accepted.
+    fn restore_in_flight(&mut self) {
+        let Some(flight) = self.in_flight.take() else {
+            return;
+        };
+        if let Some(pending) = flight.pending {
+            self.pending = Some(match self.pending.take() {
+                Some(newer) => pending.merge(newer),
+                None => pending,
+            });
+        }
+        let mut notes = flight.notes;
+        notes.append(&mut self.notes);
+        self.notes = notes;
+    }
 }
 
 /// Per-slot engine runtime. Lives on [`SessionSlot`].
@@ -141,6 +230,8 @@ pub struct EngineRuntime {
     pub phase: Mutex<AgentPhase>,
     /// The agent's running model as it last reported it.
     pub reported_model: std::sync::Mutex<Option<String>>,
+    /// The agent's context use as it last reported it: (used, window).
+    pub reported_usage: std::sync::Mutex<Option<(u64, u64)>>,
     /// Set once the transcript logger is subscribed, so restarts do not
     /// stack a second logger that writes every frame twice.
     pub logger_started: AtomicBool,
@@ -631,7 +722,19 @@ pub async fn select_agent(state: &AppState, slot: &Arc<SessionSlot>, mut params:
         hand_agent_turns_to_agent(state, slot, prev, &params).await;
     }
     if from_provider && !slot.session.read().await.transcript().await.is_empty() {
-        slot.engine.handoff.lock().await.agent_needs_context = true;
+        let from = provider_ref(state, slot, None).await["display_name"]
+            .as_str()
+            .unwrap_or("Mira")
+            .to_string();
+        let mut handoff = slot.engine.handoff.lock().await;
+        let harness_from = handoff.agent_seen_harness;
+        handoff.owe(PendingContext {
+            from,
+            harness_from,
+            // The agent's own turns are already in its native session.
+            agent_from: usize::MAX,
+        });
+        drop(handoff);
         // Mark where the provider's turns stop, so a reload replays the two
         // histories interleaved in the order they happened rather than all
         // provider turns followed by all agent turns.
@@ -810,10 +913,6 @@ pub(crate) async fn remember_agent(slot: &SessionSlot, params: &AcpLaunchParams,
         .await;
 }
 
-/// Bound on what one handoff carries. Enough for the gist of a long
-/// exchange; the tail wins because recent turns matter most.
-const HANDOFF_MAX_CHARS: usize = 12_000;
-
 /// Agent → provider: the agent's turns the harness has not seen, as a note.
 async fn hand_agent_turns_to_harness(
     state: &AppState,
@@ -848,18 +947,32 @@ async fn hand_agent_turns_to_harness(
     let mut handoff = slot.engine.handoff.lock().await;
     let from = handoff.harness_seen_agent.min(lines.len());
     handoff.harness_seen_agent = lines.len();
-    let text = agent_lines_to_text(&lines[from..]);
-    if text.trim().is_empty() {
-        return;
-    }
-    let note = format!(
-        "The user just switched this conversation from the external agent {} back to you. \
-         What happened while it was driving (its tool calls ran on this same machine and \
-         project):\n\n{}\n\nContinue from here.",
-        params.display_name(),
-        tail_chars(&text, HANDOFF_MAX_CHARS),
+    let session = slot.session.read().await;
+    let transcript = session.transcript().await;
+    let candidates: Vec<crate::handoff::Item> = crate::handoff::chat_items(&transcript, &lines)
+        .into_iter()
+        .filter(|i| matches!(i.source, crate::handoff::Source::Agent(l) if l >= from))
+        .collect();
+    let cfg = session.config().await;
+    let window = mira_harness::history::context_window_with(&cfg.model, cfg.context_window);
+    let budget = crate::handoff::budget(
+        Some(window as u64),
+        mira_harness::history::estimated_tokens(&transcript) as u64,
+        0,
+        crate::handoff::configured_tokens(),
     );
-    slot.session.read().await.push_note(note).await;
+    // Mira's own model has no `mira_thread_read`; the note is all it gets.
+    let Some(text) = crate::handoff::render(&candidates, budget, &params.display_name(), false)
+    else {
+        return;
+    };
+    session
+        .push_note(format!(
+            "The user just switched this conversation from the external agent {} back to \
+             you.\n\n{text}Continue from here.",
+            params.display_name(),
+        ))
+        .await;
 }
 
 /// Agent → agent: what the previous agent did since the last switch, for
@@ -879,12 +992,6 @@ async fn hand_agent_turns_to_agent(
         return;
     };
     let lines = mira_acp::agent_sessions::read_lines(&path);
-    // The previous agent's stretch starts after the last engine switch.
-    let start = lines
-        .iter()
-        .rposition(|l| l.get("switch").is_some())
-        .map_or(0, |i| i + 1);
-    let text = agent_lines_to_text(&lines[start..]);
     let harness_len = slot.session.read().await.transcript().await.len();
     mira_acp::agent_sessions::append_line_to(
         &path,
@@ -903,15 +1010,13 @@ async fn hand_agent_turns_to_agent(
     let mut handoff = slot.engine.handoff.lock().await;
     handoff.harness_seen_agent = lines.len() + 1;
     handoff.agent_seen_harness = 0;
-    handoff.agent_needs_context = harness_len > 0;
-    handoff.previous_agent = (!text.trim().is_empty()).then(|| {
-        format!(
-            "<previous_agent>\nThe user just switched this conversation to you from {}. \
-             What happened while it was driving (its tool calls ran on this same machine \
-             and project):\n\n{}</previous_agent>\n\n",
-            from.display_name(),
-            tail_chars(&text, HANDOFF_MAX_CHARS),
-        )
+    // The new agent saw none of this chat: it is owed all of it, which
+    // supersedes whatever the previous agent was still owed.
+    handoff.pending = None;
+    handoff.owe(PendingContext {
+        from: from.display_name(),
+        harness_from: 0,
+        agent_from: 0,
     });
 }
 
@@ -963,48 +1068,58 @@ pub async fn note_for_agent(slot: &SessionSlot, note: String) {
 }
 
 /// Everything the agent missed, formatted to sit in front of its next
-/// prompt: provider turns (provider → agent), the previous agent's turns
-/// (agent → agent), and queued notes. `None` when there is nothing to hand
-/// over, or the agent already has it.
-pub async fn take_context_for_agent(slot: &SessionSlot) -> Option<String> {
+/// prompt (`incoming`): the history a switch owes it, sized to its window,
+/// and queued notes. `None` when there is nothing to hand over, or the
+/// agent already has it. What this returns stays owed until
+/// [`confirm_context_for_agent`] says the prompt was accepted.
+pub async fn take_context_for_agent(
+    state: &AppState,
+    slot: &SessionSlot,
+    incoming: &str,
+) -> Option<String> {
     let mut handoff = slot.engine.handoff.lock().await;
+    let transcript = slot.session.read().await.transcript().await;
+    let (pending, notes) = handoff.take_for_prompt(transcript.len());
     let mut out = String::new();
-    if handoff.agent_needs_context {
-        handoff.agent_needs_context = false;
-        let transcript = slot.session.read().await.transcript().await;
-        let from = handoff.agent_seen_harness.min(transcript.len());
-        handoff.agent_seen_harness = transcript.len();
-        let mut text = String::new();
-        for m in &transcript[from..] {
-            let who = match m.role {
-                mira_core::Role::User => "User",
-                mira_core::Role::Assistant => "Assistant",
-                _ => continue,
-            };
-            let body = m.content.as_deref().unwrap_or("").trim();
-            if body.is_empty() {
-                continue;
-            }
-            text.push_str(&format!("{who}: {body}\n\n"));
-        }
-        if !text.trim().is_empty() {
-            out.push_str(&format!(
-                "<conversation_so_far>\nThis conversation started with another assistant; you are \
-                 taking over. What was said so far:\n\n{}</conversation_so_far>\n\n",
-                tail_chars(&text, HANDOFF_MAX_CHARS),
-            ));
+    if let Some(pending) = &pending {
+        let lines = state
+            .store
+            .as_ref()
+            .and_then(|s| s.agent_log_path(&slot.id))
+            .map(|path| mira_acp::agent_sessions::read_lines(&path))
+            .unwrap_or_default();
+        let candidates: Vec<crate::handoff::Item> = crate::handoff::chat_items(&transcript, &lines)
+            .into_iter()
+            .filter(|i| pending.covers(i.source))
+            .collect();
+        let usage = *slot
+            .engine
+            .reported_usage
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let budget = crate::handoff::budget(
+            usage.map(|(_, window)| window),
+            usage.map_or(0, |(used, _)| used),
+            crate::handoff::approx_tokens(incoming),
+            crate::handoff::configured_tokens(),
+        );
+        if let Some(text) = crate::handoff::render(&candidates, budget, &pending.from, true) {
+            out.push_str(&text);
         }
     }
-    if let Some(previous) = handoff.previous_agent.take() {
-        out.push_str(&previous);
-    }
-    if !handoff.notes.is_empty() {
+    if !notes.is_empty() {
         out.push_str(&format!(
             "<mira_note>\n{}\n</mira_note>\n\n",
-            std::mem::take(&mut handoff.notes).join("\n")
+            notes.join("\n")
         ));
     }
     (!out.is_empty()).then_some(out)
+}
+
+/// The prompt carrying [`take_context_for_agent`]'s text was accepted:
+/// the agent has it now, so it is never sent again.
+pub async fn confirm_context_for_agent(slot: &SessionSlot) {
+    slot.engine.handoff.lock().await.confirm();
 }
 
 /// What a restart cancelled that the agent may still expect to hear back
@@ -1094,16 +1209,6 @@ pub(crate) fn agent_lines_to_text(lines: &[serde_json::Value]) -> String {
     out
 }
 
-/// The last `max` characters of `s`, on a char boundary, marked when cut.
-fn tail_chars(s: &str, max: usize) -> String {
-    let count = s.chars().count();
-    if count <= max {
-        return s.to_string();
-    }
-    let tail: String = s.chars().skip(count - max).collect();
-    format!("[…earlier turns omitted…]\n{tail}")
-}
-
 /// A model report belongs to the process that supplied it. Replacing that
 /// process must clear the report before publishing the next agent selection.
 pub(crate) fn clear_reported_model(runtime: &EngineRuntime) {
@@ -1111,11 +1216,22 @@ pub(crate) fn clear_reported_model(runtime: &EngineRuntime) {
         .reported_model
         .lock()
         .unwrap_or_else(|error| error.into_inner()) = None;
+    *runtime
+        .reported_usage
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = None;
 }
 
 /// Track the model an agent reports running, from its config-option frames.
 /// Returns true when it changed, so the caller can republish the engine.
 pub fn observe_frame(rt: &EngineRuntime, msg: &ServerMsg, active_driver: Option<&str>) -> bool {
+    // Context use sizes the next handoff (`take_context_for_agent`).
+    if let ServerMsg::AcpUsage { used, size, .. } = msg {
+        if active_driver.is_some() && *size > 0 {
+            *rt.reported_usage.lock().unwrap_or_else(|e| e.into_inner()) = Some((*used, *size));
+        }
+        return false;
+    }
     let ServerMsg::AcpConfigOptions { options, driver } = msg else {
         return false;
     };
@@ -1230,12 +1346,49 @@ mod tests {
     }
 
     #[test]
-    fn long_handoffs_keep_the_most_recent_turns() {
-        let s = format!("{}END", "x".repeat(50));
-        let t = tail_chars(&s, 10);
-        assert!(t.ends_with("END"));
-        assert!(t.starts_with("[…earlier turns omitted…]"));
-        assert_eq!(tail_chars("short", 10), "short");
+    fn a_handoff_is_delivered_once_and_survives_a_failed_send() {
+        let owed = |from: &str, harness_from, agent_from| PendingContext {
+            from: from.into(),
+            harness_from,
+            agent_from,
+        };
+        let mut h = Handoff::default();
+        h.owe(owed("Mira", 3, usize::MAX));
+        h.notes.push("restarted".into());
+
+        // Taken for a prompt that never lands; another switch meanwhile.
+        let (taken, notes) = h.take_for_prompt(5);
+        assert_eq!(taken, Some(owed("Mira", 3, usize::MAX)));
+        assert_eq!(notes, vec!["restarted".to_string()]);
+        h.owe(owed("Codex", 5, 2));
+
+        // The retry carries both, merged; nothing was lost.
+        let (taken, notes) = h.take_for_prompt(6);
+        assert_eq!(taken, Some(owed("Codex", 3, 2)));
+        assert_eq!(notes, vec!["restarted".to_string()]);
+
+        // Accepted: the agent has seen the harness, and nothing is owed.
+        h.confirm();
+        assert_eq!(h.agent_seen_harness, 6);
+        assert_eq!(h.take_for_prompt(6), (None, Vec::new()));
+        h.confirm();
+        assert_eq!(h.take_for_prompt(6), (None, Vec::new()), "never sent twice");
+    }
+
+    #[test]
+    fn usage_frames_size_the_next_handoff() {
+        let rt = EngineRuntime::default();
+        let usage = ServerMsg::AcpUsage {
+            used: 40_000,
+            size: 200_000,
+            cost: None,
+            compact_at: None,
+        };
+        assert!(!observe_frame(&rt, &usage, Some("codex")));
+        assert_eq!(*rt.reported_usage.lock().unwrap(), Some((40_000, 200_000)));
+        // A new agent starts unknown, not with the old one's window.
+        clear_reported_model(&rt);
+        assert_eq!(*rt.reported_usage.lock().unwrap(), None);
     }
 
     #[test]

@@ -446,6 +446,7 @@ pub const READ_ONLY_AGENT_TOOLS: &[&str] = &[
     "browser_tabs",
     "browser_wait",
     "read_output",
+    crate::handoff::READ_TOOL,
 ];
 
 /// Claude Code's `--allowedTools` value for Mira's read-only tools (its MCP
@@ -1157,6 +1158,7 @@ async fn mcp_one(
                     }
                 }
                 tools.extend(extra_agent_tools().into_iter().skip(1));
+                tools.push(crate::handoff::read_tool_spec());
                 // Only where there's a simulator or emulator to drive: each
                 // definition rides along on every request the agent makes.
                 if crate::devices::available() {
@@ -1200,6 +1202,16 @@ async fn mcp_one(
                     Err(e) => {
                         json!({ "content": [{ "type": "text", "text": e }], "isError": true })
                     }
+                }));
+            }
+            if name == crate::handoff::READ_TOOL {
+                let text = |t: String, err: bool| json!({ "content": [{ "type": "text", "text": t }], "isError": err });
+                let Some(slot) = mcp_slot(state, q).await else {
+                    return Some(ok(text("This chat has closed.".into(), true)));
+                };
+                return Some(ok(match thread_history(state, &slot, args).await {
+                    Ok(t) => text(t, false),
+                    Err(e) => text(e, true),
                 }));
             }
             if name.starts_with("thread_") {
@@ -1276,6 +1288,22 @@ async fn mcp_one(
         }
         other => err(-32601, format!("method not found: {other}")),
     })
+}
+
+/// `mira_thread_read`: page through this chat's whole history.
+async fn thread_history(
+    state: &AppState,
+    slot: &crate::slot::SessionSlot,
+    args: &Value,
+) -> Result<String, String> {
+    let transcript = slot.session.read().await.transcript().await;
+    let lines = state
+        .store
+        .as_ref()
+        .and_then(|s| s.agent_log_path(&slot.id))
+        .map(|path| mira_acp::agent_sessions::read_lines(&path))
+        .unwrap_or_default();
+    crate::handoff::read_tool(&crate::handoff::chat_items(&transcript, &lines), args)
 }
 
 /// `delegate_task`: run the task on another engine (asking first when the

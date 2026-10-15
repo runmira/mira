@@ -501,6 +501,47 @@
   fill: currentColor;
 }
 
+/* `#` issue / PR reference in the composer. The same soft pill as the
+   transcript's `GithubRef` chip, so a reference looks the same before
+   and after sending: state-tinted icon, accent number, muted title. */
+.issue-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.3rem;
+  max-width: 22rem;
+  margin: 0 0.05rem;
+  padding: 0 0.4rem;
+  border-radius: 0.375rem;
+  background: rgb(var(--fg-rgb) / 0.06);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  line-height: 1.45;
+  vertical-align: baseline;
+  user-select: none;
+  cursor: default;
+  white-space: nowrap;
+  transition: background-color 120ms ease;
+}
+.issue-chip:hover {
+  background: rgb(var(--fg-rgb) / 0.1);
+}
+.issue-chip-icon {
+  flex-shrink: 0;
+  width: 0.9em;
+  height: 0.9em;
+  align-self: center;
+}
+.issue-chip-number {
+  color: rgb(var(--mira-blue));
+}
+.issue-chip-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: hsl(var(--muted-foreground));
+  font-weight: 400;
+}
+
 /* Reduce motion (Settings → General → Appearance). Kills animation and
    transitions app-wide while keeping state changes instant. */
 .reduce-motion *,

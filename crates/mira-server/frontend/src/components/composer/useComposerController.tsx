@@ -30,6 +30,7 @@ type PaletteGroup,
 type SlashCommand,
 } from '../commands';
 import { MODES } from '../composer/ComposerMenus';
+import { useIssuePicker } from '../composer/IssuePalette';
 import {
 formatBytes,
 looksBinary,
@@ -326,6 +327,14 @@ export function useComposerController({
   const slash = slashState(text, customCmds);
 
   const paletteVisible = slash.mode === 'palette';
+
+  // `#` opens the chat repo's issues and PRs; a pick becomes a chip.
+  const issuePicker = useIssuePicker({
+    text,
+    enabled: slash.mode === 'none',
+    sessionId: sessionId ?? undefined,
+    updateText,
+  });
 
   // Trigger is `/` OR `@` — `@` promotes `files` to the top of the palette
   // so a bare `@` + Enter fires the OS native file picker without any
@@ -761,6 +770,7 @@ export function useComposerController({
     setSlashFeedback,
     paletteVisible,
     paletteMatches,
+    issuePicker,
     setSlashIdx,
     slashIdx,
     commitPaletteChoice,
