@@ -14,6 +14,7 @@ import { PREF_KEYS,useBoolPref } from '../../lib/prefs';
 import {
 type RichDraft
 } from '../../lib/richComposerDrafts';
+import { forkActions } from '../../lib/agentFork';
 import { useAppRuntime } from '../../state/RuntimeProvider';
 import type { Mode } from '../../types';
 import { type ComposerNotice } from '../ComposerNoticeStack';
@@ -58,6 +59,7 @@ export function useComposerController({
   onCompact,
   onRemember,
   onUndo,
+  onAgentFork,
   engine,
   sessionId,
   skills,
@@ -110,6 +112,10 @@ export function useComposerController({
   const setAttachmentState = (value: Attachment[]) => runtime.drafts.update(textOwner.current, { ...runtime.drafts.get(textOwner.current), attachments: value }, true);
   const setImageState = (value: ImageData[]) => runtime.drafts.update(textOwner.current, { ...runtime.drafts.get(textOwner.current), images: value }, true);
   const [draftError, setDraftError] = useState<string | null>(null);
+  // `/revert` opens the turn chooser; it used to sit in the model picker.
+  const [revertOpen, setRevertOpen] = useState(false);
+  const agentChat = engine?.kind === 'agent';
+  const canForkChat = !!onAgentFork && forkActions(engine).wholeChat;
 
   const [dragging, setDragging] = useState(false);
 
@@ -363,6 +369,8 @@ export function useComposerController({
       onEnterGoalCompose: () => setGoalComposing(true),
       onRemember,
       onUndo,
+      onForkChat: canForkChat ? onAgentFork : undefined,
+      onRevertTurn: agentChat && sessionId ? () => setRevertOpen(true) : undefined,
       // Skill invocation. Insert an `@skill:<name>` chip at the caret
       // rather than firing the message immediately — that used to dump
       // a bare "Use the X skill" with no context, so the model always
@@ -388,6 +396,10 @@ export function useComposerController({
       onRemember,
       onUndo,
       onSend,
+      canForkChat,
+      onAgentFork,
+      agentChat,
+      sessionId,
     ],
   );
 
@@ -704,6 +716,8 @@ export function useComposerController({
     return () => onActiveApprovalChange?.(null);
   }, [pendingApproval?.callId, onActiveApprovalChange]);
   return {
+    revertOpen,
+    setRevertOpen,
     draftError,
     dragging,
     submit,

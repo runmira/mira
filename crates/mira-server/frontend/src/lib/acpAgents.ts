@@ -139,6 +139,14 @@ export function versionLabel(raw: string | null | undefined): string | null {
   return match ? `v${match[0]}` : raw.length <= 24 ? raw : null;
 }
 
+/** The picker's one line under an agent's name: who it runs as. Versions
+ *  and transport are diagnostics for Settings, not for choosing a model. */
+export function pickerAgentSubtitle(agent: AcpAgentStatus): string {
+  const status = describeAgentStatus(agent);
+  if (status.tone !== 'ok') return status.text;
+  return agent.auth ?? 'Uses its own sign-in';
+}
+
 export function describeAgentStatus(agent: AcpAgentStatus): {
   text: string;
   tone: AgentHealthTone;

@@ -27,15 +27,26 @@ const engines: EngineSnapshot[] = [
   provider('anthropic', 'Anthropic', ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5']),
   provider('groq', 'Groq', ['llama-4-maverick']),
   provider('ollama', 'Ollama', ['qwen3-coder:30b']),
-  provider('openrouter', 'OpenRouter', ['openai/gpt-6.1-sol', 'deepseek/deepseek-v4-flash']),
+  provider('openrouter', 'OpenRouter', [
+    'openai/gpt-6.1-sol', 'openai/gpt-6-luna', 'anthropic/claude-opus-5-5', 'anthropic/claude-sonnet-5-5',
+    'google/gemini-4-argon', 'deepseek/deepseek-v4-flash', 'qwen/qwen3-coder', 'moonshotai/kimi-k3',
+    'x-ai/grok-4.7', 'mistralai/devstral-2', 'meta-llama/llama-4-maverick', 'z-ai/glm-5', 'minimax/minimax-m3',
+    'nvidia/nemotron-3-ultra', 'openai/gpt-oss-240b']),
   agent('claude-code', 'Claude Code', { auth: 'Claude Max · you@example.com', version: '2.1.283', transport: 'native' }),
   // Codex reports its app-server user agent where other agents report a version.
-  agent('codex', 'Codex', { auth: 'you@example.com · plus', version: 'mira-probe/0.162.0-alpha.17.2 (Mac OS 26.3.0; arm64) Apple_Terminal/455.1 (mira-probe; 0.6.2)', transport: 'native' }),
+  agent('codex', 'Codex', { models: [
+    { value: 'gpt-6.1-sol', label: 'GPT-6.1-Sol', is_default: true }, { value: 'gpt-6-astra', label: 'GPT-6-Astra' }],
+    auth: 'you@example.com · plus', version: 'mira-probe/0.162.0-alpha.17.2 (Mac OS 26.3.0; arm64) Apple_Terminal/455.1 (mira-probe; 0.6.2)', transport: 'native' }),
   agent('opencode', 'OpenCode', { version: '2.0.22' }),
   agent('antigravity', 'Antigravity', { state: { state: 'not_found', looked_for: 'antigravity' } }),
   agent('grok', 'Grok Build', { state: { state: 'not_found', looked_for: 'grok' } }),
   agent('cursor', 'Cursor', { state: { state: 'not_found', looked_for: 'cursor-agent' } }, false),
 ];
+
+// Seed a couple of recent OpenRouter picks so the Recent group shows.
+try {
+  localStorage.setItem('mira.picker.recent.v1', JSON.stringify({ 'provider:openrouter': ['moonshotai/kimi-k3', 'anthropic/claude-sonnet-5-5'] }));
+} catch { /* storage unavailable */ }
 
 function Preview() {
   const [open, setOpen] = useState(true);
@@ -64,7 +75,7 @@ function Preview() {
           open={open} onOpenChange={setOpen} engine={engine} fallbackModel="" engines={engines} agents={[]}
           agentConfig={config} agentDescriptors={acpOptionsToDescriptors(config)?.filter((o) => o.id !== 'model') ?? []}
           onPickProvider={() => {}} onPickAgent={(_d, m) => m && setModel(m)} onSetModelOption={(id, v) => setOpts((p) => ({ ...p, [id]: v }))}
-          onConfigureAgents={() => {}} sessionId="preview" onAgentCompact={() => {}} onAgentFork={() => {}} onAgentReverted={() => {}}
+          onConfigureAgents={() => {}}
         />
       </main>
     </LazyMotion>

@@ -5,6 +5,7 @@ import { ArrowUp,Square } from 'lucide-react';
 import { captureScreenshot } from '../lib/screenCapture';
 import { ComposerNoticeStack } from './ComposerNoticeStack';
 import { EnginePicker } from './EnginePicker';
+import { RevertDialog } from './AgentSessionActions';
 import { FilePicker } from './FilePicker';
 import { RequestBoundary } from './RequestBoundary';
 
@@ -67,8 +68,6 @@ export function Composer(props: Props) {
     onPickAgent,
     onConfigureAgents,
     sessionId,
-    onAgentCompact,
-    onAgentFork,
     onAgentReverted,
     skills,
     usageRing,
@@ -143,10 +142,13 @@ export function Composer(props: Props) {
     setFilePickerOpen,
     attachFile,
     fileInputRef,
+    revertOpen,
+    setRevertOpen,
   } = useComposerController(props);
   const unsupportedImages = agentDriving && images.length > 0 && !agentAcceptsImages(agentConfig);
   return (
     <div className="flex flex-col items-center gap-1.5 px-4 pb-4 pt-2 max-md:px-2 max-md:pb-2">
+      <RevertDialog sessionId={sessionId} open={revertOpen} onOpenChange={setRevertOpen} onReverted={onAgentReverted} />
       {draftError && (
         <p
           role="alert"
@@ -559,10 +561,6 @@ export function Composer(props: Props) {
               onPickAgent={(driver, m, instance) => onPickAgent?.(driver, m, instance)}
               onSetModelOption={onSetModelOption}
               onConfigureAgents={onConfigureAgents}
-              sessionId={sessionId}
-              onAgentCompact={onAgentCompact}
-              onAgentFork={onAgentFork}
-              onAgentReverted={onAgentReverted}
             />
 
             <span className="contents max-md:hidden">

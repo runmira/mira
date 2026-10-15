@@ -238,7 +238,7 @@ export type AcpAgentState =
 
 /** One row in the agent list. */
 export type AcpAgentStatus = {
-  models?: { value: string; label: string; capabilities?: NativeModelCapabilities }[];
+  models?: { value: string; label: string; capabilities?: NativeModelCapabilities; is_default?: boolean }[];
   kind: string;
   display_name: string;
   state: AcpAgentState;
