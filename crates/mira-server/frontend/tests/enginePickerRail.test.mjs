@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { bundle } from './helpers/bundle.mjs';
-const { enabledAgentRail, enabledPickerRail, externalAgentStatuses } = await bundle(`export { enabledAgentRail, enabledPickerRail, externalAgentStatuses } from './src/lib/enginePickerRail';`);
+const { enabledAgentRail, enabledPickerRail, externalAgentStatuses, hiddenFromPicker } = await bundle(`export { enabledAgentRail, enabledPickerRail, externalAgentStatuses, hiddenFromPicker } from './src/lib/enginePickerRail';`);
 const row = (instance, driver = instance, enabled = true) => ({ instance, driver, enabled, display_name: instance, flavor: 'external', models: [] });
 test('enabled agents appear before probes finish; disabled agents stay hidden', () => {
   const rail = enabledAgentRail([row('codex'), row('claude-code'), row('opencode'), row('cursor', 'cursor', false)], [], null);
@@ -35,4 +35,18 @@ test('alphabetical provider and agent order is independent of registry and healt
   const expected=['a-provider','z-provider','claude-code','personal','work'];
   assert.deepEqual(enabledPickerRail(engines,[]).map(i=>i.instance),expected);
   assert.deepEqual(enabledPickerRail([...engines].reverse(),[{kind:'codex',display_name:'Codex'}]).map(i=>i.instance),expected);
+});
+
+test('agents that are not installed and providers without a key stay out of the picker', () => {
+  const missing = {...row('cursor'), state:{state:'not_found',looked_for:'cursor-agent'}};
+  const probedMissing = {...row('grok'), agent:{kind:'grok',display_name:'Grok',state:{state:'not_found',looked_for:'grok'},auth_method_ids:[],launch:''}};
+  const checking = {...row('codex'), state:{state:'failed',reason:'checking…'}};
+  const keyless = {...row('mistral'), flavor:'native', state:{state:'not_configured',reason:'no api_key'}};
+  const ready = {...row('anthropic'), flavor:'native', state:{state:'ready'}};
+  const engines = [missing, probedMissing, checking, keyless, ready, row('opencode')];
+  assert.deepEqual(enabledPickerRail(engines, []).map(i => i.instance), ['anthropic', 'codex', 'opencode'], 'a slow probe keeps its row');
+  assert.deepEqual(hiddenFromPicker(engines, []), {providers:1, agents:2});
+  // The chat's own engine is never hidden, so its picker still opens on it.
+  assert.ok(enabledPickerRail(engines, [], 'agent:cursor').some(i => i.instance === 'cursor'));
+  assert.deepEqual(hiddenFromPicker(engines, [], 'provider:mistral'), {providers:0, agents:2});
 });

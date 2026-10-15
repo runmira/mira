@@ -461,6 +461,11 @@ function AgentDetail({
     // Disabled until the server's copy loads, so nothing typed is lost.
     <fieldset disabled={!view} className="space-y-3.5 disabled:opacity-60">
       <SignInNeededNote needs={agent.sign_in_needed ?? []} terminal={view?.driver === 'opencode'} />
+      {agent.state.state === 'not_found' && (
+        <p className="text-[11.5px] leading-relaxed text-muted-foreground/75">
+          Not installed, so it's left out of the model picker. It appears there once Mira finds it — check again after installing.
+        </p>
+      )}
       {view?.driver === 'codex' && <CodexAccountPanel key={view.instance} instance={view.instance} enabled={cfg.enabled} onRefresh={onRefresh} />}
       {view?.driver === 'opencode' && <TerminalSignInPanel key={view.instance} instance={view.instance} enabled={cfg.enabled} onRefresh={onRefresh} />}
   <Field

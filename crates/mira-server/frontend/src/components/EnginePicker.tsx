@@ -40,7 +40,7 @@ import { listInstanceModels,listModels,type EngineSnapshot,type ModelInfo,type O
 import { forkActions } from '../lib/agentFork';
 import { navigateEnginePicker } from '../lib/enginePickerNavigation';
 import { agentModelChoices,describeAgentStatus } from '../lib/acpAgents';
-import { enabledPickerRail } from '../lib/enginePickerRail';
+import { enabledPickerRail, hiddenFromPicker } from '../lib/enginePickerRail';
 import {
 CODING_MATCHERS,
 formatCtx,
@@ -111,7 +111,10 @@ export function EnginePicker(props: EnginePickerProps) {
 
   // Membership comes only from enabled registry instances. Probes enrich
   // status without changing order, including while the active engine changes.
-  const rail = useMemo<RailItem[]>(() => enabledPickerRail(engines, agents), [engines, agents]);
+  // Engines that can't run here (agent not installed, provider without a
+  // key) stay out of the picker, except the one this chat is on.
+  const rail = useMemo<RailItem[]>(() => enabledPickerRail(engines, agents, currentKey), [engines, agents, currentKey]);
+  const hidden = useMemo(() => hiddenFromPicker(engines, agents, currentKey), [engines, agents, currentKey]);
 
   // What the right pane shows. Follows the current engine until the user
   // points elsewhere; reset on every open so it always starts at "here".
@@ -314,7 +317,12 @@ export function EnginePicker(props: EnginePickerProps) {
                 ))}
                 {!rail.some((r) => r.kind === 'agent') && (
                   <div className="px-2 py-1.5 text-[11.5px] text-muted-foreground/60">
-                    {engines == null ? 'Loading enabled engines…' : 'No external agents enabled.'}
+                    {engines == null ? 'Loading enabled engines…' : hidden.agents ? 'No external agents installed.' : 'No external agents enabled.'}
+                  </div>
+                )}
+                {(hidden.agents > 0 || hidden.providers > 0) && (
+                  <div className="px-2 pb-1 pt-1.5 text-[11px] leading-snug text-muted-foreground/55" role="note">
+                    {[hidden.providers && `${hidden.providers} provider${hidden.providers === 1 ? '' : 's'} without a key`, hidden.agents && `${hidden.agents} agent${hidden.agents === 1 ? '' : 's'} not installed`].filter(Boolean).join(' · ')} hidden
                   </div>
                 )}
               </div>
