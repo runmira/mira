@@ -136,7 +136,7 @@ export function UsageRing({ data }: { data: UsageRingData }) {
             )}
             {compactAt != null && (
               <div className="mt-2 text-[12px] text-muted-foreground">
-                {used >= compactAt ? 'Compacts on the next turn' : `${shortNum(compactAt - used)} until auto-compact`}
+                {used >= compactAt ? 'Compacts before the next request' : `${shortNum(compactAt - used)} until auto-compact`}
               </div>
             )}
             {(data.onInspect || data.onCompact) && (

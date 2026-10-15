@@ -389,6 +389,11 @@ pub async fn start_agent(
         }
         _ => driver.resolve(&driver_cfg, mode, program.clone()),
     };
+    if let Some(tokens) = driver_cfg.auto_compact_after {
+        if let Err(why) = mira_acp::driver::apply_auto_compact(driver.kind(), &mut launch, tokens) {
+            tracing::warn!(instance = %params.instance, "{why}");
+        }
+    }
     let mut opencode_control = if driver.kind() == "opencode" && matches!(transport, Transport::Acp)
     {
         crate::opencode_control::OpenCodeControl::prepare(&mut launch).await?
@@ -449,6 +454,7 @@ pub async fn start_agent(
         None => AcpEventPort::new(candidate_events.clone()),
     };
     events.set_driver(&params.driver_kind);
+    events.set_auto_compact_after(params.cfg.auto_compact_after);
 
     // A native agent has no ACP ports to bind — it runs in its own process and
     // asks the host its questions through one gate. Tool permissions answer

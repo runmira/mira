@@ -42,6 +42,8 @@ export function createSessionData() {
     used: number;
     size: number;
     cost: { amount: number; currency: string } | null;
+    /** Where the agent compacts on its own, when the server knows. */
+    compact_at?: number | null;
   } | null,
     acpLimits: ([]) as
     { name: string; utilization: number; resets_at?: number | null }[]

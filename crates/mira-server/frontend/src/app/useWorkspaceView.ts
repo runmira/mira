@@ -366,7 +366,8 @@ export function useWorkspaceView(
         // switch): show the ring as unknown, not as a 0-token window.
         used: acpUsage && acpUsage.size > 0 ? acpUsage.used : null,
         window: acpUsage && acpUsage.size > 0 ? acpUsage.size : null,
-        compactAt: null,
+        // The agent compacts itself; this is where (Codex, OpenCode).
+        compactAt: acpUsage && acpUsage.size > 0 ? acpUsage.compact_at ?? null : null,
         tokens: null,
         costUsd: acpUsage?.cost && acpUsage.cost.currency === 'USD' ? acpUsage.cost.amount : null,
         limitsTitle: acpLimits.length

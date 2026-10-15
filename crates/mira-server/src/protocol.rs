@@ -1003,6 +1003,10 @@ pub enum ServerMsg {
         used: u64,
         size: u64,
         cost: Option<AcpCost>,
+        /// Where the agent compacts on its own, when known
+        /// (`acp_host::agent_compact_at`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        compact_at: Option<u64>,
     },
     /// The agent account's plan limits (5-hour, weekly), for the usage ring.
     AcpLimits {
@@ -1199,6 +1203,7 @@ impl ServerMsg {
                 used,
                 size,
                 cost: cost.map(|(amount, currency)| AcpCost { amount, currency }),
+                compact_at: None,
             },
             MiraEvent::SessionInfo { title, updated_at } => {
                 Self::AcpSessionInfo { title, updated_at }

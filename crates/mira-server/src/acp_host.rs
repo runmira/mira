@@ -583,6 +583,34 @@ pub fn confine_root(repo_root: &Path, session_root: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn agent_thresholds_match_what_each_agent_does() {
+        // Codex: 258,400 usable of a 272k window; compacts at 90% of 272k.
+        assert_eq!(
+            super::agent_compact_at("codex", 258_400, None),
+            Some(244_800)
+        );
+        assert_eq!(
+            super::agent_compact_at("codex", 258_400, Some(150_000)),
+            Some(150_000)
+        );
+        assert_eq!(
+            super::agent_compact_at("codex", 258_400, Some(900_000)),
+            Some(244_800),
+            "never past its own"
+        );
+        assert_eq!(
+            super::agent_compact_at("opencode", 200_000, None),
+            Some(180_000)
+        );
+        assert_eq!(super::agent_compact_at("claude-code", 200_000, None), None);
+        assert_eq!(
+            super::agent_compact_at("codex", 0, None),
+            None,
+            "unknown window"
+        );
+    }
+
     use super::*;
     use std::time::Duration;
 
@@ -1100,6 +1128,33 @@ pub struct AcpEventPort {
     /// Which agent this port serves, stamped onto modes/config frames so
     /// the client attributes "last seen" capabilities to the right driver.
     driver: std::sync::Mutex<Option<String>>,
+    /// The instance's `auto_compact_after`, for the threshold the usage ring
+    /// shows (the agent was launched with it).
+    auto_compact_after: std::sync::Mutex<Option<u64>>,
+}
+
+/// Where an agent compacts on its own, in the same tokens its usage reports
+/// count, when Mira knows. `size` is the window the agent reported.
+///
+/// - Codex reports 95% of the model's window as usable and compacts at 90%
+///   of the full window, or at `model_auto_compact_token_limit` (which Mira
+///   passes as `auto_compact_after`) when that is lower.
+/// - OpenCode compacts when a request would leave less than a tenth of the
+///   window, or 16k tokens, free.
+/// - Claude Code reports its threshold only through `get_context_usage`
+///   (the context inspector shows it), so none here.
+pub(crate) fn agent_compact_at(driver: &str, size: u64, configured: Option<u64>) -> Option<u64> {
+    if size == 0 {
+        return None;
+    }
+    match driver {
+        "codex" => {
+            let own = size * 90 / 95;
+            Some(configured.map_or(own, |c| c.min(own)))
+        }
+        "opencode" => Some(mira_harness::history::auto_compact_at(size)),
+        _ => None,
+    }
 }
 
 /// Books spend reports in the order they arrive. Reports are running
@@ -1148,6 +1203,7 @@ impl AcpEventPort {
             events,
             spend: None,
             driver: std::sync::Mutex::new(None),
+            auto_compact_after: std::sync::Mutex::new(None),
         })
     }
 
@@ -1222,6 +1278,7 @@ impl AcpEventPort {
                 billing,
             }),
             driver: std::sync::Mutex::new(None),
+            auto_compact_after: std::sync::Mutex::new(None),
         })
     }
 
@@ -1246,6 +1303,12 @@ impl AcpEventPort {
 
     /// Remember which agent this port serves. Called once per agent start;
     /// the value is stamped onto modes/config frames.
+    pub fn set_auto_compact_after(&self, tokens: Option<u64>) {
+        if let Ok(mut t) = self.auto_compact_after.lock() {
+            *t = tokens;
+        }
+    }
+
     pub fn set_driver(&self, driver: &str) {
         if let Ok(mut d) = self.driver.lock() {
             *d = Some(driver.to_string());
@@ -1307,6 +1370,12 @@ impl AcpEventPort {
             ServerMsg::AcpModes { driver: d, .. }
             | ServerMsg::AcpConfigOptions { driver: d, .. } => {
                 *d = Some(driver);
+            }
+            ServerMsg::AcpUsage {
+                size, compact_at, ..
+            } => {
+                let configured = self.auto_compact_after.lock().ok().and_then(|t| *t);
+                *compact_at = agent_compact_at(&driver, *size, configured);
             }
             _ => {}
         }
