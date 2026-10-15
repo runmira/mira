@@ -40,7 +40,9 @@ struct SteerInbox {
 const TOOL_RESULT_TAIL_FRACTION: f64 = 0.2;
 
 use crate::approver::Approver;
-use crate::event::{HarnessEvent, PROVIDER_ERROR, STREAM_ERROR, STREAM_TIMEOUT};
+use crate::event::{
+    HarnessEvent, COMPACTION_STALLED, PROVIDER_ERROR, STREAM_ERROR, STREAM_TIMEOUT,
+};
 use crate::goal::{self, Goal, GoalStatus, GoalVerdict};
 
 /// Type alias for the slot the harness parks the current turn's event
@@ -875,7 +877,16 @@ impl Session {
             return Err("wait for the current reply to finish, then compact".into());
         }
         let (tx, mut rx) = mpsc::channel(8);
-        let n = self.compact_inner("manual", focus, &tx).await?;
+        let n = self
+            .compact_inner(
+                "manual",
+                crate::history::CompactShape {
+                    focus,
+                    ..Default::default()
+                },
+                &tx,
+            )
+            .await?;
         drop(tx);
         while rx.recv().await.is_some() {}
         checkpoint(self).await;
@@ -887,9 +898,10 @@ impl Session {
     async fn compact_inner(
         &self,
         trigger: &str,
-        focus: Option<&str>,
+        shape: crate::history::CompactShape<'_>,
         tx: &mpsc::Sender<HarnessEvent>,
     ) -> Result<usize, String> {
+        let focus = shape.focus;
         // PreCompact hooks see it coming (to save the transcript, say).
         // They can't stop it. Run without the history lock; a hook may
         // be slow.
@@ -920,7 +932,7 @@ impl Session {
             &cfg.model,
             &summarizer_model,
             &self.tool_ctx.cwd,
-            focus,
+            shape,
         )
         .await
         .map_err(|e| format!("{e:#}"))?;
@@ -1705,9 +1717,13 @@ async fn run_loop(
         // different" nudge instead of grinding through max_rounds.
         let mut prev_call_fingerprint: Option<u64> = None;
         let mut consecutive_dupe_rounds: usize = 0;
-        // One compact-and-retry per turn when the provider says the request
-        // is too long; a second refusal is reported, not looped on.
-        let mut overflow_retried = false;
+        // Compact-and-retry when the provider says the request is too long:
+        // twice per turn (the second tighter), then the refusal is reported.
+        let mut overflow_retries = 0usize;
+        // Whether a compaction ran since the last request was sent, and
+        // whether one this turn failed to bring the request under the line.
+        let mut compacted_since_request = false;
+        let mut compaction_stalled = false;
 
         for round in 0..cfg.max_rounds {
             sess.consume_steers(generation).await;
@@ -1740,11 +1756,39 @@ async fn run_loop(
                     .calibration
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
-                    .calibrated(raw);
+                    .calibrated(raw, &cfg.model);
                 let window =
                     crate::history::context_window_with(&cfg.model, cfg.context_window) as u64;
-                if crate::history::needs_compaction(tokens, window) {
-                    auto_compact(&sess, &tx, tokens, "auto").await;
+                // Never twice without a request between: right after a
+                // compaction the next request is the measure of it. And once
+                // one leaves the request still over the line, compacting again
+                // this turn would only repeat it.
+                if crate::history::needs_compaction(tokens, window)
+                    && !compacted_since_request
+                    && !compaction_stalled
+                    && auto_compact(&sess, &tx, tokens, "auto", false).await
+                {
+                    compacted_since_request = true;
+                    let after_raw = crate::context::estimate_request(
+                        &build_request_messages(&sess).await,
+                        &request_tools(&sess).await,
+                    );
+                    let after = sess
+                        .calibration
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .calibrated(after_raw, &cfg.model);
+                    if crate::history::needs_compaction(after, window) {
+                        compaction_stalled = true;
+                        let _ = tx
+                            .send(HarnessEvent::Warning(format!(
+                                "{COMPACTION_STALLED}: about {after} of {window} tokens remain after \
+                                 summarizing. The system prompt, tool definitions and the newest \
+                                 message take most of the window, so Mira won't summarize again \
+                                 this turn."
+                            )))
+                            .await;
+                    }
                 }
             }
 
@@ -1761,24 +1805,30 @@ async fn run_loop(
 
             // Kept with the provider's report for it (below), to calibrate
             // the context inspector.
-            *sess.calibration.lock().unwrap_or_else(|p| p.into_inner()) =
-                crate::context::Calibration {
-                    estimated: crate::context::estimate_request(&req.messages, &req.tools),
-                    reported: None,
-                };
+            sess.calibration
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .begin(
+                    crate::context::estimate_request(&req.messages, &req.tools),
+                    &cfg.model,
+                );
             let print = crate::cache_watch::RequestPrint::of(&req);
             let mut stream = match sess.provider.stream(req).await {
-                Ok(s) => s,
+                Ok(s) => {
+                    compacted_since_request = false;
+                    s
+                }
                 // Too long for the model after all (the estimate ran low, or
                 // one tool result was huge): summarize and send again, once.
                 Err(e)
-                    if !overflow_retried && crate::history::is_context_overflow(&e.to_string()) =>
+                    if overflow_retries < 2
+                        && crate::history::is_context_overflow(&e.to_string()) =>
                 {
-                    overflow_retried = true;
+                    overflow_retries += 1;
                     warn!(error = %e, "request exceeded the context window; compacting and retrying");
                     let tokens =
                         crate::history::context_window_with(&cfg.model, cfg.context_window) as u64;
-                    if auto_compact(&sess, &tx, tokens, "overflow").await {
+                    if overflow_retry(&sess, &tx, tokens, overflow_retries).await {
                         continue;
                     }
                     let _ = tx
@@ -1900,7 +1950,7 @@ async fn run_loop(
                             stream_errored = true;
                             // Some providers refuse an over-long prompt as the
                             // stream's first event rather than up front.
-                            if !overflow_retried
+                            if overflow_retries < 2
                                 && assistant_text.is_empty()
                                 && pending_calls.is_empty()
                                 && crate::history::is_context_overflow(&e.to_string())
@@ -1917,11 +1967,11 @@ async fn run_loop(
                 }
             }
             if let Some(e) = overflow_mid_stream.take() {
-                overflow_retried = true;
+                overflow_retries += 1;
                 warn!(error = %e, "request exceeded the context window; compacting and retrying");
                 let tokens =
                     crate::history::context_window_with(&cfg.model, cfg.context_window) as u64;
-                if auto_compact(&sess, &tx, tokens, "overflow").await {
+                if overflow_retry(&sess, &tx, tokens, overflow_retries).await {
                     continue;
                 }
                 let _ = tx
@@ -3347,6 +3397,25 @@ async fn request_tools(sess: &Session) -> Vec<mira_ai::ToolSpec> {
     }
 }
 
+/// Recover from a request refused as too long. The first time, summarize;
+/// the second, drop the file copies the summary carries (summarizing a lone
+/// summary again would gain nothing). Returns whether to send again.
+async fn overflow_retry(
+    sess: &Session,
+    tx: &mpsc::Sender<HarnessEvent>,
+    tokens: u64,
+    attempt: usize,
+) -> bool {
+    if attempt <= 1 {
+        return auto_compact(sess, tx, tokens, "overflow", false).await;
+    }
+    let dropped = crate::history::drop_restored_files(&mut sess.history.lock().await);
+    if dropped {
+        checkpoint(sess).await;
+    }
+    dropped
+}
+
 /// Summarize the conversation mid-turn, announcing it. `tokens` is the
 /// request size that made it due. Returns whether it compacted; a failure is
 /// reported and the turn carries on uncompacted.
@@ -3355,13 +3424,18 @@ async fn auto_compact(
     tx: &mpsc::Sender<HarnessEvent>,
     tokens: u64,
     trigger: &str,
+    without_files: bool,
 ) -> bool {
     let _ = tx
         .send(HarnessEvent::Compacting {
             tokens_before: tokens as usize,
         })
         .await;
-    match sess.compact_inner(trigger, None, tx).await {
+    let shape = crate::history::CompactShape {
+        without_files,
+        ..Default::default()
+    };
+    match sess.compact_inner(trigger, shape, tx).await {
         Ok(n) => {
             let _ = tx
                 .send(HarnessEvent::Compacted {

@@ -242,8 +242,8 @@ Agents compact on their own; this only lowers where:
 | OpenCode | Not supported: OpenCode keeps a reserve below each model's window rather than a threshold. Mira logs that it ignored the setting. | window minus 10% (at least 16k tokens) |
 
 A variable or `-c` override already in the instance's own `env` or `launch_args` wins.
-The usage ring shows where Codex and OpenCode will compact. Claude Code reports its
-threshold in the context inspector.
+The usage ring shows where each agent will compact: Codex and OpenCode by their rules,
+and Claude Code from the threshold it reports after each turn.
 
 ## Automatic compaction in Mira's own chats
 
@@ -252,6 +252,14 @@ a tenth of the window (or 16k tokens, whichever is more) free. The request is me
 as it will be sent: the system prompt, the tool definitions, and the history with old
 tool results cleared. That size is scaled by how the provider counted the previous
 request, so its tokenizer and cached prefix count; Codex and OpenCode measure the same
-way. If the provider still refuses a request as too long, Mira compacts and sends it
-once more. A second refusal is reported.
+way, and only counts from the same model are trusted: after a switch, the first request
+is measured by estimate alone.
+
+If the provider still refuses a request as too long, Mira compacts and sends it again. If
+it is refused a second time, Mira leaves out the copies of recent files the summary carries
+and tries once more; a third refusal is reported. When the summarizer itself refuses the
+conversation as too long, it is given the newest part that fits 70%, then 50%, then 35% of
+its window. Mira never compacts twice without a request in between. If one compaction
+leaves the request still over the line (a system prompt and tools that fill the window, for
+example), Mira says so and doesn't compact again that turn.
 

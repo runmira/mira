@@ -71,6 +71,54 @@ const SUMMARIZER_MESSAGE_CHARS: usize = 4_000;
 /// Files re-read into context after compaction.
 const RESTORE_FILES: usize = 5;
 
+/// Where a summary's copies of recently used files start and end, so a
+/// request still too long after compacting can drop them.
+const RESTORED_FILES_HEADING: &str = "\n\nCurrent contents of files recently worked on:\n\n";
+const RESTORED_FILES_END: &str = "<!-- end of restored files -->";
+
+/// Drop the file copies from the newest summary (the tight retry when a
+/// compacted request is still refused as too long). Returns whether there
+/// were any.
+pub fn drop_restored_files(history: &mut [Message]) -> bool {
+    let Some(summary) = history.iter_mut().rev().find(|m| is_summary(m)) else {
+        return false;
+    };
+    let Some(text) = summary.content.as_mut() else {
+        return false;
+    };
+    let (Some(start), Some(end)) = (
+        text.find(RESTORED_FILES_HEADING),
+        text.find(RESTORED_FILES_END),
+    ) else {
+        return false;
+    };
+    text.replace_range(
+        start..end + RESTORED_FILES_END.len(),
+        "\n\n(Copies of recently used files were left out to fit; read them again if you need them.)",
+    );
+    true
+}
+
+/// When the summarizer refuses the conversation as too long, the share of its
+/// window the next attempt gives the conversation, in order (OpenCode's steps).
+const SHRINK_STEPS: [f64; 3] = [0.7, 0.5, 0.35];
+
+/// Characters per token for sizing the summarizer's input.
+const CHARS_PER_TOKEN: usize = 4;
+
+/// How a compaction is shaped.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CompactShape<'a> {
+    /// What the user asked the summary to keep (`/compact <focus>`).
+    pub focus: Option<&'a str>,
+    /// Leave out the copies of recently used files: the tight retry after
+    /// a compacted request was still refused as too long.
+    pub without_files: bool,
+    /// Cap on the conversation the summarizer reads, in characters; the
+    /// oldest messages are left out first. `None` sends all of it.
+    pub transcript_chars: Option<usize>,
+}
+
 /// A restored file larger than this is only named, not included.
 const RESTORE_FILE_MAX_CHARS: usize = 20_000;
 
@@ -477,8 +525,9 @@ pub async fn compact(
     provider: &dyn ChatProvider,
     summarizer_model: &str,
     cwd: &Path,
-    focus: Option<&str>,
+    shape: CompactShape<'_>,
 ) -> Result<Vec<Message>> {
+    let focus = shape.focus;
     let system_end = history
         .iter()
         .take_while(|m| m.role == Role::System)
@@ -492,17 +541,25 @@ pub async fn compact(
     if end.saturating_sub(system_end) < 2 {
         return Err(anyhow!("not enough conversation to compact"));
     }
-    let transcript = render_for_summary(&history[system_end..end]);
+    let transcript = match shape.transcript_chars {
+        Some(budget) => render_newest(&history[system_end..end], budget),
+        None => render_for_summary(&history[system_end..end]),
+    };
     let summary = summarize(provider, summarizer_model, &transcript, focus).await?;
-    let files = restore_files(cwd, &recent_paths(&history[system_end..end]));
+    let files = if shape.without_files {
+        String::new()
+    } else {
+        restore_files(cwd, &recent_paths(&history[system_end..end]))
+    };
     let mut text = format!(
         "{SUMMARY_PREFIX}\nThis session continues from an earlier conversation that was summarized \
          to free up context. The summary:\n\n{}\n</conversation-summary>",
         summary.trim()
     );
     if !files.is_empty() {
-        text.push_str("\n\nCurrent contents of files recently worked on:\n\n");
+        text.push_str(RESTORED_FILES_HEADING);
         text.push_str(&files);
+        text.push_str(RESTORED_FILES_END);
     }
     text.push_str(
         "\n\nContinue from where things left off without asking the user to repeat \
@@ -521,14 +578,71 @@ pub async fn compact_with_fallback(
     session_model: &str,
     summarizer_model: &str,
     cwd: &Path,
-    focus: Option<&str>,
+    shape: CompactShape<'_>,
 ) -> Result<Vec<Message>> {
-    match compact(history, provider, summarizer_model, cwd, focus).await {
+    match compact_shrinking(history, provider, summarizer_model, cwd, shape).await {
         Err(e) if summarizer_model != session_model => {
             tracing::warn!(error = %e, model = summarizer_model, "compaction failed; retrying on the main model");
-            compact(history, provider, session_model, cwd, focus).await
+            compact_shrinking(history, provider, session_model, cwd, shape).await
         }
         r => r,
+    }
+}
+
+/// [`compact`], and when the summarizer refuses the conversation as too long,
+/// again with less of it: the newest part that fits each of [`SHRINK_STEPS`]
+/// of its window.
+async fn compact_shrinking(
+    history: &mut Vec<Message>,
+    provider: &dyn ChatProvider,
+    model: &str,
+    cwd: &Path,
+    shape: CompactShape<'_>,
+) -> Result<Vec<Message>> {
+    let mut last = match compact(history, provider, model, cwd, shape).await {
+        Err(e) if is_context_overflow(&format!("{e:#}")) => e,
+        r => return r,
+    };
+    let window = context_window(model);
+    for step in SHRINK_STEPS {
+        let budget = (window as f64 * step) as usize * CHARS_PER_TOKEN;
+        let budget = shape.transcript_chars.map_or(budget, |b| b.min(budget));
+        tracing::warn!(
+            model,
+            step,
+            "summarizer refused the conversation as too long; retrying with less of it"
+        );
+        let tighter = CompactShape {
+            transcript_chars: Some(budget),
+            ..shape
+        };
+        match compact(history, provider, model, cwd, tighter).await {
+            Err(e) if is_context_overflow(&format!("{e:#}")) => last = e,
+            r => return r,
+        }
+    }
+    Err(last)
+}
+
+/// [`render_for_summary`] of the newest messages that fit `budget`
+/// characters, saying how many older ones were left out.
+fn render_newest(msgs: &[Message], budget: usize) -> String {
+    let mut kept = 0;
+    let mut used = 0;
+    for m in msgs.iter().rev() {
+        let size = render_for_summary(std::slice::from_ref(m)).len();
+        if kept > 0 && used + size > budget {
+            break;
+        }
+        used += size;
+        kept += 1;
+    }
+    let skipped = msgs.len() - kept;
+    let rendered = render_for_summary(&msgs[skipped..]);
+    if skipped == 0 {
+        rendered
+    } else {
+        format!("[{skipped} older messages left out to fit; summarize what remains]\n\n{rendered}")
     }
 }
 
@@ -974,10 +1088,16 @@ mod tests {
             asked: Default::default(),
         };
         let mut h = long_history();
-        let removed =
-            compact_with_fallback(&mut h, &p, "claude-opus-4-7", "tiny", Path::new("."), None)
-                .await
-                .unwrap();
+        let removed = compact_with_fallback(
+            &mut h,
+            &p,
+            "claude-opus-4-7",
+            "tiny",
+            Path::new("."),
+            CompactShape::default(),
+        )
+        .await
+        .unwrap();
         assert_eq!(removed.len(), 40);
         assert_eq!(h.len(), 2, "system + summary");
         assert!(is_summary(&h[1]));
@@ -991,11 +1111,16 @@ mod tests {
         };
         let mut h = long_history();
         let before = h.len();
-        assert!(
-            compact_with_fallback(&mut h, &p, "tiny", "tiny", Path::new("."), None)
-                .await
-                .is_err()
-        );
+        assert!(compact_with_fallback(
+            &mut h,
+            &p,
+            "tiny",
+            "tiny",
+            Path::new("."),
+            CompactShape::default()
+        )
+        .await
+        .is_err());
         assert_eq!(h.len(), before, "history untouched on failure");
         assert_eq!(p.asked.lock().unwrap().len(), 1);
     }
@@ -1018,9 +1143,18 @@ mod tests {
         h.push(tool_result("c2", "ok"));
         h.push(assistant_reads("c3", "gone.rs"));
         h.push(tool_result("c3", "missing"));
-        let removed = compact(&mut h, &p, "m", tmp.path(), Some("the parser"))
-            .await
-            .unwrap();
+        let removed = compact(
+            &mut h,
+            &p,
+            "m",
+            tmp.path(),
+            CompactShape {
+                focus: Some("the parser"),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(removed.len(), 7);
         let text = h[1].content.as_deref().unwrap();
         assert!(text.starts_with(SUMMARY_PREFIX));
@@ -1039,7 +1173,7 @@ mod tests {
         };
         let mut h = long_history();
         h.push(Message::user("now do this"));
-        let removed = compact(&mut h, &p, "m", Path::new("."), None)
+        let removed = compact(&mut h, &p, "m", Path::new("."), CompactShape::default())
             .await
             .unwrap();
         assert_eq!(removed.len(), 40);
@@ -1054,9 +1188,11 @@ mod tests {
             asked: Default::default(),
         };
         let mut h = vec![Message::system("s"), Message::user("hi")];
-        assert!(compact(&mut h, &p, "m", Path::new("."), None)
-            .await
-            .is_err());
+        assert!(
+            compact(&mut h, &p, "m", Path::new("."), CompactShape::default())
+                .await
+                .is_err()
+        );
         assert!(p.asked.lock().unwrap().is_empty());
     }
 
