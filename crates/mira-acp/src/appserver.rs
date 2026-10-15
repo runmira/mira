@@ -3414,7 +3414,7 @@ mod tests {
     fn catalogs_preserve_capabilities_and_advertise_only_supported_defaults() {
         let model = capable_model();
         assert!(model.is_default);
-        let options = model_config_options(&[model.clone()], Some("gpt-test"));
+        let options = model_config_options(std::slice::from_ref(&model), Some("gpt-test"));
         assert_eq!(options[1].current.as_deref(), Some("high"));
         assert_eq!(options[2].current.as_deref(), Some("priority"));
         assert_eq!(
@@ -3505,7 +3505,7 @@ mod tests {
         };
         assert!(agent
             .turns
-            .params(&thread, "hello", &[image.clone()])
+            .params(&thread, "hello", std::slice::from_ref(&image))
             .await
             .is_err());
         let options = agent.set_model("other").await;
