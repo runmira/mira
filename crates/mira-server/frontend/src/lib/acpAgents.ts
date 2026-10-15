@@ -130,6 +130,15 @@ export type AgentHealthTone = 'ok' | 'warn' | 'error';
  * separately, in the row: the two used to be conflated and every agent read
  * "Disabled" regardless of what was actually installed.
  */
+/** `v1.2.3` from whatever an agent reports as its version. Codex reports its
+ *  app-server user agent (`mira-probe/0.162.0-alpha.17.2 (Mac OS …) …`),
+ *  which is noise in a one-line status; take the first version number. */
+export function versionLabel(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const match = raw.match(/\d+\.\d+(?:\.\d+)?(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?/);
+  return match ? `v${match[0]}` : raw.length <= 24 ? raw : null;
+}
+
 export function describeAgentStatus(agent: AcpAgentStatus): {
   text: string;
   tone: AgentHealthTone;
@@ -160,7 +169,8 @@ export function describeAgentStatus(agent: AcpAgentStatus): {
       }
       const bits: string[] = [];
       if (agent.auth) bits.push(agent.auth);
-      if (agent.version) bits.push(`v${agent.version}`);
+      const version = versionLabel(agent.version);
+      if (version) bits.push(version);
       // Name the transport. "Ready" alone does not say whether Mira is
       // driving the agent directly or through an adapter, and those are
       // very different setups for the user to be looking at.

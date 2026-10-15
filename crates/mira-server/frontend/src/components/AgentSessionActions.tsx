@@ -1,3 +1,4 @@
+import { RotateCcw } from 'lucide-react';
 /**
  * Actions on the agent session itself — as opposed to the agent's
  * configuration, which lives in Settings → Agents. They sit with the
@@ -64,9 +65,10 @@ export function RevertButton({
           if (turns === null) load();
         }}
         title="Restore files and transcript to before a turn"
-        className="flex items-center gap-1 rounded-lg border border-border/80 px-2 py-1
-                   text-[11.5px] text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
+        className="inline-flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-border/70 px-2.5
+                   text-[12px] text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
       >
+        <RotateCcw className="size-3" />
         Revert
       </button>
       <AnimatePresence initial={false}>

@@ -34,7 +34,7 @@ CommandList,
 } from '@/components/ui/command';
 import { Popover,PopoverContent,PopoverTrigger } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
-import { AlertCircle,Ban,Brain,BrainCircuit,Check,ChevronDown,Feather,Gauge,Lightbulb,Loader2,RefreshCw,Rocket,Settings2,Sparkles,Telescope,Zap } from 'lucide-react';
+import { AlertCircle, Ban, Brain, BrainCircuit, Check, ChevronDown, Feather, Gauge, GitBranch, Lightbulb, Loader2, RefreshCw, Rocket, Settings2, Shrink, Sparkles, Telescope, Zap } from 'lucide-react';
 import { useEffect,useMemo,useRef,useState } from 'react';
 import { listInstanceModels,listModels,type EngineSnapshot,type ModelInfo,type OptionDescriptor } from '../api';
 import { forkActions } from '../lib/agentFork';
@@ -381,24 +381,26 @@ export function EnginePicker(props: EnginePickerProps) {
                     </div>
                   ))}
                   {isAgent && (
-                    <div className="flex items-center gap-1.5 px-1.5 pt-1">
+                    <div className={cn('flex items-center gap-2 px-1.5 pb-0.5', descriptors.length > 0 && 'mt-1 border-t border-border/40 pt-2')}>
                       <span
-                        className="mr-auto truncate text-[11px] text-muted-foreground/60"
-                        title={engine?.capability_source === 'unknown' ? 'Available actions are confirmed when the agent starts' : engine?.agent_version ?? undefined}
+                        className="shrink-0 text-[11.5px] text-muted-foreground/65"
+                        title={engine?.capability_source === 'unknown' ? 'Available actions are confirmed when the agent starts' : undefined}
                       >
-                        This chat's agent session{engine?.agent_version ? ` · ${engine.agent_version}` : ''}
+                        Session
                       </span>
-                      {props.onAgentCompact && (
-                        <SmallButton onClick={() => { props.onAgentCompact?.(); onOpenChange(false); }} title="Ask the agent to compact its context">
-                          Compact
-                        </SmallButton>
-                      )}
-                      {props.onAgentFork && forkActions(engine).wholeChat && (
-                        <SmallButton onClick={() => { props.onAgentFork?.(); onOpenChange(false); }} title="Open a new chat with a native copy of this entire agent conversation">
-                          Fork chat
-                        </SmallButton>
-                      )}
-                      <RevertButton sessionId={props.sessionId} onReverted={props.onAgentReverted} />
+                      <div className="ml-auto flex shrink-0 items-center gap-1">
+                        {props.onAgentCompact && (
+                          <SmallButton icon={<Shrink className="size-3" />} onClick={() => { props.onAgentCompact?.(); onOpenChange(false); }} title="Ask the agent to compact its context">
+                            Compact
+                          </SmallButton>
+                        )}
+                        {props.onAgentFork && forkActions(engine).wholeChat && (
+                          <SmallButton icon={<GitBranch className="size-3" />} onClick={() => { props.onAgentFork?.(); onOpenChange(false); }} title="Open a new chat with a native copy of this entire agent conversation">
+                            Fork chat
+                          </SmallButton>
+                        )}
+                        <RevertButton sessionId={props.sessionId} onReverted={props.onAgentReverted} />
+                      </div>
                     </div>
                   )}
                 </div>
@@ -708,14 +710,19 @@ function ModelList({
   );
 }
 
-function SmallButton({ children, onClick, title }: { children: React.ReactNode; onClick: () => void; title?: string }) {
+/** Session actions share one look, and never wrap or squeeze. */
+export const SESSION_BUTTON =
+  'inline-flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-border/70 px-2.5 text-[12px] text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground';
+
+function SmallButton({ children, onClick, title, icon }: { children: React.ReactNode; onClick: () => void; title?: string; icon?: React.ReactNode }) {
   return (
     <button
       type="button"
       onClick={onClick}
       title={title}
-      className="rounded-lg border border-border/80 px-2 py-1 text-[11.5px] text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
+      className={SESSION_BUTTON}
     >
+      {icon}
       {children}
     </button>
   );
