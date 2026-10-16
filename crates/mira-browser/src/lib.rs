@@ -351,6 +351,8 @@ struct Session {
     /// A JavaScript dialog blocking a page. While one is open the page
     /// runs no script, so every other action would hang until it timed out.
     dialog: std::sync::Arc<std::sync::Mutex<Option<OpenDialog>>>,
+    /// The live view's channel, for [`point`].
+    live: tokio::sync::broadcast::Sender<LiveEvent>,
 }
 
 /// An open `alert` / `confirm` / `prompt` / `beforeunload`.
@@ -381,6 +383,10 @@ pub enum LiveEvent {
     },
     /// The current tab's main frame navigated.
     Navigated { url: String },
+    /// The agent is about to act at this point (CSS pixels, like `Frame`):
+    /// the live view moves its cursor there. `action` is `click`, `type`,
+    /// `hover`, `scroll` or `drag`. Never sent for the watcher's own input.
+    Pointer { x: f64, y: f64, action: String },
     /// The browser went away.
     Closed,
 }
@@ -903,6 +909,7 @@ async fn start(
         current,
         css_per_px: None,
         dialog,
+        live: live_seed.clone(),
     };
     attach(&mut sess).await?;
     // A viewer who connects now should see where the browser already is —
@@ -1160,6 +1167,24 @@ async fn element_center(
     Ok((x, y))
 }
 
+/// How long the agent's cursor gets to travel before the action lands, so
+/// whoever is watching sees where it is going rather than a click out of
+/// nowhere. Only spent while someone is watching.
+const POINTER_LEAD: Duration = Duration::from_millis(280);
+
+/// Show the live view where the agent is about to act.
+async fn point(sess: &Session, x: f64, y: f64, action: &str) {
+    if sess.live.receiver_count() == 0 {
+        return;
+    }
+    let _ = sess.live.send(LiveEvent::Pointer {
+        x,
+        y,
+        action: action.to_owned(),
+    });
+    tokio::time::sleep(POINTER_LEAD).await;
+}
+
 async fn mouse_click(sess: &mut Session, x: f64, y: f64, count: u32) -> Result<(), BrowserError> {
     page_call(
         sess,
@@ -1409,6 +1434,7 @@ async fn run(
                 }
                 _ => element_center(sess, element.as_deref(), selector.as_deref()).await?,
             };
+            point(sess, x, y, "click").await;
             mouse_click(sess, x, y, if *double { 2 } else { 1 }).await?;
             refresh_tabs(sess).await?;
             let what = element
@@ -1426,6 +1452,7 @@ async fn run(
         } => {
             if element.is_some() || selector.is_some() {
                 let (x, y) = element_center(sess, element.as_deref(), selector.as_deref()).await?;
+                point(sess, x, y, "type").await;
                 mouse_click(sess, x, y, 1).await?;
             }
             if *clear {
@@ -1482,6 +1509,7 @@ async fn run(
                         .unwrap_or((100.0, 100.0))
                 }
             };
+            point(sess, x, y, "scroll").await;
             page_call(
                 sess,
                 "Input.dispatchMouseEvent",
@@ -1592,6 +1620,7 @@ async fn run(
         }
         A::Hover { element, selector } => {
             let (x, y) = element_center(sess, element.as_deref(), selector.as_deref()).await?;
+            point(sess, x, y, "hover").await;
             page_call(
                 sess,
                 "Input.dispatchMouseEvent",
@@ -1691,12 +1720,21 @@ async fn run(
             let (x1, y1) =
                 element_center(sess, to_element.as_deref(), to_selector.as_deref()).await?;
             let mouse = |kind: &str, x: f64, y: f64| json!({ "type": kind, "x": x, "y": y, "button": "left", "buttons": 1, "clickCount": 1 });
+            point(sess, x0, y0, "drag").await;
             page_call(
                 sess,
                 "Input.dispatchMouseEvent",
                 mouse("mousePressed", x0, y0),
             )
             .await?;
+            // The cursor glides to the drop point while the drag runs.
+            if sess.live.receiver_count() > 0 {
+                let _ = sess.live.send(LiveEvent::Pointer {
+                    x: x1,
+                    y: y1,
+                    action: "drag".into(),
+                });
+            }
             // Intermediate moves: drag libraries wait for a threshold.
             for i in 1..=8 {
                 let t = f64::from(i) / 8.0;
@@ -1832,6 +1870,19 @@ fn target_css(element: Option<&str>, selector: Option<&str>) -> Result<String, B
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pointer_events_reach_the_live_view_as_pointer() {
+        let ev = LiveEvent::Pointer {
+            x: 12.5,
+            y: 40.0,
+            action: "click".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(ev).unwrap(),
+            json!({ "type": "pointer", "x": 12.5, "y": 40.0, "action": "click" })
+        );
+    }
 
     #[test]
     fn parses_actions_and_targets() {

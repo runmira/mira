@@ -14,6 +14,7 @@ import { RequestBoundary } from './RequestBoundary';
 
 import { ImageAttachmentMeta } from './ImageAttachmentDetails';
 import { ImageLightbox } from './ImageLightbox';
+import { BrowserNoteCard } from './BrowserNoteCard';
 import { MentionInput } from './MentionInput';
 import { QuoteCard } from './QuoteCard';
 import {
@@ -105,6 +106,8 @@ export function Composer(props: Props) {
     setImages,
     quotes,
     setQuotes,
+    notes,
+    setNotes,
     attachments,
     attachError,
     removeAttachment,
@@ -269,6 +272,19 @@ export function Composer(props: Props) {
                 </div>
               );
             })}
+          </div>
+        )}
+
+        {!activePromptKind && notes.length > 0 && (
+          <div className="flex flex-col gap-1.5 px-1.5 pt-1">
+            {notes.map((n) => (
+              <BrowserNoteCard
+                key={n.id}
+                note={n}
+                onOpen={() => setPreview(`data:${n.data.media_type};base64,${n.data.data}`)}
+                onRemove={() => setNotes((prev) => prev.filter((p) => p.id !== n.id))}
+              />
+            ))}
           </div>
         )}
 
@@ -602,7 +618,8 @@ export function Composer(props: Props) {
             !text.trim() &&
             attachments.length === 0 &&
             images.length === 0 &&
-            quotes.length === 0 ? (
+            quotes.length === 0 &&
+            notes.length === 0 ? (
               <button
                 type="button"
                 onClick={onInterrupt}
@@ -620,7 +637,8 @@ export function Composer(props: Props) {
                   (!text.trim() &&
                     attachments.length === 0 &&
                     images.length === 0 &&
-                    quotes.length === 0)
+                    quotes.length === 0 &&
+                    notes.length === 0)
                 }
                 className="flex size-8 shrink-0 items-center justify-center rounded-full bg-foreground text-background transition-opacity hover:opacity-90 disabled:opacity-35 touch:size-10"
                 title={
