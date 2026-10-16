@@ -1,120 +1,62 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import {
-  ArrowDownLeft,
-  ArrowUpRight,
-  CalendarDays,
-  ChartColumn,
-  ChevronRight,
-  Coins,
-  Download,
-  Info,
-  MessagesSquare,
-} from 'lucide-react';
-import { cn } from '@/lib/utils';
-import { costUsd, formatDollars, shortNum } from '../lib/usage';
-
 /**
- * Settings → Usage: tokens and cost across every stored session, by
- * day, model, project and session. Rows come from `/api/usage` (per
- * session/day/model); pricing uses the same table as the rest of the
- * UI. Unpriced models count tokens but never show a $0 cost.
+ * Settings → Usage: what the work cost and how many tokens it took, per
+ * provider (Mira's own model, each external agent), plus each agent's plan
+ * limits. Rows come from `/api/usage` (per session/day/model); costs are
+ * API estimates — an agent's own figure when it reports one, otherwise the
+ * price table — and tokens with no known price are counted but not costed.
  */
+import { useEffect, useMemo, useState } from 'react';
+import { Check, ChevronDown, Download, Info, RefreshCw } from 'lucide-react';
+import { cn } from '@/lib/utils';
+import { sortProviders, usageProvider } from '../lib/usageProviders';
+import { AgentIcon } from './AgentIcon';
+import { UsageLimits } from './usage/UsageLimits';
+import { UsageProviderChart } from './usage/UsageProviderChart';
+import { UsageShareBar } from './usage/UsageShareBar';
+import {
+  buildUsage,
+  dayRange,
+  formatDayShort,
+  formatPercent,
+  formatTokens,
+  formatUsd,
+  rowCost,
+  type Totals,
+  type UsageRow,
+} from './usage/usageModel';
+import { providerKey } from '../lib/usageProviders';
 
-type Row = {
-  session_id: string;
-  title: string | null;
-  cwd: string;
-  model: string;
-  day: string;
-  prompt_tokens: number;
-  completion_tokens: number;
-  cached_input_tokens: number;
-  /** The external agent that ran these turns (`claude`, `codex`). */
-  agent?: string | null;
-  /** The agent's own cost estimate, used instead of the price table. */
-  cost_usd?: number | null;
-  /** How these turns are billed. A subscription row's dollar figure is
-   *  API-equivalent, not money spent, so it is never summed into the
-   *  metered total. */
-  billing?: 'api' | 'subscription' | 'unknown' | null;
-};
+type Metric = 'tokens' | 'cost' | 'limits';
+type Breakdown = 'model' | 'day' | 'project' | 'session';
+const WINDOWS = [7, 30, 90] as const;
 
-const AGENT_NAMES: Record<string, string> = { claude: 'Claude Code', codex: 'Codex' };
-/** Model label, with the agent that ran it so agent and provider spend
- *  on the same model stay apart. */
-function modelLabel(r: Row): string {
-  return r.agent ? `${r.model} · ${AGENT_NAMES[r.agent] ?? r.agent}` : r.model;
-}
+const PREF_METRIC = 'mira.usage.metric';
+const PREF_DAYS = 'mira.usage.days';
+const PREF_HIDDEN = 'mira.usage.hiddenProviders';
 
-type Agg = {
-  input: number;
-  output: number;
-  /** Metered spend: the money actually attributable to API calls. */
-  cost: number;
-  /** API-equivalent spend covered by a plan. Real cost: none. */
-  covered: number;
-  unpriced: boolean;
-};
-
-const RANGES = [7, 30, 90] as const;
-const BAR = '#7aa2f7'; // mira-blue — one series, one hue
-
-function rowCost(r: Row): number | null {
-  if (typeof r.cost_usd === 'number') return r.cost_usd;
-  return costUsd(r.model, {
-    prompt_tokens: r.prompt_tokens,
-    completion_tokens: r.completion_tokens,
-    cached_input_tokens: r.cached_input_tokens,
-    rounds: 0,
-  });
-}
-
-function aggregate<K>(rows: Row[], key: (r: Row) => K): Map<K, Agg> {
-  const m = new Map<K, Agg>();
-  for (const r of rows) {
-    const k = key(r);
-    const a = m.get(k) ?? { input: 0, output: 0, cost: 0, covered: 0, unpriced: false };
-    a.input += r.prompt_tokens;
-    a.output += r.completion_tokens;
-    const c = rowCost(r);
-    if (c == null) a.unpriced = true;
-    // A subscription row's figure is an API-equivalent estimate, so it is
-    // kept apart from metered spend rather than added to it.
-    else if (r.billing === 'subscription') a.covered += c;
-    else a.cost += c;
-    m.set(k, a);
+function readPref<T>(key: string, parse: (raw: string) => T | undefined, def: T): T {
+  try {
+    const raw = localStorage.getItem(key);
+    return (raw != null ? parse(raw) : undefined) ?? def;
+  } catch {
+    return def;
   }
-  return m;
 }
-
-/** Cost text: never "$0.00" for tokens we couldn't price. */
-function costLabel(a: Agg): string {
-  const metered = a.cost > 0 ? formatDollars(a.cost) : a.unpriced ? '—' : formatDollars(0);
-  // Plan-covered usage is shown alongside, never inside, the total.
-  return a.covered > 0 ? `${metered} (+${formatDollars(a.covered)} on your plan)` : metered;
-}
-
-function daysBetween(since: string, n: number): string[] {
-  const out: string[] = [];
-  const d = new Date(`${since}T00:00:00Z`);
-  for (let i = 0; i < n; i++) {
-    out.push(d.toISOString().slice(0, 10));
-    d.setUTCDate(d.getUTCDate() + 1);
-  }
-  return out;
+function writePref(key: string, value: string) {
+  try { localStorage.setItem(key, value); } catch { /* private mode */ }
 }
 
 function basename(p: string) {
   return p.replace(/\/+$/, '').split('/').pop() || p;
 }
 
-function downloadCsv(rows: Row[]) {
-  const head = 'day,session_id,title,project,model,input_tokens,output_tokens,cached_input_tokens,cost_usd';
+function downloadCsv(rows: UsageRow[]) {
+  const head = 'day,session_id,title,project,provider,model,input_tokens,output_tokens,cached_input_tokens,cost_usd';
   const esc = (v: string) => (/[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
   const lines = rows.map((r) => {
     const c = rowCost(r);
     return [
-      r.day, r.session_id, esc(r.title ?? ''), esc(r.cwd), esc(r.model),
+      r.day, r.session_id, esc(r.title ?? ''), esc(r.cwd), usageProvider(r.agent).label, esc(r.model),
       r.prompt_tokens, r.completion_tokens, r.cached_input_tokens, c == null ? '' : c.toFixed(6),
     ].join(',');
   });
@@ -126,317 +68,417 @@ function downloadCsv(rows: Row[]) {
   URL.revokeObjectURL(a.href);
 }
 
-/* ---------- accent wheel ---------- */
-
-/**
- * Stable accent per breakdown row / session avatar: hash the key into a
- * Tokyo-night-friendly hue. Every class is a hard-coded literal —
- * template-interpolated classes never reach Tailwind's JIT scanner, so
- * `` `bg-${hue}-500/15` `` would silently render unstyled.
- */
-const ACCENTS = {
-  blue:    { dot: 'bg-blue-400',         bar: 'from-blue-400/90 to-blue-400/25',       chipBg: 'bg-blue-500/15',    chipText: 'text-blue-300' },
-  violet:  { dot: 'bg-violet-400',       bar: 'from-violet-400/90 to-violet-400/25',   chipBg: 'bg-violet-500/15',  chipText: 'text-violet-300' },
-  cyan:    { dot: 'bg-cyan-400',         bar: 'from-cyan-400/90 to-cyan-400/25',       chipBg: 'bg-cyan-500/15',    chipText: 'text-cyan-300' },
-  emerald: { dot: 'bg-emerald-400',      bar: 'from-emerald-400/90 to-emerald-400/25', chipBg: 'bg-emerald-500/15', chipText: 'text-emerald-300' },
-  amber:   { dot: 'bg-amber-400',        bar: 'from-amber-400/90 to-amber-400/25',     chipBg: 'bg-amber-500/15',   chipText: 'text-amber-300' },
-  pink:    { dot: 'bg-pink-400',         bar: 'from-pink-400/90 to-pink-400/25',       chipBg: 'bg-pink-500/15',    chipText: 'text-pink-300' },
-  orange:  { dot: 'bg-orange-400',       bar: 'from-orange-400/90 to-orange-400/25',   chipBg: 'bg-orange-500/15',  chipText: 'text-orange-300' },
-  red:     { dot: 'bg-red-400',          bar: 'from-red-400/90 to-red-400/25',         chipBg: 'bg-red-500/15',     chipText: 'text-red-300' },
-  teal:    { dot: 'bg-teal-400',         bar: 'from-teal-400/90 to-teal-400/25',       chipBg: 'bg-teal-500/15',    chipText: 'text-teal-300' },
-  indigo:  { dot: 'bg-indigo-400',       bar: 'from-indigo-400/90 to-indigo-400/25',   chipBg: 'bg-indigo-500/15',  chipText: 'text-indigo-300' },
-} as const;
-
-const WHEEL = ['blue', 'violet', 'cyan', 'emerald', 'amber', 'pink', 'orange', 'red', 'teal', 'indigo'] as const;
-
-type AccentKey = (typeof WHEEL)[number];
-type Accent = (typeof ACCENTS)[AccentKey];
-
-function accentFor(seed: string): Accent {
-  let h = 5381;
-  for (let i = 0; i < seed.length; i++) {
-    h = (h * 33) ^ seed.charCodeAt(i);
-  }
-  return ACCENTS[WHEEL[Math.abs(h) % WHEEL.length]];
-}
-
-/* ---------- section ---------- */
-
 export function UsageSection() {
-  const [days, setDays] = useState<(typeof RANGES)[number]>(30);
-  const [data, setData] = useState<{ since: string; rows: Row[] } | null>(null);
+  const [metric, setMetricState] = useState<Metric>(() =>
+    readPref(PREF_METRIC, (v) => (v === 'tokens' || v === 'cost' || v === 'limits' ? v : undefined), 'cost'));
+  const [days, setDaysState] = useState<(typeof WINDOWS)[number]>(() =>
+    readPref(PREF_DAYS, (v) => WINDOWS.find((d) => String(d) === v), 30));
+  const [hidden, setHiddenState] = useState<ReadonlySet<string>>(() =>
+    readPref(PREF_HIDDEN, (v) => new Set(JSON.parse(v) as string[]), new Set<string>()));
+  const setMetric = (m: Metric) => { setMetricState(m); writePref(PREF_METRIC, m); };
+  const setDays = (d: (typeof WINDOWS)[number]) => { setDaysState(d); writePref(PREF_DAYS, String(d)); };
+  const setHidden = (next: ReadonlySet<string>) => { setHiddenState(next); writePref(PREF_HIDDEN, JSON.stringify([...next])); };
+  const [breakdown, setBreakdown] = useState<Breakdown>('model');
+
+  const [data, setData] = useState<{ since: string; rows: UsageRow[] } | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [metric, setMetric] = useState<'cost' | 'tokens'>('cost');
+  const [reload, setReload] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
 
   useEffect(() => {
-    setData(null);
     setError(null);
+    setRefreshing(true);
     fetch(`/api/usage?days=${days}`)
       .then(async (r) => {
         const j = await r.json();
         if (!r.ok) throw new Error(j.error ?? `usage ${r.status}`);
         setData(j);
       })
-      .catch((e) => setError((e as Error).message));
-  }, [days]);
+      .catch((e) => setError((e as Error).message))
+      .finally(() => setRefreshing(false));
+  }, [days, reload]);
 
-  const rows = data?.rows ?? [];
-  const total = useMemo(() => aggregate(rows, () => 'all').get('all'), [rows]);
-  const byDay = useMemo(() => aggregate(rows, (r) => r.day), [rows]);
-  const byModel = useMemo(() => [...aggregate(rows, modelLabel)].sort((a, b) => b[1].cost - a[1].cost || b[1].input - a[1].input), [rows]);
-  const byProject = useMemo(() => [...aggregate(rows, (r) => r.cwd)].sort((a, b) => b[1].cost - a[1].cost || b[1].input - a[1].input), [rows]);
-  const bySession = useMemo(() => {
-    const titles = new Map(rows.map((r) => [r.session_id, { title: r.title, cwd: r.cwd }]));
-    return [...aggregate(rows, (r) => r.session_id)]
-      .sort((a, b) => b[1].cost - a[1].cost || b[1].input + b[1].output - (a[1].input + a[1].output))
-      .slice(0, 10)
-      .map(([id, a]) => ({ id, a, ...titles.get(id)! }));
-  }, [rows]);
-  const sessions = useMemo(() => new Set(rows.map((r) => r.session_id)).size, [rows]);
-  // Tokens-only when nothing in range can be priced.
-  const effectiveMetric = total && total.cost === 0 ? 'tokens' : metric;
-  // The hero leads with spend; when nothing in range has a known price,
-  // lead with total tokens instead so the number never reads as "$0".
-  const heroIsCost = !!total && (total.cost > 0 || !total.unpriced);
+  const showingLimits = metric === 'limits';
+  const valueMetric: 'tokens' | 'cost' = metric === 'tokens' ? 'tokens' : 'cost';
+  const allRows = data?.rows ?? [];
+  const providerIds = useMemo(() => sortProviders(allRows.map((r) => providerKey(r.agent))), [allRows]);
+  const rows = useMemo(() => allRows.filter((r) => !hidden.has(providerKey(r.agent))), [allRows, hidden]);
+  const dayList = useMemo(() => (data ? dayRange(data.since, days) : []), [data, days]);
+  const usage = useMemo(() => buildUsage(rows, dayList), [rows, dayList]);
+  const active = providerIds.filter((id) => !hidden.has(id) && usage.byProvider.has(id));
+  const value = (t: Totals | undefined) => (!t ? 0 : valueMetric === 'cost' ? t.costUsd : t.totalTokens);
+  const format = valueMetric === 'cost' ? formatUsd : formatTokens;
+  const totalValue = value(usage.total);
+  const windowLabel = dayList.length ? `${formatDayShort(dayList[0])} to ${formatDayShort(dayList[dayList.length - 1])}` : '';
 
   return (
-    <div className="flex flex-col gap-5">
-      <div className="flex flex-wrap items-end gap-3">
-        <div>
-          <h2 className="text-[18px] font-semibold tracking-tight">Usage</h2>
-          <p className="mt-0.5 text-[12.5px] text-muted-foreground">Tokens and cost across every session. Days are in UTC.</p>
-        </div>
-        <div className="ml-auto flex items-center gap-2">
+    <div className="flex flex-col gap-6">
+      {/* Top bar: title and provider filter, then metric, period and refresh. */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+        <h2 className="text-[18px] font-semibold tracking-tight">Usage</h2>
+        <span className="text-muted-foreground/50">/</span>
+        <ProviderFilter ids={providerIds} hidden={hidden} onChange={setHidden} />
+        {!showingLimits && <span className="hidden truncate text-xs text-muted-foreground xl:block">{windowLabel}</span>}
+        <div className="ms-auto flex items-center gap-2">
           <Segmented
+            label="Usage metric"
+            value={metric}
+            options={[{ value: 'tokens', label: 'Tokens' }, { value: 'cost', label: 'Cost' }, { value: 'limits', label: 'Limits' }]}
+            onChange={(v) => setMetric(v as Metric)}
+          />
+          <Segmented
+            label="Usage period"
             value={String(days)}
-            options={RANGES.map((d) => ({ value: String(d), label: `${d}d` }))}
-            onChange={(v) => setDays(Number(v) as (typeof RANGES)[number])}
+            disabled={showingLimits}
+            options={WINDOWS.map((d) => ({ value: String(d), label: `${d}d` }))}
+            onChange={(v) => setDays(Number(v) as (typeof WINDOWS)[number])}
           />
           <button
             type="button"
-            onClick={() => downloadCsv(rows)}
-            disabled={rows.length === 0}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-border/70 bg-background/40 px-2.5 py-1.5 text-[12px] font-medium text-muted-foreground transition-colors hover:bg-secondary/50 hover:text-foreground disabled:opacity-40"
+            onClick={() => setReload((n) => n + 1)}
+            aria-label={showingLimits ? 'Refresh limits' : 'Refresh usage'}
+            aria-busy={refreshing}
+            className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
           >
-            <Download className="size-3.5" strokeWidth={1.75} /> CSV
+            <RefreshCw className={cn('size-3.5', refreshing && 'animate-spin')} strokeWidth={1.75} />
           </button>
+          {!showingLimits && (
+            <button
+              type="button"
+              onClick={() => downloadCsv(rows)}
+              disabled={rows.length === 0}
+              aria-label="Download CSV"
+              title="Download CSV"
+              className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground disabled:opacity-40"
+            >
+              <Download className="size-3.5" strokeWidth={1.75} />
+            </button>
+          )}
         </div>
       </div>
 
-      {error && (
-        <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-[12.5px] text-destructive">
-          {error}
-        </div>
-      )}
-      {!data && !error && (
-        <div className="flex flex-col gap-4">
-          <div className="h-32 animate-pulse rounded-2xl bg-secondary/30" />
-          <div className="h-52 animate-pulse rounded-xl bg-secondary/20" />
-        </div>
-      )}
-      {data && rows.length === 0 && (
-        <div className="flex flex-col items-center gap-3 rounded-2xl border border-dashed border-border/60 bg-secondary/20 px-4 py-14 text-center">
-          <div className="inline-flex size-11 items-center justify-center rounded-full bg-mira-blue/10 text-mira-blue">
-            <ChartColumn className="size-5" strokeWidth={1.75} />
-          </div>
-          <div>
-            <div className="text-[13.5px] font-semibold text-foreground">No usage yet</div>
-            <div className="mt-1 text-[12.5px] text-muted-foreground">
-              Nothing was spent in the last {days} days. Start a chat and it will show up here.
-            </div>
-          </div>
-        </div>
-      )}
-
-      {data && total && (
-        <>
-          {/* Hero: the one number people open this page for, plus the
-              secondary stats tucked to the right so the tiles don't
-              repeat as four identical grey boxes. */}
-          <div className="relative overflow-hidden rounded-2xl border border-mira-blue/20 bg-mira-elev1/70 px-5 py-5">
-            <div aria-hidden className="pointer-events-none absolute -right-10 -top-16 size-48 rounded-full bg-mira-blue/25 blur-3xl" />
-            <div aria-hidden className="pointer-events-none absolute -bottom-20 left-1/3 size-44 rounded-full bg-mira-purple/15 blur-3xl" />
-            <div className="relative flex flex-wrap items-end justify-between gap-x-8 gap-y-5">
-              <div className="min-w-0">
-                <div className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-                  <Coins className="size-3.5 text-mira-blue" strokeWidth={1.75} />
-                  {heroIsCost ? 'Total spend' : 'Total tokens'}
-                  <span className="normal-case tracking-normal text-muted-foreground/60">· last {days} days</span>
-                </div>
-                <div className="mt-2 text-[32px] font-semibold leading-none tracking-tight tabular-nums text-foreground">
-                  {heroIsCost ? costLabel(total) : shortNum(total.input + total.output)}
-                </div>
-                <div className="mt-1.5 text-[11.5px] text-muted-foreground">
-                  {heroIsCost
-                    ? total.covered > 0
-                      ? `${formatDollars(total.covered)} more ran on a subscription — covered by your plan, not billed`
-                      : total.unpriced ? 'some models unpriced — see footnote' : 'across all models and projects'
-                    : 'no priced models in this range'}
-                </div>
+      {showingLimits ? (
+        <UsageLimits hidden={hidden} reload={reload} />
+      ) : error ? (
+        <p className="py-12 text-center text-sm text-muted-foreground">{error}</p>
+      ) : !data ? (
+        <UsageSkeleton />
+      ) : (
+        <div aria-busy={refreshing} className={cn('flex flex-col gap-6 transition-opacity', refreshing && 'opacity-60 delay-150')}>
+          <section className="grid gap-6 lg:grid-cols-[minmax(0,18rem)_minmax(0,1fr)]">
+            <div className="flex min-w-0 flex-col gap-5">
+              <div className="flex flex-col gap-1">
+                <span className="text-4xl font-semibold tabular-nums text-foreground">{format(totalValue)}</span>
+                <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                  <span>
+                    {usage.total.sessions.toLocaleString('en-US')} sessions
+                    {valueMetric === 'cost' && ' · API estimate'}
+                  </span>
+                  {valueMetric === 'cost' && (usage.total.unpricedTokens > 0 || usage.total.subscriptionUsd > 0) && (
+                    <span
+                      className="inline-flex cursor-help"
+                      title={[
+                        usage.total.unpricedTokens > 0
+                          ? `Excludes ${formatTokens(usage.total.unpricedTokens)} tokens from models with no known price.`
+                          : null,
+                        usage.total.subscriptionUsd > 0
+                          ? `${formatUsd(usage.total.subscriptionUsd)} of it ran on a subscription — covered by the plan, not billed.`
+                          : null,
+                      ].filter(Boolean).join('\n')}
+                    >
+                      <Info className="size-3" aria-hidden />
+                    </span>
+                  )}
+                </span>
               </div>
-              <div className="flex items-stretch">
-                <HeroStat
-                  icon={<ArrowDownLeft className="size-4 text-mira-cyan" strokeWidth={1.75} />}
-                  label="Input"
-                  value={shortNum(total.input)}
-                />
-                <HeroStat
-                  icon={<ArrowUpRight className="size-4 text-mira-user" strokeWidth={1.75} />}
-                  label="Output"
-                  value={shortNum(total.output)}
-                  divider
-                />
-                <HeroStat
-                  icon={<MessagesSquare className="size-4 text-mira-purple" strokeWidth={1.75} />}
-                  label="Sessions"
-                  value={String(sessions)}
-                  divider
-                />
-              </div>
-            </div>
-          </div>
-
-          {/* Daily chart */}
-          <Card>
-            <div className="flex flex-wrap items-center gap-2 border-b border-border/50 px-4 py-2.5">
-              <CalendarDays className="size-3.5 text-muted-foreground" strokeWidth={1.75} />
-              <span className="text-[12.5px] font-medium">
-                {effectiveMetric === 'cost' ? 'Cost per day' : 'Tokens per day'}
-              </span>
-              {total.cost > 0 && (
-                <div className="ml-auto">
-                  <Segmented
-                    value={metric}
-                    options={[{ value: 'cost', label: 'Cost' }, { value: 'tokens', label: 'Tokens' }]}
-                    onChange={(v) => setMetric(v as 'cost' | 'tokens')}
-                  />
-                </div>
+              {active.length === 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  {allRows.length > 0 ? 'Every provider with usage is filtered out.' : `No usage in the last ${days} days.`}
+                </p>
+              ) : (
+                [...active]
+                  .sort((a, b) => value(usage.byProvider.get(b)) - value(usage.byProvider.get(a)))
+                  .map((id) => {
+                    const t = usage.byProvider.get(id)!;
+                    const p = usageProvider(id);
+                    const share = totalValue > 0 ? value(t) / totalValue : 0;
+                    return (
+                      <div key={id} className="flex flex-col gap-1">
+                        <div className="flex items-baseline justify-between gap-4">
+                          <span className="flex min-w-0 items-center gap-2 text-sm text-foreground">
+                            <span aria-hidden className="size-2 shrink-0 rounded-full" style={{ backgroundColor: p.color }} />
+                            {p.driver && <AgentIcon kind={p.driver} name={p.label} size="sm" tile={false} className="size-4" />}
+                            <span className="flex min-w-0 items-baseline gap-1.5">
+                              <span className="truncate">{p.label}</span>
+                              <span className="shrink-0 whitespace-nowrap text-[11px] tabular-nums text-muted-foreground">
+                                {t.sessions} {t.sessions === 1 ? 'session' : 'sessions'}
+                              </span>
+                            </span>
+                          </span>
+                          <span className="shrink-0 text-sm font-medium tabular-nums text-foreground">{format(value(t))}</span>
+                        </div>
+                        <span className="text-xs text-muted-foreground">
+                          {valueMetric === 'cost'
+                            ? `${formatPercent(share)} of cost · ${formatTokens(t.totalTokens)} tokens`
+                            : `${formatPercent(share)} of tokens · ${formatUsd(t.costUsd)}`}
+                        </span>
+                      </div>
+                    );
+                  })
               )}
             </div>
-            <div className="px-3 py-3">
-              <DailyBars days={daysBetween(data.since, days)} byDay={byDay} metric={effectiveMetric} />
+            <div className="flex min-w-0 flex-col gap-3">
+              <h3 className="text-[13px] font-medium text-foreground">
+                Daily {valueMetric === 'tokens' ? 'processed tokens' : 'cost'}
+              </h3>
+              <UsageProviderChart providers={active} daily={usage.daily} metric={valueMetric} />
             </div>
-          </Card>
+          </section>
 
-          {/* Breakdowns — full-width bar lists: share bars read better
-              and truncate far less than two side-by-side tables. */}
-          <Breakdown
-            title="By model"
-            rows={byModel.map(([m, a]) => ({ key: m, label: m.split('/').pop() || m, title: m, a }))}
-          />
-          <Breakdown
-            title="By project"
-            rows={byProject.map(([p, a]) => ({ key: p, label: basename(p), title: p, a }))}
-          />
-
-          {/* Top sessions */}
-          <Card>
-            <div className="flex items-center gap-2 border-b border-border/50 px-4 py-2.5">
-              <span className="text-[12.5px] font-medium">Top sessions</span>
-              <span className="text-[11px] text-muted-foreground">· click to open</span>
+          <section className="flex flex-col gap-2">
+            <h3 className="text-[13px] font-medium text-foreground">Totals</h3>
+            <div className="grid grid-cols-2 gap-x-6 gap-y-4 py-1 md:grid-cols-5">
+              <Figure label="Processed tokens" value={formatTokens(usage.total.totalTokens)} />
+              <Figure label="Cached input" value={formatTokens(usage.total.cachedInput)} />
+              <Figure label="Uncached input" value={formatTokens(usage.total.uncachedInput)} />
+              <Figure label="Output" value={formatTokens(usage.total.output)} />
+              <Figure label="Cache savings" value={formatUsd(usage.cacheSavingsUsd)} />
             </div>
-            <div className="flex flex-col p-1.5">
-              {bySession.map((s) => {
-                const label = s.title || 'Untitled';
-                const accent = accentFor(s.cwd);
-                const initial = (label.match(/[a-zA-Z0-9]/)?.[0] ?? '?').toUpperCase();
-                return (
-                  <button
-                    key={s.id}
-                    type="button"
-                    onClick={() => window.dispatchEvent(new CustomEvent('mira:open-session', { detail: s.id }))}
-                    className="group flex items-center gap-3 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-secondary/40 focus:outline-none focus-visible:ring-1 focus-visible:ring-mira-blue"
-                    title="Open session"
-                  >
-                    <span
-                      className={cn(
-                        'inline-flex size-8 shrink-0 items-center justify-center rounded-lg text-[13px] font-semibold',
-                        accent.chipBg,
-                        accent.chipText,
-                      )}
-                    >
-                      {initial}
-                    </span>
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-[13px] font-medium text-foreground">{label}</span>
-                      <span className="mt-0.5 block truncate text-[11.5px] text-muted-foreground">
-                        {basename(s.cwd)} · {shortNum(s.a.input + s.a.output)} tokens
-                      </span>
-                    </span>
-                    <span className="shrink-0 text-right text-[12.5px] tabular-nums text-foreground">
-                      {costLabel(s.a)}
-                    </span>
-                    <ChevronRight
-                      className="size-3.5 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-70"
-                      strokeWidth={1.75}
-                    />
-                  </button>
-                );
-              })}
-            </div>
-          </Card>
+          </section>
 
-          {total.unpriced && (
-            <p className="flex items-start gap-1.5 text-[11.5px] text-muted-foreground">
-              <Info className="mt-0.5 size-3.5 shrink-0" strokeWidth={1.75} />
-              <span>
-                — means a model has no known price: its tokens are counted, but not costed. “+” marks a cost that
-                leaves some unpriced tokens out.
-              </span>
-            </p>
+          {usage.total.totalTokens > 0 && (
+            <section className="grid gap-x-12 gap-y-8 lg:grid-cols-2">
+              {valueMetric === 'tokens' ? (
+                <UsageShareBar
+                  label="Tokens by type"
+                  format={formatTokens}
+                  segments={[
+                    { label: 'Uncached input', value: usage.total.uncachedInput, color: '#7aa2f7' },
+                    { label: 'Cached input', value: usage.total.cachedInput, color: '#7dcfff' },
+                    { label: 'Output', value: usage.total.output, color: '#bb9af7' },
+                  ]}
+                />
+              ) : (
+                <UsageShareBar
+                  label="Cost by type"
+                  format={formatUsd}
+                  segments={[
+                    { label: 'Uncached input', value: usage.costByType.uncachedInput, color: '#7aa2f7' },
+                    { label: 'Cached input', value: usage.costByType.cachedInput, color: '#7dcfff' },
+                    { label: 'Output', value: usage.costByType.output, color: '#bb9af7' },
+                  ]}
+                />
+              )}
+              <UsageShareBar
+                label={valueMetric === 'tokens' ? 'Tokens by provider' : 'Cost by provider'}
+                format={format}
+                segments={active.map((id) => ({
+                  label: usageProvider(id).label,
+                  value: value(usage.byProvider.get(id)),
+                  color: usageProvider(id).color,
+                }))}
+              />
+            </section>
           )}
-        </>
+
+          <section className="flex flex-col gap-3">
+            <div className="flex items-center justify-between gap-3">
+              <h3 className="text-[13px] font-medium text-foreground">Breakdown</h3>
+              <Segmented
+                label="Usage breakdown"
+                value={breakdown}
+                options={[
+                  { value: 'model', label: 'Model' },
+                  { value: 'day', label: 'Day' },
+                  { value: 'project', label: 'Project' },
+                  { value: 'session', label: 'Session' },
+                ]}
+                onChange={(v) => setBreakdown(v as Breakdown)}
+              />
+            </div>
+            {breakdown === 'day' ? (
+              <DayTable usage={usage} providers={active} metric={valueMetric} />
+            ) : (
+              <RankedTable
+                rows={rankedRows(breakdown, rows, usage)}
+                column={breakdown === 'model' ? 'Model' : breakdown === 'project' ? 'Project' : 'Session'}
+                metric={valueMetric}
+              />
+            )}
+          </section>
+        </div>
       )}
     </div>
+  );
+}
+
+/* ---------- breakdown ---------- */
+
+type Ranked = Totals & { key: string; label: string; title?: string; provider?: string; open?: string };
+
+function rankedRows(kind: Exclude<Breakdown, 'day'>, rows: UsageRow[], usage: ReturnType<typeof buildUsage>): Ranked[] {
+  if (kind === 'model') {
+    return usage.models.map((m) => ({ ...m, label: m.model, title: m.model, provider: m.provider }));
+  }
+  const group = kind === 'project' ? (r: UsageRow) => r.cwd : (r: UsageRow) => r.session_id;
+  const groups = new Map<string, UsageRow[]>();
+  for (const r of rows) {
+    const k = group(r);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k)!.push(r);
+  }
+  return [...groups].map(([k, rs]) => {
+    const t = buildUsage(rs, []).total;
+    return kind === 'project'
+      ? { ...t, key: k, label: basename(k), title: k }
+      : { ...t, key: k, label: rs[0].title || 'Untitled', title: basename(rs[0].cwd), open: k };
+  }).sort((a, b) => b.costUsd - a.costUsd || b.totalTokens - a.totalTokens);
+}
+
+function RankedTable({ rows, column, metric }: { rows: Ranked[]; column: string; metric: 'cost' | 'tokens' }) {
+  const value = (r: Ranked) => (metric === 'tokens' ? r.totalTokens : r.costUsd);
+  const peak = Math.max(0, ...rows.map(value));
+  const sum = rows.reduce((n, r) => n + value(r), 0);
+  return (
+    <table className="w-full text-sm">
+      <thead>
+        <tr className="border-b border-border text-right text-xs text-muted-foreground">
+          <th className="py-2 pr-3 text-left font-normal">#</th>
+          <th className="w-full py-2 text-left font-normal">{column}</th>
+          <th className="py-2 pl-6 font-normal">Cost</th>
+          <th className="hidden py-2 pl-6 font-normal sm:table-cell">Share</th>
+          <th className="py-2 pl-6 font-normal">Tokens</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.length === 0 ? (
+          <tr><td colSpan={5} className="py-6 text-center text-muted-foreground">No activity in this window.</td></tr>
+        ) : rows.map((r, i) => {
+          const v = value(r);
+          const color = r.provider ? usageProvider(r.provider).color : '#7aa2f7';
+          const p = r.provider ? usageProvider(r.provider) : null;
+          const name = (
+            <span className="flex items-center gap-2 text-left text-foreground">
+              {p?.driver && <AgentIcon kind={p.driver} name={p.label} size="sm" tile={false} className="size-3.5" />}
+              {p && !p.driver && <span className="size-2 rounded-full" style={{ background: p.color }} />}
+              <span className="truncate" title={r.title}>{r.label}</span>
+              {r.open && <span className="truncate text-xs text-muted-foreground">{r.title}</span>}
+            </span>
+          );
+          return (
+            <tr
+              key={r.key}
+              className="relative border-b border-border/50 whitespace-nowrap text-right tabular-nums text-muted-foreground transition-colors hover:bg-secondary/40"
+            >
+              <td className="py-2.5 pr-3 text-left text-xs">{i + 1}</td>
+              <td className="max-w-0 py-2.5 text-left whitespace-normal">
+                {r.open ? (
+                  <button
+                    type="button"
+                    onClick={() => window.dispatchEvent(new CustomEvent('mira:open-session', { detail: r.open }))}
+                    className="w-full outline-none after:absolute after:inset-0"
+                    title="Open session"
+                  >
+                    {name}
+                  </button>
+                ) : name}
+                <div aria-hidden className="mt-1.5 h-0.5 max-w-48">
+                  <div
+                    className="h-full rounded-full"
+                    style={{ width: v > 0 && peak > 0 ? `max(0.5rem, ${(v / peak) * 100}%)` : 0, backgroundColor: color }}
+                  />
+                </div>
+              </td>
+              <td className="py-2.5 pl-6 text-foreground">
+                {r.costUsd === 0 && r.unpricedTokens > 0 ? <span className="text-muted-foreground">Unpriced</span> : formatUsd(r.costUsd)}
+              </td>
+              <td className="hidden py-2.5 pl-6 sm:table-cell">{sum > 0 ? formatPercent(v / sum) : ''}</td>
+              <td className="py-2.5 pl-6">{formatTokens(r.totalTokens)}</td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
+
+function DayTable({ usage, providers, metric }: { usage: ReturnType<typeof buildUsage>; providers: string[]; metric: 'cost' | 'tokens' }) {
+  const days = [...usage.daily].reverse().filter((d) => d.total.totalTokens > 0);
+  const format = metric === 'cost' ? formatUsd : formatTokens;
+  const value = (t: Totals | undefined) => (!t ? 0 : metric === 'cost' ? t.costUsd : t.totalTokens);
+  return (
+    <table className="w-full table-fixed text-sm">
+      <colgroup>
+        <col className="w-2/5" />
+        {providers.map((p) => <col key={p} />)}
+        <col />
+        <col />
+      </colgroup>
+      <thead>
+        <tr className="border-b border-border text-left text-xs text-muted-foreground">
+          <th className="py-2 font-normal">Day</th>
+          {providers.map((p) => <th key={p} className="py-2 text-right font-normal">{usageProvider(p).label}</th>)}
+          <th className="py-2 text-right font-normal">Total</th>
+          <th className="py-2 text-right font-normal">{metric === 'cost' ? 'Tokens' : 'Cost'}</th>
+        </tr>
+      </thead>
+      <tbody>
+        {days.length === 0 ? (
+          <tr><td colSpan={providers.length + 3} className="py-6 text-center text-muted-foreground">No activity in this window.</td></tr>
+        ) : days.map((d) => (
+          <tr key={d.day} className="border-b border-border/50 transition-colors hover:bg-secondary/40">
+            <td className="py-2 text-foreground">{formatDayShort(d.day)}</td>
+            {providers.map((p) => (
+              <td key={p} className="py-2 text-right tabular-nums text-muted-foreground">{format(value(d.byProvider.get(p)))}</td>
+            ))}
+            <td className="py-2 text-right tabular-nums text-foreground">{format(value(d.total))}</td>
+            <td className="py-2 text-right tabular-nums text-muted-foreground">
+              {metric === 'cost' ? formatTokens(d.total.totalTokens) : formatUsd(d.total.costUsd)}
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }
 
 /* ---------- pieces ---------- */
 
-function Card({ children }: { children: ReactNode }) {
-  return <div className="overflow-hidden rounded-xl border border-border/60 bg-mira-elev1/50">{children}</div>;
-}
-
-function HeroStat({
-  icon, label, value, divider,
-}: {
-  icon: ReactNode;
-  label: string;
-  value: string;
-  divider?: boolean;
-}) {
+function Figure({ label, value }: { label: string; value: string }) {
   return (
-    <div className={cn('px-5 first:pl-0', divider && 'border-l border-border/50')}>
-      <div className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-        {icon}
-        {label}
-      </div>
-      <div className="mt-1.5 text-[16px] font-semibold leading-none tabular-nums text-foreground">{value}</div>
+    <div className="flex min-w-0 flex-col gap-0.5">
+      <span className="text-xs text-muted-foreground">{label}</span>
+      <span className="text-base font-medium tabular-nums text-foreground">{value}</span>
     </div>
   );
 }
 
 function Segmented({
+  label,
   value,
   options,
   onChange,
+  disabled = false,
 }: {
+  label: string;
   value: string;
   options: { value: string; label: string }[];
   onChange: (v: string) => void;
+  disabled?: boolean;
 }) {
   return (
-    <div className="inline-flex items-center rounded-full border border-border/70 bg-secondary/40 p-0.5">
+    <div role="radiogroup" aria-label={label} className={cn('inline-flex items-center rounded-lg bg-secondary/60 p-0.5', disabled && 'opacity-50')}>
       {options.map((o) => (
         <button
           key={o.value}
           type="button"
+          role="radio"
+          aria-checked={o.value === value}
+          disabled={disabled}
           onClick={() => onChange(o.value)}
           className={cn(
-            'rounded-full px-2.5 py-0.5 text-[12px] font-medium transition-colors',
-            o.value === value
-              ? 'bg-mira-elev2 text-foreground shadow-sm ring-1 ring-fg/5'
-              : 'text-muted-foreground hover:text-foreground',
+            'rounded-md px-2.5 py-1 text-xs font-medium transition-colors',
+            o.value === value ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground',
           )}
         >
           {o.label}
@@ -446,164 +488,92 @@ function Segmented({
   );
 }
 
-/**
- * Breakdown as a bar list: one row per model/project, a share bar under
- * the name, input/output inline and cost right-aligned. Share is by cost
- * when anything in the card is priced, by total tokens otherwise — a
- * mixed metric would silently rank unpriced models as zero.
- */
-function Breakdown({
-  title,
-  rows,
+/** Show or hide providers across the page (Usage and Limits). */
+function ProviderFilter({
+  ids,
+  hidden,
+  onChange,
 }: {
-  title: string;
-  rows: { key: string; label: string; title?: string; a: Agg }[];
+  ids: string[];
+  hidden: ReadonlySet<string>;
+  onChange: (next: ReadonlySet<string>) => void;
 }) {
-  const byCost = rows.some((r) => r.a.cost > 0);
-  const share = (a: Agg): number => (byCost ? a.cost : a.input + a.output);
-  const max = Math.max(...rows.map((r) => share(r.a)), 0) || 1;
-
+  const [open, setOpen] = useState(false);
+  const all = sortProviders([...ids, ...hidden]);
+  const shown = all.filter((id) => !hidden.has(id));
+  const label = hidden.size === 0 || all.length === 0
+    ? 'All providers'
+    : shown.length === 1 ? usageProvider(shown[0]).label : `${shown.length} providers`;
   return (
-    <Card>
-      <div className="flex items-center gap-2 border-b border-border/50 px-4 py-2.5">
-        <span className="text-[12.5px] font-medium">{title}</span>
-        <span className="text-[11px] text-muted-foreground">· by {byCost ? 'cost' : 'tokens'}</span>
-      </div>
-      <div className="flex flex-col divide-y divide-border/30 px-2 py-1.5">
-        {rows.map((r) => {
-          const accent = accentFor(r.key);
-          const s = share(r.a);
-          // 2% floor only for rows that actually have a nonzero share —
-          // zero (unpriced) rows render an empty track instead of a
-          // sliver that would read as a tiny cost.
-          const pct = s > 0 ? Math.max(2, Math.round((s / max) * 100)) : 0;
-          return (
-            <div key={r.key} className="flex items-center gap-3 px-2.5 py-2" title={r.title ?? r.label}>
-              <span className={cn('size-2 shrink-0 rounded-full', accent.dot)} />
-              <div className="min-w-0 flex-1">
-                <div className="flex items-baseline justify-between gap-3">
-                  <span className="truncate font-mono text-[12.5px] text-foreground">{r.label}</span>
-                  <span className="shrink-0 text-[12px] tabular-nums text-muted-foreground">{costLabel(r.a)}</span>
-                </div>
-                <div className="mt-1.5 flex items-center gap-2.5">
-                  <div className="h-1.5 w-full max-w-56 overflow-hidden rounded-full bg-secondary/50">
-                    <div
-                      className={cn('h-full rounded-full bg-gradient-to-r', accent.bar)}
-                      style={{ width: `${pct}%` }}
-                    />
-                  </div>
-                  <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground/80">
-                    {shortNum(r.a.input)} in · {shortNum(r.a.output)} out
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-sm text-foreground transition-colors hover:bg-secondary/60"
+      >
+        {label}
+        <ChevronDown className="size-3.5 text-muted-foreground" strokeWidth={2} />
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-20" onClick={() => setOpen(false)} />
+          <div className="absolute left-0 z-30 mt-1 min-w-48 rounded-xl border border-border/70 bg-popover p-1 shadow-lg">
+            {all.length === 0 && <div className="px-2.5 py-1.5 text-xs text-muted-foreground">No providers yet</div>}
+            {all.map((id) => {
+              const p = usageProvider(id);
+              const on = !hidden.has(id);
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => {
+                    const next = new Set(hidden);
+                    if (on) next.add(id); else next.delete(id);
+                    onChange(next);
+                  }}
+                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-sm hover:bg-secondary/60"
+                >
+                  <span className="inline-flex size-4 items-center justify-center">
+                    {on && <Check className="size-3.5" strokeWidth={2.5} />}
                   </span>
-                </div>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </Card>
+                  {p.driver ? (
+                    <AgentIcon kind={p.driver} name={p.label} size="sm" tile={false} className="size-4" />
+                  ) : (
+                    <span className="size-2 rounded-full" style={{ background: p.color }} />
+                  )}
+                  {p.label}
+                </button>
+              );
+            })}
+          </div>
+        </>
+      )}
+    </div>
   );
 }
 
-/** One series of daily bars on one axis, with a per-bar hover tooltip. */
-function DailyBars({
-  days,
-  byDay,
-  metric,
-}: {
-  days: string[];
-  byDay: Map<string, Agg>;
-  metric: 'cost' | 'tokens';
-}) {
-  const [hover, setHover] = useState<number | null>(null);
-  const W = 720;
-  const H = 180;
-  const padL = 44;
-  const padB = 22;
-  const plotW = W - padL;
-  const plotH = H - padB - 8;
-  const value = (d: string) => {
-    const a = byDay.get(d);
-    if (!a) return 0;
-    return metric === 'cost' ? a.cost : a.input + a.output;
-  };
-  const max = Math.max(...days.map(value), 0) || 1;
-  const step = plotW / days.length;
-  const barW = Math.max(2, Math.min(24, step - 2));
-  const fmt = (v: number) => (metric === 'cost' ? formatDollars(v) : shortNum(v));
-  const ticks = [0, 0.5, 1].map((t) => t * max);
-  const labelEvery = Math.ceil(days.length / 8);
-
+function UsageSkeleton() {
   return (
-    <div className="relative">
-      <svg viewBox={`0 0 ${W} ${H}`} className="w-full" role="img" aria-label={`${metric} per day`}>
-        <defs>
-          <linearGradient id="mira-usage-bar" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor={BAR} stopOpacity={0.95} />
-            <stop offset="100%" stopColor={BAR} stopOpacity={0.30} />
-          </linearGradient>
-        </defs>
-        {ticks.map((t) => {
-          const y = 8 + plotH - (t / max) * plotH;
-          return (
-            <g key={t}>
-              <line
-                x1={padL} x2={W} y1={y} y2={y}
-                stroke="currentColor" className="text-border" strokeWidth={1}
-                strokeDasharray={t === 0 ? undefined : '3 4'} opacity={t === 0 ? 1 : 0.6}
-              />
-              <text x={padL - 6} y={y + 3} textAnchor="end" className="fill-muted-foreground" fontSize={10}>
-                {t === 0 ? '0' : fmt(t)}
-              </text>
-            </g>
-          );
-        })}
-        {days.map((d, i) => {
-          const v = value(d);
-          const h = (v / max) * plotH;
-          const x = padL + i * step + (step - barW) / 2;
-          const y = 8 + plotH - h;
-          return (
-            <g key={d} onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover(null)}>
-              {/* Hit target wider and taller than the bar. */}
-              <rect x={padL + i * step} y={8} width={step} height={plotH} fill="transparent" />
-              {v > 0 && (
-                <path
-                  d={`M${x},${8 + plotH} V${y + Math.min(4, h)} Q${x},${y} ${x + Math.min(4, barW / 2)},${y} H${x + barW - Math.min(4, barW / 2)} Q${x + barW},${y} ${x + barW},${y + Math.min(4, h)} V${8 + plotH} Z`}
-                  fill="url(#mira-usage-bar)"
-                  opacity={hover == null || hover === i ? 1 : 0.45}
-                />
-              )}
-              {i % labelEvery === 0 && (
-                <text x={padL + i * step + step / 2} y={H - 6} textAnchor="middle" className="fill-muted-foreground" fontSize={10}>
-                  {d.slice(5)}
-                </text>
-              )}
-            </g>
-          );
-        })}
-      </svg>
-      {hover != null && (() => {
-        const d = days[hover];
-        const a = byDay.get(d);
-        const leftPct = ((padL + hover * step + step / 2) / W) * 100;
-        return (
-          <div
-            className="tooltip tooltip-stack pointer-events-none absolute top-0 z-10 -translate-x-1/2"
-            style={{ left: `${Math.min(88, Math.max(12, leftPct))}%` }}
-          >
-            <div className="font-medium">{d}</div>
-            {a ? (
-              <>
-                <div className="mt-0.5 text-muted-foreground">{shortNum(a.input)} in · {shortNum(a.output)} out</div>
-                <div className="mt-0.5">{costLabel(a)}</div>
-              </>
-            ) : (
-              <div className="mt-0.5 text-muted-foreground">No usage</div>
-            )}
-          </div>
-        );
-      })()}
+    <div className="flex flex-col gap-6">
+      <section className="grid gap-6 lg:grid-cols-[minmax(0,18rem)_minmax(0,1fr)]">
+        <div className="flex flex-col gap-4">
+          <div className="h-9 w-32 animate-pulse rounded bg-secondary/50" />
+          {[0, 1, 2].map((i) => <div key={i} className="h-8 animate-pulse rounded bg-secondary/40" />)}
+        </div>
+        <div className="h-60 animate-pulse rounded-lg bg-secondary/30" />
+      </section>
+      <section className="flex flex-col gap-2">
+        <h3 className="text-[13px] font-medium text-foreground">Totals</h3>
+        <div className="grid grid-cols-2 gap-x-6 gap-y-4 md:grid-cols-5">
+          {['Processed tokens', 'Cached input', 'Uncached input', 'Output', 'Cache savings'].map((l) => (
+            <div key={l} className="flex flex-col gap-1">
+              <span className="text-xs text-muted-foreground">{l}</span>
+              <span className="h-5 w-16 animate-pulse rounded bg-secondary/50" />
+            </div>
+          ))}
+        </div>
+      </section>
     </div>
   );
 }

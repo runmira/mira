@@ -1636,6 +1636,12 @@ impl AcpEventPort {
     /// A send error means nobody is attached, which is normal for a
     /// background session and must not take the agent down with it.
     pub fn push(&self, msg: ServerMsg) {
+        // Usage-limit windows also feed the server-wide Usage → Limits view.
+        if let ServerMsg::AcpLimits { windows } = &msg {
+            if let Some((_, instance, driver)) = self.runtime_owner() {
+                crate::usage_limits::record(&instance, &driver, windows);
+            }
+        }
         if let Err(e) = self.events.send(msg) {
             match e {
                 tokio::sync::broadcast::error::SendError(value) => {
