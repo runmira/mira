@@ -1,24 +1,19 @@
 import { cn } from '@/lib/utils';
 import { ChevronDown, Code as CodeIcon, LoaderCircle } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
-import { getPullRequestFiles, type FileChangeView } from '../../api';
+import { useQuery } from '@tanstack/react-query';
+import { useMemo, useState } from 'react';
+import type { FileChangeView } from '../../api';
+import { prQueries } from '../../state/pullRequests/queries';
+import { useOptionalRuntime } from '../../state/RuntimeProvider';
 import { Selection } from './types';
 /* ---------- code pane (Files changed) ---------- */
 
 export function CodePane({ selection }: { selection: Selection }) {
-  const [files, setFiles] = useState<FileChangeView[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  useEffect(() => {
-    setLoading(true);
-    getPullRequestFiles(selection.owner, selection.repo, selection.number)
-      .then((v) => {
-        setFiles(v.files);
-        setError(null);
-      })
-      .catch((e) => setError(String((e as Error).message)))
-      .finally(() => setLoading(false));
-  }, [selection.owner, selection.repo, selection.number]);
+  const runtime = useOptionalRuntime();
+  const query = useQuery(prQueries.files(runtime, selection));
+  const files: FileChangeView[] | null = query.data?.files ?? null;
+  const loading = query.isPending;
+  const error = query.error?.message ?? null;
 
   if (loading) {
     return (
