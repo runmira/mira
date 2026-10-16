@@ -514,6 +514,10 @@ pub fn map_line_with(v: &Value, models: Option<&[NativeModel]>) -> Vec<NativeAct
 #[derive(Default)]
 pub struct StreamState {
     children: std::collections::HashMap<String, Box<StreamState>>,
+    /// Tool calls that started a subagent (`Task`/`Agent`). Claude Code
+    /// also sets `parent_tool_use_id` on progress from ordinary tools (a
+    /// long `Bash`), which must not become a subagent.
+    agent_calls: std::collections::HashSet<String>,
     ended_children: std::collections::VecDeque<String>,
     background: std::collections::HashMap<String, crate::runtime::RuntimeWork>,
     runtime_turn: Option<crate::runtime::RuntimeTurn>,
@@ -563,14 +567,54 @@ fn context_tokens(usage: &Value) -> Option<u64> {
     (total > 0).then_some(total)
 }
 
+/// Whether a `tool_use` block starts a subagent.
+fn is_subagent_tool(block: &Value) -> bool {
+    matches!(block["name"].as_str(), Some("Task" | "Agent"))
+        || block["input"]["subagent_type"].is_string()
+}
+
+/// The ids of the subagent-starting `tool_use` blocks in a frame: a whole
+/// assistant message's, or a streamed block's start.
+fn subagent_tool_ids(v: &Value) -> Vec<String> {
+    let blocks: Vec<&Value> = match v["type"].as_str() {
+        Some("assistant") => v["message"]["content"]
+            .as_array()
+            .map(|c| c.iter().collect())
+            .unwrap_or_default(),
+        Some("stream_event") if v["event"]["type"] == "content_block_start" => {
+            vec![&v["event"]["content_block"]]
+        }
+        _ => Vec::new(),
+    };
+    blocks
+        .into_iter()
+        .filter(|b| b["type"] == "tool_use" && is_subagent_tool(b))
+        .filter_map(|b| b["id"].as_str().map(str::to_owned))
+        .collect()
+}
+
 impl StreamState {
     pub fn map(&mut self, v: &Value, models: Option<&[NativeModel]>) -> Vec<NativeAction> {
         use crate::runtime::*;
+        // Every frame, children's too: a subagent can start its own.
+        self.agent_calls.extend(subagent_tool_ids(v));
         if let Some(call) = v
             .get("parent_tool_use_id")
             .and_then(Value::as_str)
             .filter(|id| !id.is_empty())
         {
+            // Only a real subagent's traffic is a child: a call this
+            // stream saw start one, or a background agent task. Anything
+            // else (an ordinary tool's progress) is dropped rather than
+            // shown as a "Helper".
+            let is_agent = self.agent_calls.contains(call)
+                || self.background.values().any(|w| {
+                    w.kind == WorkKind::Subagent
+                        && w.subagent.as_ref().and_then(|s| s.call_id.as_deref()) == Some(call)
+                });
+            if !is_agent {
+                return Vec::new();
+            }
             let mut frame = v.clone();
             frame["parent_tool_use_id"] = Value::Null;
             let ended = self.ended_children.iter().any(|id| id == call);
@@ -3272,6 +3316,8 @@ done
     fn claude_children_have_separate_delta_and_snapshot_state() {
         let mut st = StreamState::default();
         for call in ["child-a", "child-b"] {
+            // The parent's Agent call starts the child, as in a real stream.
+            st.map(&json!({"type":"assistant","message":{"id":format!("parent-{call}"),"content":[{"type":"tool_use","id":call,"name":"Agent","input":{"prompt":"look","subagent_type":"explore"}}]}}), None);
             let start = json!({"type":"stream_event","parent_tool_use_id":call,"event":{"type":"message_start","message":{"id":"same-id"}}});
             st.map(&start, None);
             let delta = json!({"type":"stream_event","parent_tool_use_id":call,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":call}}});
@@ -3283,6 +3329,16 @@ done
             assert!(mapped.iter().any(|a| matches!(a, NativeAction::Event(NormalizedEvent {event: MiraEvent::SubagentEvent {event, ..}, ..}) if matches!(**event, MiraEvent::ToolCall(_)))));
         }
         assert_eq!(st.children.len(), 2);
+    }
+
+    #[test]
+    fn an_ordinary_tools_progress_is_not_a_subagent() {
+        let mut st = StreamState::default();
+        st.map(&json!({"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"bash-1","name":"Bash","input":{"command":"cargo test"}}]}}), None);
+        let progress = json!({"type":"assistant","parent_tool_use_id":"bash-1","message":{"id":"p1","content":[{"type":"text","text":"Compiling…"}]}});
+        let mapped = st.map(&progress, None);
+        assert!(mapped.is_empty(), "{} actions", mapped.len());
+        assert!(st.children.is_empty(), "a Bash call became a subagent");
     }
 
     #[test]
