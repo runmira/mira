@@ -7,7 +7,6 @@ import { lazyNamed } from '../lib/lazy';
 import { LazyBoundary } from './LazyBoundary';
 import { ComposerNoticeStack } from './ComposerNoticeStack';
 import { EnginePicker } from './EnginePicker';
-import { FilePicker } from './FilePicker';
 import { IssuePalette } from './composer/IssuePalette';
 import { RequestBoundary } from './RequestBoundary';
 
@@ -32,6 +31,7 @@ import { AttachmentChip } from './composer/attachments';
 import { Props } from './composer/types';
 import { useComposerController } from './composer/useComposerController';
 import { HoverCard } from './ui/hover-card';
+const FilePicker = lazyNamed(() => import('./FilePicker'), 'FilePicker');
 const RevertDialog = lazyNamed(() => import('./AgentSessionActions'), 'RevertDialog');
 const BrowserNoteCard = lazyNamed(() => import('./BrowserNoteCard'), 'BrowserNoteCard');
 const SpendLimitNotice = lazyNamed(() => import('./SpendLimitNotice'), 'SpendLimitNotice');
@@ -655,6 +655,7 @@ export function Composer(props: Props) {
         )}
       </form>
 
+      {filePickerOpen && <LazyBoundary fallback={null}>
       <FilePicker
         open={filePickerOpen}
         startPath={cwd || undefined}
@@ -663,6 +664,7 @@ export function Composer(props: Props) {
           attachFile(p);
         }}
       />
+      </LazyBoundary>}
 
       {/* Hidden native file input. `openNativeFiles()` above `.click()`s
        *  this; the OS shows its own open dialog. `multiple` matches

@@ -25,6 +25,17 @@ export type IssueSearch = {
   error: string | null;
 };
 
+/** Narrow cached rows synchronously, before a debounced network lookup. */
+export function filterIssueOptions(items: IssueOption[], query: string, cached = true): IssueOption[] {
+  if (!query) return items;
+  if (/^\d+$/.test(query)) {
+    const number = query.replace(/^0+(?=\d)/, '');
+    const exact = items.filter(item => String(item.number) === number);
+    return exact.length ? exact : items.filter(item => String(item.number).startsWith(number));
+  }
+  return cached ? items.filter(item => item.title.toLowerCase().includes(query.toLowerCase())) : items;
+}
+
 /** The `#query` at the end of the text, when the user is typing one.
  *  Like the `/` and `@` palettes, only the tail counts — no caret
  *  tracking. A `#` glued to a word (`C#`, `foo#1`) isn't a trigger. */

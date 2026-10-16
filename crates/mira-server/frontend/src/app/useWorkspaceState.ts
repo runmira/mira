@@ -23,6 +23,7 @@ export function useWorkspaceState() {
 
   const transportStatus = useSelector(appRuntime.connection, state => state.status);
   const attachmentReady = useSelector(appRuntime.sessionState, state => state.active !== null);
+  // Command readiness also waits for attachment; it is not the socket status.
   const status = transportStatus === 'open' && !attachmentReady ? 'connecting' : transportStatus;
   const setStatus = appRuntime.reportConnection;
 

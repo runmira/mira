@@ -3,13 +3,14 @@ import { Dialog,DialogContent,DialogTitle } from '@/components/ui/dialog';
 import { useEffect } from 'react';
 import { agentFileRewind, restoreCheckpoint, type MessageRef } from '../api';
 import { ApprovalDialog } from '../components/ApprovalDialog';
-import { FilePicker } from '../components/FilePicker';
 import { LazyBoundary } from '../components/LazyBoundary';
 import { ReviewPanel } from '../components/ReviewPanel';
 import { CommandPalette,ContextInspector,FolderPicker,ImportChats,ReportProblem } from '../lazyViews';
+import { lazyNamed } from '../lib/lazy';
 import { shortNum } from '../lib/usage';
 import { cn } from '../lib/utils';
 import type { WorkspaceRuntime } from './WorkspaceRuntime';
+const FilePicker = lazyNamed(() => import('../components/FilePicker'), 'FilePicker');
 export function WorkspaceDialogs(
   context: Pick<
     WorkspaceRuntime,
@@ -182,6 +183,7 @@ export function WorkspaceDialogs(
             />
           );
         })()}
+      {panelFilePickerOpen && <LazyBoundary fallback={null}>
       <FilePicker
         open={panelFilePickerOpen}
         startPath={cwd || undefined}
@@ -191,6 +193,7 @@ export function WorkspaceDialogs(
           openFileTab(p, null);
         }}
       />
+      </LazyBoundary>}
       <Dialog open={importOpen} onOpenChange={setImportOpen}>
         <DialogContent className="max-w-3xl gap-4 p-5">
           <DialogTitle className="text-[16px] font-semibold">

@@ -1429,7 +1429,7 @@ fn issue_option(v: &Value) -> IssueOption {
 }
 
 /// The GitHub read behind a `#` query: recent open issues and PRs when
-/// empty, that number (then title matches) when numeric, a title search
+/// empty, that exact number when numeric, a title search
 /// otherwise.
 fn issue_search_paths(owner: &str, repo: &str, q: &str) -> Vec<String> {
     let q = q.trim();
@@ -1440,7 +1440,7 @@ fn issue_search_paths(owner: &str, repo: &str, q: &str) -> Vec<String> {
     let terms: String = url_encode(&format!("{q} repo:{owner}/{repo}"));
     let search = format!("search/issues?q={terms}&sort=updated&per_page=20");
     if q.chars().all(|c| c.is_ascii_digit()) {
-        return vec![format!("repos/{owner}/{repo}/issues/{q}"), search];
+        return vec![format!("repos/{owner}/{repo}/issues/{q}")];
     }
     vec![search]
 }
@@ -1678,10 +1678,7 @@ mod auth_recovery_tests {
         );
         assert_eq!(
             issue_search_paths("runmira", "mira", "205"),
-            vec![
-                "repos/runmira/mira/issues/205".to_string(),
-                "search/issues?q=205+repo%3Arunmira%2Fmira&sort=updated&per_page=20".into(),
-            ]
+            vec!["repos/runmira/mira/issues/205".to_string(),]
         );
         assert_eq!(
             issue_search_paths("runmira", "mira", "handoff budget"),
