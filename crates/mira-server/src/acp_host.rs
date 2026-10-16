@@ -1318,6 +1318,10 @@ impl AcpEventPort {
                 })
                 .await
                 .unwrap_or_else(|e| (Vec::new(), Err(e.to_string())));
+                // What this report added, for the reply's stats.
+                if let Some(msg) = turn_usage(&rows) {
+                    let _ = events_bg.send(msg);
+                }
                 let warning_events = events_bg.clone();
                 let result = tokio::task::spawn_blocking(move || {
                     booking?;
@@ -1347,10 +1351,6 @@ impl AcpEventPort {
                             slot.session.read().await.save_now().await;
                         }
                     }
-                }
-                // What this report added, for the reply's stats.
-                if let Some(msg) = turn_usage(&rows) {
-                    let _ = events_bg.send(msg);
                 }
             }
         });
@@ -1784,16 +1784,21 @@ mod event_tests {
         assert_eq!(got, vec![("gpt-5-codex", 100), ("gpt-5-codex", 150)]);
         // Each report's delta goes out as a frame, for the reply's stats.
         let mut frames = Vec::new();
-        while let Ok(m) = rx.try_recv() {
-            if let ServerMsg::AcpTurnUsage {
-                model,
-                input_tokens,
-                ..
-            } = m
-            {
-                frames.push((model, input_tokens));
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while frames.len() < 2 {
+                let m = rx.recv().await.expect("spend event channel stays open");
+                if let ServerMsg::AcpTurnUsage {
+                    model,
+                    input_tokens,
+                    ..
+                } = m
+                {
+                    frames.push((model, input_tokens));
+                }
             }
-        }
+        })
+        .await
+        .expect("both usage frames are delivered");
         assert_eq!(
             frames,
             vec![

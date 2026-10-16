@@ -224,7 +224,8 @@ impl SpendAccount {
         Ok(!policy.caps.is_empty()
             || policy
                 .projects
-                .contains_key(self.cwd.to_string_lossy().as_ref()))
+                .get(self.cwd.to_string_lossy().as_ref())
+                .is_some_and(|caps| !caps.is_empty()))
     }
     pub fn ensure_allowed(&self) -> Result<(), String> {
         match self.status()?.stop_reason() {
@@ -380,6 +381,69 @@ fn evaluate(s: &Ledger, policy: &SpendLimits, session: &str, cwd: &Path, now: i6
     }
 }
 
+/// Wrap the session's provider so summaries, evaluators and background extraction
+/// use the same account as conversational requests.
+pub struct MeteredProvider {
+    pub inner: std::sync::Arc<dyn mira_ai::ChatProvider>,
+    pub account: SpendAccount,
+}
+#[async_trait::async_trait]
+impl mira_ai::ChatProvider for MeteredProvider {
+    async fn stream(
+        &self,
+        request: mira_ai::ChatRequest,
+    ) -> Result<
+        futures::stream::BoxStream<'static, Result<mira_ai::ChatEvent, mira_ai::ProviderError>>,
+        mira_ai::ProviderError,
+    > {
+        use futures::StreamExt;
+        let fail = mira_ai::ProviderError::Config;
+        self.account.ensure_allowed().map_err(fail)?;
+        let model = request.model.clone();
+        if self.account.enabled().map_err(fail)?
+            && mira_ai::cost_usd(&model, Default::default()).is_none()
+        {
+            return Err(fail(format!("Spend limit cannot be enforced: no price is available for {model}. Choose a priced model or change the limit in Settings.")));
+        }
+        let stream = self.inner.stream(request).await?;
+        let account = self.account.clone();
+        Ok(stream
+            .map(move |event| {
+                if let Ok(mira_ai::ChatEvent::Usage(usage)) = &event {
+                    if let Some(usd) = mira_ai::cost_usd(&model, *usage) {
+                        account.record(usd).map_err(|e| {
+                            fail(format!(
+                                "Cannot save spend: {e}. Stopped to protect your limits."
+                            ))
+                        })?;
+                    }
+                }
+                event
+            })
+            .boxed())
+    }
+    fn accepts_context(&self, context: &mira_core::message::ProviderContext) -> bool {
+        self.inner.accepts_context(context)
+    }
+    async fn compact(
+        &self,
+        request: mira_ai::ChatRequest,
+    ) -> Result<Option<mira_core::Message>, mira_ai::ProviderError> {
+        // Native compaction has no usage stream: use the metered summarizer when caps apply.
+        if self
+            .account
+            .enabled()
+            .map_err(mira_ai::ProviderError::Config)?
+        {
+            return Ok(None);
+        }
+        self.inner.compact(request).await
+    }
+    async fn list_models(&self) -> Result<Vec<mira_ai::ModelInfo>, mira_ai::ProviderError> {
+        self.inner.list_models().await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -514,68 +578,5 @@ mod tests {
         assert_eq!(status.limits[2].spent, 4.0);
         std::fs::write(dir.path().join("spend-limits.json"), b"broken").unwrap();
         assert!(a.status_with(&policy, Utc::now().timestamp()).is_err());
-    }
-}
-
-/// Wrap the session's provider so summaries, evaluators and background extraction
-/// use the same account as conversational requests.
-pub struct MeteredProvider {
-    pub inner: std::sync::Arc<dyn mira_ai::ChatProvider>,
-    pub account: SpendAccount,
-}
-#[async_trait::async_trait]
-impl mira_ai::ChatProvider for MeteredProvider {
-    async fn stream(
-        &self,
-        request: mira_ai::ChatRequest,
-    ) -> Result<
-        futures::stream::BoxStream<'static, Result<mira_ai::ChatEvent, mira_ai::ProviderError>>,
-        mira_ai::ProviderError,
-    > {
-        use futures::StreamExt;
-        let fail = mira_ai::ProviderError::Config;
-        self.account.ensure_allowed().map_err(fail)?;
-        let model = request.model.clone();
-        if self.account.enabled().map_err(fail)?
-            && mira_ai::cost_usd(&model, Default::default()).is_none()
-        {
-            return Err(fail(format!("Spend limit cannot be enforced: no price is available for {model}. Choose a priced model or change the limit in Settings.")));
-        }
-        let stream = self.inner.stream(request).await?;
-        let account = self.account.clone();
-        Ok(stream
-            .map(move |event| {
-                if let Ok(mira_ai::ChatEvent::Usage(usage)) = &event {
-                    if let Some(usd) = mira_ai::cost_usd(&model, *usage) {
-                        account.record(usd).map_err(|e| {
-                            fail(format!(
-                                "Cannot save spend: {e}. Stopped to protect your limits."
-                            ))
-                        })?;
-                    }
-                }
-                event
-            })
-            .boxed())
-    }
-    fn accepts_context(&self, context: &mira_core::message::ProviderContext) -> bool {
-        self.inner.accepts_context(context)
-    }
-    async fn compact(
-        &self,
-        request: mira_ai::ChatRequest,
-    ) -> Result<Option<mira_core::Message>, mira_ai::ProviderError> {
-        // Native compaction has no usage stream: use the metered summarizer when caps apply.
-        if self
-            .account
-            .enabled()
-            .map_err(mira_ai::ProviderError::Config)?
-        {
-            return Ok(None);
-        }
-        self.inner.compact(request).await
-    }
-    async fn list_models(&self) -> Result<Vec<mira_ai::ModelInfo>, mira_ai::ProviderError> {
-        self.inner.list_models().await
     }
 }
