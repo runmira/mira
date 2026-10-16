@@ -79,7 +79,7 @@ export function WorkspaceLayout(context: WorkspaceRuntime) {
         void openProjectPicker();
       }}
       onSessionLoaded={() => {
-        // Ready broadcast refreshes + jumps to chat.
+        // Selection opens chat immediately; Ready hydrates its transcript.
         closeDrawer();
       }}
       onAttachSession={(id) => {

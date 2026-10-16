@@ -153,6 +153,9 @@ export function useSessionCommands(
     // reset is skipped. The ready handler consumes this.
     attachFromRef.current = getSessionId();
     turnCommands.suspend(id);
+    // An explicit pick opens the chat even when it is already selected or
+    // the socket is reconnecting. Ready must not own this navigation.
+    setMainView('chat');
     wsRef.current?.attach(id);
   }
 
