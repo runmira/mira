@@ -203,3 +203,19 @@ export async function mergePullRequest(
   );
   if (!r.ok) throw new Error(await readError(r, 'merge PUT'));
 }
+
+/** The GitHub key saved in Settings, as GitHub sees it. */
+export type GithubKeyStatus = {
+  saved_key: boolean;
+  rejected: boolean;
+  /** Names the key without revealing it. */
+  fingerprint: string | null;
+  /** The `gh` login works, so GitHub calls still succeed without the key. */
+  cli_login: boolean;
+};
+
+export async function getGithubKeyStatus(): Promise<GithubKeyStatus> {
+  const r = await fetch('/api/github/key-status', { cache: 'no-store' });
+  if (!r.ok) throw new Error(await readError(r, 'key status GET'));
+  return (await r.json()) as GithubKeyStatus;
+}

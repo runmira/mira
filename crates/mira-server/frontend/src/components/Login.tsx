@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { desktopAuthRedirect, isDesktop, onAuthCallback, openExternal } from '../lib/desktop';
+import { rememberReturnRoute } from '../lib/authReturn';
 import { getSupabase } from '../lib/supabase';
 
 type Provider = 'google' | 'github';
@@ -69,6 +70,8 @@ export function Login() {
       return;
     }
 
+    // The provider returns to the bare origin; keep where we were.
+    rememberReturnRoute();
     const { error } = await supabase.auth.signInWithOAuth({
       provider,
       options: {

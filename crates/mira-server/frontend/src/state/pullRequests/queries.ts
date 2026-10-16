@@ -1,5 +1,6 @@
 import { queryOptions, useQueryClient, type QueryClient } from '@tanstack/react-query';
 import {
+  getGithubKeyStatus,
   getPullRequest,
   getPullRequestFiles,
   listPullRequests,
@@ -45,6 +46,15 @@ export const prQueries = {
       queryKey: scoped(runtime, 'pr-files', ref.owner, ref.repo, String(ref.number)),
       queryFn: () => getPullRequestFiles(ref.owner, ref.repo, ref.number),
       staleTime: 60_000,
+      retry: false,
+    }),
+  /** Whether GitHub rejected the saved key. Keyed by the key as Settings
+   *  shows it (masked), so replacing the key asks again. */
+  githubKey: (runtime: Runtime | null, savedKey: string) =>
+    queryOptions({
+      queryKey: scoped(runtime, 'github-key', savedKey),
+      queryFn: getGithubKeyStatus,
+      staleTime: 5 * 60_000,
       retry: false,
     }),
 };

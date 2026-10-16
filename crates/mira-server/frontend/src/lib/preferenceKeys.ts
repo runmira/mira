@@ -24,4 +24,6 @@ export const PREF_KEYS = {
   diffTint: 'mira.diff.tint',
   /** Work tab shelves the user folded, comma-separated (Done by default). */
   workShelvesClosed: 'mira.work.shelvesClosed',
+  /** Fingerprint of the rejected GitHub key whose warning was dismissed. */
+  githubKeyNoticeDismissed: 'mira.github.keyNoticeDismissed',
 } as const;

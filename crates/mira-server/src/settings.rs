@@ -376,7 +376,8 @@ fn view_from(cfg: &MiraConfig, configured: bool) -> SettingsView {
             } else {
                 mask_key(value)
             },
-            from_env: std::env::var_os(name).is_some(),
+            // Set by the shell Mira started from: it wins over the yaml.
+            from_env: mira_config::key_set_by_environment(name),
         })
         .collect();
     // Include known well-known keys even when unset so the UI can prompt
@@ -393,7 +394,7 @@ fn view_from(cfg: &MiraConfig, configured: bool) -> SettingsView {
             keys.push(KeyView {
                 name: well_known.to_owned(),
                 masked: String::new(),
-                from_env: std::env::var_os(well_known).is_some(),
+                from_env: mira_config::key_set_by_environment(well_known),
             });
         }
     }
