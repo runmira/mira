@@ -115,3 +115,17 @@ test('issue branches are short, slugged, and link back to the issue', () => {
   assert.equal(branchFor({ number: 3, title: '🚀 !!' }), 'issue-3');
   assert.equal(linkedIssue(branchFor({ number: 42, title: 'Fix it' })), 42);
 });
+
+test('chats in a normal checkout group by the branch they recorded, and its PR', () => {
+  const items = groupWorkItems([
+    chat('a', { branch: 'feat/205-context', created_at: 10 }),
+    chat('b', { branch: 'feat/205-context', branch_pr: pr(208), created_at: 20 }),
+    chat('c', { branch: 'feat/other' }),
+    chat('wt', { worktree_branch: 'issue-7-fix', branch: 'ignored', cwd: '/work/mira/.mira/worktrees/issue-7-fix' }),
+  ]);
+  assert.deepEqual(items.map((i) => i.key).sort(), ['/work/mira#208', '/work/mira@feat/other', '/work/mira@issue-7-fix']);
+  const ctx = items.find((i) => i.key === '/work/mira#208');
+  assert.deepEqual(ctx.sessions.map((s) => s.id), ['a', 'b']);
+  assert.equal(ctx.branch, 'feat/205-context');
+  assert.equal(linkedIssue(items.find((i) => i.key === '/work/mira#208').branch), 205);
+});

@@ -51,7 +51,8 @@ export function workDetail(
     const kind = e.kind.toLowerCase();
     timeline.push({
       at,
-      text: [e.actor, e.message].filter(Boolean).join(' '),
+      // Events like `merged` carry no message: say what happened instead.
+      text: [e.actor, plainLine(e.message) || e.kind.replace(/[_-]+/g, ' ')].filter(Boolean).join(' '),
       kind: kind.includes('review') ? 'review' : kind.includes('commit') ? 'commit' : kind.includes('check') ? 'ci' : 'pr',
     });
   }
@@ -80,4 +81,19 @@ export function diffTotals(detail: Pick<WorkDetail, 'files'> | undefined): { add
     removed: files.reduce((n, f) => n + f.removed, 0),
     files: files.length,
   };
+}
+
+/** One readable line from a markdown comment, for the activity list: its
+ *  first non-empty line without markup, links reduced to their text. */
+export function plainLine(markdown: string): string {
+  const line = markdown.split('\n').map((l) => l.trim()).find(Boolean) ?? '';
+  return line
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/<[^>]+>/g, '')
+    .replace(/^#{1,6}\s+|^>\s*|^[-*+]\s+/, '')
+    .replace(/(\*\*|__|\*|_|~~|`)(.+?)\1/g, '$2')
+    .replace(/:[a-z0-9_+-]+:/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }

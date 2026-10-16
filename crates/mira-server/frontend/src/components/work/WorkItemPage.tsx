@@ -19,12 +19,14 @@ import {
 import { rowStatus } from '../../lib/sidebar';
 import type { ReviewState, WorkItem, WorkState } from '../../lib/workItems';
 import type { SessionSummary } from '../../types';
+import { Markdown } from '../Markdown';
 import { PageToolbar } from '../PageToolbar';
 import { basename } from '../sidebar/groups';
 import { EngineBadge, PR_MARK, sessionLabel, SessionStatus, timeAgo } from '../sidebar/sessionRows';
 import { CiIcon } from './WorkSidebar';
 import { diffTotals, type TimelineKind, type WorkDetail } from '../../lib/workDetail';
 import { openExternal } from '@/lib/desktop';
+import { useState } from 'react';
 
 const STATE_PILL: Record<WorkState, { label: string; tone: string }> = {
   'needs-you': { label: 'Needs you', tone: 'bg-amber-500/15 text-amber-700 dark:text-amber-300' },
@@ -84,9 +86,11 @@ export function WorkItemPage({
               </div>
             )}
             <Card icon={<CircleDot className="size-3.5" />} title={item.meta.issue ? `Goal · issue #${item.meta.issue.number}` : 'Goal'}>
-              <p className="whitespace-pre-line text-[13.5px] leading-relaxed text-foreground/85">
-                {detail ? (detail.goal ?? 'Nothing says what this is for yet.') : 'Loading…'}
-              </p>
+              {detail?.goal ? (
+                <Goal text={detail.goal} />
+              ) : (
+                <p className="text-[13.5px] leading-relaxed text-foreground/85">{detail ? 'Nothing says what this is for yet.' : 'Loading…'}</p>
+              )}
             </Card>
             {detail && detail.plan.length > 0 && <PlanCard plan={detail.plan} />}
             <ChatsCard sessions={item.sessions} activeSessionId={activeSessionId} onOpenChat={onOpenChat} />
@@ -100,6 +104,30 @@ export function WorkItemPage({
         </div>
       </div>
     </div>
+  );
+}
+
+/** The goal is an issue or PR body: markdown, sometimes pages of it.
+ *  Render it like the transcript does and fold it past a few lines. */
+function Goal({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  const long = text.split('\n').length > 8 || text.length > 600;
+  return (
+    <>
+      <div
+        className={cn(
+          'md min-w-0 break-words text-[13.5px] leading-relaxed text-foreground/85',
+          long && !open && 'max-h-40 overflow-hidden [mask-image:linear-gradient(to_bottom,black_65%,transparent)]',
+        )}
+      >
+        <Markdown text={text} />
+      </div>
+      {long && (
+        <button type="button" onClick={() => setOpen(!open)} className="mt-1 text-[12px] text-muted-foreground transition-colors hover:text-foreground">
+          {open ? 'Show less' : 'Show more'}
+        </button>
+      )}
+    </>
   );
 }
 
@@ -175,7 +203,7 @@ function ChatsCard({ sessions, activeSessionId, onOpenChat }: { sessions: Sessio
               <span className="min-w-0">
                 <span className={cn('block truncate text-[13px]', active ? 'font-semibold text-foreground' : 'text-foreground/90')}>{sessionLabel(s)}</span>
                 <span className="block truncate text-[10.5px] text-muted-foreground/70">
-                  {[relation, status.tone === 'idle' ? null : status.label, s.worktree_branch].filter(Boolean).join(' · ') || 'Idle'}
+                  {[relation, status.tone === 'idle' ? null : status.label, s.worktree_branch ?? s.branch].filter(Boolean).join(' · ') || 'Idle'}
                 </span>
               </span>
               <span className="text-[10.5px] tabular-nums text-muted-foreground/50">{timeAgo(s.updated_at)}</span>

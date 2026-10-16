@@ -362,6 +362,7 @@ mod tests {
             tasks: Vec::new(),
             goal: None,
             previews: Default::default(),
+            branch: None,
             pinned: false,
             archived_at: None,
             settle: Default::default(),

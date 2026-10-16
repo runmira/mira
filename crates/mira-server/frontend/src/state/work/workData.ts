@@ -4,7 +4,7 @@ import { createWorktree, getSessionDiff, putCwd, renameSession, type SessionDiff
 import { getPullRequest, getPullRequestFiles, mergePullRequest, type PullRequestDetailView } from '../../api/pullRequests';
 import { sessionFetch } from '../../api/sessionScope';
 import { issueToken, rememberIssue, searchIssues, type IssueOption } from '../../lib/issueMentions';
-import { branchFor, ciState, groupWorkItems, linkedIssue, prRef, projectRoot, reviewState, type WorkItem, type WorkMeta } from '../../lib/workItems';
+import { branchFor, branchOf, ciState, groupWorkItems, linkedIssue, prOf, prRef, projectRoot, reviewState, type WorkItem, type WorkMeta } from '../../lib/workItems';
 import type { SessionSummary } from '../../types';
 import { useAppRuntime } from '../RuntimeProvider';
 
@@ -109,8 +109,9 @@ export function useWorkItems(): WorkItem[] {
   const sessions = useLiveSessions();
   const open = new Map<string, { ref: PrRef; branch: string | null }>();
   for (const s of sessions) {
-    const ref = s.pr && (s.pr.state === 'open' || s.pr.state === 'draft') ? prRef(s.pr) : null;
-    if (ref) open.set(`${projectRoot(s.cwd)}#${s.pr!.number}`, { ref, branch: s.worktree_branch ?? null });
+    const pr = prOf(s);
+    const ref = pr && (pr.state === 'open' || pr.state === 'draft') ? prRef(pr) : null;
+    if (ref) open.set(`${projectRoot(s.cwd)}#${pr!.number}`, { ref, branch: branchOf(s) });
   }
   const entries = [...open];
   const meta = useQueries({
@@ -132,7 +133,7 @@ export function useWorkItems(): WorkItem[] {
 export function useWorkDetail(item: WorkItem | null) {
   const runtime = useAppRuntime();
   const ref = item?.pr ? prRef(item.pr) : null;
-  const lead = item?.sessions.find((s) => s.worktree_branch === item.branch) ?? item?.sessions[0];
+  const lead = item?.sessions.find((s) => branchOf(s) === item.branch) ?? item?.sessions[0];
   const pr = useQuery({ ...workQueries.pr(runtime, ref ?? { owner: '', repo: '', number: 0 }), enabled: !!ref });
   const files = useQuery({ ...workQueries.prFiles(runtime, ref ?? { owner: '', repo: '', number: 0 }), enabled: !!ref });
   const uncommitted = useQuery({ ...workQueries.uncommitted(runtime, lead?.id ?? ''), enabled: !!lead && !ref });

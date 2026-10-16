@@ -98,6 +98,16 @@ pub struct SessionSummary {
     /// The worktree branch's pull request on GitHub, when it has one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pr: Option<crate::session_prs::SessionPr>,
+    /// For chats outside Mira's worktrees (those report `worktree_branch`):
+    /// the branch the chat's checkout was on when it last saved, so work
+    /// done on a branch in a normal checkout can be grouped by it. Absent on
+    /// the repo's default branch, which isn't a piece of work.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// `branch`'s pull request, when it has one. Kept apart from `pr` so
+    /// the chat list's worktree rules (settling on merge) don't change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch_pr: Option<crate::session_prs::SessionPr>,
     #[serde(skip_serializing_if = "SessionUsageView::is_empty")]
     pub usage: SessionUsageView,
     /// Made with "Fork from here": the chat it branched off (the sidebar
@@ -328,6 +338,8 @@ pub async fn list_sessions(State(state): State<AppState>, Query(q): Query<ListQu
             background_mode: Some(*slot.background_mode.read().await),
             worktree_status: None,
             worktree_branch: None,
+            branch: None,
+            branch_pr: None,
             pinned: false,
             archived: false,
             settled_at: None,
@@ -466,6 +478,8 @@ async fn summarize_live(state: &AppState) -> Vec<SessionSummary> {
             background_mode: Some(*slot.background_mode.read().await),
             worktree_status: None,
             worktree_branch: None,
+            branch: None,
+            branch_pr: None,
             pinned: false,
             archived: false,
             settled_at: None,
@@ -1147,7 +1161,81 @@ fn summarize_record(
     let mut summary = summarize_metadata(&SessionListRecord::from(r), active_id, live_meta);
     let info = cached_worktree_status(&r.cwd);
     (summary.worktree_status, summary.worktree_branch) = (info.status, info.branch);
+    summary.branch = work_branch(&summary, &cached_repo_head(&r.cwd));
     summary
+}
+
+/// The recorded branch, unless the chat is in a Mira worktree (which reports
+/// its own) or the branch is the repo's default one.
+fn work_branch(summary: &SessionSummary, repo: &RepoHead) -> Option<String> {
+    if summary.worktree_branch.is_some() {
+        return None;
+    }
+    let branch = summary.branch.as_deref()?;
+    (repo.default_branch.as_deref() != Some(branch)).then(|| branch.to_string())
+}
+
+/// A checkout's repository root and default branch, for recorded branches.
+#[derive(Debug, Clone, Default)]
+struct RepoHead {
+    root: Option<std::path::PathBuf>,
+    default_branch: Option<String>,
+}
+
+fn cached_repo_head(cwd: &std::path::Path) -> RepoHead {
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+    type Cache = std::collections::HashMap<std::path::PathBuf, (Instant, RepoHead)>;
+    static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(Cache::new()));
+    if let Some((at, value)) = cache
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(cwd)
+    {
+        if at.elapsed() < Duration::from_secs(60) {
+            return value.clone();
+        }
+    }
+    let value = detect_repo_head(cwd);
+    let mut cache = cache.lock().unwrap_or_else(|error| error.into_inner());
+    cache.retain(|_, (at, _)| at.elapsed() < Duration::from_secs(60));
+    if cache.len() < 1024 {
+        cache.insert(cwd.to_path_buf(), (Instant::now(), value.clone()));
+    }
+    value
+}
+
+fn detect_repo_head(cwd: &std::path::Path) -> RepoHead {
+    if !cwd.is_dir() {
+        return RepoHead::default();
+    }
+    let Some(root) = git_output(cwd, &["rev-parse", "--show-toplevel"]).filter(|r| !r.is_empty())
+    else {
+        return RepoHead::default();
+    };
+    let root = std::path::PathBuf::from(root);
+    let default_branch = git_output(
+        &root,
+        &[
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ],
+    )
+    .map(|head| head.trim_start_matches("origin/").to_string())
+    .filter(|head| !head.is_empty())
+    .or_else(|| {
+        ["main", "master"]
+            .into_iter()
+            .find(|b| branch_exists(&root, b))
+            .map(str::to_string)
+    });
+    RepoHead {
+        root: Some(root),
+        default_branch,
+    }
 }
 
 fn summarize_metadata(
@@ -1177,6 +1265,8 @@ fn summarize_metadata(
         background_mode: live.map(|m| m.background_mode),
         worktree_status: None,
         worktree_branch: None,
+        branch: r.branch.clone(),
+        branch_pr: None,
         pinned: r.pinned,
         archived: r.archived_at.is_some(),
         settled_at: r.settle.settled_at,
@@ -1302,12 +1392,68 @@ async fn enrich_worktrees(summaries: &mut [SessionSummary]) {
             metadata.insert(folder, value);
         }
     }
-    for summary in summaries {
+    for summary in summaries.iter_mut() {
         if let Some((info, pr)) = metadata.get(std::path::Path::new(&summary.cwd)) {
             summary.worktree_status = info.status;
             summary.worktree_branch = info.branch.clone();
             summary.pr = pr.clone();
         }
+    }
+    enrich_recorded_branches(summaries).await;
+}
+
+/// Chats outside Mira's worktrees carry the branch they last saved on. Drop
+/// it on the default branch and look up its PR, once per checkout and branch.
+async fn enrich_recorded_branches(summaries: &mut [SessionSummary]) {
+    use std::sync::{Arc, OnceLock};
+    static LIMIT: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    let limit = LIMIT.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)));
+    let wanted: std::collections::HashSet<(std::path::PathBuf, String)> = summaries
+        .iter()
+        .filter(|s| s.worktree_branch.is_none())
+        .filter_map(|s| Some((std::path::PathBuf::from(&s.cwd), s.branch.clone()?)))
+        .collect();
+    let mut jobs = tokio::task::JoinSet::new();
+    for (folder, branch) in wanted {
+        let limit = limit.clone();
+        jobs.spawn(async move {
+            let _permit = limit.acquire_owned().await.ok()?;
+            tokio::task::spawn_blocking(move || {
+                let repo = cached_repo_head(&folder);
+                let pr = (repo.default_branch.as_deref() != Some(branch.as_str()))
+                    .then(|| {
+                        repo.root
+                            .as_deref()
+                            .and_then(|root| crate::session_prs::lookup(root, &branch))
+                    })
+                    .flatten();
+                ((folder, branch), (repo, pr))
+            })
+            .await
+            .ok()
+        });
+    }
+    let mut found = std::collections::HashMap::new();
+    while let Some(result) = jobs.join_next().await {
+        if let Ok(Some((key, value))) = result {
+            found.insert(key, value);
+        }
+    }
+    for summary in summaries.iter_mut() {
+        let Some(branch) = summary.branch.clone() else {
+            continue;
+        };
+        let Some((repo, pr)) = found.get(&(std::path::PathBuf::from(&summary.cwd), branch)) else {
+            // In a Mira worktree: it reports its own branch.
+            summary.branch = None;
+            continue;
+        };
+        summary.branch = work_branch(summary, repo);
+        summary.branch_pr = if summary.branch.is_some() {
+            pr.clone()
+        } else {
+            None
+        };
     }
 }
 /// A worktree chat's branch, whether it is in main yet, and the primary
@@ -1698,6 +1844,7 @@ mod metadata_tests {
             settle: Default::default(),
             agent_driver: Some("codex".into()),
             forked_from: None,
+            branch: None,
         };
         let summary = summarize_metadata(&record, "saved-chat", &Default::default());
         assert_eq!(summary.message_count, 123);
@@ -1749,6 +1896,7 @@ mod metadata_tests {
             settle: Default::default(),
             agent_driver: None,
             forked_from: None,
+            branch: None,
         };
         let mut rows = (0..100)
             .map(|_| summarize_metadata(&record, "", &Default::default()))
@@ -1758,6 +1906,29 @@ mod metadata_tests {
         assert!(rows
             .iter()
             .all(|row| row.worktree_status.is_none() && row.worktree_branch.is_none()));
+    }
+
+    #[test]
+    fn recorded_branches_skip_the_default_branch_and_mira_worktrees() {
+        let mut record = retention_record("s1", 10);
+        record.branch = Some("feat/work".into());
+        let mut summary = summarize_metadata(&record, "", &Default::default());
+        let repo = RepoHead {
+            root: Some("/repo".into()),
+            default_branch: Some("main".into()),
+        };
+        assert_eq!(work_branch(&summary, &repo).as_deref(), Some("feat/work"));
+        summary.branch = Some("main".into());
+        assert_eq!(work_branch(&summary, &repo), None);
+        summary.branch = Some("feat/work".into());
+        summary.worktree_branch = Some("issue-7-fix".into());
+        assert_eq!(work_branch(&summary, &repo), None);
+        // Outside git, nothing to compare against: keep what was recorded.
+        summary.worktree_branch = None;
+        assert_eq!(
+            work_branch(&summary, &RepoHead::default()).as_deref(),
+            Some("feat/work")
+        );
     }
 
     fn retention_record(id: &str, updated_at: u64) -> SessionListRecord {
@@ -1777,6 +1948,7 @@ mod metadata_tests {
             settle: Default::default(),
             agent_driver: None,
             forked_from: None,
+            branch: None,
         }
     }
 

@@ -8,7 +8,7 @@ const compile = (path) => ts.transpileModule(readFileSync(new URL(path, import.m
 }).outputText;
 const url = (source) => `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`;
 const items = url(compile('../src/lib/workItems.ts'));
-const { workDetail, diffTotals } = await import(url(compile('../src/lib/workDetail.ts').replace("'./workItems'", JSON.stringify(items))));
+const { workDetail, diffTotals, plainLine } = await import(url(compile('../src/lib/workDetail.ts').replace("'./workItems'", JSON.stringify(items))));
 
 const item = {
   key: '/w#1', cwd: '/w', worktree: '/w/.mira/worktrees/x', branch: 'x', pr: { number: 1 },
@@ -43,4 +43,12 @@ test('without a PR: the first message is the goal and changes are uncommitted', 
   assert.equal(d.filesSource, 'uncommitted');
   assert.deepEqual([d.base, d.ahead, d.behind], ['main', 3, 1]);
   assert.equal(d.mergeable, null);
+});
+
+test('activity lines drop markdown and keep the first line', () => {
+  assert.equal(plainLine("⚠️ **Mira couldn't finish this review:** provider stream [See the run](https://x/y).\n\nComment `@bot review` to retry."),
+    "⚠️ Mira couldn't finish this review: provider stream See the run.");
+  assert.equal(plainLine('\n## Summary\n'), 'Summary');
+  assert.equal(plainLine('- `fmt` passed :tada: <img src="x">'), 'fmt passed');
+  assert.equal(plainLine(''), '');
 });
