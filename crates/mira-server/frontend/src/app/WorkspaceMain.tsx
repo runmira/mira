@@ -10,7 +10,6 @@ import { ImageLightbox } from '../components/ImageLightbox';
 import { LazyBoundary } from '../components/LazyBoundary';
 import { toolPaneKindOf } from '../components/panes/toolPanes';
 import { RightPanelButton } from '../components/RightPanelButton';
-import { SecondOpinion } from '../components/SecondOpinion';
 import { SettingsNavigationContext } from '../components/settings/SettingsContext';
 import { SourceCitationNavigator } from '../components/SourceCitationNavigator';
 import { TaskListPanel } from '../components/TaskListPanel';
@@ -42,6 +41,7 @@ import type { WorkspaceRuntime } from './WorkspaceRuntime';
 import { NotchOutline, notchedPath, notchWidth, usePaneSize } from './WindowControls';
 import { PAGE_TITLE, PAGE_TOOLBAR, PageToolbar } from '../components/PageToolbar';
 const GithubKeyNotice = lazyNamed(() => import('../components/GithubKeyNotice'), 'GithubKeyNotice');
+const SecondOpinion = lazyNamed(() => import('../components/SecondOpinion'), 'SecondOpinion');
 import { useTrafficLights } from '../lib/desktop';
 const WorkspaceTranscript = lazyNamed(() => import('./WorkspaceTranscript'), 'WorkspaceTranscript');
 export function WorkspaceMain(
@@ -577,20 +577,22 @@ export function WorkspaceMain(
                         <WorkspaceTranscript {...context} />
                       </LazyBoundary>
                       {showSecondOpinion && (
-                        <SecondOpinion
-                          agentName={acpDriverName}
-                          files={sessionDiff.files.length}
-                          canReview={configured !== false}
-                          onReview={() => {
-                            retireSecondOpinion();
-                            void runReview('');
-                          }}
-                          onAddProvider={() => {
-                            openSettings();
-                            setSettingsSection('provider');
-                          }}
-                          onDismiss={retireSecondOpinion}
-                        />
+                        <LazyBoundary fallback={null}>
+                          <SecondOpinion
+                            agentName={acpDriverName}
+                            files={sessionDiff.files.length}
+                            canReview={configured !== false}
+                            onReview={() => {
+                              retireSecondOpinion();
+                              void runReview('');
+                            }}
+                            onAddProvider={() => {
+                              openSettings();
+                              setSettingsSection('provider');
+                            }}
+                            onDismiss={retireSecondOpinion}
+                          />
+                        </LazyBoundary>
                       )}
                       {thinking && (
                         <div className="flex justify-start">
