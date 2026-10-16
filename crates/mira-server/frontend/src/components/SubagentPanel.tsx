@@ -1,4 +1,5 @@
 import { Tip } from './ui/Tip';
+import { BrowserTabIcon } from './panes/BrowserChrome';
 import { useFileIcons } from '@/lib/fileIcons';
 import { cn } from '@/lib/utils';
 import { CircleAlert,File as FileIcon,Info,LoaderCircle,Maximize2,Minimize2,X } from 'lucide-react';
@@ -368,7 +369,7 @@ function ToolTabCapsule({
       )}
     >
       <span className={cn('shrink-0', active ? 'text-foreground/90' : 'text-muted-foreground/70')}>
-        {def.icon}
+        {tab.kind === 'browser' ? <BrowserTabIcon /> : def.icon}
       </span>
       <span className="font-medium">{tab.title}</span>
       <button

@@ -518,3 +518,23 @@
   .thinking-line-enter { animation: none; }
   [data-thinking-preview], [data-thinking-scroll] { mask-image: none !important; }
 }
+
+/* The agent's cursor in the browser pane: a press on click, a ring that
+   spreads from the point, and annotation pins that pop in. */
+.agent-cursor-press { animation: agent-cursor-press 360ms cubic-bezier(0.22, 1, 0.36, 1) 300ms both; transform-origin: 4px 3px; }
+@keyframes agent-cursor-press { 0%, 100% { transform: scale(1); } 40% { transform: scale(0.82); } }
+.agent-cursor-ripple { animation: agent-cursor-ripple 600ms cubic-bezier(0.22, 1, 0.36, 1) 320ms both; }
+@keyframes agent-cursor-ripple { from { transform: scale(0.3); opacity: 0.9; } to { transform: scale(1.6); opacity: 0; } }
+.agent-cursor-glow { animation: agent-cursor-glow 2.4s ease-in-out infinite; }
+@keyframes agent-cursor-glow { 0%, 100% { transform: scale(0.85); opacity: 0.75; } 50% { transform: scale(1.12); opacity: 1; } }
+.annotation-pin { animation: annotation-pin 260ms cubic-bezier(0.34, 1.56, 0.64, 1) both; }
+@keyframes annotation-pin { from { transform: scale(0.4); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .agent-cursor-press, .agent-cursor-ripple, .agent-cursor-glow, .annotation-pin { animation: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-cursor { transition: none; }
+}
+.reduce-motion .agent-cursor { transition: none; }
+.reduce-motion .agent-cursor-press, .reduce-motion .agent-cursor-ripple, .reduce-motion .agent-cursor-glow, .reduce-motion .annotation-pin { animation: none; }

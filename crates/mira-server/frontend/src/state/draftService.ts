@@ -19,7 +19,7 @@ export function createDraftService(scope: RuntimeScope) {
     // Rich storage handles dirty attachment retention. Keep recent empty/text-only projections bounded here.
     for (const [candidate, entry] of next) {
       if (next.size <= 40) break;
-      if (candidate !== id && !entry.attachments.length && !entry.images.length) next.delete(candidate);
+      if (candidate !== id && !entry.attachments.length && !entry.images.length && !entry.notes?.length) next.delete(candidate);
     }
     store.setState(() => next);
   }

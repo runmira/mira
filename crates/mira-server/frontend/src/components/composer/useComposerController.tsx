@@ -1,9 +1,11 @@
 import {
-ATTACH_FILE_EVENT,
-COMPOSE_QUOTE_EVENT,
-COMPOSE_TEXT_EVENT,
-registerAttachmentIntake,
-type ComposerQuote,
+  ATTACH_FILE_EVENT,
+  COMPOSE_QUOTE_EVENT,
+  COMPOSE_NOTE_EVENT,
+  COMPOSE_TEXT_EVENT,
+  type ComposerNote,
+  registerAttachmentIntake,
+  type ComposerQuote,
 } from '@/lib/attachBridge';
 import { useSelector } from '@tanstack/react-store';
 import { useEffect,useLayoutEffect,useMemo,useRef,useState } from 'react';
@@ -13,7 +15,7 @@ import { mapPosturesToModes,MIRA_MODE_TO_POSTURE } from '../../lib/agentPostures
 import { useIsPhone } from '../../lib/mobile';
 import { PREF_KEYS,useBoolPref } from '../../lib/prefs';
 import {
-type RichDraft
+type BrowserDraftNote, type RichDraft
 } from '../../lib/richComposerDrafts';
 import { forkActions } from '../../lib/agentFork';
 import { useAppRuntime } from '../../state/RuntimeProvider';
@@ -21,6 +23,7 @@ import type { Mode } from '../../types';
 import { type ComposerNotice } from '../ComposerNoticeStack';
 import { type MentionInputHandle } from '../MentionInput';
 import { quoteMarkdown } from '../QuoteCard';
+import { notesMarkdown } from '../../lib/browserNotes';
 import {
 customToCommand,
 filterCommands,
@@ -628,6 +631,33 @@ export function useComposerController({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Browser notes wait as cards too. Their screenshot is read into an
+  // image attachment on arrival, so sending stays synchronous.
+  const notes = richDraft.notes ?? [];
+  function setNotes(value: BrowserDraftNote[] | ((previous: BrowserDraftNote[]) => BrowserDraftNote[]), owner = textOwner.current) {
+    const previous = runtime.drafts.get(owner);
+    runtime.drafts.update(owner, { ...previous, notes: typeof value === 'function' ? value(previous.notes ?? []) : value }, true);
+  }
+
+  useEffect(() => {
+    async function onNote(e: Event) {
+      const note = (e as CustomEvent<ComposerNote>).detail;
+      if (!note?.comment) return;
+      const owner = note.owner ?? textOwner.current;
+      try {
+        const data = await readImage(note.image);
+        const { image: _image, ...metadata } = note;
+        setNotes((prev) => [...prev, { ...metadata, data }], owner);
+        if (textOwner.current === owner) requestAnimationFrame(() => mentionRef.current?.focus());
+      } catch (err) {
+        if (textOwner.current === owner) setAttachError(`couldn't add the browser note: ${(err as Error).message}`);
+      }
+    }
+    window.addEventListener(COMPOSE_NOTE_EVENT, onNote);
+    return () => window.removeEventListener(COMPOSE_NOTE_EVENT, onNote);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   function removeAttachment(path: string) {
     setAttachments((prev) => prev.filter((a) => a.path !== path));
   }
@@ -635,7 +665,7 @@ export function useComposerController({
   function submit() {
     const trimmed = text.trim();
     if (
-      (!trimmed && attachments.length === 0 && images.length === 0 && quotes.length === 0) ||
+      (!trimmed && attachments.length === 0 && images.length === 0 && quotes.length === 0 && notes.length === 0) ||
       disabled
     )
       return;
@@ -660,17 +690,19 @@ export function useComposerController({
       return;
     }
 
-    const quoted = quotes.map(quoteMarkdown).join('') + trimmed;
+    const quoted = notesMarkdown(notes) + quotes.map(quoteMarkdown).join('') + trimmed;
     const body =
       attachments.length > 0 ? renderAttachments(attachments, cwd) + '\n\n' + quoted : quoted;
-    if (busy && onQueueMessage) { if (onQueueMessage(body, images.length > 0 ? images : undefined) === false) return; }
+    const sent = [...images, ...notes.map((n) => n.data)];
+    if (busy && onQueueMessage) { if (onQueueMessage(body, sent.length > 0 ? sent : undefined) === false) return; }
     else if (busy) return;
-    else if (onSend(body, images.length > 0 ? images : undefined) === false) return;
+    else if (onSend(body, sent.length > 0 ? sent : undefined) === false) return;
     updateText('');
     runtime.drafts.clear(textOwner.current);
     setAttachmentState([]);
     setImageState([]);
     setQuotes([]);
+    setNotes([]);
     setAttachError(null);
     setSlashFeedback(null);
   }
@@ -754,6 +786,8 @@ export function useComposerController({
     setImages,
     quotes,
     setQuotes,
+    notes,
+    setNotes,
     attachments,
     attachError,
     removeAttachment,

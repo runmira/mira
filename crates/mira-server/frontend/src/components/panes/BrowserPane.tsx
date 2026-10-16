@@ -8,9 +8,10 @@ import {
   Globe,
   LoaderCircle,
   RefreshCw,
+  MoreHorizontal,
   Square,
+  SquareDashedMousePointer,
   X,
-  Globe2,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
@@ -19,6 +20,10 @@ import {
   trackElement,
   type ChildWebview,
 } from '@/lib/childWebview';
+import { Menu, MenuItem, MenuSeparator } from '@/components/ui/Menu';
+import { pageIcon, setBrowserPage } from '@/lib/browserPage';
+import { RoundBtn, UrlCapsule } from './BrowserChrome';
+import { AgentCursor, AnnotateHint, AnnotationLayer, FittedFrame, type AgentPointer } from './BrowserLiveOverlay';
 
 type Shot = { png_base64: string; width: number; height: number };
 type ActionResult = { text: string; screenshot?: Shot };
@@ -54,11 +59,35 @@ export function BrowserPane() {
   const [frame, setFrame] = useState<LiveFrame | null>(null);
   const [live, setLive] = useState(false);
   const [url, setUrl] = useState('');
-  const [draft, setDraft] = useState('');
   const [snapshot, setSnapshot] = useState<string | null>(null);
   const [busy, setBusy] = useState<null | string>(null);
   const [error, setError] = useState<string | null>(null);
   const inFlight = useRef(false);
+  /** Where the agent is acting, for its cursor in the live view. */
+  const [pointer, setPointer] = useState<AgentPointer | null>(null);
+  const pointerSeq = useRef(0);
+  const [annotating, setAnnotating] = useState(false);
+  const [more, setMore] = useState(false);
+  /** The page's icon, for the address capsule and the panel tab. */
+  const [icon, setIcon] = useState<string | null>(null);
+  useEffect(() => {
+    if (!url) { setIcon(null); return; }
+    let stale = false;
+    // Give the page a moment to put its <link rel=icon> in place.
+    const t = setTimeout(() => void pageIcon(url).then((i) => { if (!stale) setIcon(i); }), 700);
+    return () => { stale = true; clearTimeout(t); };
+  }, [url]);
+  useEffect(() => setBrowserPage({ url, icon }), [url, icon]);
+  useEffect(() => () => setBrowserPage({ url: '', icon: null }), []);
+  /** The how-to under the Annotate button, shown when the mode turns on
+   *  until the first mark (or a few seconds). */
+  const [annotateHint, setAnnotateHint] = useState(false);
+  useEffect(() => {
+    setAnnotateHint(annotating);
+    if (!annotating) return;
+    const t = setTimeout(() => setAnnotateHint(false), 6000);
+    return () => clearTimeout(t);
+  }, [annotating]);
   /** Bumped to force the <iframe> to remount (see `reload`). */
   const [frameKey, setFrameKey] = useState(0);
 
@@ -119,7 +148,7 @@ export function BrowserPane() {
     es.onopen = () => setLive(true);
     es.onerror = () => setLive(false);
     es.onmessage = (m) => {
-      let ev: { type: string; jpeg_base64?: string; width?: number; height?: number; url?: string };
+      let ev: { type: string; jpeg_base64?: string; width?: number; height?: number; url?: string; x?: number; y?: number; action?: string };
       try {
         ev = JSON.parse(m.data);
       } catch {
@@ -130,8 +159,12 @@ export function BrowserPane() {
       } else if (ev.type === 'navigated' && ev.url && ev.url !== 'about:blank') {
         // The agent navigated: the address bar follows it.
         setUrl(ev.url);
+      } else if (ev.type === 'pointer' && ev.x !== undefined && ev.y !== undefined) {
+        setPointer({ x: ev.x, y: ev.y, action: ev.action ?? 'click', seq: ++pointerSeq.current });
       } else if (ev.type === 'closed') {
         setFrame(null);
+        setPointer(null);
+        setAnnotating(false);
       }
     };
     return () => {
@@ -266,7 +299,6 @@ export function BrowserPane() {
     const clean = target.trim();
     if (!clean) return;
     setUrl(clean);
-    setDraft('');
     setSnapshot(null);
     setError(null);
 
@@ -357,96 +389,93 @@ export function BrowserPane() {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      {/* URL bar — outside the native view's rect on purpose. */}
-      <form
-        className="flex shrink-0 items-center gap-1 border-b border-border/60 px-2 py-1.5"
-        onSubmit={(e) => {
-          e.preventDefault();
-          void navigate(draft || url || START_URL);
-        }}
-      >
-        <IconBtn title="Back" onClick={() => void go('back')} disabled={!url && !frame}>
+      {/* Header — outside the native view's rect on purpose. */}
+      <div className="flex shrink-0 items-center gap-1 border-b border-border/60 px-2 py-1.5">
+        <RoundBtn title="Back" onClick={() => void go('back')} disabled={!url && !frame}>
           <ArrowLeft className="size-3.5" />
-        </IconBtn>
-        <IconBtn title="Forward" onClick={() => void go('forward')} disabled={!url && !frame}>
+        </RoundBtn>
+        <RoundBtn title="Forward" onClick={() => void go('forward')} disabled={!url && !frame}>
           <ArrowRight className="size-3.5" />
-        </IconBtn>
-        <IconBtn title="Reload" onClick={() => void reload()} disabled={!url && !frame}>
+        </RoundBtn>
+        <RoundBtn title="Reload" onClick={() => void reload()} disabled={!url && !frame}>
           <RefreshCw className="size-3.5" />
-        </IconBtn>
-
-        <SiteIcon url={url} />
-        <input
-          value={draft || url}
-          onChange={(e) => setDraft(e.target.value)}
-          placeholder="Search or enter address"
-          className="min-w-0 flex-1 rounded-md border border-border/60 elev-card dark:bg-transparent px-2 py-0.5 text-[12px] text-foreground outline-none transition-colors placeholder:text-muted-foreground/60 focus:border-border"
-        />
-
-        <IconBtn
-          title="Open in your browser"
-          onClick={() => url && window.open(url, '_blank', 'noopener,noreferrer')}
-          disabled={!url}
-        >
-          <ExternalLink className="size-3.5" />
-        </IconBtn>
-        <IconBtn title="Close browser" onClick={() => void shutdown()} disabled={!url}>
-          <Square className="size-3" />
-        </IconBtn>
-      </form>
-
-      {/* per-mode actions */}
-      <div className="flex shrink-0 items-center gap-1 border-b border-border/40 px-2 py-1">
-        <span className="flex-1" />
-        <span
-          className="mr-1 text-[10.5px] text-muted-foreground/60"
-          title={
-            mode === 'native'
-              ? 'Native webview inside the app window.'
-              : mode === 'iframe'
-                ? 'Framed page. Works for sites that allow embedding; back and reload are limited on cross-origin pages.'
-                : 'The browser Mira and your agents use, live. Click, scroll and type here to take over.'
-          }
-        >
-          {mode === 'cdp' ? (
-            <span className="inline-flex items-center gap-1.5">
-              <span className={cn('size-1.5 rounded-full', live && frame ? 'animate-pulse bg-emerald-400' : 'bg-muted-foreground/40')} />
-              {live && frame ? 'live' : 'agent'}
-            </span>
-          ) : mode === 'native' ? 'embedded' : 'framed'}
+        </RoundBtn>
+        <span className="relative ml-0.5 shrink-0">
+          <button
+            type="button"
+            title={mode === 'cdp' ? 'Annotate the page: notes go to your message' : 'Annotations work in the agent browser'}
+            aria-pressed={annotating}
+            disabled={mode !== 'cdp' || !frame || showSnapshot}
+            onClick={() => setAnnotating((a) => !a)}
+            className={cn(
+              'flex h-7 shrink-0 items-center gap-1.5 rounded-full border px-2.5 text-[12px] font-medium transition-colors disabled:opacity-30',
+              annotating
+                ? 'border-mira-blue/70 bg-mira-blue/10 text-mira-blue'
+                : 'border-border/70 bg-card text-foreground/80 hover:border-border hover:text-foreground',
+            )}
+          >
+            <SquareDashedMousePointer className="size-3.5" />
+            Annotate
+          </button>
+          {annotateHint && <AnnotateHint />}
         </span>
-        {mode === 'cdp' ? (
-          <IconBtn
-            title="Try embedding this page instead"
-            onClick={() => {
-              setMode('iframe');
-              setError(null);
-                        setFrameKey((k) => k + 1);
-            }}
-            disabled={!url}
-          >
-            <Globe className="size-3.5" />
-          </IconBtn>
-        ) : (
-          <IconBtn
-            title="Show the agent browser instead"
-            onClick={() => {
-              setMode('cdp');
-              setError(null);
-              if (url) void run('loading', { action: 'navigate', url });
-            }}
-          >
-            <Camera className="size-3.5" />
-          </IconBtn>
-        )}
-        <IconBtn title="Extract page text" onClick={() => void takeSnapshot()} disabled={!url}>
-          <FileText className="size-3.5" />
-        </IconBtn>
-        {showSnapshot && (
-          <IconBtn title="Close text view" onClick={() => setSnapshot(null)}>
-            <X className="size-3.5" />
-          </IconBtn>
-        )}
+        <span className="w-1 shrink-0" />
+        <UrlCapsule
+          url={url}
+          icon={icon}
+          live={mode === 'cdp' ? live && !!frame : !!url}
+          onNavigate={(target) => void navigate(target)}
+        />
+        <span className="relative shrink-0">
+          <RoundBtn title="More" onClick={() => setMore((m) => !m)} active={more}>
+            <MoreHorizontal className="size-3.5" />
+          </RoundBtn>
+          <Menu open={more} onOpenChange={setMore} label="Browser actions" minWidth={220}>
+            <MenuItem
+              label="Open in your browser"
+              icon={<ExternalLink className="size-3.5" />}
+              disabled={!url}
+              onSelect={() => url && window.open(url, '_blank', 'noopener,noreferrer')}
+            />
+            <MenuItem
+              label={showSnapshot ? 'Back to the page' : 'Show page text'}
+              icon={showSnapshot ? <X className="size-3.5" /> : <FileText className="size-3.5" />}
+              disabled={!url}
+              onSelect={() => (showSnapshot ? setSnapshot(null) : void takeSnapshot())}
+            />
+            {mode === 'cdp' ? (
+              <MenuItem
+                label="Embed this page instead"
+                hint="Frames the page, for sites that allow it"
+                icon={<Globe className="size-3.5" />}
+                disabled={!url}
+                onSelect={() => {
+                  setMode('iframe');
+                  setError(null);
+                  setFrameKey((k) => k + 1);
+                }}
+              />
+            ) : (
+              <MenuItem
+                label="Show the agent browser"
+                hint="The live browser Mira and your agents use"
+                icon={<Camera className="size-3.5" />}
+                onSelect={() => {
+                  setMode('cdp');
+                  setError(null);
+                  if (url) void run('loading', { action: 'navigate', url });
+                }}
+              />
+            )}
+            <MenuSeparator />
+            <MenuItem
+              label="Close the browser"
+              icon={<Square className="size-3" />}
+              disabled={!url}
+              onSelect={() => void shutdown()}
+            />
+          </Menu>
+        </span>
       </div>
 
       {busy && (
@@ -512,11 +541,12 @@ export function BrowserPane() {
             }}
           >
             {frame ? (
+              <FittedFrame w={frame.w} h={frame.h}>
               <img
                 src={frame.src}
                 alt={url ? `Live view of ${url}` : 'Live view of the agent browser'}
                 draggable={false}
-                className="h-full w-full cursor-default select-none object-contain"
+                className="size-full cursor-default select-none"
                 onClick={(e) => {
                   const p = toPage(e);
                   (e.currentTarget.parentElement as HTMLElement | null)?.focus();
@@ -538,6 +568,17 @@ export function BrowserPane() {
                   }, 60);
                 }}
               />
+              <AgentCursor pointer={pointer} w={frame.w} h={frame.h} />
+              {annotating && (
+                <AnnotationLayer
+                  key={url}
+                  frame={frame}
+                  url={url}
+                  onExit={() => setAnnotating(false)}
+                  onMark={() => setAnnotateHint(false)}
+                />
+              )}
+              </FittedFrame>
             ) : (
               <p className="flex items-center gap-2 p-3 text-[12.5px] text-muted-foreground">
                 <LoaderCircle className="size-3.5 animate-spin" /> Starting the browser…
@@ -595,57 +636,5 @@ function EmptyState({ onStart, live }: { onStart: () => void; live?: boolean }) 
         Open
       </button>
     </div>
-  );
-}
-
-function IconBtn({
-  children,
-  title,
-  onClick,
-  disabled,
-}: {
-  children: React.ReactNode;
-  title: string;
-  onClick: () => void;
-  disabled?: boolean;
-}) {
-  return (
-    <button
-      type="button"
-      title={title}
-      onClick={onClick}
-      disabled={disabled}
-      className="flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-fg/[0.05] hover:text-foreground disabled:opacity-30"
-    >
-      {children}
-    </button>
-  );
-}
-
-/** The site's icon, as a browser tab shows it. Loaded from the site itself
- *  (no third-party favicon service learns what's being browsed); a globe
- *  when there's no page or the site has no icon. */
-function SiteIcon({ url }: { url: string }) {
-  const origin = (() => {
-    try {
-      const u = new URL(url);
-      return u.protocol === 'http:' || u.protocol === 'https:' ? u.origin : null;
-    } catch {
-      return null;
-    }
-  })();
-  const [failed, setFailed] = useState<string | null>(null);
-  if (!origin || failed === origin) {
-    return <Globe2 className="mx-0.5 size-3.5 shrink-0 text-muted-foreground/70" />;
-  }
-  return (
-    <img
-      key={origin}
-      src={`${origin}/favicon.ico`}
-      alt=""
-      referrerPolicy="no-referrer"
-      onError={() => setFailed(origin)}
-      className="mx-0.5 size-3.5 shrink-0 rounded-sm"
-    />
   );
 }

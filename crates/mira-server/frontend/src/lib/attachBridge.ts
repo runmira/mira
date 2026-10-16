@@ -52,6 +52,30 @@ export function composeQuote(quote: Omit<ComposerQuote, 'id'>): void {
   window.dispatchEvent(new CustomEvent<ComposerQuote>(COMPOSE_QUOTE_EVENT, { detail: { id, ...quote } }));
 }
 
+export const COMPOSE_NOTE_EVENT = 'mira:compose-note';
+
+/** A note pinned to the agent browser's page (see `browserAnnotation`),
+ *  waiting in the composer as a card. On send it becomes a line of text and
+ *  its marked screenshot. */
+export type ComposerNote = {
+  /** Captured draft owner, so async rendering cannot move a note to another chat. */
+  owner?: string;
+  id: string;
+  url: string;
+  /** What's under the mark, in words: `the "Sign in" button`. */
+  target: string | null;
+  comment: string;
+  /** The whole page with the mark drawn on it: what's sent. */
+  image: File;
+  /** A close crop around the mark, for the card. */
+  thumb: string;
+};
+
+export function composeNote(note: Omit<ComposerNote, 'id'>): void {
+  const id = `n-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+  window.dispatchEvent(new CustomEvent<ComposerNote>(COMPOSE_NOTE_EVENT, { detail: { id, ...note } }));
+}
+
 /* The passage "Ask in side chat" hands the aside pane. A store rather than
    an event: the pane may not be mounted yet when it's set. */
 let asidePassage: string | null = null;

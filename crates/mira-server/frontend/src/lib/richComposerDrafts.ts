@@ -1,7 +1,8 @@
 import type { ImageAttachment } from '../types';
 import { clearDraft, queueDraft, readDraft, flushDrafts } from './composerDrafts';
 export type DraftFile = { path: string; content: string; bytes: number };
-export type RichDraft = { text: string; attachments: DraftFile[]; images: ImageAttachment[] };
+export type BrowserDraftNote = { id: string; url: string; target: string | null; comment: string; thumb: string; data: ImageAttachment };
+export type RichDraft = { text: string; attachments: DraftFile[]; images: ImageAttachment[]; notes?: BrowserDraftNote[] };
 type Stored = RichDraft & { key: string; at: number; bytes: number };
 const AGE = 14 * 86400_000;
 const cache = new Map<string, RichDraft>();
@@ -57,11 +58,12 @@ async function loadDraft(key: string): Promise<RichDraft> {
     });
   } catch { report(key, true); }
   let draft = stored && Date.now() - stored.at < AGE && typeof stored.text === 'string' && Array.isArray(stored.attachments) && Array.isArray(stored.images)
-    ? { text: stored.text, attachments: stored.attachments, images: stored.images } : cachedDraft(key);
+    ? { text: stored.text, attachments: stored.attachments, images: stored.images, notes: Array.isArray(stored.notes) ? stored.notes : [] } : cachedDraft(key);
   if (hadChanges || (revisions.get(key) ?? 0) !== revision) {
     const current = cachedDraft(key);
     draft = cleared.has(key) ? current : {
       text: current.text,
+      notes: [...new Map([...(draft.notes ?? []), ...(current.notes ?? [])].map(note => [note.id, note])).values()],
       attachments: [...new Map([...draft.attachments, ...current.attachments].map(file => [file.path, file])).values()],
       images: [...new Map([...draft.images, ...current.images].map(image => [image.media_type + image.data, image])).values()],
     };
@@ -83,7 +85,7 @@ async function persist(key: string) {
       const tx = storage.transaction(['drafts', 'metadata'], 'readwrite');
       const drafts = tx.objectStore('drafts'); const metadata = tx.objectStore('metadata');
       tx.oncomplete = () => resolve(); tx.onerror = tx.onabort = () => reject(tx.error ?? new Error('Draft save failed'));
-      if (draft.text || draft.attachments.length || draft.images.length) { drafts.put({ ...draft, key, at: Date.now(), bytes }); metadata.put({ key, at: Date.now(), bytes }); }
+      if (draft.text || draft.attachments.length || draft.images.length || draft.notes?.length) { drafts.put({ ...draft, key, at: Date.now(), bytes }); metadata.put({ key, at: Date.now(), bytes }); }
       else { drafts.delete(key); metadata.delete(key); }
       const request = metadata.getAll();
       request.onsuccess = () => {
