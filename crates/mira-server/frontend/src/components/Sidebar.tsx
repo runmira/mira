@@ -34,6 +34,7 @@ import {
   SETTLED_PAGE,
 } from './sidebar/preferences';
 import { RenameDialog } from './sidebar/RenameDialog';
+import { ProjectListSection } from './sidebar/ProjectListSection';
 import { RowMenu } from './sidebar/RowMenu';
 import { ArchivedRow, forkForest, SessionRow } from './sidebar/sessionRows';
 import { ForkNode, Props } from './sidebar/types';
@@ -336,6 +337,7 @@ export function Sidebar(props: Props) {
             </div>
             <div
               ref={scrollRef}
+              data-sidebar-scroll
               onScroll={(e) => {
                 const node = e.currentTarget;
                 setPeek(null);
@@ -403,13 +405,7 @@ export function Sidebar(props: Props) {
                 </div>
               )}
 
-              <div className="mt-4 flex flex-col gap-1 px-0.5">
-                <div
-                  // On the desktop the sidebar is the window's vibrancy, and no
-                  // fill matches it, so the toolbar scrolls with the list there
-                  // instead of pinning over it with a slab of solid panel.
-                  className={cn('-mx-0.5 px-0.5 pb-1', !hiddenTitleBar && 'sticky top-0 z-20 bg-panel')}
-                >
+              <ProjectListSection transparent={hiddenTitleBar} header={<>
                   <div className="mb-1 flex items-center justify-between px-2 py-1.5">
                     <div className="flex items-center gap-2 text-[14px] font-semibold tracking-tight text-foreground">
                       <Folder className="size-3.5 text-muted-foreground" aria-hidden />
@@ -460,7 +456,7 @@ export function Sidebar(props: Props) {
                       </div>
                     </div>
                   )}
-                </div>
+                </>}>
 
                 {listError && (
                   <ErrorNotice
@@ -726,7 +722,7 @@ export function Sidebar(props: Props) {
                     )}
                   </div>
                 )}
-              </div>
+              </ProjectListSection>
             </div>
           </div>
         )}
