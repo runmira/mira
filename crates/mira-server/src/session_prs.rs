@@ -111,7 +111,18 @@ struct GhPr {
 /// Recent PRs for the requested branch only. Empty when `gh` is missing,
 /// signed out or offline: the sidebar just shows no PR.
 fn fetch(repo: &Path, branch: &str) -> HashMap<String, SessionPr> {
-    let out = std::process::Command::new("gh")
+    // A GitHub key saved in Mira's settings is exported as `GH_TOKEN`, and a
+    // key that can't read this repo would hide every PR. Fall back to the
+    // signed-in `gh` login, as `github_auth` does.
+    gh_pr_list(repo, branch, false)
+        .or_else(|| gh_pr_list(repo, branch, true))
+        .map(|json| by_branch(&json))
+        .unwrap_or_default()
+}
+
+fn gh_pr_list(repo: &Path, branch: &str, cli_login: bool) -> Option<Vec<u8>> {
+    let mut command = std::process::Command::new("gh");
+    command
         .current_dir(repo)
         .env("GH_PROMPT_DISABLED", "1")
         .args([
@@ -125,12 +136,19 @@ fn fetch(repo: &Path, branch: &str) -> HashMap<String, SessionPr> {
             "100",
             "--json",
             "number,title,url,state,isDraft,headRefName,isCrossRepository,mergedAt,closedAt",
-        ])
-        .output();
-    match out {
-        Ok(out) if out.status.success() => by_branch(&out.stdout),
-        _ => HashMap::new(),
+        ]);
+    if cli_login {
+        for name in [
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "GH_ENTERPRISE_TOKEN",
+            "GITHUB_ENTERPRISE_TOKEN",
+        ] {
+            command.env_remove(name);
+        }
     }
+    let out = command.output().ok()?;
+    out.status.success().then_some(out.stdout)
 }
 
 fn by_branch(json: &[u8]) -> HashMap<String, SessionPr> {

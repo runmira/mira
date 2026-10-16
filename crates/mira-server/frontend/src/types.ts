@@ -857,6 +857,10 @@ export type SessionSummary = {
   unsettled_at?: number | null;
   /** The worktree branch's pull request, when it has one. */
   pr?: SessionPr | null;
+  /** Outside Mira's worktrees: the branch the chat's checkout was on when
+   *  it last saved (never the repo's default branch), and its PR. */
+  branch?: string | null;
+  branch_pr?: SessionPr | null;
   /** True when the user archived this session. Archived sessions only
    *  appear in the sidebar's "Archived" view (`?archived=true`). */
   archived?: boolean;

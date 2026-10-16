@@ -50,20 +50,38 @@ export function projectRoot(cwd: string): string {
   return i >= 0 ? cwd.slice(0, i) : cwd;
 }
 
-function ownKey(s: SessionSummary): string | null {
-  if (s.pr) return `${projectRoot(s.cwd)}#${s.pr.number}`;
-  if (s.worktree_branch) return `${projectRoot(s.cwd)}@${s.worktree_branch}`;
+/** The branch a chat works on: its Mira worktree's, or else the one its
+ *  checkout was on when it last saved. */
+export function branchOf(s: SessionSummary): string | null {
+  return s.worktree_branch ?? s.branch ?? null;
+}
+
+/** That branch's pull request. */
+export function prOf(s: SessionSummary): SessionPr | null {
+  return s.pr ?? s.branch_pr ?? null;
+}
+
+/** A branch's PR number once any chat on it knows the PR, so its other
+ *  chats (saved before the PR, or in another checkout) join the same item. */
+type BranchPrs = Map<string, number>;
+
+function ownKey(s: SessionSummary, prs: BranchPrs = new Map()): string | null {
+  const root = projectRoot(s.cwd);
+  const branch = branchOf(s);
+  const pr = prOf(s)?.number ?? (branch ? prs.get(`${root}@${branch}`) : undefined);
+  if (pr != null) return `${root}#${pr}`;
+  if (branch) return `${root}@${branch}`;
   return null;
 }
 
 /** The work item a chat belongs to: its own branch's, else the nearest
  *  parent's (fork or launcher) that has one. */
-function itemKey(s: SessionSummary, byId: Map<string, SessionSummary>): string | null {
+function itemKey(s: SessionSummary, byId: Map<string, SessionSummary>, prs: BranchPrs): string | null {
   const seen = new Set<string>();
   let at: SessionSummary | undefined = s;
   while (at && !seen.has(at.id)) {
     seen.add(at.id);
-    const key = ownKey(at);
+    const key = ownKey(at, prs);
     if (key) return key;
     const up: string | null | undefined = at.forked_from ?? at.launched_by;
     at = up ? byId.get(up) : undefined;
@@ -93,10 +111,16 @@ export function workState(sessions: SessionSummary[], pr: SessionPr | null, meta
 
 export function groupWorkItems(sessions: SessionSummary[], meta: Record<string, WorkMeta> = {}): WorkItem[] {
   const byId = new Map(sessions.map((s) => [s.id, s]));
+  const prs: BranchPrs = new Map();
+  for (const s of sessions) {
+    const branch = branchOf(s);
+    const pr = prOf(s);
+    if (branch && pr) prs.set(`${projectRoot(s.cwd)}@${branch}`, pr.number);
+  }
   const buckets = new Map<string, SessionSummary[]>();
   for (const s of sessions) {
     if (s.archived) continue;
-    const key = itemKey(s, byId);
+    const key = itemKey(s, byId, prs);
     if (!key) continue;
     const list = buckets.get(key) ?? [];
     list.push(s);
@@ -105,10 +129,10 @@ export function groupWorkItems(sessions: SessionSummary[], meta: Record<string, 
   const items: WorkItem[] = [];
   buckets.forEach((list, key) => {
     list.sort((a, b) => a.created_at - b.created_at || a.id.localeCompare(b.id));
-    const owner = list.find((s) => ownKey(s) === key) ?? list[0];
-    const pr = list.find((s) => s.pr)?.pr ?? null;
+    const owner = list.find((s) => ownKey(s, prs) === key) ?? list[0];
+    const pr = list.map(prOf).find(Boolean) ?? null;
     const given = meta[key] ?? {};
-    const issue = given.issue ?? (linkedIssue(owner.worktree_branch ?? null) ? { number: linkedIssue(owner.worktree_branch ?? null)!, title: '' } : null);
+    const issue = given.issue ?? (linkedIssue(branchOf(owner)) ? { number: linkedIssue(branchOf(owner))!, title: '' } : null);
     const m: WorkMeta = { ...given, issue };
     const agents: (string | null)[] = [];
     for (const s of list) {
@@ -119,10 +143,10 @@ export function groupWorkItems(sessions: SessionSummary[], meta: Record<string, 
       key,
       cwd: projectRoot(owner.cwd),
       worktree: list.map((s) => s.cwd).find((cwd) => cwd !== projectRoot(cwd)) ?? null,
-      branch: owner.worktree_branch ?? null,
+      branch: branchOf(owner),
       pr,
       sessions: list,
-      title: m.issue?.title || pr?.title || owner.title || owner.worktree_branch || 'Untitled',
+      title: m.issue?.title || pr?.title || owner.title || branchOf(owner) || 'Untitled',
       agents,
       ...workState(list, pr, m),
       updated_at: Math.max(...list.map((s) => s.updated_at)),
