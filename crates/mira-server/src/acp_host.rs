@@ -1120,7 +1120,7 @@ type RuntimeBinding = (
 /// the session's existing broadcast channel, so an external agent's output
 /// reaches the frontend by the same path as Mira's own.
 pub struct AcpEventPort {
-    runtime: std::sync::Mutex<Option<RuntimeBinding>>,
+    runtime: std::sync::Arc<std::sync::Mutex<Option<RuntimeBinding>>>,
 
     events: crate::session_stream::SessionEvents,
     /// Where the agent's spend reports are booked, for the Usage page.
@@ -1203,7 +1203,7 @@ fn turn_usage(rows: &[crate::agent_spend::SpendRow]) -> Option<ServerMsg> {
 impl AcpEventPort {
     pub fn new(events: crate::session_stream::SessionEvents) -> Arc<Self> {
         Arc::new(AcpEventPort {
-            runtime: std::sync::Mutex::new(None),
+            runtime: std::sync::Arc::new(std::sync::Mutex::new(None)),
             events,
             spend: None,
             driver: std::sync::Mutex::new(None),
@@ -1251,6 +1251,8 @@ impl AcpEventPort {
         let (queue, mut rx) =
             tokio::sync::mpsc::channel::<(Option<String>, Vec<mira_acp::events::ModelSpend>)>(64);
         let events_bg = events.clone();
+        let runtime: std::sync::Arc<std::sync::Mutex<Option<RuntimeBinding>>> = Default::default();
+        let runtime_bg = runtime.clone();
         // Shared with the port so a later refinement reaches the reports
         // booked after it, without rebuilding the spender.
         let billing = std::sync::Arc::new(std::sync::Mutex::new(who.billing));
@@ -1264,11 +1266,88 @@ impl AcpEventPort {
                     who.billing = *b;
                 }
                 // File I/O off the runtime, one report at a time.
-                let rows = tokio::task::spawn_blocking(move || {
-                    ledger.record(&who, session.as_deref(), &models)
+                let account = ledger.limit_account(&who);
+                let account_bg = account.clone();
+                let (rows, booking) = tokio::task::spawn_blocking(move || {
+                    let agent_session = session
+                        .as_deref()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or(&who.session_id);
+                    let booking = if who.billing == mira_acp::status::Billing::Subscription {
+                        Ok(())
+                    } else {
+                        models.iter().try_for_each(|r| {
+                            let model = if r.model.is_empty() {
+                                &who.fallback_model
+                            } else {
+                                &r.model
+                            };
+                            let cost = r.cost_usd.or_else(|| {
+                                mira_ai::cost_usd(
+                                    model,
+                                    mira_ai::TokenUsage {
+                                        prompt_tokens: r.input_tokens.min(u32::MAX as u64) as u32,
+                                        completion_tokens: r.output_tokens.min(u32::MAX as u64)
+                                            as u32,
+                                        cached_input_tokens: r
+                                            .cached_input_tokens
+                                            .min(u32::MAX as u64)
+                                            as u32,
+                                        cache_write_tokens: 0,
+                                    },
+                                )
+                            });
+                            match cost {
+                                Some(usd) => account_bg.record_total(
+                                    &format!("{}:{}:{}", who.instance, agent_session, model),
+                                    usd,
+                                ),
+                                None if r.input_tokens
+                                    + r.output_tokens
+                                    + r.cached_input_tokens
+                                    > 0 =>
+                                {
+                                    account_bg.mark_unpriced(model)
+                                }
+                                None => Ok(()),
+                            }
+                        })
+                    };
+                    let rows = ledger.record(&who, session.as_deref(), &models);
+                    (rows, booking)
                 })
                 .await
-                .unwrap_or_default();
+                .unwrap_or_else(|e| (Vec::new(), Err(e.to_string())));
+                let warning_events = events_bg.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    booking?;
+                    for warning in account.take_warnings()? {
+                        let _ = warning_events.send(ServerMsg::Warning { text: warning });
+                    }
+                    account.ensure_allowed()
+                })
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()));
+                if let Err(reason) = result {
+                    let binding = runtime_bg.lock().ok().and_then(|b| b.clone());
+                    if let Some((weak, _, _, generation)) = binding {
+                        if let Some(slot) = weak.upgrade().filter(|slot| {
+                            slot.engine
+                                .generation
+                                .load(std::sync::atomic::Ordering::SeqCst)
+                                == generation
+                        }) {
+                            let _ = slot.events_tx.send(ServerMsg::Warning {
+                                text: reason.clone(),
+                            });
+                            slot.session.read().await.push_note(reason).await;
+                            if let Some(agent) = slot.acp_agent.read().await.clone() {
+                                agent.cancel_current_turn().await;
+                            }
+                            slot.session.read().await.save_now().await;
+                        }
+                    }
+                }
                 // What this report added, for the reply's stats.
                 if let Some(msg) = turn_usage(&rows) {
                     let _ = events_bg.send(msg);
@@ -1276,7 +1355,7 @@ impl AcpEventPort {
             }
         });
         Arc::new(AcpEventPort {
-            runtime: std::sync::Mutex::new(None),
+            runtime,
             events,
             spend: Some(SpendBooking {
                 queue,

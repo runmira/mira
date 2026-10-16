@@ -1692,7 +1692,18 @@ pub async fn regenerate_session_title(
         );
     }
 
-    let provider = state.harness_provider.clone();
+    let Some(account) = mira_harness::spend::SpendAccount::user(id.clone(), record.cwd.clone())
+    else {
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Cannot locate the spend ledger".into(),
+        );
+    };
+    let provider: std::sync::Arc<dyn mira_ai::ChatProvider> =
+        std::sync::Arc::new(mira_harness::spend::MeteredProvider {
+            inner: state.harness_provider.clone(),
+            account,
+        });
     let model = record.cfg.background_model(None);
     info!(session = %id, %model, "regenerate title: calling extractor");
     let mut generated = crate::title::generate(&*provider, &model, &users).await;

@@ -1419,6 +1419,10 @@ async fn dispatch_on_slot(
             let events = slot.events_tx.clone();
             let turn_slot = slot.clone();
             tokio::spawn(async move {
+                if let Err(reason) = crate::spend_limits::check(&turn_slot).await {
+                    let _ = events.send(ServerMsg::Warning { text: reason });
+                    return;
+                }
                 match agent {
                     mira_acp::native::AgentHandle::Native(n) => {
                         // Compaction is just a prompt: the transcript shows
@@ -2447,6 +2451,13 @@ async fn prompt_agent_at_epoch(
     command_instance: Option<String>,
 ) {
     let starting = std::time::Instant::now();
+    if let Err(reason) = crate::spend_limits::check(slot).await {
+        record_prompt_failure(slot, reason);
+        crate::acp_host::AcpEventPort::for_slot(slot)
+            .turn_ended("spend_limit")
+            .await;
+        return;
+    }
     let _dispatch = slot.engine.dispatch_lock.lock().await;
     if slot
         .engine
@@ -2674,15 +2685,20 @@ async fn prompt_agent_at_epoch(
                             // Agents that can't title their own chat (Codex) get one from
                             // Mira's own provider on its cheap model. No provider set up
                             // means the first-prompt title simply stays.
-                            let provider = slot.native_provider.clone();
+                            let provider =
+                                session.meter_provider(Arc::new(slot.native_provider.clone()));
+                            let title_slot = slot.clone();
                             tokio::spawn(async move {
+                                if crate::spend_limits::check(&title_slot).await.is_err() {
+                                    return;
+                                }
                                 let title = match agent.generate_title(&description).await {
                                     Some(t) => Some(t),
                                     None => {
                                         let cfg = session.config().await;
                                         let users = vec![description.clone()];
                                         crate::title::generate(
-                                            &provider,
+                                            &*provider,
                                             &cfg.background_model(None),
                                             &users,
                                         )

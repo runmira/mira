@@ -43,6 +43,7 @@ pub fn spawn_if_needed(
     fallback: Option<String>,
     state: AppState,
 ) {
+    let provider = session.meter_provider(provider);
     tokio::spawn(async move {
         if session.title().await.is_some() {
             return;

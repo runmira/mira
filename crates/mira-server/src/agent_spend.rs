@@ -71,6 +71,10 @@ impl SpendLedger {
         Some(Self::at(PathBuf::from(home).join(".mira")))
     }
 
+    pub fn limit_account(&self, who: &Spender) -> mira_harness::spend::SpendAccount {
+        mira_harness::spend::SpendAccount::at(&self.dir, &who.session_id, &who.cwd)
+    }
+
     /// Record a running-total report from an agent session. Returns the rows
     /// appended (empty when nothing new was spent).
     pub fn record(

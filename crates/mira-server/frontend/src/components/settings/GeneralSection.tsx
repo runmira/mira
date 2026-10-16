@@ -21,6 +21,7 @@ import type { Mode,SessionsSettings } from '../../types';
 import { EditorIcon } from '../EditorPicker';
 import { TRow,TSection,TSwitch } from './SettingsFields';
 import { Draft } from './types';
+import { SpendLimitsSection } from './SpendLimitsSection';
 export const MODES: Mode[] = ['plan', 'manual', 'auto', 'edit', 'yolo'];
 
 export const MODE_DESCRIPTIONS: Record<Mode, string> = {
@@ -109,6 +110,7 @@ export function GeneralSection({
 
   return (
     <div className="flex flex-col gap-2.5">
+      <SpendLimitsSection />
       <TSection
         icon={<Cog className="size-3.5" />}
         title="General"

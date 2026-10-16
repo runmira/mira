@@ -739,6 +739,7 @@ export type SettingsView = {
   config_path: string;
   memory: MemoryView;
   sessions?: SessionsSettings;
+  spend_limits?: SpendLimits;
 };
 
 /** Effective (defaults applied) memory-runtime knobs. Every field is the
@@ -793,6 +794,7 @@ export type SettingsUpdate = {
   keys?: KeyUpdate[];
   memory?: MemoryUpdate;
   sessions?: Partial<SessionsSettings>;
+  spend_limits?: SpendLimits;
 };
 
 /** How running chats behave in the background. Saved in Mira's global
@@ -877,3 +879,7 @@ export type SessionSummary = {
 };
 
 export type ExternalChildFrame = Extract<ServerMsg, { type: 'acp_text' | 'acp_text_snapshot' | 'acp_thought' | 'acp_tool_call' | 'acp_tool_call_update' | 'acp_tool_output_delta' }>;
+
+export type SpendCaps = { per_session?: number | null; per_day?: number | null; per_month?: number | null };
+export type SpendLimits = SpendCaps & { projects?: Record<string, SpendCaps> };
+export type SpendStatus = { blocked: boolean; message?: string | null; limits: { scope: string; spent: number; limit: number; warning: boolean; blocked: boolean }[] };

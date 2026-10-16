@@ -3,6 +3,7 @@ import { cn } from '@/lib/utils';
 import { m } from 'framer-motion';
 import { ArrowUp,Square } from 'lucide-react';
 import { captureScreenshot } from '../lib/screenCapture';
+import { SpendLimitNotice } from './SpendLimitNotice';
 import { ComposerNoticeStack } from './ComposerNoticeStack';
 import { EnginePicker } from './EnginePicker';
 import { RevertDialog } from './AgentSessionActions';
@@ -151,6 +152,7 @@ export function Composer(props: Props) {
   const unsupportedImages = agentDriving && images.length > 0 && !agentAcceptsImages(agentConfig);
   return (
     <div className="flex flex-col items-center gap-1.5 px-4 pb-4 pt-2 max-md:px-2 max-md:pb-2">
+      <SpendLimitNotice sessionId={sessionId} busy={busy} />
       <RevertDialog sessionId={sessionId} open={revertOpen} onOpenChange={setRevertOpen} onReverted={onAgentReverted} />
       {draftError && (
         <p

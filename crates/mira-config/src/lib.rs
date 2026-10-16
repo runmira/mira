@@ -15,6 +15,9 @@
 //! Writing goes to the global file only — per-repo config is treated as
 //! human-authored.
 
+pub mod spend;
+pub use spend::{SpendCaps, SpendLimits};
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -105,6 +108,9 @@ pub struct MiraConfig {
     /// limits on resumes.
     #[serde(default, skip_serializing_if = "SessionsConfig::is_empty")]
     pub sessions: SessionsConfig,
+    /// Dollar caps, owned by the user; project overrides are keyed by absolute path.
+    #[serde(default, skip_serializing_if = "SpendLimits::is_empty")]
+    pub spend_limits: SpendLimits,
     /// Crash reports and problem reports. Only read from the global file.
     #[serde(default, skip_serializing_if = "DiagnosticsConfig::is_empty")]
     pub diagnostics: DiagnosticsConfig,

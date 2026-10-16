@@ -352,6 +352,7 @@ pub struct Session {
     created_at: u64,
 
     provider: Arc<dyn ChatProvider>,
+    spend: Option<crate::spend::SpendAccount>,
     registry: Arc<Mutex<Registry>>,
     policy: Arc<Mutex<Policy>>,
     approver: Arc<dyn Approver>,
@@ -526,6 +527,18 @@ impl Session {
         let progress_sink: Arc<dyn ToolProgressSink> =
             Arc::new(TurnProgress::new(progress_slot.clone()));
         tool_ctx = tool_ctx.with_progress(progress_sink);
+        let spend = if cfg!(test) {
+            None
+        } else {
+            crate::spend::SpendAccount::user(id.to_string(), tool_ctx.cwd.clone())
+        };
+        let provider: Arc<dyn ChatProvider> = match &spend {
+            Some(account) => Arc::new(crate::spend::MeteredProvider {
+                inner: provider,
+                account: account.clone(),
+            }),
+            None => provider,
+        };
         Self {
             id,
             cfg: Arc::new(Mutex::new(cfg)),
@@ -539,6 +552,7 @@ impl Session {
             usage: Arc::new(Mutex::new(UsageTotals::default())),
             rate_limit: Arc::new(Mutex::new(None)),
             created_at: now_secs(),
+            spend,
             provider,
             registry: Arc::new(Mutex::new((*registry).clone())),
             policy,
@@ -626,6 +640,23 @@ impl Session {
         let progress_sink: Arc<dyn ToolProgressSink> =
             Arc::new(TurnProgress::new(progress_slot.clone()));
         tool_ctx = tool_ctx.with_progress(progress_sink);
+        let spend = if cfg!(test) {
+            None
+        } else {
+            crate::spend::SpendAccount::user(record.id.to_string(), tool_ctx.cwd.clone())
+        };
+        if let (Some(account), Some(parent)) = (&spend, &record.parent_id) {
+            if let Err(e) = account.register_parent(&parent.to_string()) {
+                tracing::error!(%e, "could not restore spend ownership");
+            }
+        }
+        let provider: Arc<dyn ChatProvider> = match &spend {
+            Some(account) => Arc::new(crate::spend::MeteredProvider {
+                inner: provider,
+                account: account.clone(),
+            }),
+            None => provider,
+        };
         Self {
             id: record.id,
             cfg: Arc::new(Mutex::new(record.cfg)),
@@ -641,6 +672,7 @@ impl Session {
             usage: Arc::new(Mutex::new(record.usage)),
             rate_limit: Arc::new(Mutex::new(None)),
             created_at: record.created_at,
+            spend,
             provider,
             registry: Arc::new(Mutex::new((*registry).clone())),
             policy,
@@ -740,7 +772,23 @@ impl Session {
             .messages
     }
 
+    /// Bind ancillary work (such as titles) to this session's spend account.
+    pub fn meter_provider(&self, inner: Arc<dyn ChatProvider>) -> Arc<dyn ChatProvider> {
+        match &self.spend {
+            Some(account) => Arc::new(crate::spend::MeteredProvider {
+                inner,
+                account: account.clone(),
+            }),
+            None => inner,
+        }
+    }
+
     pub fn with_parent_id(mut self, parent: SessionId) -> Self {
+        if let Some(account) = &self.spend {
+            if let Err(e) = account.register_parent(&parent.to_string()) {
+                tracing::error!(%e, "could not register child spend ownership");
+            }
+        }
         self.parent_id = Some(parent);
         self
     }
@@ -1846,6 +1894,7 @@ async fn run_loop(
             /// the goal evaluator doesn't judge a truncated transcript
             /// as if the model finished on its own.
             StreamError,
+            SpendLimit,
         }
         let mut round_outcome = RoundOutcome::MaxRounds;
 
@@ -1865,6 +1914,26 @@ async fn run_loop(
         let mut compaction_stalled = false;
 
         for round in 0..cfg.max_rounds {
+            if let Some(account) = &sess.spend {
+                let allowed = if let Some(parent) = &sess.parent_id {
+                    account
+                        .register_parent(&parent.to_string())
+                        .and_then(|_| account.ensure_allowed())
+                } else {
+                    account.ensure_allowed()
+                };
+                if let Err(reason) = allowed {
+                    sess.push_note(reason.clone()).await;
+                    let _ = tx.send(HarnessEvent::Warning(reason)).await;
+                    round_outcome = RoundOutcome::SpendLimit;
+                    break;
+                }
+                if let Ok(warnings) = account.take_warnings() {
+                    for warning in warnings {
+                        let _ = tx.send(HarnessEvent::Warning(warning)).await;
+                    }
+                }
+            }
             sess.consume_steers(generation).await;
             let adopted = sess.adopt_ready_compaction(&tx).await;
             if adopted {
@@ -2150,6 +2219,26 @@ async fn run_loop(
             sess.history.lock().await.push(assistant_msg);
             checkpoint(&sess).await;
             let _ = tx.send(HarnessEvent::TurnComplete).await;
+            if let Some(account) = &sess.spend {
+                if let Ok(warnings) = account.take_warnings() {
+                    for warning in warnings {
+                        let _ = tx.send(HarnessEvent::Warning(warning)).await;
+                    }
+                }
+                if let Err(reason) = account.ensure_allowed() {
+                    // Close requested calls without executing them; the saved transcript stays replayable.
+                    for call in &pending_calls {
+                        sess.history
+                            .lock()
+                            .await
+                            .push(Message::tool(call.id.clone(), reason.clone()));
+                    }
+                    sess.push_note(reason.clone()).await;
+                    let _ = tx.send(HarnessEvent::Warning(reason)).await;
+                    round_outcome = RoundOutcome::SpendLimit;
+                    break;
+                }
+            }
 
             if pending_calls.is_empty() || finish == FinishReason::Stop {
                 // Near-miss tool-call rescue: the model sometimes emits
@@ -2306,14 +2395,19 @@ async fn run_loop(
         // gracefully, or plan to loop again for a goal iteration.
         sess.end_current_turn().await;
         checkpoint(&sess).await;
-        maybe_spawn_extractor(
-            &sess,
-            &cfg,
-            turn_start_idx,
-            any_successful_tool_call,
-            tx.clone(),
-        )
-        .await;
+        if round_outcome != RoundOutcome::SpendLimit {
+            maybe_spawn_extractor(
+                &sess,
+                &cfg,
+                turn_start_idx,
+                any_successful_tool_call,
+                tx.clone(),
+            )
+            .await;
+        }
+        if round_outcome == RoundOutcome::SpendLimit {
+            break 'goal_loop;
+        }
 
         if round_outcome == RoundOutcome::MaxRounds {
             let _ = tx
@@ -4175,5 +4269,116 @@ mod truncate_tests {
         assert_eq!(rewind_index(&h, "fix it", 1), Some(0));
         assert_eq!(rewind_index(&h, "fix it", 2), None);
         assert_eq!(rewind_index(&h, "nope", 0), None);
+    }
+}
+
+#[cfg(test)]
+mod spend_limit_tests {
+    use super::*;
+    use crate::{AutoApprover, FileStore};
+    use mira_ai::{ChatEvent, FinishReason, ProviderError};
+    use mira_config::{SpendCaps, SpendLimits};
+    use mira_policy::PolicyConfig;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CostlyProvider(Arc<AtomicUsize>);
+    #[async_trait::async_trait]
+    impl ChatProvider for CostlyProvider {
+        async fn stream(
+            &self,
+            _: ChatRequest,
+        ) -> Result<BoxStream<'static, Result<ChatEvent, ProviderError>>, ProviderError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(futures::stream::iter(vec![
+                Ok(ChatEvent::TextDelta("Saved useful work".into())),
+                Ok(ChatEvent::Usage(mira_ai::TokenUsage {
+                    prompt_tokens: 1000,
+                    completion_tokens: 1000,
+                    ..Default::default()
+                })),
+                Ok(ChatEvent::ToolCalls(vec![mira_core::ToolCall {
+                    id: mira_core::ToolCallId::from("pending"),
+                    kind: mira_core::message::ToolCallKind::Function,
+                    function: mira_core::message::ToolCallFunction::new("never_execute", "{}"),
+                }])),
+                Ok(ChatEvent::Done(FinishReason::ToolCalls)),
+            ])
+            .boxed())
+        }
+    }
+    #[tokio::test]
+    async fn spend_limit_stops_before_tool_dispatch_saves_and_resumes_after_raise() {
+        let dir = tempfile::tempdir().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let inner: Arc<dyn ChatProvider> = Arc::new(CostlyProvider(calls.clone()));
+        let mut session = Session::new(
+            SessionConfig::new("gpt-4o"),
+            "system",
+            inner.clone(),
+            Arc::new(Registry::new()),
+            Arc::new(Mutex::new(
+                Policy::from_config(&PolicyConfig {
+                    mode: Mode::Yolo,
+                    ..Default::default()
+                })
+                .unwrap(),
+            )),
+            Arc::new(AutoApprover { approve_asks: true }),
+            ToolContext::new(
+                dir.path(),
+                Arc::new(mira_sandbox::Sandbox::default_scrubbed()),
+            ),
+        );
+        let account = crate::spend::SpendAccount::at(
+            dir.path().join("ledger"),
+            session.id.to_string(),
+            dir.path(),
+        )
+        .with_test_policy(SpendLimits {
+            caps: SpendCaps {
+                per_session: Some(0.001),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        session.provider = Arc::new(crate::spend::MeteredProvider {
+            inner,
+            account: account.clone(),
+        });
+        session.spend = Some(account.clone());
+        let store = Arc::new(FileStore::at(dir.path().join("sessions")).unwrap());
+        session = session.with_store(store.clone());
+        let events: Vec<_> = session.send("Do work").await.collect().await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(events.iter().any(
+            |e| matches!(e, HarnessEvent::Warning(s) if s.starts_with("Spend limit reached:"))
+        ));
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, HarnessEvent::ToolStart(_))));
+        assert!(matches!(events.last(), Some(HarnessEvent::Done)));
+        let saved = store.load(&session.id).await.unwrap();
+        assert!(saved.messages.iter().any(|m| m
+            .content
+            .as_deref()
+            .is_some_and(|s| s.contains("Saved useful work"))));
+        assert!(saved.messages.iter().any(|m| m.role == Role::Tool));
+        assert!(saved.messages.iter().any(|m| m
+            .content
+            .as_deref()
+            .is_some_and(|s| s.contains("Spend limit reached:"))));
+        let _: Vec<_> = session.send("Continue").await.collect().await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "blocked sends must not contact the provider"
+        );
+        account.raise_session_limit().unwrap();
+        assert!(!account.status().unwrap().blocked);
+        // A subsequent send can contact the provider; this scripted provider keeps
+        // asking for an unknown tool, so cap the test at one request.
+        session.cfg.lock().await.max_rounds = 1;
+        let _: Vec<_> = session.send("Continue after raising").await.collect().await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 }

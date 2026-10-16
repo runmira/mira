@@ -91,6 +91,7 @@ mod sessions;
 mod settings;
 mod skills;
 pub mod slot;
+mod spend_limits;
 mod state;
 mod subagents_api;
 mod terminal;
@@ -565,6 +566,8 @@ fn build_router(
             "/api/auth/openai/start",
             axum::routing::post(oauth::openai::start),
         )
+        .route("/api/sessions/:id/spend", get(spend_limits::status))
+        .route("/api/sessions/:id/spend/raise", post(spend_limits::raise))
         .route("/api/sessions", get(sessions::list_sessions))
         .route(
             "/api/acp/external-sessions",

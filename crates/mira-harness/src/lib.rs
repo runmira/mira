@@ -22,6 +22,7 @@ pub mod history;
 pub mod hooks;
 pub mod persist;
 pub mod session;
+pub mod spend;
 pub mod verify;
 
 pub use approver::{Approver, AutoApprover};

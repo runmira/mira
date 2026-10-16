@@ -67,6 +67,7 @@ pub struct SettingsView {
     pub memory: MemoryView,
     /// Background behaviour of running chats.
     pub sessions: SessionsView,
+    pub spend_limits: mira_config::SpendLimits,
 }
 
 /// Effective `sessions.*` (defaults applied).
@@ -143,6 +144,8 @@ pub struct SettingsUpdate {
     pub memory: Option<MemoryUpdate>,
     #[serde(default)]
     pub sessions: Option<SessionsUpdate>,
+    #[serde(default)]
+    pub spend_limits: Option<mira_config::SpendLimits>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -417,6 +420,7 @@ fn view_from(cfg: &MiraConfig, configured: bool) -> SettingsView {
             inject_context: cfg.memory.inject_context(),
             extractor_model: cfg.memory.extractor_model().map(str::to_owned),
         },
+        spend_limits: cfg.spend_limits.clone(),
         sessions: SessionsView {
             auto_resume_after_limit: cfg.sessions.auto_resume(),
             keep_awake_while_running: cfg.sessions.keep_awake(),
@@ -425,6 +429,9 @@ fn view_from(cfg: &MiraConfig, configured: bool) -> SettingsView {
 }
 
 fn apply(cfg: &mut MiraConfig, u: SettingsUpdate) {
+    if let Some(limits) = u.spend_limits {
+        cfg.spend_limits = limits;
+    }
     if let Some(v) = u.default_provider {
         cfg.default_provider = v.filter(|s| !s.is_empty());
     }
