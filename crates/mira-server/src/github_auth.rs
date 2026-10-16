@@ -47,6 +47,33 @@ pub(crate) fn mark_rejected(token: &str) {
         .insert(token_hash(token));
 }
 
+/// Keys GitHub accepted when probed, so the status check asks once.
+pub(crate) fn mark_accepted(token: &str) {
+    accepted()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(token_hash(token));
+}
+
+pub(crate) fn is_accepted(token: &str) -> bool {
+    accepted()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(&token_hash(token))
+}
+
+fn accepted() -> &'static std::sync::Mutex<std::collections::HashSet<u64>> {
+    static ACCEPTED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<u64>>> =
+        std::sync::OnceLock::new();
+    ACCEPTED.get_or_init(Default::default)
+}
+
+/// A short, stable name for a key that isn't the key: the UI remembers
+/// which one it was told about without ever holding it.
+pub(crate) fn fingerprint(token: &str) -> String {
+    format!("{:016x}", token_hash(token))
+}
+
 pub(crate) fn is_rejected(token: &str) -> bool {
     rejected()
         .lock()

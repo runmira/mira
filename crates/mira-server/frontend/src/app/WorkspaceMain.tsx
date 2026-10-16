@@ -40,6 +40,7 @@ import { WorkspaceContextPanel } from './WorkspaceContextPanel';
 import type { WorkspaceRuntime } from './WorkspaceRuntime';
 import { NotchOutline, notchedPath, notchWidth, usePaneSize } from './WindowControls';
 import { PAGE_TITLE, PAGE_TOOLBAR, PageToolbar } from '../components/PageToolbar';
+import { GithubKeyNotice } from '../components/GithubKeyNotice';
 import { useTrafficLights } from '../lib/desktop';
 const WorkspaceTranscript = lazyNamed(() => import('./WorkspaceTranscript'), 'WorkspaceTranscript');
 export function WorkspaceMain(
@@ -319,6 +320,14 @@ export function WorkspaceMain(
           }
         >
           {notch && <NotchOutline w={notch.w} h={notch.h} nw={notchReach} />}
+          {mainView !== 'settings' && (
+            <GithubKeyNotice
+              onOpenSettings={() => {
+                setSettingsSection('search');
+                openSettings();
+              }}
+            />
+          )}
           {/* The chat view has its own header with the drawer button; the
             other pages need one too, or a phone has no way back. */}
           {phone && mainView !== 'chat' && (
