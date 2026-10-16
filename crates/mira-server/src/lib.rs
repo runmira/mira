@@ -102,6 +102,7 @@ mod transcript_history;
 mod undo;
 mod unfurl;
 mod usage;
+mod usage_limits;
 mod walkthrough;
 mod ws;
 mod live_requests;
@@ -341,6 +342,7 @@ pub async fn run(cfg: ServerConfig) -> Result<()> {
     // Build the initial slot. Seeded from the ServerConfig's `resume` (if
     // present) so a `mira serve --resume <id>` picks up where it left off.
     let session_activity = Arc::new(crate::session_activity::ActivityHub::default());
+    usage_limits::persist_to(usage_limits::default_path());
     // Chats the previous run left mid-turn, read before this run's set
     // replaces them on disk.
     let running_path = restart_recovery::path();
@@ -679,6 +681,7 @@ fn build_router(
         .route("/api/usage", get(usage::get_usage))
         .route("/api/pricing", get(usage::get_pricing))
         .route("/api/usage/external", get(usage::get_external_usage))
+        .route("/api/usage/limits", get(usage_limits::get_limits))
         .route("/api/git/session-changes", get(git::session_changes))
         .route("/api/walkthrough", axum::routing::post(walkthrough::start))
         .route(
