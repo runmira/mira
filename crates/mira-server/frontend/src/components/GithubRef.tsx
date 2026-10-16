@@ -143,7 +143,7 @@ export function GithubRef({ target, href, children }: { target: GithubRefTarget;
           onMouseEnter={show}
           onMouseLeave={hide}
           onOpenAutoFocus={(e) => e.preventDefault()}
-          className="w-80 rounded-xl border border-border/60 bg-popover/95 p-3 backdrop-blur"
+          className="w-80 rounded-xl border border-border/60 bg-popover p-3"
         >
           <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
             <span className={cn('inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11.5px] font-medium', STATE[card.state].className)}>

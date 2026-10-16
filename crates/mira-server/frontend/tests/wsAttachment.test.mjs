@@ -24,9 +24,9 @@ function harness() {
   globalThis.location = { protocol: 'https:', host: 'mira.test' };
   globalThis.setTimeout = callback => { const id = ++nextTimer; timers.set(id, callback); return id; };
   globalThis.clearTimeout = id => timers.delete(id);
-  const received = [];
-  const client = connect(msg => received.push(msg), () => {});
-  return { sockets, timers, received, client, restore() { client.close(); Object.assign(globalThis, originals); } };
+  const received = [], statuses = [];
+  const client = connect(msg => received.push(msg), status => statuses.push(status));
+  return { sockets, timers, received, statuses, client, restore() { client.close(); Object.assign(globalThis, originals); } };
 }
 
 test('attach accepts only target Ready and global activity until its snapshot arrives', () => {
@@ -115,5 +115,23 @@ test('reconnect restores the retained cursor; a restarted epoch falls back to Re
     assert.equal(h.received.at(-1).text,'two');
     current.message({type:'ready',session_id:'a',stream_cursor:{epoch:'restart',sequence:0}});current.message(stamped('a',1,'new','restart'));
     assert.equal(h.received.at(-1).text,'new');
+  } finally {h.restore();}
+});
+
+
+test('switching external chats reuses one transport and gates mutations until target Ready', () => {
+  const h=harness();try {
+    const socket=h.sockets[0];socket.open();
+    socket.message({type:'ready',session_id:'codex-a'});h.client.setSession('codex-a');
+    const statuses=[...h.statuses];
+    for(const session of ['claude-b','codex-a']) {
+      h.client.attach(session);
+      assert.equal(h.client.sendImmediate({type:'interrupt'}),false);
+      socket.message({type:'ready',session_id:session});
+      assert.equal(h.client.sendImmediate({type:'interrupt'}),true);
+    }
+    assert.equal(h.sockets.length,1);
+    assert.deepEqual(h.statuses,statuses,'attach must not report a reconnect');
+    assert.equal(h.timers.size,0);
   } finally {h.restore();}
 });

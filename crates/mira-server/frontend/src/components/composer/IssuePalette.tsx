@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
-import { keepPreviousData, useQuery } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import { CircleDot, GitMerge, GitPullRequest, GitPullRequestClosed, GitPullRequestDraft } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useAppRuntime } from '../../state/RuntimeProvider';
 import {
+  filterIssueOptions,
   issueToken,
   issueTone,
   issueTrigger,
@@ -37,29 +38,48 @@ export function useIssuePicker({
   text,
   enabled,
   sessionId,
+  cwd = '',
   updateText,
 }: {
   text: string;
   enabled: boolean;
   sessionId?: string;
+  cwd?: string;
   updateText: (next: string) => void;
 }) {
   const runtime = useAppRuntime();
   const trigger = enabled ? issueTrigger(text) : null;
   const query = trigger?.query ?? null;
-  const settled = useDebounced(query, DEBOUNCE_MS);
-  const search = useQuery({
-    queryKey: runtime.resourceKey('issues', sessionId ?? '', settled ?? ''),
-    queryFn: ({ signal }) => searchIssues(settled ?? '', sessionId, signal),
-    enabled: settled !== null && settled === query,
+  const settled = useDebounced(query, /^\d+$/.test(query ?? '') ? 60 : DEBOUNCE_MS);
+  const key = (q: string) => runtime.resourceKey('issues', sessionId ?? '', cwd, q);
+  // Warm the recent list while the user composes, before the first `#`.
+  // Runtime/account, chat and cwd all own the cache; rows never cross repos.
+  const recent = useQuery({
+    queryKey: key(''),
+    queryFn: ({ signal }) => searchIssues('', sessionId, signal),
+    enabled: enabled && (!!cwd || query === ''),
     staleTime: 60_000,
     retry: false,
-    // Keep the last rows on screen while the next query loads.
-    placeholderData: keepPreviousData,
   });
-  const result = query === null ? null : search.data ?? null;
-  const loading = query !== null && (settled !== query || search.isFetching);
-  const error = search.error ? search.error.message : null;
+  const search = useQuery({
+    queryKey: key(query ?? ''),
+    queryFn: ({ signal }) => searchIssues(query ?? '', sessionId, signal),
+    enabled: query !== null && query !== '' && settled === query,
+    staleTime: 60_000,
+    retry: false,
+    placeholderData: (previous, previousQuery) =>
+      previousQuery?.queryKey.length === key('').length && previousQuery.queryKey.slice(0, -1).every((part, i) => part === key('')[i]) ? previous : undefined,
+  });
+  const source = search.data ?? recent.data;
+  const candidates = [...(recent.data?.items ?? []), ...(search.data?.items ?? [])];
+  const unique = [...new Map(candidates.map(item => [item.number, item])).values()];
+  const exactResult = query !== '' && !search.isPlaceholderData && search.data;
+  const itemsForQuery = query === null ? [] : filterIssueOptions(
+    exactResult ? search.data!.items : unique, query, !exactResult,
+  );
+  const result = query === null || !source ? null : { ...source, items: itemsForQuery };
+  const loading = query !== null && (query === '' ? recent.isFetching : settled !== query || search.isFetching);
+  const error = (query === '' ? recent.error : search.error)?.message ?? null;
 
   const [activeIdx, setActiveIdx] = useState(0);
   // Escape hides the picker for this `#` without deleting what was typed.
@@ -129,7 +149,7 @@ export function IssuePalette({ picker }: { picker: IssuePicker }) {
     <div
       className={cn(
         'absolute bottom-full left-0 right-0 z-10 mb-2 mx-auto max-w-xl overflow-hidden',
-        'rounded-2xl border border-fg/[0.07] bg-popover/95 dark:bg-[#1f2024]/95 backdrop-blur-md',
+        'rounded-2xl border border-fg/[0.07] bg-popover dark:bg-[#1f2024]',
         'shadow-[0_20px_50px_-16px_rgba(0,0,0,0.85)] ring-1 ring-shade/40',
         'animate-fade-in',
       )}

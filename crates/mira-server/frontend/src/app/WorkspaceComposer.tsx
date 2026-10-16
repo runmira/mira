@@ -161,6 +161,8 @@ export const WorkspaceComposer = memo(function WorkspaceComposer(
   >,
 ) {
   const appRuntime = useAppRuntime();
+  // Attachment readiness gates mutations; only transport loss is a reconnect.
+  const transportStatus = useSelector(appRuntime.connection, state => state.status);
   const queuedMessages = useSelector(appRuntime.sessionState, state => state.queued.get(context.sessionId) ?? EMPTY_QUEUE);
   const {
     ctxReserve,
@@ -411,7 +413,7 @@ export const WorkspaceComposer = memo(function WorkspaceComposer(
         pendingPlans={pendingPlans}
         pendingQuestions={pendingQuestions}
         notices={[
-          ...(status !== 'open'
+          ...(transportStatus !== 'open'
             ? [
                 {
                   id: 'connection',

@@ -5,8 +5,8 @@ import { createRoot } from 'react-dom/client';
 import { Window } from 'happy-dom';
 import { bundle } from './helpers/bundle.mjs';
 
-const { issueTrigger, splitIssueTokens, rememberIssue, MentionInput, useIssuePicker, QueryClient, QueryClientProvider } = await bundle(`
-export { issueTrigger, splitIssueTokens, rememberIssue } from './src/lib/issueMentions';
+const { issueTrigger, splitIssueTokens, rememberIssue, filterIssueOptions, MentionInput, useIssuePicker, QueryClient, QueryClientProvider } = await bundle(`
+export { issueTrigger, splitIssueTokens, rememberIssue, filterIssueOptions } from './src/lib/issueMentions';
 export { MentionInput } from './src/components/MentionInput';
 export { useIssuePicker } from './src/components/composer/IssuePalette';
 export { QueryClient, QueryClientProvider } from '@tanstack/react-query';`, {
@@ -104,4 +104,40 @@ test('picking replaces the #query with the reference and Escape keeps the text',
     globalThis.fetch = original;
     await act(async () => root.unmount());
   }
+});
+
+test('cached number filtering prefers an exact issue immediately', () => {
+  const rows=[21,214,2140,12].map(number=>({number,title:`Issue ${number}`}));
+  assert.deepEqual(filterIssueOptions(rows,'214').map(i=>i.number),[214]);
+  assert.deepEqual(filterIssueOptions(rows,'00214').map(i=>i.number),[214]);
+  assert.deepEqual(filterIssueOptions(rows,'2').map(i=>i.number),[21,214,2140]);
+  assert.deepEqual(filterIssueOptions(rows,'99'),[]);
+});
+
+test('warm rows narrow before exact lookup; changed repos never show old rows', async () => {
+  const original=globalThis.fetch, requests=[];let suspended=false;
+  const rows=[214,2140,12].map(number=>({kind:'issue',number,title:`Issue ${number}`,state:'open',author:null,labels:[],updated_at:null}));
+  globalThis.fetch=async url=>{
+    requests.push(String(url));
+    if(suspended || String(url).includes('q=214'))return new Promise(()=>{});
+    return new Response(JSON.stringify({owner:'runmira',repo:'mira',items:rows,error:null}));
+  };
+  const client=new QueryClient({defaultOptions:{queries:{retry:false}}});
+  const host=document.createElement('div'),root=createRoot(host);let picker;
+  function Probe({text,cwd='/repo',session='warm'}){
+    picker=useIssuePicker({text,cwd,enabled:true,sessionId:session,updateText(){}});return null;
+  }
+  const render=props=>root.render(React.createElement(QueryClientProvider,{client},React.createElement(Probe,props)));
+  try{
+    await act(async()=>render({text:'draft'}));
+    for(let i=0;i<20&&!client.getQueryData(['mira','issues','warm','/repo','']);i++)await act(async()=>new Promise(r=>setTimeout(r,5)));
+    assert.equal(requests.length,1,'warms before #');
+    await act(async()=>render({text:'#'}));assert.equal(picker.result.items.length,3);
+    await act(async()=>render({text:'#214'}));assert.deepEqual(picker.result.items.map(i=>i.number),[214]);
+    await act(async()=>{assert.equal(picker.onKeyDown({key:'Enter',preventDefault(){}}),true);});
+    suspended=true;
+    await act(async()=>render({text:'#214',cwd:'/other'}));
+    await act(async()=>new Promise(r=>setTimeout(r,20)));
+    assert.equal(picker.result,null,'old repo must not flash while the new owner loads');
+  }finally{await act(async()=>root.unmount());client.clear();globalThis.fetch=original;}
 });

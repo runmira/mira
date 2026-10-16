@@ -336,6 +336,7 @@ export function useComposerController({
     text,
     enabled: slash.mode === 'none',
     sessionId: sessionId ?? undefined,
+    cwd,
     updateText,
   });
 
