@@ -75,6 +75,7 @@ pub struct SettingsView {
 pub struct SessionsView {
     pub auto_resume_after_limit: bool,
     pub keep_awake_while_running: bool,
+    pub resume_after_restart: bool,
 }
 
 /// `sessions` patch: absent = leave alone.
@@ -84,6 +85,8 @@ pub struct SessionsUpdate {
     pub auto_resume_after_limit: Option<bool>,
     #[serde(default)]
     pub keep_awake_while_running: Option<bool>,
+    #[serde(default)]
+    pub resume_after_restart: Option<bool>,
 }
 
 /// Effective (defaults applied) view of `memory.*` for the UI. Every field
@@ -424,6 +427,7 @@ fn view_from(cfg: &MiraConfig, configured: bool) -> SettingsView {
         sessions: SessionsView {
             auto_resume_after_limit: cfg.sessions.auto_resume(),
             keep_awake_while_running: cfg.sessions.keep_awake(),
+            resume_after_restart: cfg.sessions.resume_after_restart(),
         },
     }
 }
@@ -485,6 +489,10 @@ fn apply(cfg: &mut MiraConfig, u: SettingsUpdate) {
         }
         if let Some(v) = su.keep_awake_while_running {
             cfg.sessions.keep_awake_while_running = v.then_some(true);
+        }
+        if let Some(v) = su.resume_after_restart {
+            // On is the default: store only the opt-out.
+            cfg.sessions.resume_after_restart = (!v).then_some(false);
         }
     }
     if let Some(mu) = u.memory {

@@ -42,6 +42,14 @@ struct Checkpoint {
     tree: String,
     #[serde(default)]
     result_tree: Option<String>,
+    /// The changed files the turn itself made (see `turn_touch`); `None`
+    /// for an unwatched turn, whose whole diff counts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    files: Option<Vec<String>>,
+    /// The turn's changes, worked out once when it finished, so opening the
+    /// chat doesn't diff every past turn again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    changes: Option<Vec<crate::session_changes::ChangedFile>>,
     /// Unix seconds.
     at: u64,
 }
@@ -173,6 +181,8 @@ pub fn record(cwd: &Path, session: &str, text: &str, replaces: Option<(&str, usi
         text: text.to_string(),
         tree,
         result_tree: None,
+        files: None,
+        changes: None,
         at: now_secs(),
     });
     save(&file, &store);
@@ -227,6 +237,15 @@ pub fn finish(cwd: &Path, session: &str, expected_tree: &str) {
     else {
         return;
     };
+    let scope = crate::turn_touch::end(session, cwd, checkpoint.at);
+    if let Some(after) = result.as_ref() {
+        let mut changed = numstat(cwd, &checkpoint.tree, after).unwrap_or_default();
+        if let Some(scope) = scope {
+            changed.retain(|f| scope.keeps(&f.path));
+            checkpoint.files = Some(changed.iter().map(|f| f.path.clone()).collect());
+        }
+        checkpoint.changes = Some(changed);
+    }
     checkpoint.result_tree = result;
     save(&file, &store);
 }
@@ -261,25 +280,37 @@ pub fn turn_diffs(cwd: &Path, session: &str) -> Vec<TurnDiffSummary> {
         .enumerate()
         .filter_map(|(index, checkpoint)| {
             let result = checkpoint.result_tree.as_ref()?;
-            let output = run(git(cwd).args([
-                "diff",
-                "--relative",
-                "--numstat",
-                "-z",
-                "--no-renames",
-                &checkpoint.tree,
-                result,
-            ]))?;
+            let files = match &checkpoint.changes {
+                Some(changes) => changes.clone(),
+                None => numstat(cwd, &checkpoint.tree, result)?
+                    .into_iter()
+                    .filter(|f| checkpoint.files.as_ref().is_none_or(|own| own.contains(&f.path)))
+                    .collect(),
+            };
             Some(TurnDiffSummary {
                 text: checkpoint.text.clone(),
                 occurrence: store.checkpoints[index + 1..]
                     .iter()
                     .filter(|other| other.text == checkpoint.text)
                     .count(),
-                files: crate::session_changes::parse_numstat_z(&output),
+                files,
             })
         })
         .collect()
+}
+
+/// What changed between two snapshot trees, per file.
+fn numstat(cwd: &Path, before: &str, after: &str) -> Option<Vec<crate::session_changes::ChangedFile>> {
+    let out = run(git(cwd).args([
+        "diff",
+        "--relative",
+        "--numstat",
+        "-z",
+        "--no-renames",
+        before,
+        after,
+    ]))?;
+    Some(crate::session_changes::parse_numstat_z(&out))
 }
 
 /// Read only the frozen before/after trees. Never substitute today's working file.

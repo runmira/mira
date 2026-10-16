@@ -447,6 +447,8 @@ pub const READ_ONLY_AGENT_TOOLS: &[&str] = &[
     "browser_wait",
     "read_output",
     crate::handoff::READ_TOOL,
+    "task_status",
+    "task_requests",
 ];
 
 /// Claude Code's `--allowedTools` value for Mira's read-only tools (its MCP
@@ -733,17 +735,88 @@ fn extra_agent_tools() -> Vec<Value> {
         }),
         json!({
             "name": "delegate_task",
-            "description": "Hand a task to another engine and get its answer: a second opinion, \
-                            a review, research. `engine` is `mira` (Mira's own model) or an \
-                            installed agent. Read-only: it can read and search this project, not \
-                            edit or run commands. Takes up to 10 minutes.",
+            "description": "Hand a task to another engine: a second opinion, a review, research, \
+                            or an implementation. `engine` is `mira` (Mira's own model) or an \
+                            installed agent. It runs in its own chat the user can open. By default \
+                            it's read-only (reads and searches, no edits or commands); \
+                            access=write lets it make changes, each approval waiting for the user \
+                            in its chat, and isolation=worktree gives it its own git worktree so \
+                            its edits don't touch this checkout. It runs in the background and \
+                            returns a taskId at once; its result is delivered to this chat when it \
+                            finishes (task_status reads it sooner), and if it asks a question \
+                            you'll be told so you can answer with task_respond. Use mode=wait only \
+                            when this turn needs the answer before you can continue.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "prompt": { "type": "string", "description": "The whole task; it doesn't see this conversation" },
-                    "engine": { "type": "string", "enum": crate::delegate::engines() }
+                    "engine": { "type": "string", "enum": crate::delegate::engines() },
+                    "title": { "type": "string", "description": "Short label for the task" },
+                    "access": { "type": "string", "enum": ["read", "write"], "description": "Default read" },
+                    "isolation": { "type": "string", "enum": ["shared", "worktree"], "description": "Default shared (this checkout). worktree: a new branch from this checkout's HEAD; uncommitted edits aren't copied." },
+                    "mode": { "type": "string", "enum": ["async", "wait"], "description": "Default async" },
+                    "timeoutMs": { "type": "number", "description": "Wait budget for mode=wait (default 10 minutes). Running out returns the task's state; it doesn't stop the task." }
                 },
                 "required": ["prompt"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "task_status",
+            "description": "A delegated task's state and, once finished, its result. Reading a \
+                            finished task's result means it won't also be delivered as a message.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "taskId": { "type": "string" } },
+                "required": ["taskId"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "task_requests",
+            "description": "What a delegated task is waiting on: its questions (with requestIds) \
+                            and any actions waiting for the user's approval.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "taskId": { "type": "string" } },
+                "required": ["taskId"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "task_respond",
+            "description": "Answer a delegated task's question (see task_requests) when the answer \
+                            follows from the task or the user's instructions; otherwise ask the \
+                            user first. One answer per question, in order: pick option labels, or \
+                            give free text.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "taskId": { "type": "string" },
+                    "requestId": { "type": "string" },
+                    "answers": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "picked": { "type": "array", "items": { "type": "string" } },
+                                "text": { "type": "string" }
+                            },
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["taskId", "requestId", "answers"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "task_cancel",
+            "description": "Stop a delegated task that's still running.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "taskId": { "type": "string" } },
+                "required": ["taskId"],
                 "additionalProperties": false
             }
         }),
@@ -1196,6 +1269,9 @@ async fn mcp_one(
             if name == "delegate_task" {
                 return Some(ok(delegate_result(state, q, args).await));
             }
+            if matches!(name, "task_status" | "task_cancel" | "task_requests" | "task_respond") {
+                return Some(ok(task_tool_result(state, q, name, args).await));
+            }
             if name.starts_with("device_") {
                 return Some(ok(match crate::devices::call(name, args).await {
                     Ok(content) => json!({ "content": content, "isError": false }),
@@ -1333,8 +1409,109 @@ async fn delegate_result(state: &AppState, q: &McpGrant, args: &Value) -> Value 
         );
     }
     let call_id = call.id.to_string();
-    match crate::delegate::delegate(state, &slot, prompt, engine, &call_id).await {
-        Ok(answer) => text(answer, false),
+    let opts = crate::delegate::Options {
+        title: args.get("title").and_then(Value::as_str).map(str::to_owned),
+        write: args.get("access").and_then(Value::as_str) == Some("write"),
+        worktree: args.get("isolation").and_then(Value::as_str) == Some("worktree"),
+    };
+    let task = match crate::delegate::start(state, &slot, prompt, engine, opts, &call_id).await {
+        Ok(task) => task,
+        Err(e) => return text(e, true),
+    };
+    if args.get("mode").and_then(Value::as_str) != Some("wait") {
+        return text(crate::delegate::describe(&task), false);
+    }
+    let budget = args
+        .get("timeoutMs")
+        .and_then(Value::as_f64)
+        .filter(|ms| *ms > 0.0)
+        .map(|ms| std::time::Duration::from_millis(ms.min(3_600_000.0) as u64))
+        .unwrap_or(crate::delegate::WAIT_BUDGET);
+    match crate::delegate::wait(state, &slot.id.to_string(), &task.id, budget).await {
+        Ok(t) => {
+            let failed = t.status == crate::delegate::TaskStatus::Failed;
+            if t.status.is_terminal() {
+                text(crate::delegate::describe(&t), failed)
+            } else {
+                text(
+                    format!(
+                        "Task {} is still running after the wait budget (it keeps going). Its \
+                         result will be delivered to this chat; task_status reads it sooner.",
+                        t.id
+                    ),
+                    false,
+                )
+            }
+        }
+        Err(e) => text(e, true),
+    }
+}
+
+/// `task_status` / `task_cancel` on a task this chat delegated.
+async fn task_tool_result(state: &AppState, q: &McpGrant, name: &str, args: &Value) -> Value {
+    use serde_json::json;
+    let text = |t: String, err: bool| json!({ "content": [{ "type": "text", "text": t }], "isError": err });
+    let Some(slot) = mcp_slot(state, q).await else {
+        return text("this chat isn't open in Mira".into(), true);
+    };
+    let Some(id) = args.get("taskId").and_then(Value::as_str) else {
+        return text("`taskId` is required".into(), true);
+    };
+    let parent = slot.id.to_string();
+    if name == "task_requests" {
+        return match crate::delegate::requests(state, &parent, id).await {
+            Ok(t) => text(t, false),
+            Err(e) => text(e, true),
+        };
+    }
+    if name == "task_respond" {
+        let request_id = args.get("requestId").and_then(Value::as_str).unwrap_or("");
+        let answers = args
+            .get("answers")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .map(|v| mira_tools::prompt::AskUserAnswer {
+                        picked: v
+                            .get("picked")
+                            .and_then(Value::as_array)
+                            .map(|p| p.iter().filter_map(|x| x.as_str().map(str::to_owned)).collect())
+                            .unwrap_or_default(),
+                        custom: v
+                            .get("text")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|t| !t.is_empty())
+                            .map(str::to_owned),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        return match crate::delegate::respond(state, &parent, id, request_id, answers).await {
+            Ok(()) => text(format!("Answered; task {id} continues."), false),
+            Err(e) => text(e, true),
+        };
+    }
+    let task = if name == "task_cancel" {
+        crate::delegate::cancel(state, &parent, id).await
+    } else {
+        crate::delegate::status(state, &parent, id)
+    };
+    match task {
+        Ok(t) => {
+            let state_line = format!(
+                "Task {} ({} on {}): {}",
+                t.id,
+                t.title,
+                t.engine,
+                serde_json::to_value(t.status).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default()
+            );
+            let body = match t.status {
+                crate::delegate::TaskStatus::Running => String::new(),
+                _ => format!("\n\n{}", t.result.as_deref().unwrap_or("")),
+            };
+            text(format!("{state_line}{body}"), false)
+        }
         Err(e) => text(e, true),
     }
 }

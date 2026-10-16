@@ -69,9 +69,17 @@ pub struct WsApprover {
     /// The session policy, to name which parts of a compound command are
     /// the reason for asking.
     policy: Option<Arc<tokio::sync::Mutex<mira_policy::Policy>>>,
+    /// Holds each waiting request so a window opening the chat later is
+    /// shown it again.
+    live: crate::live_requests::LiveRequests,
 }
 
 impl WsApprover {
+    pub fn with_live(mut self, live: crate::live_requests::LiveRequests) -> Self {
+        self.live = live;
+        self
+    }
+
     pub fn with_policy(mut self, policy: Arc<tokio::sync::Mutex<mira_policy::Policy>>) -> Self {
         self.policy = Some(policy);
         self
@@ -91,6 +99,7 @@ impl WsApprover {
             attached,
             background_mode,
             policy: None,
+            live: Default::default(),
         }
     }
 }
@@ -125,9 +134,8 @@ impl Approver for WsApprover {
                     return true;
                 }
                 BackgroundMode::Park => {
-                    // Fall through — same as attached path. Wait for
-                    // someone to attach and answer, capped by the safety
-                    // timeout below.
+                    // Fall through: held until someone opens the chat and
+                    // answers.
                 }
             }
         }
@@ -153,11 +161,22 @@ impl Approver for WsApprover {
             (Some(policy), Some(cmd)) => policy.lock().await.parts_needing_approval(&cmd),
             _ => Vec::new(),
         };
-        let _ = self.event_tx.send(ServerMsg::ApprovalRequest {
+        let request = ServerMsg::ApprovalRequest {
             call: call.clone(),
             preview,
             needs,
-        });
+        };
+        let _live = self.live.hold(call_id.clone(), request.clone());
+        let _ = self.event_tx.send(request);
+        if matches!(*self.background_mode.read().await, BackgroundMode::Park) {
+            // Parked: wait for the user however long it takes, whether or
+            // not a window is open now — it's shown again when one opens
+            // the chat. Stop still releases it (`drain_pending_as_denied`).
+            return rx.await.unwrap_or_else(|_| {
+                warn!(call_id, "approval channel dropped");
+                false
+            });
+        }
 
         // Bounded wait — an unanswered oneshot used to hang the whole
         // harness (audit Gap #2). On timeout we forget the pending entry

@@ -309,6 +309,10 @@ pub enum ClientMsg {
     SetBackgroundMode {
         mode: BackgroundMode,
     },
+    /// Stop a task the attached chat delegated (the card's Stop).
+    DelegateCancel {
+        task_id: String,
+    },
 }
 
 /// Server → client.
@@ -334,6 +338,14 @@ pub enum ServerMsg {
         revision: u64,
         session_id: String,
         running: bool,
+    },
+    /// A chat started or stopped waiting on the user (approval, question,
+    /// plan, secret). Same epoch/revision sequence as `SessionActivity`.
+    SessionWaiting {
+        epoch: String,
+        revision: u64,
+        session_id: String,
+        waiting: bool,
     },
     SessionActivitySnapshot {
         snapshot: crate::session_activity::ActivitySnapshot,
@@ -371,6 +383,16 @@ pub enum ServerMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stream_cursor: Option<crate::session_stream::StreamCursor>,
 
+        /// Tasks this chat delegated.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        delegated_tasks: Vec<crate::delegate::DelegatedTask>,
+        /// The chat this one was delegated from, when it's a helper's.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_id: Option<String>,
+        /// Requests the chat is really waiting on. A question or plan the
+        /// transcript shows unanswered but missing here can't be answered
+        /// any more (its turn ended, or Mira restarted).
+        live_request_ids: Vec<String>,
         queued_inputs: Vec<crate::message_queue::QueuedInput>,
         session_activity: crate::session_activity::ActivitySnapshot,
         turn_diffs: Vec<crate::checkpoints::TurnDiffSummary>,
@@ -856,8 +878,17 @@ pub enum ServerMsg {
     /// human-readable step ("Read src/lib.rs").
     DelegateProgress {
         call_id: String,
+        /// The delegated task the step belongs to.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_id: Option<String>,
         kind: String,
         text: String,
+    },
+
+    /// A delegated task's state changed (started, finished, cancelled),
+    /// on its parent chat's channel.
+    DelegateUpdate {
+        task: crate::delegate::DelegatedTask,
     },
 
     /// An agent used Mira's browser through the tool server. Lets the
@@ -1347,3 +1378,4 @@ mod tests {
         assert_eq!(v["summary"], "10% of tokens left · resets in 30s");
     }
 }
+

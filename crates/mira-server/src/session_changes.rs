@@ -31,7 +31,7 @@ use serde::Serialize;
 const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 /// One changed file, as a commit of it would carry it.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, serde::Deserialize)]
 pub struct ChangedFile {
     /// Relative to the session's cwd.
     pub path: String,
@@ -42,7 +42,7 @@ pub struct ChangedFile {
     pub binary: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileStatus {
     Added,

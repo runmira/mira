@@ -128,14 +128,54 @@ function stageOf(status: ToolStatus): Stage {
   return 'working';
 }
 
+/* ---------- delegated tasks ---------- */
+
+/** A delegated task as the server reports it (`delegate_update`, Ready). */
+export type DelegatedTask = {
+  id: string;
+  parent_id: string;
+  child_id: string;
+  engine: string;
+  title: string;
+  prompt: string;
+  access?: 'read' | 'write';
+  worktree?: string | null;
+  status: 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
+  result: string | null;
+  started_at: number;
+  finished_at: number | null;
+};
+
+export type DelegatedTaskView = DelegatedTask & { steps: DelegateStep[] };
+
+/** The task a `delegate_task` call started: named in its result (`task_…`),
+ *  or else the task with the same brief. A task runs on after its call
+ *  returns, so the card follows the task, not the call. */
+export function taskForCall(
+  call: ToolCall,
+  result: ToolResult | null,
+  tasks: ReadonlyMap<string, DelegatedTaskView>,
+): DelegatedTaskView | undefined {
+  const named = result?.content?.match(/\btask_[0-9a-f]{12}\b/)?.[0];
+  if (named && tasks.has(named)) return tasks.get(named);
+  const { prompt } = parseDelegateArgs(call.function.arguments);
+  let match: DelegatedTaskView | undefined;
+  for (const t of tasks.values()) if (t.prompt === prompt.trim()) match = t;
+  return match;
+}
+
 /* ---------- card ---------- */
 
 export function DelegateCard({
   call,
-  status,
-  result,
-  startedAt,
-  steps,
+  status: callStatus,
+  result: callResult,
+  startedAt: callStartedAt,
+  steps: callSteps,
+  task,
+  waiting = false,
+  onOpenChat,
+  onStop,
 }: {
   call: ToolCall;
   status: ToolStatus;
@@ -144,7 +184,20 @@ export function DelegateCard({
   startedAt?: number | null;
   /** Live activity streamed from the child (newest last). */
   steps?: DelegateStep[];
+  /** The task this call started, when known; it outlives the call. */
+  task?: DelegatedTaskView;
+  /** The helper's chat is waiting on the user (a question). */
+  waiting?: boolean;
+  onOpenChat?: (childId: string) => void;
+  onStop?: (taskId: string) => void;
 }) {
+  // A background task's call returns at once; its state is the task's.
+  const status: ToolStatus = task ? (task.status === 'running' ? 'running' : 'complete') : callStatus;
+  const result: ToolResult | null = task && task.status !== 'running'
+    ? { call_id: call.id, content: task.status === 'cancelled' ? 'Stopped.' : task.result ?? '', is_error: task.status === 'failed' || task.status === 'interrupted', data: null, images: [] } as ToolResult
+    : task ? null : callResult;
+  const startedAt = task ? task.started_at : callStartedAt;
+  const steps = task && task.steps.length > 0 ? task.steps : callSteps;
   const { prompt, engine: engineId } = useMemo(
     () => parseDelegateArgs(call.function.arguments),
     [call.function.arguments],
@@ -182,7 +235,12 @@ export function DelegateCard({
           </span>
           {/* While working, the live step is more informative than the word
               "working"; fall back to the stage chip when there's nothing yet. */}
-          {active && last ? (
+          {waiting && active ? (
+            <span className="inline-flex shrink-0 items-center gap-1 text-[11.5px] text-amber-500">
+              <CircleAlert className="size-3" />
+              needs you — open its chat
+            </span>
+          ) : active && last ? (
             <span className="flex min-w-0 items-center gap-1.5 text-[11.5px] text-mira-blue">
               <LoaderCircle className="size-3 shrink-0 animate-spin" />
               <span className="truncate" title={last.text}>
@@ -209,6 +267,29 @@ export function DelegateCard({
         <StatusMark status={status} isError={isError} />
       </div>
 
+      {task && (onOpenChat || onStop) && (
+        <div className="ml-6 flex items-center gap-1 pb-0.5">
+          {onOpenChat && (
+            <button
+              type="button"
+              onClick={() => onOpenChat(task.child_id)}
+              className="rounded-md px-1.5 py-0.5 text-[11.5px] text-muted-foreground transition-colors hover:bg-accent/50 hover:text-foreground"
+            >
+              Open chat
+            </button>
+          )}
+          {onStop && active && (
+            <button
+              type="button"
+              onClick={() => onStop(task.id)}
+              className="rounded-md px-1.5 py-0.5 text-[11.5px] text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
+            >
+              Stop
+            </button>
+          )}
+        </div>
+      )}
+
       <Collapse open={expanded}>
         <DelegatePanel
           engine={engine}
@@ -217,6 +298,8 @@ export function DelegateCard({
           isError={isError}
           stage={stage}
           steps={live}
+          write={task?.access === 'write'}
+          worktree={task?.worktree ?? null}
         />
       </Collapse>
     </div>
@@ -365,6 +448,8 @@ function DelegatePanel({
   isError,
   stage,
   steps,
+  write = false,
+  worktree = null,
 }: {
   engine: DelegateEngine;
   prompt: string;
@@ -372,6 +457,10 @@ function DelegatePanel({
   isError: boolean;
   stage: Stage;
   steps: DelegateStep[];
+  /** May edit and run commands (approvals wait in its chat). */
+  write?: boolean;
+  /** Its own checkout, when it has one. */
+  worktree?: string | null;
 }) {
   return (
     <div className="ml-6 mb-1.5 mt-1 flex animate-fade-in flex-col gap-2">
@@ -386,7 +475,7 @@ function DelegatePanel({
             {engine.id}
           </span>
           <span className="ml-auto flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground/70">
-            <Eye /> read-only
+            {write ? <><NotebookPen /> can edit</> : <><Eye /> read-only</>}
           </span>
         </div>
 
@@ -413,8 +502,17 @@ function DelegatePanel({
             <SectionLabel>What it can do</SectionLabel>
             <ul className="space-y-0.5 text-[12px] text-muted-foreground">
               <Permission icon={Search} text="Read and search this project" />
-              <Permission icon={FileText} text="Answer with findings" />
-              <Permission icon={CircleAlert} text="Edits and commands are refused" muted />
+              {write ? (
+                <>
+                  <Permission icon={NotebookPen} text="Edit files and run commands — approvals wait in its chat" />
+                  {worktree && <Permission icon={Terminal} text={`In its own worktree: ${worktree}`} />}
+                </>
+              ) : (
+                <>
+                  <Permission icon={FileText} text="Answer with findings" />
+                  <Permission icon={CircleAlert} text="Edits and commands are refused" muted />
+                </>
+              )}
             </ul>
           </section>
 

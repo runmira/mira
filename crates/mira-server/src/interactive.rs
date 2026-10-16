@@ -44,6 +44,7 @@ pub type PendingPromptMap = Arc<Mutex<HashMap<String, oneshot::Sender<PromptResp
 pub struct PromptChannel {
     events_tx: crate::session_stream::SessionEvents,
     pending: PendingPromptMap,
+    live: crate::live_requests::LiveRequests,
 }
 
 impl PromptChannel {
@@ -51,7 +52,13 @@ impl PromptChannel {
         Self {
             events_tx,
             pending: Arc::new(Mutex::new(HashMap::new())),
+            live: Default::default(),
         }
+    }
+
+    pub fn with_live(mut self, live: crate::live_requests::LiveRequests) -> Self {
+        self.live = live;
+        self
     }
 
     pub fn pending(&self) -> PendingPromptMap {
@@ -64,11 +71,10 @@ impl PromptChannel {
     async fn ask(&self, prompt_id: String, msg: ServerMsg) -> Option<PromptResponse> {
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(prompt_id.clone(), tx);
-        if self.events_tx.send(msg).is_err() {
-            self.pending.lock().await.remove(&prompt_id);
-            warn!(prompt_id, "prompt sent with no listening client");
-            return None;
-        }
+        let _live = self.live.hold(prompt_id.clone(), msg.clone());
+        // Nobody watching is fine: the request is held and shown when a
+        // window opens this chat.
+        let _ = self.events_tx.send(msg);
         match rx.await {
             Ok(v) => Some(v),
             Err(_) => {

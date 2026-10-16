@@ -88,6 +88,32 @@ come from the same verb/target vocabulary the tool rows use, so a delegated
 step reads exactly like a step Mira ran itself (`Read src/lib.rs`,
 `Searched for "bind_any"`, `Ran cargo test`).
 
+### Delegated tasks run on their own
+
+A delegation is a task, not a blocking call. `delegate_task` returns a `task_…` id at once by default
+(`mode: "async"`); `mode: "wait"` blocks up to a wait budget (`timeoutMs`,
+default 10 minutes) that doesn't stop the task. `task_status` reads a task's
+state and result; `task_cancel` (or the card's **Stop**) stops it.
+
+- The helper runs in its own child chat, kept after it finishes: the card's
+  **Open chat** opens it, and that chat shows an **Open parent** bar. A
+  question it asks waits there (the card says "needs you").
+- When a task finishes, its result is queued into the parent chat and
+  delivered once the parent's own turn has ended — unless the parent already
+  read it with `task_status`, which takes the queued message back out.
+- Steps carry the task id, so the card follows the task (`delegate_update`
+  frames, and `delegated_tasks` in Ready) rather than the call that started
+  it. Tasks are saved beside the chat (`<session>.tasks`); one still running
+  when Mira stopped comes back `interrupted`.
+- `access: "write"` lets the helper edit and run commands; each approval
+  waits in its chat for the user (the card says "needs you").
+  `isolation: "worktree"` gives it its own git worktree on a `mira/task_…`
+  branch from the parent's HEAD.
+- A helper's question wakes the parent agent (a queued message, withdrawn
+  if the question is answered first). `task_requests` lists what a task is
+  waiting on; `task_respond` answers its questions. Approvals stay with the
+  user.
+
 ### Approval
 
 | Gate | Who asks | Used for |
@@ -127,7 +153,7 @@ actions follow the browser tool's own policy, as for Mira's model.
 - [x] **4 · Fewer prompts for Claude Code** — `--allowedTools` for the
       read-only Mira tools.
 - [x] **5 · Per-session tokens** — header auth, idle expiry, revoke on stop.
-- [x] **6 · Device preview + orchestration tools** — `browser_devices`; `delegate_task` to Mira's model or an installed agent, read-only, in a hidden child chat.
+- [x] **6 · Device preview + orchestration tools** — `browser_devices`; `delegate_task` to Mira's model or an installed agent, read-only, in a child chat (now a background task with `task_status` / `task_cancel`; see "Delegated tasks run on their own").
 
 ## Testing
 
