@@ -1565,6 +1565,55 @@ pub fn resolve_github_token() -> Option<String> {
         .cloned()
 }
 
+/// What the UI needs to say about the GitHub key saved in Settings.
+#[derive(Debug, Serialize)]
+pub struct GithubKeyStatus {
+    /// A key is configured (Settings or the environment).
+    pub saved_key: bool,
+    /// GitHub answered 401 to it.
+    pub rejected: bool,
+    /// Names the key without revealing it, so a dismissed warning comes
+    /// back for a different key.
+    pub fingerprint: Option<String>,
+    /// The `gh` login works, so requests still go through without the key.
+    pub cli_login: bool,
+}
+
+/// `GET /api/github/key-status`. A key nothing has used yet this run is
+/// probed once with `GET /user`, without the `gh` fallback, so the answer
+/// is about the key itself.
+pub async fn github_key_status() -> Response {
+    let key = resolve_github_token();
+    let mut rejected = key.as_deref().is_some_and(crate::github_auth::is_rejected);
+    if let Some(key) = key.as_deref() {
+        if !rejected && !crate::github_auth::is_accepted(key) {
+            let response = build_client()
+                .get(format!("{GITHUB_API}/user"))
+                .bearer_auth(key)
+                .header("Accept", "application/vnd.github+json")
+                .send()
+                .await;
+            match response.map(|r| r.status()) {
+                Ok(StatusCode::UNAUTHORIZED) => {
+                    crate::github_auth::mark_rejected(key);
+                    rejected = true;
+                }
+                Ok(status) if status.is_success() => crate::github_auth::mark_accepted(key),
+                // Offline or rate-limited: say nothing until we know.
+                _ => {}
+            }
+        }
+    }
+    let cli_login = crate::github_auth::cached_cli_token().await.is_some();
+    Json(GithubKeyStatus {
+        saved_key: key.is_some(),
+        rejected,
+        fingerprint: key.as_deref().map(crate::github_auth::fingerprint),
+        cli_login,
+    })
+    .into_response()
+}
+
 fn missing_token_msg() -> String {
     "Connect GitHub using `gh auth login` on the machine running Mira, or add a GitHub token in Settings → Search & keys.".to_string()
 }

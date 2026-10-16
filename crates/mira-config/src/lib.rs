@@ -684,22 +684,63 @@ impl ProviderConfig {
     }
 }
 
+fn exported_keys() -> std::sync::MutexGuard<'static, std::collections::HashMap<String, String>> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static EXPORTED: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    EXPORTED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// Whether `name` comes from the environment Mira was started with, rather
+/// than from a key `export_keys_to_env` copied out of the yaml.
+pub fn key_set_by_environment(name: &str) -> bool {
+    match std::env::var(name) {
+        Err(_) => false,
+        Ok(current) => exported_keys().get(name) != Some(&current),
+    }
+}
+
 /// Export every key in `cfg.keys` to the current process env so tools
 /// that read via `std::env::var(...)` (e.g. `BRAVE_SEARCH_API_KEY`) pick
-/// them up without any further wiring. Does not overwrite existing env
-/// values — an env-set key wins over a yaml-stored one, matching the
-/// "yaml is fallback for env" mental model.
+/// them up without any further wiring. A variable the environment already
+/// had wins over the yaml ("yaml is fallback for env"); one this function
+/// set itself follows the yaml, so replacing or removing a key in Settings
+/// takes effect without a restart.
 pub fn export_keys_to_env(cfg: &MiraConfig) {
+    use std::collections::HashMap;
+    let mut exported = exported_keys();
+    let ours = |name: &str, exported: &HashMap<String, String>| match std::env::var(name) {
+        Err(_) => true,
+        Ok(current) => exported.get(name) == Some(&current),
+    };
+    // Safety: setting env vars is documented as `unsafe` in Rust 2024; the
+    // callers are boot paths and the settings save, which serialise here.
     for (name, value) in &cfg.keys {
-        if std::env::var_os(name).is_none() && !value.is_empty() {
-            // Safety: setting env vars is documented as `unsafe` in Rust
-            // 2024, but our callers are all on startup / single-threaded
-            // boot paths. Wrapping so this compiles on both editions.
+        if value.is_empty() || !ours(name, &exported) {
+            continue;
+        }
+        #[allow(unused_unsafe)]
+        unsafe {
+            std::env::set_var(name, value);
+        }
+        exported.insert(name.clone(), value.clone());
+    }
+    let removed: Vec<String> = exported
+        .keys()
+        .filter(|name| cfg.keys.get(*name).is_none_or(|v| v.is_empty()))
+        .cloned()
+        .collect();
+    for name in removed {
+        if ours(&name, &exported) {
             #[allow(unused_unsafe)]
             unsafe {
-                std::env::set_var(name, value);
+                std::env::remove_var(&name);
             }
         }
+        exported.remove(&name);
     }
 }
 
@@ -1191,6 +1232,52 @@ pub fn pretty_provider_name(name: &str) -> String {
                 None => String::new(),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod export_tests {
+    use super::*;
+
+    #[test]
+    fn saved_keys_follow_settings_but_never_override_the_environment() {
+        let name = "MIRA_TEST_EXPORT_KEY_7F3A";
+        let other = "MIRA_TEST_EXPORT_SHELL_9C1B";
+        let mut cfg = MiraConfig::default();
+        cfg.keys.insert(name.into(), "first".into());
+        export_keys_to_env(&cfg);
+        assert_eq!(std::env::var(name).as_deref(), Ok("first"));
+
+        cfg.keys.insert(name.into(), "second".into());
+        export_keys_to_env(&cfg);
+        assert_eq!(
+            std::env::var(name).as_deref(),
+            Ok("second"),
+            "a replaced key takes effect"
+        );
+
+        cfg.keys.remove(name);
+        export_keys_to_env(&cfg);
+        assert!(std::env::var(name).is_err(), "a removed key is unset");
+
+        #[allow(unused_unsafe)]
+        unsafe {
+            std::env::set_var(other, "from-shell");
+        }
+        cfg.keys.insert(other.into(), "from-yaml".into());
+        export_keys_to_env(&cfg);
+        assert_eq!(
+            std::env::var(other).as_deref(),
+            Ok("from-shell"),
+            "the environment wins"
+        );
+        assert!(key_set_by_environment(other));
+        cfg.keys.insert(name.into(), "third".into());
+        export_keys_to_env(&cfg);
+        assert!(
+            !key_set_by_environment(name),
+            "exported from the yaml, not the shell"
+        );
     }
 }
 

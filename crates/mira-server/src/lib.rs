@@ -783,6 +783,10 @@ fn build_router(
             "/api/github/connect",
             get(github_connect::get_connect).post(github_connect::post_connect),
         )
+        .route(
+            "/api/github/key-status",
+            get(pull_requests::github_key_status),
+        )
         .route("/api/prs", get(pull_requests::list_pull_requests))
         .route("/api/issues", get(pull_requests::search_issues))
         .route(
