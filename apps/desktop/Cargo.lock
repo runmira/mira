@@ -2217,6 +2217,7 @@ dependencies = [
 name = "mira-desktop"
 version = "0.5.3-alpha"
 dependencies = [
+ "block2",
  "libc",
  "objc2",
  "objc2-app-kit",

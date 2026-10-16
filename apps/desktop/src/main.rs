@@ -233,34 +233,20 @@ fn build_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
 
 #[cfg(target_os = "macos")]
 fn install_traffic_light_positioning(window: &WebviewWindow) {
-    fn schedule(window: &WebviewWindow) {
-        let target = window.clone();
-        let _ = window.run_on_main_thread(move || {
-            let Some(_main_thread) = objc2_foundation::MainThreadMarker::new() else {
-                return;
-            };
-            let Ok(pointer) = target.ns_window() else {
-                return;
-            };
-            // SAFETY: Tauri supplies this window's NSWindow pointer. The
-            // handle is retained by `target`, and AppKit is called only on
-            // the main thread for the duration of this closure.
-            if let Some(native) = unsafe { pointer.cast::<objc2_app_kit::NSWindow>().as_ref() } {
-                traffic_lights::position(native);
-            }
-        });
-    }
-    schedule(window);
     let target = window.clone();
-    window.on_window_event(move |event| {
-        if matches!(
-            event,
-            tauri::WindowEvent::Resized(_)
-                | tauri::WindowEvent::ScaleFactorChanged { .. }
-                | tauri::WindowEvent::Focused(_)
-                | tauri::WindowEvent::ThemeChanged(_)
-        ) {
-            schedule(&target);
+    let _ = window.run_on_main_thread(move || {
+        let Some(_main_thread) = objc2_foundation::MainThreadMarker::new() else {
+            return;
+        };
+        let Ok(pointer) = target.ns_window() else {
+            return;
+        };
+        // SAFETY: Tauri supplies this window's NSWindow pointer. The handle
+        // is retained by `target`, and AppKit is called only on the main
+        // thread for the duration of this closure.
+        if let Some(native) = unsafe { pointer.cast::<objc2_app_kit::NSWindow>().as_ref() } {
+            traffic_lights::position(native);
+            traffic_lights::keep_positioned(native);
         }
     });
 }
